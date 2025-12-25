@@ -14,6 +14,13 @@ from .frequency_lock import (
     LockConfig,
     LockTarget,
 )
+from .afc import (
+    AutomaticFrequencyControl,
+    AFCMode,
+    AFCMethod,
+    AFCStatus,
+    AFCConfig,
+)
 
 __all__ = [
     "SpectrumAnalyzer",
@@ -26,4 +33,9 @@ __all__ = [
     "LockStatus",
     "LockConfig",
     "LockTarget",
+    "AutomaticFrequencyControl",
+    "AFCMode",
+    "AFCMethod",
+    "AFCStatus",
+    "AFCConfig",
 ]

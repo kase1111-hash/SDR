@@ -121,33 +121,77 @@ This module is a Software Defined Radio application that provides signal visuali
 
 ## 6. Technical Specifications
 
-### 6.1 Signal Processing Parameters
+### 6.1 RF Performance Specifications
+
+| Parameter | Specification | Notes |
+|-----------|---------------|-------|
+| Frequency Range | 1 kHz - 6 GHz | Hardware dependent |
+| Instantaneous Bandwidth | 2.4 MHz - 20 MHz | Hardware dependent |
+| Maximum Sample Rate | 2.56 MS/s - 20 MS/s | Hardware dependent |
+| ADC Resolution | 8-bit / 12-bit / 14-bit | Hardware dependent |
+| Effective Number of Bits (ENOB) | 7 - 11.5 bits | Varies by device |
+| Dynamic Range | 42 - 84 dB | Based on ADC resolution |
+| Noise Figure | 4 - 8 dB typical | Frequency dependent |
+| Sensitivity | -120 to -140 dBm | With appropriate LNA |
+| Maximum Input Power | -5 dBm to +10 dBm | Do not exceed; may cause damage |
+| Frequency Accuracy | 0.5 - 20 PPM | TCXO dependent |
+| Phase Noise | Device dependent | Improves with external clock |
+
+### 6.2 Signal Processing Parameters
 
 | Parameter | Specification |
 |-----------|---------------|
-| FFT Size | 1024 / 2048 / 4096 / 8192 points (configurable) |
-| Sample Rates | Up to hardware maximum (device dependent) |
-| Bit Depth | 8-bit / 16-bit I/Q samples |
-| Processing | Real-time DSP pipeline |
+| FFT Size | 1024 / 2048 / 4096 / 8192 / 16384 points (configurable) |
+| FFT Window Functions | Hamming, Hann, Blackman, Blackman-Harris, Flat-top |
+| FFT Overlap | 0% - 75% (configurable) |
+| Averaging Modes | RMS, Peak Hold, Min Hold, Linear |
+| DC Offset Removal | Automatic DC spike suppression |
+| I/Q Imbalance Correction | Automatic gain and phase correction |
+| Sample Rate Conversion | Arbitrary resampling supported |
+| Filter Transition Bandwidth | Configurable (sharper = more CPU) |
 
-### 6.2 Hardware Compatibility (Target)
+### 6.3 Hardware Compatibility Matrix
 
-| Device Type | Examples |
-|-------------|----------|
-| RTL-SDR | RTL2832U-based dongles |
-| HackRF | HackRF One |
-| SDRPlay | RSP series |
-| USRP | Ettus Research devices |
-| AirSpy | AirSpy R2, Mini |
-| LimeSDR | LimeSDR Mini, USB |
+| Device | Freq Range | Bandwidth | Sample Rate | ADC Bits | TX | Dynamic Range |
+|--------|------------|-----------|-------------|----------|-----|---------------|
+| RTL-SDR V3 | 500 kHz - 1.7 GHz | 2.4 MHz | 2.56 MS/s | 8-bit | No | ~42 dB |
+| RTL-SDR V4 | 500 kHz - 1.7 GHz | 2.4 MHz | 2.56 MS/s | 8-bit | No | ~42 dB |
+| HackRF One | 1 MHz - 6 GHz | 20 MHz | 20 MS/s | 8-bit | Yes | 48 dB |
+| HackRF Pro | 100 kHz - 6 GHz | 20 MHz | 20 MS/s | 8-bit | Yes | 48 dB |
+| SDRPlay RSP1A | 1 kHz - 2 GHz | 10 MHz | 10 MS/s | 14-bit | No | ~84 dB |
+| SDRPlay RSP1B | 1 kHz - 2 GHz | 10 MHz | 10 MS/s | 14-bit | No | ~84 dB |
+| SDRPlay RSPdx | 1 kHz - 2 GHz | 10 MHz | 10 MS/s | 14-bit | No | ~84 dB |
+| AirSpy R2 | 24 MHz - 1.8 GHz | 10 MHz | 10 MS/s | 12-bit | No | ~72 dB |
+| AirSpy Mini | 24 MHz - 1.7 GHz | 6 MHz | 6 MS/s | 12-bit | No | ~72 dB |
+| AirSpy HF+ | 9 kHz - 31 MHz, 60-260 MHz | 660 kHz | 768 kS/s | 18-bit | No | ~108 dB |
+| LimeSDR Mini | 10 MHz - 3.5 GHz | 30.72 MHz | 30.72 MS/s | 12-bit | Yes | ~72 dB |
+| LimeSDR USB | 100 kHz - 3.8 GHz | 61.44 MHz | 61.44 MS/s | 12-bit | Yes | ~72 dB |
+| USRP B200 | 70 MHz - 6 GHz | 56 MHz | 61.44 MS/s | 12-bit | Yes | ~72 dB |
+| USRP B210 | 70 MHz - 6 GHz | 56 MHz | 61.44 MS/s | 12-bit | Yes | ~72 dB |
+| PlutoSDR | 325 MHz - 3.8 GHz | 20 MHz | 61.44 MS/s | 12-bit | Yes | ~72 dB |
 
-### 6.3 Software Requirements
+### 6.4 Clock & Timing Specifications
+
+| Parameter | Specification |
+|-----------|---------------|
+| Internal Clock | TCXO (Temperature Compensated Crystal Oscillator) |
+| Frequency Stability | 0.5 - 2 PPM (device dependent) |
+| External Clock Input | 10 MHz reference (SMA, device dependent) |
+| External Clock Output | 10 MHz reference output (supported devices) |
+| Clock Synchronization | Multi-device sync via external reference |
+| PPS Input | GPS timing support (supported devices) |
+
+### 6.5 Software Requirements
 
 | Component | Requirement |
 |-----------|-------------|
 | Platform | Cross-platform (Linux, Windows, macOS) |
-| Dependencies | TBD based on implementation |
-| API | Programmatic access for automation |
+| Minimum RAM | 4 GB (8 GB recommended) |
+| CPU | Multi-core x86_64 or ARM64 |
+| GPU Acceleration | Optional (OpenGL for visualization) |
+| USB | USB 2.0 minimum, USB 3.0 recommended |
+| Dependencies | libusb, FFTW3, device-specific drivers |
+| API | Python bindings, C/C++ API |
 
 ---
 
@@ -164,7 +208,99 @@ This module is a Software Defined Radio application that provides signal visuali
 
 ---
 
-## 8. Future Considerations
+## 8. Hardware Interface Specifications
+
+### 8.1 USB Interface
+
+| Parameter | Specification |
+|-----------|---------------|
+| USB Standard | USB 2.0 High-Speed / USB 3.0 SuperSpeed |
+| USB 2.0 Data Rate | 480 Mbps (theoretical), ~35 MB/s practical |
+| USB 3.0 Data Rate | 5 Gbps (theoretical), ~400 MB/s practical |
+| Connector Type | USB Type-A, USB Type-C (device dependent) |
+| Cable Length | ≤ 3m recommended for USB 2.0, ≤ 2m for USB 3.0 |
+| Power Delivery | Bus-powered (500mA USB 2.0, 900mA USB 3.0) |
+
+### 8.2 RF Connectors
+
+| Parameter | Specification |
+|-----------|---------------|
+| Antenna Connector | SMA Female (most devices) |
+| Impedance | 50 Ω |
+| VSWR | < 2:1 (typical) |
+| Clock I/O | SMA Female (supported devices) |
+| GPIO/Expansion | Device-specific headers |
+
+### 8.3 Data Formats
+
+| Format | Description |
+|--------|-------------|
+| I/Q Sample Format | 8-bit unsigned, 16-bit signed, 32-bit float |
+| Byte Order | Little-endian (I, Q interleaved) |
+| Raw File Format | .raw, .cu8, .cs8, .cs16, .cf32 |
+| Metadata Format | SigMF (Signal Metadata Format) |
+| Audio Export | WAV (PCM 16-bit, 44.1/48 kHz) |
+
+---
+
+## 9. Physical & Environmental Specifications
+
+### 9.1 Physical Dimensions (Typical)
+
+| Device Type | Dimensions (L × W × H) | Weight |
+|-------------|------------------------|--------|
+| USB Dongle (RTL-SDR) | 65 × 25 × 10 mm | ~25 g |
+| Portable (HackRF) | 120 × 75 × 15 mm | ~200 g |
+| Desktop (USRP) | 160 × 100 × 30 mm | ~500 g |
+
+### 9.2 Environmental Conditions
+
+| Parameter | Operating | Storage |
+|-----------|-----------|---------|
+| Temperature | 0°C to +55°C | -20°C to +70°C |
+| Humidity | 10% to 90% RH (non-condensing) | 5% to 95% RH |
+| Altitude | Up to 3,000 m | Up to 12,000 m |
+
+### 9.3 Power Requirements
+
+| Parameter | Specification |
+|-----------|---------------|
+| Input Voltage | 5V DC (USB bus power) |
+| Current Draw (RX) | 200 - 500 mA typical |
+| Current Draw (TX) | 300 - 900 mA typical |
+| External Power | 5V/2A recommended for TX-capable devices |
+| Bias Tee Output | 4.5V DC, 180mA max (supported devices) |
+
+---
+
+## 10. Compliance & Regulatory
+
+### 10.1 Regulatory Notices
+
+| Region | Certification | Notes |
+|--------|---------------|-------|
+| USA | FCC Part 15 | Receive-only exempt; TX requires license |
+| Europe | CE Mark | RED compliance for TX devices |
+| Canada | ISED | RSS-210 for unlicensed operation |
+| Japan | TELEC | Certification required for TX |
+| Australia | ACMA | Class license for certain bands |
+
+### 10.2 Transmit Considerations
+
+| Requirement | Description |
+|-------------|-------------|
+| Amateur License | Required for TX on amateur bands |
+| ISM Bands | Limited TX power without license (varies by region) |
+| Spurious Emissions | User responsible for filtering |
+| Frequency Coordination | Required for certain services |
+
+### 10.3 Legal Notice
+
+> **WARNING**: Transmitting on frequencies without proper authorization is illegal in most jurisdictions. Users are responsible for compliance with all applicable laws and regulations. This software is intended for educational, amateur radio, and authorized research purposes only.
+
+---
+
+## 11. Future Considerations
 
 | Feature | Description |
 |---------|-------------|
@@ -176,7 +312,7 @@ This module is a Software Defined Radio application that provides signal visuali
 
 ---
 
-## 9. Development Phases
+## 12. Development Phases
 
 ### Phase 1: Core Infrastructure
 - [ ] Hardware abstraction layer
@@ -203,5 +339,14 @@ This module is a Software Defined Radio application that provides signal visuali
 
 ---
 
-*Document Version: 1.0*
+*Document Version: 2.0*
 *Last Updated: 2025-12-25*
+
+---
+
+## Revision History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0 | 2025-12-25 | Initial specification document |
+| 2.0 | 2025-12-25 | Added quantitative RF specs, hardware compatibility matrix, interface specs, physical/environmental specs, compliance section |

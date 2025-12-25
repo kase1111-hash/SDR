@@ -40,6 +40,14 @@ from .constellation import (
     ModulationOverlay,
 )
 
+from .signal_meter import (
+    SignalStrengthMeter,
+    MeterReading,
+    MeterConfig,
+    PowerUnit,
+    MeterMode,
+)
+
 __all__ = [
     # Waterfall
     "WaterfallDisplay",
@@ -66,4 +74,10 @@ __all__ = [
     "ConstellationStats",
     "ConstellationPoint",
     "ModulationOverlay",
+    # Signal Meter
+    "SignalStrengthMeter",
+    "MeterReading",
+    "MeterConfig",
+    "PowerUnit",
+    "MeterMode",
 ]

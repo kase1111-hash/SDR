@@ -4,6 +4,25 @@
 
 This module is a Software Defined Radio application that provides signal visualization, frequency analysis, signal classification, and protocol identification capabilities.
 
+### 1.1 Target Hardware Configuration
+
+This system is designed for a **dual-SDR setup** using:
+
+| Device | Role | Key Capability |
+|--------|------|----------------|
+| **RTL-SDR** | Primary RX | Low-cost wideband receiver (500 kHz - 1.7 GHz) |
+| **HackRF One** | TX/RX | Wideband transceiver (1 MHz - 6 GHz) |
+
+### 1.2 Combined System Capabilities
+
+| Capability | Specification |
+|------------|---------------|
+| Frequency Coverage | 500 kHz - 6 GHz (combined) |
+| Simultaneous RX Channels | 2 (RTL-SDR + HackRF) |
+| Transmit Capability | Yes (HackRF One) |
+| Full-Duplex Operation | Yes (RTL-SDR RX + HackRF TX) |
+| Maximum Combined Bandwidth | 22.4 MHz (2.4 + 20 MHz) |
+
 ---
 
 ## 2. Core Features
@@ -123,19 +142,51 @@ This module is a Software Defined Radio application that provides signal visuali
 
 ### 6.1 RF Performance Specifications
 
+#### RTL-SDR (Receive Only)
+
 | Parameter | Specification | Notes |
 |-----------|---------------|-------|
-| Frequency Range | 1 kHz - 6 GHz | Hardware dependent |
-| Instantaneous Bandwidth | 2.4 MHz - 20 MHz | Hardware dependent |
-| Maximum Sample Rate | 2.56 MS/s - 20 MS/s | Hardware dependent |
-| ADC Resolution | 8-bit / 12-bit / 14-bit | Hardware dependent |
-| Effective Number of Bits (ENOB) | 7 - 11.5 bits | Varies by device |
-| Dynamic Range | 42 - 84 dB | Based on ADC resolution |
-| Noise Figure | 4 - 8 dB typical | Frequency dependent |
-| Sensitivity | -120 to -140 dBm | With appropriate LNA |
-| Maximum Input Power | -5 dBm to +10 dBm | Do not exceed; may cause damage |
-| Frequency Accuracy | 0.5 - 20 PPM | TCXO dependent |
-| Phase Noise | Device dependent | Improves with external clock |
+| Frequency Range | 500 kHz - 1.766 GHz | 24-1766 MHz native; HF via direct sampling |
+| Instantaneous Bandwidth | 2.4 MHz | 2.56 MHz max (may drop samples) |
+| Maximum Sample Rate | 2.56 MS/s | 2.4 MS/s recommended for stability |
+| ADC Resolution | 8-bit | RTL2832U chipset |
+| Effective Number of Bits (ENOB) | ~7 bits | Actual usable resolution |
+| Dynamic Range | ~42 dB | Limited by 8-bit ADC |
+| Noise Figure | 6-8 dB | R820T2 tuner, frequency dependent |
+| Sensitivity | -130 dBm | With external LNA |
+| Maximum Input Power | +10 dBm | Do not exceed |
+| Frequency Accuracy | 1 PPM | V3 with TCXO |
+| Tuner Chip | R820T2 | Low-noise silicon tuner |
+| Bias Tee | 4.5V DC, 180mA | Software-enabled (V3+) |
+
+#### HackRF One (Transmit & Receive)
+
+| Parameter | Specification | Notes |
+|-----------|---------------|-------|
+| Frequency Range | 1 MHz - 6 GHz | Full coverage |
+| Instantaneous Bandwidth | 20 MHz | Maximum supported |
+| Maximum Sample Rate | 20 MS/s | 8 MS/s minimum recommended |
+| ADC/DAC Resolution | 8-bit | MAX5864 chipset |
+| Effective Number of Bits (ENOB) | ~7 bits | Actual usable resolution |
+| Dynamic Range | 48 dB | Limited by 8-bit ADC |
+| Noise Figure | 10-15 dB | Varies by frequency; LNA recommended |
+| Sensitivity | -115 dBm | With RX amp enabled |
+| Maximum Input Power | -5 dBm | **CAUTION: Exceeding will cause damage** |
+| TX Output Power | -10 to +15 dBm | Frequency dependent |
+| Frequency Accuracy | 20 PPM | Standard crystal (TCXO upgrade available) |
+| Half-Duplex | Yes | Cannot TX and RX simultaneously |
+| RX/TX Amp | +14 dB nominal | Software-controlled |
+| Antenna Port Power | 50mA @ 3.3V | Software-controlled |
+
+#### Combined System Performance
+
+| Parameter | RTL-SDR | HackRF One | Combined |
+|-----------|---------|------------|----------|
+| Frequency Range | 500 kHz - 1.7 GHz | 1 MHz - 6 GHz | **500 kHz - 6 GHz** |
+| Bandwidth | 2.4 MHz | 20 MHz | **22.4 MHz** (parallel) |
+| Sample Rate | 2.56 MS/s | 20 MS/s | **22.56 MS/s** (parallel) |
+| TX Capability | No | Yes | **Yes** |
+| Full Duplex | N/A | No | **Yes** (RTL RX + HackRF TX) |
 
 ### 6.2 Signal Processing Parameters
 
@@ -150,52 +201,166 @@ This module is a Software Defined Radio application that provides signal visuali
 | Sample Rate Conversion | Arbitrary resampling supported |
 | Filter Transition Bandwidth | Configurable (sharper = more CPU) |
 
-### 6.3 Hardware Compatibility Matrix
+### 6.3 Primary Hardware Specifications
 
-| Device | Freq Range | Bandwidth | Sample Rate | ADC Bits | TX | Dynamic Range |
-|--------|------------|-----------|-------------|----------|-----|---------------|
-| RTL-SDR V3 | 500 kHz - 1.7 GHz | 2.4 MHz | 2.56 MS/s | 8-bit | No | ~42 dB |
-| RTL-SDR V4 | 500 kHz - 1.7 GHz | 2.4 MHz | 2.56 MS/s | 8-bit | No | ~42 dB |
-| HackRF One | 1 MHz - 6 GHz | 20 MHz | 20 MS/s | 8-bit | Yes | 48 dB |
-| HackRF Pro | 100 kHz - 6 GHz | 20 MHz | 20 MS/s | 8-bit | Yes | 48 dB |
-| SDRPlay RSP1A | 1 kHz - 2 GHz | 10 MHz | 10 MS/s | 14-bit | No | ~84 dB |
-| SDRPlay RSP1B | 1 kHz - 2 GHz | 10 MHz | 10 MS/s | 14-bit | No | ~84 dB |
-| SDRPlay RSPdx | 1 kHz - 2 GHz | 10 MHz | 10 MS/s | 14-bit | No | ~84 dB |
-| AirSpy R2 | 24 MHz - 1.8 GHz | 10 MHz | 10 MS/s | 12-bit | No | ~72 dB |
-| AirSpy Mini | 24 MHz - 1.7 GHz | 6 MHz | 6 MS/s | 12-bit | No | ~72 dB |
-| AirSpy HF+ | 9 kHz - 31 MHz, 60-260 MHz | 660 kHz | 768 kS/s | 18-bit | No | ~108 dB |
-| LimeSDR Mini | 10 MHz - 3.5 GHz | 30.72 MHz | 30.72 MS/s | 12-bit | Yes | ~72 dB |
-| LimeSDR USB | 100 kHz - 3.8 GHz | 61.44 MHz | 61.44 MS/s | 12-bit | Yes | ~72 dB |
-| USRP B200 | 70 MHz - 6 GHz | 56 MHz | 61.44 MS/s | 12-bit | Yes | ~72 dB |
-| USRP B210 | 70 MHz - 6 GHz | 56 MHz | 61.44 MS/s | 12-bit | Yes | ~72 dB |
-| PlutoSDR | 325 MHz - 3.8 GHz | 20 MHz | 61.44 MS/s | 12-bit | Yes | ~72 dB |
+#### RTL-SDR (Your Device)
 
-### 6.4 Clock & Timing Specifications
+| Component | Specification |
+|-----------|---------------|
+| Model | RTL-SDR Blog V3 (or compatible) |
+| ADC Chip | RTL2832U |
+| Tuner Chip | R820T2 |
+| USB Interface | USB 2.0 High-Speed |
+| Connector | SMA Female |
+| Impedance | 50 Ω |
+| Power | Bus-powered (~300mA) |
+| TCXO | 1 PPM (V3), 0.5 PPM (V4) |
+| Direct Sampling | Q-branch for HF (500 kHz - 24 MHz) |
+| Case | Aluminum with thermal pad |
+
+#### HackRF One (Your Device)
+
+| Component | Specification |
+|-----------|---------------|
+| Model | HackRF One (Great Scott Gadgets) |
+| Baseband Chip | MAX2837 (2.3-2.7 GHz IF) |
+| ADC/DAC Chip | MAX5864 |
+| RF Frontend | RFFC5071 (wideband mixer) |
+| Processor | NXP LPC4320 (ARM Cortex-M4/M0) |
+| USB Interface | USB 2.0 High-Speed |
+| Connector | SMA Female |
+| Impedance | 50 Ω |
+| Power | Bus-powered (~500mA RX, ~900mA TX) |
+| Clock | 20 PPM crystal (10 MHz external ref supported) |
+| Expansion | Header for add-on boards (Opera Cake, etc.) |
+| Open Source | Fully open hardware/firmware |
+
+### 6.4 Dual-SDR Operation Modes
+
+| Mode | RTL-SDR | HackRF One | Use Case |
+|------|---------|------------|----------|
+| **Dual RX** | RX @ Freq A | RX @ Freq B | Monitor two bands simultaneously |
+| **Full Duplex** | RX @ Freq A | TX @ Freq B | Transceiver with simultaneous RX monitoring |
+| **TX + Monitor** | RX @ TX Freq | TX | Monitor own transmission quality |
+| **Wideband Scan** | Scan 0-1.7 GHz | Scan 1.7-6 GHz | Cover full spectrum faster |
+| **Backup RX** | Primary RX | Secondary RX | Redundancy / comparison |
+| **Signal Relay** | RX Input | TX Output | Receive-and-retransmit applications |
+
+### 6.5 Dual-SDR Synchronization
 
 | Parameter | Specification |
 |-----------|---------------|
-| Internal Clock | TCXO (Temperature Compensated Crystal Oscillator) |
-| Frequency Stability | 0.5 - 2 PPM (device dependent) |
-| External Clock Input | 10 MHz reference (SMA, device dependent) |
-| External Clock Output | 10 MHz reference output (supported devices) |
-| Clock Synchronization | Multi-device sync via external reference |
-| PPS Input | GPS timing support (supported devices) |
+| Clock Sync | Independent (no hardware sync) |
+| Software Sync | Sample timestamp alignment via USB SOF |
+| Timing Accuracy | ~1 ms (USB latency limited) |
+| External Reference | HackRF supports 10 MHz ext clock input |
+| GPS Sync | Via external GPSDO to HackRF clock input |
 
-### 6.5 Software Requirements
+> **Note**: RTL-SDR and HackRF One do not share a common clock. For applications requiring precise timing synchronization (e.g., TDOA), use software-based correlation or an external reference clock with HackRF.
+
+### 6.6 Clock & Timing Specifications
+
+| Parameter | RTL-SDR | HackRF One |
+|-----------|---------|------------|
+| Internal Clock | TCXO | Crystal (TCXO mod available) |
+| Frequency Stability | 1 PPM | 20 PPM (standard) |
+| External Clock Input | No | Yes (10 MHz SMA) |
+| External Clock Output | No | Yes (10 MHz SMA) |
+| GPS/PPS Support | No | Via external GPSDO |
+
+### 6.7 Software Requirements
 
 | Component | Requirement |
 |-----------|-------------|
 | Platform | Cross-platform (Linux, Windows, macOS) |
-| Minimum RAM | 4 GB (8 GB recommended) |
-| CPU | Multi-core x86_64 or ARM64 |
+| Minimum RAM | 4 GB (8 GB recommended for dual-SDR) |
+| CPU | Multi-core x86_64 or ARM64 (4+ cores recommended) |
 | GPU Acceleration | Optional (OpenGL for visualization) |
-| USB | USB 2.0 minimum, USB 3.0 recommended |
-| Dependencies | libusb, FFTW3, device-specific drivers |
+| USB | 2x USB 2.0 ports (separate controllers recommended) |
+| Dependencies | libusb, FFTW3, rtl-sdr, hackrf libraries |
 | API | Python bindings, C/C++ API |
+
+### 6.8 Dual-SDR Software Stack
+
+| Layer | Component | Purpose |
+|-------|-----------|---------|
+| Driver | rtl-sdr | RTL-SDR device control |
+| Driver | libhackrf | HackRF device control |
+| Abstraction | SoapySDR | Unified SDR API (recommended) |
+| DSP | GNU Radio | Signal processing framework |
+| DSP | LiquidDSP | Lightweight DSP library |
+| Application | Custom / GQRX / SDR++ | User interface |
 
 ---
 
-## 7. User Interface Components
+## 7. Dual-SDR Use Cases
+
+### 7.1 Simultaneous Receive (Dual RX)
+
+Monitor two different frequencies at the same time.
+
+| Application | RTL-SDR Frequency | HackRF Frequency | Description |
+|-------------|-------------------|------------------|-------------|
+| ADS-B + ACARS | 1090 MHz | 131.550 MHz | Aircraft tracking + voice |
+| ISM Band Monitoring | 433 MHz | 915 MHz | Dual ISM band coverage |
+| VHF + UHF Ham | 146 MHz | 446 MHz | 2m and 70cm bands |
+| FM Broadcast + DAB | 98 MHz | 225 MHz | Analog + digital radio |
+| Marine + Air | 156.8 MHz (Ch 16) | 121.5 MHz | Distress frequencies |
+| Trunking + Control | 460 MHz (voice) | 851 MHz (control) | P25/DMR systems |
+
+### 7.2 Full-Duplex Transceiver
+
+Use RTL-SDR for receive while HackRF transmits.
+
+| Application | RTL-SDR (RX) | HackRF (TX) | Description |
+|-------------|--------------|-------------|-------------|
+| Repeater | Input Freq | Output Freq | Simplex/duplex relay |
+| Transponder | Uplink | Downlink | Satellite-style relay |
+| SIGINT Training | Any | Test signal | Generate and capture signals |
+| Protocol Testing | Device RX Freq | Device TX Freq | Stimulate and monitor devices |
+
+### 7.3 Transmit Monitoring
+
+Monitor your own transmissions for quality assurance.
+
+| Setup | RTL-SDR | HackRF | Purpose |
+|-------|---------|--------|---------|
+| Spectrum Monitor | Same freq (attenuated) | TX | Check spectral purity |
+| Modulation Check | Same freq | TX | Verify modulation quality |
+| Spurious Monitor | Harmonic freq | TX | Detect spurious emissions |
+
+### 7.4 Extended Frequency Coverage
+
+Combine devices to cover wider spectrum.
+
+| Band | Device | Frequency Range |
+|------|--------|-----------------|
+| HF (Direct Sampling) | RTL-SDR | 500 kHz - 24 MHz |
+| VHF/UHF | RTL-SDR | 24 MHz - 1.7 GHz |
+| UHF/Microwave | HackRF | 1.7 GHz - 6 GHz |
+
+### 7.5 Signal Analysis & Classification Pipeline
+
+```
+┌─────────────┐     ┌─────────────────────────────┐
+│   RTL-SDR   │────▶│  Primary Signal Capture     │
+│  (RX Only)  │     │  • Signal detection         │
+└─────────────┘     │  • Frequency identification │
+                    │  • Initial classification   │
+                    └──────────────┬──────────────┘
+                                   │
+                                   ▼
+┌─────────────┐     ┌─────────────────────────────┐
+│  HackRF One │────▶│  Wideband Analysis          │
+│   (RX/TX)   │     │  • 20 MHz capture           │
+└─────────────┘     │  • Protocol decoding        │
+                    │  • TX for active testing    │
+                    └─────────────────────────────┘
+```
+
+---
+
+## 8. User Interface Components
 
 | Component | Description |
 |-----------|-------------|
@@ -208,9 +373,9 @@ This module is a Software Defined Radio application that provides signal visuali
 
 ---
 
-## 8. Hardware Interface Specifications
+## 9. Hardware Interface Specifications
 
-### 8.1 USB Interface
+### 9.1 USB Interface
 
 | Parameter | Specification |
 |-----------|---------------|
@@ -221,7 +386,7 @@ This module is a Software Defined Radio application that provides signal visuali
 | Cable Length | ≤ 3m recommended for USB 2.0, ≤ 2m for USB 3.0 |
 | Power Delivery | Bus-powered (500mA USB 2.0, 900mA USB 3.0) |
 
-### 8.2 RF Connectors
+### 9.2 RF Connectors
 
 | Parameter | Specification |
 |-----------|---------------|
@@ -231,7 +396,7 @@ This module is a Software Defined Radio application that provides signal visuali
 | Clock I/O | SMA Female (supported devices) |
 | GPIO/Expansion | Device-specific headers |
 
-### 8.3 Data Formats
+### 9.3 Data Formats
 
 | Format | Description |
 |--------|-------------|
@@ -243,9 +408,9 @@ This module is a Software Defined Radio application that provides signal visuali
 
 ---
 
-## 9. Physical & Environmental Specifications
+## 10. Physical & Environmental Specifications
 
-### 9.1 Physical Dimensions (Typical)
+### 10.1 Physical Dimensions
 
 | Device Type | Dimensions (L × W × H) | Weight |
 |-------------|------------------------|--------|
@@ -253,7 +418,7 @@ This module is a Software Defined Radio application that provides signal visuali
 | Portable (HackRF) | 120 × 75 × 15 mm | ~200 g |
 | Desktop (USRP) | 160 × 100 × 30 mm | ~500 g |
 
-### 9.2 Environmental Conditions
+### 10.2 Environmental Conditions
 
 | Parameter | Operating | Storage |
 |-----------|-----------|---------|
@@ -261,7 +426,7 @@ This module is a Software Defined Radio application that provides signal visuali
 | Humidity | 10% to 90% RH (non-condensing) | 5% to 95% RH |
 | Altitude | Up to 3,000 m | Up to 12,000 m |
 
-### 9.3 Power Requirements
+### 10.3 Power Requirements
 
 | Parameter | Specification |
 |-----------|---------------|
@@ -273,9 +438,9 @@ This module is a Software Defined Radio application that provides signal visuali
 
 ---
 
-## 10. Compliance & Regulatory
+## 11. Compliance & Regulatory
 
-### 10.1 Regulatory Notices
+### 11.1 Regulatory Notices
 
 | Region | Certification | Notes |
 |--------|---------------|-------|
@@ -285,7 +450,7 @@ This module is a Software Defined Radio application that provides signal visuali
 | Japan | TELEC | Certification required for TX |
 | Australia | ACMA | Class license for certain bands |
 
-### 10.2 Transmit Considerations
+### 11.2 Transmit Considerations
 
 | Requirement | Description |
 |-------------|-------------|
@@ -294,13 +459,13 @@ This module is a Software Defined Radio application that provides signal visuali
 | Spurious Emissions | User responsible for filtering |
 | Frequency Coordination | Required for certain services |
 
-### 10.3 Legal Notice
+### 11.3 Legal Notice
 
 > **WARNING**: Transmitting on frequencies without proper authorization is illegal in most jurisdictions. Users are responsible for compliance with all applicable laws and regulations. This software is intended for educational, amateur radio, and authorized research purposes only.
 
 ---
 
-## 11. Future Considerations
+## 12. Future Considerations
 
 | Feature | Description |
 |---------|-------------|
@@ -312,7 +477,7 @@ This module is a Software Defined Radio application that provides signal visuali
 
 ---
 
-## 12. Development Phases
+## 13. Development Phases
 
 ### Phase 1: Core Infrastructure
 - [ ] Hardware abstraction layer
@@ -339,7 +504,7 @@ This module is a Software Defined Radio application that provides signal visuali
 
 ---
 
-*Document Version: 2.0*
+*Document Version: 3.0*
 *Last Updated: 2025-12-25*
 
 ---
@@ -350,3 +515,4 @@ This module is a Software Defined Radio application that provides signal visuali
 |---------|------|---------|
 | 1.0 | 2025-12-25 | Initial specification document |
 | 2.0 | 2025-12-25 | Added quantitative RF specs, hardware compatibility matrix, interface specs, physical/environmental specs, compliance section |
+| 3.0 | 2025-12-25 | Tuned for dual-SDR setup (RTL-SDR + HackRF One); added device-specific specs, dual-SDR operation modes, synchronization, use cases, software stack |

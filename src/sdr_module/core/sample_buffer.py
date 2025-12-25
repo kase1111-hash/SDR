@@ -126,6 +126,13 @@ class SampleBuffer:
         with self._lock:
             n_samples = len(samples)
 
+            # If samples exceed capacity, truncate to capacity
+            if n_samples > self._capacity:
+                self._stats.samples_dropped += n_samples - self._capacity
+                self._stats.overflow_count += 1
+                samples = samples[-self._capacity:]  # Keep newest
+                n_samples = self._capacity
+
             # Handle overflow
             if n_samples > self._capacity - self._count:
                 if self._overflow_policy == BufferOverflowPolicy.BLOCK:
@@ -162,7 +169,8 @@ class SampleBuffer:
                 # Wrap around
                 first_chunk = self._capacity - self._write_idx
                 self._buffer[self._write_idx:] = samples[:first_chunk]
-                self._buffer[:end_idx] = samples[first_chunk:]
+                if end_idx > 0:
+                    self._buffer[:end_idx] = samples[first_chunk:]
 
             self._write_idx = end_idx
             self._count += n_samples

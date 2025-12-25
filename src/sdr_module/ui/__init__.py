@@ -32,6 +32,14 @@ from .time_domain import (
     DisplayMode,
 )
 
+from .constellation import (
+    ConstellationDisplay,
+    ConstellationResult,
+    ConstellationStats,
+    ConstellationPoint,
+    ModulationOverlay,
+)
+
 __all__ = [
     # Waterfall
     "WaterfallDisplay",
@@ -52,4 +60,10 @@ __all__ = [
     "TimeDomainDisplay",
     "TimeDomainResult",
     "DisplayMode",
+    # Constellation
+    "ConstellationDisplay",
+    "ConstellationResult",
+    "ConstellationStats",
+    "ConstellationPoint",
+    "ModulationOverlay",
 ]

@@ -21,6 +21,16 @@ from .afc import (
     AFCStatus,
     AFCConfig,
 )
+from .scanner import (
+    FrequencyScanner,
+    ScanMode,
+    ScanState,
+    ScanDirection,
+    ScanConfig,
+    ScanStatus,
+    ScanResult,
+    SignalHit,
+)
 
 __all__ = [
     "SpectrumAnalyzer",
@@ -38,4 +48,12 @@ __all__ = [
     "AFCMethod",
     "AFCStatus",
     "AFCConfig",
+    "FrequencyScanner",
+    "ScanMode",
+    "ScanState",
+    "ScanDirection",
+    "ScanConfig",
+    "ScanStatus",
+    "ScanResult",
+    "SignalHit",
 ]

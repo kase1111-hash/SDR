@@ -26,6 +26,12 @@ from .packet_highlighter import (
     LivePacketDisplay,
 )
 
+from .time_domain import (
+    TimeDomainDisplay,
+    TimeDomainResult,
+    DisplayMode,
+)
+
 __all__ = [
     # Waterfall
     "WaterfallDisplay",
@@ -42,4 +48,8 @@ __all__ = [
     "DetectionConfig",
     "DetectedPacket",
     "LivePacketDisplay",
+    # Time Domain
+    "TimeDomainDisplay",
+    "TimeDomainResult",
+    "DisplayMode",
 ]

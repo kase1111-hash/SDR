@@ -586,6 +586,115 @@ Support for QRP (5W CW / 10W SSB) and QRPp (milliwatt) operation.
 HackRF (0 dBm, 1mW) → Driver (+20dB) → PA (+17dB) = 5W QRP
 ```
 
+### 11.9 License Profiles
+
+TX permissions are enforced based on the operator's amateur radio license class.
+
+**License Classes:**
+
+| Class | Description | HF Privileges | VHF/UHF |
+|-------|-------------|---------------|---------|
+| None | No license | License-free only | License-free only |
+| Technician | Entry level | 10m, limited CW on 80/40/15m | Full |
+| General | Intermediate | Most HF with sub-band limits | Full |
+| Amateur Extra | Full privileges | All amateur bands | Full |
+
+**License-Free Bands (No License Required):**
+
+| Service | Frequency | Power Limit | Modes |
+|---------|-----------|-------------|-------|
+| CB Radio | 26.965-27.405 MHz | 4W AM, 12W SSB | AM, SSB |
+| MURS | 151.82-154.60 MHz | 2W | FM |
+| FRS | 462-467 MHz | 0.5-2W | FM |
+
+**Amateur Band Privileges (Examples):**
+
+| Band | Technician | General | Extra |
+|------|------------|---------|-------|
+| 160m | ✓ | ✓ | ✓ |
+| 80m | CW only (3.525-3.6) | Phone 3.8-4.0, CW 3.525-3.6 | Full |
+| 40m | CW only (7.025-7.125) | Phone 7.175-7.3, CW 7.025-7.125 | Full |
+| 20m | ✗ | Phone 14.225-14.35, CW 14.025-14.15 | Full |
+| 10m | ✓ (28.0-28.5) | ✓ | ✓ |
+| 6m | ✓ | ✓ | ✓ |
+| 2m | ✓ | ✓ | ✓ |
+| 70cm | ✓ | ✓ | ✓ |
+
+**TX Validation:**
+- All TX requests are validated against current license class
+- Hardware lockouts (GPS, aviation, emergency) always apply regardless of license
+- Mode restrictions enforced per band segment
+- Power limits enforced where applicable
+
+**Power Headroom (150%):**
+
+Power limits allow 150% of the legal limit to account for:
+- Cable and connector losses
+- Filter insertion loss
+- Amplifier efficiency variations
+- Measurement uncertainty
+
+| Band | Legal Limit | Effective Max |
+|------|-------------|---------------|
+| CB | 12W | 18W |
+| 10m Tech | 200W | 300W |
+| 30m | 200W | 300W |
+| 60m | 100W | 150W |
+
+⚠️ **IMPORTANT**: Before transmitting, test actual broadcast power with a 50Ω dummy load and power meter. The configured limit is not measured output—verify radiated power at the antenna base.
+
+### 11.10 NatLangChain Blockchain Radio Protocol
+
+Integration with the NatLangChain distributed ledger for transmitting natural language entries via radio.
+
+**Protocol Overview:**
+
+| Feature | Description |
+|---------|-------------|
+| Entry Format | Natural language prose with SHA-256 hash |
+| Packet Encoding | Compressed JSON with zlib, fragmented for radio |
+| Reassembly | Sequence numbers for multi-packet messages |
+| Peer Discovery | Callsign-based peer announcement |
+| Chain Sync | Request/response for distributed ledger sync |
+
+**Message Types:**
+
+| Type | Purpose |
+|------|---------|
+| ENTRY | Broadcast a new natural language entry |
+| ENTRY_ACK | Acknowledge receipt of an entry |
+| CHAIN_REQUEST | Request chain synchronization |
+| CHAIN_RESPONSE | Respond with chain data |
+| BLOCK_ANNOUNCE | Announce a new validated block |
+| PEER_ANNOUNCE | Announce presence on network |
+| HEARTBEAT | Keep-alive for peer discovery |
+
+**Radio Packet Format:**
+
+```
+[TYPE:1][SEQ:2][TOTAL:2][HASH:8][PAYLOAD:variable]
+```
+
+- Maximum payload: 200 bytes (within AX.25 limits)
+- Large messages fragmented automatically
+- Fragment reassembly via hash matching
+
+**GUI Panel Features:**
+
+| Tab | Functions |
+|-----|-----------|
+| Compose | Create and broadcast new entries |
+| Entries | View received entries from the network |
+| Chain | View local chain status and block history |
+| Peers | Discover and monitor network peers |
+
+**Integration:**
+
+- Entries are broadcast via HackRF TX
+- Received packets decoded from RTL-SDR RX
+- Peer discovery uses amateur radio callsigns
+- Compatible with AX.25 packet radio infrastructure
+
 ---
 
 ## 12. Future Considerations
@@ -706,7 +815,7 @@ If not using the installer:
 
 ---
 
-*Document Version: 3.8*
+*Document Version: 4.1*
 *Last Updated: 2025-12-26*
 
 ---
@@ -726,3 +835,6 @@ If not using the installer:
 | 3.6 | 2025-12-26 | Added SSTV decoder for ISS image reception; space/satellite RX presets (ISS, Meteor-M2, SO-50); GUI image viewer with live preview |
 | 3.7 | 2025-12-26 | Added HAM radio signal meter with S-units (S1-S9, S9+dB) and RST reporting; analog meter GUI; verbal reports ("five and nine, twenty over") |
 | 3.8 | 2025-12-26 | Added QRP operations module: power conversion (dBm↔watts), TX limiter for QRP compliance, amplifier chain calculator, miles-per-watt tracker; QRP calling frequency presets (80m-10m CW/SSB) |
+| 3.9 | 2025-12-26 | Added license profiles (None, Technician, General, Amateur Extra); TX lockouts enforced by license class; license-free bands (CB, MURS, FRS); GUI license selector |
+| 4.0 | 2025-12-26 | Added 150% power headroom for TX limits (accounts for cable/filter losses); dummy load testing warning; shows legal vs effective power limits in GUI |
+| 4.1 | 2025-12-26 | Added NatLangChain blockchain radio protocol: natural language entry broadcast, packet fragmentation/reassembly, peer discovery, chain sync; GUI panel with Compose/Entries/Chain/Peers tabs |

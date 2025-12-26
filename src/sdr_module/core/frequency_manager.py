@@ -1,14 +1,21 @@
 """
-Frequency management with TX lockouts and RX presets.
+Frequency management with TX lockouts, license profiles, and RX presets.
 
 This module provides:
 - TX frequency lockouts for protected bands (GPS, emergency, aviation, etc.)
+- License-based TX permissions (None, Technician, General, Amateur Extra)
 - RX frequency presets for common signals
 - Frequency validation before transmission
 
 SAFETY: GPS spoofing is extremely dangerous and illegal. Spoofed GPS signals
 have caused aircraft navigation failures and could result in loss of life.
 GPS frequencies are permanently locked out from transmission.
+
+LICENSE PROFILES:
+- None: Only license-free bands (CB, MURS, FRS)
+- Technician: VHF/UHF full, limited HF (10m, some 80m/40m/15m CW)
+- General: Most HF bands with sub-band restrictions
+- Amateur Extra: Full amateur band privileges
 """
 
 from __future__ import annotations
@@ -16,9 +23,21 @@ from __future__ import annotations
 import logging
 from enum import Enum, auto
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional, Dict
+from typing import List, Tuple, Optional, Dict, Set
 
 logger = logging.getLogger(__name__)
+
+# Power headroom factor - allows 150% of legal limit for filtering/cable losses
+# Real wattage is measured at antenna base, so we allow headroom for the TX chain
+POWER_HEADROOM_FACTOR = 1.5
+
+# Warning message for TX power testing
+TX_POWER_WARNING = (
+    "⚠️ IMPORTANT: Before transmitting, test your actual broadcast power "
+    "with a 50Ω dummy load and power meter. The power shown here is the "
+    "configured limit, not measured output. Cable losses, filtering, and "
+    "amplifier efficiency affect actual radiated power."
+)
 
 
 class LockoutReason(Enum):
@@ -31,6 +50,73 @@ class LockoutReason(Enum):
     SATELLITE = auto()        # Satellite communications
     GOVERNMENT = auto()       # Government/public safety
     BROADCAST = auto()        # Licensed broadcast bands
+    LICENSE = auto()          # No license or insufficient license
+
+
+class LicenseClass(Enum):
+    """Amateur radio license class (US FCC)."""
+    NONE = "none"                    # No license - only license-free bands
+    TECHNICIAN = "technician"        # Entry level - VHF/UHF, limited HF
+    GENERAL = "general"              # Most HF privileges
+    AMATEUR_EXTRA = "amateur_extra"  # Full privileges
+
+    @classmethod
+    def from_string(cls, s: str) -> "LicenseClass":
+        """Parse license class from string."""
+        s = s.lower().strip().replace(" ", "_").replace("-", "_")
+        for member in cls:
+            if member.value == s or member.name.lower() == s:
+                return member
+        return cls.NONE
+
+
+@dataclass
+class BandPrivilege:
+    """
+    Defines TX privileges for a frequency band segment.
+
+    Attributes:
+        name: Human-readable band name
+        start_hz: Lower edge of band segment
+        end_hz: Upper edge of band segment
+        modes: Allowed modes (CW, SSB, DATA, FM, AM) or empty for all
+        max_power_watts: Maximum power for this segment (None = no limit)
+        licenses: Set of license classes that can use this segment
+    """
+    name: str
+    start_hz: float
+    end_hz: float
+    modes: Set[str] = field(default_factory=set)
+    max_power_watts: Optional[float] = None
+    licenses: Set[LicenseClass] = field(default_factory=set)
+
+    def is_allowed(self, license_class: LicenseClass, mode: str = "") -> bool:
+        """Check if the given license and mode are allowed."""
+        if license_class not in self.licenses:
+            return False
+        if self.modes and mode and mode.upper() not in self.modes:
+            return False
+        return True
+
+    def get_legal_power_limit(self) -> Optional[float]:
+        """Get the legal power limit for this band (without headroom)."""
+        return self.max_power_watts
+
+    def get_effective_power_limit(self) -> Optional[float]:
+        """
+        Get the effective power limit with headroom for filtering/losses.
+
+        Returns 150% of the legal limit to account for:
+        - Cable/connector losses
+        - Filter insertion loss
+        - Amplifier efficiency variations
+        - Measurement uncertainty
+
+        Real radiated power should be verified with a 50Ω dummy load.
+        """
+        if self.max_power_watts is None:
+            return None
+        return self.max_power_watts * POWER_HEADROOM_FACTOR
 
 
 @dataclass
@@ -204,6 +290,482 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         description="PCS cellular band",
         rx_only=True,
         lockout_reason=LockoutReason.CELLULAR
+    ),
+]
+
+
+# =============================================================================
+# LICENSE-FREE TX BANDS - Available without any license
+# =============================================================================
+
+# Shorthand for all amateur licenses
+ALL_HAM = {LicenseClass.TECHNICIAN, LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+GENERAL_EXTRA = {LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+EXTRA_ONLY = {LicenseClass.AMATEUR_EXTRA}
+
+LICENSE_FREE_BANDS: List[BandPrivilege] = [
+    # CB Radio (Citizens Band) - 26.965-27.405 MHz
+    # 4W AM, 12W PEP SSB, 40 channels
+    BandPrivilege(
+        name="CB Radio",
+        start_hz=26.965e6,
+        end_hz=27.405e6,
+        modes={"AM", "SSB", "USB", "LSB"},
+        max_power_watts=12.0,  # 12W PEP SSB, 4W AM carrier
+        licenses={LicenseClass.NONE, LicenseClass.TECHNICIAN,
+                  LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+    ),
+
+    # MURS (Multi-Use Radio Service) - 5 channels, 2W
+    BandPrivilege(
+        name="MURS Ch 1-3",
+        start_hz=151.820e6,
+        end_hz=151.940e6,
+        modes={"FM"},
+        max_power_watts=2.0,
+        licenses={LicenseClass.NONE, LicenseClass.TECHNICIAN,
+                  LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+    ),
+    BandPrivilege(
+        name="MURS Ch 4-5",
+        start_hz=154.570e6,
+        end_hz=154.600e6,
+        modes={"FM"},
+        max_power_watts=2.0,
+        licenses={LicenseClass.NONE, LicenseClass.TECHNICIAN,
+                  LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+    ),
+
+    # FRS (Family Radio Service) - 22 channels
+    # Channels 1-7, 15-22: 2W, Channels 8-14: 0.5W
+    BandPrivilege(
+        name="FRS Channels 1-7",
+        start_hz=462.5625e6,
+        end_hz=462.7125e6,
+        modes={"FM"},
+        max_power_watts=2.0,
+        licenses={LicenseClass.NONE, LicenseClass.TECHNICIAN,
+                  LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+    ),
+    BandPrivilege(
+        name="FRS Channels 8-14",
+        start_hz=467.5625e6,
+        end_hz=467.7125e6,
+        modes={"FM"},
+        max_power_watts=0.5,
+        licenses={LicenseClass.NONE, LicenseClass.TECHNICIAN,
+                  LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+    ),
+    BandPrivilege(
+        name="FRS Channels 15-22",
+        start_hz=462.5500e6,
+        end_hz=462.7250e6,
+        modes={"FM"},
+        max_power_watts=2.0,
+        licenses={LicenseClass.NONE, LicenseClass.TECHNICIAN,
+                  LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+    ),
+]
+
+
+# =============================================================================
+# AMATEUR RADIO BAND PRIVILEGES - Based on US FCC Part 97
+# =============================================================================
+
+AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
+    # =========================================================================
+    # 160 Meters (1.8-2.0 MHz) - All licenses, all modes
+    # =========================================================================
+    BandPrivilege(
+        name="160m",
+        start_hz=1.800e6,
+        end_hz=2.000e6,
+        modes=set(),  # All modes
+        licenses=ALL_HAM
+    ),
+
+    # =========================================================================
+    # 80 Meters (3.5-4.0 MHz)
+    # =========================================================================
+    # Extra: 3.500-3.600 CW/Data
+    BandPrivilege(
+        name="80m CW Extra",
+        start_hz=3.500e6,
+        end_hz=3.525e6,
+        modes={"CW", "DATA"},
+        licenses=EXTRA_ONLY
+    ),
+    # General + Extra: 3.525-3.600 CW/Data
+    BandPrivilege(
+        name="80m CW General",
+        start_hz=3.525e6,
+        end_hz=3.600e6,
+        modes={"CW", "DATA"},
+        licenses=GENERAL_EXTRA
+    ),
+    # Technician: 3.525-3.600 CW only (Novice portion)
+    BandPrivilege(
+        name="80m CW Tech",
+        start_hz=3.525e6,
+        end_hz=3.600e6,
+        modes={"CW"},
+        licenses={LicenseClass.TECHNICIAN}
+    ),
+    # Extra: 3.600-3.700 Phone/Image
+    BandPrivilege(
+        name="80m Phone Extra",
+        start_hz=3.600e6,
+        end_hz=3.700e6,
+        modes={"SSB", "USB", "LSB", "AM", "DATA"},
+        licenses=EXTRA_ONLY
+    ),
+    # General + Extra: 3.700-3.800 Phone/Image (unofficial DX window)
+    BandPrivilege(
+        name="80m Phone DX Window",
+        start_hz=3.700e6,
+        end_hz=3.800e6,
+        modes={"SSB", "USB", "LSB", "AM", "DATA"},
+        licenses=EXTRA_ONLY
+    ),
+    # General + Extra: 3.800-4.000 Phone
+    BandPrivilege(
+        name="80m Phone General",
+        start_hz=3.800e6,
+        end_hz=4.000e6,
+        modes={"SSB", "USB", "LSB", "AM", "DATA"},
+        licenses=GENERAL_EXTRA
+    ),
+
+    # =========================================================================
+    # 60 Meters (5 MHz channels) - All licenses, USB only, 100W ERP
+    # =========================================================================
+    BandPrivilege(
+        name="60m Ch 1",
+        start_hz=5.3305e6,
+        end_hz=5.3335e6,
+        modes={"USB", "DATA", "CW"},
+        max_power_watts=100.0,
+        licenses=ALL_HAM
+    ),
+    BandPrivilege(
+        name="60m Ch 2",
+        start_hz=5.3465e6,
+        end_hz=5.3495e6,
+        modes={"USB", "DATA", "CW"},
+        max_power_watts=100.0,
+        licenses=ALL_HAM
+    ),
+    BandPrivilege(
+        name="60m Ch 3",
+        start_hz=5.3570e6,
+        end_hz=5.3600e6,
+        modes={"USB", "DATA", "CW"},
+        max_power_watts=100.0,
+        licenses=ALL_HAM
+    ),
+    BandPrivilege(
+        name="60m Ch 4",
+        start_hz=5.3715e6,
+        end_hz=5.3745e6,
+        modes={"USB", "DATA", "CW"},
+        max_power_watts=100.0,
+        licenses=ALL_HAM
+    ),
+    BandPrivilege(
+        name="60m Ch 5",
+        start_hz=5.4035e6,
+        end_hz=5.4065e6,
+        modes={"USB", "DATA", "CW"},
+        max_power_watts=100.0,
+        licenses=ALL_HAM
+    ),
+
+    # =========================================================================
+    # 40 Meters (7.0-7.3 MHz)
+    # =========================================================================
+    # Extra: 7.000-7.025 CW
+    BandPrivilege(
+        name="40m CW Extra",
+        start_hz=7.000e6,
+        end_hz=7.025e6,
+        modes={"CW", "DATA"},
+        licenses=EXTRA_ONLY
+    ),
+    # General + Extra: 7.025-7.125 CW/Data
+    BandPrivilege(
+        name="40m CW General",
+        start_hz=7.025e6,
+        end_hz=7.125e6,
+        modes={"CW", "DATA"},
+        licenses=GENERAL_EXTRA
+    ),
+    # Technician: 7.025-7.125 CW only (Novice portion)
+    BandPrivilege(
+        name="40m CW Tech",
+        start_hz=7.025e6,
+        end_hz=7.125e6,
+        modes={"CW"},
+        licenses={LicenseClass.TECHNICIAN}
+    ),
+    # Extra: 7.125-7.175 Phone
+    BandPrivilege(
+        name="40m Phone Extra",
+        start_hz=7.125e6,
+        end_hz=7.175e6,
+        modes={"SSB", "USB", "LSB", "AM", "DATA"},
+        licenses=EXTRA_ONLY
+    ),
+    # General + Extra: 7.175-7.300 Phone
+    BandPrivilege(
+        name="40m Phone General",
+        start_hz=7.175e6,
+        end_hz=7.300e6,
+        modes={"SSB", "USB", "LSB", "AM", "DATA"},
+        licenses=GENERAL_EXTRA
+    ),
+
+    # =========================================================================
+    # 30 Meters (10.1-10.15 MHz) - CW/Data only, 200W max
+    # =========================================================================
+    BandPrivilege(
+        name="30m",
+        start_hz=10.100e6,
+        end_hz=10.150e6,
+        modes={"CW", "DATA"},
+        max_power_watts=200.0,
+        licenses=GENERAL_EXTRA
+    ),
+
+    # =========================================================================
+    # 20 Meters (14.0-14.35 MHz)
+    # =========================================================================
+    # Extra: 14.000-14.025 CW
+    BandPrivilege(
+        name="20m CW Extra",
+        start_hz=14.000e6,
+        end_hz=14.025e6,
+        modes={"CW", "DATA"},
+        licenses=EXTRA_ONLY
+    ),
+    # General + Extra: 14.025-14.150 CW/Data
+    BandPrivilege(
+        name="20m CW General",
+        start_hz=14.025e6,
+        end_hz=14.150e6,
+        modes={"CW", "DATA"},
+        licenses=GENERAL_EXTRA
+    ),
+    # Extra: 14.150-14.225 Phone
+    BandPrivilege(
+        name="20m Phone Extra",
+        start_hz=14.150e6,
+        end_hz=14.225e6,
+        modes={"SSB", "USB", "LSB", "AM", "DATA"},
+        licenses=EXTRA_ONLY
+    ),
+    # General + Extra: 14.225-14.350 Phone
+    BandPrivilege(
+        name="20m Phone General",
+        start_hz=14.225e6,
+        end_hz=14.350e6,
+        modes={"SSB", "USB", "LSB", "AM", "DATA"},
+        licenses=GENERAL_EXTRA
+    ),
+
+    # =========================================================================
+    # 17 Meters (18.068-18.168 MHz)
+    # =========================================================================
+    # Extra: 18.068-18.110 CW/Data
+    BandPrivilege(
+        name="17m CW Extra",
+        start_hz=18.068e6,
+        end_hz=18.110e6,
+        modes={"CW", "DATA"},
+        licenses=EXTRA_ONLY
+    ),
+    # General + Extra: 18.110-18.168 All modes
+    BandPrivilege(
+        name="17m General",
+        start_hz=18.110e6,
+        end_hz=18.168e6,
+        modes=set(),
+        licenses=GENERAL_EXTRA
+    ),
+
+    # =========================================================================
+    # 15 Meters (21.0-21.45 MHz)
+    # =========================================================================
+    # Extra: 21.000-21.025 CW
+    BandPrivilege(
+        name="15m CW Extra",
+        start_hz=21.000e6,
+        end_hz=21.025e6,
+        modes={"CW", "DATA"},
+        licenses=EXTRA_ONLY
+    ),
+    # General + Extra: 21.025-21.200 CW/Data
+    BandPrivilege(
+        name="15m CW General",
+        start_hz=21.025e6,
+        end_hz=21.200e6,
+        modes={"CW", "DATA"},
+        licenses=GENERAL_EXTRA
+    ),
+    # Technician: 21.025-21.200 CW only
+    BandPrivilege(
+        name="15m CW Tech",
+        start_hz=21.025e6,
+        end_hz=21.200e6,
+        modes={"CW"},
+        licenses={LicenseClass.TECHNICIAN}
+    ),
+    # Extra: 21.200-21.275 Phone
+    BandPrivilege(
+        name="15m Phone Extra",
+        start_hz=21.200e6,
+        end_hz=21.275e6,
+        modes={"SSB", "USB", "LSB", "AM", "DATA"},
+        licenses=EXTRA_ONLY
+    ),
+    # General + Extra: 21.275-21.450 Phone
+    BandPrivilege(
+        name="15m Phone General",
+        start_hz=21.275e6,
+        end_hz=21.450e6,
+        modes={"SSB", "USB", "LSB", "AM", "DATA"},
+        licenses=GENERAL_EXTRA
+    ),
+
+    # =========================================================================
+    # 12 Meters (24.89-24.99 MHz)
+    # =========================================================================
+    BandPrivilege(
+        name="12m CW",
+        start_hz=24.890e6,
+        end_hz=24.930e6,
+        modes={"CW", "DATA"},
+        licenses=GENERAL_EXTRA
+    ),
+    BandPrivilege(
+        name="12m Phone",
+        start_hz=24.930e6,
+        end_hz=24.990e6,
+        modes={"SSB", "USB", "LSB", "AM", "DATA"},
+        licenses=GENERAL_EXTRA
+    ),
+
+    # =========================================================================
+    # 10 Meters (28.0-29.7 MHz)
+    # =========================================================================
+    # CW/Data: 28.000-28.300
+    BandPrivilege(
+        name="10m CW",
+        start_hz=28.000e6,
+        end_hz=28.300e6,
+        modes={"CW", "DATA"},
+        licenses=ALL_HAM
+    ),
+    # Technician CW: 28.000-28.500 (200W max for Tech)
+    BandPrivilege(
+        name="10m CW Tech",
+        start_hz=28.000e6,
+        end_hz=28.500e6,
+        modes={"CW", "DATA", "SSB", "USB", "LSB"},
+        max_power_watts=200.0,
+        licenses={LicenseClass.TECHNICIAN}
+    ),
+    # Phone: 28.300-29.700
+    BandPrivilege(
+        name="10m Phone",
+        start_hz=28.300e6,
+        end_hz=29.700e6,
+        modes=set(),  # All modes
+        licenses=GENERAL_EXTRA
+    ),
+    # FM Simplex: 29.600 (calling)
+    BandPrivilege(
+        name="10m FM",
+        start_hz=29.500e6,
+        end_hz=29.700e6,
+        modes={"FM"},
+        licenses=ALL_HAM
+    ),
+
+    # =========================================================================
+    # 6 Meters (50-54 MHz) - All licenses full privileges
+    # =========================================================================
+    BandPrivilege(
+        name="6m",
+        start_hz=50.000e6,
+        end_hz=54.000e6,
+        modes=set(),
+        licenses=ALL_HAM
+    ),
+
+    # =========================================================================
+    # 2 Meters (144-148 MHz) - All licenses full privileges
+    # =========================================================================
+    BandPrivilege(
+        name="2m",
+        start_hz=144.000e6,
+        end_hz=148.000e6,
+        modes=set(),
+        licenses=ALL_HAM
+    ),
+
+    # =========================================================================
+    # 1.25 Meters (222-225 MHz) - All licenses full privileges
+    # =========================================================================
+    BandPrivilege(
+        name="1.25m",
+        start_hz=222.000e6,
+        end_hz=225.000e6,
+        modes=set(),
+        licenses=ALL_HAM
+    ),
+
+    # =========================================================================
+    # 70 Centimeters (420-450 MHz) - All licenses full privileges
+    # =========================================================================
+    BandPrivilege(
+        name="70cm",
+        start_hz=420.000e6,
+        end_hz=450.000e6,
+        modes=set(),
+        licenses=ALL_HAM
+    ),
+
+    # =========================================================================
+    # 33 Centimeters (902-928 MHz) - All licenses full privileges
+    # =========================================================================
+    BandPrivilege(
+        name="33cm",
+        start_hz=902.000e6,
+        end_hz=928.000e6,
+        modes=set(),
+        licenses=ALL_HAM
+    ),
+
+    # =========================================================================
+    # 23 Centimeters (1240-1300 MHz) - All licenses full privileges
+    # =========================================================================
+    BandPrivilege(
+        name="23cm",
+        start_hz=1240.000e6,
+        end_hz=1300.000e6,
+        modes=set(),
+        licenses=ALL_HAM
+    ),
+
+    # =========================================================================
+    # 13 Centimeters (2300-2450 MHz) - All licenses
+    # =========================================================================
+    BandPrivilege(
+        name="13cm",
+        start_hz=2300.000e6,
+        end_hz=2450.000e6,
+        modes=set(),
+        licenses=ALL_HAM
     ),
 ]
 
@@ -549,10 +1111,12 @@ RX_PRESETS: List[FrequencyPreset] = [
 
 class FrequencyManager:
     """
-    Manages frequency validation, lockouts, and presets.
+    Manages frequency validation, lockouts, license profiles, and presets.
 
-    This class ensures that protected frequencies cannot be used for
-    transmission while allowing receive on any frequency.
+    This class ensures that:
+    - Protected frequencies cannot be used for transmission
+    - TX is only allowed on bands the operator is licensed for
+    - Receive is allowed on any frequency
     """
 
     def __init__(self):
@@ -560,15 +1124,150 @@ class FrequencyManager:
         self._lockout_bands = list(TX_LOCKOUT_BANDS)
         self._rx_presets = list(RX_PRESETS)
         self._custom_lockouts: List[FrequencyBand] = []
+        self._license_class = LicenseClass.NONE  # Default: no license
+        self._license_free_bands = list(LICENSE_FREE_BANDS)
+        self._amateur_bands = list(AMATEUR_BAND_PRIVILEGES)
         logger.info(f"FrequencyManager initialized with {len(self._lockout_bands)} lockout bands")
+        logger.info(f"License class: {self._license_class.value}")
 
-    def is_tx_allowed(self, frequency_hz: float, bandwidth_hz: float = 0) -> Tuple[bool, Optional[str]]:
+    # =========================================================================
+    # License Management
+    # =========================================================================
+
+    def set_license_class(self, license_class: LicenseClass) -> None:
+        """
+        Set the operator's license class.
+
+        Args:
+            license_class: The license class (NONE, TECHNICIAN, GENERAL, AMATEUR_EXTRA)
+        """
+        old_class = self._license_class
+        self._license_class = license_class
+        logger.info(f"License class changed: {old_class.value} -> {license_class.value}")
+
+    def get_license_class(self) -> LicenseClass:
+        """Get the current license class."""
+        return self._license_class
+
+    def get_license_privileges(self) -> List[BandPrivilege]:
+        """
+        Get all band privileges available to the current license class.
+
+        Returns:
+            List of BandPrivilege objects the operator can use
+        """
+        privileges = []
+
+        # Always include license-free bands
+        for band in self._license_free_bands:
+            if self._license_class in band.licenses:
+                privileges.append(band)
+
+        # Include amateur bands if licensed
+        if self._license_class != LicenseClass.NONE:
+            for band in self._amateur_bands:
+                if self._license_class in band.licenses:
+                    privileges.append(band)
+
+        return privileges
+
+    def _check_license_privilege(
+        self,
+        frequency_hz: float,
+        mode: str = ""
+    ) -> Tuple[bool, Optional[str], Optional[BandPrivilege]]:
+        """
+        Check if TX is allowed at the given frequency for the current license.
+
+        Args:
+            frequency_hz: Frequency in Hz
+            mode: Operating mode (CW, SSB, FM, etc.)
+
+        Returns:
+            Tuple of (allowed, reason_if_blocked, matching_privilege)
+        """
+        # Check license-free bands first (available to everyone)
+        for band in self._license_free_bands:
+            if band.start_hz <= frequency_hz <= band.end_hz:
+                if band.is_allowed(self._license_class, mode):
+                    return True, None, band
+
+        # No license = only license-free bands
+        if self._license_class == LicenseClass.NONE:
+            return False, "No amateur license - TX only allowed on license-free bands (CB, MURS, FRS)", None
+
+        # Check amateur bands for licensed operators
+        for band in self._amateur_bands:
+            if band.start_hz <= frequency_hz <= band.end_hz:
+                if band.is_allowed(self._license_class, mode):
+                    return True, None, band
+                else:
+                    # Found band but wrong license or mode
+                    if self._license_class not in band.licenses:
+                        return False, f"Frequency {frequency_hz/1e6:.3f} MHz requires higher license class", None
+                    if band.modes and mode:
+                        return False, f"Mode '{mode}' not allowed in {band.name} - allowed: {band.modes}", None
+
+        # Frequency not in any amateur or license-free band
+        return False, f"Frequency {frequency_hz/1e6:.3f} MHz is not in any amateur or license-free band", None
+
+    def get_power_limit(self, frequency_hz: float, mode: str = "") -> Optional[float]:
+        """
+        Get the legal TX power limit at the given frequency.
+
+        Args:
+            frequency_hz: Frequency in Hz
+            mode: Operating mode
+
+        Returns:
+            Legal maximum power in watts, or None if no limit
+        """
+        allowed, _, privilege = self._check_license_privilege(frequency_hz, mode)
+        if allowed and privilege:
+            return privilege.get_legal_power_limit()
+        return None
+
+    def get_effective_power_limit(self, frequency_hz: float, mode: str = "") -> Optional[float]:
+        """
+        Get the effective TX power limit with headroom (150% of legal).
+
+        This allows headroom for filtering, cable losses, and amplifier
+        efficiency. Real radiated power should be verified with a 50Ω
+        dummy load before transmitting.
+
+        Args:
+            frequency_hz: Frequency in Hz
+            mode: Operating mode
+
+        Returns:
+            Effective maximum power in watts (150% of legal), or None if no limit
+        """
+        allowed, _, privilege = self._check_license_privilege(frequency_hz, mode)
+        if allowed and privilege:
+            return privilege.get_effective_power_limit()
+        return None
+
+    def get_tx_power_warning(self) -> str:
+        """Get the TX power testing warning message."""
+        return TX_POWER_WARNING
+
+    def is_tx_allowed(
+        self,
+        frequency_hz: float,
+        bandwidth_hz: float = 0,
+        mode: str = ""
+    ) -> Tuple[bool, Optional[str]]:
         """
         Check if transmission is allowed at the given frequency.
+
+        This checks both:
+        1. Hardware/regulatory lockouts (GPS, aviation, etc.) - ALWAYS blocked
+        2. License privileges - blocked if insufficient license
 
         Args:
             frequency_hz: Center frequency in Hz
             bandwidth_hz: Signal bandwidth in Hz (checks edges too)
+            mode: Operating mode (CW, SSB, FM, etc.)
 
         Returns:
             Tuple of (allowed, reason_if_blocked)
@@ -581,6 +1280,7 @@ class FrequencyManager:
                 frequency_hz + bandwidth_hz / 2
             ])
 
+        # First check: Hardware/regulatory lockouts (always blocked regardless of license)
         for freq in freqs_to_check:
             for band in self._lockout_bands + self._custom_lockouts:
                 if band.start_hz <= freq <= band.end_hz:
@@ -589,6 +1289,13 @@ class FrequencyManager:
                         reason += " [GPS SPOOFING IS DANGEROUS AND ILLEGAL]"
                     logger.warning(f"TX blocked at {frequency_hz/1e6:.3f} MHz: {band.name}")
                     return False, reason
+
+        # Second check: License privileges
+        for freq in freqs_to_check:
+            allowed, reason, _ = self._check_license_privilege(freq, mode)
+            if not allowed:
+                logger.warning(f"TX blocked at {freq/1e6:.3f} MHz: {reason}")
+                return False, f"LICENSE: {reason}"
 
         return True, None
 
@@ -673,9 +1380,13 @@ def get_frequency_manager() -> FrequencyManager:
     return _frequency_manager
 
 
-def is_tx_allowed(frequency_hz: float, bandwidth_hz: float = 0) -> Tuple[bool, Optional[str]]:
+def is_tx_allowed(
+    frequency_hz: float,
+    bandwidth_hz: float = 0,
+    mode: str = ""
+) -> Tuple[bool, Optional[str]]:
     """Check if TX is allowed at the given frequency."""
-    return get_frequency_manager().is_tx_allowed(frequency_hz, bandwidth_hz)
+    return get_frequency_manager().is_tx_allowed(frequency_hz, bandwidth_hz, mode)
 
 
 def validate_tx_frequency(frequency_hz: float, bandwidth_hz: float = 0) -> None:
@@ -688,15 +1399,64 @@ def get_rx_presets(category: Optional[str] = None) -> List[FrequencyPreset]:
     return get_frequency_manager().get_rx_presets(category)
 
 
+def set_license_class(license_class: LicenseClass) -> None:
+    """Set the operator's license class."""
+    get_frequency_manager().set_license_class(license_class)
+
+
+def get_license_class() -> LicenseClass:
+    """Get the current license class."""
+    return get_frequency_manager().get_license_class()
+
+
+def get_license_privileges() -> List[BandPrivilege]:
+    """Get all band privileges available to the current license class."""
+    return get_frequency_manager().get_license_privileges()
+
+
+def get_power_limit(frequency_hz: float, mode: str = "") -> Optional[float]:
+    """Get the legal TX power limit at the given frequency."""
+    return get_frequency_manager().get_power_limit(frequency_hz, mode)
+
+
+def get_effective_power_limit(frequency_hz: float, mode: str = "") -> Optional[float]:
+    """Get the effective TX power limit with 150% headroom."""
+    return get_frequency_manager().get_effective_power_limit(frequency_hz, mode)
+
+
+def get_tx_power_warning() -> str:
+    """Get the TX power testing warning message."""
+    return TX_POWER_WARNING
+
+
 __all__ = [
+    # Enums
     'LockoutReason',
+    'LicenseClass',
+    # Dataclasses
     'FrequencyBand',
     'FrequencyPreset',
+    'BandPrivilege',
+    # Manager class
     'FrequencyManager',
+    # Constants
     'TX_LOCKOUT_BANDS',
     'RX_PRESETS',
+    'LICENSE_FREE_BANDS',
+    'AMATEUR_BAND_PRIVILEGES',
+    'POWER_HEADROOM_FACTOR',
+    'TX_POWER_WARNING',
+    # Singleton functions
     'get_frequency_manager',
     'is_tx_allowed',
     'validate_tx_frequency',
     'get_rx_presets',
+    # License functions
+    'set_license_class',
+    'get_license_class',
+    'get_license_privileges',
+    # Power functions
+    'get_power_limit',
+    'get_effective_power_limit',
+    'get_tx_power_warning',
 ]

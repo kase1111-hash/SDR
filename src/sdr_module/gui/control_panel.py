@@ -25,7 +25,13 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
-from ..core.frequency_manager import get_frequency_manager, FrequencyPreset
+from ..core.frequency_manager import (
+    get_frequency_manager,
+    FrequencyPreset,
+    LicenseClass,
+    TX_POWER_WARNING,
+    POWER_HEADROOM_FACTOR,
+)
 
 
 class FrequencyInput(QWidget if HAS_PYQT6 else object):
@@ -107,6 +113,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         demod_changed = pyqtSignal(str)
         recording_started = pyqtSignal(str)  # format
         recording_stopped = pyqtSignal()
+        license_changed = pyqtSignal(object)  # LicenseClass
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -286,6 +293,47 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
         layout.addWidget(record_group)
 
+        # License group
+        license_group = QGroupBox("License Profile")
+        license_layout = QVBoxLayout(license_group)
+
+        # License selector
+        lic_sel_layout = QHBoxLayout()
+        lic_sel_layout.addWidget(QLabel("Class:"))
+        self._license_combo = QComboBox()
+        self._license_combo.addItems([
+            "None (License-free only)",
+            "Technician",
+            "General",
+            "Amateur Extra"
+        ])
+        self._license_combo.currentIndexChanged.connect(self._on_license_changed)
+        lic_sel_layout.addWidget(self._license_combo)
+        license_layout.addLayout(lic_sel_layout)
+
+        # License info/status label
+        self._license_info = QLabel("TX: CB, MURS, FRS only")
+        self._license_info.setWordWrap(True)
+        self._license_info.setStyleSheet("color: #888; font-size: 10px;")
+        license_layout.addWidget(self._license_info)
+
+        # Power headroom info
+        headroom_pct = int((POWER_HEADROOM_FACTOR - 1) * 100)
+        headroom_label = QLabel(f"Power limits allow +{headroom_pct}% headroom for losses")
+        headroom_label.setStyleSheet("color: #68a; font-size: 9px;")
+        license_layout.addWidget(headroom_label)
+
+        # TX Power Warning - dummy load testing
+        self._tx_warning = QLabel(TX_POWER_WARNING)
+        self._tx_warning.setWordWrap(True)
+        self._tx_warning.setStyleSheet(
+            "color: #da4; font-size: 9px; background-color: #332; "
+            "padding: 4px; border-radius: 3px;"
+        )
+        license_layout.addWidget(self._tx_warning)
+
+        layout.addWidget(license_group)
+
         # Add stretch at bottom
         layout.addStretch()
 
@@ -385,9 +433,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         fm = get_frequency_manager()
         preset = fm.get_preset_by_name(preset_name)
         if preset:
-            # Check if TX is locked
-            allowed, reason = fm.is_tx_allowed(preset.frequency_hz, preset.bandwidth_hz)
-            tx_status = "✓ TX allowed" if allowed else "⛔ TX LOCKED"
+            # Check if TX is allowed (includes license check)
+            allowed, reason = fm.is_tx_allowed(preset.frequency_hz, preset.bandwidth_hz, preset.mode)
 
             # Format frequency
             freq_mhz = preset.frequency_hz / 1e6
@@ -395,14 +442,28 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
             info = f"{freq_mhz:.3f} MHz | {bw_khz:.0f} kHz BW | {preset.mode}\n"
             info += f"{preset.description}\n"
-            info += tx_status
-            self._preset_info.setText(info)
 
-            # Color code based on TX status
-            if not allowed:
-                self._preset_info.setStyleSheet("color: #d44; font-size: 10px;")
+            if allowed:
+                # Check for power limit (legal and effective with headroom)
+                legal_limit = fm.get_power_limit(preset.frequency_hz, preset.mode)
+                effective_limit = fm.get_effective_power_limit(preset.frequency_hz, preset.mode)
+                if legal_limit:
+                    info += f"✓ TX allowed (legal: {legal_limit:.0f}W, max: {effective_limit:.0f}W)"
+                else:
+                    info += "✓ TX allowed"
+                self._preset_info.setStyleSheet("color: #4a4; font-size: 10px;")
             else:
-                self._preset_info.setStyleSheet("color: #888; font-size: 10px;")
+                # Show why TX is blocked
+                if reason and "LICENSE:" in reason:
+                    # License issue
+                    info += f"⛔ {reason.replace('LICENSE: ', '')}"
+                    self._preset_info.setStyleSheet("color: #da4; font-size: 10px;")
+                else:
+                    # Hardware lockout (GPS, aviation, etc.)
+                    info += "⛔ TX BLOCKED (protected frequency)"
+                    self._preset_info.setStyleSheet("color: #d44; font-size: 10px;")
+
+            self._preset_info.setText(info)
 
     def _apply_preset(self):
         """Apply the selected preset."""
@@ -436,3 +497,47 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
                 idx = self._demod_combo.findText(mode)
                 if idx >= 0:
                     self._demod_combo.setCurrentIndex(idx)
+
+    def _on_license_changed(self, index: int):
+        """Handle license class change."""
+        license_map = {
+            0: LicenseClass.NONE,
+            1: LicenseClass.TECHNICIAN,
+            2: LicenseClass.GENERAL,
+            3: LicenseClass.AMATEUR_EXTRA
+        }
+        license_class = license_map.get(index, LicenseClass.NONE)
+
+        # Update frequency manager
+        fm = get_frequency_manager()
+        fm.set_license_class(license_class)
+
+        # Update info label with privileges summary
+        info_map = {
+            LicenseClass.NONE: "TX: CB, MURS, FRS only",
+            LicenseClass.TECHNICIAN: "TX: VHF/UHF + 10m + limited HF CW",
+            LicenseClass.GENERAL: "TX: Most HF bands + VHF/UHF",
+            LicenseClass.AMATEUR_EXTRA: "TX: Full amateur privileges"
+        }
+        self._license_info.setText(info_map.get(license_class, ""))
+
+        # Emit signal
+        self.license_changed.emit(license_class)
+
+        # Refresh preset TX status display
+        self._on_preset_changed(self._preset_combo.currentText())
+
+    def set_license_class(self, license_class: LicenseClass):
+        """Set the license class (for external control)."""
+        index_map = {
+            LicenseClass.NONE: 0,
+            LicenseClass.TECHNICIAN: 1,
+            LicenseClass.GENERAL: 2,
+            LicenseClass.AMATEUR_EXTRA: 3
+        }
+        idx = index_map.get(license_class, 0)
+        self._license_combo.setCurrentIndex(idx)
+
+    def get_license_class(self) -> LicenseClass:
+        """Get the current license class."""
+        return get_frequency_manager().get_license_class()

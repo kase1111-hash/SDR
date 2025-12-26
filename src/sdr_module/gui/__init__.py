@@ -11,6 +11,7 @@ Provides a complete GUI application for the SDR module including:
 - SSTV image receiver (for ISS images)
 - HAM-style signal meter (S-units / RST)
 - QRP (low power) operations panel
+- NatLangChain blockchain radio protocol panel
 
 Usage:
     from sdr_module.gui import SDRApplication
@@ -35,6 +36,7 @@ from .signal_meter_widget import (
     CompactSignalMeter,
 )
 from .qrp_panel import QRPPanel, PowerDisplayWidget, AmplifierCalculator
+from .natlangchain_panel import NatLangChainPanel
 from .app import SDRApplication
 
 __all__ = [
@@ -54,4 +56,5 @@ __all__ = [
     "QRPPanel",
     "PowerDisplayWidget",
     "AmplifierCalculator",
+    "NatLangChainPanel",
 ]

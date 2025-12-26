@@ -490,6 +490,29 @@ For amateur radio compliance, the software includes automatic callsign identific
 | "DE" Prefix | Proper amateur radio format: "DE [CALLSIGN]" |
 | GUI Panel | Callsign input, countdown timer, manual ID button |
 
+### 11.6 SSTV Image Reception (ISS/Space)
+
+The software includes an SSTV (Slow Scan Television) decoder for receiving images from the International Space Station and other amateur sources.
+
+| Feature | Description |
+|---------|-------------|
+| ISS SSTV Preset | Pre-configured 145.800 MHz with FM demodulation |
+| Supported Modes | PD120, PD180 (ISS favorites), Robot, Martin, Scottie |
+| Live Preview | Real-time image display as lines are decoded |
+| Auto-Save | Automatic saving of completed images |
+| Image History | Browse previously received images |
+| VIS Detection | Automatic mode detection from VIS header |
+
+**Space Frequency Presets:**
+
+| Preset | Frequency | Description |
+|--------|-----------|-------------|
+| ISS SSTV/Voice | 145.800 MHz | Slow Scan TV and voice downlink |
+| ISS APRS | 145.825 MHz | Packet radio / APRS digipeater |
+| ISS Packet | 437.550 MHz | UHF packet downlink |
+| Meteor-M2 LRPT | 137.100 MHz | Russian weather satellite |
+| SO-50 | 436.795 MHz | Amateur satellite |
+
 ---
 
 ## 12. Future Considerations
@@ -610,7 +633,7 @@ If not using the installer:
 
 ---
 
-*Document Version: 3.5*
+*Document Version: 3.6*
 *Last Updated: 2025-12-26*
 
 ---
@@ -627,3 +650,4 @@ If not using the installer:
 | 3.3 | 2025-12-26 | Added advanced protocol decoders: ADS-B, ACARS, FLEX; verified AX.25/APRS, RDS, POCSAG implementations |
 | 3.4 | 2025-12-26 | Implemented Main GUI application with PyQt6: spectrum analyzer, waterfall display, control panel, protocol decoder panel, recording controls, device dialog |
 | 3.5 | 2025-12-26 | Added TX frequency lockouts for safety (GPS, aviation, emergency, cellular); HAM radio callsign identification; RX presets with GUI selector |
+| 3.6 | 2025-12-26 | Added SSTV decoder for ISS image reception; space/satellite RX presets (ISS, Meteor-M2, SO-50); GUI image viewer with live preview |

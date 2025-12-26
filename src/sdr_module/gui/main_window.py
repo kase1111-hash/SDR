@@ -28,6 +28,7 @@ from .waterfall_widget import WaterfallWidget
 from .control_panel import ControlPanel
 from .decoder_panel import DecoderPanel
 from .callsign_panel import CallsignPanel
+from .sstv_panel import SSTVPanel
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +170,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._callsign_panel = CallsignPanel()
         self._callsign_panel.id_requested.connect(self._on_callsign_id_requested)
         decoder_tabs.addTab(self._callsign_panel, "HAM ID")
+
+        # SSTV panel for receiving images (ISS, etc.)
+        self._sstv_panel = SSTVPanel()
+        decoder_tabs.addTab(self._sstv_panel, "SSTV/ISS")
 
         # Info tab
         info_widget = QWidget()

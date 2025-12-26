@@ -396,6 +396,56 @@ RX_PRESETS: List[FrequencyPreset] = [
         description="Marine distress and calling",
         category="Marine"
     ),
+
+    # Space / ISS (International Space Station)
+    FrequencyPreset(
+        name="ISS SSTV/Voice",
+        frequency_hz=145.800e6,
+        bandwidth_hz=15e3,
+        mode="FM",
+        description="ISS Slow Scan TV images & voice - use SSTV decoder",
+        category="Space"
+    ),
+    FrequencyPreset(
+        name="ISS APRS",
+        frequency_hz=145.825e6,
+        bandwidth_hz=15e3,
+        mode="FM",
+        description="ISS packet radio / APRS digipeater",
+        category="Space"
+    ),
+    FrequencyPreset(
+        name="ISS Packet (UHF)",
+        frequency_hz=437.550e6,
+        bandwidth_hz=15e3,
+        mode="FM",
+        description="ISS UHF packet downlink",
+        category="Space"
+    ),
+    FrequencyPreset(
+        name="ISS Repeater Output",
+        frequency_hz=437.800e6,
+        bandwidth_hz=15e3,
+        mode="FM",
+        description="ISS cross-band repeater output",
+        category="Space"
+    ),
+    FrequencyPreset(
+        name="Meteor-M2 LRPT",
+        frequency_hz=137.1e6,
+        bandwidth_hz=120e3,
+        mode="RAW",
+        description="Russian weather satellite images",
+        category="Space"
+    ),
+    FrequencyPreset(
+        name="SO-50 Downlink",
+        frequency_hz=436.795e6,
+        bandwidth_hz=15e3,
+        mode="FM",
+        description="SaudiSat-1C amateur satellite",
+        category="Space"
+    ),
 ]
 
 

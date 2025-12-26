@@ -101,6 +101,14 @@ from .callsign import (
     MorseEncoder,
     generate_cw_id,
 )
+from .sstv import (
+    SSTVMode,
+    SSTVModeSpec,
+    SSTV_MODES,
+    SSTVState,
+    SSTVDecoder,
+    SSTVImageViewer,
+)
 
 __all__ = [
     "SpectrumAnalyzer",
@@ -194,4 +202,11 @@ __all__ = [
     "CallsignIdentifier",
     "MorseEncoder",
     "generate_cw_id",
+    # SSTV (Slow Scan Television)
+    "SSTVMode",
+    "SSTVModeSpec",
+    "SSTV_MODES",
+    "SSTVState",
+    "SSTVDecoder",
+    "SSTVImageViewer",
 ]

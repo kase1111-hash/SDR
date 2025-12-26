@@ -8,6 +8,7 @@ Provides a complete GUI application for the SDR module including:
 - Recording controls
 - Frequency scanner
 - HAM radio callsign identification
+- SSTV image receiver (for ISS images)
 
 Usage:
     from sdr_module.gui import SDRApplication
@@ -25,6 +26,7 @@ from .control_panel import ControlPanel
 from .decoder_panel import DecoderPanel
 from .device_dialog import DeviceDialog
 from .callsign_panel import CallsignPanel
+from .sstv_panel import SSTVPanel, ImageDisplayWidget
 from .app import SDRApplication
 
 __all__ = [
@@ -36,4 +38,6 @@ __all__ = [
     "DecoderPanel",
     "DeviceDialog",
     "CallsignPanel",
+    "SSTVPanel",
+    "ImageDisplayWidget",
 ]

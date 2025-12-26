@@ -446,6 +446,104 @@ RX_PRESETS: List[FrequencyPreset] = [
         description="SaudiSat-1C amateur satellite",
         category="Space"
     ),
+
+    # QRP (Low Power) Calling Frequencies
+    FrequencyPreset(
+        name="QRP 80m CW",
+        frequency_hz=3.560e6,
+        bandwidth_hz=500,
+        mode="CW",
+        description="80m QRP CW calling frequency",
+        category="QRP"
+    ),
+    FrequencyPreset(
+        name="QRP 40m CW",
+        frequency_hz=7.030e6,
+        bandwidth_hz=500,
+        mode="CW",
+        description="40m QRP CW calling frequency",
+        category="QRP"
+    ),
+    FrequencyPreset(
+        name="QRP 40m SSB",
+        frequency_hz=7.285e6,
+        bandwidth_hz=2700,
+        mode="LSB",
+        description="40m QRP SSB calling frequency",
+        category="QRP"
+    ),
+    FrequencyPreset(
+        name="QRP 30m CW",
+        frequency_hz=10.106e6,
+        bandwidth_hz=500,
+        mode="CW",
+        description="30m QRP CW calling frequency",
+        category="QRP"
+    ),
+    FrequencyPreset(
+        name="QRP 20m CW",
+        frequency_hz=14.060e6,
+        bandwidth_hz=500,
+        mode="CW",
+        description="20m QRP CW calling frequency",
+        category="QRP"
+    ),
+    FrequencyPreset(
+        name="QRP 20m SSB",
+        frequency_hz=14.285e6,
+        bandwidth_hz=2700,
+        mode="USB",
+        description="20m QRP SSB calling frequency",
+        category="QRP"
+    ),
+    FrequencyPreset(
+        name="QRP 17m CW",
+        frequency_hz=18.096e6,
+        bandwidth_hz=500,
+        mode="CW",
+        description="17m QRP CW calling frequency",
+        category="QRP"
+    ),
+    FrequencyPreset(
+        name="QRP 15m CW",
+        frequency_hz=21.060e6,
+        bandwidth_hz=500,
+        mode="CW",
+        description="15m QRP CW calling frequency",
+        category="QRP"
+    ),
+    FrequencyPreset(
+        name="QRP 15m SSB",
+        frequency_hz=21.385e6,
+        bandwidth_hz=2700,
+        mode="USB",
+        description="15m QRP SSB calling frequency",
+        category="QRP"
+    ),
+    FrequencyPreset(
+        name="QRP 12m CW",
+        frequency_hz=24.906e6,
+        bandwidth_hz=500,
+        mode="CW",
+        description="12m QRP CW calling frequency",
+        category="QRP"
+    ),
+    FrequencyPreset(
+        name="QRP 10m CW",
+        frequency_hz=28.060e6,
+        bandwidth_hz=500,
+        mode="CW",
+        description="10m QRP CW calling frequency",
+        category="QRP"
+    ),
+    FrequencyPreset(
+        name="QRP 10m SSB",
+        frequency_hz=28.360e6,
+        bandwidth_hz=2700,
+        mode="USB",
+        description="10m QRP SSB calling frequency",
+        category="QRP"
+    ),
 ]
 
 

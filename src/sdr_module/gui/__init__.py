@@ -10,6 +10,7 @@ Provides a complete GUI application for the SDR module including:
 - HAM radio callsign identification
 - SSTV image receiver (for ISS images)
 - HAM-style signal meter (S-units / RST)
+- QRP (low power) operations panel
 
 Usage:
     from sdr_module.gui import SDRApplication
@@ -33,6 +34,7 @@ from .signal_meter_widget import (
     SignalMeterPanel,
     CompactSignalMeter,
 )
+from .qrp_panel import QRPPanel, PowerDisplayWidget, AmplifierCalculator
 from .app import SDRApplication
 
 __all__ = [
@@ -49,4 +51,7 @@ __all__ = [
     "AnalogMeterWidget",
     "SignalMeterPanel",
     "CompactSignalMeter",
+    "QRPPanel",
+    "PowerDisplayWidget",
+    "AmplifierCalculator",
 ]

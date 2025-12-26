@@ -118,6 +118,22 @@ from .signal_meter import (
     S9_DBM,
     DB_PER_S_UNIT,
 )
+from .qrp import (
+    dbm_to_watts,
+    watts_to_dbm,
+    dbm_to_mw,
+    mw_to_dbm,
+    format_power,
+    format_power_verbose,
+    QRPClass,
+    QRPLimits,
+    QRP_LIMITS,
+    AmplifierStage,
+    PowerChainResult,
+    QRPController,
+    get_qrp_amplifier_chain,
+    get_qro_amplifier_chain,
+)
 
 __all__ = [
     "SpectrumAnalyzer",
@@ -226,4 +242,19 @@ __all__ = [
     "S_METER_REFERENCE",
     "S9_DBM",
     "DB_PER_S_UNIT",
+    # QRP (Low Power Operations)
+    "dbm_to_watts",
+    "watts_to_dbm",
+    "dbm_to_mw",
+    "mw_to_dbm",
+    "format_power",
+    "format_power_verbose",
+    "QRPClass",
+    "QRPLimits",
+    "QRP_LIMITS",
+    "AmplifierStage",
+    "PowerChainResult",
+    "QRPController",
+    "get_qrp_amplifier_chain",
+    "get_qro_amplifier_chain",
 ]

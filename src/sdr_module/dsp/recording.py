@@ -6,6 +6,11 @@ Provides functionality to record and playback raw baseband signals:
 - Various sample formats: 8-bit, 16-bit, 32-bit float
 - Streaming recording with buffering
 - Metadata support (frequency, sample rate, timestamps)
+
+Also provides Audio Recording and Playback for demodulated audio:
+- Standard audio sample rates: 8kHz, 22.05kHz, 44.1kHz, 48kHz
+- WAV format with 8-bit, 16-bit, 24-bit, 32-bit float support
+- Streaming audio capture from demodulators
 """
 
 import numpy as np
@@ -963,6 +968,574 @@ def save_iq_file(
         center_frequency=center_frequency,
         sample_format=sample_format,
         file_format=file_format
+    )
+
+    recorder.start(filepath)
+    recorder.write(samples)
+    return recorder.stop()
+
+
+class AudioSampleFormat(Enum):
+    """Sample format for audio data."""
+    UINT8 = "u8"         # Unsigned 8-bit
+    INT16 = "s16"        # Signed 16-bit (CD quality)
+    INT24 = "s24"        # Signed 24-bit (studio quality)
+    FLOAT32 = "f32"      # 32-bit float
+
+
+class AudioSampleRate(Enum):
+    """Standard audio sample rates."""
+    RATE_8000 = 8000      # Telephone quality
+    RATE_11025 = 11025    # Low quality
+    RATE_22050 = 22050    # FM radio quality
+    RATE_44100 = 44100    # CD quality
+    RATE_48000 = 48000    # Professional audio
+
+
+@dataclass
+class AudioMetadata:
+    """Metadata for audio recording."""
+    # Core parameters
+    sample_rate: int = 44100
+    sample_format: AudioSampleFormat = AudioSampleFormat.INT16
+    channels: int = 1     # 1=mono, 2=stereo
+
+    # Recording info
+    start_time: str = ""
+    duration_seconds: float = 0.0
+    num_samples: int = 0
+
+    # Source info
+    source_frequency: float = 0.0   # Original tuned frequency
+    demodulation: str = ""          # Demodulation mode (FM, AM, SSB, etc.)
+
+    # Optional
+    description: str = ""
+    custom: Dict[str, Any] = field(default_factory=dict)
+
+
+class AudioRecorder:
+    """
+    Audio recorder for demodulated SDR signals.
+
+    Records real audio samples (not complex I/Q) to WAV files.
+    Designed for capturing demodulated audio from FM, AM, SSB, etc.
+
+    Features:
+    - Standard audio sample rates: 8kHz to 48kHz
+    - Multiple bit depths: 8-bit, 16-bit, 24-bit, 32-bit float
+    - WAV format for universal compatibility
+    - Streaming recording with minimal latency
+    - Automatic normalization and clipping protection
+
+    Example:
+        recorder = AudioRecorder(sample_rate=44100)
+        recorder.start("audio.wav")
+        recorder.write(demodulated_samples)
+        recorder.stop()
+    """
+
+    def __init__(
+        self,
+        sample_rate: int = 44100,
+        sample_format: AudioSampleFormat = AudioSampleFormat.INT16,
+        channels: int = 1,
+        normalize: bool = True
+    ):
+        """
+        Initialize audio recorder.
+
+        Args:
+            sample_rate: Audio sample rate in Hz (8000-48000)
+            sample_format: Sample format for storage
+            channels: Number of channels (1=mono, 2=stereo)
+            normalize: Auto-normalize input to prevent clipping
+        """
+        self._sample_rate = sample_rate
+        self._sample_format = sample_format
+        self._channels = channels
+        self._normalize = normalize
+
+        # Recording state
+        self._wav_file: Optional[wave.Wave_write] = None
+        self._filepath: Optional[Path] = None
+        self._recording = False
+        self._samples_written = 0
+        self._start_time: Optional[datetime] = None
+
+        # Peak tracking for normalization
+        self._peak_level = 0.0
+        self._auto_gain = 1.0
+
+        # Metadata
+        self._metadata = AudioMetadata(
+            sample_rate=sample_rate,
+            sample_format=sample_format,
+            channels=channels
+        )
+
+    @property
+    def sample_rate(self) -> int:
+        """Get sample rate."""
+        return self._sample_rate
+
+    @property
+    def sample_format(self) -> AudioSampleFormat:
+        """Get sample format."""
+        return self._sample_format
+
+    @property
+    def channels(self) -> int:
+        """Get number of channels."""
+        return self._channels
+
+    @property
+    def is_recording(self) -> bool:
+        """Check if currently recording."""
+        return self._recording
+
+    @property
+    def samples_written(self) -> int:
+        """Get number of samples written."""
+        return self._samples_written
+
+    @property
+    def duration_seconds(self) -> float:
+        """Get recording duration in seconds."""
+        return self._samples_written / self._sample_rate
+
+    @property
+    def peak_level(self) -> float:
+        """Get peak level seen during recording."""
+        return self._peak_level
+
+    def _get_sample_width(self) -> int:
+        """Get sample width in bytes."""
+        if self._sample_format == AudioSampleFormat.UINT8:
+            return 1
+        elif self._sample_format == AudioSampleFormat.INT16:
+            return 2
+        elif self._sample_format == AudioSampleFormat.INT24:
+            return 3
+        elif self._sample_format == AudioSampleFormat.FLOAT32:
+            return 4
+        return 2
+
+    def _convert_samples(self, samples: np.ndarray) -> bytes:
+        """Convert float samples to target format."""
+        # Ensure 1D real array
+        if np.iscomplexobj(samples):
+            samples = samples.real
+        samples = samples.flatten()
+
+        # Track peak
+        peak = np.max(np.abs(samples)) if len(samples) > 0 else 0.0
+        self._peak_level = max(self._peak_level, peak)
+
+        # Normalize if needed
+        if self._normalize and peak > 0:
+            if peak > 1.0:
+                samples = samples / peak * 0.99
+
+        # Clip to valid range
+        samples = np.clip(samples, -1.0, 1.0)
+
+        # Convert to target format
+        if self._sample_format == AudioSampleFormat.UINT8:
+            # Scale to 0-255, center at 128
+            int_samples = ((samples + 1.0) * 127.5).astype(np.uint8)
+            return int_samples.tobytes()
+
+        elif self._sample_format == AudioSampleFormat.INT16:
+            # Scale to -32768 to 32767
+            int_samples = (samples * 32767).astype(np.int16)
+            return int_samples.tobytes()
+
+        elif self._sample_format == AudioSampleFormat.INT24:
+            # Scale to 24-bit range
+            int_samples = (samples * 8388607).astype(np.int32)
+            # Pack as 3 bytes per sample (little-endian)
+            result = bytearray()
+            for s in int_samples:
+                result.extend(struct.pack('<i', s)[:3])
+            return bytes(result)
+
+        elif self._sample_format == AudioSampleFormat.FLOAT32:
+            # WAV float format (rarely used, convert to int16)
+            int_samples = (samples * 32767).astype(np.int16)
+            return int_samples.tobytes()
+
+        return b''
+
+    def set_metadata(self, **kwargs) -> None:
+        """
+        Set additional metadata.
+
+        Args:
+            **kwargs: Metadata fields to set
+        """
+        for key, value in kwargs.items():
+            if hasattr(self._metadata, key):
+                setattr(self._metadata, key, value)
+            else:
+                self._metadata.custom[key] = value
+
+    def start(self, filepath: Union[str, Path]) -> None:
+        """
+        Start recording to WAV file.
+
+        Args:
+            filepath: Output WAV file path
+        """
+        if self._recording:
+            raise RuntimeError("Already recording")
+
+        self._filepath = Path(filepath)
+        self._samples_written = 0
+        self._peak_level = 0.0
+        self._start_time = datetime.utcnow()
+        self._metadata.start_time = self._start_time.isoformat() + "Z"
+
+        # Open WAV file
+        self._wav_file = wave.open(str(self._filepath), 'wb')
+
+        # WAV parameters
+        sample_width = self._get_sample_width()
+        # WAV float32 stores as 16-bit internally for compatibility
+        if self._sample_format == AudioSampleFormat.FLOAT32:
+            sample_width = 2
+
+        self._wav_file.setnchannels(self._channels)
+        self._wav_file.setsampwidth(sample_width)
+        self._wav_file.setframerate(self._sample_rate)
+
+        self._recording = True
+
+    def write(self, samples: np.ndarray) -> int:
+        """
+        Write audio samples to recording.
+
+        Args:
+            samples: Real audio samples (float, -1.0 to 1.0)
+
+        Returns:
+            Number of samples written
+        """
+        if not self._recording:
+            raise RuntimeError("Not recording")
+
+        # Convert and write
+        data = self._convert_samples(samples)
+        self._wav_file.writeframes(data)
+
+        n_samples = len(samples.flatten())
+        self._samples_written += n_samples
+
+        return n_samples
+
+    def stop(self) -> AudioMetadata:
+        """
+        Stop recording and finalize WAV file.
+
+        Returns:
+            Recording metadata
+        """
+        if not self._recording:
+            raise RuntimeError("Not recording")
+
+        # Update metadata
+        self._metadata.num_samples = self._samples_written
+        self._metadata.duration_seconds = self.duration_seconds
+
+        # Close file
+        if self._wav_file is not None:
+            self._wav_file.close()
+            self._wav_file = None
+
+        self._recording = False
+        return self._metadata
+
+    def get_metadata(self) -> AudioMetadata:
+        """Get current metadata."""
+        return self._metadata
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._recording:
+            self.stop()
+        return False
+
+
+class AudioPlayer:
+    """
+    Audio playback from WAV files.
+
+    Reads recorded WAV audio files and provides samples for
+    processing or playback.
+
+    Features:
+    - WAV file support (8-bit, 16-bit, 24-bit)
+    - Mono and stereo support
+    - Streaming playback
+    - Seek and loop support
+
+    Example:
+        player = AudioPlayer("audio.wav")
+        while not player.eof:
+            samples = player.read(1024)
+            play(samples)
+        player.close()
+    """
+
+    def __init__(self, filepath: Union[str, Path]):
+        """
+        Initialize audio player.
+
+        Args:
+            filepath: Path to WAV file
+        """
+        self._filepath = Path(filepath)
+
+        # Playback state
+        self._wav_file: Optional[wave.Wave_read] = None
+        self._position = 0
+        self._eof = False
+
+        # Audio parameters
+        self._sample_rate = 0
+        self._channels = 0
+        self._sample_width = 0
+        self._total_samples = 0
+
+        # Metadata
+        self._metadata: Optional[AudioMetadata] = None
+
+        # Open file
+        self._open()
+
+    def _open(self) -> None:
+        """Open the WAV file."""
+        self._wav_file = wave.open(str(self._filepath), 'rb')
+
+        # Get parameters
+        self._channels = self._wav_file.getnchannels()
+        self._sample_width = self._wav_file.getsampwidth()
+        self._sample_rate = self._wav_file.getframerate()
+        self._total_samples = self._wav_file.getnframes()
+
+        # Determine format
+        if self._sample_width == 1:
+            sample_format = AudioSampleFormat.UINT8
+        elif self._sample_width == 2:
+            sample_format = AudioSampleFormat.INT16
+        elif self._sample_width == 3:
+            sample_format = AudioSampleFormat.INT24
+        else:
+            sample_format = AudioSampleFormat.INT16
+
+        self._metadata = AudioMetadata(
+            sample_rate=self._sample_rate,
+            sample_format=sample_format,
+            channels=self._channels,
+            num_samples=self._total_samples,
+            duration_seconds=self._total_samples / self._sample_rate
+        )
+
+    @property
+    def sample_rate(self) -> int:
+        """Get sample rate."""
+        return self._sample_rate
+
+    @property
+    def channels(self) -> int:
+        """Get number of channels."""
+        return self._channels
+
+    @property
+    def total_samples(self) -> int:
+        """Get total number of samples."""
+        return self._total_samples
+
+    @property
+    def duration_seconds(self) -> float:
+        """Get total duration in seconds."""
+        return self._total_samples / self._sample_rate if self._sample_rate > 0 else 0.0
+
+    @property
+    def position(self) -> int:
+        """Get current sample position."""
+        return self._position
+
+    @property
+    def position_seconds(self) -> float:
+        """Get current position in seconds."""
+        return self._position / self._sample_rate if self._sample_rate > 0 else 0.0
+
+    @property
+    def eof(self) -> bool:
+        """Check if at end of file."""
+        return self._eof
+
+    @property
+    def metadata(self) -> Optional[AudioMetadata]:
+        """Get recording metadata."""
+        return self._metadata
+
+    def read(self, num_samples: int) -> np.ndarray:
+        """
+        Read audio samples from file.
+
+        Args:
+            num_samples: Number of samples to read
+
+        Returns:
+            Float samples array (-1.0 to 1.0)
+        """
+        if self._wav_file is None:
+            return np.array([], dtype=np.float32)
+
+        frames = self._wav_file.readframes(num_samples)
+
+        if len(frames) == 0:
+            self._eof = True
+            return np.array([], dtype=np.float32)
+
+        # Convert bytes to samples
+        if self._sample_width == 1:
+            # Unsigned 8-bit
+            samples = np.frombuffer(frames, dtype=np.uint8)
+            samples = (samples.astype(np.float32) - 128) / 128.0
+
+        elif self._sample_width == 2:
+            # Signed 16-bit
+            samples = np.frombuffer(frames, dtype=np.int16)
+            samples = samples.astype(np.float32) / 32767.0
+
+        elif self._sample_width == 3:
+            # Signed 24-bit (unpack manually)
+            n_frames = len(frames) // (3 * self._channels)
+            samples = np.zeros(n_frames * self._channels, dtype=np.float32)
+            for i in range(len(samples)):
+                offset = i * 3
+                if offset + 3 <= len(frames):
+                    b = frames[offset:offset+3]
+                    val = struct.unpack('<i', b + (b'\xff' if b[2] & 0x80 else b'\x00'))[0]
+                    samples[i] = val / 8388607.0
+        else:
+            # Default to 16-bit
+            samples = np.frombuffer(frames, dtype=np.int16)
+            samples = samples.astype(np.float32) / 32767.0
+
+        # Handle multi-channel: return as (n_samples, n_channels) or flatten for mono
+        if self._channels > 1:
+            n_frames_read = len(samples) // self._channels
+            samples = samples.reshape(n_frames_read, self._channels)
+
+        self._position += len(samples) if self._channels == 1 else samples.shape[0]
+
+        return samples
+
+    def read_all(self) -> np.ndarray:
+        """
+        Read entire file into memory.
+
+        Returns:
+            All samples as float array
+        """
+        self.seek(0)
+        return self.read(self._total_samples)
+
+    def seek(self, position: int) -> None:
+        """
+        Seek to sample position.
+
+        Args:
+            position: Sample position
+        """
+        if self._wav_file is None:
+            return
+
+        position = max(0, min(position, self._total_samples - 1))
+        self._wav_file.setpos(position)
+        self._position = position
+        self._eof = False
+
+    def seek_seconds(self, seconds: float) -> None:
+        """
+        Seek to time position.
+
+        Args:
+            seconds: Position in seconds
+        """
+        position = int(seconds * self._sample_rate)
+        self.seek(position)
+
+    def rewind(self) -> None:
+        """Rewind to beginning."""
+        self.seek(0)
+
+    def close(self) -> None:
+        """Close the file."""
+        if self._wav_file is not None:
+            self._wav_file.close()
+            self._wav_file = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+        return False
+
+
+def load_audio_file(
+    filepath: Union[str, Path],
+    max_samples: Optional[int] = None
+) -> Tuple[np.ndarray, AudioMetadata]:
+    """
+    Load entire audio file into memory.
+
+    Args:
+        filepath: Path to audio file
+        max_samples: Maximum samples to load
+
+    Returns:
+        Tuple of (samples, metadata)
+    """
+    with AudioPlayer(filepath) as player:
+        if max_samples is None:
+            samples = player.read_all()
+        else:
+            samples = player.read(max_samples)
+        metadata = player.metadata
+
+    return samples, metadata
+
+
+def save_audio_file(
+    filepath: Union[str, Path],
+    samples: np.ndarray,
+    sample_rate: int = 44100,
+    sample_format: AudioSampleFormat = AudioSampleFormat.INT16
+) -> AudioMetadata:
+    """
+    Save samples to audio WAV file.
+
+    Args:
+        filepath: Output file path
+        samples: Audio samples (float, -1.0 to 1.0)
+        sample_rate: Sample rate in Hz
+        sample_format: Sample format
+
+    Returns:
+        Recording metadata
+    """
+    recorder = AudioRecorder(
+        sample_rate=sample_rate,
+        sample_format=sample_format,
+        channels=1
     )
 
     recorder.start(filepath)

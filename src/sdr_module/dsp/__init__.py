@@ -74,6 +74,13 @@ from .recording import (
     RecordingSession,
     load_iq_file,
     save_iq_file,
+    AudioSampleFormat,
+    AudioSampleRate,
+    AudioMetadata,
+    AudioRecorder,
+    AudioPlayer,
+    load_audio_file,
+    save_audio_file,
 )
 
 __all__ = [
@@ -143,4 +150,11 @@ __all__ = [
     "RecordingSession",
     "load_iq_file",
     "save_iq_file",
+    "AudioSampleFormat",
+    "AudioSampleRate",
+    "AudioMetadata",
+    "AudioRecorder",
+    "AudioPlayer",
+    "load_audio_file",
+    "save_audio_file",
 ]

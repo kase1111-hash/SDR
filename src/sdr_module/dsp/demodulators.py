@@ -27,6 +27,7 @@ class ModulationType(Enum):
     BPSK = "bpsk"
     QPSK = "qpsk"
     GFSK = "gfsk"
+    MSK = "msk"
     # QAM
     QAM16 = "qam16"
     QAM64 = "qam64"
@@ -550,6 +551,392 @@ class GFSKDemodulator(Demodulator):
         self._timing_offset = 0.0
         self._dc_offset = 0.0
         self._last_phase = 0.0
+
+
+class MSKDemodulator(Demodulator):
+    """
+    MSK (Minimum Shift Keying) demodulator.
+
+    MSK is continuous-phase FSK with modulation index h=0.5,
+    providing the minimum bandwidth for orthogonal signaling.
+    Used in GSM (as GMSK) and other systems.
+
+    Features:
+    - Coherent and non-coherent demodulation
+    - Matched filter implementation
+    - Symbol timing recovery
+    - Phase tracking for coherent detection
+    - Can be viewed as offset-QPSK with sinusoidal shaping
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        symbol_rate: float,
+        coherent: bool = True,
+        samples_per_symbol: int = 0
+    ):
+        """
+        Initialize MSK demodulator.
+
+        Args:
+            sample_rate: Sample rate in Hz
+            symbol_rate: Symbol rate in Hz (bit rate)
+            coherent: Use coherent demodulation (vs non-coherent)
+            samples_per_symbol: Samples per symbol (0 = auto)
+        """
+        super().__init__(sample_rate)
+        self._symbol_rate = symbol_rate
+        self._coherent = coherent
+
+        # MSK has h = 0.5, so freq deviation = symbol_rate / 4
+        self._deviation = symbol_rate / 4
+
+        # Calculate samples per symbol
+        if samples_per_symbol <= 0:
+            self._sps = int(sample_rate / symbol_rate)
+        else:
+            self._sps = samples_per_symbol
+
+        # Generate matched filters for I and Q arms
+        self._i_filter, self._q_filter = self._generate_matched_filters()
+
+        # Phase tracking for coherent demodulation
+        self._carrier_phase = 0.0
+        self._phase_alpha = 0.01
+
+        # Timing recovery
+        self._timing_offset = 0.0
+        self._timing_alpha = 0.01
+
+        # For non-coherent: FM demodulator
+        self._fm_demod = FMDemodulator(sample_rate, self._deviation * 4)
+
+        # State for continuous operation
+        self._last_i = 0.0
+        self._last_q = 0.0
+        self._bit_polarity = 1  # Alternates for offset QPSK interpretation
+
+    def _generate_matched_filters(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Generate matched filters for MSK.
+
+        MSK can be decomposed into I and Q channels with
+        half-sinusoid pulse shaping, offset by half a symbol.
+        """
+        # Filter length = 2 symbol periods
+        n_taps = 2 * self._sps
+
+        t = np.arange(n_taps) / self._sps
+
+        # Half-sinusoid pulses
+        # I channel: cos(pi*t/2T) for 0 <= t < 2T
+        # Q channel: sin(pi*t/2T) for 0 <= t < 2T
+        i_filter = np.cos(np.pi * t / 2)
+        q_filter = np.sin(np.pi * t / 2)
+
+        # Normalize
+        i_filter = i_filter / np.sqrt(np.sum(i_filter ** 2))
+        q_filter = q_filter / np.sqrt(np.sum(q_filter ** 2))
+
+        return i_filter.astype(np.float32), q_filter.astype(np.float32)
+
+    @property
+    def symbol_rate(self) -> float:
+        """Get symbol rate."""
+        return self._symbol_rate
+
+    @property
+    def samples_per_symbol(self) -> int:
+        """Get samples per symbol."""
+        return self._sps
+
+    @property
+    def modulation_index(self) -> float:
+        """Get modulation index (always 0.5 for MSK)."""
+        return 0.5
+
+    @property
+    def is_coherent(self) -> bool:
+        """Check if using coherent demodulation."""
+        return self._coherent
+
+    @property
+    def matched_filters(self) -> Tuple[np.ndarray, np.ndarray]:
+        """Get I and Q matched filter coefficients."""
+        return self._i_filter.copy(), self._q_filter.copy()
+
+    def demodulate(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Demodulate MSK signal.
+
+        Args:
+            samples: Complex I/Q samples
+
+        Returns:
+            Demodulated signal (frequency for non-coherent,
+            matched filter output for coherent)
+        """
+        if self._coherent:
+            return self._demodulate_coherent(samples)
+        else:
+            return self._demodulate_noncoherent(samples)
+
+    def _demodulate_coherent(self, samples: np.ndarray) -> np.ndarray:
+        """Coherent MSK demodulation using matched filters."""
+        # Apply carrier phase correction
+        phase_correction = np.exp(-1j * self._carrier_phase)
+        samples_corrected = samples * phase_correction
+
+        # Separate I and Q
+        i_signal = samples_corrected.real
+        q_signal = samples_corrected.imag
+
+        # Apply matched filters
+        if len(i_signal) >= len(self._i_filter):
+            i_filtered = np.convolve(i_signal, self._i_filter, mode='same')
+            q_filtered = np.convolve(q_signal, self._q_filter, mode='same')
+        else:
+            i_filtered = i_signal
+            q_filtered = q_signal
+
+        # Combine (MSK can be seen as alternating I/Q decisions)
+        output = np.zeros(len(samples), dtype=np.float32)
+        for i in range(len(samples)):
+            # Alternate between I and Q based on symbol timing
+            symbol_idx = i // self._sps
+            if symbol_idx % 2 == 0:
+                output[i] = i_filtered[i]
+            else:
+                output[i] = q_filtered[i]
+
+        return output
+
+    def _demodulate_noncoherent(self, samples: np.ndarray) -> np.ndarray:
+        """Non-coherent MSK demodulation using FM detection."""
+        return self._fm_demod.demodulate(samples).astype(np.float32)
+
+    def demodulate_bits(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Demodulate MSK signal to bits.
+
+        Args:
+            samples: Complex I/Q samples
+
+        Returns:
+            Binary bit array
+        """
+        if self._coherent:
+            return self._demodulate_bits_coherent(samples)
+        else:
+            return self._demodulate_bits_noncoherent(samples)
+
+    def _demodulate_bits_coherent(self, samples: np.ndarray) -> np.ndarray:
+        """Coherent bit demodulation."""
+        # Apply carrier phase correction
+        phase_correction = np.exp(-1j * self._carrier_phase)
+        samples_corrected = samples * phase_correction
+
+        i_signal = samples_corrected.real
+        q_signal = samples_corrected.imag
+
+        # Apply matched filters
+        if len(i_signal) >= len(self._i_filter):
+            i_filtered = np.convolve(i_signal, self._i_filter, mode='same')
+            q_filtered = np.convolve(q_signal, self._q_filter, mode='same')
+        else:
+            i_filtered = i_signal
+            q_filtered = q_signal
+
+        # Sample at symbol boundaries
+        # MSK: I symbols at even boundaries, Q symbols at odd (offset by T/2)
+        n_symbols = len(samples) // self._sps
+        bits = np.zeros(n_symbols, dtype=np.uint8)
+
+        for i in range(n_symbols):
+            sample_idx = int((i + 0.5) * self._sps + self._timing_offset)
+            if 0 <= sample_idx < len(i_filtered):
+                if i % 2 == 0:
+                    bits[i] = 1 if i_filtered[sample_idx] > 0 else 0
+                else:
+                    bits[i] = 1 if q_filtered[sample_idx] > 0 else 0
+
+        return bits
+
+    def _demodulate_bits_noncoherent(self, samples: np.ndarray) -> np.ndarray:
+        """Non-coherent bit demodulation."""
+        freq = self._fm_demod.demodulate(samples)
+
+        n_symbols = len(freq) // self._sps
+        bits = np.zeros(n_symbols, dtype=np.uint8)
+
+        for i in range(n_symbols):
+            sample_idx = int((i + 0.5) * self._sps + self._timing_offset)
+            if 0 <= sample_idx < len(freq):
+                bits[i] = 1 if freq[sample_idx] > 0 else 0
+
+        return bits
+
+    def demodulate_soft(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Soft decision demodulation.
+
+        Args:
+            samples: Complex I/Q samples
+
+        Returns:
+            Soft bit values
+        """
+        demod = self.demodulate(samples)
+
+        n_symbols = len(demod) // self._sps
+        soft_bits = np.zeros(n_symbols, dtype=np.float32)
+
+        for i in range(n_symbols):
+            sample_idx = int((i + 0.5) * self._sps + self._timing_offset)
+            if 0 <= sample_idx < len(demod):
+                soft_bits[i] = demod[sample_idx]
+
+        return soft_bits
+
+    def track_carrier(self, samples: np.ndarray) -> float:
+        """
+        Track and correct carrier phase.
+
+        Uses decision-directed phase tracking.
+
+        Args:
+            samples: Complex I/Q samples
+
+        Returns:
+            Current phase estimate
+        """
+        # Demodulate to get decisions
+        bits = self.demodulate_bits(samples)
+
+        # Reconstruct expected signal phase based on decisions
+        # and compare to actual phase
+        phase_errors = []
+
+        for i in range(min(len(bits), len(samples) // self._sps)):
+            sample_idx = int((i + 0.5) * self._sps)
+            if sample_idx < len(samples):
+                # Expected phase based on bit decision
+                expected_phase = np.pi / 2 if bits[i] else -np.pi / 2
+
+                # Actual phase
+                actual_phase = np.angle(samples[sample_idx])
+
+                # Phase error
+                error = actual_phase - expected_phase - self._carrier_phase
+                # Wrap to [-pi, pi]
+                error = np.arctan2(np.sin(error), np.cos(error))
+                phase_errors.append(error)
+
+        if phase_errors:
+            avg_error = np.mean(phase_errors)
+            self._carrier_phase += self._phase_alpha * avg_error
+            # Wrap carrier phase
+            self._carrier_phase = np.arctan2(
+                np.sin(self._carrier_phase),
+                np.cos(self._carrier_phase)
+            )
+
+        return self._carrier_phase
+
+    def recover_timing(self, samples: np.ndarray) -> float:
+        """
+        Recover symbol timing.
+
+        Args:
+            samples: Complex I/Q samples
+
+        Returns:
+            Timing offset in samples
+        """
+        demod = self.demodulate(samples)
+
+        # Early-late gate
+        n_symbols = len(demod) // self._sps
+        timing_error = 0.0
+
+        for i in range(1, n_symbols - 1):
+            center = int((i + 0.5) * self._sps + self._timing_offset)
+            early = center - self._sps // 4
+            late = center + self._sps // 4
+
+            if 0 <= early < len(demod) and late < len(demod):
+                decision = 1 if demod[center] > 0 else -1
+                error = (abs(demod[late]) - abs(demod[early])) * decision
+                timing_error += error
+
+        if n_symbols > 2:
+            timing_error /= (n_symbols - 2)
+
+        self._timing_offset += self._timing_alpha * timing_error
+        self._timing_offset = max(-self._sps / 2, min(self._sps / 2, self._timing_offset))
+
+        return self._timing_offset
+
+    def get_constellation(self, samples: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Get constellation points for visualization.
+
+        MSK constellation alternates between I and Q axes.
+
+        Args:
+            samples: Complex I/Q samples
+
+        Returns:
+            (I, Q) constellation points
+        """
+        # Sample at symbol centers
+        n_symbols = len(samples) // self._sps
+        i_points = []
+        q_points = []
+
+        phase_correction = np.exp(-1j * self._carrier_phase)
+
+        for i in range(n_symbols):
+            sample_idx = int((i + 0.5) * self._sps + self._timing_offset)
+            if 0 <= sample_idx < len(samples):
+                point = samples[sample_idx] * phase_correction
+                i_points.append(point.real)
+                q_points.append(point.imag)
+
+        return np.array(i_points, dtype=np.float32), np.array(q_points, dtype=np.float32)
+
+    def get_eye_diagram_data(self, samples: np.ndarray, n_symbols: int = 100) -> np.ndarray:
+        """
+        Get data for eye diagram.
+
+        Args:
+            samples: Complex I/Q samples
+            n_symbols: Number of symbols to include
+
+        Returns:
+            2D array for eye diagram plotting
+        """
+        demod = self.demodulate(samples)
+
+        traces = []
+        for i in range(min(n_symbols, len(demod) // self._sps - 2)):
+            start = i * self._sps
+            end = start + 2 * self._sps
+            if end <= len(demod):
+                traces.append(demod[start:end])
+
+        if traces:
+            return np.array(traces, dtype=np.float32)
+        return np.array([], dtype=np.float32)
+
+    def reset(self) -> None:
+        """Reset demodulator state."""
+        self._carrier_phase = 0.0
+        self._timing_offset = 0.0
+        self._last_i = 0.0
+        self._last_q = 0.0
+        self._fm_demod.reset()
 
 
 class QAMDemodulator(Demodulator):
@@ -1177,6 +1564,8 @@ def create_demodulator(
         return FSKDemodulator(sample_rate, **kwargs)
     elif mod_type == ModulationType.GFSK:
         return GFSKDemodulator(sample_rate, **kwargs)
+    elif mod_type == ModulationType.MSK:
+        return MSKDemodulator(sample_rate, **kwargs)
     elif mod_type in (ModulationType.BPSK, ModulationType.QPSK):
         order = 2 if mod_type == ModulationType.BPSK else 4
         return PSKDemodulator(sample_rate, order=order, **kwargs)

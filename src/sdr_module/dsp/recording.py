@@ -2324,3 +2324,753 @@ class PlaybackScheduler:
                 schedule["next_run"] = schedule["start_time"]
             else:
                 schedule["next_run"] = datetime.utcnow()
+
+
+# =============================================================================
+# File Format Utilities
+# =============================================================================
+
+@dataclass
+class FormatInfo:
+    """Detailed information about a file format."""
+    file_format: FileFormat
+    sample_format: SampleFormat
+    sample_rate: float = 0.0
+    center_frequency: float = 0.0
+    num_samples: int = 0
+    num_channels: int = 2          # 2 for I/Q
+    file_size_bytes: int = 0
+    duration_seconds: float = 0.0
+    bits_per_sample: int = 0
+    is_valid: bool = True
+    error_message: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class FormatDetector:
+    """
+    Auto-detect SDR file formats from file content and extension.
+
+    Supports detection of:
+    - Raw I/Q files (.raw, .iq, .cu8, .cs8, .cs16, .cf32, .cf64)
+    - WAV files (.wav)
+    - SigMF files (.sigmf-data, .sigmf-meta)
+
+    Example:
+        detector = FormatDetector()
+        info = detector.detect("recording.sigmf-data")
+        print(f"Format: {info.file_format}, Sample rate: {info.sample_rate}")
+    """
+
+    # Magic bytes for format detection
+    WAV_MAGIC = b'RIFF'
+    SIGMF_META_KEYS = ['global', 'captures', 'annotations']
+
+    # Extension to format mapping
+    EXTENSION_MAP = {
+        '.wav': (FileFormat.WAV, None),
+        '.cu8': (FileFormat.RAW, SampleFormat.UINT8),
+        '.cs8': (FileFormat.RAW, SampleFormat.INT8),
+        '.cs16': (FileFormat.RAW, SampleFormat.INT16),
+        '.cf32': (FileFormat.RAW, SampleFormat.FLOAT32),
+        '.cf64': (FileFormat.RAW, SampleFormat.FLOAT64),
+        '.raw': (FileFormat.RAW, SampleFormat.FLOAT32),
+        '.iq': (FileFormat.RAW, SampleFormat.FLOAT32),
+        '.bin': (FileFormat.RAW, SampleFormat.FLOAT32),
+        '.sigmf-data': (FileFormat.SIGMF, None),
+        '.sigmf-meta': (FileFormat.SIGMF, None),
+    }
+
+    # Bytes per sample for each format
+    BYTES_PER_SAMPLE = {
+        SampleFormat.UINT8: 1,
+        SampleFormat.INT8: 1,
+        SampleFormat.INT16: 2,
+        SampleFormat.FLOAT32: 4,
+        SampleFormat.FLOAT64: 8,
+    }
+
+    def detect(self, filepath: Union[str, Path]) -> FormatInfo:
+        """
+        Detect file format and extract information.
+
+        Args:
+            filepath: Path to the file
+
+        Returns:
+            FormatInfo with detected parameters
+        """
+        filepath = Path(filepath)
+
+        if not filepath.exists():
+            return FormatInfo(
+                file_format=FileFormat.RAW,
+                sample_format=SampleFormat.FLOAT32,
+                is_valid=False,
+                error_message=f"File not found: {filepath}"
+            )
+
+        # Get file size
+        file_size = filepath.stat().st_size
+
+        # Try to detect by extension first
+        suffix = filepath.suffix.lower()
+        file_format, sample_format = self.EXTENSION_MAP.get(
+            suffix, (FileFormat.RAW, SampleFormat.FLOAT32)
+        )
+
+        # Detect by magic bytes / content
+        try:
+            if suffix == '.wav' or self._is_wav_file(filepath):
+                return self._detect_wav(filepath)
+
+            elif suffix in ('.sigmf-data', '.sigmf-meta') or self._has_sigmf_meta(filepath):
+                return self._detect_sigmf(filepath)
+
+            else:
+                return self._detect_raw(filepath, sample_format)
+
+        except Exception as e:
+            return FormatInfo(
+                file_format=file_format,
+                sample_format=sample_format or SampleFormat.FLOAT32,
+                file_size_bytes=file_size,
+                is_valid=False,
+                error_message=str(e)
+            )
+
+    def _is_wav_file(self, filepath: Path) -> bool:
+        """Check if file is a WAV file by magic bytes."""
+        try:
+            with open(filepath, 'rb') as f:
+                magic = f.read(4)
+                return magic == self.WAV_MAGIC
+        except Exception:
+            return False
+
+    def _has_sigmf_meta(self, filepath: Path) -> bool:
+        """Check if SigMF metadata file exists."""
+        meta_path = filepath.with_suffix('.sigmf-meta')
+        return meta_path.exists()
+
+    def _detect_wav(self, filepath: Path) -> FormatInfo:
+        """Detect WAV file format."""
+        try:
+            with wave.open(str(filepath), 'rb') as wav:
+                n_channels = wav.getnchannels()
+                sample_width = wav.getsampwidth()
+                sample_rate = wav.getframerate()
+                n_frames = wav.getnframes()
+
+                # Map sample width to format
+                if sample_width == 1:
+                    sample_format = SampleFormat.UINT8
+                elif sample_width == 2:
+                    sample_format = SampleFormat.INT16
+                else:
+                    sample_format = SampleFormat.INT16
+
+                file_size = filepath.stat().st_size
+                duration = n_frames / sample_rate if sample_rate > 0 else 0
+
+                return FormatInfo(
+                    file_format=FileFormat.WAV,
+                    sample_format=sample_format,
+                    sample_rate=float(sample_rate),
+                    num_samples=n_frames,
+                    num_channels=n_channels,
+                    file_size_bytes=file_size,
+                    duration_seconds=duration,
+                    bits_per_sample=sample_width * 8,
+                    is_valid=True,
+                    metadata={
+                        "wav_channels": n_channels,
+                        "wav_sample_width": sample_width,
+                    }
+                )
+        except Exception as e:
+            return FormatInfo(
+                file_format=FileFormat.WAV,
+                sample_format=SampleFormat.INT16,
+                is_valid=False,
+                error_message=str(e)
+            )
+
+    def _detect_sigmf(self, filepath: Path) -> FormatInfo:
+        """Detect SigMF file format."""
+        # Find metadata file
+        if filepath.suffix == '.sigmf-meta':
+            meta_path = filepath
+            data_path = filepath.with_suffix('.sigmf-data')
+        else:
+            data_path = filepath.with_suffix('.sigmf-data')
+            meta_path = filepath.with_suffix('.sigmf-meta')
+
+        if not data_path.exists():
+            data_path = filepath
+
+        try:
+            # Read metadata
+            sigmf_meta = {}
+            if meta_path.exists():
+                with open(meta_path, 'r') as f:
+                    sigmf_meta = json.load(f)
+
+            global_meta = sigmf_meta.get('global', {})
+            captures = sigmf_meta.get('captures', [{}])
+
+            # Parse datatype
+            datatype = global_meta.get('core:datatype', 'cf32_le')
+            format_map = {
+                'cu8': SampleFormat.UINT8,
+                'ci8': SampleFormat.INT8,
+                'ci16_le': SampleFormat.INT16,
+                'ci16_be': SampleFormat.INT16,
+                'cf32_le': SampleFormat.FLOAT32,
+                'cf32_be': SampleFormat.FLOAT32,
+                'cf64_le': SampleFormat.FLOAT64,
+                'cf64_be': SampleFormat.FLOAT64,
+            }
+            sample_format = format_map.get(datatype, SampleFormat.FLOAT32)
+
+            sample_rate = global_meta.get('core:sample_rate', 0.0)
+            center_freq = captures[0].get('core:frequency', 0.0) if captures else 0.0
+
+            # Calculate samples from file size
+            file_size = data_path.stat().st_size if data_path.exists() else 0
+            bytes_per_sample = self.BYTES_PER_SAMPLE.get(sample_format, 4) * 2
+            num_samples = file_size // bytes_per_sample
+            duration = num_samples / sample_rate if sample_rate > 0 else 0
+
+            return FormatInfo(
+                file_format=FileFormat.SIGMF,
+                sample_format=sample_format,
+                sample_rate=sample_rate,
+                center_frequency=center_freq,
+                num_samples=num_samples,
+                num_channels=2,
+                file_size_bytes=file_size,
+                duration_seconds=duration,
+                bits_per_sample=self.BYTES_PER_SAMPLE.get(sample_format, 4) * 8,
+                is_valid=True,
+                metadata={
+                    "sigmf_version": global_meta.get('core:version', ''),
+                    "sigmf_description": global_meta.get('core:description', ''),
+                    "sigmf_author": global_meta.get('core:author', ''),
+                    "sigmf_hardware": global_meta.get('core:hw', ''),
+                    "sigmf_datatype": datatype,
+                }
+            )
+        except Exception as e:
+            return FormatInfo(
+                file_format=FileFormat.SIGMF,
+                sample_format=SampleFormat.FLOAT32,
+                is_valid=False,
+                error_message=str(e)
+            )
+
+    def _detect_raw(
+        self,
+        filepath: Path,
+        sample_format: Optional[SampleFormat] = None
+    ) -> FormatInfo:
+        """Detect raw I/Q file format."""
+        file_size = filepath.stat().st_size
+        sample_format = sample_format or SampleFormat.FLOAT32
+
+        bytes_per_sample = self.BYTES_PER_SAMPLE.get(sample_format, 4) * 2
+        num_samples = file_size // bytes_per_sample
+
+        return FormatInfo(
+            file_format=FileFormat.RAW,
+            sample_format=sample_format,
+            num_samples=num_samples,
+            num_channels=2,
+            file_size_bytes=file_size,
+            bits_per_sample=self.BYTES_PER_SAMPLE.get(sample_format, 4) * 8,
+            is_valid=True,
+            metadata={
+                "detected_from": "extension",
+            }
+        )
+
+    def detect_sample_format_from_data(
+        self,
+        filepath: Union[str, Path],
+        sample_count: int = 1000
+    ) -> SampleFormat:
+        """
+        Attempt to detect sample format by analyzing data values.
+
+        Args:
+            filepath: Path to raw file
+            sample_count: Number of samples to analyze
+
+        Returns:
+            Most likely SampleFormat
+        """
+        filepath = Path(filepath)
+        file_size = filepath.stat().st_size
+
+        # Read sample data
+        with open(filepath, 'rb') as f:
+            data = f.read(min(file_size, sample_count * 16))
+
+        # Try different interpretations
+        scores = {}
+
+        # UINT8: values 0-255, typically centered around 127-128
+        try:
+            samples = np.frombuffer(data, dtype=np.uint8)
+            if len(samples) > 10:
+                mean_val = np.mean(samples)
+                if 100 < mean_val < 156:  # Near center (127.5)
+                    scores[SampleFormat.UINT8] = 1.0 - abs(mean_val - 127.5) / 127.5
+        except Exception:
+            pass
+
+        # INT16: values typically in reasonable range
+        try:
+            samples = np.frombuffer(data, dtype=np.int16)
+            if len(samples) > 10:
+                max_abs = np.max(np.abs(samples))
+                if max_abs < 32768:
+                    scores[SampleFormat.INT16] = 0.8 if max_abs > 100 else 0.3
+        except Exception:
+            pass
+
+        # FLOAT32: check for valid float values
+        try:
+            samples = np.frombuffer(data, dtype=np.float32)
+            if len(samples) > 10:
+                if not np.any(np.isnan(samples)) and not np.any(np.isinf(samples)):
+                    max_abs = np.max(np.abs(samples))
+                    if max_abs < 10.0:  # Typically normalized
+                        scores[SampleFormat.FLOAT32] = 0.9
+                    elif max_abs < 1000:
+                        scores[SampleFormat.FLOAT32] = 0.5
+        except Exception:
+            pass
+
+        if scores:
+            return max(scores.keys(), key=lambda k: scores[k])
+        return SampleFormat.FLOAT32
+
+
+class FormatConverter:
+    """
+    Convert between SDR file formats.
+
+    Supports conversion between:
+    - Raw I/Q (various sample formats)
+    - WAV (stereo I/Q)
+    - SigMF (with metadata)
+
+    Example:
+        converter = FormatConverter()
+        converter.convert(
+            "input.cu8",
+            "output.sigmf-data",
+            input_format=SampleFormat.UINT8,
+            output_format=SampleFormat.FLOAT32,
+            sample_rate=2.4e6
+        )
+    """
+
+    def __init__(self, chunk_size: int = 65536):
+        """
+        Initialize converter.
+
+        Args:
+            chunk_size: Samples per chunk for streaming conversion
+        """
+        self._chunk_size = chunk_size
+        self._detector = FormatDetector()
+
+    def convert(
+        self,
+        input_path: Union[str, Path],
+        output_path: Union[str, Path],
+        input_format: Optional[SampleFormat] = None,
+        output_format: SampleFormat = SampleFormat.FLOAT32,
+        output_file_format: Optional[FileFormat] = None,
+        sample_rate: float = 0.0,
+        center_frequency: float = 0.0,
+        description: str = ""
+    ) -> FormatInfo:
+        """
+        Convert file to different format.
+
+        Args:
+            input_path: Input file path
+            output_path: Output file path
+            input_format: Input sample format (auto-detect if None)
+            output_format: Output sample format
+            output_file_format: Output file format (detect from extension if None)
+            sample_rate: Sample rate (for metadata)
+            center_frequency: Center frequency (for metadata)
+            description: File description (for metadata)
+
+        Returns:
+            FormatInfo for output file
+        """
+        input_path = Path(input_path)
+        output_path = Path(output_path)
+
+        # Detect input format
+        input_info = self._detector.detect(input_path)
+        if not input_info.is_valid:
+            raise ValueError(f"Cannot read input file: {input_info.error_message}")
+
+        if input_format:
+            input_info.sample_format = input_format
+        if sample_rate > 0:
+            input_info.sample_rate = sample_rate
+        if center_frequency > 0:
+            input_info.center_frequency = center_frequency
+
+        # Determine output file format
+        if output_file_format is None:
+            suffix = output_path.suffix.lower()
+            if suffix == '.wav':
+                output_file_format = FileFormat.WAV
+            elif suffix in ('.sigmf-data', '.sigmf-meta'):
+                output_file_format = FileFormat.SIGMF
+            else:
+                output_file_format = FileFormat.RAW
+
+        # Load input samples
+        samples, _ = load_iq_file(input_path, input_info.sample_format)
+
+        # Save to output format
+        if output_file_format == FileFormat.WAV:
+            return self._save_wav(
+                output_path, samples, output_format,
+                input_info.sample_rate
+            )
+        elif output_file_format == FileFormat.SIGMF:
+            return self._save_sigmf(
+                output_path, samples, output_format,
+                input_info.sample_rate, input_info.center_frequency,
+                description
+            )
+        else:
+            return self._save_raw(
+                output_path, samples, output_format,
+                input_info.sample_rate, input_info.center_frequency
+            )
+
+    def _save_raw(
+        self,
+        filepath: Path,
+        samples: np.ndarray,
+        sample_format: SampleFormat,
+        sample_rate: float,
+        center_frequency: float
+    ) -> FormatInfo:
+        """Save to raw I/Q format."""
+        metadata = save_iq_file(
+            filepath, samples, sample_rate,
+            center_frequency, sample_format, FileFormat.RAW
+        )
+        return FormatInfo(
+            file_format=FileFormat.RAW,
+            sample_format=sample_format,
+            sample_rate=sample_rate,
+            center_frequency=center_frequency,
+            num_samples=len(samples),
+            file_size_bytes=filepath.stat().st_size,
+            duration_seconds=len(samples) / sample_rate if sample_rate > 0 else 0,
+            is_valid=True
+        )
+
+    def _save_wav(
+        self,
+        filepath: Path,
+        samples: np.ndarray,
+        sample_format: SampleFormat,
+        sample_rate: float
+    ) -> FormatInfo:
+        """Save to WAV format."""
+        metadata = save_iq_file(
+            filepath, samples, sample_rate,
+            0.0, sample_format, FileFormat.WAV
+        )
+        return FormatInfo(
+            file_format=FileFormat.WAV,
+            sample_format=sample_format,
+            sample_rate=sample_rate,
+            num_samples=len(samples),
+            file_size_bytes=filepath.stat().st_size,
+            duration_seconds=len(samples) / sample_rate if sample_rate > 0 else 0,
+            is_valid=True
+        )
+
+    def _save_sigmf(
+        self,
+        filepath: Path,
+        samples: np.ndarray,
+        sample_format: SampleFormat,
+        sample_rate: float,
+        center_frequency: float,
+        description: str
+    ) -> FormatInfo:
+        """Save to SigMF format."""
+        recorder = IQRecorder(
+            sample_rate=sample_rate,
+            center_frequency=center_frequency,
+            sample_format=sample_format,
+            file_format=FileFormat.SIGMF
+        )
+        recorder.set_metadata(description=description)
+        recorder.start(filepath)
+        recorder.write(samples)
+        metadata = recorder.stop()
+
+        data_path = filepath.with_suffix('.sigmf-data')
+        file_size = data_path.stat().st_size if data_path.exists() else 0
+
+        return FormatInfo(
+            file_format=FileFormat.SIGMF,
+            sample_format=sample_format,
+            sample_rate=sample_rate,
+            center_frequency=center_frequency,
+            num_samples=len(samples),
+            file_size_bytes=file_size,
+            duration_seconds=len(samples) / sample_rate if sample_rate > 0 else 0,
+            is_valid=True,
+            metadata={"description": description}
+        )
+
+    def convert_sample_format(
+        self,
+        samples: np.ndarray,
+        target_format: SampleFormat
+    ) -> np.ndarray:
+        """
+        Convert samples to different sample format (in memory).
+
+        Args:
+            samples: Input complex samples
+            target_format: Target sample format
+
+        Returns:
+            Converted samples as interleaved I/Q array
+        """
+        # Interleave I/Q
+        interleaved = np.zeros(len(samples) * 2, dtype=np.float64)
+        interleaved[0::2] = samples.real
+        interleaved[1::2] = samples.imag
+
+        # Convert to target format
+        if target_format == SampleFormat.UINT8:
+            scaled = np.clip(interleaved * 127.5 + 127.5, 0, 255)
+            return scaled.astype(np.uint8)
+
+        elif target_format == SampleFormat.INT8:
+            scaled = np.clip(interleaved * 127, -128, 127)
+            return scaled.astype(np.int8)
+
+        elif target_format == SampleFormat.INT16:
+            scaled = np.clip(interleaved * 32767, -32768, 32767)
+            return scaled.astype(np.int16)
+
+        elif target_format == SampleFormat.FLOAT32:
+            return interleaved.astype(np.float32)
+
+        elif target_format == SampleFormat.FLOAT64:
+            return interleaved.astype(np.float64)
+
+        return interleaved.astype(np.float32)
+
+    def resample_file(
+        self,
+        input_path: Union[str, Path],
+        output_path: Union[str, Path],
+        target_sample_rate: float,
+        input_sample_rate: Optional[float] = None
+    ) -> FormatInfo:
+        """
+        Resample a file to different sample rate.
+
+        Args:
+            input_path: Input file
+            output_path: Output file
+            target_sample_rate: Target sample rate
+            input_sample_rate: Input sample rate (auto-detect if None)
+
+        Returns:
+            FormatInfo for output file
+        """
+        input_path = Path(input_path)
+        output_path = Path(output_path)
+
+        # Load input
+        input_info = self._detector.detect(input_path)
+        samples, _ = load_iq_file(input_path, input_info.sample_format)
+
+        source_rate = input_sample_rate or input_info.sample_rate
+        if source_rate <= 0:
+            raise ValueError("Input sample rate not specified and could not be detected")
+
+        # Calculate resampling ratio
+        ratio = target_sample_rate / source_rate
+
+        # Simple linear interpolation resampling
+        n_output = int(len(samples) * ratio)
+        indices = np.linspace(0, len(samples) - 1, n_output)
+        indices_floor = np.floor(indices).astype(int)
+        indices_ceil = np.minimum(indices_floor + 1, len(samples) - 1)
+        frac = indices - indices_floor
+
+        resampled = ((1 - frac) * samples[indices_floor] +
+                     frac * samples[indices_ceil]).astype(np.complex64)
+
+        # Save resampled
+        output_info = self._detector.detect(output_path) if output_path.exists() else None
+        output_format = output_info.sample_format if output_info else input_info.sample_format
+
+        suffix = output_path.suffix.lower()
+        if suffix == '.wav':
+            file_format = FileFormat.WAV
+        elif suffix in ('.sigmf-data', '.sigmf-meta'):
+            file_format = FileFormat.SIGMF
+        else:
+            file_format = FileFormat.RAW
+
+        save_iq_file(
+            output_path, resampled, target_sample_rate,
+            input_info.center_frequency, output_format, file_format
+        )
+
+        return FormatInfo(
+            file_format=file_format,
+            sample_format=output_format,
+            sample_rate=target_sample_rate,
+            center_frequency=input_info.center_frequency,
+            num_samples=len(resampled),
+            file_size_bytes=output_path.stat().st_size,
+            duration_seconds=len(resampled) / target_sample_rate,
+            is_valid=True,
+            metadata={"resampled_from": source_rate}
+        )
+
+
+def detect_format(filepath: Union[str, Path]) -> FormatInfo:
+    """
+    Convenience function to detect file format.
+
+    Args:
+        filepath: Path to file
+
+    Returns:
+        FormatInfo with detected parameters
+    """
+    return FormatDetector().detect(filepath)
+
+
+def convert_format(
+    input_path: Union[str, Path],
+    output_path: Union[str, Path],
+    output_format: SampleFormat = SampleFormat.FLOAT32,
+    sample_rate: float = 0.0,
+    center_frequency: float = 0.0
+) -> FormatInfo:
+    """
+    Convenience function to convert file format.
+
+    Args:
+        input_path: Input file path
+        output_path: Output file path
+        output_format: Output sample format
+        sample_rate: Sample rate (for metadata)
+        center_frequency: Center frequency (for metadata)
+
+    Returns:
+        FormatInfo for output file
+    """
+    return FormatConverter().convert(
+        input_path, output_path,
+        output_format=output_format,
+        sample_rate=sample_rate,
+        center_frequency=center_frequency
+    )
+
+
+def get_file_info(filepath: Union[str, Path]) -> Dict[str, Any]:
+    """
+    Get human-readable file information.
+
+    Args:
+        filepath: Path to file
+
+    Returns:
+        Dictionary with file information
+    """
+    info = detect_format(filepath)
+
+    # Format duration nicely
+    if info.duration_seconds > 0:
+        if info.duration_seconds >= 3600:
+            hours = int(info.duration_seconds // 3600)
+            minutes = int((info.duration_seconds % 3600) // 60)
+            seconds = info.duration_seconds % 60
+            duration_str = f"{hours}h {minutes}m {seconds:.1f}s"
+        elif info.duration_seconds >= 60:
+            minutes = int(info.duration_seconds // 60)
+            seconds = info.duration_seconds % 60
+            duration_str = f"{minutes}m {seconds:.1f}s"
+        else:
+            duration_str = f"{info.duration_seconds:.2f}s"
+    else:
+        duration_str = "unknown"
+
+    # Format file size nicely
+    if info.file_size_bytes >= 1024 * 1024 * 1024:
+        size_str = f"{info.file_size_bytes / (1024**3):.2f} GB"
+    elif info.file_size_bytes >= 1024 * 1024:
+        size_str = f"{info.file_size_bytes / (1024**2):.2f} MB"
+    elif info.file_size_bytes >= 1024:
+        size_str = f"{info.file_size_bytes / 1024:.2f} KB"
+    else:
+        size_str = f"{info.file_size_bytes} bytes"
+
+    # Format sample rate
+    if info.sample_rate >= 1e6:
+        rate_str = f"{info.sample_rate / 1e6:.3f} MHz"
+    elif info.sample_rate >= 1e3:
+        rate_str = f"{info.sample_rate / 1e3:.3f} kHz"
+    elif info.sample_rate > 0:
+        rate_str = f"{info.sample_rate:.1f} Hz"
+    else:
+        rate_str = "unknown"
+
+    # Format center frequency
+    if info.center_frequency >= 1e9:
+        freq_str = f"{info.center_frequency / 1e9:.6f} GHz"
+    elif info.center_frequency >= 1e6:
+        freq_str = f"{info.center_frequency / 1e6:.6f} MHz"
+    elif info.center_frequency >= 1e3:
+        freq_str = f"{info.center_frequency / 1e3:.3f} kHz"
+    elif info.center_frequency > 0:
+        freq_str = f"{info.center_frequency:.1f} Hz"
+    else:
+        freq_str = "not specified"
+
+    return {
+        "file_format": info.file_format.value,
+        "sample_format": info.sample_format.value,
+        "sample_rate": rate_str,
+        "sample_rate_hz": info.sample_rate,
+        "center_frequency": freq_str,
+        "center_frequency_hz": info.center_frequency,
+        "duration": duration_str,
+        "duration_seconds": info.duration_seconds,
+        "num_samples": info.num_samples,
+        "file_size": size_str,
+        "file_size_bytes": info.file_size_bytes,
+        "bits_per_sample": info.bits_per_sample,
+        "is_valid": info.is_valid,
+        "error": info.error_message if not info.is_valid else None,
+        "metadata": info.metadata,
+    }

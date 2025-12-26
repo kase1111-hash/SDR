@@ -87,6 +87,12 @@ from .recording import (
     SignalPlayback,
     TransmitBuffer,
     PlaybackScheduler,
+    FormatInfo,
+    FormatDetector,
+    FormatConverter,
+    detect_format,
+    convert_format,
+    get_file_info,
 )
 
 __all__ = [
@@ -169,4 +175,10 @@ __all__ = [
     "SignalPlayback",
     "TransmitBuffer",
     "PlaybackScheduler",
+    "FormatInfo",
+    "FormatDetector",
+    "FormatConverter",
+    "detect_format",
+    "convert_format",
+    "get_file_info",
 ]

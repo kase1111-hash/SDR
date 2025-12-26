@@ -3,7 +3,7 @@ DSP module - Signal processing components.
 """
 
 from .spectrum import SpectrumAnalyzer
-from .filters import FilterBank
+from .filters import FilterBank, Decimator, Interpolator, Resampler
 from .demodulators import Demodulator, CWDemodulator, GFSKDemodulator, MSKDemodulator, QAMDemodulator, MORSE_CODE
 from .classifiers import SignalClassifier
 from .frequency_lock import (
@@ -48,6 +48,9 @@ from .protocols import (
 __all__ = [
     "SpectrumAnalyzer",
     "FilterBank",
+    "Decimator",
+    "Interpolator",
+    "Resampler",
     "Demodulator",
     "CWDemodulator",
     "GFSKDemodulator",

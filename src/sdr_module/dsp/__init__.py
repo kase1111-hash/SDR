@@ -65,6 +65,16 @@ from .protocols import (
     RDSData,
     create_protocol_decoder,
 )
+from .recording import (
+    SampleFormat,
+    FileFormat,
+    RecordingMetadata,
+    IQRecorder,
+    IQPlayer,
+    RecordingSession,
+    load_iq_file,
+    save_iq_file,
+)
 
 __all__ = [
     "SpectrumAnalyzer",
@@ -125,4 +135,12 @@ __all__ = [
     "RDSDecoder",
     "RDSData",
     "create_protocol_decoder",
+    "SampleFormat",
+    "FileFormat",
+    "RecordingMetadata",
+    "IQRecorder",
+    "IQPlayer",
+    "RecordingSession",
+    "load_iq_file",
+    "save_iq_file",
 ]

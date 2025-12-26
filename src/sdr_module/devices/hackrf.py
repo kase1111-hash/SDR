@@ -23,6 +23,7 @@ from .base import (
     DeviceSpec,
     DeviceCapability,
 )
+from ..core.frequency_manager import validate_tx_frequency, is_tx_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -390,6 +391,12 @@ class HackRFDevice(SDRDevice):
 
         if self._state.is_streaming:
             logger.error("Cannot TX while RX is active (half-duplex)")
+            return False
+
+        # SAFETY: Validate TX frequency against lockout bands
+        allowed, reason = is_tx_allowed(self._state.frequency, self._state.bandwidth)
+        if not allowed:
+            logger.error(f"TX BLOCKED: {reason}")
             return False
 
         self._tx_callback = callback

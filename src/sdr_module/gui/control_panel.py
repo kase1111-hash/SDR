@@ -6,11 +6,12 @@ Provides controls for:
 - Gain adjustment
 - Bandwidth selection
 - Demodulation mode
+- Frequency presets (with TX lockout indicators)
 """
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, List
 
 try:
     from PyQt6.QtWidgets import (
@@ -23,6 +24,8 @@ try:
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
+
+from ..core.frequency_manager import get_frequency_manager, FrequencyPreset
 
 
 class FrequencyInput(QWidget if HAS_PYQT6 else object):
@@ -136,6 +139,42 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         freq_layout.addLayout(quick_layout)
 
         layout.addWidget(freq_group)
+
+        # Presets group
+        presets_group = QGroupBox("Presets")
+        presets_layout = QVBoxLayout(presets_group)
+
+        # Category selector
+        cat_layout = QHBoxLayout()
+        cat_layout.addWidget(QLabel("Category:"))
+        self._category_combo = QComboBox()
+        self._category_combo.currentTextChanged.connect(self._on_category_changed)
+        cat_layout.addWidget(self._category_combo)
+        presets_layout.addLayout(cat_layout)
+
+        # Preset selector
+        preset_layout = QHBoxLayout()
+        preset_layout.addWidget(QLabel("Preset:"))
+        self._preset_combo = QComboBox()
+        self._preset_combo.currentTextChanged.connect(self._on_preset_changed)
+        preset_layout.addWidget(self._preset_combo)
+        presets_layout.addLayout(preset_layout)
+
+        # Preset info label
+        self._preset_info = QLabel("")
+        self._preset_info.setWordWrap(True)
+        self._preset_info.setStyleSheet("color: #888; font-size: 10px;")
+        presets_layout.addWidget(self._preset_info)
+
+        # Apply preset button
+        self._apply_preset_btn = QPushButton("Apply Preset")
+        self._apply_preset_btn.clicked.connect(self._apply_preset)
+        presets_layout.addWidget(self._apply_preset_btn)
+
+        # Populate categories
+        self._populate_preset_categories()
+
+        layout.addWidget(presets_group)
 
         # Gain group
         gain_group = QGroupBox("Gain")
@@ -321,3 +360,79 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         minutes = (seconds % 3600) // 60
         secs = seconds % 60
         self._record_time.setText(f"{hours:02d}:{minutes:02d}:{secs:02d}")
+
+    def _populate_preset_categories(self):
+        """Populate the preset category dropdown."""
+        fm = get_frequency_manager()
+        categories = fm.get_preset_categories()
+        self._category_combo.clear()
+        self._category_combo.addItems(categories)
+        # Trigger initial population
+        if categories:
+            self._on_category_changed(categories[0])
+
+    def _on_category_changed(self, category: str):
+        """Handle category selection change."""
+        fm = get_frequency_manager()
+        presets = fm.get_rx_presets(category)
+        self._preset_combo.clear()
+        self._preset_combo.addItems([p.name for p in presets])
+
+    def _on_preset_changed(self, preset_name: str):
+        """Handle preset selection change."""
+        if not preset_name:
+            return
+        fm = get_frequency_manager()
+        preset = fm.get_preset_by_name(preset_name)
+        if preset:
+            # Check if TX is locked
+            allowed, reason = fm.is_tx_allowed(preset.frequency_hz, preset.bandwidth_hz)
+            tx_status = "✓ TX allowed" if allowed else "⛔ TX LOCKED"
+
+            # Format frequency
+            freq_mhz = preset.frequency_hz / 1e6
+            bw_khz = preset.bandwidth_hz / 1e3
+
+            info = f"{freq_mhz:.3f} MHz | {bw_khz:.0f} kHz BW | {preset.mode}\n"
+            info += f"{preset.description}\n"
+            info += tx_status
+            self._preset_info.setText(info)
+
+            # Color code based on TX status
+            if not allowed:
+                self._preset_info.setStyleSheet("color: #d44; font-size: 10px;")
+            else:
+                self._preset_info.setStyleSheet("color: #888; font-size: 10px;")
+
+    def _apply_preset(self):
+        """Apply the selected preset."""
+        preset_name = self._preset_combo.currentText()
+        if not preset_name:
+            return
+
+        fm = get_frequency_manager()
+        preset = fm.get_preset_by_name(preset_name)
+        if preset:
+            # Set frequency
+            self._freq_input.set_frequency(preset.frequency_hz)
+            self.frequency_changed.emit(preset.frequency_hz)
+
+            # Set bandwidth if available
+            bw_khz = preset.bandwidth_hz / 1e3
+            for i in range(self._bw_combo.count()):
+                text = self._bw_combo.itemText(i)
+                if str(int(bw_khz)) in text or f"{bw_khz/1000:.1f}" in text:
+                    self._bw_combo.setCurrentIndex(i)
+                    break
+
+            # Set demodulation mode
+            mode_map = {
+                "FM": "FM", "WFM": "FM", "AM": "AM",
+                "USB": "USB", "LSB": "LSB", "CW": "CW",
+                "RAW": "None (I/Q)"
+            }
+            if preset.mode in mode_map:
+                mode = mode_map[preset.mode]
+                idx = self._demod_combo.findText(mode)
+                if idx >= 0:
+                    self._demod_combo.setCurrentIndex(idx)

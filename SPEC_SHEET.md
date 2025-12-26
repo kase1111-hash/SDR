@@ -463,6 +463,33 @@ Combine devices to cover wider spectrum.
 
 > **WARNING**: Transmitting on frequencies without proper authorization is illegal in most jurisdictions. Users are responsible for compliance with all applicable laws and regulations. This software is intended for educational, amateur radio, and authorized research purposes only.
 
+### 11.4 TX Frequency Lockouts (Safety Feature)
+
+The software includes **hard-coded TX frequency lockouts** to prevent accidental transmission on critical safety frequencies.
+
+| Category | Frequencies | Reason |
+|----------|-------------|--------|
+| **GPS/GNSS** | L1 (1575.42 MHz), L2 (1227.60 MHz), L5 (1176.45 MHz), GLONASS, Galileo, BeiDou | **CRITICAL SAFETY** - GPS spoofing can cause aircraft navigation failures |
+| **Aviation Emergency** | 121.5 MHz, 243.0 MHz | International distress frequencies |
+| **ADS-B/Mode S** | 1030 MHz, 1090 MHz | Aircraft collision avoidance transponders |
+| **ELT/EPIRB** | 406.0-406.1 MHz | Search and rescue emergency beacons |
+| **Marine Distress** | 156.8 MHz (Ch 16) | VHF marine distress and calling |
+| **Cellular** | 698-806 MHz, 824-894 MHz, 1850-1995 MHz | Commercial cellular bands |
+
+> **Note**: These lockouts **cannot be disabled** in software. TX attempts to these frequencies will be blocked with an error message.
+
+### 11.5 HAM Radio Callsign Identification
+
+For amateur radio compliance, the software includes automatic callsign identification:
+
+| Feature | Description |
+|---------|-------------|
+| Automatic ID | Transmits callsign at start/end of transmission and every 10 minutes |
+| CW Mode | Morse code identification at configurable WPM (5-50) |
+| Tone Frequency | Configurable sidetone (default: 700 Hz) |
+| "DE" Prefix | Proper amateur radio format: "DE [CALLSIGN]" |
+| GUI Panel | Callsign input, countdown timer, manual ID button |
+
 ---
 
 ## 12. Future Considerations
@@ -583,7 +610,7 @@ If not using the installer:
 
 ---
 
-*Document Version: 3.4*
+*Document Version: 3.5*
 *Last Updated: 2025-12-26*
 
 ---
@@ -599,3 +626,4 @@ If not using the installer:
 | 3.2 | 2025-12-26 | Implemented plugin system architecture; updated development phases to reflect current implementation status |
 | 3.3 | 2025-12-26 | Added advanced protocol decoders: ADS-B, ACARS, FLEX; verified AX.25/APRS, RDS, POCSAG implementations |
 | 3.4 | 2025-12-26 | Implemented Main GUI application with PyQt6: spectrum analyzer, waterfall display, control panel, protocol decoder panel, recording controls, device dialog |
+| 3.5 | 2025-12-26 | Added TX frequency lockouts for safety (GPS, aviation, emergency, cellular); HAM radio callsign identification; RX presets with GUI selector |

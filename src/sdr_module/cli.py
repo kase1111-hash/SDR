@@ -13,6 +13,31 @@ from typing import Optional
 from . import __version__
 
 
+def cmd_gui(args: argparse.Namespace) -> int:
+    """Launch the graphical user interface."""
+    try:
+        from .gui.app import SDRApplication
+    except ImportError:
+        print("Error: GUI module not available.")
+        print("Install PyQt6 with: pip install PyQt6")
+        return 1
+
+    app = SDRApplication()
+
+    if not app.is_available():
+        print("Error: PyQt6 is required for the GUI.")
+        print("Install with: pip install PyQt6")
+        return 1
+
+    settings = {
+        "demo_mode": args.demo,
+        "frequency": args.frequency,
+        "gain": args.gain,
+    }
+
+    return app.run(settings)
+
+
 def cmd_info(args: argparse.Namespace) -> int:
     """Display module information."""
     print(f"SDR Module v{__version__}")
@@ -119,7 +144,7 @@ def cmd_devices(args: argparse.Namespace) -> int:
     print()
 
     manager = DeviceManager()
-    devices = manager.enumerate_devices()
+    devices = manager.scan_devices()
 
     if not devices:
         print("No SDR devices found.")
@@ -187,6 +212,16 @@ def create_parser() -> argparse.ArgumentParser:
     encode_parser.add_argument('--wpm', type=int, default=20,
                               help='Words per minute for Morse (default: 20)')
     encode_parser.set_defaults(func=cmd_encode)
+
+    # GUI command
+    gui_parser = subparsers.add_parser('gui', help='Launch graphical user interface')
+    gui_parser.add_argument('--demo', '-d', action='store_true',
+                           help='Run in demo mode (no hardware required)')
+    gui_parser.add_argument('--frequency', '-f', type=float, default=100e6,
+                           help='Initial frequency in Hz (default: 100 MHz)')
+    gui_parser.add_argument('--gain', '-g', type=float, default=20.0,
+                           help='RF gain in dB (default: 20)')
+    gui_parser.set_defaults(func=cmd_gui)
 
     return parser
 

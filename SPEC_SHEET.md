@@ -463,6 +463,56 @@ Combine devices to cover wider spectrum.
 
 > **WARNING**: Transmitting on frequencies without proper authorization is illegal in most jurisdictions. Users are responsible for compliance with all applicable laws and regulations. This software is intended for educational, amateur radio, and authorized research purposes only.
 
+### 11.4 TX Frequency Lockouts (Safety Feature)
+
+The software includes **hard-coded TX frequency lockouts** to prevent accidental transmission on critical safety frequencies.
+
+| Category | Frequencies | Reason |
+|----------|-------------|--------|
+| **GPS/GNSS** | L1 (1575.42 MHz), L2 (1227.60 MHz), L5 (1176.45 MHz), GLONASS, Galileo, BeiDou | **CRITICAL SAFETY** - GPS spoofing can cause aircraft navigation failures |
+| **Aviation Emergency** | 121.5 MHz, 243.0 MHz | International distress frequencies |
+| **ADS-B/Mode S** | 1030 MHz, 1090 MHz | Aircraft collision avoidance transponders |
+| **ELT/EPIRB** | 406.0-406.1 MHz | Search and rescue emergency beacons |
+| **Marine Distress** | 156.8 MHz (Ch 16) | VHF marine distress and calling |
+| **Cellular** | 698-806 MHz, 824-894 MHz, 1850-1995 MHz | Commercial cellular bands |
+
+> **Note**: These lockouts **cannot be disabled** in software. TX attempts to these frequencies will be blocked with an error message.
+
+### 11.5 HAM Radio Callsign Identification
+
+For amateur radio compliance, the software includes automatic callsign identification:
+
+| Feature | Description |
+|---------|-------------|
+| Automatic ID | Transmits callsign at start/end of transmission and every 10 minutes |
+| CW Mode | Morse code identification at configurable WPM (5-50) |
+| Tone Frequency | Configurable sidetone (default: 700 Hz) |
+| "DE" Prefix | Proper amateur radio format: "DE [CALLSIGN]" |
+| GUI Panel | Callsign input, countdown timer, manual ID button |
+
+### 11.6 SSTV Image Reception (ISS/Space)
+
+The software includes an SSTV (Slow Scan Television) decoder for receiving images from the International Space Station and other amateur sources.
+
+| Feature | Description |
+|---------|-------------|
+| ISS SSTV Preset | Pre-configured 145.800 MHz with FM demodulation |
+| Supported Modes | PD120, PD180 (ISS favorites), Robot, Martin, Scottie |
+| Live Preview | Real-time image display as lines are decoded |
+| Auto-Save | Automatic saving of completed images |
+| Image History | Browse previously received images |
+| VIS Detection | Automatic mode detection from VIS header |
+
+**Space Frequency Presets:**
+
+| Preset | Frequency | Description |
+|--------|-----------|-------------|
+| ISS SSTV/Voice | 145.800 MHz | Slow Scan TV and voice downlink |
+| ISS APRS | 145.825 MHz | Packet radio / APRS digipeater |
+| ISS Packet | 437.550 MHz | UHF packet downlink |
+| Meteor-M2 LRPT | 137.100 MHz | Russian weather satellite |
+| SO-50 | 436.795 MHz | Amateur satellite |
+
 ---
 
 ## 12. Future Considerations
@@ -480,27 +530,27 @@ Combine devices to cover wider spectrum.
 ## 13. Development Phases
 
 ### Phase 1: Core Infrastructure
-- [ ] Hardware abstraction layer
-- [ ] Basic signal acquisition
-- [ ] FFT and spectrum display
-- [ ] Waterfall display
+- [x] Hardware abstraction layer
+- [x] Basic signal acquisition
+- [x] FFT and spectrum display
+- [x] Waterfall display
 
 ### Phase 2: Signal Analysis
-- [ ] Analog/digital signal detection
-- [ ] Modulation classification
-- [ ] Basic demodulation (AM, FM, SSB)
+- [x] Analog/digital signal detection
+- [x] Modulation classification
+- [x] Basic demodulation (AM, FM, SSB)
 
 ### Phase 3: Protocol Identification
-- [ ] Symbol timing recovery
-- [ ] Frame synchronization
-- [ ] Protocol signature matching
-- [ ] Decoder framework
+- [x] Symbol timing recovery
+- [x] Frame synchronization
+- [x] Protocol signature matching
+- [x] Decoder framework
 
 ### Phase 4: Advanced Features
-- [ ] Recording/playback
-- [ ] Plugin system
-- [ ] Advanced protocols
-- [ ] UI polish and optimization
+- [x] Recording/playback
+- [x] Plugin system
+- [x] Advanced protocols (ADS-B, ACARS, FLEX, AX.25/APRS, RDS, POCSAG)
+- [x] Main GUI application (PyQt6-based with spectrum, waterfall, controls, decoder panels)
 
 ---
 
@@ -583,7 +633,7 @@ If not using the installer:
 
 ---
 
-*Document Version: 3.1*
+*Document Version: 3.6*
 *Last Updated: 2025-12-26*
 
 ---
@@ -596,3 +646,8 @@ If not using the installer:
 | 2.0 | 2025-12-25 | Added quantitative RF specs, hardware compatibility matrix, interface specs, physical/environmental specs, compliance section |
 | 3.0 | 2025-12-25 | Tuned for dual-SDR setup (RTL-SDR + HackRF One); added device-specific specs, dual-SDR operation modes, synchronization, use cases, software stack |
 | 3.1 | 2025-12-26 | Added Windows build and installation documentation (Section 14) |
+| 3.2 | 2025-12-26 | Implemented plugin system architecture; updated development phases to reflect current implementation status |
+| 3.3 | 2025-12-26 | Added advanced protocol decoders: ADS-B, ACARS, FLEX; verified AX.25/APRS, RDS, POCSAG implementations |
+| 3.4 | 2025-12-26 | Implemented Main GUI application with PyQt6: spectrum analyzer, waterfall display, control panel, protocol decoder panel, recording controls, device dialog |
+| 3.5 | 2025-12-26 | Added TX frequency lockouts for safety (GPS, aviation, emergency, cellular); HAM radio callsign identification; RX presets with GUI selector |
+| 3.6 | 2025-12-26 | Added SSTV decoder for ISS image reception; space/satellite RX presets (ISS, Meteor-M2, SO-50); GUI image viewer with live preview |

@@ -94,6 +94,21 @@ from .recording import (
     convert_format,
     get_file_info,
 )
+from .callsign import (
+    IdentificationMode,
+    CallsignConfig,
+    CallsignIdentifier,
+    MorseEncoder,
+    generate_cw_id,
+)
+from .sstv import (
+    SSTVMode,
+    SSTVModeSpec,
+    SSTV_MODES,
+    SSTVState,
+    SSTVDecoder,
+    SSTVImageViewer,
+)
 
 __all__ = [
     "SpectrumAnalyzer",
@@ -181,4 +196,17 @@ __all__ = [
     "detect_format",
     "convert_format",
     "get_file_info",
+    # Callsign identification
+    "IdentificationMode",
+    "CallsignConfig",
+    "CallsignIdentifier",
+    "MorseEncoder",
+    "generate_cw_id",
+    # SSTV (Slow Scan Television)
+    "SSTVMode",
+    "SSTVModeSpec",
+    "SSTV_MODES",
+    "SSTVState",
+    "SSTVDecoder",
+    "SSTVImageViewer",
 ]

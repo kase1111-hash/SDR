@@ -21,6 +21,8 @@ from .frequency_manager import (
     RX_PRESETS,
     LICENSE_FREE_BANDS,
     AMATEUR_BAND_PRIVILEGES,
+    POWER_HEADROOM_FACTOR,
+    TX_POWER_WARNING,
     # Singleton functions
     get_frequency_manager,
     is_tx_allowed,
@@ -30,7 +32,10 @@ from .frequency_manager import (
     set_license_class,
     get_license_class,
     get_license_privileges,
+    # Power functions
     get_power_limit,
+    get_effective_power_limit,
+    get_tx_power_warning,
 )
 
 __all__ = [
@@ -52,6 +57,8 @@ __all__ = [
     "RX_PRESETS",
     "LICENSE_FREE_BANDS",
     "AMATEUR_BAND_PRIVILEGES",
+    "POWER_HEADROOM_FACTOR",
+    "TX_POWER_WARNING",
     # Frequency management - Functions
     "get_frequency_manager",
     "is_tx_allowed",
@@ -61,5 +68,8 @@ __all__ = [
     "set_license_class",
     "get_license_class",
     "get_license_privileges",
+    # Power functions
     "get_power_limit",
+    "get_effective_power_limit",
+    "get_tx_power_warning",
 ]

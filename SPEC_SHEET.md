@@ -626,6 +626,23 @@ TX permissions are enforced based on the operator's amateur radio license class.
 - Mode restrictions enforced per band segment
 - Power limits enforced where applicable
 
+**Power Headroom (150%):**
+
+Power limits allow 150% of the legal limit to account for:
+- Cable and connector losses
+- Filter insertion loss
+- Amplifier efficiency variations
+- Measurement uncertainty
+
+| Band | Legal Limit | Effective Max |
+|------|-------------|---------------|
+| CB | 12W | 18W |
+| 10m Tech | 200W | 300W |
+| 30m | 200W | 300W |
+| 60m | 100W | 150W |
+
+⚠️ **IMPORTANT**: Before transmitting, test actual broadcast power with a 50Ω dummy load and power meter. The configured limit is not measured output—verify radiated power at the antenna base.
+
 ---
 
 ## 12. Future Considerations
@@ -746,7 +763,7 @@ If not using the installer:
 
 ---
 
-*Document Version: 3.9*
+*Document Version: 4.0*
 *Last Updated: 2025-12-26*
 
 ---
@@ -767,3 +784,4 @@ If not using the installer:
 | 3.7 | 2025-12-26 | Added HAM radio signal meter with S-units (S1-S9, S9+dB) and RST reporting; analog meter GUI; verbal reports ("five and nine, twenty over") |
 | 3.8 | 2025-12-26 | Added QRP operations module: power conversion (dBm↔watts), TX limiter for QRP compliance, amplifier chain calculator, miles-per-watt tracker; QRP calling frequency presets (80m-10m CW/SSB) |
 | 3.9 | 2025-12-26 | Added license profiles (None, Technician, General, Amateur Extra); TX lockouts enforced by license class; license-free bands (CB, MURS, FRS); GUI license selector |
+| 4.0 | 2025-12-26 | Added 150% power headroom for TX limits (accounts for cable/filter losses); dummy load testing warning; shows legal vs effective power limits in GUI |

@@ -27,6 +27,18 @@ from typing import List, Tuple, Optional, Dict, Set
 
 logger = logging.getLogger(__name__)
 
+# Power headroom factor - allows 150% of legal limit for filtering/cable losses
+# Real wattage is measured at antenna base, so we allow headroom for the TX chain
+POWER_HEADROOM_FACTOR = 1.5
+
+# Warning message for TX power testing
+TX_POWER_WARNING = (
+    "⚠️ IMPORTANT: Before transmitting, test your actual broadcast power "
+    "with a 50Ω dummy load and power meter. The power shown here is the "
+    "configured limit, not measured output. Cable losses, filtering, and "
+    "amplifier efficiency affect actual radiated power."
+)
+
 
 class LockoutReason(Enum):
     """Reason for frequency lockout."""
@@ -85,6 +97,26 @@ class BandPrivilege:
         if self.modes and mode and mode.upper() not in self.modes:
             return False
         return True
+
+    def get_legal_power_limit(self) -> Optional[float]:
+        """Get the legal power limit for this band (without headroom)."""
+        return self.max_power_watts
+
+    def get_effective_power_limit(self) -> Optional[float]:
+        """
+        Get the effective power limit with headroom for filtering/losses.
+
+        Returns 150% of the legal limit to account for:
+        - Cable/connector losses
+        - Filter insertion loss
+        - Amplifier efficiency variations
+        - Measurement uncertainty
+
+        Real radiated power should be verified with a 50Ω dummy load.
+        """
+        if self.max_power_watts is None:
+            return None
+        return self.max_power_watts * POWER_HEADROOM_FACTOR
 
 
 @dataclass
@@ -1181,19 +1213,43 @@ class FrequencyManager:
 
     def get_power_limit(self, frequency_hz: float, mode: str = "") -> Optional[float]:
         """
-        Get the maximum TX power allowed at the given frequency.
+        Get the legal TX power limit at the given frequency.
 
         Args:
             frequency_hz: Frequency in Hz
             mode: Operating mode
 
         Returns:
-            Maximum power in watts, or None if no limit
+            Legal maximum power in watts, or None if no limit
         """
         allowed, _, privilege = self._check_license_privilege(frequency_hz, mode)
-        if allowed and privilege and privilege.max_power_watts:
-            return privilege.max_power_watts
+        if allowed and privilege:
+            return privilege.get_legal_power_limit()
         return None
+
+    def get_effective_power_limit(self, frequency_hz: float, mode: str = "") -> Optional[float]:
+        """
+        Get the effective TX power limit with headroom (150% of legal).
+
+        This allows headroom for filtering, cable losses, and amplifier
+        efficiency. Real radiated power should be verified with a 50Ω
+        dummy load before transmitting.
+
+        Args:
+            frequency_hz: Frequency in Hz
+            mode: Operating mode
+
+        Returns:
+            Effective maximum power in watts (150% of legal), or None if no limit
+        """
+        allowed, _, privilege = self._check_license_privilege(frequency_hz, mode)
+        if allowed and privilege:
+            return privilege.get_effective_power_limit()
+        return None
+
+    def get_tx_power_warning(self) -> str:
+        """Get the TX power testing warning message."""
+        return TX_POWER_WARNING
 
     def is_tx_allowed(
         self,
@@ -1359,8 +1415,18 @@ def get_license_privileges() -> List[BandPrivilege]:
 
 
 def get_power_limit(frequency_hz: float, mode: str = "") -> Optional[float]:
-    """Get the maximum TX power allowed at the given frequency."""
+    """Get the legal TX power limit at the given frequency."""
     return get_frequency_manager().get_power_limit(frequency_hz, mode)
+
+
+def get_effective_power_limit(frequency_hz: float, mode: str = "") -> Optional[float]:
+    """Get the effective TX power limit with 150% headroom."""
+    return get_frequency_manager().get_effective_power_limit(frequency_hz, mode)
+
+
+def get_tx_power_warning() -> str:
+    """Get the TX power testing warning message."""
+    return TX_POWER_WARNING
 
 
 __all__ = [
@@ -1378,6 +1444,8 @@ __all__ = [
     'RX_PRESETS',
     'LICENSE_FREE_BANDS',
     'AMATEUR_BAND_PRIVILEGES',
+    'POWER_HEADROOM_FACTOR',
+    'TX_POWER_WARNING',
     # Singleton functions
     'get_frequency_manager',
     'is_tx_allowed',
@@ -1387,5 +1455,8 @@ __all__ = [
     'set_license_class',
     'get_license_class',
     'get_license_privileges',
+    # Power functions
     'get_power_limit',
+    'get_effective_power_limit',
+    'get_tx_power_warning',
 ]

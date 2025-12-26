@@ -25,7 +25,13 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
-from ..core.frequency_manager import get_frequency_manager, FrequencyPreset, LicenseClass
+from ..core.frequency_manager import (
+    get_frequency_manager,
+    FrequencyPreset,
+    LicenseClass,
+    TX_POWER_WARNING,
+    POWER_HEADROOM_FACTOR,
+)
 
 
 class FrequencyInput(QWidget if HAS_PYQT6 else object):
@@ -311,6 +317,21 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._license_info.setStyleSheet("color: #888; font-size: 10px;")
         license_layout.addWidget(self._license_info)
 
+        # Power headroom info
+        headroom_pct = int((POWER_HEADROOM_FACTOR - 1) * 100)
+        headroom_label = QLabel(f"Power limits allow +{headroom_pct}% headroom for losses")
+        headroom_label.setStyleSheet("color: #68a; font-size: 9px;")
+        license_layout.addWidget(headroom_label)
+
+        # TX Power Warning - dummy load testing
+        self._tx_warning = QLabel(TX_POWER_WARNING)
+        self._tx_warning.setWordWrap(True)
+        self._tx_warning.setStyleSheet(
+            "color: #da4; font-size: 9px; background-color: #332; "
+            "padding: 4px; border-radius: 3px;"
+        )
+        license_layout.addWidget(self._tx_warning)
+
         layout.addWidget(license_group)
 
         # Add stretch at bottom
@@ -423,10 +444,11 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             info += f"{preset.description}\n"
 
             if allowed:
-                # Check for power limit
-                power_limit = fm.get_power_limit(preset.frequency_hz, preset.mode)
-                if power_limit:
-                    info += f"✓ TX allowed (max {power_limit:.0f}W)"
+                # Check for power limit (legal and effective with headroom)
+                legal_limit = fm.get_power_limit(preset.frequency_hz, preset.mode)
+                effective_limit = fm.get_effective_power_limit(preset.frequency_hz, preset.mode)
+                if legal_limit:
+                    info += f"✓ TX allowed (legal: {legal_limit:.0f}W, max: {effective_limit:.0f}W)"
                 else:
                     info += "✓ TX allowed"
                 self._preset_info.setStyleSheet("color: #4a4; font-size: 10px;")

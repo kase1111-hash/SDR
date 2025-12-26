@@ -31,7 +31,6 @@ from .callsign_panel import CallsignPanel
 from .sstv_panel import SSTVPanel
 from .signal_meter_widget import SignalMeterPanel
 from .qrp_panel import QRPPanel
-from .natlangchain_panel import NatLangChainPanel
 
 logger = logging.getLogger(__name__)
 
@@ -185,11 +184,6 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # QRP panel (low power operations)
         self._qrp_panel = QRPPanel()
         decoder_tabs.addTab(self._qrp_panel, "QRP")
-
-        # NatLangChain blockchain radio panel
-        self._nlc_panel = NatLangChainPanel()
-        self._nlc_panel.entry_broadcast.connect(self._on_nlc_broadcast)
-        decoder_tabs.addTab(self._nlc_panel, "NLC")
 
         # Info tab
         info_widget = QWidget()
@@ -440,15 +434,6 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 # TODO: Transmit audio via HackRF TX
             except Exception as e:
                 logger.error(f"Error generating callsign ID: {e}")
-
-    def _on_nlc_broadcast(self, entry):
-        """Handle NatLangChain entry broadcast request."""
-        logger.info(f"NLC broadcast requested: {entry.entry_hash}")
-        # Generate radio packets for transmission
-        packets = self._nlc_panel._nlc_radio.broadcast_entry(entry)
-        logger.info(f"Generated {len(packets)} packets for NLC broadcast")
-        # TODO: Transmit packets via HackRF TX
-        self._device_label.setText(f"NLC TX: {entry.entry_hash[:8]}")
 
     def _toggle_recording(self, checked: bool):
         """Toggle recording."""

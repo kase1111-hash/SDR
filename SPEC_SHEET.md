@@ -643,6 +643,58 @@ Power limits allow 150% of the legal limit to account for:
 
 ⚠️ **IMPORTANT**: Before transmitting, test actual broadcast power with a 50Ω dummy load and power meter. The configured limit is not measured output—verify radiated power at the antenna base.
 
+### 11.10 NatLangChain Blockchain Radio Protocol
+
+Integration with the NatLangChain distributed ledger for transmitting natural language entries via radio.
+
+**Protocol Overview:**
+
+| Feature | Description |
+|---------|-------------|
+| Entry Format | Natural language prose with SHA-256 hash |
+| Packet Encoding | Compressed JSON with zlib, fragmented for radio |
+| Reassembly | Sequence numbers for multi-packet messages |
+| Peer Discovery | Callsign-based peer announcement |
+| Chain Sync | Request/response for distributed ledger sync |
+
+**Message Types:**
+
+| Type | Purpose |
+|------|---------|
+| ENTRY | Broadcast a new natural language entry |
+| ENTRY_ACK | Acknowledge receipt of an entry |
+| CHAIN_REQUEST | Request chain synchronization |
+| CHAIN_RESPONSE | Respond with chain data |
+| BLOCK_ANNOUNCE | Announce a new validated block |
+| PEER_ANNOUNCE | Announce presence on network |
+| HEARTBEAT | Keep-alive for peer discovery |
+
+**Radio Packet Format:**
+
+```
+[TYPE:1][SEQ:2][TOTAL:2][HASH:8][PAYLOAD:variable]
+```
+
+- Maximum payload: 200 bytes (within AX.25 limits)
+- Large messages fragmented automatically
+- Fragment reassembly via hash matching
+
+**GUI Panel Features:**
+
+| Tab | Functions |
+|-----|-----------|
+| Compose | Create and broadcast new entries |
+| Entries | View received entries from the network |
+| Chain | View local chain status and block history |
+| Peers | Discover and monitor network peers |
+
+**Integration:**
+
+- Entries are broadcast via HackRF TX
+- Received packets decoded from RTL-SDR RX
+- Peer discovery uses amateur radio callsigns
+- Compatible with AX.25 packet radio infrastructure
+
 ---
 
 ## 12. Future Considerations
@@ -763,7 +815,7 @@ If not using the installer:
 
 ---
 
-*Document Version: 4.0*
+*Document Version: 4.1*
 *Last Updated: 2025-12-26*
 
 ---
@@ -785,3 +837,4 @@ If not using the installer:
 | 3.8 | 2025-12-26 | Added QRP operations module: power conversion (dBm↔watts), TX limiter for QRP compliance, amplifier chain calculator, miles-per-watt tracker; QRP calling frequency presets (80m-10m CW/SSB) |
 | 3.9 | 2025-12-26 | Added license profiles (None, Technician, General, Amateur Extra); TX lockouts enforced by license class; license-free bands (CB, MURS, FRS); GUI license selector |
 | 4.0 | 2025-12-26 | Added 150% power headroom for TX limits (accounts for cable/filter losses); dummy load testing warning; shows legal vs effective power limits in GUI |
+| 4.1 | 2025-12-26 | Added NatLangChain blockchain radio protocol: natural language entry broadcast, packet fragmentation/reassembly, peer discovery, chain sync; GUI panel with Compose/Entries/Chain/Peers tabs |

@@ -500,7 +500,7 @@ Combine devices to cover wider spectrum.
 - [x] Recording/playback
 - [x] Plugin system
 - [x] Advanced protocols (ADS-B, ACARS, FLEX, AX.25/APRS, RDS, POCSAG)
-- [ ] UI polish and optimization
+- [x] Main GUI application (PyQt6-based with spectrum, waterfall, controls, decoder panels)
 
 ---
 
@@ -583,7 +583,7 @@ If not using the installer:
 
 ---
 
-*Document Version: 3.3*
+*Document Version: 3.4*
 *Last Updated: 2025-12-26*
 
 ---
@@ -598,3 +598,4 @@ If not using the installer:
 | 3.1 | 2025-12-26 | Added Windows build and installation documentation (Section 14) |
 | 3.2 | 2025-12-26 | Implemented plugin system architecture; updated development phases to reflect current implementation status |
 | 3.3 | 2025-12-26 | Added advanced protocol decoders: ADS-B, ACARS, FLEX; verified AX.25/APRS, RDS, POCSAG implementations |
+| 3.4 | 2025-12-26 | Implemented Main GUI application with PyQt6: spectrum analyzer, waterfall display, control panel, protocol decoder panel, recording controls, device dialog |

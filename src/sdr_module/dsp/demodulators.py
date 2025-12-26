@@ -252,6 +252,306 @@ class PSKDemodulator(Demodulator):
         return samples.real, samples.imag
 
 
+class GFSKDemodulator(Demodulator):
+    """
+    GFSK (Gaussian Frequency Shift Keying) demodulator.
+
+    Used in Bluetooth, DECT, and many other protocols.
+    Features:
+    - Configurable BT (Bandwidth-Time) product
+    - Gaussian matched filter
+    - Symbol timing recovery
+    - Soft and hard decision output
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        symbol_rate: float,
+        deviation: float = 0.5,
+        bt: float = 0.5,
+        samples_per_symbol: int = 0
+    ):
+        """
+        Initialize GFSK demodulator.
+
+        Args:
+            sample_rate: Sample rate in Hz
+            symbol_rate: Symbol rate in Hz (baud rate)
+            deviation: Modulation index (h = 2*deviation*Ts)
+            bt: Bandwidth-Time product (typically 0.3-0.5)
+            samples_per_symbol: Samples per symbol (0 = auto-calculate)
+        """
+        super().__init__(sample_rate)
+        self._symbol_rate = symbol_rate
+        self._deviation = deviation
+        self._bt = bt
+
+        # Calculate samples per symbol
+        if samples_per_symbol <= 0:
+            self._sps = int(sample_rate / symbol_rate)
+        else:
+            self._sps = samples_per_symbol
+
+        # Symbol period
+        self._symbol_period = 1.0 / symbol_rate
+
+        # FM demodulator for frequency detection
+        self._fm_demod = FMDemodulator(sample_rate, deviation * symbol_rate)
+
+        # Generate Gaussian filter for matched filtering
+        self._gaussian_filter = self._generate_gaussian_filter()
+
+        # Timing recovery state
+        self._timing_offset = 0.0
+        self._timing_alpha = 0.01  # Timing loop gain
+
+        # DC offset tracking
+        self._dc_offset = 0.0
+        self._dc_alpha = 0.001
+
+        # Last phase for continuous demodulation
+        self._last_phase = 0.0
+
+    def _generate_gaussian_filter(self) -> np.ndarray:
+        """Generate Gaussian filter impulse response."""
+        # Filter spans 4 symbol periods
+        span = 4
+        n_taps = span * self._sps + 1
+
+        # Time vector
+        t = np.arange(n_taps) / self._sps - span / 2
+
+        # Gaussian pulse
+        alpha = np.sqrt(np.log(2) / 2) / self._bt
+        h = np.sqrt(np.pi) / alpha * np.exp(-(np.pi * t / alpha) ** 2)
+
+        # Normalize
+        h = h / np.sum(h)
+
+        return h.astype(np.float32)
+
+    @property
+    def symbol_rate(self) -> float:
+        """Get symbol rate."""
+        return self._symbol_rate
+
+    @property
+    def samples_per_symbol(self) -> int:
+        """Get samples per symbol."""
+        return self._sps
+
+    @property
+    def bt_product(self) -> float:
+        """Get BT product."""
+        return self._bt
+
+    @property
+    def gaussian_filter(self) -> np.ndarray:
+        """Get Gaussian filter coefficients."""
+        return self._gaussian_filter.copy()
+
+    def demodulate(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Demodulate GFSK signal to frequency deviation.
+
+        Args:
+            samples: Complex I/Q samples
+
+        Returns:
+            Frequency deviation signal (normalized)
+        """
+        # FM demodulation (quadrature detector)
+        freq = self._fm_demod.demodulate(samples)
+
+        # Apply matched Gaussian filter
+        if len(freq) >= len(self._gaussian_filter):
+            freq_filtered = np.convolve(freq, self._gaussian_filter, mode='same')
+        else:
+            freq_filtered = freq
+
+        # DC offset removal
+        for i, f in enumerate(freq_filtered):
+            self._dc_offset = self._dc_alpha * f + (1 - self._dc_alpha) * self._dc_offset
+            freq_filtered[i] = f - self._dc_offset
+
+        return freq_filtered.astype(np.float32)
+
+    def demodulate_bits(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Demodulate GFSK signal to bits.
+
+        Args:
+            samples: Complex I/Q samples
+
+        Returns:
+            Binary bit array
+        """
+        freq = self.demodulate(samples)
+
+        # Sample at symbol centers
+        n_symbols = len(freq) // self._sps
+        bits = np.zeros(n_symbols, dtype=np.uint8)
+
+        for i in range(n_symbols):
+            # Sample at center of symbol (with timing offset)
+            sample_idx = int((i + 0.5) * self._sps + self._timing_offset)
+            if 0 <= sample_idx < len(freq):
+                bits[i] = 1 if freq[sample_idx] > 0 else 0
+
+        return bits
+
+    def demodulate_soft(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Soft decision demodulation.
+
+        Args:
+            samples: Complex I/Q samples
+
+        Returns:
+            Soft bit values (positive = 1, negative = 0)
+        """
+        freq = self.demodulate(samples)
+
+        # Sample at symbol centers
+        n_symbols = len(freq) // self._sps
+        soft_bits = np.zeros(n_symbols, dtype=np.float32)
+
+        for i in range(n_symbols):
+            sample_idx = int((i + 0.5) * self._sps + self._timing_offset)
+            if 0 <= sample_idx < len(freq):
+                soft_bits[i] = freq[sample_idx]
+
+        return soft_bits
+
+    def recover_timing(self, samples: np.ndarray) -> float:
+        """
+        Recover symbol timing from samples.
+
+        Uses early-late gate timing recovery.
+
+        Args:
+            samples: Complex I/Q samples
+
+        Returns:
+            Estimated timing offset in samples
+        """
+        freq = self.demodulate(samples)
+
+        # Early-late gate timing error detector
+        n_symbols = len(freq) // self._sps
+        timing_error = 0.0
+
+        for i in range(1, n_symbols - 1):
+            center = int((i + 0.5) * self._sps + self._timing_offset)
+            early = center - self._sps // 4
+            late = center + self._sps // 4
+
+            if 0 <= early < len(freq) and late < len(freq):
+                # Timing error = (late - early) * sign(center)
+                decision = 1 if freq[center] > 0 else -1
+                error = (abs(freq[late]) - abs(freq[early])) * decision
+                timing_error += error
+
+        if n_symbols > 2:
+            timing_error /= (n_symbols - 2)
+
+        # Update timing offset
+        self._timing_offset += self._timing_alpha * timing_error
+
+        # Keep offset bounded
+        self._timing_offset = max(-self._sps / 2, min(self._sps / 2, self._timing_offset))
+
+        return self._timing_offset
+
+    def get_eye_diagram_data(self, samples: np.ndarray, n_symbols: int = 100) -> np.ndarray:
+        """
+        Get data for eye diagram visualization.
+
+        Args:
+            samples: Complex I/Q samples
+            n_symbols: Number of symbols to include
+
+        Returns:
+            2D array of shape (n_symbols, 2*sps) for eye diagram
+        """
+        freq = self.demodulate(samples)
+
+        traces = []
+        for i in range(min(n_symbols, len(freq) // self._sps - 2)):
+            start = i * self._sps
+            end = start + 2 * self._sps
+            if end <= len(freq):
+                traces.append(freq[start:end])
+
+        if traces:
+            return np.array(traces, dtype=np.float32)
+        return np.array([], dtype=np.float32)
+
+    def estimate_deviation(self, samples: np.ndarray) -> float:
+        """
+        Estimate the frequency deviation from signal.
+
+        Args:
+            samples: Complex I/Q samples
+
+        Returns:
+            Estimated deviation in Hz
+        """
+        freq = self.demodulate(samples)
+
+        # Use peak-to-peak deviation
+        if len(freq) > 0:
+            deviation = (np.max(freq) - np.min(freq)) / 2
+            return deviation * self._symbol_rate
+        return 0.0
+
+    def estimate_symbol_rate(self, samples: np.ndarray) -> float:
+        """
+        Estimate symbol rate from signal.
+
+        Uses autocorrelation to find symbol period.
+
+        Args:
+            samples: Complex I/Q samples
+
+        Returns:
+            Estimated symbol rate in Hz
+        """
+        freq = self.demodulate(samples)
+
+        if len(freq) < 2 * self._sps:
+            return self._symbol_rate
+
+        # Compute autocorrelation
+        freq_centered = freq - np.mean(freq)
+        autocorr = np.correlate(freq_centered, freq_centered, mode='full')
+        autocorr = autocorr[len(autocorr) // 2:]  # Take positive lags
+
+        # Find first peak after zero lag (symbol period)
+        # Skip first few samples
+        min_lag = self._sps // 2
+        max_lag = self._sps * 2
+
+        if max_lag >= len(autocorr):
+            return self._symbol_rate
+
+        search_region = autocorr[min_lag:max_lag]
+        if len(search_region) > 0:
+            peak_idx = np.argmax(search_region) + min_lag
+            if peak_idx > 0:
+                return self._sample_rate / peak_idx
+
+        return self._symbol_rate
+
+    def reset(self) -> None:
+        """Reset demodulator state."""
+        self._fm_demod.reset()
+        self._timing_offset = 0.0
+        self._dc_offset = 0.0
+        self._last_phase = 0.0
+
+
 class QAMDemodulator(Demodulator):
     """
     QAM (Quadrature Amplitude Modulation) demodulator.
@@ -873,8 +1173,10 @@ def create_demodulator(
         return SSBDemodulator(sample_rate, mod_type.value)
     elif mod_type in (ModulationType.OOK, ModulationType.ASK):
         return OOKDemodulator(sample_rate, **kwargs)
-    elif mod_type in (ModulationType.FSK, ModulationType.GFSK):
+    elif mod_type == ModulationType.FSK:
         return FSKDemodulator(sample_rate, **kwargs)
+    elif mod_type == ModulationType.GFSK:
+        return GFSKDemodulator(sample_rate, **kwargs)
     elif mod_type in (ModulationType.BPSK, ModulationType.QPSK):
         order = 2 if mod_type == ModulationType.BPSK else 4
         return PSKDemodulator(sample_rate, order=order, **kwargs)

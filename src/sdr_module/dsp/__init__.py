@@ -94,6 +94,13 @@ from .recording import (
     convert_format,
     get_file_info,
 )
+from .callsign import (
+    IdentificationMode,
+    CallsignConfig,
+    CallsignIdentifier,
+    MorseEncoder,
+    generate_cw_id,
+)
 
 __all__ = [
     "SpectrumAnalyzer",
@@ -181,4 +188,10 @@ __all__ = [
     "detect_format",
     "convert_format",
     "get_file_info",
+    # Callsign identification
+    "IdentificationMode",
+    "CallsignConfig",
+    "CallsignIdentifier",
+    "MorseEncoder",
+    "generate_cw_id",
 ]

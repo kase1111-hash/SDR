@@ -7,6 +7,7 @@ Provides a complete GUI application for the SDR module including:
 - Protocol decoder output
 - Recording controls
 - Frequency scanner
+- HAM radio callsign identification
 
 Usage:
     from sdr_module.gui import SDRApplication
@@ -23,6 +24,7 @@ from .waterfall_widget import WaterfallWidget
 from .control_panel import ControlPanel
 from .decoder_panel import DecoderPanel
 from .device_dialog import DeviceDialog
+from .callsign_panel import CallsignPanel
 from .app import SDRApplication
 
 __all__ = [
@@ -33,4 +35,5 @@ __all__ = [
     "ControlPanel",
     "DecoderPanel",
     "DeviceDialog",
+    "CallsignPanel",
 ]

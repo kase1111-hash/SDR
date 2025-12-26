@@ -27,6 +27,7 @@ from .spectrum_widget import SpectrumWidget
 from .waterfall_widget import WaterfallWidget
 from .control_panel import ControlPanel
 from .decoder_panel import DecoderPanel
+from .callsign_panel import CallsignPanel
 
 logger = logging.getLogger(__name__)
 
@@ -164,7 +165,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder_panel = DecoderPanel()
         decoder_tabs.addTab(self._decoder_panel, "Decoder")
 
-        # Add placeholder for future tabs
+        # Callsign panel for HAM radio operators
+        self._callsign_panel = CallsignPanel()
+        self._callsign_panel.id_requested.connect(self._on_callsign_id_requested)
+        decoder_tabs.addTab(self._callsign_panel, "HAM ID")
+
+        # Info tab
         info_widget = QWidget()
         decoder_tabs.addTab(info_widget, "Info")
 
@@ -382,10 +388,37 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._start_action.setText("Start")
         self._device_label.setText("Stopped")
 
+        # Update callsign panel
+        self._callsign_panel.set_transmitting(False)
+
         if self._device:
             self._device.stop_rx()
 
         logger.info("Acquisition stopped")
+
+    def _on_callsign_id_requested(self):
+        """Handle callsign ID request from the callsign panel."""
+        callsign = self._callsign_panel.get_callsign()
+        if callsign:
+            logger.info(f"Callsign ID requested: {callsign}")
+            # In a full implementation, this would:
+            # 1. Generate the CW/Voice ID audio
+            # 2. Transmit it via HackRF
+            # For now, just log and update status
+            self._device_label.setText(f"ID: DE {callsign}")
+
+            try:
+                from ..dsp.callsign import generate_cw_id
+                settings = self._callsign_panel.get_settings()
+                audio = generate_cw_id(
+                    callsign,
+                    wpm=settings.get('cw_wpm', 20),
+                    frequency=settings.get('cw_tone', 700)
+                )
+                logger.info(f"Generated ID audio: {len(audio)} samples")
+                # TODO: Transmit audio via HackRF TX
+            except Exception as e:
+                logger.error(f"Error generating callsign ID: {e}")
 
     def _toggle_recording(self, checked: bool):
         """Toggle recording."""

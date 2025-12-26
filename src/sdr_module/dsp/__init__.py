@@ -81,6 +81,12 @@ from .recording import (
     AudioPlayer,
     load_audio_file,
     save_audio_file,
+    PlaybackMode,
+    PlaybackState,
+    PlaybackConfig,
+    SignalPlayback,
+    TransmitBuffer,
+    PlaybackScheduler,
 )
 
 __all__ = [
@@ -157,4 +163,10 @@ __all__ = [
     "AudioPlayer",
     "load_audio_file",
     "save_audio_file",
+    "PlaybackMode",
+    "PlaybackState",
+    "PlaybackConfig",
+    "SignalPlayback",
+    "TransmitBuffer",
+    "PlaybackScheduler",
 ]

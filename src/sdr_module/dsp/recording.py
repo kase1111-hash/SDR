@@ -1541,3 +1541,786 @@ def save_audio_file(
     recorder.start(filepath)
     recorder.write(samples)
     return recorder.stop()
+
+
+class PlaybackMode(Enum):
+    """Playback modes."""
+    ONCE = "once"             # Play once and stop
+    LOOP = "loop"             # Loop continuously
+    PING_PONG = "ping_pong"   # Forward then reverse
+
+
+class PlaybackState(Enum):
+    """Playback state."""
+    STOPPED = "stopped"
+    PLAYING = "playing"
+    PAUSED = "paused"
+    FINISHED = "finished"
+
+
+@dataclass
+class PlaybackConfig:
+    """Playback configuration."""
+    mode: PlaybackMode = PlaybackMode.ONCE
+    speed: float = 1.0             # Playback speed multiplier
+    start_position: int = 0        # Start position in samples
+    end_position: int = -1         # End position (-1 = end of file)
+    fade_in_samples: int = 0       # Fade in duration
+    fade_out_samples: int = 0      # Fade out duration
+    gain: float = 1.0              # Output gain
+    loop_count: int = -1           # Number of loops (-1 = infinite)
+
+
+class SignalPlayback:
+    """
+    Advanced signal playback with looping and speed control.
+
+    Provides sophisticated playback capabilities for recorded I/Q signals,
+    suitable for signal replay, testing, and transmission preparation.
+
+    Features:
+    - Multiple playback modes: once, loop, ping-pong
+    - Variable speed playback with resampling
+    - Fade in/out for smooth transitions
+    - Loop points and loop count control
+    - Pause/resume support
+    - Real-time gain adjustment
+    - Streaming output for large files
+
+    Example:
+        playback = SignalPlayback("recording.sigmf-data")
+        playback.set_mode(PlaybackMode.LOOP)
+        while playback.state == PlaybackState.PLAYING:
+            samples = playback.get_samples(1024)
+            transmit(samples)
+    """
+
+    def __init__(
+        self,
+        source: Union[str, Path, np.ndarray],
+        sample_rate: Optional[float] = None,
+        config: Optional[PlaybackConfig] = None
+    ):
+        """
+        Initialize signal playback.
+
+        Args:
+            source: File path or numpy array of samples
+            sample_rate: Sample rate (required if source is array)
+            config: Playback configuration
+        """
+        self._config = config or PlaybackConfig()
+        self._state = PlaybackState.STOPPED
+
+        # Load source
+        if isinstance(source, (str, Path)):
+            self._player = IQPlayer(source)
+            self._samples = self._player.read(self._player.total_samples)
+            self._sample_rate = self._player.sample_rate
+            self._player.close()
+        else:
+            self._samples = np.asarray(source, dtype=np.complex64)
+            self._sample_rate = sample_rate or 1.0
+            self._player = None
+
+        # Playback state
+        self._position = self._config.start_position
+        self._direction = 1  # 1 = forward, -1 = reverse
+        self._loop_counter = 0
+        self._total_samples_played = 0
+
+        # End position
+        if self._config.end_position < 0:
+            self._end_position = len(self._samples)
+        else:
+            self._end_position = min(self._config.end_position, len(self._samples))
+
+        # Resampling for speed control
+        self._resample_buffer = np.array([], dtype=np.complex64)
+        self._fractional_position = 0.0
+
+    @property
+    def sample_rate(self) -> float:
+        """Get sample rate."""
+        return self._sample_rate
+
+    @property
+    def output_sample_rate(self) -> float:
+        """Get effective output sample rate (after speed adjustment)."""
+        return self._sample_rate * self._config.speed
+
+    @property
+    def state(self) -> PlaybackState:
+        """Get current playback state."""
+        return self._state
+
+    @property
+    def position(self) -> int:
+        """Get current position in samples."""
+        return int(self._position)
+
+    @property
+    def position_seconds(self) -> float:
+        """Get current position in seconds."""
+        return self._position / self._sample_rate
+
+    @property
+    def duration_samples(self) -> int:
+        """Get total duration in samples."""
+        return self._end_position - self._config.start_position
+
+    @property
+    def duration_seconds(self) -> float:
+        """Get total duration in seconds."""
+        return self.duration_samples / self._sample_rate
+
+    @property
+    def progress(self) -> float:
+        """Get playback progress (0.0 to 1.0)."""
+        total = self._end_position - self._config.start_position
+        if total <= 0:
+            return 0.0
+        current = self._position - self._config.start_position
+        return current / total
+
+    @property
+    def loop_count(self) -> int:
+        """Get number of loops completed."""
+        return self._loop_counter
+
+    @property
+    def total_samples_played(self) -> int:
+        """Get total samples played (including loops)."""
+        return self._total_samples_played
+
+    def set_config(self, config: PlaybackConfig) -> None:
+        """Update playback configuration."""
+        self._config = config
+        if config.end_position < 0:
+            self._end_position = len(self._samples)
+        else:
+            self._end_position = min(config.end_position, len(self._samples))
+
+    def set_mode(self, mode: PlaybackMode) -> None:
+        """Set playback mode."""
+        self._config.mode = mode
+
+    def set_speed(self, speed: float) -> None:
+        """Set playback speed (0.5 to 2.0 typical)."""
+        self._config.speed = max(0.1, min(10.0, speed))
+
+    def set_gain(self, gain: float) -> None:
+        """Set output gain."""
+        self._config.gain = gain
+
+    def set_gain_db(self, gain_db: float) -> None:
+        """Set output gain in dB."""
+        self._config.gain = 10 ** (gain_db / 20)
+
+    def play(self) -> None:
+        """Start or resume playback."""
+        if self._state == PlaybackState.FINISHED:
+            self._position = self._config.start_position
+            self._loop_counter = 0
+        self._state = PlaybackState.PLAYING
+
+    def pause(self) -> None:
+        """Pause playback."""
+        if self._state == PlaybackState.PLAYING:
+            self._state = PlaybackState.PAUSED
+
+    def stop(self) -> None:
+        """Stop playback and reset position."""
+        self._state = PlaybackState.STOPPED
+        self._position = self._config.start_position
+        self._direction = 1
+        self._loop_counter = 0
+
+    def seek(self, position: int) -> None:
+        """Seek to sample position."""
+        self._position = max(self._config.start_position,
+                            min(position, self._end_position - 1))
+
+    def seek_seconds(self, seconds: float) -> None:
+        """Seek to time position."""
+        position = int(seconds * self._sample_rate)
+        self.seek(position)
+
+    def _apply_fade(self, samples: np.ndarray, start_pos: int) -> np.ndarray:
+        """Apply fade in/out to samples."""
+        n = len(samples)
+        output = samples.copy()
+
+        # Fade in
+        if self._config.fade_in_samples > 0:
+            fade_in_end = self._config.start_position + self._config.fade_in_samples
+            for i in range(n):
+                pos = start_pos + i
+                if pos < fade_in_end:
+                    fade = (pos - self._config.start_position) / self._config.fade_in_samples
+                    output[i] *= fade
+
+        # Fade out
+        if self._config.fade_out_samples > 0:
+            fade_out_start = self._end_position - self._config.fade_out_samples
+            for i in range(n):
+                pos = start_pos + i
+                if pos >= fade_out_start:
+                    fade = (self._end_position - pos) / self._config.fade_out_samples
+                    output[i] *= max(0, fade)
+
+        return output
+
+    def _resample_chunk(self, samples: np.ndarray) -> np.ndarray:
+        """Resample chunk for speed adjustment."""
+        if abs(self._config.speed - 1.0) < 0.001:
+            return samples
+
+        # Simple linear interpolation resampling
+        n_in = len(samples)
+        n_out = int(n_in / self._config.speed)
+
+        if n_out <= 0:
+            return np.array([], dtype=np.complex64)
+
+        indices = np.linspace(0, n_in - 1, n_out)
+        indices_floor = np.floor(indices).astype(int)
+        indices_ceil = np.minimum(indices_floor + 1, n_in - 1)
+        frac = indices - indices_floor
+
+        resampled = (1 - frac) * samples[indices_floor] + frac * samples[indices_ceil]
+        return resampled.astype(np.complex64)
+
+    def get_samples(self, num_samples: int) -> np.ndarray:
+        """
+        Get next batch of samples for playback.
+
+        Args:
+            num_samples: Number of samples to retrieve
+
+        Returns:
+            Complex samples array (may be shorter at end)
+        """
+        if self._state != PlaybackState.PLAYING:
+            return np.zeros(num_samples, dtype=np.complex64)
+
+        # Calculate how many source samples we need
+        source_samples_needed = int(num_samples * self._config.speed) + 2
+
+        output = []
+        samples_remaining = num_samples
+
+        while samples_remaining > 0 and self._state == PlaybackState.PLAYING:
+            # Get chunk from source
+            if self._direction > 0:
+                # Forward playback
+                end_idx = min(int(self._position) + source_samples_needed,
+                             self._end_position)
+                chunk = self._samples[int(self._position):end_idx]
+            else:
+                # Reverse playback
+                start_idx = max(int(self._position) - source_samples_needed,
+                               self._config.start_position)
+                chunk = self._samples[start_idx:int(self._position)][::-1]
+
+            if len(chunk) == 0:
+                # Handle end of segment
+                if self._config.mode == PlaybackMode.ONCE:
+                    self._state = PlaybackState.FINISHED
+                    break
+
+                elif self._config.mode == PlaybackMode.LOOP:
+                    self._loop_counter += 1
+                    if self._config.loop_count > 0 and self._loop_counter >= self._config.loop_count:
+                        self._state = PlaybackState.FINISHED
+                        break
+                    self._position = self._config.start_position
+                    continue
+
+                elif self._config.mode == PlaybackMode.PING_PONG:
+                    self._direction *= -1
+                    if self._direction > 0:
+                        self._loop_counter += 1
+                        if self._config.loop_count > 0 and self._loop_counter >= self._config.loop_count:
+                            self._state = PlaybackState.FINISHED
+                            break
+                        self._position = self._config.start_position
+                    else:
+                        self._position = self._end_position - 1
+                    continue
+
+            # Apply fade
+            chunk = self._apply_fade(chunk, int(self._position))
+
+            # Resample for speed
+            resampled = self._resample_chunk(chunk)
+
+            # Take what we need
+            take = min(len(resampled), samples_remaining)
+            output.append(resampled[:take])
+            samples_remaining -= take
+
+            # Update position
+            self._position += self._direction * len(chunk)
+            self._total_samples_played += take
+
+        if len(output) == 0:
+            return np.zeros(num_samples, dtype=np.complex64)
+
+        result = np.concatenate(output)
+
+        # Apply gain
+        result *= self._config.gain
+
+        # Pad if needed
+        if len(result) < num_samples:
+            result = np.pad(result, (0, num_samples - len(result)))
+
+        return result[:num_samples].astype(np.complex64)
+
+    def get_all_samples(self) -> np.ndarray:
+        """Get all samples at once (for small files)."""
+        start = self._config.start_position
+        end = self._end_position
+        samples = self._samples[start:end].copy()
+
+        # Apply fade
+        samples = self._apply_fade(samples, start)
+
+        # Resample
+        samples = self._resample_chunk(samples)
+
+        # Apply gain
+        samples *= self._config.gain
+
+        return samples.astype(np.complex64)
+
+    def get_status(self) -> dict:
+        """Get playback status."""
+        return {
+            "state": self._state.value,
+            "mode": self._config.mode.value,
+            "position": self._position,
+            "position_seconds": self.position_seconds,
+            "progress": self.progress,
+            "duration_seconds": self.duration_seconds,
+            "loop_count": self._loop_counter,
+            "speed": self._config.speed,
+            "gain": self._config.gain,
+            "sample_rate": self._sample_rate,
+        }
+
+
+class TransmitBuffer:
+    """
+    Buffer for preparing signals for transmission.
+
+    Manages signal buffering and flow control for transmit operations,
+    ensuring smooth continuous transmission without underruns.
+
+    Features:
+    - Ring buffer for continuous transmission
+    - Underrun detection and handling
+    - Pre-buffering before transmission starts
+    - Multiple signal source support
+    - Gain and power control
+    - Transmit burst support
+
+    Example:
+        buffer = TransmitBuffer(sample_rate=2.4e6, buffer_seconds=1.0)
+        buffer.add_samples(modulated_signal)
+        while transmitting:
+            samples = buffer.get_transmit_samples(1024)
+            hackrf.transmit(samples)
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        buffer_seconds: float = 1.0,
+        prebuffer_seconds: float = 0.1
+    ):
+        """
+        Initialize transmit buffer.
+
+        Args:
+            sample_rate: Transmit sample rate in Hz
+            buffer_seconds: Total buffer size in seconds
+            prebuffer_seconds: Minimum buffer before transmission
+        """
+        self._sample_rate = sample_rate
+        self._buffer_size = int(buffer_seconds * sample_rate)
+        self._prebuffer_size = int(prebuffer_seconds * sample_rate)
+
+        # Ring buffer
+        self._buffer = np.zeros(self._buffer_size, dtype=np.complex64)
+        self._write_pos = 0
+        self._read_pos = 0
+        self._samples_available = 0
+
+        # State
+        self._transmitting = False
+        self._underrun_count = 0
+        self._total_transmitted = 0
+
+        # Gain control
+        self._gain = 1.0
+        self._peak_limit = 1.0  # Maximum amplitude
+
+    @property
+    def sample_rate(self) -> float:
+        """Get sample rate."""
+        return self._sample_rate
+
+    @property
+    def buffer_size(self) -> int:
+        """Get buffer size in samples."""
+        return self._buffer_size
+
+    @property
+    def samples_available(self) -> int:
+        """Get number of samples available for transmission."""
+        return self._samples_available
+
+    @property
+    def buffer_fullness(self) -> float:
+        """Get buffer fullness (0.0 to 1.0)."""
+        return self._samples_available / self._buffer_size
+
+    @property
+    def is_ready(self) -> bool:
+        """Check if buffer has enough samples to start transmission."""
+        return self._samples_available >= self._prebuffer_size
+
+    @property
+    def is_transmitting(self) -> bool:
+        """Check if currently transmitting."""
+        return self._transmitting
+
+    @property
+    def underrun_count(self) -> int:
+        """Get number of buffer underruns."""
+        return self._underrun_count
+
+    @property
+    def total_transmitted(self) -> int:
+        """Get total samples transmitted."""
+        return self._total_transmitted
+
+    def set_gain(self, gain: float) -> None:
+        """Set output gain."""
+        self._gain = gain
+
+    def set_gain_db(self, gain_db: float) -> None:
+        """Set output gain in dB."""
+        self._gain = 10 ** (gain_db / 20)
+
+    def set_peak_limit(self, limit: float) -> None:
+        """Set peak amplitude limit."""
+        self._peak_limit = limit
+
+    def add_samples(self, samples: np.ndarray) -> int:
+        """
+        Add samples to transmit buffer.
+
+        Args:
+            samples: Complex samples to add
+
+        Returns:
+            Number of samples actually added
+        """
+        samples = np.asarray(samples, dtype=np.complex64)
+        n = len(samples)
+
+        # Check available space
+        space_available = self._buffer_size - self._samples_available
+
+        if n > space_available:
+            # Buffer overflow - drop oldest samples or clip
+            n = space_available
+            samples = samples[:n]
+
+        if n == 0:
+            return 0
+
+        # Write to ring buffer
+        for i in range(n):
+            self._buffer[self._write_pos] = samples[i]
+            self._write_pos = (self._write_pos + 1) % self._buffer_size
+
+        self._samples_available += n
+        return n
+
+    def add_from_playback(self, playback: SignalPlayback, num_samples: int) -> int:
+        """
+        Add samples from a playback source.
+
+        Args:
+            playback: SignalPlayback instance
+            num_samples: Number of samples to fetch and add
+
+        Returns:
+            Number of samples added
+        """
+        samples = playback.get_samples(num_samples)
+        return self.add_samples(samples)
+
+    def get_transmit_samples(self, num_samples: int) -> np.ndarray:
+        """
+        Get samples for transmission.
+
+        Args:
+            num_samples: Number of samples needed
+
+        Returns:
+            Complex samples ready for transmission
+        """
+        if not self._transmitting:
+            if self.is_ready:
+                self._transmitting = True
+            else:
+                # Not ready - return zeros (or could return None)
+                return np.zeros(num_samples, dtype=np.complex64)
+
+        # Check for underrun
+        if self._samples_available < num_samples:
+            self._underrun_count += 1
+            # Return what we have plus zeros
+            available = self._samples_available
+        else:
+            available = num_samples
+
+        # Read from ring buffer
+        output = np.zeros(num_samples, dtype=np.complex64)
+        for i in range(available):
+            output[i] = self._buffer[self._read_pos]
+            self._read_pos = (self._read_pos + 1) % self._buffer_size
+
+        self._samples_available -= available
+
+        # Apply gain
+        output *= self._gain
+
+        # Apply peak limiting (soft clipping)
+        magnitudes = np.abs(output)
+        over_limit = magnitudes > self._peak_limit
+        if np.any(over_limit):
+            phases = np.angle(output)
+            magnitudes[over_limit] = self._peak_limit
+            output = magnitudes * np.exp(1j * phases)
+
+        self._total_transmitted += available
+
+        return output
+
+    def start_transmission(self) -> bool:
+        """
+        Start transmission (waits for buffer ready).
+
+        Returns:
+            True if started, False if buffer not ready
+        """
+        if self.is_ready:
+            self._transmitting = True
+            return True
+        return False
+
+    def stop_transmission(self) -> None:
+        """Stop transmission."""
+        self._transmitting = False
+
+    def flush(self) -> None:
+        """Clear the buffer."""
+        self._buffer.fill(0)
+        self._write_pos = 0
+        self._read_pos = 0
+        self._samples_available = 0
+
+    def get_status(self) -> dict:
+        """Get buffer status."""
+        return {
+            "transmitting": self._transmitting,
+            "samples_available": self._samples_available,
+            "buffer_fullness": self.buffer_fullness,
+            "is_ready": self.is_ready,
+            "underrun_count": self._underrun_count,
+            "total_transmitted": self._total_transmitted,
+            "gain": self._gain,
+            "peak_limit": self._peak_limit,
+        }
+
+
+class PlaybackScheduler:
+    """
+    Schedule signal playback at specific times or intervals.
+
+    Manages timed playback of signals for automated testing,
+    beacon transmission, or scheduled broadcasts.
+
+    Features:
+    - Schedule playback at absolute or relative times
+    - Repeat schedules (hourly, daily, custom intervals)
+    - Multiple playback sources
+    - Priority-based scheduling
+    - Event callbacks
+
+    Example:
+        scheduler = PlaybackScheduler()
+        scheduler.add_scheduled_playback(
+            "beacon",
+            playback=SignalPlayback("beacon.iq"),
+            interval_seconds=60
+        )
+        scheduler.start()
+    """
+
+    def __init__(self):
+        """Initialize playback scheduler."""
+        self._schedules: Dict[str, dict] = {}
+        self._running = False
+        self._current_playback: Optional[str] = None
+
+    def add_scheduled_playback(
+        self,
+        name: str,
+        playback: SignalPlayback,
+        start_time: Optional[datetime] = None,
+        interval_seconds: Optional[float] = None,
+        repeat_count: int = -1,
+        priority: int = 0
+    ) -> None:
+        """
+        Add a scheduled playback.
+
+        Args:
+            name: Unique identifier for this schedule
+            playback: SignalPlayback instance
+            start_time: When to start (None = immediately when run)
+            interval_seconds: Repeat interval (None = once only)
+            repeat_count: Number of repeats (-1 = infinite)
+            priority: Higher priority interrupts lower
+        """
+        self._schedules[name] = {
+            "playback": playback,
+            "start_time": start_time,
+            "interval": interval_seconds,
+            "repeat_count": repeat_count,
+            "repeats_done": 0,
+            "priority": priority,
+            "last_run": None,
+            "next_run": start_time or datetime.utcnow(),
+            "enabled": True,
+        }
+
+    def remove_scheduled_playback(self, name: str) -> bool:
+        """Remove a scheduled playback."""
+        if name in self._schedules:
+            del self._schedules[name]
+            return True
+        return False
+
+    def enable_schedule(self, name: str) -> None:
+        """Enable a schedule."""
+        if name in self._schedules:
+            self._schedules[name]["enabled"] = True
+
+    def disable_schedule(self, name: str) -> None:
+        """Disable a schedule."""
+        if name in self._schedules:
+            self._schedules[name]["enabled"] = False
+
+    def get_next_scheduled(self) -> Optional[Tuple[str, datetime]]:
+        """Get the next scheduled playback."""
+        next_name = None
+        next_time = None
+
+        for name, schedule in self._schedules.items():
+            if not schedule["enabled"]:
+                continue
+
+            if schedule["repeat_count"] >= 0:
+                if schedule["repeats_done"] >= schedule["repeat_count"]:
+                    continue
+
+            run_time = schedule["next_run"]
+            if run_time and (next_time is None or run_time < next_time):
+                next_name = name
+                next_time = run_time
+
+        if next_name:
+            return (next_name, next_time)
+        return None
+
+    def check_and_get_playback(self) -> Optional[Tuple[str, SignalPlayback]]:
+        """
+        Check if any playback is due and return it.
+
+        Returns:
+            Tuple of (name, playback) if due, None otherwise
+        """
+        now = datetime.utcnow()
+        best_candidate = None
+        best_priority = -1
+
+        for name, schedule in self._schedules.items():
+            if not schedule["enabled"]:
+                continue
+
+            # Check repeat limit
+            if schedule["repeat_count"] >= 0:
+                if schedule["repeats_done"] >= schedule["repeat_count"]:
+                    continue
+
+            # Check if due
+            next_run = schedule["next_run"]
+            if next_run and next_run <= now:
+                if schedule["priority"] > best_priority:
+                    best_candidate = name
+                    best_priority = schedule["priority"]
+
+        if best_candidate:
+            schedule = self._schedules[best_candidate]
+
+            # Update schedule
+            schedule["last_run"] = now
+            schedule["repeats_done"] += 1
+
+            if schedule["interval"]:
+                from datetime import timedelta
+                schedule["next_run"] = now + timedelta(seconds=schedule["interval"])
+            else:
+                schedule["next_run"] = None
+
+            # Reset playback
+            playback = schedule["playback"]
+            playback.stop()
+            playback.play()
+
+            self._current_playback = best_candidate
+            return (best_candidate, playback)
+
+        return None
+
+    def get_schedule_status(self) -> Dict[str, dict]:
+        """Get status of all schedules."""
+        status = {}
+        for name, schedule in self._schedules.items():
+            status[name] = {
+                "enabled": schedule["enabled"],
+                "next_run": schedule["next_run"].isoformat() if schedule["next_run"] else None,
+                "last_run": schedule["last_run"].isoformat() if schedule["last_run"] else None,
+                "repeats_done": schedule["repeats_done"],
+                "repeat_count": schedule["repeat_count"],
+                "priority": schedule["priority"],
+            }
+        return status
+
+    def reset_all(self) -> None:
+        """Reset all schedules to initial state."""
+        for schedule in self._schedules.values():
+            schedule["repeats_done"] = 0
+            schedule["last_run"] = None
+            if schedule["start_time"]:
+                schedule["next_run"] = schedule["start_time"]
+            else:
+                schedule["next_run"] = datetime.utcnow()

@@ -1,0 +1,10 @@
+{
+  "name": "noise_filter",
+  "version": "1.0.0",
+  "plugin_type": "PROCESSOR",
+  "author": "SDR Module Team",
+  "description": "Adaptive noise reduction using spectral subtraction",
+  "tags": ["processor", "filter", "noise", "dsp", "spectral"],
+  "license": "MIT",
+  "min_api_version": "1.0.0"
+}

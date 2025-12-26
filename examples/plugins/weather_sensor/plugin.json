@@ -1,0 +1,11 @@
+{
+  "name": "weather_sensor",
+  "version": "1.0.0",
+  "plugin_type": "PROTOCOL",
+  "author": "SDR Module Team",
+  "description": "Decoder for common 433 MHz weather sensor protocols (Oregon Scientific, Acurite, etc.)",
+  "tags": ["protocol", "weather", "433mhz", "ism", "sensors"],
+  "homepage": "https://github.com/sdr-module/weather-sensor-plugin",
+  "license": "MIT",
+  "min_api_version": "1.0.0"
+}

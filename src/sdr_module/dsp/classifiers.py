@@ -201,7 +201,8 @@ class SignalClassifier:
         norm_mag = magnitude / (np.max(magnitude) + 1e-10)
 
         # Check for OOK/ASK: amplitude levels
-        mag_hist, _ = np.histogram(norm_mag, bins=20)
+        # Use fixed range to handle constant-magnitude signals
+        mag_hist, _ = np.histogram(norm_mag, bins=20, range=(0, 1))
         n_peaks = np.sum(mag_hist > len(samples) * 0.05)
 
         if n_peaks <= 2:

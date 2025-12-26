@@ -19,6 +19,11 @@ from .filters import (
     CTCSS_TONES,
     get_ctcss_tone,
     find_ctcss_tone,
+    NoiseReduction,
+    NoiseReductionConfig,
+    NoiseReductionMethod,
+    SpectralSubtraction,
+    AdaptiveNoiseCancel,
 )
 from .demodulators import Demodulator, CWDemodulator, GFSKDemodulator, MSKDemodulator, QAMDemodulator, MORSE_CODE
 from .classifiers import SignalClassifier
@@ -78,6 +83,11 @@ __all__ = [
     "CTCSS_TONES",
     "get_ctcss_tone",
     "find_ctcss_tone",
+    "NoiseReduction",
+    "NoiseReductionConfig",
+    "NoiseReductionMethod",
+    "SpectralSubtraction",
+    "AdaptiveNoiseCancel",
     "Demodulator",
     "CWDemodulator",
     "GFSKDemodulator",

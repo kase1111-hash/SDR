@@ -1845,3 +1845,537 @@ def find_ctcss_tone(frequency: float, tolerance: float = 1.0) -> Optional[str]:
         if abs(freq - frequency) <= tolerance:
             return name
     return None
+
+
+class NoiseReductionMethod(Enum):
+    """Noise reduction algorithms."""
+    SPECTRAL_SUBTRACTION = "spectral_subtraction"  # FFT-based spectral subtraction
+    WIENER = "wiener"                              # Wiener filter
+    LMS = "lms"                                    # Least Mean Squares adaptive
+    NLMS = "nlms"                                  # Normalized LMS
+    MOVING_AVERAGE = "moving_average"              # Simple smoothing
+    MEDIAN = "median"                              # Median filter for impulse noise
+    GATE = "gate"                                  # Noise gate (mute below threshold)
+
+
+@dataclass
+class NoiseReductionConfig:
+    """Noise reduction configuration."""
+    method: NoiseReductionMethod = NoiseReductionMethod.SPECTRAL_SUBTRACTION
+    # Spectral subtraction parameters
+    fft_size: int = 1024                    # FFT size for spectral analysis
+    overlap: float = 0.5                    # FFT overlap (0.0-0.9)
+    noise_estimation_frames: int = 10       # Frames for initial noise estimation
+    subtraction_factor: float = 1.0         # Over-subtraction factor (1.0-3.0)
+    floor_factor: float = 0.01              # Spectral floor to prevent musical noise
+    # Wiener filter parameters
+    wiener_alpha: float = 0.98              # Noise estimate smoothing
+    # LMS/NLMS parameters
+    lms_step_size: float = 0.01             # Adaptation step size (mu)
+    lms_filter_length: int = 32             # Adaptive filter length
+    # Gate parameters
+    gate_threshold: float = 0.02            # Noise gate threshold
+    gate_attack: float = 0.001              # Gate attack time (seconds)
+    gate_release: float = 0.05              # Gate release time (seconds)
+    # General
+    smoothing_alpha: float = 0.1            # Output smoothing
+
+
+class NoiseReduction:
+    """
+    DSP-based noise reduction for SDR signals.
+
+    Provides multiple algorithms for reducing noise in received signals,
+    improving intelligibility and signal quality.
+
+    Features:
+    - Spectral subtraction: FFT-based noise removal
+    - Wiener filtering: Optimal linear filtering
+    - LMS/NLMS: Adaptive noise cancellation
+    - Noise gate: Simple threshold-based muting
+    - Median filter: Impulse noise removal
+    - Real and complex signal support
+
+    Typical use cases:
+    - Improving weak signal reception
+    - Reducing background noise in voice
+    - Cleaning up noisy data signals
+    - Pre-processing before demodulation
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        config: Optional[NoiseReductionConfig] = None
+    ):
+        """
+        Initialize noise reduction.
+
+        Args:
+            sample_rate: Sample rate in Hz
+            config: Configuration (uses defaults if None)
+        """
+        self._sample_rate = sample_rate
+        self._config = config or NoiseReductionConfig()
+
+        # FFT parameters
+        self._fft_size = self._config.fft_size
+        self._hop_size = int(self._fft_size * (1 - self._config.overlap))
+        self._window = np.hanning(self._fft_size)
+
+        # Noise estimation state
+        self._noise_spectrum = None
+        self._noise_frames_collected = 0
+        self._noise_estimated = False
+
+        # Processing buffers
+        self._input_buffer = np.array([], dtype=np.complex128)
+        self._output_buffer = np.array([], dtype=np.complex128)
+        self._overlap_buffer = np.zeros(self._fft_size - self._hop_size)
+
+        # LMS state
+        self._lms_weights = np.zeros(self._config.lms_filter_length)
+        self._lms_buffer = np.zeros(self._config.lms_filter_length)
+
+        # Gate state
+        self._gate_level = 0.0
+        self._gate_attack_coeff = 1.0 - np.exp(-1.0 / (self._config.gate_attack * sample_rate))
+        self._gate_release_coeff = 1.0 - np.exp(-1.0 / (self._config.gate_release * sample_rate))
+
+        # Wiener state
+        self._wiener_noise_psd = None
+
+        # Statistics
+        self._input_power = 0.0
+        self._output_power = 0.0
+        self._noise_reduction_db = 0.0
+
+    @property
+    def sample_rate(self) -> float:
+        """Get sample rate."""
+        return self._sample_rate
+
+    @property
+    def config(self) -> NoiseReductionConfig:
+        """Get configuration."""
+        return self._config
+
+    @property
+    def noise_estimated(self) -> bool:
+        """Check if noise has been estimated."""
+        return self._noise_estimated
+
+    @property
+    def noise_reduction_db(self) -> float:
+        """Get estimated noise reduction in dB."""
+        return self._noise_reduction_db
+
+    def set_config(self, config: NoiseReductionConfig) -> None:
+        """Update configuration."""
+        self._config = config
+        self._fft_size = config.fft_size
+        self._hop_size = int(self._fft_size * (1 - config.overlap))
+        self._window = np.hanning(self._fft_size)
+
+    def estimate_noise(self, noise_samples: np.ndarray) -> None:
+        """
+        Estimate noise spectrum from a noise-only segment.
+
+        Args:
+            noise_samples: Samples containing only noise (no signal)
+        """
+        # Compute average power spectrum of noise
+        n_frames = len(noise_samples) // self._hop_size
+        if n_frames < 1:
+            return
+
+        noise_psd = np.zeros(self._fft_size // 2 + 1)
+
+        for i in range(n_frames):
+            start = i * self._hop_size
+            end = start + self._fft_size
+            if end > len(noise_samples):
+                break
+
+            frame = noise_samples[start:end]
+            if len(frame) < self._fft_size:
+                frame = np.pad(frame, (0, self._fft_size - len(frame)))
+
+            windowed = frame * self._window
+            spectrum = np.fft.rfft(windowed)
+            noise_psd += np.abs(spectrum) ** 2
+
+        noise_psd /= n_frames
+        self._noise_spectrum = np.sqrt(noise_psd)
+        self._wiener_noise_psd = noise_psd
+        self._noise_estimated = True
+
+    def _spectral_subtraction(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Spectral subtraction noise reduction.
+
+        Estimates noise spectrum and subtracts it from signal spectrum.
+        """
+        output = []
+        is_complex = np.iscomplexobj(samples)
+
+        # Process in overlapping frames
+        for i in range(0, len(samples) - self._fft_size + 1, self._hop_size):
+            frame = samples[i:i + self._fft_size]
+
+            # Apply window
+            if is_complex:
+                windowed = frame * self._window
+            else:
+                windowed = frame.astype(np.float64) * self._window
+
+            # FFT
+            spectrum = np.fft.rfft(windowed)
+            magnitude = np.abs(spectrum)
+            phase = np.angle(spectrum)
+
+            # Estimate noise if not done
+            if not self._noise_estimated:
+                if self._noise_spectrum is None:
+                    self._noise_spectrum = magnitude.copy()
+                else:
+                    # Running average for noise estimation
+                    alpha = 1.0 / (self._noise_frames_collected + 1)
+                    self._noise_spectrum = (1 - alpha) * self._noise_spectrum + alpha * magnitude
+
+                self._noise_frames_collected += 1
+                if self._noise_frames_collected >= self._config.noise_estimation_frames:
+                    self._noise_estimated = True
+
+            # Spectral subtraction
+            if self._noise_estimated:
+                # Over-subtraction
+                subtracted = magnitude - self._config.subtraction_factor * self._noise_spectrum
+
+                # Spectral floor to prevent musical noise
+                floor = self._config.floor_factor * magnitude
+                subtracted = np.maximum(subtracted, floor)
+
+                # Reconstruct
+                spectrum_clean = subtracted * np.exp(1j * phase)
+            else:
+                spectrum_clean = spectrum
+
+            # IFFT
+            frame_clean = np.fft.irfft(spectrum_clean, n=self._fft_size)
+
+            # Overlap-add
+            if len(output) == 0:
+                output = list(frame_clean[:self._hop_size])
+            else:
+                # Add overlap
+                for j in range(min(len(self._overlap_buffer), len(frame_clean))):
+                    if j < len(output) - len(self._overlap_buffer):
+                        continue
+                output.extend(frame_clean[:self._hop_size])
+
+            self._overlap_buffer = frame_clean[self._hop_size:]
+
+        result = np.array(output[:len(samples)])
+
+        if is_complex:
+            return result.astype(np.complex128)
+        return result
+
+    def _wiener_filter(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Wiener filter noise reduction.
+
+        Optimal linear filter that minimizes mean square error.
+        """
+        output = []
+        is_complex = np.iscomplexobj(samples)
+
+        for i in range(0, len(samples) - self._fft_size + 1, self._hop_size):
+            frame = samples[i:i + self._fft_size]
+            windowed = frame * self._window
+
+            # FFT
+            spectrum = np.fft.rfft(windowed)
+            power = np.abs(spectrum) ** 2
+
+            # Initialize noise PSD if needed
+            if self._wiener_noise_psd is None:
+                self._wiener_noise_psd = power.copy()
+
+            # Update noise estimate (during silence)
+            signal_power = np.mean(power)
+            noise_power = np.mean(self._wiener_noise_psd)
+
+            if signal_power < noise_power * 1.5:  # Likely noise-only
+                alpha = self._config.wiener_alpha
+                self._wiener_noise_psd = alpha * self._wiener_noise_psd + (1 - alpha) * power
+
+            # Wiener filter gain
+            # H(f) = max(0, 1 - noise_psd / signal_psd)
+            snr = power / (self._wiener_noise_psd + 1e-10)
+            gain = np.maximum(0, 1 - 1 / (snr + 1e-10))
+            gain = np.sqrt(gain)  # Amplitude domain
+
+            # Apply gain
+            spectrum_clean = spectrum * gain
+
+            # IFFT
+            frame_clean = np.fft.irfft(spectrum_clean, n=self._fft_size)
+            output.extend(frame_clean[:self._hop_size])
+
+        result = np.array(output[:len(samples)])
+        if is_complex:
+            return result.astype(np.complex128)
+        return result
+
+    def _lms_filter(self, samples: np.ndarray, normalized: bool = False) -> np.ndarray:
+        """
+        LMS/NLMS adaptive noise cancellation.
+
+        Learns to predict and cancel noise from the signal.
+        """
+        output = np.zeros_like(samples)
+        n = len(samples)
+        L = self._config.lms_filter_length
+        mu = self._config.lms_step_size
+
+        for i in range(n):
+            # Shift buffer
+            self._lms_buffer = np.roll(self._lms_buffer, 1)
+            self._lms_buffer[0] = samples[i]
+
+            # Filter output (noise estimate)
+            noise_est = np.dot(self._lms_weights, self._lms_buffer)
+
+            # Error (desired signal)
+            error = samples[i] - noise_est
+
+            # Update weights
+            if normalized:
+                # NLMS normalization
+                norm = np.dot(self._lms_buffer, self._lms_buffer) + 1e-10
+                self._lms_weights += (mu / norm) * error * self._lms_buffer
+            else:
+                # Standard LMS
+                self._lms_weights += mu * error * self._lms_buffer
+
+            output[i] = error
+
+        return output
+
+    def _moving_average(self, samples: np.ndarray) -> np.ndarray:
+        """Simple moving average smoothing."""
+        window_size = max(3, self._config.lms_filter_length // 4)
+        kernel = np.ones(window_size) / window_size
+        return np.convolve(samples, kernel, mode='same')
+
+    def _median_filter(self, samples: np.ndarray) -> np.ndarray:
+        """Median filter for impulse noise removal."""
+        window_size = 5
+        output = np.zeros_like(samples)
+        half = window_size // 2
+
+        for i in range(len(samples)):
+            start = max(0, i - half)
+            end = min(len(samples), i + half + 1)
+            if np.iscomplexobj(samples):
+                # For complex, filter magnitude and preserve phase
+                window = samples[start:end]
+                mags = np.abs(window)
+                median_idx = np.argsort(mags)[len(mags) // 2]
+                output[i] = window[median_idx]
+            else:
+                output[i] = np.median(samples[start:end])
+
+        return output
+
+    def _noise_gate(self, samples: np.ndarray) -> np.ndarray:
+        """Noise gate - mute below threshold."""
+        output = np.zeros_like(samples)
+
+        for i, sample in enumerate(samples):
+            magnitude = np.abs(sample)
+
+            # Update gate level
+            if magnitude > self._config.gate_threshold:
+                self._gate_level += self._gate_attack_coeff * (1.0 - self._gate_level)
+            else:
+                self._gate_level += self._gate_release_coeff * (0.0 - self._gate_level)
+
+            output[i] = sample * self._gate_level
+
+        return output
+
+    def process(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Apply noise reduction to samples.
+
+        Args:
+            samples: Input samples (real or complex)
+
+        Returns:
+            Noise-reduced samples
+        """
+        # Track input power
+        self._input_power = np.mean(np.abs(samples) ** 2)
+
+        # Apply selected method
+        method = self._config.method
+
+        if method == NoiseReductionMethod.SPECTRAL_SUBTRACTION:
+            output = self._spectral_subtraction(samples)
+        elif method == NoiseReductionMethod.WIENER:
+            output = self._wiener_filter(samples)
+        elif method == NoiseReductionMethod.LMS:
+            output = self._lms_filter(samples, normalized=False)
+        elif method == NoiseReductionMethod.NLMS:
+            output = self._lms_filter(samples, normalized=True)
+        elif method == NoiseReductionMethod.MOVING_AVERAGE:
+            output = self._moving_average(samples)
+        elif method == NoiseReductionMethod.MEDIAN:
+            output = self._median_filter(samples)
+        elif method == NoiseReductionMethod.GATE:
+            output = self._noise_gate(samples)
+        else:
+            output = samples.copy()
+
+        # Track output power and compute reduction
+        self._output_power = np.mean(np.abs(output) ** 2)
+        if self._input_power > 1e-20:
+            ratio = self._output_power / self._input_power
+            if ratio > 0:
+                self._noise_reduction_db = -10 * np.log10(ratio)
+
+        return output
+
+    def process_with_reference(
+        self,
+        signal: np.ndarray,
+        noise_reference: np.ndarray
+    ) -> np.ndarray:
+        """
+        Adaptive noise cancellation with reference signal.
+
+        Uses a separate noise reference (e.g., from another microphone)
+        to cancel correlated noise from the primary signal.
+
+        Args:
+            signal: Primary signal with noise
+            noise_reference: Reference noise signal
+
+        Returns:
+            Noise-cancelled signal
+        """
+        output = np.zeros_like(signal)
+        L = self._config.lms_filter_length
+        mu = self._config.lms_step_size
+        ref_buffer = np.zeros(L)
+
+        for i in range(len(signal)):
+            # Shift reference buffer
+            ref_buffer = np.roll(ref_buffer, 1)
+            ref_buffer[0] = noise_reference[i] if i < len(noise_reference) else 0
+
+            # Filter reference to estimate noise in primary
+            noise_est = np.dot(self._lms_weights, ref_buffer)
+
+            # Subtract noise estimate from primary
+            error = signal[i] - noise_est
+
+            # Update weights (NLMS)
+            norm = np.dot(ref_buffer, ref_buffer) + 1e-10
+            self._lms_weights += (mu / norm) * error * ref_buffer
+
+            output[i] = error
+
+        return output
+
+    def get_noise_spectrum(self) -> Optional[np.ndarray]:
+        """Get estimated noise spectrum."""
+        return self._noise_spectrum.copy() if self._noise_spectrum is not None else None
+
+    def get_stats(self) -> dict:
+        """Get noise reduction statistics."""
+        return {
+            "method": self._config.method.value,
+            "noise_estimated": self._noise_estimated,
+            "input_power": self._input_power,
+            "output_power": self._output_power,
+            "noise_reduction_db": self._noise_reduction_db,
+            "fft_size": self._fft_size,
+        }
+
+    def reset(self) -> None:
+        """Reset noise reduction state."""
+        self._noise_spectrum = None
+        self._noise_frames_collected = 0
+        self._noise_estimated = False
+        self._input_buffer = np.array([], dtype=np.complex128)
+        self._output_buffer = np.array([], dtype=np.complex128)
+        self._overlap_buffer = np.zeros(self._fft_size - self._hop_size)
+        self._lms_weights = np.zeros(self._config.lms_filter_length)
+        self._lms_buffer = np.zeros(self._config.lms_filter_length)
+        self._gate_level = 0.0
+        self._wiener_noise_psd = None
+
+
+class SpectralSubtraction(NoiseReduction):
+    """
+    Convenience class for spectral subtraction noise reduction.
+
+    Pre-configured for spectral subtraction method.
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        fft_size: int = 1024,
+        subtraction_factor: float = 1.5,
+        floor_factor: float = 0.02
+    ):
+        """
+        Initialize spectral subtraction.
+
+        Args:
+            sample_rate: Sample rate in Hz
+            fft_size: FFT size (power of 2)
+            subtraction_factor: Over-subtraction (1.0-3.0)
+            floor_factor: Spectral floor (0.01-0.1)
+        """
+        config = NoiseReductionConfig(
+            method=NoiseReductionMethod.SPECTRAL_SUBTRACTION,
+            fft_size=fft_size,
+            subtraction_factor=subtraction_factor,
+            floor_factor=floor_factor
+        )
+        super().__init__(sample_rate, config)
+
+
+class AdaptiveNoiseCancel(NoiseReduction):
+    """
+    Convenience class for adaptive noise cancellation.
+
+    Uses NLMS algorithm for noise cancellation.
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        filter_length: int = 64,
+        step_size: float = 0.01
+    ):
+        """
+        Initialize adaptive noise canceller.
+
+        Args:
+            sample_rate: Sample rate in Hz
+            filter_length: Adaptive filter length
+            step_size: LMS step size (mu)
+        """
+        config = NoiseReductionConfig(
+            method=NoiseReductionMethod.NLMS,
+            lms_filter_length=filter_length,
+            lms_step_size=step_size
+        )
+        super().__init__(sample_rate, config)

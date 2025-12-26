@@ -1345,3 +1345,503 @@ class FastAGC:
         self._gain = 1.0
         self._envelope = 0.0
 
+
+class SquelchMode(Enum):
+    """Squelch detection modes."""
+    CARRIER = "carrier"       # Signal amplitude based
+    NOISE = "noise"           # Noise level based (opens on low noise)
+    CTCSS = "ctcss"           # Continuous Tone-Coded Squelch System
+    DCS = "dcs"               # Digital-Coded Squelch
+    VOX = "vox"               # Voice-operated (audio activity)
+
+
+class SquelchState(Enum):
+    """Squelch gate state."""
+    CLOSED = "closed"         # Muted - no signal
+    OPENING = "opening"       # Transitioning to open
+    OPEN = "open"             # Unmuted - signal present
+    CLOSING = "closing"       # Transitioning to closed (tail time)
+
+
+@dataclass
+class SquelchConfig:
+    """Squelch configuration parameters."""
+    threshold: float = 0.1           # Open threshold (linear amplitude)
+    hysteresis: float = 0.02         # Close offset below threshold
+    attack_time: float = 0.005       # Time to fully open (seconds)
+    release_time: float = 0.02       # Time to fully close (seconds)
+    tail_time: float = 0.3           # Hold open after signal drops (seconds)
+    mode: SquelchMode = SquelchMode.CARRIER
+    ctcss_freq: float = 0.0          # CTCSS tone frequency (67-254.1 Hz)
+    ctcss_bandwidth: float = 10.0    # CTCSS detection bandwidth
+
+
+class Squelch:
+    """
+    Signal-level based squelch for SDR audio muting.
+
+    Mutes output when signal level drops below threshold, preventing
+    the user from hearing noise during periods of no signal activity.
+
+    Features:
+    - Carrier-based squelch (amplitude threshold)
+    - Noise squelch (opens when noise floor drops)
+    - CTCSS tone squelch (sub-audible tone detection)
+    - Configurable threshold with hysteresis
+    - Smooth attack/release transitions
+    - Tail time to prevent choppy audio
+    - VOX mode for voice-operated switching
+
+    Typical use cases:
+    - FM receiver squelch
+    - Repeater access with CTCSS
+    - Scanner squelch for channel monitoring
+    - VOX for hands-free operation
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        config: Optional[SquelchConfig] = None
+    ):
+        """
+        Initialize Squelch.
+
+        Args:
+            sample_rate: Sample rate in Hz
+            config: Squelch configuration (uses defaults if None)
+        """
+        self._sample_rate = sample_rate
+        self._config = config or SquelchConfig()
+
+        # State
+        self._state = SquelchState.CLOSED
+        self._gate = 0.0              # Current gate level (0=closed, 1=open)
+        self._signal_level = 0.0      # Detected signal level
+        self._noise_level = 1.0       # Estimated noise floor
+        self._tail_counter = 0        # Samples remaining in tail time
+        self._ctcss_detected = False  # CTCSS tone present
+
+        # Calculate coefficients
+        self._update_coefficients()
+
+        # CTCSS detector state
+        self._ctcss_filter_state = 0.0 + 0.0j
+        self._ctcss_magnitude = 0.0
+
+    def _update_coefficients(self) -> None:
+        """Calculate time-domain coefficients."""
+        # Attack rate (gate opens)
+        if self._config.attack_time > 0:
+            self._attack_rate = 1.0 / (self._config.attack_time * self._sample_rate)
+        else:
+            self._attack_rate = 1.0
+
+        # Release rate (gate closes)
+        if self._config.release_time > 0:
+            self._release_rate = 1.0 / (self._config.release_time * self._sample_rate)
+        else:
+            self._release_rate = 1.0
+
+        # Tail time in samples
+        self._tail_samples = int(self._config.tail_time * self._sample_rate)
+
+        # Level smoothing coefficient (fast tracking)
+        self._level_alpha = 1.0 - np.exp(-1.0 / (0.01 * self._sample_rate))
+
+        # Noise estimation coefficient (slow tracking)
+        self._noise_alpha = 1.0 - np.exp(-1.0 / (0.5 * self._sample_rate))
+
+        # CTCSS Goertzel coefficient
+        if self._config.ctcss_freq > 0:
+            k = int(0.5 + (self._sample_rate * 0.02) * self._config.ctcss_freq / self._sample_rate)
+            self._ctcss_coeff = 2.0 * np.cos(2.0 * np.pi * k / (self._sample_rate * 0.02))
+
+    @property
+    def sample_rate(self) -> float:
+        """Get sample rate."""
+        return self._sample_rate
+
+    @property
+    def config(self) -> SquelchConfig:
+        """Get current configuration."""
+        return self._config
+
+    @property
+    def state(self) -> SquelchState:
+        """Get current squelch state."""
+        return self._state
+
+    @property
+    def is_open(self) -> bool:
+        """Check if squelch is open (audio passing)."""
+        return self._state in (SquelchState.OPEN, SquelchState.OPENING, SquelchState.CLOSING)
+
+    @property
+    def gate_level(self) -> float:
+        """Get current gate level (0.0 to 1.0)."""
+        return self._gate
+
+    @property
+    def signal_level(self) -> float:
+        """Get detected signal level."""
+        return self._signal_level
+
+    @property
+    def signal_level_db(self) -> float:
+        """Get signal level in dB."""
+        return 20 * np.log10(self._signal_level + 1e-20)
+
+    @property
+    def noise_level(self) -> float:
+        """Get estimated noise floor."""
+        return self._noise_level
+
+    def set_threshold(self, threshold: float) -> None:
+        """Set squelch threshold."""
+        self._config.threshold = threshold
+
+    def set_threshold_db(self, threshold_db: float) -> None:
+        """Set squelch threshold in dB."""
+        self._config.threshold = 10 ** (threshold_db / 20)
+
+    def set_config(self, config: SquelchConfig) -> None:
+        """Update configuration."""
+        self._config = config
+        self._update_coefficients()
+
+    def _detect_carrier_level(self, sample: complex) -> float:
+        """Detect signal level for carrier squelch."""
+        magnitude = np.abs(sample)
+        self._signal_level += self._level_alpha * (magnitude - self._signal_level)
+        return self._signal_level
+
+    def _detect_noise_level(self, sample: complex) -> float:
+        """
+        Detect noise level for noise squelch.
+
+        Noise squelch opens when noise floor drops (signal present).
+        """
+        magnitude = np.abs(sample)
+
+        # Track signal level
+        self._signal_level += self._level_alpha * (magnitude - self._signal_level)
+
+        # Slowly track noise floor (only when it drops)
+        if magnitude < self._noise_level:
+            self._noise_level += self._noise_alpha * (magnitude - self._noise_level)
+        else:
+            # Very slow rise for noise floor
+            self._noise_level += (self._noise_alpha * 0.1) * (magnitude - self._noise_level)
+
+        # Signal-to-noise ratio indicator
+        if self._noise_level > 1e-10:
+            return self._signal_level / self._noise_level
+        return self._signal_level
+
+    def _detect_ctcss(self, samples: np.ndarray) -> bool:
+        """
+        Detect CTCSS sub-audible tone.
+
+        Uses Goertzel algorithm for efficient single-frequency detection.
+        """
+        if self._config.ctcss_freq <= 0:
+            return False
+
+        # Simple CTCSS detection using bandpass energy
+        # Generate CTCSS reference
+        n = len(samples)
+        t = np.arange(n) / self._sample_rate
+        ref_i = np.cos(2 * np.pi * self._config.ctcss_freq * t)
+        ref_q = np.sin(2 * np.pi * self._config.ctcss_freq * t)
+
+        # Correlate (assumes real audio input)
+        if np.iscomplexobj(samples):
+            audio = samples.real
+        else:
+            audio = samples
+
+        # Integrate over block
+        corr_i = np.sum(audio * ref_i)
+        corr_q = np.sum(audio * ref_q)
+        magnitude = np.sqrt(corr_i**2 + corr_q**2) / n
+
+        # Smooth magnitude
+        self._ctcss_magnitude += 0.1 * (magnitude - self._ctcss_magnitude)
+
+        # Compare to threshold (CTCSS is typically 10-15% modulation)
+        # Threshold relative to signal level
+        ctcss_threshold = self._signal_level * 0.05
+        self._ctcss_detected = self._ctcss_magnitude > ctcss_threshold
+
+        return self._ctcss_detected
+
+    def _detect_vox(self, samples: np.ndarray) -> float:
+        """
+        Voice-operated squelch detection.
+
+        Detects audio activity based on energy and variation.
+        """
+        if np.iscomplexobj(samples):
+            audio = np.abs(samples)
+        else:
+            audio = np.abs(samples)
+
+        # RMS level
+        rms = np.sqrt(np.mean(audio ** 2))
+        self._signal_level += self._level_alpha * (rms - self._signal_level)
+
+        return self._signal_level
+
+    def _should_open(self, level: float) -> bool:
+        """Determine if squelch should open."""
+        if self._config.mode == SquelchMode.CARRIER:
+            return level > self._config.threshold
+
+        elif self._config.mode == SquelchMode.NOISE:
+            # Noise squelch: open when SNR is high (noise drops)
+            return level > (1.0 / self._config.threshold)  # Invert threshold meaning
+
+        elif self._config.mode == SquelchMode.CTCSS:
+            # Must have both signal AND correct tone
+            return (level > self._config.threshold) and self._ctcss_detected
+
+        elif self._config.mode == SquelchMode.VOX:
+            return level > self._config.threshold
+
+        return level > self._config.threshold
+
+    def _should_close(self, level: float) -> bool:
+        """Determine if squelch should close (with hysteresis)."""
+        close_threshold = self._config.threshold - self._config.hysteresis
+
+        if self._config.mode == SquelchMode.CARRIER:
+            return level < close_threshold
+
+        elif self._config.mode == SquelchMode.NOISE:
+            return level < (1.0 / close_threshold)
+
+        elif self._config.mode == SquelchMode.CTCSS:
+            # Close if signal drops OR tone disappears
+            return (level < close_threshold) or not self._ctcss_detected
+
+        elif self._config.mode == SquelchMode.VOX:
+            return level < close_threshold
+
+        return level < close_threshold
+
+    def _update_gate(self) -> None:
+        """Update gate level based on state."""
+        if self._state == SquelchState.OPENING:
+            self._gate += self._attack_rate
+            if self._gate >= 1.0:
+                self._gate = 1.0
+                self._state = SquelchState.OPEN
+
+        elif self._state == SquelchState.CLOSING:
+            self._gate -= self._release_rate
+            if self._gate <= 0.0:
+                self._gate = 0.0
+                self._state = SquelchState.CLOSED
+
+    def process_sample(self, sample: complex) -> complex:
+        """
+        Process a single sample through squelch.
+
+        Args:
+            sample: Input sample
+
+        Returns:
+            Gated sample (may be attenuated or muted)
+        """
+        # Detect level
+        if self._config.mode == SquelchMode.NOISE:
+            level = self._detect_noise_level(sample)
+        else:
+            level = self._detect_carrier_level(sample)
+
+        # State machine
+        if self._state == SquelchState.CLOSED:
+            if self._should_open(level):
+                self._state = SquelchState.OPENING
+                self._tail_counter = self._tail_samples
+
+        elif self._state == SquelchState.OPEN:
+            if self._should_close(level):
+                if self._tail_counter > 0:
+                    self._tail_counter -= 1
+                else:
+                    self._state = SquelchState.CLOSING
+            else:
+                self._tail_counter = self._tail_samples
+
+        elif self._state == SquelchState.OPENING:
+            if self._should_close(level):
+                self._state = SquelchState.CLOSING
+
+        elif self._state == SquelchState.CLOSING:
+            if self._should_open(level):
+                self._state = SquelchState.OPENING
+                self._tail_counter = self._tail_samples
+
+        # Update gate
+        self._update_gate()
+
+        # Apply gate
+        return sample * self._gate
+
+    def process(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Process array of samples through squelch.
+
+        Args:
+            samples: Input samples
+
+        Returns:
+            Gated samples
+        """
+        # For CTCSS mode, detect tone first
+        if self._config.mode == SquelchMode.CTCSS:
+            self._detect_ctcss(samples)
+
+        # For VOX mode, use block detection
+        if self._config.mode == SquelchMode.VOX:
+            self._detect_vox(samples)
+
+        # Process samples
+        output = np.zeros_like(samples)
+        for i, sample in enumerate(samples):
+            output[i] = self.process_sample(sample)
+
+        return output
+
+    def process_block(self, samples: np.ndarray) -> Tuple[np.ndarray, bool]:
+        """
+        Block-based squelch processing.
+
+        More efficient for large blocks, returns squelch state.
+
+        Args:
+            samples: Input samples
+
+        Returns:
+            Tuple of (gated_samples, is_open)
+        """
+        # Detect CTCSS if needed
+        if self._config.mode == SquelchMode.CTCSS:
+            self._detect_ctcss(samples)
+
+        # Block level detection
+        if self._config.mode == SquelchMode.NOISE:
+            magnitudes = np.abs(samples)
+            block_level = np.mean(magnitudes)
+            self._signal_level = block_level
+            # Simple noise estimate
+            noise_est = np.percentile(magnitudes, 10)
+            if noise_est > 1e-10:
+                level = block_level / noise_est
+            else:
+                level = block_level
+        else:
+            level = np.sqrt(np.mean(np.abs(samples) ** 2))
+            self._signal_level = level
+
+        # Determine state
+        was_open = self.is_open
+
+        if self._state == SquelchState.CLOSED and self._should_open(level):
+            self._state = SquelchState.OPENING
+        elif self._state == SquelchState.OPEN and self._should_close(level):
+            if self._tail_counter > len(samples):
+                self._tail_counter -= len(samples)
+            else:
+                self._state = SquelchState.CLOSING
+
+        # Generate gate ramp for smooth transitions
+        n = len(samples)
+        if self._state == SquelchState.OPENING:
+            # Ramp from current gate to 1.0
+            end_gate = min(1.0, self._gate + self._attack_rate * n)
+            gate = np.linspace(self._gate, end_gate, n)
+            self._gate = end_gate
+            if self._gate >= 1.0:
+                self._state = SquelchState.OPEN
+
+        elif self._state == SquelchState.CLOSING:
+            # Ramp from current gate to 0.0
+            end_gate = max(0.0, self._gate - self._release_rate * n)
+            gate = np.linspace(self._gate, end_gate, n)
+            self._gate = end_gate
+            if self._gate <= 0.0:
+                self._state = SquelchState.CLOSED
+
+        elif self._state == SquelchState.OPEN:
+            gate = np.ones(n)
+            self._gate = 1.0
+            self._tail_counter = self._tail_samples
+
+        else:  # CLOSED
+            gate = np.zeros(n)
+            self._gate = 0.0
+
+        return samples * gate, self.is_open
+
+    def get_status(self) -> dict:
+        """Get squelch status information."""
+        return {
+            "state": self._state.value,
+            "is_open": self.is_open,
+            "gate_level": self._gate,
+            "signal_level": self._signal_level,
+            "signal_level_db": self.signal_level_db,
+            "noise_level": self._noise_level,
+            "threshold": self._config.threshold,
+            "mode": self._config.mode.value,
+            "ctcss_detected": self._ctcss_detected if self._config.mode == SquelchMode.CTCSS else None,
+        }
+
+    def reset(self) -> None:
+        """Reset squelch state."""
+        self._state = SquelchState.CLOSED
+        self._gate = 0.0
+        self._signal_level = 0.0
+        self._noise_level = 1.0
+        self._tail_counter = 0
+        self._ctcss_detected = False
+        self._ctcss_magnitude = 0.0
+
+    def force_open(self) -> None:
+        """Force squelch open (bypass)."""
+        self._state = SquelchState.OPEN
+        self._gate = 1.0
+
+    def force_close(self) -> None:
+        """Force squelch closed (mute)."""
+        self._state = SquelchState.CLOSED
+        self._gate = 0.0
+
+
+# Common CTCSS tones (EIA standard)
+CTCSS_TONES = {
+    "XZ": 67.0, "WZ": 69.3, "XA": 71.9, "WA": 74.4, "XB": 77.0,
+    "WB": 79.7, "YZ": 82.5, "YA": 85.4, "YB": 88.5, "ZZ": 91.5,
+    "ZA": 94.8, "ZB": 97.4, "1Z": 100.0, "1A": 103.5, "1B": 107.2,
+    "2Z": 110.9, "2A": 114.8, "2B": 118.8, "3Z": 123.0, "3A": 127.3,
+    "3B": 131.8, "4Z": 136.5, "4A": 141.3, "4B": 146.2, "5Z": 151.4,
+    "5A": 156.7, "5B": 162.2, "6Z": 167.9, "6A": 173.8, "6B": 179.9,
+    "7Z": 186.2, "7A": 192.8, "M1": 203.5, "M2": 210.7, "M3": 218.1,
+    "M4": 225.7, "M5": 233.6, "M6": 241.8, "M7": 250.3,
+}
+
+
+def get_ctcss_tone(name: str) -> Optional[float]:
+    """Get CTCSS tone frequency by name."""
+    return CTCSS_TONES.get(name.upper())
+
+
+def find_ctcss_tone(frequency: float, tolerance: float = 1.0) -> Optional[str]:
+    """Find CTCSS tone name by frequency."""
+    for name, freq in CTCSS_TONES.items():
+        if abs(freq - frequency) <= tolerance:
+            return name
+    return None

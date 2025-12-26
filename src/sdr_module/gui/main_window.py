@@ -4,6 +4,8 @@ Main application window.
 Provides the primary window with all panels and controls.
 """
 
+from __future__ import annotations
+
 import logging
 from typing import Optional
 import numpy as np

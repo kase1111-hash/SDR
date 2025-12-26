@@ -8,6 +8,8 @@ Provides controls for:
 - Demodulation mode
 """
 
+from __future__ import annotations
+
 from typing import Optional
 
 try:

@@ -7,6 +7,8 @@ Provides scrolling time-frequency visualization with:
 - Zoom and pan support
 """
 
+from __future__ import annotations
+
 import numpy as np
 from typing import Optional, List, Tuple
 from collections import deque

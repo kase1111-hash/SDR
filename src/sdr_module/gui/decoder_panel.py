@@ -4,6 +4,8 @@ Protocol decoder output panel.
 Displays decoded messages from various protocols.
 """
 
+from __future__ import annotations
+
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 

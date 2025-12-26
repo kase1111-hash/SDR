@@ -119,7 +119,7 @@ def cmd_devices(args: argparse.Namespace) -> int:
     print()
 
     manager = DeviceManager()
-    devices = manager.enumerate_devices()
+    devices = manager.scan_devices()
 
     if not devices:
         print("No SDR devices found.")

@@ -4,6 +4,8 @@ Device selection dialog.
 Allows user to select and configure SDR device.
 """
 
+from __future__ import annotations
+
 from typing import Optional, List
 
 try:

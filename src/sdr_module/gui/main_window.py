@@ -29,6 +29,8 @@ from .control_panel import ControlPanel
 from .decoder_panel import DecoderPanel
 from .callsign_panel import CallsignPanel
 from .sstv_panel import SSTVPanel
+from .signal_meter_widget import SignalMeterPanel
+from .qrp_panel import QRPPanel
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +176,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # SSTV panel for receiving images (ISS, etc.)
         self._sstv_panel = SSTVPanel()
         decoder_tabs.addTab(self._sstv_panel, "SSTV/ISS")
+
+        # Signal meter panel (HAM-style S-units / RST)
+        self._signal_meter_panel = SignalMeterPanel()
+        decoder_tabs.addTab(self._signal_meter_panel, "S-Meter")
+
+        # QRP panel (low power operations)
+        self._qrp_panel = QRPPanel()
+        decoder_tabs.addTab(self._qrp_panel, "QRP")
 
         # Info tab
         info_widget = QWidget()

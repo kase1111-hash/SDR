@@ -9,6 +9,7 @@ Provides a complete GUI application for the SDR module including:
 - Frequency scanner
 - HAM radio callsign identification
 - SSTV image receiver (for ISS images)
+- HAM-style signal meter (S-units / RST)
 
 Usage:
     from sdr_module.gui import SDRApplication
@@ -27,6 +28,11 @@ from .decoder_panel import DecoderPanel
 from .device_dialog import DeviceDialog
 from .callsign_panel import CallsignPanel
 from .sstv_panel import SSTVPanel, ImageDisplayWidget
+from .signal_meter_widget import (
+    AnalogMeterWidget,
+    SignalMeterPanel,
+    CompactSignalMeter,
+)
 from .app import SDRApplication
 
 __all__ = [
@@ -40,4 +46,7 @@ __all__ = [
     "CallsignPanel",
     "SSTVPanel",
     "ImageDisplayWidget",
+    "AnalogMeterWidget",
+    "SignalMeterPanel",
+    "CompactSignalMeter",
 ]

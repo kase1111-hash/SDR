@@ -109,6 +109,15 @@ from .sstv import (
     SSTVDecoder,
     SSTVImageViewer,
 )
+from .signal_meter import (
+    SignalMode,
+    SignalReading,
+    SignalMeter,
+    SignalHistory,
+    S_METER_REFERENCE,
+    S9_DBM,
+    DB_PER_S_UNIT,
+)
 
 __all__ = [
     "SpectrumAnalyzer",
@@ -209,4 +218,12 @@ __all__ = [
     "SSTVState",
     "SSTVDecoder",
     "SSTVImageViewer",
+    # Signal Meter (HAM-style S-units/RST)
+    "SignalMode",
+    "SignalReading",
+    "SignalMeter",
+    "SignalHistory",
+    "S_METER_REFERENCE",
+    "S9_DBM",
+    "DB_PER_S_UNIT",
 ]

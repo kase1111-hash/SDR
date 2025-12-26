@@ -513,6 +513,39 @@ The software includes an SSTV (Slow Scan Television) decoder for receiving image
 | Meteor-M2 LRPT | 137.100 MHz | Russian weather satellite |
 | SO-50 | 436.795 MHz | Amateur satellite |
 
+### 11.7 HAM Radio Signal Meter (S-Units / RST)
+
+Classic signal strength reporting using formats every amateur radio operator knows.
+
+**S-Meter Scale (IARU Region 1, 50Ω):**
+
+| S-Unit | dBm | Description |
+|--------|-----|-------------|
+| S1 | -121 | Barely perceptible |
+| S3 | -109 | Weak |
+| S5 | -97 | Moderate |
+| S7 | -85 | Good |
+| S9 | -73 | Very strong (reference) |
+| S9+20 | -53 | Extremely strong |
+| S9+40 | -33 | Full scale |
+
+**RST Reporting System:**
+
+| Code | Meaning |
+|------|---------|
+| R (1-5) | Readability: 1=unreadable, 5=perfect |
+| S (1-9) | Strength: corresponds to S-meter |
+| T (1-9) | Tone (CW only): 9=perfect tone |
+
+**Example Reports:**
+
+| Report | Meaning |
+|--------|---------|
+| "59" | Perfectly readable, very strong (phone) |
+| "599" | Perfect readability, strength, tone (CW) |
+| "Five and nine, twenty over" | S9+20 dB |
+| "57" | Readable, moderate signal |
+
 ---
 
 ## 12. Future Considerations
@@ -633,7 +666,7 @@ If not using the installer:
 
 ---
 
-*Document Version: 3.6*
+*Document Version: 3.7*
 *Last Updated: 2025-12-26*
 
 ---
@@ -651,3 +684,4 @@ If not using the installer:
 | 3.4 | 2025-12-26 | Implemented Main GUI application with PyQt6: spectrum analyzer, waterfall display, control panel, protocol decoder panel, recording controls, device dialog |
 | 3.5 | 2025-12-26 | Added TX frequency lockouts for safety (GPS, aviation, emergency, cellular); HAM radio callsign identification; RX presets with GUI selector |
 | 3.6 | 2025-12-26 | Added SSTV decoder for ISS image reception; space/satellite RX presets (ISS, Meteor-M2, SO-50); GUI image viewer with live preview |
+| 3.7 | 2025-12-26 | Added HAM radio signal meter with S-units (S1-S9, S9+dB) and RST reporting; analog meter GUI; verbal reports ("five and nine, twenty over") |

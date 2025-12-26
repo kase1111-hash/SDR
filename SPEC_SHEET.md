@@ -586,6 +586,46 @@ Support for QRP (5W CW / 10W SSB) and QRPp (milliwatt) operation.
 HackRF (0 dBm, 1mW) → Driver (+20dB) → PA (+17dB) = 5W QRP
 ```
 
+### 11.9 License Profiles
+
+TX permissions are enforced based on the operator's amateur radio license class.
+
+**License Classes:**
+
+| Class | Description | HF Privileges | VHF/UHF |
+|-------|-------------|---------------|---------|
+| None | No license | License-free only | License-free only |
+| Technician | Entry level | 10m, limited CW on 80/40/15m | Full |
+| General | Intermediate | Most HF with sub-band limits | Full |
+| Amateur Extra | Full privileges | All amateur bands | Full |
+
+**License-Free Bands (No License Required):**
+
+| Service | Frequency | Power Limit | Modes |
+|---------|-----------|-------------|-------|
+| CB Radio | 26.965-27.405 MHz | 4W AM, 12W SSB | AM, SSB |
+| MURS | 151.82-154.60 MHz | 2W | FM |
+| FRS | 462-467 MHz | 0.5-2W | FM |
+
+**Amateur Band Privileges (Examples):**
+
+| Band | Technician | General | Extra |
+|------|------------|---------|-------|
+| 160m | ✓ | ✓ | ✓ |
+| 80m | CW only (3.525-3.6) | Phone 3.8-4.0, CW 3.525-3.6 | Full |
+| 40m | CW only (7.025-7.125) | Phone 7.175-7.3, CW 7.025-7.125 | Full |
+| 20m | ✗ | Phone 14.225-14.35, CW 14.025-14.15 | Full |
+| 10m | ✓ (28.0-28.5) | ✓ | ✓ |
+| 6m | ✓ | ✓ | ✓ |
+| 2m | ✓ | ✓ | ✓ |
+| 70cm | ✓ | ✓ | ✓ |
+
+**TX Validation:**
+- All TX requests are validated against current license class
+- Hardware lockouts (GPS, aviation, emergency) always apply regardless of license
+- Mode restrictions enforced per band segment
+- Power limits enforced where applicable
+
 ---
 
 ## 12. Future Considerations
@@ -706,7 +746,7 @@ If not using the installer:
 
 ---
 
-*Document Version: 3.8*
+*Document Version: 3.9*
 *Last Updated: 2025-12-26*
 
 ---
@@ -726,3 +766,4 @@ If not using the installer:
 | 3.6 | 2025-12-26 | Added SSTV decoder for ISS image reception; space/satellite RX presets (ISS, Meteor-M2, SO-50); GUI image viewer with live preview |
 | 3.7 | 2025-12-26 | Added HAM radio signal meter with S-units (S1-S9, S9+dB) and RST reporting; analog meter GUI; verbal reports ("five and nine, twenty over") |
 | 3.8 | 2025-12-26 | Added QRP operations module: power conversion (dBm↔watts), TX limiter for QRP compliance, amplifier chain calculator, miles-per-watt tracker; QRP calling frequency presets (80m-10m CW/SSB) |
+| 3.9 | 2025-12-26 | Added license profiles (None, Technician, General, Amateur Extra); TX lockouts enforced by license class; license-free bands (CB, MURS, FRS); GUI license selector |

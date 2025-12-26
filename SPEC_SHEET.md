@@ -504,8 +504,87 @@ Combine devices to cover wider spectrum.
 
 ---
 
-*Document Version: 3.0*
-*Last Updated: 2025-12-25*
+## 14. Windows Build & Installation
+
+### 14.1 Prerequisites
+
+| Component | Requirement |
+|-----------|-------------|
+| Python | 3.8 or higher |
+| pip | Python package manager |
+| Inno Setup | 6.x (optional, for creating installer) |
+
+### 14.2 Build Files
+
+| File | Purpose |
+|------|---------|
+| `build_windows.bat` | Batch script for building Windows executable |
+| `build_windows.ps1` | PowerShell script (alternative) |
+| `build_installer.bat` | Creates Windows installer with Inno Setup |
+| `sdr_module.spec` | PyInstaller specification file |
+| `installer.iss` | Inno Setup installer script |
+
+### 14.3 Quick Build (Command Prompt)
+
+```batch
+REM Basic build
+build_windows.bat
+
+REM Full clean build with development install
+build_windows.bat --clean --install
+```
+
+### 14.4 Quick Build (PowerShell)
+
+```powershell
+# Basic build
+.\build_windows.ps1
+
+# Full clean build with installer
+.\build_windows.ps1 -Clean -Install -CreateInstaller
+```
+
+### 14.5 Build Options
+
+| Option | Batch | PowerShell | Description |
+|--------|-------|------------|-------------|
+| Clean | `--clean` | `-Clean` | Remove build directories before building |
+| Install | `--install` | `-Install` | Install package in development mode |
+| No UPX | `--no-upx` | `-NoUPX` | Disable UPX compression |
+| Installer | N/A | `-CreateInstaller` | Create Windows installer |
+
+### 14.6 Creating the Installer
+
+After building the executable:
+
+```batch
+build_installer.bat
+```
+
+Or with PowerShell:
+```powershell
+.\build_windows.ps1 -CreateInstaller
+```
+
+### 14.7 Output Locations
+
+| Output | Location |
+|--------|----------|
+| Executable | `dist\sdr-module\sdr-scan.exe` |
+| Installer | `installer_output\SDR-Module-0.1.0-Setup.exe` |
+
+### 14.8 Manual Installation
+
+If not using the installer:
+
+1. Copy the `dist\sdr-module` folder to your preferred location
+2. Optionally add the folder to your system PATH
+3. Run `sdr-scan.exe --help` to verify installation
+
+---
+
+*Document Version: 3.1*
+*Last Updated: 2025-12-26*
 
 ---
 
@@ -516,3 +595,4 @@ Combine devices to cover wider spectrum.
 | 1.0 | 2025-12-25 | Initial specification document |
 | 2.0 | 2025-12-25 | Added quantitative RF specs, hardware compatibility matrix, interface specs, physical/environmental specs, compliance section |
 | 3.0 | 2025-12-25 | Tuned for dual-SDR setup (RTL-SDR + HackRF One); added device-specific specs, dual-SDR operation modes, synchronization, use cases, software stack |
+| 3.1 | 2025-12-26 | Added Windows build and installation documentation (Section 14) |

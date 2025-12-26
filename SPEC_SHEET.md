@@ -499,7 +499,7 @@ Combine devices to cover wider spectrum.
 ### Phase 4: Advanced Features
 - [x] Recording/playback
 - [x] Plugin system
-- [ ] Advanced protocols
+- [x] Advanced protocols (ADS-B, ACARS, FLEX, AX.25/APRS, RDS, POCSAG)
 - [ ] UI polish and optimization
 
 ---
@@ -583,7 +583,7 @@ If not using the installer:
 
 ---
 
-*Document Version: 3.2*
+*Document Version: 3.3*
 *Last Updated: 2025-12-26*
 
 ---
@@ -597,3 +597,4 @@ If not using the installer:
 | 3.0 | 2025-12-25 | Tuned for dual-SDR setup (RTL-SDR + HackRF One); added device-specific specs, dual-SDR operation modes, synchronization, use cases, software stack |
 | 3.1 | 2025-12-26 | Added Windows build and installation documentation (Section 14) |
 | 3.2 | 2025-12-26 | Implemented plugin system architecture; updated development phases to reflect current implementation status |
+| 3.3 | 2025-12-26 | Added advanced protocol decoders: ADS-B, ACARS, FLEX; verified AX.25/APRS, RDS, POCSAG implementations |

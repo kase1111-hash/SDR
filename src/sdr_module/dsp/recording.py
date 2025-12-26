@@ -1541,3 +1541,1536 @@ def save_audio_file(
     recorder.start(filepath)
     recorder.write(samples)
     return recorder.stop()
+
+
+class PlaybackMode(Enum):
+    """Playback modes."""
+    ONCE = "once"             # Play once and stop
+    LOOP = "loop"             # Loop continuously
+    PING_PONG = "ping_pong"   # Forward then reverse
+
+
+class PlaybackState(Enum):
+    """Playback state."""
+    STOPPED = "stopped"
+    PLAYING = "playing"
+    PAUSED = "paused"
+    FINISHED = "finished"
+
+
+@dataclass
+class PlaybackConfig:
+    """Playback configuration."""
+    mode: PlaybackMode = PlaybackMode.ONCE
+    speed: float = 1.0             # Playback speed multiplier
+    start_position: int = 0        # Start position in samples
+    end_position: int = -1         # End position (-1 = end of file)
+    fade_in_samples: int = 0       # Fade in duration
+    fade_out_samples: int = 0      # Fade out duration
+    gain: float = 1.0              # Output gain
+    loop_count: int = -1           # Number of loops (-1 = infinite)
+
+
+class SignalPlayback:
+    """
+    Advanced signal playback with looping and speed control.
+
+    Provides sophisticated playback capabilities for recorded I/Q signals,
+    suitable for signal replay, testing, and transmission preparation.
+
+    Features:
+    - Multiple playback modes: once, loop, ping-pong
+    - Variable speed playback with resampling
+    - Fade in/out for smooth transitions
+    - Loop points and loop count control
+    - Pause/resume support
+    - Real-time gain adjustment
+    - Streaming output for large files
+
+    Example:
+        playback = SignalPlayback("recording.sigmf-data")
+        playback.set_mode(PlaybackMode.LOOP)
+        while playback.state == PlaybackState.PLAYING:
+            samples = playback.get_samples(1024)
+            transmit(samples)
+    """
+
+    def __init__(
+        self,
+        source: Union[str, Path, np.ndarray],
+        sample_rate: Optional[float] = None,
+        config: Optional[PlaybackConfig] = None
+    ):
+        """
+        Initialize signal playback.
+
+        Args:
+            source: File path or numpy array of samples
+            sample_rate: Sample rate (required if source is array)
+            config: Playback configuration
+        """
+        self._config = config or PlaybackConfig()
+        self._state = PlaybackState.STOPPED
+
+        # Load source
+        if isinstance(source, (str, Path)):
+            self._player = IQPlayer(source)
+            self._samples = self._player.read(self._player.total_samples)
+            self._sample_rate = self._player.sample_rate
+            self._player.close()
+        else:
+            self._samples = np.asarray(source, dtype=np.complex64)
+            self._sample_rate = sample_rate or 1.0
+            self._player = None
+
+        # Playback state
+        self._position = self._config.start_position
+        self._direction = 1  # 1 = forward, -1 = reverse
+        self._loop_counter = 0
+        self._total_samples_played = 0
+
+        # End position
+        if self._config.end_position < 0:
+            self._end_position = len(self._samples)
+        else:
+            self._end_position = min(self._config.end_position, len(self._samples))
+
+        # Resampling for speed control
+        self._resample_buffer = np.array([], dtype=np.complex64)
+        self._fractional_position = 0.0
+
+    @property
+    def sample_rate(self) -> float:
+        """Get sample rate."""
+        return self._sample_rate
+
+    @property
+    def output_sample_rate(self) -> float:
+        """Get effective output sample rate (after speed adjustment)."""
+        return self._sample_rate * self._config.speed
+
+    @property
+    def state(self) -> PlaybackState:
+        """Get current playback state."""
+        return self._state
+
+    @property
+    def position(self) -> int:
+        """Get current position in samples."""
+        return int(self._position)
+
+    @property
+    def position_seconds(self) -> float:
+        """Get current position in seconds."""
+        return self._position / self._sample_rate
+
+    @property
+    def duration_samples(self) -> int:
+        """Get total duration in samples."""
+        return self._end_position - self._config.start_position
+
+    @property
+    def duration_seconds(self) -> float:
+        """Get total duration in seconds."""
+        return self.duration_samples / self._sample_rate
+
+    @property
+    def progress(self) -> float:
+        """Get playback progress (0.0 to 1.0)."""
+        total = self._end_position - self._config.start_position
+        if total <= 0:
+            return 0.0
+        current = self._position - self._config.start_position
+        return current / total
+
+    @property
+    def loop_count(self) -> int:
+        """Get number of loops completed."""
+        return self._loop_counter
+
+    @property
+    def total_samples_played(self) -> int:
+        """Get total samples played (including loops)."""
+        return self._total_samples_played
+
+    def set_config(self, config: PlaybackConfig) -> None:
+        """Update playback configuration."""
+        self._config = config
+        if config.end_position < 0:
+            self._end_position = len(self._samples)
+        else:
+            self._end_position = min(config.end_position, len(self._samples))
+
+    def set_mode(self, mode: PlaybackMode) -> None:
+        """Set playback mode."""
+        self._config.mode = mode
+
+    def set_speed(self, speed: float) -> None:
+        """Set playback speed (0.5 to 2.0 typical)."""
+        self._config.speed = max(0.1, min(10.0, speed))
+
+    def set_gain(self, gain: float) -> None:
+        """Set output gain."""
+        self._config.gain = gain
+
+    def set_gain_db(self, gain_db: float) -> None:
+        """Set output gain in dB."""
+        self._config.gain = 10 ** (gain_db / 20)
+
+    def play(self) -> None:
+        """Start or resume playback."""
+        if self._state == PlaybackState.FINISHED:
+            self._position = self._config.start_position
+            self._loop_counter = 0
+        self._state = PlaybackState.PLAYING
+
+    def pause(self) -> None:
+        """Pause playback."""
+        if self._state == PlaybackState.PLAYING:
+            self._state = PlaybackState.PAUSED
+
+    def stop(self) -> None:
+        """Stop playback and reset position."""
+        self._state = PlaybackState.STOPPED
+        self._position = self._config.start_position
+        self._direction = 1
+        self._loop_counter = 0
+
+    def seek(self, position: int) -> None:
+        """Seek to sample position."""
+        self._position = max(self._config.start_position,
+                            min(position, self._end_position - 1))
+
+    def seek_seconds(self, seconds: float) -> None:
+        """Seek to time position."""
+        position = int(seconds * self._sample_rate)
+        self.seek(position)
+
+    def _apply_fade(self, samples: np.ndarray, start_pos: int) -> np.ndarray:
+        """Apply fade in/out to samples."""
+        n = len(samples)
+        output = samples.copy()
+
+        # Fade in
+        if self._config.fade_in_samples > 0:
+            fade_in_end = self._config.start_position + self._config.fade_in_samples
+            for i in range(n):
+                pos = start_pos + i
+                if pos < fade_in_end:
+                    fade = (pos - self._config.start_position) / self._config.fade_in_samples
+                    output[i] *= fade
+
+        # Fade out
+        if self._config.fade_out_samples > 0:
+            fade_out_start = self._end_position - self._config.fade_out_samples
+            for i in range(n):
+                pos = start_pos + i
+                if pos >= fade_out_start:
+                    fade = (self._end_position - pos) / self._config.fade_out_samples
+                    output[i] *= max(0, fade)
+
+        return output
+
+    def _resample_chunk(self, samples: np.ndarray) -> np.ndarray:
+        """Resample chunk for speed adjustment."""
+        if abs(self._config.speed - 1.0) < 0.001:
+            return samples
+
+        # Simple linear interpolation resampling
+        n_in = len(samples)
+        n_out = int(n_in / self._config.speed)
+
+        if n_out <= 0:
+            return np.array([], dtype=np.complex64)
+
+        indices = np.linspace(0, n_in - 1, n_out)
+        indices_floor = np.floor(indices).astype(int)
+        indices_ceil = np.minimum(indices_floor + 1, n_in - 1)
+        frac = indices - indices_floor
+
+        resampled = (1 - frac) * samples[indices_floor] + frac * samples[indices_ceil]
+        return resampled.astype(np.complex64)
+
+    def get_samples(self, num_samples: int) -> np.ndarray:
+        """
+        Get next batch of samples for playback.
+
+        Args:
+            num_samples: Number of samples to retrieve
+
+        Returns:
+            Complex samples array (may be shorter at end)
+        """
+        if self._state != PlaybackState.PLAYING:
+            return np.zeros(num_samples, dtype=np.complex64)
+
+        # Calculate how many source samples we need
+        source_samples_needed = int(num_samples * self._config.speed) + 2
+
+        output = []
+        samples_remaining = num_samples
+
+        while samples_remaining > 0 and self._state == PlaybackState.PLAYING:
+            # Get chunk from source
+            if self._direction > 0:
+                # Forward playback
+                end_idx = min(int(self._position) + source_samples_needed,
+                             self._end_position)
+                chunk = self._samples[int(self._position):end_idx]
+            else:
+                # Reverse playback
+                start_idx = max(int(self._position) - source_samples_needed,
+                               self._config.start_position)
+                chunk = self._samples[start_idx:int(self._position)][::-1]
+
+            if len(chunk) == 0:
+                # Handle end of segment
+                if self._config.mode == PlaybackMode.ONCE:
+                    self._state = PlaybackState.FINISHED
+                    break
+
+                elif self._config.mode == PlaybackMode.LOOP:
+                    self._loop_counter += 1
+                    if self._config.loop_count > 0 and self._loop_counter >= self._config.loop_count:
+                        self._state = PlaybackState.FINISHED
+                        break
+                    self._position = self._config.start_position
+                    continue
+
+                elif self._config.mode == PlaybackMode.PING_PONG:
+                    self._direction *= -1
+                    if self._direction > 0:
+                        self._loop_counter += 1
+                        if self._config.loop_count > 0 and self._loop_counter >= self._config.loop_count:
+                            self._state = PlaybackState.FINISHED
+                            break
+                        self._position = self._config.start_position
+                    else:
+                        self._position = self._end_position - 1
+                    continue
+
+            # Apply fade
+            chunk = self._apply_fade(chunk, int(self._position))
+
+            # Resample for speed
+            resampled = self._resample_chunk(chunk)
+
+            # Take what we need
+            take = min(len(resampled), samples_remaining)
+            output.append(resampled[:take])
+            samples_remaining -= take
+
+            # Update position
+            self._position += self._direction * len(chunk)
+            self._total_samples_played += take
+
+        if len(output) == 0:
+            return np.zeros(num_samples, dtype=np.complex64)
+
+        result = np.concatenate(output)
+
+        # Apply gain
+        result *= self._config.gain
+
+        # Pad if needed
+        if len(result) < num_samples:
+            result = np.pad(result, (0, num_samples - len(result)))
+
+        return result[:num_samples].astype(np.complex64)
+
+    def get_all_samples(self) -> np.ndarray:
+        """Get all samples at once (for small files)."""
+        start = self._config.start_position
+        end = self._end_position
+        samples = self._samples[start:end].copy()
+
+        # Apply fade
+        samples = self._apply_fade(samples, start)
+
+        # Resample
+        samples = self._resample_chunk(samples)
+
+        # Apply gain
+        samples *= self._config.gain
+
+        return samples.astype(np.complex64)
+
+    def get_status(self) -> dict:
+        """Get playback status."""
+        return {
+            "state": self._state.value,
+            "mode": self._config.mode.value,
+            "position": self._position,
+            "position_seconds": self.position_seconds,
+            "progress": self.progress,
+            "duration_seconds": self.duration_seconds,
+            "loop_count": self._loop_counter,
+            "speed": self._config.speed,
+            "gain": self._config.gain,
+            "sample_rate": self._sample_rate,
+        }
+
+
+class TransmitBuffer:
+    """
+    Buffer for preparing signals for transmission.
+
+    Manages signal buffering and flow control for transmit operations,
+    ensuring smooth continuous transmission without underruns.
+
+    Features:
+    - Ring buffer for continuous transmission
+    - Underrun detection and handling
+    - Pre-buffering before transmission starts
+    - Multiple signal source support
+    - Gain and power control
+    - Transmit burst support
+
+    Example:
+        buffer = TransmitBuffer(sample_rate=2.4e6, buffer_seconds=1.0)
+        buffer.add_samples(modulated_signal)
+        while transmitting:
+            samples = buffer.get_transmit_samples(1024)
+            hackrf.transmit(samples)
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        buffer_seconds: float = 1.0,
+        prebuffer_seconds: float = 0.1
+    ):
+        """
+        Initialize transmit buffer.
+
+        Args:
+            sample_rate: Transmit sample rate in Hz
+            buffer_seconds: Total buffer size in seconds
+            prebuffer_seconds: Minimum buffer before transmission
+        """
+        self._sample_rate = sample_rate
+        self._buffer_size = int(buffer_seconds * sample_rate)
+        self._prebuffer_size = int(prebuffer_seconds * sample_rate)
+
+        # Ring buffer
+        self._buffer = np.zeros(self._buffer_size, dtype=np.complex64)
+        self._write_pos = 0
+        self._read_pos = 0
+        self._samples_available = 0
+
+        # State
+        self._transmitting = False
+        self._underrun_count = 0
+        self._total_transmitted = 0
+
+        # Gain control
+        self._gain = 1.0
+        self._peak_limit = 1.0  # Maximum amplitude
+
+    @property
+    def sample_rate(self) -> float:
+        """Get sample rate."""
+        return self._sample_rate
+
+    @property
+    def buffer_size(self) -> int:
+        """Get buffer size in samples."""
+        return self._buffer_size
+
+    @property
+    def samples_available(self) -> int:
+        """Get number of samples available for transmission."""
+        return self._samples_available
+
+    @property
+    def buffer_fullness(self) -> float:
+        """Get buffer fullness (0.0 to 1.0)."""
+        return self._samples_available / self._buffer_size
+
+    @property
+    def is_ready(self) -> bool:
+        """Check if buffer has enough samples to start transmission."""
+        return self._samples_available >= self._prebuffer_size
+
+    @property
+    def is_transmitting(self) -> bool:
+        """Check if currently transmitting."""
+        return self._transmitting
+
+    @property
+    def underrun_count(self) -> int:
+        """Get number of buffer underruns."""
+        return self._underrun_count
+
+    @property
+    def total_transmitted(self) -> int:
+        """Get total samples transmitted."""
+        return self._total_transmitted
+
+    def set_gain(self, gain: float) -> None:
+        """Set output gain."""
+        self._gain = gain
+
+    def set_gain_db(self, gain_db: float) -> None:
+        """Set output gain in dB."""
+        self._gain = 10 ** (gain_db / 20)
+
+    def set_peak_limit(self, limit: float) -> None:
+        """Set peak amplitude limit."""
+        self._peak_limit = limit
+
+    def add_samples(self, samples: np.ndarray) -> int:
+        """
+        Add samples to transmit buffer.
+
+        Args:
+            samples: Complex samples to add
+
+        Returns:
+            Number of samples actually added
+        """
+        samples = np.asarray(samples, dtype=np.complex64)
+        n = len(samples)
+
+        # Check available space
+        space_available = self._buffer_size - self._samples_available
+
+        if n > space_available:
+            # Buffer overflow - drop oldest samples or clip
+            n = space_available
+            samples = samples[:n]
+
+        if n == 0:
+            return 0
+
+        # Write to ring buffer
+        for i in range(n):
+            self._buffer[self._write_pos] = samples[i]
+            self._write_pos = (self._write_pos + 1) % self._buffer_size
+
+        self._samples_available += n
+        return n
+
+    def add_from_playback(self, playback: SignalPlayback, num_samples: int) -> int:
+        """
+        Add samples from a playback source.
+
+        Args:
+            playback: SignalPlayback instance
+            num_samples: Number of samples to fetch and add
+
+        Returns:
+            Number of samples added
+        """
+        samples = playback.get_samples(num_samples)
+        return self.add_samples(samples)
+
+    def get_transmit_samples(self, num_samples: int) -> np.ndarray:
+        """
+        Get samples for transmission.
+
+        Args:
+            num_samples: Number of samples needed
+
+        Returns:
+            Complex samples ready for transmission
+        """
+        if not self._transmitting:
+            if self.is_ready:
+                self._transmitting = True
+            else:
+                # Not ready - return zeros (or could return None)
+                return np.zeros(num_samples, dtype=np.complex64)
+
+        # Check for underrun
+        if self._samples_available < num_samples:
+            self._underrun_count += 1
+            # Return what we have plus zeros
+            available = self._samples_available
+        else:
+            available = num_samples
+
+        # Read from ring buffer
+        output = np.zeros(num_samples, dtype=np.complex64)
+        for i in range(available):
+            output[i] = self._buffer[self._read_pos]
+            self._read_pos = (self._read_pos + 1) % self._buffer_size
+
+        self._samples_available -= available
+
+        # Apply gain
+        output *= self._gain
+
+        # Apply peak limiting (soft clipping)
+        magnitudes = np.abs(output)
+        over_limit = magnitudes > self._peak_limit
+        if np.any(over_limit):
+            phases = np.angle(output)
+            magnitudes[over_limit] = self._peak_limit
+            output = magnitudes * np.exp(1j * phases)
+
+        self._total_transmitted += available
+
+        return output
+
+    def start_transmission(self) -> bool:
+        """
+        Start transmission (waits for buffer ready).
+
+        Returns:
+            True if started, False if buffer not ready
+        """
+        if self.is_ready:
+            self._transmitting = True
+            return True
+        return False
+
+    def stop_transmission(self) -> None:
+        """Stop transmission."""
+        self._transmitting = False
+
+    def flush(self) -> None:
+        """Clear the buffer."""
+        self._buffer.fill(0)
+        self._write_pos = 0
+        self._read_pos = 0
+        self._samples_available = 0
+
+    def get_status(self) -> dict:
+        """Get buffer status."""
+        return {
+            "transmitting": self._transmitting,
+            "samples_available": self._samples_available,
+            "buffer_fullness": self.buffer_fullness,
+            "is_ready": self.is_ready,
+            "underrun_count": self._underrun_count,
+            "total_transmitted": self._total_transmitted,
+            "gain": self._gain,
+            "peak_limit": self._peak_limit,
+        }
+
+
+class PlaybackScheduler:
+    """
+    Schedule signal playback at specific times or intervals.
+
+    Manages timed playback of signals for automated testing,
+    beacon transmission, or scheduled broadcasts.
+
+    Features:
+    - Schedule playback at absolute or relative times
+    - Repeat schedules (hourly, daily, custom intervals)
+    - Multiple playback sources
+    - Priority-based scheduling
+    - Event callbacks
+
+    Example:
+        scheduler = PlaybackScheduler()
+        scheduler.add_scheduled_playback(
+            "beacon",
+            playback=SignalPlayback("beacon.iq"),
+            interval_seconds=60
+        )
+        scheduler.start()
+    """
+
+    def __init__(self):
+        """Initialize playback scheduler."""
+        self._schedules: Dict[str, dict] = {}
+        self._running = False
+        self._current_playback: Optional[str] = None
+
+    def add_scheduled_playback(
+        self,
+        name: str,
+        playback: SignalPlayback,
+        start_time: Optional[datetime] = None,
+        interval_seconds: Optional[float] = None,
+        repeat_count: int = -1,
+        priority: int = 0
+    ) -> None:
+        """
+        Add a scheduled playback.
+
+        Args:
+            name: Unique identifier for this schedule
+            playback: SignalPlayback instance
+            start_time: When to start (None = immediately when run)
+            interval_seconds: Repeat interval (None = once only)
+            repeat_count: Number of repeats (-1 = infinite)
+            priority: Higher priority interrupts lower
+        """
+        self._schedules[name] = {
+            "playback": playback,
+            "start_time": start_time,
+            "interval": interval_seconds,
+            "repeat_count": repeat_count,
+            "repeats_done": 0,
+            "priority": priority,
+            "last_run": None,
+            "next_run": start_time or datetime.utcnow(),
+            "enabled": True,
+        }
+
+    def remove_scheduled_playback(self, name: str) -> bool:
+        """Remove a scheduled playback."""
+        if name in self._schedules:
+            del self._schedules[name]
+            return True
+        return False
+
+    def enable_schedule(self, name: str) -> None:
+        """Enable a schedule."""
+        if name in self._schedules:
+            self._schedules[name]["enabled"] = True
+
+    def disable_schedule(self, name: str) -> None:
+        """Disable a schedule."""
+        if name in self._schedules:
+            self._schedules[name]["enabled"] = False
+
+    def get_next_scheduled(self) -> Optional[Tuple[str, datetime]]:
+        """Get the next scheduled playback."""
+        next_name = None
+        next_time = None
+
+        for name, schedule in self._schedules.items():
+            if not schedule["enabled"]:
+                continue
+
+            if schedule["repeat_count"] >= 0:
+                if schedule["repeats_done"] >= schedule["repeat_count"]:
+                    continue
+
+            run_time = schedule["next_run"]
+            if run_time and (next_time is None or run_time < next_time):
+                next_name = name
+                next_time = run_time
+
+        if next_name:
+            return (next_name, next_time)
+        return None
+
+    def check_and_get_playback(self) -> Optional[Tuple[str, SignalPlayback]]:
+        """
+        Check if any playback is due and return it.
+
+        Returns:
+            Tuple of (name, playback) if due, None otherwise
+        """
+        now = datetime.utcnow()
+        best_candidate = None
+        best_priority = -1
+
+        for name, schedule in self._schedules.items():
+            if not schedule["enabled"]:
+                continue
+
+            # Check repeat limit
+            if schedule["repeat_count"] >= 0:
+                if schedule["repeats_done"] >= schedule["repeat_count"]:
+                    continue
+
+            # Check if due
+            next_run = schedule["next_run"]
+            if next_run and next_run <= now:
+                if schedule["priority"] > best_priority:
+                    best_candidate = name
+                    best_priority = schedule["priority"]
+
+        if best_candidate:
+            schedule = self._schedules[best_candidate]
+
+            # Update schedule
+            schedule["last_run"] = now
+            schedule["repeats_done"] += 1
+
+            if schedule["interval"]:
+                from datetime import timedelta
+                schedule["next_run"] = now + timedelta(seconds=schedule["interval"])
+            else:
+                schedule["next_run"] = None
+
+            # Reset playback
+            playback = schedule["playback"]
+            playback.stop()
+            playback.play()
+
+            self._current_playback = best_candidate
+            return (best_candidate, playback)
+
+        return None
+
+    def get_schedule_status(self) -> Dict[str, dict]:
+        """Get status of all schedules."""
+        status = {}
+        for name, schedule in self._schedules.items():
+            status[name] = {
+                "enabled": schedule["enabled"],
+                "next_run": schedule["next_run"].isoformat() if schedule["next_run"] else None,
+                "last_run": schedule["last_run"].isoformat() if schedule["last_run"] else None,
+                "repeats_done": schedule["repeats_done"],
+                "repeat_count": schedule["repeat_count"],
+                "priority": schedule["priority"],
+            }
+        return status
+
+    def reset_all(self) -> None:
+        """Reset all schedules to initial state."""
+        for schedule in self._schedules.values():
+            schedule["repeats_done"] = 0
+            schedule["last_run"] = None
+            if schedule["start_time"]:
+                schedule["next_run"] = schedule["start_time"]
+            else:
+                schedule["next_run"] = datetime.utcnow()
+
+
+# =============================================================================
+# File Format Utilities
+# =============================================================================
+
+@dataclass
+class FormatInfo:
+    """Detailed information about a file format."""
+    file_format: FileFormat
+    sample_format: SampleFormat
+    sample_rate: float = 0.0
+    center_frequency: float = 0.0
+    num_samples: int = 0
+    num_channels: int = 2          # 2 for I/Q
+    file_size_bytes: int = 0
+    duration_seconds: float = 0.0
+    bits_per_sample: int = 0
+    is_valid: bool = True
+    error_message: str = ""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class FormatDetector:
+    """
+    Auto-detect SDR file formats from file content and extension.
+
+    Supports detection of:
+    - Raw I/Q files (.raw, .iq, .cu8, .cs8, .cs16, .cf32, .cf64)
+    - WAV files (.wav)
+    - SigMF files (.sigmf-data, .sigmf-meta)
+
+    Example:
+        detector = FormatDetector()
+        info = detector.detect("recording.sigmf-data")
+        print(f"Format: {info.file_format}, Sample rate: {info.sample_rate}")
+    """
+
+    # Magic bytes for format detection
+    WAV_MAGIC = b'RIFF'
+    SIGMF_META_KEYS = ['global', 'captures', 'annotations']
+
+    # Extension to format mapping
+    EXTENSION_MAP = {
+        '.wav': (FileFormat.WAV, None),
+        '.cu8': (FileFormat.RAW, SampleFormat.UINT8),
+        '.cs8': (FileFormat.RAW, SampleFormat.INT8),
+        '.cs16': (FileFormat.RAW, SampleFormat.INT16),
+        '.cf32': (FileFormat.RAW, SampleFormat.FLOAT32),
+        '.cf64': (FileFormat.RAW, SampleFormat.FLOAT64),
+        '.raw': (FileFormat.RAW, SampleFormat.FLOAT32),
+        '.iq': (FileFormat.RAW, SampleFormat.FLOAT32),
+        '.bin': (FileFormat.RAW, SampleFormat.FLOAT32),
+        '.sigmf-data': (FileFormat.SIGMF, None),
+        '.sigmf-meta': (FileFormat.SIGMF, None),
+    }
+
+    # Bytes per sample for each format
+    BYTES_PER_SAMPLE = {
+        SampleFormat.UINT8: 1,
+        SampleFormat.INT8: 1,
+        SampleFormat.INT16: 2,
+        SampleFormat.FLOAT32: 4,
+        SampleFormat.FLOAT64: 8,
+    }
+
+    def detect(self, filepath: Union[str, Path]) -> FormatInfo:
+        """
+        Detect file format and extract information.
+
+        Args:
+            filepath: Path to the file
+
+        Returns:
+            FormatInfo with detected parameters
+        """
+        filepath = Path(filepath)
+
+        if not filepath.exists():
+            return FormatInfo(
+                file_format=FileFormat.RAW,
+                sample_format=SampleFormat.FLOAT32,
+                is_valid=False,
+                error_message=f"File not found: {filepath}"
+            )
+
+        # Get file size
+        file_size = filepath.stat().st_size
+
+        # Try to detect by extension first
+        suffix = filepath.suffix.lower()
+        file_format, sample_format = self.EXTENSION_MAP.get(
+            suffix, (FileFormat.RAW, SampleFormat.FLOAT32)
+        )
+
+        # Detect by magic bytes / content
+        try:
+            if suffix == '.wav' or self._is_wav_file(filepath):
+                return self._detect_wav(filepath)
+
+            elif suffix in ('.sigmf-data', '.sigmf-meta') or self._has_sigmf_meta(filepath):
+                return self._detect_sigmf(filepath)
+
+            else:
+                return self._detect_raw(filepath, sample_format)
+
+        except Exception as e:
+            return FormatInfo(
+                file_format=file_format,
+                sample_format=sample_format or SampleFormat.FLOAT32,
+                file_size_bytes=file_size,
+                is_valid=False,
+                error_message=str(e)
+            )
+
+    def _is_wav_file(self, filepath: Path) -> bool:
+        """Check if file is a WAV file by magic bytes."""
+        try:
+            with open(filepath, 'rb') as f:
+                magic = f.read(4)
+                return magic == self.WAV_MAGIC
+        except Exception:
+            return False
+
+    def _has_sigmf_meta(self, filepath: Path) -> bool:
+        """Check if SigMF metadata file exists."""
+        meta_path = filepath.with_suffix('.sigmf-meta')
+        return meta_path.exists()
+
+    def _detect_wav(self, filepath: Path) -> FormatInfo:
+        """Detect WAV file format."""
+        try:
+            with wave.open(str(filepath), 'rb') as wav:
+                n_channels = wav.getnchannels()
+                sample_width = wav.getsampwidth()
+                sample_rate = wav.getframerate()
+                n_frames = wav.getnframes()
+
+                # Map sample width to format
+                if sample_width == 1:
+                    sample_format = SampleFormat.UINT8
+                elif sample_width == 2:
+                    sample_format = SampleFormat.INT16
+                else:
+                    sample_format = SampleFormat.INT16
+
+                file_size = filepath.stat().st_size
+                duration = n_frames / sample_rate if sample_rate > 0 else 0
+
+                return FormatInfo(
+                    file_format=FileFormat.WAV,
+                    sample_format=sample_format,
+                    sample_rate=float(sample_rate),
+                    num_samples=n_frames,
+                    num_channels=n_channels,
+                    file_size_bytes=file_size,
+                    duration_seconds=duration,
+                    bits_per_sample=sample_width * 8,
+                    is_valid=True,
+                    metadata={
+                        "wav_channels": n_channels,
+                        "wav_sample_width": sample_width,
+                    }
+                )
+        except Exception as e:
+            return FormatInfo(
+                file_format=FileFormat.WAV,
+                sample_format=SampleFormat.INT16,
+                is_valid=False,
+                error_message=str(e)
+            )
+
+    def _detect_sigmf(self, filepath: Path) -> FormatInfo:
+        """Detect SigMF file format."""
+        # Find metadata file
+        if filepath.suffix == '.sigmf-meta':
+            meta_path = filepath
+            data_path = filepath.with_suffix('.sigmf-data')
+        else:
+            data_path = filepath.with_suffix('.sigmf-data')
+            meta_path = filepath.with_suffix('.sigmf-meta')
+
+        if not data_path.exists():
+            data_path = filepath
+
+        try:
+            # Read metadata
+            sigmf_meta = {}
+            if meta_path.exists():
+                with open(meta_path, 'r') as f:
+                    sigmf_meta = json.load(f)
+
+            global_meta = sigmf_meta.get('global', {})
+            captures = sigmf_meta.get('captures', [{}])
+
+            # Parse datatype
+            datatype = global_meta.get('core:datatype', 'cf32_le')
+            format_map = {
+                'cu8': SampleFormat.UINT8,
+                'ci8': SampleFormat.INT8,
+                'ci16_le': SampleFormat.INT16,
+                'ci16_be': SampleFormat.INT16,
+                'cf32_le': SampleFormat.FLOAT32,
+                'cf32_be': SampleFormat.FLOAT32,
+                'cf64_le': SampleFormat.FLOAT64,
+                'cf64_be': SampleFormat.FLOAT64,
+            }
+            sample_format = format_map.get(datatype, SampleFormat.FLOAT32)
+
+            sample_rate = global_meta.get('core:sample_rate', 0.0)
+            center_freq = captures[0].get('core:frequency', 0.0) if captures else 0.0
+
+            # Calculate samples from file size
+            file_size = data_path.stat().st_size if data_path.exists() else 0
+            bytes_per_sample = self.BYTES_PER_SAMPLE.get(sample_format, 4) * 2
+            num_samples = file_size // bytes_per_sample
+            duration = num_samples / sample_rate if sample_rate > 0 else 0
+
+            return FormatInfo(
+                file_format=FileFormat.SIGMF,
+                sample_format=sample_format,
+                sample_rate=sample_rate,
+                center_frequency=center_freq,
+                num_samples=num_samples,
+                num_channels=2,
+                file_size_bytes=file_size,
+                duration_seconds=duration,
+                bits_per_sample=self.BYTES_PER_SAMPLE.get(sample_format, 4) * 8,
+                is_valid=True,
+                metadata={
+                    "sigmf_version": global_meta.get('core:version', ''),
+                    "sigmf_description": global_meta.get('core:description', ''),
+                    "sigmf_author": global_meta.get('core:author', ''),
+                    "sigmf_hardware": global_meta.get('core:hw', ''),
+                    "sigmf_datatype": datatype,
+                }
+            )
+        except Exception as e:
+            return FormatInfo(
+                file_format=FileFormat.SIGMF,
+                sample_format=SampleFormat.FLOAT32,
+                is_valid=False,
+                error_message=str(e)
+            )
+
+    def _detect_raw(
+        self,
+        filepath: Path,
+        sample_format: Optional[SampleFormat] = None
+    ) -> FormatInfo:
+        """Detect raw I/Q file format."""
+        file_size = filepath.stat().st_size
+        sample_format = sample_format or SampleFormat.FLOAT32
+
+        bytes_per_sample = self.BYTES_PER_SAMPLE.get(sample_format, 4) * 2
+        num_samples = file_size // bytes_per_sample
+
+        return FormatInfo(
+            file_format=FileFormat.RAW,
+            sample_format=sample_format,
+            num_samples=num_samples,
+            num_channels=2,
+            file_size_bytes=file_size,
+            bits_per_sample=self.BYTES_PER_SAMPLE.get(sample_format, 4) * 8,
+            is_valid=True,
+            metadata={
+                "detected_from": "extension",
+            }
+        )
+
+    def detect_sample_format_from_data(
+        self,
+        filepath: Union[str, Path],
+        sample_count: int = 1000
+    ) -> SampleFormat:
+        """
+        Attempt to detect sample format by analyzing data values.
+
+        Args:
+            filepath: Path to raw file
+            sample_count: Number of samples to analyze
+
+        Returns:
+            Most likely SampleFormat
+        """
+        filepath = Path(filepath)
+        file_size = filepath.stat().st_size
+
+        # Read sample data
+        with open(filepath, 'rb') as f:
+            data = f.read(min(file_size, sample_count * 16))
+
+        # Try different interpretations
+        scores = {}
+
+        # UINT8: values 0-255, typically centered around 127-128
+        try:
+            samples = np.frombuffer(data, dtype=np.uint8)
+            if len(samples) > 10:
+                mean_val = np.mean(samples)
+                if 100 < mean_val < 156:  # Near center (127.5)
+                    scores[SampleFormat.UINT8] = 1.0 - abs(mean_val - 127.5) / 127.5
+        except Exception:
+            pass
+
+        # INT16: values typically in reasonable range
+        try:
+            samples = np.frombuffer(data, dtype=np.int16)
+            if len(samples) > 10:
+                max_abs = np.max(np.abs(samples))
+                if max_abs < 32768:
+                    scores[SampleFormat.INT16] = 0.8 if max_abs > 100 else 0.3
+        except Exception:
+            pass
+
+        # FLOAT32: check for valid float values
+        try:
+            samples = np.frombuffer(data, dtype=np.float32)
+            if len(samples) > 10:
+                if not np.any(np.isnan(samples)) and not np.any(np.isinf(samples)):
+                    max_abs = np.max(np.abs(samples))
+                    if max_abs < 10.0:  # Typically normalized
+                        scores[SampleFormat.FLOAT32] = 0.9
+                    elif max_abs < 1000:
+                        scores[SampleFormat.FLOAT32] = 0.5
+        except Exception:
+            pass
+
+        if scores:
+            return max(scores.keys(), key=lambda k: scores[k])
+        return SampleFormat.FLOAT32
+
+
+class FormatConverter:
+    """
+    Convert between SDR file formats.
+
+    Supports conversion between:
+    - Raw I/Q (various sample formats)
+    - WAV (stereo I/Q)
+    - SigMF (with metadata)
+
+    Example:
+        converter = FormatConverter()
+        converter.convert(
+            "input.cu8",
+            "output.sigmf-data",
+            input_format=SampleFormat.UINT8,
+            output_format=SampleFormat.FLOAT32,
+            sample_rate=2.4e6
+        )
+    """
+
+    def __init__(self, chunk_size: int = 65536):
+        """
+        Initialize converter.
+
+        Args:
+            chunk_size: Samples per chunk for streaming conversion
+        """
+        self._chunk_size = chunk_size
+        self._detector = FormatDetector()
+
+    def convert(
+        self,
+        input_path: Union[str, Path],
+        output_path: Union[str, Path],
+        input_format: Optional[SampleFormat] = None,
+        output_format: SampleFormat = SampleFormat.FLOAT32,
+        output_file_format: Optional[FileFormat] = None,
+        sample_rate: float = 0.0,
+        center_frequency: float = 0.0,
+        description: str = ""
+    ) -> FormatInfo:
+        """
+        Convert file to different format.
+
+        Args:
+            input_path: Input file path
+            output_path: Output file path
+            input_format: Input sample format (auto-detect if None)
+            output_format: Output sample format
+            output_file_format: Output file format (detect from extension if None)
+            sample_rate: Sample rate (for metadata)
+            center_frequency: Center frequency (for metadata)
+            description: File description (for metadata)
+
+        Returns:
+            FormatInfo for output file
+        """
+        input_path = Path(input_path)
+        output_path = Path(output_path)
+
+        # Detect input format
+        input_info = self._detector.detect(input_path)
+        if not input_info.is_valid:
+            raise ValueError(f"Cannot read input file: {input_info.error_message}")
+
+        if input_format:
+            input_info.sample_format = input_format
+        if sample_rate > 0:
+            input_info.sample_rate = sample_rate
+        if center_frequency > 0:
+            input_info.center_frequency = center_frequency
+
+        # Determine output file format
+        if output_file_format is None:
+            suffix = output_path.suffix.lower()
+            if suffix == '.wav':
+                output_file_format = FileFormat.WAV
+            elif suffix in ('.sigmf-data', '.sigmf-meta'):
+                output_file_format = FileFormat.SIGMF
+            else:
+                output_file_format = FileFormat.RAW
+
+        # Load input samples
+        samples, _ = load_iq_file(input_path, input_info.sample_format)
+
+        # Save to output format
+        if output_file_format == FileFormat.WAV:
+            return self._save_wav(
+                output_path, samples, output_format,
+                input_info.sample_rate
+            )
+        elif output_file_format == FileFormat.SIGMF:
+            return self._save_sigmf(
+                output_path, samples, output_format,
+                input_info.sample_rate, input_info.center_frequency,
+                description
+            )
+        else:
+            return self._save_raw(
+                output_path, samples, output_format,
+                input_info.sample_rate, input_info.center_frequency
+            )
+
+    def _save_raw(
+        self,
+        filepath: Path,
+        samples: np.ndarray,
+        sample_format: SampleFormat,
+        sample_rate: float,
+        center_frequency: float
+    ) -> FormatInfo:
+        """Save to raw I/Q format."""
+        metadata = save_iq_file(
+            filepath, samples, sample_rate,
+            center_frequency, sample_format, FileFormat.RAW
+        )
+        return FormatInfo(
+            file_format=FileFormat.RAW,
+            sample_format=sample_format,
+            sample_rate=sample_rate,
+            center_frequency=center_frequency,
+            num_samples=len(samples),
+            file_size_bytes=filepath.stat().st_size,
+            duration_seconds=len(samples) / sample_rate if sample_rate > 0 else 0,
+            is_valid=True
+        )
+
+    def _save_wav(
+        self,
+        filepath: Path,
+        samples: np.ndarray,
+        sample_format: SampleFormat,
+        sample_rate: float
+    ) -> FormatInfo:
+        """Save to WAV format."""
+        metadata = save_iq_file(
+            filepath, samples, sample_rate,
+            0.0, sample_format, FileFormat.WAV
+        )
+        return FormatInfo(
+            file_format=FileFormat.WAV,
+            sample_format=sample_format,
+            sample_rate=sample_rate,
+            num_samples=len(samples),
+            file_size_bytes=filepath.stat().st_size,
+            duration_seconds=len(samples) / sample_rate if sample_rate > 0 else 0,
+            is_valid=True
+        )
+
+    def _save_sigmf(
+        self,
+        filepath: Path,
+        samples: np.ndarray,
+        sample_format: SampleFormat,
+        sample_rate: float,
+        center_frequency: float,
+        description: str
+    ) -> FormatInfo:
+        """Save to SigMF format."""
+        recorder = IQRecorder(
+            sample_rate=sample_rate,
+            center_frequency=center_frequency,
+            sample_format=sample_format,
+            file_format=FileFormat.SIGMF
+        )
+        recorder.set_metadata(description=description)
+        recorder.start(filepath)
+        recorder.write(samples)
+        metadata = recorder.stop()
+
+        data_path = filepath.with_suffix('.sigmf-data')
+        file_size = data_path.stat().st_size if data_path.exists() else 0
+
+        return FormatInfo(
+            file_format=FileFormat.SIGMF,
+            sample_format=sample_format,
+            sample_rate=sample_rate,
+            center_frequency=center_frequency,
+            num_samples=len(samples),
+            file_size_bytes=file_size,
+            duration_seconds=len(samples) / sample_rate if sample_rate > 0 else 0,
+            is_valid=True,
+            metadata={"description": description}
+        )
+
+    def convert_sample_format(
+        self,
+        samples: np.ndarray,
+        target_format: SampleFormat
+    ) -> np.ndarray:
+        """
+        Convert samples to different sample format (in memory).
+
+        Args:
+            samples: Input complex samples
+            target_format: Target sample format
+
+        Returns:
+            Converted samples as interleaved I/Q array
+        """
+        # Interleave I/Q
+        interleaved = np.zeros(len(samples) * 2, dtype=np.float64)
+        interleaved[0::2] = samples.real
+        interleaved[1::2] = samples.imag
+
+        # Convert to target format
+        if target_format == SampleFormat.UINT8:
+            scaled = np.clip(interleaved * 127.5 + 127.5, 0, 255)
+            return scaled.astype(np.uint8)
+
+        elif target_format == SampleFormat.INT8:
+            scaled = np.clip(interleaved * 127, -128, 127)
+            return scaled.astype(np.int8)
+
+        elif target_format == SampleFormat.INT16:
+            scaled = np.clip(interleaved * 32767, -32768, 32767)
+            return scaled.astype(np.int16)
+
+        elif target_format == SampleFormat.FLOAT32:
+            return interleaved.astype(np.float32)
+
+        elif target_format == SampleFormat.FLOAT64:
+            return interleaved.astype(np.float64)
+
+        return interleaved.astype(np.float32)
+
+    def resample_file(
+        self,
+        input_path: Union[str, Path],
+        output_path: Union[str, Path],
+        target_sample_rate: float,
+        input_sample_rate: Optional[float] = None
+    ) -> FormatInfo:
+        """
+        Resample a file to different sample rate.
+
+        Args:
+            input_path: Input file
+            output_path: Output file
+            target_sample_rate: Target sample rate
+            input_sample_rate: Input sample rate (auto-detect if None)
+
+        Returns:
+            FormatInfo for output file
+        """
+        input_path = Path(input_path)
+        output_path = Path(output_path)
+
+        # Load input
+        input_info = self._detector.detect(input_path)
+        samples, _ = load_iq_file(input_path, input_info.sample_format)
+
+        source_rate = input_sample_rate or input_info.sample_rate
+        if source_rate <= 0:
+            raise ValueError("Input sample rate not specified and could not be detected")
+
+        # Calculate resampling ratio
+        ratio = target_sample_rate / source_rate
+
+        # Simple linear interpolation resampling
+        n_output = int(len(samples) * ratio)
+        indices = np.linspace(0, len(samples) - 1, n_output)
+        indices_floor = np.floor(indices).astype(int)
+        indices_ceil = np.minimum(indices_floor + 1, len(samples) - 1)
+        frac = indices - indices_floor
+
+        resampled = ((1 - frac) * samples[indices_floor] +
+                     frac * samples[indices_ceil]).astype(np.complex64)
+
+        # Save resampled
+        output_info = self._detector.detect(output_path) if output_path.exists() else None
+        output_format = output_info.sample_format if output_info else input_info.sample_format
+
+        suffix = output_path.suffix.lower()
+        if suffix == '.wav':
+            file_format = FileFormat.WAV
+        elif suffix in ('.sigmf-data', '.sigmf-meta'):
+            file_format = FileFormat.SIGMF
+        else:
+            file_format = FileFormat.RAW
+
+        save_iq_file(
+            output_path, resampled, target_sample_rate,
+            input_info.center_frequency, output_format, file_format
+        )
+
+        return FormatInfo(
+            file_format=file_format,
+            sample_format=output_format,
+            sample_rate=target_sample_rate,
+            center_frequency=input_info.center_frequency,
+            num_samples=len(resampled),
+            file_size_bytes=output_path.stat().st_size,
+            duration_seconds=len(resampled) / target_sample_rate,
+            is_valid=True,
+            metadata={"resampled_from": source_rate}
+        )
+
+
+def detect_format(filepath: Union[str, Path]) -> FormatInfo:
+    """
+    Convenience function to detect file format.
+
+    Args:
+        filepath: Path to file
+
+    Returns:
+        FormatInfo with detected parameters
+    """
+    return FormatDetector().detect(filepath)
+
+
+def convert_format(
+    input_path: Union[str, Path],
+    output_path: Union[str, Path],
+    output_format: SampleFormat = SampleFormat.FLOAT32,
+    sample_rate: float = 0.0,
+    center_frequency: float = 0.0
+) -> FormatInfo:
+    """
+    Convenience function to convert file format.
+
+    Args:
+        input_path: Input file path
+        output_path: Output file path
+        output_format: Output sample format
+        sample_rate: Sample rate (for metadata)
+        center_frequency: Center frequency (for metadata)
+
+    Returns:
+        FormatInfo for output file
+    """
+    return FormatConverter().convert(
+        input_path, output_path,
+        output_format=output_format,
+        sample_rate=sample_rate,
+        center_frequency=center_frequency
+    )
+
+
+def get_file_info(filepath: Union[str, Path]) -> Dict[str, Any]:
+    """
+    Get human-readable file information.
+
+    Args:
+        filepath: Path to file
+
+    Returns:
+        Dictionary with file information
+    """
+    info = detect_format(filepath)
+
+    # Format duration nicely
+    if info.duration_seconds > 0:
+        if info.duration_seconds >= 3600:
+            hours = int(info.duration_seconds // 3600)
+            minutes = int((info.duration_seconds % 3600) // 60)
+            seconds = info.duration_seconds % 60
+            duration_str = f"{hours}h {minutes}m {seconds:.1f}s"
+        elif info.duration_seconds >= 60:
+            minutes = int(info.duration_seconds // 60)
+            seconds = info.duration_seconds % 60
+            duration_str = f"{minutes}m {seconds:.1f}s"
+        else:
+            duration_str = f"{info.duration_seconds:.2f}s"
+    else:
+        duration_str = "unknown"
+
+    # Format file size nicely
+    if info.file_size_bytes >= 1024 * 1024 * 1024:
+        size_str = f"{info.file_size_bytes / (1024**3):.2f} GB"
+    elif info.file_size_bytes >= 1024 * 1024:
+        size_str = f"{info.file_size_bytes / (1024**2):.2f} MB"
+    elif info.file_size_bytes >= 1024:
+        size_str = f"{info.file_size_bytes / 1024:.2f} KB"
+    else:
+        size_str = f"{info.file_size_bytes} bytes"
+
+    # Format sample rate
+    if info.sample_rate >= 1e6:
+        rate_str = f"{info.sample_rate / 1e6:.3f} MHz"
+    elif info.sample_rate >= 1e3:
+        rate_str = f"{info.sample_rate / 1e3:.3f} kHz"
+    elif info.sample_rate > 0:
+        rate_str = f"{info.sample_rate:.1f} Hz"
+    else:
+        rate_str = "unknown"
+
+    # Format center frequency
+    if info.center_frequency >= 1e9:
+        freq_str = f"{info.center_frequency / 1e9:.6f} GHz"
+    elif info.center_frequency >= 1e6:
+        freq_str = f"{info.center_frequency / 1e6:.6f} MHz"
+    elif info.center_frequency >= 1e3:
+        freq_str = f"{info.center_frequency / 1e3:.3f} kHz"
+    elif info.center_frequency > 0:
+        freq_str = f"{info.center_frequency:.1f} Hz"
+    else:
+        freq_str = "not specified"
+
+    return {
+        "file_format": info.file_format.value,
+        "sample_format": info.sample_format.value,
+        "sample_rate": rate_str,
+        "sample_rate_hz": info.sample_rate,
+        "center_frequency": freq_str,
+        "center_frequency_hz": info.center_frequency,
+        "duration": duration_str,
+        "duration_seconds": info.duration_seconds,
+        "num_samples": info.num_samples,
+        "file_size": size_str,
+        "file_size_bytes": info.file_size_bytes,
+        "bits_per_sample": info.bits_per_sample,
+        "is_valid": info.is_valid,
+        "error": info.error_message if not info.is_valid else None,
+        "metadata": info.metadata,
+    }

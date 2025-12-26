@@ -896,3 +896,452 @@ class Resampler:
         self._buffer = None
         self._phase = 0
 
+
+class AGCMode(Enum):
+    """AGC detection modes."""
+    RMS = "rms"           # Root Mean Square level detection
+    PEAK = "peak"         # Peak level detection
+    LOG = "log"           # Logarithmic domain processing
+    MAGNITUDE = "magnitude"  # Magnitude-based (good for complex signals)
+
+
+@dataclass
+class AGCConfig:
+    """AGC configuration parameters."""
+    target_level: float = 1.0      # Target output amplitude
+    attack_time: float = 0.001     # Attack time in seconds (fast response)
+    decay_time: float = 0.1        # Decay/release time in seconds
+    hang_time: float = 0.0         # Hold time before decay starts
+    max_gain: float = 100.0        # Maximum gain (linear)
+    min_gain: float = 0.001        # Minimum gain (linear)
+    mode: AGCMode = AGCMode.RMS    # Detection mode
+    reference_level: float = 0.0   # Reference level for log mode (dB)
+
+
+class AGC:
+    """
+    Automatic Gain Control for SDR signal conditioning.
+
+    Maintains consistent signal amplitude by dynamically adjusting gain
+    based on input signal level. Essential for handling varying signal
+    strengths in real-world radio reception.
+
+    Features:
+    - Multiple detection modes: RMS, peak, log-domain, magnitude
+    - Configurable attack/decay time constants
+    - Hang time to prevent pumping on speech
+    - Min/max gain limiting
+    - Real and complex signal support
+    - Streaming with state preservation
+
+    Typical use cases:
+    - Normalizing signal levels before demodulation
+    - Preventing ADC saturation in receive chains
+    - Maintaining consistent audio output levels
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        config: Optional[AGCConfig] = None
+    ):
+        """
+        Initialize AGC.
+
+        Args:
+            sample_rate: Sample rate in Hz
+            config: AGC configuration (uses defaults if None)
+        """
+        self._sample_rate = sample_rate
+        self._config = config or AGCConfig()
+
+        # Calculate time constants as sample-domain coefficients
+        self._update_coefficients()
+
+        # State variables
+        self._gain = 1.0           # Current gain
+        self._level = 0.0          # Detected signal level
+        self._hang_counter = 0     # Hang time counter
+        self._peak_hold = 0.0      # Peak hold for peak detector
+
+        # For RMS calculation (exponential moving average)
+        self._rms_squared = 0.0
+
+    def _update_coefficients(self) -> None:
+        """Calculate filter coefficients from time constants."""
+        # Attack coefficient (fast, gain decreases)
+        if self._config.attack_time > 0:
+            self._attack_coeff = 1.0 - np.exp(
+                -1.0 / (self._config.attack_time * self._sample_rate)
+            )
+        else:
+            self._attack_coeff = 1.0  # Instant attack
+
+        # Decay coefficient (slow, gain increases)
+        if self._config.decay_time > 0:
+            self._decay_coeff = 1.0 - np.exp(
+                -1.0 / (self._config.decay_time * self._sample_rate)
+            )
+        else:
+            self._decay_coeff = 1.0  # Instant decay
+
+        # Hang time in samples
+        self._hang_samples = int(self._config.hang_time * self._sample_rate)
+
+    @property
+    def sample_rate(self) -> float:
+        """Get sample rate."""
+        return self._sample_rate
+
+    @property
+    def config(self) -> AGCConfig:
+        """Get current configuration."""
+        return self._config
+
+    @property
+    def current_gain(self) -> float:
+        """Get current gain value."""
+        return self._gain
+
+    @property
+    def current_gain_db(self) -> float:
+        """Get current gain in dB."""
+        return 20 * np.log10(self._gain + 1e-20)
+
+    @property
+    def current_level(self) -> float:
+        """Get detected signal level."""
+        return self._level
+
+    def set_config(self, config: AGCConfig) -> None:
+        """Update AGC configuration."""
+        self._config = config
+        self._update_coefficients()
+
+    def set_attack_time(self, attack_time: float) -> None:
+        """Set attack time in seconds."""
+        self._config.attack_time = attack_time
+        self._update_coefficients()
+
+    def set_decay_time(self, decay_time: float) -> None:
+        """Set decay time in seconds."""
+        self._config.decay_time = decay_time
+        self._update_coefficients()
+
+    def set_target_level(self, level: float) -> None:
+        """Set target output level."""
+        self._config.target_level = level
+
+    def _detect_level_rms(self, sample: complex) -> float:
+        """RMS level detection with exponential averaging."""
+        power = np.abs(sample) ** 2
+        # Use attack/decay asymmetry
+        if power > self._rms_squared:
+            self._rms_squared += self._attack_coeff * (power - self._rms_squared)
+        else:
+            self._rms_squared += self._decay_coeff * (power - self._rms_squared)
+        return np.sqrt(self._rms_squared)
+
+    def _detect_level_peak(self, sample: complex) -> float:
+        """Peak level detection with decay."""
+        magnitude = np.abs(sample)
+        if magnitude > self._peak_hold:
+            self._peak_hold = magnitude
+            self._hang_counter = self._hang_samples
+        elif self._hang_counter > 0:
+            self._hang_counter -= 1
+        else:
+            self._peak_hold *= (1.0 - self._decay_coeff)
+        return self._peak_hold
+
+    def _detect_level_magnitude(self, sample: complex) -> float:
+        """Simple magnitude-based detection with smoothing."""
+        magnitude = np.abs(sample)
+        if magnitude > self._level:
+            self._level += self._attack_coeff * (magnitude - self._level)
+        else:
+            if self._hang_counter > 0:
+                self._hang_counter -= 1
+            else:
+                self._level += self._decay_coeff * (magnitude - self._level)
+        return self._level
+
+    def _detect_level(self, sample: complex) -> float:
+        """Detect signal level based on configured mode."""
+        if self._config.mode == AGCMode.RMS:
+            return self._detect_level_rms(sample)
+        elif self._config.mode == AGCMode.PEAK:
+            return self._detect_level_peak(sample)
+        elif self._config.mode == AGCMode.MAGNITUDE:
+            return self._detect_level_magnitude(sample)
+        elif self._config.mode == AGCMode.LOG:
+            # Log-domain: work in dB
+            magnitude = np.abs(sample)
+            if magnitude > 0:
+                level_db = 20 * np.log10(magnitude)
+                if level_db > self._config.reference_level:
+                    return 10 ** (level_db / 20)
+            return self._level
+        return np.abs(sample)
+
+    def _compute_gain(self, level: float) -> float:
+        """Compute required gain from detected level."""
+        if level > 1e-10:
+            desired_gain = self._config.target_level / level
+        else:
+            desired_gain = self._config.max_gain
+
+        # Apply gain limits
+        gain = np.clip(desired_gain, self._config.min_gain, self._config.max_gain)
+        return gain
+
+    def process_sample(self, sample: complex) -> complex:
+        """
+        Process a single sample through AGC.
+
+        Args:
+            sample: Input sample (real or complex)
+
+        Returns:
+            Gain-adjusted sample
+        """
+        # Detect level
+        self._level = self._detect_level(sample)
+
+        # Compute desired gain
+        target_gain = self._compute_gain(self._level)
+
+        # Smooth gain changes (attack/decay on gain itself)
+        if target_gain < self._gain:
+            # Attacking (gain decreasing = signal increasing)
+            self._gain += self._attack_coeff * (target_gain - self._gain)
+        else:
+            # Decaying (gain increasing = signal decreasing)
+            if self._hang_counter > 0:
+                pass  # Hold gain during hang time
+            else:
+                self._gain += self._decay_coeff * (target_gain - self._gain)
+
+        # Apply gain
+        return sample * self._gain
+
+    def process(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Process array of samples through AGC.
+
+        Args:
+            samples: Input samples (real or complex array)
+
+        Returns:
+            Gain-adjusted samples
+        """
+        output = np.zeros_like(samples)
+        for i, sample in enumerate(samples):
+            output[i] = self.process_sample(sample)
+        return output
+
+    def process_block(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Efficient block-based AGC processing.
+
+        Uses block-level statistics for faster processing at the
+        cost of slightly less precise gain control.
+
+        Args:
+            samples: Input samples
+
+        Returns:
+            Gain-adjusted samples
+        """
+        # Detect block level
+        if self._config.mode == AGCMode.RMS:
+            block_level = np.sqrt(np.mean(np.abs(samples) ** 2))
+        elif self._config.mode == AGCMode.PEAK:
+            block_level = np.max(np.abs(samples))
+        else:
+            block_level = np.mean(np.abs(samples))
+
+        # Smooth level tracking
+        if block_level > self._level:
+            self._level += self._attack_coeff * (block_level - self._level)
+        else:
+            self._level += self._decay_coeff * (block_level - self._level)
+
+        # Compute and apply gain
+        target_gain = self._compute_gain(self._level)
+
+        if target_gain < self._gain:
+            self._gain += self._attack_coeff * (target_gain - self._gain)
+        else:
+            self._gain += self._decay_coeff * (target_gain - self._gain)
+
+        return samples * self._gain
+
+    def process_with_ramp(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Process with per-sample gain ramping for smooth transitions.
+
+        Interpolates gain across the block for artifact-free processing.
+
+        Args:
+            samples: Input samples
+
+        Returns:
+            Gain-adjusted samples with smooth transitions
+        """
+        n_samples = len(samples)
+        output = np.zeros_like(samples)
+        gains = np.zeros(n_samples)
+
+        # Process each sample and record gain
+        for i, sample in enumerate(samples):
+            self._level = self._detect_level(sample)
+            target_gain = self._compute_gain(self._level)
+
+            if target_gain < self._gain:
+                self._gain += self._attack_coeff * (target_gain - self._gain)
+            else:
+                self._gain += self._decay_coeff * (target_gain - self._gain)
+
+            gains[i] = self._gain
+
+        # Apply gain ramp
+        output = samples * gains
+        return output
+
+    def get_gain_history(
+        self,
+        samples: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Process samples and return gain history for analysis.
+
+        Args:
+            samples: Input samples
+
+        Returns:
+            Tuple of (processed_samples, gain_values)
+        """
+        n_samples = len(samples)
+        output = np.zeros_like(samples)
+        gains = np.zeros(n_samples)
+
+        for i, sample in enumerate(samples):
+            output[i] = self.process_sample(sample)
+            gains[i] = self._gain
+
+        return output, gains
+
+    def reset(self) -> None:
+        """Reset AGC state."""
+        self._gain = 1.0
+        self._level = 0.0
+        self._hang_counter = 0
+        self._peak_hold = 0.0
+        self._rms_squared = 0.0
+
+    def freeze(self) -> None:
+        """Freeze AGC at current gain (disable adaptation)."""
+        self._config.attack_time = float('inf')
+        self._config.decay_time = float('inf')
+        self._update_coefficients()
+
+    def unfreeze(
+        self,
+        attack_time: float = 0.001,
+        decay_time: float = 0.1
+    ) -> None:
+        """Unfreeze AGC and restore time constants."""
+        self._config.attack_time = attack_time
+        self._config.decay_time = decay_time
+        self._update_coefficients()
+
+
+class FastAGC:
+    """
+    Optimized AGC for high-performance applications.
+
+    Uses vectorized operations for block processing with
+    minimal per-sample overhead. Suitable for high sample rates.
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        target_level: float = 1.0,
+        attack_time: float = 0.001,
+        decay_time: float = 0.1,
+        max_gain: float = 100.0,
+        min_gain: float = 0.001
+    ):
+        """
+        Initialize FastAGC.
+
+        Args:
+            sample_rate: Sample rate in Hz
+            target_level: Target output amplitude
+            attack_time: Attack time in seconds
+            decay_time: Decay time in seconds
+            max_gain: Maximum gain
+            min_gain: Minimum gain
+        """
+        self._sample_rate = sample_rate
+        self._target = target_level
+        self._max_gain = max_gain
+        self._min_gain = min_gain
+
+        # Time constants
+        self._attack = 1.0 - np.exp(-1.0 / (attack_time * sample_rate))
+        self._decay = 1.0 - np.exp(-1.0 / (decay_time * sample_rate))
+
+        # State
+        self._gain = 1.0
+        self._envelope = 0.0
+
+    @property
+    def current_gain(self) -> float:
+        """Get current gain."""
+        return self._gain
+
+    def process(self, samples: np.ndarray) -> np.ndarray:
+        """
+        Fast block processing.
+
+        Args:
+            samples: Input samples
+
+        Returns:
+            Gain-adjusted samples
+        """
+        # Envelope detection (vectorized)
+        magnitudes = np.abs(samples)
+
+        # Block envelope (RMS-like)
+        block_env = np.sqrt(np.mean(magnitudes ** 2))
+
+        # Update envelope with attack/decay
+        if block_env > self._envelope:
+            self._envelope += self._attack * (block_env - self._envelope)
+        else:
+            self._envelope += self._decay * (block_env - self._envelope)
+
+        # Compute gain
+        if self._envelope > 1e-10:
+            target_gain = self._target / self._envelope
+            target_gain = np.clip(target_gain, self._min_gain, self._max_gain)
+        else:
+            target_gain = self._gain
+
+        # Smooth gain
+        if target_gain < self._gain:
+            self._gain += self._attack * (target_gain - self._gain)
+        else:
+            self._gain += self._decay * (target_gain - self._gain)
+
+        return samples * self._gain
+
+    def reset(self) -> None:
+        """Reset state."""
+        self._gain = 1.0
+        self._envelope = 0.0
+

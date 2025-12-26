@@ -31,6 +31,19 @@ from .scanner import (
     ScanResult,
     SignalHit,
 )
+from .protocols import (
+    ProtocolType,
+    ProtocolDecoder,
+    DecodedMessage,
+    POCSAGDecoder,
+    POCSAGMessage,
+    AX25Decoder,
+    AX25Frame,
+    APRSMessage,
+    RDSDecoder,
+    RDSData,
+    create_protocol_decoder,
+)
 
 __all__ = [
     "SpectrumAnalyzer",
@@ -61,4 +74,15 @@ __all__ = [
     "ScanStatus",
     "ScanResult",
     "SignalHit",
+    "ProtocolType",
+    "ProtocolDecoder",
+    "DecodedMessage",
+    "POCSAGDecoder",
+    "POCSAGMessage",
+    "AX25Decoder",
+    "AX25Frame",
+    "APRSMessage",
+    "RDSDecoder",
+    "RDSData",
+    "create_protocol_decoder",
 ]

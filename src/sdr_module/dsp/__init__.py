@@ -106,6 +106,8 @@ from .callsign import (
     CallsignIdentifier,
     MorseEncoder,
     generate_cw_id,
+    audio_to_fm_iq,
+    generate_tx_id,
 )
 from .sstv import (
     SSTVMode,
@@ -239,6 +241,8 @@ __all__ = [
     "CallsignIdentifier",
     "MorseEncoder",
     "generate_cw_id",
+    "audio_to_fm_iq",
+    "generate_tx_id",
     # SSTV (Slow Scan Television)
     "SSTVMode",
     "SSTVModeSpec",

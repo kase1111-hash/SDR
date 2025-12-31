@@ -414,26 +414,122 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _on_callsign_id_requested(self):
         """Handle callsign ID request from the callsign panel."""
         callsign = self._callsign_panel.get_callsign()
-        if callsign:
-            logger.info(f"Callsign ID requested: {callsign}")
-            # In a full implementation, this would:
-            # 1. Generate the CW/Voice ID audio
-            # 2. Transmit it via HackRF
-            # For now, just log and update status
-            self._device_label.setText(f"ID: DE {callsign}")
+        if not callsign:
+            QMessageBox.warning(
+                self, "No Callsign",
+                "Please enter your callsign in the HAM ID panel."
+            )
+            return
 
-            try:
-                from ..dsp.callsign import generate_cw_id
-                settings = self._callsign_panel.get_settings()
-                audio = generate_cw_id(
-                    callsign,
-                    wpm=settings.get('cw_wpm', 20),
-                    frequency=settings.get('cw_tone', 700)
+        logger.info(f"Callsign ID requested: {callsign}")
+        self._device_label.setText(f"ID: DE {callsign}")
+
+        try:
+            from ..dsp.callsign import generate_tx_id
+            settings = self._callsign_panel.get_settings()
+
+            # Generate FM-modulated I/Q samples ready for transmission
+            iq_samples = generate_tx_id(
+                callsign,
+                wpm=settings.get('cw_wpm', 20),
+                tone_frequency=settings.get('cw_tone', 700),
+                rf_sample_rate=2e6,
+                fm_deviation=2500.0  # Narrowband FM for CW
+            )
+            logger.info(f"Generated TX ID: {len(iq_samples)} I/Q samples")
+
+            # Attempt transmission
+            self._transmit_audio(iq_samples, callsign)
+
+        except Exception as e:
+            logger.error(f"Error generating callsign ID: {e}")
+            QMessageBox.warning(
+                self, "ID Error",
+                f"Failed to generate callsign ID: {e}"
+            )
+
+    def _transmit_audio(self, iq_samples: np.ndarray, description: str = "audio"):
+        """
+        Transmit I/Q samples via HackRF.
+
+        Args:
+            iq_samples: Complex I/Q samples to transmit
+            description: Description for logging/status
+        """
+        from ..devices.hackrf import HackRFDevice
+        from ..core.frequency_manager import is_tx_allowed
+
+        # Check if we have a TX-capable device
+        if self._device is None:
+            QMessageBox.warning(
+                self, "No Device",
+                "No SDR device connected. Connect a HackRF for transmission."
+            )
+            return
+
+        # Verify it's a HackRF (TX-capable)
+        if not isinstance(self._device, HackRFDevice):
+            QMessageBox.warning(
+                self, "TX Not Supported",
+                "Connected device does not support transmission.\n"
+                "HackRF One is required for TX operations."
+            )
+            return
+
+        # Get current frequency for TX validation
+        current_freq = self._control_panel._freq_input.get_frequency()
+        bandwidth = 10e3  # Approximate CW bandwidth
+
+        # Validate TX is allowed at this frequency
+        allowed, reason = is_tx_allowed(current_freq, bandwidth)
+        if not allowed:
+            QMessageBox.critical(
+                self, "TX Blocked",
+                f"Transmission blocked at {current_freq/1e6:.3f} MHz:\n{reason}"
+            )
+            return
+
+        # Stop RX if running (HackRF is half-duplex)
+        was_running = self._is_running
+        if was_running:
+            self._stop_acquisition()
+
+        try:
+            # Update status
+            self._device_label.setText(f"TX: {description}")
+            self._callsign_panel.set_transmitting(True)
+
+            # Configure TX gain
+            self._device.set_tx_gain(20)  # Moderate TX power
+
+            # Transmit the samples
+            logger.info(f"Starting TX: {len(iq_samples)} samples at {current_freq/1e6:.3f} MHz")
+
+            # Use write_samples for one-shot transmission
+            success = self._device.write_samples(iq_samples)
+
+            if success:
+                logger.info(f"TX complete: {description}")
+                self._device_label.setText("TX Complete")
+            else:
+                logger.error("TX failed")
+                QMessageBox.warning(
+                    self, "TX Failed",
+                    "Failed to transmit. Check device connection."
                 )
-                logger.info(f"Generated ID audio: {len(audio)} samples")
-                # TODO: Transmit audio via HackRF TX
-            except Exception as e:
-                logger.error(f"Error generating callsign ID: {e}")
+
+        except Exception as e:
+            logger.error(f"TX error: {e}")
+            QMessageBox.warning(
+                self, "TX Error",
+                f"Transmission error: {e}"
+            )
+        finally:
+            self._callsign_panel.set_transmitting(False)
+
+            # Restart RX if it was running
+            if was_running:
+                self._start_acquisition()
 
     def _toggle_recording(self, checked: bool):
         """Toggle recording."""

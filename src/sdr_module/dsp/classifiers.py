@@ -7,16 +7,18 @@ Provides automatic detection of:
 - Signal bandwidth estimation
 """
 
-import numpy as np
-from typing import Optional
 from dataclasses import dataclass
 from enum import Enum
+from typing import Optional
+
+import numpy as np
 
 from .demodulators import ModulationType
 
 
 class SignalType(Enum):
     """High-level signal type."""
+
     UNKNOWN = "unknown"
     NOISE = "noise"
     ANALOG = "analog"
@@ -27,6 +29,7 @@ class SignalType(Enum):
 @dataclass
 class ClassificationResult:
     """Result of signal classification."""
+
     signal_type: SignalType
     modulation: Optional[ModulationType]
     confidence: float  # 0.0 to 1.0
@@ -86,7 +89,7 @@ class SignalClassifier:
             bandwidth_hz=bandwidth,
             center_offset_hz=features.get("center_offset", 0.0),
             snr_db=features.get("snr_db", 0.0),
-            features=features
+            features=features,
         )
 
     def _extract_features(self, samples: np.ndarray) -> dict:
@@ -103,7 +106,9 @@ class SignalClassifier:
 
         # Normalized statistics
         norm_mag = magnitude / (np.max(magnitude) + 1e-10)
-        features["crest_factor"] = np.max(norm_mag) / (np.sqrt(np.mean(norm_mag**2)) + 1e-10)
+        features["crest_factor"] = np.max(norm_mag) / (
+            np.sqrt(np.mean(norm_mag**2)) + 1e-10
+        )
 
         # Phase statistics (unwrapped)
         phase_unwrapped = np.unwrap(phase)
@@ -157,9 +162,7 @@ class SignalClassifier:
         return SignalType.UNKNOWN
 
     def _classify_analog(
-        self,
-        samples: np.ndarray,
-        features: dict
+        self, samples: np.ndarray, features: dict
     ) -> Optional[ModulationType]:
         """Classify analog modulation type."""
         std_mag = features.get("std_magnitude", 0)
@@ -177,8 +180,8 @@ class SignalClassifier:
         # SSB: check for asymmetric spectrum
         spectrum = np.abs(np.fft.fft(samples))
         n = len(spectrum)
-        lower_power = np.sum(spectrum[:n//2]**2)
-        upper_power = np.sum(spectrum[n//2:]**2)
+        lower_power = np.sum(spectrum[: n // 2] ** 2)
+        upper_power = np.sum(spectrum[n // 2 :] ** 2)
 
         if upper_power > 2 * lower_power:
             return ModulationType.USB
@@ -188,9 +191,7 @@ class SignalClassifier:
         return None
 
     def _classify_digital(
-        self,
-        samples: np.ndarray,
-        features: dict
+        self, samples: np.ndarray, features: dict
     ) -> Optional[ModulationType]:
         """Classify digital modulation type."""
         # Constellation analysis
@@ -243,19 +244,19 @@ class SignalClassifier:
 
     def _estimate_snr(self, samples: np.ndarray) -> float:
         """Estimate SNR from samples."""
-        spectrum = np.abs(np.fft.fft(samples))**2
+        spectrum = np.abs(np.fft.fft(samples)) ** 2
 
         # Find signal and noise regions
         sorted_power = np.sort(spectrum)
-        noise_floor = np.mean(sorted_power[:len(sorted_power)//4])
-        signal_power = np.mean(sorted_power[-len(sorted_power)//4:])
+        noise_floor = np.mean(sorted_power[: len(sorted_power) // 4])
+        signal_power = np.mean(sorted_power[-len(sorted_power) // 4 :])
 
         snr_linear = signal_power / (noise_floor + 1e-10)
         return 10 * np.log10(snr_linear + 1e-10)
 
     def _estimate_bandwidth(self, samples: np.ndarray) -> float:
         """Estimate occupied bandwidth."""
-        spectrum = np.abs(np.fft.fft(samples))**2
+        spectrum = np.abs(np.fft.fft(samples)) ** 2
         spectrum = np.fft.fftshift(spectrum)
 
         total_power = np.sum(spectrum)
@@ -276,4 +277,4 @@ class SignalClassifier:
         std = np.std(data)
         if std < 1e-10:
             return 0.0
-        return np.mean(((data - mean) / std)**4) - 3
+        return np.mean(((data - mean) / std) ** 4) - 3

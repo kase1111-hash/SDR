@@ -21,9 +21,9 @@ LICENSE PROFILES:
 from __future__ import annotations
 
 import logging
-from enum import Enum, auto
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional, Set
+from enum import Enum, auto
+from typing import List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -42,22 +42,24 @@ TX_POWER_WARNING = (
 
 class LockoutReason(Enum):
     """Reason for frequency lockout."""
-    GPS = auto()              # GPS/GNSS - Aircraft/vehicle navigation
-    AVIATION = auto()         # Aviation safety frequencies
-    EMERGENCY = auto()        # Emergency/distress frequencies
-    MILITARY = auto()         # Military bands
-    CELLULAR = auto()         # Cellular/mobile bands
-    SATELLITE = auto()        # Satellite communications
-    GOVERNMENT = auto()       # Government/public safety
-    BROADCAST = auto()        # Licensed broadcast bands
-    LICENSE = auto()          # No license or insufficient license
+
+    GPS = auto()  # GPS/GNSS - Aircraft/vehicle navigation
+    AVIATION = auto()  # Aviation safety frequencies
+    EMERGENCY = auto()  # Emergency/distress frequencies
+    MILITARY = auto()  # Military bands
+    CELLULAR = auto()  # Cellular/mobile bands
+    SATELLITE = auto()  # Satellite communications
+    GOVERNMENT = auto()  # Government/public safety
+    BROADCAST = auto()  # Licensed broadcast bands
+    LICENSE = auto()  # No license or insufficient license
 
 
 class LicenseClass(Enum):
     """Amateur radio license class (US FCC)."""
-    NONE = "none"                    # No license - only license-free bands
-    TECHNICIAN = "technician"        # Entry level - VHF/UHF, limited HF
-    GENERAL = "general"              # Most HF privileges
+
+    NONE = "none"  # No license - only license-free bands
+    TECHNICIAN = "technician"  # Entry level - VHF/UHF, limited HF
+    GENERAL = "general"  # Most HF privileges
     AMATEUR_EXTRA = "amateur_extra"  # Full privileges
 
     @classmethod
@@ -83,6 +85,7 @@ class BandPrivilege:
         max_power_watts: Maximum power for this segment (None = no limit)
         licenses: Set of license classes that can use this segment
     """
+
     name: str
     start_hz: float
     end_hz: float
@@ -122,6 +125,7 @@ class BandPrivilege:
 @dataclass
 class FrequencyBand:
     """A frequency band definition."""
+
     name: str
     start_hz: float
     end_hz: float
@@ -133,6 +137,7 @@ class FrequencyBand:
 @dataclass
 class FrequencyPreset:
     """A frequency preset for quick tuning."""
+
     name: str
     frequency_hz: float
     bandwidth_hz: float = 200000  # 200 kHz default
@@ -153,7 +158,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=1575.42e6 + 15e6,
         description="GPS L1 civilian signal - AIRCRAFT NAVIGATION",
         rx_only=True,
-        lockout_reason=LockoutReason.GPS
+        lockout_reason=LockoutReason.GPS,
     ),
     FrequencyBand(
         name="GPS L2",
@@ -161,7 +166,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=1227.60e6 + 15e6,
         description="GPS L2 signal - AIRCRAFT NAVIGATION",
         rx_only=True,
-        lockout_reason=LockoutReason.GPS
+        lockout_reason=LockoutReason.GPS,
     ),
     FrequencyBand(
         name="GPS L5",
@@ -169,7 +174,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=1176.45e6 + 15e6,
         description="GPS L5 safety-of-life signal - AIRCRAFT NAVIGATION",
         rx_only=True,
-        lockout_reason=LockoutReason.GPS
+        lockout_reason=LockoutReason.GPS,
     ),
     FrequencyBand(
         name="GLONASS L1",
@@ -177,7 +182,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=1610e6,
         description="GLONASS navigation - AIRCRAFT NAVIGATION",
         rx_only=True,
-        lockout_reason=LockoutReason.GPS
+        lockout_reason=LockoutReason.GPS,
     ),
     FrequencyBand(
         name="GLONASS L2",
@@ -185,7 +190,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=1249e6,
         description="GLONASS navigation - AIRCRAFT NAVIGATION",
         rx_only=True,
-        lockout_reason=LockoutReason.GPS
+        lockout_reason=LockoutReason.GPS,
     ),
     FrequencyBand(
         name="Galileo E1",
@@ -193,7 +198,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=1575.42e6 + 15e6,
         description="Galileo E1 - AIRCRAFT NAVIGATION",
         rx_only=True,
-        lockout_reason=LockoutReason.GPS
+        lockout_reason=LockoutReason.GPS,
     ),
     FrequencyBand(
         name="Galileo E5",
@@ -201,7 +206,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=1207.14e6 + 25e6,
         description="Galileo E5 - AIRCRAFT NAVIGATION",
         rx_only=True,
-        lockout_reason=LockoutReason.GPS
+        lockout_reason=LockoutReason.GPS,
     ),
     FrequencyBand(
         name="BeiDou B1",
@@ -209,9 +214,8 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=1561.098e6 + 15e6,
         description="BeiDou B1 - NAVIGATION",
         rx_only=True,
-        lockout_reason=LockoutReason.GPS
+        lockout_reason=LockoutReason.GPS,
     ),
-
     # Aviation Emergency/Safety
     FrequencyBand(
         name="Aviation Emergency",
@@ -219,7 +223,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=121.5e6 + 0.1e6,
         description="International aviation emergency frequency",
         rx_only=True,
-        lockout_reason=LockoutReason.EMERGENCY
+        lockout_reason=LockoutReason.EMERGENCY,
     ),
     FrequencyBand(
         name="Aviation Emergency (UHF)",
@@ -227,7 +231,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=243.0e6 + 0.1e6,
         description="Military aviation emergency frequency",
         rx_only=True,
-        lockout_reason=LockoutReason.EMERGENCY
+        lockout_reason=LockoutReason.EMERGENCY,
     ),
     FrequencyBand(
         name="ELT/EPIRB",
@@ -235,9 +239,8 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=406.1e6 + 0.5e6,
         description="Emergency locator beacons - SEARCH AND RESCUE",
         rx_only=True,
-        lockout_reason=LockoutReason.EMERGENCY
+        lockout_reason=LockoutReason.EMERGENCY,
     ),
-
     # ADS-B / Mode S (Aviation safety)
     FrequencyBand(
         name="ADS-B/Mode S",
@@ -245,7 +248,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=1090e6 + 2e6,
         description="Aircraft transponder - COLLISION AVOIDANCE",
         rx_only=True,
-        lockout_reason=LockoutReason.AVIATION
+        lockout_reason=LockoutReason.AVIATION,
     ),
     FrequencyBand(
         name="Mode S Interrogation",
@@ -253,9 +256,8 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=1030e6 + 2e6,
         description="Radar interrogation frequency",
         rx_only=True,
-        lockout_reason=LockoutReason.AVIATION
+        lockout_reason=LockoutReason.AVIATION,
     ),
-
     # Marine Emergency
     FrequencyBand(
         name="Marine Distress",
@@ -263,9 +265,8 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=156.8e6 + 0.05e6,
         description="VHF Channel 16 - Marine distress and calling",
         rx_only=True,
-        lockout_reason=LockoutReason.EMERGENCY
+        lockout_reason=LockoutReason.EMERGENCY,
     ),
-
     # Cellular bands (illegal to transmit without license)
     FrequencyBand(
         name="Cellular 700 MHz",
@@ -273,7 +274,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=806e6,
         description="LTE cellular band",
         rx_only=True,
-        lockout_reason=LockoutReason.CELLULAR
+        lockout_reason=LockoutReason.CELLULAR,
     ),
     FrequencyBand(
         name="Cellular 850 MHz",
@@ -281,7 +282,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=894e6,
         description="Cellular 850 band",
         rx_only=True,
-        lockout_reason=LockoutReason.CELLULAR
+        lockout_reason=LockoutReason.CELLULAR,
     ),
     FrequencyBand(
         name="Cellular 1900 MHz",
@@ -289,7 +290,7 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         end_hz=1995e6,
         description="PCS cellular band",
         rx_only=True,
-        lockout_reason=LockoutReason.CELLULAR
+        lockout_reason=LockoutReason.CELLULAR,
     ),
 ]
 
@@ -312,10 +313,13 @@ LICENSE_FREE_BANDS: List[BandPrivilege] = [
         end_hz=27.405e6,
         modes={"AM", "SSB", "USB", "LSB"},
         max_power_watts=12.0,  # 12W PEP SSB, 4W AM carrier
-        licenses={LicenseClass.NONE, LicenseClass.TECHNICIAN,
-                  LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+        licenses={
+            LicenseClass.NONE,
+            LicenseClass.TECHNICIAN,
+            LicenseClass.GENERAL,
+            LicenseClass.AMATEUR_EXTRA,
+        },
     ),
-
     # MURS (Multi-Use Radio Service) - 5 channels, 2W
     BandPrivilege(
         name="MURS Ch 1-3",
@@ -323,8 +327,12 @@ LICENSE_FREE_BANDS: List[BandPrivilege] = [
         end_hz=151.940e6,
         modes={"FM"},
         max_power_watts=2.0,
-        licenses={LicenseClass.NONE, LicenseClass.TECHNICIAN,
-                  LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+        licenses={
+            LicenseClass.NONE,
+            LicenseClass.TECHNICIAN,
+            LicenseClass.GENERAL,
+            LicenseClass.AMATEUR_EXTRA,
+        },
     ),
     BandPrivilege(
         name="MURS Ch 4-5",
@@ -332,10 +340,13 @@ LICENSE_FREE_BANDS: List[BandPrivilege] = [
         end_hz=154.600e6,
         modes={"FM"},
         max_power_watts=2.0,
-        licenses={LicenseClass.NONE, LicenseClass.TECHNICIAN,
-                  LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+        licenses={
+            LicenseClass.NONE,
+            LicenseClass.TECHNICIAN,
+            LicenseClass.GENERAL,
+            LicenseClass.AMATEUR_EXTRA,
+        },
     ),
-
     # FRS (Family Radio Service) - 22 channels
     # Channels 1-7, 15-22: 2W, Channels 8-14: 0.5W
     BandPrivilege(
@@ -344,8 +355,12 @@ LICENSE_FREE_BANDS: List[BandPrivilege] = [
         end_hz=462.7125e6,
         modes={"FM"},
         max_power_watts=2.0,
-        licenses={LicenseClass.NONE, LicenseClass.TECHNICIAN,
-                  LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+        licenses={
+            LicenseClass.NONE,
+            LicenseClass.TECHNICIAN,
+            LicenseClass.GENERAL,
+            LicenseClass.AMATEUR_EXTRA,
+        },
     ),
     BandPrivilege(
         name="FRS Channels 8-14",
@@ -353,8 +368,12 @@ LICENSE_FREE_BANDS: List[BandPrivilege] = [
         end_hz=467.7125e6,
         modes={"FM"},
         max_power_watts=0.5,
-        licenses={LicenseClass.NONE, LicenseClass.TECHNICIAN,
-                  LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+        licenses={
+            LicenseClass.NONE,
+            LicenseClass.TECHNICIAN,
+            LicenseClass.GENERAL,
+            LicenseClass.AMATEUR_EXTRA,
+        },
     ),
     BandPrivilege(
         name="FRS Channels 15-22",
@@ -362,8 +381,12 @@ LICENSE_FREE_BANDS: List[BandPrivilege] = [
         end_hz=462.7250e6,
         modes={"FM"},
         max_power_watts=2.0,
-        licenses={LicenseClass.NONE, LicenseClass.TECHNICIAN,
-                  LicenseClass.GENERAL, LicenseClass.AMATEUR_EXTRA}
+        licenses={
+            LicenseClass.NONE,
+            LicenseClass.TECHNICIAN,
+            LicenseClass.GENERAL,
+            LicenseClass.AMATEUR_EXTRA,
+        },
     ),
 ]
 
@@ -381,9 +404,8 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=1.800e6,
         end_hz=2.000e6,
         modes=set(),  # All modes
-        licenses=ALL_HAM
+        licenses=ALL_HAM,
     ),
-
     # =========================================================================
     # 80 Meters (3.5-4.0 MHz)
     # =========================================================================
@@ -393,7 +415,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=3.500e6,
         end_hz=3.525e6,
         modes={"CW", "DATA"},
-        licenses=EXTRA_ONLY
+        licenses=EXTRA_ONLY,
     ),
     # General + Extra: 3.525-3.600 CW/Data
     BandPrivilege(
@@ -401,7 +423,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=3.525e6,
         end_hz=3.600e6,
         modes={"CW", "DATA"},
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
     # Technician: 3.525-3.600 CW only (Novice portion)
     BandPrivilege(
@@ -409,7 +431,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=3.525e6,
         end_hz=3.600e6,
         modes={"CW"},
-        licenses={LicenseClass.TECHNICIAN}
+        licenses={LicenseClass.TECHNICIAN},
     ),
     # Extra: 3.600-3.700 Phone/Image
     BandPrivilege(
@@ -417,7 +439,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=3.600e6,
         end_hz=3.700e6,
         modes={"SSB", "USB", "LSB", "AM", "DATA"},
-        licenses=EXTRA_ONLY
+        licenses=EXTRA_ONLY,
     ),
     # General + Extra: 3.700-3.800 Phone/Image (unofficial DX window)
     BandPrivilege(
@@ -425,7 +447,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=3.700e6,
         end_hz=3.800e6,
         modes={"SSB", "USB", "LSB", "AM", "DATA"},
-        licenses=EXTRA_ONLY
+        licenses=EXTRA_ONLY,
     ),
     # General + Extra: 3.800-4.000 Phone
     BandPrivilege(
@@ -433,9 +455,8 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=3.800e6,
         end_hz=4.000e6,
         modes={"SSB", "USB", "LSB", "AM", "DATA"},
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
-
     # =========================================================================
     # 60 Meters (5 MHz channels) - All licenses, USB only, 100W ERP
     # =========================================================================
@@ -445,7 +466,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         end_hz=5.3335e6,
         modes={"USB", "DATA", "CW"},
         max_power_watts=100.0,
-        licenses=ALL_HAM
+        licenses=ALL_HAM,
     ),
     BandPrivilege(
         name="60m Ch 2",
@@ -453,7 +474,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         end_hz=5.3495e6,
         modes={"USB", "DATA", "CW"},
         max_power_watts=100.0,
-        licenses=ALL_HAM
+        licenses=ALL_HAM,
     ),
     BandPrivilege(
         name="60m Ch 3",
@@ -461,7 +482,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         end_hz=5.3600e6,
         modes={"USB", "DATA", "CW"},
         max_power_watts=100.0,
-        licenses=ALL_HAM
+        licenses=ALL_HAM,
     ),
     BandPrivilege(
         name="60m Ch 4",
@@ -469,7 +490,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         end_hz=5.3745e6,
         modes={"USB", "DATA", "CW"},
         max_power_watts=100.0,
-        licenses=ALL_HAM
+        licenses=ALL_HAM,
     ),
     BandPrivilege(
         name="60m Ch 5",
@@ -477,9 +498,8 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         end_hz=5.4065e6,
         modes={"USB", "DATA", "CW"},
         max_power_watts=100.0,
-        licenses=ALL_HAM
+        licenses=ALL_HAM,
     ),
-
     # =========================================================================
     # 40 Meters (7.0-7.3 MHz)
     # =========================================================================
@@ -489,7 +509,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=7.000e6,
         end_hz=7.025e6,
         modes={"CW", "DATA"},
-        licenses=EXTRA_ONLY
+        licenses=EXTRA_ONLY,
     ),
     # General + Extra: 7.025-7.125 CW/Data
     BandPrivilege(
@@ -497,7 +517,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=7.025e6,
         end_hz=7.125e6,
         modes={"CW", "DATA"},
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
     # Technician: 7.025-7.125 CW only (Novice portion)
     BandPrivilege(
@@ -505,7 +525,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=7.025e6,
         end_hz=7.125e6,
         modes={"CW"},
-        licenses={LicenseClass.TECHNICIAN}
+        licenses={LicenseClass.TECHNICIAN},
     ),
     # Extra: 7.125-7.175 Phone
     BandPrivilege(
@@ -513,7 +533,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=7.125e6,
         end_hz=7.175e6,
         modes={"SSB", "USB", "LSB", "AM", "DATA"},
-        licenses=EXTRA_ONLY
+        licenses=EXTRA_ONLY,
     ),
     # General + Extra: 7.175-7.300 Phone
     BandPrivilege(
@@ -521,9 +541,8 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=7.175e6,
         end_hz=7.300e6,
         modes={"SSB", "USB", "LSB", "AM", "DATA"},
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
-
     # =========================================================================
     # 30 Meters (10.1-10.15 MHz) - CW/Data only, 200W max
     # =========================================================================
@@ -533,9 +552,8 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         end_hz=10.150e6,
         modes={"CW", "DATA"},
         max_power_watts=200.0,
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
-
     # =========================================================================
     # 20 Meters (14.0-14.35 MHz)
     # =========================================================================
@@ -545,7 +563,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=14.000e6,
         end_hz=14.025e6,
         modes={"CW", "DATA"},
-        licenses=EXTRA_ONLY
+        licenses=EXTRA_ONLY,
     ),
     # General + Extra: 14.025-14.150 CW/Data
     BandPrivilege(
@@ -553,7 +571,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=14.025e6,
         end_hz=14.150e6,
         modes={"CW", "DATA"},
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
     # Extra: 14.150-14.225 Phone
     BandPrivilege(
@@ -561,7 +579,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=14.150e6,
         end_hz=14.225e6,
         modes={"SSB", "USB", "LSB", "AM", "DATA"},
-        licenses=EXTRA_ONLY
+        licenses=EXTRA_ONLY,
     ),
     # General + Extra: 14.225-14.350 Phone
     BandPrivilege(
@@ -569,9 +587,8 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=14.225e6,
         end_hz=14.350e6,
         modes={"SSB", "USB", "LSB", "AM", "DATA"},
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
-
     # =========================================================================
     # 17 Meters (18.068-18.168 MHz)
     # =========================================================================
@@ -581,7 +598,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=18.068e6,
         end_hz=18.110e6,
         modes={"CW", "DATA"},
-        licenses=EXTRA_ONLY
+        licenses=EXTRA_ONLY,
     ),
     # General + Extra: 18.110-18.168 All modes
     BandPrivilege(
@@ -589,9 +606,8 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=18.110e6,
         end_hz=18.168e6,
         modes=set(),
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
-
     # =========================================================================
     # 15 Meters (21.0-21.45 MHz)
     # =========================================================================
@@ -601,7 +617,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=21.000e6,
         end_hz=21.025e6,
         modes={"CW", "DATA"},
-        licenses=EXTRA_ONLY
+        licenses=EXTRA_ONLY,
     ),
     # General + Extra: 21.025-21.200 CW/Data
     BandPrivilege(
@@ -609,7 +625,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=21.025e6,
         end_hz=21.200e6,
         modes={"CW", "DATA"},
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
     # Technician: 21.025-21.200 CW only
     BandPrivilege(
@@ -617,7 +633,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=21.025e6,
         end_hz=21.200e6,
         modes={"CW"},
-        licenses={LicenseClass.TECHNICIAN}
+        licenses={LicenseClass.TECHNICIAN},
     ),
     # Extra: 21.200-21.275 Phone
     BandPrivilege(
@@ -625,7 +641,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=21.200e6,
         end_hz=21.275e6,
         modes={"SSB", "USB", "LSB", "AM", "DATA"},
-        licenses=EXTRA_ONLY
+        licenses=EXTRA_ONLY,
     ),
     # General + Extra: 21.275-21.450 Phone
     BandPrivilege(
@@ -633,9 +649,8 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=21.275e6,
         end_hz=21.450e6,
         modes={"SSB", "USB", "LSB", "AM", "DATA"},
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
-
     # =========================================================================
     # 12 Meters (24.89-24.99 MHz)
     # =========================================================================
@@ -644,16 +659,15 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=24.890e6,
         end_hz=24.930e6,
         modes={"CW", "DATA"},
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
     BandPrivilege(
         name="12m Phone",
         start_hz=24.930e6,
         end_hz=24.990e6,
         modes={"SSB", "USB", "LSB", "AM", "DATA"},
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
-
     # =========================================================================
     # 10 Meters (28.0-29.7 MHz)
     # =========================================================================
@@ -663,7 +677,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=28.000e6,
         end_hz=28.300e6,
         modes={"CW", "DATA"},
-        licenses=ALL_HAM
+        licenses=ALL_HAM,
     ),
     # Technician CW: 28.000-28.500 (200W max for Tech)
     BandPrivilege(
@@ -672,7 +686,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         end_hz=28.500e6,
         modes={"CW", "DATA", "SSB", "USB", "LSB"},
         max_power_watts=200.0,
-        licenses={LicenseClass.TECHNICIAN}
+        licenses={LicenseClass.TECHNICIAN},
     ),
     # Phone: 28.300-29.700
     BandPrivilege(
@@ -680,7 +694,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=28.300e6,
         end_hz=29.700e6,
         modes=set(),  # All modes
-        licenses=GENERAL_EXTRA
+        licenses=GENERAL_EXTRA,
     ),
     # FM Simplex: 29.600 (calling)
     BandPrivilege(
@@ -688,31 +702,20 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=29.500e6,
         end_hz=29.700e6,
         modes={"FM"},
-        licenses=ALL_HAM
+        licenses=ALL_HAM,
     ),
-
     # =========================================================================
     # 6 Meters (50-54 MHz) - All licenses full privileges
     # =========================================================================
     BandPrivilege(
-        name="6m",
-        start_hz=50.000e6,
-        end_hz=54.000e6,
-        modes=set(),
-        licenses=ALL_HAM
+        name="6m", start_hz=50.000e6, end_hz=54.000e6, modes=set(), licenses=ALL_HAM
     ),
-
     # =========================================================================
     # 2 Meters (144-148 MHz) - All licenses full privileges
     # =========================================================================
     BandPrivilege(
-        name="2m",
-        start_hz=144.000e6,
-        end_hz=148.000e6,
-        modes=set(),
-        licenses=ALL_HAM
+        name="2m", start_hz=144.000e6, end_hz=148.000e6, modes=set(), licenses=ALL_HAM
     ),
-
     # =========================================================================
     # 1.25 Meters (222-225 MHz) - All licenses full privileges
     # =========================================================================
@@ -721,31 +724,20 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=222.000e6,
         end_hz=225.000e6,
         modes=set(),
-        licenses=ALL_HAM
+        licenses=ALL_HAM,
     ),
-
     # =========================================================================
     # 70 Centimeters (420-450 MHz) - All licenses full privileges
     # =========================================================================
     BandPrivilege(
-        name="70cm",
-        start_hz=420.000e6,
-        end_hz=450.000e6,
-        modes=set(),
-        licenses=ALL_HAM
+        name="70cm", start_hz=420.000e6, end_hz=450.000e6, modes=set(), licenses=ALL_HAM
     ),
-
     # =========================================================================
     # 33 Centimeters (902-928 MHz) - All licenses full privileges
     # =========================================================================
     BandPrivilege(
-        name="33cm",
-        start_hz=902.000e6,
-        end_hz=928.000e6,
-        modes=set(),
-        licenses=ALL_HAM
+        name="33cm", start_hz=902.000e6, end_hz=928.000e6, modes=set(), licenses=ALL_HAM
     ),
-
     # =========================================================================
     # 23 Centimeters (1240-1300 MHz) - All licenses full privileges
     # =========================================================================
@@ -754,9 +746,8 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=1240.000e6,
         end_hz=1300.000e6,
         modes=set(),
-        licenses=ALL_HAM
+        licenses=ALL_HAM,
     ),
-
     # =========================================================================
     # 13 Centimeters (2300-2450 MHz) - All licenses
     # =========================================================================
@@ -765,7 +756,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         start_hz=2300.000e6,
         end_hz=2450.000e6,
         modes=set(),
-        licenses=ALL_HAM
+        licenses=ALL_HAM,
     ),
 ]
 
@@ -782,7 +773,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=2.4e6,
         mode="RAW",
         description="GPS civilian signal - requires special processing",
-        category="GNSS"
+        category="GNSS",
     ),
     FrequencyPreset(
         name="GPS L2",
@@ -790,7 +781,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=2.4e6,
         mode="RAW",
         description="GPS L2 signal",
-        category="GNSS"
+        category="GNSS",
     ),
     FrequencyPreset(
         name="GPS L5",
@@ -798,7 +789,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=2.4e6,
         mode="RAW",
         description="GPS L5 safety-of-life signal",
-        category="GNSS"
+        category="GNSS",
     ),
     FrequencyPreset(
         name="GLONASS L1",
@@ -806,9 +797,8 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=8e6,
         mode="RAW",
         description="GLONASS L1 band center",
-        category="GNSS"
+        category="GNSS",
     ),
-
     # Aviation (RX only)
     FrequencyPreset(
         name="ADS-B",
@@ -816,7 +806,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=2.4e6,
         mode="RAW",
         description="Aircraft transponders - use dump1090",
-        category="Aviation"
+        category="Aviation",
     ),
     FrequencyPreset(
         name="ACARS",
@@ -824,7 +814,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=25e3,
         mode="AM",
         description="Aircraft communications",
-        category="Aviation"
+        category="Aviation",
     ),
     FrequencyPreset(
         name="Aviation Emergency",
@@ -832,7 +822,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=25e3,
         mode="AM",
         description="International aviation emergency",
-        category="Aviation"
+        category="Aviation",
     ),
     FrequencyPreset(
         name="Air Traffic Control",
@@ -840,9 +830,8 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=25e3,
         mode="AM",
         description="Example ATC frequency (varies by location)",
-        category="Aviation"
+        category="Aviation",
     ),
-
     # Weather
     FrequencyPreset(
         name="NOAA Weather 1",
@@ -850,7 +839,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=25e3,
         mode="FM",
         description="NOAA Weather Radio",
-        category="Weather"
+        category="Weather",
     ),
     FrequencyPreset(
         name="NOAA Weather 2",
@@ -858,7 +847,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=25e3,
         mode="FM",
         description="NOAA Weather Radio",
-        category="Weather"
+        category="Weather",
     ),
     FrequencyPreset(
         name="NOAA APT (NOAA-15)",
@@ -866,7 +855,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=40e3,
         mode="FM",
         description="Weather satellite image downlink",
-        category="Weather"
+        category="Weather",
     ),
     FrequencyPreset(
         name="NOAA APT (NOAA-18)",
@@ -874,7 +863,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=40e3,
         mode="FM",
         description="Weather satellite image downlink",
-        category="Weather"
+        category="Weather",
     ),
     FrequencyPreset(
         name="NOAA APT (NOAA-19)",
@@ -882,9 +871,8 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=40e3,
         mode="FM",
         description="Weather satellite image downlink",
-        category="Weather"
+        category="Weather",
     ),
-
     # Broadcast
     FrequencyPreset(
         name="FM Broadcast",
@@ -892,9 +880,8 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=200e3,
         mode="WFM",
         description="FM radio broadcast band",
-        category="Broadcast"
+        category="Broadcast",
     ),
-
     # Amateur Radio
     FrequencyPreset(
         name="2m Calling",
@@ -902,7 +889,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=15e3,
         mode="FM",
         description="2m FM simplex calling frequency",
-        category="Amateur"
+        category="Amateur",
     ),
     FrequencyPreset(
         name="70cm Calling",
@@ -910,7 +897,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=15e3,
         mode="FM",
         description="70cm FM simplex calling frequency",
-        category="Amateur"
+        category="Amateur",
     ),
     FrequencyPreset(
         name="APRS",
@@ -918,9 +905,8 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=15e3,
         mode="FM",
         description="APRS packet radio (North America)",
-        category="Amateur"
+        category="Amateur",
     ),
-
     # ISM Bands
     FrequencyPreset(
         name="ISM 433 MHz",
@@ -928,7 +914,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=500e3,
         mode="RAW",
         description="ISM band - remotes, sensors, etc.",
-        category="ISM"
+        category="ISM",
     ),
     FrequencyPreset(
         name="ISM 915 MHz",
@@ -936,9 +922,8 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=2e6,
         mode="RAW",
         description="ISM band - LoRa, sensors (Americas)",
-        category="ISM"
+        category="ISM",
     ),
-
     # Paging
     FrequencyPreset(
         name="POCSAG/FLEX",
@@ -946,9 +931,8 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=25e3,
         mode="FM",
         description="Paging frequencies",
-        category="Paging"
+        category="Paging",
     ),
-
     # Marine
     FrequencyPreset(
         name="Marine Ch 16",
@@ -956,9 +940,8 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=25e3,
         mode="FM",
         description="Marine distress and calling",
-        category="Marine"
+        category="Marine",
     ),
-
     # Space / ISS (International Space Station)
     FrequencyPreset(
         name="ISS SSTV/Voice",
@@ -966,7 +949,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=15e3,
         mode="FM",
         description="ISS Slow Scan TV images & voice - use SSTV decoder",
-        category="Space"
+        category="Space",
     ),
     FrequencyPreset(
         name="ISS APRS",
@@ -974,7 +957,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=15e3,
         mode="FM",
         description="ISS packet radio / APRS digipeater",
-        category="Space"
+        category="Space",
     ),
     FrequencyPreset(
         name="ISS Packet (UHF)",
@@ -982,7 +965,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=15e3,
         mode="FM",
         description="ISS UHF packet downlink",
-        category="Space"
+        category="Space",
     ),
     FrequencyPreset(
         name="ISS Repeater Output",
@@ -990,7 +973,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=15e3,
         mode="FM",
         description="ISS cross-band repeater output",
-        category="Space"
+        category="Space",
     ),
     FrequencyPreset(
         name="Meteor-M2 LRPT",
@@ -998,7 +981,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=120e3,
         mode="RAW",
         description="Russian weather satellite images",
-        category="Space"
+        category="Space",
     ),
     FrequencyPreset(
         name="SO-50 Downlink",
@@ -1006,9 +989,8 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=15e3,
         mode="FM",
         description="SaudiSat-1C amateur satellite",
-        category="Space"
+        category="Space",
     ),
-
     # QRP (Low Power) Calling Frequencies
     FrequencyPreset(
         name="QRP 80m CW",
@@ -1016,7 +998,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=500,
         mode="CW",
         description="80m QRP CW calling frequency",
-        category="QRP"
+        category="QRP",
     ),
     FrequencyPreset(
         name="QRP 40m CW",
@@ -1024,7 +1006,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=500,
         mode="CW",
         description="40m QRP CW calling frequency",
-        category="QRP"
+        category="QRP",
     ),
     FrequencyPreset(
         name="QRP 40m SSB",
@@ -1032,7 +1014,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=2700,
         mode="LSB",
         description="40m QRP SSB calling frequency",
-        category="QRP"
+        category="QRP",
     ),
     FrequencyPreset(
         name="QRP 30m CW",
@@ -1040,7 +1022,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=500,
         mode="CW",
         description="30m QRP CW calling frequency",
-        category="QRP"
+        category="QRP",
     ),
     FrequencyPreset(
         name="QRP 20m CW",
@@ -1048,7 +1030,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=500,
         mode="CW",
         description="20m QRP CW calling frequency",
-        category="QRP"
+        category="QRP",
     ),
     FrequencyPreset(
         name="QRP 20m SSB",
@@ -1056,7 +1038,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=2700,
         mode="USB",
         description="20m QRP SSB calling frequency",
-        category="QRP"
+        category="QRP",
     ),
     FrequencyPreset(
         name="QRP 17m CW",
@@ -1064,7 +1046,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=500,
         mode="CW",
         description="17m QRP CW calling frequency",
-        category="QRP"
+        category="QRP",
     ),
     FrequencyPreset(
         name="QRP 15m CW",
@@ -1072,7 +1054,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=500,
         mode="CW",
         description="15m QRP CW calling frequency",
-        category="QRP"
+        category="QRP",
     ),
     FrequencyPreset(
         name="QRP 15m SSB",
@@ -1080,7 +1062,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=2700,
         mode="USB",
         description="15m QRP SSB calling frequency",
-        category="QRP"
+        category="QRP",
     ),
     FrequencyPreset(
         name="QRP 12m CW",
@@ -1088,7 +1070,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=500,
         mode="CW",
         description="12m QRP CW calling frequency",
-        category="QRP"
+        category="QRP",
     ),
     FrequencyPreset(
         name="QRP 10m CW",
@@ -1096,7 +1078,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=500,
         mode="CW",
         description="10m QRP CW calling frequency",
-        category="QRP"
+        category="QRP",
     ),
     FrequencyPreset(
         name="QRP 10m SSB",
@@ -1104,7 +1086,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         bandwidth_hz=2700,
         mode="USB",
         description="10m QRP SSB calling frequency",
-        category="QRP"
+        category="QRP",
     ),
 ]
 
@@ -1127,7 +1109,9 @@ class FrequencyManager:
         self._license_class = LicenseClass.NONE  # Default: no license
         self._license_free_bands = list(LICENSE_FREE_BANDS)
         self._amateur_bands = list(AMATEUR_BAND_PRIVILEGES)
-        logger.info(f"FrequencyManager initialized with {len(self._lockout_bands)} lockout bands")
+        logger.info(
+            f"FrequencyManager initialized with {len(self._lockout_bands)} lockout bands"
+        )
         logger.info(f"License class: {self._license_class.value}")
 
     # =========================================================================
@@ -1143,7 +1127,9 @@ class FrequencyManager:
         """
         old_class = self._license_class
         self._license_class = license_class
-        logger.info(f"License class changed: {old_class.value} -> {license_class.value}")
+        logger.info(
+            f"License class changed: {old_class.value} -> {license_class.value}"
+        )
 
     def get_license_class(self) -> LicenseClass:
         """Get the current license class."""
@@ -1172,9 +1158,7 @@ class FrequencyManager:
         return privileges
 
     def _check_license_privilege(
-        self,
-        frequency_hz: float,
-        mode: str = ""
+        self, frequency_hz: float, mode: str = ""
     ) -> Tuple[bool, Optional[str], Optional[BandPrivilege]]:
         """
         Check if TX is allowed at the given frequency for the current license.
@@ -1194,7 +1178,11 @@ class FrequencyManager:
 
         # No license = only license-free bands
         if self._license_class == LicenseClass.NONE:
-            return False, "No amateur license - TX only allowed on license-free bands (CB, MURS, FRS)", None
+            return (
+                False,
+                "No amateur license - TX only allowed on license-free bands (CB, MURS, FRS)",
+                None,
+            )
 
         # Check amateur bands for licensed operators
         for band in self._amateur_bands:
@@ -1204,12 +1192,24 @@ class FrequencyManager:
                 else:
                     # Found band but wrong license or mode
                     if self._license_class not in band.licenses:
-                        return False, f"Frequency {frequency_hz/1e6:.3f} MHz requires higher license class", None
+                        return (
+                            False,
+                            f"Frequency {frequency_hz/1e6:.3f} MHz requires higher license class",
+                            None,
+                        )
                     if band.modes and mode:
-                        return False, f"Mode '{mode}' not allowed in {band.name} - allowed: {band.modes}", None
+                        return (
+                            False,
+                            f"Mode '{mode}' not allowed in {band.name} - allowed: {band.modes}",
+                            None,
+                        )
 
         # Frequency not in any amateur or license-free band
-        return False, f"Frequency {frequency_hz/1e6:.3f} MHz is not in any amateur or license-free band", None
+        return (
+            False,
+            f"Frequency {frequency_hz/1e6:.3f} MHz is not in any amateur or license-free band",
+            None,
+        )
 
     def get_power_limit(self, frequency_hz: float, mode: str = "") -> Optional[float]:
         """
@@ -1227,7 +1227,9 @@ class FrequencyManager:
             return privilege.get_legal_power_limit()
         return None
 
-    def get_effective_power_limit(self, frequency_hz: float, mode: str = "") -> Optional[float]:
+    def get_effective_power_limit(
+        self, frequency_hz: float, mode: str = ""
+    ) -> Optional[float]:
         """
         Get the effective TX power limit with headroom (150% of legal).
 
@@ -1252,10 +1254,7 @@ class FrequencyManager:
         return TX_POWER_WARNING
 
     def is_tx_allowed(
-        self,
-        frequency_hz: float,
-        bandwidth_hz: float = 0,
-        mode: str = ""
+        self, frequency_hz: float, bandwidth_hz: float = 0, mode: str = ""
     ) -> Tuple[bool, Optional[str]]:
         """
         Check if transmission is allowed at the given frequency.
@@ -1275,10 +1274,9 @@ class FrequencyManager:
         # Check center frequency and band edges
         freqs_to_check = [frequency_hz]
         if bandwidth_hz > 0:
-            freqs_to_check.extend([
-                frequency_hz - bandwidth_hz / 2,
-                frequency_hz + bandwidth_hz / 2
-            ])
+            freqs_to_check.extend(
+                [frequency_hz - bandwidth_hz / 2, frequency_hz + bandwidth_hz / 2]
+            )
 
         # First check: Hardware/regulatory lockouts (always blocked regardless of license)
         for freq in freqs_to_check:
@@ -1287,7 +1285,9 @@ class FrequencyManager:
                     reason = f"TX BLOCKED: {band.name} - {band.description}"
                     if band.lockout_reason == LockoutReason.GPS:
                         reason += " [GPS SPOOFING IS DANGEROUS AND ILLEGAL]"
-                    logger.warning(f"TX blocked at {frequency_hz/1e6:.3f} MHz: {band.name}")
+                    logger.warning(
+                        f"TX blocked at {frequency_hz/1e6:.3f} MHz: {band.name}"
+                    )
                     return False, reason
 
         # Second check: License privileges
@@ -1299,7 +1299,9 @@ class FrequencyManager:
 
         return True, None
 
-    def validate_tx_frequency(self, frequency_hz: float, bandwidth_hz: float = 0) -> None:
+    def validate_tx_frequency(
+        self, frequency_hz: float, bandwidth_hz: float = 0
+    ) -> None:
         """
         Validate a TX frequency, raising an exception if blocked.
 
@@ -1314,7 +1316,9 @@ class FrequencyManager:
         if not allowed:
             raise ValueError(reason)
 
-    def get_lockout_reason(self, frequency_hz: float) -> Optional[Tuple[str, LockoutReason]]:
+    def get_lockout_reason(
+        self, frequency_hz: float
+    ) -> Optional[Tuple[str, LockoutReason]]:
         """
         Get the lockout reason for a frequency, if any.
 
@@ -1381,9 +1385,7 @@ def get_frequency_manager() -> FrequencyManager:
 
 
 def is_tx_allowed(
-    frequency_hz: float,
-    bandwidth_hz: float = 0,
-    mode: str = ""
+    frequency_hz: float, bandwidth_hz: float = 0, mode: str = ""
 ) -> Tuple[bool, Optional[str]]:
     """Check if TX is allowed at the given frequency."""
     return get_frequency_manager().is_tx_allowed(frequency_hz, bandwidth_hz, mode)
@@ -1431,32 +1433,32 @@ def get_tx_power_warning() -> str:
 
 __all__ = [
     # Enums
-    'LockoutReason',
-    'LicenseClass',
+    "LockoutReason",
+    "LicenseClass",
     # Dataclasses
-    'FrequencyBand',
-    'FrequencyPreset',
-    'BandPrivilege',
+    "FrequencyBand",
+    "FrequencyPreset",
+    "BandPrivilege",
     # Manager class
-    'FrequencyManager',
+    "FrequencyManager",
     # Constants
-    'TX_LOCKOUT_BANDS',
-    'RX_PRESETS',
-    'LICENSE_FREE_BANDS',
-    'AMATEUR_BAND_PRIVILEGES',
-    'POWER_HEADROOM_FACTOR',
-    'TX_POWER_WARNING',
+    "TX_LOCKOUT_BANDS",
+    "RX_PRESETS",
+    "LICENSE_FREE_BANDS",
+    "AMATEUR_BAND_PRIVILEGES",
+    "POWER_HEADROOM_FACTOR",
+    "TX_POWER_WARNING",
     # Singleton functions
-    'get_frequency_manager',
-    'is_tx_allowed',
-    'validate_tx_frequency',
-    'get_rx_presets',
+    "get_frequency_manager",
+    "is_tx_allowed",
+    "validate_tx_frequency",
+    "get_rx_presets",
     # License functions
-    'set_license_class',
-    'get_license_class',
-    'get_license_privileges',
+    "set_license_class",
+    "get_license_class",
+    "get_license_privileges",
     # Power functions
-    'get_power_limit',
-    'get_effective_power_limit',
-    'get_tx_power_warning',
+    "get_power_limit",
+    "get_effective_power_limit",
+    "get_tx_power_warning",
 ]

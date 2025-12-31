@@ -9,14 +9,16 @@ Provides scrolling time-frequency visualization with:
 
 from __future__ import annotations
 
-import numpy as np
-from typing import Optional, List, Tuple
 from collections import deque
+from typing import List, Optional, Tuple
+
+import numpy as np
 
 try:
-    from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox
     from PyQt6.QtCore import QRectF
-    from PyQt6.QtGui import QPainter, QImage, QColor, QPen
+    from PyQt6.QtGui import QColor, QImage, QPainter, QPen
+    from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
@@ -32,29 +34,66 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
     # Color map definitions
     COLORMAPS = {
         "viridis": [
-            (68, 1, 84), (72, 35, 116), (64, 67, 135), (52, 94, 141),
-            (41, 120, 142), (32, 144, 140), (34, 167, 132), (68, 190, 112),
-            (121, 209, 81), (189, 222, 38), (253, 231, 37)
+            (68, 1, 84),
+            (72, 35, 116),
+            (64, 67, 135),
+            (52, 94, 141),
+            (41, 120, 142),
+            (32, 144, 140),
+            (34, 167, 132),
+            (68, 190, 112),
+            (121, 209, 81),
+            (189, 222, 38),
+            (253, 231, 37),
         ],
         "plasma": [
-            (13, 8, 135), (75, 3, 161), (125, 3, 168), (168, 34, 150),
-            (203, 70, 121), (229, 107, 93), (248, 148, 65), (253, 195, 40),
-            (240, 249, 33)
+            (13, 8, 135),
+            (75, 3, 161),
+            (125, 3, 168),
+            (168, 34, 150),
+            (203, 70, 121),
+            (229, 107, 93),
+            (248, 148, 65),
+            (253, 195, 40),
+            (240, 249, 33),
         ],
         "turbo": [
-            (48, 18, 59), (86, 36, 163), (75, 107, 221), (42, 171, 226),
-            (29, 223, 163), (109, 248, 101), (205, 233, 55), (252, 186, 47),
-            (252, 108, 42), (210, 38, 39), (122, 4, 3)
+            (48, 18, 59),
+            (86, 36, 163),
+            (75, 107, 221),
+            (42, 171, 226),
+            (29, 223, 163),
+            (109, 248, 101),
+            (205, 233, 55),
+            (252, 186, 47),
+            (252, 108, 42),
+            (210, 38, 39),
+            (122, 4, 3),
         ],
         "grayscale": [
-            (0, 0, 0), (28, 28, 28), (56, 56, 56), (85, 85, 85),
-            (113, 113, 113), (141, 141, 141), (170, 170, 170), (198, 198, 198),
-            (226, 226, 226), (255, 255, 255)
+            (0, 0, 0),
+            (28, 28, 28),
+            (56, 56, 56),
+            (85, 85, 85),
+            (113, 113, 113),
+            (141, 141, 141),
+            (170, 170, 170),
+            (198, 198, 198),
+            (226, 226, 226),
+            (255, 255, 255),
         ],
         "classic": [
-            (0, 0, 50), (0, 0, 100), (0, 50, 150), (0, 100, 200),
-            (0, 200, 200), (0, 200, 100), (100, 200, 0), (200, 200, 0),
-            (255, 150, 0), (255, 50, 0), (255, 0, 0)
+            (0, 0, 50),
+            (0, 0, 100),
+            (0, 50, 150),
+            (0, 100, 200),
+            (0, 200, 200),
+            (0, 200, 100),
+            (100, 200, 0),
+            (200, 200, 0),
+            (255, 150, 0),
+            (255, 50, 0),
+            (255, 0, 0),
         ],
     }
 
@@ -167,7 +206,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             power_db = np.interp(
                 np.linspace(0, 1, self._fft_size),
                 np.linspace(0, 1, len(power_db)),
-                power_db
+                power_db,
             )
 
         self._history.append(power_db.copy())
@@ -186,7 +225,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         time_end: int,
         freq_start: int,
         freq_end: int,
-        color: QColor
+        color: QColor,
     ):
         """Add a highlight region."""
         self._highlights.append((time_start, time_end, freq_start, freq_end, color))
@@ -203,12 +242,13 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             return
 
         # Create image if needed
-        if (self._image is None or
-            self._image.width() != self._fft_size or
-            self._image.height() != self._history_size):
+        if (
+            self._image is None
+            or self._image.width() != self._fft_size
+            or self._image.height() != self._history_size
+        ):
             self._image = QImage(
-                self._fft_size, self._history_size,
-                QImage.Format.Format_RGB32
+                self._fft_size, self._history_size, QImage.Format.Format_RGB32
             )
             self._image.fill(self._bg_color)
 
@@ -232,7 +272,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             idx = int(normalized * 255)
 
             r, g, b = self._colormap[idx]
-            self._image.setPixel(x, self._history_size - 1, (255 << 24) | (r << 16) | (g << 8) | b)
+            self._image.setPixel(
+                x, self._history_size - 1, (255 << 24) | (r << 16) | (g << 8) | b
+            )
 
     def _rebuild_image(self):
         """Rebuild entire image from history."""
@@ -240,8 +282,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             return
 
         self._image = QImage(
-            self._fft_size, self._history_size,
-            QImage.Format.Format_RGB32
+            self._fft_size, self._history_size, QImage.Format.Format_RGB32
         )
         self._image.fill(self._bg_color)
 

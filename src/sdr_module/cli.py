@@ -85,17 +85,17 @@ def cmd_encode(args: argparse.Namespace) -> int:
     """Encode text to protocol."""
     from .protocols.encoder import EncoderConfig, ModulationType
     from .protocols.encoders import (
-        RTTYEncoder,
-        MorseEncoder,
         ASCIIEncoder,
+        MorseEncoder,
         PSK31Encoder,
+        RTTYEncoder,
     )
 
     encoders = {
-        'rtty': RTTYEncoder,
-        'morse': MorseEncoder,
-        'ascii': ASCIIEncoder,
-        'psk31': PSK31Encoder,
+        "rtty": RTTYEncoder,
+        "morse": MorseEncoder,
+        "ascii": ASCIIEncoder,
+        "psk31": PSK31Encoder,
     }
 
     if args.protocol not in encoders:
@@ -113,7 +113,7 @@ def cmd_encode(args: argparse.Namespace) -> int:
     )
 
     encoder_class = encoders[args.protocol]
-    if args.protocol == 'morse':
+    if args.protocol == "morse":
         encoder = encoder_class(config, wpm=args.wpm)
     else:
         encoder = encoder_class(config)
@@ -163,63 +163,97 @@ def cmd_devices(args: argparse.Namespace) -> int:
 def create_parser() -> argparse.ArgumentParser:
     """Create argument parser."""
     parser = argparse.ArgumentParser(
-        prog='sdr-scan',
-        description='SDR Module - Software Defined Radio Framework',
+        prog="sdr-scan",
+        description="SDR Module - Software Defined Radio Framework",
     )
     parser.add_argument(
-        '-v', '--version',
-        action='version',
-        version=f'%(prog)s {__version__}',
+        "-v",
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
 
-    subparsers = parser.add_subparsers(dest='command', help='Available commands')
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
     # Info command
-    info_parser = subparsers.add_parser('info', help='Display module information')
+    info_parser = subparsers.add_parser("info", help="Display module information")
     info_parser.set_defaults(func=cmd_info)
 
     # Devices command
-    devices_parser = subparsers.add_parser('devices', help='List available SDR devices')
+    devices_parser = subparsers.add_parser("devices", help="List available SDR devices")
     devices_parser.set_defaults(func=cmd_devices)
 
     # Scan command
-    scan_parser = subparsers.add_parser('scan', help='Scan frequency range')
-    scan_parser.add_argument('--start', type=float, default=88.0,
-                            help='Start frequency in MHz (default: 88.0)')
-    scan_parser.add_argument('--end', type=float, default=108.0,
-                            help='End frequency in MHz (default: 108.0)')
-    scan_parser.add_argument('--step', type=float, default=100.0,
-                            help='Step size in kHz (default: 100.0)')
-    scan_parser.add_argument('--threshold', type=float, default=-60.0,
-                            help='Detection threshold in dB (default: -60.0)')
-    scan_parser.add_argument('--single', action='store_true',
-                            help='Single scan (default: continuous)')
+    scan_parser = subparsers.add_parser("scan", help="Scan frequency range")
+    scan_parser.add_argument(
+        "--start",
+        type=float,
+        default=88.0,
+        help="Start frequency in MHz (default: 88.0)",
+    )
+    scan_parser.add_argument(
+        "--end", type=float, default=108.0, help="End frequency in MHz (default: 108.0)"
+    )
+    scan_parser.add_argument(
+        "--step", type=float, default=100.0, help="Step size in kHz (default: 100.0)"
+    )
+    scan_parser.add_argument(
+        "--threshold",
+        type=float,
+        default=-60.0,
+        help="Detection threshold in dB (default: -60.0)",
+    )
+    scan_parser.add_argument(
+        "--single", action="store_true", help="Single scan (default: continuous)"
+    )
     scan_parser.set_defaults(func=cmd_scan)
 
     # Encode command
-    encode_parser = subparsers.add_parser('encode', help='Encode text to protocol')
-    encode_parser.add_argument('protocol', choices=['rtty', 'morse', 'ascii', 'psk31'],
-                              help='Protocol to use')
-    encode_parser.add_argument('--text', '-t', type=str,
-                              help='Text to encode (reads stdin if not provided)')
-    encode_parser.add_argument('--output', '-o', type=str,
-                              help='Output file for I/Q samples')
-    encode_parser.add_argument('--sample-rate', type=float, default=48000,
-                              help='Sample rate in Hz (default: 48000)')
-    encode_parser.add_argument('--carrier', type=float, default=1000,
-                              help='Carrier frequency in Hz (default: 1000)')
-    encode_parser.add_argument('--wpm', type=int, default=20,
-                              help='Words per minute for Morse (default: 20)')
+    encode_parser = subparsers.add_parser("encode", help="Encode text to protocol")
+    encode_parser.add_argument(
+        "protocol", choices=["rtty", "morse", "ascii", "psk31"], help="Protocol to use"
+    )
+    encode_parser.add_argument(
+        "--text", "-t", type=str, help="Text to encode (reads stdin if not provided)"
+    )
+    encode_parser.add_argument(
+        "--output", "-o", type=str, help="Output file for I/Q samples"
+    )
+    encode_parser.add_argument(
+        "--sample-rate",
+        type=float,
+        default=48000,
+        help="Sample rate in Hz (default: 48000)",
+    )
+    encode_parser.add_argument(
+        "--carrier",
+        type=float,
+        default=1000,
+        help="Carrier frequency in Hz (default: 1000)",
+    )
+    encode_parser.add_argument(
+        "--wpm", type=int, default=20, help="Words per minute for Morse (default: 20)"
+    )
     encode_parser.set_defaults(func=cmd_encode)
 
     # GUI command
-    gui_parser = subparsers.add_parser('gui', help='Launch graphical user interface')
-    gui_parser.add_argument('--demo', '-d', action='store_true',
-                           help='Run in demo mode (no hardware required)')
-    gui_parser.add_argument('--frequency', '-f', type=float, default=100e6,
-                           help='Initial frequency in Hz (default: 100 MHz)')
-    gui_parser.add_argument('--gain', '-g', type=float, default=20.0,
-                           help='RF gain in dB (default: 20)')
+    gui_parser = subparsers.add_parser("gui", help="Launch graphical user interface")
+    gui_parser.add_argument(
+        "--demo",
+        "-d",
+        action="store_true",
+        help="Run in demo mode (no hardware required)",
+    )
+    gui_parser.add_argument(
+        "--frequency",
+        "-f",
+        type=float,
+        default=100e6,
+        help="Initial frequency in Hz (default: 100 MHz)",
+    )
+    gui_parser.add_argument(
+        "--gain", "-g", type=float, default=20.0, help="RF gain in dB (default: 20)"
+    )
     gui_parser.set_defaults(func=cmd_gui)
 
     return parser
@@ -245,5 +279,5 @@ def main(argv: Optional[list] = None) -> int:
     return args.func(args)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

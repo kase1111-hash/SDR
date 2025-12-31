@@ -1,13 +1,14 @@
 """Tests for sample buffer implementation."""
 
-import pytest
-import numpy as np
 import threading
 import time
+
+import numpy as np
+import pytest
+
 from sdr_module.core.sample_buffer import (
-    SampleBuffer,
     BufferOverflowPolicy,
-    BufferStats,
+    SampleBuffer,
 )
 
 
@@ -134,9 +135,7 @@ class TestBufferOverflow:
 
     def test_block_policy(self):
         """Test BLOCK overflow policy with timeout."""
-        buffer = SampleBuffer(
-            capacity=100, overflow_policy=BufferOverflowPolicy.BLOCK
-        )
+        buffer = SampleBuffer(capacity=100, overflow_policy=BufferOverflowPolicy.BLOCK)
 
         # Fill buffer
         samples1 = np.ones(100, dtype=np.complex64)

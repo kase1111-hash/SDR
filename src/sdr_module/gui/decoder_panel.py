@@ -6,18 +6,28 @@ Displays decoded messages from various protocols.
 
 from __future__ import annotations
 
-from typing import List, Dict, Any
 from datetime import datetime
+from typing import Any, Dict, List
 
 try:
-    from PyQt6.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QLabel, QComboBox, QPushButton,
-        QTextEdit, QTableWidget, QTableWidgetItem,
-        QHeaderView, QCheckBox, QTabWidget
-    )
     from PyQt6.QtCore import pyqtSignal
     from PyQt6.QtGui import QColor, QFont
+    from PyQt6.QtWidgets import (
+        QCheckBox,
+        QComboBox,
+        QGridLayout,
+        QHBoxLayout,
+        QHeaderView,
+        QLabel,
+        QPushButton,
+        QTableWidget,
+        QTableWidgetItem,
+        QTabWidget,
+        QTextEdit,
+        QVBoxLayout,
+        QWidget,
+    )
+
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
@@ -53,15 +63,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         proto_layout.addWidget(QLabel("Protocol:"))
 
         self._proto_combo = QComboBox()
-        self._proto_combo.addItems([
-            "Auto Detect",
-            "POCSAG",
-            "FLEX",
-            "AX.25/APRS",
-            "ADS-B",
-            "ACARS",
-            "RDS"
-        ])
+        self._proto_combo.addItems(
+            ["Auto Detect", "POCSAG", "FLEX", "AX.25/APRS", "ADS-B", "ACARS", "RDS"]
+        )
         self._proto_combo.currentTextChanged.connect(self._on_protocol_changed)
         proto_layout.addWidget(self._proto_combo)
 
@@ -80,8 +84,12 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # Messages table
         self._table = QTableWidget()
         self._table.setColumnCount(4)
-        self._table.setHorizontalHeaderLabels(["Time", "Protocol", "Address", "Message"])
-        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self._table.setHorizontalHeaderLabels(
+            ["Time", "Protocol", "Address", "Message"]
+        )
+        self._table.horizontalHeader().setSectionResizeMode(
+            3, QHeaderView.ResizeMode.Stretch
+        )
         self._table.setAlternatingRowColors(True)
         tabs.addTab(self._table, "Messages")
 
@@ -136,7 +144,14 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         """Handle protocol change."""
         self.protocol_changed.emit(text)
 
-    def add_message(self, protocol: str, address: str, content: str, valid: bool = True, raw: str = ""):
+    def add_message(
+        self,
+        protocol: str,
+        address: str,
+        content: str,
+        valid: bool = True,
+        raw: str = "",
+    ):
         """
         Add a decoded message.
 
@@ -156,13 +171,13 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             "address": address,
             "content": content,
             "valid": valid,
-            "raw": raw
+            "raw": raw,
         }
         self._messages.append(msg)
 
         # Trim if too many
         if len(self._messages) > self._max_messages:
-            self._messages = self._messages[-self._max_messages:]
+            self._messages = self._messages[-self._max_messages :]
 
         # Add to table
         row = self._table.rowCount()
@@ -197,7 +212,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         altitude: int = 0,
         lat: float = 0,
         lon: float = 0,
-        speed: float = 0
+        speed: float = 0,
     ):
         """Add an ADS-B message with specific formatting."""
         if callsign:
@@ -220,12 +235,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self.add_message("POCSAG", addr_str, content)
 
     def add_aprs_message(
-        self,
-        source: str,
-        dest: str,
-        lat: float = 0,
-        lon: float = 0,
-        comment: str = ""
+        self, source: str, dest: str, lat: float = 0, lon: float = 0, comment: str = ""
     ):
         """Add an APRS message."""
         content = ""
@@ -261,8 +271,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         from PyQt6.QtWidgets import QFileDialog
 
         filename, _ = QFileDialog.getSaveFileName(
-            self, "Export Messages",
-            "", "CSV Files (*.csv);;Text Files (*.txt)"
+            self, "Export Messages", "", "CSV Files (*.csv);;Text Files (*.txt)"
         )
 
         if filename:

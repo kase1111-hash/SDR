@@ -1,10 +1,10 @@
 """Tests for device manager."""
 
-import pytest
-from unittest.mock import Mock, MagicMock, patch
-from sdr_module.core.device_manager import DeviceManager, DetectedDevice
-from sdr_module.devices.base import DeviceInfo, DeviceCapability, SDRDevice
+from unittest.mock import patch
+
 from sdr_module.core.config import DeviceConfig
+from sdr_module.core.device_manager import DeviceManager
+from sdr_module.devices.base import DeviceCapability, DeviceInfo, SDRDevice
 
 
 class MockSDRDevice(SDRDevice):
@@ -111,11 +111,18 @@ class TestDeviceManager:
     def test_scan_devices_both_found(self, mock_hackrf_list, mock_rtl_list):
         """Test scanning with both devices found."""
         rtl_info = DeviceInfo(
-            name="RTL-SDR", serial="00000001", manufacturer="Realtek", product="RTL2838UHIDIR", index=0
+            name="RTL-SDR",
+            serial="00000001",
+            manufacturer="Realtek",
+            product="RTL2838UHIDIR",
+            index=0,
         )
         hackrf_info = DeviceInfo(
-            name="HackRF One", serial="0000000000000000a06063c8234e5f8f", manufacturer="Great Scott Gadgets",
-            product="HackRF One", index=0
+            name="HackRF One",
+            serial="0000000000000000a06063c8234e5f8f",
+            manufacturer="Great Scott Gadgets",
+            product="HackRF One",
+            index=0,
         )
 
         mock_rtl_list.return_value = [rtl_info]
@@ -238,8 +245,10 @@ class TestDeviceManager:
 
     def test_context_manager(self):
         """Test using device manager as context manager."""
-        with patch("sdr_module.devices.rtlsdr.RTLSDRDevice.list_devices"), \
-             patch("sdr_module.devices.hackrf.HackRFDevice.list_devices"):
+        with (
+            patch("sdr_module.devices.rtlsdr.RTLSDRDevice.list_devices"),
+            patch("sdr_module.devices.hackrf.HackRFDevice.list_devices"),
+        ):
 
             with DeviceManager() as manager:
                 assert manager is not None

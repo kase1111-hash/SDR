@@ -6,21 +6,21 @@ import pytest
 from sdr_module.ui.constellation import (
     ConstellationDisplay,
     ConstellationPoint,
-    ConstellationStats,
     ConstellationResult,
+    ConstellationStats,
     ModulationOverlay,
 )
+from sdr_module.ui.signal_meter import (
+    MeterConfig,
+    MeterMode,
+    MeterReading,
+    PowerUnit,
+    SignalStrengthMeter,
+)
 from sdr_module.ui.time_domain import (
+    DisplayMode,
     TimeDomainDisplay,
     TimeDomainResult,
-    DisplayMode,
-)
-from sdr_module.ui.signal_meter import (
-    SignalStrengthMeter,
-    MeterReading,
-    MeterConfig,
-    PowerUnit,
-    MeterMode,
 )
 
 
@@ -417,7 +417,7 @@ class TestConstellationDisplayAdvanced:
 
     def test_update_adds_to_buffer(self, display):
         """Test update adds samples to buffer."""
-        samples = np.array([1+1j, -1-1j], dtype=np.complex64)
+        samples = np.array([1 + 1j, -1 - 1j], dtype=np.complex64)
         display.update(samples)
         assert len(display._buffers) == 1
 
@@ -430,14 +430,14 @@ class TestConstellationDisplayAdvanced:
 
     def test_update_normalizes(self, display):
         """Test update normalizes samples."""
-        samples = np.array([2+0j, 0+2j], dtype=np.complex64)
+        samples = np.array([2 + 0j, 0 + 2j], dtype=np.complex64)
         display.update(samples)
         # After normalization, max magnitude should be 1
         assert np.max(np.abs(display._buffers[0])) <= 1.0 + 1e-6
 
     def test_process_returns_result(self, display):
         """Test process returns ConstellationResult."""
-        samples = np.exp(1j * np.linspace(0, 2*np.pi, 100)).astype(np.complex64)
+        samples = np.exp(1j * np.linspace(0, 2 * np.pi, 100)).astype(np.complex64)
         result = display.process(samples)
 
         assert isinstance(result, ConstellationResult)
@@ -447,8 +447,9 @@ class TestConstellationDisplayAdvanced:
 
     def test_process_calculates_stats(self, display):
         """Test process calculates statistics."""
-        samples = np.random.randn(100).astype(np.complex64) + \
-                  1j * np.random.randn(100).astype(np.complex64)
+        samples = np.random.randn(100).astype(np.complex64) + 1j * np.random.randn(
+            100
+        ).astype(np.complex64)
         result = display.process(samples)
 
         assert result.stats is not None
@@ -546,8 +547,10 @@ class TestConstellationIntegration:
         display = ConstellationDisplay(overlay=ModulationOverlay.QPSK)
 
         # Create ideal QPSK samples with small noise
-        ideal = np.array([0.707+0.707j, -0.707+0.707j,
-                          -0.707-0.707j, 0.707-0.707j], dtype=np.complex64)
+        ideal = np.array(
+            [0.707 + 0.707j, -0.707 + 0.707j, -0.707 - 0.707j, 0.707 - 0.707j],
+            dtype=np.complex64,
+        )
         noisy = ideal + 0.1 * (np.random.randn(4) + 1j * np.random.randn(4))
 
         result = display.process(noisy.astype(np.complex64))

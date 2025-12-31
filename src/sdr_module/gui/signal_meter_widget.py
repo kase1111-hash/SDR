@@ -18,14 +18,19 @@ import math
 from typing import Optional
 
 try:
+    from PyQt6.QtCore import QPointF, QTimer
+    from PyQt6.QtGui import QBrush, QColor, QFont, QFontMetrics, QPainter, QPen
     from PyQt6.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QLabel, QGroupBox, QSizePolicy, QComboBox
+        QComboBox,
+        QGridLayout,
+        QGroupBox,
+        QHBoxLayout,
+        QLabel,
+        QSizePolicy,
+        QVBoxLayout,
+        QWidget,
     )
-    from PyQt6.QtCore import QTimer, QPointF
-    from PyQt6.QtGui import (
-        QPainter, QPen, QBrush, QColor, QFont, QFontMetrics
-    )
+
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
@@ -33,8 +38,11 @@ except ImportError:
 import numpy as np
 
 from ..dsp.signal_meter import (
-    SignalMeter, SignalReading, SignalMode,
-    SignalHistory, S9_DBM
+    S9_DBM,
+    SignalHistory,
+    SignalMeter,
+    SignalMode,
+    SignalReading,
 )
 
 
@@ -92,12 +100,10 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
 
         # Draw peak needle (if enabled)
         if self._show_peak:
-            self._draw_needle(painter, cx, cy, self._peak_s_units,
-                            self._peak_color, 2)
+            self._draw_needle(painter, cx, cy, self._peak_s_units, self._peak_color, 2)
 
         # Draw main needle
-        self._draw_needle(painter, cx, cy, self._s_units,
-                         self._needle_color, 3)
+        self._draw_needle(painter, cx, cy, self._s_units, self._needle_color, 3)
 
         # Draw pivot cap
         painter.setBrush(QBrush(QColor(60, 60, 65)))
@@ -106,8 +112,7 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
 
         painter.end()
 
-    def _draw_scale(self, painter: QPainter, cx: int, cy: int,
-                    w: int, h: int) -> None:
+    def _draw_scale(self, painter: QPainter, cx: int, cy: int, w: int, h: int) -> None:
         """Draw the S-meter scale."""
         # Scale arc parameters
         radius = min(w, h) * 0.7
@@ -118,15 +123,22 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
         # S-unit markers (S1-S9)
         for s in range(1, 10):
             angle = self._s_to_angle(float(s))
-            self._draw_tick(painter, cx, cy, radius, angle,
-                          str(s), is_major=(s == 9))
+            self._draw_tick(painter, cx, cy, radius, angle, str(s), is_major=(s == 9))
 
         # dB over S9 markers (+20, +40, +60)
         for db_over in [20, 40, 60]:
             s_units = 9 + db_over / 6.0  # 6 dB per S-unit
             angle = self._s_to_angle(s_units)
-            self._draw_tick(painter, cx, cy, radius, angle,
-                          f"+{db_over}", is_major=True, is_over=True)
+            self._draw_tick(
+                painter,
+                cx,
+                cy,
+                radius,
+                angle,
+                f"+{db_over}",
+                is_major=True,
+                is_over=True,
+            )
 
         # Draw "S" label
         painter.setFont(QFont("Arial", 12, QFont.Weight.Bold))
@@ -136,9 +148,17 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
         # Draw "dB" label
         painter.drawText(w - 35, h - 25, "dB")
 
-    def _draw_tick(self, painter: QPainter, cx: int, cy: int,
-                   radius: float, angle: float, label: str,
-                   is_major: bool = False, is_over: bool = False) -> None:
+    def _draw_tick(
+        self,
+        painter: QPainter,
+        cx: int,
+        cy: int,
+        radius: float,
+        angle: float,
+        label: str,
+        is_major: bool = False,
+        is_over: bool = False,
+    ) -> None:
         """Draw a tick mark on the scale."""
         rad = math.radians(angle)
         cos_a, sin_a = math.cos(rad), math.sin(rad)
@@ -169,11 +189,17 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
             text_width = fm.horizontalAdvance(label)
             text_height = fm.height()
 
-            painter.drawText(int(lx - text_width/2),
-                           int(ly + text_height/4), label)
+            painter.drawText(int(lx - text_width / 2), int(ly + text_height / 4), label)
 
-    def _draw_needle(self, painter: QPainter, cx: int, cy: int,
-                     s_units: float, color: QColor, width: int) -> None:
+    def _draw_needle(
+        self,
+        painter: QPainter,
+        cx: int,
+        cy: int,
+        s_units: float,
+        color: QColor,
+        width: int,
+    ) -> None:
         """Draw the meter needle."""
         angle = self._s_to_angle(s_units)
         rad = math.radians(angle)
@@ -399,7 +425,7 @@ class CompactSignalMeter(QWidget if HAS_PYQT6 else object):
 
 
 __all__ = [
-    'AnalogMeterWidget',
-    'SignalMeterPanel',
-    'CompactSignalMeter',
+    "AnalogMeterWidget",
+    "SignalMeterPanel",
+    "CompactSignalMeter",
 ]

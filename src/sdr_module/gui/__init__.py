@@ -21,21 +21,21 @@ Or from command line:
     python -m sdr_module.gui
 """
 
-from .main_window import SDRMainWindow
-from .spectrum_widget import SpectrumWidget
-from .waterfall_widget import WaterfallWidget
+from .app import SDRApplication
+from .callsign_panel import CallsignPanel
 from .control_panel import ControlPanel
 from .decoder_panel import DecoderPanel
 from .device_dialog import DeviceDialog
-from .callsign_panel import CallsignPanel
-from .sstv_panel import SSTVPanel, ImageDisplayWidget
+from .main_window import SDRMainWindow
+from .qrp_panel import AmplifierCalculator, PowerDisplayWidget, QRPPanel
 from .signal_meter_widget import (
     AnalogMeterWidget,
-    SignalMeterPanel,
     CompactSignalMeter,
+    SignalMeterPanel,
 )
-from .qrp_panel import QRPPanel, PowerDisplayWidget, AmplifierCalculator
-from .app import SDRApplication
+from .spectrum_widget import SpectrumWidget
+from .sstv_panel import ImageDisplayWidget, SSTVPanel
+from .waterfall_widget import WaterfallWidget
 
 __all__ = [
     "SDRApplication",

@@ -7,13 +7,15 @@ implementing protocol-specific decoders.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Optional, List, Dict, Any
 from enum import Enum
+from typing import Any, Dict, List, Optional
+
 import numpy as np
 
 
 class ProtocolType(Enum):
     """Protocol categories."""
+
     UNKNOWN = "unknown"
     ISM = "ism"
     AMATEUR = "amateur"
@@ -27,6 +29,7 @@ class ProtocolType(Enum):
 @dataclass
 class ProtocolInfo:
     """Protocol information and metadata."""
+
     name: str
     protocol_type: ProtocolType
     frequency_range: tuple  # (min_hz, max_hz)
@@ -39,6 +42,7 @@ class ProtocolInfo:
 @dataclass
 class DecodedFrame:
     """Decoded protocol frame/packet."""
+
     protocol: str
     timestamp: float
     raw_bits: np.ndarray
@@ -106,11 +110,7 @@ class ProtocolDecoder(ABC):
         """Reset decoder state."""
         pass
 
-    def _find_preamble(
-        self,
-        bits: np.ndarray,
-        preamble: np.ndarray
-    ) -> List[int]:
+    def _find_preamble(self, bits: np.ndarray, preamble: np.ndarray) -> List[int]:
         """
         Find preamble pattern in bit stream.
 
@@ -125,16 +125,13 @@ class ProtocolDecoder(ABC):
         preamble_len = len(preamble)
 
         for i in range(len(bits) - preamble_len + 1):
-            if np.array_equal(bits[i:i+preamble_len], preamble):
+            if np.array_equal(bits[i : i + preamble_len], preamble):
                 indices.append(i)
 
         return indices
 
     def _correlate_preamble(
-        self,
-        signal: np.ndarray,
-        preamble: np.ndarray,
-        threshold: float = 0.7
+        self, signal: np.ndarray, preamble: np.ndarray, threshold: float = 0.7
     ) -> List[int]:
         """
         Find preamble using correlation.
@@ -147,7 +144,7 @@ class ProtocolDecoder(ABC):
         Returns:
             List of indices where correlation exceeds threshold
         """
-        correlation = np.correlate(signal, preamble, mode='valid')
+        correlation = np.correlate(signal, preamble, mode="valid")
         max_corr = np.max(np.abs(correlation))
         normalized = np.abs(correlation) / (max_corr + 1e-10)
 
@@ -174,10 +171,7 @@ class ProtocolDecoder(ABC):
         return decoded
 
     def _crc_check(
-        self,
-        data: np.ndarray,
-        polynomial: int,
-        initial: int = 0xFFFF
+        self, data: np.ndarray, polynomial: int, initial: int = 0xFFFF
     ) -> int:
         """
         Calculate CRC.

@@ -2,41 +2,34 @@
 Core module - Device management and sample handling.
 """
 
+from .config import SDRConfig
 from .device_manager import DeviceManager
 from .dual_sdr import DualSDRController
-from .sample_buffer import SampleBuffer
-from .config import SDRConfig
-from .frequency_manager import (
-    # Enums
-    LockoutReason,
-    LicenseClass,
-    # Dataclasses
-    FrequencyBand,
-    FrequencyPreset,
-    BandPrivilege,
-    # Manager class
-    FrequencyManager,
-    # Constants
-    TX_LOCKOUT_BANDS,
-    RX_PRESETS,
-    LICENSE_FREE_BANDS,
+from .frequency_manager import (  # Enums; Dataclasses; Manager class; Constants; Singleton functions; License functions; Power functions
     AMATEUR_BAND_PRIVILEGES,
+    LICENSE_FREE_BANDS,
     POWER_HEADROOM_FACTOR,
+    RX_PRESETS,
+    TX_LOCKOUT_BANDS,
     TX_POWER_WARNING,
-    # Singleton functions
+    BandPrivilege,
+    FrequencyBand,
+    FrequencyManager,
+    FrequencyPreset,
+    LicenseClass,
+    LockoutReason,
+    get_effective_power_limit,
     get_frequency_manager,
-    is_tx_allowed,
-    validate_tx_frequency,
-    get_rx_presets,
-    # License functions
-    set_license_class,
     get_license_class,
     get_license_privileges,
-    # Power functions
     get_power_limit,
-    get_effective_power_limit,
+    get_rx_presets,
     get_tx_power_warning,
+    is_tx_allowed,
+    set_license_class,
+    validate_tx_frequency,
 )
+from .sample_buffer import SampleBuffer
 
 __all__ = [
     "DeviceManager",

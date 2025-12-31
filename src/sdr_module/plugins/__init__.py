@@ -27,15 +27,15 @@ Usage:
 """
 
 from .base import (
-    Plugin,
-    PluginMetadata,
-    PluginType,
-    PluginState,
-    PluginError,
-    ProtocolPlugin,
     DemodulatorPlugin,
     DevicePlugin,
+    Plugin,
+    PluginError,
+    PluginMetadata,
+    PluginState,
+    PluginType,
     ProcessorPlugin,
+    ProtocolPlugin,
 )
 from .manager import PluginManager
 from .registry import PluginRegistry

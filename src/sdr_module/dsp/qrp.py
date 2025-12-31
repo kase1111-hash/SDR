@@ -37,11 +37,11 @@ Usage:
 
 from __future__ import annotations
 
-import math
 import logging
-from enum import Enum, auto
+import math
 from dataclasses import dataclass
-from typing import Optional, List, Tuple, Dict
+from enum import Enum, auto
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ logger = logging.getLogger(__name__)
 # =============================================================================
 # POWER CONVERSION FUNCTIONS
 # =============================================================================
+
 
 def dbm_to_watts(dbm: float) -> float:
     """
@@ -74,7 +75,7 @@ def watts_to_dbm(watts: float) -> float:
         Power in dBm
     """
     if watts <= 0:
-        return -float('inf')
+        return -float("inf")
     return 10 * math.log10(watts) + 30
 
 
@@ -86,7 +87,7 @@ def dbm_to_mw(dbm: float) -> float:
 def mw_to_dbm(mw: float) -> float:
     """Convert milliwatts to dBm."""
     if mw <= 0:
-        return -float('inf')
+        return -float("inf")
     return 10 * math.log10(mw)
 
 
@@ -132,22 +133,25 @@ def format_power_verbose(watts: float, dbm: Optional[float] = None) -> str:
 # QRP DEFINITIONS
 # =============================================================================
 
+
 class QRPClass(Enum):
     """QRP power classifications."""
-    QRPP = auto()      # Milliwatt power (< 1W)
-    QRP_CW = auto()    # ≤ 5W CW
-    QRP_SSB = auto()   # ≤ 10W SSB
-    LOW_POWER = auto() # 10-100W (not QRP but still low)
+
+    QRPP = auto()  # Milliwatt power (< 1W)
+    QRP_CW = auto()  # ≤ 5W CW
+    QRP_SSB = auto()  # ≤ 10W SSB
+    LOW_POWER = auto()  # 10-100W (not QRP but still low)
     STANDARD = auto()  # > 100W
 
 
 @dataclass
 class QRPLimits:
     """Power limits for QRP operation."""
-    qrp_cw_watts: float = 5.0        # Max CW power for QRP
-    qrp_ssb_watts: float = 10.0      # Max SSB power for QRP
-    qrpp_watts: float = 1.0          # Max power for QRPp
-    low_power_watts: float = 100.0   # Max for "low power"
+
+    qrp_cw_watts: float = 5.0  # Max CW power for QRP
+    qrp_ssb_watts: float = 10.0  # Max SSB power for QRP
+    qrpp_watts: float = 1.0  # Max power for QRPp
+    low_power_watts: float = 100.0  # Max for "low power"
 
 
 # Standard QRP limits
@@ -157,16 +161,18 @@ QRP_LIMITS = QRPLimits()
 @dataclass
 class AmplifierStage:
     """Represents an amplifier stage in the TX chain."""
+
     name: str
     gain_db: float
     max_output_dbm: float = 50.0  # 100W default max
-    efficiency: float = 0.5       # 50% typical
+    efficiency: float = 0.5  # 50% typical
     enabled: bool = True
 
 
 @dataclass
 class PowerChainResult:
     """Result of power chain calculation."""
+
     input_dbm: float
     output_dbm: float
     input_watts: float
@@ -181,6 +187,7 @@ class PowerChainResult:
 # =============================================================================
 # QRP CONTROLLER
 # =============================================================================
+
 
 class QRPController:
     """
@@ -251,9 +258,15 @@ class QRPController:
             return True, "No power limit set"
 
         if power_watts <= self._power_limit_watts:
-            return True, f"OK: {format_power(power_watts)} ≤ {format_power(self._power_limit_watts)}"
+            return (
+                True,
+                f"OK: {format_power(power_watts)} ≤ {format_power(self._power_limit_watts)}",
+            )
         else:
-            return False, f"EXCEEDS LIMIT: {format_power(power_watts)} > {format_power(self._power_limit_watts)}"
+            return (
+                False,
+                f"EXCEEDS LIMIT: {format_power(power_watts)} > {format_power(self._power_limit_watts)}",
+            )
 
     def limit_power(self, power_dbm: float) -> float:
         """
@@ -270,7 +283,9 @@ class QRPController:
 
         limit_dbm = watts_to_dbm(self._power_limit_watts)
         if power_dbm > limit_dbm:
-            logger.warning(f"Power limited from {power_dbm:.1f} dBm to {limit_dbm:.1f} dBm")
+            logger.warning(
+                f"Power limited from {power_dbm:.1f} dBm to {limit_dbm:.1f} dBm"
+            )
             return limit_dbm
         return power_dbm
 
@@ -361,11 +376,13 @@ class QRPController:
         """Clear all amplifier stages."""
         self._amplifier_chain.clear()
 
-    def calculate_chain(self,
-                       input_dbm: Optional[float] = None,
-                       preamp_gain_db: float = 0,
-                       pa_gain_db: float = 0,
-                       mode: str = "CW") -> PowerChainResult:
+    def calculate_chain(
+        self,
+        input_dbm: Optional[float] = None,
+        preamp_gain_db: float = 0,
+        pa_gain_db: float = 0,
+        mode: str = "CW",
+    ) -> PowerChainResult:
         """
         Calculate power through the amplifier chain.
 
@@ -390,12 +407,14 @@ class QRPController:
         if preamp_gain_db > 0:
             current_dbm += preamp_gain_db
             total_gain += preamp_gain_db
-            stages.append({
-                "name": "Preamp/Driver",
-                "gain_db": preamp_gain_db,
-                "output_dbm": current_dbm,
-                "output_watts": dbm_to_watts(current_dbm)
-            })
+            stages.append(
+                {
+                    "name": "Preamp/Driver",
+                    "gain_db": preamp_gain_db,
+                    "output_dbm": current_dbm,
+                    "output_watts": dbm_to_watts(current_dbm),
+                }
+            )
 
         if pa_gain_db > 0:
             current_dbm += pa_gain_db
@@ -404,13 +423,15 @@ class QRPController:
             # Estimate DC power (assume 50% efficiency)
             dc_power = output_watts / 0.5
             total_dc_power += dc_power
-            stages.append({
-                "name": "Power Amplifier",
-                "gain_db": pa_gain_db,
-                "output_dbm": current_dbm,
-                "output_watts": output_watts,
-                "dc_power_watts": dc_power
-            })
+            stages.append(
+                {
+                    "name": "Power Amplifier",
+                    "gain_db": pa_gain_db,
+                    "output_dbm": current_dbm,
+                    "output_watts": output_watts,
+                    "dc_power_watts": dc_power,
+                }
+            )
 
         # Process defined amplifier chain
         for amp in self._amplifier_chain:
@@ -426,13 +447,15 @@ class QRPController:
             dc_power = output_watts / amp.efficiency
             total_dc_power += dc_power
 
-            stages.append({
-                "name": amp.name,
-                "gain_db": amp.gain_db,
-                "output_dbm": new_dbm,
-                "output_watts": output_watts,
-                "dc_power_watts": dc_power
-            })
+            stages.append(
+                {
+                    "name": amp.name,
+                    "gain_db": amp.gain_db,
+                    "output_dbm": new_dbm,
+                    "output_watts": output_watts,
+                    "dc_power_watts": dc_power,
+                }
+            )
 
             total_gain += new_dbm - current_dbm
             current_dbm = new_dbm
@@ -450,7 +473,7 @@ class QRPController:
             stages=stages,
             is_qrp=is_qrp,
             qrp_class=qrp_class,
-            dc_power_watts=total_dc_power
+            dc_power_watts=total_dc_power,
         )
 
     # =========================================================================
@@ -484,18 +507,16 @@ class QRPController:
             "total_qsos": self._total_qsos,
             "total_miles": self._total_miles,
             "best_mpw": self._best_mpw,
-            "average_mpw": self._total_miles / max(1, self._total_qsos)
+            "average_mpw": self._total_miles / max(1, self._total_qsos),
         }
 
     # =========================================================================
     # CONTEST EXCHANGE
     # =========================================================================
 
-    def format_contest_exchange(self,
-                                rst: str,
-                                power_watts: float,
-                                state_province: str = "",
-                                name: str = "") -> str:
+    def format_contest_exchange(
+        self, rst: str, power_watts: float, state_province: str = "", name: str = ""
+    ) -> str:
         """
         Format QRP contest exchange.
 
@@ -532,12 +553,7 @@ class QRPController:
             Parsed components
         """
         parts = exchange.upper().split()
-        result = {
-            "rst": "",
-            "location": "",
-            "power": "",
-            "power_watts": 0.0
-        }
+        result = {"rst": "", "location": "", "power": "", "power_watts": 0.0}
 
         for part in parts:
             if part.isdigit() and len(part) in (2, 3):
@@ -583,7 +599,7 @@ class QRPController:
             "qrp_status": self.get_qrp_status(watts, mode),
             "qrp_class": self.classify_power(watts).name,
             "is_qrp": self.is_qrp_compliant(watts, mode),
-            "within_limit": self.is_within_limit(watts)[0]
+            "within_limit": self.is_within_limit(watts)[0],
         }
 
     def get_status_line(self, power_dbm: float, mode: str = "CW") -> str:
@@ -609,21 +625,16 @@ class QRPController:
 # COMMON AMPLIFIER CONFIGURATIONS
 # =============================================================================
 
+
 def get_qrp_amplifier_chain() -> List[AmplifierStage]:
     """Get a typical QRP amplifier chain (HackRF -> 5W)."""
     return [
         AmplifierStage(
-            name="Driver",
-            gain_db=20,
-            max_output_dbm=30,  # 1W max
-            efficiency=0.6
+            name="Driver", gain_db=20, max_output_dbm=30, efficiency=0.6  # 1W max
         ),
         AmplifierStage(
-            name="QRP Final",
-            gain_db=10,
-            max_output_dbm=37,  # 5W max
-            efficiency=0.5
-        )
+            name="QRP Final", gain_db=10, max_output_dbm=37, efficiency=0.5  # 5W max
+        ),
     ]
 
 
@@ -631,36 +642,33 @@ def get_qro_amplifier_chain() -> List[AmplifierStage]:
     """Get a typical QRO amplifier chain (HackRF -> 100W)."""
     return [
         AmplifierStage(
-            name="Driver",
-            gain_db=20,
-            max_output_dbm=33,  # 2W max
-            efficiency=0.6
+            name="Driver", gain_db=20, max_output_dbm=33, efficiency=0.6  # 2W max
         ),
         AmplifierStage(
             name="Linear Amplifier",
             gain_db=20,
             max_output_dbm=50,  # 100W max
-            efficiency=0.5
-        )
+            efficiency=0.5,
+        ),
     ]
 
 
 __all__ = [
     # Power conversion
-    'dbm_to_watts',
-    'watts_to_dbm',
-    'dbm_to_mw',
-    'mw_to_dbm',
-    'format_power',
-    'format_power_verbose',
+    "dbm_to_watts",
+    "watts_to_dbm",
+    "dbm_to_mw",
+    "mw_to_dbm",
+    "format_power",
+    "format_power_verbose",
     # Classes
-    'QRPClass',
-    'QRPLimits',
-    'QRP_LIMITS',
-    'AmplifierStage',
-    'PowerChainResult',
-    'QRPController',
+    "QRPClass",
+    "QRPLimits",
+    "QRP_LIMITS",
+    "AmplifierStage",
+    "PowerChainResult",
+    "QRPController",
     # Helpers
-    'get_qrp_amplifier_chain',
-    'get_qro_amplifier_chain',
+    "get_qrp_amplifier_chain",
+    "get_qro_amplifier_chain",
 ]

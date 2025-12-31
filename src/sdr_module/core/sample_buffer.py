@@ -5,23 +5,26 @@ Provides thread-safe circular buffers for streaming samples
 between device drivers and DSP processing chains.
 """
 
-import numpy as np
-from threading import Lock, Condition
-from typing import Optional
 from dataclasses import dataclass
 from enum import Enum
+from threading import Condition, Lock
+from typing import Optional
+
+import numpy as np
 
 
 class BufferOverflowPolicy(Enum):
     """Policy for handling buffer overflow."""
+
     DROP_OLDEST = "drop_oldest"  # Drop oldest samples (default)
     DROP_NEWEST = "drop_newest"  # Drop incoming samples
-    BLOCK = "block"              # Block until space available
+    BLOCK = "block"  # Block until space available
 
 
 @dataclass
 class BufferStats:
     """Buffer statistics."""
+
     total_samples_in: int = 0
     total_samples_out: int = 0
     samples_dropped: int = 0
@@ -48,7 +51,7 @@ class SampleBuffer:
     def __init__(
         self,
         capacity: int = 1024 * 1024,  # 1M samples default
-        overflow_policy: BufferOverflowPolicy = BufferOverflowPolicy.DROP_OLDEST
+        overflow_policy: BufferOverflowPolicy = BufferOverflowPolicy.DROP_OLDEST,
     ):
         """
         Initialize sample buffer.
@@ -130,7 +133,7 @@ class SampleBuffer:
             if n_samples > self._capacity:
                 self._stats.samples_dropped += n_samples - self._capacity
                 self._stats.overflow_count += 1
-                samples = samples[-self._capacity:]  # Keep newest
+                samples = samples[-self._capacity :]  # Keep newest
                 n_samples = self._capacity
 
             # Handle overflow
@@ -164,11 +167,11 @@ class SampleBuffer:
 
             if end_idx > self._write_idx:
                 # No wrap
-                self._buffer[self._write_idx:end_idx] = samples
+                self._buffer[self._write_idx : end_idx] = samples
             else:
                 # Wrap around
                 first_chunk = self._capacity - self._write_idx
-                self._buffer[self._write_idx:] = samples[:first_chunk]
+                self._buffer[self._write_idx :] = samples[:first_chunk]
                 if end_idx > 0:
                     self._buffer[:end_idx] = samples[first_chunk:]
 
@@ -181,7 +184,9 @@ class SampleBuffer:
 
             return n_samples
 
-    def read(self, n_samples: int, timeout: Optional[float] = None) -> Optional[np.ndarray]:
+    def read(
+        self, n_samples: int, timeout: Optional[float] = None
+    ) -> Optional[np.ndarray]:
         """
         Read samples from buffer.
 
@@ -213,14 +218,13 @@ class SampleBuffer:
 
             if end_idx > self._read_idx:
                 # No wrap
-                samples = self._buffer[self._read_idx:end_idx].copy()
+                samples = self._buffer[self._read_idx : end_idx].copy()
             else:
                 # Wrap around
                 self._capacity - self._read_idx
-                samples = np.concatenate([
-                    self._buffer[self._read_idx:],
-                    self._buffer[:end_idx]
-                ])
+                samples = np.concatenate(
+                    [self._buffer[self._read_idx :], self._buffer[:end_idx]]
+                )
 
             self._read_idx = end_idx
             self._count -= n_samples
@@ -248,12 +252,11 @@ class SampleBuffer:
             end_idx = (self._read_idx + n_samples) % self._capacity
 
             if end_idx > self._read_idx:
-                return self._buffer[self._read_idx:end_idx].copy()
+                return self._buffer[self._read_idx : end_idx].copy()
             else:
-                return np.concatenate([
-                    self._buffer[self._read_idx:],
-                    self._buffer[:end_idx]
-                ])
+                return np.concatenate(
+                    [self._buffer[self._read_idx :], self._buffer[:end_idx]]
+                )
 
     def clear(self) -> None:
         """Clear all samples from buffer."""
@@ -266,7 +269,4 @@ class SampleBuffer:
     def reset_stats(self) -> None:
         """Reset buffer statistics."""
         with self._lock:
-            self._stats = BufferStats(
-                capacity=self._capacity,
-                current_fill=self._count
-            )
+            self._stats = BufferStats(capacity=self._capacity, current_fill=self._count)

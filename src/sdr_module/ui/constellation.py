@@ -7,24 +7,27 @@ analyzing digital modulation types (PSK, QAM, etc.).
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, List, Tuple
+from typing import List, Optional, Tuple
+
 import numpy as np
 
 
 class ModulationOverlay(Enum):
     """Predefined modulation constellation overlays."""
+
     NONE = "none"
-    BPSK = "bpsk"       # 2 points
-    QPSK = "qpsk"       # 4 points
-    PSK8 = "8psk"       # 8 points
-    QAM16 = "16qam"     # 16 points
-    QAM64 = "64qam"     # 64 points
-    QAM256 = "256qam"   # 256 points
+    BPSK = "bpsk"  # 2 points
+    QPSK = "qpsk"  # 4 points
+    PSK8 = "8psk"  # 8 points
+    QAM16 = "16qam"  # 16 points
+    QAM64 = "64qam"  # 64 points
+    QAM256 = "256qam"  # 256 points
 
 
 @dataclass
 class ConstellationPoint:
     """Ideal constellation point for overlay."""
+
     i: float
     q: float
     symbol: Optional[str] = None
@@ -33,22 +36,24 @@ class ConstellationPoint:
 @dataclass
 class ConstellationStats:
     """Statistics for constellation analysis."""
-    evm_percent: float = 0.0          # Error Vector Magnitude (%)
-    evm_db: float = 0.0               # EVM in dB
-    phase_error_deg: float = 0.0      # Mean phase error (degrees)
-    magnitude_error: float = 0.0      # Mean magnitude error
-    snr_estimate_db: float = 0.0      # Estimated SNR from constellation
-    iq_offset: complex = 0j           # DC offset (I + jQ)
-    iq_imbalance: float = 0.0         # I/Q gain imbalance (ratio)
+
+    evm_percent: float = 0.0  # Error Vector Magnitude (%)
+    evm_db: float = 0.0  # EVM in dB
+    phase_error_deg: float = 0.0  # Mean phase error (degrees)
+    magnitude_error: float = 0.0  # Mean magnitude error
+    snr_estimate_db: float = 0.0  # Estimated SNR from constellation
+    iq_offset: complex = 0j  # DC offset (I + jQ)
+    iq_imbalance: float = 0.0  # I/Q gain imbalance (ratio)
 
 
 @dataclass
 class ConstellationResult:
     """Result from constellation processing."""
-    i_data: np.ndarray               # I (real) component array
-    q_data: np.ndarray               # Q (imaginary) component array
-    num_points: int                  # Number of points
-    stats: ConstellationStats        # Constellation statistics
+
+    i_data: np.ndarray  # I (real) component array
+    q_data: np.ndarray  # Q (imaginary) component array
+    num_points: int  # Number of points
+    stats: ConstellationStats  # Constellation statistics
 
     # Bounds for display
     i_min: float = -1.5
@@ -85,12 +90,13 @@ class ConstellationDisplay:
             ConstellationPoint(0.707, -0.707, "10"),
         ],
         ModulationOverlay.PSK8: [
-            ConstellationPoint(np.cos(i * np.pi/4), np.sin(i * np.pi/4), f"{i}")
+            ConstellationPoint(np.cos(i * np.pi / 4), np.sin(i * np.pi / 4), f"{i}")
             for i in range(8)
         ],
         ModulationOverlay.QAM16: [
-            ConstellationPoint(i * 2/3 - 1, q * 2/3 - 1, f"{(q*4+i):X}")
-            for q in range(4) for i in range(4)
+            ConstellationPoint(i * 2 / 3 - 1, q * 2 / 3 - 1, f"{(q*4+i):X}")
+            for q in range(4)
+            for i in range(4)
         ],
     }
 
@@ -99,7 +105,7 @@ class ConstellationDisplay:
         max_points: int = 1024,
         persistence: int = 1,
         normalize: bool = True,
-        overlay: ModulationOverlay = ModulationOverlay.NONE
+        overlay: ModulationOverlay = ModulationOverlay.NONE,
     ):
         """
         Initialize constellation display.
@@ -175,7 +181,7 @@ class ConstellationDisplay:
         """
         # Limit to max points
         if len(samples) > self._max_points:
-            samples = samples[:self._max_points]
+            samples = samples[: self._max_points]
 
         # Normalize if enabled
         if self._normalize:
@@ -306,9 +312,13 @@ class ConstellationDisplay:
 
         # EVM = sqrt(mean error power / mean reference power)
         mean_error_power = np.mean(errors)
-        mean_ref_power = np.mean(np.abs(ref_points)**2)
+        mean_ref_power = np.mean(np.abs(ref_points) ** 2)
 
-        return np.sqrt(mean_error_power / mean_ref_power) if mean_ref_power > 1e-10 else 0.0
+        return (
+            np.sqrt(mean_error_power / mean_ref_power)
+            if mean_ref_power > 1e-10
+            else 0.0
+        )
 
     def clear(self) -> None:
         """Clear all buffered points."""

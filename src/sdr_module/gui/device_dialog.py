@@ -10,11 +10,21 @@ from typing import List
 
 try:
     from PyQt6.QtWidgets import (
-        QDialog, QVBoxLayout, QGridLayout,
-        QLabel, QComboBox, QGroupBox, QPushButton,
-        QTableWidget, QTableWidgetItem, QHeaderView,
-        QDialogButtonBox, QMessageBox, QSpinBox
+        QComboBox,
+        QDialog,
+        QDialogButtonBox,
+        QGridLayout,
+        QGroupBox,
+        QHeaderView,
+        QLabel,
+        QMessageBox,
+        QPushButton,
+        QSpinBox,
+        QTableWidget,
+        QTableWidgetItem,
+        QVBoxLayout,
     )
+
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
@@ -56,9 +66,15 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
 
         self._device_table = QTableWidget()
         self._device_table.setColumnCount(4)
-        self._device_table.setHorizontalHeaderLabels(["Type", "Name", "Serial", "Status"])
-        self._device_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self._device_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._device_table.setHorizontalHeaderLabels(
+            ["Type", "Name", "Serial", "Status"]
+        )
+        self._device_table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Stretch
+        )
+        self._device_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectRows
+        )
         self._device_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self._device_table.itemSelectionChanged.connect(self._on_selection_changed)
         list_layout.addWidget(self._device_table)
@@ -76,10 +92,17 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         # Sample rate
         settings_layout.addWidget(QLabel("Sample Rate:"), 0, 0)
         self._rate_combo = QComboBox()
-        self._rate_combo.addItems([
-            "1.0 MS/s", "1.4 MS/s", "1.8 MS/s", "2.0 MS/s",
-            "2.4 MS/s", "2.56 MS/s", "3.2 MS/s"
-        ])
+        self._rate_combo.addItems(
+            [
+                "1.0 MS/s",
+                "1.4 MS/s",
+                "1.8 MS/s",
+                "2.0 MS/s",
+                "2.4 MS/s",
+                "2.56 MS/s",
+                "3.2 MS/s",
+            ]
+        )
         self._rate_combo.setCurrentText("2.4 MS/s")
         settings_layout.addWidget(self._rate_combo, 0, 1)
 
@@ -100,8 +123,7 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
 
         # Dialog buttons
         button_box = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok |
-            QDialogButtonBox.StandardButton.Cancel
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
         button_box.accepted.connect(self._on_accept)
         button_box.rejected.connect(self.reject)
@@ -141,22 +163,14 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
                     "RTL-SDR",
                     dev_info.get("name", f"RTL-SDR #{i}"),
                     dev_info.get("serial", "Unknown"),
-                    "Available"
+                    "Available",
                 )
-                self._devices.append({
-                    "type": "rtlsdr",
-                    "index": i,
-                    "info": dev_info
-                })
+                self._devices.append({"type": "rtlsdr", "index": i, "info": dev_info})
 
         except ImportError:
             # Add mock device for testing
             self._add_device("RTL-SDR", "RTL-SDR (Mock)", "000001", "Demo Mode")
-            self._devices.append({
-                "type": "rtlsdr_mock",
-                "index": 0,
-                "info": {}
-            })
+            self._devices.append({"type": "rtlsdr_mock", "index": 0, "info": {}})
 
     def _enumerate_hackrf(self):
         """Enumerate HackRF devices."""
@@ -171,22 +185,14 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
                     "HackRF",
                     dev_info.get("name", f"HackRF #{i}"),
                     dev_info.get("serial", "Unknown"),
-                    "Available"
+                    "Available",
                 )
-                self._devices.append({
-                    "type": "hackrf",
-                    "index": i,
-                    "info": dev_info
-                })
+                self._devices.append({"type": "hackrf", "index": i, "info": dev_info})
 
         except ImportError:
             # Add mock device for testing
             self._add_device("HackRF", "HackRF One (Mock)", "000002", "Demo Mode")
-            self._devices.append({
-                "type": "hackrf_mock",
-                "index": 0,
-                "info": {}
-            })
+            self._devices.append({"type": "hackrf_mock", "index": 0, "info": {}})
 
     def _add_device(self, dev_type: str, name: str, serial: str, status: str):
         """Add device to table."""
@@ -217,10 +223,7 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         rows = self._device_table.selectionModel().selectedRows()
 
         if not rows:
-            QMessageBox.warning(
-                self, "No Selection",
-                "Please select a device."
-            )
+            QMessageBox.warning(self, "No Selection", "Please select a device.")
             return
 
         row = rows[0].row()
@@ -237,14 +240,12 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
                 self.accept()
             else:
                 QMessageBox.warning(
-                    self, "Connection Failed",
-                    "Failed to connect to the selected device."
+                    self,
+                    "Connection Failed",
+                    "Failed to connect to the selected device.",
                 )
         except Exception as e:
-            QMessageBox.critical(
-                self, "Error",
-                f"Error connecting to device: {e}"
-            )
+            QMessageBox.critical(self, "Error", f"Error connecting to device: {e}")
 
     def _open_device(self, dev: dict):
         """Open the specified device."""
@@ -252,6 +253,7 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
 
         if dev_type == "rtlsdr":
             from sdr_module.devices.rtlsdr import RTLSDRDevice
+
             device = RTLSDRDevice()
             if device.open(dev.get("index", 0)):
                 # Apply settings
@@ -262,6 +264,7 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
 
         elif dev_type == "hackrf":
             from sdr_module.devices.hackrf import HackRFDevice
+
             device = HackRFDevice()
             if device.open(dev.get("index", 0)):
                 rate_str = self._rate_combo.currentText()
@@ -316,10 +319,13 @@ class MockDevice:
 
     def read_samples(self, num_samples: int):
         import numpy as np
+
         if not self._running:
             return None
         # Generate demo samples
-        return np.random.randn(num_samples) * 0.1 + 1j * np.random.randn(num_samples) * 0.1
+        return (
+            np.random.randn(num_samples) * 0.1 + 1j * np.random.randn(num_samples) * 0.1
+        )
 
     def close(self):
         self._running = False

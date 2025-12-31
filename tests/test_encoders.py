@@ -4,15 +4,14 @@ import numpy as np
 import pytest
 
 from sdr_module.protocols.encoder import (
-    ProtocolEncoder,
     EncoderConfig,
     ModulationType,
 )
 from sdr_module.protocols.encoders import (
-    RTTYEncoder,
-    MorseEncoder,
     ASCIIEncoder,
+    MorseEncoder,
     PSK31Encoder,
+    RTTYEncoder,
 )
 
 
@@ -124,9 +123,9 @@ class TestRTTYEncoder:
 
     def test_baudot_table(self):
         """Test Baudot code table contains expected characters."""
-        assert 'A' in RTTYEncoder.BAUDOT_LETTERS
-        assert 'Z' in RTTYEncoder.BAUDOT_LETTERS
-        assert ' ' in RTTYEncoder.BAUDOT_LETTERS
+        assert "A" in RTTYEncoder.BAUDOT_LETTERS
+        assert "Z" in RTTYEncoder.BAUDOT_LETTERS
+        assert " " in RTTYEncoder.BAUDOT_LETTERS
 
 
 class TestMorseEncoder:
@@ -171,9 +170,9 @@ class TestMorseEncoder:
 
     def test_morse_table(self):
         """Test Morse code table."""
-        assert MorseEncoder.MORSE_CODE['S'] == '...'
-        assert MorseEncoder.MORSE_CODE['O'] == '---'
-        assert MorseEncoder.MORSE_CODE['1'] == '.----'
+        assert MorseEncoder.MORSE_CODE["S"] == "..."
+        assert MorseEncoder.MORSE_CODE["O"] == "---"
+        assert MorseEncoder.MORSE_CODE["1"] == ".----"
 
     def test_encode_bytes(self, morse_encoder):
         """Test encoding bytes."""
@@ -268,9 +267,9 @@ class TestPSK31Encoder:
 
     def test_varicode_table(self):
         """Test varicode table contains common characters."""
-        assert ' ' in PSK31Encoder.VARICODE
-        assert 'e' in PSK31Encoder.VARICODE
-        assert 't' in PSK31Encoder.VARICODE
+        assert " " in PSK31Encoder.VARICODE
+        assert "e" in PSK31Encoder.VARICODE
+        assert "t" in PSK31Encoder.VARICODE
 
     def test_encode_bytes(self, psk31_encoder):
         """Test encoding bytes."""
@@ -324,8 +323,10 @@ class TestProtocolEncoderBase:
         assert len(signal) == 4 * samples_per_bit
 
         # Check that '0' bits have zero amplitude
-        bit_1_power = np.mean(np.abs(signal[0:samples_per_bit])**2)
-        bit_0_power = np.mean(np.abs(signal[samples_per_bit:2*samples_per_bit])**2)
+        bit_1_power = np.mean(np.abs(signal[0:samples_per_bit]) ** 2)
+        bit_0_power = np.mean(
+            np.abs(signal[samples_per_bit : 2 * samples_per_bit]) ** 2
+        )
         assert bit_1_power > 0
         assert bit_0_power < 0.01
 

@@ -30,9 +30,10 @@ from __future__ import annotations
 
 import logging
 import time
-from enum import Enum, auto
 from dataclasses import dataclass
-from typing import Tuple, List
+from enum import Enum, auto
+from typing import List, Tuple
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -40,33 +41,35 @@ logger = logging.getLogger(__name__)
 
 class SignalMode(Enum):
     """Signal mode for RST reporting."""
-    PHONE = auto()      # Voice - uses RS (2 digits)
-    CW = auto()         # Morse - uses RST (3 digits)
-    DIGITAL = auto()    # Digital modes - uses RS (2 digits)
+
+    PHONE = auto()  # Voice - uses RS (2 digits)
+    CW = auto()  # Morse - uses RST (3 digits)
+    DIGITAL = auto()  # Digital modes - uses RS (2 digits)
 
 
 @dataclass
 class SignalReading:
     """Complete signal reading with all HAM-style measurements."""
+
     # Raw measurements
-    power_dbm: float           # Power in dBm
-    power_dbfs: float          # Power in dB relative to full scale
-    snr_db: float              # Signal-to-noise ratio
+    power_dbm: float  # Power in dBm
+    power_dbfs: float  # Power in dB relative to full scale
+    snr_db: float  # Signal-to-noise ratio
 
     # S-Meter
-    s_units: float             # S-units (can be fractional, e.g., 7.5)
-    s_meter: str               # S-meter string ("S7", "S9+20")
-    s_value: int               # Integer S value (1-9)
-    over_s9_db: float          # dB over S9 (0 if below S9)
+    s_units: float  # S-units (can be fractional, e.g., 7.5)
+    s_meter: str  # S-meter string ("S7", "S9+20")
+    s_value: int  # Integer S value (1-9)
+    over_s9_db: float  # dB over S9 (0 if below S9)
 
     # RST
-    readability: int           # R: 1-5
-    strength: int              # S: 1-9
-    tone: int                  # T: 1-9 (for CW)
+    readability: int  # R: 1-5
+    strength: int  # S: 1-9
+    tone: int  # T: 1-9 (for CW)
 
     # Timestamps
     timestamp: float
-    peak_hold_dbm: float       # Peak hold value
+    peak_hold_dbm: float  # Peak hold value
 
 
 # S-Meter reference levels (IARU Region 1 standard for HF)
@@ -76,11 +79,11 @@ S_METER_REFERENCE = {
     2: -115,  # S2
     3: -109,  # S3
     4: -103,  # S4
-    5: -97,   # S5
-    6: -91,   # S6
-    7: -85,   # S7
-    8: -79,   # S8
-    9: -73,   # S9 (reference point)
+    5: -97,  # S5
+    6: -91,  # S6
+    7: -85,  # S7
+    8: -79,  # S8
+    9: -73,  # S9 (reference point)
 }
 
 S9_DBM = -73.0  # S9 reference level
@@ -342,8 +345,15 @@ class SignalMeter:
 
         # Number words for natural speech
         num_words = {
-            1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
-            6: "six", 7: "seven", 8: "eight", 9: "nine"
+            1: "one",
+            2: "two",
+            3: "three",
+            4: "four",
+            5: "five",
+            6: "six",
+            7: "seven",
+            8: "eight",
+            9: "nine",
         }
 
         r_word = num_words.get(reading.readability, str(reading.readability))
@@ -443,8 +453,10 @@ class SignalMeter:
         reading = self.get_reading()
         rst = self.get_rst()
 
-        return (f"{reading.s_meter} ({reading.power_dbm:.0f} dBm) | "
-                f"RST: {rst} | SNR: {reading.snr_db:.0f} dB")
+        return (
+            f"{reading.s_meter} ({reading.power_dbm:.0f} dBm) | "
+            f"RST: {rst} | SNR: {reading.snr_db:.0f} dB"
+        )
 
     @staticmethod
     def get_s_meter_scale() -> str:
@@ -525,11 +537,11 @@ class SignalHistory:
 
 
 __all__ = [
-    'SignalMode',
-    'SignalReading',
-    'SignalMeter',
-    'SignalHistory',
-    'S_METER_REFERENCE',
-    'S9_DBM',
-    'DB_PER_S_UNIT',
+    "SignalMode",
+    "SignalReading",
+    "SignalMeter",
+    "SignalHistory",
+    "S_METER_REFERENCE",
+    "S9_DBM",
+    "DB_PER_S_UNIT",
 ]

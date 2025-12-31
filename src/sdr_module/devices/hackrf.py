@@ -11,34 +11,35 @@ Specifications:
     - TX Power: -10 to +15 dBm
 """
 
-import numpy as np
-from typing import Optional, Callable, List
-from threading import Thread
 import logging
+from threading import Thread
+from typing import Callable, List, Optional
 
+import numpy as np
+
+from ..core.frequency_manager import is_tx_allowed
 from .base import (
-    SDRDevice,
+    DeviceCapability,
     DeviceInfo,
     DeviceSpec,
-    DeviceCapability,
+    SDRDevice,
 )
-from ..core.frequency_manager import is_tx_allowed
 
 logger = logging.getLogger(__name__)
 
 # HackRF specifications from spec sheet
 HACKRF_SPEC = DeviceSpec(
-    freq_min=1e6,            # 1 MHz
-    freq_max=6e9,            # 6 GHz
-    sample_rate_min=8e6,     # 8 MS/s minimum recommended
-    sample_rate_max=20e6,    # 20 MS/s max
-    bandwidth_max=20e6,      # 20 MHz
+    freq_min=1e6,  # 1 MHz
+    freq_max=6e9,  # 6 GHz
+    sample_rate_min=8e6,  # 8 MS/s minimum recommended
+    sample_rate_max=20e6,  # 20 MS/s max
+    bandwidth_max=20e6,  # 20 MHz
     adc_bits=8,
     gain_min=0.0,
-    gain_max=62.0,           # Combined LNA + VGA + AMP
-    max_input_power=-5.0,    # -5 dBm max input (CAUTION!)
-    tx_power_min=-10.0,      # -10 dBm
-    tx_power_max=15.0,       # +15 dBm (frequency dependent)
+    gain_max=62.0,  # Combined LNA + VGA + AMP
+    max_input_power=-5.0,  # -5 dBm max input (CAUTION!)
+    tx_power_min=-10.0,  # -10 dBm
+    tx_power_max=15.0,  # +15 dBm (frequency dependent)
 )
 
 
@@ -75,20 +76,24 @@ class HackRFDevice(SDRDevice):
 
             # Try to open and get info
             h = HackRF()
-            serial = h.get_serial_number() if hasattr(h, 'get_serial_number') else "unknown"
-            devices.append(DeviceInfo(
-                name="HackRF One",
-                serial=serial,
-                manufacturer="Great Scott Gadgets",
-                product="HackRF One",
-                index=0,
-                capabilities=[
-                    DeviceCapability.RX,
-                    DeviceCapability.TX,
-                    DeviceCapability.HALF_DUPLEX,
-                    DeviceCapability.EXT_CLOCK,
-                ]
-            ))
+            serial = (
+                h.get_serial_number() if hasattr(h, "get_serial_number") else "unknown"
+            )
+            devices.append(
+                DeviceInfo(
+                    name="HackRF One",
+                    serial=serial,
+                    manufacturer="Great Scott Gadgets",
+                    product="HackRF One",
+                    index=0,
+                    capabilities=[
+                        DeviceCapability.RX,
+                        DeviceCapability.TX,
+                        DeviceCapability.HALF_DUPLEX,
+                        DeviceCapability.EXT_CLOCK,
+                    ],
+                )
+            )
             h.close()
         except ImportError:
             logger.warning("hackrf library not installed")
@@ -104,6 +109,7 @@ class HackRFDevice(SDRDevice):
 
         try:
             from hackrf import HackRF
+
             self._device = HackRF()
             self._is_open = True
 
@@ -125,7 +131,7 @@ class HackRFDevice(SDRDevice):
                     DeviceCapability.TX,
                     DeviceCapability.HALF_DUPLEX,
                     DeviceCapability.EXT_CLOCK,
-                ]
+                ],
             )
 
             # Set defaults
@@ -138,7 +144,9 @@ class HackRFDevice(SDRDevice):
             return True
 
         except ImportError:
-            logger.error("hackrf library not installed. Install with: pip install hackrf")
+            logger.error(
+                "hackrf library not installed. Install with: pip install hackrf"
+            )
             return False
         except Exception as e:
             logger.error(f"Failed to open HackRF: {e}")
@@ -186,8 +194,9 @@ class HackRFDevice(SDRDevice):
             return False
 
         # Clamp to valid range
-        rate_hz = max(self._spec.sample_rate_min,
-                      min(rate_hz, self._spec.sample_rate_max))
+        rate_hz = max(
+            self._spec.sample_rate_min, min(rate_hz, self._spec.sample_rate_max)
+        )
 
         try:
             self._device.set_sample_rate(rate_hz)
@@ -204,8 +213,24 @@ class HackRFDevice(SDRDevice):
             return False
 
         # HackRF has specific supported bandwidths
-        supported_bw = [1.75e6, 2.5e6, 3.5e6, 5e6, 5.5e6, 6e6, 7e6,
-                        8e6, 9e6, 10e6, 12e6, 14e6, 15e6, 20e6, 24e6, 28e6]
+        supported_bw = [
+            1.75e6,
+            2.5e6,
+            3.5e6,
+            5e6,
+            5.5e6,
+            6e6,
+            7e6,
+            8e6,
+            9e6,
+            10e6,
+            12e6,
+            14e6,
+            15e6,
+            20e6,
+            24e6,
+            28e6,
+        ]
         # Find nearest supported bandwidth
         bw_hz = min(supported_bw, key=lambda x: abs(x - bw_hz))
 
@@ -313,6 +338,7 @@ class HackRFDevice(SDRDevice):
         def rx_thread():
             """Background thread for receiving samples."""
             try:
+
                 def rx_callback(hackrf_transfer):
                     """HackRF callback for received data."""
                     if self._stop_event.is_set():
@@ -404,6 +430,7 @@ class HackRFDevice(SDRDevice):
         def tx_thread():
             """Background thread for transmitting samples."""
             try:
+
                 def tx_callback(hackrf_transfer):
                     """HackRF callback for transmit data."""
                     if self._stop_event.is_set():
@@ -416,7 +443,7 @@ class HackRFDevice(SDRDevice):
                             iq = np.zeros(len(samples) * 2, dtype=np.int8)
                             iq[0::2] = (samples.real * 127).astype(np.int8)
                             iq[1::2] = (samples.imag * 127).astype(np.int8)
-                            hackrf_transfer.buffer[:len(iq)] = iq
+                            hackrf_transfer.buffer[: len(iq)] = iq
                     return 0
 
                 self._device.start_tx(tx_callback)

@@ -10,18 +10,28 @@ Provides:
 
 from __future__ import annotations
 
-from typing import Optional
-from pathlib import Path
 import time
+from pathlib import Path
+from typing import Optional
 
 try:
+    from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+    from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
     from PyQt6.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QLabel, QPushButton, QProgressBar, QGroupBox,
-        QListWidget, QListWidgetItem, QFileDialog, QSizePolicy
+        QFileDialog,
+        QGridLayout,
+        QGroupBox,
+        QHBoxLayout,
+        QLabel,
+        QListWidget,
+        QListWidgetItem,
+        QProgressBar,
+        QPushButton,
+        QSizePolicy,
+        QVBoxLayout,
+        QWidget,
     )
-    from PyQt6.QtCore import Qt, pyqtSignal, QTimer
-    from PyQt6.QtGui import QImage, QPixmap, QPainter, QColor
+
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
@@ -54,7 +64,9 @@ class ImageDisplayWidget(QWidget if HAS_PYQT6 else object):
         self._update_pixmap()
         self.update()
 
-    def set_partial_image(self, image: np.ndarray, current_line: int, total_lines: int) -> None:
+    def set_partial_image(
+        self, image: np.ndarray, current_line: int, total_lines: int
+    ) -> None:
         """Set partial image during reception."""
         self._image = image
         self._current_line = current_line
@@ -83,10 +95,7 @@ class ImageDisplayWidget(QWidget if HAS_PYQT6 else object):
         img_data = np.ascontiguousarray(self._image)
 
         qimage = QImage(
-            img_data.data,
-            w, h,
-            bytes_per_line,
-            QImage.Format.Format_RGB888
+            img_data.data, w, h, bytes_per_line, QImage.Format.Format_RGB888
         )
 
         self._pixmap = QPixmap.fromImage(qimage)
@@ -104,7 +113,7 @@ class ImageDisplayWidget(QWidget if HAS_PYQT6 else object):
             scaled = self._pixmap.scaled(
                 self.size(),
                 Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
+                Qt.TransformationMode.SmoothTransformation,
             )
 
             # Center the image
@@ -114,7 +123,9 @@ class ImageDisplayWidget(QWidget if HAS_PYQT6 else object):
 
             # Draw progress line during reception
             if self._current_line > 0 and self._current_line < self._total_lines:
-                progress_y = y + int(scaled.height() * self._current_line / self._total_lines)
+                progress_y = y + int(
+                    scaled.height() * self._current_line / self._total_lines
+                )
                 painter.setPen(QColor(0, 255, 0))
                 painter.drawLine(x, progress_y, x + scaled.width(), progress_y)
         else:
@@ -123,7 +134,7 @@ class ImageDisplayWidget(QWidget if HAS_PYQT6 else object):
             painter.drawText(
                 self.rect(),
                 Qt.AlignmentFlag.AlignCenter,
-                "SSTV Image Viewer\n\nTune to 145.800 MHz\nto receive ISS images"
+                "SSTV Image Viewer\n\nTune to 145.800 MHz\nto receive ISS images",
             )
 
         painter.end()
@@ -304,13 +315,14 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
             self,
             "Save SSTV Image",
             default_name,
-            "PNG Image (*.png);;JPEG Image (*.jpg);;All Files (*)"
+            "PNG Image (*.png);;JPEG Image (*.jpg);;All Files (*)",
         )
 
         if filepath:
             try:
                 from PIL import Image
-                img = Image.fromarray(image, 'RGB')
+
+                img = Image.fromarray(image, "RGB")
                 img.save(filepath)
                 self._status_label.setText(f"Saved: {Path(filepath).name}")
                 self.image_saved.emit(filepath)
@@ -371,9 +383,7 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         if self._decoder and self._decoder.state.image_data is not None:
             total = self._decoder.state.mode.height if self._decoder.state.mode else 1
             self._image_display.set_partial_image(
-                self._decoder.state.image_data,
-                line,
-                total
+                self._decoder.state.image_data, line, total
             )
             self._progress_bar.setValue(int(100 * line / total))
 
@@ -434,6 +444,6 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
 
 
 __all__ = [
-    'ImageDisplayWidget',
-    'SSTVPanel',
+    "ImageDisplayWidget",
+    "SSTVPanel",
 ]

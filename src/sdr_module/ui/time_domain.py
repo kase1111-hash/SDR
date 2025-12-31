@@ -8,36 +8,39 @@ multiple display modes and configurable parameters.
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple
+
 import numpy as np
 
 
 class DisplayMode(Enum):
     """Time domain display modes."""
-    MAGNITUDE = "magnitude"      # |I + jQ| - envelope
-    I_CHANNEL = "i_channel"      # In-phase component only
-    Q_CHANNEL = "q_channel"      # Quadrature component only
-    IQ_OVERLAY = "iq_overlay"    # Both I and Q overlaid
-    PHASE = "phase"              # Phase angle (unwrapped)
-    POWER = "power"              # Power (magnitude squared) in dB
+
+    MAGNITUDE = "magnitude"  # |I + jQ| - envelope
+    I_CHANNEL = "i_channel"  # In-phase component only
+    Q_CHANNEL = "q_channel"  # Quadrature component only
+    IQ_OVERLAY = "iq_overlay"  # Both I and Q overlaid
+    PHASE = "phase"  # Phase angle (unwrapped)
+    POWER = "power"  # Power (magnitude squared) in dB
 
 
 @dataclass
 class TimeDomainResult:
     """Result from time domain processing."""
-    time_ms: np.ndarray          # Time axis in milliseconds
-    samples: int                 # Number of samples
-    sample_rate: float           # Sample rate in Hz
-    mode: DisplayMode            # Display mode used
+
+    time_ms: np.ndarray  # Time axis in milliseconds
+    samples: int  # Number of samples
+    sample_rate: float  # Sample rate in Hz
+    mode: DisplayMode  # Display mode used
 
     # Data arrays (depending on mode)
-    primary: np.ndarray          # Primary data (I, Q, mag, phase, or power)
+    primary: np.ndarray  # Primary data (I, Q, mag, phase, or power)
     secondary: Optional[np.ndarray] = None  # Secondary data (Q for IQ_OVERLAY)
 
     # Statistics
-    peak: float = 0.0            # Peak value
-    rms: float = 0.0             # RMS value
-    min_val: float = 0.0         # Minimum value
-    max_val: float = 0.0         # Maximum value
+    peak: float = 0.0  # Peak value
+    rms: float = 0.0  # RMS value
+    min_val: float = 0.0  # Minimum value
+    max_val: float = 0.0  # Maximum value
 
 
 class TimeDomainDisplay:
@@ -57,7 +60,7 @@ class TimeDomainDisplay:
         self,
         sample_rate: float,
         window_size: int = 4096,
-        mode: DisplayMode = DisplayMode.MAGNITUDE
+        mode: DisplayMode = DisplayMode.MAGNITUDE,
     ):
         """
         Initialize time domain display.
@@ -119,10 +122,7 @@ class TimeDomainDisplay:
         return (self._window_size / self._sample_rate) * 1000
 
     def set_trigger(
-        self,
-        enabled: bool = True,
-        level: float = 0.5,
-        edge: str = "rising"
+        self, enabled: bool = True, level: float = 0.5, edge: str = "rising"
     ) -> None:
         """
         Configure triggering for stable waveform display.
@@ -147,7 +147,7 @@ class TimeDomainDisplay:
 
         if n_samples >= self._window_size:
             # More samples than window - keep most recent
-            self._buffer[:] = samples[-self._window_size:]
+            self._buffer[:] = samples[-self._window_size :]
             self._buffer_valid = self._window_size
         else:
             # Shift buffer and append new samples
@@ -171,7 +171,11 @@ class TimeDomainDisplay:
 
         # Get valid portion of buffer
         if self._buffer_valid < self._window_size:
-            data = self._buffer[-self._buffer_valid:] if self._buffer_valid > 0 else self._buffer[:1]
+            data = (
+                self._buffer[-self._buffer_valid :]
+                if self._buffer_valid > 0
+                else self._buffer[:1]
+            )
         else:
             data = self._buffer
 
@@ -206,8 +210,7 @@ class TimeDomainDisplay:
         )
 
     def _compute_display_data(
-        self,
-        data: np.ndarray
+        self, data: np.ndarray
     ) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """Compute display data based on current mode."""
 
@@ -221,16 +224,13 @@ class TimeDomainDisplay:
             return np.imag(data).astype(np.float32), None
 
         elif self._mode == DisplayMode.IQ_OVERLAY:
-            return (
-                np.real(data).astype(np.float32),
-                np.imag(data).astype(np.float32)
-            )
+            return (np.real(data).astype(np.float32), np.imag(data).astype(np.float32))
 
         elif self._mode == DisplayMode.PHASE:
             return np.unwrap(np.angle(data)).astype(np.float32), None
 
         elif self._mode == DisplayMode.POWER:
-            power = np.abs(data)**2
+            power = np.abs(data) ** 2
             # Convert to dB with floor to avoid log(0)
             power_db = 10 * np.log10(power + 1e-12)
             return power_db.astype(np.float32), None

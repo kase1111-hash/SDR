@@ -4,29 +4,32 @@ Base SDR device abstraction layer.
 Provides a unified interface for all SDR hardware devices.
 """
 
+import queue
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, Callable, List
+from threading import Event, Thread
+from typing import Callable, List, Optional
+
 import numpy as np
-from threading import Thread, Event
-import queue
 
 
 class DeviceCapability(Enum):
     """SDR device capabilities."""
-    RX = auto()          # Receive capability
-    TX = auto()          # Transmit capability
-    FULL_DUPLEX = auto() # Simultaneous TX/RX
-    HALF_DUPLEX = auto() # TX or RX, not both
-    BIAS_TEE = auto()    # Bias tee for active antennas
-    EXT_CLOCK = auto()   # External clock reference
-    DIRECT_SAMPLE = auto() # Direct sampling mode (HF)
+
+    RX = auto()  # Receive capability
+    TX = auto()  # Transmit capability
+    FULL_DUPLEX = auto()  # Simultaneous TX/RX
+    HALF_DUPLEX = auto()  # TX or RX, not both
+    BIAS_TEE = auto()  # Bias tee for active antennas
+    EXT_CLOCK = auto()  # External clock reference
+    DIRECT_SAMPLE = auto()  # Direct sampling mode (HF)
 
 
 @dataclass
 class DeviceInfo:
     """SDR device information."""
+
     name: str
     serial: str
     manufacturer: str
@@ -38,15 +41,16 @@ class DeviceInfo:
 @dataclass
 class DeviceSpec:
     """SDR device specifications."""
-    freq_min: float          # Minimum frequency in Hz
-    freq_max: float          # Maximum frequency in Hz
-    sample_rate_min: float   # Minimum sample rate in Hz
-    sample_rate_max: float   # Maximum sample rate in Hz
-    bandwidth_max: float     # Maximum instantaneous bandwidth in Hz
-    adc_bits: int            # ADC resolution in bits
-    gain_min: float          # Minimum gain in dB
-    gain_max: float          # Maximum gain in dB
-    max_input_power: float   # Maximum input power in dBm
+
+    freq_min: float  # Minimum frequency in Hz
+    freq_max: float  # Maximum frequency in Hz
+    sample_rate_min: float  # Minimum sample rate in Hz
+    sample_rate_max: float  # Maximum sample rate in Hz
+    bandwidth_max: float  # Maximum instantaneous bandwidth in Hz
+    adc_bits: int  # ADC resolution in bits
+    gain_min: float  # Minimum gain in dB
+    gain_max: float  # Maximum gain in dB
+    max_input_power: float  # Maximum input power in dBm
     tx_power_min: Optional[float] = None  # Min TX power in dBm
     tx_power_max: Optional[float] = None  # Max TX power in dBm
 
@@ -54,11 +58,12 @@ class DeviceSpec:
 @dataclass
 class DeviceState:
     """Current SDR device state."""
-    frequency: float = 0.0       # Center frequency in Hz
-    sample_rate: float = 0.0     # Sample rate in Hz
-    bandwidth: float = 0.0       # Filter bandwidth in Hz
-    gain: float = 0.0            # Current gain in dB
-    gain_mode: str = "manual"    # "auto" or "manual"
+
+    frequency: float = 0.0  # Center frequency in Hz
+    sample_rate: float = 0.0  # Sample rate in Hz
+    bandwidth: float = 0.0  # Filter bandwidth in Hz
+    gain: float = 0.0  # Current gain in dB
+    gain_mode: str = "manual"  # "auto" or "manual"
     is_streaming: bool = False
     is_transmitting: bool = False
     bias_tee_enabled: bool = False
@@ -208,7 +213,9 @@ class SDRDevice(ABC):
         """
         pass
 
-    def read_samples(self, num_samples: int, timeout: float = 1.0) -> Optional[np.ndarray]:
+    def read_samples(
+        self, num_samples: int, timeout: float = 1.0
+    ) -> Optional[np.ndarray]:
         """
         Read samples from the device.
 

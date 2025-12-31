@@ -7,31 +7,34 @@ into various radio protocol formats.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
 from enum import Enum
+from typing import Optional
+
 import numpy as np
 
 
 class ModulationType(Enum):
     """Modulation types for encoding."""
-    FSK = "fsk"          # Frequency Shift Keying
-    ASK = "ask"          # Amplitude Shift Keying
-    PSK = "psk"          # Phase Shift Keying
-    OOK = "ook"          # On-Off Keying
-    AFSK = "afsk"        # Audio FSK
-    MSK = "msk"          # Minimum Shift Keying
+
+    FSK = "fsk"  # Frequency Shift Keying
+    ASK = "ask"  # Amplitude Shift Keying
+    PSK = "psk"  # Phase Shift Keying
+    OOK = "ook"  # On-Off Keying
+    AFSK = "afsk"  # Audio FSK
+    MSK = "msk"  # Minimum Shift Keying
 
 
 @dataclass
 class EncoderConfig:
     """Configuration for protocol encoder."""
+
     sample_rate: float
     carrier_freq: float
     baud_rate: float
     modulation: ModulationType
     amplitude: float = 1.0
     frequency_shift: Optional[float] = None  # For FSK
-    phase_shift: Optional[float] = None      # For PSK
+    phase_shift: Optional[float] = None  # For PSK
 
 
 class ProtocolEncoder(ABC):
@@ -84,7 +87,7 @@ class ProtocolEncoder(ABC):
         """
         pass
 
-    def text_to_bits(self, text: str, encoding: str = 'ascii') -> np.ndarray:
+    def text_to_bits(self, text: str, encoding: str = "ascii") -> np.ndarray:
         """
         Convert text to bit array.
 
@@ -100,10 +103,7 @@ class ProtocolEncoder(ABC):
         return bits
 
     def bits_to_fsk(
-        self,
-        bits: np.ndarray,
-        mark_freq: float,
-        space_freq: float
+        self, bits: np.ndarray, mark_freq: float, space_freq: float
     ) -> np.ndarray:
         """
         Modulate bits using FSK.
@@ -129,9 +129,7 @@ class ProtocolEncoder(ABC):
             start_idx = i * samples_per_bit
             end_idx = start_idx + samples_per_bit
 
-            signal[start_idx:end_idx] = (
-                self._config.amplitude * np.exp(1j * phase)
-            )
+            signal[start_idx:end_idx] = self._config.amplitude * np.exp(1j * phase)
 
         return signal
 
@@ -163,11 +161,7 @@ class ProtocolEncoder(ABC):
 
         return signal
 
-    def add_preamble(
-        self,
-        signal: np.ndarray,
-        preamble_bits: np.ndarray
-    ) -> np.ndarray:
+    def add_preamble(self, signal: np.ndarray, preamble_bits: np.ndarray) -> np.ndarray:
         """
         Add preamble to signal.
 
@@ -184,7 +178,7 @@ class ProtocolEncoder(ABC):
             preamble = self.bits_to_fsk(
                 preamble_bits,
                 self._carrier_freq + freq_shift / 2,
-                self._carrier_freq - freq_shift / 2
+                self._carrier_freq - freq_shift / 2,
             )
         else:
             preamble = self.bits_to_ask(preamble_bits)

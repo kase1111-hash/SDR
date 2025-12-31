@@ -1,25 +1,23 @@
 """Tests for plugin system."""
 
-import numpy as np
 import pytest
 
-from sdr_module.plugins.base import (
-    PluginType,
-    PluginState,
-    PluginError,
-    PluginLoadError,
-    PluginInitError,
-    PluginNotFoundError,
-    PluginMetadata,
-    Plugin,
-)
 from sdr_module.plugins import (
-    PluginManager,
-    PluginRegistry,
-    ProtocolPlugin,
     DemodulatorPlugin,
     DevicePlugin,
+    PluginManager,
+    PluginRegistry,
     ProcessorPlugin,
+    ProtocolPlugin,
+)
+from sdr_module.plugins.base import (
+    PluginError,
+    PluginInitError,
+    PluginLoadError,
+    PluginMetadata,
+    PluginNotFoundError,
+    PluginState,
+    PluginType,
 )
 
 

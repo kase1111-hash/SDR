@@ -10,16 +10,18 @@ Supports:
 - ACARS: Aircraft communications
 """
 
-import numpy as np
-from typing import Optional, List, Tuple, Callable, Dict, Any
+import time
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from abc import ABC, abstractmethod
-import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import numpy as np
 
 
 class ProtocolType(Enum):
     """Supported protocol types."""
+
     POCSAG = "pocsag"
     FLEX = "flex"
     AX25 = "ax25"
@@ -32,6 +34,7 @@ class ProtocolType(Enum):
 @dataclass
 class DecodedMessage:
     """Base class for decoded messages."""
+
     protocol: ProtocolType
     timestamp: float
     raw_bits: bytes
@@ -82,9 +85,11 @@ class ProtocolDecoder(ABC):
 # POCSAG Protocol Decoder
 # ============================================================================
 
+
 @dataclass
 class POCSAGMessage(DecodedMessage):
     """POCSAG decoded message."""
+
     address: int = 0
     function: int = 0
     message_type: str = ""  # "numeric", "alpha", "tone"
@@ -118,17 +123,26 @@ class POCSAGDecoder(ProtocolDecoder):
 
     # Alpha character set (7-bit ASCII mapping)
     ALPHA_SHIFT = {
-        0x00: '\x00', 0x01: '\x01', 0x02: '\x02', 0x03: '\x03',
-        0x04: '\x04', 0x05: '\x05', 0x06: '\x06', 0x07: '\x07',
-        0x08: '\x08', 0x09: '\x09', 0x0A: '\n', 0x0B: '\x0B',
-        0x0C: '\x0C', 0x0D: '\r', 0x0E: '\x0E', 0x0F: '\x0F',
+        0x00: "\x00",
+        0x01: "\x01",
+        0x02: "\x02",
+        0x03: "\x03",
+        0x04: "\x04",
+        0x05: "\x05",
+        0x06: "\x06",
+        0x07: "\x07",
+        0x08: "\x08",
+        0x09: "\x09",
+        0x0A: "\n",
+        0x0B: "\x0b",
+        0x0C: "\x0c",
+        0x0D: "\r",
+        0x0E: "\x0e",
+        0x0F: "\x0f",
     }
 
     def __init__(
-        self,
-        sample_rate: float,
-        baud_rate: int = 1200,
-        auto_baud: bool = True
+        self, sample_rate: float, baud_rate: int = 1200, auto_baud: bool = True
     ):
         """
         Initialize POCSAG decoder.
@@ -239,10 +253,12 @@ class POCSAGDecoder(ProtocolDecoder):
         """Decode numeric message."""
         result = ""
         for i in range(0, len(bits) - 3, 4):
-            nibble = (bits[i] << 3) | (bits[i+1] << 2) | (bits[i+2] << 1) | bits[i+3]
+            nibble = (
+                (bits[i] << 3) | (bits[i + 1] << 2) | (bits[i + 2] << 1) | bits[i + 3]
+            )
             if nibble < len(self.NUMERIC_CHARS):
                 char = self.NUMERIC_CHARS[nibble]
-                if char != ']':  # End of message marker
+                if char != "]":  # End of message marker
                     result += char
                 else:
                     break
@@ -274,7 +290,7 @@ class POCSAGDecoder(ProtocolDecoder):
         for frame in range(8):  # 8 frames per batch
             for word_idx in range(2):  # 2 words per frame
                 bit_start = (frame * 2 + word_idx) * 32
-                word_bits = batch[bit_start:bit_start + 32]
+                word_bits = batch[bit_start : bit_start + 32]
                 if len(word_bits) < 32:
                     continue
 
@@ -294,7 +310,7 @@ class POCSAGDecoder(ProtocolDecoder):
                             function=current_function,
                             message_type="alpha",
                             content=content,
-                            baud_rate=self._baud_rate
+                            baud_rate=self._baud_rate,
                         )
                         messages.append(msg)
                         message_bits = []
@@ -321,7 +337,7 @@ class POCSAGDecoder(ProtocolDecoder):
                             function=current_function,
                             message_type="alpha",
                             content=content,
-                            baud_rate=self._baud_rate
+                            baud_rate=self._baud_rate,
                         )
                         messages.append(msg)
                         message_bits = []
@@ -347,7 +363,7 @@ class POCSAGDecoder(ProtocolDecoder):
                 function=current_function,
                 message_type="alpha",
                 content=content,
-                baud_rate=self._baud_rate
+                baud_rate=self._baud_rate,
             )
             messages.append(msg)
 
@@ -421,9 +437,11 @@ class POCSAGDecoder(ProtocolDecoder):
 # AX.25 / APRS Protocol Decoder
 # ============================================================================
 
+
 @dataclass
 class AX25Frame(DecodedMessage):
     """AX.25 frame."""
+
     source: str = ""
     destination: str = ""
     digipeaters: List[str] = None
@@ -439,6 +457,7 @@ class AX25Frame(DecodedMessage):
 @dataclass
 class APRSMessage(DecodedMessage):
     """APRS decoded message."""
+
     source: str = ""
     destination: str = ""
     path: List[str] = None
@@ -575,7 +594,7 @@ class AX25Decoder(ProtocolDecoder):
                 timestamp=self._timestamp,
                 raw_bits=bytes(bits),
                 valid=False,
-                error_message="CRC mismatch"
+                error_message="CRC mismatch",
             )
 
         # Parse addresses
@@ -587,7 +606,9 @@ class AX25Decoder(ProtocolDecoder):
         addr_end = 14
         if not (src_ssid & 0x01):  # More addresses follow
             while addr_end + 7 <= len(payload):
-                digi_call, digi_ssid = self._decode_callsign(payload[addr_end:addr_end + 7])
+                digi_call, digi_ssid = self._decode_callsign(
+                    payload[addr_end : addr_end + 7]
+                )
                 digipeaters.append(digi_call)
                 addr_end += 7
                 if digi_ssid & 0x01:  # Last address
@@ -605,7 +626,7 @@ class AX25Decoder(ProtocolDecoder):
         info = ""
         if info_start < len(payload):
             try:
-                info = payload[info_start:].decode('ascii', errors='replace')
+                info = payload[info_start:].decode("ascii", errors="replace")
             except Exception:
                 info = ""
 
@@ -619,7 +640,7 @@ class AX25Decoder(ProtocolDecoder):
             digipeaters=digipeaters,
             control=control,
             pid=pid,
-            info=info
+            info=info,
         )
 
     def parse_aprs(self, frame: AX25Frame) -> Optional[APRSMessage]:
@@ -649,29 +670,34 @@ class AX25Decoder(ProtocolDecoder):
         if len(info) > 0:
             type_char = info[0]
 
-            if type_char == '!':
+            if type_char == "!":
                 data_type = "position"
-            elif type_char == '=':
+            elif type_char == "=":
                 data_type = "position_msg"
-            elif type_char == '/':
+            elif type_char == "/":
                 data_type = "position_timestamp"
-            elif type_char == '@':
+            elif type_char == "@":
                 data_type = "position_timestamp_msg"
-            elif type_char == ':':
+            elif type_char == ":":
                 data_type = "message"
-            elif type_char == '>':
+            elif type_char == ">":
                 data_type = "status"
-            elif type_char == '_':
+            elif type_char == "_":
                 data_type = "weather"
-            elif type_char == 'T':
+            elif type_char == "T":
                 data_type = "telemetry"
-            elif type_char == '`' or type_char == "'":
+            elif type_char == "`" or type_char == "'":
                 data_type = "mic-e"
             else:
                 data_type = "unknown"
 
             # Parse position if present
-            if data_type in ["position", "position_msg", "position_timestamp", "position_timestamp_msg"]:
+            if data_type in [
+                "position",
+                "position_msg",
+                "position_timestamp",
+                "position_timestamp_msg",
+            ]:
                 try:
                     # Find position data (format: DDMM.MMN/DDDMM.MMW)
                     pos_start = 1
@@ -679,26 +705,32 @@ class AX25Decoder(ProtocolDecoder):
                         pos_start = 8  # Skip timestamp
 
                     if len(info) > pos_start + 18:
-                        lat_str = info[pos_start:pos_start + 8]
-                        lon_str = info[pos_start + 9:pos_start + 18]
-                        symbol = info[pos_start + 8] + info[pos_start + 18] if len(info) > pos_start + 18 else ""
+                        lat_str = info[pos_start : pos_start + 8]
+                        lon_str = info[pos_start + 9 : pos_start + 18]
+                        symbol = (
+                            info[pos_start + 8] + info[pos_start + 18]
+                            if len(info) > pos_start + 18
+                            else ""
+                        )
 
                         # Parse latitude
                         lat_deg = float(lat_str[0:2])
                         lat_min = float(lat_str[2:7])
                         lat = lat_deg + lat_min / 60
-                        if lat_str[7] == 'S':
+                        if lat_str[7] == "S":
                             lat = -lat
 
                         # Parse longitude
                         lon_deg = float(lon_str[0:3])
                         lon_min = float(lon_str[3:8])
                         lon = lon_deg + lon_min / 60
-                        if lon_str[8] == 'W':
+                        if lon_str[8] == "W":
                             lon = -lon
 
                         # Comment is rest of info
-                        comment = info[pos_start + 19:] if len(info) > pos_start + 19 else ""
+                        comment = (
+                            info[pos_start + 19 :] if len(info) > pos_start + 19 else ""
+                        )
 
                 except (ValueError, IndexError):
                     pass
@@ -718,7 +750,7 @@ class AX25Decoder(ProtocolDecoder):
             speed=speed,
             course=course,
             symbol=symbol,
-            comment=comment
+            comment=comment,
         )
 
     def decode(self, samples: np.ndarray) -> List[AX25Frame]:
@@ -803,9 +835,11 @@ class AX25Decoder(ProtocolDecoder):
 # RDS (Radio Data System) Decoder
 # ============================================================================
 
+
 @dataclass
 class RDSData(DecodedMessage):
     """RDS decoded data."""
+
     pi_code: int = 0  # Program Identification
     pty: int = 0  # Program Type
     tp: bool = False  # Traffic Program
@@ -842,31 +876,56 @@ class RDSDecoder(ProtocolDecoder):
 
     # Syndrome values for block types
     SYNDROMES = {
-        0x3D8: 'A',
-        0x3D4: 'B',
-        0x25C: 'C',
+        0x3D8: "A",
+        0x3D4: "B",
+        0x25C: "C",
         0x3CC: "C'",
-        0x258: 'D',
+        0x258: "D",
     }
 
     # Offset words
     OFFSETS = {
-        'A': 0x0FC,
-        'B': 0x198,
-        'C': 0x168,
+        "A": 0x0FC,
+        "B": 0x198,
+        "C": 0x168,
         "C'": 0x350,
-        'D': 0x1B4,
+        "D": 0x1B4,
     }
 
     # PTY codes (North America)
     PTY_CODES = [
-        "None", "News", "Information", "Sports", "Talk", "Rock",
-        "Classic Rock", "Adult Hits", "Soft Rock", "Top 40", "Country",
-        "Oldies", "Soft", "Nostalgia", "Jazz", "Classical", "R&B",
-        "Soft R&B", "Language", "Religious Music", "Religious Talk",
-        "Personality", "Public", "College", "Spanish Talk", "Spanish Music",
-        "Hip Hop", "Unassigned", "Unassigned", "Weather", "Emergency Test",
-        "Emergency"
+        "None",
+        "News",
+        "Information",
+        "Sports",
+        "Talk",
+        "Rock",
+        "Classic Rock",
+        "Adult Hits",
+        "Soft Rock",
+        "Top 40",
+        "Country",
+        "Oldies",
+        "Soft",
+        "Nostalgia",
+        "Jazz",
+        "Classical",
+        "R&B",
+        "Soft R&B",
+        "Language",
+        "Religious Music",
+        "Religious Talk",
+        "Personality",
+        "Public",
+        "College",
+        "Spanish Talk",
+        "Spanish Music",
+        "Hip Hop",
+        "Unassigned",
+        "Unassigned",
+        "Weather",
+        "Emergency Test",
+        "Emergency",
     ]
 
     def __init__(self, sample_rate: float):
@@ -892,8 +951,8 @@ class RDSDecoder(ProtocolDecoder):
         self._tp = False
         self._ta = False
         self._ms = False
-        self._ps_name = [' '] * 8
-        self._radio_text = [' '] * 64
+        self._ps_name = [" "] * 8
+        self._radio_text = [" "] * 64
         self._rt_ab = 0
 
         self._timestamp = 0.0
@@ -921,7 +980,7 @@ class RDSDecoder(ProtocolDecoder):
             (16-bit data, block_type) or (0, '') if invalid
         """
         if len(bits) != 26:
-            return 0, ''
+            return 0, ""
 
         block = 0
         for bit in bits:
@@ -937,7 +996,7 @@ class RDSDecoder(ProtocolDecoder):
                 data = (block >> 10) & 0xFFFF
                 return data, block_type
 
-        return 0, ''
+        return 0, ""
 
     def _process_group(self, blocks: List[Tuple[int, str]]) -> Optional[RDSData]:
         """Process a complete RDS group (4 blocks)."""
@@ -949,7 +1008,7 @@ class RDSDecoder(ProtocolDecoder):
         data_c, type_c = blocks[2]
         data_d, type_d = blocks[3]
 
-        if type_a != 'A' or type_b != 'B':
+        if type_a != "A" or type_b != "B":
             return None
 
         # Block A: PI code
@@ -968,7 +1027,7 @@ class RDSDecoder(ProtocolDecoder):
 
             # PS name (2 characters per group 0)
             ps_addr = (data_b & 0x03) * 2
-            if type_d == 'D':
+            if type_d == "D":
                 char1 = (data_d >> 8) & 0xFF
                 char2 = data_d & 0xFF
                 if 32 <= char1 < 127:
@@ -979,11 +1038,11 @@ class RDSDecoder(ProtocolDecoder):
         elif group_type == 2:  # Radio Text
             rt_ab = (data_b >> 4) & 0x01
             if rt_ab != self._rt_ab:
-                self._radio_text = [' '] * 64
+                self._radio_text = [" "] * 64
                 self._rt_ab = rt_ab
 
             rt_addr = (data_b & 0x0F) * 4
-            if version == 0 and type_c == 'C' and type_d == 'D':
+            if version == 0 and type_c == "C" and type_d == "D":
                 # Version A: 4 characters
                 chars = [
                     (data_c >> 8) & 0xFF,
@@ -1006,8 +1065,8 @@ class RDSDecoder(ProtocolDecoder):
             tp=self._tp,
             ta=self._ta,
             ms=self._ms,
-            ps_name=''.join(self._ps_name).strip(),
-            radio_text=''.join(self._radio_text).strip(),
+            ps_name="".join(self._ps_name).strip(),
+            radio_text="".join(self._radio_text).strip(),
         )
 
     def decode(self, samples: np.ndarray) -> List[RDSData]:
@@ -1035,11 +1094,11 @@ class RDSDecoder(ProtocolDecoder):
 
         # Process bits into blocks
         while len(self._bit_buffer) >= self.BLOCK_SIZE:
-            block_bits = self._bit_buffer[:self.BLOCK_SIZE]
+            block_bits = self._bit_buffer[: self.BLOCK_SIZE]
             data, block_type = self._decode_block(block_bits)
 
             if block_type:
-                if block_type == 'A':
+                if block_type == "A":
                     self._current_group = [(data, block_type)]
                     self._synced = True
                 elif self._synced:
@@ -1052,7 +1111,7 @@ class RDSDecoder(ProtocolDecoder):
                             self._notify_callbacks(rds_data)
                         self._current_group = []
 
-                self._bit_buffer = self._bit_buffer[self.BLOCK_SIZE:]
+                self._bit_buffer = self._bit_buffer[self.BLOCK_SIZE :]
             else:
                 # No sync, shift by 1 bit
                 self._bit_buffer.pop(0)
@@ -1073,8 +1132,8 @@ class RDSDecoder(ProtocolDecoder):
         self._bit_buffer = []
         self._synced = False
         self._current_group = []
-        self._ps_name = [' '] * 8
-        self._radio_text = [' '] * 64
+        self._ps_name = [" "] * 8
+        self._radio_text = [" "] * 64
         self._timestamp = 0.0
 
 
@@ -1082,9 +1141,11 @@ class RDSDecoder(ProtocolDecoder):
 # ADS-B (Automatic Dependent Surveillance-Broadcast) Decoder
 # ============================================================================
 
+
 @dataclass
 class ADSBMessage(DecodedMessage):
     """ADS-B decoded message."""
+
     icao_address: str = ""  # 24-bit ICAO aircraft address
     downlink_format: int = 0  # DF (17 for ADS-B)
     type_code: int = 0  # TC (message type)
@@ -1188,7 +1249,7 @@ class ADSBDecoder(ProtocolDecoder):
         # High: 0, 2, 7, 9 (0-0.5, 1-1.5, 3.5-4, 4.5-5 us)
         # Low: 1, 3-6, 8, 10-15
 
-        threshold = np.mean(np.abs(samples[start:start + 16 * sps]))
+        threshold = np.mean(np.abs(samples[start : start + 16 * sps]))
 
         # Check high positions
         for pos in [0, 2, 7, 9]:
@@ -1204,7 +1265,9 @@ class ADSBDecoder(ProtocolDecoder):
 
         return True
 
-    def _extract_bits(self, samples: np.ndarray, start: int, num_bits: int) -> List[int]:
+    def _extract_bits(
+        self, samples: np.ndarray, start: int, num_bits: int
+    ) -> List[int]:
         """Extract bits from PPM (Pulse Position Modulation) samples."""
         bits = []
         sps = self._samples_per_bit
@@ -1215,8 +1278,8 @@ class ADSBDecoder(ProtocolDecoder):
             if pos + sps > len(samples):
                 break
 
-            first_half = samples[pos:pos + sps // 2]
-            second_half = samples[pos + sps // 2:pos + sps]
+            first_half = samples[pos : pos + sps // 2]
+            second_half = samples[pos + sps // 2 : pos + sps]
 
             if len(first_half) > 0 and len(second_half) > 0:
                 if np.mean(first_half) > np.mean(second_half):
@@ -1243,16 +1306,16 @@ class ADSBDecoder(ProtocolDecoder):
 
         # Bytes 1-6 contain callsign (6 bits per character, 8 characters)
         chars = []
-        bits = int.from_bytes(data[1:7], 'big')
+        bits = int.from_bytes(data[1:7], "big")
 
         for i in range(8):
             char_idx = (bits >> (42 - i * 6)) & 0x3F
             if char_idx < len(self.CHARSET):
                 char = self.CHARSET[char_idx]
-                if char != '#':
+                if char != "#":
                     chars.append(char)
 
-        return ''.join(chars).strip()
+        return "".join(chars).strip()
 
     def _decode_altitude(self, data: bytes) -> int:
         """Decode altitude from airborne position message."""
@@ -1275,12 +1338,7 @@ class ADSBDecoder(ProtocolDecoder):
         return altitude
 
     def _decode_cpr_position(
-        self,
-        icao: str,
-        lat_cpr: int,
-        lon_cpr: int,
-        odd: bool,
-        airborne: bool
+        self, icao: str, lat_cpr: int, lon_cpr: int, odd: bool, airborne: bool
     ) -> Tuple[float, float]:
         """
         Decode CPR (Compact Position Reporting) position.
@@ -1343,21 +1401,31 @@ class ADSBDecoder(ProtocolDecoder):
         def nl(lat: float) -> int:
             if abs(lat) >= 87:
                 return 1
-            return int(np.floor(2 * np.pi / np.arccos(
-                1 - (1 - np.cos(np.pi / 30)) / (np.cos(np.pi * lat / 180) ** 2)
-            )))
+            return int(
+                np.floor(
+                    2
+                    * np.pi
+                    / np.arccos(
+                        1 - (1 - np.cos(np.pi / 30)) / (np.cos(np.pi * lat / 180) ** 2)
+                    )
+                )
+            )
 
         nl_lat = nl(lat)
 
         if odd:
             ni = max(nl_lat - 1, 1)
             dlon = 360.0 / ni
-            m = int(np.floor((lon_even * (nl_lat - 1) - lon_odd * nl_lat) / 131072.0 + 0.5))
+            m = int(
+                np.floor((lon_even * (nl_lat - 1) - lon_odd * nl_lat) / 131072.0 + 0.5)
+            )
             lon = dlon * ((m % ni) + lon_odd / 131072.0)
         else:
             ni = max(nl_lat, 1)
             dlon = 360.0 / ni
-            m = int(np.floor((lon_even * (nl_lat - 1) - lon_odd * nl_lat) / 131072.0 + 0.5))
+            m = int(
+                np.floor((lon_even * (nl_lat - 1) - lon_odd * nl_lat) / 131072.0 + 0.5)
+            )
             lon = dlon * ((m % ni) + lon_even / 131072.0)
 
         if lon > 180:
@@ -1391,7 +1459,7 @@ class ADSBDecoder(ProtocolDecoder):
                 ns_vel = -ns_vel
 
             # Calculate speed and heading
-            velocity = np.sqrt(ew_vel ** 2 + ns_vel ** 2)
+            velocity = np.sqrt(ew_vel**2 + ns_vel**2)
             heading = np.degrees(np.arctan2(ew_vel, ns_vel))
             if heading < 0:
                 heading += 360
@@ -1436,7 +1504,7 @@ class ADSBDecoder(ProtocolDecoder):
 
         # CRC check
         crc = self._compute_crc(data[:-3])
-        received_crc = int.from_bytes(data[-3:], 'big')
+        received_crc = int.from_bytes(data[-3:], "big")
 
         # For DF17/18, CRC should be zero or match ICAO address
         if df == 17 or df == 18:
@@ -1453,7 +1521,7 @@ class ADSBDecoder(ProtocolDecoder):
             raw_bits=bytes(bits[:msg_bits]),
             valid=True,
             icao_address=icao,
-            downlink_format=df
+            downlink_format=df,
         )
 
         # Parse DF17/18 extended squitter
@@ -1464,8 +1532,16 @@ class ADSBDecoder(ProtocolDecoder):
             # Aircraft identification (TC 1-4)
             if 1 <= tc <= 4:
                 msg.callsign = self._decode_callsign(data[4:])
-                categories = ["", "Light", "Medium 1", "Medium 2",
-                            "High vortex", "Heavy", "High perf", "Rotorcraft"]
+                categories = [
+                    "",
+                    "Light",
+                    "Medium 1",
+                    "Medium 2",
+                    "High vortex",
+                    "Heavy",
+                    "High perf",
+                    "Rotorcraft",
+                ]
                 cat_idx = data[4] & 0x07
                 msg.category = categories[cat_idx] if cat_idx < len(categories) else ""
 
@@ -1512,7 +1588,9 @@ class ADSBDecoder(ProtocolDecoder):
 
         # Scan for preambles
         i = 0
-        while i < len(samples) - (self._preamble_samples + self.LONG_MSG_BITS * self._samples_per_bit):
+        while i < len(samples) - (
+            self._preamble_samples + self.LONG_MSG_BITS * self._samples_per_bit
+        ):
             if self._detect_preamble(samples, i):
                 # Try to extract message
                 msg_start = i + self._preamble_samples
@@ -1544,9 +1622,11 @@ class ADSBDecoder(ProtocolDecoder):
 # FLEX Protocol Decoder
 # ============================================================================
 
+
 @dataclass
 class FLEXMessage(DecodedMessage):
     """FLEX pager message."""
+
     capcode: int = 0  # Pager address
     cycle: int = 0  # FLEX cycle number (0-14)
     frame: int = 0  # Frame within cycle (0-127)
@@ -1653,7 +1733,11 @@ class FLEXDecoder(ProtocolDecoder):
         syndrome = 0
         for i in range(21):
             if codeword & (1 << (31 - i)):
-                syndrome ^= (self.BCH_POLY << (10 - i)) if i < 11 else (self.BCH_POLY >> (i - 10))
+                syndrome ^= (
+                    (self.BCH_POLY << (10 - i))
+                    if i < 11
+                    else (self.BCH_POLY >> (i - 10))
+                )
 
         syndrome &= 0x7FF
 
@@ -1666,7 +1750,11 @@ class FLEXDecoder(ProtocolDecoder):
             test_syndrome = 0
             for j in range(21):
                 if test & (1 << (31 - j)):
-                    test_syndrome ^= (self.BCH_POLY << (10 - j)) if j < 11 else (self.BCH_POLY >> (j - 10))
+                    test_syndrome ^= (
+                        (self.BCH_POLY << (10 - j))
+                        if j < 11
+                        else (self.BCH_POLY >> (j - 10))
+                    )
             test_syndrome &= 0x7FF
 
             if test_syndrome == 0:
@@ -1700,7 +1788,7 @@ class FLEXDecoder(ProtocolDecoder):
                 nibble = (word >> (17 - i * 4)) & 0x0F
                 if nibble < len(num_chars):
                     char = num_chars[nibble]
-                    if char != '[':  # End marker
+                    if char != "[":  # End marker
                         result += char
                     else:
                         return result
@@ -1718,7 +1806,7 @@ class FLEXDecoder(ProtocolDecoder):
         blocks = []
         for i in range(self.BLOCKS_PER_FRAME):
             start = i * self.BLOCK_BITS
-            word = self._bits_to_word(frame_bits[start:start + self.BLOCK_BITS])
+            word = self._bits_to_word(frame_bits[start : start + self.BLOCK_BITS])
             valid, corrected = self._check_bch(word)
             if valid:
                 blocks.append(corrected)
@@ -1748,19 +1836,34 @@ class FLEXDecoder(ProtocolDecoder):
             if vector_start + i >= len(blocks):
                 break
 
-            vector = blocks[vector_start + i] if vector_start + i < len(blocks) else None
+            vector = (
+                blocks[vector_start + i] if vector_start + i < len(blocks) else None
+            )
             if vector is None:
                 continue
 
             # Determine message type
             msg_type_bits = (vector >> 18) & 0x07
-            msg_types = ["tone", "tone", "numeric", "numeric",
-                        "alpha", "alpha", "secure", "secure"]
-            msg_type = msg_types[msg_type_bits] if msg_type_bits < len(msg_types) else "unknown"
+            msg_types = [
+                "tone",
+                "tone",
+                "numeric",
+                "numeric",
+                "alpha",
+                "alpha",
+                "secure",
+                "secure",
+            ]
+            msg_type = (
+                msg_types[msg_type_bits]
+                if msg_type_bits < len(msg_types)
+                else "unknown"
+            )
 
             # Get message content from remaining blocks
-            content_blocks = [b for b in blocks[vector_start + len(capcodes):]
-                            if b is not None]
+            content_blocks = [
+                b for b in blocks[vector_start + len(capcodes) :] if b is not None
+            ]
 
             if msg_type == "alpha":
                 content = self._decode_alpha(content_blocks)
@@ -1780,7 +1883,7 @@ class FLEXDecoder(ProtocolDecoder):
                 phase=self._phase,
                 message_type=msg_type,
                 content=content,
-                baud_rate=self._baud_rate
+                baud_rate=self._baud_rate,
             )
             messages.append(msg)
 
@@ -1813,7 +1916,7 @@ class FLEXDecoder(ProtocolDecoder):
             word1 = self._bits_to_word(self._bit_buffer[:32])
             self._bits_to_word(self._bit_buffer[32:64])
 
-            if (word1 == self.SYNC_1 or word1 == self.SYNC_2):
+            if word1 == self.SYNC_1 or word1 == self.SYNC_2:
                 self._synced = True
                 self._current_frame = []
                 self._bit_buffer = self._bit_buffer[64:]
@@ -1854,9 +1957,11 @@ class FLEXDecoder(ProtocolDecoder):
 # ACARS (Aircraft Communications Addressing and Reporting System) Decoder
 # ============================================================================
 
+
 @dataclass
 class ACARSMessage(DecodedMessage):
     """ACARS decoded message."""
+
     mode: str = ""  # Mode character
     registration: str = ""  # Aircraft registration (7 chars)
     ack: str = ""  # Acknowledgement character
@@ -1978,7 +2083,11 @@ class ACARSDecoder(ProtocolDecoder):
 
         # Block ID
         block_id_idx = soh_idx + 12
-        block_id = chr(data[block_id_idx]) if block_id_idx < len(data) and data[block_id_idx] < 128 else ""
+        block_id = (
+            chr(data[block_id_idx])
+            if block_id_idx < len(data) and data[block_id_idx] < 128
+            else ""
+        )
 
         # Find STX for message text
         stx_idx = -1
@@ -1991,13 +2100,19 @@ class ACARSDecoder(ProtocolDecoder):
         msg_number = ""
         flight_id = ""
         if stx_idx > 0:
-            header = data[block_id_idx + 1:stx_idx]
+            header = data[block_id_idx + 1 : stx_idx]
             if len(header) >= 4:
-                msg_number = ''.join(chr(self._remove_parity(b))
-                                    for b in header[:4] if 32 <= self._remove_parity(b) < 127)
+                msg_number = "".join(
+                    chr(self._remove_parity(b))
+                    for b in header[:4]
+                    if 32 <= self._remove_parity(b) < 127
+                )
             if len(header) >= 10:
-                flight_id = ''.join(chr(self._remove_parity(b))
-                                   for b in header[4:10] if 32 <= self._remove_parity(b) < 127)
+                flight_id = "".join(
+                    chr(self._remove_parity(b))
+                    for b in header[4:10]
+                    if 32 <= self._remove_parity(b) < 127
+                )
 
         # Find message text
         text = ""
@@ -2012,9 +2127,12 @@ class ACARSDecoder(ProtocolDecoder):
                     break
 
             # Extract text
-            text_bytes = data[stx_idx + 1:end_idx]
-            text = ''.join(chr(self._remove_parity(b))
-                          for b in text_bytes if 32 <= self._remove_parity(b) < 127)
+            text_bytes = data[stx_idx + 1 : end_idx]
+            text = "".join(
+                chr(self._remove_parity(b))
+                for b in text_bytes
+                if 32 <= self._remove_parity(b) < 127
+            )
 
         return ACARSMessage(
             protocol=ProtocolType.ACARS,
@@ -2029,7 +2147,7 @@ class ACARSDecoder(ProtocolDecoder):
             message_number=msg_number.strip(),
             flight_id=flight_id.strip(),
             text=text,
-            block_end=block_end
+            block_end=block_end,
         )
 
     def decode(self, samples: np.ndarray) -> List[ACARSMessage]:
@@ -2065,8 +2183,7 @@ class ACARSDecoder(ProtocolDecoder):
                 # Look for preamble (++)
                 self._byte_buffer.append(byte)
                 if len(self._byte_buffer) >= 2:
-                    if (self._byte_buffer[-2] == 0x2B and
-                        self._byte_buffer[-1] == 0x2B):
+                    if self._byte_buffer[-2] == 0x2B and self._byte_buffer[-1] == 0x2B:
                         self._in_message = True
                         self._byte_buffer = [0x2B, 0x2B]
 
@@ -2092,9 +2209,13 @@ class ACARSDecoder(ProtocolDecoder):
                 # Also try to parse if we have ETX/ETB + CRC
                 if len(self._byte_buffer) >= 15:
                     # Check if we have a complete message
-                    for i in range(len(self._byte_buffer) - 3, max(10, len(self._byte_buffer) - 50), -1):
+                    for i in range(
+                        len(self._byte_buffer) - 3,
+                        max(10, len(self._byte_buffer) - 50),
+                        -1,
+                    ):
                         if self._byte_buffer[i] in (self.ETX, self.ETB):
-                            msg = self._parse_message(bytes(self._byte_buffer[:i + 3]))
+                            msg = self._parse_message(bytes(self._byte_buffer[: i + 3]))
                             if msg:
                                 self._messages.append(msg)
                                 self._notify_callbacks(msg)
@@ -2115,9 +2236,7 @@ class ACARSDecoder(ProtocolDecoder):
 
 # Factory function
 def create_protocol_decoder(
-    protocol: ProtocolType,
-    sample_rate: float,
-    **kwargs
+    protocol: ProtocolType, sample_rate: float, **kwargs
 ) -> ProtocolDecoder:
     """
     Create a protocol decoder.

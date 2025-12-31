@@ -4,16 +4,18 @@ Protocol detector for automatic protocol identification.
 Scans signals and attempts to match against known protocols.
 """
 
-from typing import List, Dict, Optional, Tuple, Type
 from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple, Type
+
 import numpy as np
 
-from .base import ProtocolDecoder, ProtocolInfo, DecodedFrame
+from .base import DecodedFrame, ProtocolDecoder, ProtocolInfo
 
 
 @dataclass
 class ProtocolMatch:
     """Protocol detection result."""
+
     protocol_info: ProtocolInfo
     confidence: float
     decoder: ProtocolDecoder
@@ -38,11 +40,7 @@ class ProtocolDetector:
         self._decoders: Dict[str, ProtocolDecoder] = {}
         self._decoder_classes: Dict[str, Type[ProtocolDecoder]] = {}
 
-    def register_decoder(
-        self,
-        name: str,
-        decoder_class: Type[ProtocolDecoder]
-    ) -> None:
+    def register_decoder(self, name: str, decoder_class: Type[ProtocolDecoder]) -> None:
         """
         Register a protocol decoder class.
 
@@ -73,9 +71,7 @@ class ProtocolDetector:
         return None
 
     def detect(
-        self,
-        samples: np.ndarray,
-        min_confidence: float = 0.5
+        self, samples: np.ndarray, min_confidence: float = 0.5
     ) -> List[ProtocolMatch]:
         """
         Detect protocols in samples.
@@ -97,11 +93,13 @@ class ProtocolDetector:
             try:
                 confidence = decoder.can_decode(samples)
                 if confidence >= min_confidence:
-                    matches.append(ProtocolMatch(
-                        protocol_info=decoder.protocol_info,
-                        confidence=confidence,
-                        decoder=decoder
-                    ))
+                    matches.append(
+                        ProtocolMatch(
+                            protocol_info=decoder.protocol_info,
+                            confidence=confidence,
+                            decoder=decoder,
+                        )
+                    )
             except Exception:
                 pass  # Skip decoders that fail
 
@@ -111,9 +109,7 @@ class ProtocolDetector:
         return matches
 
     def decode(
-        self,
-        samples: np.ndarray,
-        protocol_name: Optional[str] = None
+        self, samples: np.ndarray, protocol_name: Optional[str] = None
     ) -> List[DecodedFrame]:
         """
         Decode samples using specified or auto-detected protocol.
@@ -140,9 +136,7 @@ class ProtocolDetector:
         return matches[0].decoder.decode(samples)
 
     def detect_and_decode(
-        self,
-        samples: np.ndarray,
-        min_confidence: float = 0.5
+        self, samples: np.ndarray, min_confidence: float = 0.5
     ) -> Tuple[List[ProtocolMatch], List[DecodedFrame]]:
         """
         Detect protocols and decode all matching.

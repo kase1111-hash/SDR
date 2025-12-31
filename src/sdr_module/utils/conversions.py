@@ -2,8 +2,9 @@
 Unit conversion utilities for SDR applications.
 """
 
-import numpy as np
 from typing import Union
+
+import numpy as np
 
 # Type alias for numeric types
 Numeric = Union[float, int, np.ndarray]
@@ -121,7 +122,7 @@ def str_to_freq(freq_str: str) -> float:
 
     for suffix, mult in multipliers.items():
         if freq_str.endswith(suffix):
-            value = freq_str[:-len(suffix)].strip()
+            value = freq_str[: -len(suffix)].strip()
             return float(value) * mult
 
     # No suffix, assume Hz

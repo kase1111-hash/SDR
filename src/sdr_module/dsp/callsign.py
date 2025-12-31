@@ -476,10 +476,112 @@ def generate_cw_id(callsign: str, wpm: int = 20,
     return encoder.encode(f"DE {callsign}")
 
 
+def audio_to_fm_iq(
+    audio: np.ndarray,
+    audio_sample_rate: float = 48000.0,
+    rf_sample_rate: float = 2e6,
+    deviation_hz: float = 5000.0,
+) -> np.ndarray:
+    """
+    Convert audio samples to FM-modulated I/Q samples for transmission.
+
+    This function takes baseband audio (e.g., from CW ID generator) and
+    produces complex I/Q samples suitable for SDR transmission.
+
+    Args:
+        audio: Audio samples (mono, float, -1 to 1 range)
+        audio_sample_rate: Sample rate of input audio in Hz (default: 48000)
+        rf_sample_rate: Desired output sample rate in Hz (default: 2MHz)
+        deviation_hz: FM deviation in Hz (default: 5kHz for narrowband)
+
+    Returns:
+        Complex I/Q samples as numpy array (complex64)
+
+    Example:
+        >>> audio = generate_cw_id("W1AW")
+        >>> iq_samples = audio_to_fm_iq(audio, deviation_hz=2500)  # CW uses ~2.5kHz
+        >>> hackrf.write_samples(iq_samples)
+    """
+    if len(audio) == 0:
+        return np.array([], dtype=np.complex64)
+
+    # Normalize audio to -1 to 1 range
+    max_val = np.max(np.abs(audio))
+    if max_val > 0:
+        audio = audio / max_val
+
+    # Resample audio to RF sample rate if needed
+    if audio_sample_rate != rf_sample_rate:
+        # Calculate resampling ratio
+        ratio = rf_sample_rate / audio_sample_rate
+        new_length = int(len(audio) * ratio)
+
+        # Use linear interpolation for resampling
+        old_indices = np.arange(len(audio))
+        new_indices = np.linspace(0, len(audio) - 1, new_length)
+        audio = np.interp(new_indices, old_indices, audio)
+
+    # FM modulation: phase = integral of frequency deviation
+    # frequency deviation = deviation_hz * audio_signal
+    # phase = 2*pi * integral(deviation_hz * audio) / sample_rate
+
+    # Calculate instantaneous phase
+    phase_increment = 2 * np.pi * deviation_hz / rf_sample_rate
+    phase = np.cumsum(audio) * phase_increment
+
+    # Generate complex I/Q signal: e^(j*phase)
+    iq_samples = np.exp(1j * phase).astype(np.complex64)
+
+    return iq_samples
+
+
+def generate_tx_id(
+    callsign: str,
+    wpm: int = 20,
+    tone_frequency: float = 700.0,
+    rf_sample_rate: float = 2e6,
+    fm_deviation: float = 2500.0,
+) -> np.ndarray:
+    """
+    Generate a ready-to-transmit FM-modulated CW callsign ID.
+
+    Combines CW audio generation with FM modulation for direct transmission.
+
+    Args:
+        callsign: The callsign to encode
+        wpm: Words per minute (default: 20)
+        tone_frequency: CW tone frequency in Hz (default: 700)
+        rf_sample_rate: Output sample rate in Hz (default: 2MHz)
+        fm_deviation: FM deviation in Hz (default: 2500 for CW)
+
+    Returns:
+        Complex I/Q samples ready for transmission (complex64)
+    """
+    # Generate CW audio at 48kHz
+    audio = generate_cw_id(
+        callsign,
+        wpm=wpm,
+        frequency=tone_frequency,
+        sample_rate=48000.0
+    )
+
+    # Convert to FM I/Q
+    iq = audio_to_fm_iq(
+        audio,
+        audio_sample_rate=48000.0,
+        rf_sample_rate=rf_sample_rate,
+        deviation_hz=fm_deviation
+    )
+
+    return iq
+
+
 __all__ = [
     'IdentificationMode',
     'CallsignConfig',
     'CallsignIdentifier',
     'MorseEncoder',
     'generate_cw_id',
+    'audio_to_fm_iq',
+    'generate_tx_id',
 ]

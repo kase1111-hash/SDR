@@ -11,13 +11,13 @@ Provides coordinated control of both devices for:
 import logging
 from typing import Optional, Callable, Tuple
 from enum import Enum
-from threading import Thread, Event
+from threading import Event
 import numpy as np
 from dataclasses import dataclass
 
 from .device_manager import DeviceManager
 from .sample_buffer import SampleBuffer
-from .config import DualSDRConfig, SDRConfig
+from .config import SDRConfig
 from ..devices.rtlsdr import RTLSDRDevice
 from ..devices.hackrf import HackRFDevice
 

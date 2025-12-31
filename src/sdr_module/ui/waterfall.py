@@ -8,10 +8,9 @@ Provides time-frequency visualization with:
 """
 
 import numpy as np
-from typing import Optional, List, Dict, Tuple, Callable
+from typing import Optional, List, Dict, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
-from collections import deque
 import colorsys
 
 
@@ -249,7 +248,7 @@ class WaterfallDisplay:
         """
         # Convert frequency to bins
         freq_min = self._center_freq - self._sample_rate / 2
-        freq_max = self._center_freq + self._sample_rate / 2
+        self._center_freq + self._sample_rate / 2
         hz_per_bin = self._sample_rate / self._width
 
         freq_start_bin = int((freq_start_hz - freq_min) / hz_per_bin)

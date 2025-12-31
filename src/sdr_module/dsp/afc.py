@@ -245,7 +245,7 @@ class AutomaticFrequencyControl:
 
         # Check signal level
         peak_power_db = 10 * np.log10(np.max(power) + 1e-12)
-        noise_floor_db = 10 * np.log10(np.median(power) + 1e-12)
+        10 * np.log10(np.median(power) + 1e-12)
 
         if peak_power_db < self._config.min_signal_db:
             return 0.0, False

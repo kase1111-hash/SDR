@@ -70,7 +70,7 @@ def cmd_scan(args: argparse.Namespace) -> int:
         mode=ScanMode.SINGLE if args.single else ScanMode.CONTINUOUS,
     )
 
-    scanner = FrequencyScanner(config)
+    FrequencyScanner(config)
 
     print(f"Scanning {args.start:.3f} - {args.end:.3f} MHz")
     print(f"Step: {args.step} kHz, Threshold: {args.threshold} dB")
@@ -83,7 +83,6 @@ def cmd_scan(args: argparse.Namespace) -> int:
 
 def cmd_encode(args: argparse.Namespace) -> int:
     """Encode text to protocol."""
-    import numpy as np
     from .protocols.encoder import EncoderConfig, ModulationType
     from .protocols.encoders import (
         RTTYEncoder,

@@ -32,7 +32,7 @@ import logging
 import time
 from enum import Enum, auto
 from dataclasses import dataclass
-from typing import Optional, Tuple, List
+from typing import Tuple, List
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -457,9 +457,9 @@ class SignalMeter:
         lines = ["S-Meter Reference (50Ω):"]
         for s, dbm in sorted(S_METER_REFERENCE.items()):
             lines.append(f"  S{s} = {dbm} dBm")
-        lines.append(f"  S9+10 = -63 dBm")
-        lines.append(f"  S9+20 = -53 dBm")
-        lines.append(f"  S9+40 = -33 dBm")
+        lines.append("  S9+10 = -63 dBm")
+        lines.append("  S9+20 = -53 dBm")
+        lines.append("  S9+40 = -33 dBm")
         return "\n".join(lines)
 
 

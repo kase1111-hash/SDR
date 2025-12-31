@@ -19,8 +19,8 @@ import time
 import threading
 import logging
 from enum import Enum, auto
-from dataclasses import dataclass, field
-from typing import Optional, Callable, List
+from dataclasses import dataclass
+from typing import Optional, Callable
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -192,7 +192,7 @@ class CallsignIdentifier:
         # Encoders
         self._morse_encoder: Optional[MorseEncoder] = None
 
-        logger.info(f"CallsignIdentifier initialized")
+        logger.info("CallsignIdentifier initialized")
 
     def set_callsign(self, callsign: str) -> None:
         """

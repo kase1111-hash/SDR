@@ -9,7 +9,7 @@ Provides real-time spectrum display capabilities including:
 """
 
 import numpy as np
-from typing import Optional, Tuple, List
+from typing import Optional, List
 from enum import Enum
 from dataclasses import dataclass
 

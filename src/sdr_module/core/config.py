@@ -7,7 +7,6 @@ Handles device configuration, DSP settings, and persistence.
 from dataclasses import dataclass, field, asdict
 from typing import Dict, Any, Optional, List
 import json
-import os
 from pathlib import Path
 
 

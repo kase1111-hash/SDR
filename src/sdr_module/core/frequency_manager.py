@@ -23,7 +23,7 @@ from __future__ import annotations
 import logging
 from enum import Enum, auto
 from dataclasses import dataclass, field
-from typing import List, Tuple, Optional, Dict, Set
+from typing import List, Tuple, Optional, Set
 
 logger = logging.getLogger(__name__)
 

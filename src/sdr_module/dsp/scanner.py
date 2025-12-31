@@ -7,7 +7,7 @@ detection, logging, and pause-on-signal functionality.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, List, Callable, Tuple
+from typing import Optional, List, Callable
 import numpy as np
 import time
 

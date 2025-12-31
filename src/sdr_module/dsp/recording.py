@@ -17,10 +17,9 @@ import numpy as np
 import json
 import wave
 import struct
-import os
 from typing import Optional, Tuple, Dict, Any, BinaryIO, Union
 from enum import Enum
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -530,7 +529,7 @@ class IQPlayer:
         self._wav_file = wave.open(str(self._filepath), 'rb')
 
         # Get parameters
-        n_channels = self._wav_file.getnchannels()
+        self._wav_file.getnchannels()
         sample_width = self._wav_file.getsampwidth()
         self._sample_rate = float(self._wav_file.getframerate())
         self._total_samples = self._wav_file.getnframes()
@@ -729,7 +728,7 @@ class IQPlayer:
         # Handle channels
         if n_channels == 2:
             # Stereo: I on left, Q on right
-            n_complex = len(samples) // 2
+            len(samples) // 2
             i_samples = samples[0::2]
             q_samples = samples[1::2]
             complex_samples = i_samples + 1j * q_samples
@@ -2769,7 +2768,7 @@ class FormatConverter:
         center_frequency: float
     ) -> FormatInfo:
         """Save to raw I/Q format."""
-        metadata = save_iq_file(
+        save_iq_file(
             filepath, samples, sample_rate,
             center_frequency, sample_format, FileFormat.RAW
         )
@@ -2792,7 +2791,7 @@ class FormatConverter:
         sample_rate: float
     ) -> FormatInfo:
         """Save to WAV format."""
-        metadata = save_iq_file(
+        save_iq_file(
             filepath, samples, sample_rate,
             0.0, sample_format, FileFormat.WAV
         )
@@ -2825,7 +2824,7 @@ class FormatConverter:
         recorder.set_metadata(description=description)
         recorder.start(filepath)
         recorder.write(samples)
-        metadata = recorder.stop()
+        recorder.stop()
 
         data_path = filepath.with_suffix('.sigmf-data')
         file_size = data_path.stat().st_size if data_path.exists() else 0

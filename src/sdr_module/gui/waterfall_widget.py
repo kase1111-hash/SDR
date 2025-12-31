@@ -15,7 +15,7 @@ from collections import deque
 
 try:
     from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox
-    from PyQt6.QtCore import Qt, QRectF
+    from PyQt6.QtCore import QRectF
     from PyQt6.QtGui import QPainter, QImage, QColor, QPen
     HAS_PYQT6 = True
 except ImportError:

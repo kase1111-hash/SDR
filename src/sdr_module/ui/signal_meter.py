@@ -146,11 +146,11 @@ class SignalStrengthMeter:
             MeterReading with current measurements
         """
         # Calculate instantaneous power
-        power_linear = np.mean(np.abs(samples) ** 2)
+        power_linear = float(np.mean(np.abs(samples) ** 2))
         power_dbfs = self._linear_to_dbfs(power_linear)
 
         # Check for clipping
-        peak_amplitude = np.max(np.abs(samples))
+        peak_amplitude: float = float(np.max(np.abs(samples)))
         clipping = peak_amplitude >= self._config.clip_threshold
 
         # Update current power

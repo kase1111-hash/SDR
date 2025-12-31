@@ -1292,10 +1292,11 @@ class FrequencyManager:
 
         # Second check: License privileges
         for freq in freqs_to_check:
-            allowed, reason, _ = self._check_license_privilege(freq, mode)
+            allowed, license_reason, _ = self._check_license_privilege(freq, mode)
             if not allowed:
-                logger.warning(f"TX blocked at {freq/1e6:.3f} MHz: {reason}")
-                return False, f"LICENSE: {reason}"
+                reason_str = license_reason or "Unknown restriction"
+                logger.warning(f"TX blocked at {freq/1e6:.3f} MHz: {reason_str}")
+                return False, f"LICENSE: {reason_str}"
 
         return True, None
 
@@ -1330,7 +1331,8 @@ class FrequencyManager:
         """
         for band in self._lockout_bands + self._custom_lockouts:
             if band.start_hz <= frequency_hz <= band.end_hz:
-                return band.name, band.lockout_reason
+                if band.lockout_reason is not None:
+                    return band.name, band.lockout_reason
         return None
 
     def get_rx_presets(self, category: Optional[str] = None) -> List[FrequencyPreset]:

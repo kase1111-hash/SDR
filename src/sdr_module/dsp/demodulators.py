@@ -104,7 +104,7 @@ class FMDemodulator(Demodulator):
         """Demodulate FM signal using quadrature detection."""
         # Prepend last sample for continuity
         extended = np.concatenate([[self._last_sample], samples])
-        self._last_sample = samples[-1]
+        self._last_sample = complex(samples[-1])
 
         # Quadrature demodulation
         # d(angle)/dt = Im(conj(x[n-1]) * x[n]) / |x[n-1]|^2
@@ -1048,7 +1048,7 @@ class QAMDemodulator(Demodulator):
                 samples = samples / np.sqrt(input_power)
 
         # Find nearest constellation point for each sample
-        symbols = np.zeros(len(samples), dtype=np.int32)
+        symbols: np.ndarray = np.zeros(len(samples), dtype=np.int32)
         for i, sample in enumerate(samples):
             distances = np.abs(self._constellation - sample)
             symbols[i] = np.argmin(distances)
@@ -1399,7 +1399,7 @@ class CWDemodulator(Demodulator):
         audio = np.real(mixed).astype(np.float32)
 
         # Apply simple AGC
-        peak = np.max(np.abs(audio))
+        peak: float = float(np.max(np.abs(audio)))
         if peak > 0.01:
             target = 0.5
             desired_gain = target / peak
@@ -1439,8 +1439,8 @@ class CWDemodulator(Demodulator):
         self._envelope_avg = avg
 
         # Auto-threshold
-        env_max = np.max(smoothed)
-        env_min = np.min(smoothed)
+        env_max: float = float(np.max(smoothed))
+        env_min: float = float(np.min(smoothed))
         threshold = (env_max + env_min) / 2
 
         # Apply hysteresis

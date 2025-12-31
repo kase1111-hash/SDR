@@ -180,8 +180,8 @@ class SignalClassifier:
         # SSB: check for asymmetric spectrum
         spectrum = np.abs(np.fft.fft(samples))
         n = len(spectrum)
-        lower_power = np.sum(spectrum[: n // 2] ** 2)
-        upper_power = np.sum(spectrum[n // 2 :] ** 2)
+        lower_power: float = float(np.sum(spectrum[: n // 2] ** 2))
+        upper_power: float = float(np.sum(spectrum[n // 2 :] ** 2))
 
         if upper_power > 2 * lower_power:
             return ModulationType.USB
@@ -204,7 +204,7 @@ class SignalClassifier:
         # Check for OOK/ASK: amplitude levels
         # Use fixed range to handle constant-magnitude signals
         mag_hist, _ = np.histogram(norm_mag, bins=20, range=(0, 1))
-        n_peaks = np.sum(mag_hist > len(samples) * 0.05)
+        n_peaks: int = int(np.sum(mag_hist > len(samples) * 0.05))
 
         if n_peaks <= 2:
             # Binary amplitude -> OOK
@@ -213,7 +213,7 @@ class SignalClassifier:
         # Check for FSK: frequency levels
         phase_diff = np.diff(np.unwrap(phase))
         freq_hist, _ = np.histogram(phase_diff, bins=20)
-        n_freq_peaks = np.sum(freq_hist > len(samples) * 0.05)
+        n_freq_peaks: int = int(np.sum(freq_hist > len(samples) * 0.05))
 
         if n_freq_peaks == 2:
             return ModulationType.FSK
@@ -221,7 +221,7 @@ class SignalClassifier:
         # Check for PSK: phase levels
         phase_normalized = np.mod(phase + np.pi, 2 * np.pi) - np.pi
         phase_hist, _ = np.histogram(phase_normalized, bins=16)
-        n_phase_peaks = np.sum(phase_hist > len(samples) * 0.03)
+        n_phase_peaks: int = int(np.sum(phase_hist > len(samples) * 0.03))
 
         if n_phase_peaks == 2:
             return ModulationType.BPSK
@@ -259,7 +259,7 @@ class SignalClassifier:
         spectrum = np.abs(np.fft.fft(samples)) ** 2
         spectrum = np.fft.fftshift(spectrum)
 
-        total_power = np.sum(spectrum)
+        total_power: float = float(np.sum(spectrum))
         cumsum = np.cumsum(spectrum) / total_power
 
         # Find 99% power bandwidth

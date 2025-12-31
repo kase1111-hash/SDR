@@ -187,7 +187,7 @@ class SignalMeter:
         if len(self._avg_window) > self._avg_size:
             self._avg_window.pop(0)
 
-        self._power_dbm = np.mean(self._avg_window)
+        self._power_dbm = float(np.mean(self._avg_window))
 
         # Calculate SNR
         self._snr_db = self._power_dbm - self._noise_floor_dbm

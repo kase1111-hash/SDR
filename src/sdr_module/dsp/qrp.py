@@ -254,7 +254,7 @@ class QRPController:
         Returns:
             Tuple of (is_ok, message)
         """
-        if not self._power_limit_enabled:
+        if not self._power_limit_enabled or self._power_limit_watts is None:
             return True, "No power limit set"
 
         if power_watts <= self._power_limit_watts:
@@ -278,7 +278,7 @@ class QRPController:
         Returns:
             Limited power in dBm
         """
-        if not self._power_limit_enabled:
+        if not self._power_limit_enabled or self._power_limit_watts is None:
             return power_dbm
 
         limit_dbm = watts_to_dbm(self._power_limit_watts)
@@ -615,7 +615,7 @@ class QRPController:
         """
         info = self.get_power_display(power_dbm, mode)
         limit_str = ""
-        if self._power_limit_enabled:
+        if self._power_limit_enabled and self._power_limit_watts is not None:
             limit_str = f" [Limit: {format_power(self._power_limit_watts)}]"
 
         return f"{info['verbose']} - {info['qrp_status']}{limit_str}"

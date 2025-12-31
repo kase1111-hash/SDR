@@ -35,6 +35,7 @@ from .callsign_panel import CallsignPanel
 from .control_panel import ControlPanel
 from .decoder_panel import DecoderPanel
 from .qrp_panel import QRPPanel
+from .radio_tuner import RadioTunerWidget
 from .signal_meter_widget import SignalMeterPanel
 from .spectrum_widget import SpectrumWidget
 from .sstv_panel import SSTVPanel
@@ -104,6 +105,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._recording = False
         self._samples_buffer = []
         self._demo_mode = demo_mode
+        self._radio_tuner = None  # Pop-out radio tuner window
 
         self._setup_ui()
         self._setup_menus()
@@ -270,6 +272,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         decoder_action = QAction("Protocol &Decoder...", self)
         decoder_action.triggered.connect(self._show_decoder_config)
         tools_menu.addAction(decoder_action)
+
+        tools_menu.addSeparator()
+
+        radio_action = QAction("📻 AM/FM &Radio Tuner...", self)
+        radio_action.setShortcut("Ctrl+R")
+        radio_action.triggered.connect(self._show_radio_tuner)
+        tools_menu.addAction(radio_action)
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
@@ -666,6 +675,34 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         QMessageBox.information(
             self, "Scanner", "Frequency scanner will be implemented in a future update."
         )
+
+    def _show_radio_tuner(self):
+        """Show the AM/FM radio tuner pop-out window."""
+        if self._radio_tuner is None:
+            sample_rate = 2.4e6
+            if self._device:
+                sample_rate = getattr(self._device, "sample_rate", 2.4e6)
+            self._radio_tuner = RadioTunerWidget(self, sample_rate)
+            # Connect frequency change to main tuner
+            self._radio_tuner.frequency_changed.connect(
+                self._on_radio_frequency_changed
+            )
+
+        self._radio_tuner.show()
+        self._radio_tuner.raise_()
+        self._radio_tuner.activateWindow()
+
+    def _on_radio_frequency_changed(self, freq_hz: float, band: str):
+        """Handle frequency change from radio tuner."""
+        if self._device:
+            try:
+                self._device.center_freq = freq_hz
+                self._control_panel.set_frequency(freq_hz)
+                self._spectrum.set_center_freq(freq_hz)
+                self._waterfall.set_center_freq(freq_hz)
+                logger.info(f"Tuned to {freq_hz/1e6:.3f} MHz ({band})")
+            except Exception as e:
+                logger.error(f"Failed to tune: {e}")
 
     def _show_decoder_config(self):
         """Show decoder configuration dialog."""

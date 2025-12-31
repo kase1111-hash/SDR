@@ -12,8 +12,8 @@ from enum import Enum
 from threading import Lock
 import time
 
-from .waterfall import WaterfallDisplay, PacketHighlight, PROTOCOL_COLORS
-from ..dsp.spectrum import SpectrumAnalyzer, SpectrumResult
+from .waterfall import WaterfallDisplay, PacketHighlight
+from ..dsp.spectrum import SpectrumAnalyzer
 from ..dsp.classifiers import SignalClassifier, ClassificationResult, SignalType
 from ..protocols.detector import ProtocolDetector
 

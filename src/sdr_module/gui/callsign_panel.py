@@ -10,7 +10,6 @@ Provides UI controls for:
 
 from __future__ import annotations
 
-from typing import Optional
 import logging
 
 try:
@@ -19,7 +18,7 @@ try:
         QLabel, QLineEdit, QComboBox, QGroupBox,
         QSpinBox, QPushButton, QCheckBox, QProgressBar
     )
-    from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+    from PyQt6.QtCore import pyqtSignal, QTimer
     from PyQt6.QtGui import QFont
     HAS_PYQT6 = True
 except ImportError:
@@ -237,7 +236,6 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         # Generate and play test ID
         try:
             from ..dsp.callsign import generate_cw_id
-            import numpy as np
 
             if self._callsign:
                 audio = generate_cw_id(

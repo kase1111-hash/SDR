@@ -216,7 +216,7 @@ class SampleBuffer:
                 samples = self._buffer[self._read_idx:end_idx].copy()
             else:
                 # Wrap around
-                first_chunk = self._capacity - self._read_idx
+                self._capacity - self._read_idx
                 samples = np.concatenate([
                     self._buffer[self._read_idx:],
                     self._buffer[:end_idx]

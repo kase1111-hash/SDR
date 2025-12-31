@@ -40,7 +40,7 @@ from __future__ import annotations
 import math
 import logging
 from enum import Enum, auto
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, List, Tuple, Dict
 
 logger = logging.getLogger(__name__)

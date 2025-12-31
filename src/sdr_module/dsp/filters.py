@@ -1747,7 +1747,6 @@ class Squelch:
             self._signal_level = level
 
         # Determine state
-        was_open = self.is_open
 
         if self._state == SquelchState.CLOSED and self._should_open(level):
             self._state = SquelchState.OPENING
@@ -2137,7 +2136,6 @@ class NoiseReduction:
         """
         output = np.zeros_like(samples)
         n = len(samples)
-        L = self._config.lms_filter_length
         mu = self._config.lms_step_size
 
         for i in range(n):

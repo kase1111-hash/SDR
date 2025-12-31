@@ -9,7 +9,7 @@ import logging
 from typing import Dict, List, Optional, Type
 from dataclasses import dataclass
 
-from ..devices.base import SDRDevice, DeviceInfo, DeviceCapability
+from ..devices.base import SDRDevice, DeviceInfo
 from ..devices.rtlsdr import RTLSDRDevice
 from ..devices.hackrf import HackRFDevice
 from .config import DeviceConfig

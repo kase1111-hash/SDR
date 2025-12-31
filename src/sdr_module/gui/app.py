@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 def check_pyqt6() -> bool:
     """Check if PyQt6 is available."""
     try:
-        from PyQt6 import QtWidgets, QtCore, QtGui
+        from PyQt6 import QtWidgets, QtCore, QtGui  # noqa: F401
         return True
     except ImportError:
         return False
@@ -76,7 +76,6 @@ class SDRApplication:
 
         try:
             from PyQt6.QtWidgets import QApplication
-            from PyQt6.QtCore import Qt
             from .main_window import SDRMainWindow
 
             # Create application

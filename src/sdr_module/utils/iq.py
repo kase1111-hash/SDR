@@ -6,7 +6,6 @@ Provides conversion between various I/Q data formats.
 
 import numpy as np
 from typing import Tuple, Optional
-from pathlib import Path
 
 
 def iq_to_complex(i_samples: np.ndarray, q_samples: np.ndarray) -> np.ndarray:

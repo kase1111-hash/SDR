@@ -8,7 +8,7 @@ Provides automatic detection of:
 """
 
 import numpy as np
-from typing import Optional, List, Tuple
+from typing import Optional
 from dataclasses import dataclass
 from enum import Enum
 
@@ -118,7 +118,7 @@ class SignalClassifier:
 
         # Spectral features
         spectrum = np.abs(np.fft.fft(samples))
-        spectrum_db = 20 * np.log10(spectrum + 1e-10)
+        20 * np.log10(spectrum + 1e-10)
 
         features["spectral_flatness"] = self._spectral_flatness(spectrum)
         features["spectral_centroid"] = self._spectral_centroid(spectrum)

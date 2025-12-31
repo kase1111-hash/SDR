@@ -11,23 +11,20 @@ Provides controls for:
 
 from __future__ import annotations
 
-from typing import Optional, List
 
 try:
     from PyQt6.QtWidgets import (
         QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QLabel, QLineEdit, QSlider, QComboBox, QGroupBox,
-        QSpinBox, QDoubleSpinBox, QPushButton, QCheckBox
+        QLabel, QSlider, QComboBox, QGroupBox,
+        QDoubleSpinBox, QPushButton, QCheckBox
     )
     from PyQt6.QtCore import Qt, pyqtSignal
-    from PyQt6.QtGui import QDoubleValidator
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
 
 from ..core.frequency_manager import (
     get_frequency_manager,
-    FrequencyPreset,
     LicenseClass,
     TX_POWER_WARNING,
     POWER_HEADROOM_FACTOR,

@@ -15,7 +15,6 @@ import numpy as np
 from typing import Optional, Callable, List
 from threading import Thread
 import logging
-import struct
 
 from .base import (
     SDRDevice,
@@ -23,7 +22,7 @@ from .base import (
     DeviceSpec,
     DeviceCapability,
 )
-from ..core.frequency_manager import validate_tx_frequency, is_tx_allowed
+from ..core.frequency_manager import is_tx_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -112,7 +111,7 @@ class HackRFDevice(SDRDevice):
             serial = "unknown"
             try:
                 serial = self._device.get_serial_number()
-            except:
+            except Exception:
                 pass
 
             self._info = DeviceInfo(
@@ -331,7 +330,7 @@ class HackRFDevice(SDRDevice):
                     else:
                         try:
                             self._sample_queue.put_nowait(samples)
-                        except:
+                        except Exception:
                             pass  # Queue full, drop samples
                     return 0
 
@@ -354,7 +353,7 @@ class HackRFDevice(SDRDevice):
         self._stop_event.set()
         try:
             self._device.stop_rx()
-        except:
+        except Exception:
             pass
 
         if self._rx_thread:
@@ -439,7 +438,7 @@ class HackRFDevice(SDRDevice):
         self._stop_event.set()
         try:
             self._device.stop_tx()
-        except:
+        except Exception:
             pass
 
         if self._tx_thread:

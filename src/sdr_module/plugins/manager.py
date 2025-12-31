@@ -5,25 +5,20 @@ Handles the complete plugin lifecycle from discovery to unloading,
 with support for multiple plugin directories and hot-reloading.
 """
 
-import os
 import sys
 import importlib
 import importlib.util
 import json
 import logging
 from pathlib import Path
-from typing import Dict, List, Optional, Type, Any, Set
+from typing import Dict, List, Optional, Type, Any
 from dataclasses import dataclass, field
 
 from .base import (
     Plugin,
     PluginMetadata,
     PluginType,
-    PluginState,
-    PluginError,
     PluginLoadError,
-    PluginInitError,
-    PluginNotFoundError,
     check_api_compatibility,
     PLUGIN_API_VERSION,
 )
@@ -403,7 +398,7 @@ class PluginManager:
             self._registry.unregister_class(name)
 
             # Remove module
-            module = self._loaded_modules.pop(name)
+            self._loaded_modules.pop(name)
             source = self._sources.get(name)
 
             if source and source.module_name in sys.modules:

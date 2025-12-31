@@ -22,10 +22,9 @@ try:
         QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
         QLabel, QGroupBox, QSizePolicy, QComboBox
     )
-    from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
+    from PyQt6.QtCore import QTimer, QPointF
     from PyQt6.QtGui import (
-        QPainter, QPen, QBrush, QColor, QFont, QFontMetrics,
-        QLinearGradient, QPainterPath, QPolygonF
+        QPainter, QPen, QBrush, QColor, QFont, QFontMetrics
     )
     HAS_PYQT6 = True
 except ImportError:
@@ -35,7 +34,7 @@ import numpy as np
 
 from ..dsp.signal_meter import (
     SignalMeter, SignalReading, SignalMode,
-    SignalHistory, S_METER_REFERENCE, S9_DBM
+    SignalHistory, S9_DBM
 )
 
 
@@ -112,8 +111,6 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
         """Draw the S-meter scale."""
         # Scale arc parameters
         radius = min(w, h) * 0.7
-        start_angle = 150  # degrees
-        sweep_angle = -120  # negative for clockwise
 
         # Draw arc
         painter.setPen(QPen(self._scale_color, 2))
@@ -391,7 +388,7 @@ class CompactSignalMeter(QWidget if HAS_PYQT6 else object):
 
     def update_samples(self, samples: np.ndarray) -> None:
         """Update with samples."""
-        reading = self._meter.update(samples)
+        self._meter.update(samples)
 
         # Update bar graph
         bar = self._meter.get_bar_graph(9)

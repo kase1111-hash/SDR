@@ -5,7 +5,6 @@ Provides ready-to-use encoders for common protocols.
 """
 
 import numpy as np
-from typing import Dict
 from .encoder import ProtocolEncoder, EncoderConfig, ModulationType
 
 

@@ -7,7 +7,7 @@ Supports analog and digital modulation types:
 """
 
 import numpy as np
-from typing import Optional, Tuple
+from typing import Tuple
 from enum import Enum
 from abc import ABC, abstractmethod
 
@@ -1334,7 +1334,7 @@ class CWDemodulator(Demodulator):
         n = len(samples)
 
         # Generate BFO (local oscillator)
-        t = np.arange(n) / self._sample_rate
+        np.arange(n) / self._sample_rate
         phase_increment = 2 * np.pi * self._bfo_freq / self._sample_rate
         bfo_phase = self._bfo_phase + np.cumsum(np.ones(n) * phase_increment)
         self._bfo_phase = bfo_phase[-1] % (2 * np.pi)

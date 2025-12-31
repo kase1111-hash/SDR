@@ -7,18 +7,17 @@ Provides the primary window with all panels and controls.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 import numpy as np
 
 try:
     from PyQt6.QtWidgets import (
-        QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-        QSplitter, QStatusBar, QToolBar, QMenuBar, QMenu,
-        QLabel, QMessageBox, QFileDialog, QDockWidget,
+        QMainWindow, QWidget, QVBoxLayout,
+        QSplitter, QStatusBar, QToolBar,
+        QLabel, QMessageBox, QFileDialog,
         QTabWidget, QProgressBar
     )
     from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
-    from PyQt6.QtGui import QAction, QIcon, QKeySequence
+    from PyQt6.QtGui import QAction, QKeySequence
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False

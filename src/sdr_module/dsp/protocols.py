@@ -12,7 +12,7 @@ Supports:
 
 import numpy as np
 from typing import Optional, List, Tuple, Callable, Dict, Any
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from abc import ABC, abstractmethod
 import time
@@ -1811,7 +1811,7 @@ class FLEXDecoder(ProtocolDecoder):
         while len(self._bit_buffer) >= 64:
             # Check for sync words
             word1 = self._bits_to_word(self._bit_buffer[:32])
-            word2 = self._bits_to_word(self._bit_buffer[32:64])
+            self._bits_to_word(self._bit_buffer[32:64])
 
             if (word1 == self.SYNC_1 or word1 == self.SYNC_2):
                 self._synced = True

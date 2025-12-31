@@ -6,17 +6,17 @@ Displays decoded messages from various protocols.
 
 from __future__ import annotations
 
-from typing import Optional, List, Dict, Any
+from typing import List, Dict, Any
 from datetime import datetime
 
 try:
     from PyQt6.QtWidgets import (
         QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QLabel, QComboBox, QGroupBox, QPushButton,
+        QLabel, QComboBox, QPushButton,
         QTextEdit, QTableWidget, QTableWidgetItem,
         QHeaderView, QCheckBox, QTabWidget
     )
-    from PyQt6.QtCore import Qt, pyqtSignal
+    from PyQt6.QtCore import pyqtSignal
     from PyQt6.QtGui import QColor, QFont
     HAS_PYQT6 = True
 except ImportError:

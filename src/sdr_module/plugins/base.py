@@ -8,7 +8,7 @@ and metadata structures for plugin identification.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, List, Dict, Any, Type
+from typing import Optional, List, Dict, Any
 import numpy as np
 
 

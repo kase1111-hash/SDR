@@ -7,7 +7,7 @@ into various radio protocol formats.
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional
 from enum import Enum
 import numpy as np
 

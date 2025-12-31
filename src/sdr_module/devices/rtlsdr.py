@@ -272,7 +272,7 @@ class RTLSDRDevice(SDRDevice):
                     else:
                         try:
                             self._sample_queue.put_nowait(samples)
-                        except:
+                        except Exception:
                             pass  # Queue full, drop samples
             except Exception as e:
                 if not self._stop_event.is_set():

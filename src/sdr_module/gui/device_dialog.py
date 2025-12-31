@@ -6,16 +6,15 @@ Allows user to select and configure SDR device.
 
 from __future__ import annotations
 
-from typing import Optional, List
+from typing import List
 
 try:
     from PyQt6.QtWidgets import (
-        QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
+        QDialog, QVBoxLayout, QGridLayout,
         QLabel, QComboBox, QGroupBox, QPushButton,
         QTableWidget, QTableWidgetItem, QHeaderView,
         QDialogButtonBox, QMessageBox, QSpinBox
     )
-    from PyQt6.QtCore import Qt
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False

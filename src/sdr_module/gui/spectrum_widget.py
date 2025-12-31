@@ -11,15 +11,15 @@ Provides real-time spectrum visualization with:
 from __future__ import annotations
 
 import numpy as np
-from typing import Optional, List, Tuple, TYPE_CHECKING
+from typing import List, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from PyQt6.QtGui import QPainter
 
 try:
     from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox
-    from PyQt6.QtCore import Qt, QRectF, QPointF
-    from PyQt6.QtGui import QPainter, QPen, QColor, QBrush, QFont, QPainterPath
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QPainter, QPen, QColor, QFont, QPainterPath
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False

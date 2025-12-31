@@ -5,7 +5,7 @@ Displays complex samples as points on I/Q plane, useful for
 analyzing digital modulation types (PSK, QAM, etc.).
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, List, Tuple
 import numpy as np

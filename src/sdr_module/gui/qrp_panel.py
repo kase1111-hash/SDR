@@ -11,23 +11,20 @@ Provides controls for QRP operation:
 
 from __future__ import annotations
 
-from typing import Optional
 
 try:
     from PyQt6.QtWidgets import (
         QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
         QLabel, QPushButton, QGroupBox, QSpinBox, QDoubleSpinBox,
-        QComboBox, QCheckBox, QProgressBar, QLineEdit, QFrame
+        QComboBox, QCheckBox, QFrame
     )
     from PyQt6.QtCore import Qt, pyqtSignal
-    from PyQt6.QtGui import QFont
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
 
 from ..dsp.qrp import (
-    QRPController, QRPClass, AmplifierStage,
-    dbm_to_watts, watts_to_dbm, format_power, format_power_verbose
+    QRPController, dbm_to_watts, format_power, format_power_verbose
 )
 
 
@@ -451,7 +448,7 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         distance = self._distance_spin.value()
         power = self._mpw_power_spin.value()
 
-        mpw = self._qrp.log_qso(distance, power)
+        self._qrp.log_qso(distance, power)
         self._update_mpw_display()
 
     def _update_mpw_display(self):

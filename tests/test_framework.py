@@ -51,7 +51,6 @@ def test_imports():
     print("  ✓ Config imports")
 
     print("All imports successful!\n")
-    return True
 
 
 def test_sample_buffer():
@@ -101,7 +100,6 @@ def test_sample_buffer():
     print("  ✓ Overflow handling")
 
     print("SampleBuffer tests passed!\n")
-    return True
 
 
 def test_spectrum_analyzer():
@@ -146,7 +144,6 @@ def test_spectrum_analyzer():
     print("  ✓ Window functions")
 
     print("SpectrumAnalyzer tests passed!\n")
-    return True
 
 
 def test_filters():
@@ -182,7 +179,6 @@ def test_filters():
     print("  ✓ Frequency response")
 
     print("FilterBank tests passed!\n")
-    return True
 
 
 def test_demodulators():
@@ -238,7 +234,6 @@ def test_demodulators():
     print("  ✓ Demodulator factory")
 
     print("Demodulator tests passed!\n")
-    return True
 
 
 def test_signal_classifier():
@@ -278,7 +273,6 @@ def test_signal_classifier():
     print("  ✓ Result structure")
 
     print("SignalClassifier tests passed!\n")
-    return True
 
 
 def test_waterfall():
@@ -324,7 +318,6 @@ def test_waterfall():
     print(f"  ✓ Protocol colors ({len(PROTOCOL_COLORS)} defined)")
 
     print("WaterfallDisplay tests passed!\n")
-    return True
 
 
 def test_packet_highlighter():
@@ -369,7 +362,6 @@ def test_packet_highlighter():
     print("  ✓ Reset and clear")
 
     print("PacketHighlighter tests passed!\n")
-    return True
 
 
 def test_config():
@@ -412,7 +404,6 @@ def test_config():
     print("  ✓ ADS-B preset")
 
     print("Configuration tests passed!\n")
-    return True
 
 
 def test_tooltips():
@@ -457,7 +448,6 @@ def test_tooltips():
     print("  ✓ Warning field")
 
     print("Tooltips tests passed!\n")
-    return True
 
 
 def test_utils():
@@ -519,7 +509,6 @@ def test_utils():
     print("  ✓ DC offset correction")
 
     print("Utils tests passed!\n")
-    return True
 
 
 def test_protocol_framework():
@@ -546,7 +535,6 @@ def test_protocol_framework():
     print("  ✓ Detection with no decoders")
 
     print("Protocol Framework tests passed!\n")
-    return True
 
 
 def run_all_tests():
@@ -576,8 +564,8 @@ def run_all_tests():
 
     for name, test_func in tests:
         try:
-            if test_func():
-                passed += 1
+            test_func()
+            passed += 1
         except Exception as e:
             print(f"FAILED: {name}")
             print(f"  Error: {e}")

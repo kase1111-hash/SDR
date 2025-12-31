@@ -185,7 +185,7 @@ class ConstellationDisplay:
 
         # Normalize if enabled
         if self._normalize:
-            max_mag = np.max(np.abs(samples))
+            max_mag: float = float(np.max(np.abs(samples)))
             if max_mag > 1e-10:
                 samples = samples / max_mag
 
@@ -249,7 +249,7 @@ class ConstellationDisplay:
             return ConstellationStats()
 
         # DC offset
-        dc_offset = np.mean(points)
+        dc_offset = complex(np.mean(points))
 
         # I/Q imbalance (ratio of I to Q standard deviations)
         i_std = np.std(np.real(points))
@@ -307,7 +307,7 @@ class ConstellationDisplay:
         errors = []
         for point in points:
             distances = np.abs(point - ref_points)
-            min_error = np.min(distances)
+            min_error: float = float(np.min(distances))
             errors.append(min_error**2)
 
         # EVM = sqrt(mean error power / mean reference power)

@@ -244,8 +244,8 @@ class TimeDomainDisplay:
         mag = np.abs(data)
 
         # Normalize to 0-1 range
-        mag_min = np.min(mag)
-        mag_max = np.max(mag)
+        mag_min: float = float(np.min(mag))
+        mag_max: float = float(np.max(mag))
         if mag_max - mag_min > 1e-10:
             mag_norm = (mag - mag_min) / (mag_max - mag_min)
         else:

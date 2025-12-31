@@ -201,7 +201,7 @@ class FilterBank:
             sample_rate: Sample rate in Hz
         """
         self._sample_rate = sample_rate
-        self._filters = {}
+        self._filters: dict[str, FIRFilter] = {}
 
     def add_filter(self, name: str, filter_obj: FIRFilter) -> None:
         """Add a filter to the bank."""
@@ -1563,8 +1563,8 @@ class Squelch:
             audio = samples
 
         # Integrate over block
-        corr_i = np.sum(audio * ref_i)
-        corr_q = np.sum(audio * ref_q)
+        corr_i: float = float(np.sum(audio * ref_i))
+        corr_q: float = float(np.sum(audio * ref_q))
         magnitude = np.sqrt(corr_i**2 + corr_q**2) / n
 
         # Smooth magnitude
@@ -1735,10 +1735,10 @@ class Squelch:
         # Block level detection
         if self._config.mode == SquelchMode.NOISE:
             magnitudes = np.abs(samples)
-            block_level = np.mean(magnitudes)
+            block_level = float(np.mean(magnitudes))
             self._signal_level = block_level
             # Simple noise estimate
-            noise_est = np.percentile(magnitudes, 10)
+            noise_est: float = float(np.percentile(magnitudes, 10))
             if noise_est > 1e-10:
                 level = block_level / noise_est
             else:
@@ -2053,7 +2053,7 @@ class NoiseReduction:
 
         Estimates noise spectrum and subtracts it from signal spectrum.
         """
-        output = []
+        output: list[float] = []
         is_complex = np.iscomplexobj(samples)
 
         # Process in overlapping frames
@@ -2087,7 +2087,7 @@ class NoiseReduction:
                     self._noise_estimated = True
 
             # Spectral subtraction
-            if self._noise_estimated:
+            if self._noise_estimated and self._noise_spectrum is not None:
                 # Over-subtraction
                 subtracted = (
                     magnitude - self._config.subtraction_factor * self._noise_spectrum
@@ -2143,6 +2143,7 @@ class NoiseReduction:
             # Initialize noise PSD if needed
             if self._wiener_noise_psd is None:
                 self._wiener_noise_psd = power.copy()
+            wiener_noise = self._wiener_noise_psd
 
             # Update noise estimate (during silence)
             signal_power = np.mean(power)
@@ -2151,12 +2152,13 @@ class NoiseReduction:
             if signal_power < noise_power * 1.5:  # Likely noise-only
                 alpha = self._config.wiener_alpha
                 self._wiener_noise_psd = (
-                    alpha * self._wiener_noise_psd + (1 - alpha) * power
+                    alpha * wiener_noise + (1 - alpha) * power
                 )
+                wiener_noise = self._wiener_noise_psd
 
             # Wiener filter gain
             # H(f) = max(0, 1 - noise_psd / signal_psd)
-            snr = power / (self._wiener_noise_psd + 1e-10)
+            snr = power / (wiener_noise + 1e-10)
             gain = np.maximum(0, 1 - 1 / (snr + 1e-10))
             gain = np.sqrt(gain)  # Amplitude domain
 

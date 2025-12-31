@@ -312,7 +312,7 @@ class IQRecorder:
 
         if self._file_format == FileFormat.WAV:
             self._write_wav(converted)
-        else:
+        elif self._file is not None:
             converted.tofile(self._file)
 
         self._samples_written += len(samples)

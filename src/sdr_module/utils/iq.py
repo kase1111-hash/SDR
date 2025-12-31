@@ -4,8 +4,9 @@ I/Q sample utilities for SDR applications.
 Provides conversion between various I/Q data formats.
 """
 
+from typing import Optional, Tuple
+
 import numpy as np
-from typing import Tuple, Optional
 
 
 def iq_to_complex(i_samples: np.ndarray, q_samples: np.ndarray) -> np.ndarray:
@@ -35,10 +36,7 @@ def complex_to_iq(samples: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return samples.real.astype(np.float32), samples.imag.astype(np.float32)
 
 
-def interleaved_to_complex(
-    data: np.ndarray,
-    dtype: np.dtype = np.uint8
-) -> np.ndarray:
+def interleaved_to_complex(data: np.ndarray, dtype: np.dtype = np.uint8) -> np.ndarray:
     """
     Convert interleaved I/Q data to complex.
 
@@ -66,8 +64,7 @@ def interleaved_to_complex(
 
 
 def complex_to_interleaved(
-    samples: np.ndarray,
-    dtype: np.dtype = np.uint8
+    samples: np.ndarray, dtype: np.dtype = np.uint8
 ) -> np.ndarray:
     """
     Convert complex samples to interleaved I/Q data.
@@ -109,7 +106,7 @@ def load_iq_file(
     filepath: str,
     format: str = "cu8",
     num_samples: Optional[int] = None,
-    offset_samples: int = 0
+    offset_samples: int = 0,
 ) -> np.ndarray:
     """
     Load I/Q samples from file.
@@ -142,7 +139,7 @@ def load_iq_file(
     # Read raw data
     offset_bytes = offset_samples * bytes_per_sample
 
-    with open(filepath, 'rb') as f:
+    with open(filepath, "rb") as f:
         f.seek(offset_bytes)
         if num_samples is not None:
             data = np.fromfile(f, dtype=dtype, count=num_samples * 2)
@@ -157,11 +154,7 @@ def load_iq_file(
         return interleaved_to_complex(data, dtype)
 
 
-def save_iq_file(
-    samples: np.ndarray,
-    filepath: str,
-    format: str = "cf32"
-) -> None:
+def save_iq_file(samples: np.ndarray, filepath: str, format: str = "cf32") -> None:
     """
     Save I/Q samples to file.
 
@@ -207,9 +200,7 @@ def apply_dc_offset_correction(samples: np.ndarray) -> np.ndarray:
 
 
 def apply_iq_imbalance_correction(
-    samples: np.ndarray,
-    gain_imbalance: float = 0.0,
-    phase_imbalance: float = 0.0
+    samples: np.ndarray, gain_imbalance: float = 0.0, phase_imbalance: float = 0.0
 ) -> np.ndarray:
     """
     Correct I/Q gain and phase imbalance.

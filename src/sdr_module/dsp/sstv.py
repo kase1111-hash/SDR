@@ -25,37 +25,39 @@ from __future__ import annotations
 
 import logging
 import time
-from enum import Enum, auto
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple, Callable
-import numpy as np
+from enum import Enum, auto
 from pathlib import Path
+from typing import Callable, List, Optional, Tuple
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 
 class SSTVMode(Enum):
     """SSTV transmission modes."""
+
     # Robot modes
-    ROBOT_36 = auto()      # 36 seconds, 320x240
-    ROBOT_72 = auto()      # 72 seconds, 320x240
+    ROBOT_36 = auto()  # 36 seconds, 320x240
+    ROBOT_72 = auto()  # 72 seconds, 320x240
 
     # Scottie modes
-    SCOTTIE_1 = auto()     # 110 seconds, 320x256
-    SCOTTIE_2 = auto()     # 71 seconds, 320x256
-    SCOTTIE_DX = auto()    # 269 seconds, 320x256
+    SCOTTIE_1 = auto()  # 110 seconds, 320x256
+    SCOTTIE_2 = auto()  # 71 seconds, 320x256
+    SCOTTIE_DX = auto()  # 269 seconds, 320x256
 
     # Martin modes
-    MARTIN_1 = auto()      # 114 seconds, 320x256
-    MARTIN_2 = auto()      # 58 seconds, 320x256
+    MARTIN_1 = auto()  # 114 seconds, 320x256
+    MARTIN_2 = auto()  # 58 seconds, 320x256
 
     # PD modes (ISS favorites)
-    PD_90 = auto()         # 90 seconds, 320x256
-    PD_120 = auto()        # 120 seconds, 640x496
-    PD_160 = auto()        # 160 seconds, 512x400
-    PD_180 = auto()        # 180 seconds, 640x496
-    PD_240 = auto()        # 240 seconds, 640x496
-    PD_290 = auto()        # 290 seconds, 800x616
+    PD_90 = auto()  # 90 seconds, 320x256
+    PD_120 = auto()  # 120 seconds, 640x496
+    PD_160 = auto()  # 160 seconds, 512x400
+    PD_180 = auto()  # 180 seconds, 640x496
+    PD_240 = auto()  # 240 seconds, 640x496
+    PD_290 = auto()  # 290 seconds, 800x616
 
     # Wraase modes
     WRAASE_SC2_180 = auto()
@@ -66,49 +68,192 @@ class SSTVMode(Enum):
 @dataclass
 class SSTVModeSpec:
     """Specification for an SSTV mode."""
+
     name: str
     mode: SSTVMode
-    vis_code: int          # Vertical Interval Signaling code
-    width: int             # Image width in pixels
-    height: int            # Image height in pixels
-    scan_time_ms: float    # Time for one line in milliseconds
-    sync_pulse_ms: float   # Sync pulse duration
-    sync_porch_ms: float   # Sync porch duration
-    color_format: str      # "RGB", "YUV", "GBR"
+    vis_code: int  # Vertical Interval Signaling code
+    width: int  # Image width in pixels
+    height: int  # Image height in pixels
+    scan_time_ms: float  # Time for one line in milliseconds
+    sync_pulse_ms: float  # Sync pulse duration
+    sync_porch_ms: float  # Sync porch duration
+    color_format: str  # "RGB", "YUV", "GBR"
     channel_times_ms: List[float]  # Time for each color channel
 
 
 # SSTV Mode specifications
 SSTV_MODES = {
     # Robot modes - YUV format
-    0x08: SSTVModeSpec("Robot 36", SSTVMode.ROBOT_36, 0x08, 320, 240, 150.0, 9.0, 3.0, "YUV", [88.0, 44.0, 44.0]),
-    0x0C: SSTVModeSpec("Robot 72", SSTVMode.ROBOT_72, 0x0C, 320, 240, 300.0, 9.0, 3.0, "YUV", [138.0, 69.0, 69.0]),
-
+    0x08: SSTVModeSpec(
+        "Robot 36",
+        SSTVMode.ROBOT_36,
+        0x08,
+        320,
+        240,
+        150.0,
+        9.0,
+        3.0,
+        "YUV",
+        [88.0, 44.0, 44.0],
+    ),
+    0x0C: SSTVModeSpec(
+        "Robot 72",
+        SSTVMode.ROBOT_72,
+        0x0C,
+        320,
+        240,
+        300.0,
+        9.0,
+        3.0,
+        "YUV",
+        [138.0, 69.0, 69.0],
+    ),
     # Scottie modes - GBR format
-    0x3C: SSTVModeSpec("Scottie 1", SSTVMode.SCOTTIE_1, 0x3C, 320, 256, 428.22, 9.0, 1.5, "GBR", [138.24, 138.24, 138.24]),
-    0x38: SSTVModeSpec("Scottie 2", SSTVMode.SCOTTIE_2, 0x38, 320, 256, 277.69, 9.0, 1.5, "GBR", [88.064, 88.064, 88.064]),
-    0x4C: SSTVModeSpec("Scottie DX", SSTVMode.SCOTTIE_DX, 0x4C, 320, 256, 1050.3, 9.0, 1.5, "GBR", [345.6, 345.6, 345.6]),
-
+    0x3C: SSTVModeSpec(
+        "Scottie 1",
+        SSTVMode.SCOTTIE_1,
+        0x3C,
+        320,
+        256,
+        428.22,
+        9.0,
+        1.5,
+        "GBR",
+        [138.24, 138.24, 138.24],
+    ),
+    0x38: SSTVModeSpec(
+        "Scottie 2",
+        SSTVMode.SCOTTIE_2,
+        0x38,
+        320,
+        256,
+        277.69,
+        9.0,
+        1.5,
+        "GBR",
+        [88.064, 88.064, 88.064],
+    ),
+    0x4C: SSTVModeSpec(
+        "Scottie DX",
+        SSTVMode.SCOTTIE_DX,
+        0x4C,
+        320,
+        256,
+        1050.3,
+        9.0,
+        1.5,
+        "GBR",
+        [345.6, 345.6, 345.6],
+    ),
     # Martin modes - GBR format
-    0x2C: SSTVModeSpec("Martin 1", SSTVMode.MARTIN_1, 0x2C, 320, 256, 446.446, 4.862, 0.572, "GBR", [146.432, 146.432, 146.432]),
-    0x28: SSTVModeSpec("Martin 2", SSTVMode.MARTIN_2, 0x28, 320, 256, 226.798, 4.862, 0.572, "GBR", [73.216, 73.216, 73.216]),
-
+    0x2C: SSTVModeSpec(
+        "Martin 1",
+        SSTVMode.MARTIN_1,
+        0x2C,
+        320,
+        256,
+        446.446,
+        4.862,
+        0.572,
+        "GBR",
+        [146.432, 146.432, 146.432],
+    ),
+    0x28: SSTVModeSpec(
+        "Martin 2",
+        SSTVMode.MARTIN_2,
+        0x28,
+        320,
+        256,
+        226.798,
+        4.862,
+        0.572,
+        "GBR",
+        [73.216, 73.216, 73.216],
+    ),
     # PD modes - YUV format (ISS favorites!)
-    0x5D: SSTVModeSpec("PD 90", SSTVMode.PD_90, 0x5D, 320, 256, 170.24, 20.0, 2.08, "YUV", [125.0, 125.0]),
-    0x5F: SSTVModeSpec("PD 120", SSTVMode.PD_120, 0x5F, 640, 496, 121.6, 20.0, 2.08, "YUV", [190.0, 190.0]),
-    0x62: SSTVModeSpec("PD 160", SSTVMode.PD_160, 0x62, 512, 400, 195.584, 20.0, 2.08, "YUV", [195.584]),
-    0x60: SSTVModeSpec("PD 180", SSTVMode.PD_180, 0x60, 640, 496, 183.04, 20.0, 2.08, "YUV", [286.0, 286.0]),
-    0x61: SSTVModeSpec("PD 240", SSTVMode.PD_240, 0x61, 640, 496, 244.48, 20.0, 2.08, "YUV", [382.0, 382.0]),
-    0x63: SSTVModeSpec("PD 290", SSTVMode.PD_290, 0x63, 800, 616, 228.8, 20.0, 2.08, "YUV", [286.0, 286.0]),
-
+    0x5D: SSTVModeSpec(
+        "PD 90",
+        SSTVMode.PD_90,
+        0x5D,
+        320,
+        256,
+        170.24,
+        20.0,
+        2.08,
+        "YUV",
+        [125.0, 125.0],
+    ),
+    0x5F: SSTVModeSpec(
+        "PD 120",
+        SSTVMode.PD_120,
+        0x5F,
+        640,
+        496,
+        121.6,
+        20.0,
+        2.08,
+        "YUV",
+        [190.0, 190.0],
+    ),
+    0x62: SSTVModeSpec(
+        "PD 160", SSTVMode.PD_160, 0x62, 512, 400, 195.584, 20.0, 2.08, "YUV", [195.584]
+    ),
+    0x60: SSTVModeSpec(
+        "PD 180",
+        SSTVMode.PD_180,
+        0x60,
+        640,
+        496,
+        183.04,
+        20.0,
+        2.08,
+        "YUV",
+        [286.0, 286.0],
+    ),
+    0x61: SSTVModeSpec(
+        "PD 240",
+        SSTVMode.PD_240,
+        0x61,
+        640,
+        496,
+        244.48,
+        20.0,
+        2.08,
+        "YUV",
+        [382.0, 382.0],
+    ),
+    0x63: SSTVModeSpec(
+        "PD 290",
+        SSTVMode.PD_290,
+        0x63,
+        800,
+        616,
+        228.8,
+        20.0,
+        2.08,
+        "YUV",
+        [286.0, 286.0],
+    ),
     # Wraase SC2
-    0x37: SSTVModeSpec("Wraase SC2-180", SSTVMode.WRAASE_SC2_180, 0x37, 320, 256, 711.04, 5.5225, 0.5, "RGB", [235.0, 235.0, 235.0]),
+    0x37: SSTVModeSpec(
+        "Wraase SC2-180",
+        SSTVMode.WRAASE_SC2_180,
+        0x37,
+        320,
+        256,
+        711.04,
+        5.5225,
+        0.5,
+        "RGB",
+        [235.0, 235.0, 235.0],
+    ),
 }
 
 
 @dataclass
 class SSTVState:
     """Current state of SSTV decoding."""
+
     mode: Optional[SSTVModeSpec] = None
     is_receiving: bool = False
     current_line: int = 0
@@ -141,17 +286,17 @@ class SSTVDecoder:
     """
 
     # SSTV frequency constants (Hz)
-    FREQ_BLACK = 1500      # Black level
-    FREQ_WHITE = 2300      # White level
-    FREQ_SYNC = 1200       # Sync pulse
+    FREQ_BLACK = 1500  # Black level
+    FREQ_WHITE = 2300  # White level
+    FREQ_SYNC = 1200  # Sync pulse
     FREQ_VIS_BIT_0 = 1300  # VIS bit 0
     FREQ_VIS_BIT_1 = 1100  # VIS bit 1
-    FREQ_LEADER = 1900     # Leader tone
-    FREQ_BREAK = 1200      # Break tone
+    FREQ_LEADER = 1900  # Leader tone
+    FREQ_BREAK = 1200  # Break tone
 
     # Timing constants (ms)
-    VIS_BIT_TIME = 30.0    # Each VIS bit duration
-    LEADER_TIME = 300.0    # Leader tone duration
+    VIS_BIT_TIME = 30.0  # Each VIS bit duration
+    LEADER_TIME = 300.0  # Leader tone duration
 
     def __init__(self, sample_rate: float = 48000.0):
         """
@@ -366,8 +511,10 @@ class SSTVDecoder:
             pixels_per_channel = len(line_data) // 3
             if pixels_per_channel > 0:
                 r = self._resample_line(line_data[:pixels_per_channel], mode.width)
-                g = self._resample_line(line_data[pixels_per_channel:2*pixels_per_channel], mode.width)
-                b = self._resample_line(line_data[2*pixels_per_channel:], mode.width)
+                g = self._resample_line(
+                    line_data[pixels_per_channel : 2 * pixels_per_channel], mode.width
+                )
+                b = self._resample_line(line_data[2 * pixels_per_channel :], mode.width)
 
                 self.state.image_data[line_idx, :, 0] = r
                 self.state.image_data[line_idx, :, 1] = g
@@ -377,8 +524,10 @@ class SSTVDecoder:
             pixels_per_channel = len(line_data) // 3
             if pixels_per_channel > 0:
                 g = self._resample_line(line_data[:pixels_per_channel], mode.width)
-                b = self._resample_line(line_data[pixels_per_channel:2*pixels_per_channel], mode.width)
-                r = self._resample_line(line_data[2*pixels_per_channel:], mode.width)
+                b = self._resample_line(
+                    line_data[pixels_per_channel : 2 * pixels_per_channel], mode.width
+                )
+                r = self._resample_line(line_data[2 * pixels_per_channel :], mode.width)
 
                 self.state.image_data[line_idx, :, 0] = r
                 self.state.image_data[line_idx, :, 1] = g
@@ -386,15 +535,22 @@ class SSTVDecoder:
 
         elif mode.color_format == "YUV":
             # YUV to RGB conversion
-            pixels_per_channel = len(line_data) // 2 if len(mode.channel_times_ms) == 2 else len(line_data)
+            pixels_per_channel = (
+                len(line_data) // 2
+                if len(mode.channel_times_ms) == 2
+                else len(line_data)
+            )
             if pixels_per_channel > 0:
                 y = self._resample_line(line_data[:pixels_per_channel], mode.width)
 
-                if len(mode.channel_times_ms) >= 2 and len(line_data) >= 2 * pixels_per_channel:
+                if (
+                    len(mode.channel_times_ms) >= 2
+                    and len(line_data) >= 2 * pixels_per_channel
+                ):
                     # Has chroma
                     uv_data = line_data[pixels_per_channel:]
-                    u = self._resample_line(uv_data[:len(uv_data)//2], mode.width)
-                    v = self._resample_line(uv_data[len(uv_data)//2:], mode.width)
+                    u = self._resample_line(uv_data[: len(uv_data) // 2], mode.width)
+                    v = self._resample_line(uv_data[len(uv_data) // 2 :], mode.width)
 
                     # YUV to RGB
                     r, g, b = self._yuv_to_rgb(y, u, v)
@@ -432,7 +588,9 @@ class SSTVDecoder:
 
         return np.clip(resampled, 0, 255).astype(np.uint8)
 
-    def _yuv_to_rgb(self, y: np.ndarray, u: np.ndarray, v: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _yuv_to_rgb(
+        self, y: np.ndarray, u: np.ndarray, v: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Convert YUV to RGB."""
         # Center U and V around 128
         u = u.astype(np.float32) - 128
@@ -456,7 +614,9 @@ class SSTVDecoder:
         self.state.is_receiving = False
 
         duration = time.time() - self.state.start_time
-        logger.info(f"SSTV image complete: {self.state.current_line} lines in {duration:.1f}s")
+        logger.info(
+            f"SSTV image complete: {self.state.current_line} lines in {duration:.1f}s"
+        )
 
         if self._on_image_complete and self.state.image_data is not None:
             self._on_image_complete(self.state.image_data)
@@ -523,7 +683,8 @@ class SSTVDecoder:
             # Try PIL first
             try:
                 from PIL import Image
-                img = Image.fromarray(self.state.image_data, 'RGB')
+
+                img = Image.fromarray(self.state.image_data, "RGB")
                 img.save(path)
                 logger.info(f"Saved SSTV image to {path}")
                 return True
@@ -533,6 +694,7 @@ class SSTVDecoder:
             # Fallback to matplotlib
             try:
                 import matplotlib.pyplot as plt
+
                 plt.imsave(path, self.state.image_data)
                 logger.info(f"Saved SSTV image to {path}")
                 return True
@@ -540,8 +702,13 @@ class SSTVDecoder:
                 pass
 
             # Fallback to raw numpy save
-            np.save(path.replace('.png', '.npy').replace('.jpg', '.npy'), self.state.image_data)
-            logger.info(f"Saved SSTV image data to {path}.npy (install PIL for image format)")
+            np.save(
+                path.replace(".png", ".npy").replace(".jpg", ".npy"),
+                self.state.image_data,
+            )
+            logger.info(
+                f"Saved SSTV image data to {path}.npy (install PIL for image format)"
+            )
             return True
 
         except Exception as e:
@@ -569,8 +736,9 @@ class SSTVImageViewer:
         self.images: List[dict] = []
         self.current_index: int = -1
 
-    def add_image(self, image: np.ndarray, mode: SSTVModeSpec,
-                  auto_save: bool = True) -> int:
+    def add_image(
+        self, image: np.ndarray, mode: SSTVModeSpec, auto_save: bool = True
+    ) -> int:
         """
         Add a received image.
 
@@ -599,7 +767,8 @@ class SSTVImageViewer:
 
             try:
                 from PIL import Image
-                img = Image.fromarray(image, 'RGB')
+
+                img = Image.fromarray(image, "RGB")
                 img.save(str(filepath))
                 entry["filename"] = str(filepath)
                 logger.info(f"Auto-saved SSTV image: {filepath}")
@@ -651,10 +820,10 @@ class SSTVImageViewer:
 
 
 __all__ = [
-    'SSTVMode',
-    'SSTVModeSpec',
-    'SSTV_MODES',
-    'SSTVState',
-    'SSTVDecoder',
-    'SSTVImageViewer',
+    "SSTVMode",
+    "SSTVModeSpec",
+    "SSTV_MODES",
+    "SSTVState",
+    "SSTVDecoder",
+    "SSTVImageViewer",
 ]

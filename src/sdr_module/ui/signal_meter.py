@@ -7,62 +7,67 @@ averaging, and peak hold functionality.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, List
+from typing import List, Optional
+
 import numpy as np
 
 
 class PowerUnit(Enum):
     """Power measurement units."""
-    DBFS = "dBFS"       # dB relative to full scale
-    DBM = "dBm"         # dB relative to 1 milliwatt
-    DBU = "dBuV"        # dB relative to 1 microvolt
-    LINEAR = "linear"   # Linear power (0-1 normalized)
+
+    DBFS = "dBFS"  # dB relative to full scale
+    DBM = "dBm"  # dB relative to 1 milliwatt
+    DBU = "dBuV"  # dB relative to 1 microvolt
+    LINEAR = "linear"  # Linear power (0-1 normalized)
 
 
 class MeterMode(Enum):
     """Meter response mode."""
+
     INSTANTANEOUS = "instantaneous"  # No averaging
-    AVERAGE = "average"              # RMS average
-    PEAK = "peak"                    # Peak hold
-    PEAK_DECAY = "peak_decay"        # Peak with decay
+    AVERAGE = "average"  # RMS average
+    PEAK = "peak"  # Peak hold
+    PEAK_DECAY = "peak_decay"  # Peak with decay
 
 
 @dataclass
 class MeterReading:
     """Single meter reading with all measurements."""
-    power_dbfs: float           # Power in dBFS
-    power_dbm: float            # Power in dBm (requires calibration)
-    power_linear: float         # Linear power (0-1)
 
-    peak_dbfs: float            # Peak hold value
-    average_dbfs: float         # Running average
+    power_dbfs: float  # Power in dBFS
+    power_dbm: float  # Power in dBm (requires calibration)
+    power_linear: float  # Linear power (0-1)
+
+    peak_dbfs: float  # Peak hold value
+    average_dbfs: float  # Running average
 
     # For bar display (0-100 scale)
-    bar_level: int              # Current level (0-100)
-    peak_bar_level: int         # Peak level (0-100)
+    bar_level: int  # Current level (0-100)
+    peak_bar_level: int  # Peak level (0-100)
 
     # Signal quality indicators
-    clipping: bool              # True if signal is clipping
-    noise_floor_dbfs: float     # Estimated noise floor
+    clipping: bool  # True if signal is clipping
+    noise_floor_dbfs: float  # Estimated noise floor
 
 
 @dataclass
 class MeterConfig:
     """Configuration for signal strength meter."""
+
     unit: PowerUnit = PowerUnit.DBFS
     mode: MeterMode = MeterMode.AVERAGE
 
     # Averaging
-    avg_time_ms: float = 100.0      # Averaging time constant
-    peak_hold_ms: float = 1000.0    # Peak hold time
+    avg_time_ms: float = 100.0  # Averaging time constant
+    peak_hold_ms: float = 1000.0  # Peak hold time
     peak_decay_db_per_sec: float = 20.0  # Peak decay rate
 
     # Calibration (for dBm conversion)
     reference_level_dbm: float = -30.0  # dBm at 0 dBFS
 
     # Display range
-    min_dbfs: float = -100.0    # Minimum display level
-    max_dbfs: float = 0.0       # Maximum display level (0 = full scale)
+    min_dbfs: float = -100.0  # Minimum display level
+    max_dbfs: float = 0.0  # Maximum display level (0 = full scale)
 
     # Clipping threshold
     clip_threshold: float = 0.99  # Linear level above which clipping is detected
@@ -84,11 +89,7 @@ class SignalStrengthMeter:
     - Bar meter output (0-100 scale)
     """
 
-    def __init__(
-        self,
-        sample_rate: float,
-        config: Optional[MeterConfig] = None
-    ):
+    def __init__(self, sample_rate: float, config: Optional[MeterConfig] = None):
         """
         Initialize signal strength meter.
 
@@ -100,10 +101,10 @@ class SignalStrengthMeter:
         self._config = config or MeterConfig()
 
         # State
-        self._current_power = -100.0    # dBFS
-        self._average_power = -100.0    # dBFS
-        self._peak_power = -100.0       # dBFS
-        self._noise_floor = -100.0      # dBFS
+        self._current_power = -100.0  # dBFS
+        self._average_power = -100.0  # dBFS
+        self._peak_power = -100.0  # dBFS
+        self._noise_floor = -100.0  # dBFS
 
         # Timing
         self._last_update_time = 0.0

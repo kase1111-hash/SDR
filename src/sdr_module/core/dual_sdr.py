@@ -9,33 +9,36 @@ Provides coordinated control of both devices for:
 """
 
 import logging
-from typing import Optional, Callable, Tuple
+from dataclasses import dataclass
 from enum import Enum
 from threading import Event
-import numpy as np
-from dataclasses import dataclass
+from typing import Callable, Optional, Tuple
 
+import numpy as np
+
+from ..devices.hackrf import HackRFDevice
+from ..devices.rtlsdr import RTLSDRDevice
+from .config import SDRConfig
 from .device_manager import DeviceManager
 from .sample_buffer import SampleBuffer
-from .config import SDRConfig
-from ..devices.rtlsdr import RTLSDRDevice
-from ..devices.hackrf import HackRFDevice
 
 logger = logging.getLogger(__name__)
 
 
 class OperationMode(Enum):
     """Dual-SDR operation modes."""
-    DUAL_RX = "dual_rx"              # Both devices receiving
-    FULL_DUPLEX = "full_duplex"      # RTL-SDR RX + HackRF TX
-    TX_MONITOR = "tx_monitor"        # Monitor own transmission
+
+    DUAL_RX = "dual_rx"  # Both devices receiving
+    FULL_DUPLEX = "full_duplex"  # RTL-SDR RX + HackRF TX
+    TX_MONITOR = "tx_monitor"  # Monitor own transmission
     WIDEBAND_SCAN = "wideband_scan"  # Coordinated scanning
-    RELAY = "relay"                  # Receive and retransmit
+    RELAY = "relay"  # Receive and retransmit
 
 
 @dataclass
 class DualSDRState:
     """Current state of dual-SDR system."""
+
     mode: OperationMode = OperationMode.DUAL_RX
     rtlsdr_streaming: bool = False
     hackrf_streaming: bool = False
@@ -123,8 +126,7 @@ class DualSDRController:
         self._rtlsdr = self._device_manager.get_rtlsdr()
         if self._rtlsdr:
             self._device_manager.apply_config(
-                self._rtlsdr,
-                self._config.dual_sdr.rtlsdr
+                self._rtlsdr, self._config.dual_sdr.rtlsdr
             )
             logger.info("RTL-SDR initialized")
         else:
@@ -134,8 +136,7 @@ class DualSDRController:
         self._hackrf = self._device_manager.get_hackrf()
         if self._hackrf:
             self._device_manager.apply_config(
-                self._hackrf,
-                self._config.dual_sdr.hackrf
+                self._hackrf, self._config.dual_sdr.hackrf
             )
             logger.info("HackRF initialized")
         else:
@@ -218,13 +219,13 @@ class DualSDRController:
         """Set both frequencies at once."""
         return (
             self.set_rtlsdr_frequency(rtlsdr_hz),
-            self.set_hackrf_frequency(hackrf_hz)
+            self.set_hackrf_frequency(hackrf_hz),
         )
 
     def start_dual_rx(
         self,
         rtlsdr_callback: Optional[Callable[[np.ndarray], None]] = None,
-        hackrf_callback: Optional[Callable[[np.ndarray], None]] = None
+        hackrf_callback: Optional[Callable[[np.ndarray], None]] = None,
     ) -> bool:
         """
         Start dual receive mode.
@@ -250,6 +251,7 @@ class DualSDRController:
 
         # Start RTL-SDR
         if self._rtlsdr:
+
             def rtl_cb(samples):
                 self._rtlsdr_buffer.write(samples)
                 if self._rtlsdr_callback:
@@ -263,6 +265,7 @@ class DualSDRController:
 
         # Start HackRF
         if self._hackrf:
+
             def hackrf_cb(samples):
                 self._hackrf_buffer.write(samples)
                 if self._hackrf_callback:
@@ -279,7 +282,7 @@ class DualSDRController:
     def start_full_duplex(
         self,
         rx_callback: Optional[Callable[[np.ndarray], None]] = None,
-        tx_generator: Optional[Callable[[], np.ndarray]] = None
+        tx_generator: Optional[Callable[[], np.ndarray]] = None,
     ) -> bool:
         """
         Start full-duplex mode.
@@ -333,7 +336,7 @@ class DualSDRController:
     def start_tx_monitor(
         self,
         tx_generator: Callable[[], np.ndarray],
-        monitor_callback: Optional[Callable[[np.ndarray], None]] = None
+        monitor_callback: Optional[Callable[[np.ndarray], None]] = None,
     ) -> bool:
         """
         Start TX monitoring mode.
@@ -399,17 +402,13 @@ class DualSDRController:
                 self._state.hackrf_transmitting = False
 
     def read_rtlsdr_samples(
-        self,
-        n_samples: int,
-        timeout: float = 1.0
+        self, n_samples: int, timeout: float = 1.0
     ) -> Optional[np.ndarray]:
         """Read samples from RTL-SDR buffer."""
         return self._rtlsdr_buffer.read(n_samples, timeout)
 
     def read_hackrf_samples(
-        self,
-        n_samples: int,
-        timeout: float = 1.0
+        self, n_samples: int, timeout: float = 1.0
     ) -> Optional[np.ndarray]:
         """Read samples from HackRF buffer."""
         return self._hackrf_buffer.read(n_samples, timeout)

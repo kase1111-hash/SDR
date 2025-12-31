@@ -1,12 +1,13 @@
 """Tests for DSP filter implementations."""
 
-import pytest
 import numpy as np
+import pytest
+
 from sdr_module.dsp.filters import (
-    FIRFilter,
     FilterBank,
-    FilterType,
     FilterSpec,
+    FilterType,
+    FIRFilter,
 )
 
 
@@ -242,7 +243,9 @@ class TestFilterBank:
     def test_create_bandpass(self):
         """Test creating bandpass filter in bank."""
         bank = FilterBank(sample_rate=10000)
-        filt = bank.create_bandpass("bp1", low_cutoff=1000, high_cutoff=2000, num_taps=51)
+        filt = bank.create_bandpass(
+            "bp1", low_cutoff=1000, high_cutoff=2000, num_taps=51
+        )
 
         assert filt is not None
         assert bank.get_filter("bp1") is not None

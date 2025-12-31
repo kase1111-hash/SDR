@@ -10,16 +10,18 @@ Provides real-time spectrum visualization with:
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, List, Tuple
+
 import numpy as np
-from typing import List, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from PyQt6.QtGui import QPainter
 
 try:
-    from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox
     from PyQt6.QtCore import Qt
-    from PyQt6.QtGui import QPainter, QPen, QColor, QFont, QPainterPath
+    from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
+    from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
+
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
@@ -113,7 +115,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             power_db = np.interp(
                 np.linspace(0, 1, self._fft_size),
                 np.linspace(0, 1, len(power_db)),
-                power_db
+                power_db,
             )
 
         self._spectrum = power_db
@@ -126,7 +128,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             if self._avg_count == 0:
                 self._average = power_db.copy()
             else:
-                self._average = self._avg_alpha * power_db + (1 - self._avg_alpha) * self._average
+                self._average = (
+                    self._avg_alpha * power_db + (1 - self._avg_alpha) * self._average
+                )
             self._avg_count += 1
 
         self.update()

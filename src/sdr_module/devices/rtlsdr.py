@@ -10,31 +10,32 @@ Specifications:
     - RX Only
 """
 
-import numpy as np
-from typing import Optional, Callable, List
-from threading import Thread
 import logging
+from threading import Thread
+from typing import Callable, List, Optional
+
+import numpy as np
 
 from .base import (
-    SDRDevice,
+    DeviceCapability,
     DeviceInfo,
     DeviceSpec,
-    DeviceCapability,
+    SDRDevice,
 )
 
 logger = logging.getLogger(__name__)
 
 # RTL-SDR specifications from spec sheet
 RTLSDR_SPEC = DeviceSpec(
-    freq_min=500e3,          # 500 kHz (direct sampling)
-    freq_max=1.766e9,        # 1.766 GHz
+    freq_min=500e3,  # 500 kHz (direct sampling)
+    freq_max=1.766e9,  # 1.766 GHz
     sample_rate_min=225001,  # ~225 kHz minimum
     sample_rate_max=2.56e6,  # 2.56 MS/s max (2.4 recommended)
-    bandwidth_max=2.4e6,     # 2.4 MHz
+    bandwidth_max=2.4e6,  # 2.4 MHz
     adc_bits=8,
     gain_min=0.0,
-    gain_max=49.6,           # R820T2 max gain
-    max_input_power=10.0,    # +10 dBm max input
+    gain_max=49.6,  # R820T2 max gain
+    max_input_power=10.0,  # +10 dBm max input
 )
 
 
@@ -47,9 +48,35 @@ class RTLSDRDevice(SDRDevice):
 
     # Valid gain values for R820T2 tuner
     VALID_GAINS = [
-        0.0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7,
-        16.6, 19.7, 20.7, 22.9, 25.4, 28.0, 29.7, 32.8, 33.8,
-        36.4, 37.2, 38.6, 40.2, 42.1, 43.4, 43.9, 44.5, 48.0, 49.6
+        0.0,
+        0.9,
+        1.4,
+        2.7,
+        3.7,
+        7.7,
+        8.7,
+        12.5,
+        14.4,
+        15.7,
+        16.6,
+        19.7,
+        20.7,
+        22.9,
+        25.4,
+        28.0,
+        29.7,
+        32.8,
+        33.8,
+        36.4,
+        37.2,
+        38.6,
+        40.2,
+        42.1,
+        43.4,
+        43.9,
+        44.5,
+        48.0,
+        49.6,
     ]
 
     def __init__(self):
@@ -63,6 +90,7 @@ class RTLSDRDevice(SDRDevice):
         """Get number of RTL-SDR devices connected."""
         try:
             from rtlsdr import RtlSdr
+
             return RtlSdr.get_device_count()
         except ImportError:
             logger.warning("rtlsdr library not installed")
@@ -76,6 +104,7 @@ class RTLSDRDevice(SDRDevice):
         """Get serial number of device at index."""
         try:
             from rtlsdr import RtlSdr
+
             return RtlSdr.get_device_serial(index)
         except Exception:
             return None
@@ -86,21 +115,24 @@ class RTLSDRDevice(SDRDevice):
         devices = []
         try:
             from rtlsdr import RtlSdr
+
             count = RtlSdr.get_device_count()
             for i in range(count):
                 serial = RtlSdr.get_device_serial(i) or f"rtlsdr_{i}"
-                devices.append(DeviceInfo(
-                    name=f"RTL-SDR #{i}",
-                    serial=serial,
-                    manufacturer="RTL-SDR Blog",
-                    product="RTL2832U",
-                    index=i,
-                    capabilities=[
-                        DeviceCapability.RX,
-                        DeviceCapability.BIAS_TEE,
-                        DeviceCapability.DIRECT_SAMPLE,
-                    ]
-                ))
+                devices.append(
+                    DeviceInfo(
+                        name=f"RTL-SDR #{i}",
+                        serial=serial,
+                        manufacturer="RTL-SDR Blog",
+                        product="RTL2832U",
+                        index=i,
+                        capabilities=[
+                            DeviceCapability.RX,
+                            DeviceCapability.BIAS_TEE,
+                            DeviceCapability.DIRECT_SAMPLE,
+                        ],
+                    )
+                )
         except ImportError:
             logger.warning("rtlsdr library not installed")
         except Exception as e:
@@ -115,6 +147,7 @@ class RTLSDRDevice(SDRDevice):
 
         try:
             from rtlsdr import RtlSdr
+
             self._device = RtlSdr(device_index=index)
             self._is_open = True
 
@@ -130,13 +163,13 @@ class RTLSDRDevice(SDRDevice):
                     DeviceCapability.RX,
                     DeviceCapability.BIAS_TEE,
                     DeviceCapability.DIRECT_SAMPLE,
-                ]
+                ],
             )
 
             # Set defaults
             self._device.sample_rate = 2.4e6
             self._device.center_freq = 100e6
-            self._device.gain = 'auto'
+            self._device.gain = "auto"
 
             self._state.sample_rate = 2.4e6
             self._state.frequency = 100e6
@@ -147,7 +180,9 @@ class RTLSDRDevice(SDRDevice):
             return True
 
         except ImportError:
-            logger.error("rtlsdr library not installed. Install with: pip install pyrtlsdr")
+            logger.error(
+                "rtlsdr library not installed. Install with: pip install pyrtlsdr"
+            )
             return False
         except Exception as e:
             logger.error(f"Failed to open RTL-SDR: {e}")
@@ -196,8 +231,9 @@ class RTLSDRDevice(SDRDevice):
             return False
 
         # Clamp to valid range
-        rate_hz = max(self._spec.sample_rate_min,
-                      min(rate_hz, self._spec.sample_rate_max))
+        rate_hz = max(
+            self._spec.sample_rate_min, min(rate_hz, self._spec.sample_rate_max)
+        )
 
         try:
             self._device.sample_rate = rate_hz
@@ -239,7 +275,7 @@ class RTLSDRDevice(SDRDevice):
 
         try:
             if auto:
-                self._device.gain = 'auto'
+                self._device.gain = "auto"
                 self._state.gain_mode = "auto"
             else:
                 # Set to current gain value
@@ -325,7 +361,9 @@ class RTLSDRDevice(SDRDevice):
             mode = 2 if enabled else 0  # Q-branch for RTL-SDR Blog
             self._device.set_direct_sampling(mode)
             self._direct_sampling = enabled
-            logger.info(f"Direct sampling {'enabled (Q-branch)' if enabled else 'disabled'}")
+            logger.info(
+                f"Direct sampling {'enabled (Q-branch)' if enabled else 'disabled'}"
+            )
             return True
         except Exception as e:
             logger.error(f"Failed to set direct sampling: {e}")

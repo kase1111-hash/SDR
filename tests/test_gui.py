@@ -8,16 +8,16 @@ Uses mocking to test widget logic and state management.
 
 import sys
 import unittest
-from unittest.mock import Mock, MagicMock, patch, PropertyMock
+
 import numpy as np
 
 # Add src to path
-sys.path.insert(0, '../src')
+sys.path.insert(0, "../src")
 
 # Check if PyQt6 is available
 try:
     from PyQt6.QtWidgets import QApplication
-    from PyQt6.QtCore import Qt
+
     HAS_PYQT6 = True
     # Create QApplication if needed (required for widget instantiation)
     app = QApplication.instance()
@@ -35,6 +35,7 @@ class TestSpectrumWidgetLogic(unittest.TestCase):
         if not HAS_PYQT6:
             self.skipTest("PyQt6 not available")
         from sdr_module.gui.spectrum_widget import SpectrumWidget
+
         self.widget = SpectrumWidget()
 
     def test_initialization(self):
@@ -139,6 +140,7 @@ class TestWaterfallWidgetLogic(unittest.TestCase):
         if not HAS_PYQT6:
             self.skipTest("PyQt6 not available")
         from sdr_module.gui.waterfall_widget import WaterfallWidget
+
         self.widget = WaterfallWidget(history_size=100)
 
     def test_initialization(self):
@@ -214,6 +216,7 @@ class TestWaterfallWidgetLogic(unittest.TestCase):
     def test_highlights(self):
         """Test highlight management."""
         from PyQt6.QtGui import QColor
+
         color = QColor(255, 0, 0)
 
         self.widget.add_highlight(0, 10, 100, 200, color)
@@ -240,6 +243,7 @@ class TestFrequencyInputLogic(unittest.TestCase):
         if not HAS_PYQT6:
             self.skipTest("PyQt6 not available")
         from sdr_module.gui.control_panel import FrequencyInput
+
         self.widget = FrequencyInput()
 
     def test_initialization(self):
@@ -274,6 +278,7 @@ class TestControlPanelLogic(unittest.TestCase):
         if not HAS_PYQT6:
             self.skipTest("PyQt6 not available")
         from sdr_module.gui.control_panel import ControlPanel
+
         self.widget = ControlPanel()
 
     def test_initialization(self):
@@ -322,6 +327,7 @@ class TestSignalMeterWidgetLogic(unittest.TestCase):
             self.skipTest("PyQt6 not available")
         try:
             from sdr_module.gui.signal_meter_widget import SignalMeterWidget
+
             self.widget = SignalMeterWidget()
         except ImportError:
             self.skipTest("SignalMeterWidget not available")
@@ -338,17 +344,20 @@ class TestMockGUIWithoutQt(unittest.TestCase):
         """Test SpectrumWidget has proper import guard."""
         # This tests the HAS_PYQT6 pattern is used correctly
         import sdr_module.gui.spectrum_widget as sw
-        self.assertTrue(hasattr(sw, 'HAS_PYQT6'))
+
+        self.assertTrue(hasattr(sw, "HAS_PYQT6"))
 
     def test_waterfall_widget_import_guard(self):
         """Test WaterfallWidget has proper import guard."""
         import sdr_module.gui.waterfall_widget as ww
-        self.assertTrue(hasattr(ww, 'HAS_PYQT6'))
+
+        self.assertTrue(hasattr(ww, "HAS_PYQT6"))
 
     def test_control_panel_import_guard(self):
         """Test ControlPanel has proper import guard."""
         import sdr_module.gui.control_panel as cp
-        self.assertTrue(hasattr(cp, 'HAS_PYQT6'))
+
+        self.assertTrue(hasattr(cp, "HAS_PYQT6"))
 
 
 class TestColorMapConsistency(unittest.TestCase):
@@ -359,6 +368,7 @@ class TestColorMapConsistency(unittest.TestCase):
         if not HAS_PYQT6:
             self.skipTest("PyQt6 not available")
         from sdr_module.gui.waterfall_widget import WaterfallWidget
+
         self.widget = WaterfallWidget()
 
     def test_all_colormaps_have_valid_rgb(self):
@@ -375,10 +385,7 @@ class TestColorMapConsistency(unittest.TestCase):
     def test_all_colormaps_have_minimum_colors(self):
         """Test all colormaps have at least 2 colors for interpolation."""
         for name, colors in self.widget.COLORMAPS.items():
-            self.assertGreaterEqual(
-                len(colors), 2,
-                f"{name} has fewer than 2 colors"
-            )
+            self.assertGreaterEqual(len(colors), 2, f"{name} has fewer than 2 colors")
 
 
 class TestGUIDataProcessing(unittest.TestCase):
@@ -392,6 +399,7 @@ class TestGUIDataProcessing(unittest.TestCase):
     def test_spectrum_handles_nan(self):
         """Test spectrum widget handles NaN values."""
         from sdr_module.gui.spectrum_widget import SpectrumWidget
+
         widget = SpectrumWidget()
 
         # Create spectrum with some NaN values
@@ -405,6 +413,7 @@ class TestGUIDataProcessing(unittest.TestCase):
     def test_spectrum_handles_inf(self):
         """Test spectrum widget handles infinity values."""
         from sdr_module.gui.spectrum_widget import SpectrumWidget
+
         widget = SpectrumWidget()
 
         # Create spectrum with some infinity values
@@ -419,6 +428,7 @@ class TestGUIDataProcessing(unittest.TestCase):
     def test_waterfall_handles_empty_spectrum(self):
         """Test waterfall handles empty spectrum."""
         from sdr_module.gui.waterfall_widget import WaterfallWidget
+
         widget = WaterfallWidget()
 
         # Empty array should not crash

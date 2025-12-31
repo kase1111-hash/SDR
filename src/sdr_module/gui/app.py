@@ -4,9 +4,9 @@ SDR Application entry point.
 Provides the main application class and initialization.
 """
 
-import sys
 import logging
-from typing import Optional, List, Dict, Any
+import sys
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,8 @@ logger = logging.getLogger(__name__)
 def check_pyqt6() -> bool:
     """Check if PyQt6 is available."""
     try:
-        from PyQt6 import QtWidgets, QtCore, QtGui  # noqa: F401
+        from PyQt6 import QtCore, QtGui, QtWidgets  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -45,7 +46,7 @@ class SDRApplication:
         # Configure logging
         logging.basicConfig(
             level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         )
 
     def is_available(self) -> bool:
@@ -76,6 +77,7 @@ class SDRApplication:
 
         try:
             from PyQt6.QtWidgets import QApplication
+
             from .main_window import SDRMainWindow
 
             # Create application

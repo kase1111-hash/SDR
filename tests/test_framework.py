@@ -6,48 +6,43 @@ Tests all major components without requiring actual SDR hardware.
 """
 
 import sys
+
 import numpy as np
 
 # Add src to path
-sys.path.insert(0, '../src')
+sys.path.insert(0, "../src")
+
 
 def test_imports():
     """Test all module imports."""
     print("Testing imports...")
 
     # Core
-    from sdr_module import DeviceManager, DualSDRController, SampleBuffer
+
     print("  ✓ Core imports")
 
     # Devices
-    from sdr_module.devices import SDRDevice, DeviceCapability, RTLSDRDevice, HackRFDevice
+
     print("  ✓ Device imports")
 
     # DSP
-    from sdr_module.dsp import SpectrumAnalyzer, FilterBank, Demodulator, SignalClassifier
+
     print("  ✓ DSP imports")
 
     # Protocols
-    from sdr_module.protocols import ProtocolDecoder, ProtocolDetector
+
     print("  ✓ Protocol imports")
 
     # UI
-    from sdr_module.ui import (
-        WaterfallDisplay, PacketHighlight, ColorMap,
-        PacketHighlighter, DetectionMode, LivePacketDisplay
-    )
+
     print("  ✓ UI imports")
 
     # Utils
-    from sdr_module.utils import (
-        db_to_linear, linear_to_db, freq_to_str,
-        iq_to_complex, complex_to_iq,
-        get_tooltip, Tooltip
-    )
+
     print("  ✓ Utils imports")
 
     # Config
-    from sdr_module.core.config import SDRConfig, DualSDRConfig, DSPConfig
+
     print("  ✓ Config imports")
 
     print("All imports successful!\n")
@@ -57,7 +52,7 @@ def test_sample_buffer():
     """Test sample buffer functionality."""
     print("Testing SampleBuffer...")
 
-    from sdr_module.core.sample_buffer import SampleBuffer, BufferOverflowPolicy
+    from sdr_module.core.sample_buffer import SampleBuffer
 
     # Create buffer
     buf = SampleBuffer(capacity=1024)
@@ -106,13 +101,11 @@ def test_spectrum_analyzer():
     """Test spectrum analyzer."""
     print("Testing SpectrumAnalyzer...")
 
-    from sdr_module.dsp.spectrum import SpectrumAnalyzer, WindowType, AveragingMode
+    from sdr_module.dsp.spectrum import AveragingMode, SpectrumAnalyzer, WindowType
 
     # Create analyzer
     analyzer = SpectrumAnalyzer(
-        fft_size=1024,
-        window=WindowType.HANN,
-        averaging=AveragingMode.RMS
+        fft_size=1024, window=WindowType.HANN, averaging=AveragingMode.RMS
     )
     assert analyzer.fft_size == 1024
     print("  ✓ Analyzer creation")
@@ -134,7 +127,9 @@ def test_spectrum_analyzer():
     peak_idx = np.argmax(result.power_db)
     peak_freq = result.frequencies[peak_idx]
     assert abs(peak_freq - freq) < sample_rate / 1024 * 2  # Within 2 bins
-    print(f"  ✓ Peak detection (expected {freq/1e3:.1f}kHz, got {peak_freq/1e3:.1f}kHz)")
+    print(
+        f"  ✓ Peak detection (expected {freq/1e3:.1f}kHz, got {peak_freq/1e3:.1f}kHz)"
+    )
 
     # Test different windows
     for window in [WindowType.HAMMING, WindowType.BLACKMAN, WindowType.BLACKMAN_HARRIS]:
@@ -150,7 +145,7 @@ def test_filters():
     """Test filter bank."""
     print("Testing FilterBank...")
 
-    from sdr_module.dsp.filters import FilterBank, FIRFilter, FilterType, FilterSpec
+    from sdr_module.dsp.filters import FilterBank
 
     sample_rate = 2.4e6
     bank = FilterBank(sample_rate)
@@ -186,8 +181,12 @@ def test_demodulators():
     print("Testing Demodulators...")
 
     from sdr_module.dsp.demodulators import (
-        AMDemodulator, FMDemodulator, SSBDemodulator,
-        OOKDemodulator, FSKDemodulator, create_demodulator, ModulationType
+        AMDemodulator,
+        FMDemodulator,
+        ModulationType,
+        OOKDemodulator,
+        SSBDemodulator,
+        create_demodulator,
     )
 
     sample_rate = 2.4e6
@@ -246,10 +245,14 @@ def test_signal_classifier():
     classifier = SignalClassifier(sample_rate)
 
     # Test noise - classifier may return any type for low-level noise
-    noise = (np.random.randn(10000) + 1j * np.random.randn(10000)).astype(np.complex64) * 0.01
+    noise = (np.random.randn(10000) + 1j * np.random.randn(10000)).astype(
+        np.complex64
+    ) * 0.01
     result = classifier.classify(noise)
     assert result.signal_type in SignalType  # Just verify valid type returned
-    print(f"  ✓ Noise classification: {result.signal_type.value} (confidence: {result.confidence:.2f})")
+    print(
+        f"  ✓ Noise classification: {result.signal_type.value} (confidence: {result.confidence:.2f})"
+    )
 
     # Test FM signal (continuous carrier with varying phase)
     t = np.arange(10000) / sample_rate
@@ -262,14 +265,14 @@ def test_signal_classifier():
     ook_signal = np.zeros(10000, dtype=np.complex64)
     for i in range(0, 10000, 1000):
         if i % 2000 == 0:
-            ook_signal[i:i+500] = 1.0
+            ook_signal[i : i + 500] = 1.0
     result = classifier.classify(ook_signal + noise * 0.1)
     print(f"  ✓ Digital-like classification: {result.signal_type.value}")
 
     # Check result structure
-    assert hasattr(result, 'bandwidth_hz')
-    assert hasattr(result, 'snr_db')
-    assert hasattr(result, 'confidence')
+    assert hasattr(result, "bandwidth_hz")
+    assert hasattr(result, "snr_db")
+    assert hasattr(result, "confidence")
     print("  ✓ Result structure")
 
     print("SignalClassifier tests passed!\n")
@@ -279,7 +282,7 @@ def test_waterfall():
     """Test waterfall display."""
     print("Testing WaterfallDisplay...")
 
-    from sdr_module.ui.waterfall import WaterfallDisplay, ColorMap, PROTOCOL_COLORS
+    from sdr_module.ui.waterfall import PROTOCOL_COLORS, ColorMap, WaterfallDisplay
 
     # Create display
     waterfall = WaterfallDisplay(width=512, height=256)
@@ -301,7 +304,7 @@ def test_waterfall():
         freq_end_hz=434.0e6,
         duration_lines=5,
         protocol="ook",
-        label="Test packet"
+        label="Test packet",
     )
     assert highlight.protocol == "ook"
     assert len(waterfall.highlights) == 1
@@ -324,10 +327,12 @@ def test_packet_highlighter():
     """Test packet highlighter."""
     print("Testing PacketHighlighter...")
 
-    from sdr_module.ui.waterfall import WaterfallDisplay
     from sdr_module.ui.packet_highlighter import (
-        PacketHighlighter, DetectionConfig, DetectionMode
+        DetectionConfig,
+        DetectionMode,
+        PacketHighlighter,
     )
+    from sdr_module.ui.waterfall import WaterfallDisplay
 
     # Create components
     waterfall = WaterfallDisplay(width=512, height=256)
@@ -337,7 +342,7 @@ def test_packet_highlighter():
         mode=DetectionMode.ADAPTIVE,
         threshold_db=-50,
         min_bandwidth_hz=5000,
-        min_duration_lines=2
+        min_duration_lines=2,
     )
 
     highlighter = PacketHighlighter(waterfall, 2.4e6, config)
@@ -358,7 +363,7 @@ def test_packet_highlighter():
     # Reset
     highlighter.reset()
     highlighter.clear_history()
-    assert highlighter.statistics['total_packets'] == 0
+    assert highlighter.statistics["total_packets"] == 0
     print("  ✓ Reset and clear")
 
     print("PacketHighlighter tests passed!\n")
@@ -369,8 +374,9 @@ def test_config():
     print("Testing Configuration...")
 
     from sdr_module.core.config import (
-        SDRConfig, DualSDRConfig, DSPConfig, DeviceConfig,
-        create_preset_dual_rx, create_preset_adsb, list_presets
+        SDRConfig,
+        create_preset_adsb,
+        list_presets,
     )
 
     # Create default config
@@ -411,8 +417,10 @@ def test_tooltips():
     print("Testing Tooltips...")
 
     from sdr_module.utils.tooltips import (
-        get_tooltip, get_short_tip, get_detailed_tip,
-        list_tooltips, get_tooltips_by_category
+        get_short_tip,
+        get_tooltip,
+        get_tooltips_by_category,
+        list_tooltips,
     )
 
     # Get tooltip
@@ -454,14 +462,13 @@ def test_utils():
     """Test utility functions."""
     print("Testing Utils...")
 
-    from sdr_module.utils import db_to_linear, linear_to_db, freq_to_str
+    from sdr_module.utils import db_to_linear, freq_to_str, linear_to_db
+    from sdr_module.utils.conversions import dbm_to_watts, str_to_freq, watts_to_dbm
     from sdr_module.utils.iq import (
-        iq_to_complex, complex_to_iq,
-        interleaved_to_complex, complex_to_interleaved,
-        apply_dc_offset_correction
-    )
-    from sdr_module.utils.conversions import (
-        dbm_to_watts, watts_to_dbm, str_to_freq
+        apply_dc_offset_correction,
+        complex_to_iq,
+        interleaved_to_complex,
+        iq_to_complex,
     )
 
     # dB conversions
@@ -489,7 +496,7 @@ def test_utils():
     i = np.array([1.0, 0.0, -1.0], dtype=np.float32)
     q = np.array([0.0, 1.0, 0.0], dtype=np.float32)
     c = iq_to_complex(i, q)
-    assert np.allclose(c, [1+0j, 0+1j, -1+0j])
+    assert np.allclose(c, [1 + 0j, 0 + 1j, -1 + 0j])
 
     i2, q2 = complex_to_iq(c)
     assert np.allclose(i2, i)
@@ -504,7 +511,9 @@ def test_utils():
 
     # DC offset correction
     samples = np.ones(100, dtype=np.complex64) * (0.5 + 0.3j)
-    corrected = apply_dc_offset_correction(samples + np.random.randn(100).astype(np.complex64) * 0.01)
+    corrected = apply_dc_offset_correction(
+        samples + np.random.randn(100).astype(np.complex64) * 0.01
+    )
     assert abs(np.mean(corrected)) < 0.1
     print("  ✓ DC offset correction")
 
@@ -515,7 +524,6 @@ def test_protocol_framework():
     """Test protocol detection framework."""
     print("Testing Protocol Framework...")
 
-    from sdr_module.protocols.base import ProtocolDecoder, ProtocolInfo, ProtocolType
     from sdr_module.protocols.detector import ProtocolDetector
 
     # Create detector
@@ -570,6 +578,7 @@ def run_all_tests():
             print(f"FAILED: {name}")
             print(f"  Error: {e}")
             import traceback
+
             traceback.print_exc()
             failed += 1
             print()

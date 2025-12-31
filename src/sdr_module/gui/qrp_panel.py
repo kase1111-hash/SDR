@@ -11,21 +11,28 @@ Provides controls for QRP operation:
 
 from __future__ import annotations
 
-
 try:
-    from PyQt6.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QLabel, QPushButton, QGroupBox, QSpinBox, QDoubleSpinBox,
-        QComboBox, QCheckBox, QFrame
-    )
     from PyQt6.QtCore import Qt, pyqtSignal
+    from PyQt6.QtWidgets import (
+        QCheckBox,
+        QComboBox,
+        QDoubleSpinBox,
+        QFrame,
+        QGridLayout,
+        QGroupBox,
+        QHBoxLayout,
+        QLabel,
+        QPushButton,
+        QSpinBox,
+        QVBoxLayout,
+        QWidget,
+    )
+
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
 
-from ..dsp.qrp import (
-    QRPController, dbm_to_watts, format_power, format_power_verbose
-)
+from ..dsp.qrp import QRPController, dbm_to_watts, format_power, format_power_verbose
 
 
 class PowerDisplayWidget(QWidget if HAS_PYQT6 else object):
@@ -461,7 +468,7 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
 
         stats = self._qrp.get_statistics()
         self._best_mpw_label.setText(f"{stats['best_mpw']:.0f} MPW")
-        self._qso_count_label.setText(str(stats['total_qsos']))
+        self._qso_count_label.setText(str(stats["total_qsos"]))
 
     def get_controller(self) -> QRPController:
         """Get the QRP controller instance."""
@@ -474,7 +481,7 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
 
 
 __all__ = [
-    'PowerDisplayWidget',
-    'AmplifierCalculator',
-    'QRPPanel',
+    "PowerDisplayWidget",
+    "AmplifierCalculator",
+    "QRPPanel",
 ]

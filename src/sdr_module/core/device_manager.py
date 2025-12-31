@@ -6,12 +6,12 @@ provides a unified interface for accessing SDR devices.
 """
 
 import logging
-from typing import Dict, List, Optional, Type
 from dataclasses import dataclass
+from typing import Dict, List, Optional, Type
 
-from ..devices.base import SDRDevice, DeviceInfo
-from ..devices.rtlsdr import RTLSDRDevice
+from ..devices.base import DeviceInfo, SDRDevice
 from ..devices.hackrf import HackRFDevice
+from ..devices.rtlsdr import RTLSDRDevice
 from .config import DeviceConfig
 
 logger = logging.getLogger(__name__)
@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class DetectedDevice:
     """Information about a detected SDR device."""
+
     info: DeviceInfo
     device_class: Type[SDRDevice]
     is_available: bool = True
@@ -59,11 +60,11 @@ class DeviceManager:
         try:
             rtl_devices = RTLSDRDevice.list_devices()
             for info in rtl_devices:
-                self._detected.append(DetectedDevice(
-                    info=info,
-                    device_class=RTLSDRDevice,
-                    is_available=True
-                ))
+                self._detected.append(
+                    DetectedDevice(
+                        info=info, device_class=RTLSDRDevice, is_available=True
+                    )
+                )
                 logger.info(f"Found RTL-SDR: {info.serial}")
         except Exception as e:
             logger.warning(f"Error scanning RTL-SDR devices: {e}")
@@ -72,11 +73,11 @@ class DeviceManager:
         try:
             hackrf_devices = HackRFDevice.list_devices()
             for info in hackrf_devices:
-                self._detected.append(DetectedDevice(
-                    info=info,
-                    device_class=HackRFDevice,
-                    is_available=True
-                ))
+                self._detected.append(
+                    DetectedDevice(
+                        info=info, device_class=HackRFDevice, is_available=True
+                    )
+                )
                 logger.info(f"Found HackRF: {info.serial}")
         except Exception as e:
             logger.warning(f"Error scanning HackRF devices: {e}")
@@ -118,10 +119,7 @@ class DeviceManager:
         return device_class()
 
     def open_device(
-        self,
-        device_type: str,
-        index: int = 0,
-        config: Optional[DeviceConfig] = None
+        self, device_type: str, index: int = 0, config: Optional[DeviceConfig] = None
     ) -> Optional[SDRDevice]:
         """
         Open and configure an SDR device.
@@ -225,11 +223,11 @@ class DeviceManager:
 
         # HackRF specific
         if isinstance(device, HackRFDevice):
-            if hasattr(config, 'lna_gain'):
+            if hasattr(config, "lna_gain"):
                 device.set_lna_gain(int(config.lna_gain))
-            if hasattr(config, 'vga_gain'):
+            if hasattr(config, "vga_gain"):
                 device.set_vga_gain(int(config.vga_gain))
-            if hasattr(config, 'tx_vga_gain'):
+            if hasattr(config, "tx_vga_gain"):
                 device.set_tx_gain(config.tx_vga_gain)
 
         return success

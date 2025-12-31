@@ -5,46 +5,50 @@ Integrates signal detection with waterfall display to
 automatically highlight detected packets with protocol colors.
 """
 
-import numpy as np
-from typing import Optional, List, Dict, Callable, Tuple
+import time
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
-import time
+from typing import Callable, Dict, List, Optional, Tuple
 
-from .waterfall import WaterfallDisplay, PacketHighlight
+import numpy as np
+
+from ..dsp.classifiers import ClassificationResult, SignalClassifier, SignalType
 from ..dsp.spectrum import SpectrumAnalyzer
-from ..dsp.classifiers import SignalClassifier, ClassificationResult, SignalType
 from ..protocols.detector import ProtocolDetector
+from .waterfall import PacketHighlight, WaterfallDisplay
 
 
 class DetectionMode(Enum):
     """Packet detection modes."""
-    THRESHOLD = "threshold"        # Simple power threshold
-    ADAPTIVE = "adaptive"          # Adaptive noise floor tracking
-    CLASSIFIER = "classifier"      # Use signal classifier
-    PROTOCOL = "protocol"          # Full protocol detection
+
+    THRESHOLD = "threshold"  # Simple power threshold
+    ADAPTIVE = "adaptive"  # Adaptive noise floor tracking
+    CLASSIFIER = "classifier"  # Use signal classifier
+    PROTOCOL = "protocol"  # Full protocol detection
 
 
 @dataclass
 class DetectionConfig:
     """Configuration for packet detection."""
+
     mode: DetectionMode = DetectionMode.ADAPTIVE
-    threshold_db: float = -50          # Detection threshold (dB)
-    min_bandwidth_hz: float = 1000     # Minimum signal bandwidth
-    max_bandwidth_hz: float = 1e6      # Maximum signal bandwidth
-    min_duration_lines: int = 3        # Minimum packet duration
-    max_duration_lines: int = 1000     # Maximum packet duration
-    noise_floor_alpha: float = 0.01    # Noise floor averaging factor
-    snr_threshold_db: float = 10       # SNR threshold for detection
-    merge_gap_lines: int = 2           # Merge packets within this gap
-    merge_gap_hz: float = 5000         # Merge packets within this freq gap
+    threshold_db: float = -50  # Detection threshold (dB)
+    min_bandwidth_hz: float = 1000  # Minimum signal bandwidth
+    max_bandwidth_hz: float = 1e6  # Maximum signal bandwidth
+    min_duration_lines: int = 3  # Minimum packet duration
+    max_duration_lines: int = 1000  # Maximum packet duration
+    noise_floor_alpha: float = 0.01  # Noise floor averaging factor
+    snr_threshold_db: float = 10  # SNR threshold for detection
+    merge_gap_lines: int = 2  # Merge packets within this gap
+    merge_gap_hz: float = 5000  # Merge packets within this freq gap
 
 
 @dataclass
 class DetectedPacket:
     """Detected packet information."""
-    start_time: float           # Unix timestamp
+
+    start_time: float  # Unix timestamp
     end_time: float
     center_freq_hz: float
     bandwidth_hz: float
@@ -68,7 +72,7 @@ class PacketHighlighter:
         self,
         waterfall: WaterfallDisplay,
         sample_rate: float,
-        config: Optional[DetectionConfig] = None
+        config: Optional[DetectionConfig] = None,
     ):
         """
         Initialize packet highlighter.
@@ -127,8 +131,7 @@ class PacketHighlighter:
         self._protocol_detector = detector
 
     def set_on_packet_detected(
-        self,
-        callback: Callable[[DetectedPacket], None]
+        self, callback: Callable[[DetectedPacket], None]
     ) -> None:
         """Set callback for packet detection events."""
         self._on_packet_detected = callback
@@ -137,7 +140,7 @@ class PacketHighlighter:
         self,
         power_db: np.ndarray,
         samples: Optional[np.ndarray] = None,
-        timestamp: Optional[float] = None
+        timestamp: Optional[float] = None,
     ) -> List[PacketHighlight]:
         """
         Process spectrum line and detect/highlight packets.
@@ -186,7 +189,7 @@ class PacketHighlighter:
                         "start_time": timestamp,
                         "duration": 1,
                         "peak_power": peak_power,
-                        "samples": [] if samples is not None else None
+                        "samples": [] if samples is not None else None,
                     }
 
             # Collect samples for active signals
@@ -218,9 +221,7 @@ class PacketHighlighter:
             # Process ended signals
             for active_bin, info in ended_signals:
                 if info["duration"] >= self._config.min_duration_lines:
-                    highlight = self._finalize_packet(
-                        info, samples, timestamp
-                    )
+                    highlight = self._finalize_packet(info, samples, timestamp)
                     if highlight:
                         new_highlights.append(highlight)
 
@@ -231,14 +232,11 @@ class PacketHighlighter:
         # Use minimum of current and exponential average
         alpha = self._config.noise_floor_alpha
         self._noise_floor = (
-            alpha * np.minimum(power_db, self._noise_floor + 10) +
-            (1 - alpha) * self._noise_floor
+            alpha * np.minimum(power_db, self._noise_floor + 10)
+            + (1 - alpha) * self._noise_floor
         )
 
-    def _detect_signals(
-        self,
-        power_db: np.ndarray
-    ) -> List[Tuple[int, int, float]]:
+    def _detect_signals(self, power_db: np.ndarray) -> List[Tuple[int, int, float]]:
         """
         Detect signals in spectrum.
 
@@ -275,25 +273,28 @@ class PacketHighlighter:
                 bandwidth_bins = i - signal_start
                 bandwidth_hz = bandwidth_bins * self._sample_rate / len(power_db)
 
-                if (self._config.min_bandwidth_hz <= bandwidth_hz <=
-                    self._config.max_bandwidth_hz):
+                if (
+                    self._config.min_bandwidth_hz
+                    <= bandwidth_hz
+                    <= self._config.max_bandwidth_hz
+                ):
                     signals.append((signal_start, i - 1, peak_power))
 
         # Handle signal at end
         if in_signal:
             bandwidth_bins = len(above) - signal_start
             bandwidth_hz = bandwidth_bins * self._sample_rate / len(power_db)
-            if (self._config.min_bandwidth_hz <= bandwidth_hz <=
-                self._config.max_bandwidth_hz):
+            if (
+                self._config.min_bandwidth_hz
+                <= bandwidth_hz
+                <= self._config.max_bandwidth_hz
+            ):
                 signals.append((signal_start, len(above) - 1, peak_power))
 
         return signals
 
     def _finalize_packet(
-        self,
-        info: Dict,
-        samples: Optional[np.ndarray],
-        end_time: float
+        self, info: Dict, samples: Optional[np.ndarray], end_time: float
     ) -> Optional[PacketHighlight]:
         """
         Finalize a detected packet and create highlight.
@@ -334,7 +335,10 @@ class PacketHighlighter:
                         protocol = "digital"
 
                 # Try protocol detection
-                if self._protocol_detector and self._config.mode == DetectionMode.PROTOCOL:
+                if (
+                    self._protocol_detector
+                    and self._config.mode == DetectionMode.PROTOCOL
+                ):
                     matches = self._protocol_detector.detect(
                         all_samples, min_confidence=0.6
                     )
@@ -343,7 +347,7 @@ class PacketHighlighter:
 
         # Estimate SNR
         snr_db = info["peak_power"] - np.mean(
-            self._noise_floor[info["bin_start"]:info["bin_end"]+1]
+            self._noise_floor[info["bin_start"] : info["bin_end"] + 1]
         )
 
         # Create detected packet record
@@ -356,7 +360,7 @@ class PacketHighlighter:
             snr_db=snr_db,
             protocol=protocol,
             classification=classification,
-            waterfall_lines=info["duration"]
+            waterfall_lines=info["duration"],
         )
 
         self._detected_packets.append(packet)
@@ -383,8 +387,8 @@ class PacketHighlighter:
             metadata={
                 "peak_power_db": info["peak_power"],
                 "snr_db": snr_db,
-                "bandwidth_hz": bandwidth
-            }
+                "bandwidth_hz": bandwidth,
+            },
         )
 
         return highlight
@@ -414,7 +418,7 @@ class LivePacketDisplay:
         width: int = 1024,
         height: int = 512,
         sample_rate: float = 2.4e6,
-        center_freq: float = 433.92e6
+        center_freq: float = 433.92e6,
     ):
         """
         Initialize live packet display.
@@ -428,16 +432,11 @@ class LivePacketDisplay:
         from .waterfall import ColorMap
 
         self.waterfall = WaterfallDisplay(
-            width=width,
-            height=height,
-            colormap=ColorMap.TURBO
+            width=width, height=height, colormap=ColorMap.TURBO
         )
         self.waterfall.set_frequency_range(center_freq, sample_rate)
 
-        self.highlighter = PacketHighlighter(
-            self.waterfall,
-            sample_rate
-        )
+        self.highlighter = PacketHighlighter(self.waterfall, sample_rate)
 
         self.spectrum = SpectrumAnalyzer(fft_size=width)
         self._sample_rate = sample_rate
@@ -455,19 +454,14 @@ class LivePacketDisplay:
         """
         # Compute spectrum
         result = self.spectrum.compute_spectrum(
-            samples,
-            self._center_freq,
-            self._sample_rate
+            samples, self._center_freq, self._sample_rate
         )
 
         # Add to waterfall
         self.waterfall.add_spectrum_line(result.power_db)
 
         # Detect and highlight packets
-        self.highlighter.process_spectrum(
-            result.power_db,
-            samples
-        )
+        self.highlighter.process_spectrum(result.power_db, samples)
 
         return self.waterfall.image
 

@@ -7,14 +7,16 @@ Provides various filter types for signal conditioning:
 - Real-time filtering with overlap-save
 """
 
-import numpy as np
-from typing import Optional, Tuple
-from enum import Enum
 from dataclasses import dataclass
+from enum import Enum
+from typing import Optional, Tuple
+
+import numpy as np
 
 
 class FilterType(Enum):
     """Filter response types."""
+
     LOWPASS = "lowpass"
     HIGHPASS = "highpass"
     BANDPASS = "bandpass"
@@ -24,11 +26,12 @@ class FilterType(Enum):
 @dataclass
 class FilterSpec:
     """Filter specification."""
+
     filter_type: FilterType
-    cutoff_low: float      # Lower cutoff frequency (Hz)
-    cutoff_high: float     # Upper cutoff frequency (Hz)
-    sample_rate: float     # Sample rate (Hz)
-    num_taps: int          # Number of filter taps
+    cutoff_low: float  # Lower cutoff frequency (Hz)
+    cutoff_high: float  # Upper cutoff frequency (Hz)
+    sample_rate: float  # Sample rate (Hz)
+    num_taps: int  # Number of filter taps
     window: str = "hamming"  # Window function
 
 
@@ -86,13 +89,16 @@ class FIRFilter:
             h = np.sinc(t) - 2 * fc_low * np.sinc(2 * fc_low * t)
 
         elif spec.filter_type == FilterType.BANDPASS:
-            h = (2 * fc_high * np.sinc(2 * fc_high * t) -
-                 2 * fc_low * np.sinc(2 * fc_low * t))
+            h = 2 * fc_high * np.sinc(2 * fc_high * t) - 2 * fc_low * np.sinc(
+                2 * fc_low * t
+            )
 
         elif spec.filter_type == FilterType.BANDSTOP:
-            h = (np.sinc(t) -
-                 2 * fc_high * np.sinc(2 * fc_high * t) +
-                 2 * fc_low * np.sinc(2 * fc_low * t))
+            h = (
+                np.sinc(t)
+                - 2 * fc_high * np.sinc(2 * fc_high * t)
+                + 2 * fc_low * np.sinc(2 * fc_low * t)
+            )
 
         else:
             h = np.zeros(n)
@@ -131,7 +137,7 @@ class FIRFilter:
         Returns:
             Filtered samples
         """
-        return np.convolve(samples, self._taps, mode='same')
+        return np.convolve(samples, self._taps, mode="same")
 
     def filter_stream(self, samples: np.ndarray) -> np.ndarray:
         """
@@ -155,10 +161,10 @@ class FIRFilter:
         padded = np.concatenate([self._buffer, samples])
 
         # Convolve
-        filtered = np.convolve(padded, self._taps, mode='valid')
+        filtered = np.convolve(padded, self._taps, mode="valid")
 
         # Update buffer
-        self._buffer = samples[-(n_taps - 1):]
+        self._buffer = samples[-(n_taps - 1) :]
 
         return filtered
 
@@ -166,10 +172,7 @@ class FIRFilter:
         """Reset filter state."""
         self._buffer = None
 
-    def frequency_response(
-        self,
-        n_points: int = 512
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    def frequency_response(self, n_points: int = 512) -> Tuple[np.ndarray, np.ndarray]:
         """
         Compute frequency response.
 
@@ -205,10 +208,7 @@ class FilterBank:
         self._filters[name] = filter_obj
 
     def create_lowpass(
-        self,
-        name: str,
-        cutoff: float,
-        num_taps: int = 101
+        self, name: str, cutoff: float, num_taps: int = 101
     ) -> FIRFilter:
         """Create and add a lowpass filter."""
         spec = FilterSpec(
@@ -216,17 +216,14 @@ class FilterBank:
             cutoff_low=0,
             cutoff_high=cutoff,
             sample_rate=self._sample_rate,
-            num_taps=num_taps
+            num_taps=num_taps,
         )
         filt = FIRFilter(spec)
         self._filters[name] = filt
         return filt
 
     def create_highpass(
-        self,
-        name: str,
-        cutoff: float,
-        num_taps: int = 101
+        self, name: str, cutoff: float, num_taps: int = 101
     ) -> FIRFilter:
         """Create and add a highpass filter."""
         spec = FilterSpec(
@@ -234,18 +231,14 @@ class FilterBank:
             cutoff_low=cutoff,
             cutoff_high=self._sample_rate / 2,
             sample_rate=self._sample_rate,
-            num_taps=num_taps
+            num_taps=num_taps,
         )
         filt = FIRFilter(spec)
         self._filters[name] = filt
         return filt
 
     def create_bandpass(
-        self,
-        name: str,
-        low_cutoff: float,
-        high_cutoff: float,
-        num_taps: int = 101
+        self, name: str, low_cutoff: float, high_cutoff: float, num_taps: int = 101
     ) -> FIRFilter:
         """Create and add a bandpass filter."""
         spec = FilterSpec(
@@ -253,7 +246,7 @@ class FilterBank:
             cutoff_low=low_cutoff,
             cutoff_high=high_cutoff,
             sample_rate=self._sample_rate,
-            num_taps=num_taps
+            num_taps=num_taps,
         )
         filt = FIRFilter(spec)
         self._filters[name] = filt
@@ -297,7 +290,7 @@ class Decimator:
         decimation_factor: int,
         num_taps: int = 0,
         cutoff_ratio: float = 0.8,
-        window: str = "kaiser"
+        window: str = "kaiser",
     ):
         """
         Initialize decimator.
@@ -413,10 +406,10 @@ class Decimator:
             return samples.copy()
 
         # Apply anti-aliasing filter
-        filtered = np.convolve(samples, self._filter, mode='same')
+        filtered = np.convolve(samples, self._filter, mode="same")
 
         # Downsample by taking every Nth sample
-        decimated = filtered[::self._factor]
+        decimated = filtered[:: self._factor]
 
         return decimated
 
@@ -443,14 +436,14 @@ class Decimator:
         padded = np.concatenate([self._buffer, samples])
 
         # Filter
-        filtered = np.convolve(padded, self._filter, mode='valid')
+        filtered = np.convolve(padded, self._filter, mode="valid")
 
         # Update buffer
-        self._buffer = samples[-(n_taps - 1):]
+        self._buffer = samples[-(n_taps - 1) :]
 
         # Decimate with phase tracking
         start_idx = (self._factor - self._phase) % self._factor
-        decimated = filtered[start_idx::self._factor]
+        decimated = filtered[start_idx :: self._factor]
 
         # Update phase
         self._phase = (self._phase + len(filtered)) % self._factor
@@ -479,7 +472,7 @@ class Decimator:
 
         # Pad filter to multiple of factor
         filter_padded = np.zeros(n_taps_per_phase * n_phases, dtype=self._filter.dtype)
-        filter_padded[:len(self._filter)] = self._filter
+        filter_padded[: len(self._filter)] = self._filter
 
         # Reshape into polyphase components (time-reversed for convolution)
         polyphase = filter_padded.reshape(n_taps_per_phase, n_phases).T
@@ -502,14 +495,13 @@ class Decimator:
 
             # Convolve and add
             if len(phase_filter) > 0 and len(phase_signal) > 0:
-                contribution = np.convolve(phase_signal, phase_filter, mode='full')
+                contribution = np.convolve(phase_signal, phase_filter, mode="full")
                 output += contribution[:n_output]
 
         return output
 
     def get_frequency_response(
-        self,
-        n_points: int = 512
+        self, n_points: int = 512
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Get filter frequency response.
@@ -551,7 +543,7 @@ class Interpolator:
         interpolation_factor: int,
         num_taps: int = 0,
         cutoff_ratio: float = 0.8,
-        window: str = "kaiser"
+        window: str = "kaiser",
     ):
         """
         Initialize interpolator.
@@ -651,10 +643,10 @@ class Interpolator:
 
         # Zero-stuff
         upsampled = np.zeros(len(samples) * self._factor, dtype=samples.dtype)
-        upsampled[::self._factor] = samples
+        upsampled[:: self._factor] = samples
 
         # Apply anti-imaging filter
-        filtered = np.convolve(upsampled, self._filter, mode='same')
+        filtered = np.convolve(upsampled, self._filter, mode="same")
 
         return filtered
 
@@ -675,7 +667,7 @@ class Interpolator:
 
         # Zero-stuff
         upsampled = np.zeros(len(samples) * self._factor, dtype=samples.dtype)
-        upsampled[::self._factor] = samples
+        upsampled[:: self._factor] = samples
 
         # Initialize buffer
         if self._buffer is None:
@@ -685,10 +677,10 @@ class Interpolator:
         padded = np.concatenate([self._buffer, upsampled])
 
         # Filter
-        filtered = np.convolve(padded, self._filter, mode='valid')
+        filtered = np.convolve(padded, self._filter, mode="valid")
 
         # Update buffer
-        self._buffer = upsampled[-(n_taps - 1):]
+        self._buffer = upsampled[-(n_taps - 1) :]
 
         return filtered
 
@@ -715,7 +707,7 @@ class Resampler:
         input_rate: float,
         output_rate: float,
         num_taps: int = 0,
-        window: str = "kaiser"
+        window: str = "kaiser",
     ):
         """
         Initialize resampler.
@@ -753,7 +745,9 @@ class Resampler:
         self._buffer: Optional[np.ndarray] = None
         self._phase = 0
 
-    def _find_rational(self, num: float, den: float, max_factor: int = 1000) -> Tuple[int, int]:
+    def _find_rational(
+        self, num: float, den: float, max_factor: int = 1000
+    ) -> Tuple[int, int]:
         """Find rational approximation P/Q."""
         from math import gcd
 
@@ -835,17 +829,19 @@ class Resampler:
 
         # Interpolate
         if self._interp_factor > 1:
-            upsampled = np.zeros(len(samples) * self._interp_factor, dtype=samples.dtype)
-            upsampled[::self._interp_factor] = samples
+            upsampled = np.zeros(
+                len(samples) * self._interp_factor, dtype=samples.dtype
+            )
+            upsampled[:: self._interp_factor] = samples
         else:
             upsampled = samples
 
         # Filter
-        filtered = np.convolve(upsampled, self._filter, mode='same')
+        filtered = np.convolve(upsampled, self._filter, mode="same")
 
         # Decimate
         if self._decim_factor > 1:
-            output = filtered[::self._decim_factor]
+            output = filtered[:: self._decim_factor]
         else:
             output = filtered
 
@@ -868,8 +864,10 @@ class Resampler:
 
         # Interpolate
         if self._interp_factor > 1:
-            upsampled = np.zeros(len(samples) * self._interp_factor, dtype=samples.dtype)
-            upsampled[::self._interp_factor] = samples
+            upsampled = np.zeros(
+                len(samples) * self._interp_factor, dtype=samples.dtype
+            )
+            upsampled[:: self._interp_factor] = samples
         else:
             upsampled = samples
 
@@ -878,13 +876,13 @@ class Resampler:
             self._buffer = np.zeros(n_taps - 1, dtype=upsampled.dtype)
 
         padded = np.concatenate([self._buffer, upsampled])
-        filtered = np.convolve(padded, self._filter, mode='valid')
-        self._buffer = upsampled[-(n_taps - 1):]
+        filtered = np.convolve(padded, self._filter, mode="valid")
+        self._buffer = upsampled[-(n_taps - 1) :]
 
         # Decimate with phase tracking
         if self._decim_factor > 1:
             start_idx = (self._decim_factor - self._phase) % self._decim_factor
-            output = filtered[start_idx::self._decim_factor]
+            output = filtered[start_idx :: self._decim_factor]
             self._phase = (self._phase + len(filtered)) % self._decim_factor
         else:
             output = filtered
@@ -899,23 +897,25 @@ class Resampler:
 
 class AGCMode(Enum):
     """AGC detection modes."""
-    RMS = "rms"           # Root Mean Square level detection
-    PEAK = "peak"         # Peak level detection
-    LOG = "log"           # Logarithmic domain processing
+
+    RMS = "rms"  # Root Mean Square level detection
+    PEAK = "peak"  # Peak level detection
+    LOG = "log"  # Logarithmic domain processing
     MAGNITUDE = "magnitude"  # Magnitude-based (good for complex signals)
 
 
 @dataclass
 class AGCConfig:
     """AGC configuration parameters."""
-    target_level: float = 1.0      # Target output amplitude
-    attack_time: float = 0.001     # Attack time in seconds (fast response)
-    decay_time: float = 0.1        # Decay/release time in seconds
-    hang_time: float = 0.0         # Hold time before decay starts
-    max_gain: float = 100.0        # Maximum gain (linear)
-    min_gain: float = 0.001        # Minimum gain (linear)
-    mode: AGCMode = AGCMode.RMS    # Detection mode
-    reference_level: float = 0.0   # Reference level for log mode (dB)
+
+    target_level: float = 1.0  # Target output amplitude
+    attack_time: float = 0.001  # Attack time in seconds (fast response)
+    decay_time: float = 0.1  # Decay/release time in seconds
+    hang_time: float = 0.0  # Hold time before decay starts
+    max_gain: float = 100.0  # Maximum gain (linear)
+    min_gain: float = 0.001  # Minimum gain (linear)
+    mode: AGCMode = AGCMode.RMS  # Detection mode
+    reference_level: float = 0.0  # Reference level for log mode (dB)
 
 
 class AGC:
@@ -940,11 +940,7 @@ class AGC:
     - Maintaining consistent audio output levels
     """
 
-    def __init__(
-        self,
-        sample_rate: float,
-        config: Optional[AGCConfig] = None
-    ):
+    def __init__(self, sample_rate: float, config: Optional[AGCConfig] = None):
         """
         Initialize AGC.
 
@@ -959,10 +955,10 @@ class AGC:
         self._update_coefficients()
 
         # State variables
-        self._gain = 1.0           # Current gain
-        self._level = 0.0          # Detected signal level
-        self._hang_counter = 0     # Hang time counter
-        self._peak_hold = 0.0      # Peak hold for peak detector
+        self._gain = 1.0  # Current gain
+        self._level = 0.0  # Detected signal level
+        self._hang_counter = 0  # Hang time counter
+        self._peak_hold = 0.0  # Peak hold for peak detector
 
         # For RMS calculation (exponential moving average)
         self._rms_squared = 0.0
@@ -1051,7 +1047,7 @@ class AGC:
         elif self._hang_counter > 0:
             self._hang_counter -= 1
         else:
-            self._peak_hold *= (1.0 - self._decay_coeff)
+            self._peak_hold *= 1.0 - self._decay_coeff
         return self._peak_hold
 
     def _detect_level_magnitude(self, sample: complex) -> float:
@@ -1209,10 +1205,7 @@ class AGC:
         output = samples * gains
         return output
 
-    def get_gain_history(
-        self,
-        samples: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    def get_gain_history(self, samples: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         Process samples and return gain history for analysis.
 
@@ -1242,15 +1235,11 @@ class AGC:
 
     def freeze(self) -> None:
         """Freeze AGC at current gain (disable adaptation)."""
-        self._config.attack_time = float('inf')
-        self._config.decay_time = float('inf')
+        self._config.attack_time = float("inf")
+        self._config.decay_time = float("inf")
         self._update_coefficients()
 
-    def unfreeze(
-        self,
-        attack_time: float = 0.001,
-        decay_time: float = 0.1
-    ) -> None:
+    def unfreeze(self, attack_time: float = 0.001, decay_time: float = 0.1) -> None:
         """Unfreeze AGC and restore time constants."""
         self._config.attack_time = attack_time
         self._config.decay_time = decay_time
@@ -1272,7 +1261,7 @@ class FastAGC:
         attack_time: float = 0.001,
         decay_time: float = 0.1,
         max_gain: float = 100.0,
-        min_gain: float = 0.001
+        min_gain: float = 0.001,
     ):
         """
         Initialize FastAGC.
@@ -1317,7 +1306,7 @@ class FastAGC:
         magnitudes = np.abs(samples)
 
         # Block envelope (RMS-like)
-        block_env = np.sqrt(np.mean(magnitudes ** 2))
+        block_env = np.sqrt(np.mean(magnitudes**2))
 
         # Update envelope with attack/decay
         if block_env > self._envelope:
@@ -1348,32 +1337,35 @@ class FastAGC:
 
 class SquelchMode(Enum):
     """Squelch detection modes."""
-    CARRIER = "carrier"       # Signal amplitude based
-    NOISE = "noise"           # Noise level based (opens on low noise)
-    CTCSS = "ctcss"           # Continuous Tone-Coded Squelch System
-    DCS = "dcs"               # Digital-Coded Squelch
-    VOX = "vox"               # Voice-operated (audio activity)
+
+    CARRIER = "carrier"  # Signal amplitude based
+    NOISE = "noise"  # Noise level based (opens on low noise)
+    CTCSS = "ctcss"  # Continuous Tone-Coded Squelch System
+    DCS = "dcs"  # Digital-Coded Squelch
+    VOX = "vox"  # Voice-operated (audio activity)
 
 
 class SquelchState(Enum):
     """Squelch gate state."""
-    CLOSED = "closed"         # Muted - no signal
-    OPENING = "opening"       # Transitioning to open
-    OPEN = "open"             # Unmuted - signal present
-    CLOSING = "closing"       # Transitioning to closed (tail time)
+
+    CLOSED = "closed"  # Muted - no signal
+    OPENING = "opening"  # Transitioning to open
+    OPEN = "open"  # Unmuted - signal present
+    CLOSING = "closing"  # Transitioning to closed (tail time)
 
 
 @dataclass
 class SquelchConfig:
     """Squelch configuration parameters."""
-    threshold: float = 0.1           # Open threshold (linear amplitude)
-    hysteresis: float = 0.02         # Close offset below threshold
-    attack_time: float = 0.005       # Time to fully open (seconds)
-    release_time: float = 0.02       # Time to fully close (seconds)
-    tail_time: float = 0.3           # Hold open after signal drops (seconds)
+
+    threshold: float = 0.1  # Open threshold (linear amplitude)
+    hysteresis: float = 0.02  # Close offset below threshold
+    attack_time: float = 0.005  # Time to fully open (seconds)
+    release_time: float = 0.02  # Time to fully close (seconds)
+    tail_time: float = 0.3  # Hold open after signal drops (seconds)
     mode: SquelchMode = SquelchMode.CARRIER
-    ctcss_freq: float = 0.0          # CTCSS tone frequency (67-254.1 Hz)
-    ctcss_bandwidth: float = 10.0    # CTCSS detection bandwidth
+    ctcss_freq: float = 0.0  # CTCSS tone frequency (67-254.1 Hz)
+    ctcss_bandwidth: float = 10.0  # CTCSS detection bandwidth
 
 
 class Squelch:
@@ -1399,11 +1391,7 @@ class Squelch:
     - VOX for hands-free operation
     """
 
-    def __init__(
-        self,
-        sample_rate: float,
-        config: Optional[SquelchConfig] = None
-    ):
+    def __init__(self, sample_rate: float, config: Optional[SquelchConfig] = None):
         """
         Initialize Squelch.
 
@@ -1416,10 +1404,10 @@ class Squelch:
 
         # State
         self._state = SquelchState.CLOSED
-        self._gate = 0.0              # Current gate level (0=closed, 1=open)
-        self._signal_level = 0.0      # Detected signal level
-        self._noise_level = 1.0       # Estimated noise floor
-        self._tail_counter = 0        # Samples remaining in tail time
+        self._gate = 0.0  # Current gate level (0=closed, 1=open)
+        self._signal_level = 0.0  # Detected signal level
+        self._noise_level = 1.0  # Estimated noise floor
+        self._tail_counter = 0  # Samples remaining in tail time
         self._ctcss_detected = False  # CTCSS tone present
 
         # Calculate coefficients
@@ -1454,8 +1442,15 @@ class Squelch:
 
         # CTCSS Goertzel coefficient
         if self._config.ctcss_freq > 0:
-            k = int(0.5 + (self._sample_rate * 0.02) * self._config.ctcss_freq / self._sample_rate)
-            self._ctcss_coeff = 2.0 * np.cos(2.0 * np.pi * k / (self._sample_rate * 0.02))
+            k = int(
+                0.5
+                + (self._sample_rate * 0.02)
+                * self._config.ctcss_freq
+                / self._sample_rate
+            )
+            self._ctcss_coeff = 2.0 * np.cos(
+                2.0 * np.pi * k / (self._sample_rate * 0.02)
+            )
 
     @property
     def sample_rate(self) -> float:
@@ -1475,7 +1470,11 @@ class Squelch:
     @property
     def is_open(self) -> bool:
         """Check if squelch is open (audio passing)."""
-        return self._state in (SquelchState.OPEN, SquelchState.OPENING, SquelchState.CLOSING)
+        return self._state in (
+            SquelchState.OPEN,
+            SquelchState.OPENING,
+            SquelchState.CLOSING,
+        )
 
     @property
     def gate_level(self) -> float:
@@ -1532,7 +1531,9 @@ class Squelch:
             self._noise_level += self._noise_alpha * (magnitude - self._noise_level)
         else:
             # Very slow rise for noise floor
-            self._noise_level += (self._noise_alpha * 0.1) * (magnitude - self._noise_level)
+            self._noise_level += (self._noise_alpha * 0.1) * (
+                magnitude - self._noise_level
+            )
 
         # Signal-to-noise ratio indicator
         if self._noise_level > 1e-10:
@@ -1588,7 +1589,7 @@ class Squelch:
             audio = np.abs(samples)
 
         # RMS level
-        rms = np.sqrt(np.mean(audio ** 2))
+        rms = np.sqrt(np.mean(audio**2))
         self._signal_level += self._level_alpha * (rms - self._signal_level)
 
         return self._signal_level
@@ -1796,7 +1797,9 @@ class Squelch:
             "noise_level": self._noise_level,
             "threshold": self._config.threshold,
             "mode": self._config.mode.value,
-            "ctcss_detected": self._ctcss_detected if self._config.mode == SquelchMode.CTCSS else None,
+            "ctcss_detected": (
+                self._ctcss_detected if self._config.mode == SquelchMode.CTCSS else None
+            ),
         }
 
     def reset(self) -> None:
@@ -1822,14 +1825,45 @@ class Squelch:
 
 # Common CTCSS tones (EIA standard)
 CTCSS_TONES = {
-    "XZ": 67.0, "WZ": 69.3, "XA": 71.9, "WA": 74.4, "XB": 77.0,
-    "WB": 79.7, "YZ": 82.5, "YA": 85.4, "YB": 88.5, "ZZ": 91.5,
-    "ZA": 94.8, "ZB": 97.4, "1Z": 100.0, "1A": 103.5, "1B": 107.2,
-    "2Z": 110.9, "2A": 114.8, "2B": 118.8, "3Z": 123.0, "3A": 127.3,
-    "3B": 131.8, "4Z": 136.5, "4A": 141.3, "4B": 146.2, "5Z": 151.4,
-    "5A": 156.7, "5B": 162.2, "6Z": 167.9, "6A": 173.8, "6B": 179.9,
-    "7Z": 186.2, "7A": 192.8, "M1": 203.5, "M2": 210.7, "M3": 218.1,
-    "M4": 225.7, "M5": 233.6, "M6": 241.8, "M7": 250.3,
+    "XZ": 67.0,
+    "WZ": 69.3,
+    "XA": 71.9,
+    "WA": 74.4,
+    "XB": 77.0,
+    "WB": 79.7,
+    "YZ": 82.5,
+    "YA": 85.4,
+    "YB": 88.5,
+    "ZZ": 91.5,
+    "ZA": 94.8,
+    "ZB": 97.4,
+    "1Z": 100.0,
+    "1A": 103.5,
+    "1B": 107.2,
+    "2Z": 110.9,
+    "2A": 114.8,
+    "2B": 118.8,
+    "3Z": 123.0,
+    "3A": 127.3,
+    "3B": 131.8,
+    "4Z": 136.5,
+    "4A": 141.3,
+    "4B": 146.2,
+    "5Z": 151.4,
+    "5A": 156.7,
+    "5B": 162.2,
+    "6Z": 167.9,
+    "6A": 173.8,
+    "6B": 179.9,
+    "7Z": 186.2,
+    "7A": 192.8,
+    "M1": 203.5,
+    "M2": 210.7,
+    "M3": 218.1,
+    "M4": 225.7,
+    "M5": 233.6,
+    "M6": 241.8,
+    "M7": 250.3,
 }
 
 
@@ -1848,36 +1882,38 @@ def find_ctcss_tone(frequency: float, tolerance: float = 1.0) -> Optional[str]:
 
 class NoiseReductionMethod(Enum):
     """Noise reduction algorithms."""
+
     SPECTRAL_SUBTRACTION = "spectral_subtraction"  # FFT-based spectral subtraction
-    WIENER = "wiener"                              # Wiener filter
-    LMS = "lms"                                    # Least Mean Squares adaptive
-    NLMS = "nlms"                                  # Normalized LMS
-    MOVING_AVERAGE = "moving_average"              # Simple smoothing
-    MEDIAN = "median"                              # Median filter for impulse noise
-    GATE = "gate"                                  # Noise gate (mute below threshold)
+    WIENER = "wiener"  # Wiener filter
+    LMS = "lms"  # Least Mean Squares adaptive
+    NLMS = "nlms"  # Normalized LMS
+    MOVING_AVERAGE = "moving_average"  # Simple smoothing
+    MEDIAN = "median"  # Median filter for impulse noise
+    GATE = "gate"  # Noise gate (mute below threshold)
 
 
 @dataclass
 class NoiseReductionConfig:
     """Noise reduction configuration."""
+
     method: NoiseReductionMethod = NoiseReductionMethod.SPECTRAL_SUBTRACTION
     # Spectral subtraction parameters
-    fft_size: int = 1024                    # FFT size for spectral analysis
-    overlap: float = 0.5                    # FFT overlap (0.0-0.9)
-    noise_estimation_frames: int = 10       # Frames for initial noise estimation
-    subtraction_factor: float = 1.0         # Over-subtraction factor (1.0-3.0)
-    floor_factor: float = 0.01              # Spectral floor to prevent musical noise
+    fft_size: int = 1024  # FFT size for spectral analysis
+    overlap: float = 0.5  # FFT overlap (0.0-0.9)
+    noise_estimation_frames: int = 10  # Frames for initial noise estimation
+    subtraction_factor: float = 1.0  # Over-subtraction factor (1.0-3.0)
+    floor_factor: float = 0.01  # Spectral floor to prevent musical noise
     # Wiener filter parameters
-    wiener_alpha: float = 0.98              # Noise estimate smoothing
+    wiener_alpha: float = 0.98  # Noise estimate smoothing
     # LMS/NLMS parameters
-    lms_step_size: float = 0.01             # Adaptation step size (mu)
-    lms_filter_length: int = 32             # Adaptive filter length
+    lms_step_size: float = 0.01  # Adaptation step size (mu)
+    lms_filter_length: int = 32  # Adaptive filter length
     # Gate parameters
-    gate_threshold: float = 0.02            # Noise gate threshold
-    gate_attack: float = 0.001              # Gate attack time (seconds)
-    gate_release: float = 0.05              # Gate release time (seconds)
+    gate_threshold: float = 0.02  # Noise gate threshold
+    gate_attack: float = 0.001  # Gate attack time (seconds)
+    gate_release: float = 0.05  # Gate release time (seconds)
     # General
-    smoothing_alpha: float = 0.1            # Output smoothing
+    smoothing_alpha: float = 0.1  # Output smoothing
 
 
 class NoiseReduction:
@@ -1903,9 +1939,7 @@ class NoiseReduction:
     """
 
     def __init__(
-        self,
-        sample_rate: float,
-        config: Optional[NoiseReductionConfig] = None
+        self, sample_rate: float, config: Optional[NoiseReductionConfig] = None
     ):
         """
         Initialize noise reduction.
@@ -1938,8 +1972,12 @@ class NoiseReduction:
 
         # Gate state
         self._gate_level = 0.0
-        self._gate_attack_coeff = 1.0 - np.exp(-1.0 / (self._config.gate_attack * sample_rate))
-        self._gate_release_coeff = 1.0 - np.exp(-1.0 / (self._config.gate_release * sample_rate))
+        self._gate_attack_coeff = 1.0 - np.exp(
+            -1.0 / (self._config.gate_attack * sample_rate)
+        )
+        self._gate_release_coeff = 1.0 - np.exp(
+            -1.0 / (self._config.gate_release * sample_rate)
+        )
 
         # Wiener state
         self._wiener_noise_psd = None
@@ -2020,7 +2058,7 @@ class NoiseReduction:
 
         # Process in overlapping frames
         for i in range(0, len(samples) - self._fft_size + 1, self._hop_size):
-            frame = samples[i:i + self._fft_size]
+            frame = samples[i : i + self._fft_size]
 
             # Apply window
             if is_complex:
@@ -2040,7 +2078,9 @@ class NoiseReduction:
                 else:
                     # Running average for noise estimation
                     alpha = 1.0 / (self._noise_frames_collected + 1)
-                    self._noise_spectrum = (1 - alpha) * self._noise_spectrum + alpha * magnitude
+                    self._noise_spectrum = (
+                        1 - alpha
+                    ) * self._noise_spectrum + alpha * magnitude
 
                 self._noise_frames_collected += 1
                 if self._noise_frames_collected >= self._config.noise_estimation_frames:
@@ -2049,7 +2089,9 @@ class NoiseReduction:
             # Spectral subtraction
             if self._noise_estimated:
                 # Over-subtraction
-                subtracted = magnitude - self._config.subtraction_factor * self._noise_spectrum
+                subtracted = (
+                    magnitude - self._config.subtraction_factor * self._noise_spectrum
+                )
 
                 # Spectral floor to prevent musical noise
                 floor = self._config.floor_factor * magnitude
@@ -2065,17 +2107,17 @@ class NoiseReduction:
 
             # Overlap-add
             if len(output) == 0:
-                output = list(frame_clean[:self._hop_size])
+                output = list(frame_clean[: self._hop_size])
             else:
                 # Add overlap
                 for j in range(min(len(self._overlap_buffer), len(frame_clean))):
                     if j < len(output) - len(self._overlap_buffer):
                         continue
-                output.extend(frame_clean[:self._hop_size])
+                output.extend(frame_clean[: self._hop_size])
 
-            self._overlap_buffer = frame_clean[self._hop_size:]
+            self._overlap_buffer = frame_clean[self._hop_size :]
 
-        result = np.array(output[:len(samples)])
+        result = np.array(output[: len(samples)])
 
         if is_complex:
             return result.astype(np.complex128)
@@ -2091,7 +2133,7 @@ class NoiseReduction:
         is_complex = np.iscomplexobj(samples)
 
         for i in range(0, len(samples) - self._fft_size + 1, self._hop_size):
-            frame = samples[i:i + self._fft_size]
+            frame = samples[i : i + self._fft_size]
             windowed = frame * self._window
 
             # FFT
@@ -2108,7 +2150,9 @@ class NoiseReduction:
 
             if signal_power < noise_power * 1.5:  # Likely noise-only
                 alpha = self._config.wiener_alpha
-                self._wiener_noise_psd = alpha * self._wiener_noise_psd + (1 - alpha) * power
+                self._wiener_noise_psd = (
+                    alpha * self._wiener_noise_psd + (1 - alpha) * power
+                )
 
             # Wiener filter gain
             # H(f) = max(0, 1 - noise_psd / signal_psd)
@@ -2121,9 +2165,9 @@ class NoiseReduction:
 
             # IFFT
             frame_clean = np.fft.irfft(spectrum_clean, n=self._fft_size)
-            output.extend(frame_clean[:self._hop_size])
+            output.extend(frame_clean[: self._hop_size])
 
-        result = np.array(output[:len(samples)])
+        result = np.array(output[: len(samples)])
         if is_complex:
             return result.astype(np.complex128)
         return result
@@ -2166,7 +2210,7 @@ class NoiseReduction:
         """Simple moving average smoothing."""
         window_size = max(3, self._config.lms_filter_length // 4)
         kernel = np.ones(window_size) / window_size
-        return np.convolve(samples, kernel, mode='same')
+        return np.convolve(samples, kernel, mode="same")
 
     def _median_filter(self, samples: np.ndarray) -> np.ndarray:
         """Median filter for impulse noise removal."""
@@ -2248,9 +2292,7 @@ class NoiseReduction:
         return output
 
     def process_with_reference(
-        self,
-        signal: np.ndarray,
-        noise_reference: np.ndarray
+        self, signal: np.ndarray, noise_reference: np.ndarray
     ) -> np.ndarray:
         """
         Adaptive noise cancellation with reference signal.
@@ -2330,7 +2372,7 @@ class SpectralSubtraction(NoiseReduction):
         sample_rate: float,
         fft_size: int = 1024,
         subtraction_factor: float = 1.5,
-        floor_factor: float = 0.02
+        floor_factor: float = 0.02,
     ):
         """
         Initialize spectral subtraction.
@@ -2345,7 +2387,7 @@ class SpectralSubtraction(NoiseReduction):
             method=NoiseReductionMethod.SPECTRAL_SUBTRACTION,
             fft_size=fft_size,
             subtraction_factor=subtraction_factor,
-            floor_factor=floor_factor
+            floor_factor=floor_factor,
         )
         super().__init__(sample_rate, config)
 
@@ -2358,10 +2400,7 @@ class AdaptiveNoiseCancel(NoiseReduction):
     """
 
     def __init__(
-        self,
-        sample_rate: float,
-        filter_length: int = 64,
-        step_size: float = 0.01
+        self, sample_rate: float, filter_length: int = 64, step_size: float = 0.01
     ):
         """
         Initialize adaptive noise canceller.
@@ -2374,6 +2413,6 @@ class AdaptiveNoiseCancel(NoiseReduction):
         config = NoiseReductionConfig(
             method=NoiseReductionMethod.NLMS,
             lms_filter_length=filter_length,
-            lms_step_size=step_size
+            lms_step_size=step_size,
         )
         super().__init__(sample_rate, config)

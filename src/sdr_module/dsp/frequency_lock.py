@@ -7,60 +7,66 @@ track signal drift, and maintain lock on moving signals.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, List, Tuple
+from typing import List, Optional, Tuple
+
 import numpy as np
 
 
 class LockState(Enum):
     """Frequency lock state."""
-    UNLOCKED = "unlocked"       # No lock, searching
-    ACQUIRING = "acquiring"     # Signal detected, acquiring lock
-    LOCKED = "locked"           # Locked onto signal
-    LOST = "lost"               # Lock was lost
+
+    UNLOCKED = "unlocked"  # No lock, searching
+    ACQUIRING = "acquiring"  # Signal detected, acquiring lock
+    LOCKED = "locked"  # Locked onto signal
+    LOST = "lost"  # Lock was lost
 
 
 class LockMode(Enum):
     """Frequency lock mode."""
-    PEAK = "peak"               # Lock to strongest peak
-    NEAREST = "nearest"         # Lock to nearest signal to current freq
-    MANUAL = "manual"           # Lock to manually specified frequency
+
+    PEAK = "peak"  # Lock to strongest peak
+    NEAREST = "nearest"  # Lock to nearest signal to current freq
+    MANUAL = "manual"  # Lock to manually specified frequency
 
 
 @dataclass
 class LockTarget:
     """Information about a lock target signal."""
-    frequency_hz: float         # Center frequency in Hz
-    power_db: float             # Signal power in dB
-    bandwidth_hz: float         # Estimated signal bandwidth
-    snr_db: float               # Signal-to-noise ratio
+
+    frequency_hz: float  # Center frequency in Hz
+    power_db: float  # Signal power in dB
+    bandwidth_hz: float  # Estimated signal bandwidth
+    snr_db: float  # Signal-to-noise ratio
 
 
 @dataclass
 class LockStatus:
     """Current frequency lock status."""
-    state: LockState            # Lock state
-    target_freq_hz: float       # Target frequency
-    offset_hz: float            # Offset from center frequency
-    error_hz: float             # Frequency error (for tracking)
-    power_db: float             # Current signal power
-    snr_db: float               # Current SNR
-    lock_quality: float         # Lock quality (0-1)
-    time_locked_ms: float       # Time locked in milliseconds
+
+    state: LockState  # Lock state
+    target_freq_hz: float  # Target frequency
+    offset_hz: float  # Offset from center frequency
+    error_hz: float  # Frequency error (for tracking)
+    power_db: float  # Current signal power
+    snr_db: float  # Current SNR
+    lock_quality: float  # Lock quality (0-1)
+    time_locked_ms: float  # Time locked in milliseconds
 
 
 @dataclass
 class LockConfig:
     """Configuration for frequency locker."""
+
     mode: LockMode = LockMode.PEAK
 
     # Detection thresholds
-    min_snr_db: float = 10.0            # Minimum SNR to acquire lock
-    min_power_db: float = -80.0         # Minimum power to consider
+    min_snr_db: float = 10.0  # Minimum SNR to acquire lock
+    min_power_db: float = -80.0  # Minimum power to consider
 
     # Lock behavior
     lock_bandwidth_hz: float = 10000.0  # Bandwidth around target to consider locked
-    acquire_time_ms: float = 100.0      # Time to hold signal before lock
-    lost_time_ms: float = 500.0         # Time without signal before lost
+    acquire_time_ms: float = 100.0  # Time to hold signal before lock
+    lost_time_ms: float = 500.0  # Time without signal before lost
 
     # Tracking
     max_drift_hz_per_sec: float = 1000.0  # Maximum expected drift rate
@@ -83,7 +89,7 @@ class FrequencyLocker:
         self,
         sample_rate: float,
         fft_size: int = 4096,
-        config: Optional[LockConfig] = None
+        config: Optional[LockConfig] = None,
     ):
         """
         Initialize frequency locker.
@@ -150,7 +156,7 @@ class FrequencyLocker:
         self,
         spectrum_db: np.ndarray,
         center_freq: float = 0.0,
-        time_delta_ms: float = 10.0
+        time_delta_ms: float = 10.0,
     ) -> LockStatus:
         """
         Update lock state with new spectrum data.
@@ -201,13 +207,13 @@ class FrequencyLocker:
             power_db=self._last_power_db,
             snr_db=self._last_snr_db,
             lock_quality=lock_quality,
-            time_locked_ms=self._time_in_state_ms if self._state == LockState.LOCKED else 0.0,
+            time_locked_ms=(
+                self._time_in_state_ms if self._state == LockState.LOCKED else 0.0
+            ),
         )
 
     def _detect_signals(
-        self,
-        spectrum_db: np.ndarray,
-        center_freq: float
+        self, spectrum_db: np.ndarray, center_freq: float
     ) -> List[LockTarget]:
         """Detect signals in spectrum above threshold."""
         signals = []
@@ -249,12 +255,14 @@ class FrequencyLocker:
             snr_db = peak_power - self._noise_floor_db
 
             if snr_db >= self._config.min_snr_db:
-                signals.append(LockTarget(
-                    frequency_hz=signal_freq,
-                    power_db=peak_power,
-                    bandwidth_hz=bandwidth,
-                    snr_db=snr_db,
-                ))
+                signals.append(
+                    LockTarget(
+                        frequency_hz=signal_freq,
+                        power_db=peak_power,
+                        bandwidth_hz=bandwidth,
+                        snr_db=snr_db,
+                    )
+                )
 
         return signals
 
@@ -278,10 +286,7 @@ class FrequencyLocker:
         return regions
 
     def _estimate_bandwidth(
-        self,
-        spectrum_db: np.ndarray,
-        peak_idx: int,
-        freq_per_bin: float
+        self, spectrum_db: np.ndarray, peak_idx: int, freq_per_bin: float
     ) -> float:
         """Estimate signal bandwidth using 3 dB method."""
         peak_power = spectrum_db[peak_idx]
@@ -318,7 +323,9 @@ class FrequencyLocker:
             self._freq_history.clear()
             self._freq_history.append(target.frequency_hz)
 
-    def _handle_acquiring(self, signals: List[LockTarget], time_delta_ms: float) -> None:
+    def _handle_acquiring(
+        self, signals: List[LockTarget], time_delta_ms: float
+    ) -> None:
         """Handle acquiring state."""
         # Look for signal near target
         target = self._find_signal_near(signals, self._target_freq)
@@ -340,10 +347,7 @@ class FrequencyLocker:
             self._time_in_state_ms = 0.0
 
     def _handle_locked(
-        self,
-        signals: List[LockTarget],
-        center_freq: float,
-        time_delta_ms: float
+        self, signals: List[LockTarget], center_freq: float, time_delta_ms: float
     ) -> None:
         """Handle locked state."""
         # Look for signal near target (with tracking bandwidth)
@@ -403,13 +407,14 @@ class FrequencyLocker:
         return None
 
     def _find_signal_near(
-        self,
-        signals: List[LockTarget],
-        target_freq: float
+        self, signals: List[LockTarget], target_freq: float
     ) -> Optional[LockTarget]:
         """Find signal within tracking bandwidth of target."""
         for signal in signals:
-            if abs(signal.frequency_hz - target_freq) <= self._config.tracking_bandwidth_hz:
+            if (
+                abs(signal.frequency_hz - target_freq)
+                <= self._config.tracking_bandwidth_hz
+            ):
                 return signal
         return None
 
@@ -468,7 +473,9 @@ class FrequencyLocker:
         y = np.array(self._freq_history)
 
         # Least squares fit
-        slope = (n * np.sum(x * y) - np.sum(x) * np.sum(y)) / (n * np.sum(x**2) - np.sum(x)**2)
+        slope = (n * np.sum(x * y) - np.sum(x) * np.sum(y)) / (
+            n * np.sum(x**2) - np.sum(x) ** 2
+        )
 
         # Convert to Hz/second (assuming ~10ms per sample)
         return slope * 100  # Approximate

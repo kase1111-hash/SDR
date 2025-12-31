@@ -5,17 +5,18 @@ Provides user-friendly explanations for complex SDR concepts
 and feature descriptions for UI integration.
 """
 
-from typing import Dict, Optional
 from dataclasses import dataclass
+from typing import Dict, Optional
 
 
 @dataclass
 class Tooltip:
     """Tooltip with title and description."""
+
     title: str
-    short: str          # One-liner for quick display
-    detailed: str       # Full explanation
-    warning: str = ""   # Optional warning message
+    short: str  # One-liner for quick display
+    detailed: str  # Full explanation
+    warning: str = ""  # Optional warning message
 
 
 # =============================================================================
@@ -31,7 +32,6 @@ bandwidth. For example, if tuned to 100 MHz with 2 MHz bandwidth, you'll
 see signals from 99-101 MHz. The RTL-SDR covers 500 kHz to 1.7 GHz,
 while HackRF covers 1 MHz to 6 GHz.""",
     ),
-
     "sample_rate": Tooltip(
         title="Sample Rate",
         short="How many samples per second the SDR captures (determines bandwidth).",
@@ -39,9 +39,8 @@ while HackRF covers 1 MHz to 6 GHz.""",
 you see 2.4 MHz of spectrum. Higher rates show more spectrum but require
 more CPU and USB bandwidth. RTL-SDR maxes at 2.56 MS/s, HackRF at 20 MS/s.
 Nyquist theorem: sample rate must be ≥2× highest frequency of interest.""",
-        warning="Rates above 2.4 MS/s on RTL-SDR may drop samples on some systems."
+        warning="Rates above 2.4 MS/s on RTL-SDR may drop samples on some systems.",
     ),
-
     "gain": Tooltip(
         title="RF Gain",
         short="Amplification applied to received signals (in dB).",
@@ -49,9 +48,8 @@ Nyquist theorem: sample rate must be ≥2× highest frequency of interest.""",
 gain = weak signals buried in noise. Too much gain = distortion and
 intermodulation from strong signals. Start with AGC or ~30dB, then
 adjust based on signal quality. RTL-SDR: 0-49.6dB, HackRF: 0-62dB.""",
-        warning="Excessive gain causes signal clipping and spurious signals."
+        warning="Excessive gain causes signal clipping and spurious signals.",
     ),
-
     "bandwidth": Tooltip(
         title="Filter Bandwidth",
         short="The width of the frequency range being received.",
@@ -60,7 +58,6 @@ bandwidth = less noise but may cut off wideband signals. For FM broadcast,
 use 200kHz+. For SSB voice, 2.4-3kHz. For digital modes, match the
 signal's occupied bandwidth. HackRF has selectable filters from 1.75-28 MHz.""",
     ),
-
     "bias_tee": Tooltip(
         title="Bias Tee",
         short="Supplies DC power through the antenna cable for active antennas/LNAs.",
@@ -68,9 +65,8 @@ signal's occupied bandwidth. HackRF has selectable filters from 1.75-28 MHz.""",
 conductor of the coax to power external devices like LNAs (Low Noise
 Amplifiers) or active antennas. This eliminates the need for separate
 power cables. RTL-SDR V3+ provides 4.5V at up to 180mA.""",
-        warning="Only enable if your antenna/LNA requires power. May damage passive antennas!"
+        warning="Only enable if your antenna/LNA requires power. May damage passive antennas!",
     ),
-
     "direct_sampling": Tooltip(
         title="Direct Sampling Mode",
         short="Bypasses the tuner to receive HF frequencies (below 24 MHz).",
@@ -78,9 +74,8 @@ power cables. RTL-SDR V3+ provides 4.5V at up to 180mA.""",
 Direct sampling bypasses this, feeding the ADC directly to receive HF
 (500 kHz - 24 MHz). Q-branch mode is recommended for RTL-SDR Blog devices.
 Sensitivity is reduced compared to a dedicated HF receiver.""",
-        warning="Performance below 24 MHz is limited. Consider an upconverter for better HF reception."
+        warning="Performance below 24 MHz is limited. Consider an upconverter for better HF reception.",
     ),
-
     "max_input_power": Tooltip(
         title="Maximum Input Power",
         short="The strongest signal level your SDR can safely receive.",
@@ -88,9 +83,8 @@ Sensitivity is reduced compared to a dedicated HF receiver.""",
 RTL-SDR can handle +10 dBm (10 mW), but HackRF is only rated for -5 dBm
 (0.3 mW). When transmitting nearby or monitoring your own TX, ALWAYS use
 appropriate attenuation (30-60 dB or more).""",
-        warning="HackRF max input is -5 dBm! Exceeding this WILL cause permanent damage!"
+        warning="HackRF max input is -5 dBm! Exceeding this WILL cause permanent damage!",
     ),
-
     "noise_figure": Tooltip(
         title="Noise Figure",
         short="How much noise the receiver adds to the signal (lower is better).",
@@ -99,7 +93,6 @@ means the receiver doubles the noise. RTL-SDR: ~6-8dB, HackRF: ~10-15dB.
 Adding an external LNA with 1-2dB NF before the SDR significantly improves
 weak signal reception. Place LNA close to antenna for best results.""",
     ),
-
     "dynamic_range": Tooltip(
         title="Dynamic Range",
         short="The ratio between the strongest and weakest signals you can receive simultaneously.",
@@ -123,7 +116,6 @@ and HackRF operate independently - tune each to different frequencies.
 Example uses: ADS-B (1090 MHz) + ACARS (131 MHz), or monitoring two
 ISM bands (433 + 915 MHz) simultaneously.""",
     ),
-
     "full_duplex": Tooltip(
         title="Full-Duplex Mode",
         short="Transmit with HackRF while receiving with RTL-SDR.",
@@ -131,9 +123,8 @@ ISM bands (433 + 915 MHz) simultaneously.""",
 RTL-SDR for receiving while HackRF transmits. This enables transceiver
 applications, repeaters, and protocol testing. Ensure adequate frequency
 separation or filtering to prevent RTL-SDR overload from TX signal.""",
-        warning="Use bandpass filters to prevent TX signal from overloading RTL-SDR receiver!"
+        warning="Use bandpass filters to prevent TX signal from overloading RTL-SDR receiver!",
     ),
-
     "tx_monitor": Tooltip(
         title="TX Monitoring Mode",
         short="Monitor your own transmissions for quality assurance.",
@@ -141,9 +132,8 @@ separation or filtering to prevent RTL-SDR overload from TX signal.""",
 Verify spectral purity, modulation quality, and spurious emissions.
 RTL-SDR must be heavily attenuated (40-60dB) to prevent damage and
 allow proper signal analysis. Use a directional coupler for best results.""",
-        warning="ALWAYS use 40-60dB attenuation between HackRF TX and RTL-SDR input!"
+        warning="ALWAYS use 40-60dB attenuation between HackRF TX and RTL-SDR input!",
     ),
-
     "wideband_scan": Tooltip(
         title="Wideband Scan Mode",
         short="Cover more spectrum by scanning different ranges with each SDR.",
@@ -152,7 +142,6 @@ handles 0-1.7 GHz while HackRF covers 1.7-6 GHz. Coordinate scanning
 to avoid overlap and maximize coverage. Useful for spectrum surveys
 and signal hunting across wide frequency ranges.""",
     ),
-
     "clock_sync": Tooltip(
         title="Clock Synchronization",
         short="Aligning timing between the two SDRs.",
@@ -161,7 +150,7 @@ time-aligned. For most applications this doesn't matter. For precise
 timing (TDOA, coherent processing), use HackRF's external clock input
 with a GPSDO or shared reference. Software correlation can align
 streams to ~1ms accuracy.""",
-        warning="Precise synchronization requires external hardware (GPSDO, shared 10MHz reference)."
+        warning="Precise synchronization requires external hardware (GPSDO, shared 10MHz reference).",
     ),
 }
 
@@ -178,7 +167,6 @@ At 2.4 MS/s with 4096-point FFT, RBW = 586 Hz. Larger FFTs give finer
 resolution but require more CPU and have slower update rates. Common
 sizes: 1024 (fast), 4096 (balanced), 8192+ (high resolution).""",
     ),
-
     "window_function": Tooltip(
         title="Window Function",
         short="Reduces spectral leakage artifacts in the FFT.",
@@ -189,7 +177,6 @@ where sharp signals spread across bins. Windows taper the signal edges:
 • Blackman-Harris: Excellent leakage rejection, reduced resolution
 • Flat-top: Accurate amplitude measurement, poor resolution""",
     ),
-
     "averaging_rms": Tooltip(
         title="RMS Averaging",
         short="Averages power values to reduce noise fluctuations.",
@@ -198,7 +185,6 @@ preserving signal levels. Higher averaging count = smoother display
 but slower response to changes. 10-20 averages is typical. Power
 values are averaged, then converted to dB for display.""",
     ),
-
     "averaging_peak_hold": Tooltip(
         title="Peak Hold",
         short="Displays the maximum value seen at each frequency.",
@@ -206,7 +192,6 @@ values are averaged, then converted to dB for display.""",
 at each frequency bin. Useful for catching intermittent signals or
 measuring maximum interference levels. Clear/reset to start fresh.""",
     ),
-
     "dc_offset": Tooltip(
         title="DC Offset Removal",
         short="Removes the spike at center frequency caused by hardware imperfections.",
@@ -215,7 +200,6 @@ to DC bias in the I/Q signal path. DC offset removal subtracts the
 average I and Q values to eliminate this spike. Some residual may
 remain; offsetting your tuned frequency slightly can help.""",
     ),
-
     "iq_correction": Tooltip(
         title="I/Q Imbalance Correction",
         short="Fixes image signals caused by gain/phase mismatch between I and Q.",
@@ -225,7 +209,6 @@ signals on the opposite side of center frequency. I/Q correction
 estimates and compensates for these imbalances, typically reducing
 images by 20-40dB.""",
     ),
-
     "resolution_bandwidth": Tooltip(
         title="Resolution Bandwidth (RBW)",
         short="The smallest frequency difference the analyzer can distinguish.",
@@ -249,7 +232,6 @@ amplitude envelope of the carrier. Simple to demodulate (envelope
 detection) but inefficient and susceptible to noise. Used for
 broadcast AM radio (530-1700 kHz) and aircraft communications.""",
     ),
-
     "fm": Tooltip(
         title="FM (Frequency Modulation)",
         short="Audio encoded by varying the frequency.",
@@ -258,7 +240,6 @@ resistant to noise and interference than AM. Wideband FM (broadcast,
 ±75kHz deviation) sounds great; narrowband FM (amateur, ±5kHz) fits
 more channels. Demodulated by measuring instantaneous frequency.""",
     ),
-
     "ssb": Tooltip(
         title="SSB (Single Sideband)",
         short="AM with carrier and one sideband removed for efficiency.",
@@ -268,7 +249,6 @@ efficient than AM and uses half the bandwidth. Requires accurate
 tuning (±50Hz). USB used above 10MHz, LSB below. Standard for
 amateur HF and maritime communications.""",
     ),
-
     "ook": Tooltip(
         title="OOK (On-Off Keying)",
         short="Digital data transmitted by turning carrier on/off.",
@@ -277,7 +257,6 @@ Used by many ISM band devices: garage door openers, car key fobs,
 weather sensors, 433MHz remotes. Easy to decode by measuring
 signal envelope and applying threshold detection.""",
     ),
-
     "fsk": Tooltip(
         title="FSK (Frequency Shift Keying)",
         short="Digital data encoded as frequency shifts.",
@@ -287,7 +266,6 @@ AX.25 packet radio, and many digital modes. Deviation and symbol rate
 vary by protocol. GFSK (Gaussian FSK) smooths transitions for
 narrower bandwidth (Bluetooth, DECT).""",
     ),
-
     "psk": Tooltip(
         title="PSK (Phase Shift Keying)",
         short="Digital data encoded as phase changes.",
@@ -296,7 +274,6 @@ narrower bandwidth (Bluetooth, DECT).""",
 More bandwidth-efficient than FSK but requires coherent detection.
 Common in digital TV (DVB), WiFi, and satellite communications.""",
     ),
-
     "qam": Tooltip(
         title="QAM (Quadrature Amplitude Modulation)",
         short="Data encoded in both amplitude and phase for high throughput.",
@@ -321,7 +298,6 @@ excellent. Measured by comparing signal peak power to noise floor
 power. Improve SNR with: better antenna, LNA, narrower bandwidth,
 or removing interference sources.""",
     ),
-
     "spectral_flatness": Tooltip(
         title="Spectral Flatness",
         short="Measures how noise-like a signal is (1.0 = pure noise).",
@@ -330,7 +306,6 @@ of spectrum. Pure tone = 0, white noise = 1. Used to distinguish
 signals from noise floor. Values 0.8+ suggest noise or very wideband
 signal. Values <0.3 indicate narrowband signal present.""",
     ),
-
     "crest_factor": Tooltip(
         title="Crest Factor",
         short="Peak-to-average ratio indicating signal dynamics.",
@@ -339,7 +314,6 @@ factor (~1.4) indicates continuous carrier. AM voice: ~4-5. FM: ~1.4.
 OOK digital: high (pulsed). Helps distinguish between analog and
 digital modulations and identify pulsed signals.""",
     ),
-
     "bandwidth_estimation": Tooltip(
         title="Bandwidth Estimation",
         short="Automatically measures the signal's occupied bandwidth.",

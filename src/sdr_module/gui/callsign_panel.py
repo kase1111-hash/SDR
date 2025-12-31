@@ -13,13 +13,23 @@ from __future__ import annotations
 import logging
 
 try:
-    from PyQt6.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QLabel, QLineEdit, QComboBox, QGroupBox,
-        QSpinBox, QPushButton, QCheckBox, QProgressBar
-    )
-    from PyQt6.QtCore import pyqtSignal, QTimer
+    from PyQt6.QtCore import QTimer, pyqtSignal
     from PyQt6.QtGui import QFont
+    from PyQt6.QtWidgets import (
+        QCheckBox,
+        QComboBox,
+        QGridLayout,
+        QGroupBox,
+        QHBoxLayout,
+        QLabel,
+        QLineEdit,
+        QProgressBar,
+        QPushButton,
+        QSpinBox,
+        QVBoxLayout,
+        QWidget,
+    )
+
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
@@ -198,7 +208,9 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
                 self._status_label.setText(f"Callsign: {self._callsign}")
                 self._status_label.setStyleSheet("color: green;")
             else:
-                self._status_label.setText(f"Warning: {self._callsign} (unusual format)")
+                self._status_label.setText(
+                    f"Warning: {self._callsign} (unusual format)"
+                )
                 self._status_label.setStyleSheet("color: orange;")
         else:
             self._status_label.setText("Enter your callsign")
@@ -212,7 +224,7 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
             return False
         has_letter = any(c.isalpha() for c in callsign)
         has_number = any(c.isdigit() for c in callsign)
-        valid_chars = all(c.isalnum() or c == '/' for c in callsign)
+        valid_chars = all(c.isalnum() or c == "/" for c in callsign)
         return has_letter and has_number and valid_chars
 
     def _on_settings_changed(self):
@@ -241,7 +253,7 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
                 audio = generate_cw_id(
                     self._callsign,
                     wpm=self._wpm_spin.value(),
-                    frequency=self._tone_spin.value()
+                    frequency=self._tone_spin.value(),
                 )
                 logger.info(f"Test ID generated: {len(audio)} samples")
                 # In a full implementation, this would play the audio
@@ -325,7 +337,9 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         if "id_at_end" in settings:
             self._id_end_check.setChecked(settings["id_at_end"])
         if "mode" in settings:
-            mode_index = {"CW": 0, "VOICE": 1, "PSK31": 2, "RTTY": 3}.get(settings["mode"], 0)
+            mode_index = {"CW": 0, "VOICE": 1, "PSK31": 2, "RTTY": 3}.get(
+                settings["mode"], 0
+            )
             self._mode_combo.setCurrentIndex(mode_index)
         if "interval_minutes" in settings:
             self._interval_spin.setValue(settings["interval_minutes"])

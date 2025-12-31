@@ -15,12 +15,13 @@ Supports multiple identification modes:
 
 from __future__ import annotations
 
-import time
-import threading
 import logging
-from enum import Enum, auto
+import threading
+import time
 from dataclasses import dataclass
-from typing import Optional, Callable
+from enum import Enum, auto
+from typing import Callable, Optional
+
 import numpy as np
 
 logger = logging.getLogger(__name__)
@@ -28,15 +29,17 @@ logger = logging.getLogger(__name__)
 
 class IdentificationMode(Enum):
     """Callsign identification mode."""
-    CW = auto()         # Morse code
-    VOICE = auto()      # Pre-recorded or TTS
-    PSK31 = auto()      # PSK31 digital mode
-    RTTY = auto()       # Radio teletype
+
+    CW = auto()  # Morse code
+    VOICE = auto()  # Pre-recorded or TTS
+    PSK31 = auto()  # PSK31 digital mode
+    RTTY = auto()  # Radio teletype
 
 
 @dataclass
 class CallsignConfig:
     """Configuration for callsign identification."""
+
     callsign: str = ""
     enabled: bool = True
     mode: IdentificationMode = IdentificationMode.CW
@@ -52,6 +55,7 @@ class CallsignConfig:
 @dataclass
 class IdentificationState:
     """Current state of the identification system."""
+
     is_transmitting: bool = False
     last_id_time: float = 0.0
     transmission_start_time: float = 0.0
@@ -64,19 +68,52 @@ class MorseEncoder:
 
     # International Morse Code
     MORSE_CODE = {
-        'A': '.-', 'B': '-...', 'C': '-.-.', 'D': '-..', 'E': '.',
-        'F': '..-.', 'G': '--.', 'H': '....', 'I': '..', 'J': '.---',
-        'K': '-.-', 'L': '.-..', 'M': '--', 'N': '-.', 'O': '---',
-        'P': '.--.', 'Q': '--.-', 'R': '.-.', 'S': '...', 'T': '-',
-        'U': '..-', 'V': '...-', 'W': '.--', 'X': '-..-', 'Y': '-.--',
-        'Z': '--..', '0': '-----', '1': '.----', '2': '..---',
-        '3': '...--', '4': '....-', '5': '.....', '6': '-....',
-        '7': '--...', '8': '---..', '9': '----.', '/': '-..-.',
-        ' ': ' ', '.': '.-.-.-', ',': '--..--', '?': '..--..',
+        "A": ".-",
+        "B": "-...",
+        "C": "-.-.",
+        "D": "-..",
+        "E": ".",
+        "F": "..-.",
+        "G": "--.",
+        "H": "....",
+        "I": "..",
+        "J": ".---",
+        "K": "-.-",
+        "L": ".-..",
+        "M": "--",
+        "N": "-.",
+        "O": "---",
+        "P": ".--.",
+        "Q": "--.-",
+        "R": ".-.",
+        "S": "...",
+        "T": "-",
+        "U": "..-",
+        "V": "...-",
+        "W": ".--",
+        "X": "-..-",
+        "Y": "-.--",
+        "Z": "--..",
+        "0": "-----",
+        "1": ".----",
+        "2": "..---",
+        "3": "...--",
+        "4": "....-",
+        "5": ".....",
+        "6": "-....",
+        "7": "--...",
+        "8": "---..",
+        "9": "----.",
+        "/": "-..-.",
+        " ": " ",
+        ".": ".-.-.-",
+        ",": "--..--",
+        "?": "..--..",
     }
 
-    def __init__(self, wpm: int = 20, frequency: float = 700.0,
-                 sample_rate: float = 48000.0):
+    def __init__(
+        self, wpm: int = 20, frequency: float = 700.0, sample_rate: float = 48000.0
+    ):
         """
         Initialize Morse encoder.
 
@@ -110,15 +147,15 @@ class MorseEncoder:
         text = text.upper().strip()
 
         for i, char in enumerate(text):
-            if char == ' ':
+            if char == " ":
                 # Word gap
                 samples.append(self._generate_silence(self.word_gap))
             elif char in self.MORSE_CODE:
                 morse = self.MORSE_CODE[char]
                 for j, symbol in enumerate(morse):
-                    if symbol == '.':
+                    if symbol == ".":
                         samples.append(self._generate_tone(self.dit_duration))
-                    elif symbol == '-':
+                    elif symbol == "-":
                         samples.append(self._generate_tone(self.dah_duration))
 
                     # Intra-character gap (except after last symbol)
@@ -126,7 +163,7 @@ class MorseEncoder:
                         samples.append(self._generate_silence(self.intra_char_gap))
 
                 # Inter-character gap (except after last character)
-                if i < len(text) - 1 and text[i + 1] != ' ':
+                if i < len(text) - 1 and text[i + 1] != " ":
                     samples.append(self._generate_silence(self.inter_char_gap))
 
         if samples:
@@ -306,7 +343,9 @@ class CallsignIdentifier:
 
             self.state.is_transmitting = False
             duration = time.time() - self.state.transmission_start_time
-            logger.info(f"Transmission ended. Duration: {duration:.1f}s, IDs sent: {self.state.id_count}")
+            logger.info(
+                f"Transmission ended. Duration: {duration:.1f}s, IDs sent: {self.state.id_count}"
+            )
 
             return audio
 
@@ -356,7 +395,7 @@ class CallsignIdentifier:
             Seconds until next ID is required
         """
         if not self.state.is_transmitting:
-            return float('inf')
+            return float("inf")
 
         elapsed = time.time() - self.state.last_id_time
         remaining = self.config.interval_seconds - elapsed
@@ -398,7 +437,7 @@ class CallsignIdentifier:
             self._morse_encoder = MorseEncoder(
                 wpm=self.config.cw_wpm,
                 frequency=self.config.cw_frequency,
-                sample_rate=self.config.sample_rate
+                sample_rate=self.config.sample_rate,
             )
 
         # Add "DE" prefix for proper amateur radio format
@@ -430,8 +469,7 @@ class CallsignIdentifier:
 
         if self.config.enabled and self.config.interval_seconds > 0:
             self._timer = threading.Timer(
-                self.config.interval_seconds,
-                self._on_timer_expired
+                self.config.interval_seconds, self._on_timer_expired
             )
             self._timer.daemon = True
             self._timer.start()
@@ -457,9 +495,9 @@ class CallsignIdentifier:
 
 
 # Convenience function for quick callsign ID generation
-def generate_cw_id(callsign: str, wpm: int = 20,
-                   frequency: float = 700.0,
-                   sample_rate: float = 48000.0) -> np.ndarray:
+def generate_cw_id(
+    callsign: str, wpm: int = 20, frequency: float = 700.0, sample_rate: float = 48000.0
+) -> np.ndarray:
     """
     Generate a CW callsign identification.
 
@@ -559,10 +597,7 @@ def generate_tx_id(
     """
     # Generate CW audio at 48kHz
     audio = generate_cw_id(
-        callsign,
-        wpm=wpm,
-        frequency=tone_frequency,
-        sample_rate=48000.0
+        callsign, wpm=wpm, frequency=tone_frequency, sample_rate=48000.0
     )
 
     # Convert to FM I/Q
@@ -570,18 +605,18 @@ def generate_tx_id(
         audio,
         audio_sample_rate=48000.0,
         rf_sample_rate=rf_sample_rate,
-        deviation_hz=fm_deviation
+        deviation_hz=fm_deviation,
     )
 
     return iq
 
 
 __all__ = [
-    'IdentificationMode',
-    'CallsignConfig',
-    'CallsignIdentifier',
-    'MorseEncoder',
-    'generate_cw_id',
-    'audio_to_fm_iq',
-    'generate_tx_id',
+    "IdentificationMode",
+    "CallsignConfig",
+    "CallsignIdentifier",
+    "MorseEncoder",
+    "generate_cw_id",
+    "audio_to_fm_iq",
+    "generate_tx_id",
 ]

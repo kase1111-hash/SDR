@@ -4,8 +4,8 @@ Protocol decoders and encoders - Signal protocol identification, decoding, and e
 
 from .base import ProtocolDecoder
 from .detector import ProtocolDetector
-from .encoder import ProtocolEncoder, EncoderConfig, ModulationType
-from .encoders import RTTYEncoder, MorseEncoder, ASCIIEncoder, PSK31Encoder
+from .encoder import EncoderConfig, ModulationType, ProtocolEncoder
+from .encoders import ASCIIEncoder, MorseEncoder, PSK31Encoder, RTTYEncoder
 
 __all__ = [
     "ProtocolDecoder",

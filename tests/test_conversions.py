@@ -1,17 +1,18 @@
 """Tests for conversion utilities."""
 
-import pytest
 import numpy as np
+import pytest
+
 from sdr_module.utils.conversions import (
-    db_to_linear,
-    linear_to_db,
-    dbm_to_watts,
-    watts_to_dbm,
-    dbm_to_dbv,
-    freq_to_str,
-    str_to_freq,
-    sample_rate_to_str,
     bandwidth_to_str,
+    db_to_linear,
+    dbm_to_dbv,
+    dbm_to_watts,
+    freq_to_str,
+    linear_to_db,
+    sample_rate_to_str,
+    str_to_freq,
+    watts_to_dbm,
 )
 
 

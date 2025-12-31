@@ -1,20 +1,21 @@
 """Tests for I/Q sample utilities."""
 
+import os
+import tempfile
+
 import numpy as np
 import pytest
-import tempfile
-import os
 
 from sdr_module.utils.iq import (
-    iq_to_complex,
-    complex_to_iq,
-    interleaved_to_complex,
-    complex_to_interleaved,
-    load_iq_file,
-    save_iq_file,
     apply_dc_offset_correction,
     apply_iq_imbalance_correction,
+    complex_to_interleaved,
+    complex_to_iq,
     estimate_iq_imbalance,
+    interleaved_to_complex,
+    iq_to_complex,
+    load_iq_file,
+    save_iq_file,
 )
 
 
@@ -28,7 +29,7 @@ class TestIQToComplex:
 
         result = iq_to_complex(i, q)
 
-        expected = np.array([1+0j, 0+1j, -1+0j], dtype=np.complex64)
+        expected = np.array([1 + 0j, 0 + 1j, -1 + 0j], dtype=np.complex64)
         np.testing.assert_array_almost_equal(result, expected)
 
     def test_integer_input(self):
@@ -57,7 +58,7 @@ class TestComplexToIQ:
 
     def test_basic_conversion(self):
         """Test basic complex to I/Q conversion."""
-        samples = np.array([1+2j, 3+4j, 5+6j], dtype=np.complex64)
+        samples = np.array([1 + 2j, 3 + 4j, 5 + 6j], dtype=np.complex64)
 
         i, q = complex_to_iq(samples)
 
@@ -66,7 +67,7 @@ class TestComplexToIQ:
 
     def test_output_dtype(self):
         """Test output is float32."""
-        samples = np.array([1+2j], dtype=np.complex128)
+        samples = np.array([1 + 2j], dtype=np.complex128)
 
         i, q = complex_to_iq(samples)
 
@@ -133,7 +134,7 @@ class TestComplexToInterleaved:
 
     def test_uint8_output(self):
         """Test uint8 interleaved output."""
-        samples = np.array([0+0j, 1+0j, -1+0j], dtype=np.complex64)
+        samples = np.array([0 + 0j, 1 + 0j, -1 + 0j], dtype=np.complex64)
 
         result = complex_to_interleaved(samples, np.uint8)
 
@@ -146,7 +147,7 @@ class TestComplexToInterleaved:
 
     def test_int8_output(self):
         """Test int8 interleaved output."""
-        samples = np.array([1+0j, -1+0j], dtype=np.complex64)
+        samples = np.array([1 + 0j, -1 + 0j], dtype=np.complex64)
 
         result = complex_to_interleaved(samples, np.int8)
 
@@ -156,7 +157,7 @@ class TestComplexToInterleaved:
 
     def test_int16_output(self):
         """Test int16 interleaved output."""
-        samples = np.array([1+0j], dtype=np.complex64)
+        samples = np.array([1 + 0j], dtype=np.complex64)
 
         result = complex_to_interleaved(samples, np.int16)
 
@@ -165,7 +166,7 @@ class TestComplexToInterleaved:
 
     def test_float32_output(self):
         """Test float32 interleaved output."""
-        samples = np.array([0.5+0.25j], dtype=np.complex64)
+        samples = np.array([0.5 + 0.25j], dtype=np.complex64)
 
         result = complex_to_interleaved(samples, np.float32)
 
@@ -175,7 +176,7 @@ class TestComplexToInterleaved:
 
     def test_clipping(self):
         """Test values are clipped to valid range."""
-        samples = np.array([2+3j], dtype=np.complex64)  # Out of range
+        samples = np.array([2 + 3j], dtype=np.complex64)  # Out of range
 
         result = complex_to_interleaved(samples, np.float32)
 
@@ -184,7 +185,7 @@ class TestComplexToInterleaved:
 
     def test_roundtrip_uint8(self):
         """Test uint8 roundtrip conversion."""
-        original = np.array([0.5+0.25j, -0.5-0.25j], dtype=np.complex64)
+        original = np.array([0.5 + 0.25j, -0.5 - 0.25j], dtype=np.complex64)
 
         interleaved = complex_to_interleaved(original, np.uint8)
         recovered = interleaved_to_complex(interleaved, np.uint8)
@@ -198,9 +199,9 @@ class TestIQFileOperations:
 
     def test_save_and_load_cf32(self):
         """Test saving and loading cf32 format."""
-        samples = np.array([1+2j, 3+4j, 5+6j], dtype=np.complex64)
+        samples = np.array([1 + 2j, 3 + 4j, 5 + 6j], dtype=np.complex64)
 
-        with tempfile.NamedTemporaryFile(suffix='.cf32', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".cf32", delete=False) as f:
             filepath = f.name
 
         try:
@@ -213,9 +214,9 @@ class TestIQFileOperations:
 
     def test_save_and_load_cu8(self):
         """Test saving and loading cu8 format."""
-        samples = np.array([0.5+0.25j, -0.5-0.25j], dtype=np.complex64)
+        samples = np.array([0.5 + 0.25j, -0.5 - 0.25j], dtype=np.complex64)
 
-        with tempfile.NamedTemporaryFile(suffix='.cu8', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".cu8", delete=False) as f:
             filepath = f.name
 
         try:
@@ -229,9 +230,9 @@ class TestIQFileOperations:
 
     def test_load_with_offset(self):
         """Test loading with sample offset."""
-        samples = np.array([1+1j, 2+2j, 3+3j, 4+4j], dtype=np.complex64)
+        samples = np.array([1 + 1j, 2 + 2j, 3 + 3j, 4 + 4j], dtype=np.complex64)
 
-        with tempfile.NamedTemporaryFile(suffix='.cf32', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".cf32", delete=False) as f:
             filepath = f.name
 
         try:
@@ -244,9 +245,9 @@ class TestIQFileOperations:
 
     def test_load_with_count(self):
         """Test loading limited number of samples."""
-        samples = np.array([1+1j, 2+2j, 3+3j, 4+4j], dtype=np.complex64)
+        samples = np.array([1 + 1j, 2 + 2j, 3 + 3j, 4 + 4j], dtype=np.complex64)
 
-        with tempfile.NamedTemporaryFile(suffix='.cf32', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".cf32", delete=False) as f:
             filepath = f.name
 
         try:
@@ -259,7 +260,7 @@ class TestIQFileOperations:
 
     def test_unsupported_load_format(self):
         """Test loading unsupported format raises error."""
-        with tempfile.NamedTemporaryFile(suffix='.xyz', delete=False) as f:
+        with tempfile.NamedTemporaryFile(suffix=".xyz", delete=False) as f:
             filepath = f.name
 
         try:
@@ -270,7 +271,7 @@ class TestIQFileOperations:
 
     def test_unsupported_save_format(self):
         """Test saving unsupported format raises error."""
-        samples = np.array([1+1j], dtype=np.complex64)
+        samples = np.array([1 + 1j], dtype=np.complex64)
 
         with pytest.raises(ValueError, match="Unsupported format"):
             save_iq_file(samples, "/tmp/test.xyz", "xyz")
@@ -305,7 +306,7 @@ class TestIQImbalanceCorrection:
 
     def test_no_imbalance(self):
         """Test no correction needed for balanced signal."""
-        samples = np.exp(1j * np.linspace(0, 10*np.pi, 1000)).astype(np.complex64)
+        samples = np.exp(1j * np.linspace(0, 10 * np.pi, 1000)).astype(np.complex64)
 
         corrected = apply_iq_imbalance_correction(samples, 0.0, 0.0)
 
@@ -314,7 +315,7 @@ class TestIQImbalanceCorrection:
     def test_gain_imbalance_correction(self):
         """Test gain imbalance is corrected."""
         # Create signal with gain imbalance
-        t = np.linspace(0, 10*np.pi, 1000)
+        t = np.linspace(0, 10 * np.pi, 1000)
         i = np.cos(t)
         q = 0.8 * np.sin(t)  # Q has 20% less gain
         samples = (i + 1j * q).astype(np.complex64)
@@ -328,7 +329,7 @@ class TestIQImbalanceCorrection:
 
     def test_phase_imbalance_correction(self):
         """Test phase imbalance correction."""
-        samples = np.array([1+0j, 0+1j, -1+0j, 0-1j], dtype=np.complex64)
+        samples = np.array([1 + 0j, 0 + 1j, -1 + 0j, 0 - 1j], dtype=np.complex64)
 
         # Apply small phase correction
         corrected = apply_iq_imbalance_correction(samples, phase_imbalance=0.1)
@@ -342,7 +343,7 @@ class TestEstimateIQImbalance:
 
     def test_balanced_signal(self):
         """Test balanced signal shows no imbalance."""
-        t = np.linspace(0, 100*np.pi, 10000)
+        t = np.linspace(0, 100 * np.pi, 10000)
         samples = np.exp(1j * t).astype(np.complex64)
 
         gain, phase = estimate_iq_imbalance(samples)
@@ -352,7 +353,7 @@ class TestEstimateIQImbalance:
 
     def test_gain_imbalance_detection(self):
         """Test gain imbalance is detected."""
-        t = np.linspace(0, 100*np.pi, 10000)
+        t = np.linspace(0, 100 * np.pi, 10000)
         i = np.cos(t)
         q = 0.7 * np.sin(t)  # 30% gain reduction
         samples = (i + 1j * q).astype(np.complex64)
@@ -364,8 +365,9 @@ class TestEstimateIQImbalance:
 
     def test_returns_floats(self):
         """Test returns float values."""
-        samples = np.random.randn(100).astype(np.complex64) + \
-                  1j * np.random.randn(100).astype(np.complex64)
+        samples = np.random.randn(100).astype(np.complex64) + 1j * np.random.randn(
+            100
+        ).astype(np.complex64)
 
         gain, phase = estimate_iq_imbalance(samples)
 

@@ -34,16 +34,16 @@ from .core.sample_buffer import SampleBuffer
 
 # Plugin system
 from .plugins import (
-    PluginManager,
-    PluginRegistry,
-    Plugin,
-    PluginMetadata,
-    PluginType,
-    PluginState,
-    ProtocolPlugin,
     DemodulatorPlugin,
     DevicePlugin,
+    Plugin,
+    PluginManager,
+    PluginMetadata,
+    PluginRegistry,
+    PluginState,
+    PluginType,
     ProcessorPlugin,
+    ProtocolPlugin,
 )
 
 __all__ = [

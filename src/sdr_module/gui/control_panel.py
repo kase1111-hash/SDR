@@ -11,23 +11,31 @@ Provides controls for:
 
 from __future__ import annotations
 
-
 try:
-    from PyQt6.QtWidgets import (
-        QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-        QLabel, QSlider, QComboBox, QGroupBox,
-        QDoubleSpinBox, QPushButton, QCheckBox
-    )
     from PyQt6.QtCore import Qt, pyqtSignal
+    from PyQt6.QtWidgets import (
+        QCheckBox,
+        QComboBox,
+        QDoubleSpinBox,
+        QGridLayout,
+        QGroupBox,
+        QHBoxLayout,
+        QLabel,
+        QPushButton,
+        QSlider,
+        QVBoxLayout,
+        QWidget,
+    )
+
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
 
 from ..core.frequency_manager import (
-    get_frequency_manager,
-    LicenseClass,
-    TX_POWER_WARNING,
     POWER_HEADROOM_FACTOR,
+    TX_POWER_WARNING,
+    LicenseClass,
+    get_frequency_manager,
 )
 
 
@@ -207,10 +215,19 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         bw_layout = QHBoxLayout(bw_group)
 
         self._bw_combo = QComboBox()
-        self._bw_combo.addItems([
-            "10 kHz", "25 kHz", "50 kHz", "100 kHz", "200 kHz",
-            "500 kHz", "1 MHz", "2 MHz", "2.4 MHz"
-        ])
+        self._bw_combo.addItems(
+            [
+                "10 kHz",
+                "25 kHz",
+                "50 kHz",
+                "100 kHz",
+                "200 kHz",
+                "500 kHz",
+                "1 MHz",
+                "2 MHz",
+                "2.4 MHz",
+            ]
+        )
         self._bw_combo.setCurrentText("200 kHz")
         self._bw_combo.currentTextChanged.connect(self._on_bandwidth_changed)
         bw_layout.addWidget(self._bw_combo)
@@ -222,9 +239,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         demod_layout = QVBoxLayout(demod_group)
 
         self._demod_combo = QComboBox()
-        self._demod_combo.addItems([
-            "None (I/Q)", "AM", "FM", "USB", "LSB", "CW"
-        ])
+        self._demod_combo.addItems(["None (I/Q)", "AM", "FM", "USB", "LSB", "CW"])
         self._demod_combo.currentTextChanged.connect(self._on_demod_changed)
         demod_layout.addWidget(self._demod_combo)
 
@@ -298,12 +313,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         lic_sel_layout = QHBoxLayout()
         lic_sel_layout.addWidget(QLabel("Class:"))
         self._license_combo = QComboBox()
-        self._license_combo.addItems([
-            "None (License-free only)",
-            "Technician",
-            "General",
-            "Amateur Extra"
-        ])
+        self._license_combo.addItems(
+            ["None (License-free only)", "Technician", "General", "Amateur Extra"]
+        )
         self._license_combo.currentIndexChanged.connect(self._on_license_changed)
         lic_sel_layout.addWidget(self._license_combo)
         license_layout.addLayout(lic_sel_layout)
@@ -316,7 +328,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
         # Power headroom info
         headroom_pct = int((POWER_HEADROOM_FACTOR - 1) * 100)
-        headroom_label = QLabel(f"Power limits allow +{headroom_pct}% headroom for losses")
+        headroom_label = QLabel(
+            f"Power limits allow +{headroom_pct}% headroom for losses"
+        )
         headroom_label.setStyleSheet("color: #68a; font-size: 9px;")
         license_layout.addWidget(headroom_label)
 
@@ -431,7 +445,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         preset = fm.get_preset_by_name(preset_name)
         if preset:
             # Check if TX is allowed (includes license check)
-            allowed, reason = fm.is_tx_allowed(preset.frequency_hz, preset.bandwidth_hz, preset.mode)
+            allowed, reason = fm.is_tx_allowed(
+                preset.frequency_hz, preset.bandwidth_hz, preset.mode
+            )
 
             # Format frequency
             freq_mhz = preset.frequency_hz / 1e6
@@ -443,7 +459,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             if allowed:
                 # Check for power limit (legal and effective with headroom)
                 legal_limit = fm.get_power_limit(preset.frequency_hz, preset.mode)
-                effective_limit = fm.get_effective_power_limit(preset.frequency_hz, preset.mode)
+                effective_limit = fm.get_effective_power_limit(
+                    preset.frequency_hz, preset.mode
+                )
                 if legal_limit:
                     info += f"✓ TX allowed (legal: {legal_limit:.0f}W, max: {effective_limit:.0f}W)"
                 else:
@@ -485,9 +503,13 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
             # Set demodulation mode
             mode_map = {
-                "FM": "FM", "WFM": "FM", "AM": "AM",
-                "USB": "USB", "LSB": "LSB", "CW": "CW",
-                "RAW": "None (I/Q)"
+                "FM": "FM",
+                "WFM": "FM",
+                "AM": "AM",
+                "USB": "USB",
+                "LSB": "LSB",
+                "CW": "CW",
+                "RAW": "None (I/Q)",
             }
             if preset.mode in mode_map:
                 mode = mode_map[preset.mode]
@@ -501,7 +523,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             0: LicenseClass.NONE,
             1: LicenseClass.TECHNICIAN,
             2: LicenseClass.GENERAL,
-            3: LicenseClass.AMATEUR_EXTRA
+            3: LicenseClass.AMATEUR_EXTRA,
         }
         license_class = license_map.get(index, LicenseClass.NONE)
 
@@ -514,7 +536,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             LicenseClass.NONE: "TX: CB, MURS, FRS only",
             LicenseClass.TECHNICIAN: "TX: VHF/UHF + 10m + limited HF CW",
             LicenseClass.GENERAL: "TX: Most HF bands + VHF/UHF",
-            LicenseClass.AMATEUR_EXTRA: "TX: Full amateur privileges"
+            LicenseClass.AMATEUR_EXTRA: "TX: Full amateur privileges",
         }
         self._license_info.setText(info_map.get(license_class, ""))
 
@@ -530,7 +552,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             LicenseClass.NONE: 0,
             LicenseClass.TECHNICIAN: 1,
             LicenseClass.GENERAL: 2,
-            LicenseClass.AMATEUR_EXTRA: 3
+            LicenseClass.AMATEUR_EXTRA: 3,
         }
         idx = index_map.get(license_class, 0)
         self._license_combo.setCurrentIndex(idx)

@@ -5,25 +5,24 @@ Handles the complete plugin lifecycle from discovery to unloading,
 with support for multiple plugin directories and hot-reloading.
 """
 
-import sys
 import importlib
 import importlib.util
 import json
 import logging
-from pathlib import Path
-from typing import Dict, List, Optional, Type, Any
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Type
 
 from .base import (
+    PLUGIN_API_VERSION,
     Plugin,
+    PluginLoadError,
     PluginMetadata,
     PluginType,
-    PluginLoadError,
     check_api_compatibility,
-    PLUGIN_API_VERSION,
 )
 from .registry import PluginRegistry
-
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +30,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class PluginSource:
     """Information about a discovered plugin source."""
+
     path: Path
     name: str
     is_package: bool
@@ -42,6 +42,7 @@ class PluginSource:
 @dataclass
 class PluginConfig:
     """Configuration for plugin manager."""
+
     plugin_dirs: List[Path] = field(default_factory=list)
     auto_enable: bool = True
     strict_mode: bool = False  # Fail on any plugin error
@@ -193,7 +194,9 @@ class PluginManager:
         """
         discovered = []
 
-        dirs_to_search = [Path(path).expanduser().resolve()] if path else self._config.plugin_dirs
+        dirs_to_search = (
+            [Path(path).expanduser().resolve()] if path else self._config.plugin_dirs
+        )
 
         for plugin_dir in dirs_to_search:
             if not plugin_dir.exists():
@@ -208,7 +211,11 @@ class PluginManager:
                         self._sources[source.name] = source
 
                 # Look for single-file plugins
-                elif item.is_file() and item.suffix == ".py" and not item.name.startswith("_"):
+                elif (
+                    item.is_file()
+                    and item.suffix == ".py"
+                    and not item.name.startswith("_")
+                ):
                     source = self._discover_file(item)
                     if source:
                         discovered.append(source)
@@ -328,14 +335,16 @@ class PluginManager:
                 # Load package
                 spec = importlib.util.spec_from_file_location(
                     source.module_name,
-                    source.path / "__init__.py" if (source.path / "__init__.py").exists()
-                    else source.path / "plugin.py"
+                    (
+                        source.path / "__init__.py"
+                        if (source.path / "__init__.py").exists()
+                        else source.path / "plugin.py"
+                    ),
                 )
             else:
                 # Load single file
                 spec = importlib.util.spec_from_file_location(
-                    source.module_name,
-                    source.path
+                    source.module_name, source.path
                 )
 
             if not spec or not spec.loader:
@@ -363,10 +372,12 @@ class PluginManager:
             obj = getattr(module, name)
 
             # Check if it's a class that inherits from Plugin
-            if (isinstance(obj, type) and
-                issubclass(obj, Plugin) and
-                obj is not Plugin and
-                hasattr(obj, "get_metadata")):
+            if (
+                isinstance(obj, type)
+                and issubclass(obj, Plugin)
+                and obj is not Plugin
+                and hasattr(obj, "get_metadata")
+            ):
 
                 # Make sure it's not a base class
                 try:
@@ -449,9 +460,7 @@ class PluginManager:
             self.unload_plugin(name)
 
     def initialize_plugin(
-        self,
-        name: str,
-        config: Optional[Dict[str, Any]] = None
+        self, name: str, config: Optional[Dict[str, Any]] = None
     ) -> Optional[Plugin]:
         """
         Initialize a plugin instance.
@@ -476,8 +485,7 @@ class PluginManager:
         return instance
 
     def initialize_all(
-        self,
-        plugin_type: Optional[PluginType] = None
+        self, plugin_type: Optional[PluginType] = None
     ) -> Dict[str, Plugin]:
         """
         Initialize all loaded plugins.
@@ -529,8 +537,7 @@ class PluginManager:
         return plugins
 
     def list_plugins(
-        self,
-        plugin_type: Optional[PluginType] = None
+        self, plugin_type: Optional[PluginType] = None
     ) -> List[PluginMetadata]:
         """
         List all registered plugins.
@@ -600,10 +607,7 @@ class PluginManager:
         }
 
     def create_plugin_template(
-        self,
-        name: str,
-        plugin_type: PluginType,
-        output_dir: Optional[str] = None
+        self, name: str, plugin_type: PluginType, output_dir: Optional[str] = None
     ) -> Path:
         """
         Create a plugin template.
@@ -704,7 +708,6 @@ class {class_name}Plugin(ProtocolPlugin):
         # Return confidence score 0.0 to 1.0
         return 0.0
 ''',
-
             PluginType.DEMODULATOR: f'''"""
 {name} - Demodulator plugin.
 """
@@ -749,7 +752,6 @@ class {class_name}Plugin(DemodulatorPlugin):
         # Implement demodulation logic here
         return np.abs(samples)
 ''',
-
             PluginType.PROCESSOR: f'''"""
 {name} - Signal processor plugin.
 """

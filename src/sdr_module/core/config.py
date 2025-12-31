@@ -4,22 +4,23 @@ Configuration management for SDR module.
 Handles device configuration, DSP settings, and persistence.
 """
 
-from dataclasses import dataclass, field, asdict
-from typing import Dict, Any, Optional, List
 import json
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
 class DeviceConfig:
     """Configuration for a single SDR device."""
+
     device_type: str = "rtlsdr"  # "rtlsdr" or "hackrf"
     device_index: int = 0
-    frequency: float = 100e6     # 100 MHz default
-    sample_rate: float = 2.4e6   # 2.4 MS/s default
+    frequency: float = 100e6  # 100 MHz default
+    sample_rate: float = 2.4e6  # 2.4 MS/s default
     bandwidth: float = 2.4e6
     gain: float = 30.0
-    gain_mode: str = "manual"    # "auto" or "manual"
+    gain_mode: str = "manual"  # "auto" or "manual"
     bias_tee: bool = False
     amp_enabled: bool = False
     # HackRF specific
@@ -31,12 +32,15 @@ class DeviceConfig:
 @dataclass
 class DualSDRConfig:
     """Configuration for dual-SDR operation."""
-    rtlsdr: DeviceConfig = field(default_factory=lambda: DeviceConfig(device_type="rtlsdr"))
-    hackrf: DeviceConfig = field(default_factory=lambda: DeviceConfig(
-        device_type="hackrf",
-        sample_rate=10e6,
-        bandwidth=10e6
-    ))
+
+    rtlsdr: DeviceConfig = field(
+        default_factory=lambda: DeviceConfig(device_type="rtlsdr")
+    )
+    hackrf: DeviceConfig = field(
+        default_factory=lambda: DeviceConfig(
+            device_type="hackrf", sample_rate=10e6, bandwidth=10e6
+        )
+    )
     # Operation mode
     mode: str = "dual_rx"  # "dual_rx", "full_duplex", "tx_monitor", "wideband_scan"
     # Synchronization
@@ -47,9 +51,12 @@ class DualSDRConfig:
 @dataclass
 class DSPConfig:
     """Configuration for DSP processing."""
+
     fft_size: int = 4096
-    fft_window: str = "hann"  # "hann", "hamming", "blackman", "blackman-harris", "flat-top"
-    fft_overlap: float = 0.5   # 50% overlap
+    fft_window: str = (
+        "hann"  # "hann", "hamming", "blackman", "blackman-harris", "flat-top"
+    )
+    fft_overlap: float = 0.5  # 50% overlap
     averaging_mode: str = "rms"  # "rms", "peak_hold", "min_hold", "linear"
     averaging_count: int = 10
     dc_removal: bool = True
@@ -59,15 +66,17 @@ class DSPConfig:
 @dataclass
 class RecordingConfig:
     """Configuration for recording."""
+
     output_dir: str = "./recordings"
     format: str = "cf32"  # "cu8", "cs8", "cs16", "cf32"
     include_metadata: bool = True  # SigMF metadata
-    max_file_size_mb: int = 1024   # 1 GB default
+    max_file_size_mb: int = 1024  # 1 GB default
 
 
 @dataclass
 class SDRConfig:
     """Main configuration container."""
+
     dual_sdr: DualSDRConfig = field(default_factory=DualSDRConfig)
     dsp: DSPConfig = field(default_factory=DSPConfig)
     recording: RecordingConfig = field(default_factory=RecordingConfig)
@@ -104,13 +113,13 @@ class SDRConfig:
 
     def save(self, path: str) -> None:
         """Save configuration to JSON file."""
-        with open(path, 'w') as f:
+        with open(path, "w") as f:
             json.dump(self.to_dict(), f, indent=2)
 
     @classmethod
     def load(cls, path: str) -> "SDRConfig":
         """Load configuration from JSON file."""
-        with open(path, 'r') as f:
+        with open(path, "r") as f:
             data = json.load(f)
         return cls.from_dict(data)
 
@@ -142,8 +151,8 @@ def create_preset_dual_rx() -> SDRConfig:
     """Preset for dual RX monitoring."""
     config = SDRConfig()
     config.dual_sdr.mode = "dual_rx"
-    config.dual_sdr.rtlsdr.frequency = 433e6   # ISM band
-    config.dual_sdr.hackrf.frequency = 915e6   # ISM band
+    config.dual_sdr.rtlsdr.frequency = 433e6  # ISM band
+    config.dual_sdr.hackrf.frequency = 915e6  # ISM band
     return config
 
 
@@ -151,8 +160,8 @@ def create_preset_full_duplex() -> SDRConfig:
     """Preset for full-duplex transceiver operation."""
     config = SDRConfig()
     config.dual_sdr.mode = "full_duplex"
-    config.dual_sdr.rtlsdr.frequency = 146.52e6   # 2m calling
-    config.dual_sdr.hackrf.frequency = 146.52e6   # TX same freq
+    config.dual_sdr.rtlsdr.frequency = 146.52e6  # 2m calling
+    config.dual_sdr.hackrf.frequency = 146.52e6  # TX same freq
     return config
 
 
@@ -160,10 +169,10 @@ def create_preset_adsb() -> SDRConfig:
     """Preset for ADS-B reception."""
     config = SDRConfig()
     config.dual_sdr.mode = "dual_rx"
-    config.dual_sdr.rtlsdr.frequency = 1090e6     # ADS-B
+    config.dual_sdr.rtlsdr.frequency = 1090e6  # ADS-B
     config.dual_sdr.rtlsdr.sample_rate = 2.4e6
     config.dual_sdr.rtlsdr.gain = 40.0
-    config.dual_sdr.hackrf.frequency = 131.55e6   # ACARS
+    config.dual_sdr.hackrf.frequency = 131.55e6  # ACARS
     return config
 
 

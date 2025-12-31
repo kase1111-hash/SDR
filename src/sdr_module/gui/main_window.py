@@ -7,29 +7,38 @@ Provides the primary window with all panels and controls.
 from __future__ import annotations
 
 import logging
+
 import numpy as np
 
 try:
-    from PyQt6.QtWidgets import (
-        QMainWindow, QWidget, QVBoxLayout,
-        QSplitter, QStatusBar, QToolBar,
-        QLabel, QMessageBox, QFileDialog,
-        QTabWidget, QProgressBar
-    )
-    from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QThread
+    from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
     from PyQt6.QtGui import QAction, QKeySequence
+    from PyQt6.QtWidgets import (
+        QFileDialog,
+        QLabel,
+        QMainWindow,
+        QMessageBox,
+        QProgressBar,
+        QSplitter,
+        QStatusBar,
+        QTabWidget,
+        QToolBar,
+        QVBoxLayout,
+        QWidget,
+    )
+
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
 
-from .spectrum_widget import SpectrumWidget
-from .waterfall_widget import WaterfallWidget
+from .callsign_panel import CallsignPanel
 from .control_panel import ControlPanel
 from .decoder_panel import DecoderPanel
-from .callsign_panel import CallsignPanel
-from .sstv_panel import SSTVPanel
-from .signal_meter_widget import SignalMeterPanel
 from .qrp_panel import QRPPanel
+from .signal_meter_widget import SignalMeterPanel
+from .spectrum_widget import SpectrumWidget
+from .sstv_panel import SSTVPanel
+from .waterfall_widget import WaterfallWidget
 
 logger = logging.getLogger(__name__)
 
@@ -382,8 +391,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Start signal acquisition."""
         if not self._device:
             QMessageBox.warning(
-                self, "No Device",
-                "Please connect to an SDR device first."
+                self, "No Device", "Please connect to an SDR device first."
             )
             return
 
@@ -415,8 +423,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         callsign = self._callsign_panel.get_callsign()
         if not callsign:
             QMessageBox.warning(
-                self, "No Callsign",
-                "Please enter your callsign in the HAM ID panel."
+                self, "No Callsign", "Please enter your callsign in the HAM ID panel."
             )
             return
 
@@ -425,15 +432,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         try:
             from ..dsp.callsign import generate_tx_id
+
             settings = self._callsign_panel.get_settings()
 
             # Generate FM-modulated I/Q samples ready for transmission
             iq_samples = generate_tx_id(
                 callsign,
-                wpm=settings.get('cw_wpm', 20),
-                tone_frequency=settings.get('cw_tone', 700),
+                wpm=settings.get("cw_wpm", 20),
+                tone_frequency=settings.get("cw_tone", 700),
                 rf_sample_rate=2e6,
-                fm_deviation=2500.0  # Narrowband FM for CW
+                fm_deviation=2500.0,  # Narrowband FM for CW
             )
             logger.info(f"Generated TX ID: {len(iq_samples)} I/Q samples")
 
@@ -443,8 +451,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         except Exception as e:
             logger.error(f"Error generating callsign ID: {e}")
             QMessageBox.warning(
-                self, "ID Error",
-                f"Failed to generate callsign ID: {e}"
+                self, "ID Error", f"Failed to generate callsign ID: {e}"
             )
 
     def _transmit_audio(self, iq_samples: np.ndarray, description: str = "audio"):
@@ -455,23 +462,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             iq_samples: Complex I/Q samples to transmit
             description: Description for logging/status
         """
-        from ..devices.hackrf import HackRFDevice
         from ..core.frequency_manager import is_tx_allowed
+        from ..devices.hackrf import HackRFDevice
 
         # Check if we have a TX-capable device
         if self._device is None:
             QMessageBox.warning(
-                self, "No Device",
-                "No SDR device connected. Connect a HackRF for transmission."
+                self,
+                "No Device",
+                "No SDR device connected. Connect a HackRF for transmission.",
             )
             return
 
         # Verify it's a HackRF (TX-capable)
         if not isinstance(self._device, HackRFDevice):
             QMessageBox.warning(
-                self, "TX Not Supported",
+                self,
+                "TX Not Supported",
                 "Connected device does not support transmission.\n"
-                "HackRF One is required for TX operations."
+                "HackRF One is required for TX operations.",
             )
             return
 
@@ -483,8 +492,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         allowed, reason = is_tx_allowed(current_freq, bandwidth)
         if not allowed:
             QMessageBox.critical(
-                self, "TX Blocked",
-                f"Transmission blocked at {current_freq/1e6:.3f} MHz:\n{reason}"
+                self,
+                "TX Blocked",
+                f"Transmission blocked at {current_freq/1e6:.3f} MHz:\n{reason}",
             )
             return
 
@@ -502,7 +512,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._device.set_tx_gain(20)  # Moderate TX power
 
             # Transmit the samples
-            logger.info(f"Starting TX: {len(iq_samples)} samples at {current_freq/1e6:.3f} MHz")
+            logger.info(
+                f"Starting TX: {len(iq_samples)} samples at {current_freq/1e6:.3f} MHz"
+            )
 
             # Use write_samples for one-shot transmission
             success = self._device.write_samples(iq_samples)
@@ -513,16 +525,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             else:
                 logger.error("TX failed")
                 QMessageBox.warning(
-                    self, "TX Failed",
-                    "Failed to transmit. Check device connection."
+                    self, "TX Failed", "Failed to transmit. Check device connection."
                 )
 
         except Exception as e:
             logger.error(f"TX error: {e}")
-            QMessageBox.warning(
-                self, "TX Error",
-                f"Transmission error: {e}"
-            )
+            QMessageBox.warning(self, "TX Error", f"Transmission error: {e}")
         finally:
             self._callsign_panel.set_transmitting(False)
 
@@ -628,8 +636,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _open_recording(self):
         """Open a recording file."""
         filename, _ = QFileDialog.getOpenFileName(
-            self, "Open Recording",
-            "", "I/Q Files (*.raw *.cf32 *.cs16 *.cu8);;WAV Files (*.wav);;All Files (*)"
+            self,
+            "Open Recording",
+            "",
+            "I/Q Files (*.raw *.cf32 *.cs16 *.cu8);;WAV Files (*.wav);;All Files (*)",
         )
         if filename:
             logger.info(f"Opening recording: {filename}")
@@ -638,15 +648,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _save_recording(self):
         """Save the current recording."""
         if not self._samples_buffer:
-            QMessageBox.information(
-                self, "No Data",
-                "No recorded data to save."
-            )
+            QMessageBox.information(self, "No Data", "No recorded data to save.")
             return
 
         filename, _ = QFileDialog.getSaveFileName(
-            self, "Save Recording",
-            "", "Complex Float32 (*.cf32);;Complex Int16 (*.cs16);;WAV (*.wav)"
+            self,
+            "Save Recording",
+            "",
+            "Complex Float32 (*.cf32);;Complex Int16 (*.cs16);;WAV (*.wav)",
         )
         if filename:
             logger.info(f"Saving recording: {filename}")
@@ -655,21 +664,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _show_scanner(self):
         """Show frequency scanner dialog."""
         QMessageBox.information(
-            self, "Scanner",
-            "Frequency scanner will be implemented in a future update."
+            self, "Scanner", "Frequency scanner will be implemented in a future update."
         )
 
     def _show_decoder_config(self):
         """Show decoder configuration dialog."""
         QMessageBox.information(
-            self, "Decoder",
-            "Protocol decoder configuration will be implemented in a future update."
+            self,
+            "Decoder",
+            "Protocol decoder configuration will be implemented in a future update.",
         )
 
     def _show_about(self):
         """Show about dialog."""
         QMessageBox.about(
-            self, "About SDR Module",
+            self,
+            "About SDR Module",
             "<h3>SDR Module</h3>"
             "<p>Version 0.1.0</p>"
             "<p>A Software Defined Radio application for signal visualization, "
@@ -682,7 +692,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "<li>Protocol decoders (POCSAG, FLEX, ADS-B, ACARS, etc.)</li>"
             "<li>I/Q recording and playback</li>"
             "<li>Plugin system for extensions</li>"
-            "</ul>"
+            "</ul>",
         )
 
     def closeEvent(self, event):
@@ -699,6 +709,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _start_demo_mode(self):
         """Start demo mode with synthetic signals."""
         from .device_dialog import MockDevice
+
         self._device = MockDevice()
         self._device_label.setText("Demo Mode")
         self._is_running = True

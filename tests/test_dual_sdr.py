@@ -1,14 +1,14 @@
 """Tests for dual-SDR controller."""
 
-import pytest
+from unittest.mock import Mock, patch
+
 import numpy as np
-from unittest.mock import Mock, MagicMock, patch
+
 from sdr_module.core.dual_sdr import (
     DualSDRController,
-    OperationMode,
     DualSDRState,
+    OperationMode,
 )
-from sdr_module.core.config import SDRConfig
 
 
 class MockRTLSDRDevice:
@@ -142,7 +142,9 @@ class TestDualSDRController:
     @patch("sdr_module.core.device_manager.DeviceManager.get_rtlsdr")
     @patch("sdr_module.core.device_manager.DeviceManager.get_hackrf")
     @patch("sdr_module.core.device_manager.DeviceManager.apply_config")
-    def test_initialize_with_devices(self, mock_apply, mock_get_hackrf, mock_get_rtlsdr, mock_scan):
+    def test_initialize_with_devices(
+        self, mock_apply, mock_get_hackrf, mock_get_rtlsdr, mock_scan
+    ):
         """Test initialization with both devices."""
         mock_rtl = MockRTLSDRDevice()
         mock_hack = MockHackRFDevice()
@@ -369,7 +371,9 @@ class TestDualSDRContextManager:
     @patch("sdr_module.core.device_manager.DeviceManager.get_rtlsdr")
     @patch("sdr_module.core.device_manager.DeviceManager.get_hackrf")
     @patch("sdr_module.core.device_manager.DeviceManager.apply_config")
-    def test_context_manager(self, mock_apply, mock_get_hackrf, mock_get_rtlsdr, mock_scan):
+    def test_context_manager(
+        self, mock_apply, mock_get_hackrf, mock_get_rtlsdr, mock_scan
+    ):
         """Test using controller as context manager."""
         mock_rtl = MockRTLSDRDevice()
         mock_hack = MockHackRFDevice()

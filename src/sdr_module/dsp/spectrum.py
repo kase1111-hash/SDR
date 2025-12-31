@@ -8,14 +8,16 @@ Provides real-time spectrum display capabilities including:
 - Peak detection
 """
 
-import numpy as np
-from typing import Optional, List
-from enum import Enum
 from dataclasses import dataclass
+from enum import Enum
+from typing import List, Optional
+
+import numpy as np
 
 
 class WindowType(Enum):
     """FFT window functions."""
+
     RECTANGULAR = "rectangular"
     HANN = "hann"
     HAMMING = "hamming"
@@ -26,6 +28,7 @@ class WindowType(Enum):
 
 class AveragingMode(Enum):
     """Spectrum averaging modes."""
+
     NONE = "none"
     RMS = "rms"
     PEAK_HOLD = "peak_hold"
@@ -37,20 +40,22 @@ class AveragingMode(Enum):
 @dataclass
 class SpectrumResult:
     """Result of spectrum analysis."""
-    frequencies: np.ndarray    # Frequency bins in Hz
-    power_db: np.ndarray       # Power in dB
-    center_freq: float         # Center frequency in Hz
-    sample_rate: float         # Sample rate in Hz
-    fft_size: int              # FFT size used
-    rbw: float                 # Resolution bandwidth in Hz
+
+    frequencies: np.ndarray  # Frequency bins in Hz
+    power_db: np.ndarray  # Power in dB
+    center_freq: float  # Center frequency in Hz
+    sample_rate: float  # Sample rate in Hz
+    fft_size: int  # FFT size used
+    rbw: float  # Resolution bandwidth in Hz
 
 
 @dataclass
 class Peak:
     """Detected spectral peak."""
-    frequency: float   # Frequency in Hz
-    power_db: float    # Power in dB
-    bin_index: int     # FFT bin index
+
+    frequency: float  # Frequency in Hz
+    power_db: float  # Power in dB
+    bin_index: int  # FFT bin index
 
 
 class SpectrumAnalyzer:
@@ -67,7 +72,7 @@ class SpectrumAnalyzer:
         window: WindowType = WindowType.HANN,
         averaging: AveragingMode = AveragingMode.RMS,
         avg_count: int = 10,
-        overlap: float = 0.5
+        overlap: float = 0.5,
     ):
         """
         Initialize spectrum analyzer.
@@ -133,16 +138,28 @@ class SpectrumAnalyzer:
             # 4-term Blackman-Harris
             n = np.arange(size)
             a0, a1, a2, a3 = 0.35875, 0.48829, 0.14128, 0.01168
-            return (a0 - a1 * np.cos(2 * np.pi * n / size)
-                    + a2 * np.cos(4 * np.pi * n / size)
-                    - a3 * np.cos(6 * np.pi * n / size))
+            return (
+                a0
+                - a1 * np.cos(2 * np.pi * n / size)
+                + a2 * np.cos(4 * np.pi * n / size)
+                - a3 * np.cos(6 * np.pi * n / size)
+            )
         elif window_type == WindowType.FLAT_TOP:
             n = np.arange(size)
-            a0, a1, a2, a3, a4 = 0.21557895, 0.41663158, 0.277263158, 0.083578947, 0.006947368
-            return (a0 - a1 * np.cos(2 * np.pi * n / size)
-                    + a2 * np.cos(4 * np.pi * n / size)
-                    - a3 * np.cos(6 * np.pi * n / size)
-                    + a4 * np.cos(8 * np.pi * n / size))
+            a0, a1, a2, a3, a4 = (
+                0.21557895,
+                0.41663158,
+                0.277263158,
+                0.083578947,
+                0.006947368,
+            )
+            return (
+                a0
+                - a1 * np.cos(2 * np.pi * n / size)
+                + a2 * np.cos(4 * np.pi * n / size)
+                - a3 * np.cos(6 * np.pi * n / size)
+                + a4 * np.cos(8 * np.pi * n / size)
+            )
         else:
             return np.hanning(size)
 
@@ -161,10 +178,7 @@ class SpectrumAnalyzer:
         self._reset_averaging()
 
     def compute_spectrum(
-        self,
-        samples: np.ndarray,
-        center_freq: float = 0.0,
-        sample_rate: float = 1.0
+        self, samples: np.ndarray, center_freq: float = 0.0, sample_rate: float = 1.0
     ) -> SpectrumResult:
         """
         Compute power spectrum from I/Q samples.
@@ -219,9 +233,10 @@ class SpectrumAnalyzer:
         power_db = self._apply_averaging(power_avg)
 
         # Generate frequency axis
-        frequencies = np.fft.fftshift(
-            np.fft.fftfreq(self._fft_size, 1.0 / sample_rate)
-        ) + center_freq
+        frequencies = (
+            np.fft.fftshift(np.fft.fftfreq(self._fft_size, 1.0 / sample_rate))
+            + center_freq
+        )
 
         return SpectrumResult(
             frequencies=frequencies,
@@ -229,7 +244,7 @@ class SpectrumAnalyzer:
             center_freq=center_freq,
             sample_rate=sample_rate,
             fft_size=self._fft_size,
-            rbw=sample_rate / self._fft_size
+            rbw=sample_rate / self._fft_size,
         )
 
     def _apply_averaging(self, power_linear: np.ndarray) -> np.ndarray:
@@ -277,8 +292,10 @@ class SpectrumAnalyzer:
             if self._exp_avg is None:
                 self._exp_avg = power_linear.copy()
             else:
-                self._exp_avg = (self._exp_alpha * power_linear +
-                                 (1 - self._exp_alpha) * self._exp_avg)
+                self._exp_avg = (
+                    self._exp_alpha * power_linear
+                    + (1 - self._exp_alpha) * self._exp_avg
+                )
             return 10 * np.log10(self._exp_avg + 1e-20)
 
         else:
@@ -288,7 +305,7 @@ class SpectrumAnalyzer:
         self,
         result: SpectrumResult,
         threshold_db: float = -60,
-        min_distance_hz: float = 1000
+        min_distance_hz: float = 1000,
     ) -> List[Peak]:
         """
         Find peaks in spectrum.
@@ -310,7 +327,7 @@ class SpectrumAnalyzer:
         # Simple peak detection
         for i in range(1, len(power_db) - 1):
             if power_db[i] > threshold_db:
-                if power_db[i] > power_db[i-1] and power_db[i] > power_db[i+1]:
+                if power_db[i] > power_db[i - 1] and power_db[i] > power_db[i + 1]:
                     # Check minimum distance from existing peaks
                     too_close = False
                     for p in peaks:
@@ -322,11 +339,13 @@ class SpectrumAnalyzer:
                             break
 
                     if not too_close:
-                        peaks.append(Peak(
-                            frequency=frequencies[i],
-                            power_db=power_db[i],
-                            bin_index=i
-                        ))
+                        peaks.append(
+                            Peak(
+                                frequency=frequencies[i],
+                                power_db=power_db[i],
+                                bin_index=i,
+                            )
+                        )
 
         # Sort by power
         peaks.sort(key=lambda p: p.power_db, reverse=True)

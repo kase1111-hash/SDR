@@ -7,55 +7,60 @@ keeping the signal centered in the passband.
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Callable
+from typing import Callable, Optional
+
 import numpy as np
 
 
 class AFCMode(Enum):
     """AFC operating mode."""
-    OFF = "off"                 # AFC disabled
-    HOLD = "hold"               # Hold current correction, don't update
-    SLOW = "slow"               # Slow tracking for stable signals
-    MEDIUM = "medium"           # Medium tracking speed
-    FAST = "fast"               # Fast tracking for drifting signals
+
+    OFF = "off"  # AFC disabled
+    HOLD = "hold"  # Hold current correction, don't update
+    SLOW = "slow"  # Slow tracking for stable signals
+    MEDIUM = "medium"  # Medium tracking speed
+    FAST = "fast"  # Fast tracking for drifting signals
 
 
 class AFCMethod(Enum):
     """Frequency error detection method."""
-    FFT_PEAK = "fft_peak"       # FFT peak detection
-    PHASE_DIFF = "phase_diff"   # Phase difference method
+
+    FFT_PEAK = "fft_peak"  # FFT peak detection
+    PHASE_DIFF = "phase_diff"  # Phase difference method
     CORRELATION = "correlation"  # Cross-correlation method
 
 
 @dataclass
 class AFCStatus:
     """AFC status information."""
-    mode: AFCMode               # Current mode
-    enabled: bool               # AFC is active
-    locked: bool                # AFC is locked to signal
-    frequency_error_hz: float   # Measured frequency error
-    correction_hz: float        # Applied correction
+
+    mode: AFCMode  # Current mode
+    enabled: bool  # AFC is active
+    locked: bool  # AFC is locked to signal
+    frequency_error_hz: float  # Measured frequency error
+    correction_hz: float  # Applied correction
     drift_rate_hz_per_sec: float  # Estimated drift rate
-    signal_present: bool        # Signal detected
+    signal_present: bool  # Signal detected
 
 
 @dataclass
 class AFCConfig:
     """AFC configuration."""
+
     mode: AFCMode = AFCMode.MEDIUM
     method: AFCMethod = AFCMethod.FFT_PEAK
 
     # Loop parameters
-    loop_bandwidth_hz: float = 100.0    # Control loop bandwidth
-    damping_factor: float = 0.707       # Loop damping (0.707 = critically damped)
+    loop_bandwidth_hz: float = 100.0  # Control loop bandwidth
+    damping_factor: float = 0.707  # Loop damping (0.707 = critically damped)
 
     # Limits
     max_correction_hz: float = 50000.0  # Maximum correction range
     max_rate_hz_per_sec: float = 1000.0  # Maximum correction rate
 
     # Detection
-    min_signal_db: float = -60.0        # Minimum signal level for AFC
-    lock_threshold_hz: float = 100.0    # Error threshold for "locked" state
+    min_signal_db: float = -60.0  # Minimum signal level for AFC
+    lock_threshold_hz: float = 100.0  # Error threshold for "locked" state
 
     # FFT parameters (for FFT_PEAK method)
     fft_size: int = 1024
@@ -76,11 +81,7 @@ class AutomaticFrequencyControl:
     - Correction limiting
     """
 
-    def __init__(
-        self,
-        sample_rate: float,
-        config: Optional[AFCConfig] = None
-    ):
+    def __init__(self, sample_rate: float, config: Optional[AFCConfig] = None):
         """
         Initialize AFC.
 
@@ -120,7 +121,7 @@ class AutomaticFrequencyControl:
 
         # Proportional and integral gains
         self._kp = 2 * zeta * omega_n
-        self._ki = omega_n ** 2
+        self._ki = omega_n**2
 
         # Timing factor (normalized to 1 second)
         self._loop_gain = 1.0
@@ -165,11 +166,7 @@ class AutomaticFrequencyControl:
         """
         self._on_correction = callback
 
-    def update(
-        self,
-        samples: np.ndarray,
-        time_delta_ms: float = 10.0
-    ) -> AFCStatus:
+    def update(self, samples: np.ndarray, time_delta_ms: float = 10.0) -> AFCStatus:
         """
         Update AFC with new samples.
 
@@ -314,7 +311,7 @@ class AutomaticFrequencyControl:
 
         # Cross-correlate with previous samples
         n = min(len(samples), len(self._prev_samples), 256)
-        corr = np.correlate(samples[:n], self._prev_samples[:n], mode='full')
+        corr = np.correlate(samples[:n], self._prev_samples[:n], mode="full")
 
         # Find peak of correlation
         peak_idx = np.argmax(np.abs(corr))
@@ -368,7 +365,7 @@ class AutomaticFrequencyControl:
         self._correction_hz = np.clip(
             self._correction_hz,
             -self._config.max_correction_hz,
-            self._config.max_correction_hz
+            self._config.max_correction_hz,
         )
 
     def _get_speed_factor(self) -> float:
@@ -441,7 +438,7 @@ class AutomaticFrequencyControl:
         self._correction_hz = np.clip(
             correction_hz,
             -self._config.max_correction_hz,
-            self._config.max_correction_hz
+            self._config.max_correction_hz,
         )
         self._integrator = correction_hz  # Preset integrator
 

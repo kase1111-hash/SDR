@@ -6,14 +6,16 @@ Supports analog and digital modulation types:
 - ASK/OOK, FSK, PSK (digital)
 """
 
-import numpy as np
-from typing import Tuple
-from enum import Enum
 from abc import ABC, abstractmethod
+from enum import Enum
+from typing import Tuple
+
+import numpy as np
 
 
 class ModulationType(Enum):
     """Modulation types."""
+
     # Analog
     AM = "am"
     FM = "fm"
@@ -180,12 +182,7 @@ class FSKDemodulator(Demodulator):
     Uses quadrature detection to recover frequency shifts.
     """
 
-    def __init__(
-        self,
-        sample_rate: float,
-        symbol_rate: float,
-        deviation: float = 2400
-    ):
+    def __init__(self, sample_rate: float, symbol_rate: float, deviation: float = 2400):
         super().__init__(sample_rate)
         self._symbol_rate = symbol_rate
         self._deviation = deviation
@@ -221,10 +218,7 @@ class PSKDemodulator(Demodulator):
     """
 
     def __init__(
-        self,
-        sample_rate: float,
-        symbol_rate: float,
-        order: int = 2  # 2=BPSK, 4=QPSK
+        self, sample_rate: float, symbol_rate: float, order: int = 2  # 2=BPSK, 4=QPSK
     ):
         super().__init__(sample_rate)
         self._symbol_rate = symbol_rate
@@ -244,7 +238,9 @@ class PSKDemodulator(Demodulator):
             symbols = np.floor((phase + np.pi) / (np.pi / 2)) % 4
         else:
             # General M-PSK
-            symbols = np.floor((phase + np.pi) / (2 * np.pi / self._order)) % self._order
+            symbols = (
+                np.floor((phase + np.pi) / (2 * np.pi / self._order)) % self._order
+            )
 
         return symbols
 
@@ -271,7 +267,7 @@ class GFSKDemodulator(Demodulator):
         symbol_rate: float,
         deviation: float = 0.5,
         bt: float = 0.5,
-        samples_per_symbol: int = 0
+        samples_per_symbol: int = 0,
     ):
         """
         Initialize GFSK demodulator.
@@ -325,7 +321,7 @@ class GFSKDemodulator(Demodulator):
 
         # Gaussian pulse
         alpha = np.sqrt(np.log(2) / 2) / self._bt
-        h = np.sqrt(np.pi) / alpha * np.exp(-(np.pi * t / alpha) ** 2)
+        h = np.sqrt(np.pi) / alpha * np.exp(-((np.pi * t / alpha) ** 2))
 
         # Normalize
         h = h / np.sum(h)
@@ -367,13 +363,15 @@ class GFSKDemodulator(Demodulator):
 
         # Apply matched Gaussian filter
         if len(freq) >= len(self._gaussian_filter):
-            freq_filtered = np.convolve(freq, self._gaussian_filter, mode='same')
+            freq_filtered = np.convolve(freq, self._gaussian_filter, mode="same")
         else:
             freq_filtered = freq
 
         # DC offset removal
         for i, f in enumerate(freq_filtered):
-            self._dc_offset = self._dc_alpha * f + (1 - self._dc_alpha) * self._dc_offset
+            self._dc_offset = (
+                self._dc_alpha * f + (1 - self._dc_alpha) * self._dc_offset
+            )
             freq_filtered[i] = f - self._dc_offset
 
         return freq_filtered.astype(np.float32)
@@ -455,17 +453,21 @@ class GFSKDemodulator(Demodulator):
                 timing_error += error
 
         if n_symbols > 2:
-            timing_error /= (n_symbols - 2)
+            timing_error /= n_symbols - 2
 
         # Update timing offset
         self._timing_offset += self._timing_alpha * timing_error
 
         # Keep offset bounded
-        self._timing_offset = max(-self._sps / 2, min(self._sps / 2, self._timing_offset))
+        self._timing_offset = max(
+            -self._sps / 2, min(self._sps / 2, self._timing_offset)
+        )
 
         return self._timing_offset
 
-    def get_eye_diagram_data(self, samples: np.ndarray, n_symbols: int = 100) -> np.ndarray:
+    def get_eye_diagram_data(
+        self, samples: np.ndarray, n_symbols: int = 100
+    ) -> np.ndarray:
         """
         Get data for eye diagram visualization.
 
@@ -526,8 +528,8 @@ class GFSKDemodulator(Demodulator):
 
         # Compute autocorrelation
         freq_centered = freq - np.mean(freq)
-        autocorr = np.correlate(freq_centered, freq_centered, mode='full')
-        autocorr = autocorr[len(autocorr) // 2:]  # Take positive lags
+        autocorr = np.correlate(freq_centered, freq_centered, mode="full")
+        autocorr = autocorr[len(autocorr) // 2 :]  # Take positive lags
 
         # Find first peak after zero lag (symbol period)
         # Skip first few samples
@@ -574,7 +576,7 @@ class MSKDemodulator(Demodulator):
         sample_rate: float,
         symbol_rate: float,
         coherent: bool = True,
-        samples_per_symbol: int = 0
+        samples_per_symbol: int = 0,
     ):
         """
         Initialize MSK demodulator.
@@ -636,8 +638,8 @@ class MSKDemodulator(Demodulator):
         q_filter = np.sin(np.pi * t / 2)
 
         # Normalize
-        i_filter = i_filter / np.sqrt(np.sum(i_filter ** 2))
-        q_filter = q_filter / np.sqrt(np.sum(q_filter ** 2))
+        i_filter = i_filter / np.sqrt(np.sum(i_filter**2))
+        q_filter = q_filter / np.sqrt(np.sum(q_filter**2))
 
         return i_filter.astype(np.float32), q_filter.astype(np.float32)
 
@@ -694,8 +696,8 @@ class MSKDemodulator(Demodulator):
 
         # Apply matched filters
         if len(i_signal) >= len(self._i_filter):
-            i_filtered = np.convolve(i_signal, self._i_filter, mode='same')
-            q_filtered = np.convolve(q_signal, self._q_filter, mode='same')
+            i_filtered = np.convolve(i_signal, self._i_filter, mode="same")
+            q_filtered = np.convolve(q_signal, self._q_filter, mode="same")
         else:
             i_filtered = i_signal
             q_filtered = q_signal
@@ -742,8 +744,8 @@ class MSKDemodulator(Demodulator):
 
         # Apply matched filters
         if len(i_signal) >= len(self._i_filter):
-            i_filtered = np.convolve(i_signal, self._i_filter, mode='same')
-            q_filtered = np.convolve(q_signal, self._q_filter, mode='same')
+            i_filtered = np.convolve(i_signal, self._i_filter, mode="same")
+            q_filtered = np.convolve(q_signal, self._q_filter, mode="same")
         else:
             i_filtered = i_signal
             q_filtered = q_signal
@@ -838,8 +840,7 @@ class MSKDemodulator(Demodulator):
             self._carrier_phase += self._phase_alpha * avg_error
             # Wrap carrier phase
             self._carrier_phase = np.arctan2(
-                np.sin(self._carrier_phase),
-                np.cos(self._carrier_phase)
+                np.sin(self._carrier_phase), np.cos(self._carrier_phase)
             )
 
         return self._carrier_phase
@@ -871,10 +872,12 @@ class MSKDemodulator(Demodulator):
                 timing_error += error
 
         if n_symbols > 2:
-            timing_error /= (n_symbols - 2)
+            timing_error /= n_symbols - 2
 
         self._timing_offset += self._timing_alpha * timing_error
-        self._timing_offset = max(-self._sps / 2, min(self._sps / 2, self._timing_offset))
+        self._timing_offset = max(
+            -self._sps / 2, min(self._sps / 2, self._timing_offset)
+        )
 
         return self._timing_offset
 
@@ -904,9 +907,13 @@ class MSKDemodulator(Demodulator):
                 i_points.append(point.real)
                 q_points.append(point.imag)
 
-        return np.array(i_points, dtype=np.float32), np.array(q_points, dtype=np.float32)
+        return np.array(i_points, dtype=np.float32), np.array(
+            q_points, dtype=np.float32
+        )
 
-    def get_eye_diagram_data(self, samples: np.ndarray, n_symbols: int = 100) -> np.ndarray:
+    def get_eye_diagram_data(
+        self, samples: np.ndarray, n_symbols: int = 100
+    ) -> np.ndarray:
         """
         Get data for eye diagram.
 
@@ -955,7 +962,7 @@ class QAMDemodulator(Demodulator):
         sample_rate: float,
         symbol_rate: float = 1000.0,
         order: int = 16,
-        normalize: bool = True
+        normalize: bool = True,
     ):
         """
         Initialize QAM demodulator.
@@ -1080,8 +1087,8 @@ class QAMDemodulator(Demodulator):
                 symbols_1 = [j for j in range(self._order) if (j & bit_mask)]
 
                 # Min distance to 0 and 1 constellation points
-                min_dist_0 = np.min(distances[symbols_0]) if symbols_0 else float('inf')
-                min_dist_1 = np.min(distances[symbols_1]) if symbols_1 else float('inf')
+                min_dist_0 = np.min(distances[symbols_0]) if symbols_0 else float("inf")
+                min_dist_1 = np.min(distances[symbols_1]) if symbols_1 else float("inf")
 
                 # LLR = log(P(bit=0)/P(bit=1)) ≈ (d1² - d0²) / (2σ²)
                 # Using σ² = 1 for normalized constellation
@@ -1125,7 +1132,9 @@ class QAMDemodulator(Demodulator):
                 samples = samples / np.sqrt(input_power)
 
         # Find ideal constellation points
-        symbols = self.demodulate(samples * np.sqrt(input_power) if self._normalize else samples)
+        symbols = self.demodulate(
+            samples * np.sqrt(input_power) if self._normalize else samples
+        )
         ideal_points = self._constellation[symbols]
 
         # Calculate error vectors
@@ -1201,19 +1210,61 @@ class QAMDemodulator(Demodulator):
 
 # Morse code lookup table
 MORSE_CODE = {
-    '.-': 'A', '-...': 'B', '-.-.': 'C', '-..': 'D', '.': 'E',
-    '..-.': 'F', '--.': 'G', '....': 'H', '..': 'I', '.---': 'J',
-    '-.-': 'K', '.-..': 'L', '--': 'M', '-.': 'N', '---': 'O',
-    '.--.': 'P', '--.-': 'Q', '.-.': 'R', '...': 'S', '-': 'T',
-    '..-': 'U', '...-': 'V', '.--': 'W', '-..-': 'X', '-.--': 'Y',
-    '--..': 'Z', '-----': '0', '.----': '1', '..---': '2',
-    '...--': '3', '....-': '4', '.....': '5', '-....': '6',
-    '--...': '7', '---..': '8', '----.': '9', '.-.-.-': '.',
-    '--..--': ',', '..--..': '?', '.----.': "'", '-.-.--': '!',
-    '-..-.': '/', '-.--.': '(', '-.--.-': ')', '.-...': '&',
-    '---...': ':', '-.-.-.': ';', '-...-': '=', '.-.-.': '+',
-    '-....-': '-', '..--.-': '_', '.-..-.': '"', '...-..-': '$',
-    '.--.-.': '@', '...---...': 'SOS',
+    ".-": "A",
+    "-...": "B",
+    "-.-.": "C",
+    "-..": "D",
+    ".": "E",
+    "..-.": "F",
+    "--.": "G",
+    "....": "H",
+    "..": "I",
+    ".---": "J",
+    "-.-": "K",
+    ".-..": "L",
+    "--": "M",
+    "-.": "N",
+    "---": "O",
+    ".--.": "P",
+    "--.-": "Q",
+    ".-.": "R",
+    "...": "S",
+    "-": "T",
+    "..-": "U",
+    "...-": "V",
+    ".--": "W",
+    "-..-": "X",
+    "-.--": "Y",
+    "--..": "Z",
+    "-----": "0",
+    ".----": "1",
+    "..---": "2",
+    "...--": "3",
+    "....-": "4",
+    ".....": "5",
+    "-....": "6",
+    "--...": "7",
+    "---..": "8",
+    "----.": "9",
+    ".-.-.-": ".",
+    "--..--": ",",
+    "..--..": "?",
+    ".----.": "'",
+    "-.-.--": "!",
+    "-..-.": "/",
+    "-.--.": "(",
+    "-.--.-": ")",
+    ".-...": "&",
+    "---...": ":",
+    "-.-.-.": ";",
+    "-...-": "=",
+    ".-.-.": "+",
+    "-....-": "-",
+    "..--.-": "_",
+    ".-..-.": '"',
+    "...-..-": "$",
+    ".--.-.": "@",
+    "...---...": "SOS",
 }
 
 
@@ -1238,7 +1289,7 @@ class CWDemodulator(Demodulator):
         sample_rate: float,
         bfo_freq: float = 700.0,
         bandwidth: float = 500.0,
-        wpm: float = 15.0
+        wpm: float = 15.0,
     ):
         """
         Initialize CW demodulator.
@@ -1352,8 +1403,9 @@ class CWDemodulator(Demodulator):
         if peak > 0.01:
             target = 0.5
             desired_gain = target / peak
-            self._agc_gain = self._agc_alpha * desired_gain + \
-                            (1 - self._agc_alpha) * self._agc_gain
+            self._agc_gain = (
+                self._agc_alpha * desired_gain + (1 - self._agc_alpha) * self._agc_gain
+            )
         audio = audio * self._agc_gain
 
         # Clip to prevent overflow
@@ -1429,9 +1481,9 @@ class CWDemodulator(Demodulator):
 
             # Classify as dot or dash
             if duration_sec < self._dash_time * 0.6:
-                element = '.'
+                element = "."
             else:
-                element = '-'
+                element = "-"
 
             elements.append((element, duration_sec))
 
@@ -1460,9 +1512,13 @@ class CWDemodulator(Demodulator):
         for i, (start, end) in enumerate(zip(key_down, key_up)):
             # Check gap before this element
             if i == 0 and self._last_key_time > 0:
-                gap = start / self._sample_rate + (current_time - len(keying) / self._sample_rate) - self._last_key_time
+                gap = (
+                    start / self._sample_rate
+                    + (current_time - len(keying) / self._sample_rate)
+                    - self._last_key_time
+                )
             elif i > 0:
-                gap = (start - key_up[i-1]) / self._sample_rate
+                gap = (start - key_up[i - 1]) / self._sample_rate
             else:
                 gap = 0
 
@@ -1470,13 +1526,13 @@ class CWDemodulator(Demodulator):
             if gap > self._word_gap * 0.6:
                 # Word gap - decode current letter and add space
                 if self._current_letter:
-                    char = MORSE_CODE.get(self._current_letter, '?')
-                    decoded += char + ' '
+                    char = MORSE_CODE.get(self._current_letter, "?")
+                    decoded += char + " "
                     self._current_letter = ""
             elif gap > self._letter_gap * 0.6:
                 # Letter gap - decode current letter
                 if self._current_letter:
-                    char = MORSE_CODE.get(self._current_letter, '?')
+                    char = MORSE_CODE.get(self._current_letter, "?")
                     decoded += char
                     self._current_letter = ""
 
@@ -1485,9 +1541,9 @@ class CWDemodulator(Demodulator):
             duration_sec = duration_samples / self._sample_rate
 
             if duration_sec < self._dash_time * 0.6:
-                self._current_letter += '.'
+                self._current_letter += "."
             else:
-                self._current_letter += '-'
+                self._current_letter += "-"
 
             self._last_key_time = current_time - (len(keying) - end) / self._sample_rate
 
@@ -1537,9 +1593,7 @@ class CWDemodulator(Demodulator):
 
 
 def create_demodulator(
-    mod_type: ModulationType,
-    sample_rate: float,
-    **kwargs
+    mod_type: ModulationType, sample_rate: float, **kwargs
 ) -> Demodulator:
     """
     Factory function to create demodulators.
@@ -1571,8 +1625,16 @@ def create_demodulator(
         return PSKDemodulator(sample_rate, order=order, **kwargs)
     elif mod_type == ModulationType.CW:
         return CWDemodulator(sample_rate, **kwargs)
-    elif mod_type in (ModulationType.QAM16, ModulationType.QAM64, ModulationType.QAM256):
-        order_map = {ModulationType.QAM16: 16, ModulationType.QAM64: 64, ModulationType.QAM256: 256}
+    elif mod_type in (
+        ModulationType.QAM16,
+        ModulationType.QAM64,
+        ModulationType.QAM256,
+    ):
+        order_map = {
+            ModulationType.QAM16: 16,
+            ModulationType.QAM64: 64,
+            ModulationType.QAM256: 256,
+        }
         return QAMDemodulator(sample_rate, order=order_map[mod_type], **kwargs)
     else:
         raise ValueError(f"Unsupported modulation type: {mod_type}")

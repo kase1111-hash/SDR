@@ -9,9 +9,9 @@ This module can also be run directly:
     python -m sdr_module.gui --help    # Show help
 """
 
-import sys
 import argparse
 import logging
+import sys
 
 from .app import SDRApplication
 
@@ -27,48 +27,46 @@ Examples:
     python -m sdr_module.gui --demo       # Demo mode with synthetic signals
     python -m sdr_module.gui -v           # Verbose logging
     python -m sdr_module.gui -f 144.8e6   # Start at specific frequency
-        """
+        """,
     )
 
     parser.add_argument(
-        "--demo", "-d",
+        "--demo",
+        "-d",
         action="store_true",
-        help="Run in demo mode with synthetic signals (no hardware required)"
+        help="Run in demo mode with synthetic signals (no hardware required)",
     )
 
     parser.add_argument(
-        "--frequency", "-f",
+        "--frequency",
+        "-f",
         type=float,
         default=100e6,
-        help="Initial frequency in Hz (default: 100 MHz)"
+        help="Initial frequency in Hz (default: 100 MHz)",
     )
 
     parser.add_argument(
-        "--sample-rate", "-s",
+        "--sample-rate",
+        "-s",
         type=float,
         default=2.4e6,
-        help="Sample rate in Hz (default: 2.4 MHz)"
+        help="Sample rate in Hz (default: 2.4 MHz)",
     )
 
     parser.add_argument(
-        "--gain", "-g",
-        type=float,
-        default=20.0,
-        help="RF gain in dB (default: 20)"
+        "--gain", "-g", type=float, default=20.0, help="RF gain in dB (default: 20)"
     )
 
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="count",
         default=0,
-        help="Increase logging verbosity (-v, -vv, -vvv)"
+        help="Increase logging verbosity (-v, -vv, -vvv)",
     )
 
     parser.add_argument(
-        "--log-file",
-        type=str,
-        default=None,
-        help="Log to file instead of console"
+        "--log-file", type=str, default=None, help="Log to file instead of console"
     )
 
     return parser.parse_args()
@@ -83,16 +81,10 @@ def setup_logging(verbosity: int, log_file: str = None):
 
     if log_file:
         logging.basicConfig(
-            level=level,
-            format=format_str,
-            filename=log_file,
-            filemode='w'
+            level=level, format=format_str, filename=log_file, filemode="w"
         )
     else:
-        logging.basicConfig(
-            level=level,
-            format=format_str
-        )
+        logging.basicConfig(level=level, format=format_str)
 
     # Set third-party loggers to WARNING
     logging.getLogger("PyQt6").setLevel(logging.WARNING)
@@ -120,7 +112,7 @@ def main():
         "frequency": args.frequency,
         "sample_rate": args.sample_rate,
         "gain": args.gain,
-        "demo_mode": args.demo
+        "demo_mode": args.demo,
     }
 
     # Run application

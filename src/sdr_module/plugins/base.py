@@ -8,33 +8,38 @@ and metadata structures for plugin identification.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 import numpy as np
 
 
 class PluginType(Enum):
     """Types of plugins supported by the system."""
-    PROTOCOL = auto()      # Protocol decoder plugin
-    DEMODULATOR = auto()   # Demodulator plugin
-    DEVICE = auto()        # SDR device driver plugin
-    PROCESSOR = auto()     # Signal processor plugin
-    UI_WIDGET = auto()     # UI widget plugin
+
+    PROTOCOL = auto()  # Protocol decoder plugin
+    DEMODULATOR = auto()  # Demodulator plugin
+    DEVICE = auto()  # SDR device driver plugin
+    PROCESSOR = auto()  # Signal processor plugin
+    UI_WIDGET = auto()  # UI widget plugin
 
 
 class PluginState(Enum):
     """Plugin lifecycle states."""
-    DISCOVERED = auto()    # Plugin file found
-    LOADED = auto()        # Plugin module loaded
-    INITIALIZED = auto()   # Plugin instance created
-    ENABLED = auto()       # Plugin active and usable
-    DISABLED = auto()      # Plugin loaded but not active
-    ERROR = auto()         # Plugin failed to load/initialize
+
+    DISCOVERED = auto()  # Plugin file found
+    LOADED = auto()  # Plugin module loaded
+    INITIALIZED = auto()  # Plugin instance created
+    ENABLED = auto()  # Plugin active and usable
+    DISABLED = auto()  # Plugin loaded but not active
+    ERROR = auto()  # Plugin failed to load/initialize
 
 
 class PluginError(Exception):
     """Base exception for plugin-related errors."""
 
-    def __init__(self, message: str, plugin_name: str = "", cause: Optional[Exception] = None):
+    def __init__(
+        self, message: str, plugin_name: str = "", cause: Optional[Exception] = None
+    ):
         super().__init__(message)
         self.plugin_name = plugin_name
         self.cause = cause
@@ -42,16 +47,19 @@ class PluginError(Exception):
 
 class PluginLoadError(PluginError):
     """Raised when a plugin fails to load."""
+
     pass
 
 
 class PluginInitError(PluginError):
     """Raised when a plugin fails to initialize."""
+
     pass
 
 
 class PluginNotFoundError(PluginError):
     """Raised when a requested plugin is not found."""
+
     pass
 
 
@@ -72,6 +80,7 @@ class PluginMetadata:
         homepage: URL to plugin homepage/documentation
         license: License identifier (e.g., "MIT", "GPL-3.0")
     """
+
     name: str
     version: str
     plugin_type: PluginType
@@ -186,7 +195,10 @@ class Plugin(ABC):
         Returns:
             True if enabled successfully
         """
-        if self._state == PluginState.INITIALIZED or self._state == PluginState.DISABLED:
+        if (
+            self._state == PluginState.INITIALIZED
+            or self._state == PluginState.DISABLED
+        ):
             self._state = PluginState.ENABLED
             return True
         return False

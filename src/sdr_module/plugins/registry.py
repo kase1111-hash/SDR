@@ -5,17 +5,16 @@ Provides centralized storage and access to all loaded plugins,
 with support for filtering by type, tags, and capabilities.
 """
 
-from typing import Dict, List, Optional, Type, Callable, Any
-from threading import Lock
 import logging
+from threading import Lock
+from typing import Any, Callable, Dict, List, Optional, Type
 
 from .base import (
     Plugin,
     PluginMetadata,
-    PluginType,
     PluginState,
+    PluginType,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +49,9 @@ class PluginRegistry:
 
             with self._lock:
                 if name in self._plugin_classes:
-                    logger.warning(f"Plugin class '{name}' already registered, replacing")
+                    logger.warning(
+                        f"Plugin class '{name}' already registered, replacing"
+                    )
 
                 self._plugin_classes[name] = plugin_class
                 logger.info(f"Registered plugin class: {name} v{metadata.version}")
@@ -87,9 +88,7 @@ class PluginRegistry:
         return False
 
     def create_instance(
-        self,
-        name: str,
-        config: Optional[Dict[str, Any]] = None
+        self, name: str, config: Optional[Dict[str, Any]] = None
     ) -> Optional[Plugin]:
         """
         Create and initialize a plugin instance.
@@ -137,9 +136,7 @@ class PluginRegistry:
             return self._plugins.get(name)
 
     def get_or_create(
-        self,
-        name: str,
-        config: Optional[Dict[str, Any]] = None
+        self, name: str, config: Optional[Dict[str, Any]] = None
     ) -> Optional[Plugin]:
         """
         Get existing instance or create new one.
@@ -193,7 +190,7 @@ class PluginRegistry:
         self,
         plugin_type: Optional[PluginType] = None,
         state: Optional[PluginState] = None,
-        tag: Optional[str] = None
+        tag: Optional[str] = None,
     ) -> List[PluginMetadata]:
         """
         List registered plugins with optional filtering.
@@ -273,9 +270,11 @@ class PluginRegistry:
             for plugin_class in self._plugin_classes.values():
                 metadata = plugin_class.get_metadata()
 
-                if (query in metadata.name.lower() or
-                    query in metadata.description.lower() or
-                    any(query in tag.lower() for tag in metadata.tags)):
+                if (
+                    query in metadata.name.lower()
+                    or query in metadata.description.lower()
+                    or any(query in tag.lower() for tag in metadata.tags)
+                ):
                     results.append(metadata)
 
         return results

@@ -7,15 +7,17 @@ Provides time-frequency visualization with:
 - Color-coded overlays for detected signals
 """
 
-import numpy as np
-from typing import Optional, List, Dict, Tuple
+import colorsys
 from dataclasses import dataclass, field
 from enum import Enum
-import colorsys
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
 
 
 class ColorMap(Enum):
     """Waterfall color maps."""
+
     VIRIDIS = "viridis"
     PLASMA = "plasma"
     INFERNO = "inferno"
@@ -28,23 +30,25 @@ class ColorMap(Enum):
 @dataclass
 class PacketHighlight:
     """Highlighted packet region on waterfall."""
-    time_start: int         # Start row (time index)
-    time_end: int           # End row (time index)
-    freq_start: int         # Start column (frequency bin)
-    freq_end: int           # End column (frequency bin)
-    protocol: str           # Protocol name
+
+    time_start: int  # Start row (time index)
+    time_end: int  # End row (time index)
+    freq_start: int  # Start column (frequency bin)
+    freq_end: int  # End column (frequency bin)
+    protocol: str  # Protocol name
     color: Tuple[int, int, int, int]  # RGBA color
-    label: str = ""         # Optional label text
-    confidence: float = 1.0 # Detection confidence
+    label: str = ""  # Optional label text
+    confidence: float = 1.0  # Detection confidence
     metadata: Dict = field(default_factory=dict)
 
 
 @dataclass
 class ProtocolColorScheme:
     """Color scheme for protocol highlighting."""
+
     name: str
     color: Tuple[int, int, int]  # RGB
-    alpha: int = 180             # Transparency (0-255)
+    alpha: int = 180  # Transparency (0-255)
     border_color: Tuple[int, int, int] = (255, 255, 255)
     border_width: int = 2
 
@@ -52,47 +56,40 @@ class ProtocolColorScheme:
 # Default protocol color schemes
 PROTOCOL_COLORS: Dict[str, ProtocolColorScheme] = {
     # ISM Band protocols
-    "ook": ProtocolColorScheme("OOK", (255, 165, 0)),      # Orange
-    "ask": ProtocolColorScheme("ASK", (255, 140, 0)),      # Dark orange
-    "fsk": ProtocolColorScheme("FSK", (0, 191, 255)),      # Deep sky blue
-    "gfsk": ProtocolColorScheme("GFSK", (30, 144, 255)),   # Dodger blue
-
+    "ook": ProtocolColorScheme("OOK", (255, 165, 0)),  # Orange
+    "ask": ProtocolColorScheme("ASK", (255, 140, 0)),  # Dark orange
+    "fsk": ProtocolColorScheme("FSK", (0, 191, 255)),  # Deep sky blue
+    "gfsk": ProtocolColorScheme("GFSK", (30, 144, 255)),  # Dodger blue
     # Amateur radio
-    "ax25": ProtocolColorScheme("AX.25", (50, 205, 50)),   # Lime green
-    "aprs": ProtocolColorScheme("APRS", (34, 139, 34)),    # Forest green
-    "ft8": ProtocolColorScheme("FT8", (0, 255, 127)),      # Spring green
-    "wspr": ProtocolColorScheme("WSPR", (0, 250, 154)),    # Medium spring green
-
+    "ax25": ProtocolColorScheme("AX.25", (50, 205, 50)),  # Lime green
+    "aprs": ProtocolColorScheme("APRS", (34, 139, 34)),  # Forest green
+    "ft8": ProtocolColorScheme("FT8", (0, 255, 127)),  # Spring green
+    "wspr": ProtocolColorScheme("WSPR", (0, 250, 154)),  # Medium spring green
     # Aviation
-    "adsb": ProtocolColorScheme("ADS-B", (255, 0, 0)),     # Red
+    "adsb": ProtocolColorScheme("ADS-B", (255, 0, 0)),  # Red
     "acars": ProtocolColorScheme("ACARS", (220, 20, 60)),  # Crimson
-    "vdl2": ProtocolColorScheme("VDL2", (178, 34, 34)),    # Firebrick
-
+    "vdl2": ProtocolColorScheme("VDL2", (178, 34, 34)),  # Firebrick
     # Paging
-    "pocsag": ProtocolColorScheme("POCSAG", (255, 20, 147)), # Deep pink
-    "flex": ProtocolColorScheme("FLEX", (255, 105, 180)),    # Hot pink
-
+    "pocsag": ProtocolColorScheme("POCSAG", (255, 20, 147)),  # Deep pink
+    "flex": ProtocolColorScheme("FLEX", (255, 105, 180)),  # Hot pink
     # Trunking
-    "p25": ProtocolColorScheme("P25", (138, 43, 226)),     # Blue violet
-    "dmr": ProtocolColorScheme("DMR", (148, 0, 211)),      # Dark violet
-    "tetra": ProtocolColorScheme("TETRA", (186, 85, 211)), # Medium orchid
-    "nxdn": ProtocolColorScheme("NXDN", (153, 50, 204)),   # Dark orchid
-
+    "p25": ProtocolColorScheme("P25", (138, 43, 226)),  # Blue violet
+    "dmr": ProtocolColorScheme("DMR", (148, 0, 211)),  # Dark violet
+    "tetra": ProtocolColorScheme("TETRA", (186, 85, 211)),  # Medium orchid
+    "nxdn": ProtocolColorScheme("NXDN", (153, 50, 204)),  # Dark orchid
     # IoT
-    "lora": ProtocolColorScheme("LoRa", (0, 255, 255)),    # Cyan
-    "zigbee": ProtocolColorScheme("Zigbee", (0, 206, 209)), # Dark turquoise
-    "zwave": ProtocolColorScheme("Z-Wave", (64, 224, 208)), # Turquoise
-    "bluetooth": ProtocolColorScheme("Bluetooth", (0, 0, 255)), # Blue
-
+    "lora": ProtocolColorScheme("LoRa", (0, 255, 255)),  # Cyan
+    "zigbee": ProtocolColorScheme("Zigbee", (0, 206, 209)),  # Dark turquoise
+    "zwave": ProtocolColorScheme("Z-Wave", (64, 224, 208)),  # Turquoise
+    "bluetooth": ProtocolColorScheme("Bluetooth", (0, 0, 255)),  # Blue
     # Broadcast
-    "rds": ProtocolColorScheme("RDS", (255, 215, 0)),      # Gold
-    "dab": ProtocolColorScheme("DAB", (255, 223, 0)),      # Golden yellow
-
+    "rds": ProtocolColorScheme("RDS", (255, 215, 0)),  # Gold
+    "dab": ProtocolColorScheme("DAB", (255, 223, 0)),  # Golden yellow
     # Generic
-    "unknown": ProtocolColorScheme("Unknown", (128, 128, 128)), # Gray
-    "analog": ProtocolColorScheme("Analog", (255, 255, 0)),     # Yellow
-    "digital": ProtocolColorScheme("Digital", (0, 255, 0)),     # Green
-    "noise": ProtocolColorScheme("Noise", (64, 64, 64)),        # Dark gray
+    "unknown": ProtocolColorScheme("Unknown", (128, 128, 128)),  # Gray
+    "analog": ProtocolColorScheme("Analog", (255, 255, 0)),  # Yellow
+    "digital": ProtocolColorScheme("Digital", (0, 255, 0)),  # Green
+    "noise": ProtocolColorScheme("Noise", (64, 64, 64)),  # Dark gray
 }
 
 
@@ -110,7 +107,7 @@ class WaterfallDisplay:
         height: int = 512,
         colormap: ColorMap = ColorMap.TURBO,
         min_db: float = -100,
-        max_db: float = -20
+        max_db: float = -20,
     ):
         """
         Initialize waterfall display.
@@ -204,7 +201,7 @@ class WaterfallDisplay:
             power_db = np.interp(
                 np.linspace(0, len(power_db) - 1, self._width),
                 np.arange(len(power_db)),
-                power_db
+                power_db,
             )
 
         # Scroll up (oldest data at top)
@@ -229,7 +226,7 @@ class WaterfallDisplay:
         protocol: str,
         label: str = "",
         confidence: float = 1.0,
-        metadata: Optional[Dict] = None
+        metadata: Optional[Dict] = None,
     ) -> PacketHighlight:
         """
         Add a packet highlight at the current position.
@@ -270,14 +267,14 @@ class WaterfallDisplay:
             color=color,
             label=label,
             confidence=confidence,
-            metadata=metadata or {}
+            metadata=metadata or {},
         )
 
         self._highlights.append(highlight)
 
         # Limit stored highlights
         if len(self._highlights) > self._max_highlights:
-            self._highlights = self._highlights[-self._max_highlights:]
+            self._highlights = self._highlights[-self._max_highlights :]
 
         # Draw highlight on image
         self._draw_highlight(highlight)
@@ -292,7 +289,7 @@ class WaterfallDisplay:
         freq_end_bin: int,
         protocol: str,
         label: str = "",
-        confidence: float = 1.0
+        confidence: float = 1.0,
     ) -> PacketHighlight:
         """
         Add highlight at specific position (in display coordinates).
@@ -319,7 +316,7 @@ class WaterfallDisplay:
             protocol=protocol,
             color=color,
             label=label,
-            confidence=confidence
+            confidence=confidence,
         )
 
         self._highlights.append(highlight)
@@ -336,22 +333,16 @@ class WaterfallDisplay:
         """Get highlights at a specific position."""
         hits = []
         for h in self._highlights:
-            if (h.freq_start <= x <= h.freq_end and
-                h.time_start <= y <= h.time_end):
+            if h.freq_start <= x <= h.freq_end and h.time_start <= y <= h.time_end:
                 hits.append(h)
         return hits
 
     def _get_protocol_color(
-        self,
-        protocol: str,
-        confidence: float = 1.0
+        self, protocol: str, confidence: float = 1.0
     ) -> Tuple[int, int, int, int]:
         """Get RGBA color for protocol."""
         protocol_lower = protocol.lower()
-        scheme = PROTOCOL_COLORS.get(
-            protocol_lower,
-            PROTOCOL_COLORS["unknown"]
-        )
+        scheme = PROTOCOL_COLORS.get(protocol_lower, PROTOCOL_COLORS["unknown"])
 
         # Adjust alpha by confidence
         alpha = int(scheme.alpha * confidence)
@@ -395,9 +386,32 @@ class WaterfallDisplay:
 
             elif colormap == ColorMap.TURBO:
                 # Approximation of turbo
-                r = int((0.135 + 4.243 * t - 14.72 * t**2 + 23.07 * t**3 - 17.66 * t**4 + 5.055 * t**5) * 255)
-                g = int((0.091 + 3.109 * t - 5.437 * t**2 + 3.093 * t**3 - 0.855 * t**4) * 255)
-                b = int((0.107 + 5.637 * t - 19.14 * t**2 + 27.42 * t**3 - 17.66 * t**4 + 4.709 * t**5) * 255)
+                r = int(
+                    (
+                        0.135
+                        + 4.243 * t
+                        - 14.72 * t**2
+                        + 23.07 * t**3
+                        - 17.66 * t**4
+                        + 5.055 * t**5
+                    )
+                    * 255
+                )
+                g = int(
+                    (0.091 + 3.109 * t - 5.437 * t**2 + 3.093 * t**3 - 0.855 * t**4)
+                    * 255
+                )
+                b = int(
+                    (
+                        0.107
+                        + 5.637 * t
+                        - 19.14 * t**2
+                        + 27.42 * t**3
+                        - 17.66 * t**4
+                        + 4.709 * t**5
+                    )
+                    * 255
+                )
                 r, g, b = max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))
 
             else:  # INFERNO, MAGMA, etc - use HSV approximation
@@ -414,8 +428,7 @@ class WaterfallDisplay:
         """Update entire image from data."""
         # Normalize data to 0-255
         normalized = np.clip(
-            (self._data - self._min_db) / (self._max_db - self._min_db),
-            0, 1
+            (self._data - self._min_db) / (self._max_db - self._min_db), 0, 1
         )
         indices = (normalized * 255).astype(np.uint8)
 
@@ -433,8 +446,7 @@ class WaterfallDisplay:
 
         # Update last line
         normalized = np.clip(
-            (self._data[-1] - self._min_db) / (self._max_db - self._min_db),
-            0, 1
+            (self._data[-1] - self._min_db) / (self._max_db - self._min_db), 0, 1
         )
         indices = (normalized * 255).astype(np.uint8)
         self._image[-1] = self._color_lut[indices]
@@ -471,7 +483,7 @@ class WaterfallDisplay:
         for t in range(t1, t2 + 1):
             for f in range(f1, f2 + 1):
                 # Border
-                is_border = (t == t1 or t == t2 or f == f1 or f == f2)
+                is_border = t == t1 or t == t2 or f == f1 or f == f2
                 if is_border:
                     self._image[t, f] = [255, 255, 255, 255]
                 else:
@@ -496,10 +508,7 @@ class WaterfallDisplay:
 
 def get_protocol_color(protocol: str) -> Tuple[int, int, int]:
     """Get RGB color for a protocol."""
-    scheme = PROTOCOL_COLORS.get(
-        protocol.lower(),
-        PROTOCOL_COLORS["unknown"]
-    )
+    scheme = PROTOCOL_COLORS.get(protocol.lower(), PROTOCOL_COLORS["unknown"])
     return scheme.color
 
 
@@ -509,13 +518,9 @@ def list_protocol_colors() -> Dict[str, Tuple[int, int, int]]:
 
 
 def register_protocol_color(
-    protocol: str,
-    color: Tuple[int, int, int],
-    alpha: int = 180
+    protocol: str, color: Tuple[int, int, int], alpha: int = 180
 ) -> None:
     """Register a custom protocol color."""
     PROTOCOL_COLORS[protocol.lower()] = ProtocolColorScheme(
-        name=protocol,
-        color=color,
-        alpha=alpha
+        name=protocol, color=color, alpha=alpha
     )

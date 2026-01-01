@@ -645,19 +645,97 @@ Power limits allow 150% of the legal limit to account for:
 
 ---
 
-## 12. Future Considerations
+## 12. AM/FM Radio Tuner
+
+The software includes a vintage car radio-style AM/FM tuner widget for broadcast radio reception.
+
+### 12.1 Frequency Bands
+
+| Band | Frequency Range | Step Size | Modulation |
+|------|-----------------|-----------|------------|
+| AM | 530 kHz - 1700 kHz | 10 kHz | Amplitude Modulation |
+| FM | 87.5 MHz - 108 MHz | 100/200 kHz | Frequency Modulation |
+
+### 12.2 User Interface Features
 
 | Feature | Description |
 |---------|-------------|
-| Plugin Architecture | Extensible protocol decoder support |
+| **LED Display** | Amber/orange segmented display showing frequency and band |
+| **Tuning Dial** | Analog-style slider with frequency scale markings |
+| **Preset Buttons** | 6 station presets per band (12 total) |
+| **Volume/Tone/Balance** | Classic rotary-style slider controls |
+| **Seek Buttons** | Auto-scan up/down for next station |
+| **AM/FM Selector** | Toggle between bands with visual indicator |
+| **Stereo Indicator** | Green LED when stereo signal detected |
+| **Power/Mute** | Power toggle and mute controls |
+
+### 12.3 Default Presets
+
+**FM Presets (example):**
+
+| Preset | Frequency | Label |
+|--------|-----------|-------|
+| 1 | 101.1 MHz | Rock |
+| 2 | 93.3 MHz | Classic |
+| 3 | 97.1 MHz | Pop |
+| 4 | 104.3 MHz | Jazz |
+| 5 | 88.5 MHz | NPR |
+| 6 | 99.5 MHz | Country |
+
+**AM Presets (example):**
+
+| Preset | Frequency | Label |
+|--------|-----------|-------|
+| 1 | 880 kHz | News |
+| 2 | 1010 kHz | Talk |
+| 3 | 770 kHz | Sports |
+| 4 | 1050 kHz | Weather |
+| 5 | 660 kHz | News2 |
+| 6 | 1260 kHz | Oldies |
+
+### 12.4 Styling
+
+The tuner widget uses a vintage 1970s-80s car radio aesthetic:
+- Dark metallic gradient background
+- Chrome-look bezels and buttons
+- Amber LED-style frequency display with glow effect
+- Red tuning indicator line
+- Metallic slider controls
+
+### 12.5 Integration
+
+```python
+from sdr_module.gui.radio_tuner import RadioTunerWidget, show_radio_tuner
+
+# Launch as standalone window
+tuner = show_radio_tuner(sample_rate=2.4e6)
+
+# Or integrate into existing application
+tuner_widget = RadioTunerWidget(parent=main_window, sample_rate=2.4e6)
+
+# Process samples through tuner
+audio = tuner.process_samples(iq_samples)
+
+# Get current frequency
+freq = tuner.get_frequency()
+band = tuner.get_band()  # RadioBand.AM or RadioBand.FM
+```
+
+---
+
+## 13. Future Considerations
+
+| Feature | Description |
+|---------|-------------|
 | Remote Operation | Network-based SDR control |
 | Database Integration | Signal/protocol signature database |
 | Machine Learning | AI-based signal classification |
 | Multi-SDR Support | Multiple receiver operation |
+| Spectral Signature Library | Community-sourced signal database |
 
 ---
 
-## 13. Development Phases
+## 14. Development Phases
 
 ### Phase 1: Core Infrastructure
 - [x] Hardware abstraction layer
@@ -684,9 +762,9 @@ Power limits allow 150% of the legal limit to account for:
 
 ---
 
-## 14. Windows Build & Installation
+## 15. Windows Build & Installation
 
-### 14.1 Prerequisites
+### 15.1 Prerequisites
 
 | Component | Requirement |
 |-----------|-------------|
@@ -694,7 +772,7 @@ Power limits allow 150% of the legal limit to account for:
 | pip | Python package manager |
 | Inno Setup | 6.x (optional, for creating installer) |
 
-### 14.2 Build Files
+### 15.2 Build Files
 
 | File | Purpose |
 |------|---------|
@@ -704,7 +782,7 @@ Power limits allow 150% of the legal limit to account for:
 | `sdr_module.spec` | PyInstaller specification file |
 | `installer.iss` | Inno Setup installer script |
 
-### 14.3 Quick Build (Command Prompt)
+### 15.3 Quick Build (Command Prompt)
 
 ```batch
 REM Basic build
@@ -714,7 +792,7 @@ REM Full clean build with development install
 build_windows.bat --clean --install
 ```
 
-### 14.4 Quick Build (PowerShell)
+### 15.4 Quick Build (PowerShell)
 
 ```powershell
 # Basic build
@@ -724,7 +802,7 @@ build_windows.bat --clean --install
 .\build_windows.ps1 -Clean -Install -CreateInstaller
 ```
 
-### 14.5 Build Options
+### 15.5 Build Options
 
 | Option | Batch | PowerShell | Description |
 |--------|-------|------------|-------------|
@@ -733,7 +811,7 @@ build_windows.bat --clean --install
 | No UPX | `--no-upx` | `-NoUPX` | Disable UPX compression |
 | Installer | N/A | `-CreateInstaller` | Create Windows installer |
 
-### 14.6 Creating the Installer
+### 15.6 Creating the Installer
 
 After building the executable:
 
@@ -746,14 +824,14 @@ Or with PowerShell:
 .\build_windows.ps1 -CreateInstaller
 ```
 
-### 14.7 Output Locations
+### 15.7 Output Locations
 
 | Output | Location |
 |--------|----------|
 | Executable | `dist\sdr-module\sdr-scan.exe` |
 | Installer | `installer_output\SDR-Module-0.1.0-Setup.exe` |
 
-### 14.8 Manual Installation
+### 15.8 Manual Installation
 
 If not using the installer:
 
@@ -763,8 +841,8 @@ If not using the installer:
 
 ---
 
-*Document Version: 4.1*
-*Last Updated: 2025-12-26*
+*Document Version: 4.2*
+*Last Updated: 2026-01-01*
 
 ---
 
@@ -775,7 +853,7 @@ If not using the installer:
 | 1.0 | 2025-12-25 | Initial specification document |
 | 2.0 | 2025-12-25 | Added quantitative RF specs, hardware compatibility matrix, interface specs, physical/environmental specs, compliance section |
 | 3.0 | 2025-12-25 | Tuned for dual-SDR setup (RTL-SDR + HackRF One); added device-specific specs, dual-SDR operation modes, synchronization, use cases, software stack |
-| 3.1 | 2025-12-26 | Added Windows build and installation documentation (Section 14) |
+| 3.1 | 2025-12-26 | Added Windows build and installation documentation (Section 15) |
 | 3.2 | 2025-12-26 | Implemented plugin system architecture; updated development phases to reflect current implementation status |
 | 3.3 | 2025-12-26 | Added advanced protocol decoders: ADS-B, ACARS, FLEX; verified AX.25/APRS, RDS, POCSAG implementations |
 | 3.4 | 2025-12-26 | Implemented Main GUI application with PyQt6: spectrum analyzer, waterfall display, control panel, protocol decoder panel, recording controls, device dialog |
@@ -786,3 +864,4 @@ If not using the installer:
 | 3.9 | 2025-12-26 | Added license profiles (None, Technician, General, Amateur Extra); TX lockouts enforced by license class; license-free bands (CB, MURS, FRS); GUI license selector |
 | 4.0 | 2025-12-26 | Added 150% power headroom for TX limits (accounts for cable/filter losses); dummy load testing warning; shows legal vs effective power limits in GUI |
 | 4.1 | 2025-12-26 | Removed NatLangChain blockchain radio protocol integration |
+| 4.2 | 2026-01-01 | Added AM/FM Radio Tuner documentation (Section 12); vintage car radio-style interface with presets, tuning dial, and volume controls |

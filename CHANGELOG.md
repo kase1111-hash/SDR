@@ -9,9 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Python 3.13 support
+- AM/FM Radio Tuner widget with vintage car radio styling
+  - LED-style frequency display with amber glow effect
+  - Analog tuning dial with frequency scale markings
+  - 6 station presets per band (12 total for AM/FM)
+  - Volume, tone, and balance controls
+  - Seek up/down buttons for station scanning
+  - AM/FM band selector with stereo indicator
+  - Power and mute controls
+- Comprehensive documentation updates for README.md and SPEC_SHEET.md
 
 ### Fixed
 - Test warnings in test_framework.py (PytestReturnNotNoneWarning)
+- Mypy type errors with sensible type checking configuration
 
 ## [0.1.0] - 2024-01-01
 

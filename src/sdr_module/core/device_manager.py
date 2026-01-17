@@ -7,7 +7,7 @@ provides a unified interface for accessing SDR devices.
 
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Type
+from typing import Dict, List, Optional, Type, cast
 
 from ..devices.base import DeviceInfo, SDRDevice
 from ..devices.hackrf import HackRFDevice
@@ -238,7 +238,7 @@ class DeviceManager:
         device = self._devices.get(device_id)
         if device is None:
             device = self.open_device("rtlsdr", index)
-        return device
+        return cast(Optional[RTLSDRDevice], device)
 
     def get_hackrf(self, index: int = 0) -> Optional[HackRFDevice]:
         """Convenience method to get/open HackRF device."""
@@ -246,7 +246,7 @@ class DeviceManager:
         device = self._devices.get(device_id)
         if device is None:
             device = self.open_device("hackrf", index)
-        return device
+        return cast(Optional[HackRFDevice], device)
 
     def has_rtlsdr(self) -> bool:
         """Check if an RTL-SDR device is available."""

@@ -331,22 +331,22 @@ class ConstellationDisplay:
         Returns:
             List of (x1, y1, x2, y2) line segments
         """
-        boundaries = []
+        boundaries: List[Tuple[float, float, float, float]] = []
 
         if self._overlay == ModulationOverlay.BPSK:
             # Vertical line at x=0
-            boundaries.append((0, -1.5, 0, 1.5))
+            boundaries.append((0.0, -1.5, 0.0, 1.5))
 
         elif self._overlay == ModulationOverlay.QPSK:
             # Cross at origin
-            boundaries.append((-1.5, 0, 1.5, 0))  # Horizontal
-            boundaries.append((0, -1.5, 0, 1.5))  # Vertical
+            boundaries.append((-1.5, 0.0, 1.5, 0.0))  # Horizontal
+            boundaries.append((0.0, -1.5, 0.0, 1.5))  # Vertical
 
         elif self._overlay == ModulationOverlay.PSK8:
             # 8 radial lines at 22.5 degree intervals
             for i in range(8):
                 angle = (i + 0.5) * np.pi / 4
-                boundaries.append((0, 0, 1.5 * np.cos(angle), 1.5 * np.sin(angle)))
+                boundaries.append((0.0, 0.0, 1.5 * np.cos(angle), 1.5 * np.sin(angle)))
 
         elif self._overlay == ModulationOverlay.QAM16:
             # Grid lines

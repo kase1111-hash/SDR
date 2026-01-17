@@ -377,15 +377,21 @@ class IQRecorder:
             SampleFormat.FLOAT64: "cf64_le",
         }
 
-        sigmf_meta = {
-            "global": {
-                "core:datatype": format_map.get(self._sample_format, "cf32_le"),
-                "core:sample_rate": self._sample_rate,
-                "core:version": "1.0.0",
-                "core:description": self._metadata.description or "SDR Recording",
-                "core:author": "",
-                "core:recorder": "SDR Module IQRecorder",
-            },
+        global_meta: Dict[str, Any] = {
+            "core:datatype": format_map.get(self._sample_format, "cf32_le"),
+            "core:sample_rate": self._sample_rate,
+            "core:version": "1.0.0",
+            "core:description": self._metadata.description or "SDR Recording",
+            "core:author": "",
+            "core:recorder": "SDR Module IQRecorder",
+        }
+
+        # Add optional fields
+        if self._metadata.hardware:
+            global_meta["core:hw"] = self._metadata.hardware
+
+        sigmf_meta: Dict[str, Any] = {
+            "global": global_meta,
             "captures": [
                 {
                     "core:sample_start": 0,
@@ -395,10 +401,6 @@ class IQRecorder:
             ],
             "annotations": [],
         }
-
-        # Add optional fields
-        if self._metadata.hardware:
-            sigmf_meta["global"]["core:hw"] = self._metadata.hardware
 
         # Write metadata file
         meta_path = self._filepath.with_suffix(".sigmf-meta")
@@ -608,7 +610,7 @@ class IQPlayer:
         return self._center_frequency
 
     @property
-    def sample_format(self) -> SampleFormat:
+    def sample_format(self) -> Optional[SampleFormat]:
         """Get sample format."""
         return self._sample_format
 
@@ -657,6 +659,8 @@ class IQPlayer:
 
     def _read_raw(self, num_samples: int) -> np.ndarray:
         """Read from raw file."""
+        if self._file is None:
+            return np.array([], dtype=np.complex64)
         bytes_per_sample = self._get_bytes_per_sample()
         bytes_to_read = num_samples * bytes_per_sample * 2
 
@@ -709,6 +713,8 @@ class IQPlayer:
 
     def _read_wav(self, num_samples: int) -> np.ndarray:
         """Read from WAV file."""
+        if self._wav_file is None:
+            return np.array([], dtype=np.complex64)
         frames = self._wav_file.readframes(num_samples)
 
         if len(frames) == 0:
@@ -882,6 +888,8 @@ class RecordingSession:
         if self._recorder is None or not self._recorder.is_recording:
             self.start()
 
+        if self._recorder is None:
+            return 0
         return self._recorder.write(samples)
 
     def stop(self) -> Optional[RecordingMetadata]:
@@ -1227,6 +1235,9 @@ class AudioRecorder:
         """
         if not self._recording:
             raise RuntimeError("Not recording")
+
+        if self._wav_file is None:
+            raise RuntimeError("WAV file not open")
 
         # Convert and write
         data = self._convert_samples(samples)
@@ -1619,15 +1630,16 @@ class SignalPlayback:
         self._state = PlaybackState.STOPPED
 
         # Load source
+        self._player: Optional[IQPlayer] = None
         if isinstance(source, (str, Path)):
             self._player = IQPlayer(source)
             self._samples = self._player.read(self._player.total_samples)
             self._sample_rate = self._player.sample_rate
             self._player.close()
+            self._player = None
         else:
             self._samples = np.asarray(source, dtype=np.complex64)
             self._sample_rate = sample_rate or 1.0
-            self._player = None
 
         # Playback state
         self._position = self._config.start_position
@@ -2265,7 +2277,7 @@ class PlaybackScheduler:
                 next_name = name
                 next_time = run_time
 
-        if next_name:
+        if next_name and next_time is not None:
             return (next_name, next_time)
         return None
 

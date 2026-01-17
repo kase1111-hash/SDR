@@ -12,7 +12,7 @@ import logging
 from dataclasses import dataclass
 from enum import Enum
 from threading import Event
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -413,35 +413,36 @@ class DualSDRController:
         """Read samples from HackRF buffer."""
         return self._hackrf_buffer.read(n_samples, timeout)
 
-    def get_status(self) -> dict:
+    def get_status(self) -> Dict[str, Any]:
         """Get comprehensive status of dual-SDR system."""
-        status = {
-            "mode": self._state.mode.value,
-            "rtlsdr": {
-                "connected": self._rtlsdr is not None,
-                "streaming": self._state.rtlsdr_streaming,
-                "frequency_mhz": self._state.rtlsdr_frequency / 1e6,
-                "buffer_fill": self._rtlsdr_buffer.stats.fill_ratio,
-            },
-            "hackrf": {
-                "connected": self._hackrf is not None,
-                "streaming": self._state.hackrf_streaming,
-                "transmitting": self._state.hackrf_transmitting,
-                "frequency_mhz": self._state.hackrf_frequency / 1e6,
-                "buffer_fill": self._hackrf_buffer.stats.fill_ratio,
-            },
+        rtlsdr_status: Dict[str, Any] = {
+            "connected": self._rtlsdr is not None,
+            "streaming": self._state.rtlsdr_streaming,
+            "frequency_mhz": self._state.rtlsdr_frequency / 1e6,
+            "buffer_fill": self._rtlsdr_buffer.stats.fill_ratio,
+        }
+        hackrf_status: Dict[str, Any] = {
+            "connected": self._hackrf is not None,
+            "streaming": self._state.hackrf_streaming,
+            "transmitting": self._state.hackrf_transmitting,
+            "frequency_mhz": self._state.hackrf_frequency / 1e6,
+            "buffer_fill": self._hackrf_buffer.stats.fill_ratio,
         }
 
         # Add device-specific info
         if self._rtlsdr:
-            status["rtlsdr"]["sample_rate"] = self._rtlsdr.state.sample_rate
-            status["rtlsdr"]["gain"] = self._rtlsdr.state.gain
+            rtlsdr_status["sample_rate"] = self._rtlsdr.state.sample_rate
+            rtlsdr_status["gain"] = self._rtlsdr.state.gain
 
         if self._hackrf:
-            status["hackrf"]["sample_rate"] = self._hackrf.state.sample_rate
-            status["hackrf"]["gain"] = self._hackrf.state.gain
+            hackrf_status["sample_rate"] = self._hackrf.state.sample_rate
+            hackrf_status["gain"] = self._hackrf.state.gain
 
-        return status
+        return {
+            "mode": self._state.mode.value,
+            "rtlsdr": rtlsdr_status,
+            "hackrf": hackrf_status,
+        }
 
     def __enter__(self):
         """Context manager entry."""

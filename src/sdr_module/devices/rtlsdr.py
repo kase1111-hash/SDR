@@ -227,7 +227,7 @@ class RTLSDRDevice(SDRDevice):
 
     def set_sample_rate(self, rate_hz: float) -> bool:
         """Set sample rate."""
-        if not self._is_open or self._device is None:
+        if not self._is_open or self._device is None or self._spec is None:
             return False
 
         # Clamp to valid range
@@ -302,6 +302,8 @@ class RTLSDRDevice(SDRDevice):
             """Background thread for receiving samples."""
             try:
                 while not self._stop_event.is_set():
+                    if self._device is None:
+                        break
                     samples = self._device.read_samples(256 * 1024)
                     if self._rx_callback:
                         self._rx_callback(samples)

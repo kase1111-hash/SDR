@@ -9,7 +9,7 @@ Provides various filter types for signal conditioning:
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -2129,7 +2129,7 @@ class NoiseReduction:
 
         Optimal linear filter that minimizes mean square error.
         """
-        output = []
+        output: List[float] = []
         is_complex = np.iscomplexobj(samples)
 
         for i in range(0, len(samples) - self._fft_size + 1, self._hop_size):
@@ -2143,7 +2143,8 @@ class NoiseReduction:
             # Initialize noise PSD if needed
             if self._wiener_noise_psd is None:
                 self._wiener_noise_psd = power.copy()
-            wiener_noise = self._wiener_noise_psd
+            assert self._wiener_noise_psd is not None
+            wiener_noise: np.ndarray = self._wiener_noise_psd
 
             # Update noise estimate (during silence)
             signal_power = np.mean(power)
@@ -2151,9 +2152,7 @@ class NoiseReduction:
 
             if signal_power < noise_power * 1.5:  # Likely noise-only
                 alpha = self._config.wiener_alpha
-                self._wiener_noise_psd = (
-                    alpha * wiener_noise + (1 - alpha) * power
-                )
+                self._wiener_noise_psd = alpha * wiener_noise + (1 - alpha) * power
                 wiener_noise = self._wiener_noise_psd
 
             # Wiener filter gain

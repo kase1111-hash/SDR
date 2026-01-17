@@ -368,12 +368,12 @@ class PluginRegistry:
     def get_stats(self) -> Dict[str, Any]:
         """Get registry statistics."""
         with self._lock:
-            type_counts = {}
+            type_counts: Dict[str, int] = {}
             for plugin_class in self._plugin_classes.values():
                 ptype = plugin_class.get_metadata().plugin_type.name
                 type_counts[ptype] = type_counts.get(ptype, 0) + 1
 
-            state_counts = {}
+            state_counts: Dict[str, int] = {}
             for plugin in self._plugins.values():
                 state = plugin.state.name
                 state_counts[state] = state_counts.get(state, 0) + 1

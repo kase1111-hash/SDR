@@ -10,14 +10,13 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from typing import Callable, List, Optional
+from typing import List, Optional
 
 try:
-    from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+    from PyQt6.QtCore import Qt, pyqtSignal
     from PyQt6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen
     from PyQt6.QtWidgets import (
         QDialog,
-        QFrame,
         QHBoxLayout,
         QLabel,
         QPushButton,

@@ -171,7 +171,7 @@ class HackRFDevice(SDRDevice):
 
     def set_frequency(self, freq_hz: float) -> bool:
         """Set center frequency."""
-        if not self._is_open or self._device is None:
+        if not self._is_open or self._device is None or self._spec is None:
             return False
 
         # Validate range
@@ -190,7 +190,7 @@ class HackRFDevice(SDRDevice):
 
     def set_sample_rate(self, rate_hz: float) -> bool:
         """Set sample rate."""
-        if not self._is_open or self._device is None:
+        if not self._is_open or self._device is None or self._spec is None:
             return False
 
         # Clamp to valid range
@@ -360,7 +360,8 @@ class HackRFDevice(SDRDevice):
                             pass  # Queue full, drop samples
                     return 0
 
-                self._device.start_rx(rx_callback)
+                if self._device is not None:
+                    self._device.start_rx(rx_callback)
             except Exception as e:
                 if not self._stop_event.is_set():
                     logger.error(f"RX thread error: {e}")
@@ -378,7 +379,8 @@ class HackRFDevice(SDRDevice):
 
         self._stop_event.set()
         try:
-            self._device.stop_rx()
+            if self._device is not None:
+                self._device.stop_rx()
         except Exception:
             pass
 
@@ -446,7 +448,8 @@ class HackRFDevice(SDRDevice):
                             hackrf_transfer.buffer[: len(iq)] = iq
                     return 0
 
-                self._device.start_tx(tx_callback)
+                if self._device is not None:
+                    self._device.start_tx(tx_callback)
             except Exception as e:
                 if not self._stop_event.is_set():
                     logger.error(f"TX thread error: {e}")
@@ -464,7 +467,8 @@ class HackRFDevice(SDRDevice):
 
         self._stop_event.set()
         try:
-            self._device.stop_tx()
+            if self._device is not None:
+                self._device.stop_tx()
         except Exception:
             pass
 

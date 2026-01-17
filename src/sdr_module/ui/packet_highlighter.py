@@ -253,10 +253,10 @@ class PacketHighlighter:
         above = power_db > threshold
 
         # Find contiguous regions
-        signals = []
+        signals: List[Tuple[int, int, float]] = []
         in_signal = False
         signal_start = 0
-        peak_power = -200
+        peak_power: float = -200.0
 
         for i in range(len(above)):
             if above[i] and not in_signal:

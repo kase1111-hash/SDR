@@ -113,6 +113,8 @@ class PluginManager:
 
     def _load_plugin_configs(self) -> None:
         """Load plugin configurations from file."""
+        if self._config.config_file is None:
+            return
         try:
             with open(self._config.config_file, "r") as f:
                 self._plugin_configs = json.load(f)
@@ -238,9 +240,10 @@ class PluginManager:
             return None
 
         # Look for metadata
-        metadata_file = path / self.METADATA_FILE
-        if not metadata_file.exists():
-            metadata_file = None
+        possible_metadata = path / self.METADATA_FILE
+        metadata_file: Optional[Path] = (
+            possible_metadata if possible_metadata.exists() else None
+        )
 
         # Derive name from directory
         name = path.name
@@ -325,6 +328,9 @@ class PluginManager:
 
     def _load_module(self, source: PluginSource) -> Optional[Any]:
         """Load a plugin module."""
+        if source.module_name is None:
+            logger.error(f"Module name not set for: {source.name}")
+            return None
         try:
             if source.is_package:
                 # Add parent directory to path

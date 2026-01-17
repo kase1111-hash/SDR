@@ -1,8 +1,5 @@
 """Tests for AM/FM Radio Tuner widget."""
 
-import numpy as np
-import pytest
-
 from sdr_module.gui.radio_tuner import (
     AM_RANGE,
     FM_RANGE,

@@ -85,6 +85,7 @@ class RTTYEncoder(ProtocolEncoder):
         bits = np.array(bits, dtype=np.uint8)
 
         # Modulate using FSK
+        assert self._config.frequency_shift is not None
         mark_freq = self._carrier_freq + self._config.frequency_shift / 2
         space_freq = self._carrier_freq - self._config.frequency_shift / 2
 
@@ -272,6 +273,7 @@ class ASCIIEncoder(ProtocolEncoder):
         bits = np.array(bits, dtype=np.uint8)
 
         # Modulate using FSK
+        assert self._config.frequency_shift is not None
         mark_freq = self._carrier_freq + self._config.frequency_shift / 2
         space_freq = self._carrier_freq - self._config.frequency_shift / 2
 

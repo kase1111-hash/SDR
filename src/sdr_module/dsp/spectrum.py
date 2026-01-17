@@ -318,7 +318,7 @@ class SpectrumAnalyzer:
         Returns:
             List of detected peaks
         """
-        peaks = []
+        peaks: List[Peak] = []
         power_db = result.power_db
         frequencies = result.frequencies
 

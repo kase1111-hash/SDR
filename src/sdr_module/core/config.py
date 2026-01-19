@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 class DeviceConfig:
     """Configuration for a single SDR device."""
 
-    device_type: str = "rtlsdr"  # "rtlsdr" or "hackrf"
+    device_type: str = "rtlsdr"  # "rtlsdr", "hackrf", or "mxk2_keyer"
     device_index: int = 0
     frequency: float = 100e6  # 100 MHz default
     sample_rate: float = 2.4e6  # 2.4 MS/s default
@@ -27,6 +27,25 @@ class DeviceConfig:
     lna_gain: float = 16.0
     vga_gain: float = 20.0
     tx_vga_gain: float = 20.0
+
+
+@dataclass
+class KeyerConfig:
+    """Configuration for CW keyer devices (e.g., MX-K2)."""
+
+    device_type: str = "mxk2_keyer"
+    device_index: int = 0
+    port: str = ""  # Serial port (e.g., "/dev/ttyUSB0" or "COM3")
+    baud_rate: int = 1200  # Default baud rate for MX-K2
+    wpm: int = 20  # Words per minute (5-50)
+    sidetone_freq: int = 700  # Sidetone frequency in Hz (300-1200)
+    sidetone_enabled: bool = True
+    paddle_mode: str = "iambic_b"  # "iambic_a", "iambic_b", "ultimatic", "bug", "straight"
+    paddle_swap: bool = False  # Swap dit/dah paddles
+    weight: int = 50  # Dit/dah weight (25-75, 50 = standard 1:3)
+    ptt_lead_time_ms: int = 50  # PTT lead time before keying
+    ptt_tail_time_ms: int = 100  # PTT hang time after keying
+    auto_space: bool = False  # Automatic inter-character spacing
 
 
 @dataclass
@@ -80,6 +99,7 @@ class SDRConfig:
     dual_sdr: DualSDRConfig = field(default_factory=DualSDRConfig)
     dsp: DSPConfig = field(default_factory=DSPConfig)
     recording: RecordingConfig = field(default_factory=RecordingConfig)
+    keyer: KeyerConfig = field(default_factory=KeyerConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
@@ -108,6 +128,9 @@ class SDRConfig:
 
         if "recording" in data:
             config.recording = RecordingConfig(**data["recording"])
+
+        if "keyer" in data:
+            config.keyer = KeyerConfig(**data["keyer"])
 
         return config
 

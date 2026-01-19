@@ -11,8 +11,9 @@ from typing import Dict, List, Optional, Type, cast
 
 from ..devices.base import DeviceInfo, SDRDevice
 from ..devices.hackrf import HackRFDevice
+from ..devices.mxk2_keyer import MXK2Keyer
 from ..devices.rtlsdr import RTLSDRDevice
-from .config import DeviceConfig
+from .config import DeviceConfig, KeyerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,7 @@ class DeviceManager:
     DEVICE_TYPES: Dict[str, Type[SDRDevice]] = {
         "rtlsdr": RTLSDRDevice,
         "hackrf": HackRFDevice,
+        "mxk2_keyer": MXK2Keyer,
     }
 
     def __init__(self):
@@ -81,6 +83,19 @@ class DeviceManager:
                 logger.info(f"Found HackRF: {info.serial}")
         except Exception as e:
             logger.warning(f"Error scanning HackRF devices: {e}")
+
+        # Scan MX-K2 keyer devices
+        try:
+            keyer_devices = MXK2Keyer.list_devices()
+            for info in keyer_devices:
+                self._detected.append(
+                    DetectedDevice(
+                        info=info, device_class=MXK2Keyer, is_available=True
+                    )
+                )
+                logger.info(f"Found MX-K2 Keyer: {info.serial}")
+        except Exception as e:
+            logger.warning(f"Error scanning MX-K2 keyer devices: {e}")
 
         logger.info(f"Total devices found: {len(self._detected)}")
         return self._detected
@@ -265,6 +280,66 @@ class DeviceManager:
     def has_dual_sdr(self) -> bool:
         """Check if both RTL-SDR and HackRF are available."""
         return self.has_rtlsdr() and self.has_hackrf()
+
+    def has_mxk2_keyer(self) -> bool:
+        """Check if an MX-K2 keyer is available."""
+        for d in self._detected:
+            if d.device_class == MXK2Keyer and d.is_available:
+                return True
+        return False
+
+    def get_mxk2_keyer(self, index: int = 0) -> Optional[MXK2Keyer]:
+        """Convenience method to get/open MX-K2 keyer device."""
+        device_id = f"mxk2_keyer_{index}"
+        device = self._devices.get(device_id)
+        if device is None:
+            device = self.open_device("mxk2_keyer", index)
+        return cast(Optional[MXK2Keyer], device)
+
+    def apply_keyer_config(self, keyer: MXK2Keyer, config: KeyerConfig) -> bool:
+        """
+        Apply keyer-specific configuration.
+
+        Args:
+            keyer: MX-K2 keyer instance
+            config: Keyer configuration to apply
+
+        Returns:
+            True if all settings applied successfully
+        """
+        success = True
+
+        if not keyer.set_wpm(config.wpm):
+            logger.warning(f"Failed to set keyer WPM to {config.wpm}")
+            success = False
+
+        if not keyer.set_sidetone(config.sidetone_freq, config.sidetone_enabled):
+            logger.warning(f"Failed to set sidetone to {config.sidetone_freq}")
+            success = False
+
+        # Map paddle mode string to enum
+        from ..devices.mxk2_keyer import PaddleMode
+
+        paddle_mode_map = {
+            "iambic_a": PaddleMode.IAMBIC_A,
+            "iambic_b": PaddleMode.IAMBIC_B,
+            "ultimatic": PaddleMode.ULTIMATIC,
+            "bug": PaddleMode.BUG,
+            "straight": PaddleMode.STRAIGHT,
+        }
+        paddle_mode = paddle_mode_map.get(config.paddle_mode.lower(), PaddleMode.IAMBIC_B)
+        if not keyer.set_paddle_mode(paddle_mode):
+            logger.warning(f"Failed to set paddle mode to {config.paddle_mode}")
+            success = False
+
+        if not keyer.set_weight(config.weight):
+            logger.warning(f"Failed to set weight to {config.weight}")
+            success = False
+
+        if config.paddle_swap:
+            keyer.swap_paddles()
+
+        return success
 
     @property
     def open_devices(self) -> Dict[str, SDRDevice]:

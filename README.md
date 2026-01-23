@@ -344,6 +344,8 @@ Output: `installer_output/SDR-Module-0.1.0-Setup.exe`
 
 - [SPEC_SHEET.md](SPEC_SHEET.md) - Detailed technical specifications
 - [CHANGELOG.md](CHANGELOG.md) - Version history and release notes
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines
+- [SECURITY.md](SECURITY.md) - Security policy and vulnerability reporting
 - [tools/README_TEXT_ENCODER.md](tools/README_TEXT_ENCODER.md) - Text encoder tool guide
 
 ## Requirements
@@ -376,7 +378,7 @@ MIT License - see [LICENSE](LICENSE) for details.
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request.
+Contributions are welcome! Please read our [Contributing Guidelines](CONTRIBUTING.md) before submitting a Pull Request.
 
 Areas where contributions are appreciated:
 - New protocol decoders
@@ -384,6 +386,8 @@ Areas where contributions are appreciated:
 - GUI improvements
 - Documentation
 - Bug fixes and optimizations
+
+For security issues, please review our [Security Policy](SECURITY.md).
 
 ## Links
 

@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/kase1111-hash/SDR#readme
+    about: Check the README for usage instructions and examples
+  - name: Discussions
+    url: https://github.com/kase1111-hash/SDR/discussions
+    about: Ask questions and discuss ideas with the community
+  - name: Security Issues
+    url: https://github.com/kase1111-hash/SDR/security/advisories/new
+    about: Report security vulnerabilities privately

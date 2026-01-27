@@ -4,12 +4,15 @@ Protocol detector for automatic protocol identification.
 Scans signals and attempts to match against known protocols.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Type
 
 import numpy as np
 
 from .base import DecodedFrame, ProtocolDecoder, ProtocolInfo
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -100,8 +103,8 @@ class ProtocolDetector:
                             decoder=decoder,
                         )
                     )
-            except Exception:
-                pass  # Skip decoders that fail
+            except Exception as e:
+                logger.debug(f"Decoder {name} failed during detection: {e}")
 
         # Sort by confidence
         matches.sort(key=lambda m: m.confidence, reverse=True)

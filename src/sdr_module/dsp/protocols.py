@@ -10,6 +10,7 @@ Supports:
 - ACARS: Aircraft communications
 """
 
+import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -17,6 +18,8 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class ProtocolType(Enum):
@@ -67,8 +70,8 @@ class ProtocolDecoder(ABC):
         for callback in self._callbacks:
             try:
                 callback(message)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Callback {callback.__name__} failed: {e}")
 
     @abstractmethod
     def decode(self, samples: np.ndarray) -> List[DecodedMessage]:

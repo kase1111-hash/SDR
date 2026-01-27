@@ -738,7 +738,6 @@ class IQPlayer:
         # Handle channels
         if n_channels == 2:
             # Stereo: I on left, Q on right
-            len(samples) // 2
             i_samples = samples[0::2]
             q_samples = samples[1::2]
             complex_samples = i_samples + 1j * q_samples

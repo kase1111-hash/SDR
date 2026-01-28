@@ -608,13 +608,25 @@ class MXK2Keyer(SDRDevice):
 
         # Clean text - only valid Morse characters
         valid_chars = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,?/-=")
-        text = text.upper()
-        text = "".join(c for c in text if c in valid_chars)
+        original_text = text.upper()
+        filtered_text = "".join(c for c in original_text if c in valid_chars)
 
-        if self._send_command(MXK2Command.SEND_TEXT, text.encode("ascii")):
+        # Warn user if characters were filtered
+        if filtered_text != original_text:
+            removed = set(original_text) - set(filtered_text)
+            logger.warning(
+                f"Invalid Morse characters removed from text: {removed}. "
+                f"Sending: '{filtered_text}'"
+            )
+
+        if not filtered_text:
+            logger.warning("No valid Morse characters in text after filtering")
+            return False
+
+        if self._send_command(MXK2Command.SEND_TEXT, filtered_text.encode("ascii")):
             self._status.is_keying = True
             self._status.state = KeyerState.KEYING
-            logger.info(f"Sending CW: {text}")
+            logger.info(f"Sending CW: {filtered_text}")
             return True
         return False
 

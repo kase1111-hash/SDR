@@ -12,6 +12,7 @@ Specifications:
 """
 
 import logging
+import queue
 from threading import Thread
 from typing import Callable, List, Optional
 
@@ -117,8 +118,8 @@ class HackRFDevice(SDRDevice):
             serial = "unknown"
             try:
                 serial = self._device.get_serial_number()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not get HackRF serial number: {e}")
 
             self._info = DeviceInfo(
                 name="HackRF One",
@@ -374,7 +375,7 @@ class HackRFDevice(SDRDevice):
                     else:
                         try:
                             self._sample_queue.put_nowait(samples)
-                        except Exception:
+                        except queue.Full:
                             pass  # Queue full, drop samples
                     return 0
 

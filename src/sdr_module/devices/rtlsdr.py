@@ -11,6 +11,7 @@ Specifications:
 """
 
 import logging
+import queue
 from threading import Thread
 from typing import Callable, List, Optional
 
@@ -106,7 +107,10 @@ class RTLSDRDevice(SDRDevice):
             from rtlsdr import RtlSdr
 
             return RtlSdr.get_device_serial(index)
-        except Exception:
+        except ImportError:
+            return None  # Library not installed
+        except Exception as e:
+            logger.debug(f"Could not get serial for RTL-SDR device {index}: {e}")
             return None
 
     @staticmethod
@@ -266,6 +270,12 @@ class RTLSDRDevice(SDRDevice):
         # Find nearest valid gain
         nearest_gain = min(self.VALID_GAINS, key=lambda x: abs(x - gain_db))
 
+        # Warn if requested gain was significantly different from nearest valid
+        if abs(nearest_gain - gain_db) > 0.5:
+            logger.warning(
+                f"Requested gain {gain_db:.1f} dB clamped to nearest valid: {nearest_gain} dB"
+            )
+
         try:
             self._device.gain = nearest_gain
             self._state.gain = nearest_gain
@@ -318,7 +328,7 @@ class RTLSDRDevice(SDRDevice):
                     else:
                         try:
                             self._sample_queue.put_nowait(samples)
-                        except Exception:
+                        except queue.Full:
                             pass  # Queue full, drop samples
             except Exception as e:
                 if not self._stop_event.is_set():

@@ -5,9 +5,12 @@ Handles device configuration, DSP settings, and persistence.
 """
 
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -134,17 +137,55 @@ class SDRConfig:
 
         return config
 
-    def save(self, path: str) -> None:
-        """Save configuration to JSON file."""
-        with open(path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+    def save(self, path: str) -> bool:
+        """Save configuration to JSON file.
+
+        Args:
+            path: File path to save configuration to
+
+        Returns:
+            True if saved successfully, False otherwise
+        """
+        try:
+            with open(path, "w") as f:
+                json.dump(self.to_dict(), f, indent=2)
+            logger.info(f"Configuration saved to {path}")
+            return True
+        except (OSError, IOError) as e:
+            logger.error(f"Failed to save configuration to {path}: {e}")
+            return False
+        except (TypeError, ValueError) as e:
+            logger.error(f"Failed to serialize configuration: {e}")
+            return False
 
     @classmethod
-    def load(cls, path: str) -> "SDRConfig":
-        """Load configuration from JSON file."""
-        with open(path, "r") as f:
-            data = json.load(f)
-        return cls.from_dict(data)
+    def load(cls, path: str) -> Optional["SDRConfig"]:
+        """Load configuration from JSON file.
+
+        Args:
+            path: File path to load configuration from
+
+        Returns:
+            SDRConfig instance or None if loading failed
+        """
+        try:
+            with open(path, "r") as f:
+                data = json.load(f)
+            config = cls.from_dict(data)
+            logger.info(f"Configuration loaded from {path}")
+            return config
+        except FileNotFoundError:
+            logger.warning(f"Configuration file not found: {path}")
+            return None
+        except (OSError, IOError) as e:
+            logger.error(f"Failed to read configuration from {path}: {e}")
+            return None
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in configuration file {path}: {e}")
+            return None
+        except (KeyError, TypeError, ValueError) as e:
+            logger.error(f"Invalid configuration format in {path}: {e}")
+            return None
 
     @classmethod
     def get_default_config_path(cls) -> Path:
@@ -159,10 +200,13 @@ class SDRConfig:
 
     @classmethod
     def load_default(cls) -> "SDRConfig":
-        """Load from default configuration path, or create new."""
+        """Load from default configuration path, or create new if not found or invalid."""
         path = cls.get_default_config_path()
         if path.exists():
-            return cls.load(str(path))
+            config = cls.load(str(path))
+            if config is not None:
+                return config
+            logger.warning("Using default configuration due to load failure")
         return cls()
 
 

@@ -711,12 +711,21 @@ class MXK2Keyer(SDRDevice):
             logger.error(f"Invalid memory slot: {slot}")
             return False
 
-        text = text.upper()[:50]  # Limit message length
-        data = f"{slot}{text}".encode("ascii")
+        # Sanitize text - only valid Morse characters, limit length
+        valid_chars = set("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 .,?/-=")
+        original_text = text.upper()
+        filtered_text = "".join(c for c in original_text if c in valid_chars)[:50]
+
+        if filtered_text != original_text[:50]:
+            removed = set(original_text) - set(filtered_text) - valid_chars
+            if removed:
+                logger.warning(f"Invalid Morse characters removed from memory text: {removed}")
+
+        data = f"{slot}{filtered_text}".encode("ascii")
 
         if self._send_command(MXK2Command.STORE_MEMORY, data):
-            self._config.memory_slots[slot - 1] = text
-            logger.info(f"Stored in memory slot {slot}: {text}")
+            self._config.memory_slots[slot - 1] = filtered_text
+            logger.info(f"Stored in memory slot {slot}: {filtered_text}")
             return True
         return False
 

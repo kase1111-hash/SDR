@@ -35,7 +35,16 @@ class PluginState(Enum):
 
 
 class PluginError(Exception):
-    """Base exception for plugin-related errors."""
+    """
+    Base exception for plugin-related errors.
+
+    All plugin exceptions inherit from this class, allowing callers to catch
+    all plugin errors with a single except clause if desired.
+
+    Attributes:
+        plugin_name: Name of the plugin that caused the error
+        cause: Original exception that caused this error (if any)
+    """
 
     def __init__(
         self, message: str, plugin_name: str = "", cause: Optional[Exception] = None
@@ -44,21 +53,49 @@ class PluginError(Exception):
         self.plugin_name = plugin_name
         self.cause = cause
 
+    def __str__(self) -> str:
+        msg = super().__str__()
+        if self.plugin_name:
+            msg = f"[{self.plugin_name}] {msg}"
+        if self.cause:
+            msg = f"{msg} (caused by: {self.cause})"
+        return msg
+
 
 class PluginLoadError(PluginError):
-    """Raised when a plugin fails to load."""
+    """
+    Raised when a plugin fails to load.
+
+    This typically occurs when:
+    - Plugin file cannot be found or read
+    - Plugin module has syntax errors
+    - Plugin dependencies are missing
+    """
 
     pass
 
 
 class PluginInitError(PluginError):
-    """Raised when a plugin fails to initialize."""
+    """
+    Raised when a plugin fails to initialize.
+
+    This typically occurs when:
+    - Plugin class cannot be instantiated
+    - Plugin's __init__ raises an exception
+    - Plugin configuration is invalid
+    """
 
     pass
 
 
 class PluginNotFoundError(PluginError):
-    """Raised when a requested plugin is not found."""
+    """
+    Raised when a requested plugin is not found.
+
+    This typically occurs when:
+    - Plugin with the given name is not registered
+    - Plugin was unloaded or disabled
+    """
 
     pass
 

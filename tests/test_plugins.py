@@ -62,15 +62,28 @@ class TestPluginErrors:
     def test_plugin_error(self):
         """Test base PluginError."""
         error = PluginError("Test error", plugin_name="test_plugin")
-        assert str(error) == "Test error"
+        assert str(error) == "[test_plugin] Test error"
         assert error.plugin_name == "test_plugin"
         assert error.cause is None
+
+    def test_plugin_error_without_name(self):
+        """Test PluginError without plugin name."""
+        error = PluginError("Test error")
+        assert str(error) == "Test error"
+        assert error.plugin_name == ""
 
     def test_plugin_error_with_cause(self):
         """Test PluginError with cause."""
         cause = ValueError("Original error")
         error = PluginError("Wrapped error", cause=cause)
         assert error.cause is cause
+        assert "caused by" in str(error)
+
+    def test_plugin_error_full_format(self):
+        """Test PluginError with both name and cause."""
+        cause = ValueError("Original error")
+        error = PluginError("Wrapped error", plugin_name="test", cause=cause)
+        assert str(error) == "[test] Wrapped error (caused by: Original error)"
 
     def test_plugin_load_error(self):
         """Test PluginLoadError."""

@@ -9,7 +9,7 @@ Provides automatic detection of:
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 
@@ -36,7 +36,7 @@ class ClassificationResult:
     bandwidth_hz: float
     center_offset_hz: float
     snr_db: float
-    features: dict
+    features: Dict[str, Any]
 
 
 class SignalClassifier:
@@ -92,9 +92,9 @@ class SignalClassifier:
             features=features,
         )
 
-    def _extract_features(self, samples: np.ndarray) -> dict:
+    def _extract_features(self, samples: np.ndarray) -> Dict[str, Any]:
         """Extract statistical features from samples."""
-        features = {}
+        features: Dict[str, Any] = {}
 
         # Basic statistics
         magnitude = np.abs(samples)
@@ -136,7 +136,7 @@ class SignalClassifier:
 
         return features
 
-    def _detect_signal_type(self, features: dict) -> SignalType:
+    def _detect_signal_type(self, features: Dict[str, Any]) -> SignalType:
         """Detect high-level signal type from features."""
         snr = features.get("snr_db", 0)
         flatness = features.get("spectral_flatness", 1.0)
@@ -162,7 +162,7 @@ class SignalClassifier:
         return SignalType.UNKNOWN
 
     def _classify_analog(
-        self, samples: np.ndarray, features: dict
+        self, samples: np.ndarray, features: Dict[str, Any]
     ) -> Optional[ModulationType]:
         """Classify analog modulation type."""
         std_mag = features.get("std_magnitude", 0)
@@ -191,7 +191,7 @@ class SignalClassifier:
         return None
 
     def _classify_digital(
-        self, samples: np.ndarray, features: dict
+        self, samples: np.ndarray, features: Dict[str, Any]
     ) -> Optional[ModulationType]:
         """Classify digital modulation type."""
         # Constellation analysis

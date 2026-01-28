@@ -11,6 +11,7 @@ Specifications:
 """
 
 import logging
+import queue
 from threading import Thread
 from typing import Callable, List, Optional
 
@@ -106,7 +107,10 @@ class RTLSDRDevice(SDRDevice):
             from rtlsdr import RtlSdr
 
             return RtlSdr.get_device_serial(index)
-        except Exception:
+        except ImportError:
+            return None  # Library not installed
+        except Exception as e:
+            logger.debug(f"Could not get serial for RTL-SDR device {index}: {e}")
             return None
 
     @staticmethod
@@ -205,7 +209,15 @@ class RTLSDRDevice(SDRDevice):
 
     def set_frequency(self, freq_hz: float) -> bool:
         """Set center frequency."""
-        if not self._is_open or self._device is None:
+        if not self._is_open or self._device is None or self._spec is None:
+            return False
+
+        # Validate frequency against device specifications
+        if freq_hz < self._spec.freq_min or freq_hz > self._spec.freq_max:
+            logger.error(
+                f"Frequency {freq_hz/1e6:.3f} MHz out of range "
+                f"({self._spec.freq_min/1e6:.3f} - {self._spec.freq_max/1e6:.3f} MHz)"
+            )
             return False
 
         # Check if we need direct sampling for HF
@@ -257,6 +269,12 @@ class RTLSDRDevice(SDRDevice):
 
         # Find nearest valid gain
         nearest_gain = min(self.VALID_GAINS, key=lambda x: abs(x - gain_db))
+
+        # Warn if requested gain was significantly different from nearest valid
+        if abs(nearest_gain - gain_db) > 0.5:
+            logger.warning(
+                f"Requested gain {gain_db:.1f} dB clamped to nearest valid: {nearest_gain} dB"
+            )
 
         try:
             self._device.gain = nearest_gain
@@ -310,7 +328,7 @@ class RTLSDRDevice(SDRDevice):
                     else:
                         try:
                             self._sample_queue.put_nowait(samples)
-                        except Exception:
+                        except queue.Full:
                             pass  # Queue full, drop samples
             except Exception as e:
                 if not self._stop_event.is_set():

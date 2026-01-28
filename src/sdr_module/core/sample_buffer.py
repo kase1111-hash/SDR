@@ -264,6 +264,7 @@ class SampleBuffer:
             self._read_idx = 0
             self._count = 0
             self._not_full.notify_all()
+            self._not_empty.notify_all()  # Wake blocked readers so they can check for shutdown
 
     def reset_stats(self) -> None:
         """Reset buffer statistics."""

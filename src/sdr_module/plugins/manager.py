@@ -391,9 +391,11 @@ class PluginManager:
                     metadata = obj.get_metadata()
                     if metadata and metadata.name:
                         plugin_classes.append(obj)
-                except Exception:
+                except (NotImplementedError, TypeError, AttributeError):
                     # Skip abstract classes that don't implement get_metadata
                     pass
+                except Exception as e:
+                    logger.debug(f"Could not get metadata from {obj}: {e}")
 
         return plugin_classes
 

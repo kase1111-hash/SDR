@@ -12,6 +12,7 @@ Specifications:
 """
 
 import logging
+import queue
 from threading import Thread
 from typing import Callable, List, Optional
 
@@ -117,8 +118,8 @@ class HackRFDevice(SDRDevice):
             serial = "unknown"
             try:
                 serial = self._device.get_serial_number()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not get HackRF serial number: {e}")
 
             self._info = DeviceInfo(
                 name="HackRF One",
@@ -249,11 +250,29 @@ class HackRFDevice(SDRDevice):
             return False
 
         # Split gain between LNA and VGA
-        # LNA: 0, 8, 16, 24, 32, 40 dB
+        # LNA: 0, 8, 16, 24, 32, 40 dB (discrete steps)
         # VGA: 0-62 dB in 2dB steps
-        lna_gain = min(40, max(0, int(gain_db / 3) * 8))
-        remaining = gain_db - lna_gain
-        vga_gain = min(62, max(0, int(remaining / 2) * 2))
+        # Strategy: For best noise figure, maximize LNA first, then use VGA for remainder
+        # For gains up to 40 dB: try to use LNA only if possible, otherwise add VGA
+        # For gains above 40 dB: max LNA (40 dB) + VGA for remainder
+
+        gain_db = max(0, min(102, gain_db))  # Clamp to valid range (LNA max 40 + VGA max 62)
+
+        if gain_db <= 40:
+            # For lower gains, find nearest LNA step and use VGA for fine adjustment
+            lna_gain = min(self.LNA_GAIN_VALUES, key=lambda x: abs(x - gain_db))
+            if lna_gain > gain_db:
+                # LNA alone would be too much, try lower LNA + VGA
+                lower_lna_values = [v for v in self.LNA_GAIN_VALUES if v <= gain_db]
+                lna_gain = max(lower_lna_values) if lower_lna_values else 0
+            vga_gain = int((gain_db - lna_gain) / 2) * 2  # Round to nearest 2 dB
+            vga_gain = max(0, min(62, vga_gain))
+        else:
+            # For higher gains, max out LNA and use VGA
+            lna_gain = 40
+            remaining = gain_db - lna_gain
+            vga_gain = int(remaining / 2) * 2  # Round to nearest 2 dB
+            vga_gain = max(0, min(62, vga_gain))
 
         try:
             self._device.set_lna_gain(lna_gain)
@@ -356,7 +375,7 @@ class HackRFDevice(SDRDevice):
                     else:
                         try:
                             self._sample_queue.put_nowait(samples)
-                        except Exception:
+                        except queue.Full:
                             pass  # Queue full, drop samples
                     return 0
 
@@ -381,8 +400,8 @@ class HackRFDevice(SDRDevice):
         try:
             if self._device is not None:
                 self._device.stop_rx()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error stopping RX: {e}")
 
         if self._rx_thread:
             self._rx_thread.join(timeout=2.0)
@@ -469,8 +488,8 @@ class HackRFDevice(SDRDevice):
         try:
             if self._device is not None:
                 self._device.stop_tx()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Error stopping TX: {e}")
 
         if self._tx_thread:
             self._tx_thread.join(timeout=2.0)

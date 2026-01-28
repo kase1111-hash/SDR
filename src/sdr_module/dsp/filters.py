@@ -9,7 +9,7 @@ Provides various filter types for signal conditioning:
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -207,7 +207,7 @@ class FilterBank:
             sample_rate: Sample rate in Hz
         """
         self._sample_rate = sample_rate
-        self._filters: dict[str, FIRFilter] = {}
+        self._filters: Dict[str, FIRFilter] = {}
 
     def add_filter(self, name: str, filter_obj: FIRFilter) -> None:
         """Add a filter to the bank."""
@@ -1793,7 +1793,7 @@ class Squelch:
 
         return samples * gate, self.is_open
 
-    def get_status(self) -> dict:
+    def get_status(self) -> Dict[str, Any]:
         """Get squelch status information."""
         return {
             "state": self._state.value,
@@ -2346,7 +2346,7 @@ class NoiseReduction:
         """Get estimated noise spectrum."""
         return self._noise_spectrum.copy() if self._noise_spectrum is not None else None
 
-    def get_stats(self) -> dict:
+    def get_stats(self) -> Dict[str, Any]:
         """Get noise reduction statistics."""
         return {
             "method": self._config.method.value,

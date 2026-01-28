@@ -630,7 +630,8 @@ class AX25Decoder(ProtocolDecoder):
         if info_start < len(payload):
             try:
                 info = payload[info_start:].decode("ascii", errors="replace")
-            except Exception:
+            except (UnicodeDecodeError, AttributeError) as e:
+                logger.debug(f"Failed to decode AX.25 info field: {e}")
                 info = ""
 
         return AX25Frame(

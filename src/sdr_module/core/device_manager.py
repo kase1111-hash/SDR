@@ -159,8 +159,8 @@ class DeviceManager:
             # Clean up device on open failure to prevent resource leak
             try:
                 device.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Error during device cleanup after open failure: {e}")
             return None
 
         # Apply configuration if provided

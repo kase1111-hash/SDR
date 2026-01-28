@@ -332,8 +332,8 @@ class MXK2Keyer(SDRDevice):
             if self._serial is not None:
                 try:
                     self._serial.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Error closing serial port during cleanup: {e}")
                 self._serial = None
             self._is_open = False
             self._status.is_connected = False

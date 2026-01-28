@@ -1271,26 +1271,30 @@ class FrequencyManager:
         Returns:
             Tuple of (allowed, reason_if_blocked)
         """
-        # Check center frequency and band edges
-        freqs_to_check = [frequency_hz]
-        if bandwidth_hz > 0:
-            freqs_to_check.extend(
-                [frequency_hz - bandwidth_hz / 2, frequency_hz + bandwidth_hz / 2]
-            )
+        # Calculate signal band edges
+        half_bw = abs(bandwidth_hz) / 2 if bandwidth_hz > 0 else 0
+        signal_start = frequency_hz - half_bw
+        signal_end = frequency_hz + half_bw
 
         # First check: Hardware/regulatory lockouts (always blocked regardless of license)
-        for freq in freqs_to_check:
-            for band in self._lockout_bands + self._custom_lockouts:
-                if band.start_hz <= freq <= band.end_hz:
-                    reason = f"TX BLOCKED: {band.name} - {band.description}"
-                    if band.lockout_reason == LockoutReason.GPS:
-                        reason += " [GPS SPOOFING IS DANGEROUS AND ILLEGAL]"
-                    logger.warning(
-                        f"TX blocked at {frequency_hz/1e6:.3f} MHz: {band.name}"
-                    )
-                    return False, reason
+        # Check for ANY overlap between signal band and lockout band
+        # Two ranges overlap if: signal_start < band_end AND signal_end > band_start
+        for band in self._lockout_bands + self._custom_lockouts:
+            if signal_start < band.end_hz and signal_end > band.start_hz:
+                reason = f"TX BLOCKED: {band.name} - {band.description}"
+                if band.lockout_reason == LockoutReason.GPS:
+                    reason += " [GPS SPOOFING IS DANGEROUS AND ILLEGAL]"
+                logger.warning(
+                    f"TX blocked at {frequency_hz/1e6:.3f} MHz (BW={bandwidth_hz/1e3:.1f} kHz): {band.name}"
+                )
+                return False, reason
 
         # Second check: License privileges
+        # Check center frequency and band edges for license requirements
+        freqs_to_check = [frequency_hz]
+        if bandwidth_hz > 0:
+            freqs_to_check.extend([signal_start, signal_end])
+
         for freq in freqs_to_check:
             allowed, license_reason, _ = self._check_license_privilege(freq, mode)
             if not allowed:

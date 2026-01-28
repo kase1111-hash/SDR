@@ -627,7 +627,27 @@ class PluginManager:
 
         Returns:
             Path to created plugin directory
+
+        Raises:
+            ValueError: If plugin name contains invalid characters or path traversal
         """
+        # SECURITY: Validate plugin name to prevent path traversal
+        if not name or not name.strip():
+            raise ValueError("Plugin name cannot be empty")
+        # Check for path separators and traversal sequences
+        if "/" in name or "\\" in name or ".." in name:
+            raise ValueError(
+                f"Invalid plugin name '{name}': must not contain path separators or '..'"
+            )
+        # Only allow alphanumeric, underscore, and hyphen
+        import re
+
+        if not re.match(r"^[a-zA-Z][a-zA-Z0-9_-]*$", name):
+            raise ValueError(
+                f"Invalid plugin name '{name}': must start with a letter and contain "
+                "only letters, numbers, underscores, and hyphens"
+            )
+
         if output_dir:
             base_dir = Path(output_dir).expanduser().resolve()
         elif self._config.plugin_dirs:
@@ -635,7 +655,16 @@ class PluginManager:
         else:
             base_dir = Path.cwd() / "plugins"
 
-        plugin_dir = base_dir / name
+        plugin_dir = (base_dir / name).resolve()
+
+        # SECURITY: Verify plugin_dir is inside base_dir (prevent path traversal)
+        try:
+            plugin_dir.relative_to(base_dir)
+        except ValueError:
+            raise ValueError(
+                f"Plugin directory '{plugin_dir}' would be outside base directory '{base_dir}'"
+            )
+
         plugin_dir.mkdir(parents=True, exist_ok=True)
 
         # Create plugin.json

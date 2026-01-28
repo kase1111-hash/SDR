@@ -180,6 +180,13 @@ class HackRFDevice(SDRDevice):
             logger.error(f"Frequency {freq_hz/1e6:.3f} MHz out of range")
             return False
 
+        # SAFETY: If transmitting, check TX lockout before allowing frequency change
+        if self._state.is_transmitting:
+            allowed, reason = is_tx_allowed(freq_hz, self._state.bandwidth)
+            if not allowed:
+                logger.error(f"TX frequency change BLOCKED: {reason}")
+                return False
+
         try:
             self._device.set_freq(int(freq_hz))
             self._state.frequency = freq_hz
@@ -234,6 +241,13 @@ class HackRFDevice(SDRDevice):
         ]
         # Find nearest supported bandwidth
         bw_hz = min(supported_bw, key=lambda x: abs(x - bw_hz))
+
+        # SAFETY: If transmitting, check TX lockout before allowing bandwidth change
+        if self._state.is_transmitting:
+            allowed, reason = is_tx_allowed(self._state.frequency, bw_hz)
+            if not allowed:
+                logger.error(f"TX bandwidth change BLOCKED: {reason}")
+                return False
 
         try:
             self._device.set_baseband_filter_bandwidth(int(bw_hz))

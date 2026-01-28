@@ -424,6 +424,8 @@ class HackRFDevice(SDRDevice):
 
         if self._rx_thread:
             self._rx_thread.join(timeout=2.0)
+            if self._rx_thread.is_alive():
+                logger.warning("RX thread did not terminate within timeout")
             self._rx_thread = None
 
         logger.info("Stopped HackRF RX streaming")
@@ -520,6 +522,8 @@ class HackRFDevice(SDRDevice):
 
         if self._tx_thread:
             self._tx_thread.join(timeout=2.0)
+            if self._tx_thread.is_alive():
+                logger.warning("TX thread did not terminate within timeout")
             self._tx_thread = None
 
         logger.info("Stopped HackRF TX streaming")

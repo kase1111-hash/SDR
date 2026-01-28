@@ -353,6 +353,8 @@ class RTLSDRDevice(SDRDevice):
         self._stop_event.set()
         if self._rx_thread:
             self._rx_thread.join(timeout=2.0)
+            if self._rx_thread.is_alive():
+                logger.warning("RX thread did not terminate within timeout")
             self._rx_thread = None
 
         logger.info("Stopped RX streaming")

@@ -243,62 +243,82 @@ class DeviceManager:
         for device_id in device_ids:
             self.close_device(device_id)
 
-    def apply_config(self, device: SDRDevice, config: DeviceConfig) -> bool:
+    def apply_config(
+        self, device: SDRDevice, config: DeviceConfig, fail_fast: bool = False
+    ) -> bool:
         """
         Apply configuration to a device.
 
         Args:
             device: SDR device instance
             config: Configuration to apply
+            fail_fast: If True, stop on first failure; if False, try all settings
 
         Returns:
             True if all settings applied successfully
         """
-        success = True
+        failures = []
 
         if not device.set_frequency(config.frequency):
-            logger.warning(f"Failed to set frequency to {config.frequency}")
-            success = False
+            failures.append(f"frequency={config.frequency}")
+            if fail_fast:
+                logger.error(f"Config failed: could not set frequency to {config.frequency}")
+                return False
 
         if not device.set_sample_rate(config.sample_rate):
-            logger.warning(f"Failed to set sample rate to {config.sample_rate}")
-            success = False
+            failures.append(f"sample_rate={config.sample_rate}")
+            if fail_fast:
+                logger.error(f"Config failed: could not set sample rate to {config.sample_rate}")
+                return False
 
         if not device.set_bandwidth(config.bandwidth):
-            logger.warning(f"Failed to set bandwidth to {config.bandwidth}")
-            success = False
+            failures.append(f"bandwidth={config.bandwidth}")
+            if fail_fast:
+                logger.error(f"Config failed: could not set bandwidth to {config.bandwidth}")
+                return False
 
         if config.gain_mode == "auto":
             device.set_gain_mode(True)
         else:
             device.set_gain_mode(False)
             if not device.set_gain(config.gain):
-                logger.warning(f"Failed to set gain to {config.gain}")
-                success = False
+                failures.append(f"gain={config.gain}")
+                if fail_fast:
+                    logger.error(f"Config failed: could not set gain to {config.gain}")
+                    return False
 
         # Optional features
         if config.bias_tee:
             try:
-                device.set_bias_tee(True)
+                if not device.set_bias_tee(True):
+                    failures.append("bias_tee=True")
             except NotImplementedError:
-                pass
+                pass  # Feature not supported, not a failure
 
         if config.amp_enabled:
             try:
-                device.set_amp(True)
+                if not device.set_amp(True):
+                    failures.append("amp=True")
             except NotImplementedError:
-                pass
+                pass  # Feature not supported, not a failure
 
         # HackRF specific
         if isinstance(device, HackRFDevice):
             if hasattr(config, "lna_gain"):
-                device.set_lna_gain(int(config.lna_gain))
+                if not device.set_lna_gain(int(config.lna_gain)):
+                    failures.append(f"lna_gain={config.lna_gain}")
             if hasattr(config, "vga_gain"):
-                device.set_vga_gain(int(config.vga_gain))
+                if not device.set_vga_gain(int(config.vga_gain)):
+                    failures.append(f"vga_gain={config.vga_gain}")
             if hasattr(config, "tx_vga_gain"):
-                device.set_tx_gain(config.tx_vga_gain)
+                if not device.set_tx_gain(config.tx_vga_gain):
+                    failures.append(f"tx_vga_gain={config.tx_vga_gain}")
 
-        return success
+        if failures:
+            logger.warning(f"Config partially applied, failed settings: {', '.join(failures)}")
+            return False
+
+        return True
 
     def get_rtlsdr(self, index: int = 0) -> Optional[RTLSDRDevice]:
         """Convenience method to get/open RTL-SDR device.

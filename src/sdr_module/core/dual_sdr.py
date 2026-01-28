@@ -273,6 +273,9 @@ class DualSDRController:
         if self._rtlsdr:
 
             def rtl_cb(samples):
+                # Check stop event to prevent callbacks after shutdown
+                if self._stop_event.is_set():
+                    return
                 self._rtlsdr_buffer.write(samples)
                 if rtl_user_cb:
                     rtl_user_cb(samples)
@@ -288,6 +291,9 @@ class DualSDRController:
         if self._hackrf:
 
             def hackrf_cb(samples):
+                # Check stop event to prevent callbacks after shutdown
+                if self._stop_event.is_set():
+                    return
                 self._hackrf_buffer.write(samples)
                 if hackrf_user_cb:
                     hackrf_user_cb(samples)
@@ -342,6 +348,9 @@ class DualSDRController:
 
         # Start RTL-SDR RX
         def rtl_cb(samples):
+            # Check stop event to prevent callbacks after shutdown
+            if self._stop_event.is_set():
+                return
             self._rtlsdr_buffer.write(samples)
             if rx_user_cb:
                 rx_user_cb(samples)

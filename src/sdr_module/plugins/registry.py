@@ -27,7 +27,7 @@ class PluginRegistry:
     Supports filtering, querying, and lifecycle management.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._plugins: Dict[str, Plugin] = {}
         self._plugin_classes: Dict[str, Type[Plugin]] = {}
         self._lock = Lock()

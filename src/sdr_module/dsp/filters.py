@@ -146,11 +146,17 @@ class FIRFilter:
         Uses overlap-save method for efficient streaming.
 
         Args:
-            samples: Input samples
+            samples: Input samples (must have at least 1 sample)
 
         Returns:
             Filtered samples
+
+        Raises:
+            ValueError: If samples array is empty
         """
+        if len(samples) == 0:
+            raise ValueError("Input samples array cannot be empty")
+
         n_taps = len(self._taps)
 
         # Initialize buffer if needed

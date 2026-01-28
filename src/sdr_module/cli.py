@@ -8,6 +8,7 @@ Provides access to scanning, encoding, and signal analysis tools.
 
 import argparse
 import sys
+from pathlib import Path
 from typing import Optional
 
 from . import __version__
@@ -129,8 +130,13 @@ def cmd_encode(args: argparse.Namespace) -> int:
     print(f"Generated {len(samples)} samples ({len(samples)/args.sample_rate:.3f}s)")
 
     if args.output:
-        samples.tofile(args.output)
-        print(f"Saved to: {args.output}")
+        output_path = Path(args.output).expanduser().resolve()
+        # Ensure parent directory exists
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if output_path.exists():
+            print(f"Warning: Overwriting existing file: {output_path}")
+        samples.tofile(output_path)
+        print(f"Saved to: {output_path}")
 
     return 0
 

@@ -111,11 +111,21 @@ class PluginManager:
         if local_plugin_dir.exists():
             self._config.plugin_dirs.append(local_plugin_dir)
 
+    # Maximum plugin config file size (1 MB should be plenty for configs)
+    MAX_CONFIG_FILE_SIZE = 1024 * 1024
+
     def _load_plugin_configs(self) -> None:
         """Load plugin configurations from file."""
         if self._config.config_file is None:
             return
         try:
+            # Check file size to prevent memory exhaustion from large files
+            file_size = self._config.config_file.stat().st_size
+            if file_size > self.MAX_CONFIG_FILE_SIZE:
+                logger.error(
+                    f"Plugin config file too large ({file_size} bytes, max {self.MAX_CONFIG_FILE_SIZE})"
+                )
+                return
             with open(self._config.config_file, "r") as f:
                 self._plugin_configs = json.load(f)
         except Exception as e:

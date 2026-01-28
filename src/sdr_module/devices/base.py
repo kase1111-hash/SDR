@@ -75,9 +75,17 @@ class SDRDevice(ABC):
     Abstract base class for SDR devices.
 
     Provides a unified interface for RTL-SDR, HackRF, and other SDR hardware.
+
+    Thread Safety:
+        - The `state` property returns a thread-safe copy of the device state
+        - State modifications (streaming/transmitting flags) are protected by _state_lock
+        - Configuration methods (set_frequency, set_gain, etc.) should be called from
+          the main thread only
+        - RX/TX callbacks execute in background threads and should not modify device state
+        - The sample_queue is thread-safe for producer-consumer patterns
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._info: Optional[DeviceInfo] = None
         self._spec: Optional[DeviceSpec] = None
         self._state: DeviceState = DeviceState()
@@ -86,7 +94,7 @@ class SDRDevice(ABC):
         self._rx_callback: Optional[Callable[[np.ndarray], None]] = None
         self._rx_thread: Optional[Thread] = None
         self._stop_event: Event = Event()
-        self._sample_queue: queue.Queue = queue.Queue(maxsize=100)
+        self._sample_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=100)
 
     @property
     def info(self) -> Optional[DeviceInfo]:
@@ -284,12 +292,12 @@ class SDRDevice(ABC):
         """Enable or disable RF amplifier."""
         raise NotImplementedError("This device does not support amplifier control")
 
-    def __enter__(self):
+    def __enter__(self) -> "SDRDevice":
         """Context manager entry."""
         self.open()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object) -> bool:
         """Context manager exit."""
         self.close()
         return False

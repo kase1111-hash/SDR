@@ -46,13 +46,21 @@ class SampleBuffer:
 
     Designed for producer-consumer pattern between SDR device
     and DSP processing pipeline.
+
+    Thread Safety:
+        - All public methods are thread-safe (protected by internal Lock)
+        - write() can be called from producer thread (device callback)
+        - read()/read_all() can be called from consumer thread (DSP pipeline)
+        - stats property returns a thread-safe copy of BufferStats
+        - Uses Condition variables for efficient blocking on BLOCK overflow policy
+        - Multiple concurrent readers are NOT supported; use one consumer thread
     """
 
     def __init__(
         self,
         capacity: int = 1024 * 1024,  # 1M samples default
         overflow_policy: BufferOverflowPolicy = BufferOverflowPolicy.DROP_OLDEST,
-    ):
+    ) -> None:
         """
         Initialize sample buffer.
 
@@ -96,9 +104,10 @@ class SampleBuffer:
 
     @property
     def stats(self) -> BufferStats:
-        """Get buffer statistics."""
+        """Get buffer statistics (thread-safe copy)."""
         with self._lock:
-            self._stats.current_fill = self._count
+            # Return a copy to ensure thread safety
+            # The copy overhead is intentional - callers get a consistent snapshot
             return BufferStats(
                 total_samples_in=self._stats.total_samples_in,
                 total_samples_out=self._stats.total_samples_out,

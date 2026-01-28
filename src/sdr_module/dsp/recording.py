@@ -14,6 +14,8 @@ Also provides Audio Recording and Playback for demodulated audio:
 """
 
 import json
+import logging
+import os
 import struct
 import wave
 from dataclasses import dataclass, field
@@ -23,6 +25,8 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, Optional, Tuple, Union
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class SampleFormat(Enum):
@@ -525,8 +529,8 @@ class IQPlayer:
         # Open data file
         self._file = open(data_path, "rb")
 
-        # Calculate total samples
-        file_size = data_path.stat().st_size
+        # Calculate total samples using fstat on open file to avoid TOCTOU race
+        file_size = os.fstat(self._file.fileno()).st_size
         bytes_per_sample = self._get_bytes_per_sample() * 2  # I and Q
         self._total_samples = file_size // bytes_per_sample
 
@@ -574,8 +578,8 @@ class IQPlayer:
 
         self._file = open(self._filepath, "rb")
 
-        # Calculate total samples
-        file_size = self._filepath.stat().st_size
+        # Calculate total samples using fstat on open file to avoid TOCTOU race
+        file_size = os.fstat(self._file.fileno()).st_size
         bytes_per_sample = self._get_bytes_per_sample() * 2
         self._total_samples = file_size // bytes_per_sample
 
@@ -2612,7 +2616,12 @@ class FormatDetector:
     ) -> FormatInfo:
         """Detect raw I/Q file format."""
         file_size = filepath.stat().st_size
-        sample_format = sample_format or SampleFormat.FLOAT32
+        if sample_format is None:
+            sample_format = SampleFormat.FLOAT32
+            logger.warning(
+                f"No sample format specified for raw file '{filepath.name}', "
+                f"assuming {sample_format.name}. Specify format explicitly for accuracy."
+            )
 
         bytes_per_sample = self.BYTES_PER_SAMPLE.get(sample_format, 4) * 2
         num_samples = file_size // bytes_per_sample

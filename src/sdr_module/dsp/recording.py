@@ -1928,7 +1928,7 @@ class SignalPlayback:
 
         return samples.astype(np.complex64)
 
-    def get_status(self) -> dict:
+    def get_status(self) -> Dict[str, Any]:
         """Get playback status."""
         return {
             "state": self._state.value,
@@ -2169,7 +2169,7 @@ class TransmitBuffer:
         self._read_pos = 0
         self._samples_available = 0
 
-    def get_status(self) -> dict:
+    def get_status(self) -> Dict[str, Any]:
         """Get buffer status."""
         return {
             "transmitting": self._transmitting,

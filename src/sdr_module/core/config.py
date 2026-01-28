@@ -163,6 +163,24 @@ class DualSDRConfig:
     sync_enabled: bool = False
     sync_method: str = "software"  # "software", "external_clock", "gps"
 
+    def __post_init__(self) -> None:
+        """Validate configuration values after initialization."""
+        self._validate()
+
+    def _validate(self) -> None:
+        """Validate all configuration fields."""
+        valid_modes = ("dual_rx", "full_duplex", "tx_monitor", "wideband_scan", "relay")
+        valid_sync_methods = ("software", "external_clock", "gps")
+
+        if self.mode not in valid_modes:
+            raise ConfigValidationError(
+                f"mode must be one of {valid_modes}, got {self.mode}"
+            )
+        if self.sync_method not in valid_sync_methods:
+            raise ConfigValidationError(
+                f"sync_method must be one of {valid_sync_methods}, got {self.sync_method}"
+            )
+
 
 @dataclass
 class DSPConfig:
@@ -178,6 +196,41 @@ class DSPConfig:
     dc_removal: bool = True
     iq_correction: bool = True
 
+    def __post_init__(self) -> None:
+        """Validate configuration values after initialization."""
+        self._validate()
+
+    def _validate(self) -> None:
+        """Validate all configuration fields."""
+        valid_windows = ("hann", "hamming", "blackman", "blackman-harris", "flat-top", "rectangular")
+        valid_avg_modes = ("rms", "peak_hold", "min_hold", "linear", "exponential")
+
+        # FFT size must be power of 2 and reasonable
+        if self.fft_size < 64 or self.fft_size > 1048576:
+            raise ConfigValidationError(
+                f"fft_size must be between 64 and 1048576, got {self.fft_size}"
+            )
+        if self.fft_size & (self.fft_size - 1) != 0:
+            raise ConfigValidationError(
+                f"fft_size must be a power of 2, got {self.fft_size}"
+            )
+        if self.fft_window.lower() not in valid_windows:
+            raise ConfigValidationError(
+                f"fft_window must be one of {valid_windows}, got {self.fft_window}"
+            )
+        if not (0.0 <= self.fft_overlap < 1.0):
+            raise ConfigValidationError(
+                f"fft_overlap must be between 0.0 and 1.0 (exclusive), got {self.fft_overlap}"
+            )
+        if self.averaging_mode.lower() not in valid_avg_modes:
+            raise ConfigValidationError(
+                f"averaging_mode must be one of {valid_avg_modes}, got {self.averaging_mode}"
+            )
+        if self.averaging_count < 1 or self.averaging_count > 10000:
+            raise ConfigValidationError(
+                f"averaging_count must be between 1 and 10000, got {self.averaging_count}"
+            )
+
 
 @dataclass
 class RecordingConfig:
@@ -187,6 +240,23 @@ class RecordingConfig:
     format: str = "cf32"  # "cu8", "cs8", "cs16", "cf32"
     include_metadata: bool = True  # SigMF metadata
     max_file_size_mb: int = 1024  # 1 GB default
+
+    def __post_init__(self) -> None:
+        """Validate configuration values after initialization."""
+        self._validate()
+
+    def _validate(self) -> None:
+        """Validate all configuration fields."""
+        valid_formats = ("cu8", "cs8", "cs16", "cf32", "wav")
+
+        if self.format.lower() not in valid_formats:
+            raise ConfigValidationError(
+                f"format must be one of {valid_formats}, got {self.format}"
+            )
+        if self.max_file_size_mb < 1 or self.max_file_size_mb > 102400:
+            raise ConfigValidationError(
+                f"max_file_size_mb must be between 1 and 102400 (100 GB), got {self.max_file_size_mb}"
+            )
 
 
 @dataclass
@@ -252,6 +322,9 @@ class SDRConfig:
             logger.error(f"Failed to serialize configuration: {e}")
             return False
 
+    # Maximum config file size (1 MB should be more than enough)
+    MAX_CONFIG_FILE_SIZE = 1024 * 1024
+
     @classmethod
     def load(cls, path: str) -> Optional["SDRConfig"]:
         """Load configuration from JSON file.
@@ -263,6 +336,16 @@ class SDRConfig:
             SDRConfig instance or None if loading failed
         """
         try:
+            # Check file size before reading to prevent DoS
+            file_path = Path(path)
+            if file_path.exists():
+                file_size = file_path.stat().st_size
+                if file_size > cls.MAX_CONFIG_FILE_SIZE:
+                    logger.error(
+                        f"Configuration file too large ({file_size} bytes > {cls.MAX_CONFIG_FILE_SIZE}): {path}"
+                    )
+                    return None
+
             with open(path, "r") as f:
                 data = json.load(f)
             config = cls.from_dict(data)
@@ -276,6 +359,9 @@ class SDRConfig:
             return None
         except json.JSONDecodeError as e:
             logger.error(f"Invalid JSON in configuration file {path}: {e}")
+            return None
+        except ConfigValidationError as e:
+            logger.error(f"Configuration validation failed in {path}: {e}")
             return None
         except (KeyError, TypeError, ValueError) as e:
             logger.error(f"Invalid configuration format in {path}: {e}")

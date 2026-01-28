@@ -32,7 +32,7 @@ import logging
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
@@ -517,7 +517,7 @@ class SignalHistory:
         times, values = zip(*self._s_history)
         return np.array(times), np.array(values)
 
-    def get_statistics(self) -> dict:
+    def get_statistics(self) -> Dict[str, Any]:
         """Get statistics over the history."""
         if not self._history:
             return {"min": 0, "max": 0, "avg": 0, "current": 0}

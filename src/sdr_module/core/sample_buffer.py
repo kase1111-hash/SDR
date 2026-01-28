@@ -96,9 +96,10 @@ class SampleBuffer:
 
     @property
     def stats(self) -> BufferStats:
-        """Get buffer statistics."""
+        """Get buffer statistics (thread-safe copy)."""
         with self._lock:
-            self._stats.current_fill = self._count
+            # Return a copy to ensure thread safety
+            # The copy overhead is intentional - callers get a consistent snapshot
             return BufferStats(
                 total_samples_in=self._stats.total_samples_in,
                 total_samples_out=self._stats.total_samples_out,

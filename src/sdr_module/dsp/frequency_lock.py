@@ -72,6 +72,9 @@ class LockConfig:
     max_drift_hz_per_sec: float = 1000.0  # Maximum expected drift rate
     tracking_bandwidth_hz: float = 5000.0  # Search bandwidth when tracking
 
+    # Update timing
+    update_interval_ms: float = 10.0  # Expected interval between updates (for drift calculation)
+
 
 class FrequencyLocker:
     """
@@ -477,5 +480,6 @@ class FrequencyLocker:
             n * np.sum(x**2) - np.sum(x) ** 2
         )
 
-        # Convert to Hz/second (assuming ~10ms per sample)
-        return slope * 100  # Approximate
+        # Convert to Hz/second using configured update interval
+        samples_per_second = 1000.0 / self._config.update_interval_ms
+        return slope * samples_per_second

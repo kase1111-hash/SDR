@@ -180,6 +180,13 @@ class HackRFDevice(SDRDevice):
             logger.error(f"Frequency {freq_hz/1e6:.3f} MHz out of range")
             return False
 
+        # SAFETY: If transmitting, check TX lockout before allowing frequency change
+        if self._state.is_transmitting:
+            allowed, reason = is_tx_allowed(freq_hz, self._state.bandwidth)
+            if not allowed:
+                logger.error(f"TX frequency change BLOCKED: {reason}")
+                return False
+
         try:
             self._device.set_freq(int(freq_hz))
             self._state.frequency = freq_hz
@@ -234,6 +241,13 @@ class HackRFDevice(SDRDevice):
         ]
         # Find nearest supported bandwidth
         bw_hz = min(supported_bw, key=lambda x: abs(x - bw_hz))
+
+        # SAFETY: If transmitting, check TX lockout before allowing bandwidth change
+        if self._state.is_transmitting:
+            allowed, reason = is_tx_allowed(self._state.frequency, bw_hz)
+            if not allowed:
+                logger.error(f"TX bandwidth change BLOCKED: {reason}")
+                return False
 
         try:
             self._device.set_baseband_filter_bandwidth(int(bw_hz))
@@ -343,13 +357,14 @@ class HackRFDevice(SDRDevice):
         if not self._is_open or self._device is None:
             return False
 
-        if self._state.is_streaming:
-            logger.warning("Already streaming RX")
-            return True
+        with self._state_lock:
+            if self._state.is_streaming:
+                logger.warning("Already streaming RX")
+                return True
 
-        if self._state.is_transmitting:
-            logger.error("Cannot RX while TX is active (half-duplex)")
-            return False
+            if self._state.is_transmitting:
+                logger.error("Cannot RX while TX is active (half-duplex)")
+                return False
 
         self._rx_callback = callback
         self._stop_event.clear()
@@ -387,14 +402,18 @@ class HackRFDevice(SDRDevice):
 
         self._rx_thread = Thread(target=rx_thread, daemon=True)
         self._rx_thread.start()
-        self._state.is_streaming = True
+        with self._state_lock:
+            self._state.is_streaming = True
         logger.info("Started HackRF RX streaming")
         return True
 
     def stop_rx(self) -> bool:
         """Stop receiving samples."""
-        if not self._state.is_streaming:
-            return True
+        with self._state_lock:
+            if not self._state.is_streaming:
+                return True
+            # Mark as not streaming before stopping to prevent races
+            self._state.is_streaming = False
 
         self._stop_event.set()
         try:
@@ -405,9 +424,10 @@ class HackRFDevice(SDRDevice):
 
         if self._rx_thread:
             self._rx_thread.join(timeout=2.0)
+            if self._rx_thread.is_alive():
+                logger.warning("RX thread did not terminate within timeout")
             self._rx_thread = None
 
-        self._state.is_streaming = False
         logger.info("Stopped HackRF RX streaming")
         return True
 
@@ -431,16 +451,21 @@ class HackRFDevice(SDRDevice):
         if not self._is_open or self._device is None:
             return False
 
-        if self._state.is_transmitting:
-            logger.warning("Already transmitting")
-            return True
+        with self._state_lock:
+            if self._state.is_transmitting:
+                logger.warning("Already transmitting")
+                return True
 
-        if self._state.is_streaming:
-            logger.error("Cannot TX while RX is active (half-duplex)")
-            return False
+            if self._state.is_streaming:
+                logger.error("Cannot TX while RX is active (half-duplex)")
+                return False
 
-        # SAFETY: Validate TX frequency against lockout bands
-        allowed, reason = is_tx_allowed(self._state.frequency, self._state.bandwidth)
+            # SAFETY: Validate TX frequency against lockout bands
+            # Read freq/bandwidth atomically while holding lock
+            freq = self._state.frequency
+            bw = self._state.bandwidth
+
+        allowed, reason = is_tx_allowed(freq, bw)
         if not allowed:
             logger.error(f"TX BLOCKED: {reason}")
             return False
@@ -475,14 +500,18 @@ class HackRFDevice(SDRDevice):
 
         self._tx_thread = Thread(target=tx_thread, daemon=True)
         self._tx_thread.start()
-        self._state.is_transmitting = True
+        with self._state_lock:
+            self._state.is_transmitting = True
         logger.info("Started HackRF TX streaming")
         return True
 
     def stop_tx(self) -> bool:
         """Stop transmitting samples."""
-        if not self._state.is_transmitting:
-            return True
+        with self._state_lock:
+            if not self._state.is_transmitting:
+                return True
+            # Mark as not transmitting before stopping to prevent races
+            self._state.is_transmitting = False
 
         self._stop_event.set()
         try:
@@ -493,9 +522,10 @@ class HackRFDevice(SDRDevice):
 
         if self._tx_thread:
             self._tx_thread.join(timeout=2.0)
+            if self._tx_thread.is_alive():
+                logger.warning("TX thread did not terminate within timeout")
             self._tx_thread = None
 
-        self._state.is_transmitting = False
         logger.info("Stopped HackRF TX streaming")
         return True
 

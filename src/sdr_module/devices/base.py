@@ -8,7 +8,7 @@ import queue
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from threading import Event, Thread
+from threading import Event, RLock, Thread
 from typing import Callable, List, Optional
 
 import numpy as np
@@ -81,6 +81,7 @@ class SDRDevice(ABC):
         self._info: Optional[DeviceInfo] = None
         self._spec: Optional[DeviceSpec] = None
         self._state: DeviceState = DeviceState()
+        self._state_lock: RLock = RLock()  # Protects _state modifications
         self._is_open: bool = False
         self._rx_callback: Optional[Callable[[np.ndarray], None]] = None
         self._rx_thread: Optional[Thread] = None
@@ -99,8 +100,19 @@ class SDRDevice(ABC):
 
     @property
     def state(self) -> DeviceState:
-        """Get current device state."""
-        return self._state
+        """Get current device state (thread-safe copy)."""
+        with self._state_lock:
+            return DeviceState(
+                frequency=self._state.frequency,
+                sample_rate=self._state.sample_rate,
+                bandwidth=self._state.bandwidth,
+                gain=self._state.gain,
+                gain_mode=self._state.gain_mode,
+                is_streaming=self._state.is_streaming,
+                is_transmitting=self._state.is_transmitting,
+                bias_tee_enabled=self._state.bias_tee_enabled,
+                amp_enabled=self._state.amp_enabled,
+            )
 
     @property
     def is_open(self) -> bool:

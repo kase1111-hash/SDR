@@ -273,6 +273,9 @@ class DualSDRController:
         if self._rtlsdr:
 
             def rtl_cb(samples):
+                # Check stop event to prevent callbacks after shutdown
+                if self._stop_event.is_set():
+                    return
                 self._rtlsdr_buffer.write(samples)
                 if rtl_user_cb:
                     rtl_user_cb(samples)
@@ -288,6 +291,9 @@ class DualSDRController:
         if self._hackrf:
 
             def hackrf_cb(samples):
+                # Check stop event to prevent callbacks after shutdown
+                if self._stop_event.is_set():
+                    return
                 self._hackrf_buffer.write(samples)
                 if hackrf_user_cb:
                     hackrf_user_cb(samples)
@@ -298,6 +304,13 @@ class DualSDRController:
                 logger.info("HackRF RX started")
             else:
                 success = False
+
+        # Clean up callbacks for devices that didn't start
+        with self._lock:
+            if not self._state.rtlsdr_streaming:
+                self._rtlsdr_callback = None
+            if not self._state.hackrf_streaming:
+                self._hackrf_callback = None
 
         return success
 
@@ -335,12 +348,19 @@ class DualSDRController:
 
         # Start RTL-SDR RX
         def rtl_cb(samples):
+            # Check stop event to prevent callbacks after shutdown
+            if self._stop_event.is_set():
+                return
             self._rtlsdr_buffer.write(samples)
             if rx_user_cb:
                 rx_user_cb(samples)
 
         if not self._rtlsdr.start_rx(rtl_cb):
             logger.error("Failed to start RTL-SDR RX")
+            # Clean up callbacks on failure
+            with self._lock:
+                self._rtlsdr_callback = None
+                self._tx_generator = None
             return False
 
         with self._lock:

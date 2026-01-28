@@ -175,6 +175,47 @@ class DeviceManager:
         logger.info(f"Opened device: {device_id}")
         return device
 
+    def _open_device_unlocked(
+        self, device_type: str, index: int = 0, config: Optional[DeviceConfig] = None
+    ) -> Optional[SDRDevice]:
+        """
+        Open and configure an SDR device (caller must hold _lock).
+
+        Internal method used by get_rtlsdr/get_hackrf to prevent TOCTOU race.
+        The caller must already hold self._lock before calling this method.
+
+        Args:
+            device_type: Type of device ("rtlsdr" or "hackrf")
+            index: Device index
+            config: Optional device configuration
+
+        Returns:
+            Configured SDRDevice instance or None on failure
+        """
+        device = self.create_device(device_type)
+        if device is None:
+            return None
+
+        if not device.open(index):
+            logger.error(f"Failed to open {device_type} device {index}")
+            # Clean up device on open failure to prevent resource leak
+            try:
+                device.close()
+            except Exception as e:
+                logger.debug(f"Error during device cleanup after open failure: {e}")
+            return None
+
+        # Apply configuration if provided
+        if config is not None:
+            self.apply_config(device, config)
+
+        # Register device (lock is already held by caller)
+        device_id = f"{device_type}_{index}"
+        self._devices[device_id] = device
+
+        logger.info(f"Opened device: {device_id}")
+        return device
+
     def close_device(self, device_id: str) -> bool:
         """
         Close a device by ID.
@@ -202,79 +243,109 @@ class DeviceManager:
         for device_id in device_ids:
             self.close_device(device_id)
 
-    def apply_config(self, device: SDRDevice, config: DeviceConfig) -> bool:
+    def apply_config(
+        self, device: SDRDevice, config: DeviceConfig, fail_fast: bool = False
+    ) -> bool:
         """
         Apply configuration to a device.
 
         Args:
             device: SDR device instance
             config: Configuration to apply
+            fail_fast: If True, stop on first failure; if False, try all settings
 
         Returns:
             True if all settings applied successfully
         """
-        success = True
+        failures = []
 
         if not device.set_frequency(config.frequency):
-            logger.warning(f"Failed to set frequency to {config.frequency}")
-            success = False
+            failures.append(f"frequency={config.frequency}")
+            if fail_fast:
+                logger.error(f"Config failed: could not set frequency to {config.frequency}")
+                return False
 
         if not device.set_sample_rate(config.sample_rate):
-            logger.warning(f"Failed to set sample rate to {config.sample_rate}")
-            success = False
+            failures.append(f"sample_rate={config.sample_rate}")
+            if fail_fast:
+                logger.error(f"Config failed: could not set sample rate to {config.sample_rate}")
+                return False
 
         if not device.set_bandwidth(config.bandwidth):
-            logger.warning(f"Failed to set bandwidth to {config.bandwidth}")
-            success = False
+            failures.append(f"bandwidth={config.bandwidth}")
+            if fail_fast:
+                logger.error(f"Config failed: could not set bandwidth to {config.bandwidth}")
+                return False
 
         if config.gain_mode == "auto":
             device.set_gain_mode(True)
         else:
             device.set_gain_mode(False)
             if not device.set_gain(config.gain):
-                logger.warning(f"Failed to set gain to {config.gain}")
-                success = False
+                failures.append(f"gain={config.gain}")
+                if fail_fast:
+                    logger.error(f"Config failed: could not set gain to {config.gain}")
+                    return False
 
         # Optional features
         if config.bias_tee:
             try:
-                device.set_bias_tee(True)
+                if not device.set_bias_tee(True):
+                    failures.append("bias_tee=True")
             except NotImplementedError:
-                pass
+                pass  # Feature not supported, not a failure
 
         if config.amp_enabled:
             try:
-                device.set_amp(True)
+                if not device.set_amp(True):
+                    failures.append("amp=True")
             except NotImplementedError:
-                pass
+                pass  # Feature not supported, not a failure
 
         # HackRF specific
         if isinstance(device, HackRFDevice):
             if hasattr(config, "lna_gain"):
-                device.set_lna_gain(int(config.lna_gain))
+                if not device.set_lna_gain(int(config.lna_gain)):
+                    failures.append(f"lna_gain={config.lna_gain}")
             if hasattr(config, "vga_gain"):
-                device.set_vga_gain(int(config.vga_gain))
+                if not device.set_vga_gain(int(config.vga_gain)):
+                    failures.append(f"vga_gain={config.vga_gain}")
             if hasattr(config, "tx_vga_gain"):
-                device.set_tx_gain(config.tx_vga_gain)
+                if not device.set_tx_gain(config.tx_vga_gain):
+                    failures.append(f"tx_vga_gain={config.tx_vga_gain}")
 
-        return success
+        if failures:
+            logger.warning(f"Config partially applied, failed settings: {', '.join(failures)}")
+            return False
+
+        return True
 
     def get_rtlsdr(self, index: int = 0) -> Optional[RTLSDRDevice]:
-        """Convenience method to get/open RTL-SDR device."""
+        """Convenience method to get/open RTL-SDR device.
+
+        Thread-safe: uses lock to prevent race conditions when multiple
+        threads try to open the same device simultaneously.
+        """
         device_id = f"rtlsdr_{index}"
         with self._lock:
             device = self._devices.get(device_id)
-        if device is None:
-            device = self.open_device("rtlsdr", index)
+            if device is None:
+                # Open device while still holding lock to prevent TOCTOU race
+                device = self._open_device_unlocked("rtlsdr", index)
         return cast(Optional[RTLSDRDevice], device)
 
     def get_hackrf(self, index: int = 0) -> Optional[HackRFDevice]:
-        """Convenience method to get/open HackRF device."""
+        """Convenience method to get/open HackRF device.
+
+        Thread-safe: uses lock to prevent race conditions when multiple
+        threads try to open the same device simultaneously.
+        """
         device_id = f"hackrf_{index}"
         with self._lock:
             device = self._devices.get(device_id)
-        if device is None:
-            device = self.open_device("hackrf", index)
+            if device is None:
+                # Open device while still holding lock to prevent TOCTOU race
+                device = self._open_device_unlocked("hackrf", index)
         return cast(Optional[HackRFDevice], device)
 
     def has_rtlsdr(self) -> bool:

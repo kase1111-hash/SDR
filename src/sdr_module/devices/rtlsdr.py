@@ -309,9 +309,10 @@ class RTLSDRDevice(SDRDevice):
         if not self._is_open or self._device is None:
             return False
 
-        if self._state.is_streaming:
-            logger.warning("Already streaming")
-            return True
+        with self._state_lock:
+            if self._state.is_streaming:
+                logger.warning("Already streaming")
+                return True
 
         self._rx_callback = callback
         self._stop_event.clear()
@@ -336,21 +337,26 @@ class RTLSDRDevice(SDRDevice):
 
         self._rx_thread = Thread(target=rx_thread, daemon=True)
         self._rx_thread.start()
-        self._state.is_streaming = True
+        with self._state_lock:
+            self._state.is_streaming = True
         logger.info("Started RX streaming")
         return True
 
     def stop_rx(self) -> bool:
         """Stop receiving samples."""
-        if not self._state.is_streaming:
-            return True
+        with self._state_lock:
+            if not self._state.is_streaming:
+                return True
+            # Mark as not streaming before stopping to prevent races
+            self._state.is_streaming = False
 
         self._stop_event.set()
         if self._rx_thread:
             self._rx_thread.join(timeout=2.0)
+            if self._rx_thread.is_alive():
+                logger.warning("RX thread did not terminate within timeout")
             self._rx_thread = None
 
-        self._state.is_streaming = False
         logger.info("Stopped RX streaming")
         return True
 

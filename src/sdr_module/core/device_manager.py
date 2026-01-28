@@ -175,6 +175,47 @@ class DeviceManager:
         logger.info(f"Opened device: {device_id}")
         return device
 
+    def _open_device_unlocked(
+        self, device_type: str, index: int = 0, config: Optional[DeviceConfig] = None
+    ) -> Optional[SDRDevice]:
+        """
+        Open and configure an SDR device (caller must hold _lock).
+
+        Internal method used by get_rtlsdr/get_hackrf to prevent TOCTOU race.
+        The caller must already hold self._lock before calling this method.
+
+        Args:
+            device_type: Type of device ("rtlsdr" or "hackrf")
+            index: Device index
+            config: Optional device configuration
+
+        Returns:
+            Configured SDRDevice instance or None on failure
+        """
+        device = self.create_device(device_type)
+        if device is None:
+            return None
+
+        if not device.open(index):
+            logger.error(f"Failed to open {device_type} device {index}")
+            # Clean up device on open failure to prevent resource leak
+            try:
+                device.close()
+            except Exception as e:
+                logger.debug(f"Error during device cleanup after open failure: {e}")
+            return None
+
+        # Apply configuration if provided
+        if config is not None:
+            self.apply_config(device, config)
+
+        # Register device (lock is already held by caller)
+        device_id = f"{device_type}_{index}"
+        self._devices[device_id] = device
+
+        logger.info(f"Opened device: {device_id}")
+        return device
+
     def close_device(self, device_id: str) -> bool:
         """
         Close a device by ID.
@@ -260,21 +301,31 @@ class DeviceManager:
         return success
 
     def get_rtlsdr(self, index: int = 0) -> Optional[RTLSDRDevice]:
-        """Convenience method to get/open RTL-SDR device."""
+        """Convenience method to get/open RTL-SDR device.
+
+        Thread-safe: uses lock to prevent race conditions when multiple
+        threads try to open the same device simultaneously.
+        """
         device_id = f"rtlsdr_{index}"
         with self._lock:
             device = self._devices.get(device_id)
-        if device is None:
-            device = self.open_device("rtlsdr", index)
+            if device is None:
+                # Open device while still holding lock to prevent TOCTOU race
+                device = self._open_device_unlocked("rtlsdr", index)
         return cast(Optional[RTLSDRDevice], device)
 
     def get_hackrf(self, index: int = 0) -> Optional[HackRFDevice]:
-        """Convenience method to get/open HackRF device."""
+        """Convenience method to get/open HackRF device.
+
+        Thread-safe: uses lock to prevent race conditions when multiple
+        threads try to open the same device simultaneously.
+        """
         device_id = f"hackrf_{index}"
         with self._lock:
             device = self._devices.get(device_id)
-        if device is None:
-            device = self.open_device("hackrf", index)
+            if device is None:
+                # Open device while still holding lock to prevent TOCTOU race
+                device = self._open_device_unlocked("hackrf", index)
         return cast(Optional[HackRFDevice], device)
 
     def has_rtlsdr(self) -> bool:

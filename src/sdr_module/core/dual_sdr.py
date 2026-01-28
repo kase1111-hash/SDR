@@ -299,6 +299,13 @@ class DualSDRController:
             else:
                 success = False
 
+        # Clean up callbacks for devices that didn't start
+        with self._lock:
+            if not self._state.rtlsdr_streaming:
+                self._rtlsdr_callback = None
+            if not self._state.hackrf_streaming:
+                self._hackrf_callback = None
+
         return success
 
     def start_full_duplex(
@@ -341,6 +348,10 @@ class DualSDRController:
 
         if not self._rtlsdr.start_rx(rtl_cb):
             logger.error("Failed to start RTL-SDR RX")
+            # Clean up callbacks on failure
+            with self._lock:
+                self._rtlsdr_callback = None
+                self._tx_generator = None
             return False
 
         with self._lock:

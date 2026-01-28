@@ -55,9 +55,17 @@ class DualSDRController:
     Manages coordinated operation of RTL-SDR and HackRF One
     for various use cases including dual receive, full-duplex,
     and transmit monitoring.
+
+    Thread Safety:
+        - The state property returns a thread-safe copy of DualSDRState
+        - State modifications and callback references are protected by _lock (RLock)
+        - SampleBuffer instances (_rtlsdr_buffer, _hackrf_buffer) are internally thread-safe
+        - Device initialization (initialize()) should be called from the main thread
+        - start_*() and stop_*() methods are thread-safe
+        - Callbacks execute in device threads and should not modify controller state directly
     """
 
-    def __init__(self, config: Optional[SDRConfig] = None):
+    def __init__(self, config: Optional[SDRConfig] = None) -> None:
         """
         Initialize dual-SDR controller.
 
@@ -505,12 +513,12 @@ class DualSDRController:
                 "hackrf": hackrf_status,
             }
 
-    def __enter__(self):
+    def __enter__(self) -> "DualSDRController":
         """Context manager entry."""
         self.initialize()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object) -> bool:
         """Context manager exit."""
         self.shutdown()
         return False

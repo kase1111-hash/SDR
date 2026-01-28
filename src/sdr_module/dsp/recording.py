@@ -15,6 +15,7 @@ Also provides Audio Recording and Playback for demodulated audio:
 
 import json
 import logging
+import os
 import struct
 import wave
 from dataclasses import dataclass, field
@@ -528,8 +529,8 @@ class IQPlayer:
         # Open data file
         self._file = open(data_path, "rb")
 
-        # Calculate total samples
-        file_size = data_path.stat().st_size
+        # Calculate total samples using fstat on open file to avoid TOCTOU race
+        file_size = os.fstat(self._file.fileno()).st_size
         bytes_per_sample = self._get_bytes_per_sample() * 2  # I and Q
         self._total_samples = file_size // bytes_per_sample
 
@@ -577,8 +578,8 @@ class IQPlayer:
 
         self._file = open(self._filepath, "rb")
 
-        # Calculate total samples
-        file_size = self._filepath.stat().st_size
+        # Calculate total samples using fstat on open file to avoid TOCTOU race
+        file_size = os.fstat(self._file.fileno()).st_size
         bytes_per_sample = self._get_bytes_per_sample() * 2
         self._total_samples = file_size // bytes_per_sample
 

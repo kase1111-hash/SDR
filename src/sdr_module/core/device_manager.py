@@ -37,6 +37,14 @@ class DeviceManager:
     - Creating device instances
     - Managing device connections
     - Applying configurations
+
+    Thread Safety:
+        - The _devices dictionary is protected by _lock (RLock)
+        - get_device(), get_rtlsdr(), get_hackrf(), get_mxk2_keyer() are thread-safe
+        - open_device() and close_device() are thread-safe
+        - scan_devices() modifies _detected list and should be called from main thread
+        - apply_config() is not thread-safe; caller must ensure exclusive device access
+        - The open_devices property returns a copy to prevent external modification
     """
 
     # Registered device types
@@ -46,7 +54,7 @@ class DeviceManager:
         "mxk2_keyer": MXK2Keyer,
     }
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._lock = RLock()  # Protects _devices dictionary
         self._devices: Dict[str, SDRDevice] = {}
         self._detected: List[DetectedDevice] = []
@@ -433,12 +441,12 @@ class DeviceManager:
         with self._lock:
             return self._devices.copy()
 
-    def __enter__(self):
+    def __enter__(self) -> "DeviceManager":
         """Context manager entry."""
         self.scan_devices()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
+    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object) -> bool:
         """Context manager exit."""
         self.close_all()
         return False

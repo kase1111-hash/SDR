@@ -14,6 +14,7 @@ Also provides Audio Recording and Playback for demodulated audio:
 """
 
 import json
+import logging
 import struct
 import wave
 from dataclasses import dataclass, field
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, Optional, Tuple, Union
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class SampleFormat(Enum):
@@ -2612,7 +2615,12 @@ class FormatDetector:
     ) -> FormatInfo:
         """Detect raw I/Q file format."""
         file_size = filepath.stat().st_size
-        sample_format = sample_format or SampleFormat.FLOAT32
+        if sample_format is None:
+            sample_format = SampleFormat.FLOAT32
+            logger.warning(
+                f"No sample format specified for raw file '{filepath.name}', "
+                f"assuming {sample_format.name}. Specify format explicitly for accuracy."
+            )
 
         bytes_per_sample = self.BYTES_PER_SAMPLE.get(sample_format, 4) * 2
         num_samples = file_size // bytes_per_sample

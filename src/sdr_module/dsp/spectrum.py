@@ -92,7 +92,9 @@ class SpectrumAnalyzer:
 
         # Precompute window
         self._window = self._create_window(fft_size, window)
-        self._window_gain = np.sum(self._window) ** 2
+        # Use sum of squares for proper ENBW (Equivalent Noise Bandwidth) correction
+        # This gives accurate power readings regardless of window type
+        self._window_gain = np.sum(self._window**2)
 
         # Averaging state
         self._avg_buffer: Optional[np.ndarray] = None
@@ -116,7 +118,8 @@ class SpectrumAnalyzer:
         """Set FFT size."""
         self._fft_size = size
         self._window = self._create_window(size, self._window_type)
-        self._window_gain = np.sum(self._window) ** 2
+        # Use sum of squares for proper ENBW correction
+        self._window_gain = np.sum(self._window**2)
         self._reset_averaging()
 
     @property

@@ -480,8 +480,9 @@ class Decimator:
         filter_padded = np.zeros(n_taps_per_phase * n_phases, dtype=self._filter.dtype)
         filter_padded[: len(self._filter)] = self._filter
 
-        # Reshape into polyphase components (time-reversed for convolution)
-        polyphase = filter_padded.reshape(n_taps_per_phase, n_phases).T
+        # Reshape into polyphase components and time-reverse for convolution
+        # The time reversal ensures correct polyphase decimation output
+        polyphase = filter_padded.reshape(n_taps_per_phase, n_phases).T[:, ::-1]
 
         # Pad samples to multiple of decimation factor
         n_samples = len(samples)
@@ -608,9 +609,9 @@ class Interpolator:
 
         h *= window
 
-        # Scale for interpolation gain
-        h *= self._factor
-        h /= np.sum(h) / self._factor
+        # Scale for interpolation gain: normalize to unity then scale by factor
+        # This ensures the interpolated signal has correct amplitude
+        h *= self._factor / np.sum(h)
 
         return h.astype(np.float32)
 
@@ -789,9 +790,9 @@ class Resampler:
         window = np.kaiser(n, 8.0)
         h *= window
 
-        # Scale for interpolation
-        h *= self._interp_factor
-        h /= np.sum(h) / self._interp_factor
+        # Scale for interpolation: normalize to unity then scale by factor
+        # This ensures the interpolated signal has correct amplitude
+        h *= self._interp_factor / np.sum(h)
 
         return h.astype(np.float32)
 

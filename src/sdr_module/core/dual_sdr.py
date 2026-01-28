@@ -11,7 +11,7 @@ Provides coordinated control of both devices for:
 import logging
 from dataclasses import dataclass
 from enum import Enum
-from threading import Event
+from threading import Event, RLock
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
@@ -73,6 +73,9 @@ class DualSDRController:
         self._rtlsdr_buffer = SampleBuffer(capacity=2 * 1024 * 1024)
         self._hackrf_buffer = SampleBuffer(capacity=8 * 1024 * 1024)
 
+        # Thread synchronization - protects _state and callback references
+        self._lock = RLock()
+
         # State
         self._state = DualSDRState()
         self._stop_event = Event()
@@ -84,8 +87,17 @@ class DualSDRController:
 
     @property
     def state(self) -> DualSDRState:
-        """Get current controller state."""
-        return self._state
+        """Get current controller state (thread-safe copy)."""
+        with self._lock:
+            return DualSDRState(
+                mode=self._state.mode,
+                rtlsdr_streaming=self._state.rtlsdr_streaming,
+                hackrf_streaming=self._state.hackrf_streaming,
+                hackrf_transmitting=self._state.hackrf_transmitting,
+                rtlsdr_frequency=self._state.rtlsdr_frequency,
+                hackrf_frequency=self._state.hackrf_frequency,
+                is_synchronized=self._state.is_synchronized,
+            )
 
     @property
     def rtlsdr(self) -> Optional[RTLSDRDevice]:
@@ -178,42 +190,45 @@ class DualSDRController:
         Returns:
             True if mode change successful
         """
-        if self._state.rtlsdr_streaming or self._state.hackrf_streaming:
-            logger.warning("Stop streaming before changing mode")
-            return False
-
-        # Validate mode requirements
-        if mode == OperationMode.FULL_DUPLEX:
-            if not self._rtlsdr or not self._hackrf:
-                logger.error("Full-duplex requires both RTL-SDR and HackRF")
+        with self._lock:
+            if self._state.rtlsdr_streaming or self._state.hackrf_streaming:
+                logger.warning("Stop streaming before changing mode")
                 return False
 
-        if mode == OperationMode.TX_MONITOR:
-            if not self._hackrf:
-                logger.error("TX monitor requires HackRF")
-                return False
+            # Validate mode requirements
+            if mode == OperationMode.FULL_DUPLEX:
+                if not self._rtlsdr or not self._hackrf:
+                    logger.error("Full-duplex requires both RTL-SDR and HackRF")
+                    return False
 
-        self._state.mode = mode
-        logger.info(f"Operation mode set to: {mode.value}")
-        return True
+            if mode == OperationMode.TX_MONITOR:
+                if not self._hackrf:
+                    logger.error("TX monitor requires HackRF")
+                    return False
+
+            self._state.mode = mode
+            logger.info(f"Operation mode set to: {mode.value}")
+            return True
 
     def set_rtlsdr_frequency(self, freq_hz: float) -> bool:
         """Set RTL-SDR center frequency."""
-        if self._rtlsdr is None:
+        with self._lock:
+            if self._rtlsdr is None:
+                return False
+            if self._rtlsdr.set_frequency(freq_hz):
+                self._state.rtlsdr_frequency = freq_hz
+                return True
             return False
-        if self._rtlsdr.set_frequency(freq_hz):
-            self._state.rtlsdr_frequency = freq_hz
-            return True
-        return False
 
     def set_hackrf_frequency(self, freq_hz: float) -> bool:
         """Set HackRF center frequency."""
-        if self._hackrf is None:
+        with self._lock:
+            if self._hackrf is None:
+                return False
+            if self._hackrf.set_frequency(freq_hz):
+                self._state.hackrf_frequency = freq_hz
+                return True
             return False
-        if self._hackrf.set_frequency(freq_hz):
-            self._state.hackrf_frequency = freq_hz
-            return True
-        return False
 
     def set_frequencies(self, rtlsdr_hz: float, hackrf_hz: float) -> Tuple[bool, bool]:
         """Set both frequencies at once."""
@@ -240,12 +255,17 @@ class DualSDRController:
         Returns:
             True if both started successfully
         """
-        if self._state.mode != OperationMode.DUAL_RX:
-            self.set_mode(OperationMode.DUAL_RX)
+        with self._lock:
+            if self._state.mode != OperationMode.DUAL_RX:
+                self.set_mode(OperationMode.DUAL_RX)
 
-        self._rtlsdr_callback = rtlsdr_callback
-        self._hackrf_callback = hackrf_callback
-        self._stop_event.clear()
+            self._rtlsdr_callback = rtlsdr_callback
+            self._hackrf_callback = hackrf_callback
+            self._stop_event.clear()
+
+            # Capture callback references for thread-safe access in closures
+            rtl_user_cb = self._rtlsdr_callback
+            hackrf_user_cb = self._hackrf_callback
 
         success = True
 
@@ -254,11 +274,12 @@ class DualSDRController:
 
             def rtl_cb(samples):
                 self._rtlsdr_buffer.write(samples)
-                if self._rtlsdr_callback:
-                    self._rtlsdr_callback(samples)
+                if rtl_user_cb:
+                    rtl_user_cb(samples)
 
             if self._rtlsdr.start_rx(rtl_cb):
-                self._state.rtlsdr_streaming = True
+                with self._lock:
+                    self._state.rtlsdr_streaming = True
                 logger.info("RTL-SDR RX started")
             else:
                 success = False
@@ -268,11 +289,12 @@ class DualSDRController:
 
             def hackrf_cb(samples):
                 self._hackrf_buffer.write(samples)
-                if self._hackrf_callback:
-                    self._hackrf_callback(samples)
+                if hackrf_user_cb:
+                    hackrf_user_cb(samples)
 
             if self._hackrf.start_rx(hackrf_cb):
-                self._state.hackrf_streaming = True
+                with self._lock:
+                    self._state.hackrf_streaming = True
                 logger.info("HackRF RX started")
             else:
                 success = False
@@ -296,28 +318,33 @@ class DualSDRController:
         Returns:
             True if started successfully
         """
-        if not self._rtlsdr or not self._hackrf:
-            logger.error("Full-duplex requires both devices")
-            return False
+        with self._lock:
+            if not self._rtlsdr or not self._hackrf:
+                logger.error("Full-duplex requires both devices")
+                return False
 
-        if self._state.mode != OperationMode.FULL_DUPLEX:
-            self.set_mode(OperationMode.FULL_DUPLEX)
+            if self._state.mode != OperationMode.FULL_DUPLEX:
+                self.set_mode(OperationMode.FULL_DUPLEX)
 
-        self._rtlsdr_callback = rx_callback
-        self._tx_generator = tx_generator
-        self._stop_event.clear()
+            self._rtlsdr_callback = rx_callback
+            self._tx_generator = tx_generator
+            self._stop_event.clear()
+
+            # Capture callback reference for thread-safe access in closure
+            rx_user_cb = self._rtlsdr_callback
 
         # Start RTL-SDR RX
         def rtl_cb(samples):
             self._rtlsdr_buffer.write(samples)
-            if self._rtlsdr_callback:
-                self._rtlsdr_callback(samples)
+            if rx_user_cb:
+                rx_user_cb(samples)
 
         if not self._rtlsdr.start_rx(rtl_cb):
             logger.error("Failed to start RTL-SDR RX")
             return False
 
-        self._state.rtlsdr_streaming = True
+        with self._lock:
+            self._state.rtlsdr_streaming = True
         logger.info("RTL-SDR RX started (full-duplex)")
 
         # Start HackRF TX
@@ -325,10 +352,14 @@ class DualSDRController:
             if not self._hackrf.start_tx(self._tx_generator):
                 logger.error("Failed to start HackRF TX")
                 self._rtlsdr.stop_rx()
-                self._state.rtlsdr_streaming = False
+                with self._lock:
+                    self._state.rtlsdr_streaming = False
+                    self._rtlsdr_callback = None  # Clean up callback on failure
+                    self._tx_generator = None
                 return False
 
-            self._state.hackrf_transmitting = True
+            with self._lock:
+                self._state.hackrf_transmitting = True
             logger.info("HackRF TX started (full-duplex)")
 
         return True
@@ -369,37 +400,46 @@ class DualSDRController:
         """Stop all streaming and transmission."""
         self._stop_event.set()
 
-        if self._rtlsdr and self._state.rtlsdr_streaming:
-            self._rtlsdr.stop_rx()
-            self._state.rtlsdr_streaming = False
-            logger.info("RTL-SDR RX stopped")
+        with self._lock:
+            if self._rtlsdr and self._state.rtlsdr_streaming:
+                self._rtlsdr.stop_rx()
+                self._state.rtlsdr_streaming = False
+                self._rtlsdr_callback = None
+                logger.info("RTL-SDR RX stopped")
 
-        if self._hackrf:
-            if self._state.hackrf_streaming:
-                self._hackrf.stop_rx()
-                self._state.hackrf_streaming = False
-                logger.info("HackRF RX stopped")
+            if self._hackrf:
+                if self._state.hackrf_streaming:
+                    self._hackrf.stop_rx()
+                    self._state.hackrf_streaming = False
+                    self._hackrf_callback = None
+                    logger.info("HackRF RX stopped")
 
-            if self._state.hackrf_transmitting:
-                self._hackrf.stop_tx()
-                self._state.hackrf_transmitting = False
-                logger.info("HackRF TX stopped")
+                if self._state.hackrf_transmitting:
+                    self._hackrf.stop_tx()
+                    self._state.hackrf_transmitting = False
+                    self._tx_generator = None
+                    logger.info("HackRF TX stopped")
 
     def stop_rtlsdr(self) -> None:
         """Stop RTL-SDR streaming only."""
-        if self._rtlsdr and self._state.rtlsdr_streaming:
-            self._rtlsdr.stop_rx()
-            self._state.rtlsdr_streaming = False
+        with self._lock:
+            if self._rtlsdr and self._state.rtlsdr_streaming:
+                self._rtlsdr.stop_rx()
+                self._state.rtlsdr_streaming = False
+                self._rtlsdr_callback = None
 
     def stop_hackrf(self) -> None:
         """Stop HackRF streaming/transmission only."""
-        if self._hackrf:
-            if self._state.hackrf_streaming:
-                self._hackrf.stop_rx()
-                self._state.hackrf_streaming = False
-            if self._state.hackrf_transmitting:
-                self._hackrf.stop_tx()
-                self._state.hackrf_transmitting = False
+        with self._lock:
+            if self._hackrf:
+                if self._state.hackrf_streaming:
+                    self._hackrf.stop_rx()
+                    self._state.hackrf_streaming = False
+                    self._hackrf_callback = None
+                if self._state.hackrf_transmitting:
+                    self._hackrf.stop_tx()
+                    self._state.hackrf_transmitting = False
+                    self._tx_generator = None
 
     def read_rtlsdr_samples(
         self, n_samples: int, timeout: float = 1.0
@@ -415,34 +455,35 @@ class DualSDRController:
 
     def get_status(self) -> Dict[str, Any]:
         """Get comprehensive status of dual-SDR system."""
-        rtlsdr_status: Dict[str, Any] = {
-            "connected": self._rtlsdr is not None,
-            "streaming": self._state.rtlsdr_streaming,
-            "frequency_mhz": self._state.rtlsdr_frequency / 1e6,
-            "buffer_fill": self._rtlsdr_buffer.stats.fill_ratio,
-        }
-        hackrf_status: Dict[str, Any] = {
-            "connected": self._hackrf is not None,
-            "streaming": self._state.hackrf_streaming,
-            "transmitting": self._state.hackrf_transmitting,
-            "frequency_mhz": self._state.hackrf_frequency / 1e6,
-            "buffer_fill": self._hackrf_buffer.stats.fill_ratio,
-        }
+        with self._lock:
+            rtlsdr_status: Dict[str, Any] = {
+                "connected": self._rtlsdr is not None,
+                "streaming": self._state.rtlsdr_streaming,
+                "frequency_mhz": self._state.rtlsdr_frequency / 1e6,
+                "buffer_fill": self._rtlsdr_buffer.stats.fill_ratio,
+            }
+            hackrf_status: Dict[str, Any] = {
+                "connected": self._hackrf is not None,
+                "streaming": self._state.hackrf_streaming,
+                "transmitting": self._state.hackrf_transmitting,
+                "frequency_mhz": self._state.hackrf_frequency / 1e6,
+                "buffer_fill": self._hackrf_buffer.stats.fill_ratio,
+            }
 
-        # Add device-specific info
-        if self._rtlsdr:
-            rtlsdr_status["sample_rate"] = self._rtlsdr.state.sample_rate
-            rtlsdr_status["gain"] = self._rtlsdr.state.gain
+            # Add device-specific info
+            if self._rtlsdr:
+                rtlsdr_status["sample_rate"] = self._rtlsdr.state.sample_rate
+                rtlsdr_status["gain"] = self._rtlsdr.state.gain
 
-        if self._hackrf:
-            hackrf_status["sample_rate"] = self._hackrf.state.sample_rate
-            hackrf_status["gain"] = self._hackrf.state.gain
+            if self._hackrf:
+                hackrf_status["sample_rate"] = self._hackrf.state.sample_rate
+                hackrf_status["gain"] = self._hackrf.state.gain
 
-        return {
-            "mode": self._state.mode.value,
-            "rtlsdr": rtlsdr_status,
-            "hackrf": hackrf_status,
-        }
+            return {
+                "mode": self._state.mode.value,
+                "rtlsdr": rtlsdr_status,
+                "hackrf": hackrf_status,
+            }
 
     def __enter__(self):
         """Context manager entry."""

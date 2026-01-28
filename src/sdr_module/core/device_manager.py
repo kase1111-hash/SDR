@@ -7,6 +7,7 @@ provides a unified interface for accessing SDR devices.
 
 import logging
 from dataclasses import dataclass
+from threading import RLock
 from typing import Dict, List, Optional, Type, cast
 
 from ..devices.base import DeviceInfo, SDRDevice
@@ -46,6 +47,7 @@ class DeviceManager:
     }
 
     def __init__(self):
+        self._lock = RLock()  # Protects _devices dictionary
         self._devices: Dict[str, SDRDevice] = {}
         self._detected: List[DetectedDevice] = []
 
@@ -115,7 +117,8 @@ class DeviceManager:
         Returns:
             SDRDevice instance or None if not found
         """
-        return self._devices.get(device_id)
+        with self._lock:
+            return self._devices.get(device_id)
 
     def create_device(self, device_type: str) -> Optional[SDRDevice]:
         """
@@ -153,6 +156,11 @@ class DeviceManager:
 
         if not device.open(index):
             logger.error(f"Failed to open {device_type} device {index}")
+            # Clean up device on open failure to prevent resource leak
+            try:
+                device.close()
+            except Exception:
+                pass
             return None
 
         # Apply configuration if provided
@@ -161,7 +169,8 @@ class DeviceManager:
 
         # Register device
         device_id = f"{device_type}_{index}"
-        self._devices[device_id] = device
+        with self._lock:
+            self._devices[device_id] = device
 
         logger.info(f"Opened device: {device_id}")
         return device
@@ -176,7 +185,8 @@ class DeviceManager:
         Returns:
             True if closed successfully
         """
-        device = self._devices.pop(device_id, None)
+        with self._lock:
+            device = self._devices.pop(device_id, None)
         if device is None:
             logger.warning(f"Device not found: {device_id}")
             return False
@@ -187,7 +197,9 @@ class DeviceManager:
 
     def close_all(self) -> None:
         """Close all open devices."""
-        for device_id in list(self._devices.keys()):
+        with self._lock:
+            device_ids = list(self._devices.keys())
+        for device_id in device_ids:
             self.close_device(device_id)
 
     def apply_config(self, device: SDRDevice, config: DeviceConfig) -> bool:
@@ -250,7 +262,8 @@ class DeviceManager:
     def get_rtlsdr(self, index: int = 0) -> Optional[RTLSDRDevice]:
         """Convenience method to get/open RTL-SDR device."""
         device_id = f"rtlsdr_{index}"
-        device = self._devices.get(device_id)
+        with self._lock:
+            device = self._devices.get(device_id)
         if device is None:
             device = self.open_device("rtlsdr", index)
         return cast(Optional[RTLSDRDevice], device)
@@ -258,7 +271,8 @@ class DeviceManager:
     def get_hackrf(self, index: int = 0) -> Optional[HackRFDevice]:
         """Convenience method to get/open HackRF device."""
         device_id = f"hackrf_{index}"
-        device = self._devices.get(device_id)
+        with self._lock:
+            device = self._devices.get(device_id)
         if device is None:
             device = self.open_device("hackrf", index)
         return cast(Optional[HackRFDevice], device)
@@ -291,7 +305,8 @@ class DeviceManager:
     def get_mxk2_keyer(self, index: int = 0) -> Optional[MXK2Keyer]:
         """Convenience method to get/open MX-K2 keyer device."""
         device_id = f"mxk2_keyer_{index}"
-        device = self._devices.get(device_id)
+        with self._lock:
+            device = self._devices.get(device_id)
         if device is None:
             device = self.open_device("mxk2_keyer", index)
         return cast(Optional[MXK2Keyer], device)
@@ -344,7 +359,8 @@ class DeviceManager:
     @property
     def open_devices(self) -> Dict[str, SDRDevice]:
         """Get dictionary of currently open devices."""
-        return self._devices.copy()
+        with self._lock:
+            return self._devices.copy()
 
     def __enter__(self):
         """Context manager entry."""

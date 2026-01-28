@@ -205,7 +205,15 @@ class RTLSDRDevice(SDRDevice):
 
     def set_frequency(self, freq_hz: float) -> bool:
         """Set center frequency."""
-        if not self._is_open or self._device is None:
+        if not self._is_open or self._device is None or self._spec is None:
+            return False
+
+        # Validate frequency against device specifications
+        if freq_hz < self._spec.freq_min or freq_hz > self._spec.freq_max:
+            logger.error(
+                f"Frequency {freq_hz/1e6:.3f} MHz out of range "
+                f"({self._spec.freq_min/1e6:.3f} - {self._spec.freq_max/1e6:.3f} MHz)"
+            )
             return False
 
         # Check if we need direct sampling for HF

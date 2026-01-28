@@ -328,7 +328,15 @@ class MXK2Keyer(SDRDevice):
             return False
         except Exception as e:
             logger.error(f"Failed to open MX-K2: {e}")
+            # Clean up serial port on failure to prevent resource leak
+            if self._serial is not None:
+                try:
+                    self._serial.close()
+                except Exception:
+                    pass
+                self._serial = None
             self._is_open = False
+            self._status.is_connected = False
             return False
 
     def close(self) -> None:
@@ -367,15 +375,20 @@ class MXK2Keyer(SDRDevice):
             logger.error(f"Failed to send command: {e}")
             return False
 
-    def _read_response(self, timeout: float = 0.5) -> bytes:
-        """Read response from the keyer."""
+    def _read_response(self, timeout: float = 0.5, max_size: int = 1024) -> bytes:
+        """Read response from the keyer.
+
+        Args:
+            timeout: Read timeout in seconds
+            max_size: Maximum bytes to read (prevents unbounded reads from malicious devices)
+        """
         if not self._is_open or not self._serial:
             return b""
 
         try:
             with self._lock:
                 self._serial.timeout = timeout
-                response = self._serial.read_until(b"\r")
+                response = self._serial.read_until(b"\r", size=max_size)
             return response.strip()
         except Exception as e:
             logger.error(f"Failed to read response: {e}")

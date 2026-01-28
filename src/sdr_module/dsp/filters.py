@@ -2109,11 +2109,14 @@ class NoiseReduction:
             if len(output) == 0:
                 output = list(frame_clean[: self._hop_size])
             else:
-                # Add overlap
-                for j in range(min(len(self._overlap_buffer), len(frame_clean))):
-                    if j < len(output) - len(self._overlap_buffer):
-                        continue
-                output.extend(frame_clean[: self._hop_size])
+                # Add overlap from previous frame to beginning of current frame
+                overlap_len = min(len(self._overlap_buffer), len(frame_clean))
+                for j in range(overlap_len):
+                    # Add overlap samples to the end of current output
+                    output_idx = len(output) - len(self._overlap_buffer) + j
+                    if 0 <= output_idx < len(output):
+                        output[output_idx] += frame_clean[j]
+                output.extend(frame_clean[overlap_len : self._hop_size + overlap_len])
 
             self._overlap_buffer = frame_clean[self._hop_size :]
 

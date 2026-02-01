@@ -6,12 +6,16 @@ Provides support for multi-SDR antenna array operation including:
 - Timestamped sample buffers for synchronization
 - Array geometry and calibration configuration
 - Beamforming and direction finding algorithms
+- Adaptive beamforming with interference suppression
+- Automated array calibration
 
 Example:
     from sdr_module.antenna_array import (
         AntennaArrayController,
         ArrayConfig,
         Beamformer,
+        AdaptiveBeamformer,
+        ArrayCalibrator,
         PhaseDifferenceDoA,
         create_linear_2_element,
     )
@@ -24,13 +28,15 @@ Example:
         array.start_receive(sample_callback=process_samples)
         # ... do processing ...
 
-    # Create beamformer
-    beamformer = Beamformer(config)
-    output = beamformer.steer_and_sum(signals, azimuth=np.radians(30))
+    # Adaptive beamforming with interference suppression
+    adaptive = AdaptiveBeamformer(config)
+    result = adaptive.mvdr(signals, desired_azimuth=np.radians(30))
 
-    # Direction finding
-    doa = PhaseDifferenceDoA(spacing=0.35, frequency=433e6)
-    result = doa.estimate(signal_0, signal_1)
+    # Calibrate the array
+    calibrator = ArrayCalibrator(config)
+    cal_result = calibrator.calibrate_correlation(signals)
+    if cal_result.success:
+        calibrator.apply_calibration(cal_result)
 
 Phase 1 Components (Foundation):
     - TimestampedSampleBuffer: Sample buffer with timing metadata
@@ -44,11 +50,17 @@ Phase 2 Components (Spatial Processing):
     - BeamscanDoA: Conventional beamscan DoA
     - MUSICDoA: Subspace-based direction finding
 
-Phase 3 Components (Planned):
-    - AdaptiveBeamformer: MVDR/Capon beamforming
-    - ArrayCalibration: Automated phase offset correction
+Phase 3 Components (Advanced):
+    - AdaptiveBeamformer: MVDR/Capon/LCMV/GSC beamforming
+    - ArrayCalibrator: Automated phase offset calibration
 """
 
+from .adaptive_beamformer import (
+    AdaptiveBeamformer,
+    AdaptiveBeamformerState,
+    AdaptiveMethod,
+    MVDRResult,
+)
 from .array_config import (
     ARRAY_PRESETS,
     SPEED_OF_LIGHT,
@@ -78,6 +90,14 @@ from .beamformer import (
     BeamPattern,
     Beamformer,
     SteeringVector,
+)
+from .calibration import (
+    ArrayCalibrator,
+    CalibrationConfig,
+    CalibrationMeasurement,
+    CalibrationMethod,
+    CalibrationResult,
+    CalibrationState,
 )
 from .cross_correlator import (
     ArrayAlignmentResult,
@@ -128,6 +148,18 @@ __all__ = [
     "BeamformingMethod",
     "BeamPattern",
     "SteeringVector",
+    # Adaptive Beamformer
+    "AdaptiveBeamformer",
+    "AdaptiveBeamformerState",
+    "AdaptiveMethod",
+    "MVDRResult",
+    # Calibration
+    "ArrayCalibrator",
+    "CalibrationConfig",
+    "CalibrationMeasurement",
+    "CalibrationMethod",
+    "CalibrationResult",
+    "CalibrationState",
     # Direction of Arrival
     "DoAMethod",
     "DoAResult",
@@ -146,4 +178,4 @@ __all__ = [
     "ARRAY_PRESETS",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

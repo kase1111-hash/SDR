@@ -5,12 +5,14 @@ Provides support for multi-SDR antenna array operation including:
 - N-device orchestration with AntennaArrayController
 - Timestamped sample buffers for synchronization
 - Array geometry and calibration configuration
-- Support for beamforming and direction finding (Phase 2)
+- Beamforming and direction finding algorithms
 
 Example:
     from sdr_module.antenna_array import (
         AntennaArrayController,
         ArrayConfig,
+        Beamformer,
+        PhaseDifferenceDoA,
         create_linear_2_element,
     )
 
@@ -22,18 +24,27 @@ Example:
         array.start_receive(sample_callback=process_samples)
         # ... do processing ...
 
+    # Create beamformer
+    beamformer = Beamformer(config)
+    output = beamformer.steer_and_sum(signals, azimuth=np.radians(30))
+
+    # Direction finding
+    doa = PhaseDifferenceDoA(spacing=0.35, frequency=433e6)
+    result = doa.estimate(signal_0, signal_1)
+
 Phase 1 Components (Foundation):
     - TimestampedSampleBuffer: Sample buffer with timing metadata
     - ArrayConfig: Array geometry, elements, and calibration
     - AntennaArrayController: N-device orchestration
 
-Phase 2 Components (Planned):
+Phase 2 Components (Spatial Processing):
     - CrossCorrelator: Phase alignment between elements
-    - BasicBeamformer: Delay-and-sum beamforming
+    - Beamformer: Delay-and-sum and phase-shift beamforming
     - PhaseDifferenceDoA: 2-element direction finding
+    - BeamscanDoA: Conventional beamscan DoA
+    - MUSICDoA: Subspace-based direction finding
 
 Phase 3 Components (Planned):
-    - MUSICDoA: Subspace-based direction finding
     - AdaptiveBeamformer: MVDR/Capon beamforming
     - ArrayCalibration: Automated phase offset correction
 """
@@ -61,10 +72,30 @@ from .array_controller import (
     ElementState,
     SyncState,
 )
+from .beamformer import (
+    BeamformerOutput,
+    BeamformingMethod,
+    BeamPattern,
+    Beamformer,
+    SteeringVector,
+)
+from .cross_correlator import (
+    ArrayAlignmentResult,
+    CorrelationResult,
+    CrossCorrelator,
+)
+from .doa import (
+    BeamscanDoA,
+    DoAMethod,
+    DoAResult,
+    MultiSourceDoAResult,
+    MUSICDoA,
+    PhaseDifferenceDoA,
+)
 from .timestamped_buffer import (
+    TimestampedBufferStats,
     TimestampedChunk,
     TimestampedSampleBuffer,
-    TimestampedBufferStats,
 )
 
 __all__ = [
@@ -87,6 +118,23 @@ __all__ = [
     "TimestampedChunk",
     "TimestampedSampleBuffer",
     "TimestampedBufferStats",
+    # Cross-correlator
+    "CrossCorrelator",
+    "CorrelationResult",
+    "ArrayAlignmentResult",
+    # Beamformer
+    "Beamformer",
+    "BeamformerOutput",
+    "BeamformingMethod",
+    "BeamPattern",
+    "SteeringVector",
+    # Direction of Arrival
+    "DoAMethod",
+    "DoAResult",
+    "MultiSourceDoAResult",
+    "PhaseDifferenceDoA",
+    "BeamscanDoA",
+    "MUSICDoA",
     # Preset functions
     "create_linear_2_element",
     "create_linear_4_element",
@@ -98,4 +146,4 @@ __all__ = [
     "ARRAY_PRESETS",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

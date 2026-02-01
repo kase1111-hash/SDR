@@ -14,6 +14,11 @@ Combined Capabilities:
     - Full-Duplex: RTL-SDR RX + HackRF TX
     - Combined Bandwidth: 22.4 MHz
 
+Antenna Array Support:
+    The module supports multi-SDR antenna arrays for beamforming and
+    direction finding. See sdr_module.antenna_array for configuration
+    and controller classes.
+
 Plugin System:
     The module supports extensibility through plugins. See sdr_module.plugins
     for the plugin API and base classes.
@@ -31,6 +36,16 @@ __author__ = "SDR Module Team"
 from .core.device_manager import DeviceManager
 from .core.dual_sdr import DualSDRController
 from .core.sample_buffer import SampleBuffer
+
+# Antenna array support
+from .antenna_array import (
+    AntennaArrayController,
+    ArrayConfig,
+    ArrayGeometry,
+    TimestampedSampleBuffer,
+    create_linear_2_element,
+    create_linear_4_element,
+)
 
 # Plugin system
 from .plugins import (
@@ -51,6 +66,13 @@ __all__ = [
     "DeviceManager",
     "DualSDRController",
     "SampleBuffer",
+    # Antenna array
+    "AntennaArrayController",
+    "ArrayConfig",
+    "ArrayGeometry",
+    "TimestampedSampleBuffer",
+    "create_linear_2_element",
+    "create_linear_4_element",
     # Plugin system
     "PluginManager",
     "PluginRegistry",

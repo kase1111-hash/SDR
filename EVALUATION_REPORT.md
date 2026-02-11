@@ -101,7 +101,7 @@ Each dilutes focus from the others. The README promises all three simultaneously
 
 ### CUT
 
-- **P25/DMR/TETRA/LoRa/Zigbee/Z-Wave references** — Remove from README, SPEC_SHEET.md, and UI color schemes (`ui/waterfall.py:76-83`). These are lies. Zero implementation exists. Claiming protocol support that doesn't exist erodes trust in the features that do work.
+- **P25/DMR/TETRA/LoRa/Zigbee/Z-Wave references** — Remove from README, SPEC_SHEET.md, and UI color schemes (`ui/waterfall.py:76-83`). Zero implementation exists. Claiming protocol support that isn't backed by code erodes trust in the features that do work.
 - **Plugin system** (`plugins/manager.py`, `plugins/registry.py`, `plugins/base.py`) — Delete entirely or move to `examples/`. No real plugins exist. The plugin architecture adds 500+ lines of complexity for zero user value. If extensibility is needed later, it can be re-added when there's actual demand.
 - **MX-K2 Morse keyer driver** (`devices/mxk2_keyer.py`) — A USB keyer driver for a specific piece of ham hardware. Has nothing to do with SDR. Remove.
 - **Example plugins** (`examples/plugins/`) — Without a plugin system, these are dead code.

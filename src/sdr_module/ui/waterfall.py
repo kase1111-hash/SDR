@@ -63,28 +63,14 @@ PROTOCOL_COLORS: Dict[str, ProtocolColorScheme] = {
     # Amateur radio
     "ax25": ProtocolColorScheme("AX.25", (50, 205, 50)),  # Lime green
     "aprs": ProtocolColorScheme("APRS", (34, 139, 34)),  # Forest green
-    "ft8": ProtocolColorScheme("FT8", (0, 255, 127)),  # Spring green
-    "wspr": ProtocolColorScheme("WSPR", (0, 250, 154)),  # Medium spring green
     # Aviation
     "adsb": ProtocolColorScheme("ADS-B", (255, 0, 0)),  # Red
     "acars": ProtocolColorScheme("ACARS", (220, 20, 60)),  # Crimson
-    "vdl2": ProtocolColorScheme("VDL2", (178, 34, 34)),  # Firebrick
     # Paging
     "pocsag": ProtocolColorScheme("POCSAG", (255, 20, 147)),  # Deep pink
     "flex": ProtocolColorScheme("FLEX", (255, 105, 180)),  # Hot pink
-    # Trunking
-    "p25": ProtocolColorScheme("P25", (138, 43, 226)),  # Blue violet
-    "dmr": ProtocolColorScheme("DMR", (148, 0, 211)),  # Dark violet
-    "tetra": ProtocolColorScheme("TETRA", (186, 85, 211)),  # Medium orchid
-    "nxdn": ProtocolColorScheme("NXDN", (153, 50, 204)),  # Dark orchid
-    # IoT
-    "lora": ProtocolColorScheme("LoRa", (0, 255, 255)),  # Cyan
-    "zigbee": ProtocolColorScheme("Zigbee", (0, 206, 209)),  # Dark turquoise
-    "zwave": ProtocolColorScheme("Z-Wave", (64, 224, 208)),  # Turquoise
-    "bluetooth": ProtocolColorScheme("Bluetooth", (0, 0, 255)),  # Blue
     # Broadcast
     "rds": ProtocolColorScheme("RDS", (255, 215, 0)),  # Gold
-    "dab": ProtocolColorScheme("DAB", (255, 223, 0)),  # Golden yellow
     # Generic
     "unknown": ProtocolColorScheme("Unknown", (128, 128, 128)),  # Gray
     "analog": ProtocolColorScheme("Analog", (255, 255, 0)),  # Yellow

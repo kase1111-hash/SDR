@@ -16,15 +16,15 @@ Everything that doesn't directly serve this identity gets cut, extracted, or def
 
 ---
 
-## Phase 1: Stop Lying (Documentation Honesty)
+## Phase 1: Correct Over-Promises (Documentation Honesty)
 
 **Goal:** Align all public-facing documentation with what actually exists in the codebase.
 **Risk:** Zero. No code changes. Only text edits.
 **Estimated scope:** ~50 lines of edits across 2 files.
 
-### 1.1 Remove phantom protocol claims
+### 1.1 Remove unimplemented protocol claims
 
-The following protocols are listed in documentation but have zero implementation:
+The following protocols are listed in documentation but have no implementation:
 - P25, DMR, TETRA (Trunking)
 - LoRa, Zigbee, Z-Wave (IoT)
 - ISS SSTV, Meteor-M2 (Space -- SSTV decoder exists but not satellite-specific)
@@ -34,7 +34,7 @@ The following protocols are listed in documentation but have zero implementation
 | File | Change |
 |------|--------|
 | `README.md:211-220` | Remove P25, DMR, TETRA, LoRa, Zigbee, Z-Wave rows from Supported Protocols table. Keep ISM Band, Aviation, Paging, Amateur Radio, Broadcast rows (these have real implementations). |
-| `README.md:15` | Change `(ADS-B, POCSAG, LoRa, APRS, etc.)` to `(ADS-B, POCSAG, APRS, RDS, FLEX, ACARS)` -- list only what's real. |
+| `README.md:15` | Change `(ADS-B, POCSAG, LoRa, APRS, etc.)` to `(ADS-B, POCSAG, APRS, RDS, FLEX, ACARS)` -- list only what's implemented. |
 | `SPEC_SHEET.md` | Audit every protocol reference. Remove or tag as "Planned" any protocol without a decoder class in `dsp/protocols.py`. |
 
 ### 1.2 Add performance disclaimer
@@ -55,7 +55,7 @@ Remove the entire "Plugin System" section including the code example. The plugin
 
 ### 1.4 Deliverable
 
-A README and SPEC_SHEET that a user can trust. Every feature listed has working code behind it.
+A README and SPEC_SHEET that accurately represent the codebase. Every feature listed has working code behind it.
 
 ---
 

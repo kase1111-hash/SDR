@@ -91,18 +91,17 @@ This system is designed for a **dual-SDR setup** using:
 | Frame Structure Analysis | Packet/frame boundary detection |
 | Protocol Matching | Compares against known protocol signatures |
 
-### 4.2 Common Protocols (Target Support)
+### 4.2 Supported Protocols
 
-| Category | Protocols |
-|----------|-----------|
-| ISM Band | 433 MHz, 868 MHz, 915 MHz devices |
-| Wireless Sensors | Weather stations, temperature sensors |
-| Remote Controls | Garage doors, car key fobs |
-| Paging | POCSAG, FLEX |
-| Amateur Radio | AX.25, APRS |
-| Aviation | ADS-B, ACARS |
-| Trunking | P25, DMR, TETRA |
-| IoT | LoRa, Zigbee, Z-Wave |
+| Category | Protocols | Status |
+|----------|-----------|--------|
+| ISM Band | 433 MHz, 868 MHz, 915 MHz devices | Implemented |
+| Wireless Sensors | Weather stations, temperature sensors | Implemented (via OOK/FSK decoding) |
+| Remote Controls | Garage doors, car key fobs | Implemented (via OOK/ASK decoding) |
+| Paging | POCSAG, FLEX | Implemented |
+| Amateur Radio | AX.25, APRS | Implemented |
+| Aviation | ADS-B, ACARS | Implemented |
+| Broadcast | RDS (FM Radio Data System) | Implemented |
 
 ---
 
@@ -280,16 +279,15 @@ This system is designed for a **dual-SDR setup** using:
 | Dependencies | libusb, FFTW3, rtl-sdr, hackrf libraries |
 | API | Python bindings, C/C++ API |
 
-### 6.8 Dual-SDR Software Stack
+### 6.8 Software Stack
 
 | Layer | Component | Purpose |
 |-------|-----------|---------|
-| Driver | rtl-sdr | RTL-SDR device control |
-| Driver | libhackrf | HackRF device control |
-| Abstraction | SoapySDR | Unified SDR API (recommended) |
-| DSP | GNU Radio | Signal processing framework |
-| DSP | LiquidDSP | Lightweight DSP library |
-| Application | Custom / GQRX / SDR++ | User interface |
+| Driver | pyrtlsdr | RTL-SDR Python bindings |
+| Driver | hackrf (Python) | HackRF Python bindings |
+| DSP | NumPy / SciPy | Signal processing |
+| GUI | PyQt6 | User interface |
+| Application | sdr-module | This project |
 
 ---
 
@@ -306,7 +304,7 @@ Monitor two different frequencies at the same time.
 | VHF + UHF Ham | 146 MHz | 446 MHz | 2m and 70cm bands |
 | FM Broadcast + DAB | 98 MHz | 225 MHz | Analog + digital radio |
 | Marine + Air | 156.8 MHz (Ch 16) | 121.5 MHz | Distress frequencies |
-| Trunking + Control | 460 MHz (voice) | 851 MHz (control) | P25/DMR systems |
+| UHF Monitoring | 460 MHz | 851 MHz | Dual UHF band monitoring |
 
 ### 7.2 Full-Duplex Transceiver
 
@@ -756,7 +754,6 @@ band = tuner.get_band()  # RadioBand.AM or RadioBand.FM
 
 ### Phase 4: Advanced Features
 - [x] Recording/playback
-- [x] Plugin system
 - [x] Advanced protocols (ADS-B, ACARS, FLEX, AX.25/APRS, RDS, POCSAG)
 - [x] Main GUI application (PyQt6-based with spectrum, waterfall, controls, decoder panels)
 

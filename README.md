@@ -12,9 +12,8 @@ A dual-SDR framework for RTL-SDR and HackRF One, providing signal visualization,
 - **Dual-SDR Support**: Simultaneous operation of RTL-SDR and HackRF One
 - **Signal Visualization**: Real-time spectrum analyzer, waterfall display, constellation diagrams
 - **Signal Classification**: Automatic detection of analog/digital modulation types
-- **Protocol Detection**: Identify and decode common protocols (ADS-B, POCSAG, LoRa, APRS, etc.)
+- **Protocol Detection**: Identify and decode protocols (ADS-B, POCSAG, APRS, RDS, FLEX, ACARS)
 - **Full-Duplex**: RTL-SDR receive + HackRF transmit simultaneously
-- **Plugin System**: Extensible architecture for custom decoders and processors
 
 ### HAM Radio Features
 - **AM/FM Radio Tuner**: Vintage car radio-style interface with presets
@@ -38,6 +37,13 @@ A dual-SDR framework for RTL-SDR and HackRF One, providing signal visualization,
 | HackRF One | TX/RX | 1 MHz - 6 GHz | 20 MHz |
 
 **Combined Coverage**: 500 kHz - 6 GHz with 22.4 MHz combined bandwidth
+
+## Known Limitations
+
+- **Real-time bandwidth**: Pure Python + NumPy DSP cannot process the full 20 MHz HackRF bandwidth in real-time. Effective real-time bandwidth depends on FFT size, demodulator complexity, and host CPU. For wideband capture, record I/Q to disk and process offline.
+- **HackRF half-duplex**: HackRF One cannot transmit and receive simultaneously. Full-duplex mode uses RTL-SDR for RX while HackRF transmits.
+- **RTL-SDR RX only**: The RTL-SDR cannot transmit.
+- **No GPU acceleration**: All signal processing runs on CPU.
 
 ## Installation
 
@@ -208,16 +214,13 @@ samples = player.read_samples(262144)
 
 ## Supported Protocols
 
-| Category | Protocols |
-|----------|-----------|
-| ISM Band | 433/868/915 MHz devices, weather sensors, remote controls |
-| Aviation | ADS-B, ACARS |
-| Paging | POCSAG, FLEX |
-| Amateur Radio | AX.25, APRS |
-| Trunking | P25, DMR, TETRA |
-| IoT | LoRa, Zigbee, Z-Wave |
-| Space | ISS SSTV, Meteor-M2 |
-| Broadcast | RDS (FM Radio Data System) |
+| Category | Protocols | Status |
+|----------|-----------|--------|
+| ISM Band | 433/868/915 MHz devices, weather sensors, remote controls | Implemented |
+| Aviation | ADS-B, ACARS | Implemented |
+| Paging | POCSAG, FLEX | Implemented |
+| Amateur Radio | AX.25, APRS | Implemented |
+| Broadcast | RDS (FM Radio Data System) | Implemented |
 
 ## Dual-SDR Operation Modes
 
@@ -238,7 +241,6 @@ sdr-module/
 │   ├── devices/       # RTL-SDR and HackRF drivers
 │   ├── dsp/           # Signal processing (spectrum, demodulators, filters, etc.)
 │   ├── gui/           # PyQt6 graphical interface
-│   ├── plugins/       # Plugin system architecture
 │   ├── protocols/     # Protocol encoders/decoders
 │   ├── ui/            # Visualization components (waterfall, constellation)
 │   └── utils/         # Helper utilities (conversions, I/Q tools)
@@ -246,34 +248,6 @@ sdr-module/
 ├── examples/          # Example scripts and plugins
 └── tools/             # Utility tools (text encoder)
 ```
-
-## Plugin System
-
-Extend functionality with custom plugins:
-
-```python
-from sdr_module.plugins import ProtocolPlugin, PluginMetadata, PluginType
-
-class MyProtocolDecoder(ProtocolPlugin):
-    @property
-    def metadata(self) -> PluginMetadata:
-        return PluginMetadata(
-            name="my-protocol",
-            version="1.0.0",
-            plugin_type=PluginType.PROTOCOL,
-            description="Custom protocol decoder"
-        )
-
-    def decode(self, samples: np.ndarray) -> dict:
-        # Your decoding logic here
-        return {"data": decoded_data}
-```
-
-Plugin types available:
-- `ProtocolPlugin`: Custom protocol decoders
-- `DemodulatorPlugin`: Custom demodulation algorithms
-- `DevicePlugin`: Custom SDR device drivers
-- `ProcessorPlugin`: Custom signal processing blocks
 
 ## Development
 

@@ -270,7 +270,9 @@ class HackRFDevice(SDRDevice):
         # For gains up to 40 dB: try to use LNA only if possible, otherwise add VGA
         # For gains above 40 dB: max LNA (40 dB) + VGA for remainder
 
-        gain_db = max(0, min(102, gain_db))  # Clamp to valid range (LNA max 40 + VGA max 62)
+        gain_db = max(
+            0, min(102, gain_db)
+        )  # Clamp to valid range (LNA max 40 + VGA max 62)
 
         if gain_db <= 40:
             # For lower gains, find nearest LNA step and use VGA for fine adjustment

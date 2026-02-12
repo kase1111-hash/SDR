@@ -518,7 +518,9 @@ class DualSDRController:
         self.initialize()
         return self
 
-    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object) -> bool:
+    def __exit__(
+        self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object
+    ) -> bool:
         """Context manager exit."""
         self.shutdown()
         return False

@@ -143,7 +143,14 @@ class DSPConfig:
 
     def _validate(self) -> None:
         """Validate all configuration fields."""
-        valid_windows = ("hann", "hamming", "blackman", "blackman-harris", "flat-top", "rectangular")
+        valid_windows = (
+            "hann",
+            "hamming",
+            "blackman",
+            "blackman-harris",
+            "flat-top",
+            "rectangular",
+        )
         valid_avg_modes = ("rms", "peak_hold", "min_hold", "linear", "exponential")
 
         # FFT size must be power of 2 and reasonable

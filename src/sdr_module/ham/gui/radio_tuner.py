@@ -305,8 +305,7 @@ class PresetButton(QPushButton if HAS_PYQT6 else object):
 
     def _apply_style(self) -> None:
         """Apply vintage button style."""
-        self.setStyleSheet(
-            """
+        self.setStyleSheet("""
             QPushButton {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #808080, stop:0.4 #606060,
@@ -329,8 +328,7 @@ class PresetButton(QPushButton if HAS_PYQT6 else object):
                     stop:0.5 #606060, stop:1 #707070);
                 border: 2px inset #505050;
             }
-        """
-        )
+        """)
 
     def set_preset(self, preset: RadioPreset) -> None:
         """Store a preset for this button."""
@@ -374,8 +372,7 @@ class VolumeKnob(QWidget if HAS_PYQT6 else object):
         self._slider.setRange(0, 100)
         self._slider.setValue(50)
         self._slider.setFixedHeight(80)
-        self._slider.setStyleSheet(
-            """
+        self._slider.setStyleSheet("""
             QSlider::groove:vertical {
                 background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
                     stop:0 #303030, stop:0.5 #404040, stop:1 #303030);
@@ -390,8 +387,7 @@ class VolumeKnob(QWidget if HAS_PYQT6 else object):
                 border-radius: 6px;
                 border: 1px solid #606060;
             }
-        """
-        )
+        """)
         self._slider.valueChanged.connect(self.volume_changed.emit)
         layout.addWidget(self._slider, alignment=Qt.AlignmentFlag.AlignHCenter)
 
@@ -545,14 +541,12 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
 
         # Stereo indicator
         self._stereo_indicator = QLabel("STEREO")
-        self._stereo_indicator.setStyleSheet(
-            """
+        self._stereo_indicator.setStyleSheet("""
             color: #404040;
             font-size: 11px;
             font-weight: bold;
             padding: 5px;
-        """
-        )
+        """)
         bottom_section.addWidget(self._stereo_indicator)
 
         main_layout.addLayout(bottom_section)
@@ -586,8 +580,7 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
 
     def _apply_style(self) -> None:
         """Apply vintage car radio styling."""
-        self.setStyleSheet(
-            """
+        self.setStyleSheet("""
             QDialog {
                 background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
                     stop:0 #2a2a2a, stop:0.1 #1a1a1a,
@@ -624,8 +617,7 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
                     stop:0.5 #B06000, stop:1 #904000);
                 color: #FFFFFF;
             }
-        """
-        )
+        """)
 
     def _connect_signals(self) -> None:
         """Connect widget signals."""
@@ -753,23 +745,19 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         """Set stereo indicator state."""
         self._stereo = stereo
         if stereo:
-            self._stereo_indicator.setStyleSheet(
-                """
+            self._stereo_indicator.setStyleSheet("""
                 color: #00FF00;
                 font-size: 11px;
                 font-weight: bold;
                 padding: 5px;
-            """
-            )
+            """)
         else:
-            self._stereo_indicator.setStyleSheet(
-                """
+            self._stereo_indicator.setStyleSheet("""
                 color: #404040;
                 font-size: 11px;
                 font-weight: bold;
                 padding: 5px;
-            """
-            )
+            """)
 
     def process_samples(self, samples: np.ndarray) -> np.ndarray:
         """

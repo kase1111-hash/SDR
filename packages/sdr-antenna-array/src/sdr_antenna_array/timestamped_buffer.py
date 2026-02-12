@@ -12,7 +12,17 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from ..core.sample_buffer import BufferOverflowPolicy, BufferStats
+try:
+    from sdr_module.core.sample_buffer import BufferOverflowPolicy, BufferStats
+except ImportError:
+    from enum import Enum
+
+    class BufferOverflowPolicy(Enum):  # type: ignore[no-redef]
+        DROP_OLDEST = "drop_oldest"
+        DROP_NEWEST = "drop_newest"
+        BLOCK = "block"
+
+    BufferStats = None  # type: ignore[assignment,misc]
 
 
 @dataclass

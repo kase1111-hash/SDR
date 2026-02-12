@@ -31,7 +31,7 @@ except ImportError:
 
 import numpy as np
 
-from ..dsp.demodulators import AMDemodulator, FMDemodulator
+from ...dsp.demodulators import AMDemodulator, FMDemodulator
 
 logger = logging.getLogger(__name__)
 

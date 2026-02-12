@@ -38,7 +38,7 @@ except ImportError:
 
 import numpy as np
 
-from ..dsp.sstv import SSTVDecoder, SSTVImageViewer, SSTVModeSpec
+from ..sstv import SSTVDecoder, SSTVImageViewer, SSTVModeSpec
 
 
 class ImageDisplayWidget(QWidget if HAS_PYQT6 else object):

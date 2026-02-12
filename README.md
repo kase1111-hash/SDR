@@ -173,22 +173,6 @@ am_demod = AMDemodulator(sample_rate=2.4e6)
 audio = am_demod.demodulate(samples)
 ```
 
-### Protocol Encoding
-
-```bash
-# Encode text as Morse code
-sdr-scan encode morse --text "CQ CQ CQ DE W1ABC" --output morse.iq --wpm 20
-
-# Encode as RTTY
-sdr-scan encode rtty --text "HELLO WORLD" --output rtty.iq
-
-# Encode as PSK31
-sdr-scan encode psk31 --text "hello world" --output psk31.iq
-
-# Encode as ASCII FSK
-sdr-scan encode ascii --text "Test message" --output ascii.iq
-```
-
 ### Recording and Playback
 
 ```python
@@ -241,12 +225,14 @@ sdr-module/
 │   ├── devices/       # RTL-SDR and HackRF drivers
 │   ├── dsp/           # Signal processing (spectrum, demodulators, filters, etc.)
 │   ├── gui/           # PyQt6 graphical interface
+│   ├── ham/           # Optional ham radio features (callsign, SSTV, QRP, etc.)
 │   ├── protocols/     # Protocol encoders/decoders
 │   ├── ui/            # Visualization components (waterfall, constellation)
 │   └── utils/         # Helper utilities (conversions, I/Q tools)
-├── tests/             # Test suite (13 test modules)
-├── examples/          # Example scripts and plugins
-└── tools/             # Utility tools (text encoder)
+├── packages/
+│   └── sdr-antenna-array/  # Separate antenna array package
+├── tests/             # Test suite
+└── examples/          # Example scripts
 ```
 
 ## Development

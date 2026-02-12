@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sdr-antenna-array"
+version = "0.3.0"
+description = "Multi-SDR antenna array support for beamforming and direction finding"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy>=1.21.0",
+]
+
+[project.optional-dependencies]
+sdr = ["sdr-module>=0.1.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

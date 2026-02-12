@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from sdr_module.antenna_array import (
+from sdr_antenna_array import (
     SPEED_OF_LIGHT,
     AdaptiveBeamformer,
     AdaptiveBeamformerState,
@@ -533,7 +533,7 @@ class TestCalibrationResult:
 
     def test_get_phase_corrections(self):
         """Test getting phase corrections."""
-        from sdr_module.antenna_array import ElementCalibration
+        from sdr_antenna_array import ElementCalibration
 
         result = CalibrationResult(
             success=True,
@@ -555,7 +555,7 @@ class TestCalibrationResult:
 
     def test_get_amplitude_corrections(self):
         """Test getting amplitude corrections."""
-        from sdr_module.antenna_array import ElementCalibration
+        from sdr_antenna_array import ElementCalibration
 
         result = CalibrationResult(
             success=True,

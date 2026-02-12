@@ -1,6 +1,6 @@
 """Tests for AM/FM Radio Tuner widget."""
 
-from sdr_module.gui.radio_tuner import (
+from sdr_module.ham.gui.radio_tuner import (
     AM_RANGE,
     FM_RANGE,
     RadioBand,
@@ -68,37 +68,37 @@ class TestRadioTunerImport:
 
     def test_import_radio_tuner_widget(self):
         """Test RadioTunerWidget can be imported."""
-        from sdr_module.gui.radio_tuner import RadioTunerWidget
+        from sdr_module.ham.gui.radio_tuner import RadioTunerWidget
 
         assert RadioTunerWidget is not None
 
     def test_import_show_radio_tuner(self):
         """Test show_radio_tuner function exists."""
-        from sdr_module.gui.radio_tuner import show_radio_tuner
+        from sdr_module.ham.gui.radio_tuner import show_radio_tuner
 
         assert callable(show_radio_tuner)
 
     def test_import_frequency_display(self):
         """Test FrequencyDisplay can be imported."""
-        from sdr_module.gui.radio_tuner import FrequencyDisplay
+        from sdr_module.ham.gui.radio_tuner import FrequencyDisplay
 
         assert FrequencyDisplay is not None
 
     def test_import_tuning_dial(self):
         """Test TuningDial can be imported."""
-        from sdr_module.gui.radio_tuner import TuningDial
+        from sdr_module.ham.gui.radio_tuner import TuningDial
 
         assert TuningDial is not None
 
     def test_import_preset_button(self):
         """Test PresetButton can be imported."""
-        from sdr_module.gui.radio_tuner import PresetButton
+        from sdr_module.ham.gui.radio_tuner import PresetButton
 
         assert PresetButton is not None
 
     def test_import_volume_knob(self):
         """Test VolumeKnob can be imported."""
-        from sdr_module.gui.radio_tuner import VolumeKnob
+        from sdr_module.ham.gui.radio_tuner import VolumeKnob
 
         assert VolumeKnob is not None
 
@@ -108,19 +108,19 @@ class TestRadioTunerDefaults:
 
     def test_default_fm_presets_count(self):
         """Test default FM presets list has correct count."""
-        from sdr_module.gui.radio_tuner import RadioTunerWidget
+        from sdr_module.ham.gui.radio_tuner import RadioTunerWidget
 
         assert len(RadioTunerWidget.DEFAULT_FM_PRESETS) == 6
 
     def test_default_am_presets_count(self):
         """Test default AM presets list has correct count."""
-        from sdr_module.gui.radio_tuner import RadioTunerWidget
+        from sdr_module.ham.gui.radio_tuner import RadioTunerWidget
 
         assert len(RadioTunerWidget.DEFAULT_AM_PRESETS) == 6
 
     def test_default_fm_presets_in_range(self):
         """Test all default FM presets are within FM range."""
-        from sdr_module.gui.radio_tuner import RadioTunerWidget
+        from sdr_module.ham.gui.radio_tuner import RadioTunerWidget
 
         for preset in RadioTunerWidget.DEFAULT_FM_PRESETS:
             assert FM_RANGE[0] <= preset.frequency_hz <= FM_RANGE[1]
@@ -128,7 +128,7 @@ class TestRadioTunerDefaults:
 
     def test_default_am_presets_in_range(self):
         """Test all default AM presets are within AM range."""
-        from sdr_module.gui.radio_tuner import RadioTunerWidget
+        from sdr_module.ham.gui.radio_tuner import RadioTunerWidget
 
         for preset in RadioTunerWidget.DEFAULT_AM_PRESETS:
             assert AM_RANGE[0] <= preset.frequency_hz <= AM_RANGE[1]
@@ -158,6 +158,6 @@ class TestGuiExports:
 
     def test_show_radio_tuner_in_gui_exports(self):
         """Test show_radio_tuner is exported from gui module."""
-        from sdr_module.gui import show_radio_tuner
+        from sdr_module.ham.gui import show_radio_tuner
 
         assert callable(show_radio_tuner)

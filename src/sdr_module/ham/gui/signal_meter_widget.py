@@ -37,7 +37,7 @@ except ImportError:
 
 import numpy as np
 
-from ..dsp.signal_meter import (
+from ..signal_meter import (
     S9_DBM,
     SignalHistory,
     SignalMeter,

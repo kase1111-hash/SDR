@@ -247,7 +247,7 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         """Handle test ID button."""
         # Generate and play test ID
         try:
-            from ..dsp.callsign import generate_cw_id
+            from ..callsign import generate_cw_id
 
             if self._callsign:
                 audio = generate_cw_id(

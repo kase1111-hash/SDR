@@ -14,7 +14,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..core.config import ConfigValidationError, DeviceConfig
+try:
+    from sdr_module.core.config import ConfigValidationError, DeviceConfig
+except ImportError:
+
+    class ConfigValidationError(ValueError):
+        pass
+
+    DeviceConfig = None  # type: ignore[assignment,misc]
 
 logger = logging.getLogger(__name__)
 

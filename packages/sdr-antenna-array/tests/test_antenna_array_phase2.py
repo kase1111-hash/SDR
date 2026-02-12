@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from sdr_module.antenna_array import (
+from sdr_antenna_array import (
     SPEED_OF_LIGHT,
     ArrayAlignmentResult,
     ArrayConfig,

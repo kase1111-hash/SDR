@@ -14,9 +14,18 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..core.device_manager import DeviceManager
-from ..core.sample_buffer import BufferOverflowPolicy
-from ..devices.base import SDRDevice
+try:
+    from sdr_module.core.device_manager import DeviceManager
+    from sdr_module.core.sample_buffer import BufferOverflowPolicy
+    from sdr_module.devices.base import SDRDevice
+except ImportError:
+    DeviceManager = None  # type: ignore[assignment,misc]
+    SDRDevice = None  # type: ignore[assignment,misc]
+
+    class BufferOverflowPolicy(Enum):  # type: ignore[no-redef]
+        DROP_OLDEST = "drop_oldest"
+        DROP_NEWEST = "drop_newest"
+        BLOCK = "block"
 from .array_config import ArrayConfig, ArrayElement
 from .timestamped_buffer import TimestampedChunk, TimestampedSampleBuffer
 

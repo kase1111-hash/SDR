@@ -31,15 +31,22 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
-from .callsign_panel import CallsignPanel
 from .control_panel import ControlPanel
 from .decoder_panel import DecoderPanel
-from .qrp_panel import QRPPanel
-from .radio_tuner import RadioTunerWidget
-from .signal_meter_widget import SignalMeterPanel
 from .spectrum_widget import SpectrumWidget
-from .sstv_panel import SSTVPanel
 from .waterfall_widget import WaterfallWidget
+
+# Optional ham radio panels
+try:
+    from ..ham.gui.callsign_panel import CallsignPanel
+    from ..ham.gui.qrp_panel import QRPPanel
+    from ..ham.gui.radio_tuner import RadioTunerWidget
+    from ..ham.gui.signal_meter_widget import SignalMeterPanel
+    from ..ham.gui.sstv_panel import SSTVPanel
+
+    HAS_HAM_RADIO = True
+except ImportError:
+    HAS_HAM_RADIO = False
 
 logger = logging.getLogger(__name__)
 
@@ -178,22 +185,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder_panel = DecoderPanel()
         decoder_tabs.addTab(self._decoder_panel, "Decoder")
 
-        # Callsign panel for HAM radio operators
-        self._callsign_panel = CallsignPanel()
-        self._callsign_panel.id_requested.connect(self._on_callsign_id_requested)
-        decoder_tabs.addTab(self._callsign_panel, "HAM ID")
+        # Optional ham radio panels
+        if HAS_HAM_RADIO:
+            self._callsign_panel = CallsignPanel()
+            self._callsign_panel.id_requested.connect(self._on_callsign_id_requested)
+            decoder_tabs.addTab(self._callsign_panel, "HAM ID")
 
-        # SSTV panel for receiving images (ISS, etc.)
-        self._sstv_panel = SSTVPanel()
-        decoder_tabs.addTab(self._sstv_panel, "SSTV/ISS")
+            self._sstv_panel = SSTVPanel()
+            decoder_tabs.addTab(self._sstv_panel, "SSTV/ISS")
 
-        # Signal meter panel (HAM-style S-units / RST)
-        self._signal_meter_panel = SignalMeterPanel()
-        decoder_tabs.addTab(self._signal_meter_panel, "S-Meter")
+            self._signal_meter_panel = SignalMeterPanel()
+            decoder_tabs.addTab(self._signal_meter_panel, "S-Meter")
 
-        # QRP panel (low power operations)
-        self._qrp_panel = QRPPanel()
-        decoder_tabs.addTab(self._qrp_panel, "QRP")
+            self._qrp_panel = QRPPanel()
+            decoder_tabs.addTab(self._qrp_panel, "QRP")
 
         # Info tab
         info_widget = QWidget()
@@ -273,12 +278,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         decoder_action.triggered.connect(self._show_decoder_config)
         tools_menu.addAction(decoder_action)
 
-        tools_menu.addSeparator()
+        if HAS_HAM_RADIO:
+            tools_menu.addSeparator()
 
-        radio_action = QAction("📻 AM/FM &Radio Tuner...", self)
-        radio_action.setShortcut("Ctrl+R")
-        radio_action.triggered.connect(self._show_radio_tuner)
-        tools_menu.addAction(radio_action)
+            radio_action = QAction("AM/FM &Radio Tuner...", self)
+            radio_action.setShortcut("Ctrl+R")
+            radio_action.triggered.connect(self._show_radio_tuner)
+            tools_menu.addAction(radio_action)
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
@@ -420,7 +426,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._device_label.setText("Stopped")
 
         # Update callsign panel
-        self._callsign_panel.set_transmitting(False)
+        if HAS_HAM_RADIO:
+            self._callsign_panel.set_transmitting(False)
 
         if self._device:
             self._device.stop_rx()
@@ -440,7 +447,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._device_label.setText(f"ID: DE {callsign}")
 
         try:
-            from ..dsp.callsign import generate_tx_id
+            from ..ham.callsign import generate_tx_id
 
             settings = self._callsign_panel.get_settings()
 
@@ -515,7 +522,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         try:
             # Update status
             self._device_label.setText(f"TX: {description}")
-            self._callsign_panel.set_transmitting(True)
+            if HAS_HAM_RADIO:
+                self._callsign_panel.set_transmitting(True)
 
             # Configure TX gain
             self._device.set_tx_gain(20)  # Moderate TX power
@@ -541,7 +549,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             logger.error(f"TX error: {e}")
             QMessageBox.warning(self, "TX Error", f"Transmission error: {e}")
         finally:
-            self._callsign_panel.set_transmitting(False)
+            if HAS_HAM_RADIO:
+                self._callsign_panel.set_transmitting(False)
 
             # Restart RX if it was running
             if was_running:
@@ -726,9 +735,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "<ul>"
             "<li>Spectrum analyzer and waterfall display</li>"
             "<li>Multiple demodulation modes</li>"
-            "<li>Protocol decoders (POCSAG, FLEX, ADS-B, ACARS, etc.)</li>"
+            "<li>Protocol decoders (POCSAG, FLEX, ADS-B, ACARS, AX.25, RDS)</li>"
             "<li>I/Q recording and playback</li>"
-            "<li>Plugin system for extensions</li>"
             "</ul>",
         )
 

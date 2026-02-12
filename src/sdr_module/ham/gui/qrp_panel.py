@@ -32,7 +32,7 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
-from ..dsp.qrp import QRPController, dbm_to_watts, format_power, format_power_verbose
+from ..qrp import QRPController, dbm_to_watts, format_power, format_power_verbose
 
 
 class PowerDisplayWidget(QWidget if HAS_PYQT6 else object):

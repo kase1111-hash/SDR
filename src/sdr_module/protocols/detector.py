@@ -159,9 +159,7 @@ class ProtocolDetector:
                 frames = match.decoder.decode(samples)
                 all_frames.extend(frames)
             except Exception as e:
-                logger.debug(
-                    f"Protocol decoder {match.protocol_info.name} failed: {e}"
-                )
+                logger.debug(f"Protocol decoder {match.protocol_info.name} failed: {e}")
 
         return matches, all_frames
 

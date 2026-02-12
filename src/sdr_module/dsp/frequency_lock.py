@@ -73,7 +73,9 @@ class LockConfig:
     tracking_bandwidth_hz: float = 5000.0  # Search bandwidth when tracking
 
     # Update timing
-    update_interval_ms: float = 10.0  # Expected interval between updates (for drift calculation)
+    update_interval_ms: float = (
+        10.0  # Expected interval between updates (for drift calculation)
+    )
 
 
 class FrequencyLocker:

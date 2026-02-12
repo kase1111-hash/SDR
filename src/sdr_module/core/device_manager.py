@@ -255,19 +255,25 @@ class DeviceManager:
         if not device.set_frequency(config.frequency):
             failures.append(f"frequency={config.frequency}")
             if fail_fast:
-                logger.error(f"Config failed: could not set frequency to {config.frequency}")
+                logger.error(
+                    f"Config failed: could not set frequency to {config.frequency}"
+                )
                 return False
 
         if not device.set_sample_rate(config.sample_rate):
             failures.append(f"sample_rate={config.sample_rate}")
             if fail_fast:
-                logger.error(f"Config failed: could not set sample rate to {config.sample_rate}")
+                logger.error(
+                    f"Config failed: could not set sample rate to {config.sample_rate}"
+                )
                 return False
 
         if not device.set_bandwidth(config.bandwidth):
             failures.append(f"bandwidth={config.bandwidth}")
             if fail_fast:
-                logger.error(f"Config failed: could not set bandwidth to {config.bandwidth}")
+                logger.error(
+                    f"Config failed: could not set bandwidth to {config.bandwidth}"
+                )
                 return False
 
         if config.gain_mode == "auto":
@@ -308,7 +314,9 @@ class DeviceManager:
                     failures.append(f"tx_vga_gain={config.tx_vga_gain}")
 
         if failures:
-            logger.warning(f"Config partially applied, failed settings: {', '.join(failures)}")
+            logger.warning(
+                f"Config partially applied, failed settings: {', '.join(failures)}"
+            )
             return False
 
         return True
@@ -370,7 +378,9 @@ class DeviceManager:
         self.scan_devices()
         return self
 
-    def __exit__(self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object) -> bool:
+    def __exit__(
+        self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object
+    ) -> bool:
         """Context manager exit."""
         self.close_all()
         return False

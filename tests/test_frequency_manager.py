@@ -15,21 +15,18 @@ This module tests the safety-critical TX frequency lockout system that protects:
 import pytest
 
 from sdr_module.core.frequency_manager import (
+    POWER_HEADROOM_FACTOR,
+    TX_LOCKOUT_BANDS,
     BandPrivilege,
     FrequencyBand,
-    FrequencyManager,
     LicenseClass,
     LockoutReason,
+    get_effective_power_limit,
     get_frequency_manager,
+    get_power_limit,
     is_tx_allowed,
     set_license_class,
-    get_license_class,
-    get_power_limit,
-    get_effective_power_limit,
     validate_tx_frequency,
-    TX_LOCKOUT_BANDS,
-    LICENSE_FREE_BANDS,
-    POWER_HEADROOM_FACTOR,
 )
 
 
@@ -136,7 +133,11 @@ class TestAviationLockouts:
         """ADS-B/Mode S transponder frequency (1090 MHz) must be blocked."""
         allowed, reason = is_tx_allowed(1090e6)
         assert not allowed
-        assert "ADS-B" in reason.upper() or "AVIATION" in reason.upper() or "TRANSPONDER" in reason.upper()
+        assert (
+            "ADS-B" in reason.upper()
+            or "AVIATION" in reason.upper()
+            or "TRANSPONDER" in reason.upper()
+        )
 
     def test_mode_s_interrogation_1030_blocked(self):
         """Mode S interrogation frequency (1030 MHz) must be blocked."""
@@ -158,13 +159,21 @@ class TestEmergencyLockouts:
         """ELT/EPIRB emergency beacon frequency (406 MHz) must be blocked."""
         allowed, reason = is_tx_allowed(406.0e6)
         assert not allowed
-        assert "EMERGENCY" in reason.upper() or "ELT" in reason.upper() or "EPIRB" in reason.upper()
+        assert (
+            "EMERGENCY" in reason.upper()
+            or "ELT" in reason.upper()
+            or "EPIRB" in reason.upper()
+        )
 
     def test_marine_distress_156_8_blocked(self):
         """Marine distress frequency (156.8 MHz / VHF Ch 16) must be blocked."""
         allowed, reason = is_tx_allowed(156.8e6)
         assert not allowed
-        assert "DISTRESS" in reason.upper() or "MARINE" in reason.upper() or "EMERGENCY" in reason.upper()
+        assert (
+            "DISTRESS" in reason.upper()
+            or "MARINE" in reason.upper()
+            or "EMERGENCY" in reason.upper()
+        )
 
 
 class TestCellularLockouts:
@@ -346,7 +355,10 @@ class TestValidateTxFrequency:
         """validate_tx_frequency should raise ValueError for GPS."""
         with pytest.raises(ValueError) as excinfo:
             validate_tx_frequency(1575.42e6)
-        assert "GPS" in str(excinfo.value).upper() or "LOCKOUT" in str(excinfo.value).upper()
+        assert (
+            "GPS" in str(excinfo.value).upper()
+            or "LOCKOUT" in str(excinfo.value).upper()
+        )
 
     def test_validate_raises_on_cellular(self):
         """validate_tx_frequency should raise ValueError for cellular."""
@@ -455,10 +467,10 @@ class TestLockoutBandsCompleteness:
     def test_all_aviation_frequencies_have_lockouts(self):
         """Verify all aviation frequencies have lockout bands defined."""
         aviation_freqs = [
-            121.5e6,   # Emergency
-            243.0e6,   # Military emergency
-            1090e6,    # ADS-B
-            1030e6,    # Mode S interrogation
+            121.5e6,  # Emergency
+            243.0e6,  # Military emergency
+            1090e6,  # ADS-B
+            1030e6,  # Mode S interrogation
         ]
         for freq in aviation_freqs:
             allowed, _ = is_tx_allowed(freq)
@@ -467,8 +479,8 @@ class TestLockoutBandsCompleteness:
     def test_emergency_frequencies_have_lockouts(self):
         """Verify emergency frequencies have lockout bands defined."""
         emergency_freqs = [
-            406.0e6,   # ELT/EPIRB
-            156.8e6,   # Marine distress
+            406.0e6,  # ELT/EPIRB
+            156.8e6,  # Marine distress
         ]
         for freq in emergency_freqs:
             allowed, _ = is_tx_allowed(freq)

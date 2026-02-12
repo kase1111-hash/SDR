@@ -274,10 +274,10 @@ This system is designed for a **dual-SDR setup** using:
 | Platform | Cross-platform (Linux, Windows, macOS) |
 | Minimum RAM | 4 GB (8 GB recommended for dual-SDR) |
 | CPU | Multi-core x86_64 or ARM64 (4+ cores recommended) |
-| GPU Acceleration | Optional (OpenGL for visualization) |
+| GPU Acceleration | None (CPU only, NumPy-based DSP) |
 | USB | 2x USB 2.0 ports (separate controllers recommended) |
-| Dependencies | libusb, FFTW3, rtl-sdr, hackrf libraries |
-| API | Python bindings, C/C++ API |
+| Dependencies | libusb, rtl-sdr, hackrf libraries |
+| API | Python API (sdr_module package) |
 
 ### 6.8 Software Stack
 
@@ -288,6 +288,28 @@ This system is designed for a **dual-SDR setup** using:
 | DSP | NumPy / SciPy | Signal processing |
 | GUI | PyQt6 | User interface |
 | Application | sdr-module | This project |
+
+### 6.9 DSP Performance Characteristics
+
+All signal processing runs in Python/NumPy on CPU. The following are realistic throughput expectations:
+
+| Operation | FFT/Block Size | Approx. Throughput | Notes |
+|-----------|---------------|-------------------|-------|
+| Spectrum (FFT) | 4096 | ~50 MS/s | NumPy FFT, single core |
+| Spectrum (FFT) | 8192 | ~30 MS/s | Larger FFT reduces throughput |
+| FM Demodulation | N/A | ~2.4 MS/s real-time | Matches RTL-SDR max rate |
+| AM Demodulation | N/A | ~2.4 MS/s real-time | Envelope detection is lightweight |
+| Protocol Decoding | N/A | Varies | Bit-level processing, lower throughput |
+| Filter (FIR, 101 taps) | N/A | ~5 MS/s | NumPy convolution |
+
+**Key constraints:**
+- The RTL-SDR's 2.4 MHz bandwidth is generally processable in real-time
+- The HackRF's 20 MHz bandwidth exceeds real-time DSP capacity for most operations
+- For wideband HackRF capture, record raw I/Q and process offline
+- GUI display updates are capped at 30 Hz to prevent UI thread starvation
+- Running multiple demodulators simultaneously reduces per-chain throughput
+
+These figures are approximate and vary by CPU. Measured on a typical 4-core x86_64 system.
 
 ---
 

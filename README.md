@@ -1,74 +1,46 @@
 # SDR Module
 
-A dual-SDR framework for RTL-SDR and HackRF One, providing signal visualization, frequency analysis, signal classification, protocol identification, and amateur radio capabilities.
+A dual-SDR framework for simultaneous RTL-SDR + HackRF One operation, with signal visualization, protocol decoding, and a PyQt6 GUI.
 
 [![CI](https://github.com/kase1111-hash/SDR/actions/workflows/ci.yml/badge.svg)](https://github.com/kase1111-hash/SDR/actions/workflows/ci.yml)
 [![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## Features
+## What It Does
 
-### Core Capabilities
-- **Dual-SDR Support**: Simultaneous operation of RTL-SDR and HackRF One
-- **Signal Visualization**: Real-time spectrum analyzer, waterfall display, constellation diagrams
-- **Signal Classification**: Automatic detection of analog/digital modulation types
-- **Protocol Detection**: Identify and decode protocols (ADS-B, POCSAG, APRS, RDS, FLEX, ACARS)
-- **Full-Duplex**: RTL-SDR receive + HackRF transmit simultaneously
-
-### HAM Radio Features
-- **AM/FM Radio Tuner**: Vintage car radio-style interface with presets
-- **Signal Meter**: S-unit meter with RST reporting (S1-S9, S9+dB)
-- **Callsign Identification**: Automatic CW callsign transmission for FCC compliance
-- **SSTV Decoder**: Receive slow-scan television images from ISS and satellites
-- **QRP Operations**: Power calculations and amplifier chain management for low-power ops
-
-### DSP & Processing
-- **Demodulators**: AM, FM, SSB, CW, OOK, ASK, FSK, PSK, GFSK, MSK, QAM
-- **Filters**: FIR filters, AGC, squelch, noise reduction, CTCSS tone detection
-- **Frequency Control**: AFC (Automatic Frequency Control), frequency locking
-- **Recording**: I/Q recording/playback in WAV, raw binary, and SigMF formats
-- **Text Encoding**: RTTY, Morse code, ASCII FSK, PSK31 encoders
+- **Dual-SDR control**: Operate RTL-SDR and HackRF One simultaneously in five modes (dual RX, full-duplex, TX monitor, wideband scan, relay)
+- **Signal processing**: Spectrum analysis, demodulation (AM/FM/SSB/CW/OOK/FSK/PSK/QAM), filtering, AGC, and signal classification
+- **Protocol decoding**: ADS-B, POCSAG, FLEX, AX.25/APRS, RDS, ACARS
+- **GUI**: PyQt6 application with spectrum analyzer, waterfall display, and decoder panels
 
 ## Hardware Support
 
 | Device | Mode | Frequency Range | Bandwidth |
 |--------|------|-----------------|-----------|
-| RTL-SDR | RX | 500 kHz - 1.7 GHz | 2.4 MHz |
+| RTL-SDR | RX only | 500 kHz - 1.7 GHz | 2.4 MHz |
 | HackRF One | TX/RX | 1 MHz - 6 GHz | 20 MHz |
 
-**Combined Coverage**: 500 kHz - 6 GHz with 22.4 MHz combined bandwidth
+**Combined coverage**: 500 kHz - 6 GHz
 
 ## Known Limitations
 
-- **Real-time bandwidth**: Pure Python + NumPy DSP cannot process the full 20 MHz HackRF bandwidth in real-time. Effective real-time bandwidth depends on FFT size, demodulator complexity, and host CPU. For wideband capture, record I/Q to disk and process offline.
-- **HackRF half-duplex**: HackRF One cannot transmit and receive simultaneously. Full-duplex mode uses RTL-SDR for RX while HackRF transmits.
+- **Real-time bandwidth**: Pure Python + NumPy DSP cannot sustain the full 20 MHz HackRF bandwidth in real-time. Effective throughput depends on FFT size, demodulator complexity, and host CPU. For wideband capture, record I/Q to disk and process offline.
+- **HackRF half-duplex**: HackRF One cannot TX and RX simultaneously. Full-duplex mode pairs RTL-SDR (RX) with HackRF (TX).
 - **RTL-SDR RX only**: The RTL-SDR cannot transmit.
-- **No GPU acceleration**: All signal processing runs on CPU.
+- **No GPU acceleration**: All signal processing runs on CPU via NumPy.
 
 ## Installation
 
-### Basic Installation
-
 ```bash
+# Basic
 pip install sdr-module
-```
 
-### With Hardware Support
+# With hardware support
+pip install sdr-module[rtlsdr]    # RTL-SDR
+pip install sdr-module[hackrf]    # HackRF
+pip install sdr-module[full]      # Everything
 
-```bash
-# RTL-SDR support
-pip install sdr-module[rtlsdr]
-
-# HackRF support
-pip install sdr-module[hackrf]
-
-# Full installation (all features)
-pip install sdr-module[full]
-```
-
-### From Source
-
-```bash
+# From source
 git clone https://github.com/kase1111-hash/SDR.git
 cd SDR
 pip install -e ".[full]"
@@ -76,42 +48,11 @@ pip install -e ".[full]"
 
 ## Quick Start
 
-### Graphical User Interface
+### GUI
 
 ```bash
-# Launch GUI with connected hardware
-sdr-scan gui
-
-# Demo mode (no hardware required)
-sdr-scan gui --demo
-
-# With specific frequency and gain
-sdr-scan gui --demo --frequency 100000000 --gain 20
-```
-
-The GUI includes:
-- Real-time spectrum analyzer with peak detection
-- Waterfall display with time-frequency visualization
-- Control panel for frequency, gain, and mode settings
-- Protocol decoder panel for decoded data output
-- AM/FM radio tuner with vintage car radio styling
-- Signal meter with S-units display
-- SSTV image viewer for satellite reception
-
-### Command Line
-
-```bash
-# Display module information
-sdr-scan info
-
-# List available SDR devices
-sdr-scan devices
-
-# Scan FM broadcast band
-sdr-scan scan --start 88 --end 108
-
-# Scan with custom parameters
-sdr-scan scan --start 430 --end 440 --step 25 --threshold -50
+sdr-scan gui              # Launch with connected hardware
+sdr-scan gui --demo       # Demo mode (no hardware required)
 ```
 
 ### Python API
@@ -119,22 +60,17 @@ sdr-scan scan --start 430 --end 440 --step 25 --threshold -50
 ```python
 from sdr_module import DeviceManager, DualSDRController
 
-# Initialize device manager
+# Scan for devices
 manager = DeviceManager()
 devices = manager.scan_devices()
 
-# Create dual-SDR controller
+# Dual-SDR operation
 controller = DualSDRController()
 controller.initialize()
-
-# Set frequencies
-controller.set_rtlsdr_frequency(433.92e6)  # ISM band
-controller.set_hackrf_frequency(915e6)     # ISM band
-
-# Start dual receive
+controller.set_rtlsdr_frequency(433.92e6)
+controller.set_hackrf_frequency(915e6)
 controller.start_dual_rx()
 
-# Read samples
 samples = controller.read_rtlsdr_samples(262144)
 ```
 
@@ -142,69 +78,41 @@ samples = controller.read_rtlsdr_samples(262144)
 
 ```python
 from sdr_module.dsp import SpectrumAnalyzer, SignalClassifier
+from sdr_module.dsp.demodulators import FMDemodulator
 
-# Analyze spectrum
+# Spectrum analysis
 analyzer = SpectrumAnalyzer(fft_size=1024)
-result = analyzer.compute_spectrum(
-    samples,
-    center_freq=433.92e6,
-    sample_rate=2.4e6
-)
+result = analyzer.compute_spectrum(samples, center_freq=433.92e6, sample_rate=2.4e6)
 
-# Classify signal
+# Signal classification
 classifier = SignalClassifier(sample_rate=2.4e6)
 classification = classifier.classify(samples)
-print(f"Signal type: {classification.signal_type}")
-print(f"Modulation: {classification.modulation}")
-print(f"Confidence: {classification.confidence:.2%}")
-```
-
-### Demodulation
-
-```python
-from sdr_module.dsp.demodulators import FMDemodulator, AMDemodulator
 
 # FM demodulation
 fm_demod = FMDemodulator(sample_rate=2.4e6)
 audio = fm_demod.demodulate(samples)
-
-# AM demodulation
-am_demod = AMDemodulator(sample_rate=2.4e6)
-audio = am_demod.demodulate(samples)
 ```
 
-### Recording and Playback
+### Protocol Decoding
 
 ```python
-from sdr_module.dsp.recording import IQRecorder, RecordingFormat
+from sdr_module.dsp.protocols import create_protocol_decoder, ProtocolType
 
-# Record I/Q samples
-recorder = IQRecorder(sample_rate=2.4e6, format=RecordingFormat.SIGMF)
-recorder.start("recording.sigmf")
-# ... capture samples ...
-recorder.stop()
-
-# Playback
-from sdr_module.dsp.recording import IQPlayer
-player = IQPlayer("recording.sigmf")
-samples = player.read_samples(262144)
+decoder = create_protocol_decoder(ProtocolType.ADSB, sample_rate=2e6)
+messages = decoder.decode(samples)
+for msg in messages:
+    print(f"ICAO: {msg.icao_address}, Alt: {msg.altitude}")
 ```
-
-## Supported Modulations
-
-**Analog**: AM, FM, SSB (USB/LSB), CW
-
-**Digital**: ASK/OOK, FSK (2FSK, 4FSK), PSK (BPSK, QPSK, 8PSK), QAM, GFSK, MSK
 
 ## Supported Protocols
 
 | Category | Protocols | Status |
 |----------|-----------|--------|
-| ISM Band | 433/868/915 MHz devices, weather sensors, remote controls | Implemented |
 | Aviation | ADS-B, ACARS | Implemented |
 | Paging | POCSAG, FLEX | Implemented |
 | Amateur Radio | AX.25, APRS | Implemented |
 | Broadcast | RDS (FM Radio Data System) | Implemented |
+| ISM Band | 433/868/915 MHz devices, weather sensors | Implemented (OOK/FSK) |
 
 ## Dual-SDR Operation Modes
 
@@ -214,142 +122,82 @@ samples = player.read_samples(262144)
 | FULL_DUPLEX | RX @ Freq A | TX @ Freq B | Transceiver with simultaneous RX |
 | TX_MONITOR | RX @ TX Freq | TX | Monitor own transmission quality |
 | WIDEBAND_SCAN | Scan 0-1.7 GHz | Scan 1.7-6 GHz | Cover full spectrum faster |
-| RELAY | RX Input | TX Output | Receive-and-retransmit applications |
+| RELAY | RX Input | TX Output | Receive-and-retransmit |
+
+## Safety
+
+Hard-coded TX frequency lockouts prevent transmission on protected frequencies: GPS/GNSS, aviation (121.5/243.0 MHz), ADS-B (1030/1090 MHz), emergency beacons (406 MHz), marine distress (156.8 MHz), and cellular bands. See [SPEC_SHEET.md](SPEC_SHEET.md) for details.
+
+## Optional: Ham Radio Features
+
+The `sdr_module.ham` subpackage provides amateur radio functionality:
+
+- **AM/FM Radio Tuner** with vintage car radio styling
+- **Signal Meter** with S-units (S1-S9, S9+dB) and RST reporting
+- **Callsign ID** for automatic CW identification
+- **SSTV Decoder** for ISS image reception
+- **QRP Operations** with power calculations
+
+```python
+from sdr_module.ham import SignalMeter, QRPController
+from sdr_module.ham.gui import RadioTunerWidget
+```
+
+## Optional: Antenna Array
+
+The `sdr-antenna-array` package (in `packages/sdr-antenna-array/`) provides multi-SDR antenna array support:
+
+- Beamforming (delay-and-sum, MVDR/Capon)
+- Direction of arrival estimation (MUSIC, beamscan)
+- Array calibration
+
+```bash
+pip install -e packages/sdr-antenna-array/
+```
 
 ## Project Structure
 
 ```
 sdr-module/
 ├── src/sdr_module/
-│   ├── core/          # Device management, dual-SDR controller, configuration
+│   ├── core/          # Device management, dual-SDR controller
 │   ├── devices/       # RTL-SDR and HackRF drivers
-│   ├── dsp/           # Signal processing (spectrum, demodulators, filters, etc.)
+│   ├── dsp/           # Signal processing, demodulators, protocol decoders
 │   ├── gui/           # PyQt6 graphical interface
-│   ├── ham/           # Optional ham radio features (callsign, SSTV, QRP, etc.)
-│   ├── protocols/     # Protocol encoders/decoders
+│   ├── ham/           # Optional ham radio features
+│   ├── protocols/     # Protocol encoders
 │   ├── ui/            # Visualization components (waterfall, constellation)
-│   └── utils/         # Helper utilities (conversions, I/Q tools)
+│   └── utils/         # Helper utilities
 ├── packages/
-│   └── sdr-antenna-array/  # Separate antenna array package
+│   └── sdr-antenna-array/  # Standalone antenna array package
 ├── tests/             # Test suite
 └── examples/          # Example scripts
 ```
 
 ## Development
 
-### Setup
-
 ```bash
 git clone https://github.com/kase1111-hash/SDR.git
 cd SDR
 pip install -e ".[dev]"
+pytest                    # Run tests
+pytest --cov=sdr_module   # With coverage
 ```
-
-### Running Tests
-
-```bash
-# Run all tests
-pytest
-
-# Run with coverage
-pytest --cov=sdr_module
-
-# Run specific test file
-pytest tests/test_dual_sdr.py -v
-```
-
-### Code Quality
-
-```bash
-# Format code
-black src/ tests/
-
-# Sort imports
-isort src/ tests/
-
-# Lint
-ruff check src/ tests/
-
-# Type check
-mypy src/sdr_module
-```
-
-## Building
-
-### Linux Portable Build
-
-```bash
-./build_portable.sh
-```
-
-### Windows Build
-
-```batch
-REM Basic build
-build_windows.bat
-
-REM Full build with installer
-build_windows.bat --clean --install
-```
-
-### Windows Installer
-
-```batch
-build_installer.bat
-```
-
-Output: `installer_output/SDR-Module-0.1.0-Setup.exe`
-
-## Documentation
-
-- [SPEC_SHEET.md](SPEC_SHEET.md) - Detailed technical specifications
-- [CHANGELOG.md](CHANGELOG.md) - Version history and release notes
-- [CONTRIBUTING.md](CONTRIBUTING.md) - Contribution guidelines
-- [SECURITY.md](SECURITY.md) - Security policy and vulnerability reporting
-- [tools/README_TEXT_ENCODER.md](tools/README_TEXT_ENCODER.md) - Text encoder tool guide
 
 ## Requirements
 
-- Python 3.9+ (tested on 3.9, 3.10, 3.11, 3.12, 3.13)
-- NumPy ≥1.21.0
-
-**Optional Dependencies:**
-- pyrtlsdr ≥0.2.92 (RTL-SDR support)
-- hackrf ≥1.0.0 (HackRF support)
-- scipy ≥1.7.0 (advanced DSP)
-- matplotlib ≥3.4.0 (plotting)
-- PyQt6 (GUI application)
-
-## Safety Features
-
-The software includes hard-coded TX frequency lockouts for safety:
-- GPS/GNSS frequencies (L1, L2, L5, GLONASS, Galileo, BeiDou)
-- Aviation emergency frequencies (121.5 MHz, 243.0 MHz)
-- ADS-B/Mode S (1030 MHz, 1090 MHz)
-- Emergency beacons (406.0-406.1 MHz)
-- Marine distress (156.8 MHz)
-- Cellular bands
-
-See [SPEC_SHEET.md](SPEC_SHEET.md) for complete details.
+- Python 3.9+
+- NumPy >= 1.21.0
+- **Optional**: pyrtlsdr (RTL-SDR), hackrf (HackRF), scipy (advanced DSP), PyQt6 (GUI)
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
 
-## Contributing
-
-Contributions are welcome! Please read our [Contributing Guidelines](CONTRIBUTING.md) before submitting a Pull Request.
-
-Areas where contributions are appreciated:
-- New protocol decoders
-- Additional modulation support
-- GUI improvements
-- Documentation
-- Bug fixes and optimizations
-
-For security issues, please review our [Security Policy](SECURITY.md).
-
 ## Links
 
 - [GitHub Repository](https://github.com/kase1111-hash/SDR)
 - [Issue Tracker](https://github.com/kase1111-hash/SDR/issues)
+- [Technical Specifications](SPEC_SHEET.md)
+- [Contributing Guidelines](CONTRIBUTING.md)
+- [Security Policy](SECURITY.md)

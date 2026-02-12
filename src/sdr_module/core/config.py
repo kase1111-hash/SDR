@@ -23,7 +23,7 @@ class ConfigValidationError(ValueError):
 class DeviceConfig:
     """Configuration for a single SDR device."""
 
-    device_type: str = "rtlsdr"  # "rtlsdr", "hackrf", or "mxk2_keyer"
+    device_type: str = "rtlsdr"  # "rtlsdr" or "hackrf"
     device_index: int = 0
     frequency: float = 100e6  # 100 MHz default
     sample_rate: float = 2.4e6  # 2.4 MS/s default
@@ -43,10 +43,10 @@ class DeviceConfig:
 
     def _validate(self) -> None:
         """Validate all configuration fields."""
-        if self.device_type not in ("rtlsdr", "hackrf", "mxk2_keyer"):
+        if self.device_type not in ("rtlsdr", "hackrf"):
             raise ConfigValidationError(
                 f"Invalid device_type: {self.device_type}. "
-                "Must be 'rtlsdr', 'hackrf', or 'mxk2_keyer'"
+                "Must be 'rtlsdr' or 'hackrf'"
             )
         if self.device_index < 0:
             raise ConfigValidationError(
@@ -83,65 +83,6 @@ class DeviceConfig:
         if not (0 <= self.tx_vga_gain <= 47):
             raise ConfigValidationError(
                 f"tx_vga_gain must be between 0 and 47 dB, got {self.tx_vga_gain}"
-            )
-
-
-@dataclass
-class KeyerConfig:
-    """Configuration for CW keyer devices (e.g., MX-K2)."""
-
-    device_type: str = "mxk2_keyer"
-    device_index: int = 0
-    port: str = ""  # Serial port (e.g., "/dev/ttyUSB0" or "COM3")
-    baud_rate: int = 1200  # Default baud rate for MX-K2
-    wpm: int = 20  # Words per minute (5-50)
-    sidetone_freq: int = 700  # Sidetone frequency in Hz (300-1200)
-    sidetone_enabled: bool = True
-    paddle_mode: str = "iambic_b"  # "iambic_a", "iambic_b", "ultimatic", "bug", "straight"
-    paddle_swap: bool = False  # Swap dit/dah paddles
-    weight: int = 50  # Dit/dah weight (25-75, 50 = standard 1:3)
-    ptt_lead_time_ms: int = 50  # PTT lead time before keying
-    ptt_tail_time_ms: int = 100  # PTT hang time after keying
-    auto_space: bool = False  # Automatic inter-character spacing
-
-    def __post_init__(self) -> None:
-        """Validate configuration values after initialization."""
-        self._validate()
-
-    def _validate(self) -> None:
-        """Validate all configuration fields."""
-        valid_paddle_modes = ("iambic_a", "iambic_b", "ultimatic", "bug", "straight")
-        if self.device_index < 0:
-            raise ConfigValidationError(
-                f"device_index must be non-negative, got {self.device_index}"
-            )
-        if self.baud_rate <= 0:
-            raise ConfigValidationError(
-                f"baud_rate must be positive, got {self.baud_rate}"
-            )
-        if not (5 <= self.wpm <= 50):
-            raise ConfigValidationError(
-                f"wpm must be between 5 and 50, got {self.wpm}"
-            )
-        if not (300 <= self.sidetone_freq <= 1200):
-            raise ConfigValidationError(
-                f"sidetone_freq must be between 300 and 1200 Hz, got {self.sidetone_freq}"
-            )
-        if self.paddle_mode not in valid_paddle_modes:
-            raise ConfigValidationError(
-                f"paddle_mode must be one of {valid_paddle_modes}, got {self.paddle_mode}"
-            )
-        if not (25 <= self.weight <= 75):
-            raise ConfigValidationError(
-                f"weight must be between 25 and 75, got {self.weight}"
-            )
-        if self.ptt_lead_time_ms < 0:
-            raise ConfigValidationError(
-                f"ptt_lead_time_ms must be non-negative, got {self.ptt_lead_time_ms}"
-            )
-        if self.ptt_tail_time_ms < 0:
-            raise ConfigValidationError(
-                f"ptt_tail_time_ms must be non-negative, got {self.ptt_tail_time_ms}"
             )
 
 
@@ -266,7 +207,6 @@ class SDRConfig:
     dual_sdr: DualSDRConfig = field(default_factory=DualSDRConfig)
     dsp: DSPConfig = field(default_factory=DSPConfig)
     recording: RecordingConfig = field(default_factory=RecordingConfig)
-    keyer: KeyerConfig = field(default_factory=KeyerConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert configuration to dictionary."""
@@ -295,9 +235,6 @@ class SDRConfig:
 
         if "recording" in data:
             config.recording = RecordingConfig(**data["recording"])
-
-        if "keyer" in data:
-            config.keyer = KeyerConfig(**data["keyer"])
 
         return config
 

@@ -18,16 +18,6 @@ Antenna Array Support:
     The module supports multi-SDR antenna arrays for beamforming and
     direction finding. See sdr_module.antenna_array for configuration
     and controller classes.
-
-Plugin System:
-    The module supports extensibility through plugins. See sdr_module.plugins
-    for the plugin API and base classes.
-
-    Plugin Types:
-        - ProtocolPlugin: Custom protocol decoders
-        - DemodulatorPlugin: Custom demodulation algorithms
-        - DevicePlugin: Custom SDR device drivers
-        - ProcessorPlugin: Custom signal processing blocks
 """
 
 __version__ = "0.1.0"
@@ -47,20 +37,6 @@ from .antenna_array import (
     create_linear_4_element,
 )
 
-# Plugin system
-from .plugins import (
-    DemodulatorPlugin,
-    DevicePlugin,
-    Plugin,
-    PluginManager,
-    PluginMetadata,
-    PluginRegistry,
-    PluginState,
-    PluginType,
-    ProcessorPlugin,
-    ProtocolPlugin,
-)
-
 __all__ = [
     # Core
     "DeviceManager",
@@ -73,17 +49,6 @@ __all__ = [
     "TimestampedSampleBuffer",
     "create_linear_2_element",
     "create_linear_4_element",
-    # Plugin system
-    "PluginManager",
-    "PluginRegistry",
-    "Plugin",
-    "PluginMetadata",
-    "PluginType",
-    "PluginState",
-    "ProtocolPlugin",
-    "DemodulatorPlugin",
-    "DevicePlugin",
-    "ProcessorPlugin",
     # Version
     "__version__",
 ]

@@ -108,8 +108,23 @@ class FIRFilter:
         window = self._get_window(spec.window, n)
         h *= window
 
-        # Normalize
-        h /= np.sum(h)
+        # Normalize based on filter type
+        if spec.filter_type == FilterType.LOWPASS or spec.filter_type == FilterType.BANDSTOP:
+            # Normalize for unity gain at DC
+            dc_gain = np.sum(h)
+            if abs(dc_gain) > 1e-10:
+                h /= dc_gain
+        elif spec.filter_type == FilterType.HIGHPASS:
+            # Normalize for unity gain at Nyquist
+            nyquist_gain = np.sum(h * ((-1) ** np.arange(len(h))))
+            if abs(nyquist_gain) > 1e-10:
+                h /= abs(nyquist_gain)
+        elif spec.filter_type == FilterType.BANDPASS:
+            # Normalize for unity gain at center frequency
+            fc_center = (spec.cutoff_low + spec.cutoff_high) / (2 * spec.sample_rate)
+            center_response = np.abs(np.sum(h * np.exp(1j * 2 * np.pi * fc_center * np.arange(len(h)))))
+            if center_response > 1e-10:
+                h /= center_response
 
         return h
 

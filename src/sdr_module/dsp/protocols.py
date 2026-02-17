@@ -280,10 +280,10 @@ class POCSAGDecoder(ProtocolDecoder):
                 break
         return result
 
-    def _process_batch(self, batch: List[int]) -> Optional[POCSAGMessage]:
+    def _process_batch(self, batch: List[int]) -> List[POCSAGMessage]:
         """Process a complete batch (16 codewords after sync)."""
         if len(batch) < 512:  # 16 words * 32 bits
-            return None
+            return []
 
         messages = []
         current_address = None
@@ -370,7 +370,7 @@ class POCSAGDecoder(ProtocolDecoder):
             )
             messages.append(msg)
 
-        return messages[0] if messages else None
+        return messages
 
     def decode(self, samples: np.ndarray) -> List[POCSAGMessage]:
         """
@@ -416,8 +416,8 @@ class POCSAGDecoder(ProtocolDecoder):
 
                 if len(self._current_batch) >= 512:
                     # Process complete batch
-                    msg = self._process_batch(self._current_batch)
-                    if msg:
+                    batch_msgs = self._process_batch(self._current_batch)
+                    for msg in batch_msgs:
                         self._messages.append(msg)
                         self._notify_callbacks(msg)
                     self._current_batch = []

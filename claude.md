@@ -16,11 +16,16 @@ src/sdr_module/          # Main source code
 ├── devices/             # Hardware drivers (RTL-SDR, HackRF, MXK2 Keyer)
 ├── dsp/                 # Digital signal processing (spectrum, demodulators, filters)
 ├── gui/                 # PyQt6 graphical interface
+├── ham/                 # Optional ham radio features (signal meter, QRP, SSTV, callsign)
+│   └── gui/             # Ham radio GUI widgets (radio tuner, panels)
 ├── plugins/             # Plugin system (registry, manager, base classes)
 ├── protocols/           # Protocol encoders/decoders
 ├── ui/                  # Visualization components (waterfall, constellation)
 ├── utils/               # Helper utilities (conversions, I/Q tools)
 └── cli.py               # Command-line interface
+
+packages/
+└── sdr-antenna-array/   # Standalone antenna array package
 
 tests/                   # pytest test suite
 examples/                # Example scripts and sample plugins
@@ -96,12 +101,25 @@ sdr-scan --help
 - `demodulators.py` - AM, FM, SSB, CW, OOK, FSK, PSK, GFSK, MSK, QAM
 - `filters.py` - FIR filters, AGC, decimators, interpolators
 - `classifiers.py` - Signal classification with confidence scoring
+- `protocols.py` - Protocol decoders (POCSAG, AX.25/APRS, RDS, ADS-B, FLEX, ACARS)
 - `recording.py` - I/Q recording/playback (WAV, raw binary, SigMF)
 
 ### Devices (`devices/`)
 - `base.py` - Abstract SDR device interface
 - `rtlsdr.py` - RTL-SDR driver
 - `hackrf.py` - HackRF One driver
+
+### Protocols (`protocols/`)
+- `base.py` - Protocol decoder base class and types
+- `detector.py` - Automatic protocol detection
+- `encoders.py` - Text encoders (RTTY, Morse, ASCII FSK, PSK31)
+
+### Ham Radio (`ham/`) - Optional
+- `signal_meter.py` - S-unit signal meter with RST reporting
+- `qrp.py` - QRP (low-power) operations support
+- `callsign.py` - Automatic CW callsign identification
+- `sstv.py` - SSTV image decoder
+- `gui/` - Radio tuner, QRP panel, SSTV panel, signal meter widget
 
 ### Plugins (`plugins/`)
 - Plugin types: Protocol, Demodulator, Device, Processor

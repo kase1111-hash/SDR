@@ -138,14 +138,15 @@ class SpectrumAnalyzer:
         elif window_type == WindowType.BLACKMAN:
             return np.blackman(size)
         elif window_type == WindowType.BLACKMAN_HARRIS:
-            # 4-term Blackman-Harris
+            # 4-term Blackman-Harris (symmetric window, divide by N-1)
             n = np.arange(size)
             a0, a1, a2, a3 = 0.35875, 0.48829, 0.14128, 0.01168
+            denom = size - 1 if size > 1 else 1
             return (
                 a0
-                - a1 * np.cos(2 * np.pi * n / size)
-                + a2 * np.cos(4 * np.pi * n / size)
-                - a3 * np.cos(6 * np.pi * n / size)
+                - a1 * np.cos(2 * np.pi * n / denom)
+                + a2 * np.cos(4 * np.pi * n / denom)
+                - a3 * np.cos(6 * np.pi * n / denom)
             )
         elif window_type == WindowType.FLAT_TOP:
             n = np.arange(size)
@@ -156,12 +157,13 @@ class SpectrumAnalyzer:
                 0.083578947,
                 0.006947368,
             )
+            denom = size - 1 if size > 1 else 1
             return (
                 a0
-                - a1 * np.cos(2 * np.pi * n / size)
-                + a2 * np.cos(4 * np.pi * n / size)
-                - a3 * np.cos(6 * np.pi * n / size)
-                + a4 * np.cos(8 * np.pi * n / size)
+                - a1 * np.cos(2 * np.pi * n / denom)
+                + a2 * np.cos(4 * np.pi * n / denom)
+                - a3 * np.cos(6 * np.pi * n / denom)
+                + a4 * np.cos(8 * np.pi * n / denom)
             )
         else:
             return np.hanning(size)

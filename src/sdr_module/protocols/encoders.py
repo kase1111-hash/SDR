@@ -339,8 +339,8 @@ class PSK31Encoder(ProtocolEncoder):
 
         phase = 0.0
         for i, bit in enumerate(bits):
-            # Phase shift by π for bit transitions
-            if bit == 1:
+            # PSK31 differential BPSK: phase reversal on 0-bits, no change on 1-bits
+            if bit == 0:
                 phase = (phase + np.pi) % (2 * np.pi)
 
             carrier_phase = 2 * np.pi * self._carrier_freq * t + phase

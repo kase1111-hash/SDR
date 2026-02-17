@@ -161,7 +161,7 @@ def save_iq_file(samples: np.ndarray, filepath: str, format: str = "cf32") -> No
     Args:
         samples: Complex samples
         filepath: Output file path
-        format: File format (cu8, cs8, cs16, cf32)
+        format: File format (cu8, cs8, cs16, cf32, cf64)
     """
     format = format.lower()
 
@@ -170,6 +170,7 @@ def save_iq_file(samples: np.ndarray, filepath: str, format: str = "cf32") -> No
         "cs8": np.int8,
         "cs16": np.int16,
         "cf32": np.float32,
+        "cf64": np.float64,
     }
 
     if format not in format_dtypes:
@@ -180,6 +181,9 @@ def save_iq_file(samples: np.ndarray, filepath: str, format: str = "cf32") -> No
     if format == "cf32":
         # Direct complex output
         data = samples.astype(np.complex64)
+    elif format == "cf64":
+        # Direct complex output (double precision)
+        data = samples.astype(np.complex128)
     else:
         data = complex_to_interleaved(samples, dtype)
 

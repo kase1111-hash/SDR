@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive documentation updates for README.md and SPEC_SHEET.md
 
 ### Fixed
+- FIR filter normalization for highpass, bandpass, and bandstop filters (was dividing by near-zero sum for non-lowpass types)
+- POCSAG decoder dropping all but the first message per batch (`_process_batch` returned only `messages[0]`)
+- PSK31 encoder phase inversion (was shifting phase on 1-bits instead of 0-bits per the PSK31 BPSK standard)
+- Blackman-Harris and Flat-top window function denominators (used `n/N` instead of correct `n/(N-1)`)
+- `save_iq_file` missing cf64 format support that `load_iq_file` already had
 - Test warnings in test_framework.py (PytestReturnNotNoneWarning)
 - Mypy type errors with sensible type checking configuration
 
@@ -58,8 +63,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Amateur Radio (AX.25, APRS)
 - Aviation (ADS-B, ACARS)
 - Paging (POCSAG, FLEX)
-- Trunking (P25, DMR, TETRA)
-- IoT (LoRa, Zigbee, Z-Wave)
+- Broadcast (RDS)
 
 [Unreleased]: https://github.com/kase1111-hash/SDR/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/kase1111-hash/SDR/releases/tag/v0.1.0

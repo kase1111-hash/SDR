@@ -420,9 +420,9 @@ Combine devices to cover wider spectrum.
 
 | Format | Description |
 |--------|-------------|
-| I/Q Sample Format | 8-bit unsigned, 16-bit signed, 32-bit float |
+| I/Q Sample Format | 8-bit unsigned, 16-bit signed, 32-bit float, 64-bit float |
 | Byte Order | Little-endian (I, Q interleaved) |
-| Raw File Format | .raw, .cu8, .cs8, .cs16, .cf32 |
+| Raw File Format | .raw, .cu8, .cs8, .cs16, .cf32, .cf64 |
 | Metadata Format | SigMF (Signal Metadata Format) |
 | Audio Export | WAV (PCM 16-bit, 44.1/48 kHz) |
 

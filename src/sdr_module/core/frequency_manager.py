@@ -152,6 +152,8 @@ class FrequencyPreset:
 
 TX_LOCKOUT_BANDS: List[FrequencyBand] = [
     # GPS/GNSS - CRITICAL SAFETY - NEVER TRANSMIT
+    # WHY ±15 MHz guard: GPS C/A + P(Y) codes span ~20 MHz; extra margin protects
+    # against out-of-band emissions desensitizing GPS receivers
     FrequencyBand(
         name="GPS L1",
         start_hz=1575.42e6 - 15e6,  # 1560.42 - 1590.42 MHz
@@ -259,6 +261,8 @@ TX_LOCKOUT_BANDS: List[FrequencyBand] = [
         lockout_reason=LockoutReason.AVIATION,
     ),
     # Marine Emergency
+    # WHY ±50 kHz: VHF Ch16 is 25 kHz wide; guard band covers adjacent channel
+    # splatter from typical FM transmitters
     FrequencyBand(
         name="Marine Distress",
         start_hz=156.8e6 - 0.05e6,

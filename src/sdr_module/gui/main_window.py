@@ -352,6 +352,27 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._recording_label = QLabel("")
         statusbar.addPermanentWidget(self._recording_label)
 
+        # Error display (auto-clearing)
+        self._error_label = QLabel("")
+        self._error_label.setStyleSheet("color: #cc3300; font-weight: bold;")
+        statusbar.addPermanentWidget(self._error_label)
+        self._error_clear_timer = QTimer(self)
+        self._error_clear_timer.setSingleShot(True)
+        self._error_clear_timer.timeout.connect(
+            lambda: self._error_label.setText("")
+        )
+
+    def _show_status_error(self, message: str, duration_ms: int = 5000) -> None:
+        """Show a transient error message in the status bar.
+
+        Args:
+            message: Error text to display
+            duration_ms: How long to show before auto-clearing
+        """
+        self._error_label.setText(message)
+        self._error_clear_timer.start(duration_ms)
+        logger.warning(f"Status bar error: {message}")
+
     def _setup_timers(self):
         """Setup update timers."""
         # Display update timer (30 Hz)
@@ -712,6 +733,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 logger.info(f"Tuned to {freq_hz/1e6:.3f} MHz ({band})")
             except Exception as e:
                 logger.error(f"Failed to tune: {e}")
+                self._show_status_error(f"Tune failed: {e}")
 
     def _show_decoder_config(self):
         """Show decoder configuration dialog."""

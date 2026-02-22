@@ -70,7 +70,7 @@ class ProtocolDecoder(ABC):
         for callback in self._callbacks:
             try:
                 callback(message)
-            except Exception as e:
+            except (TypeError, ValueError, RuntimeError) as e:
                 logger.warning(f"Callback {callback.__name__} failed: {e}")
 
     @abstractmethod
@@ -113,12 +113,15 @@ class POCSAGDecoder(ProtocolDecoder):
     - Address and function code extraction
     """
 
-    # POCSAG constants
-    SYNC_WORD = 0x7CD215D8
-    IDLE_WORD = 0x7A89C197
-    PREAMBLE_BITS = 576  # Minimum preamble length
+    # POCSAG constants (ITU-R M.584-2)
+    SYNC_WORD = 0x7CD215D8  # 32-bit frame sync per POCSAG spec
+    IDLE_WORD = 0x7A89C197  # Filler codeword — pagers ignore these
+    # WHY 576: spec requires ≥576 alternating bits (1010...) so all pagers
+    # have time to achieve bit synchronization before the first sync word
+    PREAMBLE_BITS = 576
 
-    # BCH(31,21) generator polynomial
+    # WHY 0x769: BCH(31,21) generator polynomial x^10+x^9+x^8+x^6+x^5+x^3+1
+    # provides single-error correction for each 31-bit codeword
     BCH_POLY = 0x769
 
     # Numeric character set
@@ -493,8 +496,9 @@ class AX25Decoder(ProtocolDecoder):
     - APRS data parsing
     """
 
-    FLAG = 0x7E
-    CRC_POLY = 0x8408  # CRC-CCITT (reversed)
+    FLAG = 0x7E  # HDLC frame delimiter 01111110 — six consecutive 1s are unique
+    # due to bit-stuffing, so this pattern unambiguously marks frame boundaries
+    CRC_POLY = 0x8408  # CRC-CCITT bit-reversed form (ITU-T V.41)
 
     def __init__(self, sample_rate: float, baud_rate: int = 1200):
         """
@@ -538,7 +542,7 @@ class AX25Decoder(ProtocolDecoder):
 
     def _compute_crc(self, data: bytes) -> int:
         """Compute CRC-16-CCITT."""
-        crc = 0xFFFF
+        crc = 0xFFFF  # WHY all-ones seed: per ITU-T CRC-16-CCITT; detects leading zeros
         for byte in data:
             crc ^= byte
             for _ in range(8):
@@ -963,7 +967,8 @@ class RDSDecoder(ProtocolDecoder):
 
     def _syndrome(self, block: int) -> int:
         """Calculate syndrome for 26-bit block."""
-        # Generator polynomial for RDS
+        # WHY 0x5B9: RDS uses a shortened cyclic code derived from this generator
+        # polynomial (EN 62106); provides 5-bit error correction per 26-bit block
         poly = 0x5B9  # x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1
 
         reg = 0

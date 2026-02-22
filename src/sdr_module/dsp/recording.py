@@ -2487,7 +2487,8 @@ class FormatDetector:
             with open(filepath, "rb") as f:
                 magic = f.read(4)
                 return magic == self.WAV_MAGIC
-        except Exception:
+        except (OSError, ValueError) as e:
+            logger.debug(f"WAV magic byte detection failed for {filepath}: {e}")
             return False
 
     def _has_sigmf_meta(self, filepath: Path) -> bool:
@@ -2530,7 +2531,7 @@ class FormatDetector:
                         "wav_sample_width": sample_width,
                     },
                 )
-        except Exception as e:
+        except (OSError, wave.Error, ValueError) as e:
             return FormatInfo(
                 file_format=FileFormat.WAV,
                 sample_format=SampleFormat.INT16,
@@ -2603,7 +2604,7 @@ class FormatDetector:
                     "sigmf_datatype": datatype,
                 },
             )
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
             return FormatInfo(
                 file_format=FileFormat.SIGMF,
                 sample_format=SampleFormat.FLOAT32,
@@ -2669,8 +2670,8 @@ class FormatDetector:
                 mean_val = np.mean(samples)
                 if 100 < mean_val < 156:  # Near center (127.5)
                     scores[SampleFormat.UINT8] = 1.0 - abs(mean_val - 127.5) / 127.5
-        except Exception:
-            pass
+        except (ValueError, IndexError) as e:
+            logger.debug(f"UINT8 format probe failed for {filepath}: {e}")
 
         # INT16: values typically in reasonable range
         try:
@@ -2679,8 +2680,8 @@ class FormatDetector:
                 max_abs = np.max(np.abs(samples))
                 if max_abs < 32768:
                     scores[SampleFormat.INT16] = 0.8 if max_abs > 100 else 0.3
-        except Exception:
-            pass
+        except (ValueError, IndexError) as e:
+            logger.debug(f"INT16 format probe failed for {filepath}: {e}")
 
         # FLOAT32: check for valid float values
         try:
@@ -2692,8 +2693,8 @@ class FormatDetector:
                         scores[SampleFormat.FLOAT32] = 0.9
                     elif max_abs < 1000:
                         scores[SampleFormat.FLOAT32] = 0.5
-        except Exception:
-            pass
+        except (ValueError, IndexError) as e:
+            logger.debug(f"FLOAT32 format probe failed for {filepath}: {e}")
 
         if scores:
             return max(scores.keys(), key=lambda k: scores[k])

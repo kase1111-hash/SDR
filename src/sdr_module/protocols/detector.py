@@ -103,7 +103,7 @@ class ProtocolDetector:
                             decoder=decoder,
                         )
                     )
-            except Exception as e:
+            except (ValueError, IndexError, RuntimeError) as e:
                 logger.debug(f"Decoder {name} failed during detection: {e}")
 
         # Sort by confidence
@@ -158,7 +158,7 @@ class ProtocolDetector:
             try:
                 frames = match.decoder.decode(samples)
                 all_frames.extend(frames)
-            except Exception as e:
+            except (ValueError, IndexError, RuntimeError) as e:
                 logger.debug(f"Protocol decoder {match.protocol_info.name} failed: {e}")
 
         return matches, all_frames

@@ -80,7 +80,9 @@ class FIRFilter:
 
         # Time axis
         t = np.arange(n) - (n - 1) / 2
-        t[t == 0] = 1e-10  # Avoid division by zero
+        # WHY 1e-10: sinc(x)=sin(πx)/(πx) has a removable singularity at x=0;
+        # this epsilon avoids the NaN without measurably changing the result
+        t[t == 0] = 1e-10
 
         if spec.filter_type == FilterType.LOWPASS:
             h = 2 * fc_high * np.sinc(2 * fc_high * t)
@@ -102,7 +104,7 @@ class FIRFilter:
 
         else:
             h = np.zeros(n)
-            h[(n - 1) // 2] = 1.0  # Pass-through
+            h[(n - 1) // 2] = 1.0  # Unity impulse at center tap = all-pass
 
         # Apply window
         window = self._get_window(spec.window, n)
@@ -112,12 +114,12 @@ class FIRFilter:
         if spec.filter_type == FilterType.LOWPASS or spec.filter_type == FilterType.BANDSTOP:
             # Normalize for unity gain at DC
             dc_gain = np.sum(h)
-            if abs(dc_gain) > 1e-10:
+            if abs(dc_gain) > 1e-10:  # Guard: skip normalization if gain ≈ 0 (degenerate filter)
                 h /= dc_gain
         elif spec.filter_type == FilterType.HIGHPASS:
             # Normalize for unity gain at Nyquist
             nyquist_gain = np.sum(h * ((-1) ** np.arange(len(h))))
-            if abs(nyquist_gain) > 1e-10:
+            if abs(nyquist_gain) > 1e-10:  # Guard: skip if Nyquist gain ≈ 0
                 h /= abs(nyquist_gain)
         elif spec.filter_type == FilterType.BANDPASS:
             # Normalize for unity gain at center frequency
@@ -138,6 +140,8 @@ class FIRFilter:
         elif window_type == "blackman":
             return np.blackman(length)
         elif window_type == "kaiser":
+            # WHY beta=8: gives ~65 dB stopband attenuation — a practical default
+            # balancing transition width vs rejection for general SDR use
             return np.kaiser(length, 8.0)
         else:
             return np.ones(length)
@@ -205,6 +209,7 @@ class FIRFilter:
         """
         freqs = np.fft.rfftfreq(n_points, 1 / self._spec.sample_rate)
         response = np.fft.rfft(self._taps, n_points)
+        # WHY 1e-20: floor prevents log10(0) = -inf for zero-magnitude bins
         magnitude_db = 20 * np.log10(np.abs(response) + 1e-20)
         return freqs, magnitude_db
 
@@ -338,8 +343,8 @@ class Decimator:
 
         # Auto-calculate taps if not specified
         if num_taps <= 0:
-            # Rule of thumb: more taps for larger decimation
-            # At least 4 taps per decimation factor
+            # WHY factor*8: rule of thumb for anti-aliasing — 8 taps per decimation
+            # factor gives adequate stopband rejection (~50 dB) for SDR signals
             num_taps = max(31, decimation_factor * 8 + 1)
             # Make odd for symmetric filter
             if num_taps % 2 == 0:
@@ -360,14 +365,14 @@ class Decimator:
 
         # Time axis centered at 0
         t = np.arange(n) - (n - 1) / 2
-        t[t == 0] = 1e-10
+        t[t == 0] = 1e-10  # Avoid sinc singularity at t=0 (see FIRFilter._design)
 
         # Sinc function
         h = 2 * fc * np.sinc(2 * fc * t)
 
         # Apply window
         if self._window.lower() == "kaiser":
-            # Kaiser with beta=8 for good stopband
+            # WHY beta=8: ~65 dB stopband — sufficient for anti-aliasing
             window = np.kaiser(n, 8.0)
         elif self._window.lower() == "blackman":
             window = np.blackman(n)
@@ -753,6 +758,7 @@ class Resampler:
 
         # Design combined filter at intermediate rate
         min_nyquist = min(input_rate, output_rate) / 2
+        # WHY 0.8: leave 20% guard below Nyquist for the filter's transition band
         self._cutoff = min_nyquist * 0.8
 
         if num_taps <= 0:
@@ -1024,7 +1030,7 @@ class AGC:
     @property
     def current_gain_db(self) -> float:
         """Get current gain in dB."""
-        return 20 * np.log10(self._gain + 1e-20)
+        return 20 * np.log10(self._gain + 1e-20)  # Floor prevents log(0) at zero gain
 
     @property
     def current_level(self) -> float:

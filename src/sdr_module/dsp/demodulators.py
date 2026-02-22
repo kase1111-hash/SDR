@@ -67,6 +67,9 @@ class AMDemodulator(Demodulator):
         super().__init__(sample_rate)
         self._dc_block = dc_block
         self._dc_avg = 0.0
+        # WHY 0.001: single-pole IIR time constant ≈ 1/α samples; at 48 kHz
+        # this gives ~1 s settling — slow enough to not track audio, fast enough
+        # to remove DC drift from SDR front-ends
         self._dc_alpha = 0.001
 
     def demodulate(self, samples: np.ndarray) -> np.ndarray:
@@ -115,7 +118,8 @@ class FMDemodulator(Demodulator):
         product = np.conj(delayed) * current
         phase_diff = np.angle(product)
 
-        # Normalize by max deviation
+        # WHY fs/(2π·Δf): instantaneous frequency = dφ/dt · fs/(2π).
+        # Dividing by max_deviation normalizes to ±1.0 at full deviation.
         demod = phase_diff * (self._sample_rate / (2 * np.pi * self._max_deviation))
 
         return demod
@@ -301,7 +305,9 @@ class GFSKDemodulator(Demodulator):
 
         # Timing recovery state
         self._timing_offset = 0.0
-        self._timing_alpha = 0.01  # Timing loop gain
+        # WHY 0.01: early-late gate loop bandwidth — small enough for stable
+        # convergence, large enough to track typical oscillator drift (< 100 ppm)
+        self._timing_alpha = 0.01
 
         # DC offset tracking
         self._dc_offset = 0.0
@@ -319,7 +325,8 @@ class GFSKDemodulator(Demodulator):
         # Time vector
         t = np.arange(n_taps) / self._sps - span / 2
 
-        # Gaussian pulse
+        # WHY sqrt(ln2/2)/BT: derived from the Gaussian pulse definition where
+        # the -3 dB bandwidth equals BT·symbol_rate; α sets the pulse width
         alpha = np.sqrt(np.log(2) / 2) / self._bt
         h = np.sqrt(np.pi) / alpha * np.exp(-((np.pi * t / alpha) ** 2))
 
@@ -591,7 +598,8 @@ class MSKDemodulator(Demodulator):
         self._symbol_rate = symbol_rate
         self._coherent = coherent
 
-        # MSK has h = 0.5, so freq deviation = symbol_rate / 4
+        # WHY h=0.5: Minimum Shift Keying is defined by modulation index h=0.5,
+        # the smallest index that maintains orthogonality. Deviation = h·Rs/2 = Rs/4.
         self._deviation = symbol_rate / 4
 
         # Calculate samples per symbol

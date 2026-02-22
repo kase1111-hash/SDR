@@ -711,7 +711,7 @@ class SSTVDecoder:
             )
             return True
 
-        except Exception as e:
+        except (OSError, ValueError) as e:
             logger.error(f"Failed to save image: {e}")
             return False
 
@@ -772,7 +772,7 @@ class SSTVImageViewer:
                 img.save(str(filepath))
                 entry["filename"] = str(filepath)
                 logger.info(f"Auto-saved SSTV image: {filepath}")
-            except Exception as e:
+            except (ImportError, OSError, ValueError) as e:
                 logger.warning(f"Failed to auto-save: {e}")
 
         self.images.append(entry)

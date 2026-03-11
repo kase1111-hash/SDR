@@ -58,13 +58,13 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._show_average = False
         self._grid_enabled = True
 
-        # Colors
-        self._bg_color = QColor(20, 20, 30)
-        self._grid_color = QColor(60, 60, 80)
-        self._spectrum_color = QColor(0, 255, 100)
-        self._peak_color = QColor(255, 100, 100)
-        self._avg_color = QColor(100, 100, 255)
-        self._text_color = QColor(200, 200, 200)
+        # Colors — matched to Catppuccin Mocha theme
+        self._bg_color = QColor(17, 17, 27)  # #11111b crust
+        self._grid_color = QColor(49, 50, 68)  # #313244 surface0
+        self._spectrum_color = QColor(166, 227, 161)  # #a6e3a1 green
+        self._peak_color = QColor(243, 139, 168)  # #f38ba8 red
+        self._avg_color = QColor(137, 180, 250)  # #89b4fa blue
+        self._text_color = QColor(186, 194, 222)  # #bac2de subtext1
 
         # Markers
         self._markers: List[Tuple[float, float]] = []  # (freq, power)
@@ -76,19 +76,40 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         """Setup UI elements."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # Controls bar
-        controls = QHBoxLayout()
+        controls_widget = QWidget()
+        controls_widget.setFixedHeight(28)
+        controls_widget.setStyleSheet(
+            "background-color: #181825; border-bottom: 1px solid #313244;"
+        )
+        controls = QHBoxLayout(controls_widget)
+        controls.setContentsMargins(8, 2, 8, 2)
+        controls.setSpacing(6)
 
-        controls.addWidget(QLabel("Avg:"))
-        self._avg_combo = QComboBox()
-        self._avg_combo.addItems(["Off", "2", "4", "8", "16", "32"])
-        self._avg_combo.currentIndexChanged.connect(self._on_avg_changed)
-        controls.addWidget(self._avg_combo)
+        title = QLabel("SPECTRUM")
+        title.setStyleSheet(
+            "color: #585b70; font-size: 9px; font-weight: bold;"
+            "background: transparent;"
+        )
+        controls.addWidget(title)
 
         controls.addStretch()
 
-        layout.addLayout(controls)
+        avg_label = QLabel("AVG")
+        avg_label.setStyleSheet(
+            "color: #585b70; font-size: 9px; font-weight: bold;"
+            "background: transparent;"
+        )
+        controls.addWidget(avg_label)
+        self._avg_combo = QComboBox()
+        self._avg_combo.addItems(["Off", "2", "4", "8", "16", "32"])
+        self._avg_combo.setFixedWidth(60)
+        self._avg_combo.currentIndexChanged.connect(self._on_avg_changed)
+        controls.addWidget(self._avg_combo)
+
+        layout.addWidget(controls_widget)
 
     def _on_avg_changed(self, index: int):
         """Handle averaging mode change."""

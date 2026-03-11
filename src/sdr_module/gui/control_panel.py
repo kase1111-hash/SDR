@@ -131,10 +131,13 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     def _setup_ui(self):
         """Setup UI elements."""
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(6)
 
         # Frequency group
         freq_group = QGroupBox("Frequency")
         freq_layout = QVBoxLayout(freq_group)
+        freq_layout.setSpacing(6)
 
         # Main frequency
         self._freq_input = FrequencyInput()
@@ -143,9 +146,14 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
         # Quick tune buttons
         quick_layout = QHBoxLayout()
+        quick_layout.setSpacing(3)
         for offset in [-1e6, -100e3, -10e3, 10e3, 100e3, 1e6]:
             btn = QPushButton(self._format_offset(offset))
-            btn.setMaximumWidth(50)
+            btn.setFixedHeight(26)
+            btn.setMinimumWidth(40)
+            btn.setStyleSheet(
+                "font-size: 11px; padding: 2px 4px;" "font-family: monospace;"
+            )
             btn.clicked.connect(lambda checked, o=offset: self._quick_tune(o))
             quick_layout.addWidget(btn)
         freq_layout.addLayout(quick_layout)
@@ -175,7 +183,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         # Preset info label
         self._preset_info = QLabel("")
         self._preset_info.setWordWrap(True)
-        self._preset_info.setStyleSheet("color: #888; font-size: 10px;")
+        self._preset_info.setStyleSheet("color: #a6adc8; font-size: 10px;")
         presets_layout.addWidget(self._preset_info)
 
         # Apply preset button
@@ -323,7 +331,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         # License info/status label
         self._license_info = QLabel("TX: CB, MURS, FRS only")
         self._license_info.setWordWrap(True)
-        self._license_info.setStyleSheet("color: #888; font-size: 10px;")
+        self._license_info.setStyleSheet("color: #a6adc8; font-size: 10px;")
         license_layout.addWidget(self._license_info)
 
         # Power headroom info
@@ -331,15 +339,15 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         headroom_label = QLabel(
             f"Power limits allow +{headroom_pct}% headroom for losses"
         )
-        headroom_label.setStyleSheet("color: #68a; font-size: 9px;")
+        headroom_label.setStyleSheet("color: #74c7ec; font-size: 9px;")
         license_layout.addWidget(headroom_label)
 
         # TX Power Warning - dummy load testing
         self._tx_warning = QLabel(TX_POWER_WARNING)
         self._tx_warning.setWordWrap(True)
         self._tx_warning.setStyleSheet(
-            "color: #da4; font-size: 9px; background-color: #332; "
-            "padding: 4px; border-radius: 3px;"
+            "color: #f9e2af; font-size: 9px; background-color: #2a2520;"
+            "padding: 6px; border-radius: 4px; border: 1px solid #45475a;"
         )
         license_layout.addWidget(self._tx_warning)
 
@@ -466,17 +474,17 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
                     info += f"✓ TX allowed (legal: {legal_limit:.0f}W, max: {effective_limit:.0f}W)"
                 else:
                     info += "✓ TX allowed"
-                self._preset_info.setStyleSheet("color: #4a4; font-size: 10px;")
+                self._preset_info.setStyleSheet("color: #a6e3a1; font-size: 10px;")
             else:
                 # Show why TX is blocked
                 if reason and "LICENSE:" in reason:
                     # License issue
                     info += f"⛔ {reason.replace('LICENSE: ', '')}"
-                    self._preset_info.setStyleSheet("color: #da4; font-size: 10px;")
+                    self._preset_info.setStyleSheet("color: #f9e2af; font-size: 10px;")
                 else:
                     # Hardware lockout (GPS, aviation, etc.)
                     info += "⛔ TX BLOCKED (protected frequency)"
-                    self._preset_info.setStyleSheet("color: #d44; font-size: 10px;")
+                    self._preset_info.setStyleSheet("color: #f38ba8; font-size: 10px;")
 
             self._preset_info.setText(info)
 

@@ -121,9 +121,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         # Highlights
         self._highlights: List[Tuple[int, int, int, int, QColor]] = []
 
-        # Colors
-        self._bg_color = QColor(20, 20, 30)
-        self._text_color = QColor(200, 200, 200)
+        # Colors — matched to Catppuccin Mocha theme
+        self._bg_color = QColor(17, 17, 27)  # #11111b crust
+        self._text_color = QColor(186, 194, 222)  # #bac2de subtext1
 
         self.setMinimumHeight(200)
         self._setup_ui()
@@ -132,27 +132,54 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         """Setup UI elements."""
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # Controls bar
-        controls = QHBoxLayout()
+        controls_widget = QWidget()
+        controls_widget.setFixedHeight(28)
+        controls_widget.setStyleSheet(
+            "background-color: #181825; border-bottom: 1px solid #313244;"
+        )
+        controls = QHBoxLayout(controls_widget)
+        controls.setContentsMargins(8, 2, 8, 2)
+        controls.setSpacing(6)
 
-        controls.addWidget(QLabel("Color:"))
-        self._color_combo = QComboBox()
-        self._color_combo.addItems(list(self.COLORMAPS.keys()))
-        self._color_combo.setCurrentText(self._colormap_name)
-        self._color_combo.currentTextChanged.connect(self._on_colormap_changed)
-        controls.addWidget(self._color_combo)
+        title = QLabel("WATERFALL")
+        title.setStyleSheet(
+            "color: #585b70; font-size: 9px; font-weight: bold;"
+            "background: transparent;"
+        )
+        controls.addWidget(title)
 
         controls.addStretch()
 
-        controls.addWidget(QLabel("Range:"))
+        color_label = QLabel("COLOR")
+        color_label.setStyleSheet(
+            "color: #585b70; font-size: 9px; font-weight: bold;"
+            "background: transparent;"
+        )
+        controls.addWidget(color_label)
+        self._color_combo = QComboBox()
+        self._color_combo.addItems(list(self.COLORMAPS.keys()))
+        self._color_combo.setCurrentText(self._colormap_name)
+        self._color_combo.setFixedWidth(90)
+        self._color_combo.currentTextChanged.connect(self._on_colormap_changed)
+        controls.addWidget(self._color_combo)
+
+        range_label = QLabel("RANGE")
+        range_label.setStyleSheet(
+            "color: #585b70; font-size: 9px; font-weight: bold;"
+            "background: transparent;"
+        )
+        controls.addWidget(range_label)
         self._range_combo = QComboBox()
         self._range_combo.addItems(["60 dB", "80 dB", "100 dB", "120 dB"])
         self._range_combo.setCurrentIndex(2)
+        self._range_combo.setFixedWidth(70)
         self._range_combo.currentIndexChanged.connect(self._on_range_changed)
         controls.addWidget(self._range_combo)
 
-        layout.addLayout(controls)
+        layout.addWidget(controls_widget)
 
     def _on_colormap_changed(self, name: str):
         """Handle colormap change."""

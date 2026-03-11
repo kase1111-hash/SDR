@@ -27,21 +27,25 @@ classifiers = [
 keywords = ["sdr", "rtl-sdr", "hackrf", "radio", "dsp", "signal-processing"]
 
 dependencies = [
-    "numpy>=1.21.0",
+    "numpy>=1.21.0,<3",
 ]
 
 [project.optional-dependencies]
 rtlsdr = [
-    "pyrtlsdr>=0.2.92",
+    "pyrtlsdr>=0.2.92,<1",
 ]
 hackrf = [
-    "hackrf>=1.0.0",
+    "hackrf>=1.0.0,<2",
 ]
 full = [
-    "pyrtlsdr>=0.2.92",
-    "hackrf>=1.0.0",
-    "scipy>=1.7.0",
-    "matplotlib>=3.4.0",
+    "pyrtlsdr>=0.2.92,<1",
+    "hackrf>=1.0.0,<2",
+    "scipy>=1.7.0,<2",
+    "matplotlib>=3.4.0,<4",
+    "PyQt6>=6.4.0,<7",
+]
+gui = [
+    "PyQt6>=6.4.0,<7",
 ]
 dev = [
     "pytest>=7.0.0",

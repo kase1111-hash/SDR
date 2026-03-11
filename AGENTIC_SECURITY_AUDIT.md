@@ -245,13 +245,26 @@ Risk:      Future credential leaks would not be caught pre-merge
 Fix:       Add `gitleaks detect` step to CI workflow
 ```
 
-### [INFO] — PyQt6 Version Unpinned
+### [LOW] — All Dependencies Use Floating Minimum Versions
 ```
 Layer:     4
-Location:  pyproject.toml (optional dependencies)
-Evidence:  PyQt6 specified without version constraint
-Risk:      Major version changes could break GUI without warning
-Fix:       Add minimum version pin (e.g., `PyQt6>=6.4.0`)
+Location:  pyproject.toml
+Evidence:  All deps use `>=` with no upper bounds or lock file. No poetry.lock,
+           requirements.lock, or pip-compile output. NumPy >=1.21.0 could pull
+           2.x with breaking API changes.
+Risk:      Dependency drift; different builds on different dates; transitive
+           vulnerability exposure
+Fix:       Generate lock file via `pip-compile` or Poetry for reproducible builds.
+           Pin PyQt6 minimum version (currently unpinned entirely).
+```
+
+### [LOW] — No Code Signing or SBOM in Distribution
+```
+Layer:     4
+Location:  .github/workflows/release.yml
+Evidence:  No package signing, no Software Bill of Materials generation
+Risk:      Supply chain integrity not independently verifiable
+Fix:       Add sigstore signing and SBOM generation to release pipeline
 ```
 
 ---
@@ -278,9 +291,11 @@ Fix:       Add minimum version pin (e.g., `PyQt6>=6.4.0`)
 |----------|--------|--------|
 | 1 | Fix silent exception swallowing in `recording.py` | 15 min |
 | 2 | Add `gitleaks` to CI pipeline | 30 min |
-| 3 | Pin PyQt6 minimum version | 5 min |
-| 4 | Add assertions to GUI tests | 2-4 hrs |
-| 5 | Narrow broad `except Exception` to specific types in DSP code | 2-4 hrs |
+| 3 | Generate dependency lock file (`pip-compile` or Poetry) | 30 min |
+| 4 | Pin PyQt6 minimum version in `pyproject.toml` | 5 min |
+| 5 | Add assertions to GUI tests | 2-4 hrs |
+| 6 | Narrow broad `except Exception` to specific types in DSP code | 2-4 hrs |
+| 7 | Add sigstore signing + SBOM to release pipeline | 1-2 hrs |
 
 ---
 

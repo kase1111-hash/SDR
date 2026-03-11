@@ -245,26 +245,21 @@ Risk:      Future credential leaks would not be caught pre-merge
 Fix:       Add `gitleaks detect` step to CI workflow
 ```
 
-### [LOW] — All Dependencies Use Floating Minimum Versions
+### [LOW] — All Dependencies Use Floating Minimum Versions — RESOLVED
 ```
 Layer:     4
 Location:  pyproject.toml
-Evidence:  All deps use `>=` with no upper bounds or lock file. No poetry.lock,
-           requirements.lock, or pip-compile output. NumPy >=1.21.0 could pull
-           2.x with breaking API changes.
-Risk:      Dependency drift; different builds on different dates; transitive
-           vulnerability exposure
-Fix:       Generate lock file via `pip-compile` or Poetry for reproducible builds.
-           Pin PyQt6 minimum version (currently unpinned entirely).
+Status:    RESOLVED — Added major-version upper bounds (<3, <2, <4, <7) to all
+           runtime and optional deps. Added PyQt6>=6.4.0,<7 as explicit gui extra.
 ```
 
-### [LOW] — No Code Signing or SBOM in Distribution
+### [LOW] — No Code Signing or SBOM in Distribution — RESOLVED
 ```
 Layer:     4
 Location:  .github/workflows/release.yml
-Evidence:  No package signing, no Software Bill of Materials generation
-Risk:      Supply chain integrity not independently verifiable
-Fix:       Add sigstore signing and SBOM generation to release pipeline
+Status:    RESOLVED — Added `attest` job with actions/attest-build-provenance@v2
+           for sigstore attestation and anchore/sbom-action@v0 for SPDX SBOM
+           generation. Both artifacts attached to GitHub releases.
 ```
 
 ---

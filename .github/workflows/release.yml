@@ -113,12 +113,14 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
-  github-release:
-    name: Create GitHub Release
+  attest:
+    name: Sign & Generate SBOM
     runs-on: ubuntu-latest
-    needs: publish-pypi
+    needs: build
     permissions:
-      contents: write
+      id-token: write
+      contents: read
+      attestations: write
 
     steps:
       - uses: actions/checkout@v6
@@ -127,6 +129,40 @@ jobs:
         uses: actions/download-artifact@v7
         with:
           name: dist
+          path: dist/
+
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/sbom.spdx.json
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: 'dist/*.tar.gz,dist/*.whl'
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: dist-signed
+          path: dist/
+
+  github-release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [publish-pypi, attest]
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download signed artifacts
+        uses: actions/download-artifact@v7
+        with:
+          name: dist-signed
           path: dist/
 
       - name: Extract version from tag
@@ -157,6 +193,11 @@ jobs:
             ```bash
             pip install sdr-module==${{ steps.version.outputs.version }}
             ```
+
+            ### Verification
+
+            Build provenance attestations are available via `gh attestation verify`.
+            SBOM (SPDX) is attached to this release as `sbom.spdx.json`.
 
             ### Links
             - [PyPI](https://pypi.org/project/sdr-module/${{ steps.version.outputs.version }}/)

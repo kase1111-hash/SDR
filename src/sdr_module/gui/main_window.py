@@ -131,7 +131,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _setup_ui(self):
         """Setup the user interface."""
-        self.setWindowTitle("SDR Module")
+        self.setWindowTitle("SDR Module v0.1.0")
         self.setMinimumSize(1200, 800)
 
         # Central widget with splitters
@@ -314,17 +314,36 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         toolbar.addSeparator()
 
-        # Frequency display
-        toolbar.addWidget(QLabel("Freq: "))
+        # Frequency display — styled as LCD readout
+        freq_label = QLabel("FREQ")
+        freq_label.setStyleSheet(
+            "color: #585b70; font-size: 9px; font-weight: bold; padding-right: 2px;"
+        )
+        toolbar.addWidget(freq_label)
         self._freq_label = QLabel("100.000 MHz")
-        self._freq_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        self._freq_label.setStyleSheet(
+            "font-family: 'Consolas', 'SF Mono', 'Fira Code', monospace;"
+            "font-size: 18px; font-weight: bold; color: #a6e3a1;"
+            "background-color: #11111b; border: 1px solid #313244;"
+            "border-radius: 4px; padding: 2px 10px; letter-spacing: 1px;"
+        )
         toolbar.addWidget(self._freq_label)
 
         toolbar.addSeparator()
 
-        # Signal level
-        toolbar.addWidget(QLabel("Level: "))
+        # Signal level — styled as meter readout
+        level_label = QLabel("LEVEL")
+        level_label.setStyleSheet(
+            "color: #585b70; font-size: 9px; font-weight: bold; padding-right: 2px;"
+        )
+        toolbar.addWidget(level_label)
         self._level_label = QLabel("-80.0 dB")
+        self._level_label.setStyleSheet(
+            "font-family: 'Consolas', 'SF Mono', 'Fira Code', monospace;"
+            "font-size: 14px; color: #f9e2af;"
+            "background-color: #11111b; border: 1px solid #313244;"
+            "border-radius: 4px; padding: 2px 8px;"
+        )
         toolbar.addWidget(self._level_label)
 
     def _setup_statusbar(self):
@@ -334,33 +353,46 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         # Device status
         self._device_label = QLabel("No device")
+        self._device_label.setStyleSheet(
+            "color: #a6adc8; font-weight: bold; padding: 0 8px;"
+        )
         statusbar.addWidget(self._device_label)
 
+        # Separator
+        sep1 = QLabel("|")
+        sep1.setStyleSheet("color: #313244; padding: 0 2px;")
+        statusbar.addWidget(sep1)
+
         # Sample rate
-        self._rate_label = QLabel("Rate: 2.4 MS/s")
+        self._rate_label = QLabel("2.4 MS/s")
+        self._rate_label.setStyleSheet(
+            "font-family: monospace; color: #bac2de; padding: 0 4px;"
+        )
         statusbar.addWidget(self._rate_label)
 
         # Buffer indicator
         self._buffer_progress = QProgressBar()
-        self._buffer_progress.setMaximumWidth(100)
-        self._buffer_progress.setMaximumHeight(16)
+        self._buffer_progress.setFixedWidth(80)
+        self._buffer_progress.setFixedHeight(14)
         self._buffer_progress.setRange(0, 100)
         self._buffer_progress.setValue(0)
+        self._buffer_progress.setFormat("%p%")
         statusbar.addPermanentWidget(self._buffer_progress)
 
         # Recording status
         self._recording_label = QLabel("")
+        self._recording_label.setStyleSheet("font-weight: bold; padding: 0 6px;")
         statusbar.addPermanentWidget(self._recording_label)
 
         # Error display (auto-clearing)
         self._error_label = QLabel("")
-        self._error_label.setStyleSheet("color: #cc3300; font-weight: bold;")
+        self._error_label.setStyleSheet(
+            "color: #f38ba8; font-weight: bold; padding: 0 6px;"
+        )
         statusbar.addPermanentWidget(self._error_label)
         self._error_clear_timer = QTimer(self)
         self._error_clear_timer.setSingleShot(True)
-        self._error_clear_timer.timeout.connect(
-            lambda: self._error_label.setText("")
-        )
+        self._error_clear_timer.timeout.connect(lambda: self._error_label.setText(""))
 
     def _show_status_error(self, message: str, duration_ms: int = 5000) -> None:
         """Show a transient error message in the status bar.
@@ -588,8 +620,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Start recording."""
         self._recording = True
         self._samples_buffer = []
-        self._recording_label.setText("REC")
-        self._recording_label.setStyleSheet("color: red; font-weight: bold;")
+        self._recording_label.setText("  REC  ")
+        self._recording_label.setStyleSheet(
+            "color: #1e1e2e; font-weight: bold; background-color: #f38ba8;"
+            "border-radius: 3px; padding: 1px 6px;"
+        )
         logger.info("Recording started")
 
     def _stop_recording(self):

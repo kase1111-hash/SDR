@@ -15,7 +15,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 try:
-    from PyQt6.QtCore import QRectF
+    from PyQt6.QtCore import QRectF, Qt, pyqtSignal
     from PyQt6.QtGui import QColor, QImage, QPainter, QPen
     from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
@@ -97,6 +97,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         ],
     }
 
+    if HAS_PYQT6:
+        frequency_clicked = pyqtSignal(float)  # Hz
+
     def __init__(self, parent=None, history_size: int = 500):
         if not HAS_PYQT6:
             raise ImportError("PyQt6 is required")
@@ -107,6 +110,8 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._history_size = history_size
         self._fft_size = 2048
         self._db_range = (-100, 0)
+        self._center_freq = 100e6
+        self._sample_rate = 2.4e6
 
         # Data storage
         self._history: deque = deque(maxlen=history_size)
@@ -249,6 +254,39 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._history.clear()
         self._image = None
         self.update()
+
+    def set_center_freq(self, center_freq: float) -> None:
+        """Update the center frequency used for click-to-tune and labels."""
+        self._center_freq = center_freq
+        self.update()
+
+    def set_sample_rate(self, sample_rate: float) -> None:
+        """Update the sample rate used for click-to-tune and labels."""
+        self._sample_rate = sample_rate
+        self.update()
+
+    def save_image(self, path: str) -> bool:
+        """Save the current waterfall image to a file. Returns success."""
+        if self._image is None:
+            return False
+        return bool(self._image.save(path))
+
+    def mousePressEvent(self, event):
+        """Emit frequency_clicked on left-click inside the image area."""
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        margin = 50  # matches _draw code; ~left axis margin
+        right_pad = 10
+        w = self.width() - margin - right_pad
+        if w <= 0:
+            return
+        x = event.position().x() - margin
+        if x < 0 or x > w:
+            return
+        frac = x / w
+        freq_start = self._center_freq - self._sample_rate / 2
+        freq = freq_start + frac * self._sample_rate
+        self.frequency_clicked.emit(float(freq))
 
     def add_highlight(
         self,

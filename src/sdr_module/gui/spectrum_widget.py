@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     from PyQt6.QtGui import QPainter
 
 try:
-    from PyQt6.QtCore import Qt
+    from PyQt6.QtCore import Qt, pyqtSignal
     from PyQt6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
     from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
@@ -33,6 +33,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
     Shows power spectrum with configurable averaging and peak hold.
     """
+
+    if HAS_PYQT6:
+        frequency_clicked = pyqtSignal(float)  # Hz
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -170,6 +173,29 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._center_freq = center_freq
         self._sample_rate = sample_rate
         self.update()
+
+    def set_center_freq(self, center_freq: float):
+        """Convenience setter used by the main window."""
+        self._center_freq = center_freq
+        self.update()
+
+    def mousePressEvent(self, event):
+        """Emit frequency_clicked when the user clicks inside the plot."""
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        # Plot margins must match paintEvent
+        margin_left = 50
+        margin_right = 10
+        plot_width = self.width() - margin_left - margin_right
+        if plot_width <= 0:
+            return
+        x = event.position().x() - margin_left
+        if x < 0 or x > plot_width:
+            return
+        frac = x / plot_width
+        freq_start = self._center_freq - self._sample_rate / 2
+        freq = freq_start + frac * self._sample_rate
+        self.frequency_clicked.emit(float(freq))
 
     def set_db_range(self, min_db: float, max_db: float):
         """Set dB range for display."""

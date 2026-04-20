@@ -12,8 +12,9 @@ import numpy as np
 
 try:
     from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-    from PyQt6.QtGui import QAction, QKeySequence
+    from PyQt6.QtGui import QAction, QKeySequence, QShortcut
     from PyQt6.QtWidgets import (
+        QApplication,
         QFileDialog,
         QLabel,
         QMainWindow,
@@ -31,10 +32,26 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
+from .audio_sink import AudioSink
+from .bookmarks_panel import BookmarksPanel
 from .control_panel import ControlPanel
 from .decoder_panel import DecoderPanel
+from .settings_store import GuiSettings
 from .spectrum_widget import SpectrumWidget
+from .themes import get_stylesheet
 from .waterfall_widget import WaterfallWidget
+
+# Band presets shown in the Tools → Bands menu
+BAND_PRESETS = [
+    ("FM Broadcast", 100.1e6, "FM"),
+    ("NOAA Weather", 162.55e6, "FM"),
+    ("2m Ham (146.52)", 146.52e6, "FM"),
+    ("70cm Ham (446)", 446.0e6, "FM"),
+    ("Airband AM", 125.0e6, "AM"),
+    ("ADS-B (1090)", 1090e6, "None (I/Q)"),
+    ("ISM 433", 433.92e6, "FM"),
+    ("ISM 915", 915e6, "FM"),
+]
 
 # Optional ham radio panels
 try:
@@ -113,19 +130,40 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._samples_buffer = []
         self._demo_mode = demo_mode
         self._radio_tuner = None  # Pop-out radio tuner window
+        self._squelch_db = -80.0  # applied to spectrum gating
+        self._agc_enabled = False
+        self._recording_bytes = 0  # for free-space display
+        self._theme = "dark"
+        self._known_device_names: set = set()
+
+        # Persisted settings (frequency, gain, theme, bookmarks live here)
+        self._settings = GuiSettings()
+        self._theme = self._settings.get_str("theme", "dark")
+
+        # Audio output
+        self._audio = AudioSink()
+        self._audio_enabled = self._settings.get_bool("audio_enabled", False)
 
         self._setup_ui()
         self._setup_menus()
         self._setup_toolbar()
         self._setup_statusbar()
         self._setup_timers()
+        self._setup_shortcuts()
 
         # Connect signals
         self._connect_signals()
 
+        # Restore persisted values
+        self._restore_state()
+
         # Auto-start demo mode
         if demo_mode:
             self._start_demo_mode()
+
+        # First-run wizard
+        if self._settings.is_first_run():
+            self._run_first_run_wizard()
 
         logger.info("Main window initialized")
 
@@ -184,6 +222,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         self._decoder_panel = DecoderPanel()
         decoder_tabs.addTab(self._decoder_panel, "Decoder")
+
+        self._bookmarks_panel = BookmarksPanel()
+        self._bookmarks_panel.tune_requested.connect(self._on_bookmark_tune)
+        decoder_tabs.addTab(self._bookmarks_panel, "Bookmarks")
 
         # Optional ham radio panels
         if HAS_HAM_RADIO:
@@ -278,6 +320,45 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         decoder_action.triggered.connect(self._show_decoder_config)
         tools_menu.addAction(decoder_action)
 
+        # Band presets submenu
+        bands_menu = tools_menu.addMenu("&Bands")
+        for label, freq_hz, mode in BAND_PRESETS:
+            act = QAction(label, self)
+            act.triggered.connect(
+                lambda _c, f=freq_hz, m=mode, n=label: self._apply_band_preset(f, m, n)
+            )
+            bands_menu.addAction(act)
+
+        tools_menu.addSeparator()
+
+        bookmark_action = QAction("&Bookmark Current Frequency", self)
+        bookmark_action.setShortcut("Ctrl+B")
+        bookmark_action.triggered.connect(self._bookmark_current_frequency)
+        tools_menu.addAction(bookmark_action)
+
+        screenshot_action = QAction("Save &Screenshot...", self)
+        screenshot_action.setShortcut("Ctrl+P")
+        screenshot_action.triggered.connect(self._save_screenshot)
+        tools_menu.addAction(screenshot_action)
+
+        errors_action = QAction("&Error History...", self)
+        errors_action.setShortcut("Ctrl+E")
+        errors_action.triggered.connect(self._show_error_history)
+        tools_menu.addAction(errors_action)
+
+        tools_menu.addSeparator()
+
+        theme_action = QAction("Toggle Light/Dark &Theme", self)
+        theme_action.setShortcut("Ctrl+T")
+        theme_action.triggered.connect(self._toggle_theme)
+        tools_menu.addAction(theme_action)
+
+        audio_action = QAction("&Audio Output", self)
+        audio_action.setCheckable(True)
+        audio_action.setChecked(self._audio_enabled)
+        audio_action.toggled.connect(self._set_audio_enabled)
+        tools_menu.addAction(audio_action)
+
         if HAS_HAM_RADIO:
             tools_menu.addSeparator()
 
@@ -288,6 +369,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         # Help menu
         help_menu = menubar.addMenu("&Help")
+
+        help_action = QAction("Keyboard &Shortcuts...", self)
+        help_action.setShortcut("F1")
+        help_action.triggered.connect(self._show_help)
+        help_menu.addAction(help_action)
 
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._show_about)
@@ -417,11 +503,59 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._status_timer.timeout.connect(self._update_status)
         self._status_timer.start(200)
 
+        # Device hot-plug polling (0.5 Hz)
+        self._hotplug_timer = QTimer(self)
+        self._hotplug_timer.timeout.connect(self._poll_hotplug)
+        self._hotplug_timer.start(2000)
+
+    def _setup_shortcuts(self):
+        """Install keyboard shortcuts."""
+        # Space = start/stop
+        sc = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
+        sc.activated.connect(self._toggle_acquisition)
+
+        # Ctrl+Shift+R = record toggle
+        sc = QShortcut(QKeySequence("Ctrl+Shift+R"), self)
+        sc.activated.connect(
+            lambda: self._record_action.setChecked(not self._record_action.isChecked())
+        )
+
+        # Tuning arrows
+        for key, step in [
+            (QKeySequence(Qt.Key.Key_Left), -10e3),
+            (QKeySequence(Qt.Key.Key_Right), +10e3),
+            (QKeySequence("Shift+Left"), -100e3),
+            (QKeySequence("Shift+Right"), +100e3),
+            (QKeySequence("Ctrl+Left"), -1e6),
+            (QKeySequence("Ctrl+Right"), +1e6),
+        ]:
+            s = QShortcut(key, self)
+            s.activated.connect(lambda off=step: self._nudge_frequency(off))
+
+        # Ctrl+P = screenshot, Ctrl+T = theme toggle, Ctrl+B = add bookmark,
+        # Ctrl+E = error history, F1 = help, Ctrl+F = scanner
+        for ks, slot in [
+            ("Ctrl+P", self._save_screenshot),
+            ("Ctrl+T", self._toggle_theme),
+            ("Ctrl+B", self._bookmark_current_frequency),
+            ("Ctrl+E", self._show_error_history),
+            ("F1", self._show_help),
+            ("Ctrl+F", self._show_scanner),
+        ]:
+            s = QShortcut(QKeySequence(ks), self)
+            s.activated.connect(slot)
+
     def _connect_signals(self):
         """Connect control panel signals."""
         self._control_panel.frequency_changed.connect(self._on_frequency_changed)
         self._control_panel.gain_changed.connect(self._on_gain_changed)
         self._control_panel.bandwidth_changed.connect(self._on_bandwidth_changed)
+        self._control_panel.squelch_changed.connect(self._on_squelch_changed)
+        self._control_panel.agc_changed.connect(self._on_agc_changed)
+        self._control_panel.demod_changed.connect(self._on_demod_changed)
+        # Click-to-tune from spectrum and waterfall
+        self._spectrum.frequency_clicked.connect(self._on_frequency_changed)
+        self._waterfall.frequency_clicked.connect(self._on_frequency_changed)
 
     def _on_frequency_changed(self, freq_hz: float):
         """Handle frequency change."""
@@ -447,6 +581,43 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._device:
             self._device.set_bandwidth(bw_hz)
         logger.debug(f"Bandwidth changed to {bw_hz/1e3:.1f} kHz")
+
+    def _on_squelch_changed(self, db: float):
+        """Handle squelch threshold change."""
+        self._squelch_db = float(db)
+        self._settings.set("squelch_db", self._squelch_db)
+
+    def _on_agc_changed(self, enabled: bool):
+        """Handle AGC toggle."""
+        self._agc_enabled = bool(enabled)
+        self._settings.set("agc_enabled", self._agc_enabled)
+        if self._device and hasattr(self._device, "set_gain_mode"):
+            try:
+                self._device.set_gain_mode("auto" if enabled else "manual")
+            except Exception as e:
+                logger.debug(f"Device AGC set failed: {e}")
+
+    def _on_demod_changed(self, mode: str):
+        """Handle demodulator selection change."""
+        self._settings.set("demod_mode", mode)
+        self._start_or_stop_audio(mode)
+
+    def _start_or_stop_audio(self, mode: str):
+        """Start audio for audible demods, stop otherwise."""
+        if not self._audio_enabled:
+            self._audio.stop()
+            return
+        audible = {"AM", "FM", "USB", "LSB", "CW"}
+        if mode in audible:
+            self._audio.start(48000)
+        else:
+            self._audio.stop()
+
+    def _on_bookmark_tune(self, freq_hz: float, label: str):
+        """Tune to a bookmarked frequency."""
+        self.set_frequency(freq_hz)
+        self._show_status_error(f"Tuned to {label}", duration_ms=2000)
+        # The status-bar helper is error-styled; use it as a generic toast.
 
     def _toggle_acquisition(self):
         """Toggle signal acquisition."""
@@ -618,8 +789,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _start_recording(self):
         """Start recording."""
+        import time
+
         self._recording = True
         self._samples_buffer = []
+        self._recording_bytes = 0
+        self._recording_started_at = time.monotonic()
         self._recording_label.setText("  REC  ")
         self._recording_label.setStyleSheet(
             "color: #1e1e2e; font-weight: bold; background-color: #f38ba8;"
@@ -667,18 +842,65 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._waterfall.add_line(power)
 
         # Update level display
-        peak_level = np.max(power)
+        peak_level = float(np.max(power))
         self._level_label.setText(f"{peak_level:.1f} dB")
+
+        # Squelch + audio: demodulate when carrier is above threshold
+        if self._audio_enabled and peak_level >= self._squelch_db:
+            self._demodulate_and_play(samples)
 
         # Record if active
         if self._recording:
             self._samples_buffer.append(samples)
+            # complex64 = 8 bytes/sample
+            self._recording_bytes += len(samples) * 8
+
+    def _demodulate_and_play(self, samples: np.ndarray) -> None:
+        """Demodulate samples to audio and push to the output sink."""
+        mode = self._control_panel._demod_combo.currentText()
+        if mode not in ("AM", "FM", "USB", "LSB", "CW"):
+            return
+        try:
+            # Simple demodulators sufficient for monitoring in the GUI
+            if mode == "FM":
+                # FM discriminator
+                prod = samples[1:] * np.conj(samples[:-1])
+                audio = np.angle(prod).astype(np.float32)
+            elif mode == "AM":
+                audio = (np.abs(samples) - np.mean(np.abs(samples))).astype(np.float32)
+            else:  # SSB/CW: pass real part as crude envelope
+                audio = samples.real.astype(np.float32)
+            # Normalize softly then write
+            peak = float(np.max(np.abs(audio)) + 1e-9)
+            audio = audio / max(peak, 1e-6) * 0.5
+            # Decimate to ~48 kHz assuming 2.4 MS/s (48x)
+            rate = getattr(self._device, "sample_rate", 2.4e6) if self._device else 2.4e6
+            decim = max(1, int(rate / 48000))
+            self._audio.write(audio[::decim])
+        except Exception as e:  # pragma: no cover
+            logger.debug(f"Audio demod failed: {e}")
 
     def _update_status(self):
         """Update status bar."""
+        import shutil
+        import time
+
         if self._recording:
-            samples_count = sum(len(s) for s in self._samples_buffer)
-            self._recording_label.setText(f"REC: {samples_count/1e6:.2f} MS")
+            started = getattr(self, "_recording_started_at", time.monotonic())
+            elapsed = int(time.monotonic() - started)
+            mb = self._recording_bytes / (1024 * 1024)
+            # Show elapsed time + size + free space on the cwd volume
+            try:
+                free_gb = shutil.disk_usage(".").free / (1024**3)
+                free_str = f"{free_gb:.1f} GB free"
+            except OSError:
+                free_str = ""
+            h = elapsed // 3600
+            m = (elapsed % 3600) // 60
+            s = elapsed % 60
+            self._recording_label.setText(
+                f"REC {h:02d}:{m:02d}:{s:02d}  {mb:.1f} MB  {free_str}"
+            )
 
     def _show_device_dialog(self):
         """Show device connection dialog."""
@@ -888,8 +1110,153 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "</ul>",
         )
 
+    # ---- New helpers ----
+
+    def _nudge_frequency(self, offset_hz: float) -> None:
+        """Adjust the center frequency by the given offset."""
+        current = self._control_panel._freq_input.get_frequency()
+        new_freq = max(0.0, current + offset_hz)
+        self.set_frequency(new_freq)
+
+    def _apply_band_preset(self, freq_hz: float, mode: str, label: str) -> None:
+        """Tune to a band preset and set matching demod mode."""
+        self.set_frequency(freq_hz)
+        idx = self._control_panel._demod_combo.findText(mode)
+        if idx >= 0:
+            self._control_panel._demod_combo.setCurrentIndex(idx)
+        self._show_status_error(f"Band: {label}", duration_ms=1500)
+
+    def _bookmark_current_frequency(self) -> None:
+        """Save the current tuner frequency into bookmarks."""
+        freq = self._control_panel._freq_input.get_frequency()
+        label = f"{freq/1e6:.3f} MHz"
+        self._bookmarks_panel.add_bookmark(label, freq)
+        self._show_status_error(f"Bookmarked {label}", duration_ms=1500)
+
+    def _save_screenshot(self) -> None:
+        """Save a PNG of the window (spectrum + waterfall + panels)."""
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save Screenshot", "sdr.png", "PNG (*.png)"
+        )
+        if not filename:
+            return
+        pixmap = self.grab()
+        if pixmap.save(filename):
+            self._show_status_error(f"Saved {filename}", duration_ms=2000)
+        else:
+            QMessageBox.warning(self, "Save Failed", "Could not save screenshot.")
+
+    def _toggle_theme(self) -> None:
+        """Switch between dark and light stylesheets."""
+        self._theme = "light" if self._theme == "dark" else "dark"
+        self._settings.set("theme", self._theme)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(get_stylesheet(self._theme))
+        self._show_status_error(f"Theme: {self._theme}", duration_ms=1500)
+
+    def _show_help(self) -> None:
+        """Open the keyboard shortcuts reference."""
+        from .help_dialog import HelpDialog
+
+        HelpDialog(self).exec()
+
+    def _show_error_history(self) -> None:
+        """Open the error history viewer."""
+        from .error_log_dialog import ErrorLogDialog, install_history_handler
+
+        install_history_handler()
+        ErrorLogDialog(self).exec()
+
+    def _set_audio_enabled(self, enabled: bool) -> None:
+        """Toggle audio output on/off and persist the preference."""
+        self._audio_enabled = bool(enabled)
+        self._settings.set("audio_enabled", self._audio_enabled)
+        # Apply immediately to current demod mode
+        mode = self._control_panel._demod_combo.currentText()
+        self._start_or_stop_audio(mode)
+
+    def _poll_hotplug(self) -> None:
+        """Poll for device hot-plug changes and notify on new devices."""
+        try:
+            from ..core.device_manager import DeviceManager
+
+            devices = DeviceManager().scan_devices()
+        except Exception:
+            return
+        names = {str(d) for d in devices}
+        if not self._known_device_names:
+            # First poll after init — baseline silently.
+            self._known_device_names = names
+            return
+        added = names - self._known_device_names
+        self._known_device_names = names
+        if added:
+            for name in added:
+                logger.info(f"Device connected: {name}")
+            self._show_status_error(
+                f"New device: {next(iter(added))}", duration_ms=4000
+            )
+
+    def _restore_state(self) -> None:
+        """Restore persisted user settings on startup."""
+        try:
+            freq = self._settings.get_float("frequency_hz", 100e6)
+            gain = self._settings.get_float("gain_db", 20.0)
+            squelch = self._settings.get_float("squelch_db", -80.0)
+            agc = self._settings.get_bool("agc_enabled", False)
+            demod = self._settings.get_str("demod_mode", "None (I/Q)")
+        except Exception as e:
+            logger.debug(f"Settings restore failed: {e}")
+            return
+        self._control_panel.set_frequency(freq)
+        self._control_panel.set_gain(gain)
+        self._control_panel.set_squelch_db(squelch)
+        self._control_panel.set_agc_enabled(agc)
+        idx = self._control_panel._demod_combo.findText(demod)
+        if idx >= 0:
+            self._control_panel._demod_combo.setCurrentIndex(idx)
+        # Window geometry
+        geom = self._settings.load_geometry("main")
+        if geom:
+            try:
+                self.restoreGeometry(geom)
+            except Exception:
+                pass
+
+    def _persist_state(self) -> None:
+        """Save settings on exit."""
+        try:
+            freq = self._control_panel._freq_input.get_frequency()
+            gain = float(self._control_panel._gain_slider.value())
+            self._settings.set("frequency_hz", freq)
+            self._settings.set("gain_db", gain)
+            self._settings.set("squelch_db", self._squelch_db)
+            self._settings.set("agc_enabled", self._agc_enabled)
+            self._settings.set("theme", self._theme)
+            self._settings.save_geometry("main", self.saveGeometry())
+            self._settings.sync()
+        except Exception as e:
+            logger.debug(f"Settings save failed: {e}")
+
+    def _run_first_run_wizard(self) -> None:
+        """Show the welcome wizard and tune to the chosen starting band."""
+        from ..core.device_manager import DeviceManager
+        from .first_run_wizard import FirstRunWizard
+
+        try:
+            hw_found = len(DeviceManager().scan_devices()) > 0
+        except Exception:
+            hw_found = False
+        wiz = FirstRunWizard(self, hardware_found=hw_found)
+        if wiz.exec():
+            self.set_frequency(wiz.selected_frequency())
+        self._settings.mark_first_run_done()
+
     def closeEvent(self, event):
         """Handle window close."""
+        self._persist_state()
+        self._audio.stop()
         if self._is_running:
             self._stop_acquisition()
 

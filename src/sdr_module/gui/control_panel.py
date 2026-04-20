@@ -119,6 +119,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         recording_started = pyqtSignal(str)  # format
         recording_stopped = pyqtSignal()
         license_changed = pyqtSignal(object)  # LicenseClass
+        squelch_changed = pyqtSignal(float)  # dB
+        agc_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -269,12 +271,10 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._squelch_slider = QSlider(Qt.Orientation.Horizontal)
         self._squelch_slider.setRange(-120, 0)
         self._squelch_slider.setValue(-80)
+        self._squelch_slider.valueChanged.connect(self._on_squelch_changed)
         squelch_layout.addWidget(self._squelch_slider)
 
         self._squelch_label = QLabel("-80 dB")
-        self._squelch_slider.valueChanged.connect(
-            lambda v: self._squelch_label.setText(f"{v} dB")
-        )
         squelch_layout.addWidget(self._squelch_label)
 
         layout.addWidget(squelch_group)
@@ -381,8 +381,30 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         """Handle AGC toggle."""
         enabled = state == Qt.CheckState.Checked.value
         self._gain_slider.setEnabled(not enabled)
+        self.agc_changed.emit(enabled)
         if enabled:
             self.gain_changed.emit(-1)  # -1 indicates AGC
+
+    def _on_squelch_changed(self, value: int):
+        """Handle squelch slider change."""
+        self._squelch_label.setText(f"{value} dB")
+        self.squelch_changed.emit(float(value))
+
+    def get_squelch_db(self) -> float:
+        """Return the current squelch threshold in dB."""
+        return float(self._squelch_slider.value())
+
+    def set_squelch_db(self, db: float) -> None:
+        """Set the squelch threshold in dB."""
+        self._squelch_slider.setValue(int(db))
+
+    def is_agc_enabled(self) -> bool:
+        """Whether AGC is currently enabled."""
+        return bool(self._agc_check.isChecked())
+
+    def set_agc_enabled(self, enabled: bool) -> None:
+        """Toggle AGC."""
+        self._agc_check.setChecked(bool(enabled))
 
     def _on_bandwidth_changed(self, text: str):
         """Handle bandwidth change."""

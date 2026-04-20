@@ -298,11 +298,13 @@ class SDRDevice(ABC):
         return self
 
     def __exit__(
-        self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object
-    ) -> bool:
+        self,
+        exc_type: Optional[type],
+        exc_val: Optional[BaseException],
+        exc_tb: object,
+    ) -> None:
         """Context manager exit."""
         self.close()
-        return False
 
     def __repr__(self) -> str:
         if self._info:

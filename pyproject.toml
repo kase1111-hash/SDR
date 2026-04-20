@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
+# Cap setuptools below 77 because 77+ emits `Dynamic: license-file` in wheel
+# METADATA which twine 6.2.0's validator rejects. Remove the upper bound once
+# a twine release recognises PEP 639 metadata fields.
+requires = ["setuptools>=61.0,<77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,6 +10,10 @@ name = "sdr-module"
 version = "0.1.0"
 description = "Dual-SDR system for RTL-SDR and HackRF One"
 readme = "README.md"
+# NOTE: Stays on the classic `license = {text = ...}` form because twine 6.2.0
+# rejects PEP 639 "License-Expression" / "License-File" metadata fields as
+# unrecognized during `twine check`. Switch to `license = "MIT"` +
+# `license-files = [...]` once twine learns about those fields.
 license = {text = "MIT"}
 requires-python = ">=3.9"
 classifiers = [
@@ -92,7 +99,7 @@ warn_redundant_casts = true
 warn_unused_configs = true
 
 [[tool.mypy.overrides]]
-module = "sdr_module.gui.*"
+module = ["sdr_module.gui.*", "sdr_module.ham.gui.*"]
 disallow_untyped_defs = false
 ignore_errors = true
 

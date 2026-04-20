@@ -13,9 +13,9 @@ Supports:
 import logging
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -74,7 +74,7 @@ class ProtocolDecoder(ABC):
                 logger.warning(f"Callback {callback.__name__} failed: {e}")
 
     @abstractmethod
-    def decode(self, samples: np.ndarray) -> List[DecodedMessage]:
+    def decode(self, samples: np.ndarray) -> Sequence[DecodedMessage]:
         """Decode samples and return messages."""
         pass
 
@@ -290,8 +290,8 @@ class POCSAGDecoder(ProtocolDecoder):
 
         messages = []
         current_address = None
-        current_function = None
-        message_bits = []
+        current_function: Optional[int] = None
+        message_bits: List[int] = []
 
         for frame in range(8):  # 8 frames per batch
             for word_idx in range(2):  # 2 words per frame
@@ -313,7 +313,7 @@ class POCSAGDecoder(ProtocolDecoder):
                             raw_bits=bytes(batch),
                             valid=True,
                             address=current_address,
-                            function=current_function,
+                            function=current_function or 0,
                             message_type="alpha",
                             content=content,
                             baud_rate=self._baud_rate,
@@ -340,7 +340,7 @@ class POCSAGDecoder(ProtocolDecoder):
                             raw_bits=bytes(batch),
                             valid=True,
                             address=current_address,
-                            function=current_function,
+                            function=current_function or 0,
                             message_type="alpha",
                             content=content,
                             baud_rate=self._baud_rate,
@@ -366,7 +366,7 @@ class POCSAGDecoder(ProtocolDecoder):
                 raw_bits=bytes(batch),
                 valid=True,
                 address=current_address,
-                function=current_function,
+                function=current_function or 0,
                 message_type="alpha",
                 content=content,
                 baud_rate=self._baud_rate,
@@ -450,14 +450,10 @@ class AX25Frame(DecodedMessage):
 
     source: str = ""
     destination: str = ""
-    digipeaters: List[str] = None
+    digipeaters: List[str] = field(default_factory=list)
     control: int = 0
     pid: int = 0
     info: str = ""
-
-    def __post_init__(self):
-        if self.digipeaters is None:
-            self.digipeaters = []
 
 
 @dataclass
@@ -466,7 +462,7 @@ class APRSMessage(DecodedMessage):
 
     source: str = ""
     destination: str = ""
-    path: List[str] = None
+    path: List[str] = field(default_factory=list)
     data_type: str = ""  # position, message, weather, telemetry, etc.
     latitude: float = 0.0
     longitude: float = 0.0
@@ -475,10 +471,6 @@ class APRSMessage(DecodedMessage):
     course: float = 0.0
     symbol: str = ""
     comment: str = ""
-
-    def __post_init__(self):
-        if self.path is None:
-            self.path = []
 
 
 class AX25Decoder(ProtocolDecoder):
@@ -856,11 +848,7 @@ class RDSData(DecodedMessage):
     ps_name: str = ""  # Program Service name (8 chars)
     radio_text: str = ""  # Radio Text (64 chars)
     clock_time: str = ""  # CT (Clock Time)
-    af_list: List[float] = None  # Alternative Frequencies
-
-    def __post_init__(self):
-        if self.af_list is None:
-            self.af_list = []
+    af_list: List[float] = field(default_factory=list)  # Alternative Frequencies
 
 
 class RDSDecoder(ProtocolDecoder):
@@ -951,7 +939,7 @@ class RDSDecoder(ProtocolDecoder):
         self._bit_buffer: List[int] = []
         self._synced = False
         self._block_count = 0
-        self._current_group: List[int] = []
+        self._current_group: List[Tuple[int, str]] = []
 
         # Decoded data
         self._pi_code = 0
@@ -1806,13 +1794,13 @@ class FLEXDecoder(ProtocolDecoder):
 
     def _parse_frame(self, frame_bits: List[int]) -> List[FLEXMessage]:
         """Parse FLEX frame and extract messages."""
-        messages = []
+        messages: List["FLEXMessage"] = []
 
         if len(frame_bits) < self.BLOCKS_PER_FRAME * self.BLOCK_BITS:
             return messages
 
         # Extract blocks
-        blocks = []
+        blocks: List[Optional[int]] = []
         for i in range(self.BLOCKS_PER_FRAME):
             start = i * self.BLOCK_BITS
             word = self._bits_to_word(frame_bits[start : start + self.BLOCK_BITS])
@@ -1834,10 +1822,11 @@ class FLEXDecoder(ProtocolDecoder):
         vector_start = ((biw >> 8) & 0x1F) if biw else 1
 
         # Find addresses (capcodes)
-        capcodes = []
+        capcodes: List[int] = []
         for i in range(1, min(addr_start + 1, len(blocks))):
-            if blocks[i] is not None:
-                capcode = (blocks[i] >> 10) & 0x1FFFFF
+            block = blocks[i]
+            if block is not None:
+                capcode = (block >> 10) & 0x1FFFFF
                 capcodes.append(capcode)
 
         # Find message vectors and content

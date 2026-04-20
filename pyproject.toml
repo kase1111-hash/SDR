@@ -49,19 +49,19 @@ full = [
     "hackrf>=1.0.0,<2",
     "scipy>=1.7.0,<2",
     "matplotlib>=3.4.0,<4",
-    "PyQt6>=6.4.0,<7",
+    "PyQt6>=6.10.2,<7",
 ]
 gui = [
-    "PyQt6>=6.4.0,<7",
+    "PyQt6>=6.10.2,<7",
 ]
 dev = [
-    "pytest>=7.0.0",
+    "pytest>=8.4.2",
     "pytest-cov>=4.0.0",
     "hypothesis>=6.0.0",
     "black>=23.0.0",
     "isort>=5.0.0",
-    "mypy>=1.0.0",
-    "ruff>=0.1.0",
+    "mypy>=1.19.1",
+    "ruff>=0.15.10",
 ]
 
 [project.urls]

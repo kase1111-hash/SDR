@@ -703,43 +703,131 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             logger.info("Device disconnected")
 
     def _refresh_devices(self):
-        """Refresh device list."""
+        """Refresh device list by rescanning hardware."""
+        from ..core.device_manager import DeviceManager
+
         logger.info("Refreshing device list...")
-        # This would trigger a device rescan
+        try:
+            manager = DeviceManager()
+            devices = manager.scan_devices()
+        except Exception as e:
+            logger.error(f"Device scan failed: {e}")
+            self._show_status_error(f"Scan failed: {e}")
+            return
+
+        if not devices:
+            QMessageBox.information(
+                self,
+                "No Devices",
+                "No SDR devices detected.\n\n"
+                "Connect an RTL-SDR or HackRF One and try again,\n"
+                "or launch with --demo for demo mode.",
+            )
+        else:
+            names = "\n".join(f"  - {d}" for d in devices)
+            QMessageBox.information(
+                self,
+                "Devices Found",
+                f"Detected {len(devices)} device(s):\n\n{names}\n\n"
+                "Use Device → Connect to open one.",
+            )
 
     def _open_recording(self):
-        """Open a recording file."""
+        """Open a recording file and load its samples."""
         filename, _ = QFileDialog.getOpenFileName(
             self,
             "Open Recording",
             "",
             "I/Q Files (*.raw *.cf32 *.cs16 *.cu8);;WAV Files (*.wav);;All Files (*)",
         )
-        if filename:
-            logger.info(f"Opening recording: {filename}")
-            # Load and playback would go here
+        if not filename:
+            return
+
+        from ..dsp.recording import load_iq_file
+
+        try:
+            samples, metadata = load_iq_file(filename)
+        except Exception as e:
+            logger.error(f"Failed to open recording: {e}")
+            QMessageBox.warning(
+                self, "Open Failed", f"Could not open recording:\n{e}"
+            )
+            return
+
+        self._samples_buffer = [samples]
+        if metadata.center_frequency > 0:
+            self.set_frequency(metadata.center_frequency)
+        logger.info(
+            f"Loaded {len(samples)} samples from {filename} "
+            f"(rate={metadata.sample_rate}, freq={metadata.center_frequency})"
+        )
+        QMessageBox.information(
+            self,
+            "Recording Loaded",
+            f"Loaded {len(samples):,} samples\n"
+            f"Sample rate: {metadata.sample_rate/1e6:.3f} MS/s\n"
+            f"Center freq: {metadata.center_frequency/1e6:.3f} MHz",
+        )
 
     def _save_recording(self):
-        """Save the current recording."""
+        """Save the current recording buffer to an I/Q file."""
         if not self._samples_buffer:
             QMessageBox.information(self, "No Data", "No recorded data to save.")
             return
 
-        filename, _ = QFileDialog.getSaveFileName(
+        filename, selected_filter = QFileDialog.getSaveFileName(
             self,
             "Save Recording",
             "",
-            "Complex Float32 (*.cf32);;Complex Int16 (*.cs16);;WAV (*.wav)",
+            "Complex Float32 (*.cf32);;Complex Int16 (*.cs16);;Raw I/Q (*.raw);;WAV (*.wav)",
         )
-        if filename:
-            logger.info(f"Saving recording: {filename}")
-            # Save logic would go here
+        if not filename:
+            return
+
+        from ..dsp.recording import FileFormat, SampleFormat, save_iq_file
+
+        # Pick format from extension / filter
+        ext = filename.lower()
+        if ext.endswith(".wav") or "WAV" in selected_filter:
+            fmt, sample_fmt = FileFormat.WAV, SampleFormat.INT16
+        elif ext.endswith(".cs16") or "Int16" in selected_filter:
+            fmt, sample_fmt = FileFormat.RAW, SampleFormat.INT16
+        else:
+            fmt, sample_fmt = FileFormat.RAW, SampleFormat.FLOAT32
+
+        samples = np.concatenate(self._samples_buffer).astype(np.complex64)
+        sample_rate = getattr(self._device, "sample_rate", 2.4e6) if self._device else 2.4e6
+        center_freq = self._control_panel._freq_input.get_frequency()
+
+        try:
+            save_iq_file(
+                filename,
+                samples,
+                sample_rate=sample_rate,
+                center_frequency=center_freq,
+                sample_format=sample_fmt,
+                file_format=fmt,
+            )
+        except Exception as e:
+            logger.error(f"Failed to save recording: {e}")
+            QMessageBox.warning(
+                self, "Save Failed", f"Could not save recording:\n{e}"
+            )
+            return
+
+        logger.info(f"Saved {len(samples)} samples to {filename}")
+        QMessageBox.information(
+            self,
+            "Recording Saved",
+            f"Saved {len(samples):,} samples to:\n{filename}",
+        )
 
     def _show_scanner(self):
-        """Show frequency scanner dialog."""
-        QMessageBox.information(
-            self, "Scanner", "Frequency scanner will be implemented in a future update."
-        )
+        """Show the frequency scanner dialog."""
+        from .scanner_dialog import ScannerDialog
+
+        dialog = ScannerDialog(self, device=self._device)
+        dialog.exec()
 
     def _show_radio_tuner(self):
         """Show the AM/FM radio tuner pop-out window."""
@@ -771,11 +859,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._show_status_error(f"Tune failed: {e}")
 
     def _show_decoder_config(self):
-        """Show decoder configuration dialog."""
+        """Focus the decoder panel tab."""
+        # Decoder UI lives in the right-hand tab; surface it instead of a stub.
         QMessageBox.information(
             self,
-            "Decoder",
-            "Protocol decoder configuration will be implemented in a future update.",
+            "Protocol Decoder",
+            "Protocol decoding runs in the 'Decoder' tab on the right.\n\n"
+            "Supported: ADS-B, POCSAG, FLEX, AX.25/APRS, RDS, ACARS.\n"
+            "Start acquisition and received packets will appear there.",
         )
 
     def _show_about(self):
@@ -813,6 +904,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         from .device_dialog import MockDevice
 
         self._device = MockDevice()
+        self._device.start_rx()
         self._device_label.setText("Demo Mode")
         self._is_running = True
         self._start_action.setText("Stop")

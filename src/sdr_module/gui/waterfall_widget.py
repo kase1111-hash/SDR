@@ -228,7 +228,11 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         Args:
             power_db: Power spectrum in dB
         """
-        if len(power_db) != self._fft_size:
+        if len(power_db) == 0:
+            # No spectrum data: record a neutral (min-dB) row so history stays
+            # in sync with caller cadence but we skip the expensive interp path.
+            power_db = np.full(self._fft_size, self._db_range[0], dtype=np.float32)
+        elif len(power_db) != self._fft_size:
             # Resample if needed
             power_db = np.interp(
                 np.linspace(0, 1, self._fft_size),
@@ -299,9 +303,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             idx = int(normalized * 255)
 
             r, g, b = self._colormap[idx]
-            self._image.setPixel(
-                x, self._history_size - 1, (255 << 24) | (r << 16) | (g << 8) | b
-            )
+            # Cast to int so the bitshift doesn't overflow numpy uint8
+            argb = (255 << 24) | (int(r) << 16) | (int(g) << 8) | int(b)
+            self._image.setPixel(x, self._history_size - 1, argb)
 
     def _rebuild_image(self):
         """Rebuild entire image from history."""
@@ -325,7 +329,13 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 r, g, b = self._colormap[idx]
                 row = self._history_size - len(self._history) + y
                 if 0 <= row < self._history_size:
-                    self._image.setPixel(x, row, (255 << 24) | (r << 16) | (g << 8) | b)
+                    argb = (
+                        (255 << 24)
+                        | (int(r) << 16)
+                        | (int(g) << 8)
+                        | int(b)
+                    )
+                    self._image.setPixel(x, row, argb)
 
     def paintEvent(self, event):
         """Paint the waterfall display."""

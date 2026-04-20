@@ -7,7 +7,7 @@ Stored via GuiSettings; survives restarts.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 try:
     from PyQt6.QtCore import Qt, pyqtSignal

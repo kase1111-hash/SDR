@@ -11,7 +11,7 @@ import logging
 from typing import List, Optional
 
 try:
-    from PyQt6.QtCore import Qt, QThread, pyqtSignal
+    from PyQt6.QtCore import QThread, pyqtSignal
     from PyQt6.QtWidgets import (
         QDialog,
         QDialogButtonBox,

@@ -11,7 +11,7 @@ A dual-SDR framework for simultaneous RTL-SDR + HackRF One operation, with signa
 - **Dual-SDR control**: Operate RTL-SDR and HackRF One simultaneously in five modes (dual RX, full-duplex, TX monitor, wideband scan, relay)
 - **Signal processing**: Spectrum analysis, demodulation (AM/FM/SSB/CW/OOK/FSK/PSK/QAM), filtering, AGC, and signal classification
 - **Protocol decoding**: ADS-B, POCSAG, FLEX, AX.25/APRS, RDS, ACARS
-- **GUI**: PyQt6 application with spectrum analyzer, waterfall display, and decoder panels
+- **GUI**: PyQt6 application with spectrum analyzer, waterfall, click-to-tune, bookmarks, band presets, audio output, light/dark themes, keyboard shortcuts, and persisted state
 
 ## Hardware Support
 
@@ -38,7 +38,7 @@ pip install sdr-module
 # With hardware support
 pip install sdr-module[rtlsdr]    # RTL-SDR
 pip install sdr-module[hackrf]    # HackRF
-pip install sdr-module[full]      # Everything
+pip install sdr-module[full]      # Everything (drivers + SciPy + matplotlib + PyQt6)
 
 # From source
 git clone https://github.com/kase1111-hash/SDR.git
@@ -53,6 +53,18 @@ pip install -e ".[full]"
 ```bash
 sdr-scan gui              # Launch with connected hardware
 sdr-scan gui --demo       # Demo mode (no hardware required)
+```
+
+On first launch the GUI shows a welcome wizard that offers demo mode and a
+starting band. Press **F1** at any time for the shortcut reference.
+
+### Command line
+
+```bash
+sdr-scan info                                      # Build + capability summary
+sdr-scan devices                                   # Scan for connected SDRs
+sdr-scan scan --start 88 --end 108 --step 100      # Sweep a range
+sdr-scan encode morse --text "HELLO" --output out  # Encode text to I/Q
 ```
 
 ### Python API
@@ -104,6 +116,28 @@ for msg in messages:
     print(f"ICAO: {msg.icao_address}, Alt: {msg.altitude}")
 ```
 
+## GUI Features
+
+| Feature | How |
+|---|---|
+| Click-to-tune | Left-click anywhere on the spectrum or waterfall |
+| Keyboard tuning | `←`/`→` ±10 kHz, `Shift+←`/`→` ±100 kHz, `Ctrl+←`/`→` ±1 MHz |
+| Start / stop acquisition | `Space` |
+| Record I/Q | `Ctrl+Shift+R` (live duration + size + free-space shown in status bar) |
+| Open / save recording | `Ctrl+O` / `Ctrl+S` (cf32, cs16, raw, WAV) |
+| Screenshot | `Ctrl+P` (captures the whole window) |
+| Bookmarks | `Ctrl+B` adds current frequency; double-click a row to tune |
+| Band presets | Tools → Bands (FM Broadcast, NOAA Weather, 2 m, 70 cm, Airband, ADS-B, ISM 433/915) |
+| Frequency scanner | `Ctrl+F` — non-blocking sweep with progress bar and hit list |
+| Audio output | Tools → Audio Output — squelch-gated demodulation to the default sound device |
+| Squelch + AGC | Control panel sliders; squelch gates audio output |
+| Light / dark theme | `Ctrl+T` |
+| Error history | `Ctrl+E` shows the last 500 warning / error log records |
+| Help / shortcuts | `F1` |
+
+Settings (frequency, gain, squelch, AGC, demod mode, theme, window
+geometry, bookmarks) persist across launches via `QSettings`.
+
 ## Supported Protocols
 
 | Category | Protocols | Status |
@@ -126,7 +160,14 @@ for msg in messages:
 
 ## Safety
 
-Hard-coded TX frequency lockouts prevent transmission on protected frequencies: GPS/GNSS, aviation (121.5/243.0 MHz), ADS-B (1030/1090 MHz), emergency beacons (406 MHz), marine distress (156.8 MHz), and cellular bands. See [SPEC_SHEET.md](SPEC_SHEET.md) for details.
+Hard-coded TX frequency lockouts prevent transmission on protected
+frequencies: GPS/GNSS, aviation (121.5/243.0 MHz), ADS-B (1030/1090 MHz),
+emergency beacons (406 MHz), marine distress (156.8 MHz), and cellular
+bands. License-class enforcement blocks TX on ham bands unless the
+configured class has privileges there. See
+[SPEC_SHEET.md](SPEC_SHEET.md) for the full list.
+
+The lockout path is covered by `tests/test_frequency_manager.py` (58 tests).
 
 ## Optional: Ham Radio Features
 
@@ -160,18 +201,19 @@ pip install -e packages/sdr-antenna-array/
 ```
 sdr-module/
 ├── src/sdr_module/
-│   ├── core/          # Device management, dual-SDR controller
+│   ├── core/          # Device management, dual-SDR controller, config, frequency manager
 │   ├── devices/       # RTL-SDR and HackRF drivers
-│   ├── dsp/           # Signal processing, demodulators, protocol decoders
-│   ├── gui/           # PyQt6 graphical interface
-│   ├── ham/           # Optional ham radio features
-│   ├── protocols/     # Protocol encoders
-│   ├── ui/            # Visualization components (waterfall, constellation)
+│   ├── dsp/           # Signal processing, demodulators, protocol decoders, recording
+│   ├── gui/           # PyQt6 GUI: main window, panels, dialogs, themes, settings store
+│   ├── ham/           # Optional ham radio features + radio tuner UI
+│   ├── protocols/     # Protocol encoders + detector
+│   ├── ui/            # Visualization components (waterfall, constellation, time-domain)
 │   └── utils/         # Helper utilities
 ├── packages/
 │   └── sdr-antenna-array/  # Standalone antenna array package
-├── tests/             # Test suite
-└── examples/          # Example scripts
+├── tests/             # Test suite (~735 tests)
+├── examples/          # Example scripts
+└── tools/             # Dev helpers
 ```
 
 ## Development
@@ -180,24 +222,30 @@ sdr-module/
 git clone https://github.com/kase1111-hash/SDR.git
 cd SDR
 pip install -e ".[dev]"
-pytest                    # Run tests
-pytest --cov=sdr_module   # With coverage
+pytest                                # Run tests
+pytest --cov=sdr_module               # With coverage
+ruff check src/ tests/
+black --check src/ tests/
+isort --check-only src/ tests/
+mypy src/sdr_module --ignore-missing-imports
 ```
 
 ## Requirements
 
 - Python 3.9+
 - NumPy >= 1.21.0
-- **Optional**: pyrtlsdr (RTL-SDR), hackrf (HackRF), scipy (advanced DSP), PyQt6 (GUI)
+- **Optional**: pyrtlsdr (RTL-SDR), hackrf (HackRF), scipy (advanced DSP), PyQt6 (GUI), PyQt6-multimedia (audio output)
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License - see [LICENSE](LICENSE.md) for details.
 
 ## Links
 
 - [GitHub Repository](https://github.com/kase1111-hash/SDR)
 - [Issue Tracker](https://github.com/kase1111-hash/SDR/issues)
 - [Technical Specifications](SPEC_SHEET.md)
+- [Changelog](CHANGELOG.md)
+- [Audit History](AUDIT_HISTORY.md)
 - [Contributing Guidelines](CONTRIBUTING.md)
 - [Security Policy](SECURITY.md)

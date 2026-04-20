@@ -382,14 +382,69 @@ Combine devices to cover wider spectrum.
 
 ## 8. User Interface Components
 
+### 8.1 Display panels
+
 | Component | Description |
 |-----------|-------------|
-| Spectrum Analyzer | Main frequency display with adjustable span |
-| Waterfall | Scrolling time-frequency display |
-| Control Panel | Frequency, gain, bandwidth controls |
-| Signal Classifier | Displays detected modulation type |
-| Protocol Decoder | Shows identified protocol and decoded data |
-| Recording Controls | Start/stop recording, file management |
+| Spectrum Analyzer | FFT display with adjustable span, averaging, peak hold; left-click to tune |
+| Waterfall | Scrolling time-frequency display with selectable colormap and dB range; left-click to tune; image export |
+| Control Panel | Frequency, gain, bandwidth, demodulator, squelch, AGC, license class, TX/RX presets |
+| Protocol Decoder | Tabbed view of decoded messages (ADS-B, POCSAG, FLEX, AX.25/APRS, RDS, ACARS) |
+| Bookmarks / Memory | Saved frequencies with labels; persists across launches |
+| Status Bar | Device status, sample rate, buffer fill, recording HH:MM:SS / size / free space, transient error toast |
+
+### 8.2 Menus and dialogs
+
+| Menu / Dialog | Purpose |
+|---|---|
+| File → Open / Save Recording | Load and save I/Q files (cf32, cs16, raw, WAV) |
+| Device → Connect / Disconnect / Refresh | Open the device selection dialog, manage hardware |
+| Tools → Bands | Preset tuner + demod mode for FM Broadcast, NOAA Weather, 2 m, 70 cm, Airband AM, ADS-B, ISM 433/915 |
+| Tools → Frequency Scanner | Non-blocking sweep dialog with progress bar and hit table |
+| Tools → Audio Output (toggle) | Enable in-GUI demodulation to the default audio device; gated by squelch |
+| Tools → AM/FM Radio Tuner | Pop-out vintage-radio tuner (`Ctrl+R`) |
+| Tools → Save Screenshot | PNG of the current window (`Ctrl+P`) |
+| Tools → Bookmark Current Frequency | `Ctrl+B`; double-click a row to tune |
+| Tools → Toggle Light/Dark Theme | `Ctrl+T`; persists across launches |
+| Tools → Error History | `Ctrl+E`; last 500 warning/error log records |
+| Help → Keyboard Shortcuts | `F1`; full shortcut reference |
+| Help → About | Version and feature summary |
+
+### 8.3 Keyboard shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Space` | Start / stop acquisition |
+| `Ctrl+Shift+R` | Toggle recording |
+| `←` / `→` | Tune ±10 kHz |
+| `Shift+←` / `Shift+→` | Tune ±100 kHz |
+| `Ctrl+←` / `Ctrl+→` | Tune ±1 MHz |
+| Click on spectrum / waterfall | Tune to clicked frequency |
+| `Ctrl+O` / `Ctrl+S` | Open / Save recording |
+| `Ctrl+P` | Save screenshot |
+| `Ctrl+B` | Bookmark current frequency |
+| `Ctrl+F` | Frequency scanner |
+| `Ctrl+T` | Toggle theme |
+| `Ctrl+E` | Error history |
+| `Ctrl+R` | AM/FM Radio Tuner (ham module) |
+| `F1` | Shortcut reference |
+
+### 8.4 Persisted state
+
+Stored via `QSettings` (platform-specific backing store — Windows registry,
+macOS plist, Linux `~/.config/SDR Module/`):
+
+- Center frequency, gain, bandwidth, squelch threshold, AGC enable.
+- Demodulation mode, theme, audio-output enable.
+- Main window geometry and splitter sizes.
+- Frequency bookmarks.
+- First-run wizard completion flag.
+
+### 8.5 First-run wizard
+
+Launched automatically the first time the GUI starts. Detects whether any
+SDR hardware is attached, offers Demo Mode (synthetic signals) if not, and
+lets the user pick a starting band.
 
 ---
 

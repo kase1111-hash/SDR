@@ -18,10 +18,10 @@ from sdr_module.dsp.demodulators import (
 )
 from sdr_module.dsp.filters import AGC, AGCConfig, AGCMode, FilterBank
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def find_peak_frequency(signal: np.ndarray, sample_rate: float) -> float:
     """Return the frequency (Hz) of the dominant spectral peak in a real signal.
@@ -63,6 +63,7 @@ def rms(signal: np.ndarray) -> float:
 # FM Demodulation Round-Trip
 # ---------------------------------------------------------------------------
 
+
 class TestFMDemodulationRoundTrip:
     """Generate a known FM signal and verify the demodulator recovers the tone."""
 
@@ -87,7 +88,9 @@ class TestFMDemodulationRoundTrip:
         modulating = np.sin(2.0 * np.pi * tone_freq * t)
 
         # Instantaneous phase: integral of 2*pi*deviation*modulating
-        phase = 2.0 * np.pi * self.MAX_DEVIATION * np.cumsum(modulating) / self.SAMPLE_RATE
+        phase = (
+            2.0 * np.pi * self.MAX_DEVIATION * np.cumsum(modulating) / self.SAMPLE_RATE
+        )
 
         # Complex baseband FM signal
         return amplitude * np.exp(1j * phase)
@@ -98,7 +101,9 @@ class TestFMDemodulationRoundTrip:
         duration = 0.05  # 50 ms gives 50k samples at 2.4 MS/s
         signal = self._generate_fm_signal(tone_freq, duration)
 
-        demod = FMDemodulator(sample_rate=self.SAMPLE_RATE, max_deviation=self.MAX_DEVIATION)
+        demod = FMDemodulator(
+            sample_rate=self.SAMPLE_RATE, max_deviation=self.MAX_DEVIATION
+        )
         output = demod.demodulate(signal)
 
         # Trim edges to avoid transient artefacts
@@ -106,9 +111,9 @@ class TestFMDemodulationRoundTrip:
         output_trimmed = output[trim:-trim]
 
         peak_freq = find_peak_frequency(output_trimmed, self.SAMPLE_RATE)
-        assert abs(peak_freq - tone_freq) < 50.0, (
-            f"Expected peak near {tone_freq} Hz, got {peak_freq:.1f} Hz"
-        )
+        assert (
+            abs(peak_freq - tone_freq) < 50.0
+        ), f"Expected peak near {tone_freq} Hz, got {peak_freq:.1f} Hz"
 
     def test_fm_5khz_tone(self):
         """FM-demod a 5 kHz tone -- ensures it is not hard-coded for 1 kHz."""
@@ -116,7 +121,9 @@ class TestFMDemodulationRoundTrip:
         duration = 0.05
         signal = self._generate_fm_signal(tone_freq, duration)
 
-        demod = FMDemodulator(sample_rate=self.SAMPLE_RATE, max_deviation=self.MAX_DEVIATION)
+        demod = FMDemodulator(
+            sample_rate=self.SAMPLE_RATE, max_deviation=self.MAX_DEVIATION
+        )
         output = demod.demodulate(signal)
 
         trim = len(output) // 10
@@ -136,10 +143,14 @@ class TestFMDemodulationRoundTrip:
         n_samples = int(self.SAMPLE_RATE * duration)
         t = np.arange(n_samples) / self.SAMPLE_RATE
         modulating = 0.5 * np.sin(2.0 * np.pi * tone_freq * t)
-        phase = 2.0 * np.pi * self.MAX_DEVIATION * np.cumsum(modulating) / self.SAMPLE_RATE
+        phase = (
+            2.0 * np.pi * self.MAX_DEVIATION * np.cumsum(modulating) / self.SAMPLE_RATE
+        )
         signal_half = np.exp(1j * phase)
 
-        demod = FMDemodulator(sample_rate=self.SAMPLE_RATE, max_deviation=self.MAX_DEVIATION)
+        demod = FMDemodulator(
+            sample_rate=self.SAMPLE_RATE, max_deviation=self.MAX_DEVIATION
+        )
         out_full = demod.demodulate(signal_low)
         demod.reset()
         out_half = demod.demodulate(signal_half)
@@ -153,7 +164,9 @@ class TestFMDemodulationRoundTrip:
         tone_freq = 1000.0
         signal = self._generate_fm_signal(tone_freq, 0.02)
 
-        demod = FMDemodulator(sample_rate=self.SAMPLE_RATE, max_deviation=self.MAX_DEVIATION)
+        demod = FMDemodulator(
+            sample_rate=self.SAMPLE_RATE, max_deviation=self.MAX_DEVIATION
+        )
         out1 = demod.demodulate(signal)
 
         demod.reset()
@@ -165,6 +178,7 @@ class TestFMDemodulationRoundTrip:
 # ---------------------------------------------------------------------------
 # AM Demodulation Round-Trip
 # ---------------------------------------------------------------------------
+
 
 class TestAMDemodulationRoundTrip:
     """Generate a known AM signal and verify envelope detection recovers the tone."""
@@ -197,7 +211,9 @@ class TestAMDemodulationRoundTrip:
         mod_freq = 400.0
         mod_index = 0.8
         duration = 0.1  # 100 ms -- long enough for good freq resolution
-        signal = self._generate_am_signal(mod_freq, mod_index, carrier_freq=0.0, duration=duration)
+        signal = self._generate_am_signal(
+            mod_freq, mod_index, carrier_freq=0.0, duration=duration
+        )
 
         demod = AMDemodulator(sample_rate=self.SAMPLE_RATE, dc_block=True)
         output = demod.demodulate(signal)
@@ -207,16 +223,18 @@ class TestAMDemodulationRoundTrip:
         output_trimmed = output[trim:]
 
         peak_freq = find_peak_frequency(output_trimmed, self.SAMPLE_RATE)
-        assert abs(peak_freq - mod_freq) < 50.0, (
-            f"Expected peak near {mod_freq} Hz, got {peak_freq:.1f} Hz"
-        )
+        assert (
+            abs(peak_freq - mod_freq) < 50.0
+        ), f"Expected peak near {mod_freq} Hz, got {peak_freq:.1f} Hz"
 
     def test_am_1khz_tone(self):
         """AM-demod a 1 kHz tone to test a second frequency."""
         mod_freq = 1000.0
         mod_index = 0.5
         duration = 0.1
-        signal = self._generate_am_signal(mod_freq, mod_index, carrier_freq=0.0, duration=duration)
+        signal = self._generate_am_signal(
+            mod_freq, mod_index, carrier_freq=0.0, duration=duration
+        )
 
         demod = AMDemodulator(sample_rate=self.SAMPLE_RATE, dc_block=True)
         output = demod.demodulate(signal)
@@ -232,7 +250,9 @@ class TestAMDemodulationRoundTrip:
         mod_freq = 400.0
         mod_index = 0.5
         duration = 0.05
-        signal = self._generate_am_signal(mod_freq, mod_index, carrier_freq=0.0, duration=duration)
+        signal = self._generate_am_signal(
+            mod_freq, mod_index, carrier_freq=0.0, duration=duration
+        )
 
         demod = AMDemodulator(sample_rate=self.SAMPLE_RATE, dc_block=False)
         output = demod.demodulate(signal)
@@ -246,11 +266,15 @@ class TestAMDemodulationRoundTrip:
         duration = 0.1
 
         demod_low = AMDemodulator(sample_rate=self.SAMPLE_RATE, dc_block=True)
-        signal_low = self._generate_am_signal(mod_freq, mod_index=0.3, carrier_freq=0.0, duration=duration)
+        signal_low = self._generate_am_signal(
+            mod_freq, mod_index=0.3, carrier_freq=0.0, duration=duration
+        )
         out_low = demod_low.demodulate(signal_low)
 
         demod_high = AMDemodulator(sample_rate=self.SAMPLE_RATE, dc_block=True)
-        signal_high = self._generate_am_signal(mod_freq, mod_index=0.9, carrier_freq=0.0, duration=duration)
+        signal_high = self._generate_am_signal(
+            mod_freq, mod_index=0.9, carrier_freq=0.0, duration=duration
+        )
         out_high = demod_high.demodulate(signal_high)
 
         # Trim transients
@@ -267,6 +291,7 @@ class TestAMDemodulationRoundTrip:
 # ---------------------------------------------------------------------------
 # AGC Convergence
 # ---------------------------------------------------------------------------
+
 
 class TestAGCConvergence:
     """Feed AGC a constant-amplitude signal and verify gain converges."""
@@ -295,11 +320,11 @@ class TestAGCConvergence:
         output = agc.process(tone)
 
         # Check the last 10% of the output for convergence
-        tail = output[-(n_samples // 10):]
+        tail = output[-(n_samples // 10) :]
         output_level = rms(tail)
-        assert abs(output_level - target_level) / target_level < 0.15, (
-            f"AGC output level {output_level:.4f} not within 15% of target {target_level}"
-        )
+        assert (
+            abs(output_level - target_level) / target_level < 0.15
+        ), f"AGC output level {output_level:.4f} not within 15% of target {target_level}"
 
     def test_agc_converges_for_strong_signal(self):
         """An overly-strong signal should be attenuated toward the target level."""
@@ -319,7 +344,7 @@ class TestAGCConvergence:
         tone = input_amplitude * np.ones(n_samples, dtype=np.complex128)
         output = agc.process(tone)
 
-        tail = output[-(n_samples // 10):]
+        tail = output[-(n_samples // 10) :]
         output_level = rms(tail)
         assert abs(output_level - target_level) / target_level < 0.10
 
@@ -365,12 +390,12 @@ class TestAGCConvergence:
         tone = 0.05 * np.ones(n_samples, dtype=np.complex128)
         output = agc.process(tone)
 
-        tail = output[-(n_samples // 10):]
+        tail = output[-(n_samples // 10) :]
         output_level = float(np.max(np.abs(tail)))
         # Peak mode tracks peaks; allow wider tolerance for convergence dynamics
-        assert abs(output_level - target_level) / target_level < 0.25, (
-            f"AGC PEAK output {output_level:.4f} not within 25% of target {target_level}"
-        )
+        assert (
+            abs(output_level - target_level) / target_level < 0.25
+        ), f"AGC PEAK output {output_level:.4f} not within 25% of target {target_level}"
 
     def test_agc_reset_restores_initial_state(self):
         """After reset, AGC gain should revert to the initial value."""
@@ -388,6 +413,7 @@ class TestAGCConvergence:
 # ---------------------------------------------------------------------------
 # Filter Response
 # ---------------------------------------------------------------------------
+
 
 class TestFilterResponse:
     """Create a lowpass filter and verify spectral rolloff."""
@@ -423,9 +449,9 @@ class TestFilterResponse:
         assert stopband_power < passband_power, "Stopband not attenuated"
 
         ratio_db = 10.0 * np.log10(passband_power / (stopband_power + 1e-30))
-        assert ratio_db > 10.0, (
-            f"Passband/stopband ratio only {ratio_db:.1f} dB, expected >10 dB"
-        )
+        assert (
+            ratio_db > 10.0
+        ), f"Passband/stopband ratio only {ratio_db:.1f} dB, expected >10 dB"
 
     def test_lowpass_passes_low_frequencies(self):
         """A tone well below the cutoff should pass through largely unattenuated."""
@@ -507,6 +533,7 @@ class TestFilterResponse:
 # OOK Demodulation
 # ---------------------------------------------------------------------------
 
+
 class TestOOKDemodulation:
     """Generate an OOK signal with a known bit pattern and verify demodulation."""
 
@@ -546,9 +573,9 @@ class TestOOKDemodulation:
             mid = i * samples_per_bit + samples_per_bit // 2
             recovered_bits.append(int(output[mid] > 0.5))
 
-        assert recovered_bits == bit_pattern, (
-            f"Recovered {recovered_bits}, expected {bit_pattern}"
-        )
+        assert (
+            recovered_bits == bit_pattern
+        ), f"Recovered {recovered_bits}, expected {bit_pattern}"
 
     def test_ook_all_ones(self):
         """All-ones pattern with manual threshold produces all-high output.
@@ -586,11 +613,17 @@ class TestOOKDemodulation:
         rng = np.random.default_rng(99)
         bit_pattern = [1, 0, 1, 1, 0, 1, 0, 0, 1, 1]
         samples_per_bit = 2000
-        signal = self._generate_ook_signal(bit_pattern, samples_per_bit, on_amplitude=1.0)
+        signal = self._generate_ook_signal(
+            bit_pattern, samples_per_bit, on_amplitude=1.0
+        )
 
         # Add noise at ~20 dB SNR
         noise_power = 0.1
-        noise = noise_power * (rng.standard_normal(len(signal)) + 1j * rng.standard_normal(len(signal))) / np.sqrt(2)
+        noise = (
+            noise_power
+            * (rng.standard_normal(len(signal)) + 1j * rng.standard_normal(len(signal)))
+            / np.sqrt(2)
+        )
         noisy_signal = signal + noise
 
         demod = OOKDemodulator(sample_rate=self.SAMPLE_RATE)
@@ -601,9 +634,9 @@ class TestOOKDemodulation:
             mid = i * samples_per_bit + samples_per_bit // 2
             recovered_bits.append(int(output[mid] > 0.5))
 
-        assert recovered_bits == bit_pattern, (
-            f"Recovered {recovered_bits}, expected {bit_pattern}"
-        )
+        assert (
+            recovered_bits == bit_pattern
+        ), f"Recovered {recovered_bits}, expected {bit_pattern}"
 
     def test_ook_threshold_auto_vs_manual(self):
         """Auto threshold should match manual for a clean signal."""
@@ -629,6 +662,7 @@ class TestOOKDemodulation:
 # CW Demodulator Smoke Test
 # ---------------------------------------------------------------------------
 
+
 class TestCWDemodulatorSmoke:
     """Basic sanity checks for the CW demodulator."""
 
@@ -650,9 +684,9 @@ class TestCWDemodulatorSmoke:
 
         # The dominant frequency in the audio should be near the BFO frequency
         peak_freq = find_peak_frequency(audio, self.SAMPLE_RATE)
-        assert abs(peak_freq - bfo_freq) < 20.0, (
-            f"Expected BFO tone near {bfo_freq} Hz, got {peak_freq:.1f} Hz"
-        )
+        assert (
+            abs(peak_freq - bfo_freq) < 20.0
+        ), f"Expected BFO tone near {bfo_freq} Hz, got {peak_freq:.1f} Hz"
 
     def test_cw_keying_detection(self):
         """Keying detection should distinguish carrier-present from carrier-absent."""
@@ -667,10 +701,8 @@ class TestCWDemodulatorSmoke:
 
         assert len(keying) == len(signal)
 
-        # Sample well inside the on and off regions
+        # Sample well inside the first "on" region
         on_mid = n_on // 2
-        off_mid = n_on + n_off // 2
-        on2_mid = n_on + n_off + n_on // 2
 
         # The first "on" should eventually register as keyed
         # (The detector has a settling time, so check towards the middle)
@@ -682,6 +714,7 @@ class TestCWDemodulatorSmoke:
 # ---------------------------------------------------------------------------
 # Integration: FM demod through AGC
 # ---------------------------------------------------------------------------
+
 
 class TestFMWithAGC:
     """End-to-end: FM signal -> AGC -> FM demod and verify tone recovery."""
@@ -700,7 +733,9 @@ class TestFMWithAGC:
 
         # Generate a weak FM signal
         modulating = np.sin(2.0 * np.pi * tone_freq * t)
-        phase = 2.0 * np.pi * self.MAX_DEVIATION * np.cumsum(modulating) / self.SAMPLE_RATE
+        phase = (
+            2.0 * np.pi * self.MAX_DEVIATION * np.cumsum(modulating) / self.SAMPLE_RATE
+        )
         weak_signal = 0.01 * np.exp(1j * phase)  # -40 dB
 
         # AGC to normalise amplitude
@@ -716,21 +751,24 @@ class TestFMWithAGC:
         normalised = agc.process(weak_signal)
 
         # FM demodulate
-        demod = FMDemodulator(sample_rate=self.SAMPLE_RATE, max_deviation=self.MAX_DEVIATION)
+        demod = FMDemodulator(
+            sample_rate=self.SAMPLE_RATE, max_deviation=self.MAX_DEVIATION
+        )
         output = demod.demodulate(normalised)
 
         trim = len(output) // 5
         output_trimmed = output[trim:-trim]
 
         peak_freq = find_peak_frequency(output_trimmed, self.SAMPLE_RATE)
-        assert abs(peak_freq - tone_freq) < 50.0, (
-            f"After AGC + FM demod, expected ~{tone_freq} Hz, got {peak_freq:.1f} Hz"
-        )
+        assert (
+            abs(peak_freq - tone_freq) < 50.0
+        ), f"After AGC + FM demod, expected ~{tone_freq} Hz, got {peak_freq:.1f} Hz"
 
 
 # ---------------------------------------------------------------------------
 # Integration: Filtered noise through FM demod (negative test)
 # ---------------------------------------------------------------------------
+
 
 class TestNegativeCases:
     """Sanity-check that demodulators do not produce false positives."""
@@ -741,7 +779,9 @@ class TestNegativeCases:
         """FM-demodulating pure noise should not produce a sharp spectral peak."""
         rng = np.random.default_rng(123)
         n_samples = 50000
-        noise = (rng.standard_normal(n_samples) + 1j * rng.standard_normal(n_samples)) / np.sqrt(2)
+        noise = (
+            rng.standard_normal(n_samples) + 1j * rng.standard_normal(n_samples)
+        ) / np.sqrt(2)
 
         demod = FMDemodulator(sample_rate=self.SAMPLE_RATE, max_deviation=75e3)
         output = demod.demodulate(noise)
@@ -753,9 +793,9 @@ class TestNegativeCases:
 
         # The peak should not be more than ~10x the mean (in a flat spectrum
         # it is typically 2-4x due to windowing)
-        assert max_mag < mean_mag * 12.0, (
-            f"Noise demod has suspiciously sharp peak: max/mean = {max_mag/mean_mag:.1f}"
-        )
+        assert (
+            max_mag < mean_mag * 12.0
+        ), f"Noise demod has suspiciously sharp peak: max/mean = {max_mag/mean_mag:.1f}"
 
     def test_am_demod_of_zero_signal(self):
         """AM-demodulating a zero signal should produce near-zero output."""

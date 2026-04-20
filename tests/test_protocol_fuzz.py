@@ -16,18 +16,17 @@ ACARSDecoder, FLEXDecoder.
 
 import numpy as np
 import pytest
-from hypothesis import given, settings, assume
+from hypothesis import given, settings
 from hypothesis import strategies as st
 
 from sdr_module.dsp.protocols import (
-    POCSAGDecoder,
-    ADSBDecoder,
-    RDSDecoder,
-    AX25Decoder,
     ACARSDecoder,
+    ADSBDecoder,
+    AX25Decoder,
     FLEXDecoder,
+    POCSAGDecoder,
+    RDSDecoder,
 )
-
 
 # ---------------------------------------------------------------------------
 # Hypothesis strategies
@@ -40,26 +39,22 @@ random_length = st.integers(min_value=10, max_value=10000)
 # Uses flatmap to first pick a length, then build the array.
 random_complex64_samples = random_length.flatmap(
     lambda n: st.just(n).map(
-        lambda size: (
-            np.random.randn(size) + 1j * np.random.randn(size)
-        ).astype(np.complex64)
+        lambda size: (np.random.randn(size) + 1j * np.random.randn(size)).astype(
+            np.complex64
+        )
     )
 )
 
 # Strategy: generate a random float32 numpy array (real-valued) of random length.
 random_float32_samples = random_length.flatmap(
-    lambda n: st.just(n).map(
-        lambda size: np.random.randn(size).astype(np.float32)
-    )
+    lambda n: st.just(n).map(lambda size: np.random.randn(size).astype(np.float32))
 )
 
 # Strategy: generate random bytes then reinterpret as float32 samples.
 # This produces truly arbitrary bit patterns including denormals, NaN, etc.
 random_bytes_as_float32 = st.integers(min_value=10, max_value=5000).flatmap(
     lambda n: st.just(n).map(
-        lambda size: np.frombuffer(
-            np.random.bytes(size * 4), dtype=np.float32
-        ).copy()
+        lambda size: np.frombuffer(np.random.bytes(size * 4), dtype=np.float32).copy()
     )
 )
 
@@ -197,10 +192,12 @@ class TestStructuredInvalidData:
         decoder = factory()
         for period in [2, 4, 8, 16, 50, 200]:
             half = period // 2
-            one_cycle = np.concatenate([
-                np.ones(half, dtype=np.float32),
-                -np.ones(half, dtype=np.float32),
-            ])
+            one_cycle = np.concatenate(
+                [
+                    np.ones(half, dtype=np.float32),
+                    -np.ones(half, dtype=np.float32),
+                ]
+            )
             samples = np.tile(one_cycle, 500)
             result = decoder.decode(samples)
             assert isinstance(result, list)
@@ -245,12 +242,14 @@ class TestStructuredInvalidData:
 
         # Only 10 bits of message data instead of 56 or 112
         short_msg = np.full(10 * sps, 0.5, dtype=np.float32)
-        signal = np.concatenate([
-            np.full(50, 0.1, dtype=np.float32),
-            preamble_samples,
-            short_msg,
-            np.full(50, 0.1, dtype=np.float32),
-        ])
+        signal = np.concatenate(
+            [
+                np.full(50, 0.1, dtype=np.float32),
+                preamble_samples,
+                short_msg,
+                np.full(50, 0.1, dtype=np.float32),
+            ]
+        )
 
         result = decoder.decode(signal)
         assert isinstance(result, list)
@@ -281,12 +280,14 @@ class TestStructuredInvalidData:
                 msg_samples[pos : pos + half] = 0.1
                 msg_samples[pos + half : pos + sps] = 1.0
 
-        signal = np.concatenate([
-            np.full(50, 0.1, dtype=np.float32),
-            preamble_samples,
-            msg_samples,
-            np.full(200, 0.1, dtype=np.float32),
-        ])
+        signal = np.concatenate(
+            [
+                np.full(50, 0.1, dtype=np.float32),
+                preamble_samples,
+                msg_samples,
+                np.full(200, 0.1, dtype=np.float32),
+            ]
+        )
 
         result = decoder.decode(signal)
         assert isinstance(result, list)
@@ -481,8 +482,17 @@ class TestEdgeCases:
         samples = rng.standard_normal(1000).astype(np.float32)
         # Inject special values at random positions
         positions = rng.integers(0, 1000, size=30)
-        specials = [np.nan, np.inf, -np.inf, 0.0, -0.0, 1e38, -1e38,
-                    np.finfo(np.float32).tiny, np.finfo(np.float32).max]
+        specials = [
+            np.nan,
+            np.inf,
+            -np.inf,
+            0.0,
+            -0.0,
+            1e38,
+            -1e38,
+            np.finfo(np.float32).tiny,
+            np.finfo(np.float32).max,
+        ]
         for pos in positions:
             samples[pos] = rng.choice(specials)
         try:
@@ -523,10 +533,12 @@ class TestEdgeCases:
     def test_single_transition(self, name, factory):
         """Step function: half negative, half positive."""
         decoder = factory()
-        samples = np.concatenate([
-            np.full(2500, -1.0, dtype=np.float32),
-            np.full(2500, 1.0, dtype=np.float32),
-        ])
+        samples = np.concatenate(
+            [
+                np.full(2500, -1.0, dtype=np.float32),
+                np.full(2500, 1.0, dtype=np.float32),
+            ]
+        )
         result = decoder.decode(samples)
         assert isinstance(result, list)
 

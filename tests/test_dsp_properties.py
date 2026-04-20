@@ -8,15 +8,13 @@ Validates mathematical properties that must hold for any input:
 """
 
 import numpy as np
-import pytest
-from hypothesis import given, settings, assume
+from hypothesis import assume, given, settings
 from hypothesis import strategies as st
 
-from sdr_module.dsp.filters import FIRFilter, FilterSpec, FilterType
+from sdr_module.core.sample_buffer import BufferOverflowPolicy, SampleBuffer
 from sdr_module.dsp.demodulators import AMDemodulator, FMDemodulator
-from sdr_module.utils.conversions import linear_to_db, db_to_linear, freq_to_str
-from sdr_module.core.sample_buffer import SampleBuffer, BufferOverflowPolicy
-
+from sdr_module.dsp.filters import FilterSpec, FilterType, FIRFilter
+from sdr_module.utils.conversions import db_to_linear, freq_to_str, linear_to_db
 
 # ---------------------------------------------------------------------------
 # Hypothesis strategies
@@ -32,6 +30,7 @@ window_names = st.sampled_from(["hamming", "hann", "blackman", "kaiser", "rectan
 # ---------------------------------------------------------------------------
 # 1. FIR filter properties
 # ---------------------------------------------------------------------------
+
 
 class TestFIRFilterProperties:
     """Property-based tests for FIR filter invariants."""
@@ -61,9 +60,9 @@ class TestFIRFilterProperties:
         signal = np.random.randn(n_samples)
         output = fir.filter(signal)
 
-        assert output.shape == signal.shape, (
-            f"Output length {output.shape} != input length {signal.shape}"
-        )
+        assert (
+            output.shape == signal.shape
+        ), f"Output length {output.shape} != input length {signal.shape}"
 
     @given(
         cutoff=st.floats(min_value=500.0, max_value=4000.0),
@@ -147,14 +146,13 @@ class TestFIRFilterProperties:
         taps = fir.taps
 
         dc_gain = np.sum(taps)
-        assert abs(dc_gain - 1.0) < 0.01, (
-            f"DC gain should be ~1.0, got {dc_gain}"
-        )
+        assert abs(dc_gain - 1.0) < 0.01, f"DC gain should be ~1.0, got {dc_gain}"
 
 
 # ---------------------------------------------------------------------------
 # 2. Demodulator round-trips
 # ---------------------------------------------------------------------------
+
 
 class TestDemodulatorRoundTrips:
     """Property-based tests for modulate-then-demodulate fidelity."""
@@ -252,6 +250,7 @@ class TestDemodulatorRoundTrips:
 # 3. Conversion round-trips
 # ---------------------------------------------------------------------------
 
+
 class TestConversionRoundTrips:
     """Property-based tests for unit-conversion invertibility."""
 
@@ -307,6 +306,7 @@ class TestConversionRoundTrips:
 # 4. Sample buffer properties
 # ---------------------------------------------------------------------------
 
+
 class TestSampleBufferProperties:
     """Property-based tests for SampleBuffer integrity."""
 
@@ -330,15 +330,13 @@ class TestSampleBufferProperties:
         samples = (real_part + 1j * imag_part).astype(np.complex64)
 
         written = buf.write(samples)
-        assert written == n_samples, (
-            f"Expected to write {n_samples}, wrote {written}"
-        )
+        assert written == n_samples, f"Expected to write {n_samples}, wrote {written}"
 
         read_back = buf.read(n_samples, timeout=0)
         assert read_back is not None, "Read returned None unexpectedly"
-        assert len(read_back) == n_samples, (
-            f"Read back {len(read_back)} samples, expected {n_samples}"
-        )
+        assert (
+            len(read_back) == n_samples
+        ), f"Read back {len(read_back)} samples, expected {n_samples}"
         np.testing.assert_array_equal(
             read_back,
             samples,
@@ -365,14 +363,13 @@ class TestSampleBufferProperties:
             buf.write(samples)
 
             assert buf.available <= capacity, (
-                f"Buffer available ({buf.available}) exceeds "
-                f"capacity ({capacity})"
+                f"Buffer available ({buf.available}) exceeds " f"capacity ({capacity})"
             )
 
         stats = buf.stats
-        assert stats.current_fill <= capacity, (
-            f"Buffer fill ({stats.current_fill}) exceeds capacity ({capacity})"
-        )
+        assert (
+            stats.current_fill <= capacity
+        ), f"Buffer fill ({stats.current_fill}) exceeds capacity ({capacity})"
 
     @given(
         capacity=st.integers(min_value=64, max_value=2048),
@@ -424,6 +421,5 @@ class TestSampleBufferProperties:
             f"total_samples_in ({stats.total_samples_in})"
         )
         assert stats.current_fill <= capacity, (
-            f"current_fill ({stats.current_fill}) exceeds "
-            f"capacity ({capacity})"
+            f"current_fill ({stats.current_fill}) exceeds " f"capacity ({capacity})"
         )

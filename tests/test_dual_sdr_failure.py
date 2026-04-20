@@ -6,7 +6,6 @@ and frequency setting on uninitialized controllers.
 """
 
 import threading
-import time
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -14,16 +13,14 @@ import pytest
 
 from sdr_module.core.dual_sdr import (
     DualSDRController,
-    DualSDRState,
     OperationMode,
 )
-from sdr_module.core.config import SDRConfig
 from sdr_module.core.sample_buffer import SampleBuffer
-
 
 # ---------------------------------------------------------------------------
 # Mock devices (reused from the main test suite with failure-injection hooks)
 # ---------------------------------------------------------------------------
+
 
 class MockRTLSDRDevice:
     """Mock RTL-SDR device with failure-injection support."""
@@ -147,6 +144,7 @@ class MockHackRFDevice:
 # Helper to generate random IQ samples
 # ---------------------------------------------------------------------------
 
+
 def _make_samples(n: int) -> np.ndarray:
     """Return *n* random complex64 IQ samples."""
     return (np.random.randn(n) + 1j * np.random.randn(n)).astype(np.complex64)
@@ -155,6 +153,7 @@ def _make_samples(n: int) -> np.ndarray:
 # ===========================================================================
 # 1. Device disconnection during streaming
 # ===========================================================================
+
 
 class TestDeviceDisconnectionDuringStreaming:
     """Verify the controller recovers when a device raises mid-stream."""
@@ -281,6 +280,7 @@ class TestDeviceDisconnectionDuringStreaming:
 # 2. Buffer overrun handling
 # ===========================================================================
 
+
 class TestBufferOverrunHandling:
     """Verify the controller does not crash when the buffer overflows."""
 
@@ -375,6 +375,7 @@ class TestBufferOverrunHandling:
 # 3. Mode switching during active streaming
 # ===========================================================================
 
+
 class TestModeSwitchDuringActiveStreaming:
     """Verify mode switch behaviour while devices are streaming."""
 
@@ -452,6 +453,7 @@ class TestModeSwitchDuringActiveStreaming:
 # ===========================================================================
 # 4. Initialize with no devices available
 # ===========================================================================
+
 
 class TestInitializeWithNoDevices:
     """Verify initialize() returns False when no hardware is found."""
@@ -537,7 +539,9 @@ class TestInitializeWithNoDevices:
 
         controller = DualSDRController()
         # apply_config is called for the RTL-SDR device; patch it.
-        with patch.object(controller._device_manager, "apply_config", return_value=True):
+        with patch.object(
+            controller._device_manager, "apply_config", return_value=True
+        ):
             result = controller.initialize()
 
         assert result
@@ -570,6 +574,7 @@ class TestInitializeWithNoDevices:
 # 5. Double start / stop
 # ===========================================================================
 
+
 class TestDoubleStartStop:
     """Calling start or stop multiple times must not crash."""
 
@@ -584,7 +589,7 @@ class TestDoubleStartStop:
 
         # Second call -- the devices are already streaming but the
         # controller re-invokes start_rx.  This must not crash.
-        second = controller.start_dual_rx()
+        controller.start_dual_rx()
         # Regardless of the return value, state must be consistent.
         assert controller.state.rtlsdr_streaming
         assert controller.state.hackrf_streaming
@@ -670,6 +675,7 @@ class TestDoubleStartStop:
 # ===========================================================================
 # 6. Frequency setting on uninitialized controller
 # ===========================================================================
+
 
 class TestFrequencyOnUninitializedController:
     """Verify set_rtlsdr_frequency and set_hackrf_frequency return False

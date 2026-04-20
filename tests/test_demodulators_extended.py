@@ -16,7 +16,6 @@ from sdr_module.dsp.demodulators import (
     SSBDemodulator,
 )
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -143,7 +142,9 @@ class TestFSKDemodulator:
     def test_reset_clears_state(self):
         """Reset should not crash."""
         demod = FSKDemodulator(self.SAMPLE_RATE, self.SYMBOL_RATE, self.DEVIATION)
-        signal = generate_fsk([1, 0], self.SAMPLE_RATE, self.SYMBOL_RATE, self.DEVIATION)
+        signal = generate_fsk(
+            [1, 0], self.SAMPLE_RATE, self.SYMBOL_RATE, self.DEVIATION
+        )
         demod.demodulate(signal)
         demod.reset()
         # Should be able to demodulate again after reset
@@ -201,7 +202,6 @@ class TestPSKDemodulator:
         """QPSK outputs symbols in {0, 1, 2, 3}."""
         demod = PSKDemodulator(self.SAMPLE_RATE, self.SYMBOL_RATE, order=4)
         # Generate QPSK: 4 constellation points
-        t = np.arange(4000) / self.SAMPLE_RATE
         phases = [np.pi / 4, 3 * np.pi / 4, -3 * np.pi / 4, -np.pi / 4]
         signal = np.zeros(4000, dtype=np.complex64)
         for i, phase in enumerate(phases):
@@ -248,9 +248,7 @@ class TestGFSKDemodulator:
     def test_demodulate_soft_output(self):
         """Soft decision output has non-zero values."""
         demod = GFSKDemodulator(self.SAMPLE_RATE, self.SYMBOL_RATE)
-        signal = generate_fsk(
-            [1, 0, 1, 0], self.SAMPLE_RATE, self.SYMBOL_RATE, 600
-        )
+        signal = generate_fsk([1, 0, 1, 0], self.SAMPLE_RATE, self.SYMBOL_RATE, 600)
         soft = demod.demodulate_soft(signal)
         assert len(soft) > 0
 
@@ -258,9 +256,7 @@ class TestGFSKDemodulator:
     def test_different_bt_products(self, bt):
         """GFSK demodulator works with various BT products."""
         demod = GFSKDemodulator(self.SAMPLE_RATE, self.SYMBOL_RATE, bt=bt)
-        signal = generate_fsk(
-            [1, 0, 1, 0], self.SAMPLE_RATE, self.SYMBOL_RATE, 600
-        )
+        signal = generate_fsk([1, 0, 1, 0], self.SAMPLE_RATE, self.SYMBOL_RATE, 600)
         result = demod.demodulate(signal)
         assert len(result) > 0
 

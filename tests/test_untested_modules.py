@@ -20,7 +20,6 @@ from sdr_module.dsp.classifiers import (
 )
 from sdr_module.dsp.frequency_lock import (
     FrequencyLocker,
-    LockConfig,
     LockState,
     LockStatus,
 )
@@ -28,11 +27,9 @@ from sdr_module.dsp.scanner import (
     FrequencyScanner,
     ScanConfig,
     ScanDirection,
-    ScanMode,
     ScanState,
     ScanStatus,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -49,12 +46,14 @@ def make_noise(n_samples: int, power: float = 0.01) -> np.ndarray:
     """Generate complex Gaussian noise."""
     rng = np.random.default_rng(42)
     scale = np.sqrt(power / 2)
-    return (rng.normal(0, scale, n_samples) + 1j * rng.normal(0, scale, n_samples)).astype(
-        np.complex64
-    )
+    return (
+        rng.normal(0, scale, n_samples) + 1j * rng.normal(0, scale, n_samples)
+    ).astype(np.complex64)
 
 
-def make_spectrum_db(fft_size: int, signal_bin: int = -1, snr_db: float = 30.0) -> np.ndarray:
+def make_spectrum_db(
+    fft_size: int, signal_bin: int = -1, snr_db: float = 30.0
+) -> np.ndarray:
     """Generate a synthetic power spectrum in dB with a peak at signal_bin."""
     noise_floor = -80.0
     spectrum = np.full(fft_size, noise_floor, dtype=np.float64)

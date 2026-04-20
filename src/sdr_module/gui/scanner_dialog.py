@@ -74,9 +74,7 @@ class _ScanWorker(QThread if HAS_PYQT6 else object):
                 samples = self._device.read_samples(4096)
             else:
                 # Synthetic: random noise plus a fake signal near band centers
-                samples = (
-                    np.random.randn(4096) + 1j * np.random.randn(4096)
-                ) * 0.05
+                samples = (np.random.randn(4096) + 1j * np.random.randn(4096)) * 0.05
         except Exception as e:
             logger.debug(f"Scan read failed at {freq_hz}: {e}")
             return None

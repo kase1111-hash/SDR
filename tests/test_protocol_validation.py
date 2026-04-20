@@ -5,7 +5,6 @@ and noise rejection behavior using realistic but synthetic signal generation.
 """
 
 import struct
-import time
 
 import numpy as np
 import pytest
@@ -25,7 +24,6 @@ from sdr_module.dsp.protocols import (
     RDSDecoder,
     create_protocol_decoder,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helper utilities
@@ -111,9 +109,7 @@ class TestPOCSAGDecoder:
     BAUD_RATE = 1200
 
     def _make_decoder(self):
-        return POCSAGDecoder(
-            sample_rate=self.SAMPLE_RATE, baud_rate=self.BAUD_RATE
-        )
+        return POCSAGDecoder(sample_rate=self.SAMPLE_RATE, baud_rate=self.BAUD_RATE)
 
     # -- Synthetic signal generation helpers --------------------------------
 
@@ -210,9 +206,7 @@ class TestPOCSAGDecoder:
         """A preamble-only signal should not produce spurious messages."""
         decoder = self._make_decoder()
         bits = self._generate_preamble_bits(1152)  # 2x normal preamble
-        samples = bits_to_fsk_samples(
-            bits, self.SAMPLE_RATE, self.BAUD_RATE
-        )
+        samples = bits_to_fsk_samples(bits, self.SAMPLE_RATE, self.BAUD_RATE)
         messages = decoder.decode(samples)
         assert messages == []
 
@@ -228,9 +222,7 @@ class TestPOCSAGDecoder:
         """reset() should clear internal buffers so subsequent decodes are fresh."""
         decoder = self._make_decoder()
         bits = self._build_pocsag_signal()
-        samples = bits_to_fsk_samples(
-            bits, self.SAMPLE_RATE, self.BAUD_RATE
-        )
+        samples = bits_to_fsk_samples(bits, self.SAMPLE_RATE, self.BAUD_RATE)
         decoder.decode(samples)
         decoder.reset()
         # After reset, feeding silence should produce nothing
@@ -245,9 +237,7 @@ class TestPOCSAGDecoder:
         decoder.add_callback(lambda msg: received.append(msg))
 
         bits = self._build_pocsag_signal()
-        samples = bits_to_fsk_samples(
-            bits, self.SAMPLE_RATE, self.BAUD_RATE
-        )
+        samples = bits_to_fsk_samples(bits, self.SAMPLE_RATE, self.BAUD_RATE)
         decoder.decode(samples)
 
         # Each message returned by decode() should also trigger the callback
@@ -267,9 +257,7 @@ class TestPOCSAGDecoder:
         decoder.remove_callback(cb)
 
         bits = self._build_pocsag_signal()
-        samples = bits_to_fsk_samples(
-            bits, self.SAMPLE_RATE, self.BAUD_RATE
-        )
+        samples = bits_to_fsk_samples(bits, self.SAMPLE_RATE, self.BAUD_RATE)
         decoder.decode(samples)
         assert len(received) == 0
 
@@ -279,9 +267,7 @@ class TestPOCSAGDecoder:
             sample_rate=self.SAMPLE_RATE, baud_rate=512, auto_baud=True
         )
         bits = self._generate_preamble_bits(576)
-        samples = bits_to_fsk_samples(
-            bits, self.SAMPLE_RATE, self.BAUD_RATE
-        )
+        samples = bits_to_fsk_samples(bits, self.SAMPLE_RATE, self.BAUD_RATE)
         # Should not crash; baud rate may or may not change
         decoder.decode(samples)
         assert decoder.baud_rate in (512, 1200, 2400)
@@ -292,9 +278,7 @@ class TestPOCSAGDecoder:
         bits = self._build_pocsag_signal()
         # Repeat the signal
         bits_doubled = bits + bits
-        samples = bits_to_fsk_samples(
-            bits_doubled, self.SAMPLE_RATE, self.BAUD_RATE
-        )
+        samples = bits_to_fsk_samples(bits_doubled, self.SAMPLE_RATE, self.BAUD_RATE)
         messages = decoder.decode(samples)
         assert isinstance(messages, list)
 
@@ -530,7 +514,7 @@ class TestADSBDecoder:
     def test_crc_computation(self):
         """CRC-24 computation produces deterministic results."""
         decoder = self._make_decoder()
-        data = b"\x8D\xA1\xB2\xC3\x20\x04\x12\x48\x12\x48\x00"
+        data = b"\x8d\xa1\xb2\xc3\x20\x04\x12\x48\x12\x48\x00"
         crc = decoder._compute_crc(data)
         # CRC should be deterministic
         assert crc == decoder._compute_crc(data)
@@ -631,9 +615,7 @@ class TestRDSDecoder:
         bits = block_a + block_b + block_c + block_d
 
         # Convert to BPSK-demodulated samples
-        samples = bits_to_fsk_samples(
-            bits, self.SAMPLE_RATE, 1187.5, amplitude=1.0
-        )
+        samples = bits_to_fsk_samples(bits, self.SAMPLE_RATE, 1187.5, amplitude=1.0)
         return samples
 
     # -- Tests --------------------------------------------------------------
@@ -1012,9 +994,7 @@ class TestCreateProtocolDecoder:
 
     def test_acars(self):
         """Factory creates ACARSDecoder for ProtocolType.ACARS."""
-        decoder = create_protocol_decoder(
-            ProtocolType.ACARS, sample_rate=48000
-        )
+        decoder = create_protocol_decoder(ProtocolType.ACARS, sample_rate=48000)
         assert isinstance(decoder, ACARSDecoder)
         assert decoder.sample_rate == 48000
 

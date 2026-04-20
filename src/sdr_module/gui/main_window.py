@@ -874,7 +874,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             peak = float(np.max(np.abs(audio)) + 1e-9)
             audio = audio / max(peak, 1e-6) * 0.5
             # Decimate to ~48 kHz assuming 2.4 MS/s (48x)
-            rate = getattr(self._device, "sample_rate", 2.4e6) if self._device else 2.4e6
+            rate = (
+                getattr(self._device, "sample_rate", 2.4e6) if self._device else 2.4e6
+            )
             decim = max(1, int(rate / 48000))
             self._audio.write(audio[::decim])
         except Exception as e:  # pragma: no cover
@@ -971,9 +973,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             samples, metadata = load_iq_file(filename)
         except Exception as e:
             logger.error(f"Failed to open recording: {e}")
-            QMessageBox.warning(
-                self, "Open Failed", f"Could not open recording:\n{e}"
-            )
+            QMessageBox.warning(self, "Open Failed", f"Could not open recording:\n{e}")
             return
 
         self._samples_buffer = [samples]
@@ -1018,7 +1018,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             fmt, sample_fmt = FileFormat.RAW, SampleFormat.FLOAT32
 
         samples = np.concatenate(self._samples_buffer).astype(np.complex64)
-        sample_rate = getattr(self._device, "sample_rate", 2.4e6) if self._device else 2.4e6
+        sample_rate = (
+            getattr(self._device, "sample_rate", 2.4e6) if self._device else 2.4e6
+        )
         center_freq = self._control_panel._freq_input.get_frequency()
 
         try:
@@ -1032,9 +1034,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
         except Exception as e:
             logger.error(f"Failed to save recording: {e}")
-            QMessageBox.warning(
-                self, "Save Failed", f"Could not save recording:\n{e}"
-            )
+            QMessageBox.warning(self, "Save Failed", f"Could not save recording:\n{e}")
             return
 
         logger.info(f"Saved {len(samples)} samples to {filename}")

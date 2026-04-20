@@ -367,12 +367,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 r, g, b = self._colormap[idx]
                 row = self._history_size - len(self._history) + y
                 if 0 <= row < self._history_size:
-                    argb = (
-                        (255 << 24)
-                        | (int(r) << 16)
-                        | (int(g) << 8)
-                        | int(b)
-                    )
+                    argb = (255 << 24) | (int(r) << 16) | (int(g) << 8) | int(b)
                     self._image.setPixel(x, row, argb)
 
     def paintEvent(self, event):

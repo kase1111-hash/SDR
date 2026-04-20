@@ -8,6 +8,8 @@ import logging
 import sys
 from typing import Any, Dict, List, Optional
 
+from .themes import get_stylesheet
+
 logger = logging.getLogger(__name__)
 
 
@@ -379,8 +381,22 @@ class SDRApplication:
             # Set application style
             self._app.setStyle("Fusion")
 
-            # Apply dark theme
-            self._app.setStyleSheet(_DARK_STYLESHEET)
+            # Apply theme (persisted user preference, default dark)
+            try:
+                from .settings_store import GuiSettings
+
+                theme = GuiSettings().get_str("theme", "dark")
+            except Exception:
+                theme = "dark"
+            self._app.setStyleSheet(get_stylesheet(theme))
+
+            # Install error-history handler so the Error History dialog works
+            try:
+                from .error_log_dialog import install_history_handler
+
+                install_history_handler()
+            except Exception:  # pragma: no cover
+                pass
 
             # Create and show main window
             demo_mode = settings.get("demo_mode", False)

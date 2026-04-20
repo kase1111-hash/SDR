@@ -15,7 +15,7 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 try:
-    from PyQt6.QtCore import QRectF
+    from PyQt6.QtCore import QRectF, Qt, pyqtSignal
     from PyQt6.QtGui import QColor, QImage, QPainter, QPen
     from PyQt6.QtWidgets import QComboBox, QHBoxLayout, QLabel, QVBoxLayout, QWidget
 
@@ -97,6 +97,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         ],
     }
 
+    if HAS_PYQT6:
+        frequency_clicked = pyqtSignal(float)  # Hz
+
     def __init__(self, parent=None, history_size: int = 500):
         if not HAS_PYQT6:
             raise ImportError("PyQt6 is required")
@@ -107,6 +110,8 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._history_size = history_size
         self._fft_size = 2048
         self._db_range = (-100, 0)
+        self._center_freq = 100e6
+        self._sample_rate = 2.4e6
 
         # Data storage
         self._history: deque = deque(maxlen=history_size)
@@ -228,7 +233,11 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         Args:
             power_db: Power spectrum in dB
         """
-        if len(power_db) != self._fft_size:
+        if len(power_db) == 0:
+            # No spectrum data: record a neutral (min-dB) row so history stays
+            # in sync with caller cadence but we skip the expensive interp path.
+            power_db = np.full(self._fft_size, self._db_range[0], dtype=np.float32)
+        elif len(power_db) != self._fft_size:
             # Resample if needed
             power_db = np.interp(
                 np.linspace(0, 1, self._fft_size),
@@ -245,6 +254,39 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._history.clear()
         self._image = None
         self.update()
+
+    def set_center_freq(self, center_freq: float) -> None:
+        """Update the center frequency used for click-to-tune and labels."""
+        self._center_freq = center_freq
+        self.update()
+
+    def set_sample_rate(self, sample_rate: float) -> None:
+        """Update the sample rate used for click-to-tune and labels."""
+        self._sample_rate = sample_rate
+        self.update()
+
+    def save_image(self, path: str) -> bool:
+        """Save the current waterfall image to a file. Returns success."""
+        if self._image is None:
+            return False
+        return bool(self._image.save(path))
+
+    def mousePressEvent(self, event):
+        """Emit frequency_clicked on left-click inside the image area."""
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        margin = 50  # matches _draw code; ~left axis margin
+        right_pad = 10
+        w = self.width() - margin - right_pad
+        if w <= 0:
+            return
+        x = event.position().x() - margin
+        if x < 0 or x > w:
+            return
+        frac = x / w
+        freq_start = self._center_freq - self._sample_rate / 2
+        freq = freq_start + frac * self._sample_rate
+        self.frequency_clicked.emit(float(freq))
 
     def add_highlight(
         self,
@@ -299,9 +341,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             idx = int(normalized * 255)
 
             r, g, b = self._colormap[idx]
-            self._image.setPixel(
-                x, self._history_size - 1, (255 << 24) | (r << 16) | (g << 8) | b
-            )
+            # Cast to int so the bitshift doesn't overflow numpy uint8
+            argb = (255 << 24) | (int(r) << 16) | (int(g) << 8) | int(b)
+            self._image.setPixel(x, self._history_size - 1, argb)
 
     def _rebuild_image(self):
         """Rebuild entire image from history."""
@@ -325,7 +367,13 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 r, g, b = self._colormap[idx]
                 row = self._history_size - len(self._history) + y
                 if 0 <= row < self._history_size:
-                    self._image.setPixel(x, row, (255 << 24) | (r << 16) | (g << 8) | b)
+                    argb = (
+                        (255 << 24)
+                        | (int(r) << 16)
+                        | (int(g) << 8)
+                        | int(b)
+                    )
+                    self._image.setPixel(x, row, argb)
 
     def paintEvent(self, event):
         """Paint the waterfall display."""

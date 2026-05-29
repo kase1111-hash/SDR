@@ -43,8 +43,14 @@ pip install sdr-module[full]      # Everything (drivers + SciPy + matplotlib + P
 # From source
 git clone https://github.com/kase1111-hash/SDR.git
 cd SDR
-pip install -e ".[full]"
+python -m pip install -e ".[full]"
 ```
+
+> **Tip:** Always install with `python -m pip` rather than a bare `pip`. On some
+> systems the `pip` on your `PATH` belongs to a different interpreter than
+> `python`, which silently installs packages where `python` can't import them
+> (the classic `ModuleNotFoundError: No module named 'numpy'` right after a
+> "successful" install). Routing through `python -m pip` guarantees they agree.
 
 ## Quick Start
 
@@ -63,9 +69,25 @@ starting band. Press **F1** at any time for the shortcut reference.
 ```bash
 sdr-scan info                                      # Build + capability summary
 sdr-scan devices                                   # Scan for connected SDRs
-sdr-scan scan --start 88 --end 108 --step 100      # Sweep a range
+sdr-scan scan --start 88 --end 108 --step 100      # Live sweep (needs hardware)
 sdr-scan encode morse --text "HELLO" --output out  # Encode text to I/Q
 ```
+
+#### Offline analysis (no hardware required)
+
+Record I/Q to disk (via the GUI or any SDR tool), then analyze it offline:
+
+```bash
+# Detect signals in a capture via FFT peak detection
+sdr-scan scan --input capture.cf32 --sample-rate 2400000 --center 100e6 --threshold -40
+
+# Decode a protocol from a capture (POCSAG, FLEX, AX.25/APRS, RDS, ADS-B, ACARS)
+sdr-scan decode adsb --input adsb_1090.cf32 --sample-rate 2000000
+```
+
+The sample format is auto-detected for WAV/SigMF files; for headerless raw
+captures pass `--format` (`cu8`, `cs8`, `cs16`, `cf32`, `cf64`) and
+`--sample-rate`. `cu8` is the RTL-SDR native format.
 
 ### Python API
 
@@ -193,7 +215,7 @@ The `sdr-antenna-array` package (in `packages/sdr-antenna-array/`) provides mult
 - Array calibration
 
 ```bash
-pip install -e packages/sdr-antenna-array/
+python -m pip install -e packages/sdr-antenna-array/
 ```
 
 ## Project Structure
@@ -221,7 +243,7 @@ sdr-module/
 ```bash
 git clone https://github.com/kase1111-hash/SDR.git
 cd SDR
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 pytest                                # Run tests
 pytest --cov=sdr_module               # With coverage
 ruff check src/ tests/

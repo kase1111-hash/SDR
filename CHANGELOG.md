@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — CLI
+- **`sdr-scan decode`** — decode a protocol (POCSAG, FLEX, AX.25/APRS, RDS,
+  ADS-B, ACARS) from a recorded I/Q file, exposing the shipped decoders without
+  writing Python.
+- **`sdr-scan scan --input FILE`** — offline signal detection on a recorded I/Q
+  file via FFT peak detection (previously `scan` was a hardware-only stub that
+  performed no analysis). Supports `--format`, `--sample-rate`, `--center`,
+  `--fft-size`, and `--max-samples`.
+
+### Fixed — Developer experience
+- Added a `SessionStart` hook (`.claude/hooks/session-start.sh`) that installs
+  the project and the bundled `sdr-antenna-array` package with the correct
+  interpreter, so Claude Code on the web sessions are ready with no manual
+  steps.
+- Documented the `python -m pip` install requirement in the README to avoid
+  interpreter/pip mismatches.
+
 ### Added — GUI usability
 - **AM/FM Radio Tuner widget** with vintage car radio styling (LED frequency
   readout, analog tuning dial, 6 presets per band, volume/tone/balance,

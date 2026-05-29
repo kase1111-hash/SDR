@@ -51,16 +51,21 @@ def cmd_info(args: argparse.Namespace) -> int:
     print("  - HackRF One (TX/RX): 1 MHz - 6 GHz")
     print()
     print("Features:")
-    print("  - Frequency scanning and signal detection")
+    print("  - Frequency scanning and signal detection (live or from a recording)")
     print("  - Spectrum analysis and visualization")
-    print("  - Signal classification and protocol detection")
+    print("  - Protocol decoding (POCSAG, FLEX, AX.25/APRS, RDS, ADS-B, ACARS)")
     print("  - Text encoding (RTTY, Morse, PSK31, ASCII)")
     print("  - I/Q recording and playback")
     return 0
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
-    """Run frequency scanner."""
+    """Scan a frequency range (live) or analyze a recorded I/Q file (offline)."""
+    if args.input:
+        return _scan_file(args)
+
+    # Live sweep: requires hardware. Validate the config so bad ranges are
+    # caught even without a device attached.
     from .dsp.scanner import FrequencyScanner, ScanConfig, ScanMode
 
     config = ScanConfig(
@@ -76,8 +81,107 @@ def cmd_scan(args: argparse.Namespace) -> int:
     print(f"Scanning {args.start:.3f} - {args.end:.3f} MHz")
     print(f"Step: {args.step} kHz, Threshold: {args.threshold} dB")
     print()
-    print("Note: This requires connected SDR hardware.")
-    print("Use with RTL-SDR or HackRF One for actual scanning.")
+    print("Note: A live sweep requires connected SDR hardware.")
+    print("To analyze a recorded capture offline, pass --input FILE.")
+
+    return 0
+
+
+def _scan_file(args: argparse.Namespace) -> int:
+    """Detect signals in a recorded I/Q file via FFT peak detection."""
+    from .dsp.recording import SampleFormat, load_iq_file
+    from .dsp.spectrum import SpectrumAnalyzer
+
+    input_path = Path(args.input).expanduser()
+    if not input_path.exists():
+        print(f"Error: file not found: {input_path}")
+        return 1
+
+    sample_format = SampleFormat(args.format) if args.format else None
+    samples, metadata = load_iq_file(
+        input_path, sample_format=sample_format, max_samples=args.max_samples
+    )
+
+    sample_rate = args.sample_rate or metadata.sample_rate
+    if not sample_rate:
+        print("Error: sample rate unknown for this file; specify --sample-rate (Hz).")
+        return 1
+
+    center_freq = args.center if args.center is not None else metadata.center_frequency
+
+    if len(samples) < args.fft_size:
+        print(
+            f"Error: file has {len(samples)} samples, fewer than the FFT size "
+            f"({args.fft_size}). Use a smaller --fft-size."
+        )
+        return 1
+
+    analyzer = SpectrumAnalyzer(fft_size=args.fft_size)
+    result = analyzer.compute_spectrum(
+        samples, center_freq=center_freq, sample_rate=sample_rate
+    )
+    peaks = analyzer.find_peaks(
+        result, threshold_db=args.threshold, min_distance_hz=args.step * 1e3
+    )
+
+    print(
+        f"Analyzed {len(samples)} samples "
+        f"({len(samples) / sample_rate:.3f}s at {sample_rate / 1e6:.3f} Msps)"
+    )
+    print(
+        f"Center: {center_freq / 1e6:.4f} MHz, "
+        f"RBW: {result.rbw:.1f} Hz, Threshold: {args.threshold} dB"
+    )
+    print()
+
+    if not peaks:
+        print("No signals above threshold.")
+        return 0
+
+    print(f"Detected {len(peaks)} signal(s):")
+    for i, peak in enumerate(peaks):
+        offset_khz = (peak.frequency - center_freq) / 1e3
+        print(
+            f"  [{i}] {peak.frequency / 1e6:11.4f} MHz "
+            f"({offset_khz:+8.1f} kHz)  {peak.power_db:7.1f} dB"
+        )
+
+    return 0
+
+
+def cmd_decode(args: argparse.Namespace) -> int:
+    """Decode a protocol from a recorded I/Q file."""
+    from .dsp.protocols import ProtocolType, create_protocol_decoder
+    from .dsp.recording import SampleFormat, load_iq_file
+
+    protocol = ProtocolType(args.protocol)
+
+    input_path = Path(args.input).expanduser()
+    if not input_path.exists():
+        print(f"Error: file not found: {input_path}")
+        return 1
+
+    sample_format = SampleFormat(args.format) if args.format else None
+    samples, metadata = load_iq_file(
+        input_path, sample_format=sample_format, max_samples=args.max_samples
+    )
+
+    sample_rate = args.sample_rate or metadata.sample_rate
+    if not sample_rate:
+        print("Error: sample rate unknown for this file; specify --sample-rate (Hz).")
+        return 1
+
+    print(
+        f"Loaded {len(samples)} samples "
+        f"({len(samples) / sample_rate:.3f}s at {sample_rate / 1e6:.3f} Msps)"
+    )
+
+    decoder = create_protocol_decoder(protocol, sample_rate=sample_rate)
+    messages = decoder.decode(samples)
+
+    print(f"Decoded {len(messages)} {args.protocol.upper()} message(s)")
+    for i, msg in enumerate(messages):
+        print(f"  [{i}] {msg}")
 
     return 0
 
@@ -212,7 +316,73 @@ def create_parser() -> argparse.ArgumentParser:
     scan_parser.add_argument(
         "--single", action="store_true", help="Single scan (default: continuous)"
     )
+    scan_parser.add_argument(
+        "--input",
+        "-i",
+        type=str,
+        help="Analyze a recorded I/Q file offline instead of a live sweep",
+    )
+    scan_parser.add_argument(
+        "--format",
+        choices=["cu8", "cs8", "cs16", "cf32", "cf64"],
+        help="Sample format of --input file (auto-detect if omitted)",
+    )
+    scan_parser.add_argument(
+        "--sample-rate",
+        type=float,
+        default=0.0,
+        help="Sample rate in Hz for --input (overrides file metadata)",
+    )
+    scan_parser.add_argument(
+        "--center",
+        type=float,
+        default=None,
+        help="Center frequency in Hz for --input (overrides file metadata)",
+    )
+    scan_parser.add_argument(
+        "--fft-size",
+        type=int,
+        default=4096,
+        help="FFT size for --input (default: 4096)",
+    )
+    scan_parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Maximum samples to read from --input (default: all)",
+    )
     scan_parser.set_defaults(func=cmd_scan)
+
+    # Decode command
+    decode_parser = subparsers.add_parser(
+        "decode", help="Decode a protocol from a recorded I/Q file"
+    )
+    decode_parser.add_argument(
+        "protocol",
+        choices=["pocsag", "flex", "ax25", "aprs", "rds", "adsb", "acars"],
+        help="Protocol to decode",
+    )
+    decode_parser.add_argument(
+        "--input", "-i", type=str, required=True, help="Recorded I/Q file to decode"
+    )
+    decode_parser.add_argument(
+        "--format",
+        choices=["cu8", "cs8", "cs16", "cf32", "cf64"],
+        help="Sample format of the input file (auto-detect if omitted)",
+    )
+    decode_parser.add_argument(
+        "--sample-rate",
+        type=float,
+        default=0.0,
+        help="Sample rate in Hz (overrides file metadata)",
+    )
+    decode_parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Maximum samples to read (default: all)",
+    )
+    decode_parser.set_defaults(func=cmd_decode)
 
     # Encode command
     encode_parser = subparsers.add_parser("encode", help="Encode text to protocol")

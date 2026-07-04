@@ -319,22 +319,40 @@ class TestControlPanelLogic(unittest.TestCase):
 
 
 class TestSignalMeterWidgetLogic(unittest.TestCase):
-    """Test SignalMeterWidget logic."""
+    """Test SignalMeterPanel logic."""
 
     def setUp(self):
         """Set up test fixtures."""
         if not HAS_PYQT6:
             self.skipTest("PyQt6 not available")
-        try:
-            from sdr_module.gui.signal_meter_widget import SignalMeterWidget
+        from sdr_module.ham.gui.signal_meter_widget import SignalMeterPanel
 
-            self.widget = SignalMeterWidget()
-        except ImportError:
-            self.skipTest("SignalMeterWidget not available")
+        self.widget = SignalMeterPanel()
+
+    def tearDown(self):
+        """Stop the panel's update timer."""
+        self.widget._update_timer.stop()
 
     def test_initialization(self):
         """Test widget initializes correctly."""
         self.assertIsNotNone(self.widget)
+        self.assertIsNotNone(self.widget.get_meter())
+        self.assertIsNone(self.widget._last_reading)
+
+    def test_update_samples_produces_reading(self):
+        """Feeding I/Q samples produces a signal reading."""
+        t = np.arange(2048) / 48000.0
+        samples = (0.5 * np.exp(2j * np.pi * 1000 * t)).astype(np.complex64)
+        self.widget.update_samples(samples)
+        self.assertIsNotNone(self.widget._last_reading)
+
+    def test_display_update_after_samples(self):
+        """Display refresh runs without error after an update."""
+        t = np.arange(2048) / 48000.0
+        samples = (0.5 * np.exp(2j * np.pi * 1000 * t)).astype(np.complex64)
+        self.widget.update_samples(samples)
+        self.widget._update_display()
+        self.assertTrue(self.widget._s_meter_label.text().startswith("S"))
 
 
 class TestMockGUIWithoutQt(unittest.TestCase):

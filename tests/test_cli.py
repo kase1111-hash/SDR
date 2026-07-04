@@ -118,6 +118,24 @@ class TestDecode:
         assert rc == 1
         assert "file not found" in capsys.readouterr().out
 
+    @pytest.mark.parametrize(
+        "protocol,rate",
+        [
+            ("adsb", "48000"),  # below the 2 MHz Mode S minimum; used to hang
+            ("pocsag", "400"),
+            ("flex", "1000"),
+            ("ax25", "800"),
+            ("acars", "1000"),
+        ],
+    )
+    def test_sample_rate_too_low_errors(self, capsys, iq_capture, protocol, rate):
+        path, _, _ = iq_capture
+        rc = main(["decode", protocol, "--input", str(path), "--sample-rate", rate])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Error:" in out
+        assert "sample rate" in out.lower() or "sample_rate" in out
+
 
 class TestEncode:
     def test_encode_morse_to_file(self, capsys, tmp_path):

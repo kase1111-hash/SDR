@@ -20,7 +20,6 @@ from sdr_antenna_array import (
     SyncState,
     TimestampedChunk,
     TimestampedSampleBuffer,
-    TimestampedBufferStats,
     create_circular_4_element,
     create_linear_2_element,
     create_linear_4_element,

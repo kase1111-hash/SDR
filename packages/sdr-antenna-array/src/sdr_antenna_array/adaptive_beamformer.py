@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 from .array_config import SPEED_OF_LIGHT, ArrayConfig
-from .beamformer import Beamformer, BeamformerOutput, SteeringVector
+from .beamformer import Beamformer, BeamformerOutput
 
 logger = logging.getLogger(__name__)
 

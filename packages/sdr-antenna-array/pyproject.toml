@@ -1,5 +1,8 @@
 [build-system]
-requires = ["setuptools>=64", "setuptools-scm>=8"]
+# Cap setuptools below 77 to match the root package: 77+ emits PEP 639
+# license metadata (`License-Expression` / `Dynamic: license-file`) that
+# twine's validator rejects. Remove the cap once twine supports PEP 639.
+requires = ["setuptools>=64,<77", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +10,7 @@ name = "sdr-antenna-array"
 version = "0.3.0"
 description = "Multi-SDR antenna array support for beamforming and direction finding"
 readme = "README.md"
-license = "MIT"
+license = {text = "MIT"}
 requires-python = ">=3.9"
 dependencies = [
     "numpy>=1.21.0",

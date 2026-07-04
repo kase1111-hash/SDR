@@ -1,6 +1,5 @@
 """Tests for antenna array Phase 2 components (spatial processing)."""
 
-import math
 
 import numpy as np
 import pytest
@@ -12,7 +11,6 @@ from sdr_antenna_array import (
     BeamPattern,
     Beamformer,
     BeamformerOutput,
-    BeamformingMethod,
     BeamscanDoA,
     CorrelationResult,
     CrossCorrelator,
@@ -22,7 +20,6 @@ from sdr_antenna_array import (
     MultiSourceDoAResult,
     PhaseDifferenceDoA,
     SteeringVector,
-    create_linear_2_element,
     create_linear_4_element,
 )
 

@@ -10,6 +10,11 @@ updates:
     labels:
       - "dependencies"
       - "python"
+    ignore:
+      # setuptools 77+ emits `Dynamic: license-file` in wheel METADATA which
+      # twine's validator rejects; keep in sync with the cap in pyproject.toml.
+      - dependency-name: "setuptools"
+        versions: [">=77"]
 
   # GitHub Actions
   - package-ecosystem: "github-actions"

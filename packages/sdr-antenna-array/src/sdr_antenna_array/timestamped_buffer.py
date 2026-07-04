@@ -22,7 +22,7 @@ except ImportError:
         DROP_NEWEST = "drop_newest"
         BLOCK = "block"
 
-    BufferStats = None  # type: ignore[assignment,misc]
+    BufferStats = None
 
 
 @dataclass

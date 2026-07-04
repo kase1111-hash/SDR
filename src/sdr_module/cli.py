@@ -176,7 +176,11 @@ def cmd_decode(args: argparse.Namespace) -> int:
         f"({len(samples) / sample_rate:.3f}s at {sample_rate / 1e6:.3f} Msps)"
     )
 
-    decoder = create_protocol_decoder(protocol, sample_rate=sample_rate)
+    try:
+        decoder = create_protocol_decoder(protocol, sample_rate=sample_rate)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
     messages = decoder.decode(samples)
 
     print(f"Decoded {len(messages)} {args.protocol.upper()} message(s)")

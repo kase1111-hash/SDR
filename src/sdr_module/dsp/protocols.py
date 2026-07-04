@@ -49,6 +49,8 @@ class ProtocolDecoder(ABC):
     """Abstract base class for protocol decoders."""
 
     def __init__(self, sample_rate: float):
+        if sample_rate <= 0:
+            raise ValueError(f"sample_rate must be positive, got {sample_rate}")
         self._sample_rate = sample_rate
         self._callbacks: List[Callable] = []
 
@@ -162,6 +164,11 @@ class POCSAGDecoder(ProtocolDecoder):
         self._baud_rate = baud_rate
         self._auto_baud = auto_baud
         self._samples_per_bit = int(sample_rate / baud_rate)
+        if self._samples_per_bit < 1:
+            raise ValueError(
+                f"sample_rate {sample_rate:g} Hz is too low for POCSAG at "
+                f"{baud_rate} baud; need at least {baud_rate} Hz"
+            )
 
         # State machine
         self._state = "searching"  # searching, synced, receiving
@@ -503,6 +510,11 @@ class AX25Decoder(ProtocolDecoder):
         super().__init__(sample_rate)
         self._baud_rate = baud_rate
         self._samples_per_bit = int(sample_rate / baud_rate)
+        if self._samples_per_bit < 1:
+            raise ValueError(
+                f"sample_rate {sample_rate:g} Hz is too low for AX.25 at "
+                f"{baud_rate} baud; need at least {baud_rate} Hz"
+            )
 
         # State
         self._bit_buffer: List[int] = []
@@ -1194,7 +1206,15 @@ class ADSBDecoder(ProtocolDecoder):
         """
         super().__init__(sample_rate)
 
-        # 1090 MHz Mode S: 1 us per bit, 2 samples per bit at 2 MHz
+        # 1090 MHz Mode S: 1 us per bit, 2 samples per bit at 2 MHz.
+        # Below 2 MHz there are not enough samples to resolve the PPM
+        # half-bit positions (and at <1 MHz the preamble scan cannot
+        # advance at all), so reject unusable rates up front.
+        if sample_rate < 2e6:
+            raise ValueError(
+                f"ADS-B (Mode S) requires a sample rate of at least 2 MHz, "
+                f"got {sample_rate:g} Hz"
+            )
         self._samples_per_bit = int(sample_rate / 1e6)
         self._preamble_samples = int(self.PREAMBLE_US * sample_rate / 1e6)
 
@@ -1672,6 +1692,11 @@ class FLEXDecoder(ProtocolDecoder):
         super().__init__(sample_rate)
         self._baud_rate = baud_rate
         self._samples_per_bit = int(sample_rate / baud_rate)
+        if self._samples_per_bit < 1:
+            raise ValueError(
+                f"sample_rate {sample_rate:g} Hz is too low for FLEX at "
+                f"{baud_rate} baud; need at least {baud_rate} Hz"
+            )
 
         # State
         self._bit_buffer: List[int] = []
@@ -2005,6 +2030,11 @@ class ACARSDecoder(ProtocolDecoder):
         """
         super().__init__(sample_rate)
         self._samples_per_bit = int(sample_rate / self.BAUD_RATE)
+        if self._samples_per_bit < 1:
+            raise ValueError(
+                f"sample_rate {sample_rate:g} Hz is too low for ACARS at "
+                f"{self.BAUD_RATE} baud; need at least {self.BAUD_RATE} Hz"
+            )
 
         # State
         self._bit_buffer: List[int] = []

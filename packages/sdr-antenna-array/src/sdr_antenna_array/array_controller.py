@@ -7,10 +7,10 @@ antenna array, with synchronized streaming and buffer management.
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from threading import Event, RLock, Thread
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -19,14 +19,14 @@ try:
     from sdr_module.core.sample_buffer import BufferOverflowPolicy
     from sdr_module.devices.base import SDRDevice
 except ImportError:
-    DeviceManager = None  # type: ignore[assignment,misc]
-    SDRDevice = None  # type: ignore[assignment,misc]
+    DeviceManager = None
+    SDRDevice = None
 
     class BufferOverflowPolicy(Enum):  # type: ignore[no-redef]
         DROP_OLDEST = "drop_oldest"
         DROP_NEWEST = "drop_newest"
         BLOCK = "block"
-from .array_config import ArrayConfig, ArrayElement
+from .array_config import ArrayConfig
 from .timestamped_buffer import TimestampedChunk, TimestampedSampleBuffer
 
 logger = logging.getLogger(__name__)
@@ -80,11 +80,7 @@ class ArrayState:
     common_sample_rate: float = 0.0
     total_samples_received: int = 0
     last_sync_time: float = 0.0
-    element_states: Dict[int, ElementState] = None
-
-    def __post_init__(self) -> None:
-        if self.element_states is None:
-            self.element_states = {}
+    element_states: Dict[int, ElementState] = field(default_factory=dict)
 
 
 class AntennaArrayController:
@@ -736,11 +732,13 @@ class AntennaArrayController:
         return self
 
     def __exit__(
-        self, exc_type: type | None, exc_val: BaseException | None, exc_tb: object
-    ) -> bool:
+        self,
+        exc_type: Optional[type],
+        exc_val: Optional[BaseException],
+        exc_tb: object,
+    ) -> None:
         """Context manager exit."""
         self.shutdown()
-        return False
 
     def __repr__(self) -> str:
         return (

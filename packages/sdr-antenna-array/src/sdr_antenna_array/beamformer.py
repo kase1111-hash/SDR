@@ -6,13 +6,13 @@ techniques for phased array signal processing.
 """
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from .array_config import SPEED_OF_LIGHT, ArrayConfig, ElementPosition
+from .array_config import SPEED_OF_LIGHT, ArrayConfig
 
 logger = logging.getLogger(__name__)
 

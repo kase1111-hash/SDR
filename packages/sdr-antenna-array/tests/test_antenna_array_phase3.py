@@ -7,7 +7,6 @@ from sdr_antenna_array import (
     SPEED_OF_LIGHT,
     AdaptiveBeamformer,
     AdaptiveBeamformerState,
-    AdaptiveMethod,
     ArrayCalibrator,
     ArrayConfig,
     Beamformer,
@@ -194,7 +193,6 @@ class TestAdaptiveBeamformer:
         """Test MVDR suppresses interference."""
         config = create_linear_4_element(frequency=433e6)
         adaptive = AdaptiveBeamformer(config)
-        conventional = Beamformer(config)
 
         # Signal at 0 degrees, interference at 30 degrees
         signals = generate_array_signals_with_interference(

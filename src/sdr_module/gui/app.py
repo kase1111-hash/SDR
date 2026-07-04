@@ -8,6 +8,7 @@ import logging
 import sys
 from typing import Any, Dict, List, Optional
 
+from .. import __version__
 from .themes import get_stylesheet
 
 logger = logging.getLogger(__name__)
@@ -361,8 +362,10 @@ class SDRApplication:
         """
         if not check_pyqt6():
             logger.error("PyQt6 is required but not installed.")
-            logger.error("Install with: pip install PyQt6")
-            print("Error: PyQt6 is required. Install with: pip install PyQt6")
+            logger.error('Install it with: python -m pip install "sdr-module[gui]"')
+            print(
+                'Error: PyQt6 is required. Install it with: python -m pip install "sdr-module[gui]"'
+            )
             return 1
 
         settings = settings or {}
@@ -375,7 +378,7 @@ class SDRApplication:
             # Create application
             self._app = QApplication(self._args)
             self._app.setApplicationName("SDR Module")
-            self._app.setApplicationVersion("0.1.0")
+            self._app.setApplicationVersion(__version__)
             self._app.setOrganizationName("SDR Module Team")
 
             # Set application style

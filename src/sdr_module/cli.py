@@ -20,14 +20,14 @@ def cmd_gui(args: argparse.Namespace) -> int:
         from .gui.app import SDRApplication
     except ImportError:
         print("Error: GUI module not available.")
-        print("Install PyQt6 with: pip install PyQt6")
+        print('Install it with: python -m pip install "sdr-module[gui]"')
         return 1
 
     app = SDRApplication()
 
     if not app.is_available():
         print("Error: PyQt6 is required for the GUI.")
-        print("Install with: pip install PyQt6")
+        print('Install it with: python -m pip install "sdr-module[gui]"')
         return 1
 
     settings = {
@@ -176,7 +176,11 @@ def cmd_decode(args: argparse.Namespace) -> int:
         f"({len(samples) / sample_rate:.3f}s at {sample_rate / 1e6:.3f} Msps)"
     )
 
-    decoder = create_protocol_decoder(protocol, sample_rate=sample_rate)
+    try:
+        decoder = create_protocol_decoder(protocol, sample_rate=sample_rate)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
     messages = decoder.decode(samples)
 
     print(f"Decoded {len(messages)} {args.protocol.upper()} message(s)")
@@ -239,7 +243,18 @@ def cmd_encode(args: argparse.Namespace) -> int:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         if output_path.exists():
             print(f"Warning: Overwriting existing file: {output_path}")
-        samples.tofile(output_path)
+        if output_path.suffix.lower() == ".wav":
+            from .dsp.recording import FileFormat, SampleFormat, save_iq_file
+
+            save_iq_file(
+                output_path,
+                samples,
+                sample_rate=args.sample_rate,
+                sample_format=SampleFormat.INT16,
+                file_format=FileFormat.WAV,
+            )
+        else:
+            samples.tofile(output_path)
         print(f"Saved to: {output_path}")
 
     return 0
@@ -393,7 +408,10 @@ def create_parser() -> argparse.ArgumentParser:
         "--text", "-t", type=str, help="Text to encode (reads stdin if not provided)"
     )
     encode_parser.add_argument(
-        "--output", "-o", type=str, help="Output file for I/Q samples"
+        "--output",
+        "-o",
+        type=str,
+        help="Output file (.wav writes a playable WAV; anything else raw cf32)",
     )
     encode_parser.add_argument(
         "--sample-rate",

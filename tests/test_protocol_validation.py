@@ -1347,6 +1347,49 @@ class TestACARSDecoder:
 
 
 # ---------------------------------------------------------------------------
+# Sample-rate validation
+# ---------------------------------------------------------------------------
+
+
+class TestSampleRateValidation:
+    """Decoders reject sample rates too low to resolve their bit rate.
+
+    Regression tests: ADSBDecoder previously entered an infinite loop in
+    decode() when samples_per_bit truncated to zero, and the FSK decoders
+    crashed with an opaque ``range() arg 3 must not be zero``.
+    """
+
+    def test_adsb_rejects_sub_2mhz_rate(self):
+        with pytest.raises(ValueError, match="2 MHz"):
+            ADSBDecoder(sample_rate=48000)
+
+    def test_adsb_accepts_2mhz_rate(self):
+        decoder = ADSBDecoder(sample_rate=2e6)
+        assert decoder.sample_rate == 2e6
+
+    @pytest.mark.parametrize(
+        "decoder_cls,rate",
+        [
+            (POCSAGDecoder, 400),
+            (FLEXDecoder, 1000),
+            (AX25Decoder, 800),
+            (ACARSDecoder, 1000),
+        ],
+    )
+    def test_fsk_decoders_reject_sub_baud_rate(self, decoder_cls, rate):
+        with pytest.raises(ValueError, match="too low"):
+            decoder_cls(rate)
+
+    @pytest.mark.parametrize(
+        "decoder_cls",
+        [POCSAGDecoder, FLEXDecoder, AX25Decoder, ACARSDecoder, RDSDecoder],
+    )
+    def test_decoders_reject_nonpositive_rate(self, decoder_cls):
+        with pytest.raises(ValueError, match="positive"):
+            decoder_cls(0)
+
+
+# ---------------------------------------------------------------------------
 # Integration-style tests
 # ---------------------------------------------------------------------------
 

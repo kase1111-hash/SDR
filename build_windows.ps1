@@ -203,7 +203,7 @@ Write-Host "  cd dist\sdr-module" -ForegroundColor Gray
 Write-Host "  .\sdr-scan.exe --help" -ForegroundColor Gray
 Write-Host ""
 
-if ($CreateInstaller -and (Test-Path "installer_output\SDR-Module-0.1.0-Setup.exe")) {
-    Write-Host "Installer location: installer_output\SDR-Module-0.1.0-Setup.exe" -ForegroundColor Cyan
+if ($CreateInstaller -and (Test-Path "installer_output\SDR-Module-0.2.0-Setup.exe")) {
+    Write-Host "Installer location: installer_output\SDR-Module-0.2.0-Setup.exe" -ForegroundColor Cyan
     Write-Host ""
 }

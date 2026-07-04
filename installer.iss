@@ -17,7 +17,7 @@
 ; ============================================================================
 
 #define MyAppName "SDR Module"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.0"
 #define MyAppPublisher "SDR Module Team"
 #define MyAppURL "https://github.com/sdr-module"
 #define MyAppExeName "sdr-scan.exe"

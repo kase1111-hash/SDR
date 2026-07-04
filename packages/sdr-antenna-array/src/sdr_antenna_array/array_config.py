@@ -9,8 +9,7 @@ import json
 import logging
 import math
 from dataclasses import asdict, dataclass, field
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -18,10 +17,10 @@ try:
     from sdr_module.core.config import ConfigValidationError, DeviceConfig
 except ImportError:
 
-    class ConfigValidationError(ValueError):
+    class ConfigValidationError(ValueError):  # type: ignore[no-redef]
         pass
 
-    DeviceConfig = None  # type: ignore[assignment,misc]
+    DeviceConfig = None
 
 logger = logging.getLogger(__name__)
 

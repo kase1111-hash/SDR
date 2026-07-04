@@ -2,12 +2,12 @@
 # Cap setuptools below 77 because 77+ emits `Dynamic: license-file` in wheel
 # METADATA which twine 6.2.0's validator rejects. Remove the upper bound once
 # a twine release recognises PEP 639 metadata fields.
-requires = ["setuptools>=61.0,<83", "wheel"]
+requires = ["setuptools>=61.0,<77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "sdr-module"
-version = "0.1.0"
+version = "0.2.0"
 description = "Dual-SDR system for RTL-SDR and HackRF One"
 readme = "README.md"
 # NOTE: Stays on the classic `license = {text = ...}` form because twine 6.2.0

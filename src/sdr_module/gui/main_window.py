@@ -32,6 +32,7 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
+from .. import __version__
 from .audio_sink import AudioSink
 from .bookmarks_panel import BookmarksPanel
 from .control_panel import ControlPanel
@@ -169,7 +170,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _setup_ui(self):
         """Setup the user interface."""
-        self.setWindowTitle("SDR Module v0.1.0")
+        self.setWindowTitle(f"SDR Module v{__version__}")
         self.setMinimumSize(1200, 800)
 
         # Central widget with splitters
@@ -1097,7 +1098,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self,
             "About SDR Module",
             "<h3>SDR Module</h3>"
-            "<p>Version 0.1.0</p>"
+            f"<p>Version {__version__}</p>"
             "<p>A Software Defined Radio application for signal visualization, "
             "frequency analysis, and protocol decoding.</p>"
             "<p>Supports RTL-SDR and HackRF One devices.</p>"

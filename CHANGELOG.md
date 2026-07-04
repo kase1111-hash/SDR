@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-04
+
+First release published to PyPI.
+
 ### Added — CLI
 - **`sdr-scan decode`** — decode a protocol (POCSAG, FLEX, AX.25/APRS, RDS,
   ADS-B, ACARS) from a recorded I/Q file, exposing the shipped decoders without
@@ -77,6 +81,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   recognises PEP 639 fields).
 
 ### Fixed
+- **ADS-B decoder hung forever** on any input below 1 MHz sample rate
+  (`samples_per_bit` truncated to 0, so the preamble scan never advanced).
+  All protocol decoders now validate their sample rate up front and raise
+  a descriptive `ValueError` instead of hanging or crashing with
+  `range() arg 3 must not be zero`; the CLI reports these as friendly
+  errors.
+- **`sdr-scan encode --output out.wav`** now writes a real playable 16-bit
+  stereo (I/Q) WAV instead of raw float bytes in a `.wav`-named file.
+- **`--input` accepts `.sigmf-meta` paths**: previously the JSON metadata
+  file was misread as raw samples; the SigMF data/meta pair is now
+  resolved from either filename.
+- **README install instructions** led with `pip install sdr-module`
+  before the package was published; now lead with the working
+  from-source install.
+- **Release workflow**: the SBOM job no longer tries to attach SBOMs to a
+  GitHub release with a read-only token (that step failed every prior
+  release run; the release job attaches artifacts itself).
+- **Dead GUI test revived**: `TestSignalMeterWidgetLogic` imported a
+  widget from a module path that never existed and silently skipped
+  forever; it now tests the real `SignalMeterPanel`.
+- **`sdr-antenna-array`**: fixed a Python 3.9 crash-on-import
+  (`type | None` annotation without `__future__` import), a `None`
+  default on a dict dataclass field, unused imports, and stale
+  type-ignore comments; added the missing README the packaging
+  referenced; aligned license metadata with the root package so
+  `twine check` passes.
 - **Waterfall widget crashed on first frame under NumPy 2.x**: bitshift of
   `uint8` colormap components into a 32-bit ARGB word overflowed. Cast
   components to `int` before the shift.
@@ -147,5 +177,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Paging (POCSAG, FLEX).
 - Broadcast (RDS).
 
-[Unreleased]: https://github.com/kase1111-hash/SDR/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kase1111-hash/SDR/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kase1111-hash/SDR/compare/v0.2.0-Beta...v0.2.0
 [0.1.0]: https://github.com/kase1111-hash/SDR/releases/tag/v0.1.0

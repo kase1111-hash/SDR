@@ -15,7 +15,7 @@ Combined Capabilities:
     - Combined Bandwidth: 22.4 MHz
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __author__ = "SDR Module Team"
 
 from .core.device_manager import DeviceManager

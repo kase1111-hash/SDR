@@ -87,7 +87,7 @@ echo ============================================
 echo   INSTALLER BUILD SUCCESSFUL
 echo ============================================
 echo.
-echo Installer location: installer_output\SDR-Module-0.1.0-Setup.exe
+echo Installer location: installer_output\SDR-Module-0.2.0-Setup.exe
 echo.
 echo To install:
 echo   Run the installer and follow the prompts.

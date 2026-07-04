@@ -137,6 +137,11 @@ jobs:
           path: .
           format: spdx-json
           output-file: dist/sbom.spdx.json
+          # This job's token is read-only (contents: read), so the action
+          # must not try to attach SBOMs to the GitHub release itself —
+          # that failed every prior release run. The github-release job
+          # uploads dist/* (including the SBOM) with a write token instead.
+          upload-release-assets: false
 
       - name: Attest build provenance
         uses: actions/attest-build-provenance@v4

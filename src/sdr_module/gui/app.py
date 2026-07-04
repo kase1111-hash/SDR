@@ -8,6 +8,7 @@ import logging
 import sys
 from typing import Any, Dict, List, Optional
 
+from .. import __version__
 from .themes import get_stylesheet
 
 logger = logging.getLogger(__name__)
@@ -377,7 +378,7 @@ class SDRApplication:
             # Create application
             self._app = QApplication(self._args)
             self._app.setApplicationName("SDR Module")
-            self._app.setApplicationVersion("0.1.0")
+            self._app.setApplicationVersion(__version__)
             self._app.setOrganizationName("SDR Module Team")
 
             # Set application style

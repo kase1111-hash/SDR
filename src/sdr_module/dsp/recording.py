@@ -478,8 +478,9 @@ class IQPlayer:
         """Open the recording file."""
         suffix = self._filepath.suffix.lower()
 
-        # Check for SigMF
-        if suffix in (".sigmf-data", ".sigmf"):
+        # Check for SigMF (accept the metadata file path too — _open_sigmf
+        # resolves the companion .sigmf-data/.sigmf-meta pair either way)
+        if suffix in (".sigmf-data", ".sigmf", ".sigmf-meta"):
             self._open_sigmf()
         elif suffix == ".wav":
             self._open_wav()

@@ -361,8 +361,10 @@ class SDRApplication:
         """
         if not check_pyqt6():
             logger.error("PyQt6 is required but not installed.")
-            logger.error("Install with: pip install PyQt6")
-            print("Error: PyQt6 is required. Install with: pip install PyQt6")
+            logger.error('Install it with: python -m pip install "sdr-module[gui]"')
+            print(
+                'Error: PyQt6 is required. Install it with: python -m pip install "sdr-module[gui]"'
+            )
             return 1
 
         settings = settings or {}

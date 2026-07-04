@@ -137,6 +137,28 @@ class TestDecode:
         assert "sample rate" in out.lower() or "sample_rate" in out
 
 
+class TestScanSigMF:
+    def test_scan_accepts_meta_or_data_path(self, capsys, tmp_path):
+        fs = 48000.0
+        t = np.arange(int(fs)) / fs
+        sig = (0.5 * np.exp(2j * np.pi * 1000 * t)).astype(np.complex64)
+        save_iq_file(
+            tmp_path / "cap.sigmf-data",
+            sig,
+            sample_rate=fs,
+            center_frequency=100e6,
+            sample_format=SampleFormat.FLOAT32,
+            file_format=FileFormat.SIGMF,
+        )
+        # Rate and center frequency come from the metadata for both paths.
+        for name in ("cap.sigmf-data", "cap.sigmf-meta"):
+            rc = main(["scan", "--input", str(tmp_path / name)])
+            out = capsys.readouterr().out
+            assert rc == 0, out
+            assert "at 0.048 Msps" in out
+            assert "Center: 100.0000 MHz" in out
+
+
 class TestEncode:
     def test_encode_morse_to_file(self, capsys, tmp_path):
         out_file = tmp_path / "morse.cf32"
@@ -144,3 +166,14 @@ class TestEncode:
         assert rc == 0
         assert out_file.exists()
         assert "MORSE" in capsys.readouterr().out
+
+    def test_encode_to_wav_writes_real_wav(self, capsys, tmp_path):
+        import wave
+
+        out_file = tmp_path / "morse.wav"
+        rc = main(["encode", "morse", "--text", "SOS", "--output", str(out_file)])
+        assert rc == 0
+        with wave.open(str(out_file)) as w:
+            assert w.getnchannels() == 2  # I and Q
+            assert w.getframerate() == 48000
+            assert w.getnframes() > 0

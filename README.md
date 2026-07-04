@@ -31,19 +31,20 @@ A dual-SDR framework for simultaneous RTL-SDR + HackRF One operation, with signa
 
 ## Installation
 
+Install from source (the package is not yet published to PyPI):
+
 ```bash
-# Basic
-pip install sdr-module
-
-# With hardware support
-pip install sdr-module[rtlsdr]    # RTL-SDR
-pip install sdr-module[hackrf]    # HackRF
-pip install sdr-module[full]      # Everything (drivers + SciPy + matplotlib + PyQt6)
-
-# From source
 git clone https://github.com/kase1111-hash/SDR.git
 cd SDR
-python -m pip install -e ".[full]"
+
+# Basic (offline analysis, encoding, decoding — no hardware drivers)
+python -m pip install -e .
+
+# With optional extras
+python -m pip install -e ".[rtlsdr]"   # RTL-SDR driver
+python -m pip install -e ".[hackrf]"   # HackRF driver
+python -m pip install -e ".[gui]"      # PyQt6 GUI
+python -m pip install -e ".[full]"     # Everything (drivers + SciPy + matplotlib + PyQt6)
 ```
 
 > **Tip:** Always install with `python -m pip` rather than a bare `pip`. On some
@@ -70,7 +71,8 @@ starting band. Press **F1** at any time for the shortcut reference.
 sdr-scan info                                      # Build + capability summary
 sdr-scan devices                                   # Scan for connected SDRs
 sdr-scan scan --start 88 --end 108 --step 100      # Live sweep (needs hardware)
-sdr-scan encode morse --text "HELLO" --output out  # Encode text to I/Q
+sdr-scan encode morse --text "HELLO" -o out.cf32   # Encode text to raw I/Q
+sdr-scan encode morse --text "HELLO" -o out.wav    # ...or to a playable WAV
 ```
 
 #### Offline analysis (no hardware required)
@@ -85,9 +87,12 @@ sdr-scan scan --input capture.cf32 --sample-rate 2400000 --center 100e6 --thresh
 sdr-scan decode adsb --input adsb_1090.cf32 --sample-rate 2000000
 ```
 
-The sample format is auto-detected for WAV/SigMF files; for headerless raw
-captures pass `--format` (`cu8`, `cs8`, `cs16`, `cf32`, `cf64`) and
-`--sample-rate`. `cu8` is the RTL-SDR native format.
+The sample format, rate, and center frequency are auto-detected for WAV and
+SigMF files (pass either the `.sigmf-data` or `.sigmf-meta` path); for
+headerless raw captures pass `--format` (`cu8`, `cs8`, `cs16`, `cf32`,
+`cf64`) and `--sample-rate`. `cu8` is the RTL-SDR native format. Note that
+ADS-B requires a capture of at least 2 MHz sample rate (Mode S bits are
+1 µs wide).
 
 ### Python API
 
@@ -233,7 +238,7 @@ sdr-module/
 │   └── utils/         # Helper utilities
 ├── packages/
 │   └── sdr-antenna-array/  # Standalone antenna array package
-├── tests/             # Test suite (~735 tests)
+├── tests/             # Test suite (~770 tests, plus ~125 in sdr-antenna-array)
 ├── examples/          # Example scripts
 └── tools/             # Dev helpers
 ```

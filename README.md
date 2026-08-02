@@ -87,6 +87,28 @@ sdr-scan scan --input capture.cf32 --sample-rate 2400000 --center 100e6 --thresh
 sdr-scan decode adsb --input adsb_1090.cf32 --sample-rate 2000000
 ```
 
+#### Memory channels (CHIRP-compatible CSV)
+
+Saved channels move in and out as [CHIRP](https://chirpmyradio.com/) generic
+CSV files, so the same file works in CHIRP and can be uploaded to a handheld:
+
+```bash
+sdr-scan channels export my-channels.csv     # Saved channels -> CHIRP CSV
+sdr-scan channels export bands.csv --presets # ...or the built-in RX presets
+sdr-scan channels import my-channels.csv     # CHIRP CSV -> saved channels
+sdr-scan channels import more.csv --append   # Add instead of replacing
+sdr-scan channels list my-channels.csv       # Show a file's channels
+sdr-scan channels list                       # Show the saved channels
+```
+
+Files use CHIRP's exact 21-column header (`Location,Name,Frequency,Duplex,
+Offset,Tone,...`), frequencies in MHz. Import is forgiving: any subset of the
+optional columns works, headers are matched case-insensitively, extra columns
+are ignored, and repeater shift, tone/DTCS, mode, tuning step, skip, power,
+and comment fields are preserved on a round trip. Reading and writing saved
+channels needs PyQt6 (they live in the GUI's settings store); `list` and
+`export --presets` on a file work without it.
+
 The sample format, rate, and center frequency are auto-detected for WAV and
 SigMF files (pass either the `.sigmf-data` or `.sigmf-meta` path); for
 headerless raw captures pass `--format` (`cu8`, `cs8`, `cs16`, `cf32`,
@@ -154,6 +176,7 @@ for msg in messages:
 | Open / save recording | `Ctrl+O` / `Ctrl+S` (cf32, cs16, raw, WAV) |
 | Screenshot | `Ctrl+P` (captures the whole window) |
 | Bookmarks | `Ctrl+B` adds current frequency; double-click a row to tune |
+| Import / export channels | Bookmarks tab → Import/Export CSV, or File → Import/Export Channels — CHIRP-compatible CSV |
 | Band presets | Tools → Bands (FM Broadcast, NOAA Weather, 2 m, 70 cm, Airband, ADS-B, ISM 433/915) |
 | Frequency scanner | `Ctrl+F` — non-blocking sweep with progress bar and hit list |
 | Audio output | Tools → Audio Output — squelch-gated demodulation to the default sound device |

@@ -56,6 +56,14 @@ _HELP_HTML = """
 <tr><td><b>F1</b></td><td>This help dialog</td></tr>
 </table>
 
+<h3>Memory channels</h3>
+<table>
+<tr><td><b>Bookmarks tab</b></td><td>Import CSV / Export CSV buttons</td></tr>
+<tr><td><b>File menu</b></td><td>Import / Export Channels (CHIRP CSV)</td></tr>
+</table>
+<p><i>Channel files use CHIRP's generic CSV format, so the same file opens in
+CHIRP and can be uploaded to a radio.</i></p>
+
 <p><i>Settings (theme, bookmarks, frequency, gain) persist between launches.</i></p>
 """
 

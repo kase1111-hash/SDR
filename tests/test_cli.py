@@ -38,7 +38,15 @@ class TestParser:
         for action in parser._actions:
             if hasattr(action, "choices") and action.choices:
                 names.update(action.choices.keys())
-        assert {"info", "devices", "scan", "encode", "decode", "gui"} <= names
+        assert {
+            "info",
+            "devices",
+            "scan",
+            "encode",
+            "decode",
+            "gui",
+            "channels",
+        } <= names
 
 
 class TestInfoAndDevices:
@@ -177,3 +185,68 @@ class TestEncode:
             assert w.getnchannels() == 2  # I and Q
             assert w.getframerate() == 48000
             assert w.getnframes() > 0
+
+
+class TestChannels:
+    """CHIRP-compatible saved-channel import/export."""
+
+    def test_export_presets_writes_chirp_csv(self, capsys, tmp_path):
+        out_file = tmp_path / "presets.csv"
+        rc = main(["channels", "export", str(out_file), "--presets"])
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        assert "CHIRP" in out
+
+        from sdr_module.core.chirp_csv import CHIRP_COLUMNS, read_chirp_csv
+        from sdr_module.core.frequency_manager import RX_PRESETS
+
+        header = out_file.read_text(encoding="utf-8").splitlines()[0]
+        assert header == ",".join(CHIRP_COLUMNS)
+        assert len(read_chirp_csv(out_file).channels) == len(RX_PRESETS)
+
+    def test_list_from_file(self, capsys, tmp_path):
+        csv_file = tmp_path / "ch.csv"
+        csv_file.write_text(
+            "Location,Name,Frequency,Mode\n0,Calling,146.520000,FM\n", encoding="utf-8"
+        )
+        rc = main(["channels", "list", str(csv_file)])
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        assert "146.5200 MHz" in out
+        assert "Calling" in out
+        assert "1 channel(s)" in out
+
+    def test_list_shows_repeater_shift(self, capsys, tmp_path):
+        csv_file = tmp_path / "rpt.csv"
+        csv_file.write_text(
+            "Name,Frequency,Duplex,Offset,Tone\nRptr,146.940000,-,0.600000,TSQL\n",
+            encoding="utf-8",
+        )
+        assert main(["channels", "list", str(csv_file)]) == 0
+        out = capsys.readouterr().out
+        assert "TSQL" in out
+        assert "-0.6" in out
+
+    def test_list_missing_file(self, capsys, tmp_path):
+        rc = main(["channels", "list", str(tmp_path / "nope.csv")])
+        assert rc == 1
+        assert "file not found" in capsys.readouterr().out
+
+    def test_import_rejects_non_chirp_file(self, capsys, tmp_path):
+        csv_file = tmp_path / "other.csv"
+        csv_file.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
+        rc = main(["channels", "import", str(csv_file)])
+        assert rc == 1
+        assert "Frequency" in capsys.readouterr().out
+
+    def test_export_round_trips_through_import_format(self, tmp_path):
+        """A file we export re-reads with identical channel data."""
+        from sdr_module.core.chirp_csv import read_chirp_csv, write_chirp_csv
+
+        out_file = tmp_path / "presets.csv"
+        assert main(["channels", "export", str(out_file), "--presets"]) == 0
+
+        channels = read_chirp_csv(out_file).channels
+        again = tmp_path / "again.csv"
+        write_chirp_csv(again, channels, renumber=True)
+        assert again.read_bytes() == out_file.read_bytes()

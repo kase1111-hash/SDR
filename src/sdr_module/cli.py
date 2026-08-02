@@ -260,6 +260,134 @@ def cmd_encode(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_saved_channels():
+    """
+    Read the GUI's saved channels (bookmarks) as `Channel` objects.
+
+    Returns:
+        Tuple of (channels, error_message). `error_message` is set when the
+        store cannot be read (PyQt6 missing), in which case channels is empty.
+    """
+    from .core.chirp_csv import bookmarks_to_channels
+
+    try:
+        from .gui.settings_store import GuiSettings
+    except ImportError:
+        return [], "PyQt6 is required to read saved channels."
+
+    try:
+        settings = GuiSettings()
+    except ImportError:
+        return [], (
+            "PyQt6 is required to read saved channels.\n"
+            'Install it with: python -m pip install "sdr-module[gui]"'
+        )
+    return bookmarks_to_channels(settings.get_bookmarks()), None
+
+
+def _print_channels(channels) -> None:
+    """Print a channel table to stdout."""
+    print(f"{'#':>4}  {'Frequency':>13}  {'Mode':<5} {'Tone':<6} {'Name'}")
+    for i, ch in enumerate(channels):
+        slot = ch.location if ch.location is not None else i
+        shift = f" {ch.duplex}{abs(ch.offset_hz)/1e6:g}" if ch.duplex else ""
+        print(
+            f"{slot:>4}  {ch.frequency_hz/1e6:>9.4f} MHz  "
+            f"{ch.mode:<5} {ch.tone_mode or '-':<6} {ch.name}{shift}"
+        )
+
+
+def cmd_channels_export(args: argparse.Namespace) -> int:
+    """Export saved channels (or the built-in RX presets) to a CHIRP CSV."""
+    from .core.chirp_csv import presets_to_channels, write_chirp_csv
+
+    if args.presets:
+        from .core.frequency_manager import RX_PRESETS
+
+        channels = presets_to_channels(RX_PRESETS)
+    else:
+        channels, error = _load_saved_channels()
+        if error:
+            print(f"Error: {error}")
+            return 1
+        if not channels:
+            print("No saved channels to export.")
+            return 1
+
+    output = Path(args.output).expanduser()
+    count = write_chirp_csv(output, channels, renumber=True)
+    print(f"Exported {count} channel(s) to {output}")
+    print("This file opens directly in CHIRP (File → Open).")
+    return 0
+
+
+def cmd_channels_import(args: argparse.Namespace) -> int:
+    """Import channels from a CHIRP CSV into the saved channel store."""
+    from .core.chirp_csv import ChirpCsvError, channels_to_bookmarks, read_chirp_csv
+
+    try:
+        report = read_chirp_csv(Path(args.input).expanduser(), strict=not args.skip_bad)
+    except ChirpCsvError as exc:
+        print(f"Error: {exc}")
+        return 1
+
+    if not report.channels:
+        print("No channels found in that file.")
+        return 1
+
+    for message in report.skipped:
+        print(f"Warning: skipped {message}")
+
+    try:
+        from .gui.settings_store import GuiSettings
+
+        settings = GuiSettings()
+    except ImportError:
+        print("Error: PyQt6 is required to write saved channels.")
+        print('Install it with: python -m pip install "sdr-module[gui]"')
+        return 1
+
+    imported = channels_to_bookmarks(report.channels)
+    if args.append:
+        bookmarks = settings.get_bookmarks() + imported
+    else:
+        bookmarks = imported
+    settings.set_bookmarks(bookmarks)
+    settings.sync()
+
+    action = "Appended" if args.append else "Imported"
+    print(f"{action} {len(imported)} channel(s); {len(bookmarks)} saved in total.")
+    return 0
+
+
+def cmd_channels_list(args: argparse.Namespace) -> int:
+    """List channels from a CHIRP CSV, or the saved channels."""
+    from .core.chirp_csv import ChirpCsvError, read_chirp_csv
+
+    if args.input:
+        try:
+            channels = read_chirp_csv(
+                Path(args.input).expanduser(), strict=False
+            ).channels
+        except ChirpCsvError as exc:
+            print(f"Error: {exc}")
+            return 1
+    else:
+        channels, error = _load_saved_channels()
+        if error:
+            print(f"Error: {error}")
+            return 1
+
+    if not channels:
+        print("No channels.")
+        return 0
+
+    _print_channels(channels)
+    print()
+    print(f"{len(channels)} channel(s)")
+    return 0
+
+
 def cmd_devices(args: argparse.Namespace) -> int:
     """List available SDR devices."""
     from .core.device_manager import DeviceManager
@@ -429,6 +557,59 @@ def create_parser() -> argparse.ArgumentParser:
         "--wpm", type=int, default=20, help="Words per minute for Morse (default: 20)"
     )
     encode_parser.set_defaults(func=cmd_encode)
+
+    # Channels command (CHIRP-compatible CSV import/export)
+    channels_parser = subparsers.add_parser(
+        "channels",
+        help="Import/export saved channels as CHIRP-compatible CSV",
+        description=(
+            "Move memory channels between this application and CHIRP. "
+            "Files use CHIRP's generic CSV format, so they open directly in "
+            "CHIRP and can be uploaded to a radio."
+        ),
+    )
+    channels_sub = channels_parser.add_subparsers(dest="channels_command")
+    channels_sub.required = True
+
+    channels_export = channels_sub.add_parser(
+        "export", help="Write saved channels to a CHIRP CSV file"
+    )
+    channels_export.add_argument(
+        "output",
+        nargs="?",
+        default="channels.csv",
+        help="Output CSV file (default: channels.csv)",
+    )
+    channels_export.add_argument(
+        "--presets",
+        action="store_true",
+        help="Export the built-in RX presets instead of the saved channels",
+    )
+    channels_export.set_defaults(func=cmd_channels_export)
+
+    channels_import = channels_sub.add_parser(
+        "import", help="Load channels from a CHIRP CSV file"
+    )
+    channels_import.add_argument("input", help="CHIRP CSV file to read")
+    channels_import.add_argument(
+        "--append",
+        action="store_true",
+        help="Add to the existing channels instead of replacing them",
+    )
+    channels_import.add_argument(
+        "--skip-bad",
+        action="store_true",
+        help="Skip unreadable rows instead of aborting",
+    )
+    channels_import.set_defaults(func=cmd_channels_import)
+
+    channels_list = channels_sub.add_parser(
+        "list", help="Show channels in a CSV file, or the saved channels"
+    )
+    channels_list.add_argument(
+        "input", nargs="?", help="CHIRP CSV file (default: the saved channels)"
+    )
+    channels_list.set_defaults(func=cmd_channels_list)
 
     # GUI command
     gui_parser = subparsers.add_parser("gui", help="Launch graphical user interface")

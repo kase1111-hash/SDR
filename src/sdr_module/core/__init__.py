@@ -2,6 +2,16 @@
 Core module - Device management and sample handling.
 """
 
+from .chirp_csv import (
+    CHIRP_COLUMNS,
+    Channel,
+    ChirpCsvError,
+    ImportReport,
+    export_bookmarks_csv,
+    import_bookmarks_csv,
+    read_chirp_csv,
+    write_chirp_csv,
+)
 from .config import SDRConfig
 from .device_manager import DeviceManager
 from .dual_sdr import DualSDRController
@@ -36,6 +46,15 @@ __all__ = [
     "DualSDRController",
     "SampleBuffer",
     "SDRConfig",
+    # Saved channels / CHIRP CSV
+    "Channel",
+    "ChirpCsvError",
+    "ImportReport",
+    "CHIRP_COLUMNS",
+    "read_chirp_csv",
+    "write_chirp_csv",
+    "import_bookmarks_csv",
+    "export_bookmarks_csv",
     # Frequency management - Enums
     "LockoutReason",
     "LicenseClass",

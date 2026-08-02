@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Saved channels (CHIRP CSV)
+- **`sdr_module.core.chirp_csv`** — read and write memory channels in
+  [CHIRP's](https://chirpmyradio.com/) generic CSV format. Exports use CHIRP's
+  exact 21-column header and value formatting (MHz with six decimals,
+  zero-padded DTCS codes), so a file written here opens directly in CHIRP and
+  can be uploaded to a radio; a CHIRP file re-exported unchanged is
+  byte-identical. Imports are forgiving: headers matched case-insensitively,
+  any subset of the optional columns, unknown columns ignored, UTF-8 BOM
+  stripped, blank rows skipped. Repeater duplex/offset, CTCSS/DTCS tones,
+  mode, tuning step, skip flag, power, and comments all survive a round trip.
+  Pure Python — no PyQt6 or NumPy needed.
+- **GUI** — Import/Export CSV buttons on the Bookmarks (memory channels)
+  panel, plus `File → Import / Export Channels (CHIRP CSV)`. Importing offers
+  replace or append; imported mode, tone, and repeater shift are shown in the
+  channel list. Channels saved before this change still load.
+- **CLI** — `sdr-scan channels export|import|list`, including
+  `channels export --presets` to dump the built-in RX preset list as a CHIRP
+  CSV without needing the GUI.
+
 ## [0.2.0] - 2026-07-04
 
 First release published to PyPI.

@@ -504,6 +504,98 @@ class TestGUISignalEmission(unittest.TestCase):
         self.assertAlmostEqual(signal_received[0], 145.8e6, places=0)
 
 
+class TestBookmarksPanelCsv(unittest.TestCase):
+    """Test CHIRP CSV import/export from the bookmarks (memory channel) panel."""
+
+    class _FakeSettings:
+        """In-memory stand-in for GuiSettings so tests never touch QSettings."""
+
+        def __init__(self):
+            self.bookmarks = []
+
+        def get_bookmarks(self):
+            return list(self.bookmarks)
+
+        def set_bookmarks(self, bookmarks):
+            self.bookmarks = list(bookmarks)
+
+    def setUp(self):
+        if not HAS_PYQT6:
+            self.skipTest("PyQt6 not available")
+        import tempfile
+
+        from sdr_module.gui import bookmarks_panel as panel_module
+
+        self._panel_module = panel_module
+        self._real_settings = panel_module.GuiSettings
+        self._store = self._FakeSettings()
+        panel_module.GuiSettings = lambda: self._store
+
+        # Silence the modal result dialogs the panel shows.
+        self._real_information = panel_module.QMessageBox.information
+        self._real_warning = panel_module.QMessageBox.warning
+        panel_module.QMessageBox.information = staticmethod(lambda *a, **k: None)
+        panel_module.QMessageBox.warning = staticmethod(lambda *a, **k: None)
+
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.panel = panel_module.BookmarksPanel()
+
+    def tearDown(self):
+        if not HAS_PYQT6:
+            return
+        self._panel_module.GuiSettings = self._real_settings
+        self._panel_module.QMessageBox.information = self._real_information
+        self._panel_module.QMessageBox.warning = self._real_warning
+        self._tmpdir.cleanup()
+
+    def _path(self, name):
+        import os
+
+        return os.path.join(self._tmpdir.name, name)
+
+    def test_export_then_import_round_trip(self):
+        self.panel.add_bookmark("2m Calling", 146.52e6)
+        self.panel.add_bookmark("NOAA", 162.55e6)
+
+        path = self._path("channels.csv")
+        self.assertEqual(self.panel.export_csv(path), 2)
+
+        # Import into an empty panel: no replace/append prompt is shown.
+        self._store.set_bookmarks([])
+        fresh = self._panel_module.BookmarksPanel()
+        self.assertEqual(fresh.import_csv(path), 2)
+        self.assertEqual(
+            [b["label"] for b in self._store.get_bookmarks()],
+            ["2m Calling", "NOAA"],
+        )
+        self.assertEqual(self._store.get_bookmarks()[0]["freq_hz"], 146.52e6)
+
+    def test_export_adds_csv_extension(self):
+        self.panel.add_bookmark("A", 100e6)
+        path = self._path("channels")
+        self.panel.export_csv(path)
+        import os
+
+        self.assertTrue(os.path.exists(path + ".csv"))
+
+    def test_export_with_no_channels(self):
+        self.assertEqual(self.panel.export_csv(self._path("empty.csv")), 0)
+
+    def test_import_rejects_non_chirp_file(self):
+        path = self._path("other.csv")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("a,b\n1,2\n")
+        self.assertEqual(self.panel.import_csv(path), 0)
+        self.assertEqual(self._store.get_bookmarks(), [])
+
+    def test_import_shows_mode_in_list(self):
+        path = self._path("modes.csv")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("Name,Frequency,Mode\nTower,118.300000,AM\n")
+        self.assertEqual(self.panel.import_csv(path), 1)
+        self.assertIn("AM", self.panel._list.item(0).text())
+
+
 def run_tests():
     """Run all GUI tests."""
     loader = unittest.TestLoader()
@@ -519,6 +611,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestColorMapConsistency))
     suite.addTests(loader.loadTestsFromTestCase(TestGUIDataProcessing))
     suite.addTests(loader.loadTestsFromTestCase(TestGUISignalEmission))
+    suite.addTests(loader.loadTestsFromTestCase(TestBookmarksPanelCsv))
 
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)

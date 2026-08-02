@@ -3,21 +3,28 @@ Bookmarks / memory channels panel.
 
 A simple list of saved frequencies the user can tune with a click.
 Stored via GuiSettings; survives restarts.
+
+Channels import and export as CHIRP-compatible CSV (see
+`sdr_module.core.chirp_csv`), so memories can be moved between this
+application, CHIRP, and a handheld radio.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+import logging
+from typing import Any, Dict, List, Optional
 
 try:
     from PyQt6.QtCore import Qt, pyqtSignal
     from PyQt6.QtWidgets import (
         QDoubleSpinBox,
+        QFileDialog,
         QHBoxLayout,
         QInputDialog,
         QLineEdit,
         QListWidget,
         QListWidgetItem,
+        QMessageBox,
         QPushButton,
         QVBoxLayout,
         QWidget,
@@ -27,7 +34,12 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
+from ..core.chirp_csv import ChirpCsvError, export_bookmarks_csv, read_chirp_csv
 from .settings_store import GuiSettings
+
+logger = logging.getLogger(__name__)
+
+CSV_FILTER = "CHIRP CSV (*.csv);;All files (*)"
 
 
 class BookmarksPanel(QWidget if HAS_PYQT6 else object):
@@ -87,11 +99,130 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         btn_row.addWidget(remove_btn)
         layout.addLayout(btn_row)
 
+        # CSV row (CHIRP-compatible)
+        csv_row = QHBoxLayout()
+        import_btn = QPushButton("Import CSV...")
+        import_btn.setToolTip("Import memory channels from a CHIRP CSV file")
+        import_btn.clicked.connect(self.import_csv)
+        csv_row.addWidget(import_btn)
+
+        export_btn = QPushButton("Export CSV...")
+        export_btn.setToolTip("Export saved channels as a CHIRP-compatible CSV file")
+        export_btn.clicked.connect(self.export_csv)
+        csv_row.addWidget(export_btn)
+        layout.addLayout(csv_row)
+
     def add_bookmark(self, label: str, freq_hz: float) -> None:
         """Public helper so other parts of the UI can add bookmarks."""
         self._bookmarks.append({"label": label, "freq_hz": float(freq_hz)})
         self._settings.set_bookmarks(self._bookmarks)
         self._refresh_list()
+
+    # ---- CHIRP CSV import / export ----
+    def import_csv(self, path: Optional[str] = None) -> int:
+        """
+        Load memory channels from a CHIRP CSV file.
+
+        Prompts for the file (when `path` is omitted) and for whether to
+        replace the existing channels or append to them.
+
+        Args:
+            path: CSV file to read; a file dialog is shown when omitted.
+
+        Returns:
+            Number of channels imported (0 if cancelled or on error).
+        """
+        if not path:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "Import Channels (CHIRP CSV)", "", CSV_FILTER
+            )
+        if not path:
+            return 0
+
+        try:
+            report = read_chirp_csv(path, strict=False)
+        except ChirpCsvError as exc:
+            logger.warning("Channel import failed: %s", exc)
+            QMessageBox.warning(self, "Import Failed", str(exc))
+            return 0
+
+        if not report.channels:
+            QMessageBox.information(
+                self, "Import Channels", "No channels found in that file."
+            )
+            return 0
+
+        imported = [c.to_bookmark() for c in report.channels]
+
+        if self._bookmarks:
+            choice = QMessageBox.question(
+                self,
+                "Import Channels",
+                f"Import {len(imported)} channel(s).\n\n"
+                f"Replace the {len(self._bookmarks)} existing channel(s), "
+                "or append to them?",
+                QMessageBox.StandardButton.Yes
+                | QMessageBox.StandardButton.No
+                | QMessageBox.StandardButton.Cancel,
+            )
+            if choice == QMessageBox.StandardButton.Cancel:
+                return 0
+            if choice == QMessageBox.StandardButton.Yes:
+                self._bookmarks = imported
+            else:
+                self._bookmarks = self._bookmarks + imported
+        else:
+            self._bookmarks = imported
+
+        self._settings.set_bookmarks(self._bookmarks)
+        self._refresh_list()
+
+        if report.skipped:
+            QMessageBox.information(
+                self,
+                "Import Channels",
+                f"Imported {len(imported)} channel(s).\n"
+                f"Skipped {len(report.skipped)} unreadable row(s):\n"
+                + "\n".join(report.skipped[:10]),
+            )
+        return len(imported)
+
+    def export_csv(self, path: Optional[str] = None) -> int:
+        """
+        Save the current channels to a CHIRP-compatible CSV file.
+
+        Args:
+            path: Destination file; a file dialog is shown when omitted.
+
+        Returns:
+            Number of channels written (0 if cancelled or on error).
+        """
+        if not self._bookmarks:
+            QMessageBox.information(
+                self, "Export Channels", "There are no saved channels to export."
+            )
+            return 0
+
+        if not path:
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Export Channels (CHIRP CSV)", "channels.csv", CSV_FILTER
+            )
+        if not path:
+            return 0
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+
+        try:
+            count = export_bookmarks_csv(path, self._bookmarks)
+        except OSError as exc:
+            logger.warning("Channel export failed: %s", exc)
+            QMessageBox.warning(self, "Export Failed", str(exc))
+            return 0
+
+        QMessageBox.information(
+            self, "Export Channels", f"Exported {count} channel(s) to:\n{path}"
+        )
+        return count
 
     def set_current_frequency(self, freq_hz: float) -> None:
         """Update the 'add new' frequency to match the main tuner."""
@@ -106,6 +237,12 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             freq = float(b.get("freq_hz", 0.0))
             label = str(b.get("label", ""))
             text = f"{freq/1e6:10.3f} MHz  —  {label}"
+            # Imported CHIRP channels carry extra detail worth showing.
+            extras = [str(b[k]) for k in ("mode", "tone_mode") if b.get(k)]
+            if b.get("duplex"):
+                extras.append(f"{b['duplex']}{abs(float(b.get('offset_hz', 0)))/1e6:g}")
+            if extras:
+                text += f"  [{' '.join(extras)}]"
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, (freq, label))
             self._list.addItem(item)

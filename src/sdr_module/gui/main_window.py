@@ -273,6 +273,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         file_menu.addSeparator()
 
+        import_channels_action = QAction("&Import Channels (CHIRP CSV)...", self)
+        import_channels_action.setStatusTip(
+            "Load memory channels from a CHIRP-compatible CSV file"
+        )
+        import_channels_action.triggered.connect(self._import_channels_csv)
+        file_menu.addAction(import_channels_action)
+
+        export_channels_action = QAction("&Export Channels (CHIRP CSV)...", self)
+        export_channels_action.setStatusTip(
+            "Save the saved channels as a CHIRP-compatible CSV file"
+        )
+        export_channels_action.triggered.connect(self._export_channels_csv)
+        file_menu.addAction(export_channels_action)
+
+        file_menu.addSeparator()
+
         exit_action = QAction("E&xit", self)
         exit_action.setShortcut(QKeySequence.StandardKey.Quit)
         exit_action.triggered.connect(self.close)
@@ -1133,6 +1149,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         label = f"{freq/1e6:.3f} MHz"
         self._bookmarks_panel.add_bookmark(label, freq)
         self._show_status_error(f"Bookmarked {label}", duration_ms=1500)
+
+    def _import_channels_csv(self) -> None:
+        """Import memory channels from a CHIRP CSV into the bookmarks panel."""
+        count = self._bookmarks_panel.import_csv()
+        if count:
+            self._show_status_error(f"Imported {count} channel(s)", duration_ms=2000)
+
+    def _export_channels_csv(self) -> None:
+        """Export the saved channels to a CHIRP-compatible CSV file."""
+        count = self._bookmarks_panel.export_csv()
+        if count:
+            self._show_status_error(f"Exported {count} channel(s)", duration_ms=2000)
 
     def _save_screenshot(self) -> None:
         """Save a PNG of the window (spectrum + waterfall + panels)."""

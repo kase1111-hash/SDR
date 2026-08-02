@@ -390,7 +390,7 @@ Combine devices to cover wider spectrum.
 | Waterfall | Scrolling time-frequency display with selectable colormap and dB range; left-click to tune; image export |
 | Control Panel | Frequency, gain, bandwidth, demodulator, squelch, AGC, license class, TX/RX presets |
 | Protocol Decoder | Tabbed view of decoded messages (ADS-B, POCSAG, FLEX, AX.25/APRS, RDS, ACARS) |
-| Bookmarks / Memory | Saved frequencies with labels; persists across launches |
+| Bookmarks / Memory | Saved channels with labels; persists across launches; import/export as CHIRP-compatible CSV |
 | Status Bar | Device status, sample rate, buffer fill, recording HH:MM:SS / size / free space, transient error toast |
 
 ### 8.2 Menus and dialogs
@@ -398,6 +398,7 @@ Combine devices to cover wider spectrum.
 | Menu / Dialog | Purpose |
 |---|---|
 | File → Open / Save Recording | Load and save I/Q files (cf32, cs16, raw, WAV) |
+| File → Import / Export Channels | Memory channels as CHIRP-compatible CSV (replace or append on import) |
 | Device → Connect / Disconnect / Refresh | Open the device selection dialog, manage hardware |
 | Tools → Bands | Preset tuner + demod mode for FM Broadcast, NOAA Weather, 2 m, 70 cm, Airband AM, ADS-B, ISM 433/915 |
 | Tools → Frequency Scanner | Non-blocking sweep dialog with progress bar and hit table |
@@ -437,7 +438,8 @@ macOS plist, Linux `~/.config/SDR Module/`):
 - Center frequency, gain, bandwidth, squelch threshold, AGC enable.
 - Demodulation mode, theme, audio-output enable.
 - Main window geometry and splitter sizes.
-- Frequency bookmarks.
+- Saved channels (frequency, label, and CHIRP fields: mode, duplex/offset,
+  tone, tuning step, skip, power, comment).
 - First-run wizard completion flag.
 
 ### 8.5 First-run wizard
@@ -480,6 +482,7 @@ lets the user pick a starting band.
 | Raw File Format | .raw, .cu8, .cs8, .cs16, .cf32, .cf64 |
 | Metadata Format | SigMF (Signal Metadata Format) |
 | Audio Export | WAV (PCM 16-bit, 44.1/48 kHz) |
+| Memory Channels | CHIRP generic CSV (21-column header; MHz frequencies; duplex/offset, CTCSS/DTCS, mode, tuning step, skip, power, comment) |
 
 ---
 

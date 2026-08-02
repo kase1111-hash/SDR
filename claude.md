@@ -92,6 +92,7 @@ sdr-scan --help
 ## Key Modules
 
 ### Core (`core/`)
+- `chirp_csv.py` - CHIRP-compatible CSV import/export for saved channels
 - `device_manager.py` - Device enumeration and lifecycle management
 - `dual_sdr.py` - Dual-SDR controller with 5 operation modes
 - `config.py` - Configuration management with validation

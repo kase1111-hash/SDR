@@ -51,9 +51,8 @@ class Demodulator(ABC):
         """Demodulate samples."""
         pass
 
-    def reset(self) -> None:
-        """Reset demodulator state."""
-        pass
+    def reset(self) -> None:  # noqa: B027 - optional hook, no-op by default
+        """Reset demodulator state (no-op for stateless demodulators)."""
 
 
 class AMDemodulator(Demodulator):
@@ -1482,7 +1481,7 @@ class CWDemodulator(Demodulator):
         key_down = np.where(diff > 0)[0]
         key_up = np.where(diff < 0)[0]
 
-        for start, end in zip(key_down, key_up):
+        for start, end in zip(key_down, key_up, strict=True):
             duration_samples = end - start
             duration_sec = duration_samples / self._sample_rate
 
@@ -1516,7 +1515,7 @@ class CWDemodulator(Demodulator):
 
         decoded = ""
 
-        for i, (start, end) in enumerate(zip(key_down, key_up)):
+        for i, (start, end) in enumerate(zip(key_down, key_up, strict=True)):
             # Check gap before this element
             if i == 0 and self._last_key_time > 0:
                 gap = (

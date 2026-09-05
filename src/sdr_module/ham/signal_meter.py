@@ -507,14 +507,14 @@ class SignalHistory:
         """Get dBm history as numpy arrays."""
         if not self._history:
             return np.array([]), np.array([])
-        times, values = zip(*self._history)
+        times, values = zip(*self._history, strict=True)
         return np.array(times), np.array(values)
 
     def get_s_history(self) -> Tuple[np.ndarray, np.ndarray]:
         """Get S-unit history as numpy arrays."""
         if not self._s_history:
             return np.array([]), np.array([])
-        times, values = zip(*self._s_history)
+        times, values = zip(*self._s_history, strict=True)
         return np.array(times), np.array(values)
 
     def get_statistics(self) -> Dict[str, Any]:

@@ -1,8 +1,6 @@
 [build-system]
-# Cap setuptools below 77 to match the root package: 77+ emits PEP 639
-# license metadata (`License-Expression` / `Dynamic: license-file`) that
-# twine's validator rejects. Remove the cap once twine supports PEP 639.
-requires = ["setuptools>=64,<77", "setuptools-scm>=8"]
+# setuptools >= 77 is required for PEP 639 license metadata (License-Expression).
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -10,14 +8,39 @@ name = "sdr-antenna-array"
 version = "0.3.0"
 description = "Multi-SDR antenna array support for beamforming and direction finding"
 readme = "README.md"
-license = {text = "MIT"}
-requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE.md"]
+requires-python = ">=3.10"
+authors = [{name = "SDR Module contributors"}]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Scientific/Engineering :: Signal Processing",
+    "Typing :: Typed",
+]
+keywords = ["sdr", "antenna-array", "beamforming", "direction-finding", "doa"]
 dependencies = [
-    "numpy>=1.21.0",
+    "numpy>=1.21.0,<3",
 ]
 
 [project.optional-dependencies]
-sdr = ["sdr-module>=0.1.0"]
+sdr = ["sdr-module>=0.2.0"]
+
+[project.urls]
+Homepage = "https://github.com/kase1111-hash/SDR"
+Repository = "https://github.com/kase1111-hash/SDR"
+Issues = "https://github.com/kase1111-hash/SDR/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+sdr_antenna_array = ["py.typed"]

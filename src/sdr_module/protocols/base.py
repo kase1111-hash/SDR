@@ -106,9 +106,8 @@ class ProtocolDecoder(ABC):
         """
         pass
 
-    def reset(self) -> None:
-        """Reset decoder state."""
-        pass
+    def reset(self) -> None:  # noqa: B027 - optional hook, no-op by default
+        """Reset decoder state (no-op for stateless decoders)."""
 
     def _find_preamble(self, bits: np.ndarray, preamble: np.ndarray) -> List[int]:
         """

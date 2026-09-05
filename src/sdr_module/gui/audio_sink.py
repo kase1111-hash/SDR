@@ -72,8 +72,8 @@ class AudioSink:
         if self._sink is not None:
             try:
                 self._sink.stop()
-            except Exception:  # pragma: no cover
-                pass
+            except Exception as e:  # pragma: no cover
+                logger.debug(f"Audio sink stop failed: {e}")
         self._sink = None
         self._io = None
         self._sample_rate = 0

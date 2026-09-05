@@ -1,23 +1,21 @@
 """Tests for antenna array Phase 2 components (spatial processing)."""
 
-
 import numpy as np
 import pytest
-
 from sdr_antenna_array import (
     SPEED_OF_LIGHT,
     ArrayAlignmentResult,
     ArrayConfig,
-    BeamPattern,
     Beamformer,
     BeamformerOutput,
+    BeamPattern,
     BeamscanDoA,
     CorrelationResult,
     CrossCorrelator,
     DoAMethod,
     DoAResult,
-    MUSICDoA,
     MultiSourceDoAResult,
+    MUSICDoA,
     PhaseDifferenceDoA,
     SteeringVector,
     create_linear_4_element,
@@ -188,7 +186,9 @@ class TestCrossCorrelator:
         signal_b = np.exp(2j * np.pi * (10e3 + freq_offset) * t).astype(np.complex64)
 
         time_span = n_samples / 2.4e6
-        estimated_offset = correlator.estimate_frequency_offset(signal_a, signal_b, time_span)
+        estimated_offset = correlator.estimate_frequency_offset(
+            signal_a, signal_b, time_span
+        )
 
         # Magnitude should match, sign depends on which signal is considered reference
         assert abs(estimated_offset) == pytest.approx(freq_offset, rel=0.1)
@@ -321,9 +321,7 @@ class TestBeamformer:
 
         # Array factor at steering direction should be maximum
         steering_az = np.radians(10)
-        af_at_steering = beamformer.compute_array_factor(
-            steering_az, 0, steering_az, 0
-        )
+        af_at_steering = beamformer.compute_array_factor(steering_az, 0, steering_az, 0)
         af_away = beamformer.compute_array_factor(
             steering_az + np.pi / 4, 0, steering_az, 0
         )
@@ -428,7 +426,9 @@ class TestPhaseDifferenceDoA:
         wavelength = SPEED_OF_LIGHT / frequency
         spacing = wavelength / 2
 
-        doa = PhaseDifferenceDoA(spacing=spacing, frequency=frequency, sample_rate=2.4e6)
+        doa = PhaseDifferenceDoA(
+            spacing=spacing, frequency=frequency, sample_rate=2.4e6
+        )
 
         # Generate signals with phase difference for 30 degrees
         angle = np.radians(30)

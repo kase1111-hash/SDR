@@ -9,9 +9,6 @@ import sys
 
 import numpy as np
 
-# Add src to path
-sys.path.insert(0, "../src")
-
 
 def test_imports():
     """Test all module imports."""
@@ -292,7 +289,7 @@ def test_waterfall():
     print("  ✓ Waterfall creation")
 
     # Add spectrum lines
-    for i in range(10):
+    for _i in range(10):
         power = np.random.randn(512) * 10 - 60
         waterfall.add_spectrum_line(power)
     assert waterfall.image.shape == (256, 512, 4)

@@ -143,7 +143,7 @@ class TestFIRFilter:
         total_samples = 1000
         output_chunks = []
 
-        for i in range(total_samples // chunk_size):
+        for _i in range(total_samples // chunk_size):
             chunk = np.ones(chunk_size)
             filtered_chunk = fir.filter_stream(chunk)
             output_chunks.append(filtered_chunk)

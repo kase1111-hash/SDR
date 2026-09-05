@@ -57,9 +57,7 @@ class ElementPosition:
     def distance_to(self, other: "ElementPosition") -> float:
         """Calculate Euclidean distance to another element."""
         return math.sqrt(
-            (self.x - other.x) ** 2
-            + (self.y - other.y) ** 2
-            + (self.z - other.z) ** 2
+            (self.x - other.x) ** 2 + (self.y - other.y) ** 2 + (self.z - other.z) ** 2
         )
 
 
@@ -410,7 +408,9 @@ class ArrayConfig:
             if "position" in elem_data:
                 elem_data["position"] = ElementPosition(**elem_data["position"])
             if "calibration" in elem_data:
-                elem_data["calibration"] = ElementCalibration(**elem_data["calibration"])
+                elem_data["calibration"] = ElementCalibration(
+                    **elem_data["calibration"]
+                )
             if "device_config" in elem_data and elem_data["device_config"]:
                 elem_data["device_config"] = DeviceConfig(**elem_data["device_config"])
             elements.append(ArrayElement(**elem_data))
@@ -428,7 +428,9 @@ class ArrayConfig:
             common_bandwidth=data.get("common_bandwidth", 2.4e6),
             common_gain=data.get("common_gain", 30.0),
             buffer_capacity_chunks=data.get("buffer_capacity_chunks", 256),
-            buffer_capacity_samples=data.get("buffer_capacity_samples", 4 * 1024 * 1024),
+            buffer_capacity_samples=data.get(
+                "buffer_capacity_samples", 4 * 1024 * 1024
+            ),
             enable_dc_removal=data.get("enable_dc_removal", True),
             enable_iq_correction=data.get("enable_iq_correction", True),
         )

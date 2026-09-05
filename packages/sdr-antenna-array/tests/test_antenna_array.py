@@ -6,7 +6,6 @@ import time
 
 import numpy as np
 import pytest
-
 from sdr_antenna_array import (
     SPEED_OF_LIGHT,
     AntennaArrayController,
@@ -27,6 +26,7 @@ from sdr_antenna_array import (
     get_array_preset,
     list_array_presets,
 )
+
 from sdr_module.core.sample_buffer import BufferOverflowPolicy
 
 
@@ -551,9 +551,7 @@ class TestTimestampedBufferThreadSafety:
 
     def test_concurrent_write_read(self):
         """Test concurrent writes and reads."""
-        buffer = TimestampedSampleBuffer(
-            capacity_chunks=100, capacity_samples=100000
-        )
+        buffer = TimestampedSampleBuffer(capacity_chunks=100, capacity_samples=100000)
         write_count = 0
         read_count = 0
         errors = []
@@ -561,7 +559,7 @@ class TestTimestampedBufferThreadSafety:
         def writer():
             nonlocal write_count
             try:
-                for i in range(50):
+                for _i in range(50):
                     samples = np.random.randn(100) + 1j * np.random.randn(100)
                     samples = samples.astype(np.complex64)
                     buffer.write(samples, timestamp=time.time(), sample_rate=1000.0)

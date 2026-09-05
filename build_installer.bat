@@ -2,11 +2,11 @@
 REM ============================================================================
 REM SDR Module Windows Installer Build Script
 REM ============================================================================
-REM This script creates a Windows installer using Inno Setup.
+REM Creates installer_output\SDR-Module-<version>-Setup.exe with Inno Setup.
 REM
 REM Prerequisites:
 REM   - Inno Setup 6.x installed (https://jrsoftware.org/isinfo.php)
-REM   - Built executable in dist\sdr-module\ directory (run build_windows.bat first)
+REM   - Built executable in dist\sdr-module\ (run build_windows.bat first)
 REM
 REM Usage:
 REM   build_installer.bat
@@ -20,29 +20,22 @@ echo   SDR Module Installer Build Script
 echo ============================================
 echo.
 
-REM Check if PyInstaller build exists
 if not exist "dist\sdr-module\sdr-scan.exe" (
     echo ERROR: Executable not found at dist\sdr-module\sdr-scan.exe
     echo.
     echo Please run build_windows.bat first to create the executable.
-    echo.
     exit /b 1
 )
 
 echo [1/3] Checking for Inno Setup...
 
-REM Try to find Inno Setup compiler
 set ISCC=""
-
-REM Check common installation paths
 if exist "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" (
     set ISCC="C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 )
 if exist "C:\Program Files\Inno Setup 6\ISCC.exe" (
     set ISCC="C:\Program Files\Inno Setup 6\ISCC.exe"
 )
-
-REM Check if ISCC is in PATH
 where iscc >nul 2>&1
 if not errorlevel 1 (
     set ISCC=iscc
@@ -61,24 +54,26 @@ if %ISCC%=="" (
 echo Found Inno Setup: %ISCC%
 echo.
 
-REM Create output directory
-echo [2/3] Creating installer output directory...
+echo [2/3] Reading version...
+for /f "delims=" %%v in ('python tools\get_version.py') do set APPVER=%%v
+if "%APPVER%"=="" (
+    echo ERROR: could not read the version from src\sdr_module\__init__.py
+    exit /b 1
+)
+echo Version: %APPVER%
 if not exist "installer_output" mkdir installer_output
 echo.
 
-REM Build the installer
 echo [3/3] Building installer...
 echo.
 
-%ISCC% installer.iss
+%ISCC% /DMyAppVersion=%APPVER% installer.iss
 
 if errorlevel 1 (
     echo.
     echo ============================================
     echo   INSTALLER BUILD FAILED
     echo ============================================
-    echo.
-    echo Check the error messages above for details.
     exit /b 1
 )
 
@@ -87,10 +82,7 @@ echo ============================================
 echo   INSTALLER BUILD SUCCESSFUL
 echo ============================================
 echo.
-echo Installer location: installer_output\SDR-Module-0.2.0-Setup.exe
-echo.
-echo To install:
-echo   Run the installer and follow the prompts.
+echo Installer location: installer_output\SDR-Module-%APPVER%-Setup.exe
 echo.
 
 endlocal

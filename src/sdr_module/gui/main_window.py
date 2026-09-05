@@ -1250,8 +1250,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if geom:
             try:
                 self.restoreGeometry(geom)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Could not restore window geometry: {e}")
 
     def _persist_state(self) -> None:
         """Save settings on exit."""

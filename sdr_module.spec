@@ -2,118 +2,104 @@
 """
 PyInstaller spec file for SDR Module.
 
-This creates a standalone portable executable for the SDR Module application.
-Can be run from a USB drive without installation.
+Builds a self-contained, portable folder (dist/sdr-module/) with a
+``sdr-scan`` executable that can run from a USB drive without a Python
+installation.
 
 Usage:
-    pyinstaller sdr_module.spec           # CLI only
-    pyinstaller sdr_module.spec --gui     # With GUI support
+    pyinstaller sdr_module.spec                       # CLI + GUI (default)
+    SDR_BUILD_GUI=0 pyinstaller sdr_module.spec       # CLI only, no PyQt6
 
 Requirements:
-    pip install pyinstaller
-    pip install PyQt6  # Optional, for GUI
+    python -m pip install -e ".[gui]" pyinstaller     # or "." for CLI only
+
+The build scripts (build_portable.sh, build_windows.bat, build_windows.ps1)
+wrap this file and set SDR_BUILD_GUI for you.
 """
 
-import sys
 import os
 from pathlib import Path
 
-block_cipher = None
+from PyInstaller.utils.hooks import collect_submodules
 
-# Check if GUI should be included
-INCLUDE_GUI = '--gui' in sys.argv or os.environ.get('SDR_BUILD_GUI', '0') == '1'
+# Include the PyQt6 GUI unless explicitly disabled.
+INCLUDE_GUI = os.environ.get("SDR_BUILD_GUI", "1") != "0"
 
-# Project paths
-PROJECT_ROOT = Path(SPECPATH)
-SRC_PATH = PROJECT_ROOT / 'src'
+PROJECT_ROOT = Path(SPECPATH)  # noqa: F821 - provided by PyInstaller
+SRC_PATH = PROJECT_ROOT / "src"
 
-# Hidden imports for core functionality
-hidden_imports = [
-    'numpy',
-    'scipy',
-    'scipy.signal',
-    'scipy.fft',
-    'scipy.ndimage',
-    'sdr_module',
-    'sdr_module.core',
-    'sdr_module.core.sample_buffer',
-    'sdr_module.core.device_manager',
-    'sdr_module.core.dual_sdr',
-    'sdr_module.dsp',
-    'sdr_module.dsp.spectrum',
-    'sdr_module.dsp.filters',
-    'sdr_module.dsp.demodulators',
-    'sdr_module.dsp.classifiers',
-    'sdr_module.dsp.frequency_lock',
-    'sdr_module.dsp.afc',
-    'sdr_module.dsp.scanner',
-    'sdr_module.dsp.protocols',
-    'sdr_module.dsp.recording',
-    'sdr_module.plugins',
-    'sdr_module.plugins.base',
-    'sdr_module.plugins.manager',
-    'sdr_module.plugins.registry',
-    'sdr_module.ui',
-    'sdr_module.ui.waterfall',
-    'sdr_module.ui.constellation',
-    'sdr_module.ui.time_domain',
-    'sdr_module.ui.signal_meter',
-    'sdr_module.ui.packet_display',
-    'sdr_module.utils',
-    'sdr_module.utils.conversions',
+
+def _wanted(module_name: str) -> bool:
+    """Drop the Qt-dependent subpackages when building without the GUI."""
+    if INCLUDE_GUI:
+        return True
+    return ".gui" not in module_name
+
+
+# Every sdr_module submodule is imported lazily somewhere (decoders, ham
+# features, GUI panels), so collect them all rather than maintaining a list.
+hidden_imports = collect_submodules("sdr_module", filter=_wanted)
+
+# Optional DSP acceleration: bundle SciPy only when it is installed.
+try:
+    import scipy  # noqa: F401
+
+    hidden_imports += ["scipy.signal", "scipy.fft"]
+except ImportError:
+    pass
+
+excludes = ["tkinter", "matplotlib"]
+
+if INCLUDE_GUI:
+    hidden_imports += [
+        "PyQt6",
+        "PyQt6.QtCore",
+        "PyQt6.QtGui",
+        "PyQt6.QtWidgets",
+        "PyQt6.QtMultimedia",
+    ]
+else:
+    excludes += [
+        "PyQt5",
+        "PyQt6",
+        "PySide2",
+        "PySide6",
+        "sdr_module.gui",
+        "sdr_module.ham.gui",
+    ]
+
+datas = [
+    (str(PROJECT_ROOT / "README.md"), "."),
+    (str(PROJECT_ROOT / "LICENSE.md"), "."),
+    (str(PROJECT_ROOT / "CHANGELOG.md"), "."),
 ]
 
-# Excludes
-excludes = ['tkinter']
-
-# Add GUI imports if building with GUI
-if INCLUDE_GUI:
-    hidden_imports.extend([
-        'PyQt6',
-        'PyQt6.QtWidgets',
-        'PyQt6.QtCore',
-        'PyQt6.QtGui',
-        'sdr_module.gui',
-        'sdr_module.gui.app',
-        'sdr_module.gui.main_window',
-        'sdr_module.gui.spectrum_widget',
-        'sdr_module.gui.waterfall_widget',
-        'sdr_module.gui.control_panel',
-        'sdr_module.gui.decoder_panel',
-        'sdr_module.gui.device_dialog',
-    ])
-else:
-    excludes.extend(['PyQt5', 'PyQt6', 'PySide2', 'PySide6'])
-
-# Collect all Python files from the sdr_module package
-a = Analysis(
-    [str(SRC_PATH / 'sdr_module' / 'cli.py')],
+# The entry script must live outside the package: running a package module
+# directly breaks its relative imports ("attempted relative import with no
+# known parent package").
+a = Analysis(  # noqa: F821 - provided by PyInstaller
+    [str(PROJECT_ROOT / "tools" / "pyinstaller_entry.py")],
     pathex=[str(SRC_PATH)],
     binaries=[],
-    datas=[
-        # Include example plugins for portability
-        (str(PROJECT_ROOT / 'examples' / 'plugins'), 'plugins'),
-    ],
+    datas=datas,
     hiddenimports=hidden_imports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=excludes,
-    win_no_prefer_redirects=False,
-    win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
 
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)  # noqa: F821 - provided by PyInstaller
 
-# Main CLI executable
-exe = EXE(
+# Console executable: `sdr-scan --help` must work from a terminal, and
+# `sdr-scan gui` launches the Qt window from the same binary.
+exe = EXE(  # noqa: F821 - provided by PyInstaller
     pyz,
     a.scripts,
     [],
     exclude_binaries=True,
-    name='sdr-scan',
+    name="sdr-scan",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -124,17 +110,15 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,  # Add icon path if available: 'assets/icon.ico'
+    icon=None,  # Add an icon path here if one is added to the repo.
 )
 
-# Collect all files into portable folder
-coll = COLLECT(
+coll = COLLECT(  # noqa: F821 - provided by PyInstaller
     exe,
     a.binaries,
-    a.zipfiles,
     a.datas,
     strip=False,
     upx=True,
     upx_exclude=[],
-    name='sdr-module',
+    name="sdr-module",
 )

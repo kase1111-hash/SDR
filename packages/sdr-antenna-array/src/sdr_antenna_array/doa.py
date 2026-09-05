@@ -348,16 +348,20 @@ class BeamscanDoA:
         """Get array configuration."""
         return self._config
 
-    def _compute_steering_vector(self, azimuth: float, elevation: float = 0.0) -> np.ndarray:
+    def _compute_steering_vector(
+        self, azimuth: float, elevation: float = 0.0
+    ) -> np.ndarray:
         """Compute steering vector for given direction."""
         k = 2 * np.pi / self._wavelength
 
         cos_el = np.cos(elevation)
-        u = np.array([
-            cos_el * np.sin(azimuth),
-            cos_el * np.cos(azimuth),
-            np.sin(elevation),
-        ])
+        u = np.array(
+            [
+                cos_el * np.sin(azimuth),
+                cos_el * np.cos(azimuth),
+                np.sin(elevation),
+            ]
+        )
 
         phases = k * (self._positions @ u)
         return np.exp(1j * phases).astype(np.complex64)
@@ -538,19 +542,25 @@ class MUSICDoA:
         if n < 1:
             raise ValueError("num_sources must be >= 1")
         if n >= self._num_elements:
-            raise ValueError(f"num_sources must be < num_elements ({self._num_elements})")
+            raise ValueError(
+                f"num_sources must be < num_elements ({self._num_elements})"
+            )
         self._num_sources = n
 
-    def _compute_steering_vector(self, azimuth: float, elevation: float = 0.0) -> np.ndarray:
+    def _compute_steering_vector(
+        self, azimuth: float, elevation: float = 0.0
+    ) -> np.ndarray:
         """Compute steering vector for given direction."""
         k = 2 * np.pi / self._wavelength
 
         cos_el = np.cos(elevation)
-        u = np.array([
-            cos_el * np.sin(azimuth),
-            cos_el * np.cos(azimuth),
-            np.sin(elevation),
-        ])
+        u = np.array(
+            [
+                cos_el * np.sin(azimuth),
+                cos_el * np.cos(azimuth),
+                np.sin(elevation),
+            ]
+        )
 
         phases = k * (self._positions @ u)
         return np.exp(1j * phases).astype(np.complex64)

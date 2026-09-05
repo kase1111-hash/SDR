@@ -381,7 +381,9 @@ class Beamformer:
 
         for i, az in enumerate(azimuths):
             for j, el in enumerate(elevations):
-                af = self.compute_array_factor(az, el, steering_azimuth, steering_elevation)
+                af = self.compute_array_factor(
+                    az, el, steering_azimuth, steering_elevation
+                )
                 pattern[i, j] = np.abs(af) ** 2
 
         # Convert to dB

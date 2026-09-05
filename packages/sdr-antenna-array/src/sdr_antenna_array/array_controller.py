@@ -26,6 +26,8 @@ except ImportError:
         DROP_OLDEST = "drop_oldest"
         DROP_NEWEST = "drop_newest"
         BLOCK = "block"
+
+
 from .array_config import ArrayConfig
 from .timestamped_buffer import TimestampedChunk, TimestampedSampleBuffer
 
@@ -122,7 +124,9 @@ class AntennaArrayController:
 
         # Device tracking
         self._devices: Dict[int, SDRDevice] = {}  # element_index -> device
-        self._buffers: Dict[int, TimestampedSampleBuffer] = {}  # element_index -> buffer
+        self._buffers: Dict[int, TimestampedSampleBuffer] = (
+            {}
+        )  # element_index -> buffer
 
         # Thread synchronization
         self._lock = RLock()
@@ -136,12 +140,12 @@ class AntennaArrayController:
         )
 
         # User callbacks
-        self._sample_callback: Optional[
-            Callable[[int, np.ndarray, float], None]
-        ] = None  # (element_idx, samples, timestamp)
-        self._sync_callback: Optional[
-            Callable[[Dict[int, TimestampedChunk]], None]
-        ] = None  # Synchronized samples from all elements
+        self._sample_callback: Optional[Callable[[int, np.ndarray, float], None]] = (
+            None  # (element_idx, samples, timestamp)
+        )
+        self._sync_callback: Optional[Callable[[Dict[int, TimestampedChunk]], None]] = (
+            None  # Synchronized samples from all elements
+        )
 
         # Synchronization tracking
         self._reference_element = self._config.sync.reference_element
@@ -322,7 +326,9 @@ class AntennaArrayController:
 
             self._state.common_frequency = freq_hz
 
-        logger.info(f"Set frequency to {freq_hz/1e6:.3f} MHz: {success}/{total} elements")
+        logger.info(
+            f"Set frequency to {freq_hz/1e6:.3f} MHz: {success}/{total} elements"
+        )
         return (success, total)
 
     def set_sample_rate(self, rate_hz: float) -> Tuple[int, int]:
@@ -348,7 +354,9 @@ class AntennaArrayController:
 
             self._state.common_sample_rate = rate_hz
 
-        logger.info(f"Set sample rate to {rate_hz/1e6:.3f} MS/s: {success}/{total} elements")
+        logger.info(
+            f"Set sample rate to {rate_hz/1e6:.3f} MS/s: {success}/{total} elements"
+        )
         return (success, total)
 
     def set_gain(self, gain_db: float) -> Tuple[int, int]:
@@ -441,7 +449,12 @@ class AntennaArrayController:
             with self._lock:
                 user_callback = self._sample_callback
 
-            def make_callback(idx: int, buf: TimestampedSampleBuffer, rate: float, user_cb: Optional[Callable]):
+            def make_callback(
+                idx: int,
+                buf: TimestampedSampleBuffer,
+                rate: float,
+                user_cb: Optional[Callable],
+            ):
                 def rx_callback(samples: np.ndarray) -> None:
                     if self._stop_event.is_set():
                         return
@@ -625,7 +638,9 @@ class AntennaArrayController:
 
         return result
 
-    def apply_calibration(self, samples: Dict[int, np.ndarray]) -> Dict[int, np.ndarray]:
+    def apply_calibration(
+        self, samples: Dict[int, np.ndarray]
+    ) -> Dict[int, np.ndarray]:
         """
         Apply calibration corrections to samples from all elements.
 

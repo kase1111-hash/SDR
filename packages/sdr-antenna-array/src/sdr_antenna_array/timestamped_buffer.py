@@ -390,10 +390,11 @@ class TimestampedSampleBuffer:
                     # Update chunk in place
                     new_chunk = TimestampedChunk(
                         samples=chunk.samples[remaining:],
-                        timestamp=chunk.timestamp
-                        + remaining / chunk.sample_rate
-                        if chunk.sample_rate > 0
-                        else chunk.timestamp,
+                        timestamp=(
+                            chunk.timestamp + remaining / chunk.sample_rate
+                            if chunk.sample_rate > 0
+                            else chunk.timestamp
+                        ),
                         sample_index=chunk.sample_index + remaining,
                         sample_rate=chunk.sample_rate,
                         device_id=chunk.device_id,

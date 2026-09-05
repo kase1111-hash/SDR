@@ -10,8 +10,8 @@
 .PARAMETER Clean
     Clean build directories before building.
 
-.PARAMETER Install
-    Install the package in development mode before building.
+.PARAMETER NoGUI
+    Build the command-line tool only (no PyQt6 in the bundle).
 
 .PARAMETER NoUPX
     Disable UPX compression (faster build, larger executable).
@@ -24,7 +24,7 @@
     Basic build with default options.
 
 .EXAMPLE
-    .\build_windows.ps1 -Clean -Install -CreateInstaller
+    .\build_windows.ps1 -Clean -CreateInstaller
     Full clean build with installer creation.
 
 .NOTES
@@ -36,7 +36,7 @@
 
 param(
     [switch]$Clean,
-    [switch]$Install,
+    [switch]$NoGUI,
     [switch]$NoUPX,
     [switch]$CreateInstaller
 )
@@ -56,14 +56,15 @@ try {
     Write-Host "  Found: $pythonVersion" -ForegroundColor Green
 } catch {
     Write-Host "ERROR: Python is not installed or not in PATH" -ForegroundColor Red
-    Write-Host "Please install Python 3.8+ from https://www.python.org/downloads/" -ForegroundColor Red
+    Write-Host "Please install Python 3.10+ from https://www.python.org/downloads/" -ForegroundColor Red
     exit 1
 }
 
 # Step 2: Check pip
 Write-Host "[2/7] Checking pip installation..." -ForegroundColor Yellow
 try {
-    $pipVersion = pip --version 2>&1
+    # Always call pip through the interpreter so both agree on the environment.
+    $pipVersion = python -m pip --version 2>&1
     Write-Host "  Found: $pipVersion" -ForegroundColor Green
 } catch {
     Write-Host "ERROR: pip is not installed" -ForegroundColor Red
@@ -89,33 +90,29 @@ if ($Clean) {
 # Step 4: Install dependencies
 Write-Host "[4/7] Installing build dependencies..." -ForegroundColor Yellow
 try {
-    pip install --upgrade pip setuptools wheel | Out-Null
-    pip install pyinstaller numpy | Out-Null
-
-    # Try to install optional dependencies
-    try {
-        pip install scipy matplotlib | Out-Null
-    } catch {
-        Write-Host "  Warning: Some optional dependencies failed" -ForegroundColor Yellow
+    python -m pip install --upgrade pip | Out-Null
+    if ($NoGUI) {
+        python -m pip install -e . pyinstaller | Out-Null
+        $env:SDR_BUILD_GUI = "0"
+    } else {
+        python -m pip install -e ".[gui]" pyinstaller | Out-Null
+        $env:SDR_BUILD_GUI = "1"
     }
-
+    if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
     Write-Host "  Dependencies installed." -ForegroundColor Green
 } catch {
-    Write-Host "  Warning: Dependency installation had issues" -ForegroundColor Yellow
+    Write-Host "ERROR: Dependency installation failed: $_" -ForegroundColor Red
+    exit 1
 }
 
-# Step 5: Install package in development mode
-Write-Host "[5/7] Installing SDR Module..." -ForegroundColor Yellow
-if ($Install) {
-    try {
-        pip install -e . | Out-Null
-        Write-Host "  Package installed." -ForegroundColor Green
-    } catch {
-        Write-Host "  Warning: Development install failed" -ForegroundColor Yellow
-    }
-} else {
-    Write-Host "  Skipped (use -Install to enable)" -ForegroundColor Gray
+# Step 5: Read the version from the single source of truth
+Write-Host "[5/7] Reading package version..." -ForegroundColor Yellow
+$appVersion = (python tools/get_version.py).Trim()
+if (-not $appVersion) {
+    Write-Host "ERROR: could not read the version from src/sdr_module/__init__.py" -ForegroundColor Red
+    exit 1
 }
+Write-Host "  Version: $appVersion (GUI included: $($env:SDR_BUILD_GUI))" -ForegroundColor Green
 
 # Step 6: Build executable
 Write-Host "[6/7] Building Windows executable..." -ForegroundColor Yellow
@@ -128,7 +125,7 @@ if ($NoUPX) {
 }
 
 try {
-    & pyinstaller @pyinstallerArgs
+    & python -m PyInstaller @pyinstallerArgs
     if ($LASTEXITCODE -ne 0) {
         throw "PyInstaller failed"
     }
@@ -175,7 +172,7 @@ if ($CreateInstaller) {
         }
 
         try {
-            & $iscc installer.iss
+            & $iscc "/DMyAppVersion=$appVersion" installer.iss
             if ($LASTEXITCODE -eq 0) {
                 Write-Host "  Installer created." -ForegroundColor Green
             } else {
@@ -200,10 +197,10 @@ Write-Host "Executable location: dist\sdr-module\sdr-scan.exe" -ForegroundColor 
 Write-Host ""
 Write-Host "To run:" -ForegroundColor White
 Write-Host "  cd dist\sdr-module" -ForegroundColor Gray
-Write-Host "  .\sdr-scan.exe --help" -ForegroundColor Gray
+Write-Host "  .\sdr-scan.exe gui --demo" -ForegroundColor Gray
 Write-Host ""
 
-if ($CreateInstaller -and (Test-Path "installer_output\SDR-Module-0.2.0-Setup.exe")) {
-    Write-Host "Installer location: installer_output\SDR-Module-0.2.0-Setup.exe" -ForegroundColor Cyan
+if ($CreateInstaller -and (Test-Path "installer_output\SDR-Module-$appVersion-Setup.exe")) {
+    Write-Host "Installer location: installer_output\SDR-Module-$appVersion-Setup.exe" -ForegroundColor Cyan
     Write-Host ""
 }

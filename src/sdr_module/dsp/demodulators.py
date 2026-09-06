@@ -139,13 +139,35 @@ class SSBDemodulator(Demodulator):
         self._mode = mode.lower()
 
     def demodulate(self, samples: np.ndarray) -> np.ndarray:
-        """Demodulate SSB signal."""
-        if self._mode == "lsb":
-            # For LSB, conjugate to flip spectrum
-            samples = np.conj(samples)
+        """
+        Demodulate an SSB signal at complex baseband.
 
-        # Extract real part (product detection with carrier)
-        return samples.real
+        The wanted audio lives on one side of the (suppressed) carrier at DC:
+        the upper sideband occupies positive baseband frequencies, the lower
+        sideband negative ones. We null the unwanted half of the spectrum and
+        take the real part, so USB and LSB genuinely differ and each rejects
+        the opposite sideband. (The previous implementation conjugated for LSB
+        and then took the real part, which leaves the real part unchanged, so
+        USB and LSB produced byte-identical output and neither rejected the
+        other sideband.)
+        """
+        x = np.asarray(samples, dtype=np.complex128)
+        n = x.size
+        if n == 0:
+            return np.zeros(0, dtype=np.float32)
+
+        spectrum = np.fft.fft(x)
+        half = n // 2
+        if self._mode == "lsb":
+            # Keep negative-frequency bins (lower sideband); null DC..+Nyquist.
+            spectrum[1 : half + 1] = 0
+        else:
+            # Keep positive-frequency bins (upper sideband); null the rest.
+            spectrum[half + 1 :] = 0
+
+        # x2 restores amplitude after discarding one sideband's energy.
+        audio = 2.0 * np.fft.ifft(spectrum).real
+        return audio.astype(np.float32)
 
 
 class OOKDemodulator(Demodulator):
@@ -234,8 +256,12 @@ class PSKDemodulator(Demodulator):
         phase = np.angle(samples)
 
         if self._order == 2:  # BPSK
-            # Map to 0 or 1
-            symbols = (phase > 0).astype(np.float32)
+            # BPSK symbols sit on the real axis (0 and pi). Decide on the sign
+            # of the in-phase component: real >= 0 -> 0, real < 0 -> 1. The old
+            # `phase > 0` test keyed off the quadrature sign, so a symbol at pi
+            # (whose phase wraps to +/-pi depending on tiny Q noise) landed in
+            # either class at random, giving ~0.5 BER on a clean signal.
+            symbols = (samples.real < 0).astype(np.float32)
         elif self._order == 4:  # QPSK
             # Map to 0, 1, 2, 3
             symbols = np.floor((phase + np.pi) / (np.pi / 2)) % 4

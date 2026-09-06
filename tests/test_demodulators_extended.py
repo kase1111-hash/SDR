@@ -28,17 +28,15 @@ def generate_tone(freq_hz: float, sample_rate: float, duration: float) -> np.nda
 
 
 def generate_bpsk(bits, sample_rate: float, symbol_rate: float) -> np.ndarray:
-    """Generate BPSK signal: 1 → positive real, 0 → negative real.
+    """Generate real-axis BPSK: bit 0 → +1 (phase 0), bit 1 → -1 (phase pi).
 
-    PSKDemodulator maps phase>0 to symbol 1, phase≤0 to symbol 0.
-    So bit=1 uses a small positive phase, bit=0 uses a negative phase.
+    PSKDemodulator decides on the sign of the in-phase component, so a symbol
+    at -1 decodes to 1 and a symbol at +1 decodes to 0.
     """
     sps = int(sample_rate / symbol_rate)
     samples = np.zeros(len(bits) * sps, dtype=np.complex64)
     for i, bit in enumerate(bits):
-        # phase > 0 → symbol 1, phase < 0 → symbol 0
-        phase = 0.3 if bit == 1 else -0.3
-        samples[i * sps : (i + 1) * sps] = np.exp(1j * phase)
+        samples[i * sps : (i + 1) * sps] = -1.0 if bit == 1 else 1.0
     return samples
 
 
@@ -83,20 +81,38 @@ class TestSSBDemodulator:
         result = demod.demodulate(tone)
         assert len(result) == len(tone)
 
-    def test_usb_recovers_real_component(self):
-        """USB extracts the real part of the signal."""
+    def test_usb_passes_upper_sideband_rejects_lower(self):
+        """USB keeps a positive-frequency tone and rejects a negative one."""
         demod = SSBDemodulator(self.SAMPLE_RATE, mode="usb")
-        tone = generate_tone(1000, self.SAMPLE_RATE, 0.1)
-        result = demod.demodulate(tone)
-        np.testing.assert_allclose(result, tone.real, atol=1e-6)
+        t = np.arange(4096) / self.SAMPLE_RATE
+        upper = np.exp(2j * np.pi * 3000 * t).astype(np.complex64)
+        lower = np.exp(-2j * np.pi * 3000 * t).astype(np.complex64)
+        upper_power = np.mean(demod.demodulate(upper) ** 2)
+        lower_power = np.mean(demod.demodulate(lower) ** 2)
+        assert upper_power > 0.5
+        assert lower_power < 0.01 * upper_power
 
-    def test_lsb_flips_spectrum(self):
-        """LSB conjugates before extracting real — inverts frequency."""
+    def test_lsb_passes_lower_sideband_rejects_upper(self):
+        """LSB keeps a negative-frequency tone and rejects a positive one."""
         demod = SSBDemodulator(self.SAMPLE_RATE, mode="lsb")
-        tone = generate_tone(1000, self.SAMPLE_RATE, 0.1)
-        result = demod.demodulate(tone)
-        expected = np.conj(tone).real
-        np.testing.assert_allclose(result, expected, atol=1e-6)
+        t = np.arange(4096) / self.SAMPLE_RATE
+        upper = np.exp(2j * np.pi * 3000 * t).astype(np.complex64)
+        lower = np.exp(-2j * np.pi * 3000 * t).astype(np.complex64)
+        upper_power = np.mean(demod.demodulate(upper) ** 2)
+        lower_power = np.mean(demod.demodulate(lower) ** 2)
+        assert lower_power > 0.5
+        assert upper_power < 0.01 * lower_power
+
+    def test_usb_and_lsb_differ(self):
+        """USB and LSB must not produce identical output (they used to)."""
+        t = np.arange(2048) / self.SAMPLE_RATE
+        # A signal with energy on both sidebands.
+        signal = (
+            np.exp(2j * np.pi * 2000 * t) + np.exp(-2j * np.pi * 1500 * t)
+        ).astype(np.complex64)
+        usb = SSBDemodulator(self.SAMPLE_RATE, mode="usb").demodulate(signal)
+        lsb = SSBDemodulator(self.SAMPLE_RATE, mode="lsb").demodulate(signal)
+        assert not np.allclose(usb, lsb)
 
     @pytest.mark.parametrize("mode", ["usb", "lsb"])
     def test_output_is_real(self, mode):
@@ -191,6 +207,18 @@ class TestPSKDemodulator:
             symbol_samples = result[i * sps : (i + 1) * sps]
             recovered = 1 if np.mean(symbol_samples) > 0.5 else 0
             assert recovered == expected_bit
+
+    def test_bpsk_zero_ber_on_clean_signal(self):
+        """A clean real-axis BPSK stream decodes with no bit errors."""
+        rng = np.random.default_rng(0)
+        bits = rng.integers(0, 2, 2000)
+        sym = np.where(bits == 1, -1.0, 1.0).astype(np.complex64)
+        noisy = sym + 0.01 * (
+            rng.standard_normal(sym.shape) + 1j * rng.standard_normal(sym.shape)
+        )
+        demod = PSKDemodulator(1e6, 1e6, order=2)
+        out = demod.demodulate(noisy)
+        assert np.mean(out != bits) == 0.0
 
     @pytest.mark.parametrize("order", [2, 4])
     def test_psk_creates_without_error(self, order):

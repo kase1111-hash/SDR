@@ -392,6 +392,13 @@ class TestControlPanelLogic(unittest.TestCase):
         self.widget.update_record_time(3661)
         self.assertEqual(self.widget._record_time.text(), "01:01:01")
 
+    def test_get_fm_deviation(self):
+        """FM Dev selection is readable (was an inert control)."""
+        self.widget._fm_dev_combo.setCurrentText("75 kHz")
+        self.assertEqual(self.widget.get_fm_deviation(), 75e3)
+        self.widget._fm_dev_combo.setCurrentText("12.5 kHz")
+        self.assertEqual(self.widget.get_fm_deviation(), 12.5e3)
+
     def test_set_gain(self):
         """Test setting gain."""
         self.widget.set_gain(30)

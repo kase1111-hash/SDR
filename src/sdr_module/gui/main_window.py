@@ -12,7 +12,7 @@ from typing import Any, Optional
 import numpy as np
 
 try:
-    from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+    from PyQt6.QtCore import Qt, QTimer
     from PyQt6.QtGui import QAction, QKeySequence, QShortcut
     from PyQt6.QtWidgets import (
         QApplication,
@@ -68,44 +68,6 @@ except ImportError:
     HAS_HAM_RADIO = False
 
 logger = logging.getLogger(__name__)
-
-
-class SDRWorker(QThread if HAS_PYQT6 else object):
-    """Background worker for SDR data acquisition."""
-
-    if HAS_PYQT6:
-        samples_ready = pyqtSignal(np.ndarray)
-        error_occurred = pyqtSignal(str)
-
-    def __init__(self, parent=None):
-        if HAS_PYQT6:
-            super().__init__(parent)
-        self._running = False
-        self._device = None
-        self._sample_rate = 2.4e6
-        self._center_freq = 100e6
-
-    def set_device(self, device):
-        """Set the SDR device."""
-        self._device = device
-
-    def run(self):
-        """Main acquisition loop."""
-        self._running = True
-
-        while self._running and self._device:
-            try:
-                # Read samples from device
-                samples = self._device.read_samples(16384)
-                if samples is not None:
-                    self.samples_ready.emit(samples)
-            except Exception as e:
-                self.error_occurred.emit(str(e))
-                break
-
-    def stop(self):
-        """Stop acquisition."""
-        self._running = False
 
 
 class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
@@ -945,26 +907,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _update_display(self):
         """Update spectrum and waterfall displays."""
-        if not self._is_running:
+        if not self._is_running or not self._device:
             return
 
-        # Generate demo data if no device
-        if not self._device:
-            # Demo: noise + some signals
-            n = 2048
-            noise = np.random.randn(n) + 1j * np.random.randn(n)
-            noise *= 0.1
-
-            # Add some fake signals
-            t = np.arange(n)
-            sig1 = 0.5 * np.exp(2j * np.pi * 0.1 * t)
-            sig2 = 0.3 * np.exp(2j * np.pi * 0.25 * t)
-
-            samples = noise + sig1 + sig2
-        else:
-            samples = self._device.read_samples(2048)
-            if samples is None:
-                return
+        samples = self._device.read_samples(2048)
+        if samples is None:
+            return
 
         # Compute spectrum (windowed, referenced to dBFS)
         power = self._power_spectrum_dbfs(samples)
@@ -1027,23 +975,29 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         mode = self._control_panel._demod_combo.currentText()
         if mode not in ("AM", "FM", "USB", "LSB", "CW"):
             return
+        rate = getattr(self._device, "sample_rate", 2.4e6) if self._device else 2.4e6
         try:
             # Simple demodulators sufficient for monitoring in the GUI
             if mode == "FM":
-                # FM discriminator
+                # FM discriminator scaled by the selected deviation so a signal
+                # at +/- that deviation reaches full-scale audio (this is what
+                # the FM Dev control selects).
                 prod = samples[1:] * np.conj(samples[:-1])
-                audio = np.angle(prod).astype(np.float32)
-            elif mode == "AM":
-                audio = (np.abs(samples) - np.mean(np.abs(samples))).astype(np.float32)
-            else:  # SSB/CW: pass real part as crude envelope
-                audio = samples.real.astype(np.float32)
-            # Normalize softly then write
-            peak = float(np.max(np.abs(audio)) + 1e-9)
-            audio = audio / max(peak, 1e-6) * 0.5
+                inst_freq = np.angle(prod).astype(np.float32)
+                deviation = self._control_panel.get_fm_deviation()
+                gain = float(rate) / (2.0 * np.pi * max(deviation, 1.0))
+                audio = np.clip(inst_freq * gain, -1.0, 1.0).astype(np.float32)
+            else:
+                if mode == "AM":
+                    audio = (np.abs(samples) - np.mean(np.abs(samples))).astype(
+                        np.float32
+                    )
+                else:  # SSB/CW: pass real part as crude envelope
+                    audio = samples.real.astype(np.float32)
+                # Peak-normalize the non-FM modes.
+                peak = float(np.max(np.abs(audio)) + 1e-9)
+                audio = audio / max(peak, 1e-6) * 0.5
             # Decimate to ~48 kHz assuming 2.4 MS/s (48x)
-            rate = (
-                getattr(self._device, "sample_rate", 2.4e6) if self._device else 2.4e6
-            )
             decim = max(1, int(rate / 48000))
             self._audio.write(audio[::decim])
         except Exception as e:  # pragma: no cover

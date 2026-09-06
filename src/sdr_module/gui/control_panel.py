@@ -473,6 +473,14 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         """Return the currently selected recording format label."""
         return self._format_combo.currentText()
 
+    def get_fm_deviation(self) -> float:
+        """Return the selected FM deviation in Hz (default 25 kHz)."""
+        text = self._fm_dev_combo.currentText()  # e.g. "25 kHz"
+        try:
+            return float(text.split()[0]) * 1e3
+        except (ValueError, IndexError):
+            return 25e3
+
     def _populate_preset_categories(self):
         """Populate the preset category dropdown."""
         fm = get_frequency_manager()

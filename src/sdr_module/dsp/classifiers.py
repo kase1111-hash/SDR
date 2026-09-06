@@ -82,15 +82,53 @@ class SignalClassifier:
         # Estimate bandwidth
         bandwidth = self._estimate_bandwidth(samples)
 
+        confidence = self._compute_confidence(signal_type, modulation, features)
+
         return ClassificationResult(
             signal_type=signal_type,
             modulation=modulation,
-            confidence=features.get("confidence", 0.5),
+            confidence=confidence,
             bandwidth_hz=bandwidth,
             center_offset_hz=features.get("center_offset", 0.0),
             snr_db=features.get("snr_db", 0.0),
             features=features,
         )
+
+    def _compute_confidence(
+        self,
+        signal_type: SignalType,
+        modulation: Optional[ModulationType],
+        features: Dict[str, Any],
+    ) -> float:
+        """Estimate a classification confidence in [0, 1].
+
+        This is a heuristic, not a calibrated probability: it grows with SNR
+        and with how specific the result is (a concrete modulation is more
+        trustworthy than a bare DIGITAL/ANALOG label, which beats UNKNOWN).
+        For NOISE it reports confidence that the input *is* noise — a flat
+        spectrum with low SNR. The previous code returned a constant 0.5 for
+        every input.
+        """
+        snr = float(features.get("snr_db", 0.0))
+        # 3 dB -> 0, 30 dB -> 1.
+        snr_quality = float(np.clip((snr - 3.0) / 27.0, 0.0, 1.0))
+        flatness = float(np.clip(features.get("spectral_flatness", 1.0), 0.0, 1.0))
+
+        if signal_type == SignalType.NOISE:
+            return float(np.clip(0.5 * flatness + 0.5 * (1.0 - snr_quality), 0.0, 1.0))
+
+        if modulation is not None:
+            decisiveness = 1.0
+        elif signal_type in (
+            SignalType.DIGITAL,
+            SignalType.ANALOG,
+            SignalType.PULSED,
+        ):
+            decisiveness = 0.6
+        else:  # UNKNOWN
+            decisiveness = 0.3
+
+        return float(np.clip(snr_quality * decisiveness, 0.0, 1.0))
 
     def _extract_features(self, samples: np.ndarray) -> Dict[str, Any]:
         """Extract statistical features from samples."""

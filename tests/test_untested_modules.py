@@ -190,6 +190,33 @@ class TestSignalClassifier:
         result = clf.classify(tone)
         assert isinstance(result, ClassificationResult)
 
+    def test_confidence_is_not_constant_and_tracks_snr(self):
+        """Confidence must reflect the input, not be a hardcoded 0.5.
+
+        Regression: classify() returned a constant 0.5 confidence for every
+        signal because the value was never computed.
+        """
+        clf = SignalClassifier(self.SAMPLE_RATE)
+        rng = np.random.default_rng(0)
+        n = 8192
+        t = np.arange(n) / self.SAMPLE_RATE
+        strong = np.exp(
+            1j * (2 * np.pi * 1e5 * t + 5 * np.sin(2 * np.pi * 1e3 * t))
+        ).astype(np.complex64)
+        weak_noise = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(
+            np.complex64
+        ) * 0.1
+
+        strong_conf = clf.classify(strong).confidence
+        noise_conf = clf.classify(weak_noise).confidence
+
+        assert 0.0 <= strong_conf <= 1.0
+        assert 0.0 <= noise_conf <= 1.0
+        # A high-SNR signal is classified more confidently than faint noise,
+        # and at least one of them differs from the old constant 0.5.
+        assert strong_conf > noise_conf
+        assert strong_conf != 0.5 or noise_conf != 0.5
+
 
 # ---------------------------------------------------------------------------
 # FrequencyLocker

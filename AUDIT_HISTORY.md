@@ -229,7 +229,14 @@ this pass:
   one hit at the true peak frequency. FrequencyLocker mapped bins with the
   unshifted-FFT convention while the spectra are fftshifted, mirroring the
   detected frequency. SignalClassifier reported a constant 0.5 confidence
-  because it was never computed. All fixed with regression tests.
+  because it was never computed. The Resampler silently stayed 1:1 for ratios
+  its hand-rolled search could not represent (now uses
+  `Fraction.limit_denominator` and warns when a rate is unrepresentable). The
+  block AGC/FastAGC applied the per-sample attack/decay coefficient once per
+  block, stretching a 1 ms attack to hundreds of ms (now scaled to the block).
+  AFC restarted its correction-tone phase every block, breaking phase
+  continuity across blocks (now driven from a running NCO phase). All fixed
+  with regression tests.
 - **Robustness (medium).** `SampleBuffer.read()/peek()` bounds-checking;
   atomic `SDRConfig.save()`; side-effect-free default-config-path getter;
   the packet-highlighter KeyError crash and its flaky (unseeded) test.
@@ -250,11 +257,14 @@ are candidates for the next pass:
 | Coherent MSK demod returns ~0.5 BER on a clean signal | `dsp/demodulators.py` | Wrong carrier-phase model in `track_carrier`. |
 | SignalClassifier still mislabels some modulation *types* | `dsp/classifiers.py` | Confidence is now computed (fixed); the type-decision heuristics still need tuning. |
 | LMS/NLMS "noise reduction" self-predicts and cancels the signal | `dsp/filters.py` | Needs a genuine noise reference. |
-| AGC/FastAGC apply per-block attack; Resampler falls back to pass-through when the ratio needs a denominator > 1000 | `dsp/filters.py` | Attack-time and rational-resampling limits. |
-| AFC PI gains oscillate and the NCO phase resets per block | `dsp/afc.py` | Loop tuning + phase continuity. |
 
-The scanner hit dedup/frequency and the FrequencyLocker fftshift mismatch,
-listed here in an earlier revision, have since been fixed (see §8.1).
+Fixed since an earlier revision of this list (now in §8.1): the scanner hit
+dedup/frequency, the FrequencyLocker fftshift mismatch, the SignalClassifier
+constant-0.5 confidence, the Resampler silent 1:1 fallback, the per-block AGC
+attack-time stretch, and the AFC per-block NCO phase reset. The AFC PI loop
+gains, also listed earlier, were checked with a closed-loop simulation and
+converge cleanly with no oscillation (the reported oscillation was an
+open-loop windup artifact), so they were left unchanged.
 
 ### 8.3 Not yet re-audited
 

@@ -240,6 +240,27 @@ class TestFrequencyLocker:
         expected = self.SAMPLE_RATE / fft_size
         assert abs(locker._freq_resolution - expected) < 0.01
 
+    @pytest.mark.parametrize("offset_hz", [+300e3, -300e3, 0.0, +900e3, -700e3])
+    def test_detected_frequency_matches_fftshifted_bin(self, offset_hz):
+        """A tone in an fftshifted spectrum is reported at its true frequency.
+
+        Regression: the bin-to-frequency mapping assumed an unshifted FFT, so a
+        tone at center+300 kHz was reported at center-900 kHz (mirrored). The
+        spectrum from SpectrumAnalyzer is fftshifted (bin N/2 == centre).
+        """
+        n = self.FFT_SIZE
+        fpb = self.SAMPLE_RATE / n
+        center = 100e6
+        locker = FrequencyLocker(self.SAMPLE_RATE, n)
+        locker._noise_floor_db = -90.0
+        b = int(round(n / 2 + offset_hz / fpb))
+        spectrum = np.full(n, -90.0)
+        spectrum[b] = -20.0
+        signals = locker._detect_signals(spectrum, center)
+        assert signals, "signal above threshold should be detected"
+        detected_offset = signals[0].frequency_hz - center
+        assert abs(detected_offset - offset_hz) <= fpb
+
 
 # ---------------------------------------------------------------------------
 # FrequencyScanner

@@ -240,7 +240,12 @@ this pass:
   input and desired output, so it predicted the sample from itself and
   cancelled the whole signal (output ~0); a decorrelation delay makes it a
   proper adaptive line enhancer that keeps a narrowband tone and suppresses
-  broadband noise. All fixed with regression tests.
+  broadband noise. The MSK demodulator's "coherent" matched-filter path had no
+  carrier or symbol-timing recovery, so its bit decisions were effectively
+  random (~0.5 BER on a clean signal); since MSK is CPFSK with modulation
+  index 0.5, bit and soft-bit decisions now always come from the FM
+  discriminator, and the `coherent` flag defaults to False. All fixed with
+  regression tests.
 - **Robustness (medium).** `SampleBuffer.read()/peek()` bounds-checking;
   atomic `SDRConfig.save()`; side-effect-free default-config-path getter;
   the packet-highlighter KeyError crash and its flaky (unseeded) test.
@@ -258,16 +263,16 @@ are candidates for the next pass:
 
 | Item | File | Notes |
 |---|---|---|
-| Coherent MSK demod returns ~0.5 BER on a clean signal | `dsp/demodulators.py` | Wrong carrier-phase model in `track_carrier`. |
 | SignalClassifier still mislabels some modulation *types* | `dsp/classifiers.py` | Confidence is now computed (fixed); the type-decision heuristics still need tuning. |
 
 Fixed since an earlier revision of this list (now in §8.1): the scanner hit
 dedup/frequency, the FrequencyLocker fftshift mismatch, the SignalClassifier
 constant-0.5 confidence, the Resampler silent 1:1 fallback, the per-block AGC
-attack-time stretch, and the AFC per-block NCO phase reset. The AFC PI loop
-gains, also listed earlier, were checked with a closed-loop simulation and
-converge cleanly with no oscillation (the reported oscillation was an
-open-loop windup artifact), so they were left unchanged.
+attack-time stretch, the AFC per-block NCO phase reset, and the coherent MSK
+demodulator's ~0.5 BER. The AFC PI loop gains, also listed earlier, were
+checked with a closed-loop simulation and converge cleanly with no oscillation
+(the reported oscillation was an open-loop windup artifact), so they were left
+unchanged.
 
 ### 8.3 Not yet re-audited
 

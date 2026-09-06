@@ -210,6 +210,88 @@ class TestPOCSAGDecoder:
         messages = decoder.decode(samples)
         assert messages == []
 
+    @staticmethod
+    def _encode_codeword(flag_bit, data_20):
+        """BCH(31,21)-encode a codeword the way the decoder reads it.
+
+        Layout of the returned 32-bit word: bit31 = flag, bits30..11 = the
+        20-bit payload, bits10..1 = BCH check, bit0 = even parity.
+        """
+        msg = (flag_bit << 20) | (data_20 & 0xFFFFF)
+        reg = msg << 10
+        for i in range(30, 9, -1):
+            if reg & (1 << i):
+                reg ^= 0x769 << (i - 10)
+        cw31 = (msg << 10) | (reg & 0x3FF)
+        return (cw31 << 1) | (bin(cw31).count("1") & 1)
+
+    def _batch_bits(self, words):
+        bits = []
+        for word in words:
+            bits.extend(int_to_bits(word, 32))
+        return bits
+
+    def test_address_is_full_ric_with_frame_bits(self):
+        """The decoded address is the 18-bit field shifted up with the frame.
+
+        Regression: the old mask 0x1FFFF8 zeroed the low 3 bits of the field
+        without shifting, and the frame number was never folded in.
+        """
+        decoder = self._make_decoder()
+        field = 0xAAAA  # 18-bit address field
+        frame = 5
+        idle = POCSAGDecoder.IDLE_WORD
+        words = [idle] * 16
+        words[2 * frame] = self._encode_codeword(0, (field << 2) | 0)  # function 0
+        words[2 * frame + 1] = self._encode_codeword(1, 0x00001)  # a message word
+        messages = decoder._process_batch(self._batch_bits(words))
+        assert len(messages) == 1
+        assert messages[0].address == (field << 3) | frame
+
+    def test_numeric_page_uses_numeric_decoder(self):
+        """Function 0 selects the numeric decoder, not alphanumeric.
+
+        Regression: _process_batch always called _decode_alpha and hardcoded
+        message_type='alpha', so numeric pages decoded as ASCII garbage and
+        _decode_numeric was dead code.
+        """
+        decoder = self._make_decoder()
+        frame = 0
+        idle = POCSAGDecoder.IDLE_WORD
+        # Numeric payload: digits 1,2,3,4,5 as 4-bit symbols, MSB first.
+        data_20 = (1 << 16) | (2 << 12) | (3 << 8) | (4 << 4) | 5
+        words = [idle] * 16
+        words[2 * frame] = self._encode_codeword(0, (0x100 << 2) | 0)  # function 0
+        words[2 * frame + 1] = self._encode_codeword(1, data_20)
+        messages = decoder._process_batch(self._batch_bits(words))
+        assert len(messages) == 1
+        assert messages[0].function == 0
+        assert messages[0].message_type == "numeric"
+        assert messages[0].content == "12345"
+
+    def test_alpha_page_uses_alpha_decoder(self):
+        """A non-zero function selects the alphanumeric decoder."""
+        decoder = self._make_decoder()
+        frame = 0
+        idle = POCSAGDecoder.IDLE_WORD
+        # "Hi": 7-bit characters, LSB first per _decode_alpha, packed MSB-first.
+        alpha_bits = []
+        for char in "Hi":
+            for j in range(7):
+                alpha_bits.append((ord(char) >> j) & 1)
+        alpha_bits += [0] * (20 - len(alpha_bits))
+        data_20 = 0
+        for bit in alpha_bits[:20]:
+            data_20 = (data_20 << 1) | bit
+        words = [idle] * 16
+        words[2 * frame] = self._encode_codeword(0, (0x100 << 2) | 3)  # function 3
+        words[2 * frame + 1] = self._encode_codeword(1, data_20)
+        messages = decoder._process_batch(self._batch_bits(words))
+        assert len(messages) == 1
+        assert messages[0].function == 3
+        assert messages[0].message_type == "alpha"
+        assert messages[0].content == "Hi"
+
     def test_noise_rejection(self):
         """Random noise should not produce false POCSAG decodes."""
         rng = np.random.default_rng(42)

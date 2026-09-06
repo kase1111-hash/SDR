@@ -290,6 +290,36 @@ class POCSAGDecoder(ProtocolDecoder):
                 break
         return result
 
+    def _build_message(
+        self,
+        batch: List[int],
+        address: int,
+        function: int,
+        message_bits: List[int],
+    ) -> POCSAGMessage:
+        """Assemble a POCSAGMessage, decoding the payload per the function code.
+
+        Function 0 selects a numeric page (4-bit BCD-style symbols); the other
+        function codes select an alphanumeric page (7-bit characters).
+        """
+        if function == 0:
+            content = self._decode_numeric(message_bits)
+            message_type = "numeric"
+        else:
+            content = self._decode_alpha(message_bits)
+            message_type = "alpha"
+        return POCSAGMessage(
+            protocol=ProtocolType.POCSAG,
+            timestamp=self._timestamp,
+            raw_bits=bytes(batch),
+            valid=True,
+            address=address,
+            function=function,
+            message_type=message_type,
+            content=content,
+            baud_rate=self._baud_rate,
+        )
+
     def _process_batch(self, batch: List[int]) -> List[POCSAGMessage]:
         """Process a complete batch (16 codewords after sync)."""
         if len(batch) < 512:  # 16 words * 32 bits
@@ -313,19 +343,14 @@ class POCSAGDecoder(ProtocolDecoder):
                 if word == self.IDLE_WORD:
                     if message_bits and current_address is not None:
                         # End of message
-                        content = self._decode_alpha(message_bits)
-                        msg = POCSAGMessage(
-                            protocol=ProtocolType.POCSAG,
-                            timestamp=self._timestamp,
-                            raw_bits=bytes(batch),
-                            valid=True,
-                            address=current_address,
-                            function=current_function or 0,
-                            message_type="alpha",
-                            content=content,
-                            baud_rate=self._baud_rate,
+                        messages.append(
+                            self._build_message(
+                                batch,
+                                current_address,
+                                current_function or 0,
+                                message_bits,
+                            )
                         )
-                        messages.append(msg)
                         message_bits = []
                         current_address = None
                     continue
@@ -340,23 +365,22 @@ class POCSAGDecoder(ProtocolDecoder):
                     # Address word
                     if message_bits and current_address is not None:
                         # Save previous message
-                        content = self._decode_alpha(message_bits)
-                        msg = POCSAGMessage(
-                            protocol=ProtocolType.POCSAG,
-                            timestamp=self._timestamp,
-                            raw_bits=bytes(batch),
-                            valid=True,
-                            address=current_address,
-                            function=current_function or 0,
-                            message_type="alpha",
-                            content=content,
-                            baud_rate=self._baud_rate,
+                        messages.append(
+                            self._build_message(
+                                batch,
+                                current_address,
+                                current_function or 0,
+                                message_bits,
+                            )
                         )
-                        messages.append(msg)
                         message_bits = []
 
-                    # Extract address (18 bits) and function (2 bits)
-                    current_address = ((corrected >> 13) & 0x1FFFF8) | frame
+                    # Extract the 18-bit address field (bits 30..13) and the
+                    # 2-bit function code (bits 12..11). The full 21-bit
+                    # receiver address is the field shifted up by 3 with the
+                    # frame number (0-7) supplying the low 3 bits.
+                    address_field = (corrected >> 13) & 0x3FFFF
+                    current_address = (address_field << 3) | frame
                     current_function = (corrected >> 11) & 0x3
 
                 else:
@@ -366,19 +390,11 @@ class POCSAGDecoder(ProtocolDecoder):
 
         # Handle any remaining message
         if message_bits and current_address is not None:
-            content = self._decode_alpha(message_bits)
-            msg = POCSAGMessage(
-                protocol=ProtocolType.POCSAG,
-                timestamp=self._timestamp,
-                raw_bits=bytes(batch),
-                valid=True,
-                address=current_address,
-                function=current_function or 0,
-                message_type="alpha",
-                content=content,
-                baud_rate=self._baud_rate,
+            messages.append(
+                self._build_message(
+                    batch, current_address, current_function or 0, message_bits
+                )
             )
-            messages.append(msg)
 
         return messages
 

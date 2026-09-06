@@ -175,10 +175,13 @@ class AdaptiveBeamformer:
         min_len = min(lengths)
         data = np.zeros((self._num_elements, min_len), dtype=np.complex128)
 
-        for elem in self._config.enabled_elements:
+        # Fill by row position (matching the steering-vector manifold), not by
+        # global element index, so a disabled or non-contiguous element does
+        # not misplace signals onto the wrong manifold rows.
+        for row, elem in enumerate(self._config.enabled_elements):
             idx = elem.index
-            if idx in signals and idx < self._num_elements:
-                data[idx, :] = signals[idx][:min_len]
+            if idx in signals and row < self._num_elements:
+                data[row, :] = signals[idx][:min_len]
 
         # Block-based covariance estimation
         n_blocks = max(1, min_len // block_size)
@@ -290,10 +293,13 @@ class AdaptiveBeamformer:
         min_len = min(lengths)
         data = np.zeros((self._num_elements, min_len), dtype=np.complex128)
 
-        for elem in self._config.enabled_elements:
+        # Fill by row position (matching the steering-vector manifold), not by
+        # global element index, so a disabled or non-contiguous element does
+        # not misplace signals onto the wrong manifold rows.
+        for row, elem in enumerate(self._config.enabled_elements):
             idx = elem.index
-            if idx in signals and idx < self._num_elements:
-                data[idx, :] = signals[idx][:min_len]
+            if idx in signals and row < self._num_elements:
+                data[row, :] = signals[idx][:min_len]
 
         # Apply weights
         output = weights.conj() @ data
@@ -461,10 +467,13 @@ class AdaptiveBeamformer:
         min_len = min(lengths)
         data = np.zeros((self._num_elements, min_len), dtype=np.complex128)
 
-        for elem in self._config.enabled_elements:
+        # Fill by row position (matching the steering-vector manifold), not by
+        # global element index, so a disabled or non-contiguous element does
+        # not misplace signals onto the wrong manifold rows.
+        for row, elem in enumerate(self._config.enabled_elements):
             idx = elem.index
-            if idx in signals and idx < self._num_elements:
-                data[idx, :] = signals[idx][:min_len]
+            if idx in signals and row < self._num_elements:
+                data[row, :] = signals[idx][:min_len]
 
         output = weights.conj() @ data
         beam_power = 10 * np.log10(np.mean(np.abs(output) ** 2) + 1e-20)
@@ -512,10 +521,13 @@ class AdaptiveBeamformer:
         min_len = min(lengths)
         data = np.zeros((self._num_elements, min_len), dtype=np.complex128)
 
-        for elem in self._config.enabled_elements:
+        # Fill by row position (matching the steering-vector manifold), not by
+        # global element index, so a disabled or non-contiguous element does
+        # not misplace signals onto the wrong manifold rows.
+        for row, elem in enumerate(self._config.enabled_elements):
             idx = elem.index
-            if idx in signals and idx < self._num_elements:
-                data[idx, :] = signals[idx][:min_len]
+            if idx in signals and row < self._num_elements:
+                data[row, :] = signals[idx][:min_len]
 
         # Quiescent weight vector (conventional beamformer toward desired)
         w_q = self._compute_steering_vector(desired_azimuth)

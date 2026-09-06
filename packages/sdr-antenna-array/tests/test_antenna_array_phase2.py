@@ -558,6 +558,24 @@ class TestBeamscanDoA:
         assert len(azimuths) > 0
         assert len(spectrum) == len(azimuths)
 
+    def test_estimate_with_disabled_element(self):
+        """DoA stays correct when an element is disabled (non-contiguous indices).
+
+        Regression: signals were placed into the data matrix by global element
+        index while the steering-vector manifold used enabled elements in row
+        order, so disabling element 1 scrambled the manifold (a 20 deg source
+        was estimated near -26 deg) and dropped the highest-index element.
+        """
+        config = create_linear_4_element(frequency=433e6)
+        config.elements[1].enabled = False  # indices become [0, 2, 3]
+
+        doa = BeamscanDoA(config, azimuth_resolution=2.0)
+        signal_azimuth = np.radians(20)
+        signals = generate_array_signals(config, signal_azimuth, snr_db=30)
+
+        result = doa.estimate(signals)
+        assert result.azimuth == pytest.approx(signal_azimuth, abs=np.radians(10))
+
 
 class TestMUSICDoA:
     """Test MUSICDoA class."""

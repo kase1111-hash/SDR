@@ -327,3 +327,34 @@ class TestEdgeCases:
 
         result = buffer.read(10, timeout=0)
         assert result.dtype == np.complex64
+
+
+class TestReadPeekValidation:
+    """A read/peek request larger than capacity used to block forever, and a
+    negative count silently corrupted the ring buffer. Both now raise."""
+
+    def test_read_over_capacity_raises(self):
+        buf = SampleBuffer(capacity=100)
+        with pytest.raises(ValueError):
+            buf.read(200, timeout=0)
+
+    def test_read_negative_raises(self):
+        buf = SampleBuffer(capacity=100)
+        with pytest.raises(ValueError):
+            buf.read(-5, timeout=0)
+
+    def test_peek_over_capacity_raises(self):
+        buf = SampleBuffer(capacity=100)
+        with pytest.raises(ValueError):
+            buf.peek(200)
+
+    def test_peek_negative_raises(self):
+        buf = SampleBuffer(capacity=100)
+        with pytest.raises(ValueError):
+            buf.peek(-1)
+
+    def test_peek_zero_returns_empty(self):
+        buf = SampleBuffer(capacity=100)
+        result = buf.peek(0)
+        assert result is not None
+        assert len(result) == 0

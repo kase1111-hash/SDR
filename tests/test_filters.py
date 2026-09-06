@@ -4,12 +4,61 @@ import numpy as np
 import pytest
 
 from sdr_module.dsp.filters import (
+    AGC,
+    AGCConfig,
+    AGCMode,
+    FastAGC,
     FilterBank,
     FilterSpec,
     FilterType,
     FIRFilter,
     Resampler,
 )
+
+
+class TestAGCBlockTiming:
+    """AGC.process_block / FastAGC.process applied the per-sample attack/decay
+    coefficient once per block, stretching the attack time by the block length
+    (a 1 ms attack took hundreds of ms). The coefficient is now scaled to the
+    block, so settle time no longer grows with the block count."""
+
+    FS = 48000
+
+    def _blocks_to_settle(self, gains, tol=0.2):
+        final = gains[-1]
+        span = abs(gains[0] - final)
+        if span == 0:
+            return 0
+        for i, g in enumerate(gains):
+            if abs(g - final) <= tol * span:
+                return i + 1
+        return len(gains)
+
+    @pytest.mark.parametrize("block", [512, 2048, 8192])
+    def test_block_agc_settles_within_a_few_blocks(self, block):
+        cfg = AGCConfig(
+            mode=AGCMode.RMS, attack_time=0.001, decay_time=0.1, target_level=0.5
+        )
+        agc = AGC(self.FS, cfg)
+        loud = np.full(self.FS, 1.0, dtype=np.float32)
+        gains = []
+        for i in range(0, len(loud), block):
+            agc.process_block(loud[i : i + block])
+            gains.append(agc._gain)
+        # A 1 ms attack is far shorter than any of these block durations, so
+        # the gain should settle within a couple of blocks regardless of size.
+        # (Before the fix this took ~14 blocks at N=2048.)
+        assert self._blocks_to_settle(np.array(gains)) <= 3
+
+    @pytest.mark.parametrize("block", [512, 4096])
+    def test_fast_agc_settles_within_a_few_blocks(self, block):
+        agc = FastAGC(self.FS, target_level=0.5, attack_time=0.001, decay_time=0.1)
+        loud = np.full(self.FS, 1.0, dtype=np.float32)
+        gains = []
+        for i in range(0, len(loud), block):
+            agc.process(loud[i : i + block])
+            gains.append(agc.current_gain)
+        assert self._blocks_to_settle(np.array(gains)) <= 3
 
 
 class TestResampler:

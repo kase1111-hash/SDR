@@ -1211,19 +1211,28 @@ class AGC:
         else:
             block_level = np.mean(np.abs(samples))
 
+        # The attack/decay coefficients are per-sample one-pole constants.
+        # Applying them once per block would stretch the attack/decay time by
+        # the block length (a 1 ms attack became seconds at large block sizes).
+        # Scale them to a single one-pole step over the whole block:
+        # 1 - (1 - alpha)**n is the exact decay of n per-sample updates.
+        n = len(samples)
+        attack_b = 1.0 - (1.0 - self._attack_coeff) ** n
+        decay_b = 1.0 - (1.0 - self._decay_coeff) ** n
+
         # Smooth level tracking
         if block_level > self._level:
-            self._level += self._attack_coeff * (block_level - self._level)
+            self._level += attack_b * (block_level - self._level)
         else:
-            self._level += self._decay_coeff * (block_level - self._level)
+            self._level += decay_b * (block_level - self._level)
 
         # Compute and apply gain
         target_gain = self._compute_gain(self._level)
 
         if target_gain < self._gain:
-            self._gain += self._attack_coeff * (target_gain - self._gain)
+            self._gain += attack_b * (target_gain - self._gain)
         else:
-            self._gain += self._decay_coeff * (target_gain - self._gain)
+            self._gain += decay_b * (target_gain - self._gain)
 
         return samples * self._gain
 
@@ -1362,11 +1371,18 @@ class FastAGC:
         # Block envelope (RMS-like)
         block_env = np.sqrt(np.mean(magnitudes**2))
 
+        # Scale the per-sample attack/decay coefficients to one one-pole step
+        # over the whole block, so the time constants do not depend on the
+        # block size (see AGC.process_block).
+        n = len(samples)
+        attack_b = 1.0 - (1.0 - self._attack) ** n
+        decay_b = 1.0 - (1.0 - self._decay) ** n
+
         # Update envelope with attack/decay
         if block_env > self._envelope:
-            self._envelope += self._attack * (block_env - self._envelope)
+            self._envelope += attack_b * (block_env - self._envelope)
         else:
-            self._envelope += self._decay * (block_env - self._envelope)
+            self._envelope += decay_b * (block_env - self._envelope)
 
         # Compute gain
         if self._envelope > 1e-10:
@@ -1377,9 +1393,9 @@ class FastAGC:
 
         # Smooth gain
         if target_gain < self._gain:
-            self._gain += self._attack * (target_gain - self._gain)
+            self._gain += attack_b * (target_gain - self._gain)
         else:
-            self._gain += self._decay * (target_gain - self._gain)
+            self._gain += decay_b * (target_gain - self._gain)
 
         return samples * self._gain
 

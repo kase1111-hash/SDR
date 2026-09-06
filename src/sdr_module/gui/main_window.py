@@ -7,6 +7,7 @@ Provides the primary window with all panels and controls.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 import numpy as np
 
@@ -132,6 +133,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._demo_mode = demo_mode
         self._radio_tuner = None  # Pop-out radio tuner window
         self._squelch_db = -80.0  # applied to spectrum gating
+        # Cached analysis window for the spectrum display (built lazily to
+        # match the sample-block length).
+        self._spectrum_window: Optional[np.ndarray] = None
+        self._spectrum_window_gain = 1.0
         self._agc_enabled = False
         self._recording_bytes = 0  # for free-space display
         self._theme = "dark"
@@ -848,9 +853,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if samples is None:
                 return
 
-        # Compute spectrum
-        spectrum = np.fft.fftshift(np.fft.fft(samples))
-        power = 20 * np.log10(np.abs(spectrum) + 1e-10)
+        # Compute spectrum (windowed, referenced to dBFS)
+        power = self._power_spectrum_dbfs(samples)
 
         # Update spectrum widget
         self._spectrum.update_spectrum(power)
@@ -871,6 +875,30 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._samples_buffer.append(samples)
             # complex64 = 8 bytes/sample
             self._recording_bytes += len(samples) * 8
+
+    def _power_spectrum_dbfs(self, samples: np.ndarray) -> np.ndarray:
+        """Windowed power spectrum in dBFS (full-scale sinusoid -> 0 dB).
+
+        A raw ``20*log10(|FFT|)`` of an N-point block scales with N (an N=2048
+        FFT of a full-scale tone peaks near +66 dB), so every bin saturated the
+        top of the (-120, 0) dB display and pinned the -80 dB squelch open.
+
+        A Hann window suppresses spectral leakage, and dividing the magnitude by
+        the window's coherent gain (the sum of its samples) references the
+        result to dBFS: a full-scale complex sinusoid peaks at 0 dB and real
+        captures land in the display/squelch range as intended.
+        """
+        n = len(samples)
+        if n == 0:
+            return np.empty(0, dtype=np.float32)
+        if self._spectrum_window is None or self._spectrum_window.shape[0] != n:
+            # Periodic Hann (the form used for spectral analysis).
+            self._spectrum_window = np.hanning(n + 1)[:-1].astype(np.float64)
+            self._spectrum_window_gain = float(np.sum(self._spectrum_window))
+        windowed = samples * self._spectrum_window
+        spectrum = np.fft.fftshift(np.fft.fft(windowed))
+        magnitude = np.abs(spectrum) / max(self._spectrum_window_gain, 1e-12)
+        return (20.0 * np.log10(magnitude + 1e-12)).astype(np.float32)
 
     def _demodulate_and_play(self, samples: np.ndarray) -> None:
         """Demodulate samples to audio and push to the output sink."""

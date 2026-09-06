@@ -513,6 +513,49 @@ class TestGUIDataProcessing(unittest.TestCase):
         self.assertEqual(len(widget._history), 1)
 
 
+class TestSpectrumDbfsNormalization(unittest.TestCase):
+    """The display FFT must be referenced to dBFS, not raw 20*log10(|FFT|).
+
+    Regression for the unnormalized spectrum that made a full-scale tone read
+    ~+66 dB, saturating the (-120, 0) dB display and pinning the -80 dB squelch
+    permanently open.
+    """
+
+    def setUp(self):
+        require_pyqt6(self)
+        from sdr_module.gui.main_window import SDRMainWindow
+
+        # Exercise just the pure DSP helper without building the whole window.
+        self.win = SDRMainWindow.__new__(SDRMainWindow)
+        self.win._spectrum_window = None
+        self.win._spectrum_window_gain = 1.0
+
+    def _tone(self, n=2048, k=200, amplitude=1.0):
+        t = np.arange(n)
+        return (amplitude * np.exp(2j * np.pi * k / n * t)).astype(np.complex64)
+
+    def test_full_scale_tone_reads_zero_dbfs(self):
+        peak = float(self.win._power_spectrum_dbfs(self._tone()).max())
+        self.assertAlmostEqual(peak, 0.0, delta=0.5)
+
+    def test_half_scale_tone_reads_minus_six_db(self):
+        peak = float(self.win._power_spectrum_dbfs(self._tone(amplitude=0.5)).max())
+        self.assertAlmostEqual(peak, -6.02, delta=0.5)
+
+    def test_noise_floor_well_below_full_scale(self):
+        rng = np.random.default_rng(0)
+        n = 2048
+        noise = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(
+            np.complex64
+        ) * 0.1
+        power = self.win._power_spectrum_dbfs(noise)
+        self.assertLess(float(power.max()), -10.0)
+
+    def test_empty_input_returns_empty(self):
+        out = self.win._power_spectrum_dbfs(np.array([], dtype=np.complex64))
+        self.assertEqual(out.shape, (0,))
+
+
 class TestGUISignalEmission(unittest.TestCase):
     """Test that GUI widgets emit signals correctly."""
 

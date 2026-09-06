@@ -235,8 +235,12 @@ this pass:
   block AGC/FastAGC applied the per-sample attack/decay coefficient once per
   block, stretching a 1 ms attack to hundreds of ms (now scaled to the block).
   AFC restarted its correction-tone phase every block, breaking phase
-  continuity across blocks (now driven from a running NCO phase). All fixed
-  with regression tests.
+  continuity across blocks (now driven from a running NCO phase). The
+  single-input LMS/NLMS noise reducer used the current sample as both filter
+  input and desired output, so it predicted the sample from itself and
+  cancelled the whole signal (output ~0); a decorrelation delay makes it a
+  proper adaptive line enhancer that keeps a narrowband tone and suppresses
+  broadband noise. All fixed with regression tests.
 - **Robustness (medium).** `SampleBuffer.read()/peek()` bounds-checking;
   atomic `SDRConfig.save()`; side-effect-free default-config-path getter;
   the packet-highlighter KeyError crash and its flaky (unseeded) test.
@@ -256,7 +260,6 @@ are candidates for the next pass:
 |---|---|---|
 | Coherent MSK demod returns ~0.5 BER on a clean signal | `dsp/demodulators.py` | Wrong carrier-phase model in `track_carrier`. |
 | SignalClassifier still mislabels some modulation *types* | `dsp/classifiers.py` | Confidence is now computed (fixed); the type-decision heuristics still need tuning. |
-| LMS/NLMS "noise reduction" self-predicts and cancels the signal | `dsp/filters.py` | Needs a genuine noise reference. |
 
 Fixed since an earlier revision of this list (now in §8.1): the scanner hit
 dedup/frequency, the FrequencyLocker fftshift mismatch, the SignalClassifier

@@ -12,8 +12,66 @@ from sdr_module.dsp.filters import (
     FilterSpec,
     FilterType,
     FIRFilter,
+    NoiseReduction,
+    NoiseReductionConfig,
+    NoiseReductionMethod,
     Resampler,
 )
+
+
+class TestAdaptiveLineEnhancer:
+    """Single-input LMS/NLMS used the current sample as both filter input and
+    desired output, so it predicted the sample from itself and cancelled the
+    whole signal (output ~0). With a decorrelation delay it is now an adaptive
+    line enhancer: it keeps a narrowband tone and suppresses broadband noise."""
+
+    FS = 48000
+
+    def _tone_in_noise(self, n=16000):
+        t = np.arange(n) / self.FS
+        rng = np.random.default_rng(0)
+        tone = np.sin(2 * np.pi * 1500 * t)
+        noisy = (tone + 0.5 * rng.standard_normal(n)).astype(np.float64)
+        return tone, noisy
+
+    @staticmethod
+    def _corr(a, b):
+        a = a - a.mean()
+        b = b - b.mean()
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
+
+    def test_lms_does_not_self_cancel(self):
+        tone, noisy = self._tone_in_noise()
+        nr = NoiseReduction(
+            self.FS,
+            NoiseReductionConfig(
+                method=NoiseReductionMethod.LMS,
+                lms_step_size=0.05,
+                lms_filter_length=32,
+            ),
+        )
+        out = nr.process(noisy)
+        # Output retains real energy instead of collapsing to ~0 (the old bug
+        # left out/in power near 0.01).
+        ratio = np.mean(out[len(out) // 2 :] ** 2) / np.mean(
+            noisy[len(noisy) // 2 :] ** 2
+        )
+        assert ratio > 0.1
+
+    def test_nlms_enhances_narrowband_in_noise(self):
+        tone, noisy = self._tone_in_noise()
+        nr = NoiseReduction(
+            self.FS,
+            NoiseReductionConfig(
+                method=NoiseReductionMethod.NLMS,
+                lms_step_size=0.05,
+                lms_filter_length=32,
+            ),
+        )
+        out = nr.process(noisy)
+        h = slice(len(out) // 2, None)  # after the filter has adapted
+        # The enhanced output tracks the clean tone better than the noisy input.
+        assert self._corr(out[h], tone[h]) > self._corr(noisy[h], tone[h])
 
 
 class TestAGCBlockTiming:

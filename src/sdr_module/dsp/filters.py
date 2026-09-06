@@ -2272,35 +2272,49 @@ class NoiseReduction:
 
     def _lms_filter(self, samples: np.ndarray, normalized: bool = False) -> np.ndarray:
         """
-        LMS/NLMS adaptive noise cancellation.
+        Single-input adaptive line enhancer (LMS/NLMS).
 
-        Learns to predict and cancel noise from the signal.
+        Without a separate noise reference, a one-input adaptive filter can
+        only exploit the *self-correlation* of the signal: it predicts each
+        sample from a delayed history and keeps the predictable part. A
+        narrowband signal (a tone/carrier) is predictable and survives; the
+        broadband noise is not and is suppressed. It enhances narrowband
+        signals in broadband noise; it is not a general denoiser, and for a
+        genuine two-input noise canceller use ``process_with_reference``.
+
+        The previous implementation put the current sample at tap 0 of the
+        filter *and* used it as the desired output, so the filter trivially
+        predicted the sample from itself — the tap-0 weight ran to 1, the
+        error went to zero, and the output collapsed to ~0 (it cancelled the
+        whole signal). A one-sample decorrelation delay prevents that, and the
+        output is the prediction (the enhanced narrowband component) rather
+        than the prediction error.
         """
         output = np.zeros_like(samples)
         n = len(samples)
         mu = self._config.lms_step_size
 
         for i in range(n):
-            # Shift buffer
-            self._lms_buffer = np.roll(self._lms_buffer, 1)
-            self._lms_buffer[0] = samples[i]
+            # Predict the current sample from the delayed history (the buffer
+            # holds samples[i-1], samples[i-2], ...): the decorrelation delay
+            # is what stops the filter from predicting the sample from itself.
+            prediction = np.dot(self._lms_weights, self._lms_buffer)
 
-            # Filter output (noise estimate)
-            noise_est = np.dot(self._lms_weights, self._lms_buffer)
+            # Prediction error drives the weight update.
+            error = samples[i] - prediction
 
-            # Error (desired signal)
-            error = samples[i] - noise_est
-
-            # Update weights
             if normalized:
-                # NLMS normalization
                 norm = np.dot(self._lms_buffer, self._lms_buffer) + 1e-10
                 self._lms_weights += (mu / norm) * error * self._lms_buffer
             else:
-                # Standard LMS
                 self._lms_weights += mu * error * self._lms_buffer
 
-            output[i] = error
+            # Keep the predictable (narrowband) component.
+            output[i] = prediction
+
+            # Shift the current sample into the delay line for future steps.
+            self._lms_buffer = np.roll(self._lms_buffer, 1)
+            self._lms_buffer[0] = samples[i]
 
         return output
 

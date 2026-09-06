@@ -159,12 +159,28 @@ class SignalClassifier:
         features["mean_inst_freq"] = np.mean(inst_freq)
         features["std_inst_freq"] = np.std(inst_freq)
 
+        # Amplitude coefficient of variation: ~0 for constant-envelope signals
+        # (FM/FSK/PSK), moderate for noise (Rayleigh ~0.52) and AM, ~1 for OOK.
+        mean_mag = float(np.mean(magnitude))
+        features["amp_cv"] = float(np.std(magnitude) / (mean_mag + 1e-12))
+
+        # Fraction of samples near zero amplitude (on/off keying signature).
+        norm_mag_full = magnitude / (np.max(magnitude) + 1e-12)
+        features["frac_low"] = float(np.mean(norm_mag_full < 0.25))
+
         # Spectral features
         spectrum = np.abs(np.fft.fft(samples))
-        20 * np.log10(spectrum + 1e-10)
+        psd = spectrum**2
 
         features["spectral_flatness"] = self._spectral_flatness(spectrum)
         features["spectral_centroid"] = self._spectral_centroid(spectrum)
+        # Peak-to-median PSD ratio: high when a dominant carrier is present
+        # (AM/FM/OOK-on), low for noise and constant-envelope wideband PSK.
+        features["peak_ratio"] = float(np.max(psd) / (np.median(psd) + 1e-12))
+
+        # Bimodality of the amplitude-weighted instantaneous frequency: high
+        # for 2-FSK (two discrete tones), lower for continuous FM.
+        features["freq_bimodality"] = self._freq_bimodality(samples)
 
         # SNR estimation
         features["snr_db"] = self._estimate_snr(samples)
@@ -174,98 +190,123 @@ class SignalClassifier:
 
         return features
 
+    def _freq_bimodality(self, samples: np.ndarray) -> float:
+        """Bimodality coefficient of the amplitude-weighted instantaneous
+        frequency. Values above ~0.8 indicate two discrete tones (FSK) rather
+        than a continuously varying frequency (FM)."""
+        magnitude = np.abs(samples)
+        if len(samples) < 4:
+            return 0.0
+        inst = np.diff(np.unwrap(np.angle(samples)))
+        weight = (magnitude[1:] / (np.max(magnitude) + 1e-12)) ** 2
+        wsum = float(np.sum(weight)) + 1e-12
+        mu = float(np.sum(inst * weight) / wsum)
+        centered = inst - mu
+        m2 = float(np.sum(weight * centered**2) / wsum)
+        if m2 < 1e-18:
+            return 0.0
+        m3 = float(np.sum(weight * centered**3) / wsum)
+        m4 = float(np.sum(weight * centered**4) / wsum)
+        skew = m3 / (m2**1.5)
+        kurt = m4 / (m2**2)
+        return float((skew * skew + 1.0) / (kurt + 1e-12))
+
     def _detect_signal_type(self, features: Dict[str, Any]) -> SignalType:
-        """Detect high-level signal type from features."""
-        snr = features.get("snr_db", 0)
-        flatness = features.get("spectral_flatness", 1.0)
-        kurtosis = features.get("kurtosis", 3.0)
-        std_phase = features.get("std_phase_diff", 0)
+        """Detect the high-level signal type from features.
 
-        # Noise detection
-        if snr < 3.0 and flatness > 0.8:
-            return SignalType.NOISE
+        The previous version keyed off ``std_phase_diff`` alone, which is
+        backwards for these signals (AM has near-constant phase and read as
+        "digital"; BPSK's pi phase jumps read as "analog"). This uses the
+        amplitude envelope, spectral flatness and carrier strength instead:
 
-        # Pulsed signal detection
+        - constant envelope (``amp_cv`` ~ 0): FM/FSK (narrowband) or PSK
+          (wideband) -> ANALOG for continuous FM, otherwise DIGITAL;
+        - amplitude varies: on/off keying -> DIGITAL, else AM/SSB -> ANALOG;
+        - broadband with no dominant carrier and Rayleigh amplitude -> NOISE.
+        """
+        flatness = float(features.get("spectral_flatness", 1.0))
+        kurtosis = float(features.get("kurtosis", 3.0))
+        amp_cv = float(features.get("amp_cv", 0.0))
+        peak_ratio = float(features.get("peak_ratio", 0.0))
+        frac_low = float(features.get("frac_low", 0.0))
+        bimodality = float(features.get("freq_bimodality", 0.0))
+
+        # Impulsive / pulsed: a very peaky amplitude distribution.
         if kurtosis > 10:
             return SignalType.PULSED
 
-        # Digital vs analog
-        # Digital signals tend to have discrete phase values
-        if std_phase < 0.5:
-            return SignalType.DIGITAL
-        elif std_phase > 1.5:
-            return SignalType.ANALOG
+        # Broadband noise: flat spectrum, no dominant carrier, and an
+        # amplitude spread characteristic of complex Gaussian noise (Rayleigh
+        # envelope has std/mean ~ 0.52), which excludes both constant-envelope
+        # signals (cv ~ 0) and on/off keying (cv ~ 1).
+        if flatness > 0.6 and peak_ratio < 50.0 and 0.3 < amp_cv < 0.8:
+            return SignalType.NOISE
 
-        # Default to unknown
-        return SignalType.UNKNOWN
+        if amp_cv < 0.2:
+            # Constant envelope. Wideband -> phase-shift keying (digital);
+            # narrowband -> frequency modulation, digital (FSK, two discrete
+            # tones) if bimodal, else analog FM.
+            if flatness >= 0.6:
+                return SignalType.DIGITAL
+            return SignalType.DIGITAL if bimodality > 0.8 else SignalType.ANALOG
+
+        # Amplitude varies: on/off keying is digital, continuous AM is analog.
+        if frac_low > 0.2:
+            return SignalType.DIGITAL
+        return SignalType.ANALOG
 
     def _classify_analog(
         self, samples: np.ndarray, features: Dict[str, Any]
     ) -> Optional[ModulationType]:
-        """Classify analog modulation type."""
-        std_mag = features.get("std_magnitude", 0)
-        std_freq = features.get("std_inst_freq", 0)
-        mean_mag = features.get("mean_magnitude", 0)
+        """Classify analog modulation type (reached only for ANALOG signals)."""
+        amp_cv = float(features.get("amp_cv", 0.0))
 
-        # AM: varying amplitude, stable frequency
-        if std_mag / (mean_mag + 1e-10) > 0.3 and std_freq < 1000:
-            return ModulationType.AM
-
-        # FM: stable amplitude, varying frequency
-        if std_mag / (mean_mag + 1e-10) < 0.1 and std_freq > 1000:
+        # Constant envelope analog -> FM.
+        if amp_cv < 0.2:
             return ModulationType.FM
 
-        # SSB: check for asymmetric spectrum
-        spectrum = np.abs(np.fft.fft(samples))
-        n = len(spectrum)
-        lower_power: float = float(np.sum(spectrum[: n // 2] ** 2))
-        upper_power: float = float(np.sum(spectrum[n // 2 :] ** 2))
+        # Amplitude-modulated analog: AM (double sideband + carrier, symmetric)
+        # vs SSB (one sideband). Compare the two halves of the shifted power
+        # spectrum, excluding the central carrier bins.
+        psd = np.fft.fftshift(np.abs(np.fft.fft(samples)) ** 2)
+        n = len(psd)
+        center = n // 2
+        guard = max(1, n // 64)
+        lower_power = float(np.sum(psd[: center - guard]))
+        upper_power = float(np.sum(psd[center + guard :]))
 
-        if upper_power > 2 * lower_power:
+        if upper_power > 3 * lower_power:
             return ModulationType.USB
-        elif lower_power > 2 * upper_power:
+        if lower_power > 3 * upper_power:
             return ModulationType.LSB
-
-        return None
+        return ModulationType.AM
 
     def _classify_digital(
         self, samples: np.ndarray, features: Dict[str, Any]
     ) -> Optional[ModulationType]:
-        """Classify digital modulation type."""
-        # Constellation analysis
-        magnitude = np.abs(samples)
-        phase = np.angle(samples)
+        """Classify digital modulation type (reached only for DIGITAL signals)."""
+        amp_cv = float(features.get("amp_cv", 0.0))
+        flatness = float(features.get("spectral_flatness", 1.0))
 
-        # Normalize magnitude
-        norm_mag = magnitude / (np.max(magnitude) + 1e-10)
-
-        # Check for OOK/ASK: amplitude levels
-        # Use fixed range to handle constant-magnitude signals
-        mag_hist, _ = np.histogram(norm_mag, bins=20, range=(0, 1))
-        n_peaks: int = int(np.sum(mag_hist > len(samples) * 0.05))
-
-        if n_peaks <= 2:
-            # Binary amplitude -> OOK
+        # Amplitude varies -> on/off keying.
+        if amp_cv >= 0.2:
             return ModulationType.OOK
 
-        # Check for FSK: frequency levels
-        phase_diff = np.diff(np.unwrap(phase))
-        freq_hist, _ = np.histogram(phase_diff, bins=20)
-        n_freq_peaks: int = int(np.sum(freq_hist > len(samples) * 0.05))
-
-        if n_freq_peaks == 2:
+        # Constant envelope, narrowband -> frequency-shift keying.
+        if flatness < 0.6:
             return ModulationType.FSK
 
-        # Check for PSK: phase levels
-        phase_normalized = np.mod(phase + np.pi, 2 * np.pi) - np.pi
-        phase_hist, _ = np.histogram(phase_normalized, bins=16)
-        n_phase_peaks: int = int(np.sum(phase_hist > len(samples) * 0.03))
-
-        if n_phase_peaks == 2:
+        # Constant envelope, wideband -> phase-shift keying. Identify the order
+        # with the M-th-power nonlinearity, which is robust to noise: for M-PSK
+        # the M-th power of the unit-magnitude signal collapses onto a single
+        # point, so |mean((x/|x|)^M)| ~ 1. BPSK collapses at M=2, QPSK at M=4.
+        unit = samples / (np.abs(samples) + 1e-12)
+        c2 = float(np.abs(np.mean(unit**2)))
+        c4 = float(np.abs(np.mean(unit**4)))
+        if c2 > 0.5:
             return ModulationType.BPSK
-        elif n_phase_peaks == 4:
+        if c4 > 0.5:
             return ModulationType.QPSK
-
         return None
 
     def _spectral_flatness(self, spectrum: np.ndarray) -> float:

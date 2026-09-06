@@ -18,6 +18,7 @@ from sdr_module.dsp.classifiers import (
     SignalClassifier,
     SignalType,
 )
+from sdr_module.dsp.demodulators import ModulationType
 from sdr_module.dsp.frequency_lock import (
     FrequencyLocker,
     LockState,
@@ -251,6 +252,76 @@ class TestSignalClassifier:
         # and at least one of them differs from the old constant 0.5.
         assert strong_conf > noise_conf
         assert strong_conf != 0.5 or noise_conf != 0.5
+
+
+class TestSignalClassifierModulationTypes:
+    """Correct type + modulation for clean, unambiguous signals.
+
+    Regression: the previous heuristics keyed the analog/digital decision off
+    ``std_phase_diff`` alone, which is backwards for these signals -- AM/FM
+    were labelled "digital", BPSK/QPSK "analog", and noise "analog". Only OOK
+    classified correctly. These lock in the corrected feature-based decisions
+    on clean signals.
+    """
+
+    FS = 100_000.0
+    N = 8192
+
+    def _classify(self, samples):
+        clf = SignalClassifier(self.FS)
+        return clf.classify(samples.astype(np.complex64))
+
+    def _t(self):
+        return np.arange(self.N) / self.FS
+
+    def test_am_is_analog_am(self):
+        s = (1 + 0.6 * np.sin(2 * np.pi * 1000 * self._t())).astype(complex)
+        r = self._classify(s)
+        assert r.signal_type == SignalType.ANALOG
+        assert r.modulation == ModulationType.AM
+
+    def test_fm_is_analog_fm(self):
+        t = self._t()
+        s = np.exp(2j * np.pi * np.cumsum(5000 * np.sin(2 * np.pi * 500 * t)) / self.FS)
+        r = self._classify(s)
+        assert r.signal_type == SignalType.ANALOG
+        assert r.modulation == ModulationType.FM
+
+    def test_bpsk_is_digital_bpsk(self):
+        rng = np.random.default_rng(1)
+        s = np.exp(1j * rng.integers(0, 2, self.N) * np.pi)
+        r = self._classify(s)
+        assert r.signal_type == SignalType.DIGITAL
+        assert r.modulation == ModulationType.BPSK
+
+    def test_qpsk_is_digital_qpsk(self):
+        rng = np.random.default_rng(2)
+        s = np.exp(1j * rng.integers(0, 4, self.N) * (np.pi / 2))
+        r = self._classify(s)
+        assert r.signal_type == SignalType.DIGITAL
+        assert r.modulation == ModulationType.QPSK
+
+    def test_fsk_is_digital_fsk(self):
+        rng = np.random.default_rng(3)
+        bits = rng.integers(0, 2, self.N)
+        freq = np.where(bits > 0, 3000, -3000).astype(float)
+        s = np.exp(2j * np.pi * np.cumsum(freq) / self.FS)
+        r = self._classify(s)
+        assert r.signal_type == SignalType.DIGITAL
+        assert r.modulation == ModulationType.FSK
+
+    def test_ook_is_digital_ook(self):
+        rng = np.random.default_rng(4)
+        s = rng.integers(0, 2, self.N).astype(complex)
+        r = self._classify(s)
+        assert r.signal_type == SignalType.DIGITAL
+        assert r.modulation == ModulationType.OOK
+
+    def test_noise_is_noise(self):
+        rng = np.random.default_rng(5)
+        s = (rng.standard_normal(self.N) + 1j * rng.standard_normal(self.N)) * 0.5
+        r = self._classify(s)
+        assert r.signal_type == SignalType.NOISE
 
 
 # ---------------------------------------------------------------------------

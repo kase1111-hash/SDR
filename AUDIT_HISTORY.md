@@ -200,3 +200,58 @@ Recent additions on top of those audits (see `CHANGELOG.md` `[Unreleased]`):
 | No security tooling in CI (bandit/semgrep/CodeQL) | Low | This file §6. |
 | `setuptools<77` build cap | Low | `pyproject.toml` has a TODO comment; remove when twine supports PEP 639. |
 | NumPy 2.x bump (Dependabot PR #64) | — | Closed pending fresh recreate against post-UX main. |
+
+---
+
+## 8. Production-readiness pass (2026-09)
+
+A 15-dimension production-readiness audit was run with adversarial
+verification of each finding. Rate limits meant only the `core-runtime` and
+`dsp-numerics` dimensions produced fully verified findings; the other 13
+dimensions did not complete and should be re-run. The fixes that landed in
+this pass:
+
+### 8.1 Fixed
+
+- **Hardware drivers (blocker).** RTL-SDR enumeration used pyrtlsdr methods
+  that never existed, so no RTL-SDR was ever detected; the HackRF driver
+  imported a non-existent `hackrf` PyPI package. Both were rewritten against
+  the real libraries (`pyrtlsdr`, `python_hackrf`) with fake-backend tests
+  that lock the library surface in. See `CHANGELOG.md`.
+- **HackRF TX safety (blocker/high).** `write_samples()` returned success
+  without transmitting; `start_tx(None)` radiated an uninitialised buffer;
+  TX samples were wrapped instead of clipped. All fixed, with the TX lockout
+  enforced in every tuning path.
+- **DSP correctness (high).** BPSK sliced on the wrong axis (~0.5 BER); SSB
+  USB and LSB were byte-identical; spectral noise reduction crashed on
+  complex I/Q and dropped samples. All fixed with regression tests.
+- **Robustness (medium).** `SampleBuffer.read()/peek()` bounds-checking;
+  atomic `SDRConfig.save()`; side-effect-free default-config-path getter.
+- **Packaging/CI/docs.** Real CI gates (blocking mypy, headless GUI suite,
+  antenna-array tests, 3.10-3.14 + Windows/macOS, Bandit + pip-audit,
+  CodeQL, wheel smoke test); PEP 639 metadata (the `setuptools<77` cap is
+  gone); `py.typed`; single-sourced version; corrected PyInstaller spec,
+  Windows installer and build scripts; docs realigned to the shipping code.
+
+### 8.2 Remaining known items (verified but not yet fixed)
+
+These `dsp-numerics` findings were verified as real and are documented here
+rather than left implicit. They affect correctness of secondary features and
+are candidates for the next pass:
+
+| Item | File | Notes |
+|---|---|---|
+| Coherent MSK demod returns ~0.5 BER on a clean signal | `dsp/demodulators.py` | Wrong carrier-phase model in `track_carrier`. |
+| SignalClassifier returns wrong types for some inputs; confidence is a constant 0.5 | `dsp/classifiers.py` | Confidence is never computed. |
+| FrequencyLocker assumes unshifted FFT but SpectrumAnalyzer emits fftshifted spectra | `dsp/frequency_lock.py` | "Zero-in" offset is mirrored. |
+| Scanner logs one station once per step with the tuned centre as the hit frequency | `dsp/scanner.py` | Needs peak-bin frequency + hit dedup. |
+| LMS/NLMS "noise reduction" self-predicts and cancels the signal | `dsp/filters.py` | Needs a genuine noise reference. |
+| AGC/FastAGC apply per-block attack; Resampler falls back to pass-through when the ratio needs a denominator > 1000 | `dsp/filters.py` | Attack-time and rational-resampling limits. |
+| AFC PI gains oscillate and the NCO phase resets per block | `dsp/afc.py` | Loop tuning + phase continuity. |
+
+### 8.3 Not yet re-audited
+
+The `recording-io`, `protocol-decoders`, `gui-core`, `gui-widgets`, `cli`,
+`packaging-ci`, `docs-truth`, `security-tx-safety`, `ham-features`,
+`demo-vs-real`, `tests-quality`, `antenna-array` and `ui-viz-utils`
+dimensions did not complete in this pass and should be run before a 1.0.

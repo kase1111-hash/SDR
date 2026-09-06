@@ -4,8 +4,8 @@
 
 SDR Module is a Software Defined Radio framework for dual-SDR operation using RTL-SDR and HackRF One devices. It provides signal analysis, visualization, classification, and protocol decoding capabilities for amateur radio operators and signal analysts.
 
-**Version**: 0.1.0 (Alpha)
-**Python**: 3.9 - 3.13
+**Version**: 0.2.0 (Beta)
+**Python**: 3.10 - 3.14
 **License**: MIT
 
 ## Directory Structure
@@ -13,12 +13,11 @@ SDR Module is a Software Defined Radio framework for dual-SDR operation using RT
 ```
 src/sdr_module/          # Main source code
 ├── core/                # Device management, dual-SDR controller, config
-├── devices/             # Hardware drivers (RTL-SDR, HackRF, MXK2 Keyer)
+├── devices/             # Hardware drivers (RTL-SDR via pyrtlsdr, HackRF via python_hackrf)
 ├── dsp/                 # Digital signal processing (spectrum, demodulators, filters)
 ├── gui/                 # PyQt6 graphical interface
 ├── ham/                 # Optional ham radio features (signal meter, QRP, SSTV, callsign)
 │   └── gui/             # Ham radio GUI widgets (radio tuner, panels)
-├── plugins/             # Plugin system (registry, manager, base classes)
 ├── protocols/           # Protocol encoders/decoders
 ├── ui/                  # Visualization components (waterfall, constellation)
 ├── utils/               # Helper utilities (conversions, I/Q tools)
@@ -28,14 +27,14 @@ packages/
 └── sdr-antenna-array/   # Standalone antenna array package
 
 tests/                   # pytest test suite
-examples/                # Example scripts and sample plugins
+examples/                # Example scripts
 tools/                   # Utility tools
 ```
 
 ## Key Technologies
 
 - **NumPy** - Core numerical computing (required)
-- **pyrtlsdr** / **hackrf** - SDR device drivers (optional)
+- **pyrtlsdr** / **python_hackrf** - SDR device drivers (optional)
 - **scipy** - Advanced signal processing
 - **PyQt6** - GUI framework
 - **pytest** - Testing framework
@@ -78,11 +77,10 @@ sdr-scan --help
 
 ### Architecture Patterns
 
-1. **Abstract Base Classes** - Used for device, demodulator, protocol, and plugin interfaces
+1. **Abstract Base Classes** - Used for device, demodulator, and protocol interfaces
 2. **Dataclasses** - Used for configuration and state objects (often immutable)
 3. **Enums** - Extensive use for type-safe constants (OperationMode, ModulationType, etc.)
 4. **Thread Safety** - RLock used for shared state; thread-safety documented in docstrings
-5. **Plugin System** - Registry pattern for extensibility
 
 ### Documentation
 - Module docstrings describing purpose
@@ -122,9 +120,6 @@ sdr-scan --help
 - `sstv.py` - SSTV image decoder
 - `gui/` - Radio tuner, QRP panel, SSTV panel, signal meter widget
 
-### Plugins (`plugins/`)
-- Plugin types: Protocol, Demodulator, Device, Processor
-- Example plugins in `examples/plugins/`
 
 ## Testing
 
@@ -158,4 +153,3 @@ Operation Modes:
 - Hardware drivers are optional; graceful degradation if missing
 - GUI module may have relaxed mypy rules for PyQt6 compatibility
 - Use demo mode for development without physical SDR devices
-- Plugin system allows extending functionality without modifying core code

@@ -120,8 +120,12 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._colormap_name = "turbo"
         self._colormap = self._build_colormap(self._colormap_name)
 
-        # Image buffer
+        # Image buffer. ``_image_rgb`` is the contiguous uint8 (H, W, 3) array
+        # that ``_image`` (a QImage view) points at; we must keep a reference to
+        # it alive for as long as the QImage exists, since QImage does not copy
+        # the buffer it is constructed from.
         self._image: Optional[QImage] = None
+        self._image_rgb: Optional[np.ndarray] = None
 
         # Highlights
         self._highlights: List[Tuple[int, int, int, int, QColor]] = []
@@ -190,14 +194,14 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         """Handle colormap change."""
         self._colormap_name = name
         self._colormap = self._build_colormap(name)
-        self._rebuild_image()
+        self._render_image()
         self.update()
 
     def _on_range_changed(self, index: int):
         """Handle range change."""
         ranges = [60, 80, 100, 120]
         self._db_range = (-ranges[index], 0)
-        self._rebuild_image()
+        self._render_image()
         self.update()
 
     def _build_colormap(self, name: str) -> np.ndarray:
@@ -246,13 +250,14 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             )
 
         self._history.append(power_db.copy())
-        self._update_image()
+        self._render_image()
         self.update()
 
     def clear(self):
         """Clear the waterfall."""
         self._history.clear()
         self._image = None
+        self._image_rgb = None
         self.update()
 
     def set_center_freq(self, center_freq: float) -> None:
@@ -305,70 +310,54 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._highlights.clear()
         self.update()
 
-    def _update_image(self):
-        """Update the image buffer with new data."""
+    def _render_image(self):
+        """Rebuild the whole image buffer from history, vectorized.
+
+        The waterfall is ``history_size`` rows by ``fft_size`` columns, with the
+        newest line at the bottom. Rendering this per-pixel in Python (a nested
+        ``QImage.pixel``/``setPixel`` scroll over ~1M pixels) took ~0.4 s per
+        line, far above the ~33 ms display cadence, so acquisition froze the UI.
+
+        Instead we map every history line to colormap indices and gather the RGB
+        rows with NumPy in one pass, then wrap the resulting contiguous
+        ``(H, W, 3)`` uint8 array in a QImage. The array is kept alive on
+        ``self._image_rgb`` because QImage references the buffer without copying.
+        """
         if len(self._history) == 0:
+            self._image = None
+            self._image_rgb = None
             return
 
-        # Create image if needed
-        if (
-            self._image is None
-            or self._image.width() != self._fft_size
-            or self._image.height() != self._history_size
-        ):
-            self._image = QImage(
-                self._fft_size, self._history_size, QImage.Format.Format_RGB32
-            )
-            self._image.fill(self._bg_color)
-
-        # Scroll image up
-        if len(self._history) > 1:
-            # Shift existing data up by one line
-            for y in range(self._history_size - 1):
-                for x in range(self._fft_size):
-                    color = self._image.pixel(x, y + 1)
-                    self._image.setPixel(x, y, color)
-
-        # Add new line at bottom
-        line = self._history[-1]
         min_db, max_db = self._db_range
         db_range = max_db - min_db
+        if db_range <= 0:
+            db_range = 1.0
 
-        for x in range(min(len(line), self._fft_size)):
-            # Normalize to 0-255
-            normalized = (line[x] - min_db) / db_range
-            normalized = np.clip(normalized, 0, 1)
-            idx = int(normalized * 255)
+        # Background-filled buffer; history fills the bottom rows.
+        buf = np.empty((self._history_size, self._fft_size, 3), dtype=np.uint8)
+        buf[:, :, 0] = self._bg_color.red()
+        buf[:, :, 1] = self._bg_color.green()
+        buf[:, :, 2] = self._bg_color.blue()
 
-            r, g, b = self._colormap[idx]
-            # Cast to int so the bitshift doesn't overflow numpy uint8
-            argb = (255 << 24) | (int(r) << 16) | (int(g) << 8) | int(b)
-            self._image.setPixel(x, self._history_size - 1, argb)
+        # Stack history into (n, fft_size); add_line guarantees each row is
+        # already fft_size long.
+        lines = np.stack(self._history).astype(np.float32, copy=False)
+        normalized = np.clip((lines - min_db) / db_range, 0.0, 1.0)
+        idx = (normalized * 255.0).astype(np.intp)  # (n, fft_size)
+        rgb = self._colormap[idx]  # (n, fft_size, 3) uint8
 
-    def _rebuild_image(self):
-        """Rebuild entire image from history."""
-        if len(self._history) == 0:
-            return
+        n = rgb.shape[0]
+        buf[self._history_size - n :] = rgb
 
+        # Keep the buffer alive: QImage does not copy it.
+        self._image_rgb = np.ascontiguousarray(buf)
         self._image = QImage(
-            self._fft_size, self._history_size, QImage.Format.Format_RGB32
+            self._image_rgb.data,
+            self._fft_size,
+            self._history_size,
+            3 * self._fft_size,
+            QImage.Format.Format_RGB888,
         )
-        self._image.fill(self._bg_color)
-
-        min_db, max_db = self._db_range
-        db_range = max_db - min_db
-
-        for y, line in enumerate(self._history):
-            for x in range(min(len(line), self._fft_size)):
-                normalized = (line[x] - min_db) / db_range
-                normalized = np.clip(normalized, 0, 1)
-                idx = int(normalized * 255)
-
-                r, g, b = self._colormap[idx]
-                row = self._history_size - len(self._history) + y
-                if 0 <= row < self._history_size:
-                    argb = (255 << 24) | (int(r) << 16) | (int(g) << 8) | int(b)
-                    self._image.setPixel(x, row, argb)
 
     def paintEvent(self, event):
         """Paint the waterfall display."""

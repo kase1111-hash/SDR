@@ -248,6 +248,55 @@ class TestWaterfallWidgetLogic(unittest.TestCase):
             colormap = self.widget._build_colormap(name)
             self.assertEqual(colormap.shape, (256, 3))
 
+    def test_render_newest_line_at_bottom(self):
+        """Newest line renders at the bottom row with the correct colormap color."""
+        from PyQt6.QtGui import QColor
+
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        widget = WaterfallWidget(history_size=10)
+        # A full-scale (max-dB) line maps to the top colormap entry (index 255).
+        widget.add_line(np.zeros(2048, dtype=np.float32))  # 0 dB == max_db
+        image = widget._image
+        self.assertIsNotNone(image)
+        self.assertEqual((image.width(), image.height()), (2048, 10))
+
+        r, g, b = (int(v) for v in widget._colormap[255])
+        bottom = QColor(image.pixel(1024, image.height() - 1))
+        self.assertEqual((bottom.red(), bottom.green(), bottom.blue()), (r, g, b))
+
+        # With only one line of history, the top row is still background.
+        top = QColor(image.pixel(1024, 0))
+        bg = widget._bg_color
+        self.assertEqual(
+            (top.red(), top.green(), top.blue()),
+            (bg.red(), bg.green(), bg.blue()),
+        )
+
+    def test_render_is_vectorized_fast(self):
+        """A full-history repaint must stay well under the ~33 ms frame budget.
+
+        Regression guard for the old per-pixel QImage.pixel/setPixel scroll,
+        which took ~0.4 s per line and froze the UI during acquisition.
+        """
+        import time
+
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        widget = WaterfallWidget(history_size=500)
+        rng = np.random.default_rng(0)
+        line = (rng.standard_normal(2048) * 10 - 40).astype(np.float32)
+        for _ in range(5):  # fill some history so the buffer is non-trivial
+            widget.add_line(line)
+
+        start = time.perf_counter()
+        for _ in range(10):
+            widget.add_line(line)
+        avg = (time.perf_counter() - start) / 10
+        # Generous ceiling (33 ms budget); the fix runs in a few ms, the old
+        # code took hundreds of ms.
+        self.assertLess(avg, 0.033, f"add_line too slow: {avg * 1000:.1f} ms")
+
 
 class TestFrequencyInputLogic(unittest.TestCase):
     """Test FrequencyInput widget logic."""

@@ -7,7 +7,7 @@ Provides the primary window with all panels and controls.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
@@ -141,6 +141,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._recording_bytes = 0  # for free-space display
         self._theme = "dark"
         self._known_device_names: set = set()
+
+        # Live protocol decoder driven by the Decoder panel (None = Auto Detect
+        # / no active decoder). Rebuilt when the panel's protocol changes.
+        self._decoder: Any = None
+        self._decoder_protocol: Any = None
 
         # Persisted settings (frequency, gain, theme, bookmarks live here)
         self._settings = GuiSettings()
@@ -579,6 +584,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # toolbar action (its signals were previously connected to nothing).
         self._control_panel.recording_started.connect(self._on_panel_record_started)
         self._control_panel.recording_stopped.connect(self._on_panel_record_stopped)
+        # The decoder panel's protocol selector drives a live decoder over the
+        # acquired samples (the panel was previously fed no data at all).
+        self._decoder_panel.protocol_changed.connect(self._on_decoder_protocol_changed)
         # Click-to-tune from spectrum and waterfall
         self._spectrum.frequency_clicked.connect(self._on_frequency_changed)
         self._waterfall.frequency_clicked.connect(self._on_frequency_changed)
@@ -596,6 +604,91 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._record_action.blockSignals(True)
         self._record_action.setChecked(False)
         self._record_action.blockSignals(False)
+
+    # Panel labels -> ProtocolType for the live decoder.
+    _DECODER_PROTOCOLS = {
+        "POCSAG": "pocsag",
+        "FLEX": "flex",
+        "AX.25/APRS": "ax25",
+        "ADS-B": "adsb",
+        "ACARS": "acars",
+        "RDS": "rds",
+    }
+
+    def _on_decoder_protocol_changed(self, text: str) -> None:
+        """Build (or clear) the live decoder for the panel's selected protocol."""
+        from ..dsp.protocols import ProtocolType, create_protocol_decoder
+
+        proto_value = self._DECODER_PROTOCOLS.get(text)
+        if proto_value is None:
+            # "Auto Detect" (or unknown): no single live decoder.
+            self._decoder = None
+            self._decoder_protocol = None
+            return
+
+        rate = getattr(self._device, "sample_rate", None) or 2.4e6
+        try:
+            protocol = ProtocolType(proto_value)
+            self._decoder = create_protocol_decoder(protocol, sample_rate=float(rate))
+            self._decoder_protocol = protocol
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Could not create %s decoder: %s", text, exc)
+            self._decoder = None
+            self._decoder_protocol = None
+
+    def _run_decoder(self, samples: np.ndarray) -> None:
+        """Feed demodulated samples to the active decoder and show any messages."""
+        if self._decoder is None or self._decoder_protocol is None:
+            return
+        if not self._decoder_panel._enabled_check.isChecked():
+            return
+
+        from ..dsp.protocols import demodulate_for_protocol
+
+        baseband = demodulate_for_protocol(samples, self._decoder_protocol)
+        if baseband is None:
+            return
+        try:
+            messages = self._decoder.decode(baseband)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Decoder error: %s", exc)
+            return
+        for msg in messages:
+            self._push_decoded_message(msg)
+
+    def _push_decoded_message(self, msg: Any) -> None:
+        """Render one decoded message into the decoder panel."""
+        panel = self._decoder_panel
+        name = type(msg).__name__
+        try:
+            if name == "POCSAGMessage":
+                panel.add_pocsag_message(msg.address, msg.content, msg.function)
+            elif name == "ADSBMessage":
+                panel.add_adsb_message(
+                    msg.icao_address,
+                    msg.callsign,
+                    msg.altitude,
+                    msg.latitude,
+                    msg.longitude,
+                    msg.velocity,
+                )
+            elif name in ("AX25Frame", "APRSMessage"):
+                panel.add_aprs_message(
+                    getattr(msg, "source", ""),
+                    getattr(msg, "destination", ""),
+                    getattr(msg, "latitude", 0.0),
+                    getattr(msg, "longitude", 0.0),
+                    getattr(msg, "info", getattr(msg, "comment", "")),
+                )
+            else:
+                address = str(getattr(msg, "address", getattr(msg, "icao_address", "")))
+                content = str(getattr(msg, "content", getattr(msg, "info", "")))
+                proto = getattr(getattr(msg, "protocol", None), "value", name)
+                panel.add_message(
+                    str(proto), address, content, getattr(msg, "valid", True)
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Could not render decoded message: %s", exc)
 
     def _on_frequency_changed(self, freq_hz: float):
         """Handle frequency change."""
@@ -901,6 +994,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 import time
 
                 self._control_panel.update_record_time(int(time.monotonic() - started))
+
+        # Feed the live protocol decoder (if the Decoder panel selected one).
+        self._run_decoder(samples)
 
     def _power_spectrum_dbfs(self, samples: np.ndarray) -> np.ndarray:
         """Windowed power spectrum in dBFS (full-scale sinusoid -> 0 dB).

@@ -2325,6 +2325,43 @@ def create_protocol_decoder(
         raise ValueError(f"Unsupported protocol: {protocol}")
 
 
+def demodulate_for_protocol(
+    samples: np.ndarray, protocol: ProtocolType
+) -> Optional[np.ndarray]:
+    """Demodulate raw I/Q into the baseband a protocol decoder expects.
+
+    The decoders operate on demodulated baseband, not raw I/Q: the FSK/AFSK/
+    MSK pager and packet decoders want an FM discriminator output
+    (positive = mark, negative = space) and ADS-B wants the pulse envelope.
+    Passing raw complex I/Q straight in yields zero messages on real captures.
+
+    Returns None when the required baseband cannot be produced for the protocol
+    (currently RDS, which needs 57 kHz subcarrier recovery), so callers can say
+    so rather than silently decoding nothing.
+    """
+    samples = np.asarray(samples)
+
+    if protocol == ProtocolType.ADSB:
+        return np.abs(samples).astype(np.float32)
+
+    fsk_like = {
+        ProtocolType.POCSAG,
+        ProtocolType.FLEX,
+        ProtocolType.AX25,
+        ProtocolType.APRS,
+        ProtocolType.ACARS,
+    }
+    if protocol in fsk_like:
+        if np.iscomplexobj(samples) and np.any(samples.imag != 0):
+            # FM discriminator: instantaneous frequency of the I/Q stream.
+            return np.angle(samples[1:] * np.conj(samples[:-1])).astype(np.float32)
+        # Already a real, pre-demodulated baseband.
+        return samples.real.astype(np.float32)
+
+    # RDS needs 57 kHz subcarrier recovery + coherent BPSK, not implemented here.
+    return None
+
+
 # Export all decoders and message types
 __all__ = [
     # Protocol types
@@ -2351,4 +2388,5 @@ __all__ = [
     "ACARSDecoder",
     # Factory
     "create_protocol_decoder",
+    "demodulate_for_protocol",
 ]

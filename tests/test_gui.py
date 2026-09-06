@@ -811,3 +811,80 @@ class TestDeviceDialogDemoSelectable(unittest.TestCase):
         self.assertTrue(any(d.get("type") == "demo" for d in dialog._devices))
         opened = dialog._open_device(dialog._devices[0])
         self.assertIsInstance(opened, MockDevice)
+
+
+class TestDecoderPanelWiring(unittest.TestCase):
+    """The Decoder panel must actually receive decoded messages (was fed none)."""
+
+    def setUp(self):
+        require_pyqt6(self)
+
+    @staticmethod
+    def _pocsag_iq(fs=38400.0, baud=1200.0, deviation=2400.0):
+        from sdr_module.dsp.protocols import POCSAGDecoder
+
+        def enc(flag, data20):
+            msg = (flag << 20) | (data20 & 0xFFFFF)
+            reg = msg << 10
+            for i in range(30, 9, -1):
+                if reg & (1 << i):
+                    reg ^= 0x769 << (i - 10)
+            cw31 = (msg << 10) | (reg & 0x3FF)
+            return (cw31 << 1) | (bin(cw31).count("1") & 1)
+
+        def w2b(word):
+            return [(word >> (31 - i)) & 1 for i in range(32)]
+
+        bits = [1, 0] * 288 + w2b(POCSAGDecoder.SYNC_WORD)
+        words = [POCSAGDecoder.IDLE_WORD] * 16
+        words[0] = enc(0, (0x100 << 2) | 0)
+        words[1] = enc(1, (1 << 16) | (2 << 12) | (3 << 8) | (4 << 4) | 5)
+        for word in words:
+            bits += w2b(word)
+        bits += [1, 0] * 32
+        sps = int(fs / baud)
+        phase = 0.0
+        iq = np.empty(len(bits) * sps, dtype=np.complex64)
+        idx = 0
+        for bit in bits:
+            freq = deviation if bit else -deviation
+            for _ in range(sps):
+                phase += 2 * np.pi * freq / fs
+                iq[idx] = np.exp(1j * phase)
+                idx += 1
+        return iq
+
+    def test_selected_decoder_feeds_panel(self):
+        from sdr_module.gui.decoder_panel import DecoderPanel
+        from sdr_module.gui.main_window import SDRMainWindow
+
+        # Build just enough of the window to exercise the decoder wiring.
+        win = SDRMainWindow.__new__(SDRMainWindow)
+        win._decoder = None
+        win._decoder_protocol = None
+        win._decoder_panel = DecoderPanel()
+
+        class FakeDevice:
+            sample_rate = 38400.0
+
+        win._device = FakeDevice()
+        win._on_decoder_protocol_changed("POCSAG")
+        self.assertIsNotNone(win._decoder)
+
+        win._run_decoder(self._pocsag_iq())
+        self.assertGreaterEqual(win._decoder_panel.get_message_count(), 1)
+
+    def test_auto_detect_clears_decoder(self):
+        from sdr_module.gui.decoder_panel import DecoderPanel
+        from sdr_module.gui.main_window import SDRMainWindow
+
+        win = SDRMainWindow.__new__(SDRMainWindow)
+        win._decoder = object()
+        win._decoder_protocol = object()
+        win._decoder_panel = DecoderPanel()
+        win._device = None
+        win._on_decoder_protocol_changed("Auto Detect")
+        self.assertIsNone(win._decoder)
+        # No active decoder -> feeding samples is a no-op, not a crash.
+        win._run_decoder(np.zeros(1000, dtype=np.complex64))
+        self.assertEqual(win._decoder_panel.get_message_count(), 0)

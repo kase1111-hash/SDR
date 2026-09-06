@@ -98,6 +98,8 @@ class AutomaticFrequencyControl:
         self._integrator = 0.0
         self._locked = False
         self._signal_present = False
+        # Running NCO phase so the correction tone is continuous across blocks.
+        self._nco_phase = 0.0
 
         # History for drift estimation
         self._error_history: list = []
@@ -426,6 +428,7 @@ class AutomaticFrequencyControl:
         self._error_history.clear()
         self._time_history.clear()
         self._prev_samples = None
+        self._nco_phase = 0.0
 
     def set_correction(self, correction_hz: float) -> None:
         """
@@ -451,14 +454,25 @@ class AutomaticFrequencyControl:
         Returns:
             Frequency-corrected samples
         """
-        if abs(self._correction_hz) < 0.01:
+        n = len(samples)
+        if n == 0:
             return samples
 
-        # Generate correction tone
-        # Positive correction shifts signal down in frequency
-        n = len(samples)
-        t = np.arange(n) / self._sample_rate
-        correction_tone = np.exp(-2j * np.pi * self._correction_hz * t)
+        # Generate the correction tone from a running phase accumulator so the
+        # tone is continuous from one block to the next. Rebuilding the time
+        # vector from zero each call restarted the phase at every block
+        # boundary, injecting a phase jump that corrupted phase-sensitive
+        # downstream processing (e.g. PSK demodulation).
+        # Positive correction shifts the signal down in frequency.
+        phase = self._nco_phase - 2 * np.pi * self._correction_hz * (
+            np.arange(n) / self._sample_rate
+        )
+        correction_tone = np.exp(1j * phase)
 
-        # Apply correction
+        # Advance and wrap the accumulator for the next block.
+        self._nco_phase = float(
+            (self._nco_phase - 2 * np.pi * self._correction_hz * n / self._sample_rate)
+            % (2 * np.pi)
+        )
+
         return samples * correction_tone.astype(np.complex64)

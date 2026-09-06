@@ -131,6 +131,41 @@ class TestAFC:
         afc.config = new_cfg
         assert afc.config.loop_bandwidth_hz == 5.0
 
+    def test_apply_correction_is_continuous_across_blocks(self):
+        """The correction tone must not restart its phase every block.
+
+        Regression: apply_correction rebuilt the time vector from zero each
+        call, so correcting a stream block-by-block injected a phase jump at
+        every boundary. Correcting in two blocks must equal correcting the
+        whole stream at once.
+        """
+        afc = AutomaticFrequencyControl(self.SAMPLE_RATE)
+        afc.set_correction(1000.0)
+        x = make_tone(1234.0, self.SAMPLE_RATE, 4096)
+
+        first = afc.apply_correction(x[:2048])
+        second = afc.apply_correction(x[2048:])
+        blockwise = np.concatenate([first, second])
+
+        afc.reset()
+        afc.set_correction(1000.0)
+        whole = afc.apply_correction(x)
+
+        assert np.max(np.abs(blockwise - whole)) < 1e-5
+
+    def test_apply_correction_shifts_frequency(self):
+        """A +f correction moves a +f tone to DC (residual frequency ~0)."""
+        afc = AutomaticFrequencyControl(self.SAMPLE_RATE)
+        afc.set_correction(1000.0)
+        tone = make_tone(1000.0, self.SAMPLE_RATE, 8192)
+        corrected = afc.apply_correction(tone)
+        residual = (
+            np.angle(np.mean(corrected[1:] * np.conj(corrected[:-1])))
+            / (2 * np.pi)
+            * self.SAMPLE_RATE
+        )
+        assert abs(residual) < 5.0
+
 
 # ---------------------------------------------------------------------------
 # SignalClassifier

@@ -3,7 +3,7 @@
 A dual-SDR framework for simultaneous RTL-SDR + HackRF One operation, with signal visualization, protocol decoding, and a PyQt6 GUI.
 
 [![CI](https://github.com/kase1111-hash/SDR/actions/workflows/ci.yml/badge.svg)](https://github.com/kase1111-hash/SDR/actions/workflows/ci.yml)
-[![Python 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## What It Does
@@ -41,11 +41,31 @@ cd SDR
 python -m pip install -e .
 
 # With optional extras
-python -m pip install -e ".[rtlsdr]"   # RTL-SDR driver
-python -m pip install -e ".[hackrf]"   # HackRF driver
+python -m pip install -e ".[rtlsdr]"   # RTL-SDR driver (pyrtlsdr)
+python -m pip install -e ".[hackrf]"   # HackRF driver (python_hackrf)
 python -m pip install -e ".[gui]"      # PyQt6 GUI
-python -m pip install -e ".[full]"     # Everything (drivers + SciPy + matplotlib + PyQt6)
+python -m pip install -e ".[dsp]"      # SciPy-accelerated DSP
+python -m pip install -e ".[images]"   # Pillow, for SSTV image export
+python -m pip install -e ".[full]"     # rtlsdr + gui + dsp + images (wheels only)
 ```
+
+### Hardware drivers (system libraries required)
+
+The Python driver packages wrap system libraries that must be installed first:
+
+- **RTL-SDR** (`[rtlsdr]` → `pyrtlsdr`) needs **librtlsdr**.
+  Debian/Ubuntu: `sudo apt install librtlsdr-dev`; macOS: `brew install librtlsdr`.
+  On Linux, install the RTL-SDR udev rules so the device is usable without root.
+- **HackRF** (`[hackrf]` → `python_hackrf`) needs **libhackrf** *and a C
+  compiler and CMake* (python_hackrf builds from source).
+  Debian/Ubuntu: `sudo apt install libhackrf-dev build-essential cmake`;
+  macOS: `brew install hackrf cmake`.
+  Because it builds from source, `[hackrf]` is deliberately left out of
+  `[full]`; add it explicitly once the toolchain is present.
+
+Without a driver installed, `sdr-scan devices` reports no hardware and the GUI
+still runs in demo mode (`sdr-scan gui --demo`); offline analysis, decoding,
+and encoding work with no drivers at all.
 
 > **Tip:** Always install with `python -m pip` rather than a bare `pip`. On some
 > systems the `pip` on your `PATH` belongs to a different interpreter than
@@ -282,9 +302,12 @@ mypy src/sdr_module --ignore-missing-imports
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.10 - 3.14
 - NumPy >= 1.21.0
-- **Optional**: pyrtlsdr (RTL-SDR), hackrf (HackRF), scipy (advanced DSP), PyQt6 (GUI), PyQt6-multimedia (audio output)
+- **Optional**: pyrtlsdr (RTL-SDR), python_hackrf (HackRF), scipy (advanced DSP), PyQt6 (GUI, includes multimedia for audio output), Pillow (SSTV image export)
+
+See [Hardware drivers](#hardware-drivers-system-libraries-required) for the
+system libraries the driver packages require.
 
 ## License
 

@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed — Hardware drivers now work against real libraries
+- **RTL-SDR enumeration** called `RtlSdr.get_device_count()` /
+  `get_device_serial()`, methods pyrtlsdr has never had, so device scanning
+  always returned nothing and no RTL-SDR was ever detected. Rewritten on the
+  real API (`get_device_serial_addresses()`,
+  `librtlsdr.rtlsdr_get_device_count()`). `open()` no longer leaks a USB
+  handle when a default setter fails, and a dead RX thread now clears the
+  streaming flag and exposes the error instead of hanging silently.
+- **HackRF driver** imported a `hackrf` package that does not exist on PyPI,
+  so `pip install ".[hackrf]"` failed and no HackRF could be opened.
+  Reimplemented on **python_hackrf** with correct RX/TX callback handling.
+- **HackRF transmit safety**: `write_samples()` was a stub that returned
+  success without transmitting (the GUI reported "TX complete" while nothing
+  was sent); it is now a real blocking one-shot transmission. `start_tx(None)`
+  is refused instead of radiating an uninitialised buffer, TX samples are
+  clipped before scaling, and the TX frequency lockout is enforced in every
+  tuning path.
+
+### Fixed — DSP correctness
+- **BPSK demodulation** decided on the quadrature sign, giving ~50% bit-error
+  rate on a clean signal; it now slices on the in-phase axis (0 BER clean).
+- **SSB demodulation**: USB and LSB produced byte-identical output and
+  neither rejected the opposite sideband; sideband selection is now done in
+  the frequency domain so USB and LSB differ and reject the other sideband.
+- **Spectral noise reduction** crashed on complex I/Q (used `rfft`) and
+  returned fewer samples than it consumed; both spectral-subtraction and
+  Wiener paths now use a complex-safe, length-preserving overlap-add.
+
+### Fixed — Robustness
+- `SampleBuffer.read()/peek()` raise on a negative count or one exceeding
+  capacity instead of blocking forever or corrupting the ring buffer.
+- `SDRConfig.save()` writes atomically (temp file + rename), so an interrupted
+  write can no longer truncate a good config; `get_default_config_path()` no
+  longer creates directories as a side effect.
+
+### Changed — Packaging, CI and tooling
+- CI runs the PyQt6 GUI suite headless on every job, adds the antenna-array
+  tests, spans Python 3.10-3.14 plus Windows and macOS, makes mypy a blocking
+  gate, adds a Bandit + pip-audit security job and a CodeQL workflow, and
+  smoke-tests the built wheel. Release tags are checked against the package
+  version and CHANGELOG.
+- `requires-python` raised to `>=3.10` (PyQt6 already required it; 3.9 is EOL).
+  Version is single-sourced from `sdr_module.__version__`; both packages ship
+  `py.typed`. The `[hackrf]` extra points at `python_hackrf`, `[dsp]` adds
+  SciPy and `[images]` adds Pillow; `[dev]` includes PyQt6 so contributors run
+  the GUI tests. Development status is now Beta.
+- The PyInstaller spec, Windows installer and build scripts were corrected:
+  a working entry point (running `cli.py` directly broke its relative
+  imports), the GUI bundled by default, a real installer GUID, `LICENSE.md`,
+  and version/`python -m pip` fixes.
+
 ### Added — Saved channels (CHIRP CSV)
 - **`sdr_module.core.chirp_csv`** — read and write memory channels in
   [CHIRP's](https://chirpmyradio.com/) generic CSV format. Exports use CHIRP's

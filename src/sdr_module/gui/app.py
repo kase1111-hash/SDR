@@ -398,8 +398,8 @@ class SDRApplication:
                 from .error_log_dialog import install_history_handler
 
                 install_history_handler()
-            except Exception:  # pragma: no cover
-                pass
+            except Exception as e:  # pragma: no cover
+                logger.warning(f"Error-history handler not installed: {e}")
 
             # Create and show main window
             demo_mode = settings.get("demo_mode", False)

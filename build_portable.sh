@@ -1,126 +1,107 @@
 #!/bin/bash
-# Build portable SDR Module for Linux/macOS
-# Usage: ./build_portable.sh [--gui] [--clean]
+# Build a portable SDR Module folder for Linux/macOS with PyInstaller.
+#
+# Usage: ./build_portable.sh [--no-gui] [--clean]
+#
+#   --no-gui   Build the command-line tool only (no PyQt6 in the bundle).
+#   --clean    Remove build/ and dist/ before building.
+#
+# Output: dist/sdr-module/ containing the `sdr-scan` executable, a launcher
+# script and a README. Copy the folder to a USB drive to run it elsewhere.
+#
+# The bundle does not include the RTL-SDR / HackRF USB drivers: the host
+# system still needs librtlsdr / libhackrf (plus udev rules on Linux).
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Parse arguments
-INCLUDE_GUI=0
+INCLUDE_GUI=1
 CLEAN=0
 for arg in "$@"; do
     case $arg in
-        --gui) INCLUDE_GUI=1 ;;
+        --no-gui) INCLUDE_GUI=0 ;;
+        --gui) INCLUDE_GUI=1 ;;   # kept for backwards compatibility (now the default)
         --clean) CLEAN=1 ;;
+        -h|--help)
+            sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *) echo "Unknown option: $arg" >&2; exit 2 ;;
     esac
 done
+
+# Always go through `python3 -m pip` so pip and the interpreter agree.
+PY="$(command -v python3 || command -v python || true)"
+if [ -z "$PY" ]; then
+    echo "Error: Python 3.10+ is required" >&2
+    exit 1
+fi
 
 echo "=========================================="
 echo "  SDR Module Portable Build"
 echo "=========================================="
+echo "Interpreter: $PY ($("$PY" --version 2>&1))"
 
-# Clean if requested
-if [ $CLEAN -eq 1 ]; then
+if [ "$CLEAN" -eq 1 ]; then
     echo "Cleaning previous build..."
-    rm -rf build/ dist/ *.egg-info
+    rm -rf build/ dist/
 fi
 
-# Check Python
-if ! command -v python3 &> /dev/null; then
-    echo "Error: Python 3 is required"
-    exit 1
-fi
-
-# Install dependencies
-echo "Installing dependencies..."
-pip install -e . -q
-pip install pyinstaller -q
-
-if [ $INCLUDE_GUI -eq 1 ]; then
-    echo "Including GUI support..."
-    pip install PyQt6 -q
+echo "Installing build dependencies..."
+if [ "$INCLUDE_GUI" -eq 1 ]; then
+    "$PY" -m pip install -q -e ".[gui]" pyinstaller
     export SDR_BUILD_GUI=1
+else
+    "$PY" -m pip install -q -e . pyinstaller
+    export SDR_BUILD_GUI=0
 fi
 
-# Build
-echo "Building portable executable..."
-pyinstaller sdr_module.spec --noconfirm
+VERSION="$("$PY" tools/get_version.py)"
+echo "Building sdr-module $VERSION (GUI: $INCLUDE_GUI)..."
+"$PY" -m PyInstaller sdr_module.spec --noconfirm
 
-# Create portable structure
 DIST_DIR="dist/sdr-module"
-echo "Creating portable structure..."
-
-# Create directories for portable data
-mkdir -p "$DIST_DIR/config"
 mkdir -p "$DIST_DIR/recordings"
-mkdir -p "$DIST_DIR/plugins"
 
-# Create portable config
-cat > "$DIST_DIR/config/settings.json" << 'EOF'
-{
-    "portable": true,
-    "frequency": 100000000,
-    "sample_rate": 2400000,
-    "gain": 20,
-    "recordings_dir": "./recordings",
-    "plugins_dir": "./plugins"
-}
-EOF
-
-# Create launcher script
-cat > "$DIST_DIR/sdr-module.sh" << 'EOF'
+cat > "$DIST_DIR/sdr-module.sh" << 'LAUNCHER'
 #!/bin/bash
-# SDR Module Portable Launcher
+# SDR Module portable launcher: runs sdr-scan from this folder.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
-export SDR_PORTABLE=1
-export SDR_CONFIG_DIR="$SCRIPT_DIR/config"
-./sdr-scan "$@"
-EOF
+exec "$SCRIPT_DIR/sdr-scan" "$@"
+LAUNCHER
 chmod +x "$DIST_DIR/sdr-module.sh"
 
-# Create README
-cat > "$DIST_DIR/README.txt" << 'EOF'
-SDR Module - Portable Edition
-=============================
+cat > "$DIST_DIR/README.txt" << README
+SDR Module $VERSION - Portable Edition
+=====================================
 
-This is a portable version that can run from a USB drive.
+Run from this folder (or a USB drive); no Python installation needed.
 
-USAGE:
-------
-Linux/macOS:
-    ./sdr-module.sh info        # Show module info
-    ./sdr-module.sh devices     # List SDR devices
-    ./sdr-module.sh scan        # Frequency scanner
+USAGE
+-----
+    ./sdr-module.sh info          # Build and capability summary
+    ./sdr-module.sh devices       # List connected SDRs
+    ./sdr-module.sh gui           # Graphical interface (needs a display)
+    ./sdr-module.sh gui --demo    # GUI with synthetic signals, no hardware
+    ./sdr-module.sh --help        # All commands
 
-Windows:
-    sdr-scan.exe info
-    sdr-scan.exe devices
-    sdr-scan.exe scan
+DIRECTORIES
+-----------
+recordings/   Suggested location for I/Q recordings (choose it in the GUI)
 
-DIRECTORIES:
+Settings persist in the user's profile (Qt QSettings for the GUI,
+~/.config/sdr_module/config.json for the library), not in this folder.
+
+REQUIREMENTS
 ------------
-config/      - Configuration files (portable settings)
-recordings/  - Saved I/Q recordings
-plugins/     - Custom plugins
-
-REQUIREMENTS:
--------------
-- RTL-SDR or HackRF One device
-- USB drivers installed on host system
-
-For GUI version, run: sdr-scan gui --demo
-EOF
+- RTL-SDR: librtlsdr installed on the host (and udev rules on Linux)
+- HackRF One: libhackrf installed on the host
+Without hardware, use demo mode: ./sdr-module.sh gui --demo
+README
 
 echo ""
 echo "=========================================="
-echo "  Build Complete!"
+echo "  Build Complete: $DIST_DIR"
 echo "=========================================="
-echo ""
-echo "Portable folder: $DIST_DIR"
-echo ""
-echo "To use, copy the 'sdr-module' folder to a USB drive."
-echo ""
-ls -la "$DIST_DIR"
+ls -la "$DIST_DIR" | head -20

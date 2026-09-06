@@ -141,11 +141,13 @@ class AdaptiveBeamformer:
         k = 2 * np.pi / self._wavelength
 
         cos_el = np.cos(elevation)
-        u = np.array([
-            cos_el * np.sin(azimuth),
-            cos_el * np.cos(azimuth),
-            np.sin(elevation),
-        ])
+        u = np.array(
+            [
+                cos_el * np.sin(azimuth),
+                cos_el * np.cos(azimuth),
+                np.sin(elevation),
+            ]
+        )
 
         phases = k * (self._positions @ u)
         return np.exp(1j * phases).astype(np.complex128)
@@ -188,7 +190,7 @@ class AdaptiveBeamformer:
             block = data[:, start:end]
             R += block @ block.conj().T
 
-        R /= (n_blocks * block_size)
+        R /= n_blocks * block_size
 
         # Update running covariance with forgetting factor
         if self._covariance is None:
@@ -568,7 +570,11 @@ class AdaptiveBeamformer:
         # Compute equivalent weights
         weights = w_q - B @ w_a
 
-        beam_power = 10 * np.log10(np.mean(np.abs(output) ** 2) + 1e-20) if len(output) > 0 else -np.inf
+        beam_power = (
+            10 * np.log10(np.mean(np.abs(output) ** 2) + 1e-20)
+            if len(output) > 0
+            else -np.inf
+        )
 
         return BeamformerOutput(
             output_signal=output.astype(np.complex64),

@@ -219,7 +219,7 @@ class PacketHighlighter:
                         del self._active_signals[active_bin]
 
             # Process ended signals
-            for active_bin, info in ended_signals:
+            for _active_bin, info in ended_signals:
                 if info["duration"] >= self._config.min_duration_lines:
                     highlight = self._finalize_packet(info, samples, timestamp)
                     if highlight:

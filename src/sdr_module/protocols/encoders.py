@@ -82,14 +82,14 @@ class RTTYEncoder(ProtocolEncoder):
                 # Stop bit (1)
                 bits.append(1)
 
-        bits = np.array(bits, dtype=np.uint8)
+        bit_array = np.array(bits, dtype=np.uint8)
 
         # Modulate using FSK
         assert self._config.frequency_shift is not None
         mark_freq = self._carrier_freq + self._config.frequency_shift / 2
         space_freq = self._carrier_freq - self._config.frequency_shift / 2
 
-        return self.bits_to_fsk(bits, mark_freq, space_freq)
+        return self.bits_to_fsk(bit_array, mark_freq, space_freq)
 
     def encode_bytes(self, data: bytes) -> np.ndarray:
         """Encode bytes (converts to text first)."""
@@ -270,14 +270,14 @@ class ASCIIEncoder(ProtocolEncoder):
             # Stop bit
             bits.append(1)
 
-        bits = np.array(bits, dtype=np.uint8)
+        bit_array = np.array(bits, dtype=np.uint8)
 
         # Modulate using FSK
         assert self._config.frequency_shift is not None
         mark_freq = self._carrier_freq + self._config.frequency_shift / 2
         space_freq = self._carrier_freq - self._config.frequency_shift / 2
 
-        return self.bits_to_fsk(bits, mark_freq, space_freq)
+        return self.bits_to_fsk(bit_array, mark_freq, space_freq)
 
 
 class PSK31Encoder(ProtocolEncoder):

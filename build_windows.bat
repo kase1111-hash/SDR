@@ -2,18 +2,18 @@
 REM ============================================================================
 REM SDR Module Windows Build Script
 REM ============================================================================
-REM This script builds a standalone Windows executable for the SDR Module.
+REM Builds a standalone Windows folder (dist\sdr-module\sdr-scan.exe) with
+REM PyInstaller. The GUI is included by default.
 REM
 REM Prerequisites:
-REM   - Python 3.8 or higher
-REM   - pip (Python package manager)
+REM   - Python 3.10 or higher on PATH
 REM
 REM Usage:
 REM   build_windows.bat [options]
 REM
 REM Options:
 REM   --clean     Clean build directories before building
-REM   --install   Install the package in development mode first
+REM   --no-gui    Build the command-line tool only (no PyQt6)
 REM   --no-upx    Disable UPX compression (faster build, larger exe)
 REM ============================================================================
 
@@ -25,90 +25,73 @@ echo   SDR Module Windows Build Script
 echo ============================================
 echo.
 
-REM Parse command line arguments
 set CLEAN=0
-set INSTALL=0
+set NO_GUI=0
 set NO_UPX=0
 
 :parse_args
 if "%~1"=="" goto :end_parse
 if /i "%~1"=="--clean" set CLEAN=1
-if /i "%~1"=="--install" set INSTALL=1
+if /i "%~1"=="--no-gui" set NO_GUI=1
 if /i "%~1"=="--no-upx" set NO_UPX=1
 shift
 goto :parse_args
 :end_parse
 
-REM Check Python installation
-echo [1/6] Checking Python installation...
+echo [1/5] Checking Python installation...
 python --version >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Python is not installed or not in PATH
-    echo Please install Python 3.8+ from https://www.python.org/downloads/
+    echo Please install Python 3.10+ from https://www.python.org/downloads/
     exit /b 1
 )
 python --version
 echo.
 
-REM Check pip installation
-echo [2/6] Checking pip installation...
-pip --version >nul 2>&1
+REM Always call pip through the interpreter so both agree on the environment.
+echo [2/5] Checking pip installation...
+python -m pip --version >nul 2>&1
 if errorlevel 1 (
-    echo ERROR: pip is not installed
-    echo Please ensure pip is installed with Python
+    echo ERROR: pip is not available for this Python
     exit /b 1
 )
-pip --version
+python -m pip --version
 echo.
 
-REM Clean build directories if requested
 if %CLEAN%==1 (
-    echo [3/6] Cleaning build directories...
+    echo [3/5] Cleaning build directories...
     if exist "build" rmdir /s /q build
     if exist "dist" rmdir /s /q dist
-    if exist "*.egg-info" rmdir /s /q *.egg-info
     echo Cleaned.
     echo.
 ) else (
-    echo [3/6] Skipping clean (use --clean to enable)
+    echo [3/5] Skipping clean (use --clean to enable)
     echo.
 )
 
-REM Install development dependencies
-echo [4/6] Installing build dependencies...
-pip install --upgrade pip setuptools wheel >nul 2>&1
-pip install pyinstaller numpy scipy matplotlib >nul 2>&1
-if errorlevel 1 (
-    echo WARNING: Some optional dependencies failed to install
-    echo Continuing with available dependencies...
+echo [4/5] Installing the package and build dependencies...
+python -m pip install --upgrade pip
+if %NO_GUI%==1 (
+    python -m pip install -e . pyinstaller
+    set SDR_BUILD_GUI=0
+) else (
+    python -m pip install -e ".[gui]" pyinstaller
+    set SDR_BUILD_GUI=1
 )
-echo Dependencies installed.
+if errorlevel 1 (
+    echo ERROR: dependency installation failed
+    exit /b 1
+)
 echo.
 
-REM Install package in development mode if requested
-if %INSTALL%==1 (
-    echo [5/6] Installing SDR Module in development mode...
-    pip install -e . >nul 2>&1
-    if errorlevel 1 (
-        echo WARNING: Development install failed
-        echo Continuing anyway...
-    )
-    echo Package installed.
-    echo.
-) else (
-    echo [5/6] Skipping package install (use --install to enable)
-    echo.
-)
-
-REM Build the executable
-echo [6/6] Building Windows executable...
+for /f "delims=" %%v in ('python tools\get_version.py') do set APPVER=%%v
+echo [5/5] Building sdr-module %APPVER% (GUI included: %SDR_BUILD_GUI%)...
 echo.
 
 if %NO_UPX%==1 (
-    echo Building without UPX compression...
-    pyinstaller --noconfirm --clean sdr_module.spec --upx-dir=""
+    python -m PyInstaller --noconfirm --clean sdr_module.spec --upx-dir=""
 ) else (
-    pyinstaller --noconfirm --clean sdr_module.spec
+    python -m PyInstaller --noconfirm --clean sdr_module.spec
 )
 
 if errorlevel 1 (
@@ -116,10 +99,11 @@ if errorlevel 1 (
     echo ============================================
     echo   BUILD FAILED
     echo ============================================
-    echo.
-    echo Check the error messages above for details.
     exit /b 1
 )
+
+REM Record the version for installer.iss (read via #include).
+echo #define MyAppVersion "%APPVER%"> installer_version.iss
 
 echo.
 echo ============================================
@@ -130,7 +114,7 @@ echo Executable location: dist\sdr-module\sdr-scan.exe
 echo.
 echo To run:
 echo   cd dist\sdr-module
-echo   sdr-scan.exe --help
+echo   sdr-scan.exe gui --demo
 echo.
 echo To create an installer, run:
 echo   build_installer.bat

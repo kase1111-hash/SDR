@@ -6,25 +6,41 @@ Tests PyQt6 widgets without requiring a display or actual Qt event loop.
 Uses mocking to test widget logic and state management.
 """
 
+import os
 import sys
 import unittest
 
 import numpy as np
-
-# Add src to path
-sys.path.insert(0, "../src")
 
 # Check if PyQt6 is available
 try:
     from PyQt6.QtWidgets import QApplication
 
     HAS_PYQT6 = True
+    PYQT6_IMPORT_ERROR = ""
     # Create QApplication if needed (required for widget instantiation)
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
-except ImportError:
+except ImportError as _import_error:
     HAS_PYQT6 = False
+    PYQT6_IMPORT_ERROR = str(_import_error)
+
+
+def require_pyqt6(test_case: unittest.TestCase) -> None:
+    """Skip the test when PyQt6 is unavailable.
+
+    CI sets ``SDR_REQUIRE_GUI=1`` so that a missing or broken PyQt6 fails
+    loudly instead of silently skipping the whole GUI suite.
+    """
+    if HAS_PYQT6:
+        return
+    if os.environ.get("SDR_REQUIRE_GUI"):
+        test_case.fail(
+            "PyQt6 is required because SDR_REQUIRE_GUI is set, but it could "
+            f"not be imported: {PYQT6_IMPORT_ERROR}"
+        )
+    test_case.skipTest("PyQt6 not available")
 
 
 class TestSpectrumWidgetLogic(unittest.TestCase):
@@ -32,8 +48,7 @@ class TestSpectrumWidgetLogic(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        if not HAS_PYQT6:
-            self.skipTest("PyQt6 not available")
+        require_pyqt6(self)
         from sdr_module.gui.spectrum_widget import SpectrumWidget
 
         self.widget = SpectrumWidget()
@@ -137,8 +152,7 @@ class TestWaterfallWidgetLogic(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        if not HAS_PYQT6:
-            self.skipTest("PyQt6 not available")
+        require_pyqt6(self)
         from sdr_module.gui.waterfall_widget import WaterfallWidget
 
         self.widget = WaterfallWidget(history_size=100)
@@ -240,8 +254,7 @@ class TestFrequencyInputLogic(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        if not HAS_PYQT6:
-            self.skipTest("PyQt6 not available")
+        require_pyqt6(self)
         from sdr_module.gui.control_panel import FrequencyInput
 
         self.widget = FrequencyInput()
@@ -275,8 +288,7 @@ class TestControlPanelLogic(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        if not HAS_PYQT6:
-            self.skipTest("PyQt6 not available")
+        require_pyqt6(self)
         from sdr_module.gui.control_panel import ControlPanel
 
         self.widget = ControlPanel()
@@ -323,8 +335,7 @@ class TestSignalMeterWidgetLogic(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        if not HAS_PYQT6:
-            self.skipTest("PyQt6 not available")
+        require_pyqt6(self)
         from sdr_module.ham.gui.signal_meter_widget import SignalMeterPanel
 
         self.widget = SignalMeterPanel()
@@ -383,8 +394,7 @@ class TestColorMapConsistency(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        if not HAS_PYQT6:
-            self.skipTest("PyQt6 not available")
+        require_pyqt6(self)
         from sdr_module.gui.waterfall_widget import WaterfallWidget
 
         self.widget = WaterfallWidget()
@@ -411,8 +421,7 @@ class TestGUIDataProcessing(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        if not HAS_PYQT6:
-            self.skipTest("PyQt6 not available")
+        require_pyqt6(self)
 
     def test_spectrum_handles_nan(self):
         """Test spectrum widget handles NaN values."""
@@ -460,8 +469,7 @@ class TestGUISignalEmission(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures."""
-        if not HAS_PYQT6:
-            self.skipTest("PyQt6 not available")
+        require_pyqt6(self)
 
     def test_control_panel_frequency_signal(self):
         """Test ControlPanel emits frequency_changed signal."""
@@ -520,8 +528,7 @@ class TestBookmarksPanelCsv(unittest.TestCase):
             self.bookmarks = list(bookmarks)
 
     def setUp(self):
-        if not HAS_PYQT6:
-            self.skipTest("PyQt6 not available")
+        require_pyqt6(self)
         import tempfile
 
         from sdr_module.gui import bookmarks_panel as panel_module

@@ -88,7 +88,7 @@ class ProtocolDetector:
         """
         matches = []
 
-        for name, decoder_class in self._decoder_classes.items():
+        for name, _decoder_class in self._decoder_classes.items():
             decoder = self.get_decoder(name)
             if decoder is None:
                 continue

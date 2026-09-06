@@ -254,7 +254,9 @@ class FrequencyLocker:
             signal_freq = center_freq + freq_offset
 
             # Estimate bandwidth (3 dB down from peak)
-            bandwidth = self._estimate_bandwidth(spectrum_db, peak_idx, freq_per_bin)
+            bandwidth = self._estimate_bandwidth(
+                spectrum_db, int(peak_idx), freq_per_bin
+            )
 
             # Calculate SNR
             snr_db = peak_power - self._noise_floor_db
@@ -435,12 +437,12 @@ class FrequencyLocker:
         if len(self._freq_history) >= 3:
             freq_std = np.std(self._freq_history[-10:])
             max_std = self._config.tracking_bandwidth_hz / 2
-            stability_quality = max(0.0, 1.0 - freq_std / max_std)
+            stability_quality = float(max(0.0, 1.0 - freq_std / max_std))
         else:
             stability_quality = 0.5
 
         # Combined quality
-        return 0.6 * snr_quality + 0.4 * stability_quality
+        return float(0.6 * snr_quality + 0.4 * stability_quality)
 
     def lock_to_frequency(self, frequency_hz: float) -> None:
         """

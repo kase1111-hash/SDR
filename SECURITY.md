@@ -6,7 +6,8 @@ The following versions of SDR Module are currently supported with security updat
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 0.1.x   | :white_check_mark: |
+| 0.2.x   | :white_check_mark: |
+| < 0.2   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -82,22 +83,15 @@ Users are responsible for:
 - Configuration files may contain frequency presets and hardware settings
 - Do not share configurations that reveal sensitive monitoring setups
 
-### Plugin Security
+### Untrusted Input Files
 
-When using third-party plugins:
+SDR Module reads several file formats that may come from untrusted sources
+(I/Q recordings, SigMF metadata, CHIRP CSV channel lists, JSON config). When
+processing files you did not create:
 
-- Only install plugins from trusted sources
-- Review plugin code before installation when possible
-- Plugins have access to hardware and file system through the API
-- Report suspicious plugins to the maintainers
-
-### Network Security
-
-If using network features (future planned features):
-
-- Do not expose SDR control interfaces to untrusted networks
-- Use authentication when available
-- Be cautious with remote control capabilities
+- Treat CHIRP CSV and SigMF metadata as data, not as trusted configuration.
+- Configuration JSON is size-capped and schema-validated on load; values
+  outside the allowed ranges are rejected rather than applied.
 
 ## Known Security Considerations
 
@@ -120,7 +114,7 @@ If using network features (future planned features):
 2. Use the minimum required privileges
 3. Be aware of what frequencies you are monitoring (legal considerations)
 4. Secure your I/Q recordings appropriately
-5. Validate plugins before installation
+5. Be cautious with channel/config files from untrusted sources
 
 ### For Contributors
 

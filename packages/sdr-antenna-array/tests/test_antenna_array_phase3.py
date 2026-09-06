@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-
 from sdr_antenna_array import (
     SPEED_OF_LIGHT,
     AdaptiveBeamformer,
@@ -98,8 +97,12 @@ def generate_array_signals_with_interference(
 
     # Interference
     interference_amp = 10 ** (-sir_db / 20)
-    interference = interference_amp * np.exp(2j * np.pi * interference_freq * t).astype(np.complex64)
-    u_interference = np.array([np.sin(interference_azimuth), np.cos(interference_azimuth), 0.0])
+    interference = interference_amp * np.exp(2j * np.pi * interference_freq * t).astype(
+        np.complex64
+    )
+    u_interference = np.array(
+        [np.sin(interference_azimuth), np.cos(interference_azimuth), 0.0]
+    )
 
     signals = {}
     for element in config.enabled_elements:
@@ -110,9 +113,8 @@ def generate_array_signals_with_interference(
         interference_phase = k * np.dot(pos, u_interference)
 
         # Combined signal
-        element_signal = (
-            signal * np.exp(1j * signal_phase)
-            + interference * np.exp(1j * interference_phase)
+        element_signal = signal * np.exp(1j * signal_phase) + interference * np.exp(
+            1j * interference_phase
         )
 
         # Add noise
@@ -260,7 +262,9 @@ class TestAdaptiveBeamformer:
         config = create_linear_4_element(frequency=433e6)
         adaptive = AdaptiveBeamformer(config)
 
-        signals = generate_array_signals(config, np.radians(0), snr_db=20, duration=0.05)
+        signals = generate_array_signals(
+            config, np.radians(0), snr_db=20, duration=0.05
+        )
         result = adaptive.gsc(signals, desired_azimuth=0.0, mu=0.001)
 
         assert len(result.output_signal) > 0
@@ -340,7 +344,9 @@ class TestArrayCalibrator:
         calibrator = ArrayCalibrator(config)
 
         # Generate signals with known phase offsets
-        base_signal = generate_test_signal(10e3, config.common_sample_rate, 0.01, snr_db=30)
+        base_signal = generate_test_signal(
+            10e3, config.common_sample_rate, 0.01, snr_db=30
+        )
         signals = {
             0: base_signal,
             1: base_signal * np.exp(1j * np.pi / 4),
@@ -357,7 +363,9 @@ class TestArrayCalibrator:
         assert len(result.element_calibrations) == 4
 
         # Reference element should have zero offset
-        assert result.element_calibrations[0].phase_offset == pytest.approx(0.0, abs=0.1)
+        assert result.element_calibrations[0].phase_offset == pytest.approx(
+            0.0, abs=0.1
+        )
 
     def test_calibrate_correlation_confidence(self):
         """Test calibration confidence calculation."""
@@ -365,7 +373,9 @@ class TestArrayCalibrator:
         calibrator = ArrayCalibrator(config)
 
         # High SNR signals should give high confidence
-        base_signal = generate_test_signal(10e3, config.common_sample_rate, 0.01, snr_db=40)
+        base_signal = generate_test_signal(
+            10e3, config.common_sample_rate, 0.01, snr_db=40
+        )
         signals = {i: base_signal for i in range(4)}
 
         result = calibrator.calibrate_correlation(signals)
@@ -420,7 +430,9 @@ class TestArrayCalibrator:
         config = create_linear_4_element(frequency=433e6)
         calibrator = ArrayCalibrator(config)
 
-        base_signal = generate_test_signal(10e3, config.common_sample_rate, 0.01, snr_db=30)
+        base_signal = generate_test_signal(
+            10e3, config.common_sample_rate, 0.01, snr_db=30
+        )
         signals = {
             0: base_signal,
             1: base_signal * np.exp(1j * np.pi / 4),
@@ -435,7 +447,10 @@ class TestArrayCalibrator:
         for idx in range(4):
             element = updated_config.get_element_by_index(idx)
             assert element is not None
-            assert element.calibration.phase_offset == result.element_calibrations[idx].phase_offset
+            assert (
+                element.calibration.phase_offset
+                == result.element_calibrations[idx].phase_offset
+            )
 
     def test_track_calibration_drift(self):
         """Test tracking calibration drift."""
@@ -443,7 +458,9 @@ class TestArrayCalibrator:
         calibrator = ArrayCalibrator(config)
 
         # Initial calibration
-        base_signal = generate_test_signal(10e3, config.common_sample_rate, 0.01, snr_db=30)
+        base_signal = generate_test_signal(
+            10e3, config.common_sample_rate, 0.01, snr_db=30
+        )
         initial_signals = {i: base_signal for i in range(4)}
         calibrator.calibrate_correlation(initial_signals)
 
@@ -465,7 +482,9 @@ class TestArrayCalibrator:
         config = create_linear_4_element(frequency=433e6)
         calibrator = ArrayCalibrator(config)
 
-        base_signal = generate_test_signal(10e3, config.common_sample_rate, 0.01, snr_db=30)
+        base_signal = generate_test_signal(
+            10e3, config.common_sample_rate, 0.01, snr_db=30
+        )
         signals = {i: base_signal for i in range(4)}
 
         result = calibrator.calibrate_correlation(signals)
@@ -486,7 +505,9 @@ class TestArrayCalibrator:
         config = create_linear_4_element(frequency=433e6)
         calibrator = ArrayCalibrator(config)
 
-        base_signal = generate_test_signal(10e3, config.common_sample_rate, 0.01, snr_db=30)
+        base_signal = generate_test_signal(
+            10e3, config.common_sample_rate, 0.01, snr_db=30
+        )
         signals = {i: base_signal for i in range(4)}
 
         # Run multiple calibrations
@@ -583,7 +604,9 @@ class TestIntegration:
 
         # Step 1: Calibrate
         calibrator = ArrayCalibrator(config)
-        base_signal = generate_test_signal(10e3, config.common_sample_rate, 0.01, snr_db=30)
+        base_signal = generate_test_signal(
+            10e3, config.common_sample_rate, 0.01, snr_db=30
+        )
         cal_signals = {i: base_signal for i in range(4)}
 
         cal_result = calibrator.calibrate_correlation(cal_signals)
@@ -635,7 +658,9 @@ class TestIntegration:
         config = create_linear_4_element(frequency=433e6)
 
         # Step 1: Generate calibration signals
-        cal_base = generate_test_signal(10e3, config.common_sample_rate, 0.01, snr_db=35)
+        cal_base = generate_test_signal(
+            10e3, config.common_sample_rate, 0.01, snr_db=35
+        )
         cal_signals = {i: cal_base for i in range(4)}
 
         # Step 2: Calibrate

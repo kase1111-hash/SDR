@@ -27,6 +27,10 @@ wheels/
 # PyInstaller
 *.manifest
 *.spec
+# ...except the project's own build spec, which is tracked.
+!sdr_module.spec
+installer_output/
+installer_version.iss
 
 # Unit test / coverage reports
 htmlcov/
@@ -59,3 +63,6 @@ venv.bak/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code agent worktrees
+.claude/worktrees/

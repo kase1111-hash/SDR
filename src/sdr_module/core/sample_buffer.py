@@ -206,6 +206,15 @@ class SampleBuffer:
         Returns:
             Complex numpy array, or None on timeout
         """
+        if n_samples < 0:
+            raise ValueError(f"n_samples must be non-negative, got {n_samples}")
+        if n_samples > self._capacity:
+            # This request can never be satisfied; blocking would hang forever.
+            raise ValueError(
+                f"cannot read {n_samples} samples from a buffer of capacity "
+                f"{self._capacity}"
+            )
+
         with self._lock:
             # Wait for samples
             while self._count < n_samples:
@@ -253,9 +262,20 @@ class SampleBuffer:
         Returns:
             Complex numpy array, or None if not enough samples
         """
+        if n_samples < 0:
+            raise ValueError(f"n_samples must be non-negative, got {n_samples}")
+        if n_samples > self._capacity:
+            raise ValueError(
+                f"cannot peek {n_samples} samples from a buffer of capacity "
+                f"{self._capacity}"
+            )
+
         with self._lock:
             if self._count < n_samples:
                 return None
+
+            if n_samples == 0:
+                return np.array([], dtype=np.complex64)
 
             end_idx = (self._read_idx + n_samples) % self._capacity
 

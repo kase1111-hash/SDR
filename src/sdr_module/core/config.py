@@ -6,6 +6,8 @@ Handles device configuration, DSP settings, and persistence.
 
 import json
 import logging
+import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -255,8 +257,31 @@ class SDRConfig:
             True if saved successfully, False otherwise
         """
         try:
-            with open(path, "w") as f:
-                json.dump(self.to_dict(), f, indent=2)
+            target = Path(path)
+            if target.parent and not target.parent.exists():
+                target.parent.mkdir(parents=True, exist_ok=True)
+            # Write to a temp file in the same directory and atomically rename,
+            # so an interrupted or failed write can never corrupt an existing
+            # config (a partial file would otherwise make load_default() fall
+            # back to defaults and silently discard the user's settings).
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(target.parent) if str(target.parent) else ".",
+                prefix=".config-",
+                suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, "w") as f:
+                    json.dump(self.to_dict(), f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp_path, str(target))
+            except BaseException:
+                # Clean up the temp file on any failure.
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
             logger.info(f"Configuration saved to {path}")
             return True
         except (OSError, IOError) as e:
@@ -313,10 +338,14 @@ class SDRConfig:
 
     @classmethod
     def get_default_config_path(cls) -> Path:
-        """Get default configuration file path."""
-        config_dir = Path.home() / ".config" / "sdr_module"
-        config_dir.mkdir(parents=True, exist_ok=True)
-        return config_dir / "config.json"
+        """Return the default configuration file path.
+
+        Pure: this does not touch the filesystem. The directory is created by
+        save() when a config is actually written, so read paths such as
+        load_default() can never raise PermissionError just from asking where
+        the config lives.
+        """
+        return Path.home() / ".config" / "sdr_module" / "config.json"
 
     def save_default(self) -> None:
         """Save to default configuration path."""

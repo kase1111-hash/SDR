@@ -9,9 +9,6 @@ import sys
 
 import numpy as np
 
-# Add src to path
-sys.path.insert(0, "../src")
-
 
 def test_imports():
     """Test all module imports."""
@@ -292,7 +289,7 @@ def test_waterfall():
     print("  ✓ Waterfall creation")
 
     # Add spectrum lines
-    for i in range(10):
+    for _i in range(10):
         power = np.random.randn(512) * 10 - 60
         waterfall.add_spectrum_line(power)
     assert waterfall.image.shape == (256, 512, 4)
@@ -326,6 +323,10 @@ def test_waterfall():
 def test_packet_highlighter():
     """Test packet highlighter."""
     print("Testing PacketHighlighter...")
+
+    # Seed so this test is deterministic; it feeds np.random data and used to
+    # pass or fail depending on preceding tests' RNG state.
+    np.random.seed(1)
 
     from sdr_module.ui.packet_highlighter import (
         DetectionConfig,
@@ -593,3 +594,50 @@ def run_all_tests():
 if __name__ == "__main__":
     success = run_all_tests()
     sys.exit(0 if success else 1)
+
+
+class TestConfigPersistenceSafety:
+    """Config save must be atomic and the path getter must be side-effect free."""
+
+    def test_get_default_config_path_has_no_filesystem_side_effect(self, tmp_path):
+        import os
+
+        from sdr_module.core.config import SDRConfig
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"] = str(fake_home)
+        try:
+            path = SDRConfig.get_default_config_path()
+            # Asking where the config lives must not create the directory.
+            assert not path.parent.exists()
+        finally:
+            if old_home is not None:
+                os.environ["HOME"] = old_home
+
+    def test_save_creates_parent_and_is_atomic(self, tmp_path):
+        from sdr_module.core.config import SDRConfig
+
+        target = tmp_path / "nested" / "dir" / "config.json"
+        assert SDRConfig().save(str(target)) is True
+        assert target.exists()
+        # No stray temp files left behind.
+        leftovers = list(target.parent.glob(".config-*.tmp"))
+        assert leftovers == []
+
+    def test_save_leaves_previous_file_intact_on_serialization_error(self, tmp_path):
+        import json
+
+        from sdr_module.core.config import SDRConfig
+
+        target = tmp_path / "config.json"
+        SDRConfig().save(str(target))
+        original = target.read_text()
+        # Corrupt the object so json.dump raises mid-write.
+        cfg = SDRConfig()
+        cfg.dsp.fft_size = {1, 2, 3}  # a set is not JSON-serialisable
+        assert cfg.save(str(target)) is False
+        # The good file on disk is untouched (atomic replace never happened).
+        assert target.read_text() == original
+        json.loads(target.read_text())

@@ -266,8 +266,14 @@ class SDRDevice(ABC):
         return self.has_capability(DeviceCapability.RX)
 
     # TX methods (optional, not all devices support TX)
-    def start_tx(self, callback: Optional[Callable[[], np.ndarray]] = None) -> bool:
-        """Start transmitting samples."""
+    def start_tx(
+        self, callback: Optional[Callable[[], Optional[np.ndarray]]] = None
+    ) -> bool:
+        """Start transmitting samples.
+
+        The callback returns the next block of complex samples, or None/empty
+        to end the transmission.
+        """
         raise NotImplementedError("This device does not support transmit")
 
     def stop_tx(self) -> bool:

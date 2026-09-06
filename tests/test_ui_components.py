@@ -600,3 +600,36 @@ class TestConstellationIntegration:
 
         # Should only have 20 points (last 2 frames)
         assert result.num_points == 20
+
+
+class TestPacketHighlighterRobustness:
+    """The active-signal tracking loop referenced a stale loop variable and
+    raised KeyError on some random inputs (a burst that ended while another
+    signal was active). Exercise many seeds so a regression is caught
+    regardless of global RNG state."""
+
+    def test_process_spectrum_never_raises_across_seeds(self):
+        from sdr_module.ui.packet_highlighter import (
+            DetectionConfig,
+            DetectionMode,
+            PacketHighlighter,
+        )
+        from sdr_module.ui.waterfall import WaterfallDisplay
+
+        config = DetectionConfig(
+            mode=DetectionMode.ADAPTIVE,
+            threshold_db=-50,
+            min_bandwidth_hz=5000,
+            min_duration_lines=2,
+        )
+        for seed in range(50):
+            np.random.seed(seed)
+            waterfall = WaterfallDisplay(width=512, height=256)
+            waterfall.set_frequency_range(433.92e6, 2.4e6)
+            highlighter = PacketHighlighter(waterfall, 2.4e6, config)
+            for i in range(20):
+                power = np.random.randn(512) * 5 - 80
+                if 5 <= i <= 10:
+                    power[200:250] = -40  # transient burst
+                # Must not raise (used to raise KeyError on some seeds).
+                highlighter.process_spectrum(power)

@@ -274,7 +274,9 @@ class TestIQFileOperations:
         samples = np.array([1 + 1j], dtype=np.complex64)
 
         with pytest.raises(ValueError, match="Unsupported format"):
-            save_iq_file(samples, "/tmp/test.xyz", "xyz")
+            save_iq_file(
+                samples, os.path.join(tempfile.gettempdir(), "test.xyz"), "xyz"
+            )
 
 
 class TestDCOffsetCorrection:

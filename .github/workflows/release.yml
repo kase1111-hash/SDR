@@ -16,12 +16,25 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
+
+      - name: Verify the tag matches the package version and has a changelog entry
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(python tools/get_version.py)"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag v${TAG_VERSION} does not match sdr_module.__version__ (${PKG_VERSION})"
+            exit 1
+          fi
+          if ! grep -q "^## \[${TAG_VERSION}\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## [${TAG_VERSION}]' section"
+            exit 1
+          fi
 
       - name: Install build tools
         run: |
           python -m pip install --upgrade pip
-          pip install build twine
+          python -m pip install build twine
 
       - name: Build package
         run: |
@@ -29,7 +42,7 @@ jobs:
 
       - name: Check package
         run: |
-          twine check dist/*
+          twine check --strict dist/*
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
@@ -48,7 +61,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: "3.12"
 
       - name: Download artifacts
         uses: actions/download-artifact@v8
@@ -58,7 +71,8 @@ jobs:
 
       - name: Install package from wheel
         run: |
-          pip install dist/*.whl
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl
 
       - name: Test import
         run: |
@@ -66,7 +80,10 @@ jobs:
 
       - name: Test CLI
         run: |
+          sdr-scan --version
           sdr-scan info
+          sdr-scan encode morse --text HELLO -o "${RUNNER_TEMP}/hello.wav"
+          sdr-scan scan --input "${RUNNER_TEMP}/hello.wav" --threshold -40
 
   publish-testpypi:
     name: Publish to TestPyPI

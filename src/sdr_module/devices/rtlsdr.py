@@ -26,6 +26,32 @@ from .base import (
 
 logger = logging.getLogger(__name__)
 
+_INSTALL_HINT = (
+    "RTL-SDR support is not installed. Install it with "
+    '`python -m pip install "sdr-module[rtlsdr]"` and make sure the system '
+    "librtlsdr library is present (Debian/Ubuntu: `sudo apt install "
+    "librtlsdr-dev`; macOS: `brew install librtlsdr`; Linux users also need "
+    "the RTL-SDR udev rules to run without root)."
+)
+
+
+def _device_count() -> int:
+    """Number of connected RTL-SDR devices, via the real pyrtlsdr API."""
+    from rtlsdr import librtlsdr
+
+    return int(librtlsdr.rtlsdr_get_device_count())
+
+
+def _device_serials() -> List[str]:
+    """Serial strings for connected devices (index order)."""
+    from rtlsdr import RtlSdr
+
+    # get_device_serial_addresses() is the supported enumeration entry point;
+    # RtlSdr.get_device_count / get_device_serial (used by older code) never
+    # existed in pyrtlsdr and always raised AttributeError.
+    return list(RtlSdr.get_device_serial_addresses())
+
+
 # RTL-SDR specifications from spec sheet
 RTLSDR_SPEC = DeviceSpec(
     freq_min=500e3,  # 500 kHz (direct sampling)
@@ -85,16 +111,15 @@ class RTLSDRDevice(SDRDevice):
         self._device = None
         self._spec = RTLSDR_SPEC
         self._direct_sampling = False
+        self._rx_error: Optional[str] = None
 
     @staticmethod
     def get_device_count() -> int:
         """Get number of RTL-SDR devices connected."""
         try:
-            from rtlsdr import RtlSdr
-
-            return RtlSdr.get_device_count()
+            return _device_count()
         except ImportError:
-            logger.warning("rtlsdr library not installed")
+            logger.warning(_INSTALL_HINT)
             return 0
         except Exception as e:
             logger.error(f"Error getting device count: {e}")
@@ -104,9 +129,10 @@ class RTLSDRDevice(SDRDevice):
     def get_device_serial(index: int) -> Optional[str]:
         """Get serial number of device at index."""
         try:
-            from rtlsdr import RtlSdr
-
-            return RtlSdr.get_device_serial(index)
+            serials = _device_serials()
+            if 0 <= index < len(serials):
+                return serials[index]
+            return None
         except ImportError:
             return None  # Library not installed
         except Exception as e:
@@ -118,15 +144,12 @@ class RTLSDRDevice(SDRDevice):
         """List all available RTL-SDR devices."""
         devices = []
         try:
-            from rtlsdr import RtlSdr
-
-            count = RtlSdr.get_device_count()
-            for i in range(count):
-                serial = RtlSdr.get_device_serial(i) or f"rtlsdr_{i}"
+            serials = _device_serials()
+            for i, serial in enumerate(serials):
                 devices.append(
                     DeviceInfo(
                         name=f"RTL-SDR #{i}",
-                        serial=serial,
+                        serial=serial or f"rtlsdr_{i}",
                         manufacturer="RTL-SDR Blog",
                         product="RTL2832U",
                         index=i,
@@ -138,7 +161,7 @@ class RTLSDRDevice(SDRDevice):
                     )
                 )
         except ImportError:
-            logger.warning("rtlsdr library not installed")
+            logger.warning(_INSTALL_HINT)
         except Exception as e:
             logger.error(f"Error listing devices: {e}")
         return devices
@@ -151,11 +174,14 @@ class RTLSDRDevice(SDRDevice):
 
         try:
             from rtlsdr import RtlSdr
+        except ImportError:
+            logger.error(_INSTALL_HINT)
+            return False
 
+        try:
             self._device = RtlSdr(device_index=index)
-            self._is_open = True
 
-            # Get device info
+            # Get device info (best-effort; enumeration may not expose a serial).
             serial = self.get_device_serial(index) or f"rtlsdr_{index}"
             self._info = DeviceInfo(
                 name=f"RTL-SDR #{index}",
@@ -180,16 +206,23 @@ class RTLSDRDevice(SDRDevice):
             self._state.gain_mode = "auto"
             self._state.bandwidth = 2.4e6
 
+            self._is_open = True
             logger.info(f"Opened RTL-SDR device: {serial}")
             return True
 
-        except ImportError:
-            logger.error(
-                "rtlsdr library not installed. Install with: pip install pyrtlsdr"
-            )
-            return False
         except Exception as e:
             logger.error(f"Failed to open RTL-SDR: {e}")
+            # A setter may have raised after RtlSdr() succeeded: close the
+            # handle so we do not leak an open USB device or report is_open.
+            if self._device is not None:
+                try:
+                    self._device.close()
+                except Exception:
+                    logger.debug(
+                        "Error closing RTL-SDR after failed open", exc_info=True
+                    )
+            self._device = None
+            self._is_open = False
             return False
 
     def close(self) -> None:
@@ -315,6 +348,7 @@ class RTLSDRDevice(SDRDevice):
                 return True
 
         self._rx_callback = callback
+        self._rx_error = None
         self._stop_event.clear()
 
         def rx_thread():
@@ -333,12 +367,21 @@ class RTLSDRDevice(SDRDevice):
                             pass  # Queue full, drop samples
             except Exception as e:
                 if not self._stop_event.is_set():
+                    # The stream died on its own (USB unplug, read error, or a
+                    # user callback raising). Record it and clear the streaming
+                    # flag so callers can see acquisition has stopped.
+                    self._rx_error = str(e)
                     logger.error(f"RX thread error: {e}")
+                    with self._state_lock:
+                        self._state.is_streaming = False
 
-        self._rx_thread = Thread(target=rx_thread, daemon=True)
-        self._rx_thread.start()
+        # Mark streaming BEFORE starting the thread. If we set it afterwards, a
+        # thread that dies immediately (bad read, callback raising) would clear
+        # the flag first and this line would wrongly set it back to True.
         with self._state_lock:
             self._state.is_streaming = True
+        self._rx_thread = Thread(target=rx_thread, daemon=True)
+        self._rx_thread.start()
         logger.info("Started RX streaming")
         return True
 
@@ -398,3 +441,8 @@ class RTLSDRDevice(SDRDevice):
     def get_tuner_gains(self) -> List[float]:
         """Get list of valid tuner gain values."""
         return self.VALID_GAINS.copy()
+
+    @property
+    def rx_error(self) -> Optional[str]:
+        """The last RX-thread error, if streaming stopped unexpectedly."""
+        return self._rx_error

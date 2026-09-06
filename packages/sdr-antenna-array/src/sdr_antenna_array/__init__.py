@@ -85,10 +85,10 @@ from .array_controller import (
     SyncState,
 )
 from .beamformer import (
+    Beamformer,
     BeamformerOutput,
     BeamformingMethod,
     BeamPattern,
-    Beamformer,
     SteeringVector,
 )
 from .calibration import (

@@ -27,6 +27,7 @@ from sdr_module.dsp.scanner import (
     FrequencyScanner,
     ScanConfig,
     ScanDirection,
+    ScanMode,
     ScanState,
     ScanStatus,
 )
@@ -358,3 +359,50 @@ class TestFrequencyScanner:
         scanner = FrequencyScanner(config=cfg)
         # 10 MHz range / 1 MHz step = 10 + 1 = 11 steps
         assert scanner._total_steps == 11
+
+    def _sweep_station(self, station_freqs, n=1024, fs=2.4e6):
+        """Run a single UP sweep with strong tones at the given frequencies."""
+        cfg = self._make_config(
+            mode=ScanMode.SINGLE,
+            direction=ScanDirection.UP,
+            start_freq_hz=99e6,
+            end_freq_hz=101e6,
+            step_hz=100e3,
+            threshold_db=-40,
+            min_snr_db=6,
+            record_spectrum=False,
+        )
+        scanner = FrequencyScanner(config=cfg)
+        scanner.start()
+        for _ in range(scanner._total_steps + 2):
+            c = scanner.current_frequency
+            spec = np.full(n, -90.0)
+            for s in station_freqs:
+                off = s - c
+                if abs(off) < fs / 2:
+                    b = int(round(n / 2 + off / (fs / n)))
+                    if 0 <= b < n:
+                        spec[b] = -20.0
+            status = scanner.update(spec, center_freq=c, sample_rate=fs)
+            if status.state in (ScanState.COMPLETED, ScanState.IDLE):
+                break
+        return scanner.hits
+
+    def test_one_station_yields_one_hit_at_true_frequency(self):
+        """A station in a wide window is not logged once per overlapping step.
+
+        Regression: the scanner used to append a hit at the tuned centre on
+        every step whose window contained the station (21 hits for one
+        station), all at the wrong frequency.
+        """
+        hits = self._sweep_station([100.0e6])
+        assert len(hits) == 1
+        assert abs(hits[0].frequency_hz - 100.0e6) < 100e3  # true freq, not centre
+
+    def test_two_stations_yield_two_distinct_hits(self):
+        """Two well-separated stations produce exactly two hits."""
+        hits = self._sweep_station([99.5e6, 100.6e6])
+        freqs = sorted(h.frequency_hz for h in hits)
+        assert len(hits) == 2
+        assert abs(freqs[0] - 99.5e6) < 100e3
+        assert abs(freqs[1] - 100.6e6) < 100e3

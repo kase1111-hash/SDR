@@ -292,38 +292,71 @@ class FrequencyScanner:
     def _check_for_signals(
         self, spectrum_db: np.ndarray, center_freq: float, sample_rate: Optional[float]
     ) -> None:
-        """Check spectrum for signals above threshold."""
-        peak_power = float(np.max(spectrum_db))
+        """Check spectrum for signals above threshold.
+
+        The scanning window (``sample_rate``) is typically far wider than the
+        tuning step, so a single strong station appears as the peak of many
+        consecutive, overlapping steps. We therefore report the *actual* peak
+        frequency (derived from the peak bin, not the tuned centre) and
+        deduplicate against hits already found this sweep, so one station
+        yields one hit at its true frequency instead of one bogus hit per step.
+        """
+        n = len(spectrum_db)
+        if n == 0:
+            return
+
+        peak_bin = int(np.argmax(spectrum_db))
+        peak_power = float(spectrum_db[peak_bin])
         snr = peak_power - self._noise_floor_db
 
-        if peak_power >= self._config.threshold_db and snr >= self._config.min_snr_db:
-            # Signal detected
+        if peak_power < self._config.threshold_db or snr < self._config.min_snr_db:
+            return
+
+        # Map the peak bin to an absolute frequency. SpectrumAnalyzer emits an
+        # fftshifted spectrum, so bin n//2 is the tuned centre and each bin is
+        # sample_rate / n wide. Without a sample rate we can only report the
+        # tuned centre.
+        if sample_rate:
+            bin_width = sample_rate / n
+            signal_freq = center_freq + (peak_bin - n // 2) * bin_width
+            # 3 dB bandwidth from the number of bins within 3 dB of the peak.
+            above_threshold = spectrum_db >= (peak_power - 3.0)
+            bandwidth = float(np.sum(above_threshold) * bin_width)
+        else:
+            signal_freq = center_freq
             bandwidth = 0.0
-            if sample_rate:
-                # Estimate bandwidth from spectrum
-                threshold = peak_power - 3.0  # 3 dB bandwidth
-                above_threshold = spectrum_db >= threshold
-                bandwidth = float(
-                    np.sum(above_threshold) * sample_rate / len(spectrum_db)
-                )
 
-            hit = SignalHit(
-                frequency_hz=center_freq,
-                power_db=peak_power,
-                bandwidth_hz=bandwidth,
-                timestamp=time.time(),
-                snr_db=snr,
-            )
-            self._hits.append(hit)
+        # Deduplicate: two detections within the tuning step (or the signal's
+        # own bandwidth) are the same station seen from overlapping windows.
+        tolerance = max(self._config.step_hz, bandwidth)
+        for existing in self._hits:
+            if abs(existing.frequency_hz - signal_freq) <= tolerance:
+                # Keep the strongest reading of this station.
+                if peak_power > existing.power_db:
+                    existing.frequency_hz = signal_freq
+                    existing.power_db = peak_power
+                    existing.bandwidth_hz = bandwidth
+                    existing.snr_db = snr
+                    existing.timestamp = time.time()
+                return
 
-            # Callback
-            if self._on_signal:
-                self._on_signal(hit)
+        hit = SignalHit(
+            frequency_hz=signal_freq,
+            power_db=peak_power,
+            bandwidth_hz=bandwidth,
+            timestamp=time.time(),
+            snr_db=snr,
+        )
+        self._hits.append(hit)
 
-            # Pause if configured
-            if self._config.mode == ScanMode.PAUSE_ON_SIGNAL:
-                self._state = ScanState.PAUSED
-                self._pause_start_time = time.time()
+        # Callback
+        if self._on_signal:
+            self._on_signal(hit)
+
+        # Pause if configured
+        if self._config.mode == ScanMode.PAUSE_ON_SIGNAL:
+            self._state = ScanState.PAUSED
+            self._pause_start_time = time.time()
 
     def _handle_pause(self) -> ScanStatus:
         """Handle paused state."""

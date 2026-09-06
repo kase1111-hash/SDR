@@ -1992,18 +1992,18 @@ class NoiseReduction:
         self._window = np.hanning(self._fft_size)
 
         # Noise estimation state
-        self._noise_spectrum = None
+        self._noise_spectrum: Optional[np.ndarray] = None
         self._noise_frames_collected = 0
         self._noise_estimated = False
 
         # Processing buffers
         self._input_buffer = np.array([], dtype=np.complex128)
         self._output_buffer = np.array([], dtype=np.complex128)
-        self._overlap_buffer = np.zeros(self._fft_size - self._hop_size)
+        self._overlap_buffer: np.ndarray = np.zeros(self._fft_size - self._hop_size)
 
         # LMS state
         self._lms_weights = np.zeros(self._config.lms_filter_length)
-        self._lms_buffer = np.zeros(self._config.lms_filter_length)
+        self._lms_buffer: np.ndarray = np.zeros(self._config.lms_filter_length)
 
         # Gate state
         self._gate_level = 0.0
@@ -2015,7 +2015,7 @@ class NoiseReduction:
         )
 
         # Wiener state
-        self._wiener_noise_psd = None
+        self._wiener_noise_psd: Optional[np.ndarray] = None
 
         # Statistics
         self._input_power = 0.0
@@ -2347,7 +2347,7 @@ class NoiseReduction:
         output = np.zeros_like(signal)
         L = self._config.lms_filter_length
         mu = self._config.lms_step_size
-        ref_buffer = np.zeros(L)
+        ref_buffer: np.ndarray = np.zeros(L)
 
         for i in range(len(signal)):
             # Shift reference buffer

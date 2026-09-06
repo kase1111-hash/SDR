@@ -194,16 +194,16 @@ class IQRecorder:
     def _get_numpy_dtype(self) -> np.dtype:
         """Get numpy dtype for sample format."""
         if self._sample_format == SampleFormat.UINT8:
-            return np.uint8
+            return np.dtype(np.uint8)
         elif self._sample_format == SampleFormat.INT8:
-            return np.int8
+            return np.dtype(np.int8)
         elif self._sample_format == SampleFormat.INT16:
-            return np.int16
+            return np.dtype(np.int16)
         elif self._sample_format == SampleFormat.FLOAT32:
-            return np.float32
+            return np.dtype(np.float32)
         elif self._sample_format == SampleFormat.FLOAT64:
-            return np.float64
-        return np.float32
+            return np.dtype(np.float64)
+        return np.dtype(np.float32)
 
     def _convert_samples(self, samples: np.ndarray) -> np.ndarray:
         """Convert samples to target format."""
@@ -705,16 +705,16 @@ class IQPlayer:
     def _get_numpy_dtype(self) -> np.dtype:
         """Get numpy dtype."""
         if self._sample_format == SampleFormat.UINT8:
-            return np.uint8
+            return np.dtype(np.uint8)
         elif self._sample_format == SampleFormat.INT8:
-            return np.int8
+            return np.dtype(np.int8)
         elif self._sample_format == SampleFormat.INT16:
-            return np.int16
+            return np.dtype(np.int16)
         elif self._sample_format == SampleFormat.FLOAT32:
-            return np.float32
+            return np.dtype(np.float32)
         elif self._sample_format == SampleFormat.FLOAT64:
-            return np.float64
-        return np.float32
+            return np.dtype(np.float64)
+        return np.dtype(np.float32)
 
     def _read_wav(self, num_samples: int) -> np.ndarray:
         """Read from WAV file."""
@@ -730,15 +730,17 @@ class IQPlayer:
         sample_width = self._wav_file.getsampwidth()
         n_channels = self._wav_file.getnchannels()
 
+        raw: np.ndarray
+        samples: np.ndarray
         if sample_width == 1:
-            samples = np.frombuffer(frames, dtype=np.uint8)
-            samples = (samples.astype(np.float64) - 128) / 128.0
+            raw = np.frombuffer(frames, dtype=np.uint8)
+            samples = (raw.astype(np.float64) - 128) / 128.0
         elif sample_width == 2:
-            samples = np.frombuffer(frames, dtype=np.int16)
-            samples = samples.astype(np.float64) / 32767.0
+            raw = np.frombuffer(frames, dtype=np.int16)
+            samples = raw.astype(np.float64) / 32767.0
         else:
-            samples = np.frombuffer(frames, dtype=np.int16)
-            samples = samples.astype(np.float64) / 32767.0
+            raw = np.frombuffer(frames, dtype=np.int16)
+            samples = raw.astype(np.float64) / 32767.0
 
         # Handle channels
         if n_channels == 2:
@@ -1422,15 +1424,17 @@ class AudioPlayer:
             return np.array([], dtype=np.float32)
 
         # Convert bytes to samples
+        raw: np.ndarray
+        samples: np.ndarray
         if self._sample_width == 1:
             # Unsigned 8-bit
-            samples = np.frombuffer(frames, dtype=np.uint8)
-            samples = (samples.astype(np.float32) - 128) / 128.0
+            raw = np.frombuffer(frames, dtype=np.uint8)
+            samples = (raw.astype(np.float32) - 128) / 128.0
 
         elif self._sample_width == 2:
             # Signed 16-bit
-            samples = np.frombuffer(frames, dtype=np.int16)
-            samples = samples.astype(np.float32) / 32767.0
+            raw = np.frombuffer(frames, dtype=np.int16)
+            samples = raw.astype(np.float32) / 32767.0
 
         elif self._sample_width == 3:
             # Signed 24-bit (unpack manually)
@@ -1446,8 +1450,8 @@ class AudioPlayer:
                     samples[i] = val / 8388607.0
         else:
             # Default to 16-bit
-            samples = np.frombuffer(frames, dtype=np.int16)
-            samples = samples.astype(np.float32) / 32767.0
+            raw = np.frombuffer(frames, dtype=np.int16)
+            samples = raw.astype(np.float32) / 32767.0
 
         # Handle multi-channel: return as (n_samples, n_channels) or flatten for mono
         if self._channels > 1:
@@ -2662,7 +2666,7 @@ class FormatDetector:
             data = f.read(min(file_size, sample_count * 16))
 
         # Try different interpretations
-        scores = {}
+        scores: dict[SampleFormat, float] = {}
 
         # UINT8: values 0-255, typically centered around 127-128
         try:

@@ -116,7 +116,7 @@ class WaterfallDisplay:
         self._data.fill(min_db)
 
         # RGB image buffer
-        self._image = np.zeros((height, width, 4), dtype=np.uint8)
+        self._image: np.ndarray = np.zeros((height, width, 4), dtype=np.uint8)
 
         # Packet highlights
         self._highlights: List[PacketHighlight] = []

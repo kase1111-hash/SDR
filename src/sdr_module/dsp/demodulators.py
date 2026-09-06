@@ -549,7 +549,7 @@ class GFSKDemodulator(Demodulator):
         if len(search_region) > 0:
             peak_idx = np.argmax(search_region) + min_lag
             if peak_idx > 0:
-                return self._sample_rate / peak_idx
+                return float(self._sample_rate / peak_idx)
 
         return self._symbol_rate
 
@@ -1202,7 +1202,7 @@ class QAMDemodulator(Demodulator):
         """
         levels = self._levels
         # Decision boundaries are midpoints between levels
-        boundaries = np.arange(-(levels - 2), levels, 2)
+        boundaries: np.ndarray = np.arange(-(levels - 2), levels, 2)
 
         if self._normalize:
             # Scale boundaries by same normalization
@@ -1526,7 +1526,7 @@ class CWDemodulator(Demodulator):
             elif i > 0:
                 gap = (start - key_up[i - 1]) / self._sample_rate
             else:
-                gap = 0
+                gap = 0.0
 
             # Handle gaps
             if gap > self._word_gap * 0.6:

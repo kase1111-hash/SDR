@@ -7,6 +7,7 @@ Provides conversion between various I/Q data formats.
 from typing import Optional, Tuple
 
 import numpy as np
+import numpy.typing as npt
 
 
 def iq_to_complex(i_samples: np.ndarray, q_samples: np.ndarray) -> np.ndarray:
@@ -36,7 +37,9 @@ def complex_to_iq(samples: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return samples.real.astype(np.float32), samples.imag.astype(np.float32)
 
 
-def interleaved_to_complex(data: np.ndarray, dtype: np.dtype = np.uint8) -> np.ndarray:
+def interleaved_to_complex(
+    data: np.ndarray, dtype: npt.DTypeLike = np.uint8
+) -> np.ndarray:
     """
     Convert interleaved I/Q data to complex.
 
@@ -64,7 +67,7 @@ def interleaved_to_complex(data: np.ndarray, dtype: np.dtype = np.uint8) -> np.n
 
 
 def complex_to_interleaved(
-    samples: np.ndarray, dtype: np.dtype = np.uint8
+    samples: np.ndarray, dtype: npt.DTypeLike = np.uint8
 ) -> np.ndarray:
     """
     Convert complex samples to interleaved I/Q data.

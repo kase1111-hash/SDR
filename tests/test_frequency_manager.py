@@ -274,6 +274,25 @@ class TestLicenseClassEnforcement:
         # But 40m phone is not (only some portions for CW)
         # This depends on exact band definitions
 
+    def test_technician_blocked_on_160m(self):
+        """Technicians have no 160m privileges (was wrongly allowed via ALL_HAM)."""
+        set_license_class(LicenseClass.TECHNICIAN)
+        allowed, _ = is_tx_allowed(1.900e6, 3000)
+        assert not allowed
+
+    def test_technician_blocked_on_60m(self):
+        """Technicians have no 60m privileges; 60m requires General or above."""
+        set_license_class(LicenseClass.TECHNICIAN)
+        for freq in (5.3320e6, 5.3480e6, 5.3585e6, 5.3730e6, 5.4050e6):
+            allowed, _ = is_tx_allowed(freq, 2700)
+            assert not allowed, f"{freq/1e6:.4f} MHz wrongly allowed for Technician"
+
+    def test_general_allowed_on_160m_and_60m(self):
+        """General and above keep 160m and 60m access."""
+        set_license_class(LicenseClass.GENERAL)
+        assert is_tx_allowed(1.900e6, 3000)[0]
+        assert is_tx_allowed(5.3320e6, 2700)[0]
+
     def test_general_has_hf_privileges(self):
         """General class should have HF privileges."""
         set_license_class(LicenseClass.GENERAL)

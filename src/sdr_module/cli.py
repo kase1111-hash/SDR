@@ -151,7 +151,11 @@ def _scan_file(args: argparse.Namespace) -> int:
 
 def cmd_decode(args: argparse.Namespace) -> int:
     """Decode a protocol from a recorded I/Q file."""
-    from .dsp.protocols import ProtocolType, create_protocol_decoder
+    from .dsp.protocols import (
+        ProtocolType,
+        create_protocol_decoder,
+        demodulate_for_protocol,
+    )
     from .dsp.recording import SampleFormat, load_iq_file
 
     protocol = ProtocolType(args.protocol)
@@ -181,7 +185,15 @@ def cmd_decode(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"Error: {exc}")
         return 1
-    messages = decoder.decode(samples)
+
+    baseband = demodulate_for_protocol(samples, protocol)
+    if baseband is None:
+        print(
+            f"Error: decoding {protocol.value.upper()} from a raw I/Q capture "
+            "is not supported yet (it needs subcarrier recovery)."
+        )
+        return 2
+    messages = decoder.decode(baseband)
 
     print(f"Decoded {len(messages)} {args.protocol.upper()} message(s)")
     for i, msg in enumerate(messages):

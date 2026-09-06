@@ -103,7 +103,8 @@ Record I/Q to disk (via the GUI or any SDR tool), then analyze it offline:
 # Detect signals in a capture via FFT peak detection
 sdr-scan scan --input capture.cf32 --sample-rate 2400000 --center 100e6 --threshold -40
 
-# Decode a protocol from a capture (POCSAG, FLEX, AX.25/APRS, RDS, ADS-B, ACARS)
+# Decode a protocol from a capture (POCSAG, FLEX, AX.25/APRS, ADS-B, ACARS)
+# (RDS needs 57 kHz subcarrier recovery and is not decodable from a raw I/Q capture yet)
 sdr-scan decode adsb --input adsb_1090.cf32 --sample-rate 2000000
 ```
 
@@ -281,7 +282,7 @@ sdr-module/
 │   └── utils/         # Helper utilities
 ├── packages/
 │   └── sdr-antenna-array/  # Standalone antenna array package
-├── tests/             # Test suite (~770 tests, plus ~125 in sdr-antenna-array)
+├── tests/             # Test suite (~970 tests, plus ~125 in sdr-antenna-array)
 ├── examples/          # Example scripts
 └── tools/             # Dev helpers
 ```

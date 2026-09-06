@@ -248,6 +248,55 @@ class TestWaterfallWidgetLogic(unittest.TestCase):
             colormap = self.widget._build_colormap(name)
             self.assertEqual(colormap.shape, (256, 3))
 
+    def test_render_newest_line_at_bottom(self):
+        """Newest line renders at the bottom row with the correct colormap color."""
+        from PyQt6.QtGui import QColor
+
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        widget = WaterfallWidget(history_size=10)
+        # A full-scale (max-dB) line maps to the top colormap entry (index 255).
+        widget.add_line(np.zeros(2048, dtype=np.float32))  # 0 dB == max_db
+        image = widget._image
+        self.assertIsNotNone(image)
+        self.assertEqual((image.width(), image.height()), (2048, 10))
+
+        r, g, b = (int(v) for v in widget._colormap[255])
+        bottom = QColor(image.pixel(1024, image.height() - 1))
+        self.assertEqual((bottom.red(), bottom.green(), bottom.blue()), (r, g, b))
+
+        # With only one line of history, the top row is still background.
+        top = QColor(image.pixel(1024, 0))
+        bg = widget._bg_color
+        self.assertEqual(
+            (top.red(), top.green(), top.blue()),
+            (bg.red(), bg.green(), bg.blue()),
+        )
+
+    def test_render_is_vectorized_fast(self):
+        """A full-history repaint must stay well under the ~33 ms frame budget.
+
+        Regression guard for the old per-pixel QImage.pixel/setPixel scroll,
+        which took ~0.4 s per line and froze the UI during acquisition.
+        """
+        import time
+
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        widget = WaterfallWidget(history_size=500)
+        rng = np.random.default_rng(0)
+        line = (rng.standard_normal(2048) * 10 - 40).astype(np.float32)
+        for _ in range(5):  # fill some history so the buffer is non-trivial
+            widget.add_line(line)
+
+        start = time.perf_counter()
+        for _ in range(10):
+            widget.add_line(line)
+        avg = (time.perf_counter() - start) / 10
+        # Generous ceiling (33 ms budget); the fix runs in a few ms, the old
+        # code took hundreds of ms.
+        self.assertLess(avg, 0.033, f"add_line too slow: {avg * 1000:.1f} ms")
+
 
 class TestFrequencyInputLogic(unittest.TestCase):
     """Test FrequencyInput widget logic."""
@@ -312,6 +361,43 @@ class TestControlPanelLogic(unittest.TestCase):
         """Test setting frequency."""
         self.widget.set_frequency(433e6)
         self.assertEqual(self.widget._freq_input.get_frequency(), 433e6)
+
+    def test_record_button_emits_signals(self):
+        """The Record button emits recording_started/stopped (was connected to nothing)."""
+        events = []
+        self.widget.recording_started.connect(lambda f: events.append(("start", f)))
+        self.widget.recording_stopped.connect(lambda: events.append(("stop",)))
+
+        self.widget._record_btn.setChecked(True)
+        self.assertEqual(events, [("start", self.widget.get_recording_format())])
+        self.assertEqual(self.widget._record_btn.text(), "⏹ Stop")
+
+        self.widget._record_btn.setChecked(False)
+        self.assertEqual(events[-1], ("stop",))
+
+    def test_set_recording_state_does_not_re_emit(self):
+        """External sync must not re-trigger the recording signals (no loop)."""
+        events = []
+        self.widget.recording_started.connect(lambda f: events.append("start"))
+        self.widget.recording_stopped.connect(lambda: events.append("stop"))
+
+        self.widget.set_recording_state(True)
+        self.assertTrue(self.widget._record_btn.isChecked())
+        self.widget.set_recording_state(False)
+        self.assertFalse(self.widget._record_btn.isChecked())
+        self.assertEqual(events, [])  # nothing emitted
+
+    def test_update_record_time_formats_hms(self):
+        """Recording timer formats hh:mm:ss."""
+        self.widget.update_record_time(3661)
+        self.assertEqual(self.widget._record_time.text(), "01:01:01")
+
+    def test_get_fm_deviation(self):
+        """FM Dev selection is readable (was an inert control)."""
+        self.widget._fm_dev_combo.setCurrentText("75 kHz")
+        self.assertEqual(self.widget.get_fm_deviation(), 75e3)
+        self.widget._fm_dev_combo.setCurrentText("12.5 kHz")
+        self.assertEqual(self.widget.get_fm_deviation(), 12.5e3)
 
     def test_set_gain(self):
         """Test setting gain."""
@@ -462,6 +548,90 @@ class TestGUIDataProcessing(unittest.TestCase):
         widget.add_line(np.array([]))
         # History should still have an entry (resampled)
         self.assertEqual(len(widget._history), 1)
+
+
+class TestSpectrumDbfsNormalization(unittest.TestCase):
+    """The display FFT must be referenced to dBFS, not raw 20*log10(|FFT|).
+
+    Regression for the unnormalized spectrum that made a full-scale tone read
+    ~+66 dB, saturating the (-120, 0) dB display and pinning the -80 dB squelch
+    permanently open.
+    """
+
+    def setUp(self):
+        require_pyqt6(self)
+        from sdr_module.gui.main_window import SDRMainWindow
+
+        # Exercise just the pure DSP helper without building the whole window.
+        self.win = SDRMainWindow.__new__(SDRMainWindow)
+        self.win._spectrum_window = None
+        self.win._spectrum_window_gain = 1.0
+
+    def _tone(self, n=2048, k=200, amplitude=1.0):
+        t = np.arange(n)
+        return (amplitude * np.exp(2j * np.pi * k / n * t)).astype(np.complex64)
+
+    def test_full_scale_tone_reads_zero_dbfs(self):
+        peak = float(self.win._power_spectrum_dbfs(self._tone()).max())
+        self.assertAlmostEqual(peak, 0.0, delta=0.5)
+
+    def test_half_scale_tone_reads_minus_six_db(self):
+        peak = float(self.win._power_spectrum_dbfs(self._tone(amplitude=0.5)).max())
+        self.assertAlmostEqual(peak, -6.02, delta=0.5)
+
+    def test_noise_floor_well_below_full_scale(self):
+        rng = np.random.default_rng(0)
+        n = 2048
+        noise = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(
+            np.complex64
+        ) * 0.1
+        power = self.win._power_spectrum_dbfs(noise)
+        self.assertLess(float(power.max()), -10.0)
+
+    def test_empty_input_returns_empty(self):
+        out = self.win._power_spectrum_dbfs(np.array([], dtype=np.complex64))
+        self.assertEqual(out.shape, (0,))
+
+
+class TestScannerNoDeviceHonesty(unittest.TestCase):
+    """The scanner must not fabricate detections when no device is present."""
+
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_worker_measure_peak_returns_none_without_device(self):
+        from sdr_module.gui.scanner_dialog import _ScanWorker
+
+        worker = _ScanWorker(None, 88e6, 108e6, 200e3, -20.0)
+        # Repeated calls must never invent a measurement from synthetic noise.
+        for _ in range(20):
+            self.assertIsNone(worker._measure_peak(100e6))
+
+    def test_dialog_disables_scan_without_device(self):
+        from sdr_module.gui.scanner_dialog import ScannerDialog
+
+        dialog = ScannerDialog(device=None)
+        self.assertFalse(dialog._start_btn.isEnabled())
+        # Toggling anyway produces no hits.
+        dialog._toggle_scan()
+        self.assertEqual(dialog._table.rowCount(), 0)
+
+    def test_measure_peak_is_dbfs_referenced_with_device(self):
+        from sdr_module.gui.scanner_dialog import _ScanWorker
+
+        class FakeDevice:
+            def set_frequency(self, freq):
+                self._freq = freq
+
+            def read_samples(self, n):
+                t = np.arange(n)
+                return np.exp(2j * np.pi * 0.1 * t).astype(np.complex64)
+
+        worker = _ScanWorker(FakeDevice(), 88e6, 108e6, 200e3, -20.0)
+        peak = worker._measure_peak(100e6)
+        self.assertIsNotNone(peak)
+        # A full-scale tone should read near 0 dBFS, not tens of dB.
+        self.assertLess(abs(peak), 3.0)
 
 
 class TestGUISignalEmission(unittest.TestCase):
@@ -629,3 +799,99 @@ def run_tests():
 if __name__ == "__main__":
     success = run_tests()
     sys.exit(0 if success else 1)
+
+
+class TestDeviceDialogDemoSelectable(unittest.TestCase):
+    """The Demo Device row must be selectable and open a device."""
+
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_demo_device_has_backing_entry(self):
+        from sdr_module.gui.device_dialog import DeviceDialog, MockDevice
+
+        dialog = DeviceDialog()
+        dialog._refresh_devices()
+        # When no real hardware is present a Demo Device row is shown and it
+        # must have a matching entry in _devices, or _on_accept rejects it.
+        self.assertEqual(dialog._device_table.rowCount(), len(dialog._devices))
+        self.assertTrue(any(d.get("type") == "demo" for d in dialog._devices))
+        opened = dialog._open_device(dialog._devices[0])
+        self.assertIsInstance(opened, MockDevice)
+
+
+class TestDecoderPanelWiring(unittest.TestCase):
+    """The Decoder panel must actually receive decoded messages (was fed none)."""
+
+    def setUp(self):
+        require_pyqt6(self)
+
+    @staticmethod
+    def _pocsag_iq(fs=38400.0, baud=1200.0, deviation=2400.0):
+        from sdr_module.dsp.protocols import POCSAGDecoder
+
+        def enc(flag, data20):
+            msg = (flag << 20) | (data20 & 0xFFFFF)
+            reg = msg << 10
+            for i in range(30, 9, -1):
+                if reg & (1 << i):
+                    reg ^= 0x769 << (i - 10)
+            cw31 = (msg << 10) | (reg & 0x3FF)
+            return (cw31 << 1) | (bin(cw31).count("1") & 1)
+
+        def w2b(word):
+            return [(word >> (31 - i)) & 1 for i in range(32)]
+
+        bits = [1, 0] * 288 + w2b(POCSAGDecoder.SYNC_WORD)
+        words = [POCSAGDecoder.IDLE_WORD] * 16
+        words[0] = enc(0, (0x100 << 2) | 0)
+        words[1] = enc(1, (1 << 16) | (2 << 12) | (3 << 8) | (4 << 4) | 5)
+        for word in words:
+            bits += w2b(word)
+        bits += [1, 0] * 32
+        sps = int(fs / baud)
+        phase = 0.0
+        iq = np.empty(len(bits) * sps, dtype=np.complex64)
+        idx = 0
+        for bit in bits:
+            freq = deviation if bit else -deviation
+            for _ in range(sps):
+                phase += 2 * np.pi * freq / fs
+                iq[idx] = np.exp(1j * phase)
+                idx += 1
+        return iq
+
+    def test_selected_decoder_feeds_panel(self):
+        from sdr_module.gui.decoder_panel import DecoderPanel
+        from sdr_module.gui.main_window import SDRMainWindow
+
+        # Build just enough of the window to exercise the decoder wiring.
+        win = SDRMainWindow.__new__(SDRMainWindow)
+        win._decoder = None
+        win._decoder_protocol = None
+        win._decoder_panel = DecoderPanel()
+
+        class FakeDevice:
+            sample_rate = 38400.0
+
+        win._device = FakeDevice()
+        win._on_decoder_protocol_changed("POCSAG")
+        self.assertIsNotNone(win._decoder)
+
+        win._run_decoder(self._pocsag_iq())
+        self.assertGreaterEqual(win._decoder_panel.get_message_count(), 1)
+
+    def test_auto_detect_clears_decoder(self):
+        from sdr_module.gui.decoder_panel import DecoderPanel
+        from sdr_module.gui.main_window import SDRMainWindow
+
+        win = SDRMainWindow.__new__(SDRMainWindow)
+        win._decoder = object()
+        win._decoder_protocol = object()
+        win._decoder_panel = DecoderPanel()
+        win._device = None
+        win._on_decoder_protocol_changed("Auto Detect")
+        self.assertIsNone(win._decoder)
+        # No active decoder -> feeding samples is a no-op, not a crash.
+        win._run_decoder(np.zeros(1000, dtype=np.complex64))
+        self.assertEqual(win._decoder_panel.get_message_count(), 0)

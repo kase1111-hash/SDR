@@ -401,14 +401,14 @@ LICENSE_FREE_BANDS: List[BandPrivilege] = [
 
 AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
     # =========================================================================
-    # 160 Meters (1.8-2.0 MHz) - All licenses, all modes
+    # 160 Meters (1.8-2.0 MHz) - General and above (no Technician HF here)
     # =========================================================================
     BandPrivilege(
         name="160m",
         start_hz=1.800e6,
         end_hz=2.000e6,
         modes=set(),  # All modes
-        licenses=ALL_HAM,
+        licenses=GENERAL_EXTRA,
     ),
     # =========================================================================
     # 80 Meters (3.5-4.0 MHz)
@@ -462,7 +462,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         licenses=GENERAL_EXTRA,
     ),
     # =========================================================================
-    # 60 Meters (5 MHz channels) - All licenses, USB only, 100W ERP
+    # 60 Meters (5 MHz channels) - General and above, USB/CW/data, 100W ERP
     # =========================================================================
     BandPrivilege(
         name="60m Ch 1",
@@ -470,7 +470,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         end_hz=5.3335e6,
         modes={"USB", "DATA", "CW"},
         max_power_watts=100.0,
-        licenses=ALL_HAM,
+        licenses=GENERAL_EXTRA,
     ),
     BandPrivilege(
         name="60m Ch 2",
@@ -478,7 +478,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         end_hz=5.3495e6,
         modes={"USB", "DATA", "CW"},
         max_power_watts=100.0,
-        licenses=ALL_HAM,
+        licenses=GENERAL_EXTRA,
     ),
     BandPrivilege(
         name="60m Ch 3",
@@ -486,7 +486,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         end_hz=5.3600e6,
         modes={"USB", "DATA", "CW"},
         max_power_watts=100.0,
-        licenses=ALL_HAM,
+        licenses=GENERAL_EXTRA,
     ),
     BandPrivilege(
         name="60m Ch 4",
@@ -494,7 +494,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         end_hz=5.3745e6,
         modes={"USB", "DATA", "CW"},
         max_power_watts=100.0,
-        licenses=ALL_HAM,
+        licenses=GENERAL_EXTRA,
     ),
     BandPrivilege(
         name="60m Ch 5",
@@ -502,7 +502,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         end_hz=5.4065e6,
         modes={"USB", "DATA", "CW"},
         max_power_watts=100.0,
-        licenses=ALL_HAM,
+        licenses=GENERAL_EXTRA,
     ),
     # =========================================================================
     # 40 Meters (7.0-7.3 MHz)

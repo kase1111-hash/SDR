@@ -258,10 +258,13 @@ class Beamformer:
         # Apply weights and sum
         output = np.zeros(min_len, dtype=np.complex64)
 
-        for elem in self._config.enabled_elements:
+        # Index the weights by row position (weights follow the steering-vector
+        # manifold of enabled elements in order); with a disabled or
+        # non-contiguous element that differs from the global element index.
+        for row, elem in enumerate(self._config.enabled_elements):
             idx = elem.index
-            if idx in signals and idx < len(weights):
-                output += signals[idx][:min_len] * weights[idx]
+            if idx in signals and row < len(weights):
+                output += signals[idx][:min_len] * weights[row]
 
         # Compute output power
         if len(output) > 0:
@@ -511,10 +514,13 @@ class Beamformer:
         min_len = min(lengths)
 
         output = np.zeros(min_len, dtype=np.complex64)
-        for elem in self._config.enabled_elements:
+        # Index the weights by row position (weights follow the steering-vector
+        # manifold of enabled elements in order); with a disabled or
+        # non-contiguous element that differs from the global element index.
+        for row, elem in enumerate(self._config.enabled_elements):
             idx = elem.index
-            if idx in signals and idx < len(weights):
-                output += signals[idx][:min_len] * weights[idx]
+            if idx in signals and row < len(weights):
+                output += signals[idx][:min_len] * weights[row]
 
         beam_power = 10 * np.log10(np.mean(np.abs(output) ** 2) + 1e-20)
 

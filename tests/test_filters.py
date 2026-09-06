@@ -4,11 +4,157 @@ import numpy as np
 import pytest
 
 from sdr_module.dsp.filters import (
+    AGC,
+    AGCConfig,
+    AGCMode,
+    FastAGC,
     FilterBank,
     FilterSpec,
     FilterType,
     FIRFilter,
+    NoiseReduction,
+    NoiseReductionConfig,
+    NoiseReductionMethod,
+    Resampler,
 )
+
+
+class TestAdaptiveLineEnhancer:
+    """Single-input LMS/NLMS used the current sample as both filter input and
+    desired output, so it predicted the sample from itself and cancelled the
+    whole signal (output ~0). With a decorrelation delay it is now an adaptive
+    line enhancer: it keeps a narrowband tone and suppresses broadband noise."""
+
+    FS = 48000
+
+    def _tone_in_noise(self, n=16000):
+        t = np.arange(n) / self.FS
+        rng = np.random.default_rng(0)
+        tone = np.sin(2 * np.pi * 1500 * t)
+        noisy = (tone + 0.5 * rng.standard_normal(n)).astype(np.float64)
+        return tone, noisy
+
+    @staticmethod
+    def _corr(a, b):
+        a = a - a.mean()
+        b = b - b.mean()
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-12))
+
+    def test_lms_does_not_self_cancel(self):
+        tone, noisy = self._tone_in_noise()
+        nr = NoiseReduction(
+            self.FS,
+            NoiseReductionConfig(
+                method=NoiseReductionMethod.LMS,
+                lms_step_size=0.05,
+                lms_filter_length=32,
+            ),
+        )
+        out = nr.process(noisy)
+        # Output retains real energy instead of collapsing to ~0 (the old bug
+        # left out/in power near 0.01).
+        ratio = np.mean(out[len(out) // 2 :] ** 2) / np.mean(
+            noisy[len(noisy) // 2 :] ** 2
+        )
+        assert ratio > 0.1
+
+    def test_nlms_enhances_narrowband_in_noise(self):
+        tone, noisy = self._tone_in_noise()
+        nr = NoiseReduction(
+            self.FS,
+            NoiseReductionConfig(
+                method=NoiseReductionMethod.NLMS,
+                lms_step_size=0.05,
+                lms_filter_length=32,
+            ),
+        )
+        out = nr.process(noisy)
+        h = slice(len(out) // 2, None)  # after the filter has adapted
+        # The enhanced output tracks the clean tone better than the noisy input.
+        assert self._corr(out[h], tone[h]) > self._corr(noisy[h], tone[h])
+
+
+class TestAGCBlockTiming:
+    """AGC.process_block / FastAGC.process applied the per-sample attack/decay
+    coefficient once per block, stretching the attack time by the block length
+    (a 1 ms attack took hundreds of ms). The coefficient is now scaled to the
+    block, so settle time no longer grows with the block count."""
+
+    FS = 48000
+
+    def _blocks_to_settle(self, gains, tol=0.2):
+        final = gains[-1]
+        span = abs(gains[0] - final)
+        if span == 0:
+            return 0
+        for i, g in enumerate(gains):
+            if abs(g - final) <= tol * span:
+                return i + 1
+        return len(gains)
+
+    @pytest.mark.parametrize("block", [512, 2048, 8192])
+    def test_block_agc_settles_within_a_few_blocks(self, block):
+        cfg = AGCConfig(
+            mode=AGCMode.RMS, attack_time=0.001, decay_time=0.1, target_level=0.5
+        )
+        agc = AGC(self.FS, cfg)
+        loud = np.full(self.FS, 1.0, dtype=np.float32)
+        gains = []
+        for i in range(0, len(loud), block):
+            agc.process_block(loud[i : i + block])
+            gains.append(agc._gain)
+        # A 1 ms attack is far shorter than any of these block durations, so
+        # the gain should settle within a couple of blocks regardless of size.
+        # (Before the fix this took ~14 blocks at N=2048.)
+        assert self._blocks_to_settle(np.array(gains)) <= 3
+
+    @pytest.mark.parametrize("block", [512, 4096])
+    def test_fast_agc_settles_within_a_few_blocks(self, block):
+        agc = FastAGC(self.FS, target_level=0.5, attack_time=0.001, decay_time=0.1)
+        loud = np.full(self.FS, 1.0, dtype=np.float32)
+        gains = []
+        for i in range(0, len(loud), block):
+            agc.process(loud[i : i + block])
+            gains.append(agc.current_gain)
+        assert self._blocks_to_settle(np.array(gains)) <= 3
+
+
+class TestResampler:
+    """Rational resampling used to silently stay 1:1 for ratios whose best
+    approximation needed a denominator > the search cap. It now uses
+    Fraction.limit_denominator and warns when the request is unrepresentable."""
+
+    @pytest.mark.parametrize(
+        "in_rate,out_rate",
+        [
+            (2400000, 48000),
+            (48000, 44100),
+            (2048000, 44100),
+            (96000, 44100),
+            (1000000, 500000),
+        ],
+    )
+    def test_actual_rate_matches_request(self, in_rate, out_rate):
+        r = Resampler(in_rate, out_rate)
+        # The achievable rate is within 0.1% of the request for realistic rates.
+        assert abs(r.actual_output_rate - out_rate) / out_rate < 1e-3
+        # And it is not a silent 1:1 no-op when a real change was asked for.
+        if abs(out_rate - in_rate) / in_rate > 1e-2:
+            assert (r.interpolation_factor, r.decimation_factor) != (1, 1)
+
+    def test_output_length_scales_with_ratio(self):
+        r = Resampler(48000, 24000)
+        x = np.ones(4800, dtype=np.complex64)
+        y = r.resample(x)
+        assert abs(len(y) - 2400) <= 2  # ~half as many samples
+
+    def test_unrepresentable_ratio_warns_and_is_safe(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="sdr_module.dsp.filters"):
+            r = Resampler(1_000_000_000, 7)  # denominator > cap: unrepresentable
+        assert r.interpolation_factor >= 1 and r.decimation_factor >= 1
+        assert any("Resampler" in rec.message for rec in caplog.records)
 
 
 class TestFIRFilter:

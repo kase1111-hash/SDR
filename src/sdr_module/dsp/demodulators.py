@@ -607,7 +607,7 @@ class MSKDemodulator(Demodulator):
         self,
         sample_rate: float,
         symbol_rate: float,
-        coherent: bool = True,
+        coherent: bool = False,
         samples_per_symbol: int = 0,
     ):
         """
@@ -616,7 +616,12 @@ class MSKDemodulator(Demodulator):
         Args:
             sample_rate: Sample rate in Hz
             symbol_rate: Symbol rate in Hz (bit rate)
-            coherent: Use coherent demodulation (vs non-coherent)
+            coherent: Select the coherent matched-filter *waveform* output.
+                Bit decisions always use the reliable non-coherent FM
+                discriminator (MSK is CPFSK with h=0.5): the coherent
+                matched-filter detector here has no carrier or timing recovery,
+                so it cannot recover bits on its own (it returned ~0.5 BER on a
+                clean signal). Defaults to False.
             samples_per_symbol: Samples per symbol (0 = auto)
         """
         super().__init__(sample_rate)
@@ -767,36 +772,15 @@ class MSKDemodulator(Demodulator):
             return self._demodulate_bits_noncoherent(samples)
 
     def _demodulate_bits_coherent(self, samples: np.ndarray) -> np.ndarray:
-        """Coherent bit demodulation."""
-        # Apply carrier phase correction
-        phase_correction = np.exp(-1j * self._carrier_phase)
-        samples_corrected = samples * phase_correction
+        """Recover bits.
 
-        i_signal = samples_corrected.real
-        q_signal = samples_corrected.imag
-
-        # Apply matched filters
-        if len(i_signal) >= len(self._i_filter):
-            i_filtered = np.convolve(i_signal, self._i_filter, mode="same")
-            q_filtered = np.convolve(q_signal, self._q_filter, mode="same")
-        else:
-            i_filtered = i_signal
-            q_filtered = q_signal
-
-        # Sample at symbol boundaries
-        # MSK: I symbols at even boundaries, Q symbols at odd (offset by T/2)
-        n_symbols = len(samples) // self._sps
-        bits = np.zeros(n_symbols, dtype=np.uint8)
-
-        for i in range(n_symbols):
-            sample_idx = int((i + 0.5) * self._sps + self._timing_offset)
-            if 0 <= sample_idx < len(i_filtered):
-                if i % 2 == 0:
-                    bits[i] = 1 if i_filtered[sample_idx] > 0 else 0
-                else:
-                    bits[i] = 1 if q_filtered[sample_idx] > 0 else 0
-
-        return bits
+        The coherent matched-filter path here lacks carrier and symbol-timing
+        recovery, so its I/Q decisions were effectively random (~0.5 BER on a
+        clean signal). MSK is CPFSK with modulation index 0.5, so the FM
+        discriminator recovers the bits reliably; delegate to it regardless of
+        the ``coherent`` flag.
+        """
+        return self._demodulate_bits_noncoherent(samples)
 
     def _demodulate_bits_noncoherent(self, samples: np.ndarray) -> np.ndarray:
         """Non-coherent bit demodulation."""
@@ -821,8 +805,12 @@ class MSKDemodulator(Demodulator):
 
         Returns:
             Soft bit values
+
+        Uses the FM discriminator (the reliable MSK detector) so the soft
+        values are consistent with ``demodulate_bits`` regardless of the
+        ``coherent`` flag.
         """
-        demod = self.demodulate(samples)
+        demod = self._fm_demod.demodulate(samples).astype(np.float32)
 
         n_symbols = len(demod) // self._sps
         soft_bits = np.zeros(n_symbols, dtype=np.float32)

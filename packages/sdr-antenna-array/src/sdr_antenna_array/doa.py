@@ -395,10 +395,14 @@ class BeamscanDoA:
         min_len = min(lengths)
         data = np.zeros((self._num_elements, min_len), dtype=np.complex64)
 
-        for elem in self._config.enabled_elements:
+        # Fill by row position (matching the steering-vector manifold, which
+        # lists enabled elements in order), not by global element index: with a
+        # disabled or non-contiguous element the two differ, which otherwise
+        # placed signals on the wrong rows and dropped high-index elements.
+        for row, elem in enumerate(self._config.enabled_elements):
             idx = elem.index
-            if idx in signals and idx < self._num_elements:
-                data[idx, :] = signals[idx][:min_len]
+            if idx in signals and row < self._num_elements:
+                data[row, :] = signals[idx][:min_len]
 
         # Scan all azimuths
         powers = np.zeros(len(self._scan_azimuths))
@@ -461,10 +465,14 @@ class BeamscanDoA:
         min_len = min(lengths)
         data = np.zeros((self._num_elements, min_len), dtype=np.complex64)
 
-        for elem in self._config.enabled_elements:
+        # Fill by row position (matching the steering-vector manifold, which
+        # lists enabled elements in order), not by global element index: with a
+        # disabled or non-contiguous element the two differ, which otherwise
+        # placed signals on the wrong rows and dropped high-index elements.
+        for row, elem in enumerate(self._config.enabled_elements):
             idx = elem.index
-            if idx in signals and idx < self._num_elements:
-                data[idx, :] = signals[idx][:min_len]
+            if idx in signals and row < self._num_elements:
+                data[row, :] = signals[idx][:min_len]
 
         # Compute spectrum
         spectrum = np.zeros(len(azimuths))
@@ -595,10 +603,14 @@ class MUSICDoA:
         min_len = min(lengths)
         data = np.zeros((self._num_elements, min_len), dtype=np.complex64)
 
-        for elem in self._config.enabled_elements:
+        # Fill by row position (matching the steering-vector manifold, which
+        # lists enabled elements in order), not by global element index: with a
+        # disabled or non-contiguous element the two differ, which otherwise
+        # placed signals on the wrong rows and dropped high-index elements.
+        for row, elem in enumerate(self._config.enabled_elements):
             idx = elem.index
-            if idx in signals and idx < self._num_elements:
-                data[idx, :] = signals[idx][:min_len]
+            if idx in signals and row < self._num_elements:
+                data[row, :] = signals[idx][:min_len]
 
         # Compute sample covariance matrix
         R = (data @ data.conj().T) / min_len

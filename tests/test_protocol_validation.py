@@ -210,6 +210,88 @@ class TestPOCSAGDecoder:
         messages = decoder.decode(samples)
         assert messages == []
 
+    @staticmethod
+    def _encode_codeword(flag_bit, data_20):
+        """BCH(31,21)-encode a codeword the way the decoder reads it.
+
+        Layout of the returned 32-bit word: bit31 = flag, bits30..11 = the
+        20-bit payload, bits10..1 = BCH check, bit0 = even parity.
+        """
+        msg = (flag_bit << 20) | (data_20 & 0xFFFFF)
+        reg = msg << 10
+        for i in range(30, 9, -1):
+            if reg & (1 << i):
+                reg ^= 0x769 << (i - 10)
+        cw31 = (msg << 10) | (reg & 0x3FF)
+        return (cw31 << 1) | (bin(cw31).count("1") & 1)
+
+    def _batch_bits(self, words):
+        bits = []
+        for word in words:
+            bits.extend(int_to_bits(word, 32))
+        return bits
+
+    def test_address_is_full_ric_with_frame_bits(self):
+        """The decoded address is the 18-bit field shifted up with the frame.
+
+        Regression: the old mask 0x1FFFF8 zeroed the low 3 bits of the field
+        without shifting, and the frame number was never folded in.
+        """
+        decoder = self._make_decoder()
+        field = 0xAAAA  # 18-bit address field
+        frame = 5
+        idle = POCSAGDecoder.IDLE_WORD
+        words = [idle] * 16
+        words[2 * frame] = self._encode_codeword(0, (field << 2) | 0)  # function 0
+        words[2 * frame + 1] = self._encode_codeword(1, 0x00001)  # a message word
+        messages = decoder._process_batch(self._batch_bits(words))
+        assert len(messages) == 1
+        assert messages[0].address == (field << 3) | frame
+
+    def test_numeric_page_uses_numeric_decoder(self):
+        """Function 0 selects the numeric decoder, not alphanumeric.
+
+        Regression: _process_batch always called _decode_alpha and hardcoded
+        message_type='alpha', so numeric pages decoded as ASCII garbage and
+        _decode_numeric was dead code.
+        """
+        decoder = self._make_decoder()
+        frame = 0
+        idle = POCSAGDecoder.IDLE_WORD
+        # Numeric payload: digits 1,2,3,4,5 as 4-bit symbols, MSB first.
+        data_20 = (1 << 16) | (2 << 12) | (3 << 8) | (4 << 4) | 5
+        words = [idle] * 16
+        words[2 * frame] = self._encode_codeword(0, (0x100 << 2) | 0)  # function 0
+        words[2 * frame + 1] = self._encode_codeword(1, data_20)
+        messages = decoder._process_batch(self._batch_bits(words))
+        assert len(messages) == 1
+        assert messages[0].function == 0
+        assert messages[0].message_type == "numeric"
+        assert messages[0].content == "12345"
+
+    def test_alpha_page_uses_alpha_decoder(self):
+        """A non-zero function selects the alphanumeric decoder."""
+        decoder = self._make_decoder()
+        frame = 0
+        idle = POCSAGDecoder.IDLE_WORD
+        # "Hi": 7-bit characters, LSB first per _decode_alpha, packed MSB-first.
+        alpha_bits = []
+        for char in "Hi":
+            for j in range(7):
+                alpha_bits.append((ord(char) >> j) & 1)
+        alpha_bits += [0] * (20 - len(alpha_bits))
+        data_20 = 0
+        for bit in alpha_bits[:20]:
+            data_20 = (data_20 << 1) | bit
+        words = [idle] * 16
+        words[2 * frame] = self._encode_codeword(0, (0x100 << 2) | 3)  # function 3
+        words[2 * frame + 1] = self._encode_codeword(1, data_20)
+        messages = decoder._process_batch(self._batch_bits(words))
+        assert len(messages) == 1
+        assert messages[0].function == 3
+        assert messages[0].message_type == "alpha"
+        assert messages[0].content == "Hi"
+
     def test_noise_rejection(self):
         """Random noise should not produce false POCSAG decodes."""
         rng = np.random.default_rng(42)
@@ -531,6 +613,31 @@ class TestADSBDecoder:
         messages = decoder.decode(combined)
         assert isinstance(messages, list)
 
+    def test_altitude_q1_canonical(self):
+        """Q=1 (25 ft) altitude decodes to the published value.
+
+        Regression: the Q=1 branch used to swap the high 7 and low 4 bits of
+        the 11-bit multiplier, so the canonical 38000 ft message decoded as
+        27025 ft. alt field 0xC38: data[1]=0xC3, data[2] high nibble=0x8.
+        """
+        decoder = self._make_decoder()
+        data = bytes([0x8D, 0xC3, 0x80, 0x00, 0x00, 0x00, 0x00])
+        assert decoder._decode_altitude(data) == 38000
+
+    def test_altitude_q1_roundtrip(self):
+        """A range of Q=1 altitudes decode back to the value that produced them."""
+        decoder = self._make_decoder()
+        for altitude in (1000, 5000, 12500, 38000, 50175):
+            n = (altitude + 1000) // 25
+            # Re-assemble the 12-bit field: 7 high bits, Q=1, 4 low bits.
+            high = (n >> 4) & 0x7F
+            low = n & 0x0F
+            alt_field = (high << 5) | (1 << 4) | low
+            data = bytes(
+                [0x8D, (alt_field >> 4) & 0xFF, (alt_field & 0x0F) << 4, 0, 0, 0]
+            )
+            assert decoder._decode_altitude(data) == altitude
+
 
 # ---------------------------------------------------------------------------
 # RDS Decoder Tests
@@ -548,38 +655,16 @@ class TestRDSDecoder:
     def _generate_rds_block(self, data_16, offset_word):
         """Generate a 26-bit RDS block from 16-bit data and an offset word.
 
-        RDS encoding: 16 data bits + 10 check bits.
-        The check word is computed via the RDS generator polynomial then
-        XORed with the offset word for the block type.
+        Standard IEC 62106 systematic encoding: the 10 check bits are
+        ``(data * x^10) mod g(x)`` (g = x^10+x^8+x^7+x^5+x^4+x^3+1, i.e. 0x5B9)
+        XORed with the block's offset word.
         """
-        # RDS generator polynomial: x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1
-        poly = 0x1B9  # 0b110111001
-
-        # Compute check bits for the 16-bit data
-        reg = data_16
-        for _ in range(16):
-            if reg & 0x8000:
-                reg = ((reg << 1) ^ (poly << 6)) & 0xFFFF
-            else:
-                reg = (reg << 1) & 0xFFFF
-
-        # The lower 10 bits of reg form the check word
-        # Actually, we use the syndrome approach. Let's use the decoder's method
-        # directly by constructing the block such that the syndrome matches.
-
-        # Simpler: build 26 bits = data(16) + check(10)
-        # where check = CRC(data) XOR offset
-        # We compute the CRC by polynomial division of data * x^10 by the poly.
-        crc = 0
-        msg = data_16
-        for _ in range(16):
-            if msg & 0x8000:
-                msg = ((msg << 1) ^ (poly << 6)) & 0xFFFFFF
-            else:
-                msg = (msg << 1) & 0xFFFFFF
-        crc = (msg >> 6) & 0x3FF
-
-        check = crc ^ offset_word
+        g = 0x5B9  # generator polynomial, degree 10 (includes the x^10 term)
+        reg = data_16 << 10
+        for i in range(25, 9, -1):
+            if (reg >> i) & 1:
+                reg ^= g << (i - 10)
+        check = (reg & 0x3FF) ^ offset_word
         block_26 = (data_16 << 10) | check
         return int_to_bits(block_26, 26)
 
@@ -612,7 +697,10 @@ class TestRDSDecoder:
         data_d = (ord("A") << 8) | ord("B")
         block_d = self._generate_rds_block(data_d, offsets["D"])
 
-        bits = block_a + block_b + block_c + block_d
+        # Real RDS repeats groups continuously; tile the group so that the
+        # decoder's fixed-step bit slicer (which has no clock recovery) has a
+        # complete, cleanly aligned first group to lock onto.
+        bits = (block_a + block_b + block_c + block_d) * 3
 
         # Convert to BPSK-demodulated samples
         samples = bits_to_fsk_samples(bits, self.SAMPLE_RATE, 1187.5, amplitude=1.0)
@@ -631,6 +719,39 @@ class TestRDSDecoder:
         samples = self._build_rds_signal(pi_code=0x5678)
         results = decoder.decode(samples)
         assert isinstance(results, list)
+
+    def test_syndrome_of_error_free_block_is_offset(self):
+        """A correctly encoded block reduces to its offset word.
+
+        Regression: the old LFSR produced values absent from the syndrome
+        table, so no block was ever recognised.
+        """
+        decoder = self._make_decoder()
+        for block_type, offset in RDSDecoder.OFFSETS.items():
+            bits = self._generate_rds_block(0xABCD, offset)
+            block = 0
+            for bit in bits:
+                block = (block << 1) | bit
+            assert decoder._syndrome(block) == offset
+            data, decoded_type = decoder._decode_block(bits)
+            assert decoded_type == block_type
+            assert data == 0xABCD
+
+    def test_decode_recovers_group_fields(self):
+        """A full, correctly encoded RDS group decodes to its PI/PTY/PS values.
+
+        This is the end-to-end regression for the non-functional decoder: it
+        used to return zero messages for every input.
+        """
+        decoder = self._make_decoder()
+        pi_code = 0x3039
+        samples = self._build_rds_signal(pi_code=pi_code)
+        results = decoder.decode(samples)
+        assert len(results) >= 1
+        msg = results[0]
+        assert msg.pi_code == pi_code
+        assert msg.pty == 5  # set by _build_rds_signal (Rock)
+        assert msg.ps_name[:2] == "AB"
 
     def test_rds_data_fields_accessible(self):
         """All RDSData dataclass fields are accessible."""

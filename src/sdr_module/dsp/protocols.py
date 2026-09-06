@@ -290,6 +290,36 @@ class POCSAGDecoder(ProtocolDecoder):
                 break
         return result
 
+    def _build_message(
+        self,
+        batch: List[int],
+        address: int,
+        function: int,
+        message_bits: List[int],
+    ) -> POCSAGMessage:
+        """Assemble a POCSAGMessage, decoding the payload per the function code.
+
+        Function 0 selects a numeric page (4-bit BCD-style symbols); the other
+        function codes select an alphanumeric page (7-bit characters).
+        """
+        if function == 0:
+            content = self._decode_numeric(message_bits)
+            message_type = "numeric"
+        else:
+            content = self._decode_alpha(message_bits)
+            message_type = "alpha"
+        return POCSAGMessage(
+            protocol=ProtocolType.POCSAG,
+            timestamp=self._timestamp,
+            raw_bits=bytes(batch),
+            valid=True,
+            address=address,
+            function=function,
+            message_type=message_type,
+            content=content,
+            baud_rate=self._baud_rate,
+        )
+
     def _process_batch(self, batch: List[int]) -> List[POCSAGMessage]:
         """Process a complete batch (16 codewords after sync)."""
         if len(batch) < 512:  # 16 words * 32 bits
@@ -313,19 +343,14 @@ class POCSAGDecoder(ProtocolDecoder):
                 if word == self.IDLE_WORD:
                     if message_bits and current_address is not None:
                         # End of message
-                        content = self._decode_alpha(message_bits)
-                        msg = POCSAGMessage(
-                            protocol=ProtocolType.POCSAG,
-                            timestamp=self._timestamp,
-                            raw_bits=bytes(batch),
-                            valid=True,
-                            address=current_address,
-                            function=current_function or 0,
-                            message_type="alpha",
-                            content=content,
-                            baud_rate=self._baud_rate,
+                        messages.append(
+                            self._build_message(
+                                batch,
+                                current_address,
+                                current_function or 0,
+                                message_bits,
+                            )
                         )
-                        messages.append(msg)
                         message_bits = []
                         current_address = None
                     continue
@@ -340,23 +365,22 @@ class POCSAGDecoder(ProtocolDecoder):
                     # Address word
                     if message_bits and current_address is not None:
                         # Save previous message
-                        content = self._decode_alpha(message_bits)
-                        msg = POCSAGMessage(
-                            protocol=ProtocolType.POCSAG,
-                            timestamp=self._timestamp,
-                            raw_bits=bytes(batch),
-                            valid=True,
-                            address=current_address,
-                            function=current_function or 0,
-                            message_type="alpha",
-                            content=content,
-                            baud_rate=self._baud_rate,
+                        messages.append(
+                            self._build_message(
+                                batch,
+                                current_address,
+                                current_function or 0,
+                                message_bits,
+                            )
                         )
-                        messages.append(msg)
                         message_bits = []
 
-                    # Extract address (18 bits) and function (2 bits)
-                    current_address = ((corrected >> 13) & 0x1FFFF8) | frame
+                    # Extract the 18-bit address field (bits 30..13) and the
+                    # 2-bit function code (bits 12..11). The full 21-bit
+                    # receiver address is the field shifted up by 3 with the
+                    # frame number (0-7) supplying the low 3 bits.
+                    address_field = (corrected >> 13) & 0x3FFFF
+                    current_address = (address_field << 3) | frame
                     current_function = (corrected >> 11) & 0x3
 
                 else:
@@ -366,19 +390,11 @@ class POCSAGDecoder(ProtocolDecoder):
 
         # Handle any remaining message
         if message_bits and current_address is not None:
-            content = self._decode_alpha(message_bits)
-            msg = POCSAGMessage(
-                protocol=ProtocolType.POCSAG,
-                timestamp=self._timestamp,
-                raw_bits=bytes(batch),
-                valid=True,
-                address=current_address,
-                function=current_function or 0,
-                message_type="alpha",
-                content=content,
-                baud_rate=self._baud_rate,
+            messages.append(
+                self._build_message(
+                    batch, current_address, current_function or 0, message_bits
+                )
             )
-            messages.append(msg)
 
         return messages
 
@@ -882,13 +898,17 @@ class RDSDecoder(ProtocolDecoder):
     BLOCK_SIZE = 26  # bits
     GROUP_SIZE = 4  # blocks
 
-    # Syndrome values for block types
+    # Syndrome values for block types. For an error-free block the syndrome
+    # (the 26-bit block reduced modulo the generator polynomial) equals the
+    # block's offset word, because the transmitted check bits carry
+    # ``(message * x^10 mod g) XOR offset``. These are therefore the standard
+    # IEC 62106 offset words A, B, C, C' and D.
     SYNDROMES = {
-        0x3D8: "A",
-        0x3D4: "B",
-        0x25C: "C",
-        0x3CC: "C'",
-        0x258: "D",
+        0x0FC: "A",
+        0x198: "B",
+        0x168: "C",
+        0x350: "C'",
+        0x1B4: "D",
     }
 
     # Offset words
@@ -966,20 +986,22 @@ class RDSDecoder(ProtocolDecoder):
         self._timestamp = 0.0
 
     def _syndrome(self, block: int) -> int:
-        """Calculate syndrome for 26-bit block."""
-        # WHY 0x5B9: RDS uses a shortened cyclic code derived from this generator
-        # polynomial (EN 62106); provides 5-bit error correction per 26-bit block
-        poly = 0x5B9  # x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1
+        """Return the RDS block syndrome: the 26-bit block reduced modulo the
+        generator polynomial g(x) = x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1.
 
-        reg = 0
-        for i in range(26):
-            bit = (block >> (25 - i)) & 1
-            feedback = ((reg >> 9) & 1) ^ bit
-            reg = ((reg << 1) | feedback) & 0x3FF
-            if feedback:
-                reg ^= poly
-
-        return reg
+        The check bits of a block carry ``(message * x^10 mod g) XOR offset``,
+        so an error-free block reduces to its offset word; ``_decode_block``
+        matches that against ``SYNDROMES`` to identify the block type. (The
+        previous LFSR fed the feedback bit back into the register and XORed an
+        11-bit polynomial into a 10-bit register, so it never produced any of
+        the tabulated values and the decoder recognised nothing.)
+        """
+        poly = 0x5B9  # includes the x^10 term (degree 10)
+        reg = block & 0x3FFFFFF  # 26-bit block
+        for i in range(25, 9, -1):
+            if (reg >> i) & 1:
+                reg ^= poly << (i - 10)
+        return reg & 0x3FF
 
     def _decode_block(self, bits: List[int]) -> Tuple[int, str]:
         """
@@ -1345,8 +1367,10 @@ class ADSBDecoder(ProtocolDecoder):
         q_bit = (alt_bits >> 4) & 0x01
 
         if q_bit:
-            # 25 ft resolution
-            n = ((alt_bits & 0x0F) << 7) | ((alt_bits >> 5) & 0x7F)
+            # 25 ft resolution: drop the Q bit (bit 4) and concatenate the 7
+            # high bits (11..5) with the 4 low bits (3..0) to form the
+            # 11-bit multiplier.
+            n = (((alt_bits >> 5) & 0x7F) << 4) | (alt_bits & 0x0F)
             altitude = n * 25 - 1000
         else:
             # Gillham code (100 ft resolution) - simplified
@@ -2301,6 +2325,43 @@ def create_protocol_decoder(
         raise ValueError(f"Unsupported protocol: {protocol}")
 
 
+def demodulate_for_protocol(
+    samples: np.ndarray, protocol: ProtocolType
+) -> Optional[np.ndarray]:
+    """Demodulate raw I/Q into the baseband a protocol decoder expects.
+
+    The decoders operate on demodulated baseband, not raw I/Q: the FSK/AFSK/
+    MSK pager and packet decoders want an FM discriminator output
+    (positive = mark, negative = space) and ADS-B wants the pulse envelope.
+    Passing raw complex I/Q straight in yields zero messages on real captures.
+
+    Returns None when the required baseband cannot be produced for the protocol
+    (currently RDS, which needs 57 kHz subcarrier recovery), so callers can say
+    so rather than silently decoding nothing.
+    """
+    samples = np.asarray(samples)
+
+    if protocol == ProtocolType.ADSB:
+        return np.abs(samples).astype(np.float32)
+
+    fsk_like = {
+        ProtocolType.POCSAG,
+        ProtocolType.FLEX,
+        ProtocolType.AX25,
+        ProtocolType.APRS,
+        ProtocolType.ACARS,
+    }
+    if protocol in fsk_like:
+        if np.iscomplexobj(samples) and np.any(samples.imag != 0):
+            # FM discriminator: instantaneous frequency of the I/Q stream.
+            return np.angle(samples[1:] * np.conj(samples[:-1])).astype(np.float32)
+        # Already a real, pre-demodulated baseband.
+        return samples.real.astype(np.float32)
+
+    # RDS needs 57 kHz subcarrier recovery + coherent BPSK, not implemented here.
+    return None
+
+
 # Export all decoders and message types
 __all__ = [
     # Protocol types
@@ -2327,4 +2388,5 @@ __all__ = [
     "ACARSDecoder",
     # Factory
     "create_protocol_decoder",
+    "demodulate_for_protocol",
 ]

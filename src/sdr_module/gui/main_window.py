@@ -7,11 +7,12 @@ Provides the primary window with all panels and controls.
 from __future__ import annotations
 
 import logging
+from typing import Any, Optional
 
 import numpy as np
 
 try:
-    from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+    from PyQt6.QtCore import Qt, QTimer
     from PyQt6.QtGui import QAction, QKeySequence, QShortcut
     from PyQt6.QtWidgets import (
         QApplication,
@@ -69,44 +70,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-class SDRWorker(QThread if HAS_PYQT6 else object):
-    """Background worker for SDR data acquisition."""
-
-    if HAS_PYQT6:
-        samples_ready = pyqtSignal(np.ndarray)
-        error_occurred = pyqtSignal(str)
-
-    def __init__(self, parent=None):
-        if HAS_PYQT6:
-            super().__init__(parent)
-        self._running = False
-        self._device = None
-        self._sample_rate = 2.4e6
-        self._center_freq = 100e6
-
-    def set_device(self, device):
-        """Set the SDR device."""
-        self._device = device
-
-    def run(self):
-        """Main acquisition loop."""
-        self._running = True
-
-        while self._running and self._device:
-            try:
-                # Read samples from device
-                samples = self._device.read_samples(16384)
-                if samples is not None:
-                    self.samples_ready.emit(samples)
-            except Exception as e:
-                self.error_occurred.emit(str(e))
-                break
-
-    def stop(self):
-        """Stop acquisition."""
-        self._running = False
-
-
 class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     """
     Main SDR application window.
@@ -132,10 +95,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._demo_mode = demo_mode
         self._radio_tuner = None  # Pop-out radio tuner window
         self._squelch_db = -80.0  # applied to spectrum gating
+        # Cached analysis window for the spectrum display (built lazily to
+        # match the sample-block length).
+        self._spectrum_window: Optional[np.ndarray] = None
+        self._spectrum_window_gain = 1.0
         self._agc_enabled = False
         self._recording_bytes = 0  # for free-space display
         self._theme = "dark"
         self._known_device_names: set = set()
+
+        # Live protocol decoder driven by the Decoder panel (None = Auto Detect
+        # / no active decoder). Rebuilt when the panel's protocol changes.
+        self._decoder: Any = None
+        self._decoder_protocol: Any = None
 
         # Persisted settings (frequency, gain, theme, bookmarks live here)
         self._settings = GuiSettings()
@@ -570,9 +542,115 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._control_panel.squelch_changed.connect(self._on_squelch_changed)
         self._control_panel.agc_changed.connect(self._on_agc_changed)
         self._control_panel.demod_changed.connect(self._on_demod_changed)
+        # The control panel's Record button drives the same recording as the
+        # toolbar action (its signals were previously connected to nothing).
+        self._control_panel.recording_started.connect(self._on_panel_record_started)
+        self._control_panel.recording_stopped.connect(self._on_panel_record_stopped)
+        # The decoder panel's protocol selector drives a live decoder over the
+        # acquired samples (the panel was previously fed no data at all).
+        self._decoder_panel.protocol_changed.connect(self._on_decoder_protocol_changed)
         # Click-to-tune from spectrum and waterfall
         self._spectrum.frequency_clicked.connect(self._on_frequency_changed)
         self._waterfall.frequency_clicked.connect(self._on_frequency_changed)
+
+    def _on_panel_record_started(self, fmt: str) -> None:
+        """Start recording from the control panel's Record button."""
+        self._start_recording()
+        self._record_action.blockSignals(True)
+        self._record_action.setChecked(True)
+        self._record_action.blockSignals(False)
+
+    def _on_panel_record_stopped(self) -> None:
+        """Stop recording from the control panel's Record button."""
+        self._stop_recording()
+        self._record_action.blockSignals(True)
+        self._record_action.setChecked(False)
+        self._record_action.blockSignals(False)
+
+    # Panel labels -> ProtocolType for the live decoder.
+    _DECODER_PROTOCOLS = {
+        "POCSAG": "pocsag",
+        "FLEX": "flex",
+        "AX.25/APRS": "ax25",
+        "ADS-B": "adsb",
+        "ACARS": "acars",
+        "RDS": "rds",
+    }
+
+    def _on_decoder_protocol_changed(self, text: str) -> None:
+        """Build (or clear) the live decoder for the panel's selected protocol."""
+        from ..dsp.protocols import ProtocolType, create_protocol_decoder
+
+        proto_value = self._DECODER_PROTOCOLS.get(text)
+        if proto_value is None:
+            # "Auto Detect" (or unknown): no single live decoder.
+            self._decoder = None
+            self._decoder_protocol = None
+            return
+
+        rate = getattr(self._device, "sample_rate", None) or 2.4e6
+        try:
+            protocol = ProtocolType(proto_value)
+            self._decoder = create_protocol_decoder(protocol, sample_rate=float(rate))
+            self._decoder_protocol = protocol
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Could not create %s decoder: %s", text, exc)
+            self._decoder = None
+            self._decoder_protocol = None
+
+    def _run_decoder(self, samples: np.ndarray) -> None:
+        """Feed demodulated samples to the active decoder and show any messages."""
+        if self._decoder is None or self._decoder_protocol is None:
+            return
+        if not self._decoder_panel._enabled_check.isChecked():
+            return
+
+        from ..dsp.protocols import demodulate_for_protocol
+
+        baseband = demodulate_for_protocol(samples, self._decoder_protocol)
+        if baseband is None:
+            return
+        try:
+            messages = self._decoder.decode(baseband)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Decoder error: %s", exc)
+            return
+        for msg in messages:
+            self._push_decoded_message(msg)
+
+    def _push_decoded_message(self, msg: Any) -> None:
+        """Render one decoded message into the decoder panel."""
+        panel = self._decoder_panel
+        name = type(msg).__name__
+        try:
+            if name == "POCSAGMessage":
+                panel.add_pocsag_message(msg.address, msg.content, msg.function)
+            elif name == "ADSBMessage":
+                panel.add_adsb_message(
+                    msg.icao_address,
+                    msg.callsign,
+                    msg.altitude,
+                    msg.latitude,
+                    msg.longitude,
+                    msg.velocity,
+                )
+            elif name in ("AX25Frame", "APRSMessage"):
+                panel.add_aprs_message(
+                    getattr(msg, "source", ""),
+                    getattr(msg, "destination", ""),
+                    getattr(msg, "latitude", 0.0),
+                    getattr(msg, "longitude", 0.0),
+                    getattr(msg, "info", getattr(msg, "comment", "")),
+                )
+            else:
+                address = str(getattr(msg, "address", getattr(msg, "icao_address", "")))
+                content = str(getattr(msg, "content", getattr(msg, "info", "")))
+                proto = getattr(getattr(msg, "protocol", None), "value", name)
+                panel.add_message(
+                    str(proto), address, content, getattr(msg, "valid", True)
+                )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Could not render decoded message: %s", exc)
 
     def _on_frequency_changed(self, freq_hz: float):
         """Handle frequency change."""
@@ -692,6 +770,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
             settings = self._callsign_panel.get_settings()
 
+            # Only CW ID is implemented for transmission. Refuse the other
+            # modes rather than silently transmitting Morse under their label.
+            mode = settings.get("mode", "CW")
+            if mode != "CW":
+                QMessageBox.information(
+                    self,
+                    "Mode not available",
+                    f"{mode} identification is not implemented for transmission "
+                    "yet; only CW (Morse) ID can be sent. Select CW (Morse) in "
+                    "the HAM ID panel.",
+                )
+                self._device_label.setText("")
+                return
+
             # Generate FM-modulated I/Q samples ready for transmission
             iq_samples = generate_tx_id(
                 callsign,
@@ -798,11 +890,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._start_acquisition()
 
     def _toggle_recording(self, checked: bool):
-        """Toggle recording."""
+        """Toggle recording from the toolbar action."""
         if checked:
             self._start_recording()
         else:
             self._stop_recording()
+        # Keep the control panel's Record button in sync (without re-emitting).
+        self._control_panel.set_recording_state(checked)
 
     def _start_recording(self):
         """Start recording."""
@@ -827,30 +921,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _update_display(self):
         """Update spectrum and waterfall displays."""
-        if not self._is_running:
+        if not self._is_running or not self._device:
             return
 
-        # Generate demo data if no device
-        if not self._device:
-            # Demo: noise + some signals
-            n = 2048
-            noise = np.random.randn(n) + 1j * np.random.randn(n)
-            noise *= 0.1
+        samples = self._device.read_samples(2048)
+        if samples is None:
+            return
 
-            # Add some fake signals
-            t = np.arange(n)
-            sig1 = 0.5 * np.exp(2j * np.pi * 0.1 * t)
-            sig2 = 0.3 * np.exp(2j * np.pi * 0.25 * t)
-
-            samples = noise + sig1 + sig2
-        else:
-            samples = self._device.read_samples(2048)
-            if samples is None:
-                return
-
-        # Compute spectrum
-        spectrum = np.fft.fftshift(np.fft.fft(samples))
-        power = 20 * np.log10(np.abs(spectrum) + 1e-10)
+        # Compute spectrum (windowed, referenced to dBFS)
+        power = self._power_spectrum_dbfs(samples)
 
         # Update spectrum widget
         self._spectrum.update_spectrum(power)
@@ -871,29 +950,68 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._samples_buffer.append(samples)
             # complex64 = 8 bytes/sample
             self._recording_bytes += len(samples) * 8
+            # Advance the control panel's recording timer.
+            started = getattr(self, "_recording_started_at", None)
+            if started is not None:
+                import time
+
+                self._control_panel.update_record_time(int(time.monotonic() - started))
+
+        # Feed the live protocol decoder (if the Decoder panel selected one).
+        self._run_decoder(samples)
+
+    def _power_spectrum_dbfs(self, samples: np.ndarray) -> np.ndarray:
+        """Windowed power spectrum in dBFS (full-scale sinusoid -> 0 dB).
+
+        A raw ``20*log10(|FFT|)`` of an N-point block scales with N (an N=2048
+        FFT of a full-scale tone peaks near +66 dB), so every bin saturated the
+        top of the (-120, 0) dB display and pinned the -80 dB squelch open.
+
+        A Hann window suppresses spectral leakage, and dividing the magnitude by
+        the window's coherent gain (the sum of its samples) references the
+        result to dBFS: a full-scale complex sinusoid peaks at 0 dB and real
+        captures land in the display/squelch range as intended.
+        """
+        n = len(samples)
+        if n == 0:
+            return np.empty(0, dtype=np.float32)
+        if self._spectrum_window is None or self._spectrum_window.shape[0] != n:
+            # Periodic Hann (the form used for spectral analysis).
+            self._spectrum_window = np.hanning(n + 1)[:-1].astype(np.float64)
+            self._spectrum_window_gain = float(np.sum(self._spectrum_window))
+        windowed = samples * self._spectrum_window
+        spectrum = np.fft.fftshift(np.fft.fft(windowed))
+        magnitude = np.abs(spectrum) / max(self._spectrum_window_gain, 1e-12)
+        return (20.0 * np.log10(magnitude + 1e-12)).astype(np.float32)
 
     def _demodulate_and_play(self, samples: np.ndarray) -> None:
         """Demodulate samples to audio and push to the output sink."""
         mode = self._control_panel._demod_combo.currentText()
         if mode not in ("AM", "FM", "USB", "LSB", "CW"):
             return
+        rate = getattr(self._device, "sample_rate", 2.4e6) if self._device else 2.4e6
         try:
             # Simple demodulators sufficient for monitoring in the GUI
             if mode == "FM":
-                # FM discriminator
+                # FM discriminator scaled by the selected deviation so a signal
+                # at +/- that deviation reaches full-scale audio (this is what
+                # the FM Dev control selects).
                 prod = samples[1:] * np.conj(samples[:-1])
-                audio = np.angle(prod).astype(np.float32)
-            elif mode == "AM":
-                audio = (np.abs(samples) - np.mean(np.abs(samples))).astype(np.float32)
-            else:  # SSB/CW: pass real part as crude envelope
-                audio = samples.real.astype(np.float32)
-            # Normalize softly then write
-            peak = float(np.max(np.abs(audio)) + 1e-9)
-            audio = audio / max(peak, 1e-6) * 0.5
+                inst_freq = np.angle(prod).astype(np.float32)
+                deviation = self._control_panel.get_fm_deviation()
+                gain = float(rate) / (2.0 * np.pi * max(deviation, 1.0))
+                audio = np.clip(inst_freq * gain, -1.0, 1.0).astype(np.float32)
+            else:
+                if mode == "AM":
+                    audio = (np.abs(samples) - np.mean(np.abs(samples))).astype(
+                        np.float32
+                    )
+                else:  # SSB/CW: pass real part as crude envelope
+                    audio = samples.real.astype(np.float32)
+                # Peak-normalize the non-FM modes.
+                peak = float(np.max(np.abs(audio)) + 1e-9)
+                audio = audio / max(peak, 1e-6) * 0.5
             # Decimate to ~48 kHz assuming 2.4 MS/s (48x)
-            rate = (
-                getattr(self._device, "sample_rate", 2.4e6) if self._device else 2.4e6
-            )
             decim = max(1, int(rate / 48000))
             self._audio.write(audio[::decim])
         except Exception as e:  # pragma: no cover

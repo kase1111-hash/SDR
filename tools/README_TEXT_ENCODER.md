@@ -17,7 +17,7 @@ A powerful, interactive tool for encoding text into various radio protocols. Per
 Run the text encoder tool:
 
 ```bash
-cd tools
+cd deferred
 python3 text_encoder.py
 ```
 
@@ -219,7 +219,7 @@ samples = encoder.encode_text("HELLO WORLD")
 samples.tofile("output.iq")
 ```
 
-See `examples/text_encoding_example.py` for more examples.
+See `deferred/text_encoding_example.py` for more examples.
 
 ## Transmitting Encoded Signals
 

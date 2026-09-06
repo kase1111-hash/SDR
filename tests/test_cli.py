@@ -101,9 +101,56 @@ class TestScanOffline:
         assert "--input" in capsys.readouterr().out
 
 
+def _pocsag_iq_capture(path, fs=38400.0, baud=1200.0, deviation=2400.0):
+    """Write a synthetic complex-FSK POCSAG capture (one numeric page)."""
+
+    def enc(flag, data20):
+        msg = (flag << 20) | (data20 & 0xFFFFF)
+        reg = msg << 10
+        for i in range(30, 9, -1):
+            if reg & (1 << i):
+                reg ^= 0x769 << (i - 10)
+        cw31 = (msg << 10) | (reg & 0x3FF)
+        return (cw31 << 1) | (bin(cw31).count("1") & 1)
+
+    from sdr_module.dsp.protocols import POCSAGDecoder
+
+    def w2b(word):
+        return [(word >> (31 - i)) & 1 for i in range(32)]
+
+    bits = [1, 0] * 288 + w2b(POCSAGDecoder.SYNC_WORD)
+    words = [POCSAGDecoder.IDLE_WORD] * 16
+    words[0] = enc(0, (0x100 << 2) | 0)  # numeric address, function 0
+    words[1] = enc(1, (1 << 16) | (2 << 12) | (3 << 8) | (4 << 4) | 5)  # "12345"
+    for word in words:
+        bits += w2b(word)
+    bits += [1, 0] * 32  # trailing data so the final batch completes
+
+    sps = int(fs / baud)
+    phase = 0.0
+    iq = np.empty(len(bits) * sps, dtype=np.complex64)
+    idx = 0
+    for bit in bits:
+        freq = deviation if bit else -deviation
+        for _ in range(sps):
+            phase += 2 * np.pi * freq / fs
+            iq[idx] = np.exp(1j * phase)
+            idx += 1
+
+    save_iq_file(
+        path,
+        iq,
+        sample_rate=fs,
+        center_frequency=152.0e6,
+        sample_format=SampleFormat.FLOAT32,
+        file_format=FileFormat.RAW,
+    )
+    return fs
+
+
 class TestDecode:
     @pytest.mark.parametrize(
-        "protocol", ["pocsag", "flex", "ax25", "aprs", "rds", "adsb", "acars"]
+        "protocol", ["pocsag", "flex", "ax25", "aprs", "adsb", "acars"]
     )
     def test_decode_runs_cleanly(self, capsys, iq_capture, protocol):
         path, fs, _ = iq_capture
@@ -111,6 +158,28 @@ class TestDecode:
         out = capsys.readouterr().out
         assert rc == 0
         assert f"{protocol.upper()} message(s)" in out
+
+    def test_decode_pocsag_from_iq(self, capsys, tmp_path):
+        """A real complex-FSK POCSAG capture decodes to its page.
+
+        Regression: the CLI passed raw I/Q straight to the decoder without
+        demodulating, so it reported zero messages for every real capture.
+        """
+        path = tmp_path / "pocsag.cf32"
+        fs = _pocsag_iq_capture(path)
+        rc = main(["decode", "pocsag", "--input", str(path), "--sample-rate", str(fs)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Decoded 1 POCSAG message(s)" in out
+        assert "12345" in out
+
+    def test_rds_reports_unsupported(self, capsys, iq_capture):
+        """RDS from raw broadcast I/Q is reported as unsupported, not silent."""
+        path, fs, _ = iq_capture
+        rc = main(["decode", "rds", "--input", str(path), "--sample-rate", str(fs)])
+        out = capsys.readouterr().out
+        assert rc == 2
+        assert "not supported" in out.lower()
 
     def test_missing_file(self, capsys, tmp_path):
         rc = main(

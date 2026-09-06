@@ -7,11 +7,14 @@ Provides various filter types for signal conditioning:
 - Real-time filtering with overlap-save
 """
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class FilterType(Enum):
@@ -780,31 +783,47 @@ class Resampler:
         self._buffer: Optional[np.ndarray] = None
         self._phase = 0
 
+        # A rational approximation with a bounded denominator cannot hit every
+        # ratio exactly. Warn (rather than silently resample at the wrong rate)
+        # when the achievable output rate misses the request by more than 0.1%.
+        achieved = self.actual_output_rate
+        if output_rate > 0 and abs(achieved - output_rate) / output_rate > 1e-3:
+            logger.warning(
+                "Resampler: requested %.6g Hz but the best rational ratio with "
+                "denominator <= %d gives %.6g Hz (%d/%d). Raise num_taps/limit "
+                "or resample in stages for an exact rate.",
+                output_rate,
+                max(self._interp_factor, self._decim_factor),
+                achieved,
+                self._interp_factor,
+                self._decim_factor,
+            )
+
     def _find_rational(
         self, num: float, den: float, max_factor: int = 1000
     ) -> Tuple[int, int]:
-        """Find rational approximation P/Q."""
-        from math import gcd
+        """Find the rational approximation P/Q of ``num/den``.
 
-        # Try to find integer ratio
-        ratio = num / den
+        Uses ``Fraction.limit_denominator`` — the standard best-rational-
+        approximation algorithm — instead of a hand-rolled search. The old
+        search seeded the answer at 1/1 and only replaced it on a *strictly*
+        smaller error, so ratios whose best approximation needed a denominator
+        greater than ``max_factor`` were silently left at 1/1 (the resampler
+        became a no-op at the wrong rate).
+        """
+        from fractions import Fraction
 
-        best_p, best_q = 1, 1
-        best_error = abs(ratio - 1)
+        if den <= 0 or num <= 0:
+            return 1, 1
 
-        for q in range(1, max_factor + 1):
-            p = round(ratio * q)
-            if p > 0 and p <= max_factor:
-                error = abs(ratio - p / q)
-                if error < best_error:
-                    best_error = error
-                    best_p, best_q = p, q
-                    if error < 1e-9:
-                        break
-
-        # Simplify
-        g = gcd(best_p, best_q)
-        return best_p // g, best_q // g
+        frac = Fraction(num / den).limit_denominator(max_factor)
+        p, q = frac.numerator, frac.denominator
+        # Guard against an extreme ratio rounding the numerator to 0.
+        if p < 1:
+            p = 1
+        if q < 1:
+            q = 1
+        return p, q
 
     def _design_filter(self) -> np.ndarray:
         """Design resampling filter."""
@@ -1192,19 +1211,28 @@ class AGC:
         else:
             block_level = np.mean(np.abs(samples))
 
+        # The attack/decay coefficients are per-sample one-pole constants.
+        # Applying them once per block would stretch the attack/decay time by
+        # the block length (a 1 ms attack became seconds at large block sizes).
+        # Scale them to a single one-pole step over the whole block:
+        # 1 - (1 - alpha)**n is the exact decay of n per-sample updates.
+        n = len(samples)
+        attack_b = 1.0 - (1.0 - self._attack_coeff) ** n
+        decay_b = 1.0 - (1.0 - self._decay_coeff) ** n
+
         # Smooth level tracking
         if block_level > self._level:
-            self._level += self._attack_coeff * (block_level - self._level)
+            self._level += attack_b * (block_level - self._level)
         else:
-            self._level += self._decay_coeff * (block_level - self._level)
+            self._level += decay_b * (block_level - self._level)
 
         # Compute and apply gain
         target_gain = self._compute_gain(self._level)
 
         if target_gain < self._gain:
-            self._gain += self._attack_coeff * (target_gain - self._gain)
+            self._gain += attack_b * (target_gain - self._gain)
         else:
-            self._gain += self._decay_coeff * (target_gain - self._gain)
+            self._gain += decay_b * (target_gain - self._gain)
 
         return samples * self._gain
 
@@ -1343,11 +1371,18 @@ class FastAGC:
         # Block envelope (RMS-like)
         block_env = np.sqrt(np.mean(magnitudes**2))
 
+        # Scale the per-sample attack/decay coefficients to one one-pole step
+        # over the whole block, so the time constants do not depend on the
+        # block size (see AGC.process_block).
+        n = len(samples)
+        attack_b = 1.0 - (1.0 - self._attack) ** n
+        decay_b = 1.0 - (1.0 - self._decay) ** n
+
         # Update envelope with attack/decay
         if block_env > self._envelope:
-            self._envelope += self._attack * (block_env - self._envelope)
+            self._envelope += attack_b * (block_env - self._envelope)
         else:
-            self._envelope += self._decay * (block_env - self._envelope)
+            self._envelope += decay_b * (block_env - self._envelope)
 
         # Compute gain
         if self._envelope > 1e-10:
@@ -1358,9 +1393,9 @@ class FastAGC:
 
         # Smooth gain
         if target_gain < self._gain:
-            self._gain += self._attack * (target_gain - self._gain)
+            self._gain += attack_b * (target_gain - self._gain)
         else:
-            self._gain += self._decay * (target_gain - self._gain)
+            self._gain += decay_b * (target_gain - self._gain)
 
         return samples * self._gain
 
@@ -2237,35 +2272,49 @@ class NoiseReduction:
 
     def _lms_filter(self, samples: np.ndarray, normalized: bool = False) -> np.ndarray:
         """
-        LMS/NLMS adaptive noise cancellation.
+        Single-input adaptive line enhancer (LMS/NLMS).
 
-        Learns to predict and cancel noise from the signal.
+        Without a separate noise reference, a one-input adaptive filter can
+        only exploit the *self-correlation* of the signal: it predicts each
+        sample from a delayed history and keeps the predictable part. A
+        narrowband signal (a tone/carrier) is predictable and survives; the
+        broadband noise is not and is suppressed. It enhances narrowband
+        signals in broadband noise; it is not a general denoiser, and for a
+        genuine two-input noise canceller use ``process_with_reference``.
+
+        The previous implementation put the current sample at tap 0 of the
+        filter *and* used it as the desired output, so the filter trivially
+        predicted the sample from itself — the tap-0 weight ran to 1, the
+        error went to zero, and the output collapsed to ~0 (it cancelled the
+        whole signal). A one-sample decorrelation delay prevents that, and the
+        output is the prediction (the enhanced narrowband component) rather
+        than the prediction error.
         """
         output = np.zeros_like(samples)
         n = len(samples)
         mu = self._config.lms_step_size
 
         for i in range(n):
-            # Shift buffer
-            self._lms_buffer = np.roll(self._lms_buffer, 1)
-            self._lms_buffer[0] = samples[i]
+            # Predict the current sample from the delayed history (the buffer
+            # holds samples[i-1], samples[i-2], ...): the decorrelation delay
+            # is what stops the filter from predicting the sample from itself.
+            prediction = np.dot(self._lms_weights, self._lms_buffer)
 
-            # Filter output (noise estimate)
-            noise_est = np.dot(self._lms_weights, self._lms_buffer)
+            # Prediction error drives the weight update.
+            error = samples[i] - prediction
 
-            # Error (desired signal)
-            error = samples[i] - noise_est
-
-            # Update weights
             if normalized:
-                # NLMS normalization
                 norm = np.dot(self._lms_buffer, self._lms_buffer) + 1e-10
                 self._lms_weights += (mu / norm) * error * self._lms_buffer
             else:
-                # Standard LMS
                 self._lms_weights += mu * error * self._lms_buffer
 
-            output[i] = error
+            # Keep the predictable (narrowband) component.
+            output[i] = prediction
+
+            # Shift the current sample into the delay line for future steps.
+            self._lms_buffer = np.roll(self._lms_buffer, 1)
+            self._lms_buffer[0] = samples[i]
 
         return output
 

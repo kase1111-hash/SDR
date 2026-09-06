@@ -171,10 +171,10 @@ SSTV_MODES = {
         [73.216, 73.216, 73.216],
     ),
     # PD modes - YUV format (ISS favorites!)
-    0x5D: SSTVModeSpec(
+    0x63: SSTVModeSpec(
         "PD 90",
         SSTVMode.PD_90,
-        0x5D,
+        0x63,  # standard PD90 VIS is 99 (0x63), not 93 (0x5D, which is PD50)
         320,
         256,
         170.24,
@@ -222,10 +222,10 @@ SSTV_MODES = {
         "YUV",
         [382.0, 382.0],
     ),
-    0x63: SSTVModeSpec(
+    0x5E: SSTVModeSpec(
         "PD 290",
         SSTVMode.PD_290,
-        0x63,
+        0x5E,  # standard PD290 VIS is 94 (0x5E), not 99 (0x63, which is PD90)
         800,
         616,
         228.8,

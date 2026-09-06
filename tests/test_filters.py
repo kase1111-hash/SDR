@@ -8,7 +8,46 @@ from sdr_module.dsp.filters import (
     FilterSpec,
     FilterType,
     FIRFilter,
+    Resampler,
 )
+
+
+class TestResampler:
+    """Rational resampling used to silently stay 1:1 for ratios whose best
+    approximation needed a denominator > the search cap. It now uses
+    Fraction.limit_denominator and warns when the request is unrepresentable."""
+
+    @pytest.mark.parametrize(
+        "in_rate,out_rate",
+        [
+            (2400000, 48000),
+            (48000, 44100),
+            (2048000, 44100),
+            (96000, 44100),
+            (1000000, 500000),
+        ],
+    )
+    def test_actual_rate_matches_request(self, in_rate, out_rate):
+        r = Resampler(in_rate, out_rate)
+        # The achievable rate is within 0.1% of the request for realistic rates.
+        assert abs(r.actual_output_rate - out_rate) / out_rate < 1e-3
+        # And it is not a silent 1:1 no-op when a real change was asked for.
+        if abs(out_rate - in_rate) / in_rate > 1e-2:
+            assert (r.interpolation_factor, r.decimation_factor) != (1, 1)
+
+    def test_output_length_scales_with_ratio(self):
+        r = Resampler(48000, 24000)
+        x = np.ones(4800, dtype=np.complex64)
+        y = r.resample(x)
+        assert abs(len(y) - 2400) <= 2  # ~half as many samples
+
+    def test_unrepresentable_ratio_warns_and_is_safe(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="sdr_module.dsp.filters"):
+            r = Resampler(1_000_000_000, 7)  # denominator > cap: unrepresentable
+        assert r.interpolation_factor >= 1 and r.decimation_factor >= 1
+        assert any("Resampler" in rec.message for rec in caplog.records)
 
 
 class TestFIRFilter:

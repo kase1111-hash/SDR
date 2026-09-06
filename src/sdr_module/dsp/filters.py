@@ -7,11 +7,14 @@ Provides various filter types for signal conditioning:
 - Real-time filtering with overlap-save
 """
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 class FilterType(Enum):
@@ -780,31 +783,47 @@ class Resampler:
         self._buffer: Optional[np.ndarray] = None
         self._phase = 0
 
+        # A rational approximation with a bounded denominator cannot hit every
+        # ratio exactly. Warn (rather than silently resample at the wrong rate)
+        # when the achievable output rate misses the request by more than 0.1%.
+        achieved = self.actual_output_rate
+        if output_rate > 0 and abs(achieved - output_rate) / output_rate > 1e-3:
+            logger.warning(
+                "Resampler: requested %.6g Hz but the best rational ratio with "
+                "denominator <= %d gives %.6g Hz (%d/%d). Raise num_taps/limit "
+                "or resample in stages for an exact rate.",
+                output_rate,
+                max(self._interp_factor, self._decim_factor),
+                achieved,
+                self._interp_factor,
+                self._decim_factor,
+            )
+
     def _find_rational(
         self, num: float, den: float, max_factor: int = 1000
     ) -> Tuple[int, int]:
-        """Find rational approximation P/Q."""
-        from math import gcd
+        """Find the rational approximation P/Q of ``num/den``.
 
-        # Try to find integer ratio
-        ratio = num / den
+        Uses ``Fraction.limit_denominator`` — the standard best-rational-
+        approximation algorithm — instead of a hand-rolled search. The old
+        search seeded the answer at 1/1 and only replaced it on a *strictly*
+        smaller error, so ratios whose best approximation needed a denominator
+        greater than ``max_factor`` were silently left at 1/1 (the resampler
+        became a no-op at the wrong rate).
+        """
+        from fractions import Fraction
 
-        best_p, best_q = 1, 1
-        best_error = abs(ratio - 1)
+        if den <= 0 or num <= 0:
+            return 1, 1
 
-        for q in range(1, max_factor + 1):
-            p = round(ratio * q)
-            if p > 0 and p <= max_factor:
-                error = abs(ratio - p / q)
-                if error < best_error:
-                    best_error = error
-                    best_p, best_q = p, q
-                    if error < 1e-9:
-                        break
-
-        # Simplify
-        g = gcd(best_p, best_q)
-        return best_p // g, best_q // g
+        frac = Fraction(num / den).limit_denominator(max_factor)
+        p, q = frac.numerator, frac.denominator
+        # Guard against an extreme ratio rounding the numerator to 0.
+        if p < 1:
+            p = 1
+        if q < 1:
+            q = 1
+        return p, q
 
     def _design_filter(self) -> np.ndarray:
         """Design resampling filter."""

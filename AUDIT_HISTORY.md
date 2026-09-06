@@ -254,6 +254,41 @@ this pass:
   CodeQL, wheel smoke test); PEP 639 metadata (the `setuptools<77` cap is
   gone); `py.typed`; single-sourced version; corrected PyInstaller spec,
   Windows installer and build scripts; docs realigned to the shipping code.
+- **Protocol decoders (blocker/high).** ADS-B decoded a wrong altitude for
+  essentially all civil traffic (the Q=1 25 ft branch swapped the two halves
+  of the field: the canonical 38000 ft message read 27025 ft). The RDS
+  decoder recognised no block and returned zero messages for all input (its
+  syndrome LFSR fed feedback into the register and XORed an 11-bit polynomial
+  into a 10-bit register, producing values absent from its own table); it now
+  reduces the block modulo `g(x)=0x5B9` and matches the IEC 62106 offset
+  words, decoding a full group end to end. POCSAG mis-assembled the receiver
+  address (a mask that dropped the low 3 bits without shifting and never
+  folded in the frame) and always decoded pages as alphanumeric, so numeric
+  pages were garbage (`_decode_numeric` was dead code). All fixed with
+  regression tests.
+- **Recording (medium).** WAV I/Q recording clamped the frame rate to
+  192 kHz, so a 2.4 MS/s capture read back 12.5x slow; it now stores the true
+  rate.
+- **CLI (high).** `decode` passed raw I/Q straight to the decoders (which
+  need demodulated baseband), so it reported zero messages on every real
+  capture; it now demodulates per protocol (FM discriminator / envelope) via
+  a shared `demodulate_for_protocol`, and says so for RDS (subcarrier
+  recovery not implemented) instead of silently decoding nothing.
+- **GUI "demo vs product" (blocker/high).** The waterfall repainted the
+  500x2048 image pixel-by-pixel in Python (~0.4 s per line, ~12x over the
+  frame budget) and froze the display during acquisition -- now a vectorized
+  NumPy->QImage render (~1.7 ms/line). The spectrum FFT was unnormalized
+  (`20*log10(|FFT|)`, no window), so every bin saturated the (-120,0) dB
+  display and pinned the -80 dB squelch open -- now windowed and referenced
+  to dBFS. The frequency scanner fabricated detections from synthetic noise
+  when no device was attached -- now requires real hardware. The Decoder tab
+  received no data (its `add_message*` had no callers) -- now driven by a
+  live decoder over the acquired samples. The control-panel Record button and
+  the connect dialog's "Demo Device" row were wired to nothing -- both are
+  functional now. The inert FM Dev control drives the FM audio gain; the
+  callsign panel no longer silently transmits CW for the unimplemented
+  Voice/PSK31/RTTY modes; dead code (`SDRWorker`, a latent `np.random` feed)
+  was removed. All fixed with regression tests.
 
 ### 8.2 Remaining known items (verified but not yet fixed)
 
@@ -276,7 +311,10 @@ unchanged.
 
 ### 8.3 Not yet re-audited
 
-The `recording-io`, `protocol-decoders`, `gui-core`, `gui-widgets`, `cli`,
-`packaging-ci`, `docs-truth`, `security-tx-safety`, `ham-features`,
-`demo-vs-real`, `tests-quality`, `antenna-array` and `ui-viz-utils`
-dimensions did not complete in this pass and should be run before a 1.0.
+A later pass audited `protocol-decoders`, `recording-io`, `cli`, `gui-core`,
+`gui-widgets` and `demo-vs-real`; the confirmed findings are fixed in §8.1.
+The `packaging-ci`, `docs-truth`, `security-tx-safety`, `ham-features`,
+`tests-quality`, `antenna-array` and `ui-viz-utils` dimensions have not had a
+dedicated deep re-audit and should be run before a 1.0. The one known
+`dsp-numerics` item that remains is the SignalClassifier type heuristics
+(§8.2).

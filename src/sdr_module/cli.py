@@ -9,7 +9,7 @@ Provides access to scanning, encoding, and signal analysis tools.
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from . import __version__
 
@@ -149,6 +149,46 @@ def _scan_file(args: argparse.Namespace) -> int:
     return 0
 
 
+def _demodulate_for_protocol(samples: "Any", protocol: "Any") -> "Optional[Any]":
+    """Demodulate raw I/Q into the baseband each protocol decoder expects.
+
+    The decoders operate on demodulated baseband, not raw I/Q: the FSK/AFSK/MSK
+    pager and packet decoders want an FM discriminator output (positive = mark,
+    negative = space) and ADS-B wants the sample magnitude. Passing raw complex
+    I/Q straight in (as the CLI used to) yields zero messages on real captures.
+
+    Returns None when the CLI cannot yet produce the required baseband for the
+    protocol, so the caller can say so instead of silently decoding nothing.
+    """
+    import numpy as np
+
+    from .dsp.protocols import ProtocolType
+
+    samples = np.asarray(samples)
+
+    if protocol == ProtocolType.ADSB:
+        # 1090 MHz PPM: the decoder works on the pulse envelope.
+        return np.abs(samples).astype(np.float32)
+
+    fsk_like = {
+        ProtocolType.POCSAG,
+        ProtocolType.FLEX,
+        ProtocolType.AX25,
+        ProtocolType.APRS,
+        ProtocolType.ACARS,
+    }
+    if protocol in fsk_like:
+        if np.iscomplexobj(samples) and np.any(samples.imag != 0):
+            # FM discriminator: instantaneous frequency of the I/Q stream.
+            return np.angle(samples[1:] * np.conj(samples[:-1])).astype(np.float32)
+        # Already a real, pre-demodulated baseband.
+        return samples.real.astype(np.float32)
+
+    # RDS needs 57 kHz subcarrier recovery and coherent BPSK demodulation of
+    # broadcast-FM I/Q, which the CLI does not implement yet.
+    return None
+
+
 def cmd_decode(args: argparse.Namespace) -> int:
     """Decode a protocol from a recorded I/Q file."""
     from .dsp.protocols import ProtocolType, create_protocol_decoder
@@ -181,7 +221,15 @@ def cmd_decode(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"Error: {exc}")
         return 1
-    messages = decoder.decode(samples)
+
+    baseband = _demodulate_for_protocol(samples, protocol)
+    if baseband is None:
+        print(
+            f"Error: decoding {protocol.value.upper()} from a raw I/Q capture "
+            "is not supported yet (it needs subcarrier recovery)."
+        )
+        return 2
+    messages = decoder.decode(baseband)
 
     print(f"Decoded {len(messages)} {args.protocol.upper()} message(s)")
     for i, msg in enumerate(messages):

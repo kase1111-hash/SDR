@@ -291,8 +291,17 @@ class IQRecorder:
         else:
             sample_width = 2  # Default to 16-bit for WAV
 
-        # Limit sample rate for WAV compatibility
-        wav_sample_rate = min(int(self._sample_rate), 192000)
+        # Store the true sample rate. The WAV header holds the frame rate as a
+        # 32-bit field, so any SDR rate fits; clamping it (as an earlier version
+        # did at 192 kHz) silently mis-timed playback of a 2.4 MS/s I/Q capture.
+        # Some consumer audio players balk at very high rates, so note it.
+        wav_sample_rate = int(self._sample_rate)
+        if wav_sample_rate > 192000:
+            logger.info(
+                "WAV frame rate %d Hz exceeds the 192 kHz some audio players "
+                "support; the true rate is stored so I/Q timing stays correct.",
+                wav_sample_rate,
+            )
 
         self._wav_file.setnchannels(n_channels)
         self._wav_file.setsampwidth(sample_width)

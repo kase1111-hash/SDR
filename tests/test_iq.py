@@ -375,3 +375,36 @@ class TestEstimateIQImbalance:
 
         assert isinstance(gain, (float, np.floating))
         assert isinstance(phase, (float, np.floating))
+
+
+class TestIQRecorderWav:
+    """Regression tests for WAV I/Q recording."""
+
+    def test_wav_stores_true_sample_rate(self):
+        """The WAV header must carry the real sample rate, not a clamped one.
+
+        Regression: _start_wav clamped the frame rate to min(rate, 192000), so
+        a 2.4 MS/s I/Q capture was stored as 192 kHz and played back 12.5x slow
+        with wrong frequency scaling.
+        """
+        import wave
+
+        from sdr_module.dsp.recording import FileFormat, IQRecorder, SampleFormat
+
+        sample_rate = 2_400_000
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            filepath = f.name
+        try:
+            recorder = IQRecorder(
+                sample_rate=sample_rate,
+                sample_format=SampleFormat.INT16,
+                file_format=FileFormat.WAV,
+            )
+            recorder.start(filepath)
+            recorder.write((np.ones(1000) * 0.5).astype(np.complex64))
+            recorder.stop()
+
+            with wave.open(filepath, "rb") as wav:
+                assert wav.getframerate() == sample_rate
+        finally:
+            os.unlink(filepath)

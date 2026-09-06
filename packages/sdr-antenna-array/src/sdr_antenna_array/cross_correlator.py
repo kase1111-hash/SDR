@@ -204,15 +204,19 @@ class CrossCorrelator:
 
         delay_seconds = delay_samples / self._sample_rate
 
-        # Extract phase at peak
-        phase_offset = np.angle(correlation[peak_idx])
+        # Extract phase at peak. The cross-spectrum fft_a * conj(fft_b) makes
+        # angle(correlation[peak]) = phi_a - phi_b, but every consumer treats
+        # phase_offset as element b's *excess* phase over the reference a and
+        # corrects with exp(-1j * phase_offset). Report phi_b - phi_a so that
+        # correction removes the offset instead of doubling it.
+        phase_offset = -np.angle(correlation[peak_idx])
 
         # If center frequency provided, adjust phase for frequency
         if center_frequency is not None:
-            # Phase contribution from time delay
+            # Phase contribution from time delay (matching the negated sign).
             phase_from_delay = 2 * np.pi * center_frequency * delay_seconds
             # Remove time-delay phase to get residual phase offset
-            phase_offset = self._wrap_phase(phase_offset - phase_from_delay)
+            phase_offset = self._wrap_phase(phase_offset + phase_from_delay)
 
         # Estimate SNR from correlation peak
         noise_floor = np.median(corr_mag)

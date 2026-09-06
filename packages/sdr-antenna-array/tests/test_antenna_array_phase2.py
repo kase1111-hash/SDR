@@ -173,6 +173,30 @@ class TestCrossCorrelator:
         correction = alignment.get_correction_vector(2)
         assert len(correction) == 2
 
+    def test_apply_alignment_actually_aligns(self):
+        """Correcting must REMOVE the phase offset, not double it.
+
+        Regression: the correlator reported phi_a - phi_b while consumers
+        corrected with exp(-1j * phase_offset), so apply_alignment left ~2x the
+        original offset (a 60 deg shift became a 120 deg residual).
+        """
+        correlator = CrossCorrelator(sample_rate=2.4e6)
+        base_signal = generate_test_signal(10e3, 2.4e6, 0.01, snr_db=40)
+        phase_offset = np.pi / 3  # 60 degrees
+        signals = {0: base_signal, 1: base_signal * np.exp(1j * phase_offset)}
+
+        alignment = correlator.align_array(signals, reference_element=0)
+        corrected = correlator.apply_alignment(signals, alignment)
+
+        # After correction element 1 must be in-phase with the reference.
+        residual = np.angle(np.mean(corrected[1] * np.conj(corrected[0])))
+        assert abs(residual) < 0.15, f"residual {np.degrees(residual):.1f} deg"
+
+        # And the residual must be much smaller than the uncorrected offset
+        # (guards against the sign bug, which would leave ~2x, i.e. ~120 deg).
+        uncorrected = np.angle(np.mean(signals[1] * np.conj(signals[0])))
+        assert abs(residual) < abs(uncorrected) / 2
+
     def test_estimate_frequency_offset(self):
         """Test frequency offset estimation."""
         correlator = CrossCorrelator(sample_rate=2.4e6)

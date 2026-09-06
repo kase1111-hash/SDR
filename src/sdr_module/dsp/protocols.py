@@ -882,13 +882,17 @@ class RDSDecoder(ProtocolDecoder):
     BLOCK_SIZE = 26  # bits
     GROUP_SIZE = 4  # blocks
 
-    # Syndrome values for block types
+    # Syndrome values for block types. For an error-free block the syndrome
+    # (the 26-bit block reduced modulo the generator polynomial) equals the
+    # block's offset word, because the transmitted check bits carry
+    # ``(message * x^10 mod g) XOR offset``. These are therefore the standard
+    # IEC 62106 offset words A, B, C, C' and D.
     SYNDROMES = {
-        0x3D8: "A",
-        0x3D4: "B",
-        0x25C: "C",
-        0x3CC: "C'",
-        0x258: "D",
+        0x0FC: "A",
+        0x198: "B",
+        0x168: "C",
+        0x350: "C'",
+        0x1B4: "D",
     }
 
     # Offset words
@@ -966,20 +970,22 @@ class RDSDecoder(ProtocolDecoder):
         self._timestamp = 0.0
 
     def _syndrome(self, block: int) -> int:
-        """Calculate syndrome for 26-bit block."""
-        # WHY 0x5B9: RDS uses a shortened cyclic code derived from this generator
-        # polynomial (EN 62106); provides 5-bit error correction per 26-bit block
-        poly = 0x5B9  # x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1
+        """Return the RDS block syndrome: the 26-bit block reduced modulo the
+        generator polynomial g(x) = x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1.
 
-        reg = 0
-        for i in range(26):
-            bit = (block >> (25 - i)) & 1
-            feedback = ((reg >> 9) & 1) ^ bit
-            reg = ((reg << 1) | feedback) & 0x3FF
-            if feedback:
-                reg ^= poly
-
-        return reg
+        The check bits of a block carry ``(message * x^10 mod g) XOR offset``,
+        so an error-free block reduces to its offset word; ``_decode_block``
+        matches that against ``SYNDROMES`` to identify the block type. (The
+        previous LFSR fed the feedback bit back into the register and XORed an
+        11-bit polynomial into a 10-bit register, so it never produced any of
+        the tabulated values and the decoder recognised nothing.)
+        """
+        poly = 0x5B9  # includes the x^10 term (degree 10)
+        reg = block & 0x3FFFFFF  # 26-bit block
+        for i in range(25, 9, -1):
+            if (reg >> i) & 1:
+                reg ^= poly << (i - 10)
+        return reg & 0x3FF
 
     def _decode_block(self, bits: List[int]) -> Tuple[int, str]:
         """
@@ -1345,8 +1351,10 @@ class ADSBDecoder(ProtocolDecoder):
         q_bit = (alt_bits >> 4) & 0x01
 
         if q_bit:
-            # 25 ft resolution
-            n = ((alt_bits & 0x0F) << 7) | ((alt_bits >> 5) & 0x7F)
+            # 25 ft resolution: drop the Q bit (bit 4) and concatenate the 7
+            # high bits (11..5) with the 4 low bits (3..0) to form the
+            # 11-bit multiplier.
+            n = (((alt_bits >> 5) & 0x7F) << 4) | (alt_bits & 0x0F)
             altitude = n * 25 - 1000
         else:
             # Gillham code (100 ft resolution) - simplified

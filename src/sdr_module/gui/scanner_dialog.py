@@ -1,8 +1,9 @@
 """
 Frequency scanner dialog.
 
-Runs a non-blocking sweep using the connected SDR (or synthetic data
-when none is connected) and lists detected signals.
+Runs a non-blocking sweep using the connected SDR and lists detected
+signals. A real device is required: with no hardware the scan is disabled
+rather than fabricating detections from synthetic noise.
 """
 
 from __future__ import annotations
@@ -68,13 +69,14 @@ class _ScanWorker(QThread if HAS_PYQT6 else object):
         self.finished_scan.emit()
 
     def _measure_peak(self, freq_hz: float) -> Optional[float]:
+        # A real sweep requires real hardware. Never synthesise samples here:
+        # noise fed through an FFT clears a low threshold at every step and the
+        # dialog would fill with fabricated "detections".
+        if not (self._device and hasattr(self._device, "set_frequency")):
+            return None
         try:
-            if self._device and hasattr(self._device, "set_frequency"):
-                self._device.set_frequency(freq_hz)
-                samples = self._device.read_samples(4096)
-            else:
-                # Synthetic: random noise plus a fake signal near band centers
-                samples = (np.random.randn(4096) + 1j * np.random.randn(4096)) * 0.05
+            self._device.set_frequency(freq_hz)
+            samples = self._device.read_samples(4096)
         except Exception as e:
             logger.debug(f"Scan read failed at {freq_hz}: {e}")
             return None
@@ -82,8 +84,13 @@ class _ScanWorker(QThread if HAS_PYQT6 else object):
         if samples is None or len(samples) == 0:
             return None
 
-        spec = np.fft.fft(samples)
-        power = 20 * np.log10(np.abs(spec) + 1e-10)
+        # Windowed power spectrum referenced to dBFS (full-scale tone -> 0 dB),
+        # matching the main display so the threshold means the same thing.
+        samples = np.asarray(samples)
+        window = np.hanning(len(samples) + 1)[:-1]
+        gain = float(np.sum(window)) or 1.0
+        spec = np.fft.fft(samples * window)
+        power = 20.0 * np.log10(np.abs(spec) / gain + 1e-12)
         return float(np.max(power))
 
 
@@ -141,6 +148,13 @@ class ScannerDialog(QDialog if HAS_PYQT6 else object):
         self._start_btn.clicked.connect(self._toggle_scan)
         layout.addWidget(self._start_btn)
 
+        # Status / device-required notice
+        self._status = QLabel("")
+        layout.addWidget(self._status)
+        if self._device is None:
+            self._start_btn.setEnabled(False)
+            self._status.setText("Connect a device to scan (no hardware detected).")
+
         # Progress
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
@@ -163,6 +177,10 @@ class ScannerDialog(QDialog if HAS_PYQT6 else object):
     def _toggle_scan(self):
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
+            return
+
+        if self._device is None:
+            self._status.setText("Connect a device to scan (no hardware detected).")
             return
 
         self._table.setRowCount(0)

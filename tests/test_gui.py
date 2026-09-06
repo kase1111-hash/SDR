@@ -556,6 +556,47 @@ class TestSpectrumDbfsNormalization(unittest.TestCase):
         self.assertEqual(out.shape, (0,))
 
 
+class TestScannerNoDeviceHonesty(unittest.TestCase):
+    """The scanner must not fabricate detections when no device is present."""
+
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_worker_measure_peak_returns_none_without_device(self):
+        from sdr_module.gui.scanner_dialog import _ScanWorker
+
+        worker = _ScanWorker(None, 88e6, 108e6, 200e3, -20.0)
+        # Repeated calls must never invent a measurement from synthetic noise.
+        for _ in range(20):
+            self.assertIsNone(worker._measure_peak(100e6))
+
+    def test_dialog_disables_scan_without_device(self):
+        from sdr_module.gui.scanner_dialog import ScannerDialog
+
+        dialog = ScannerDialog(device=None)
+        self.assertFalse(dialog._start_btn.isEnabled())
+        # Toggling anyway produces no hits.
+        dialog._toggle_scan()
+        self.assertEqual(dialog._table.rowCount(), 0)
+
+    def test_measure_peak_is_dbfs_referenced_with_device(self):
+        from sdr_module.gui.scanner_dialog import _ScanWorker
+
+        class FakeDevice:
+            def set_frequency(self, freq):
+                self._freq = freq
+
+            def read_samples(self, n):
+                t = np.arange(n)
+                return np.exp(2j * np.pi * 0.1 * t).astype(np.complex64)
+
+        worker = _ScanWorker(FakeDevice(), 88e6, 108e6, 200e3, -20.0)
+        peak = worker._measure_peak(100e6)
+        self.assertIsNotNone(peak)
+        # A full-scale tone should read near 0 dBFS, not tens of dB.
+        self.assertLess(abs(peak), 3.0)
+
+
 class TestGUISignalEmission(unittest.TestCase):
     """Test that GUI widgets emit signals correctly."""
 

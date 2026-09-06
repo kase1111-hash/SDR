@@ -145,9 +145,13 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         except Exception as e:
             logger.debug(f"HackRF enumeration failed: {e}")
 
-        # Add demo device if no real devices found
+        # Add demo device if no real devices found. The backing entry must be
+        # appended too: _on_accept rejects any selected row whose index is not
+        # in self._devices, so a table row with no matching entry made OK
+        # silently cancel.
         if not self._devices:
             self._add_device("Demo", "Demo Device", "N/A", "Available")
+            self._devices.append({"type": "demo", "index": 0, "info": {}})
 
     def _enumerate_rtlsdr(self):
         """Enumerate RTL-SDR devices."""

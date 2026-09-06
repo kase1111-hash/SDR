@@ -575,9 +575,27 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._control_panel.squelch_changed.connect(self._on_squelch_changed)
         self._control_panel.agc_changed.connect(self._on_agc_changed)
         self._control_panel.demod_changed.connect(self._on_demod_changed)
+        # The control panel's Record button drives the same recording as the
+        # toolbar action (its signals were previously connected to nothing).
+        self._control_panel.recording_started.connect(self._on_panel_record_started)
+        self._control_panel.recording_stopped.connect(self._on_panel_record_stopped)
         # Click-to-tune from spectrum and waterfall
         self._spectrum.frequency_clicked.connect(self._on_frequency_changed)
         self._waterfall.frequency_clicked.connect(self._on_frequency_changed)
+
+    def _on_panel_record_started(self, fmt: str) -> None:
+        """Start recording from the control panel's Record button."""
+        self._start_recording()
+        self._record_action.blockSignals(True)
+        self._record_action.setChecked(True)
+        self._record_action.blockSignals(False)
+
+    def _on_panel_record_stopped(self) -> None:
+        """Stop recording from the control panel's Record button."""
+        self._stop_recording()
+        self._record_action.blockSignals(True)
+        self._record_action.setChecked(False)
+        self._record_action.blockSignals(False)
 
     def _on_frequency_changed(self, freq_hz: float):
         """Handle frequency change."""
@@ -803,11 +821,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._start_acquisition()
 
     def _toggle_recording(self, checked: bool):
-        """Toggle recording."""
+        """Toggle recording from the toolbar action."""
         if checked:
             self._start_recording()
         else:
             self._stop_recording()
+        # Keep the control panel's Record button in sync (without re-emitting).
+        self._control_panel.set_recording_state(checked)
 
     def _start_recording(self):
         """Start recording."""
@@ -875,6 +895,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._samples_buffer.append(samples)
             # complex64 = 8 bytes/sample
             self._recording_bytes += len(samples) * 8
+            # Advance the control panel's recording timer.
+            started = getattr(self, "_recording_started_at", None)
+            if started is not None:
+                import time
+
+                self._control_panel.update_record_time(int(time.monotonic() - started))
 
     def _power_spectrum_dbfs(self, samples: np.ndarray) -> np.ndarray:
         """Windowed power spectrum in dBFS (full-scale sinusoid -> 0 dB).

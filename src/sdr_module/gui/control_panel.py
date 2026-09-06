@@ -450,6 +450,29 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         secs = seconds % 60
         self._record_time.setText(f"{hours:02d}:{minutes:02d}:{secs:02d}")
 
+    def set_recording_state(self, recording: bool) -> None:
+        """Reflect recording state on the panel without re-emitting signals.
+
+        Lets the main window keep this panel's Record button in sync when
+        recording is toggled from elsewhere (e.g. the toolbar action).
+        """
+        self._record_btn.blockSignals(True)
+        self._record_btn.setChecked(recording)
+        self._record_btn.setText("⏹ Stop" if recording else "⏺ Record")
+        self._pause_btn.setEnabled(recording)
+        if not recording:
+            self._pause_btn.setChecked(False)
+            self._record_status.setText("Ready")
+            self._record_time.setText("00:00:00")
+        else:
+            self._record_status.setText("Recording...")
+        self._format_combo.setEnabled(not recording)
+        self._record_btn.blockSignals(False)
+
+    def get_recording_format(self) -> str:
+        """Return the currently selected recording format label."""
+        return self._format_combo.currentText()
+
     def _populate_preset_categories(self):
         """Populate the preset category dropdown."""
         fm = get_frequency_manager()

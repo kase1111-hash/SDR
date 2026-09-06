@@ -362,6 +362,36 @@ class TestControlPanelLogic(unittest.TestCase):
         self.widget.set_frequency(433e6)
         self.assertEqual(self.widget._freq_input.get_frequency(), 433e6)
 
+    def test_record_button_emits_signals(self):
+        """The Record button emits recording_started/stopped (was connected to nothing)."""
+        events = []
+        self.widget.recording_started.connect(lambda f: events.append(("start", f)))
+        self.widget.recording_stopped.connect(lambda: events.append(("stop",)))
+
+        self.widget._record_btn.setChecked(True)
+        self.assertEqual(events, [("start", self.widget.get_recording_format())])
+        self.assertEqual(self.widget._record_btn.text(), "⏹ Stop")
+
+        self.widget._record_btn.setChecked(False)
+        self.assertEqual(events[-1], ("stop",))
+
+    def test_set_recording_state_does_not_re_emit(self):
+        """External sync must not re-trigger the recording signals (no loop)."""
+        events = []
+        self.widget.recording_started.connect(lambda f: events.append("start"))
+        self.widget.recording_stopped.connect(lambda: events.append("stop"))
+
+        self.widget.set_recording_state(True)
+        self.assertTrue(self.widget._record_btn.isChecked())
+        self.widget.set_recording_state(False)
+        self.assertFalse(self.widget._record_btn.isChecked())
+        self.assertEqual(events, [])  # nothing emitted
+
+    def test_update_record_time_formats_hms(self):
+        """Recording timer formats hh:mm:ss."""
+        self.widget.update_record_time(3661)
+        self.assertEqual(self.widget._record_time.text(), "01:01:01")
+
     def test_set_gain(self):
         """Test setting gain."""
         self.widget.set_gain(30)
@@ -762,3 +792,22 @@ def run_tests():
 if __name__ == "__main__":
     success = run_tests()
     sys.exit(0 if success else 1)
+
+
+class TestDeviceDialogDemoSelectable(unittest.TestCase):
+    """The Demo Device row must be selectable and open a device."""
+
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_demo_device_has_backing_entry(self):
+        from sdr_module.gui.device_dialog import DeviceDialog, MockDevice
+
+        dialog = DeviceDialog()
+        dialog._refresh_devices()
+        # When no real hardware is present a Demo Device row is shown and it
+        # must have a matching entry in _devices, or _on_accept rejects it.
+        self.assertEqual(dialog._device_table.rowCount(), len(dialog._devices))
+        self.assertTrue(any(d.get("type") == "demo" for d in dialog._devices))
+        opened = dialog._open_device(dialog._devices[0])
+        self.assertIsInstance(opened, MockDevice)

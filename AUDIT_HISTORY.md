@@ -224,9 +224,15 @@ this pass:
   enforced in every tuning path.
 - **DSP correctness (high).** BPSK sliced on the wrong axis (~0.5 BER); SSB
   USB and LSB were byte-identical; spectral noise reduction crashed on
-  complex I/Q and dropped samples. All fixed with regression tests.
+  complex I/Q and dropped samples. The frequency scanner logged one hit per
+  overlapping step at the tuned centre (21 hits for one station) instead of
+  one hit at the true peak frequency. FrequencyLocker mapped bins with the
+  unshifted-FFT convention while the spectra are fftshifted, mirroring the
+  detected frequency. SignalClassifier reported a constant 0.5 confidence
+  because it was never computed. All fixed with regression tests.
 - **Robustness (medium).** `SampleBuffer.read()/peek()` bounds-checking;
-  atomic `SDRConfig.save()`; side-effect-free default-config-path getter.
+  atomic `SDRConfig.save()`; side-effect-free default-config-path getter;
+  the packet-highlighter KeyError crash and its flaky (unseeded) test.
 - **Packaging/CI/docs.** Real CI gates (blocking mypy, headless GUI suite,
   antenna-array tests, 3.10-3.14 + Windows/macOS, Bandit + pip-audit,
   CodeQL, wheel smoke test); PEP 639 metadata (the `setuptools<77` cap is
@@ -242,12 +248,13 @@ are candidates for the next pass:
 | Item | File | Notes |
 |---|---|---|
 | Coherent MSK demod returns ~0.5 BER on a clean signal | `dsp/demodulators.py` | Wrong carrier-phase model in `track_carrier`. |
-| SignalClassifier returns wrong types for some inputs; confidence is a constant 0.5 | `dsp/classifiers.py` | Confidence is never computed. |
-| FrequencyLocker assumes unshifted FFT but SpectrumAnalyzer emits fftshifted spectra | `dsp/frequency_lock.py` | "Zero-in" offset is mirrored. |
-| Scanner logs one station once per step with the tuned centre as the hit frequency | `dsp/scanner.py` | Needs peak-bin frequency + hit dedup. |
+| SignalClassifier still mislabels some modulation *types* | `dsp/classifiers.py` | Confidence is now computed (fixed); the type-decision heuristics still need tuning. |
 | LMS/NLMS "noise reduction" self-predicts and cancels the signal | `dsp/filters.py` | Needs a genuine noise reference. |
 | AGC/FastAGC apply per-block attack; Resampler falls back to pass-through when the ratio needs a denominator > 1000 | `dsp/filters.py` | Attack-time and rational-resampling limits. |
 | AFC PI gains oscillate and the NCO phase resets per block | `dsp/afc.py` | Loop tuning + phase continuity. |
+
+The scanner hit dedup/frequency and the FrequencyLocker fftshift mismatch,
+listed here in an earlier revision, have since been fixed (see §8.1).
 
 ### 8.3 Not yet re-audited
 

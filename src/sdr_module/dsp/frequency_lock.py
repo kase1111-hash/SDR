@@ -245,11 +245,12 @@ class FrequencyLocker:
             peak_idx = start + peak_idx_local
             peak_power = spectrum_db[peak_idx]
 
-            # Calculate frequency (centered FFT)
-            if peak_idx < n_bins // 2:
-                freq_offset = peak_idx * freq_per_bin
-            else:
-                freq_offset = (peak_idx - n_bins) * freq_per_bin
+            # Map the bin to a frequency offset from the tuned centre. The
+            # spectrum is fftshifted (as produced by SpectrumAnalyzer), so bin
+            # n_bins//2 is the centre (DC) and each bin is freq_per_bin wide.
+            # The previous formula assumed an unshifted FFT (bin 0 = DC), which
+            # mirrored positive offsets onto negative frequencies.
+            freq_offset = (peak_idx - n_bins // 2) * freq_per_bin
 
             signal_freq = center_freq + freq_offset
 

@@ -27,6 +27,7 @@ from sdr_module.dsp.scanner import (
     FrequencyScanner,
     ScanConfig,
     ScanDirection,
+    ScanMode,
     ScanState,
     ScanStatus,
 )
@@ -189,6 +190,33 @@ class TestSignalClassifier:
         result = clf.classify(tone)
         assert isinstance(result, ClassificationResult)
 
+    def test_confidence_is_not_constant_and_tracks_snr(self):
+        """Confidence must reflect the input, not be a hardcoded 0.5.
+
+        Regression: classify() returned a constant 0.5 confidence for every
+        signal because the value was never computed.
+        """
+        clf = SignalClassifier(self.SAMPLE_RATE)
+        rng = np.random.default_rng(0)
+        n = 8192
+        t = np.arange(n) / self.SAMPLE_RATE
+        strong = np.exp(
+            1j * (2 * np.pi * 1e5 * t + 5 * np.sin(2 * np.pi * 1e3 * t))
+        ).astype(np.complex64)
+        weak_noise = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(
+            np.complex64
+        ) * 0.1
+
+        strong_conf = clf.classify(strong).confidence
+        noise_conf = clf.classify(weak_noise).confidence
+
+        assert 0.0 <= strong_conf <= 1.0
+        assert 0.0 <= noise_conf <= 1.0
+        # A high-SNR signal is classified more confidently than faint noise,
+        # and at least one of them differs from the old constant 0.5.
+        assert strong_conf > noise_conf
+        assert strong_conf != 0.5 or noise_conf != 0.5
+
 
 # ---------------------------------------------------------------------------
 # FrequencyLocker
@@ -238,6 +266,27 @@ class TestFrequencyLocker:
         locker = FrequencyLocker(self.SAMPLE_RATE, fft_size)
         expected = self.SAMPLE_RATE / fft_size
         assert abs(locker._freq_resolution - expected) < 0.01
+
+    @pytest.mark.parametrize("offset_hz", [+300e3, -300e3, 0.0, +900e3, -700e3])
+    def test_detected_frequency_matches_fftshifted_bin(self, offset_hz):
+        """A tone in an fftshifted spectrum is reported at its true frequency.
+
+        Regression: the bin-to-frequency mapping assumed an unshifted FFT, so a
+        tone at center+300 kHz was reported at center-900 kHz (mirrored). The
+        spectrum from SpectrumAnalyzer is fftshifted (bin N/2 == centre).
+        """
+        n = self.FFT_SIZE
+        fpb = self.SAMPLE_RATE / n
+        center = 100e6
+        locker = FrequencyLocker(self.SAMPLE_RATE, n)
+        locker._noise_floor_db = -90.0
+        b = int(round(n / 2 + offset_hz / fpb))
+        spectrum = np.full(n, -90.0)
+        spectrum[b] = -20.0
+        signals = locker._detect_signals(spectrum, center)
+        assert signals, "signal above threshold should be detected"
+        detected_offset = signals[0].frequency_hz - center
+        assert abs(detected_offset - offset_hz) <= fpb
 
 
 # ---------------------------------------------------------------------------
@@ -358,3 +407,50 @@ class TestFrequencyScanner:
         scanner = FrequencyScanner(config=cfg)
         # 10 MHz range / 1 MHz step = 10 + 1 = 11 steps
         assert scanner._total_steps == 11
+
+    def _sweep_station(self, station_freqs, n=1024, fs=2.4e6):
+        """Run a single UP sweep with strong tones at the given frequencies."""
+        cfg = self._make_config(
+            mode=ScanMode.SINGLE,
+            direction=ScanDirection.UP,
+            start_freq_hz=99e6,
+            end_freq_hz=101e6,
+            step_hz=100e3,
+            threshold_db=-40,
+            min_snr_db=6,
+            record_spectrum=False,
+        )
+        scanner = FrequencyScanner(config=cfg)
+        scanner.start()
+        for _ in range(scanner._total_steps + 2):
+            c = scanner.current_frequency
+            spec = np.full(n, -90.0)
+            for s in station_freqs:
+                off = s - c
+                if abs(off) < fs / 2:
+                    b = int(round(n / 2 + off / (fs / n)))
+                    if 0 <= b < n:
+                        spec[b] = -20.0
+            status = scanner.update(spec, center_freq=c, sample_rate=fs)
+            if status.state in (ScanState.COMPLETED, ScanState.IDLE):
+                break
+        return scanner.hits
+
+    def test_one_station_yields_one_hit_at_true_frequency(self):
+        """A station in a wide window is not logged once per overlapping step.
+
+        Regression: the scanner used to append a hit at the tuned centre on
+        every step whose window contained the station (21 hits for one
+        station), all at the wrong frequency.
+        """
+        hits = self._sweep_station([100.0e6])
+        assert len(hits) == 1
+        assert abs(hits[0].frequency_hz - 100.0e6) < 100e3  # true freq, not centre
+
+    def test_two_stations_yield_two_distinct_hits(self):
+        """Two well-separated stations produce exactly two hits."""
+        hits = self._sweep_station([99.5e6, 100.6e6])
+        freqs = sorted(h.frequency_hz for h in hits)
+        assert len(hits) == 2
+        assert abs(freqs[0] - 99.5e6) < 100e3
+        assert abs(freqs[1] - 100.6e6) < 100e3

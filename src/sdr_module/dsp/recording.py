@@ -2674,7 +2674,9 @@ class FormatDetector:
             if len(samples) > 10:
                 mean_val = np.mean(samples)
                 if 100 < mean_val < 156:  # Near center (127.5)
-                    scores[SampleFormat.UINT8] = 1.0 - abs(mean_val - 127.5) / 127.5
+                    scores[SampleFormat.UINT8] = float(
+                        1.0 - abs(mean_val - 127.5) / 127.5
+                    )
         except (ValueError, IndexError) as e:
             logger.debug(f"UINT8 format probe failed for {filepath}: {e}")
 

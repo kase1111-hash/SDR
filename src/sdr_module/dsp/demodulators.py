@@ -1544,13 +1544,13 @@ class CWDemodulator(Demodulator):
         for i, (start, end) in enumerate(zip(key_down, key_up, strict=True)):
             # Check gap before this element
             if i == 0 and self._last_key_time > 0:
-                gap = (
+                gap = float(
                     start / self._sample_rate
                     + (current_time - len(keying) / self._sample_rate)
                     - self._last_key_time
                 )
             elif i > 0:
-                gap = (start - key_up[i - 1]) / self._sample_rate
+                gap = float((start - key_up[i - 1]) / self._sample_rate)
             else:
                 gap = 0.0
 

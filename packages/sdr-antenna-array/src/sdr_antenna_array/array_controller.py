@@ -19,8 +19,8 @@ try:
     from sdr_module.core.sample_buffer import BufferOverflowPolicy
     from sdr_module.devices.base import SDRDevice
 except ImportError:
-    DeviceManager = None
-    SDRDevice = None
+    DeviceManager = None  # type: ignore[assignment, misc]
+    SDRDevice = None  # type: ignore[assignment, misc]
 
     class BufferOverflowPolicy(Enum):  # type: ignore[no-redef]
         DROP_OLDEST = "drop_oldest"

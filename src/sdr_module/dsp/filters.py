@@ -2140,12 +2140,15 @@ class NoiseReduction:
             rec = inv(cleaned)
             if not is_complex:
                 rec = np.real(rec)
-            out[i : i + fft_size] += rec * win
-            norm[i : i + fft_size] += win**2
+            contrib = (rec * win).astype(out.dtype)
+            # Explicit add (not +=): the in-place operator's stub rejects a
+            # float contribution into a complex slice under some numpy versions.
+            out[i : i + fft_size] = out[i : i + fft_size] + contrib
+            norm[i : i + fft_size] = norm[i : i + fft_size] + win**2
 
         norm[norm < 1e-12] = 1.0
-        out = out / norm
-        result = out[:n]
+        normalized = out / norm
+        result = normalized[:n]
         if is_complex:
             return result.astype(np.complex128)
         return np.real(result).astype(np.float64)

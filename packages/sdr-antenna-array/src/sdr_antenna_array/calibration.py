@@ -270,30 +270,30 @@ class ArrayCalibrator:
             measurement = CalibrationMeasurement(
                 element_index=idx,
                 reference_element=ref_elem,
-                phase_offset=avg_phase,
-                amplitude_ratio=avg_amplitude,
-                delay_samples=avg_delay,
+                phase_offset=float(avg_phase),
+                amplitude_ratio=float(avg_amplitude),
+                delay_samples=float(avg_delay),
                 timestamp=time.time(),
-                confidence=avg_confidence,
+                confidence=float(avg_confidence),
             )
             measurements.append(measurement)
 
             element_calibrations[idx] = ElementCalibration(
                 element_index=idx,
-                phase_offset=avg_phase,
-                amplitude_scale=avg_amplitude,
-                delay_samples=avg_delay,
+                phase_offset=float(avg_phase),
+                amplitude_scale=float(avg_amplitude),
+                delay_samples=float(avg_delay),
                 calibration_frequency=self._config.common_frequency,
                 calibration_timestamp=time.time(),
             )
 
         # Calculate overall confidence
         if measurements:
-            overall_confidence = np.mean([m.confidence for m in measurements])
+            overall_confidence = float(np.mean([m.confidence for m in measurements]))
         else:
             overall_confidence = 0.0
 
-        success = overall_confidence >= self._cal_config.min_confidence
+        success = bool(overall_confidence >= self._cal_config.min_confidence)
 
         result = CalibrationResult(
             success=success,
@@ -462,9 +462,11 @@ class ArrayCalibrator:
             )
 
         overall_confidence = (
-            np.mean([m.confidence for m in measurements]) if measurements else 0.0
+            float(np.mean([m.confidence for m in measurements]))
+            if measurements
+            else 0.0
         )
-        success = overall_confidence >= self._cal_config.min_confidence
+        success = bool(overall_confidence >= self._cal_config.min_confidence)
 
         result = CalibrationResult(
             success=success,
@@ -597,9 +599,11 @@ class ArrayCalibrator:
             )
 
         overall_confidence = (
-            np.mean([m.confidence for m in measurements]) if measurements else 0.0
+            float(np.mean([m.confidence for m in measurements]))
+            if measurements
+            else 0.0
         )
-        success = overall_confidence >= self._cal_config.min_confidence
+        success = bool(overall_confidence >= self._cal_config.min_confidence)
 
         result = CalibrationResult(
             success=success,

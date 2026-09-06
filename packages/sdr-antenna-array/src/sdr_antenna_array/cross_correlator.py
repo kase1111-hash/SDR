@@ -196,7 +196,7 @@ class CrossCorrelator:
             peak_val = neg_peak_val
 
         # Sub-sample interpolation using parabolic fit
-        delay_samples = self._subsample_interpolate(corr_mag, peak_idx)
+        delay_samples = self._subsample_interpolate(corr_mag, int(peak_idx))
 
         # Convert to actual delay (handle wrap-around)
         if delay_samples > fft_size // 2:

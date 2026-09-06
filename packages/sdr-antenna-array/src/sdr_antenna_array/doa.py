@@ -607,9 +607,9 @@ class MUSICDoA:
         eigenvalues, eigenvectors = np.linalg.eigh(R)
 
         # Sort by eigenvalue (descending)
-        idx = np.argsort(eigenvalues)[::-1]
-        eigenvalues = eigenvalues[idx]
-        eigenvectors = eigenvectors[:, idx]
+        order = np.argsort(eigenvalues)[::-1]
+        eigenvalues = eigenvalues[order]
+        eigenvectors = eigenvectors[:, order]
 
         # Noise subspace (smallest eigenvalues)
         noise_subspace = eigenvectors[:, n_sources:]

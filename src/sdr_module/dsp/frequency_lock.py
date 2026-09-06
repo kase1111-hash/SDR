@@ -437,7 +437,7 @@ class FrequencyLocker:
         if len(self._freq_history) >= 3:
             freq_std = np.std(self._freq_history[-10:])
             max_std = self._config.tracking_bandwidth_hz / 2
-            stability_quality = max(0.0, 1.0 - freq_std / max_std)
+            stability_quality = float(max(0.0, 1.0 - freq_std / max_std))
         else:
             stability_quality = 0.5
 

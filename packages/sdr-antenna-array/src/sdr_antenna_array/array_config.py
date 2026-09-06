@@ -20,7 +20,7 @@ except ImportError:
     class ConfigValidationError(ValueError):  # type: ignore[no-redef]
         pass
 
-    DeviceConfig = None
+    DeviceConfig = None  # type: ignore[assignment, misc]
 
 logger = logging.getLogger(__name__)
 

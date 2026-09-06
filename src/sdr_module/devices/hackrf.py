@@ -130,7 +130,7 @@ class HackRFDevice(SDRDevice):
         self._amp_enabled = False
         self._tx_callback: Optional[Callable[[], Optional[np.ndarray]]] = None
         # Leftover int8 I/Q bytes not yet handed to a TX transfer.
-        self._tx_leftover = np.empty(0, dtype=np.int8)
+        self._tx_leftover: np.ndarray = np.empty(0, dtype=np.int8)
         self._tx_done = threading.Event()
         self._rx_error: Optional[str] = None
 
@@ -547,7 +547,9 @@ class HackRFDevice(SDRDevice):
         iq[1::2] = np.round(imag * 127.0).astype(np.int8)
         return iq
 
-    def start_tx(self, callback: Optional[Callable[[], np.ndarray]] = None) -> bool:
+    def start_tx(
+        self, callback: Optional[Callable[[], Optional[np.ndarray]]] = None
+    ) -> bool:
         """
         Start transmitting.
 

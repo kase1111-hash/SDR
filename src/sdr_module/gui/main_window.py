@@ -770,6 +770,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
             settings = self._callsign_panel.get_settings()
 
+            # Only CW ID is implemented for transmission. Refuse the other
+            # modes rather than silently transmitting Morse under their label.
+            mode = settings.get("mode", "CW")
+            if mode != "CW":
+                QMessageBox.information(
+                    self,
+                    "Mode not available",
+                    f"{mode} identification is not implemented for transmission "
+                    "yet; only CW (Morse) ID can be sent. Select CW (Morse) in "
+                    "the HAM ID panel.",
+                )
+                self._device_label.setText("")
+                return
+
             # Generate FM-modulated I/Q samples ready for transmission
             iq_samples = generate_tx_id(
                 callsign,

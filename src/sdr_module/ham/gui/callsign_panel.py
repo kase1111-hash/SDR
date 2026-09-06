@@ -114,7 +114,11 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
 
         mode_layout.addWidget(QLabel("Mode:"))
         self._mode_combo = QComboBox()
-        self._mode_combo.addItems(["CW (Morse)", "Voice", "PSK31", "RTTY"])
+        # Only CW is implemented for transmission; the others are marked so the
+        # selector does not imply they will be sent (they are refused if picked).
+        self._mode_combo.addItems(
+            ["CW (Morse)", "Voice (N/A)", "PSK31 (N/A)", "RTTY (N/A)"]
+        )
         self._mode_combo.currentIndexChanged.connect(self._on_settings_changed)
         mode_layout.addWidget(self._mode_combo)
 

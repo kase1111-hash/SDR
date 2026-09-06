@@ -324,6 +324,10 @@ def test_packet_highlighter():
     """Test packet highlighter."""
     print("Testing PacketHighlighter...")
 
+    # Seed so this test is deterministic; it feeds np.random data and used to
+    # pass or fail depending on preceding tests' RNG state.
+    np.random.seed(1)
+
     from sdr_module.ui.packet_highlighter import (
         DetectionConfig,
         DetectionMode,

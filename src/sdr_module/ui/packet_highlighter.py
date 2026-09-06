@@ -201,7 +201,7 @@ class PacketHighlighter:
 
             # Check for ended signals
             ended_signals = []
-            for _active_bin in list(self._active_signals.keys()):
+            for active_bin in list(self._active_signals.keys()):
                 signal_found = False
                 for signal in signals:
                     bin_start, bin_end, _ = signal

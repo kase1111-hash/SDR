@@ -9,7 +9,7 @@ Provides various filter types for signal conditioning:
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -2082,132 +2082,155 @@ class NoiseReduction:
         self._wiener_noise_psd = noise_psd
         self._noise_estimated = True
 
+    def _stft_process(self, samples, gain_fn):
+        """
+        Short-time Fourier transform processing with weighted overlap-add.
+
+        Runs ``gain_fn(spectrum) -> cleaned_spectrum`` on each windowed frame
+        and reconstructs the signal with a proper analysis/synthesis window so
+        the output has exactly ``len(samples)`` samples. Works for both real
+        audio and complex I/Q (the previous rfft-based loop crashed on complex
+        input and returned fewer samples than it was given).
+        """
+        x = np.asarray(samples)
+        is_complex = np.iscomplexobj(x)
+        n = int(x.size)
+        out_dtype = np.complex128 if is_complex else np.float64
+        if n == 0:
+            return np.zeros(0, dtype=out_dtype)
+
+        fft_size = self._fft_size
+        hop = self._hop_size
+        win = self._window
+        buf = x.astype(out_dtype)
+
+        # Pad so the frames tile the whole signal (at least one full frame,
+        # and a whole number of hops past the start of the last frame).
+        if n < fft_size:
+            pad = fft_size - n
+        else:
+            rem = (n - fft_size) % hop
+            pad = (hop - rem) if rem else 0
+        if pad:
+            buf = np.concatenate([buf, np.zeros(pad, dtype=out_dtype)])
+
+        out = np.zeros(buf.size, dtype=out_dtype)
+        norm = np.zeros(buf.size, dtype=np.float64)
+
+        if is_complex:
+
+            def fwd(w):
+                return np.fft.fft(w)
+
+            def inv(s):
+                return np.fft.ifft(s)
+
+        else:
+
+            def fwd(w):
+                return np.fft.rfft(w)
+
+            def inv(s):
+                return np.fft.irfft(s, n=fft_size)
+
+        for i in range(0, buf.size - fft_size + 1, hop):
+            frame = buf[i : i + fft_size]
+            windowed = frame * win
+            cleaned = gain_fn(fwd(windowed))
+            rec = inv(cleaned)
+            if not is_complex:
+                rec = np.real(rec)
+            out[i : i + fft_size] += rec * win
+            norm[i : i + fft_size] += win**2
+
+        norm[norm < 1e-12] = 1.0
+        out = out / norm
+        result = out[:n]
+        if is_complex:
+            return result.astype(np.complex128)
+        return np.real(result).astype(np.float64)
+
     def _spectral_subtraction(self, samples: np.ndarray) -> np.ndarray:
         """
         Spectral subtraction noise reduction.
 
-        Estimates noise spectrum and subtracts it from signal spectrum.
+        Estimates the noise spectrum and subtracts it from the signal
+        spectrum, with over-subtraction and a spectral floor to limit musical
+        noise. Uses weighted overlap-add so the output length matches the
+        input and complex I/Q is handled without crashing.
         """
-        output: list[float] = []
-        is_complex = np.iscomplexobj(samples)
 
-        # Process in overlapping frames
-        for i in range(0, len(samples) - self._fft_size + 1, self._hop_size):
-            frame = samples[i : i + self._fft_size]
-
-            # Apply window
-            if is_complex:
-                windowed = frame * self._window
-            else:
-                windowed = frame.astype(np.float64) * self._window
-
-            # FFT
-            spectrum = np.fft.rfft(windowed)
+        def gain_fn(spectrum):
             magnitude = np.abs(spectrum)
             phase = np.angle(spectrum)
 
-            # Estimate noise if not done
+            # A running noise estimate stored per shape (real rfft bins differ
+            # from complex fft bins); reset if the shape changed.
+            if (
+                self._noise_spectrum is not None
+                and self._noise_spectrum.shape != magnitude.shape
+            ):
+                self._noise_spectrum = None
+                self._noise_estimated = False
+                self._noise_frames_collected = 0
+
             if not self._noise_estimated:
                 if self._noise_spectrum is None:
                     self._noise_spectrum = magnitude.copy()
                 else:
-                    # Running average for noise estimation
                     alpha = 1.0 / (self._noise_frames_collected + 1)
                     self._noise_spectrum = (
                         1 - alpha
                     ) * self._noise_spectrum + alpha * magnitude
-
                 self._noise_frames_collected += 1
                 if self._noise_frames_collected >= self._config.noise_estimation_frames:
                     self._noise_estimated = True
 
-            # Spectral subtraction
             if self._noise_estimated and self._noise_spectrum is not None:
-                # Over-subtraction
                 subtracted = (
                     magnitude - self._config.subtraction_factor * self._noise_spectrum
                 )
-
-                # Spectral floor to prevent musical noise
                 floor = self._config.floor_factor * magnitude
                 subtracted = np.maximum(subtracted, floor)
+                return subtracted * np.exp(1j * phase)
+            return spectrum
 
-                # Reconstruct
-                spectrum_clean = subtracted * np.exp(1j * phase)
-            else:
-                spectrum_clean = spectrum
-
-            # IFFT
-            frame_clean = np.fft.irfft(spectrum_clean, n=self._fft_size)
-
-            # Overlap-add: combine tail of previous frame with head of current frame
-            if len(output) == 0:
-                output = list(frame_clean[: self._hop_size])
-            else:
-                # Add overlap buffer (tail of previous frame) to beginning of current frame
-                overlap_len = min(len(self._overlap_buffer), len(frame_clean))
-                for j in range(overlap_len):
-                    frame_clean[j] += self._overlap_buffer[j]
-                # Output only the hop_size new samples
-                output.extend(frame_clean[: self._hop_size])
-
-            self._overlap_buffer = frame_clean[self._hop_size :].copy()
-
-        result = np.array(output[: len(samples)])
-
-        if is_complex:
-            return result.astype(np.complex128)
-        return result
+        return self._stft_process(samples, gain_fn)
 
     def _wiener_filter(self, samples: np.ndarray) -> np.ndarray:
         """
         Wiener filter noise reduction.
 
-        Optimal linear filter that minimizes mean square error.
+        Optimal linear filter that minimises mean-square error. Uses weighted
+        overlap-add so the output length matches the input and complex I/Q is
+        handled without crashing.
         """
-        output: List[float] = []
-        is_complex = np.iscomplexobj(samples)
 
-        for i in range(0, len(samples) - self._fft_size + 1, self._hop_size):
-            frame = samples[i : i + self._fft_size]
-            windowed = frame * self._window
-
-            # FFT
-            spectrum = np.fft.rfft(windowed)
+        def gain_fn(spectrum):
             power = np.abs(spectrum) ** 2
 
-            # Initialize noise PSD if needed
+            if (
+                self._wiener_noise_psd is not None
+                and self._wiener_noise_psd.shape != power.shape
+            ):
+                self._wiener_noise_psd = None
             if self._wiener_noise_psd is None:
                 self._wiener_noise_psd = power.copy()
-            assert self._wiener_noise_psd is not None
-            wiener_noise: np.ndarray = self._wiener_noise_psd
+            wiener_noise = self._wiener_noise_psd
 
-            # Update noise estimate (during silence)
-            signal_power = np.mean(power)
-            noise_power = np.mean(self._wiener_noise_psd)
-
-            if signal_power < noise_power * 1.5:  # Likely noise-only
-                alpha = self._config.wiener_alpha
-                self._wiener_noise_psd = alpha * wiener_noise + (1 - alpha) * power
+            signal_power = float(np.mean(power))
+            noise_power = float(np.mean(wiener_noise))
+            if signal_power < noise_power * 1.5:  # likely noise-only frame
+                a = self._config.wiener_alpha
+                self._wiener_noise_psd = a * wiener_noise + (1 - a) * power
                 wiener_noise = self._wiener_noise_psd
 
-            # Wiener filter gain
-            # H(f) = max(0, 1 - noise_psd / signal_psd)
             snr = power / (wiener_noise + 1e-10)
-            gain = np.maximum(0, 1 - 1 / (snr + 1e-10))
-            gain = np.sqrt(gain)  # Amplitude domain
+            gain = np.maximum(0.0, 1 - 1 / (snr + 1e-10))
+            gain = np.sqrt(gain)
+            return spectrum * gain
 
-            # Apply gain
-            spectrum_clean = spectrum * gain
-
-            # IFFT
-            frame_clean = np.fft.irfft(spectrum_clean, n=self._fft_size)
-            output.extend(frame_clean[: self._hop_size])
-
-        result = np.array(output[: len(samples)])
-        if is_complex:
-            return result.astype(np.complex128)
-        return result
+        return self._stft_process(samples, gain_fn)
 
     def _lms_filter(self, samples: np.ndarray, normalized: bool = False) -> np.ndarray:
         """

@@ -440,3 +440,56 @@ class TestEdgeCases:
         fir = FIRFilter(spec)
         output = fir.filter(np.ones(100))
         assert len(output) == 100
+
+
+class TestNoiseReductionSTFT:
+    """Regression tests for the spectral noise-reduction paths.
+
+    The spectral-subtraction and Wiener methods used to crash on complex I/Q
+    (rfft rejects complex input) and return fewer samples than they were given
+    (no overlap-add flush). These lock in complex support and length parity.
+    """
+
+    import pytest as _pytest
+
+    from sdr_module.dsp.filters import (
+        NoiseReduction,
+        NoiseReductionConfig,
+        NoiseReductionMethod,
+    )
+
+    @_pytest.mark.parametrize(
+        "method",
+        [NoiseReductionMethod.SPECTRAL_SUBTRACTION, NoiseReductionMethod.WIENER],
+    )
+    @_pytest.mark.parametrize("dtype", [np.float64, np.complex64])
+    def test_output_length_matches_input(self, method, dtype):
+        nr = self.NoiseReduction(48000.0, self.NoiseReductionConfig(method=method))
+        rng = np.random.default_rng(0)
+        if np.issubdtype(dtype, np.complexfloating):
+            x = (rng.standard_normal(4096) + 1j * rng.standard_normal(4096)).astype(
+                dtype
+            )
+        else:
+            x = rng.standard_normal(4096).astype(dtype)
+        out = nr.process(x)
+        assert len(out) == len(x)
+        assert np.all(np.isfinite(np.asarray(out).view(np.float64)))
+
+    def test_complex_iq_does_not_crash(self):
+        nr = self.NoiseReduction(
+            2.4e6,
+            self.NoiseReductionConfig(
+                method=self.NoiseReductionMethod.SPECTRAL_SUBTRACTION
+            ),
+        )
+        x = (np.random.randn(2048) + 1j * np.random.randn(2048)).astype(np.complex64)
+        out = nr.process(x)
+        assert np.iscomplexobj(out)
+        assert len(out) == len(x)
+
+    def test_short_input_shorter_than_fft(self):
+        nr = self.NoiseReduction(48000.0)
+        x = np.random.randn(100).astype(np.float64)
+        out = nr.process(x)
+        assert len(out) == len(x)

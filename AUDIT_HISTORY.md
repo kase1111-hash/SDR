@@ -289,32 +289,60 @@ this pass:
   callsign panel no longer silently transmits CW for the unimplemented
   Voice/PSK31/RTTY modes; dead code (`SDRWorker`, a latent `np.random` feed)
   was removed. All fixed with regression tests.
+- **Antenna array (blocker/high).** `CrossCorrelator.correlate` reported the
+  phase as `phi_a - phi_b` while every consumer corrected with
+  `exp(-1j * phase_offset)`, so correlation-based phase alignment and
+  known-source/correlation calibration *doubled* the phase error instead of
+  removing it (a 60 deg shift left a 120 deg residual). And the DOA
+  estimators and beamformers filled the array-manifold data by global element
+  index while the steering vectors used enabled elements in row order, so a
+  disabled or non-contiguous element scrambled the manifold (a +20 deg source
+  read near -26 deg). Both fixed with regression tests; the steering-vector /
+  MUSIC / MVDR math itself was verified correct.
+- **Amateur license gating (medium).** The 160m band and all five 60m
+  channels were open to Technicians (`ALL_HAM`); both require General or
+  above under Part 97. Restricted to `GENERAL_EXTRA`. The prohibited-frequency
+  lockouts and the unlicensed-profile confinement were audited and are
+  correct.
+- **SSTV (medium).** The PD 90 and PD 290 VIS codes were swapped/wrong (93/99
+  instead of the standard 99/94), so a real PD90 decoded as PD 290 and PD290
+  was dropped. Corrected to the standard codes.
+- **SignalClassifier types (dsp-numerics).** The analog/digital decision keyed
+  off `std_phase_diff` alone, which is backwards (AM/FM read as digital,
+  BPSK/QPSK as analog, noise as analog); only OOK classified correctly.
+  Re-keyed on amplitude CV, spectral flatness, carrier peak ratio,
+  instantaneous-frequency bimodality and the M-th-power PSK nonlinearity;
+  clean signals now classify 7/7 and the type decision holds to ~20 dB.
+- **Docs.** Corrected the moved text-encoder tool paths, the radio-tuner
+  import path, a non-existent PowerShell build option, the RDS-from-capture
+  claim, the required Python version (3.10, not 3.8), the test count, and the
+  installer version example.
 
-### 8.2 Remaining known items (verified but not yet fixed)
+### 8.2 Remaining known items
 
-These `dsp-numerics` findings were verified as real and are documented here
-rather than left implicit. They affect correctness of secondary features and
-are candidates for the next pass:
-
-| Item | File | Notes |
-|---|---|---|
-| SignalClassifier still mislabels some modulation *types* | `dsp/classifiers.py` | Confidence is now computed (fixed); the type-decision heuristics still need tuning. |
-
-Fixed since an earlier revision of this list (now in §8.1): the scanner hit
-dedup/frequency, the FrequencyLocker fftshift mismatch, the SignalClassifier
+The `dsp-numerics` SignalClassifier type heuristics are fixed for clean and
+moderate-SNR signals (§8.1). No further verified-but-unfixed findings remain
+open from the audits run so far. Earlier revisions of this list (the scanner
+hit dedup/frequency, the FrequencyLocker fftshift mismatch, the
 constant-0.5 confidence, the Resampler silent 1:1 fallback, the per-block AGC
 attack-time stretch, the AFC per-block NCO phase reset, and the coherent MSK
-demodulator's ~0.5 BER. The AFC PI loop gains, also listed earlier, were
-checked with a closed-loop simulation and converge cleanly with no oscillation
-(the reported oscillation was an open-loop windup artifact), so they were left
-unchanged.
+demodulator's ~0.5 BER) are all now in §8.1. The AFC PI loop gains were
+checked with a closed-loop simulation and converge cleanly with no
+oscillation (the reported oscillation was an open-loop windup artifact), so
+they were left unchanged.
 
-### 8.3 Not yet re-audited
+Known non-defects worth noting: the CLI does not decode RDS from a raw I/Q
+capture (it needs 57 kHz subcarrier recovery and says so); the HackRF TX path
+enforces frequency and license but not emission mode (it transmits raw I/Q
+and cannot infer the mode); and the `src/sdr_module/ui/` compute classes
+(constellation/waterfall colour maps) contain some inaccuracies but are dead
+code -- the running GUI uses `src/sdr_module/gui/`.
 
-A later pass audited `protocol-decoders`, `recording-io`, `cli`, `gui-core`,
-`gui-widgets` and `demo-vs-real`; the confirmed findings are fixed in §8.1.
-The `packaging-ci`, `docs-truth`, `security-tx-safety`, `ham-features`,
-`tests-quality`, `antenna-array` and `ui-viz-utils` dimensions have not had a
-dedicated deep re-audit and should be run before a 1.0. The one known
-`dsp-numerics` item that remains is the SignalClassifier type heuristics
-(§8.2).
+### 8.3 Audit coverage
+
+Across two passes the following dimensions were audited, with confirmed
+findings fixed in §8.1: `dsp-numerics`, `protocol-decoders`, `recording-io`,
+`cli`, `gui-core`, `gui-widgets`, `demo-vs-real`, `security-tx-safety`,
+`ham-features`, `ui-viz-utils`, `packaging-ci`, `docs-truth` and
+`antenna-array`. Packaging/CI was found clean. A fresh end-to-end pass is
+still worthwhile before a 1.0 release, but no dimension remains un-audited.

@@ -783,7 +783,7 @@ The tuner widget uses a vintage 1970s-80s car radio aesthetic:
 ### 12.5 Integration
 
 ```python
-from sdr_module.gui.radio_tuner import RadioTunerWidget, show_radio_tuner
+from sdr_module.ham.gui.radio_tuner import RadioTunerWidget, show_radio_tuner
 
 # Launch as standalone window
 tuner = show_radio_tuner(sample_rate=2.4e6)
@@ -845,7 +845,7 @@ band = tuner.get_band()  # RadioBand.AM or RadioBand.FM
 
 | Component | Requirement |
 |-----------|-------------|
-| Python | 3.8 or higher |
+| Python | 3.10 or higher |
 | pip | Python package manager |
 | Inno Setup | 6.x (optional, for creating installer) |
 
@@ -865,8 +865,8 @@ band = tuner.get_band()  # RadioBand.AM or RadioBand.FM
 REM Basic build
 build_windows.bat
 
-REM Full clean build with development install
-build_windows.bat --clean --install
+REM Full clean build
+build_windows.bat --clean
 ```
 
 ### 15.4 Quick Build (PowerShell)
@@ -876,7 +876,7 @@ build_windows.bat --clean --install
 .\build_windows.ps1
 
 # Full clean build with installer
-.\build_windows.ps1 -Clean -Install -CreateInstaller
+.\build_windows.ps1 -Clean -CreateInstaller
 ```
 
 ### 15.5 Build Options
@@ -884,7 +884,7 @@ build_windows.bat --clean --install
 | Option | Batch | PowerShell | Description |
 |--------|-------|------------|-------------|
 | Clean | `--clean` | `-Clean` | Remove build directories before building |
-| Install | `--install` | `-Install` | Install package in development mode |
+| No GUI | `--no-gui` | `-NoGUI` | Build the CLI only (skip PyQt6 GUI) |
 | No UPX | `--no-upx` | `-NoUPX` | Disable UPX compression |
 | Installer | N/A | `-CreateInstaller` | Create Windows installer |
 
@@ -906,7 +906,7 @@ Or with PowerShell:
 | Output | Location |
 |--------|----------|
 | Executable | `dist\sdr-module\sdr-scan.exe` |
-| Installer | `installer_output\SDR-Module-0.1.0-Setup.exe` |
+| Installer | `installer_output\SDR-Module-0.2.0-Setup.exe` (version injected by the build) |
 
 ### 15.8 Manual Installation
 

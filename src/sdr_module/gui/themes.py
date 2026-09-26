@@ -475,7 +475,7 @@ QPushButton[role="danger"]:disabled, QToolButton[role="danger"]:disabled {{
 QPushButton[role="compact"] {{ padding: 3px 6px; font-size: 11px; }}
 QWidget[role="header-strip"] QPushButton[role="compact"],
 QFrame[role="header-strip"] QPushButton[role="compact"] {{ min-height: 20px;
-    padding: 3px 8px; }}
+    padding: 3px 8px; font-size: 12px; }}
 QDialogButtonBox QPushButton {{ min-width: 72px; }}
 
 /* ---- Inputs -------------------------------------------------------- */
@@ -576,7 +576,7 @@ QProgressBar::chunk {{ background-color: {p.accent_muted}; border-radius: 3px; }
 /* ---- Tabs ---------------------------------------------------------- */
 QTabWidget::pane {{ border: 1px solid {p.surface1}; border-radius: 4px;
     background-color: {p.base}; top: -1px; }}
-QTabBar {{ background: transparent; }}
+QTabBar {{ background: transparent; outline: 0; }}
 QTabBar::tab {{ background-color: {p.mantle}; color: {p.subtext};
     border: 1px solid {p.surface1}; border-bottom: none;
     border-top-left-radius: 4px; border-top-right-radius: 4px;

@@ -135,8 +135,8 @@ class TestSignalMeterPanel(unittest.TestCase):
         self.panel.deleteLater()
 
     def test_empty_state_before_any_samples(self):
-        self.assertEqual(self.panel._s_meter_label.text(), "--")
-        self.assertEqual(self.panel._rst_label.text(), "--")
+        self.assertEqual(self.panel._s_meter_label.text(), "—")
+        self.assertEqual(self.panel._rst_label.text(), "—")
         self.assertIn("Start the receiver", self.panel._verbal_label.text())
         self.assertEqual(self.panel._verbal_label.property("role"), "hint")
 
@@ -161,7 +161,7 @@ class TestSignalMeterPanel(unittest.TestCase):
         self.panel._update_display()
         self.panel._last_reading.timestamp = time.time() - 60
         self.panel._update_display()
-        self.assertEqual(self.panel._s_meter_label.text(), "--")
+        self.assertEqual(self.panel._s_meter_label.text(), "—")
         self.assertFalse(self.panel._analog_meter._active)
 
     def test_gauge_can_shrink_in_a_short_tab(self):

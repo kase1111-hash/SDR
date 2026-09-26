@@ -69,6 +69,15 @@ _MAX_SEGMENTS = 4
 # has returned some: the device is not delivering data, and each empty read
 # can wait a second on real hardware.
 _EMPTY_STEPS_LIMIT = 2
+# Reported frequencies. Narrow signals are measured to well within 1 kHz and
+# are rounded to it. A wide signal (broadcast FM) found with a
+# broadcast-sized step goes on the 100 kHz channel raster instead: its power
+# centroid wanders by up to about 20 kHz with the modulation, so the raw
+# value would tune the receiver off the station.
+_FINE_RASTER_HZ = 1e3
+_WIDE_RASTER_HZ = 100e3
+_WIDE_STEP_HZ = 100e3  # steps at least this big are broadcast-channel scans
+_WIDE_SIGNAL_HZ = 60e3  # occupied width (20 dB down) of a wide signal
 
 # Worker threads still winding down after their dialog closed. Holding a
 # reference keeps the QThread alive until run() returns, instead of it being
@@ -112,6 +121,33 @@ def _power_spectrum_dbfs(samples: np.ndarray) -> np.ndarray:
     spec = np.fft.fftshift(np.fft.fft(blocks * window, axis=1), axes=1)
     power = np.mean(np.abs(spec) ** 2, axis=0) / (gain * gain)
     return 10.0 * np.log10(power + 1e-24)
+
+
+def _report_frequency(
+    freq_hz: float, width_hz: float, step_hz: Optional[float]
+) -> float:
+    """The frequency to list and tune to for a signal measured at ``freq_hz``.
+
+    ``width_hz`` is the signal's occupied width and ``step_hz`` the sweep
+    step (``None`` outside a sweep); see ``_WIDE_RASTER_HZ``.
+    """
+    if step_hz and step_hz >= _WIDE_STEP_HZ and width_hz >= _WIDE_SIGNAL_HZ:
+        raster = _WIDE_RASTER_HZ
+    else:
+        raster = _FINE_RASTER_HZ
+    return float(round(freq_hz / raster) * raster)
+
+
+def _contiguous(power: np.ndarray, k: int, floor_db: float, allowed: np.ndarray):
+    """``(lo, hi)``: the run of ``allowed`` bins around bin ``k`` at or above
+    ``floor_db``."""
+    above = (power >= floor_db) & allowed
+    lo = hi = k
+    while lo > 0 and above[lo - 1]:
+        lo -= 1
+    while hi < len(power) - 1 and above[hi + 1]:
+        hi += 1
+    return lo, hi
 
 
 def _is_streaming(device) -> Optional[bool]:
@@ -160,6 +196,7 @@ class _ScanWorker(QThread if HAS_PYQT6 else object):
         self.no_samples = False  # gave up: the device delivered no samples
         self.started_stream = False  # the sweep started the device itself
         self.noise_floor_db: Optional[float] = None  # median across the sweep
+        self.error = ""  # why the sweep stopped early, if something failed
         self._last_failure = ""  # why the last _measure() returned None
 
     def cancel(self):
@@ -199,6 +236,11 @@ class _ScanWorker(QThread if HAS_PYQT6 else object):
                         self.no_samples = True
                         break
                 self.progress.emit(int((i + 1) * 100 / total))
+        except Exception as e:
+            # An exception escaping QThread.run() aborts the whole app: end
+            # the sweep here instead and let the dialog say what happened.
+            self.error = str(e) or type(e).__name__
+            logger.warning(f"Frequency scan stopped by an error: {self.error}")
         finally:
             if noise:
                 self.noise_floor_db = float(np.median(noise))
@@ -264,7 +306,8 @@ class _ScanWorker(QThread if HAS_PYQT6 else object):
 
         Only bins within ``span_hz / 2`` of ``freq_hz`` count toward the peak
         (``None`` = the whole capture), so each step reports the signals of
-        its own slice instead of every strong carrier in the passband.
+        its own slice instead of every strong carrier in the passband. The
+        frequency is rounded as ``_report_frequency`` describes.
         """
         # A real sweep requires real hardware. Never synthesise samples here:
         # noise fed through an FFT clears a low threshold at every step and the
@@ -291,39 +334,54 @@ class _ScanWorker(QThread if HAS_PYQT6 else object):
             self._last_failure = "error"
             return None
 
-        if samples is None or len(samples) == 0:
+        if samples is None or len(samples) < 2:
             self._last_failure = "samples"
             return None
+        try:
+            measured = self._analyse(np.asarray(samples), freq_hz, span_hz)
+        except Exception as e:
+            logger.debug(f"Scan measurement failed at {freq_hz}: {e}")
+            self._last_failure = "error"
+            return None
         self._last_failure = ""
+        return measured
 
-        power = _power_spectrum_dbfs(np.asarray(samples))
+    def _analyse(
+        self, samples: np.ndarray, freq_hz: float, span_hz: Optional[float]
+    ) -> Tuple[float, float, float]:
+        """``(peak_freq_hz, peak_dbfs, noise_dbfs)`` of one capture."""
+        power = _power_spectrum_dbfs(samples)
         n = len(power)
-        offsets = (np.arange(n) - n // 2) * (self._sample_rate() / n)
+        bin_hz = self._sample_rate() / n
+        offsets = (np.arange(n) - n // 2) * bin_hz
+        noise_db = float(np.median(power))
 
+        everywhere = np.ones(n, dtype=bool)
+        in_step = reach = everywhere
         if span_hz:
-            mask = np.abs(offsets) <= max(span_hz / 2.0, abs(offsets[1] - offsets[0]))
-            if not np.any(mask):
-                mask = np.ones(n, dtype=bool)
-        else:
-            mask = np.ones(n, dtype=bool)
-        region = power[mask]
-        region_offsets = offsets[mask]
-        k = int(np.argmax(region))
-        peak_db = float(region[k])
+            half = max(span_hz / 2.0, bin_hz)
+            in_step = np.abs(offsets) <= half
+            # A signal on the edge of the step's slice is measured whole.
+            reach = np.abs(offsets) <= 2.0 * half
+            if not np.any(in_step):
+                in_step = reach = everywhere
+        candidates = np.flatnonzero(in_step)
+        k = int(candidates[np.argmax(power[candidates])])
+        peak_db = float(power[k])
 
         # Report the signal's center, not just its hottest bin: a power-
         # weighted centroid of the contiguous bins within 12 dB of the peak
         # lands on the carrier of wide FM stations too.
-        above = region >= peak_db - 12.0
-        lo = k
-        while lo > 0 and above[lo - 1]:
-            lo -= 1
-        hi = k
-        while hi < len(region) - 1 and above[hi + 1]:
-            hi += 1
-        weights = 10.0 ** (region[lo : hi + 1] / 10.0)
-        center = float(np.sum(region_offsets[lo : hi + 1] * weights) / np.sum(weights))
-        return float(freq_hz + center), peak_db, float(np.median(power))
+        lo, hi = _contiguous(power, k, peak_db - 12.0, in_step)
+        weights = 10.0 ** (power[lo : hi + 1] / 10.0)
+        center = float(np.sum(offsets[lo : hi + 1] * weights) / np.sum(weights))
+
+        # Occupied width: bins within 20 dB of the peak and clearly (6 dB)
+        # above the noise, so a weak narrow carrier doesn't read as wide.
+        floor_db = max(peak_db - 20.0, noise_db + 6.0)
+        lo, hi = _contiguous(power, k, floor_db, reach)
+        width = (hi - lo + 1) * bin_hz
+        return _report_frequency(freq_hz + center, width, span_hz), peak_db, noise_db
 
 
 class _NumericItem(QTableWidgetItem if HAS_PYQT6 else object):
@@ -427,7 +485,7 @@ class ScannerDialog(QDialog if HAS_PYQT6 else object):
             "signal within half a step either side.\nUse about the channel "
             "spacing: 200 kHz for FM broadcast, 12.5-25 kHz for voice."
         )
-        self._add_field(grid, 1, 2, "St&ep:", self._step)
+        self._add_field(grid, 1, 2, "Ste&p:", self._step)
 
         self._threshold = self._spin(-140.0, 0.0, 1, -60.0, " dBFS")
         self._threshold.setToolTip(
@@ -487,7 +545,8 @@ class ScannerDialog(QDialog if HAS_PYQT6 else object):
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         header.setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         header_tips = (
-            "Signal center frequency",
+            "Signal center frequency, to the nearest kHz (a broadcast FM "
+            "station: its 100 kHz channel)",
             "Strongest FFT bin, in dB relative to full scale (same scale as "
             "the spectrum)",
             get_short_tip("snr"),
@@ -504,9 +563,16 @@ class ScannerDialog(QDialog if HAS_PYQT6 else object):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self._table.setToolTip("Double-click a signal to tune to it")
+        # Arrow keys pick a result and Tab moves on to the buttons (walking
+        # the cells trapped keyboard focus in the table).
+        self._table.setTabKeyNavigation(False)
+        self._table.setAccessibleName("Scan results")
+        self._table.setToolTip("Double-click a signal, or press Enter, to tune to it")
         self._table.itemSelectionChanged.connect(self._update_controls)
         self._table.itemDoubleClicked.connect(lambda _item: self._tune_selected())
+        # Enter tunes to the selected result, as in Bookmarks, instead of
+        # reaching the default Start Scan button and wiping the results.
+        self._table.installEventFilter(self)
         layout.addWidget(self._table, 1)
 
         # Empty-state overlay on the table
@@ -536,11 +602,27 @@ class ScannerDialog(QDialog if HAS_PYQT6 else object):
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
 
-        # Status / device-required notice
+        # Status / device-required notice (the results area says what to do)
         if self._device is None:
             self._start_btn.setEnabled(False)
             self._start_btn.setToolTip(_NO_DEVICE_TIP)
             self._set_status("No device connected.", "warning")
+
+    def eventFilter(self, obj, event):  # noqa: N802 (Qt API)
+        """Enter in the results list tunes to the selected signal."""
+        if (
+            obj is self._table
+            and event.type() == QEvent.Type.KeyPress
+            and event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+            and self._table.rowCount()
+        ):
+            if not self._table.selectionModel().selectedRows():
+                row = self._table.currentRow()
+                if row >= 0:
+                    self._table.selectRow(row)
+            self._tune_selected()
+            return True
+        return super().eventFilter(obj, event)
 
     @staticmethod
     def _add_field(grid, row, col, text, field, span=1) -> None:
@@ -675,10 +757,10 @@ class ScannerDialog(QDialog if HAS_PYQT6 else object):
             self._empty.hide()
             return
         if self._device is None:
+            # The status line beside Start Scan already says why it is off.
             text = (
-                "No device connected.\n"
-                "Close the scanner, choose Device > Connect... or\n"
-                "Device > Use Demo Device, then open it again."
+                "To scan, close the scanner and choose Device > Connect...\n"
+                "or Device > Use Demo Device, then open it again."
             )
         elif scanning:
             text = "Scanning... signals above the threshold will appear here."
@@ -783,7 +865,13 @@ class ScannerDialog(QDialog if HAS_PYQT6 else object):
             if skipped
             else ""
         )
-        if worker is not None and worker.steps_measured == 0 and not worker.cancelled:
+        if worker is not None and worker.error:
+            self._set_status(
+                f"The scan stopped because of an error ({worker.error}). "
+                f"{count} {noun} found. Details are in Tools > Error History.",
+                "warning",
+            )
+        elif worker is not None and worker.steps_measured == 0 and not worker.cancelled:
             if skipped and not worker.no_samples:
                 text = "The device could not tune to any step in this range."
             else:

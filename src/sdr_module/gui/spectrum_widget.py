@@ -260,6 +260,22 @@ def draw_placeholder(
     )
 
 
+def draw_focus_frame(painter: "QPainter", plot: "QRectF", palette) -> None:
+    """Accent frame around ``plot``: the plot has the keyboard focus.
+
+    Two pixels wide: the plot's own 1 px frame plus one more pixel outward,
+    so it never hides data. Drawn as exact 1 px lines, like the rest of the
+    plot chrome.
+    """
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    painter.setPen(QPen(palette.qcolor("accent"), 1))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.drawRect(plot.adjusted(-0.5, -0.5, 0.5, 0.5))
+    painter.drawRect(plot.adjusted(-1.5, -1.5, 1.5, 1.5))
+    painter.restore()
+
+
 def fit_header_hint(owner: "QWidget", header: "QWidget", hint: "QLabel") -> None:
     """Hide a header strip's hint text when the strip is too narrow for it.
 
@@ -483,6 +499,15 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
     def resizeEvent(self, event):  # noqa: N802 - Qt override
         super().resizeEvent(event)
         fit_header_hint(self, self._header, self._hint_label)
+
+    def focusInEvent(self, event):  # noqa: N802 - Qt override
+        """Show the focus frame: Space and Left/Right now act on this plot."""
+        super().focusInEvent(event)
+        self._canvas.update()
+
+    def focusOutEvent(self, event):  # noqa: N802 - Qt override
+        super().focusOutEvent(event)
+        self._canvas.update()
 
     def _update_reset_button(self) -> None:
         self._peak_reset_btn.setEnabled(self._show_peak)
@@ -854,6 +879,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
                 self._draw_traces(painter, plot, p)
             self._draw_center_marker(painter, plot, p)
             painter.restore()
+            if self.hasFocus():
+                draw_focus_frame(painter, plot, p)
 
             if not self._has_data:
                 draw_placeholder(

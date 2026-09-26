@@ -89,7 +89,23 @@ def default_save_directory() -> Path:
 
 
 def rgb_to_qimage(image: np.ndarray) -> "QImage":
-    """Copy an ``(H, W, 3)`` RGB array into a standalone ``QImage``."""
+    """Copy an ``(H, W, 3)`` RGB array into a standalone ``QImage``.
+
+    A single-channel ``(H, W)`` array is copied into all three channels; an
+    alpha channel, if any, is dropped.
+
+    Raises:
+        ValueError: for any other shape (QImage would otherwise read past
+            the end of the array).
+    """
+    image = np.asarray(image)
+    if image.ndim == 2:
+        image = np.repeat(image[..., None], 3, axis=2)
+    if image.ndim != 3 or image.shape[2] < 3:
+        raise ValueError(
+            f"expected an (H, W, 3) RGB or (H, W) single-channel array, got "
+            f"shape {image.shape}"
+        )
     data = np.ascontiguousarray(image[..., :3], dtype=np.uint8)
     h, w = data.shape[:2]
     return QImage(data.data, w, h, 3 * w, QImage.Format.Format_RGB888).copy()
@@ -235,46 +251,25 @@ class ImageDisplayWidget(QWidget if HAS_PYQT6 else object):
         painter.end()
 
     def _paint_placeholder(self, painter: "QPainter", rect, p) -> None:
-        text_rect = rect.adjusted(16, 12, -16, -12)
-        title_font = QFont(self.font())
-        title_font.setBold(True)
-        title_font.setPixelSize(13)
-        hint_font = QFont(self.font())
-        hint_font.setItalic(True)
-        hint_font.setPixelSize(11)
+        """Empty-state text in the same style as the spectrum and waterfall."""
+        # Imported here: sdr_module.gui imports this module while it
+        # initialises (see _theme()).
+        from ...gui.spectrum_widget import draw_placeholder
 
-        painter.setFont(title_font)
-        title_h = painter.fontMetrics().height()
-        painter.setFont(hint_font)
-        flags = Qt.AlignmentFlag.AlignHCenter | Qt.TextFlag.TextWordWrap
-        hint_bounds = painter.fontMetrics().boundingRect(
-            text_rect, int(flags), self._placeholder_hint
-        )
-        hint_h = hint_bounds.height() if self._placeholder_hint else 0
-        gap = 6 if self._placeholder_hint else 0
-        top = text_rect.y() + (text_rect.height() - (title_h + gap + hint_h)) // 2
-
-        painter.setFont(title_font)
-        painter.setPen(p.qcolor("plot_text"))
-        painter.drawText(
-            text_rect.x(),
-            top,
-            text_rect.width(),
-            title_h,
-            int(Qt.AlignmentFlag.AlignHCenter),
+        font = QFont(self.font())
+        if font.pointSizeF() <= 0 < font.pixelSize():
+            # draw_placeholder sizes its title in points (+1 pt, bold); the
+            # stylesheet gives widgets a pixel-sized font, which would make
+            # the title smaller than the hint.
+            font.setPointSizeF(font.pixelSize() * 72.0 / max(1, self.logicalDpiY()))
+        draw_placeholder(
+            painter,
+            QRectF(rect),
             self._placeholder_title,
+            self._placeholder_hint,
+            font,
+            p,
         )
-        if self._placeholder_hint:
-            painter.setFont(hint_font)
-            painter.setPen(p.qcolor("plot_axis"))
-            painter.drawText(
-                text_rect.x(),
-                top + title_h + gap,
-                text_rect.width(),
-                hint_h,
-                int(flags),
-                self._placeholder_hint,
-            )
 
 
 class SSTVPanel(QWidget if HAS_PYQT6 else object):

@@ -8,6 +8,7 @@ plain-text log that is easy to copy, and running statistics.
 from __future__ import annotations
 
 import csv
+import math
 import os
 from collections import Counter
 from datetime import datetime
@@ -40,6 +41,7 @@ try:
         QLabel,
         QMenu,
         QMessageBox,
+        QPushButton,
         QScrollArea,
         QSizePolicy,
         QStyledItemDelegate,
@@ -47,7 +49,6 @@ try:
         QTableWidgetItem,
         QTabWidget,
         QTextEdit,
-        QToolButton,
         QVBoxLayout,
         QWidget,
     )
@@ -57,6 +58,14 @@ except ImportError:
     HAS_PYQT6 = False
 
 from .themes import get_palette, set_role, set_tone
+
+
+def _format_mhz(freq_hz: float) -> str:
+    """``1090e6 -> "1090.000 MHz"`` (3 to 6 decimals, like other readouts)."""
+    text = f"{float(freq_hz) / 1e6:.6f}".rstrip("0")
+    whole, _, frac = text.partition(".")
+    return f"{whole}.{frac.ljust(3, '0')} MHz"
+
 
 #: Selector entry that runs no decoder. The main window maps any name it
 #: does not know (this one included) to "no live decoder".
@@ -78,6 +87,40 @@ PROTOCOL_INFO: Dict[str, Tuple[str, str]] = {
     "ACARS": ("Aircraft data-link text messages (AM)", "129–137 MHz"),
     "RDS": ("Station name and radio text from FM broadcasts", "88–108 MHz"),
 }
+
+#: Protocol name -> (frequency in Hz, demod mode, FM deviation, what it is)
+#: offered as a one-click "Tune to ..." in the empty message table. Only
+#: protocols with one well-known channel get one; pagers use many channels
+#: across a band, so their hint names the band instead.
+PROTOCOL_TUNE: Dict[str, Tuple[float, str, str, str]] = {
+    "ADS-B": (1090e6, "", "", "the ADS-B frequency used worldwide"),
+    "AX.25/APRS": (
+        144.39e6,
+        "FM",
+        "5 kHz",
+        "the North American APRS frequency (Europe: 144.800 MHz)",
+    ),
+    "ACARS": (131.55e6, "AM", "", "the primary ACARS channel"),
+}
+
+#: Protocol name -> tuning ranges (Hz) in which the receiver counts as
+#: listening for it: around its channel, or anywhere in its band.
+PROTOCOL_BANDS: Dict[str, Tuple[Tuple[float, float], ...]] = {
+    "POCSAG": ((152e6, 159e6), (929e6, 932e6)),
+    "FLEX": ((929e6, 932e6),),
+    "AX.25/APRS": ((144.3775e6, 144.4025e6), (144.7875e6, 144.8125e6)),
+    "ADS-B": ((1089e6, 1091e6),),
+    "ACARS": ((129e6, 137e6),),
+    "RDS": ((87.5e6, 108e6),),
+}
+
+#: Protocols listed but not decodable from live signals yet (shown disabled).
+PROTOCOL_UNAVAILABLE: Dict[str, str] = {
+    "RDS": "Live RDS decoding isn't available yet: it needs 57 kHz "
+    "subcarrier recovery, which the receiver doesn't do.",
+}
+
+_START_HINT = "press Start (Space)"
 
 # Table columns.
 COL_TIME, COL_PROTOCOL, COL_ADDRESS, COL_MESSAGE = range(4)
@@ -104,30 +147,80 @@ class ViewPlaceholder(QObject if HAS_PYQT6 else object):
 
     The label uses the ``placeholder`` role, lets clicks through and follows
     the viewport size. Call :meth:`set_text` and :meth:`set_visible` to
-    update it.
+    update it. :meth:`set_action` adds an optional button under the text
+    (e.g. "Tune to 1090.000 MHz"); clicking it emits :attr:`action_triggered`.
     """
+
+    if HAS_PYQT6:
+        action_triggered = pyqtSignal()
+
+    _ACTION_GAP = 4
 
     def __init__(self, view: Any, text: str = ""):
         super().__init__(view)
         viewport = view.viewport()
+        self._viewport = viewport
         self.label = QLabel(text, viewport)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setWordWrap(True)
         self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         set_role(self.label, "placeholder")
-        self.label.setGeometry(viewport.rect())
+        self.button = QPushButton(viewport)
+        set_role(self.button, "primary")
+        self.button.setAutoDefault(False)
+        self.button.clicked.connect(lambda _checked=False: self.action_triggered.emit())
+        self.button.hide()
+        self._has_action = False
+        self._layout()
         viewport.installEventFilter(self)
 
     def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802 (Qt API)
         if event.type() == QEvent.Type.Resize:
-            self.label.setGeometry(obj.rect())
+            self._layout()
         return False
 
+    def _layout(self) -> None:
+        """Center the text (and the action button under it) in the view."""
+        rect = self._viewport.rect()
+        if not self._has_action:
+            self.label.setGeometry(rect)
+            return
+        hint = self.button.sizeHint()
+        width = rect.width()
+        text_h = min(self.label.heightForWidth(width), rect.height())
+        total = text_h + self._ACTION_GAP + hint.height()
+        top = max(0, (rect.height() - total) // 2)
+        self.label.setGeometry(0, top, width, text_h)
+        button_w = min(hint.width(), max(width - 16, 0))
+        self.button.setGeometry(
+            (width - button_w) // 2,
+            top + text_h + self._ACTION_GAP,
+            button_w,
+            hint.height(),
+        )
+
     def set_text(self, text: str) -> None:
-        self.label.setText(text)
+        if text != self.label.text():
+            self.label.setText(text)
+            self._layout()
+
+    def set_action(self, text: Optional[str], tip: str = "") -> None:
+        """Show a button labelled ``text`` under the message (None: none)."""
+        self._has_action = bool(text)
+        if text:
+            self.button.setText(text)
+            self.button.setToolTip(tip)
+            self.button.setAccessibleName(text)
+        self.button.setVisible(self._has_action and not self.label.isHidden())
+        self._layout()
+
+    def action_text(self) -> str:
+        """Text of the action button ("" when there is none)."""
+        return self.button.text() if self._has_action else ""
 
     def set_visible(self, visible: bool) -> None:
         self.label.setVisible(visible)
+        self.button.setVisible(visible and self._has_action)
 
     def is_visible(self) -> bool:
         return not self.label.isHidden()
@@ -180,6 +273,7 @@ class _MessageTable(QTableWidget if HAS_PYQT6 else object):
         select_act = menu.addAction("Select All")
         select_act.setEnabled(self.rowCount() > 0)
         chosen = menu.exec(event.globalPos())
+        menu.deleteLater()  # a new menu is built for every right-click
         if chosen is copy_act:
             self._panel.copy_selected()
         elif chosen is select_act:
@@ -312,10 +406,19 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
     Displays decoded messages and allows protocol selection. The
     ``_enabled_check`` box ("Decode") pauses decoding without losing the
     selected protocol; the main window reads it before feeding samples.
+
+    While the table is empty it says where to listen and, for protocols with
+    one well-known channel, offers a "Tune to ..." button that emits
+    :attr:`tune_requested`. Tell the panel the tuned frequency and whether
+    the receiver runs (:meth:`set_current_frequency`, :meth:`set_receiving`)
+    and it confirms when it is listening in the right place.
     """
 
     if HAS_PYQT6:
         protocol_changed = pyqtSignal(str)
+        # freq_hz, label, demod mode and FM deviation ("" = keep the current
+        # one): the same shape as BookmarksPanel.tune_requested.
+        tune_requested = pyqtSignal(float, str, str, str)
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -331,6 +434,11 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._per_protocol: Counter = Counter()
         # Widest cell text seen per size-to-contents column, in px.
         self._col_content: Dict[int, int] = {}
+        # Receiver state, when the main window reports it (None: unknown).
+        self._tuned_hz: Optional[float] = None
+        self._receiving: Optional[bool] = None
+        # The user's Decode choice; the box shows unticked while Off.
+        self._decode_wanted = True
 
         self._setup_ui()
         self._update_state()
@@ -361,11 +469,15 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         )
         for name, (what, where) in PROTOCOL_INFO.items():
             self._proto_combo.addItem(name)
-            self._proto_combo.setItemData(
-                self._proto_combo.count() - 1,
-                f"{what}. Usually {where}.",
-                Qt.ItemDataRole.ToolTipRole,
-            )
+            index = self._proto_combo.count() - 1
+            tip = f"{what}. Usually {where}."
+            unavailable = PROTOCOL_UNAVAILABLE.get(name)
+            if unavailable:
+                tip = f"{what}. {unavailable}"
+                item = self._proto_combo.model().item(index)
+                if item is not None:
+                    item.setEnabled(False)
+            self._proto_combo.setItemData(index, tip, Qt.ItemDataRole.ToolTipRole)
         self._proto_combo.setSizePolicy(
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
@@ -376,9 +488,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         proto_row.addWidget(self._proto_combo, 1)
 
         self._enabled_check = QCheckBox("Decode")
-        self._enabled_check.setChecked(True)
+        self._enabled_check.setChecked(False)  # ticked once a protocol is chosen
         self._enabled_check.setAccessibleName("Decode messages")
-        self._enabled_check.toggled.connect(self._update_state)
+        self._enabled_check.toggled.connect(self._on_decode_toggled)
         proto_row.addWidget(self._enabled_check)
         proto_row.addStretch(0)
         layout.addLayout(proto_row)
@@ -387,8 +499,15 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # table keeps as much height as possible in the short right column.
         self._tabs = QTabWidget()
         self._tabs.setDocumentMode(True)
+        # No base line: it drew an empty tab-like outline between the last
+        # tab and the corner buttons.
+        self._tabs.tabBar().setDrawBase(False)
 
         self._table = _MessageTable(self)
+        self._table.setAccessibleName("Decoded messages")
+        # Tab moves on to the next control instead of walking the cells
+        # (the arrow keys still move between rows).
+        self._table.setTabKeyNavigation(False)
         self._table.setHorizontalHeaderLabels(list(_HEADERS))
         self._table.setItemDelegate(_MessageDelegate(self._table))
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -421,6 +540,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # Stick to the newest message unless the user scrolled up to read.
         self._table_tail = TailFollower(self._table.verticalScrollBar())
         self._empty = ViewPlaceholder(self._table)
+        self._empty.action_triggered.connect(self._tune_to_protocol)
         self._table.itemSelectionChanged.connect(self._update_detail)
 
         messages_page = QWidget()
@@ -453,18 +573,19 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._tabs.addTab(self._build_stats(), "Stats")
         self._tabs.setTabToolTip(2, "Message counts since the last Clear")
 
+        # Regular push buttons, the same size as every other panel action.
         corner = QWidget()
         corner_row = QHBoxLayout(corner)
         corner_row.setContentsMargins(0, 0, 0, 2)
         corner_row.setSpacing(4)
-        self._clear_btn = QToolButton()
-        self._clear_btn.setText("Clear")
-        self._clear_btn.clicked.connect(self.clear)
+        self._clear_btn = QPushButton("Clear")
+        self._clear_btn.clicked.connect(lambda _checked=False: self.clear())
         corner_row.addWidget(self._clear_btn)
-        self._export_btn = QToolButton()
-        self._export_btn.setText("Export...")
+        self._export_btn = QPushButton("Export...")
         self._export_btn.clicked.connect(lambda _checked=False: self._export_messages())
         corner_row.addWidget(self._export_btn)
+        for button in (self._clear_btn, self._export_btn):
+            button.setAutoDefault(False)
         self._tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
 
         layout.addWidget(self._tabs, 1)
@@ -513,6 +634,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         area = QScrollArea()
         area.setWidgetResizable(True)
         area.setFrameShape(QScrollArea.Shape.NoFrame)
+        # Not a Tab stop: it has nothing to focus and no focus frame.
+        area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         area.setWidget(page)
         return area
 
@@ -591,38 +714,125 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._update_state()
         self.protocol_changed.emit(text)
 
+    def _on_decode_toggled(self, checked: bool) -> None:
+        # Only a choice made with a protocol selected counts; while Off the
+        # box is unticked by the panel itself.
+        if self.protocol() is not None:
+            self._decode_wanted = bool(checked)
+        self._update_state()
+
+    def set_current_frequency(self, freq_hz: float) -> None:
+        """Tell the panel the tuned frequency (updates the empty-table hint)."""
+        try:
+            freq_hz = float(freq_hz)
+        except (TypeError, ValueError):
+            return
+        if math.isfinite(freq_hz) and freq_hz != self._tuned_hz:
+            self._tuned_hz = freq_hz
+            self._update_state()
+
+    def set_receiving(self, receiving: bool) -> None:
+        """Tell the panel whether the receiver is running."""
+        receiving = bool(receiving)
+        if receiving != self._receiving:
+            self._receiving = receiving
+            self._update_state()
+
+    def _tuned_for(self, proto: str) -> bool:
+        """Whether the tuned frequency is where ``proto`` is heard."""
+        freq = self._tuned_hz
+        if freq is None:
+            return False
+        return any(lo <= freq <= hi for lo, hi in PROTOCOL_BANDS.get(proto, ()))
+
+    def _tune_action(self, proto: str) -> Tuple[Optional[str], str]:
+        """Text and tooltip of the empty table's "Tune to ..." button."""
+        suggestion = PROTOCOL_TUNE.get(proto)
+        if suggestion is None or self._tuned_for(proto):
+            return None, ""
+        # Offered only when something (the main window) acts on it.
+        try:
+            if self.receivers(self.tune_requested) <= 0:
+                return None, ""
+        except (TypeError, RuntimeError):  # pragma: no cover - defensive
+            return None, ""
+        freq, mode, _dev, what = suggestion
+        text = f"Tune to {_format_mhz(freq)}"
+        tip = f"Tune the receiver to {what}"
+        if mode:
+            tip += f", in {mode}"
+        return text, tip + "."
+
+    def _tune_to_protocol(self) -> None:
+        """Emit :attr:`tune_requested` for the selected protocol's channel."""
+        proto = self.protocol()
+        suggestion = PROTOCOL_TUNE.get(proto or "")
+        if proto is None or suggestion is None:
+            return
+        freq, mode, deviation, _what = suggestion
+        self.tune_requested.emit(
+            float(freq), f"{proto} ({_format_mhz(freq)})", mode, deviation
+        )
+
+    def _waiting_text(self, proto: str, where: str) -> str:
+        """Empty-table hint for a selected, decoding protocol."""
+        if proto in PROTOCOL_UNAVAILABLE:
+            return f"{proto} can't be decoded yet.\n{PROTOCOL_UNAVAILABLE[proto]}"
+        if self._tuned_for(proto):
+            here = _format_mhz(self._tuned_hz or 0.0)
+            if self._receiving:
+                return (
+                    f"Listening for {proto} on {here}…\nDecoded messages appear here."
+                )
+            return (
+                f"Waiting for {proto} messages.\n"
+                f"Tuned to {here}: {_START_HINT} to decode."
+            )
+        if not where:
+            return (
+                f"Waiting for {proto} messages.\n{_START_HINT.capitalize()} to decode."
+            )
+        if self._receiving:
+            return f"Waiting for {proto} messages.\nTune to {where} to decode."
+        return f"Waiting for {proto} messages.\nTune to {where}, then {_START_HINT}."
+
     def _update_state(self, *_args: Any) -> None:
         """Refresh tooltips, enabled states and the empty-table hint."""
         proto = self.protocol()
-        self._enabled_check.setEnabled(proto is not None)
+        check = self._enabled_check
+        check.setEnabled(proto is not None)
+        # Unticked while Off (nothing decodes); the user's choice returns
+        # once a protocol is selected.
+        wanted = proto is not None and self._decode_wanted
+        if check.isChecked() != wanted:
+            check.blockSignals(True)
+            check.setChecked(wanted)
+            check.blockSignals(False)
+        action: Tuple[Optional[str], str] = (None, "")
         if proto is None:
             self._proto_combo.setToolTip(
-                "Protocol to decode. Off: no decoder runs. Hover an entry "
-                "for where to listen."
+                "Protocol to decode. Off: no decoder runs. After choosing one, "
+                "the message table says where to listen."
             )
-            self._enabled_check.setToolTip("Choose a protocol first")
+            check.setToolTip("Choose a protocol first")
             empty = (
                 "No decoder selected.\n"
-                "Choose a protocol above, tune to its frequency and start "
-                "acquisition. Decoded messages appear here."
+                f"Choose a protocol above, tune to its frequency and "
+                f"{_START_HINT}. Decoded messages appear here."
             )
         else:
             what, where = PROTOCOL_INFO.get(proto, ("", ""))
             self._proto_combo.setToolTip(
                 f"{proto}: {what}. Usually {where}." if what else proto
             )
-            self._enabled_check.setToolTip(
-                "Untick to pause decoding without changing the protocol"
-            )
-            if self._enabled_check.isChecked():
-                empty = f"Waiting for {proto} messages.\n" + (
-                    f"Tune to {where}, then start acquisition."
-                    if where
-                    else "Start acquisition to decode."
-                )
+            check.setToolTip("Untick to pause decoding without changing the protocol")
+            if check.isChecked():
+                empty = self._waiting_text(proto, where)
+                action = self._tune_action(proto)
             else:
                 empty = "Decoding is paused.\nTick Decode to resume."
         self._empty.set_text(empty)
+        self._empty.set_action(*action)
         self._empty.set_visible(self._table.rowCount() == 0)
         self._update_buttons()
 
@@ -760,7 +970,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         if speed:
             parts.append(f"{speed:.0f} kt")
 
-        self.add_message("ADS-B", str(icao), "  ·  ".join(parts))
+        # Many replies carry only the aircraft's address; say so rather than
+        # showing a bare "(empty)".
+        content = "  ·  ".join(parts) or "(aircraft address only)"
+        self.add_message("ADS-B", str(icao), content)
 
     def add_pocsag_message(self, address: int, content: str, function: int = 0):
         """Add a POCSAG message."""

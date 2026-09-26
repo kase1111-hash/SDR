@@ -16,8 +16,9 @@ gracefully (scrolls instead of crushing its group boxes) when it is short.
 from __future__ import annotations
 
 import logging
+import math
 from contextlib import contextmanager
-from typing import Dict, Iterator, List, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 try:
     from PyQt6.QtCore import QEvent, QObject, QSize, Qt, pyqtSignal
@@ -59,9 +60,12 @@ from .themes import set_role, set_tone
 # Constants
 # ---------------------------------------------------------------------------
 
-# Tuning range of the frequency entry (covers every supported receiver).
+# Tuning range of the frequency entry: the union of every supported
+# receiver (RTL-SDR from 500 kHz, HackRF One up to 6 GHz). The Bookmarks
+# frequency field uses the same range, so a bookmark always stores exactly
+# the frequency the tuner showed.
 MIN_FREQUENCY_HZ = 1e3
-MAX_FREQUENCY_HZ = 10e9
+MAX_FREQUENCY_HZ = 6e9
 
 # One arrow-key / wheel step of the frequency entry (matches the plots'
 # Left/Right tuning step). Ctrl+wheel and Page Up/Down step ten times this.
@@ -112,7 +116,12 @@ FM_DEVIATIONS: Tuple[Tuple[str, str], ...] = (
 )
 DEFAULT_FM_DEVIATION = "25 kHz"
 
-RECORDING_FORMATS = ("Raw IQ (Complex64)", "WAV (16-bit)", "SigMF")
+# Named like File > Save Recording's filters, which preselect the choice.
+RECORDING_FORMATS = (
+    "Complex Float32 I/Q (.cf32)",
+    "WAV, 16-bit I/Q (.wav)",
+    "SigMF (.sigmf-data)",
+)
 
 # (license class, combo text, TX privileges summary)
 LICENSE_CLASSES: Tuple[Tuple[LicenseClass, str, str], ...] = (
@@ -126,6 +135,20 @@ LICENSE_CLASSES: Tuple[Tuple[LicenseClass, str, str], ...] = (
     (LicenseClass.AMATEUR_EXTRA, "Amateur Extra", "full amateur privileges"),
 )
 
+# Preset mode -> Mode combo entry (presets use "WFM" and "RAW", which the
+# Mode list calls FM with a 75 kHz deviation and "None (I/Q)").
+_PRESET_DEMOD = {
+    "FM": "FM",
+    "WFM": "FM",
+    "AM": "AM",
+    "USB": "USB",
+    "LSB": "LSB",
+    "CW": "CW",
+    "RAW": "None (I/Q)",
+}
+# How a preset's mode is shown in its details, in the Mode list's words.
+_PRESET_MODE_LABEL = {"WFM": "FM (broadcast)", "RAW": "None (I/Q)"}
+
 # Compact dummy-load reminder shown in the panel (full text in the tooltip).
 TX_POWER_REMINDER = (
     "⚠ Before transmitting, check your output power with a 50 Ω dummy load "
@@ -136,7 +159,8 @@ TX_POWER_REMINDER = (
 _VALUE_LABEL_WIDEST = "-120 dBFS"
 
 _FORMAT_TIP = (
-    "File format for the recorded I/Q samples; File > Save Recording offers " "it first"
+    "File format for the recorded I/Q samples; File > Save Recording offers "
+    "it first. These are raw radio samples, not audio."
 )
 
 _APPLY_PRESET_TIP = "Tune to this preset and set its bandwidth and demodulation mode"
@@ -144,6 +168,8 @@ _APPLY_PRESET_TIP = "Tune to this preset and set its bandwidth and demodulation 
 _STATUS_READY = "Ready"
 _STATUS_RECORDING = "● Recording"
 _STATUS_PAUSED = "❚❚ Paused"
+_STATUS_ARMED = "◌ Armed – waiting for the receiver"
+_ARMED_TIP = "Samples are captured once the receiver starts (Space)"
 _PAUSE_TEXT = "❚❚ Pause"
 _RESUME_TEXT = "▶ Resume"
 _RECORD_TEXT = "● Record"
@@ -177,6 +203,20 @@ def _format_bandwidth(bw_hz: float) -> str:
     if bw_hz >= 1e3:
         return f"{bw_hz / 1e3:.2f}".rstrip("0").rstrip(".") + " kHz"
     return f"{bw_hz:.0f} Hz"
+
+
+_LISTEN_OK = "Listen ✓"
+
+
+def _power_limit_tip(legal: float, effective: Optional[float]) -> str:
+    """Tooltip explaining the legal power limit and the app's TX guard."""
+    pct = int(round(POWER_HEADROOM_FACTOR * 100))
+    effective = effective or legal * POWER_HEADROOM_FACTOR
+    return (
+        f"Legal limit: {legal:g} W at your transmitter output. The app only "
+        f"blocks power above {pct}% of it ({effective:g} W) to allow for "
+        "cable loss; stay within the legal limit itself."
+    )
 
 
 def _in_amateur_band(freq_hz: float) -> bool:
@@ -227,6 +267,23 @@ class _WheelGuard(QObject if HAS_PYQT6 else object):
 # ---------------------------------------------------------------------------
 
 
+class _FrequencySpinBox(QDoubleSpinBox if HAS_PYQT6 else object):
+    """Spin box that keeps 1 Hz resolution but shows at least three
+    decimals and drops the trailing zeros after them.
+
+    In MHz that reads "100.000" or "137.9125", like the toolbar, the Bookmarks
+    list and every other MHz readout, instead of an unreadable "100.000000".
+    Units with three decimals or fewer (Hz, kHz) are shown unchanged.
+    """
+
+    def textFromValue(self, value: float) -> str:  # noqa: N802 (Qt API)
+        text = super().textFromValue(value)
+        whole, point, frac = text.partition(self.locale().decimalPoint())
+        if not point or len(frac) <= 3:
+            return text
+        return f"{whole}{point}{frac.rstrip('0').ljust(3, '0')}"
+
+
 class FrequencyInput(QWidget if HAS_PYQT6 else object):
     """Frequency input widget with unit selection.
 
@@ -251,7 +308,7 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
         layout.setSpacing(6)
 
         # Frequency value (in the selected unit)
-        self._freq_input = QDoubleSpinBox()
+        self._freq_input = _FrequencySpinBox()
         self._freq_input.setKeyboardTracking(False)
         self._freq_input.setAccelerated(True)
         self._freq_input.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -315,10 +372,19 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
         self._apply_unit()
 
     def set_frequency(self, freq_hz: float):
-        """Set frequency in Hz (clamped to the tuning range, no signal)."""
-        self._frequency_hz = min(
-            max(float(freq_hz), MIN_FREQUENCY_HZ), MAX_FREQUENCY_HZ
-        )
+        """Set frequency in Hz (clamped to the tuning range, no signal).
+
+        Values that are not finite numbers (NaN, infinity, e.g. from a
+        corrupted setting or ``-f nan``) are ignored: the entry keeps the
+        frequency it had.
+        """
+        try:
+            freq_hz = float(freq_hz)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(freq_hz):
+            return
+        self._frequency_hz = min(max(freq_hz, MIN_FREQUENCY_HZ), MAX_FREQUENCY_HZ)
         mult = self._get_multiplier()
         self._freq_input.blockSignals(True)
         self._freq_input.setValue(self._frequency_hz / mult)
@@ -364,6 +430,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
         self._form_labels: List[QLabel] = []
         self._wheel_guard = _WheelGuard(self)
+        # A recording is "armed" while it waits for the receiver to start.
+        self._armed = False
         self._setup_ui()
 
     # ------------------------------------------------------------------
@@ -390,14 +458,14 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         layout.setContentsMargins(4, 4, 4, 6)
         layout.setSpacing(8)
 
-        # Signal-chain order: the controls used all the time (gain,
-        # bandwidth, mode, squelch) come before occasional ones (presets,
-        # recording, license), so they are visible without scrolling in the
-        # main window's default layout.
+        # Where to listen first: Presets sit right under the frequency they
+        # set (the quickest way for a newcomer to find something to hear),
+        # then how to listen (mode, squelch) and the receiver settings. The
+        # occasional sections (recording, license) come last.
         layout.addWidget(self._build_frequency_group())
-        layout.addWidget(self._build_receiver_group())
-        layout.addWidget(self._build_demod_group())
         layout.addWidget(self._build_presets_group())
+        layout.addWidget(self._build_demod_group())
+        layout.addWidget(self._build_receiver_group())
         layout.addWidget(self._build_recording_group())
         layout.addWidget(self._build_license_group())
         layout.addStretch()
@@ -518,7 +586,10 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             btn.setMinimumWidth(btn.fontMetrics().horizontalAdvance(btn.text()) + 12)
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             direction = "up" if offset > 0 else "down"
-            btn.setToolTip(f"Tune {direction} {_format_bandwidth(abs(offset))}")
+            spoken = f"Tune {direction} {_format_bandwidth(abs(offset))}"
+            btn.setToolTip(spoken)
+            # Screen readers announce this rather than "+10k".
+            btn.setAccessibleName(spoken)
             btn.clicked.connect(lambda _checked=False, o=offset: self._quick_tune(o))
             steps.addWidget(btn)
             self._quick_tune_buttons.append(btn)
@@ -661,8 +732,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
         buttons = QHBoxLayout()
         buttons.setSpacing(6)
+        # Neutral at rest, red ("danger") only while recording, exactly like
+        # the toolbar's Record button: red always means "recording now".
         self._record_btn = QPushButton(_RECORD_TEXT)
-        set_role(self._record_btn, "danger")
         self._record_btn.setCheckable(True)
         self._record_btn.setToolTip(
             "Start or stop capturing I/Q samples. Save them afterwards with "
@@ -681,6 +753,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         status.setSpacing(8)
         self._record_status = QLabel(_STATUS_READY)
         set_role(self._record_status, "hint")
+        # Wraps rather than widening the panel for the longer armed text.
+        self._record_status.setWordWrap(True)
         status.addWidget(self._record_status, 1)
         self._record_time = QLabel("00:00:00")
         set_role(self._record_time, "lcd-small")
@@ -815,6 +889,14 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         else:
             self._fm_dev_combo.setToolTip("Only used in FM mode")
 
+    def get_demod_mode(self) -> str:
+        """The selected demodulation mode (a :data:`DEMOD_MODES` name)."""
+        return self._demod_combo.currentText()
+
+    def get_fm_deviation_text(self) -> str:
+        """The FM deviation choice as shown, e.g. ``"75 kHz"``."""
+        return self._fm_dev_combo.currentText()
+
     def get_fm_deviation(self) -> float:
         """Return the selected FM deviation in Hz (default 25 kHz)."""
         text = self._fm_dev_combo.currentText()  # e.g. "25 kHz"
@@ -850,6 +932,11 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     def _update_record_controls(self, recording: bool) -> None:
         """Reflect the recording state on the Recording group (no signals)."""
         self._record_btn.setText(_STOP_TEXT if recording else _RECORD_TEXT)
+        role = "danger" if recording else ""
+        if (self._record_btn.property("role") or "") != role:
+            set_role(self._record_btn, role or None)
+        if not recording:
+            self._armed = False
         self._format_combo.setEnabled(not recording)
         self._format_combo.setToolTip(
             "Can't change the format while recording" if recording else _FORMAT_TIP
@@ -876,16 +963,21 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     def _update_record_status(self) -> None:
         recording = self._record_btn.isChecked()
         paused = recording and self._pause_btn.isChecked()
+        armed = recording and self._armed and not paused
         if paused:
             text, tone = _STATUS_PAUSED, "warning"
+        elif armed:
+            text, tone = _STATUS_ARMED, "warning"
         elif recording:
             text, tone = _STATUS_RECORDING, "danger"
         else:
             text, tone = _STATUS_READY, None
         self._record_status.setText(text)
+        self._record_status.setToolTip(_ARMED_TIP if armed else "")
         set_tone(self._record_status, tone)
-        # Idle, the timer is muted: the LCD's default amber read as a warning.
-        set_tone(self._record_time, tone or "muted")
+        # The timer only runs while samples are captured; idle or armed it is
+        # muted (the LCD's default amber read as a warning).
+        set_tone(self._record_time, "muted" if armed else tone or "muted")
 
     def _on_record_toggled(self, checked: bool):
         """Handle record button toggle."""
@@ -911,6 +1003,21 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         minutes = (seconds % 3600) // 60
         secs = seconds % 60
         self._record_time.setText(f"{hours:02d}:{minutes:02d}:{secs:02d}")
+
+    def set_recording_armed(self, armed: bool) -> None:
+        """Show whether the current recording is armed: started, but waiting
+        for the receiver to run before any samples are captured.
+
+        Only matters while recording; stopping the recording clears it.
+        """
+        armed = bool(armed)
+        if armed != self._armed:
+            self._armed = armed
+            self._update_record_status()
+
+    def is_recording_armed(self) -> bool:
+        """Whether the panel shows the recording as armed (not capturing)."""
+        return self._record_btn.isChecked() and self._armed
 
     def set_recording_state(self, recording: bool) -> None:
         """Reflect recording state on the panel without re-emitting signals.
@@ -971,9 +1078,10 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             set_tone(self._preset_tx, None)
             return
 
+        mode = _PRESET_MODE_LABEL.get(preset.mode, preset.mode)
         self._preset_info.setText(
             f"{_format_mhz(preset.frequency_hz)} · "
-            f"{_format_bandwidth(preset.bandwidth_hz)} · {preset.mode}\n"
+            f"{_format_bandwidth(preset.bandwidth_hz)} · {mode}\n"
             f"{preset.description}"
         )
 
@@ -982,54 +1090,57 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
                 preset.frequency_hz, preset.bandwidth_hz, preset.mode
             )
         reason = reason or ""
+        # Receiving is never restricted, so every line starts by saying so:
+        # the transmit status must not read as "this preset won't work".
+        tip = reason
         if allowed:
             legal = fm.get_power_limit(preset.frequency_hz, preset.mode)
             effective = fm.get_effective_power_limit(preset.frequency_hz, preset.mode)
-            text = "✓ TX allowed with your license"
+            text = f"{_LISTEN_OK} · Transmit ✓ with your license"
             if legal:
-                text = (
-                    f"✓ TX allowed · limit {legal:.0f} W "
-                    f"({effective:.0f} W with headroom)"
-                )
+                text = f"{_LISTEN_OK} · Transmit ✓ (legal limit {legal:g} W)"
+                tip = _power_limit_tip(legal, effective)
             tone = "success"
         elif reason.startswith("LICENSE:"):
-            # Not covered by the selected license class
+            # Not covered by the selected license class: informational, since
+            # listening works the same.
             text = self._license_block_text(
                 reason[len("LICENSE:") :].strip(), preset.frequency_hz, preset.mode
             )
-            tone = "warning"
+            tone = None
         else:
             # Hardware lockout (GPS, aviation, marine distress ...)
             detail = reason.replace("TX BLOCKED:", "").split("[")[0].strip()
             band = detail.split(" - ")[0].strip()
             text = (
-                f"⊘ TX locked out: {band} is a protected frequency"
+                f"{_LISTEN_OK} · Transmit locked out: {band} is protected"
                 if band
-                else "⊘ TX locked out: protected frequency"
+                else f"{_LISTEN_OK} · Transmit locked out: protected frequency"
             )
-            tone = "danger"
+            tone = "warning"
         self._preset_tx.setText(text)
-        self._preset_tx.setToolTip(reason)
+        self._preset_tx.setToolTip(tip)
         set_tone(self._preset_tx, tone)
 
     @staticmethod
     def _license_block_text(reason: str, freq_hz: float = 0.0, mode: str = "") -> str:
         """Short, plain-language version of a license restriction."""
         lowered = reason.lower()
-        outside = "✕ No TX: outside the amateur and license-free bands"
+        prefix = f"{_LISTEN_OK} · Transmit:"
+        outside = f"{prefix} not allowed here (outside the amateur bands)"
         if "no amateur license" in lowered:
             # Only an amateur frequency becomes usable with a license; FM
             # broadcast, aviation or paging never do.
             if freq_hz and not _in_amateur_band(freq_hz):
                 return outside
-            return "✕ TX needs an amateur license (see License Profile)"
+            return f"{prefix} needs an amateur license"
         if "higher license class" in lowered:
-            return "✕ TX needs a higher license class"
+            return f"{prefix} needs a higher license class"
         if "not in any amateur" in lowered:
             return outside
         if lowered.startswith("mode"):
-            return f"✕ {mode or 'This mode'} isn't allowed in this band segment"
-        return f"✕ TX not allowed: {reason}" if reason else "✕ TX not allowed"
+            return f"{prefix} {mode or 'this mode'} isn't allowed in this band segment"
+        return f"{prefix} not allowed ({reason})" if reason else f"{prefix} not allowed"
 
     def _closest_bandwidth_index(self, bw_hz: float) -> int:
         """Index of the narrowest bandwidth option that fits ``bw_hz``."""
@@ -1074,17 +1185,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
                 self._fm_dev_combo.setCurrentText("5 kHz")
 
         # Set demodulation mode
-        mode_map = {
-            "FM": "FM",
-            "WFM": "FM",
-            "AM": "AM",
-            "USB": "USB",
-            "LSB": "LSB",
-            "CW": "CW",
-            "RAW": "None (I/Q)",
-        }
-        if preset.mode in mode_map:
-            idx = self._demod_combo.findText(mode_map[preset.mode])
+        if preset.mode in _PRESET_DEMOD:
+            idx = self._demod_combo.findText(_PRESET_DEMOD[preset.mode])
             if idx >= 0:
                 self._demod_combo.setCurrentIndex(idx)
 
@@ -1108,11 +1210,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     def _update_license_info(self) -> None:
         license_class = self._selected_license()
         summary = next((s for lc, _t, s in LICENSE_CLASSES if lc == license_class), "")
-        headroom_pct = int(round((POWER_HEADROOM_FACTOR - 1) * 100))
-        self._license_info.setText(
-            f"TX privileges: {summary}. Power limits include +{headroom_pct}% "
-            "headroom for feed-line losses."
-        )
+        self._license_info.setText(f"Transmit privileges: {summary}.")
 
     def _on_license_changed(self, index: int):
         """Handle license class change."""

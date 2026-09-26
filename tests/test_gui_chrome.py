@@ -118,6 +118,9 @@ class _WindowTestCase(unittest.TestCase):
             self.win._hotplug_timer,
         ):
             timer.stop()
+        # Recording a new take or closing with unsaved samples asks first
+        # (a modal box); tests answer "Don't Save" unless they test the box.
+        self.win._confirm_discard_recording = lambda *_args: True
         self.win.resize(1280, 720)
         self.win.show()
         self.win.activateWindow()
@@ -473,7 +476,7 @@ class TestReviewFixes(_WindowTestCase):
         from sdr_module.gui import main_window
 
         panel = self.win._control_panel
-        panel._format_combo.setCurrentText("SigMF")
+        panel._format_combo.setCurrentText("SigMF (.sigmf-data)")
         self.win._record_button.click()
         self.win._update_display()
         self.win._record_button.click()
@@ -633,17 +636,22 @@ class TestHardwareStream(_WindowTestCase):
         self.win._device = None
 
     def test_hotplug_announces_first_device_after_empty_start(self):
-        from sdr_module.core import device_manager
+        from sdr_module.devices.base import DeviceInfo
 
-        found = [[], ["RTL-SDR #0"]]
-        with mock.patch.object(
-            device_manager.DeviceManager,
-            "scan_devices",
-            side_effect=lambda *a, **k: found.pop(0),
-        ):
-            self.win._poll_hotplug()  # baseline: nothing attached
-            self.win._poll_hotplug()  # a dongle was plugged in
-        self.assertIn("RTL-SDR #0", self.win._message_label.text())
+        dongle = DeviceInfo("RTL-SDR #0", "00000001", "RTL-SDR Blog", "RTL2832U")
+        found = [[], [dongle]]
+
+        class Driver:
+            @staticmethod
+            def list_devices():
+                return found.pop(0)
+
+        self.win._hardware_classes = [Driver]
+        self.win._poll_hotplug()  # baseline: nothing attached
+        self.win._poll_hotplug()  # a dongle was plugged in
+        text = self.win._message_label.text()
+        self.assertIn("RTL-SDR #0", text)
+        self.assertNotIn("DeviceInfo(", text)  # a name, not a repr
 
 
 class TestFatalErrorDialog(unittest.TestCase):

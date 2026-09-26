@@ -81,6 +81,16 @@ def _driver_installed(module_name: str) -> bool:
         return False
 
 
+def missing_drivers() -> List[Tuple[str, str]]:
+    """``(device label, install command)`` for each hardware driver whose
+    Python binding isn't installed, so its devices can't be found."""
+    return [
+        (label, install)
+        for module_name, label, install in _DRIVERS.values()
+        if not _driver_installed(module_name)
+    ]
+
+
 def _format_rate(rate: float) -> str:
     """``2400000.0`` -> ``"2.4 MS/s"``."""
     return f"{rate / 1e6:g} MS/s"
@@ -146,7 +156,13 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
             QTableWidget.SelectionBehavior.SelectRows
         )
         self._device_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
-        self._device_table.setToolTip("Double-click a device to connect to it.")
+        # Arrow keys pick a row; Tab moves on to the settings and buttons
+        # instead of walking the cells (which trapped keyboard focus here).
+        self._device_table.setTabKeyNavigation(False)
+        self._device_table.setAccessibleName("Available devices")
+        self._device_table.setToolTip(
+            "Double-click a device, or press Enter, to connect to it."
+        )
         self._device_table.itemSelectionChanged.connect(self._on_selection_changed)
         self._device_table.itemDoubleClicked.connect(lambda _item: self._on_accept())
         list_layout.addWidget(self._device_table, 1)
@@ -177,18 +193,18 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         self._rate_combo = QComboBox()
         self._rate_combo.setToolTip(get_short_tip("sample_rate"))
         self._populate_rates("demo")
-        form.addRow("Sample rate:", self._rate_combo)
+        form.addRow("&Sample rate:", self._rate_combo)
 
         self._ppm_spin = QSpinBox()
         self._ppm_spin.setRange(-100, 100)
         self._ppm_spin.setValue(0)
         self._ppm_spin.setSuffix(" ppm")
         self._ppm_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
-        form.addRow("Frequency correction:", self._ppm_spin)
+        form.addRow("&Frequency correction:", self._ppm_spin)
 
         self._direct_combo = QComboBox()
         self._direct_combo.addItems(["Off", "I-ADC", "Q-ADC"])
-        form.addRow("Direct sampling:", self._direct_combo)
+        form.addRow("&Direct sampling:", self._direct_combo)
 
         layout.addWidget(settings_group)
 
@@ -210,6 +226,11 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         self._button_box.accepted.connect(self._on_accept)
         self._button_box.rejected.connect(self.reject)
         layout.addWidget(self._button_box)
+        # Making Connect the default also makes it the button box's focus
+        # proxy (set again when the box is reparented), so Tab into the box
+        # jumped straight to Connect and never reached Refresh, which is laid
+        # out before it. Without the proxy Tab visits every button in order.
+        self._button_box.setFocusProxy(None)
 
         self._update_setting_controls(None)
 
@@ -298,14 +319,18 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
 
     def _update_status(self, hardware_count: int) -> None:
         """Explain what was found, and what to do when nothing was."""
+        # A leading glyph, as in the app's other callouts.
         if hardware_count:
             noun = "device" if hardware_count == 1 else "devices"
-            text = f"Found {hardware_count} SDR {noun}. Select one and click Connect."
+            text = (
+                f"\u2713 Found {hardware_count} SDR {noun}. Select one and "
+                "click Connect."
+            )
             tone = "success"
         else:
             text = (
-                "No SDR hardware found. Plug in an RTL-SDR or HackRF One and "
-                "click Refresh, or connect the Demo Device to explore with "
+                "\u24d8 No SDR hardware found. Plug in an RTL-SDR or HackRF One "
+                "and click Refresh, or connect the Demo Device to explore with "
                 "simulated signals."
             )
             tone = "info"
@@ -509,19 +534,24 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
 # Simulated band plan: (frequency Hz, kind, level dBFS at 20 dB gain,
 # (period s, on s) for intermittent signals or None for continuous).
 # Levels are per-bin peaks on the main display's dBFS scale.
+#
+# Stations sit where the app sends people: the strongest one is on 100.1 MHz,
+# the "FM Broadcast" preset of the welcome screen and Radio > Band Presets
+# (and next to the 100 MHz start-up frequency), and the radio tuner's FM
+# presets (88.5, 93.3, 97.1, 99.5, 101.1, 104.3 MHz) each find a station.
 _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ...] = (
     # FM broadcast band
     (88.5e6, "wfm", -38.0, None),
     (89.3e6, "wfm", -52.0, None),
     (90.1e6, "wfm", -32.0, None),
     (91.5e6, "wfm", -46.0, None),
-    (93.1e6, "wfm", -28.0, None),
+    (93.3e6, "wfm", -28.0, None),
     (94.7e6, "wfm", -50.0, None),
     (95.5e6, "wfm", -36.0, None),
     (97.1e6, "wfm", -24.0, None),
     (98.3e6, "wfm", -42.0, None),
     (99.5e6, "wfm", -34.0, None),
-    (100.3e6, "wfm", -18.0, None),
+    (100.1e6, "wfm", -18.0, None),
     (101.1e6, "wfm", -44.0, None),
     (102.7e6, "wfm", -30.0, None),
     (103.5e6, "wfm", -54.0, None),
@@ -588,7 +618,9 @@ class MockDevice:
     noise floor. Signals move across the display as you tune, so
     click-to-tune and the frequency scanner behave as they would with real
     hardware. Raising the gain lifts signals and noise together and, as on a
-    real receiver, too much gain clips the ADC.
+    real receiver, too much gain clips the ADC. With automatic gain
+    (``set_gain_mode(True)``) the device picks the gain itself, keeping the
+    signals in the passband clear of clipping.
 
     ``read_samples`` is cheap (well under a millisecond for 2048 samples) so
     the display can poll it at 30 Hz.
@@ -603,12 +635,17 @@ class MockDevice:
     _NOISE_FLOOR_DB = -88.0
     _ADC_NOISE_DB = -104.0
     _REF_GAIN_DB = 20.0
+    # Automatic gain keeps the passband's combined peak this far below full
+    # scale, within the gain range an RTL-SDR tuner offers.
+    _AGC_HEADROOM_DB = 10.0
+    _AGC_RANGE_DB = (0.0, 40.0)
 
     def __init__(self):
         self.info = self.MockInfo()
         self._frequency = 100e6
         self._sample_rate = 2.4e6
         self._gain = 20
+        self._auto_gain = False
         self._running = False
         self._rng = np.random.default_rng()
         self._sample_clock = 0  # samples generated so far (phase continuity)
@@ -625,7 +662,19 @@ class MockDevice:
         return True
 
     def set_gain(self, gain: float) -> bool:
+        """Set the manual gain (dB). With automatic gain on, it takes effect
+        when automatic gain is switched off again."""
         self._gain = gain
+        return True
+
+    def set_gain_mode(self, auto: bool) -> bool:
+        """Switch automatic gain (AGC) on or off, like the hardware drivers.
+
+        With AGC on the gain follows what is in the passband, so the
+        strongest signals stay about 10 dB below full scale and never clip;
+        switching it off returns to the manual gain from :meth:`set_gain`.
+        """
+        self._auto_gain = bool(auto)
         return True
 
     def set_bandwidth(self, bw: float) -> bool:
@@ -643,8 +692,28 @@ class MockDevice:
 
     @property
     def gain(self) -> float:
-        """Current gain in dB."""
-        return float(self._gain)
+        """Current gain in dB (the automatic gain's choice while it is on)."""
+        return self._gain_db(float(self._frequency), float(self._sample_rate) or 2.4e6)
+
+    @property
+    def gain_mode(self) -> str:
+        """``"auto"`` while automatic gain is on, else ``"manual"``."""
+        return "auto" if self._auto_gain else "manual"
+
+    def _gain_db(self, center: float, rate: float) -> float:
+        """The gain in effect: manual, or chosen for the current passband."""
+        if not self._auto_gain:
+            return float(self._gain)
+        # Worst case, every signal peaks at once: keep that sum (plus the
+        # noise peaks) the headroom below the ADC's full scale.
+        peak = sum(
+            amp * (3.0 if kind == "pulse" else 1.0)
+            for _offset, kind, amp, _duty, _seed in self._visible_signals(center, rate)
+        )
+        peak += 4.0 * math.sqrt(2.0) * self._noise_sigma(self._NOISE_FLOOR_DB)
+        gain = self._REF_GAIN_DB - self._AGC_HEADROOM_DB - 20.0 * math.log10(peak)
+        low, high = self._AGC_RANGE_DB
+        return float(min(max(gain, low), high))
 
     @property
     def is_streaming(self) -> bool:
@@ -702,6 +771,14 @@ class MockDevice:
             level = -80.0 + ((h >> 20) % 14)
             out.append((freq - center, kind, level, None, 1000 + c))
         return out
+
+    @staticmethod
+    def _noise_sigma(bin_db: float) -> float:
+        """Per-component sigma of complex white noise whose FFT bins
+        (2048-point Hann) sit at ``bin_db`` dBFS:
+        bin power = 2*sigma^2 * sum(w^2)/sum(w)^2."""
+        bin_factor = 1.5 / 2048.0
+        return math.sqrt(10.0 ** (bin_db / 10.0) / bin_factor / 2)
 
     @staticmethod
     def _active(duty: Optional[Tuple[float, float]], seed: int, now: float) -> bool:
@@ -791,15 +868,11 @@ class MockDevice:
 
         rate = float(self._sample_rate) or 2.4e6
         center = float(self._frequency)
-        gain_lin = 10.0 ** ((float(self._gain) - self._REF_GAIN_DB) / 20.0)
+        gain_lin = 10.0 ** ((self._gain_db(center, rate) - self._REF_GAIN_DB) / 20.0)
         now = time.monotonic()
 
-        # Complex white noise scaled so one FFT bin (2048-point Hann) sits at
-        # the requested dBFS: bin power = 2*sigma^2 * sum(w^2)/sum(w)^2.
-        bin_factor = 1.5 / 2048.0
-        sigma_ant = math.sqrt(10.0 ** (self._NOISE_FLOOR_DB / 10.0) / bin_factor / 2)
-        sigma_adc = math.sqrt(10.0 ** (self._ADC_NOISE_DB / 10.0) / bin_factor / 2)
-        sigma = math.hypot(sigma_ant * gain_lin, sigma_adc)
+        sigma_ant = self._noise_sigma(self._NOISE_FLOOR_DB)
+        sigma = math.hypot(sigma_ant * gain_lin, self._noise_sigma(self._ADC_NOISE_DB))
         samples = self._rng.standard_normal(2 * n).view(np.complex128) * sigma
 
         t = (self._sample_clock + np.arange(n)) / rate

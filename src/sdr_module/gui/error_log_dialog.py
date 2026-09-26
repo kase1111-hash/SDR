@@ -208,11 +208,16 @@ class ErrorLogDialog(QDialog if HAS_PYQT6 else object):
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # Arrow keys pick an entry; Tab moves on to the details and buttons
+        # instead of walking every cell (a keyboard trap).
+        self._table.setTabKeyNavigation(False)
+        self._table.setAccessibleName("Logged warnings and errors")
         self._table.itemSelectionChanged.connect(self._show_details)
 
         self._details = QPlainTextEdit()
         self._details.setReadOnly(True)
         self._details.setPlaceholderText("Select an entry to see the full message.")
+        self._details.setAccessibleName("Message details")
         set_role(self._details, "terminal")
 
         self._splitter = QSplitter(Qt.Orientation.Vertical)

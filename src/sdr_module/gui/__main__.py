@@ -24,7 +24,7 @@ def parse_args():
         epilog="""
 Examples:
     python -m sdr_module.gui              # Normal mode
-    python -m sdr_module.gui --demo       # Demo mode with synthetic signals
+    python -m sdr_module.gui --demo       # Demo mode with simulated signals
     python -m sdr_module.gui -v           # Verbose logging
     python -m sdr_module.gui -f 144.8e6   # Start at specific frequency
         """,
@@ -34,7 +34,7 @@ Examples:
         "--demo",
         "-d",
         action="store_true",
-        help="Run in demo mode with synthetic signals (no hardware required)",
+        help="Run in demo mode with simulated signals (no hardware required)",
     )
 
     parser.add_argument(

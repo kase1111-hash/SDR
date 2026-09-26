@@ -115,7 +115,7 @@ class TestGaugeUsesWidth(unittest.TestCase):
 
         compact = CompactSignalMeter()
         self.assertNotIn("S1", compact._bar_label.text())
-        self.assertIn("--", compact._bar_label.text())
+        self.assertIn("—", compact._bar_label.text())
         compact.deleteLater()
 
 

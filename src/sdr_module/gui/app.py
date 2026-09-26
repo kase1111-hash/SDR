@@ -6,6 +6,7 @@ Provides the main application class and initialization.
 
 import logging
 import sys
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .. import __version__
@@ -14,10 +15,15 @@ from .themes import apply_theme
 logger = logging.getLogger(__name__)
 
 # Defaults the GUI launchers pass when no value is given on the command line.
-_LAUNCH_DEFAULTS: Dict[str, float] = {"frequency": 100e6, "gain": 20.0}
+_LAUNCH_DEFAULTS: Dict[str, float] = {
+    "frequency": 100e6,
+    "gain": 20.0,
+    "sample_rate": 2.4e6,
+}
 _LAUNCH_FLAGS: Dict[str, Tuple[str, str]] = {
     "frequency": ("-f", "--frequency"),
     "gain": ("-g", "--gain"),
+    "sample_rate": ("-s", "--sample-rate"),
 }
 
 
@@ -108,6 +114,9 @@ class SDRApplication:
         self._args = args if args is not None else sys.argv
         self._app = None
         self._main_window = None
+        # Last unhandled error: (signature, monotonic time), to log a
+        # repeating one (e.g. in the 30 Hz display timer) only now and then.
+        self._last_error: Optional[Tuple[Any, float]] = None
 
         # Configure logging
         logging.basicConfig(
@@ -126,7 +135,8 @@ class SDRApplication:
         Args:
             settings: Optional settings dictionary with keys:
                 - frequency: Initial frequency in Hz
-                - sample_rate: Sample rate in Hz
+                - sample_rate: Sample rate in Hz, used by the demo device and
+                  preselected in Device > Connect (hardware is opened there)
                 - gain: RF gain in dB
                 - demo_mode: Run in demo mode
 
@@ -142,7 +152,77 @@ class SDRApplication:
             return 1
 
         settings = settings or {}
+        previous_hook = sys.excepthook
+        # PyQt6 aborts the process on an exception escaping a slot, virtual
+        # or thread unless a hook is installed: log it and carry on instead.
+        sys.excepthook = self._handle_exception
 
+        try:
+            return self._run(settings)
+        finally:
+            sys.excepthook = previous_hook
+
+    def _handle_exception(self, exc_type, exc, tb) -> None:
+        """sys.excepthook while the GUI runs.
+
+        An unhandled error inside Qt (a slot, paint event or worker thread)
+        is logged, so it shows in Tools > Error History, and reported in the
+        status bar, instead of aborting the app and losing unsaved work.
+        """
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            if self._app is not None:
+                self._app.quit()
+            return
+        frame = tb
+        while frame is not None and frame.tb_next is not None:
+            frame = frame.tb_next
+        where = (
+            (frame.tb_frame.f_code.co_filename, frame.tb_lineno)
+            if frame is not None
+            else None
+        )
+        signature = (exc_type, where)
+        now = time.monotonic()
+        last = self._last_error
+        if last is not None and last[0] == signature and now - last[1] < 5.0:
+            logger.debug("Unhandled error again: %s", exc)
+            return
+        self._last_error = (signature, now)
+        logger.error(
+            "Unhandled error: %s: %s",
+            exc_type.__name__,
+            exc,
+            exc_info=(exc_type, exc, tb),
+        )
+        # Widgets may only be touched from the GUI thread; an error in a
+        # worker thread is logged only.
+        if not self._in_gui_thread():
+            return
+        window = self._main_window
+        report = getattr(window, "_show_status_error", None)
+        if callable(report):
+            try:
+                report(
+                    f"Internal error: {exc_type.__name__}: {exc}. Details are in "
+                    "Tools > Error History.",
+                    10000,
+                )
+            except Exception as e:  # pragma: no cover - window already gone
+                logger.debug(f"Could not report the error in the window: {e}")
+
+    def _in_gui_thread(self) -> bool:
+        if self._app is None:
+            return False
+        try:
+            from PyQt6.QtCore import QThread
+
+            return QThread.currentThread() is self._app.thread()
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    def _run(self, settings: Dict[str, Any]) -> int:
+        """Create the application and main window and run the event loop."""
         try:
             from PyQt6.QtWidgets import QApplication
 
@@ -189,6 +269,8 @@ class SDRApplication:
                 self._main_window.set_frequency(float(settings["frequency"]))
             if self._should_apply(settings, "gain"):
                 self._main_window.set_gain(float(settings["gain"]))
+            if self._should_apply(settings, "sample_rate"):
+                self._main_window.set_sample_rate(float(settings["sample_rate"]))
 
             self._main_window.show()
 

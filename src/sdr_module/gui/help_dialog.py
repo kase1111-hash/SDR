@@ -304,13 +304,23 @@ def _keycap_tokens(keys: Sequence[str], literal: bool = False) -> List[str]:
 
 
 class _SwallowEnter(QObject if HAS_PYQT6 else object):
-    """Keeps Enter in the filter box from closing the dialog."""
+    """Keys for the filter box: Enter doesn't close the dialog, and Page Up /
+    Page Down scroll the list (which takes no keyboard focus itself)."""
+
+    def __init__(self, parent=None, scroll_bar=None):
+        super().__init__(parent)
+        self._scroll_bar = scroll_bar
 
     def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.KeyPress and event.key() in (
-            Qt.Key.Key_Return,
-            Qt.Key.Key_Enter,
-        ):
+        if event.type() != QEvent.Type.KeyPress:
+            return False
+        key = event.key()
+        if key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            return True
+        bar = self._scroll_bar
+        if bar is not None and key in (Qt.Key.Key_PageUp, Qt.Key.Key_PageDown):
+            step = bar.pageStep() if key == Qt.Key.Key_PageDown else -bar.pageStep()
+            bar.setValue(bar.value() + step)
             return True
         return False
 
@@ -341,12 +351,17 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
         self._filter = QLineEdit()
         self._filter.setPlaceholderText("Filter shortcuts (e.g. tune, record, Ctrl+S)")
         self._filter.setClearButtonEnabled(True)
+        self._filter.setAccessibleName("Filter shortcuts")
+        self._filter.setToolTip(
+            "Type to narrow the list. Page Up / Page Down scroll it."
+        )
         self._filter.textChanged.connect(self._apply_filter)
-        self._enter_guard = _SwallowEnter(self)
-        self._filter.installEventFilter(self._enter_guard)
         layout.addWidget(self._filter)
 
         scroll = QScrollArea()
+        # A read-only list: the wheel and scroll bar still scroll it, but it
+        # is not an (invisible) Tab stop between the filter and Close.
+        scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -364,6 +379,9 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
         self._content_layout.addStretch(1)
         scroll.setWidget(content)
         layout.addWidget(scroll, 1)
+        self._scroll = scroll
+        self._enter_guard = _SwallowEnter(self, scroll.verticalScrollBar())
+        self._filter.installEventFilter(self._enter_guard)
 
         note = QLabel(
             "Space and the arrow keys act when the focused control does not "
@@ -441,7 +459,7 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
             cap = QLabel(token)
             cap.setAlignment(Qt.AlignmentFlag.AlignCenter)
             cap.setMinimumWidth(22)
-            set_role(cap, "badge", "muted")
+            set_role(cap, "keycap")
             caps_layout.addWidget(cap)
         caps_layout.addStretch(1)
         h.addWidget(caps, 0, Qt.AlignmentFlag.AlignTop)

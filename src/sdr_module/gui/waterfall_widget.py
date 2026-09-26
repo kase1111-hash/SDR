@@ -26,6 +26,7 @@ import numpy as np
 from .spectrum_widget import (
     axis_font,
     columns_max,
+    draw_focus_frame,
     draw_placeholder,
     draw_readout,
     fit_header_hint,
@@ -62,11 +63,21 @@ _RANGE_CHOICES = (60, 80, 100, 120)
 _TIME_STEPS = (0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 1800, 3600)
 
 
-def time_step(raw: float) -> float:
-    """Smallest time-axis step (seconds) that is >= ``raw``."""
+def time_step(raw: float, max_age: Optional[float] = None) -> float:
+    """Smallest time-axis step (seconds) that is >= ``raw``.
+
+    With ``max_age``, the step is also coarse enough that every tick label up
+    to that age fits four characters (the shared left margin): a tall
+    waterfall at 0.5 s steps would otherwise need ``10.5s``.
+    """
     for step in _TIME_STEPS:
-        if step >= raw:
-            return float(step)
+        if step < raw:
+            continue
+        if max_age is not None:
+            ticks = nice_ticks(0.0, max_age, step)
+            if ticks and len(format_age(ticks[-1], step)) > 4:
+                continue
+        return float(step)
     return float(_TIME_STEPS[-1])
 
 
@@ -90,8 +101,14 @@ def format_age(age: float, step: float) -> str:
 
 
 def format_elapsed(age: float) -> str:
-    """At most four characters for any age: ``4.2s``, ``65s``, ``12m``, ``3h``, ``5d``."""
-    if age < 10:
+    """At most four characters for any age: ``4.2s``, ``65s``, ``12m``, ``3h``, ``5d``.
+
+    (Years, ``3y``, only for absurdly old lines, to keep the promise.)
+    """
+    if not math.isfinite(age):
+        return "--"
+    # Round first, so 9.96 s reads "10s" rather than a five-character "10.0s".
+    if round(age, 1) < 10:
         return f"{max(0.0, age):.1f}s"
     if age < 99.5:
         return f"{age:.0f}s"
@@ -99,7 +116,9 @@ def format_elapsed(age: float) -> str:
         return f"{max(2.0, round(age / 60)):.0f}m"
     if age < 99.5 * 3600:
         return f"{max(2.0, round(age / 3600)):.0f}h"
-    return f"{max(5.0, round(age / 86400)):.0f}d"
+    if age < 999.5 * 86400:
+        return f"{max(5.0, round(age / 86400)):.0f}d"
+    return f"{min(999.0, max(3.0, round(age / 31_557_600))):.0f}y"
 
 
 class _WaterfallCanvas(QWidget if HAS_PYQT6 else object):
@@ -365,6 +384,15 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
     def resizeEvent(self, event):  # noqa: N802 - Qt override
         super().resizeEvent(event)
         fit_header_hint(self, self._header, self._hint_label)
+
+    def focusInEvent(self, event):  # noqa: N802 - Qt override
+        """Show the focus frame: Space and Left/Right now act on this plot."""
+        super().focusInEvent(event)
+        self._canvas.update()
+
+    def focusOutEvent(self, event):  # noqa: N802 - Qt override
+        super().focusOutEvent(event)
+        self._canvas.update()
 
     def _update_clear_button(self) -> None:
         has_data = len(self._history) > 0
@@ -782,12 +810,15 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 )
                 painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, False)
 
-            # Frame around the plot
+            self._draw_time_axis(painter, plot, p)
+
+            # Frame around the plot, over the ends of the pause separators
             painter.setPen(QPen(p.qcolor("plot_grid"), 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(plot.adjusted(-0.5, -0.5, 0.5, 0.5))
+            if self.hasFocus():
+                draw_focus_frame(painter, plot, p)
 
-            self._draw_time_axis(painter, plot, p)
             self._draw_highlights(painter, plot)
 
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -833,8 +864,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         def draw_label(y: float, text: str) -> None:
             # Keep the label inside the plot's vertical extent.
             y_label = min(max(y, plot.top() + fh / 2), plot.bottom() - fh / 2)
+            # A 3 px tick ending on the frame (not on the image's first column).
             painter.setPen(tick_pen)
-            painter.drawLine(QPointF(plot.left() - 3, y), QPointF(plot.left(), y))
+            painter.drawLine(QPointF(plot.left() - 4, y), QPointF(plot.left() - 1, y))
             painter.setPen(axis_color)
             painter.drawText(
                 QRectF(0, y_label - fh / 2, label_right - 2, fh), right_align, text
@@ -856,7 +888,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
 
         # Regular ticks within the newest continuous run of lines.
         run = ages[: int(gaps[0])] if gaps.size else ages
-        step = time_step(spr * self._history_size * max(28.0, fh * 2.2) / plot.height())
+        step = time_step(
+            spr * self._history_size * max(28.0, fh * 2.2) / plot.height(),
+            max_age=float(run[-1]),
+        )
         last_y = -math.inf
         for age in nice_ticks(0.0, float(run[-1]) + 1e-9, step):
             # Fractional row between the two lines that bracket this age (the

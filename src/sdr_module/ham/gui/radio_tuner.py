@@ -110,6 +110,16 @@ def format_station(freq_hz: float, band: "RadioBand") -> str:
     return f"{freq_hz / 1e3:.0f} kHz"
 
 
+def format_receiver_frequency(freq_hz: float) -> str:
+    """Any receiver frequency, as the main window's toolbar shows it.
+
+    MHz with 3 to 6 decimals: ``"146.520 MHz"``, ``"146.5125 MHz"``.
+    """
+    text = f"{max(0.0, float(freq_hz)) / 1e6:.6f}".rstrip("0")
+    whole, _, frac = text.partition(".")
+    return f"{whole}.{frac.ljust(3, '0')} MHz"
+
+
 def _themes() -> Any:
     """The GUI theme helpers, imported lazily.
 
@@ -180,6 +190,8 @@ class FrequencyDisplay(QWidget if HAS_PYQT6 else object):
         self._band = RadioBand.FM
         self._station = ""
         self._stereo = False
+        # Receiver frequency while it is outside both broadcast bands.
+        self._off_band_hz: Optional[float] = None
         self.setMinimumSize(220, 84)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -205,7 +217,20 @@ class FrequencyDisplay(QWidget if HAS_PYQT6 else object):
             self._stereo = bool(stereo)
             self.update()
 
+    def set_off_band(self, receiver_hz: Optional[float]) -> None:
+        """Show that the receiver is on ``receiver_hz``, outside both
+        broadcast bands (dimmed digits, no band badge); ``None`` returns to
+        the tuned station."""
+        if receiver_hz != self._off_band_hz:
+            self._off_band_hz = receiver_hz
+            self.update()
+
     def _digits(self) -> tuple:
+        if self._off_band_hz is not None:
+            digits, _, unit = format_receiver_frequency(self._off_band_hz).partition(
+                " "
+            )
+            return digits, unit
         if self._band == RadioBand.FM:
             return f"{self._frequency_hz / 1e6:.1f}", "MHz"
         return f"{self._frequency_hz / 1e3:.0f}", "kHz"
@@ -232,8 +257,10 @@ class FrequencyDisplay(QWidget if HAS_PYQT6 else object):
         badge_font.setBold(True)
         bfm = QFontMetricsF(badge_font)
         painter.setFont(badge_font)
-        self._draw_badge(painter, pad, pad, self._band.value, bfm, p, "accent")
-        if self._stereo:
+        off_band = self._off_band_hz is not None
+        if not off_band:
+            self._draw_badge(painter, pad, pad, self._band.value, bfm, p, "accent")
+        if self._stereo and not off_band:
             text = "STEREO"
             bw = bfm.horizontalAdvance(text) + 12
             self._draw_badge(painter, w - pad - bw, pad, text, bfm, p, "success")
@@ -249,29 +276,38 @@ class FrequencyDisplay(QWidget if HAS_PYQT6 else object):
         area_top = pad + bfm.height() * 0.4
         area_bottom = h - pad - station_h - 2
         digit_px = int(max(20, min(46, (area_bottom - area_top) * 0.95)))
-        digit_font = _themes().mono_font(10, bold=True)
-        digit_font.setPixelSize(digit_px)
-        dfm = QFontMetricsF(digit_font)
-        unit_font = QFont(self.font())
-        unit_font.setPixelSize(max(11, int(digit_px * 0.34)))
-        unit_font.setBold(True)
-        ufm = QFontMetricsF(unit_font)
-
-        dw = dfm.horizontalAdvance(digits)
-        uw = ufm.horizontalAdvance(unit)
         gap = 6.0
+        while True:
+            # Shrink long readouts (e.g. "1090.000 MHz") to fit the width.
+            digit_font = _themes().mono_font(10, bold=True)
+            digit_font.setPixelSize(digit_px)
+            dfm = QFontMetricsF(digit_font)
+            unit_font = QFont(self.font())
+            unit_font.setPixelSize(max(11, int(digit_px * 0.34)))
+            unit_font.setBold(True)
+            ufm = QFontMetricsF(unit_font)
+            dw = dfm.horizontalAdvance(digits)
+            uw = ufm.horizontalAdvance(unit)
+            if dw + gap + uw <= w - 2 * pad or digit_px <= 14:
+                break
+            digit_px -= 2
+
         x = (w - (dw + gap + uw)) / 2.0
         baseline = (area_top + area_bottom) / 2.0 + dfm.capHeight() / 2.0
         painter.setFont(digit_font)
-        painter.setPen(p.qcolor("lcd_text"))
+        painter.setPen(p.qcolor("caption" if off_band else "lcd_text"))
         painter.drawText(QPointF(x, baseline), digits)
         painter.setFont(unit_font)
-        painter.setPen(p.qcolor("lcd_alt"))
+        painter.setPen(p.qcolor("caption" if off_band else "lcd_alt"))
         painter.drawText(QPointF(x + dw + gap, baseline), unit)
 
         painter.setFont(station_font)
-        painter.setPen(p.qcolor("lcd_alt" if self._station else "caption"))
-        text = self._station or self._band_text()
+        if off_band:
+            text = "Receiver · outside the AM/FM broadcast bands"
+            painter.setPen(p.qcolor("caption"))
+        else:
+            text = self._station or self._band_text()
+            painter.setPen(p.qcolor("lcd_alt" if self._station else "caption"))
         painter.drawText(
             QRectF(pad, h - pad - station_h, w - 2 * pad, station_h),
             Qt.AlignmentFlag.AlignCenter,
@@ -321,6 +357,8 @@ class TuningDial(QWidget if HAS_PYQT6 else object):
         self._dragging = False
         self._last_x = 0
         self._wheel_accum = 0
+        # False while the receiver is outside the band: the pointer dims.
+        self._active = True
 
         self.setAccessibleName("Tuning dial")
         self.setMinimumSize(240, 64)
@@ -362,6 +400,13 @@ class TuningDial(QWidget if HAS_PYQT6 else object):
     def get_frequency(self) -> float:
         """Get current frequency."""
         return self._frequency
+
+    def set_active(self, active: bool) -> None:
+        """Draw the pointer normally (True) or dimmed (False), e.g. while the
+        receiver is tuned outside this band."""
+        if bool(active) != self._active:
+            self._active = bool(active)
+            self.update()
 
     # ------------------------------------------------------------- geometry
 
@@ -435,7 +480,7 @@ class TuningDial(QWidget if HAS_PYQT6 else object):
         painter.setPen(QPen(p.qcolor("plot_grid"), 1.5))
         painter.drawLine(QPointF(left, base_y), QPointF(right, base_y))
 
-        # Ticks (labels are drawn after the pointer so it never hides one).
+        # Ticks, and the label boxes under the major ones.
         major, minor = self._tick_steps()
         unit = self._unit_hz()
         first = math.ceil(self._min_freq / minor - 1e-9) * minor
@@ -464,10 +509,12 @@ class TuningDial(QWidget if HAS_PYQT6 else object):
                     QPointF(self._x_for(marker), base_y + 3.0), 2.5, 2.5
                 )
 
-        # Pointer
+        # Pointer: from the top down through the ticks, ending just above
+        # the label row so it never runs through a number.
         x = self._x_for(self._frequency)
-        top, bottom = 6.0, h - 6.0
-        painter.setPen(QPen(p.qcolor("plot_marker"), 2.0))
+        top, bottom = 6.0, label_y - 1.0
+        pointer = p.qcolor("plot_marker" if self._active else "disabled")
+        painter.setPen(QPen(pointer, 2.0))
         painter.drawLine(QPointF(x, top + 5.0), QPointF(x, bottom))
         tri = QPainterPath()
         tri.moveTo(x - 5.0, top)
@@ -475,16 +522,12 @@ class TuningDial(QWidget if HAS_PYQT6 else object):
         tri.lineTo(x, top + 7.0)
         tri.closeSubpath()
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(p.qcolor("plot_marker"))
+        painter.setBrush(pointer)
         painter.drawPath(tri)
 
-        # Scale labels on top: the pointer passes behind a label it crosses,
-        # so the number under it stays readable.
         painter.setFont(font)
+        painter.setPen(p.qcolor("plot_text"))
         for label, rect in labels:
-            if rect.left() - 1.0 <= x <= rect.right() + 1.0:
-                painter.fillRect(rect, p.qcolor("plot_bg"))
-            painter.setPen(p.qcolor("plot_text"))
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, label)
 
         # Unit legend in the top corner the pointer is not in.
@@ -576,7 +619,9 @@ class TuningDial(QWidget if HAS_PYQT6 else object):
 
     def _tune_to(self, freq: float) -> None:
         freq = self._snap(freq)
-        if abs(freq - self._frequency) < 1.0:
+        # While dimmed, even the pointer's own position is a new choice: it
+        # brings the receiver back to that station.
+        if abs(freq - self._frequency) < 1.0 and self._active:
             return
         self._frequency = freq
         self.update()
@@ -640,13 +685,6 @@ class PresetButton(QPushButton if HAS_PYQT6 else object):
         """Get stored preset."""
         return self._preset
 
-    def _format_freq(self, preset: RadioPreset) -> str:
-        """Format frequency for display."""
-        if preset.band == RadioBand.FM:
-            return f"{preset.frequency_hz / 1e6:.1f} FM"
-        else:
-            return f"{preset.frequency_hz / 1e3:.0f} AM"
-
     # Long press / context menu to store -----------------------------------
 
     def mousePressEvent(self, event) -> None:
@@ -677,6 +715,8 @@ class PresetButton(QPushButton if HAS_PYQT6 else object):
         tune.setEnabled(self._preset is not None)
         store = menu.addAction("&Store Current Station Here")
         chosen = menu.exec(event.globalPos())
+        # A new menu per right-click: free it rather than keep one per click.
+        menu.deleteLater()
         if chosen is store:
             self.store_requested.emit()
         elif chosen is tune:
@@ -686,6 +726,9 @@ class PresetButton(QPushButton if HAS_PYQT6 else object):
 class VolumeKnob(QWidget if HAS_PYQT6 else object):
     """
     Labelled vertical level slider (0-100).
+
+    Not used by :class:`RadioTunerWidget` (the main window's volume control
+    sets the level); kept for code that imports it.
     """
 
     if HAS_PYQT6:
@@ -733,7 +776,6 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
 
     if HAS_PYQT6:
         frequency_changed = pyqtSignal(float, str)  # freq_hz, band
-        audio_output = pyqtSignal(np.ndarray)
 
     # Default FM presets (classic rock stations style)
     DEFAULT_FM_PRESETS = [
@@ -768,7 +810,9 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         self._volume = 50
         self._muted = False
         self._stereo = False
-        self._powered = True
+        # Receiver frequency while it is outside both broadcast bands (the
+        # tuner then keeps its own station but shows it is not playing).
+        self._off_band_hz: Optional[float] = None
 
         # Last station tuned on each band, restored when switching back.
         self._band_frequency: Dict[RadioBand, float] = {
@@ -939,6 +983,7 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         lo, hi = band_range(self._band)
         self._frequency = max(lo, min(float(freq_hz), hi))
         self._band_frequency[self._band] = self._frequency
+        self._leave_off_band()
         self._tuning_dial.set_frequency(self._frequency)
         self._freq_display.set_frequency(self._frequency, self._band)
         self._refresh_preset_states()
@@ -981,6 +1026,7 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
             preset = btn.get_preset()
             match = (
                 preset is not None
+                and self._off_band_hz is None
                 and preset.band == self._band
                 and abs(preset.frequency_hz - self._frequency) < 1.0
             )
@@ -1031,8 +1077,53 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         self._hint_timer.start(4000)
 
     def _reset_hint(self) -> None:
-        self._hint_label.setText(self._FOOTER_HINT)
-        _themes().set_tone(self._hint_label, None)
+        """Back to the standing footer text for the current state."""
+        if self._off_band_hz is not None:
+            text = (
+                f"The receiver is on {format_receiver_frequency(self._off_band_hz)}, "
+                "outside the broadcast bands. Pick a preset or tune the dial to "
+                "switch it to a station."
+            )
+            tone: Optional[str] = "info"
+        else:
+            text, tone = self._FOOTER_HINT, None
+        self._hint_label.setText(text)
+        _themes().set_tone(self._hint_label, tone)
+
+    # ------------------------------------------------------------- off band
+
+    def is_off_band(self) -> bool:
+        """True while the receiver is tuned outside both broadcast bands."""
+        return self._off_band_hz is not None
+
+    def _enter_off_band(self, receiver_hz: float) -> None:
+        """Show that the receiver is on ``receiver_hz``, outside AM and FM.
+
+        The tuner keeps its own station (the dial pointer dims there), no
+        band or preset is selected, and the footer says where the receiver
+        is. Tuning from here switches the receiver back to a station.
+        """
+        self._off_band_hz = float(receiver_hz)
+        # An exclusive group keeps one button checked; lift that briefly.
+        self._band_group.setExclusive(False)
+        self._fm_btn.setChecked(False)
+        self._am_btn.setChecked(False)
+        self._band_group.setExclusive(True)
+        self._tuning_dial.set_active(False)
+        self._freq_display.set_off_band(self._off_band_hz)
+        self._refresh_preset_states()
+        self._hint_timer.stop()
+        self._reset_hint()
+
+    def _leave_off_band(self) -> None:
+        if self._off_band_hz is None:
+            return
+        self._off_band_hz = None
+        (self._fm_btn if self._band == RadioBand.FM else self._am_btn).setChecked(True)
+        self._tuning_dial.set_active(True)
+        self._freq_display.set_off_band(None)
+        self._hint_timer.stop()
+        self._reset_hint()
 
     def _seek_up(self) -> None:
         """Tune up one channel."""
@@ -1065,9 +1156,6 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         Returns:
             Demodulated audio samples
         """
-        if not self._powered:
-            return np.zeros(len(samples), dtype=np.float32)
-
         # Demodulate based on band
         if self._band == RadioBand.FM:
             audio = self._fm_demod.demodulate(samples)
@@ -1084,7 +1172,10 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         return audio.astype(np.float32)
 
     def get_frequency(self) -> float:
-        """Get current tuned frequency in Hz."""
+        """The tuner's station in Hz (the one its dial and presets start from).
+
+        While :meth:`is_off_band`, the receiver is elsewhere.
+        """
         return self._frequency
 
     def get_band(self) -> RadioBand:
@@ -1092,13 +1183,17 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         return self._band
 
     def set_frequency(self, freq_hz: float) -> None:
-        """Set frequency externally (does not emit ``frequency_changed``).
+        """Follow the receiver's frequency (does not emit ``frequency_changed``).
 
-        A frequency inside the other broadcast band switches bands; anything
-        outside both bands is clamped to the current band.
+        A frequency inside a broadcast band tunes the tuner there, switching
+        bands if needed. Anything outside both bands leaves the tuner's
+        station alone and shows that the receiver is elsewhere (see
+        :meth:`is_off_band`), rather than a station the receiver is not on.
         """
         band = band_for_frequency(freq_hz)
-        if band is not None and band != self._band:
+        if band is None:
+            self._enter_off_band(freq_hz)
+        elif band != self._band:
             self._band_frequency[band] = freq_hz
             self._switch_band(band, emit=False)
         else:

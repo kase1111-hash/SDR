@@ -138,9 +138,9 @@ class TestLayout(_PanelTestCase):
             titles,
             [
                 "Frequency",
-                "Receiver",
-                "Demodulation",
                 "Presets",
+                "Demodulation",
+                "Receiver",
                 "Recording",
                 "License Profile",
             ],
@@ -199,7 +199,12 @@ class TestTheming(_PanelTestCase):
         self.assertEqual(p._license_info.property("role"), "hint")
         self.assertEqual(p._tx_warning.property("role"), "callout")
         self.assertEqual(p._tx_warning.property("tone"), "warning")
+        # Red only while recording, like the toolbar's Record button.
+        self.assertFalse(p._record_btn.property("role"))
+        p.set_recording_state(True)
         self.assertEqual(p._record_btn.property("role"), "danger")
+        p.set_recording_state(False)
+        self.assertFalse(p._record_btn.property("role"))
 
 
 class TestFrequencyEntry(_PanelTestCase):
@@ -386,13 +391,16 @@ class TestPresets(_PanelTestCase):
 
         self.panel.set_license_class(LicenseClass.NONE)
         self.select("Amateur", "2m Calling")
-        self.assertEqual(self.panel._preset_tx.property("tone"), "warning")
+        # Listening always works, so a license restriction is only a note.
+        self.assertFalse(self.panel._preset_tx.property("tone"))
+        self.assertTrue(self.panel._preset_tx.text().startswith("Listen ✓"))
         self.panel.set_license_class(LicenseClass.TECHNICIAN)
         self.assertEqual(self.panel._preset_tx.property("tone"), "success")
-        self.assertIn("TX allowed", self.panel._preset_tx.text())
+        self.assertIn("Transmit ✓", self.panel._preset_tx.text())
         self.select("GNSS", "GPS L1 (C/A)")
-        self.assertEqual(self.panel._preset_tx.property("tone"), "danger")
+        self.assertEqual(self.panel._preset_tx.property("tone"), "warning")
         self.assertIn("GPS L1", self.panel._preset_tx.text())
+        self.assertTrue(self.panel._preset_tx.text().startswith("Listen ✓"))
 
     def test_browsing_presets_does_not_flood_the_error_log(self):
         with self.assertNoLogs("sdr_module.core.frequency_manager", "WARNING"):

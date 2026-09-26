@@ -87,7 +87,9 @@ _S9_FRACTION = 0.6
 # Readings older than this (seconds) are shown as stale.
 _STALE_AFTER_S = 3.0
 
-_EMPTY = "--"
+# Shown in place of a reading before data arrives; the em dash matches the
+# rest of the app's empty values.
+_EMPTY = "—"  # em dash
 
 
 def dbm_to_s_units(dbm: float) -> float:
@@ -127,6 +129,13 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
     # Half of the arc's sweep, in degrees either side of vertical.
     _HALF_SWEEP = 50.0
     _MARGIN = 10.0
+    # Below _ROOMY_HEIGHT the face trades its margins and the room under the
+    # arc for scale size, down to _MIN_HEIGHT. That keeps a usable gauge in
+    # a short tab (1024x640 window) with the S-METER / RST readouts under it
+    # still in view.
+    _MIN_HEIGHT = 88
+    _ROOMY_HEIGHT = 140.0
+    _TIGHT_MARGIN = 4.0
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -142,7 +151,7 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
         # Preferred height fits the full-width scale; in a short panel the
         # gauge shrinks (down to its minimum) before anything scrolls.
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self.setMinimumSize(220, 120)
+        self.setMinimumSize(220, self._MIN_HEIGHT)
         self.setToolTip(
             "Signal strength in S-units (6 dB each, S9 = -73 dBm), then dB over "
             "S9. The thin needle shows the peak hold."
@@ -162,7 +171,7 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
 
     def minimumSizeHint(self) -> "QSize":
         """Smallest useful size."""
-        return QSize(220, 120)
+        return QSize(220, self._MIN_HEIGHT)
 
     # ------------------------------------------------------------------ API
 
@@ -244,23 +253,47 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
         radius = (width / 2.0 - self._MARGIN - lw / 2.0) / cos_e - base - extent
         return max(20.0, radius)
 
+    def _squeeze(self, height: Optional[float]) -> float:
+        """0 for a roomy face (or an unknown height), rising to 1 at the
+        minimum height."""
+        if height is None:
+            return 0.0
+        span = self._ROOMY_HEIGHT - self._MIN_HEIGHT
+        return max(0.0, min(1.0, (self._ROOMY_HEIGHT - height) / span))
+
+    def _v_margin(self, squeeze: float) -> float:
+        """Space above the top label and below the legends."""
+        return self._MARGIN - (self._MARGIN - self._TIGHT_MARGIN) * squeeze
+
     def _needed_height(
-        self, radius: float, fm: "QFontMetricsF", width: Optional[float] = None
+        self,
+        radius: float,
+        fm: "QFontMetricsF",
+        width: Optional[float] = None,
+        height: Optional[float] = None,
     ) -> float:
-        """Face height for a scale of ``radius``: labels, arc and legends."""
+        """Face height for a scale of ``radius``: labels, arc and legends.
+
+        ``height`` is the face's actual height, when known: a short face uses
+        the tighter layout (see ``_squeeze``).
+        """
         width = self.width() if width is None else width
+        squeeze = self._squeeze(height)
+        roomy = 1.0 - squeeze
+        margin = self._v_margin(squeeze)
         cos_h = math.cos(math.radians(self._HALF_SWEEP))
         return (
-            self._MARGIN
+            margin
             + fm.height()  # top label
             + self._gap(fm)
             + self._band_width(width) / 2.0
             + radius * (1.0 - cos_h)  # arc rise between its ends and its top
             # Room under the arc ends for the S / dB legends and enough of
             # the needle that its angle reads at a glance. Kept small so a
-            # short, wide face still gets a full-width scale.
-            + max(fm.height() * 1.8, radius * 0.18)
-            + self._MARGIN
+            # short, wide face still gets a full-width scale; a squeezed
+            # face keeps just the legends.
+            + max(fm.height() * (1.0 + 0.8 * roomy), radius * 0.18 * roomy)
+            + margin
         )
 
     def _geometry(self, fm: "QFontMetricsF") -> Tuple[float, float, float]:
@@ -271,12 +304,12 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
         """
         w, h = float(self.width()), float(self.height())
         radius = self._radius_for_width(w, fm)
-        needed = self._needed_height(radius, fm)
+        needed = self._needed_height(radius, fm, height=h)
         while needed > h + 0.5 and radius > 20.0:
             # Squeezed vertically: shrink the scale until it fits.
             radius = max(20.0, radius * (h / needed))
-            needed = self._needed_height(radius, fm)
-        top = (h - needed) / 2.0 + self._MARGIN
+            needed = self._needed_height(radius, fm, height=h)
+        top = (h - needed) / 2.0 + self._v_margin(self._squeeze(h))
         pivot_y = top + fm.height() + self._gap(fm) + self._band_width(w) / 2.0 + radius
         return w / 2.0, pivot_y, radius
 
@@ -668,8 +701,11 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
         peak_s = dbm_to_s_units(reading.peak_hold_dbm)
         self._analog_meter.set_value(s_units, peak_s)
 
-        # Digital readouts
-        self._s_meter_label.setText(reading.s_meter)
+        # Digital readouts. The S reading uses the same 1 dB resolution as
+        # the needle and PEAK HOLD (the core rounds to 10 dB above S9, which
+        # could read below the peak); the spoken report keeps the 10 dB
+        # steps that operators say on the air.
+        self._s_meter_label.setText(format_s_units(s_units))
         set_tone(self._s_meter_label, strength_tone(s_units))
         self._rst_label.setText(self._meter.get_rst())
         self._verbal_label.setText(self._meter.get_verbal_report())
@@ -712,7 +748,7 @@ class CompactSignalMeter(QWidget if HAS_PYQT6 else object):
         layout.addWidget(self._bar_label)
 
         # RST
-        self._rst_label = set_role(QLabel("RST: --"), "value")
+        self._rst_label = set_role(QLabel(f"RST: {_EMPTY}"), "value")
         self._rst_label.setToolTip("Signal report (RST)")
         layout.addWidget(self._rst_label)
 

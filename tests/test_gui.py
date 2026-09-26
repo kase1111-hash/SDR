@@ -876,6 +876,9 @@ class TestDecoderPanelWiring(unittest.TestCase):
             sample_rate = 38400.0
 
         win._device = FakeDevice()
+        # As in the app: the protocol is chosen in the panel (which ticks
+        # Decode), and the panel's signal builds the decoder.
+        win._decoder_panel._proto_combo.setCurrentText("POCSAG")
         win._on_decoder_protocol_changed("POCSAG")
         self.assertIsNotNone(win._decoder)
 

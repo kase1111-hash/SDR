@@ -526,8 +526,8 @@ class TestQRPPanel(unittest.TestCase):
 
     def test_initial_power_matches_calculator(self):
         display = self.panel._power_display
-        self.assertEqual(display._watts_label.text(), "1.0 W")
-        self.assertEqual(display._dbm_label.text(), "+30.0 dBm")
+        self.assertEqual(display._watts_label.text(), "1 W")
+        self.assertEqual(display._dbm_label.text(), "+30 dBm")
         self.assertEqual(display._status_label.text(), "QRPp")
 
     def test_mode_changes_status(self):
@@ -583,8 +583,8 @@ class TestQRPPanel(unittest.TestCase):
         from sdr_module.ham.gui.qrp_panel import classify_qrp
 
         p = self.panel
-        p._amp_calc._pa_spin.setValue(17)  # +37 dBm = 5.01 W, shown as "5.0 W"
-        self.assertEqual(p._power_display._watts_label.text(), "5.0 W")
+        p._amp_calc._pa_spin.setValue(17)  # +37 dBm = 5.01 W, shown as "5 W"
+        self.assertEqual(p._power_display._watts_label.text(), "5 W")
         self.assertEqual(p._power_display._status_label.text(), "QRP")
         p._preset_buttons[1].click()  # 5 W limit
         self.assertEqual(p._limit_status.property("tone"), "success")

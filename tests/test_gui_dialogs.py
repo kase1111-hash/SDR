@@ -88,9 +88,9 @@ class TestMockDevice(unittest.TestCase):
         self.assertGreater(float(db.max()) - floor, 40.0)  # a strong station
 
     def test_signals_stay_put_when_tuning(self):
-        """A station at 100.3 MHz moves to the center when tuned to it."""
+        """A station at 100.1 MHz moves to the center when tuned to it."""
         self.dev.start_rx()
-        self.dev.set_frequency(100.3e6)
+        self.dev.set_frequency(100.1e6)
         power = np.mean(
             [10 ** (_spectrum_db(self.dev.read_samples(2048)) / 10) for _ in range(8)],
             axis=0,
@@ -98,7 +98,7 @@ class TestMockDevice(unittest.TestCase):
         peak_bin = int(np.argmax(power))
         offset_hz = (peak_bin - 1024) * self.dev.sample_rate / 2048
         self.assertLess(abs(offset_hz), 120e3)
-        self.assertEqual(self.dev.frequency, 100.3e6)
+        self.assertEqual(self.dev.frequency, 100.1e6)
 
     def test_read_samples_is_fast(self):
         self.dev.start_rx()
@@ -193,8 +193,8 @@ class TestScanner(unittest.TestCase):
         worker = _ScanWorker(dev, 99.9e6, 100.7e6, 200e3, -60.0)
         worker.detected.connect(lambda f, p, n: hits.append((f, p, n)))
         worker.run()  # synchronous: signals are delivered directly
-        near = [f for f, _p, _n in hits if abs(f - 100.3e6) < 150e3]
-        self.assertTrue(near, f"100.3 MHz station not found in {hits}")
+        near = [f for f, _p, _n in hits if abs(f - 100.1e6) < 150e3]
+        self.assertTrue(near, f"100.1 MHz station not found in {hits}")
         # Only the steps whose slice holds the station report it.
         self.assertLessEqual(len(near), 2)
         # The receiver is put back where it was tuned.
@@ -485,7 +485,7 @@ class TestScannerReview(unittest.TestCase):
         worker.run()
         self.assertTrue(worker.started_stream)
         self.assertFalse(dev.is_streaming)  # stopped again afterwards
-        self.assertTrue(any(abs(f - 100.3e6) < 50e3 for f in hits), hits)
+        self.assertTrue(any(abs(f - 100.1e6) < 50e3 for f in hits), hits)
 
     def test_levels_do_not_depend_on_the_device_block_size(self):
         from sdr_module.gui.scanner_dialog import _ScanWorker

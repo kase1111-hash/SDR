@@ -38,13 +38,7 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
-from ..qrp import (
-    QRP_LIMITS,
-    QRPController,
-    dbm_to_watts,
-    format_power,
-    format_power_verbose,
-)
+from ..qrp import QRP_LIMITS, QRPController, dbm_to_watts
 
 # Modes held to the stricter CW/digital QRP limit (matches QRPController).
 _CW_DIGITAL_MODES = ("CW", "RTTY", "PSK", "FT8", "FT4", "JT65", "WSPR")
@@ -72,6 +66,52 @@ def _theme() -> Any:
     return themes
 
 
+def _trim(number: str) -> str:
+    """Drop a fractional part that is all zeros ("5.0" -> "5", "2.5" stays)."""
+    if "." in number:
+        number = number.rstrip("0").rstrip(".")
+    return number
+
+
+# (smallest value in watts, watts per unit, unit). The thresholds sit just
+# under 1 so a value that would round to "1000" of a unit uses the next unit
+# up: 0.9996 W reads "1 W", not "1000 mW".
+_POWER_UNITS = (
+    (0.9995, 1.0, "W"),
+    (0.9995e-3, 1e-3, "mW"),
+    (0.9995e-6, 1e-6, "µW"),
+    (0.9995e-9, 1e-9, "nW"),
+)
+
+
+def format_watts(watts: float) -> str:
+    """Power in the panel's one watt format.
+
+    One decimal below 100 of a unit, none above, trailing ".0" dropped:
+    ``"5 W"``, ``"1.3 W"``, ``"12.6 W"``, ``"250 mW"``, ``"1 mW"``.
+    """
+    watts = float(watts)
+    if watts <= 0.0 or not math.isfinite(watts):
+        return "0 W"
+    scale, unit = 1e-12, "pW"
+    for threshold, unit_scale, unit_name in _POWER_UNITS:
+        if watts >= threshold:
+            scale, unit = unit_scale, unit_name
+            break
+    value = watts / scale
+    number = f"{value:.0f}" if value >= 99.95 else _trim(f"{value:.1f}")
+    return f"{number} {unit}"
+
+
+def format_dbm(dbm: float) -> str:
+    """Power in dBm, signed, with one decimal only when it is not zero
+    (``"+30 dBm"``, ``"+30.5 dBm"``, ``"0 dBm"``)."""
+    number = _trim(f"{float(dbm):+.1f}")
+    if number in ("+0", "-0"):
+        number = "0"
+    return f"{number} dBm"
+
+
 def qrp_limit_for_mode(mode: str) -> float:
     """QRP ceiling in watts for ``mode`` (5 W CW/digital, 10 W phone)."""
     if mode.upper() in _CW_DIGITAL_MODES:
@@ -93,16 +133,39 @@ def classify_qrp(watts: float, mode: str = "CW") -> Tuple[str, str, str]:
     mode = (mode or "CW").upper()
     limit = qrp_limit_for_mode(mode)
     if within_limit(watts, QRP_LIMITS.qrpp_watts):
-        return "QRPp", "success", f"QRPp: {format_power(QRP_LIMITS.qrpp_watts)} or less"
+        return "QRPp", "success", f"QRPp: {format_watts(QRP_LIMITS.qrpp_watts)} or less"
     if within_limit(watts, limit):
-        return "QRP", "success", f"Within the {limit:g} W QRP limit for {mode}"
+        return (
+            "QRP",
+            "success",
+            f"Within the {format_watts(limit)} QRP limit for {mode}",
+        )
     if within_limit(watts, QRP_LIMITS.low_power_watts):
-        return "Low Power", "warning", f"Above the {limit:g} W QRP limit for {mode}"
+        return (
+            "Low Power",
+            "warning",
+            f"Above the {format_watts(limit)} QRP limit for {mode}",
+        )
     return (
         "QRO",
         "danger",
-        f"Above {QRP_LIMITS.low_power_watts:g} W: high power (QRO)",
+        f"Above {format_watts(QRP_LIMITS.low_power_watts)}: high power (QRO)",
     )
+
+
+class _WattSpinBox(QDoubleSpinBox if HAS_PYQT6 else object):
+    """Watt spin box that shows ``5 W`` / ``0.25 W`` rather than ``5.000 W``.
+
+    It keeps three decimals (1 mW steps) for input but drops trailing zeros
+    from the displayed value, like the panel's other watt readouts.
+    """
+
+    def textFromValue(self, value: float) -> str:
+        text = super().textFromValue(value)
+        point = self.locale().decimalPoint()
+        if point and point in text:
+            text = text.rstrip("0").rstrip(point)
+        return text
 
 
 def _match_label_heights(form: "QFormLayout") -> None:
@@ -197,8 +260,8 @@ class PowerDisplayWidget(QWidget if HAS_PYQT6 else object):
         watts = dbm_to_watts(dbm)
         label, tone, detail = classify_qrp(watts, mode)
 
-        self._watts_label.setText(format_power(watts))
-        self._dbm_label.setText(f"{dbm:+.1f} dBm")
+        self._watts_label.setText(format_watts(watts))
+        self._dbm_label.setText(format_dbm(dbm))
         self._status_label.setText(label)
         self._detail_label.setText(detail)
         self._status_label.setToolTip(detail)
@@ -261,6 +324,8 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
         self._driver_spin.setSuffix(" dB")
         self._driver_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._driver_spin.setToolTip("Gain of the driver stage")
+        # Labelled by a checkbox, which cannot be a buddy: name it directly.
+        self._driver_spin.setAccessibleName("Driver gain")
         self._driver_spin.valueChanged.connect(self._calculate)
         layout.addWidget(self._driver_spin, 1, 1)
 
@@ -280,13 +345,14 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
         self._pa_spin.setSuffix(" dB")
         self._pa_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._pa_spin.setToolTip("Gain of the power amplifier stage")
+        self._pa_spin.setAccessibleName("PA gain")
         self._pa_spin.valueChanged.connect(self._calculate)
         layout.addWidget(self._pa_spin, 2, 1)
 
-        self._pa_out = _readout("1.0 W")
+        self._pa_out = _readout("1 W")
         layout.addWidget(self._pa_out, 2, 2)
 
-        # Result column must fit "(bypassed)" and "100.0 mW" without jitter.
+        # Result column must fit "(bypassed)" and "79.4 mW" without jitter.
         for label in (self._input_watts, self._driver_out, self._pa_out):
             label.ensurePolished()
             label.setMinimumWidth(label.fontMetrics().horizontalAdvance("(bypassed)"))
@@ -297,7 +363,7 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
         # Output
         output_caption = QLabel("Output:")
         layout.addWidget(output_caption, 4, 0)
-        self._output_label = _readout("1.0 W (+30 dBm)", "value")
+        self._output_label = _readout("1 W (+30 dBm)", "value")
         self._output_label.setToolTip("Power at the antenna connector")
         layout.addWidget(self._output_label, 4, 1, 1, 2)
 
@@ -313,7 +379,7 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
             output_caption,
             dc_caption,
         ]
-        self._dc_label = _readout("2.0 W")
+        self._dc_label = _readout("2.2 W")
         self._dc_label.setToolTip(dc_caption.toolTip())
         layout.addWidget(self._dc_label, 5, 1, 1, 2)
 
@@ -333,7 +399,7 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
         """Recalculate power chain."""
         t = _theme()
         input_dbm = self._input_spin.value()
-        self._input_watts.setText(format_power(dbm_to_watts(input_dbm)))
+        self._input_watts.setText(format_watts(dbm_to_watts(input_dbm)))
 
         current_dbm = input_dbm
         dc_power = 0.0
@@ -344,7 +410,7 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
             current_dbm += gain
             watts = dbm_to_watts(current_dbm)
             dc_power += watts / 0.5  # 50% efficiency
-            self._driver_out.setText(format_power(watts))
+            self._driver_out.setText(format_watts(watts))
             t.set_tone(self._driver_out, None)
             self._driver_spin.setEnabled(True)
         else:
@@ -358,7 +424,7 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
             current_dbm += gain
             watts = dbm_to_watts(current_dbm)
             dc_power += watts / 0.5  # 50% efficiency
-            self._pa_out.setText(format_power(watts))
+            self._pa_out.setText(format_watts(watts))
             t.set_tone(self._pa_out, None)
             self._pa_spin.setEnabled(True)
         else:
@@ -368,10 +434,12 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
 
         # Output
         output_watts = dbm_to_watts(current_dbm)
-        self._output_label.setText(format_power_verbose(output_watts, current_dbm))
+        self._output_label.setText(
+            f"{format_watts(output_watts)} ({format_dbm(current_dbm)})"
+        )
 
         # DC power
-        self._dc_label.setText(format_power(dc_power) if dc_power > 0 else "0 W")
+        self._dc_label.setText(format_watts(dc_power))
 
         # Emit signal
         self.power_changed.emit(current_dbm)
@@ -421,6 +489,8 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        # Not a Tab stop of its own: focus goes straight to the controls.
+        self._scroll.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         outer.addWidget(self._scroll)
 
         content = QWidget()
@@ -484,7 +554,7 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
 
         limit_form = _make_form()
         self._forms.append(limit_form)
-        self._limit_spin = QDoubleSpinBox()
+        self._limit_spin = _WattSpinBox()
         self._limit_spin.setRange(0.001, 1500.0)
         self._limit_spin.setValue(5.0)
         self._limit_spin.setSuffix(" W")
@@ -502,14 +572,14 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         preset_layout = QHBoxLayout()
         preset_layout.setSpacing(6)
         presets = (
-            ("QRPp 1 W", QRP_LIMITS.qrpp_watts, "QRPp: 1 W or less"),
-            ("CW 5 W", QRP_LIMITS.qrp_cw_watts, "QRP for CW and digital: 5 W"),
-            ("SSB 10 W", QRP_LIMITS.qrp_ssb_watts, "QRP for phone: 10 W"),
+            ("QRPp", QRP_LIMITS.qrpp_watts, "QRPp: {} or less"),
+            ("CW", QRP_LIMITS.qrp_cw_watts, "QRP for CW and digital: {}"),
+            ("SSB", QRP_LIMITS.qrp_ssb_watts, "QRP for phone: {}"),
         )
         self._preset_buttons = []
-        for text, watts, tip in presets:
-            btn = QPushButton(text)
-            btn.setToolTip(f"Limit to {tip}")
+        for name, watts, tip in presets:
+            btn = QPushButton(f"{name} {format_watts(watts)}")
+            btn.setToolTip(f"Limit to {tip.format(format_watts(watts))}")
             btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             btn.clicked.connect(
                 lambda _checked=False, w=watts: self._set_quick_limit(w)
@@ -538,7 +608,7 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         self._distance_label.setBuddy(self._distance_spin)
         mpw_form.addRow(self._distance_label, self._distance_spin)
 
-        self._mpw_power_spin = QDoubleSpinBox()
+        self._mpw_power_spin = _WattSpinBox()
         self._mpw_power_spin.setRange(0.001, 100)
         self._mpw_power_spin.setDecimals(3)
         self._mpw_power_spin.setValue(5.0)
@@ -646,13 +716,13 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
             return
         watts = dbm_to_watts(self._current_dbm)
         if within_limit(watts, limit):
-            text = f"✓ Within your {format_power(limit)} limit"
+            text = f"✓ Within your {format_watts(limit)} limit"
             tone = "success"
         else:
             over_db = 10.0 * math.log10(max(watts, 1e-12) / max(limit, 1e-12))
             # A non-breaking space keeps "3.0 dB" together when wrapping.
             text = (
-                f"\u26a0 Exceeds your {format_power(limit)} limit "
+                f"\u26a0 Exceeds your {format_watts(limit)} limit "
                 f"by {over_db:.1f}\u00a0dB"
             )
             tone = "danger"
@@ -708,7 +778,7 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         mpw = self._qrp.log_qso(distance, power)
         self._update_mpw_display()
 
-        summary = f"Logged {distance} mi on {format_power(power)} = {mpw:,.0f} MPW."
+        summary = f"Logged {distance} mi on {format_watts(power)} = {mpw:,.0f} MPW."
         if mpw > previous_best:
             self._mpw_feedback.setText(f"{summary} New best!")
             _theme().set_tone(self._mpw_feedback, "success")
@@ -747,6 +817,8 @@ __all__ = [
     "AmplifierCalculator",
     "QRPPanel",
     "classify_qrp",
+    "format_dbm",
+    "format_watts",
     "qrp_limit_for_mode",
     "within_limit",
 ]

@@ -54,6 +54,7 @@ from ..core.frequency_manager import (
     get_frequency_manager,
 )
 from ..utils.tooltips import get_short_tip
+from .settings_store import DEFAULT_FREQUENCY_HZ
 from .themes import set_role, set_tone
 
 # ---------------------------------------------------------------------------
@@ -84,6 +85,7 @@ _UNITS: Dict[str, Tuple[float, int]] = {
 _GROUPED_UNITS = ("Hz", "kHz")
 
 QUICK_TUNE_STEPS = (-1e6, -100e3, -10e3, 10e3, 100e3, 1e6)
+_MINUS = "−"  # typographic minus for the step buttons' labels
 
 BANDWIDTH_OPTIONS = (
     "10 kHz",
@@ -301,7 +303,7 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
 
         super().__init__(parent)
 
-        self._frequency_hz = 100e6
+        self._frequency_hz = float(DEFAULT_FREQUENCY_HZ)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -578,7 +580,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         for i, offset in enumerate(QUICK_TUNE_STEPS):
             if i == len(QUICK_TUNE_STEPS) // 2:
                 steps.addSpacing(6)
-            btn = QPushButton(self._format_offset(offset))
+            # A true minus sign: in the proportional button font a hyphen is
+            # narrower than "+", so "-10k" and "+10k" looked mismatched.
+            btn = QPushButton(self._format_offset(offset).replace("-", _MINUS))
             set_role(btn, "compact")
             # An explicit minimum (text + padding) lets the six buttons share
             # a 360 px column; otherwise styles impose a ~80 px button minimum.
@@ -708,8 +712,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._squelch_slider.setValue(-80)
         self._squelch_slider.setPageStep(5)
         self._squelch_slider.setToolTip(
-            "Audio is muted while the signal peak is below this level (dBFS). "
-            "Compare with the LEVEL readout in the toolbar."
+            "Mutes audio while the tuned channel's level is below this "
+            "threshold (dBFS). The LEVEL readout in the toolbar shows that "
+            "level."
         )
         self._squelch_slider.setAccessibleName("Squelch threshold")
         self._squelch_slider.valueChanged.connect(self._on_squelch_changed)
@@ -1073,17 +1078,31 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         )
         if preset is None:
             self._preset_info.setText("Choose a category and a preset to see it here.")
+            self._preset_info.setToolTip("")
             self._preset_tx.setText("")
             self._preset_tx.setToolTip("")
             set_tone(self._preset_tx, None)
             return
 
         mode = _PRESET_MODE_LABEL.get(preset.mode, preset.mode)
+        # Show the Bandwidth option Apply Preset will select (the narrowest
+        # that fits the channel), not the channel's nominal width: "15 kHz"
+        # here while Apply set 25 kHz made the details look wrong.
+        bandwidth = self._preset_bandwidth_text(preset.bandwidth_hz)
         self._preset_info.setText(
-            f"{_format_mhz(preset.frequency_hz)} · "
-            f"{_format_bandwidth(preset.bandwidth_hz)} · {mode}\n"
+            f"{_format_mhz(preset.frequency_hz)} · {bandwidth} · {mode}\n"
             f"{preset.description}"
         )
+        nominal = _format_bandwidth(preset.bandwidth_hz)
+        tip = ""
+        if nominal != bandwidth:
+            fits = _parse_hz(bandwidth) >= preset.bandwidth_hz
+            tip = (
+                f"The channel is {nominal} wide; Apply Preset sets Bandwidth "
+                f"to {bandwidth}, the "
+                + ("narrowest option that fits it." if fits else "widest option.")
+            )
+        self._preset_info.setToolTip(tip)
 
         with _quiet_frequency_manager():
             allowed, reason = fm.is_tx_allowed(
@@ -1153,6 +1172,13 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         if fitting:
             return min(fitting, key=lambda i: values[i])
         return max(range(len(values)), key=lambda i: values[i])
+
+    def _preset_bandwidth_text(self, bw_hz: float) -> str:
+        """The Bandwidth option Apply Preset picks for ``bw_hz``, as shown."""
+        index = self._closest_bandwidth_index(bw_hz)
+        if index < 0:
+            return _format_bandwidth(bw_hz)
+        return self._bw_combo.itemText(index)
 
     def _apply_preset(self):
         """Apply the selected preset: frequency, bandwidth and mode."""

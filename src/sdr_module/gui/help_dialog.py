@@ -51,15 +51,16 @@ SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
     ("Tuning", ("Left", "Right"), "Tune down / up by 10 kHz"),
     ("Tuning", ("Shift+Left", "Shift+Right"), "Tune down / up by 100 kHz"),
     ("Tuning", ("Ctrl+Left", "Ctrl+Right"), "Tune down / up by 1 MHz"),
-    ("File", ("Ctrl+O",), "Open a recording"),
+    ("File", ("Ctrl+O",), "Import a recording to convert its format"),
     ("File", ("Ctrl+S",), "Save the recording"),
     ("File", ("Ctrl+P",), "Save a screenshot"),
     ("File", ("Ctrl+Q",), "Exit SDR Module"),
-    ("Tools", ("Ctrl+F",), "Frequency scanner"),
-    ("Tools", ("Ctrl+R",), "AM/FM radio tuner"),
-    ("Tools", ("Ctrl+E",), "Error history"),
-    ("View", ("Ctrl+T",), "Switch between light and dark theme"),
-    ("Help", ("F1",), "Keyboard shortcuts (this window)"),
+    ("Tools", ("Ctrl+F",), "Open the frequency scanner"),
+    ("Tools", ("Ctrl+R",), "Open the AM/FM radio tuner"),
+    ("Tools", ("Ctrl+E",), "Show the error history"),
+    ("View", ("F6",), "Put the keyboard focus on the spectrum"),
+    ("View", ("Ctrl+T",), "Switch between the light and dark themes"),
+    ("Help", ("F1",), "Show this list of keyboard shortcuts"),
 )
 
 # Submenus whose items are described as "Show the <item> panel".
@@ -248,13 +249,29 @@ def build_entries(
 def _describe_action(text: str) -> str:
     """Readable description for a menu action found on the window.
 
-    ``"Panels › Decoder"`` -> ``"Show the Decoder panel"``; anything else is
-    kept as the menu shows it.
+    ``"Panels › Decoder"`` -> ``"Show the Decoder panel"`` (the panel's
+    name as its tab shows it); anything else is the menu text in sentence
+    case, like the rest of the list: ``"Focus Spectrum"`` -> ``"Focus
+    spectrum"``.
     """
     parts = text.split(" › ")
     if len(parts) == 2 and parts[0] in _PANEL_MENUS:
         return f"Show the {parts[1]} panel"
-    return text
+    return " › ".join(_sentence_case(part) for part in parts)
+
+
+def _sentence_case(text: str) -> str:
+    """Title Case -> Sentence case. Acronyms and names keep their capitals:
+    ``I/Q``, ``CHIRP``, ``S-Meter``, and a word after one (``SDR Module``,
+    ``HackRF One``)."""
+    words = text.split(" ")
+    for i in range(1, len(words)):
+        word, before = words[i], words[i - 1]
+        if any(c.isupper() for c in before[1:]):
+            continue  # part of a name: "SDR Module"
+        if word[:1].isupper() and word[1:].isalpha() and word[1:].islower():
+            words[i] = word.lower()
+    return " ".join(words)
 
 
 def _keycap_parts(key: str) -> List[str]:
@@ -385,8 +402,8 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
 
         note = QLabel(
             "Space and the arrow keys act when the focused control does not "
-            "use them itself. If they seem to do nothing, click the spectrum "
-            "first."
+            "use them itself. If they seem to do nothing, press F6 (or click "
+            "the spectrum) first."
         )
         note.setWordWrap(True)
         set_role(note, "hint")

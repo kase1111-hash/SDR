@@ -183,7 +183,7 @@ class TestLayout(_WindowTestCase):
         self.settle()
         self.win._refresh_info_panel()
         info = self.win._info_panel
-        self.assertEqual(info.value("frequency"), "100.000 MHz")
+        self.assertEqual(info.value("frequency"), "100.100 MHz")  # the default
         self.assertEqual(info.value("state"), "Not connected")
         self.assertTrue(info.value("version"))
 
@@ -240,7 +240,9 @@ class TestShortcuts(_WindowTestCase):
             self.win._spectrum, Qt.Key.Key_Right, Qt.KeyboardModifier.ControlModifier
         )
         self.assertAlmostEqual(self.freq(), start + 910e3)
-        self.assertEqual(self.win._freq_label.text(), "100.910 MHz")
+        self.assertEqual(
+            self.win._freq_label.text(), self.mw.format_frequency(start + 910e3)
+        )
 
     def test_focused_slider_keeps_its_arrow_keys(self):
         slider = self.win._control_panel._gain_slider
@@ -616,7 +618,9 @@ class TestHardwareStream(_WindowTestCase):
         seen = []
         self.win._spectrum.update_spectrum = seen.append
         self.win._update_display()
-        self.assertEqual(dev.timeouts, [0.0])
+        # Every queued transfer is taken, none waited for.
+        self.assertTrue(dev.timeouts)
+        self.assertEqual(set(dev.timeouts), {0.0})
         self.assertEqual(len(seen[0]), DISPLAY_BLOCK)
         # The recording keeps the whole block, not just the plotted part.
         self.assertEqual(len(self.win._samples_buffer[0]), len(block))
@@ -707,8 +711,12 @@ class TestLauncherSettings(unittest.TestCase):
         self.make = lambda *argv: SDRApplication(args=["sdr", *argv])
 
     def test_default_values_not_typed_are_ignored(self):
+        from sdr_module.gui.settings_store import DEFAULT_FREQUENCY_HZ
+
         app_ = self.make("--demo")
-        self.assertFalse(app_._should_apply({"frequency": 100e6}, "frequency"))
+        self.assertFalse(
+            app_._should_apply({"frequency": DEFAULT_FREQUENCY_HZ}, "frequency")
+        )
         self.assertFalse(app_._should_apply({"gain": 20.0}, "gain"))
         self.assertFalse(app_._should_apply({"frequency": None}, "frequency"))
 

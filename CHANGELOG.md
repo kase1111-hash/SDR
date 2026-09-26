@@ -7,6 +7,91 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — GUI overhaul
+- **Layout** — resizable splitters whose sizes persist (View → Reset Layout
+  restores them); the window fits a 1366×768 screen and the control panel
+  scrolls instead of crushing its sections. The tool tabs are **Decoder**,
+  **Bookmarks**, **Ham Radio** (S-Meter, Ham ID, SSTV and QRP sub-tabs) and
+  **Info** (live receiver status and quick tips). The spectrum and waterfall
+  keep their controls in header strips and share one frequency axis.
+- **Menus** — a new **Radio** menu holds Start/Stop Receiving, Record I/Q,
+  Audio Output, **Band Presets**, Enter Frequency (`Ctrl+L`) and Bookmark
+  Current Frequency (band presets, audio output and bookmarking were under
+  Tools). Save Screenshot moved to File and the theme to View → Theme;
+  File → Open Recording is now Import Recording (convert format) and
+  Device → Refresh Devices is Scan for Devices, beside a new Use Demo
+  Device. View adds Panels (`Ctrl+1`–`Ctrl+7`), Focus Spectrum (`F6`) and
+  Reset Layout; Help adds Welcome and Quick Start. The `F1` list is built
+  from the live menus, grouped by menu and filterable.
+- **Toolbar and status bar** — an Audio button and volume slider join the
+  toolbar; clicking the FREQ readout opens the frequency entry, and LEVEL
+  shows the tuned channel in dBFS (green above squelch). The status bar
+  shows a NO DEVICE / STOPPED / RUNNING badge, device and sample rate,
+  self-clearing messages colored by tone, and while recording a REC badge
+  (elapsed time, ARMED or PAUSED) with size and free disk space.
+- **Theming** — one stylesheet rendered from per-theme palette tokens
+  replaces two hand-written ones that had drifted apart. Widgets use style
+  roles and tones instead of hard-coded colors; the spectrum, waterfall
+  axes, S-meter and radio tuner paint from the palette and switch live.
+  Light-theme text reaches at least 4.6:1 contrast, light-theme buttons no
+  longer look disabled, and check boxes, radio buttons and spin-box arrows
+  use generated icons.
+- **Focus and accessibility** — keyboard focus is always visible (a 2 px
+  ring on buttons, check boxes and slider handles, an accent outline on
+  tabs and lists, a focus frame on the plots). `F6`/`Esc` return the focus
+  to the spectrum; `Ctrl+1`–`Ctrl+7` jump to a panel's first control.
+  Dialogs have a consistent tab order and Enter/Esc behavior, controls
+  carry accessible names, and the mouse wheel no longer changes a control
+  panel setting it merely scrolls past.
+- **Radio tuner** — redrawn in theme colors with a slide-rule dial,
+  one-channel step buttons (FM steps 100 kHz) and presets stored by
+  right-click or press-and-hold. It tunes the main receiver in AM or FM
+  with the matching deviation and bandwidth, follows the receiver, and
+  shows when the receiver is outside the broadcast bands.
+- **Defaults** — with nothing saved, the GUI starts on 100.1 MHz in FM with
+  audio output on.
+
+### Added — GUI
+- **Passband display** — a shaded band on the spectrum marks the channel
+  being demodulated; LEVEL, squelch and the S-meter now measure that
+  channel instead of the strongest signal anywhere in the span.
+- **Demo audio** — the demo device streams in real time and its strongest
+  station, 100.1 MHz, plays a looping tune in stereo FM, so audio works
+  without hardware. It also simulates airband AM, 2 m, 70 cm and NOAA FM,
+  ISM and APRS bursts, ADS-B pulses and a CW beacon. A computer that can't
+  keep up gets a hint and muted audio instead of a stutter.
+- **Decoder and bookmarks** — the Decoder tab offers a one-click "Tune to …"
+  for ADS-B, APRS and ACARS, says whether the receiver is tuned where the
+  protocol is heard, and marks RDS as not decodable live. Bookmarks save the
+  demodulation mode (and FM deviation) and restore it when tuned.
+- **Plots** — hover readouts (frequency and level) on both plots; the
+  waterfall puts the newest line at the top, with a time axis in seconds
+  and a Clear button.
+- **Persistence** — the bandwidth, FM deviation, recording format, audio
+  volume, splitter sizes, open tool tab, license class and Ham ID settings
+  are now remembered too.
+
+### Fixed — GUI behavior
+- Shortcuts bound twice (so neither fired) have one owner, and Space and
+  the arrow keys no longer take over a focused slider, list or text field.
+- Click-to-tune updates the control panel, toolbar readout and plot axes
+  together; AGC can be switched off again; the saved frequency and gain
+  survive a launch; the Recording panel's Pause and format choice work; an
+  unsaved recording is offered for saving before it would be lost.
+- The SSTV decoder gets continuous FM audio whether or not the speaker is
+  on; Ham ID transmits only with a HackRF One connected; reconnecting the
+  open device changes its sample rate; the display pauses during a
+  frequency scan; hot-plug polling stays quiet without drivers; dialogs are
+  freed after use instead of piling up as hidden windows; audio output
+  says when no output device can be opened.
+
+### Removed — GUI
+- The radio tuner's volume, tone, balance, seek and power/mute controls,
+  which never affected the audio: it plays through the main window's Audio
+  button and volume slider. `set_volume()` / `set_muted()` remain for
+  `process_samples()`.
+- The status bar's buffer-fill gauge (the Info tab shows the buffer).
+
 ### Fixed — Hardware drivers now work against real libraries
 - **RTL-SDR enumeration** called `RtlSdr.get_device_count()` /
   `get_device_serial()`, methods pyrtlsdr has never had, so device scanning
@@ -69,8 +154,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stripped, blank rows skipped. Repeater duplex/offset, CTCSS/DTCS tones,
   mode, tuning step, skip flag, power, and comments all survive a round trip.
   Pure Python — no PyQt6 or NumPy needed.
-- **GUI** — Import/Export CSV buttons on the Bookmarks (memory channels)
-  panel, plus `File → Import / Export Channels (CHIRP CSV)`. Importing offers
+- **GUI** — a CSV button on the Bookmarks (memory channels) tab with
+  Import / Export Channels (CHIRP CSV), plus the same two commands in the
+  File menu. Importing offers
   replace or append; imported mode, tone, and repeater shift are shown in the
   channel list. Channels saved before this change still load.
 - **CLI** — `sdr-scan channels export|import|list`, including

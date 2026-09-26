@@ -33,6 +33,7 @@ def cmd_gui(args: argparse.Namespace) -> int:
     settings = {
         "demo_mode": args.demo,
         "frequency": args.frequency,
+        "sample_rate": args.sample_rate,
         "gain": args.gain,
     }
 
@@ -631,12 +632,24 @@ def create_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Run in demo mode (no hardware required)",
     )
+    # Same as the GUI's DEFAULT_FREQUENCY_HZ (not imported: that would load
+    # the GUI package for every command).
     gui_parser.add_argument(
         "--frequency",
         "-f",
         type=float,
-        default=100e6,
-        help="Initial frequency in Hz (default: 100 MHz)",
+        default=100.1e6,
+        help="Initial frequency in Hz (default: the last one used, or 100.1 MHz)",
+    )
+    gui_parser.add_argument(
+        "--sample-rate",
+        "-s",
+        type=float,
+        default=2.4e6,
+        help=(
+            "Sample rate in Hz for the demo device; also preselected in "
+            "Device > Connect (default: 2.4 MHz)"
+        ),
     )
     gui_parser.add_argument(
         "--gain", "-g", type=float, default=20.0, help="RF gain in dB (default: 20)"

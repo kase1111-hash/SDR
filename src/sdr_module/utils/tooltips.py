@@ -27,18 +27,24 @@ RF_TOOLTIPS: Dict[str, Tooltip] = {
     "center_frequency": Tooltip(
         title="Center Frequency",
         short="The frequency your SDR is tuned to receive or transmit.",
-        detailed="""The center frequency is the middle of your receive/transmit
-bandwidth. For example, if tuned to 100 MHz with 2 MHz bandwidth, you'll
-see signals from 99-101 MHz. The RTL-SDR covers 500 kHz to 1.7 GHz,
-while HackRF covers 1 MHz to 6 GHz.""",
+        detailed="""The center frequency is the middle of the span the SDR captures.
+For example, tuned to 100 MHz at a sample rate of 2 MS/s, the spectrum
+shows 99-101 MHz. The RTL-SDR covers 500 kHz to 1.7 GHz, while HackRF
+covers 1 MHz to 6 GHz.""",
     ),
     "sample_rate": Tooltip(
         title="Sample Rate",
-        short="How many samples per second the SDR captures (determines bandwidth).",
-        detailed="""Sample rate directly determines your visible bandwidth. At 2.4 MS/s,
-you see 2.4 MHz of spectrum. Higher rates show more spectrum but require
-more CPU and USB bandwidth. RTL-SDR maxes at 2.56 MS/s, HackRF at 20 MS/s.
-Nyquist theorem: sample rate must be ≥2× highest frequency of interest.""",
+        short=(
+            "Samples per second the SDR captures. Sets the span, the width of "
+            "spectrum shown (2.4 MS/s = 2.4 MHz)."
+        ),
+        detailed="""The sample rate sets the span: with I/Q sampling, the spectrum and
+waterfall show as many MHz as the rate has MS/s (2.4 MS/s shows 2.4 MHz
+around the center frequency). Higher rates show more spectrum but need
+more CPU and USB bandwidth. RTL-SDR tops out at 2.56 MS/s (2.4 MS/s is
+the reliable maximum), HackRF at 20 MS/s. Choose it when connecting the
+device (Device > Connect). It does not change the channel you listen to;
+that is the Bandwidth setting.""",
         warning="Rates above 2.4 MS/s on RTL-SDR may drop samples on some systems.",
     ),
     "gain": Tooltip(
@@ -51,12 +57,19 @@ adjust based on signal quality. RTL-SDR: 0-49.6dB, HackRF: 0-62dB.""",
         warning="Excessive gain causes signal clipping and spurious signals.",
     ),
     "bandwidth": Tooltip(
-        title="Filter Bandwidth",
-        short="The width of the frequency range being received.",
-        detailed="""Bandwidth determines how much spectrum you capture. Narrower
-bandwidth = less noise but may cut off wideband signals. For FM broadcast,
-use 200kHz+. For SSB voice, 2.4-3kHz. For digital modes, match the
-signal's occupied bandwidth. HackRF has selectable filters from 1.75-28 MHz.""",
+        title="Channel Bandwidth",
+        short=(
+            "Width of the channel around the tuned frequency that is "
+            "demodulated. It does not change the span shown in the spectrum."
+        ),
+        detailed="""The channel filter keeps this much spectrum around the tuned
+frequency for the demodulator, the level readout, the squelch and the
+S-meter. Pick the narrowest option that still holds the whole signal: a
+wider one lets in more noise and neighbouring stations, a narrower one
+cuts off part of the signal. FM broadcast: 200 kHz. Narrowband FM
+(amateur, weather) and airband AM: 25 kHz. SSB and CW: 10 kHz, the
+narrowest option. The span shown in the spectrum is set by the sample
+rate, not by this setting.""",
     ),
     "bias_tee": Tooltip(
         title="Bias Tee",

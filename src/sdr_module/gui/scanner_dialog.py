@@ -44,14 +44,16 @@ if HAS_PYQT6:
 
 logger = logging.getLogger(__name__)
 
-# Scan presets: (label, start MHz, end MHz, step kHz).
+# Scan presets: (label, start MHz, end MHz, step kHz), named and ordered like
+# the band presets of the welcome screen and Radio > Band Presets. The first
+# one matches the dialog's default range.
 SCAN_PRESETS: Tuple[Tuple[str, float, float, float], ...] = (
     ("FM Broadcast (88–108 MHz)", 88.0, 108.0, 200.0),
-    ("Airband AM (118–137 MHz)", 118.0, 137.0, 25.0),
-    ("2m Ham (144–148 MHz)", 144.0, 148.0, 12.5),
     ("NOAA Weather (162 MHz)", 162.4, 162.55, 25.0),
-    ("ISM 433 MHz", 433.05, 434.79, 25.0),
+    ("2m Ham (144–148 MHz)", 144.0, 148.0, 12.5),
     ("70cm Ham (420–450 MHz)", 420.0, 450.0, 25.0),
+    ("Airband AM (118–137 MHz)", 118.0, 137.0, 25.0),
+    ("ISM 433 (433.05–434.79 MHz)", 433.05, 434.79, 25.0),
 )
 _CUSTOM = "Custom"
 _NO_DEVICE_TIP = (
@@ -65,6 +67,12 @@ _FFT_SIZE = 2048
 # Up to this many FFT_SIZE segments are power-averaged per step (Welch), which
 # steadies the noise floor without hiding steady carriers.
 _MAX_SEGMENTS = 4
+# A broadcast-channel step measures this long instead (more segments): a
+# few milliseconds of a music station can catch a quiet or bass-heavy moment
+# whose spectrum is a narrow carrier off to one side of its channel, while
+# about 30 ms averages over the modulation and shows the whole channel.
+_WIDE_CAPTURE_S = 0.03
+_MAX_WIDE_SEGMENTS = 64
 # Give up when this many steps in a row return no samples before any step
 # has returned some: the device is not delivering data, and each empty read
 # can wait a second on real hardware.
@@ -101,16 +109,18 @@ def _format_freq(freq_hz: float) -> str:
     return f"{freq_hz / 1e6:.3f} MHz"
 
 
-def _power_spectrum_dbfs(samples: np.ndarray) -> np.ndarray:
+def _power_spectrum_dbfs(
+    samples: np.ndarray, max_segments: int = _MAX_SEGMENTS
+) -> np.ndarray:
     """Hann-windowed power spectrum in dBFS (a full-scale tone reads 0 dB).
 
-    Uses the main display's FFT length and averages up to ``_MAX_SEGMENTS``
+    Uses the main display's FFT length and averages up to ``max_segments``
     of the newest segments, so levels match the spectrum whatever block size
     the device delivers. Shorter captures use a single FFT of their length.
     """
     n = len(samples)
     if n >= _FFT_SIZE:
-        segments = min(_MAX_SEGMENTS, n // _FFT_SIZE)
+        segments = max(1, min(max_segments, n // _FFT_SIZE))
         blocks = samples[n - segments * _FFT_SIZE :].reshape(segments, _FFT_SIZE)
         size = _FFT_SIZE
     else:
@@ -328,7 +338,7 @@ class _ScanWorker(QThread if HAS_PYQT6 else object):
             if first is None or len(first) == 0:
                 self._last_failure = "samples"
                 return None
-            samples = self._device.read_samples(_FFT_SIZE * _MAX_SEGMENTS)
+            samples = self._device.read_samples(_FFT_SIZE * self._segments(span_hz))
         except Exception as e:
             logger.debug(f"Scan read failed at {freq_hz}: {e}")
             self._last_failure = "error"
@@ -346,11 +356,18 @@ class _ScanWorker(QThread if HAS_PYQT6 else object):
         self._last_failure = ""
         return measured
 
+    def _segments(self, span_hz: Optional[float]) -> int:
+        """FFT segments to average for one step (see ``_WIDE_CAPTURE_S``)."""
+        if not (span_hz and span_hz >= _WIDE_STEP_HZ):
+            return _MAX_SEGMENTS
+        wanted = int(np.ceil(_WIDE_CAPTURE_S * self._sample_rate() / _FFT_SIZE))
+        return int(min(max(wanted, _MAX_SEGMENTS), _MAX_WIDE_SEGMENTS))
+
     def _analyse(
         self, samples: np.ndarray, freq_hz: float, span_hz: Optional[float]
     ) -> Tuple[float, float, float]:
         """``(peak_freq_hz, peak_dbfs, noise_dbfs)`` of one capture."""
-        power = _power_spectrum_dbfs(samples)
+        power = _power_spectrum_dbfs(samples, self._segments(span_hz))
         n = len(power)
         bin_hz = self._sample_rate() / n
         offsets = (np.arange(n) - n // 2) * bin_hz

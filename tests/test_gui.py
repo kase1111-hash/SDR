@@ -310,7 +310,9 @@ class TestFrequencyInputLogic(unittest.TestCase):
 
     def test_initialization(self):
         """Test widget initializes correctly."""
-        self.assertEqual(self.widget._frequency_hz, 100e6)
+        from sdr_module.gui.settings_store import DEFAULT_FREQUENCY_HZ
+
+        self.assertEqual(self.widget._frequency_hz, DEFAULT_FREQUENCY_HZ)
 
     def test_set_frequency(self):
         """Test setting frequency."""

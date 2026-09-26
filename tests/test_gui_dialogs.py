@@ -312,7 +312,8 @@ class TestHelpDialog(unittest.TestCase):
         keys = {k for _cat, ks, _d in entries for k in ks}
         self.assertIn("Ctrl+O", keys)
         self.assertNotIn("Ctrl+R", keys)  # not bound -> not listed
-        self.assertIn(("Tools", ("Ctrl+J",), "Jump Somewhere"), entries)
+        # Unknown menu items are listed in sentence case like the rest.
+        self.assertIn(("Tools", ("Ctrl+J",), "Jump somewhere"), entries)
 
     def test_reads_shortcuts_from_the_parent_window(self):
         from PyQt6.QtCore import Qt
@@ -339,7 +340,7 @@ class TestHelpDialog(unittest.TestCase):
         entries = HelpDialog(win).shortcut_entries()
         by_key = {ks: (cat, d) for cat, ks, d in entries}
         self.assertEqual(by_key[("Space",)][0], "Radio")
-        self.assertEqual(by_key[("Ctrl+F",)], ("Tools", "Frequency scanner"))
+        self.assertEqual(by_key[("Ctrl+F",)], ("Tools", "Open the frequency scanner"))
         self.assertEqual(
             by_key[("Left", "Right")], ("Tuning", "Tune down / up by 5 kHz")
         )

@@ -16,6 +16,13 @@ LICENSE PROFILES:
 - Technician: VHF/UHF full, limited HF (10m, some 80m/40m/15m CW)
 - General: Most HF bands with sub-band restrictions
 - Amateur Extra: Full amateur band privileges
+
+A higher amateur class always holds every privilege of the lower ones
+(Extra > General > Technician): a segment listed for Technicians is open to
+General and Extra operators too, so the tables only need to list the lowest
+class a segment is granted to. Where several segments cover a frequency, the
+one listed for the operator's own class sets the power limit (e.g. the 200 W
+Technician limit on HF does not apply to a General operator).
 """
 
 from __future__ import annotations
@@ -71,6 +78,30 @@ class LicenseClass(Enum):
                 return member
         return cls.NONE
 
+    @property
+    def rank(self) -> int:
+        """Privilege level: NONE 0, TECHNICIAN 1, GENERAL 2, AMATEUR_EXTRA 3."""
+        return _LICENSE_RANK[self]
+
+    def includes(self, other: "LicenseClass") -> bool:
+        """True if this class holds every privilege granted to ``other``.
+
+        Amateur classes are cumulative: Extra includes General, which
+        includes Technician. Unlicensed (NONE) includes only itself; every
+        license keeps the license-free bands, which list all classes.
+        """
+        if other is LicenseClass.NONE:
+            return self is LicenseClass.NONE
+        return self.rank >= other.rank
+
+
+_LICENSE_RANK = {
+    LicenseClass.NONE: 0,
+    LicenseClass.TECHNICIAN: 1,
+    LicenseClass.GENERAL: 2,
+    LicenseClass.AMATEUR_EXTRA: 3,
+}
+
 
 @dataclass
 class BandPrivilege:
@@ -83,7 +114,8 @@ class BandPrivilege:
         end_hz: Upper edge of band segment
         modes: Allowed modes (CW, SSB, DATA, FM, AM) or empty for all
         max_power_watts: Maximum power for this segment (None = no limit)
-        licenses: Set of license classes that can use this segment
+        licenses: License classes the segment is granted to. Higher amateur
+            classes inherit it (see ``LicenseClass.includes``).
     """
 
     name: str
@@ -93,9 +125,13 @@ class BandPrivilege:
     max_power_watts: Optional[float] = None
     licenses: Set[LicenseClass] = field(default_factory=set)
 
+    def is_granted_to(self, license_class: LicenseClass) -> bool:
+        """True if ``license_class`` may use this segment (listed or inherited)."""
+        return any(license_class.includes(listed) for listed in self.licenses)
+
     def is_allowed(self, license_class: LicenseClass, mode: str = "") -> bool:
         """Check if the given license and mode are allowed."""
-        if license_class not in self.licenses:
+        if not self.is_granted_to(license_class):
             return False
         if self.modes and mode and mode.upper() not in self.modes:
             return False
@@ -429,12 +465,13 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         modes={"CW", "DATA"},
         licenses=GENERAL_EXTRA,
     ),
-    # Technician: 3.525-3.600 CW only (Novice portion)
+    # Technician: 3.525-3.600 CW only (Novice portion), 200 W PEP
     BandPrivilege(
         name="80m CW Tech",
         start_hz=3.525e6,
         end_hz=3.600e6,
         modes={"CW"},
+        max_power_watts=200.0,
         licenses={LicenseClass.TECHNICIAN},
     ),
     # Extra: 3.600-3.700 Phone/Image
@@ -445,7 +482,7 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         modes={"SSB", "USB", "LSB", "AM", "DATA"},
         licenses=EXTRA_ONLY,
     ),
-    # General + Extra: 3.700-3.800 Phone/Image (unofficial DX window)
+    # Extra only: 3.700-3.800 Phone/Image (General phone starts at 3.800)
     BandPrivilege(
         name="80m Phone DX Window",
         start_hz=3.700e6,
@@ -523,12 +560,13 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         modes={"CW", "DATA"},
         licenses=GENERAL_EXTRA,
     ),
-    # Technician: 7.025-7.125 CW only (Novice portion)
+    # Technician: 7.025-7.125 CW only (Novice portion), 200 W PEP
     BandPrivilege(
         name="40m CW Tech",
         start_hz=7.025e6,
         end_hz=7.125e6,
         modes={"CW"},
+        max_power_watts=200.0,
         licenses={LicenseClass.TECHNICIAN},
     ),
     # Extra: 7.125-7.175 Phone
@@ -596,13 +634,13 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
     # =========================================================================
     # 17 Meters (18.068-18.168 MHz)
     # =========================================================================
-    # Extra: 18.068-18.110 CW/Data
+    # General + Extra: 18.068-18.110 CW/Data (17m has no Extra-only part)
     BandPrivilege(
-        name="17m CW Extra",
+        name="17m CW",
         start_hz=18.068e6,
         end_hz=18.110e6,
         modes={"CW", "DATA"},
-        licenses=EXTRA_ONLY,
+        licenses=GENERAL_EXTRA,
     ),
     # General + Extra: 18.110-18.168 All modes
     BandPrivilege(
@@ -631,12 +669,13 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         modes={"CW", "DATA"},
         licenses=GENERAL_EXTRA,
     ),
-    # Technician: 21.025-21.200 CW only
+    # Technician: 21.025-21.200 CW only, 200 W PEP
     BandPrivilege(
         name="15m CW Tech",
         start_hz=21.025e6,
         end_hz=21.200e6,
         modes={"CW"},
+        max_power_watts=200.0,
         licenses={LicenseClass.TECHNICIAN},
     ),
     # Extra: 21.200-21.275 Phone
@@ -675,24 +714,34 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
     # =========================================================================
     # 10 Meters (28.0-29.7 MHz)
     # =========================================================================
-    # CW/Data: 28.000-28.300
+    # General + Extra: 28.000-28.300 CW/Data
     BandPrivilege(
         name="10m CW",
         start_hz=28.000e6,
         end_hz=28.300e6,
         modes={"CW", "DATA"},
-        licenses=ALL_HAM,
+        licenses=GENERAL_EXTRA,
     ),
-    # Technician CW: 28.000-28.500 (200W max for Tech)
+    # Technician: 28.000-28.300 CW/Data, 200 W PEP
     BandPrivilege(
         name="10m CW Tech",
         start_hz=28.000e6,
-        end_hz=28.500e6,
-        modes={"CW", "DATA", "SSB", "USB", "LSB"},
+        end_hz=28.300e6,
+        modes={"CW", "DATA"},
         max_power_watts=200.0,
         licenses={LicenseClass.TECHNICIAN},
     ),
-    # Phone: 28.300-29.700
+    # Technician: 28.300-28.500 CW/Phone, 200 W PEP (the only HF phone
+    # segment for Technicians; General and Extra use "10m Phone" here)
+    BandPrivilege(
+        name="10m Phone Tech",
+        start_hz=28.300e6,
+        end_hz=28.500e6,
+        modes={"CW", "SSB", "USB", "LSB", "AM"},
+        max_power_watts=200.0,
+        licenses={LicenseClass.TECHNICIAN},
+    ),
+    # General + Extra: 28.300-29.700 Phone (all modes)
     BandPrivilege(
         name="10m Phone",
         start_hz=28.300e6,
@@ -700,13 +749,13 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         modes=set(),  # All modes
         licenses=GENERAL_EXTRA,
     ),
-    # FM Simplex: 29.600 (calling)
+    # FM Simplex: 29.600 (calling). Above 28.500, so General and above.
     BandPrivilege(
         name="10m FM",
         start_hz=29.500e6,
         end_hz=29.700e6,
         modes={"FM"},
-        licenses=ALL_HAM,
+        licenses=GENERAL_EXTRA,
     ),
     # =========================================================================
     # 6 Meters (50-54 MHz) - All licenses full privileges
@@ -809,7 +858,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         frequency_hz=1090e6,
         bandwidth_hz=2.4e6,
         mode="RAW",
-        description="Aircraft transponders - use dump1090",
+        description="Aircraft transponders: choose ADS-B in the Decoder tab",
         category="Aviation",
     ),
     FrequencyPreset(
@@ -880,7 +929,7 @@ RX_PRESETS: List[FrequencyPreset] = [
     # Broadcast
     FrequencyPreset(
         name="FM Broadcast",
-        frequency_hz=100e6,
+        frequency_hz=100.1e6,
         bandwidth_hz=200e3,
         mode="WFM",
         description="FM radio broadcast band",
@@ -1150,13 +1199,13 @@ class FrequencyManager:
 
         # Always include license-free bands
         for band in self._license_free_bands:
-            if self._license_class in band.licenses:
+            if band.is_granted_to(self._license_class):
                 privileges.append(band)
 
-        # Include amateur bands if licensed
+        # Include amateur bands (own class and the lower ones) if licensed
         if self._license_class != LicenseClass.NONE:
             for band in self._amateur_bands:
-                if self._license_class in band.licenses:
+                if band.is_granted_to(self._license_class):
                     privileges.append(band)
 
         return privileges
@@ -1188,25 +1237,44 @@ class FrequencyManager:
                 None,
             )
 
-        # Check amateur bands for licensed operators
-        for band in self._amateur_bands:
-            if band.start_hz <= frequency_hz <= band.end_hz:
-                if band.is_allowed(self._license_class, mode):
-                    return True, None, band
-                else:
-                    # Found band but wrong license or mode
-                    if self._license_class not in band.licenses:
-                        return (
-                            False,
-                            f"Frequency {frequency_hz/1e6:.3f} MHz requires higher license class",
-                            None,
-                        )
-                    if band.modes and mode:
-                        return (
-                            False,
-                            f"Mode '{mode}' not allowed in {band.name} - allowed: {band.modes}",
-                            None,
-                        )
+        # Every amateur segment covering the frequency counts: 10m at 28.36
+        # MHz is both a Technician phone segment and the General phone
+        # segment, and the first one found must not decide alone.
+        license_class = self._license_class
+        segments = [
+            band
+            for band in self._amateur_bands
+            if band.start_hz <= frequency_hz <= band.end_hz
+        ]
+        usable = [band for band in segments if band.is_allowed(license_class, mode)]
+        if usable:
+            # The segment listed for the operator's own class sets the power
+            # limit; otherwise the most restrictive of the inherited ones.
+            def preference(band: BandPrivilege) -> Tuple[bool, float]:
+                limit = band.max_power_watts
+                return (
+                    license_class in band.licenses,
+                    -(limit if limit is not None else float("inf")),
+                )
+
+            return True, None, max(usable, key=preference)
+
+        granted = [band for band in segments if band.is_granted_to(license_class)]
+        if granted and mode:
+            band = granted[0]
+            allowed_modes = sorted(set().union(*(b.modes for b in granted)))
+            return (
+                False,
+                f"Mode '{mode}' not allowed in {band.name} - allowed: "
+                f"{', '.join(allowed_modes)}",
+                None,
+            )
+        if segments:
+            return (
+                False,
+                f"Frequency {frequency_hz/1e6:.3f} MHz requires higher license class",
+                None,
+            )
 
         # Frequency not in any amateur or license-free band
         return (

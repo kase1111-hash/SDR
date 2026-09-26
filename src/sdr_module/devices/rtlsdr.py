@@ -112,6 +112,8 @@ class RTLSDRDevice(SDRDevice):
         self._spec = RTLSDR_SPEC
         self._direct_sampling = False
         self._rx_error: Optional[str] = None
+        # Tuner IF bandwidth set with set_bandwidth(); 0 = automatic.
+        self._if_bandwidth = 0.0
 
     @staticmethod
     def get_device_count() -> int:
@@ -180,6 +182,7 @@ class RTLSDRDevice(SDRDevice):
 
         try:
             self._device = RtlSdr(device_index=index)
+            self._if_bandwidth = 0.0  # a fresh handle starts automatic
 
             # Get device info (best-effort; enumeration may not expose a serial).
             serial = self.get_device_serial(index) or f"rtlsdr_{index}"
@@ -283,7 +286,8 @@ class RTLSDRDevice(SDRDevice):
         try:
             self._device.sample_rate = rate_hz
             self._state.sample_rate = rate_hz
-            self._state.bandwidth = rate_hz  # Bandwidth follows sample rate
+            # The tuner filter follows the sample rate unless set explicitly.
+            self._state.bandwidth = self._if_bandwidth or rate_hz
             logger.debug(f"Set sample rate to {rate_hz/1e6:.3f} MS/s")
             return True
         except Exception as e:
@@ -291,9 +295,52 @@ class RTLSDRDevice(SDRDevice):
             return False
 
     def set_bandwidth(self, bw_hz: float) -> bool:
-        """Set filter bandwidth (limited by sample rate in RTL-SDR)."""
-        # RTL-SDR bandwidth is tied to sample rate
-        return self.set_sample_rate(bw_hz)
+        """Set the tuner's IF (anti-alias) filter bandwidth.
+
+        This is the analog filter in front of the ADC. It never changes the
+        sample rate, so the span shown stays the same; 0 makes the filter
+        follow the sample rate again (the default). The tuner rounds the
+        width to one it supports (R820T/R828D: about 0.3-8 MHz), so this is
+        not the demodulated channel width, which the DSP chain filters.
+
+        Returns False, and changes nothing, when the device is not open, the
+        width is negative, or the installed pyrtlsdr / librtlsdr cannot set
+        the tuner bandwidth (``rtlsdr_set_tuner_bandwidth``). Without that
+        support, asking for the automatic width (0 or the sample rate) still
+        succeeds, because the filter already is that wide.
+        """
+        if not self._is_open or self._device is None:
+            return False
+        if bw_hz < 0:
+            logger.error(f"Invalid RTL-SDR tuner bandwidth: {bw_hz} Hz")
+            return False
+
+        try:
+            setter = getattr(self._device, "set_bandwidth", None)
+            if not callable(setter):
+                raise AttributeError("set_bandwidth")
+            setter(int(bw_hz))
+        except AttributeError:
+            # Old pyrtlsdr without the method, or a librtlsdr without
+            # rtlsdr_set_tuner_bandwidth behind it.
+            if bw_hz in (0, self._state.sample_rate):
+                return True  # what the automatic filter already does
+            logger.info(
+                "This RTL-SDR library cannot set the tuner bandwidth; it "
+                "stays automatic (it follows the sample rate)"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to set tuner bandwidth: {e}")
+            return False
+
+        self._if_bandwidth = float(bw_hz)
+        self._state.bandwidth = self._if_bandwidth or self._state.sample_rate
+        if bw_hz:
+            logger.debug(f"Set tuner bandwidth to {bw_hz/1e6:.3f} MHz")
+        else:
+            logger.debug("Tuner bandwidth follows the sample rate")
+        return True
 
     def set_gain(self, gain_db: float) -> bool:
         """Set gain value."""

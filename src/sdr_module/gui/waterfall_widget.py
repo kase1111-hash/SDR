@@ -24,6 +24,8 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 from .spectrum_widget import (
+    HEADER_MARGINS,
+    PASSBAND_TOKEN,
     axis_font,
     columns_max,
     draw_focus_frame,
@@ -32,6 +34,8 @@ from .spectrum_widget import (
     fit_header_hint,
     format_mhz,
     nice_ticks,
+    normalize_passband,
+    passband_px,
     plot_side_margins,
     readout_decimals,
     snap_step_hz,
@@ -85,6 +89,9 @@ def time_step(raw: float, max_age: Optional[float] = None) -> float:
 #: (and at least _GAP_MIN_S seconds) is drawn as a separator.
 _GAP_FACTOR = 5.0
 _GAP_MIN_S = 1.0
+
+#: Height (px) of the passband bracket's end ticks on the top edge.
+_PASSBAND_TICK_PX = 6
 
 
 def format_age(age: float, step: float) -> str:
@@ -269,6 +276,8 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
 
         # Highlights
         self._highlights: List[Tuple[int, int, int, int, QColor]] = []
+        # Demodulated channel: (low, high) Hz offsets from the center.
+        self._passband: Optional[Tuple[float, float]] = None
 
         # Paint state
         self._font = axis_font()
@@ -298,7 +307,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         set_role(header, "header-strip")
         self._header = header
         controls = QHBoxLayout(header)
-        controls.setContentsMargins(10, 3, 8, 3)
+        controls.setContentsMargins(*HEADER_MARGINS)
         controls.setSpacing(8)
 
         title = QLabel("WATERFALL")
@@ -550,6 +559,23 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._center_freq = center_freq
         self._sample_rate = sample_rate
         self._canvas.update()
+
+    def set_passband(self, low_hz: Optional[float], high_hz: Optional[float]) -> None:
+        """Mark the demodulated channel with a bracket on the top edge.
+
+        Same arguments as :meth:`SpectrumWidget.set_passband
+        <sdr_module.gui.spectrum_widget.SpectrumWidget.set_passband>`: Hz
+        offsets from the tuned frequency; ``None`` or ``low_hz >= high_hz``
+        hides it. Only the top edge is marked, so no signal is tinted.
+        """
+        band = normalize_passband(low_hz, high_hz)
+        if band != self._passband:
+            self._passband = band
+            self._canvas.update()
+
+    def passband(self) -> Optional[Tuple[float, float]]:
+        """The marked channel as (low, high) Hz offsets, or None when hidden."""
+        return self._passband
 
     def save_image(self, path: str) -> bool:
         """Save the current waterfall image to a file. Returns success."""
@@ -821,6 +847,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
 
             self._draw_highlights(painter, plot)
 
+            self._draw_passband(painter, plot, p)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             self._draw_center_marker(painter, plot, p)
 
@@ -840,51 +867,38 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         finally:
             painter.end()
 
-    def _draw_time_axis(self, painter: "QPainter", plot: "QRectF", p) -> None:
-        """Seconds-ago labels in the left margin (0s at the newest line).
+    def _time_axis_layout(
+        self, plot: "QRectF"
+    ) -> Tuple[List[float], List[Tuple[float, float, str]]]:
+        """Where the time axis goes: ``(separator_ys, labels)``.
 
-        Labels are placed at the rows whose lines actually arrived that long
-        ago, so they stay right when reception was paused and resumed. Each
-        pause gets a separator across the plot, labelled with the age of the
-        older lines below it.
+        ``separator_ys`` are the pauses in reception (one line across the
+        plot each). Each label is ``(tick_y, label_y, text)``: its tick marks
+        the row the age belongs to and its text is centered on ``label_y``,
+        the tick's y kept inside the plot's vertical extent. The overlap
+        checks use ``label_y``, where the text really is, so no two labels
+        come closer than a line height. The newest line's ``0s`` always
+        shows; then each pause's label (the older lines' age), then regular
+        ticks within the newest continuous run, wherever they fit.
         """
         spr = self._seconds_per_row()
         ages = self._row_ages()
-        if spr is None or ages is None:
-            return
+        if spr is None or ages is None or plot.height() <= 0:
+            return [], []
         rows_px = plot.height() / self._history_size
-        fm = self._fm
-        fh = fm.height()
-        label_right = plot.left() - 6
-        right_align = int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        tick_pen = QPen(p.qcolor("plot_grid"), 1)
-        axis_color = p.qcolor("plot_axis")
+        fh = self._fm.height()
         min_sep = fh + 2
+        y_min = plot.top() + fh / 2
+        y_max = max(y_min, plot.bottom() - fh / 2)
+        labels: List[Tuple[float, float, str]] = []
 
-        def draw_label(y: float, text: str) -> None:
-            # Keep the label inside the plot's vertical extent.
-            y_label = min(max(y, plot.top() + fh / 2), plot.bottom() - fh / 2)
-            # A 3 px tick ending on the frame (not on the image's first column).
-            painter.setPen(tick_pen)
-            painter.drawLine(QPointF(plot.left() - 4, y), QPointF(plot.left() - 1, y))
-            painter.setPen(axis_color)
-            painter.drawText(
-                QRectF(0, y_label - fh / 2, label_right - 2, fh), right_align, text
-            )
+        def place(tick_y: float, text: str) -> None:
+            label_y = min(max(tick_y, y_min), y_max)
+            if all(abs(label_y - other) >= min_sep for _t, other, _s in labels):
+                labels.append((tick_y, label_y, text))
 
-        # Pauses: a separator line across the plot plus the older lines' age.
         gaps = self._gap_rows(ages, spr)
-        gap_ys: List[float] = []
-        if gaps.size:
-            separator = QPen(p.qcolor("plot_bg", 230), 1)
-            for row in gaps.tolist():
-                y = round(plot.top() + row * rows_px) + 0.5
-                painter.setPen(separator)
-                painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
-                if gap_ys and y - gap_ys[-1] < min_sep:
-                    continue
-                draw_label(y, format_elapsed(float(ages[row])))
-                gap_ys.append(y)
+        separators = [round(plot.top() + row * rows_px) + 0.5 for row in gaps.tolist()]
 
         # Regular ticks within the newest continuous run of lines.
         run = ages[: int(gaps[0])] if gaps.size else ages
@@ -892,7 +906,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             spr * self._history_size * max(28.0, fh * 2.2) / plot.height(),
             max_age=float(run[-1]),
         )
-        last_y = -math.inf
+        ticks: List[Tuple[float, str]] = []
         for age in nice_ticks(0.0, float(run[-1]) + 1e-9, step):
             # Fractional row between the two lines that bracket this age (the
             # run has no pauses, so the pair is always close together).
@@ -902,11 +916,48 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             else:
                 a0, a1 = float(run[i - 1]), float(run[i])
                 row = i - 1 + ((age - a0) / (a1 - a0) if a1 > a0 else 1.0)
-            y = plot.top() + (row + 0.5) * rows_px
-            if y - last_y < min_sep or any(abs(y - g) < min_sep for g in gap_ys):
-                continue
-            draw_label(y, format_age(age, step))
-            last_y = y
+            ticks.append((plot.top() + (row + 0.5) * rows_px, format_age(age, step)))
+
+        # "0s" first: right after Stop -> Start the newest rows sit just above
+        # a pause, and their label must not be the older lines' age.
+        if ticks:
+            place(*ticks[0])
+        for row, y in zip(gaps.tolist(), separators, strict=True):
+            place(y, format_elapsed(float(ages[row])))
+        for tick in ticks[1:]:
+            place(*tick)
+        return separators, labels
+
+    def _draw_time_axis(self, painter: "QPainter", plot: "QRectF", p) -> None:
+        """Seconds-ago labels in the left margin (0s at the newest line).
+
+        Labels are placed at the rows whose lines actually arrived that long
+        ago, so they stay right when reception was paused and resumed. Each
+        pause gets a separator across the plot, labelled with the age of the
+        older lines below it (see :meth:`_time_axis_layout`).
+        """
+        separators, labels = self._time_axis_layout(plot)
+        if separators:
+            painter.setPen(QPen(p.qcolor("plot_bg", 230), 1))
+            for y in separators:
+                painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
+        if not labels:
+            return
+        fh = self._fm.height()
+        label_right = plot.left() - 6
+        right_align = int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        tick_pen = QPen(p.qcolor("plot_grid"), 1)
+        axis_color = p.qcolor("plot_axis")
+        for tick_y, label_y, text in labels:
+            # A 3 px tick ending on the frame (not on the image's first column).
+            painter.setPen(tick_pen)
+            painter.drawLine(
+                QPointF(plot.left() - 4, tick_y), QPointF(plot.left() - 1, tick_y)
+            )
+            painter.setPen(axis_color)
+            painter.drawText(
+                QRectF(0, label_y - fh / 2, label_right - 2, fh), right_align, text
+            )
 
     def _draw_highlights(self, painter: "QPainter", plot: "QRectF") -> None:
         if not self._highlights:
@@ -923,6 +974,36 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             painter.setPen(QPen(color, 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)
+
+    def _draw_passband(self, painter: "QPainter", plot: "QRectF", p) -> None:
+        """A thin bracket along the top edge spanning the demodulated channel.
+
+        Drawn with a plot-colored halo so it reads on any colormap, and only
+        over the newest few rows, so it never hides the signal history.
+        """
+        extent = passband_px(self._passband, plot, self._sample_rate)
+        if extent is None:
+            return
+        x0, x1 = extent
+        if x1 <= plot.left() or x0 >= plot.right():
+            return
+        top = plot.top()
+        tick = _PASSBAND_TICK_PX
+        halo = p.qcolor("plot_bg", 170)
+        color = p.qcolor(PASSBAND_TOKEN)
+        painter.save()
+        painter.setClipRect(plot)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        # The bracket is a 2 px bar with a short tick down at each end, on a
+        # 1 px plot-colored halo.
+        ends = (x0, x1 - 1) if x1 - x0 >= 6 else ()
+        painter.fillRect(QRectF(x0 - 1, top, x1 - x0 + 2, 3), halo)
+        for x in ends:
+            painter.fillRect(QRectF(x - 1, top + 3, 3, tick - 2), halo)
+        painter.fillRect(QRectF(x0, top, x1 - x0, 2), color)
+        for x in ends:
+            painter.fillRect(QRectF(x, top + 2, 1, tick - 2), color)
+        painter.restore()
 
     def _draw_center_marker(self, painter: "QPainter", plot: "QRectF", p) -> None:
         """Small flag on the top edge at the tuned (center) frequency."""

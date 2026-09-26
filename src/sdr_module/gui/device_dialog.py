@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import math
+import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -44,6 +45,7 @@ except ImportError:
 import numpy as np
 
 from ..utils.tooltips import get_short_tip
+from .settings_store import DEFAULT_FREQUENCY_HZ
 
 if HAS_PYQT6:
     from .themes import set_role, set_tone
@@ -536,9 +538,10 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
 # Levels are per-bin peaks on the main display's dBFS scale.
 #
 # Stations sit where the app sends people: the strongest one is on 100.1 MHz,
-# the "FM Broadcast" preset of the welcome screen and Radio > Band Presets
-# (and next to the 100 MHz start-up frequency), and the radio tuner's FM
-# presets (88.5, 93.3, 97.1, 99.5, 101.1, 104.3 MHz) each find a station.
+# the start-up frequency and the "FM Broadcast" preset of the welcome screen
+# and Radio > Band Presets (it plays music, see _MUSIC_BARS), and the radio
+# tuner's FM presets (88.5, 93.3, 97.1, 99.5, 101.1, 104.3 MHz) each find a
+# station.
 _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ...] = (
     # FM broadcast band
     (88.5e6, "wfm", -38.0, None),
@@ -559,7 +562,7 @@ _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ..
     (105.9e6, "wfm", -40.0, None),
     (106.7e6, "wfm", -48.0, None),
     (107.5e6, "wfm", -34.0, None),
-    # Narrowband carriers near the default 100 MHz view
+    # Narrowband carriers in the start-up view
     (99.82e6, "cw", -62.0, None),
     (100.715e6, "nfm", -58.0, (9.0, 5.0)),
     # Airband (AM)
@@ -607,6 +610,310 @@ def _morse_keying(message: str) -> Tuple[int, ...]:
 
 _CW_KEYING = _morse_keying("VVV DE SDR")
 _CW_DIT_S = 0.08  # ~15 WPM
+_CW_EDGE_S = 0.005  # keying rise/fall time (no key clicks)
+
+# The station with a program worth listening to: a looping tune on the
+# start-up frequency (settings_store.DEFAULT_FREQUENCY_HZ), the "FM
+# Broadcast" preset and the demo's strongest station.
+_MUSIC_STATION_HZ = 100.1e6
+_MUSIC_SEED = next(i for i, s in enumerate(_DEMO_SIGNALS) if s[0] == _MUSIC_STATION_HZ)
+
+# The tune: four bars of I-vi-IV-V in C major, each an eighth-note
+# arpeggio (MIDI notes) over a bass note and a soft pad chord.
+_MUSIC_BARS: Tuple[Tuple[Tuple[int, ...], int, Tuple[int, ...]], ...] = (
+    ((72, 76, 79, 84, 88, 84, 79, 76), 48, (60, 64, 67)),  # C
+    ((69, 72, 76, 81, 84, 81, 76, 72), 45, (57, 60, 64)),  # Am
+    ((65, 69, 72, 77, 81, 77, 72, 69), 41, (53, 57, 60)),  # F
+    ((67, 71, 74, 79, 83, 79, 74, 71), 43, (55, 59, 62)),  # G
+)
+_MUSIC_STEP_S = 0.25  # one arpeggio note (120 BPM eighth notes)
+
+# Broadcast FM composite, as fractions of the 75 kHz peak deviation: the
+# 19 kHz stereo pilot and the 57 kHz RDS subcarrier; program audio (L+R)
+# and the L-R subcarrier at 38 kHz share the rest.
+_WFM_DEVIATION_HZ = 75e3
+_PILOT_HZ = 19e3
+_PILOT_SHARE = 0.09
+_RDS_SHARE = 0.04
+_PROGRAM_SHARE = 1.0 - _PILOT_SHARE - _RDS_SHARE
+
+# Modulation (audio, keying, data) is computed once per station as a loop at
+# about this rate, then read back at the device rate by linear
+# interpolation: far cheaper than synthesising every sample, and seamless
+# because every loop is periodic.
+_LOOP_RATE_HZ = 48e3
+_TONE_LOOP_S = 4.0  # loops of tones (their pitch sweeps once per loop)
+_LOOP_CACHE_SIZE = 24
+_LOOP_CACHE: Dict[tuple, Any] = {}
+_LOOP_LOCK = threading.Lock()
+_RAMPS: Dict[int, np.ndarray] = {}
+
+# Complex white noise (unit variance per component) that every demo device
+# draws its noise floor from, at a random offset and phase each read.
+_NOISE_POOL_SIZE = 1 << 20
+_NOISE_POOL: Optional[np.ndarray] = None
+
+# Carrier phase is built from BLOCK-sample tables (see MockDevice._phase).
+_PHASE_BLOCK = 2048
+# Reading this far behind real time (polling small blocks, or restarting
+# after a pause), the demo skips ahead so timed signals keep wall-clock time.
+_MAX_LAG_S = 0.5
+
+
+def _noise_pool() -> np.ndarray:
+    global _NOISE_POOL
+    with _LOOP_LOCK:
+        if _NOISE_POOL is None:
+            rng = np.random.default_rng(0x5D12)
+            _NOISE_POOL = rng.standard_normal(
+                2 * _NOISE_POOL_SIZE, dtype=np.float32
+            ).view(np.complex64)
+    return _NOISE_POOL
+
+
+def _ramp(factor: int, length: int) -> np.ndarray:
+    """``(k % factor) / factor`` for ``k < length`` (interpolation weights)."""
+    ramp = _RAMPS.get(factor)
+    if ramp is None or len(ramp) < length:
+        size = max(length, 1 << 16) + factor
+        ramp = ((np.arange(size) % factor) / factor).astype(np.float32)
+        _RAMPS[factor] = ramp
+    return ramp
+
+
+class _Loop:
+    """A periodic real waveform stored at ``1/factor`` of the device rate."""
+
+    __slots__ = ("values", "factor")
+
+    def __init__(self, values: np.ndarray, factor: int):
+        self.values = np.ascontiguousarray(values, dtype=np.float32)
+        self.factor = int(factor)
+
+    def read(self, pos: int, n: int) -> np.ndarray:
+        """``n`` samples at the device rate from stream position ``pos``,
+        linearly interpolated (float32)."""
+        values, factor = self.values, self.factor
+        first, skip = divmod(pos % (len(values) * factor), factor)
+        count = (skip + n - 1) // factor + 2
+        seg = values.take(np.arange(first, first + count), mode="wrap")
+        if factor == 1:
+            return seg[:n]
+        out = np.repeat(np.diff(seg), factor)[skip : skip + n]
+        out *= _ramp(factor, skip + n)[skip : skip + n]
+        out += np.repeat(seg[:-1], factor)[skip : skip + n]
+        return out
+
+
+def _loop_timebase(
+    rate: float, seconds: float, loop_hz: float = _LOOP_RATE_HZ
+) -> Tuple[int, float, np.ndarray]:
+    """``(factor, loop rate, sample times)`` for a loop of about ``seconds``
+    at about ``loop_hz``."""
+    factor = max(1, int(round(rate / loop_hz)))
+    loop_rate = rate / factor
+    size = max(2, int(round(seconds * loop_rate)))
+    return factor, loop_rate, np.arange(size) / loop_rate
+
+
+def _whole_cycles(freq: float, period: float) -> float:
+    """``freq`` nudged to a whole number of cycles per loop (no seam)."""
+    return max(1.0, round(freq * period)) / period
+
+
+def _cos_cycles(cycles: np.ndarray) -> np.ndarray:
+    """``cos(2 pi cycles)`` (float32: wrapped to one cycle first, it is
+    exact enough and many times faster)."""
+    return np.cos(((2 * np.pi) * (cycles - np.floor(cycles))).astype(np.float32))
+
+
+def _tone(freq: float, t: np.ndarray, twist: float = 0.0) -> np.ndarray:
+    """A steady tone with a whole number of cycles per loop."""
+    period = len(t) * (t[1] - t[0])
+    return _cos_cycles(_whole_cycles(freq, period) * t + twist / (2 * np.pi))
+
+
+def _swept_tone(mean_hz: float, sweep_hz: float, t: np.ndarray, twist: float):
+    """A tone whose pitch sweeps by +/- ``sweep_hz`` once per loop."""
+    step = t[1] - t[0]
+    period = len(t) * step
+    sweep = np.sin(((2 * np.pi / period) * t + twist).astype(np.float32))
+    freq = _whole_cycles(mean_hz, period) + sweep_hz * sweep.astype(float)
+    return _cos_cycles(np.cumsum(freq) * step)
+
+
+def _fm_phase(deviation_hz: np.ndarray, loop_rate: float) -> np.ndarray:
+    """Phase (rad) of an FM modulation, closed over the loop and centred."""
+    deviation_hz = deviation_hz - np.mean(deviation_hz)
+    phase = (2 * np.pi / loop_rate) * np.cumsum(deviation_hz)
+    return phase - np.mean(phase)
+
+
+def _midi_hz(note: int) -> float:
+    return 440.0 * 2.0 ** ((note - 69) / 12.0)
+
+
+def _music_channels(loop_rate: float, size: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Left and right channels of the demo tune, peak-normalized to 1."""
+    left = np.zeros(size, dtype=np.float32)
+    right = np.zeros(size, dtype=np.float32)
+    envelopes: Dict[tuple, np.ndarray] = {}
+
+    def envelope(length_s, attack_s, decay_s, release_s, gain) -> np.ndarray:
+        key = (length_s, attack_s, decay_s, release_s, gain)
+        env = envelopes.get(key)
+        if env is None:
+            t = np.arange(int(length_s * loop_rate)) / loop_rate
+            env = gain * np.exp(-t / decay_s)
+            rise = max(1, int(attack_s * loop_rate))
+            env[:rise] *= 0.5 - 0.5 * np.cos(np.pi * np.arange(rise) / rise)
+            fall = max(1, int(release_s * loop_rate))
+            env[-fall:] *= 0.5 + 0.5 * np.cos(np.pi * np.arange(fall) / fall)
+            env = envelopes[key] = env.astype(np.float32)
+        return env
+
+    def note(start_s, midi, env, pan):
+        # A soft, slightly bright timbre: fundamental plus two harmonics.
+        cycles = np.arange(len(env)) * (_midi_hz(midi) / loop_rate)
+        phase = ((2 * np.pi) * (cycles - np.floor(cycles))).astype(np.float32)
+        # sin x + 0.22 sin 2x + 0.06 sin 3x
+        #   = sin x (1.18 + 0.44 cos x - 0.24 sin^2 x)
+        s1 = np.sin(phase)
+        wave = np.cos(phase)
+        wave *= 0.44
+        wave += 1.18
+        wave -= 0.24 * s1 * s1
+        wave *= s1
+        wave *= env
+        # Notes that ring past the end of the loop wrap round to its start.
+        first = int(round(start_s * loop_rate)) % size
+        head = min(len(wave), size - first)
+        for channel, gain in ((left, pan[0]), (right, pan[1])):
+            channel[first : first + head] += gain * wave[:head]
+            channel[: len(wave) - head] += gain * wave[head:]
+
+    bar_s = _MUSIC_STEP_S * 8
+    pluck = envelope(1.2, 0.005, 0.45, 0.15, 0.30)
+    bass_env = envelope(bar_s + 0.1, 0.02, 1.6, 0.25, 0.42)
+    pad_env = envelope(bar_s + 0.3, 0.35, 8.0, 0.4, 0.07)
+    for bar, (arpeggio, bass, pad) in enumerate(_MUSIC_BARS):
+        start = bar * bar_s
+        for step, midi in enumerate(arpeggio):
+            note(start + step * _MUSIC_STEP_S, midi, pluck, (0.55, 1.0))
+        note(start, bass, bass_env, (0.85, 0.85))
+        for midi in pad:
+            note(start - 0.1, midi, pad_env, (1.0, 0.45))
+    peak = max(float(np.max(np.abs(left))), float(np.max(np.abs(right))), 1e-9)
+    return left / peak, right / peak
+
+
+def _build_loops(kind: str, variant: Any, rate: float):
+    """The modulation loop(s) for one kind of demo signal (see _loops)."""
+    if kind == "wfm":
+        # (program phase, L-R subcarrier amplitude as a phase multiplier)
+        if variant == "music":
+            factor, loop_rate, t = _loop_timebase(
+                rate, _MUSIC_STEP_S * 8 * len(_MUSIC_BARS)
+            )
+            left, right = _music_channels(loop_rate, len(t))
+            mono = (left + right) * (_PROGRAM_SHARE / 2)
+            diff = (left - right) * (_PROGRAM_SHARE / 2)
+        else:
+            # Three tones for the program and a 2.5 kHz L-R tone.
+            factor, loop_rate, t = _loop_timebase(rate, _TONE_LOOP_S)
+            twist = variant * 2.1
+            mono = 0.30 * _swept_tone(1.5e3, 400.0, t, twist)
+            mono += 0.18 * _tone(3.7e3, t, twist)
+            mono += 0.12 * _swept_tone(6.9e3, -1e3, t, twist)
+            diff = 0.16 * _tone(2.5e3, t)
+        # L-R rides on 2 x pilot: its phase is S(t) sin(2 theta) * dev / 38k.
+        diff *= _WFM_DEVIATION_HZ / (2 * _PILOT_HZ)
+        return (
+            _Loop(_fm_phase(_WFM_DEVIATION_HZ * mono.astype(float), loop_rate), factor),
+            _Loop(diff, factor),
+        )
+    if kind == "nfm":
+        # Voice-like FM, +/-3 kHz peak deviation.
+        factor, loop_rate, t = _loop_timebase(rate, _TONE_LOOP_S)
+        twist = variant * 2.1
+        deviation = 2.2e3 * _swept_tone(820.0, 200.0, t, twist)
+        deviation += 1.2e3 * _swept_tone(1650.0, -250.0, t, twist)
+        return _Loop(_fm_phase(deviation, loop_rate), factor)
+    if kind == "am":
+        factor, loop_rate, t = _loop_timebase(rate, _TONE_LOOP_S)
+        envelope = 1.0 + 0.35 * _swept_tone(600.0, 150.0, t, variant * 2.1)
+        envelope += 0.2 * _tone(1700.0, t, variant)
+        return _Loop(envelope, factor)
+    if kind == "burst":
+        # 2-FSK data at 9.6 kbit/s, +/-20 kHz shift; as many ones as zeros.
+        factor, loop_rate, t = _loop_timebase(rate, 0.5)
+        count = int(np.ceil(len(t) * 9600 / loop_rate))
+        bits = np.resize([1.0, -1.0], count)
+        np.random.default_rng(variant).shuffle(bits)
+        symbol = (np.arange(len(t)) * 9600 / loop_rate).astype(int)
+        return _Loop(_fm_phase(20e3 * bits[symbol], loop_rate), factor)
+    if kind == "cw":
+        # Only the keying envelope: a low loop rate is plenty.
+        factor, loop_rate, t = _loop_timebase(
+            rate, len(_CW_KEYING) * _CW_DIT_S, _LOOP_RATE_HZ / 10
+        )
+        keyed = np.asarray(_CW_KEYING, dtype=float)[
+            np.minimum((t / _CW_DIT_S).astype(int), len(_CW_KEYING) - 1)
+        ]
+        # Two passes of a circular moving average: S-shaped key edges.
+        width = max(1, int(_CW_EDGE_S * loop_rate))
+        for _ in range(2):
+            sums = np.cumsum(np.concatenate((keyed[-width:], keyed)))
+            keyed = (sums[width:] - sums[:-width]) / width
+        return _Loop(keyed, factor)
+    if kind == "pulse":
+        # ADS-B-like 1 us pulse chips, at the device rate.
+        chips = np.random.default_rng(1090).random(1 << 16) < 0.35
+        return _Loop(chips.astype(np.float32), 1)
+    return None
+
+
+def _loops(kind: str, seed: int, rate: float):
+    """Cached modulation loop(s) of a demo signal at ``rate``."""
+    if kind == "wfm" and seed == _MUSIC_SEED:
+        variant: Any = "music"
+    elif kind in ("cw", "pulse"):
+        variant = 0
+    else:
+        variant = seed % 3
+    key = (kind, variant, float(rate))
+    # The scanner reads from its own thread.
+    with _LOOP_LOCK:
+        loops = _LOOP_CACHE.get(key)
+        if loops is None:
+            loops = _build_loops(kind, variant, rate)
+            while len(_LOOP_CACHE) >= _LOOP_CACHE_SIZE:
+                _LOOP_CACHE.pop(next(iter(_LOOP_CACHE)))
+            _LOOP_CACHE[key] = loops
+    return loops
+
+
+def _on_ranges(
+    duty: Optional[Tuple[float, float]], seed: int, t0: float, n: int, rate: float
+) -> List[Tuple[int, int]]:
+    """Sample ranges of a block starting at ``t0`` s in which a signal with
+    ``duty`` = (period s, on s) is on (the whole block when ``None``)."""
+    if duty is None:
+        return [(0, n)]
+    period, on = duty
+    shift = (seed * 1.7) % period
+    end = t0 + n / rate
+    ranges = []
+    cycle = math.floor((t0 + shift) / period)
+    while True:
+        start = cycle * period - shift
+        if start >= end:
+            return ranges
+        a = max(0, int(math.ceil((start - t0) * rate)))
+        b = min(n, int(math.ceil((start + on - t0) * rate)))
+        if b > a:
+            ranges.append((a, b))
+        cycle += 1
 
 
 class MockDevice:
@@ -622,8 +929,16 @@ class MockDevice:
     (``set_gain_mode(True)``) the device picks the gain itself, keeping the
     signals in the passband clear of clipping.
 
-    ``read_samples`` is cheap (well under a millisecond for 2048 samples) so
-    the display can poll it at 30 Hz.
+    The strongest station, 100.1 MHz, broadcasts a looping tune in stereo
+    FM, so listening to it in FM mode plays music; the others carry tones,
+    voice-like modulation, keyed CW or data bursts.
+
+    The samples form one continuous stream: each read carries on where the
+    last one ended, so demodulated audio has no clicks between reads, and
+    reading at the sample rate plays it in real time. ``read_samples`` is
+    fast enough for that: at most about 0.04 us per sample (about 3 ms for
+    a 30 Hz frame's worth, 0.034 s, at 2.4 MS/s), because the modulation is
+    precomputed as loops and the noise floor comes from a shared pool.
     """
 
     class MockInfo:
@@ -642,15 +957,20 @@ class MockDevice:
 
     def __init__(self):
         self.info = self.MockInfo()
-        self._frequency = 100e6
+        self._frequency = float(DEFAULT_FREQUENCY_HZ)
         self._sample_rate = 2.4e6
         self._gain = 20
         self._auto_gain = False
         self._running = False
         self._rng = np.random.default_rng()
-        self._sample_clock = 0  # samples generated so far (phase continuity)
+        # Stream position (samples) of the next sample, the rate it counts
+        # in, and the wall-clock time of position 0.
+        self._stream_pos = 0
+        self._stream_rate = 0.0
+        self._stream_epoch: Optional[float] = None
         self._visible_key: Optional[Tuple[float, float]] = None
         self._visible: List[tuple] = []
+        self._tables: Dict[Tuple[float, float], Tuple[np.ndarray, np.ndarray]] = {}
 
     # -- configuration (same API as the hardware drivers) ------------------ #
     def set_frequency(self, freq: float) -> bool:
@@ -751,6 +1071,7 @@ class MockDevice:
             amp = 10.0 ** (level / 20.0) * rolloff
             visible.append((offset, kind, amp, duty, seed))
         self._visible, self._visible_key = visible, key
+        self._tables = {}
         return visible
 
     @staticmethod
@@ -780,84 +1101,129 @@ class MockDevice:
         bin_factor = 1.5 / 2048.0
         return math.sqrt(10.0 ** (bin_db / 10.0) / bin_factor / 2)
 
-    @staticmethod
-    def _active(duty: Optional[Tuple[float, float]], seed: int, now: float) -> bool:
-        if duty is None:
-            return True
-        period, on = duty
-        phase = (now + (seed * 1.7) % period) % period
-        return phase < on
+    def _advance(self, n: int, rate: float) -> int:
+        """Stream position of the next ``n`` samples (and move past them)."""
+        now = time.monotonic()
+        if rate != self._stream_rate:
+            if self._stream_rate:
+                # Same point in time at the new rate.
+                self._stream_pos = int(self._stream_pos * rate / self._stream_rate)
+            self._stream_rate = rate
+        if self._stream_epoch is None:
+            self._stream_epoch = now - self._stream_pos / rate
+        # Reading slower than real time: skip ahead, so timed signals follow
+        # the clock. Reading faster (a scan) just runs ahead.
+        behind = (now - self._stream_epoch) * rate - (self._stream_pos + n)
+        if behind > _MAX_LAG_S * rate:
+            self._stream_pos += int(behind)
+        pos = self._stream_pos
+        self._stream_pos += n
+        return pos
 
-    def _modulated(self, kind, offset, amp, seed, t, now, n) -> Optional[np.ndarray]:
-        """One signal's complex baseband contribution, or None when silent."""
-        two_pi = 2.0 * np.pi
-        carrier_phase = two_pi * offset * t
-        # Slow per-signal audio variation, derived from wall-clock time.
-        wobble = math.sin(now * 0.7 + seed) * 0.5 + 0.5
+    def _table(self, freq: float, rate: float) -> Tuple[np.ndarray, np.ndarray]:
+        """Phase (float32) and phasor (complex64) of ``freq`` over one block."""
+        key = (freq, rate)
+        table = self._tables.get(key)
+        if table is None:
+            cycles = np.mod(np.arange(_PHASE_BLOCK) * (freq / rate), 1.0)
+            phase = (2 * np.pi) * cycles
+            table = (phase.astype(np.float32), np.exp(1j * phase).astype(np.complex64))
+            self._tables[key] = table
+        return table
 
-        if kind == "wfm":
-            # Composite stereo baseband: program audio, 19 kHz pilot, L-R on a
-            # 38 kHz subcarrier and RDS at 57 kHz; +/-75 kHz peak deviation.
-            tones = (
-                (1.1e3 + 800 * wobble, 0.30),
-                (3.7e3, 0.18),
-                (7.9e3 - 2e3 * wobble, 0.12),
-                (19e3, 0.09),
-                (38e3 - 2.5e3, 0.08),
-                (38e3 + 2.5e3, 0.08),
-                (57e3, 0.04),
-            )
-            phase = carrier_phase
-            rs = seed * 0.37 + now * 3.1
-            for i, (f_mod, weight) in enumerate(tones):
-                phase = phase + (75e3 * weight / f_mod) * np.sin(
-                    two_pi * f_mod * t + rs * (i + 1)
-                )
-            return amp * np.exp(1j * phase)
+    def _block_starts(self, freq: float, rate: float, pos: int, n: int) -> np.ndarray:
+        """Phase (rad, float64) of ``freq`` at the start of each block."""
+        starts = pos + _PHASE_BLOCK * np.arange(-(-n // _PHASE_BLOCK))
+        return (2 * np.pi) * np.mod(starts * (freq / rate), 1.0)
 
-        if kind == "nfm":
-            # Voice-like FM, +/-3 kHz deviation.
-            f1, f2 = 620.0 + 400 * wobble, 1900.0 - 500 * wobble
-            phase = (
-                carrier_phase
-                + (2.2e3 / f1) * np.sin(two_pi * f1 * t + now)
-                + (1.2e3 / f2) * np.sin(two_pi * f2 * t + 2 * now)
-            )
-            return amp * np.exp(1j * phase)
+    def _phase(self, freq: float, rate: float, pos: int, n: int) -> np.ndarray:
+        """Phase of a ``freq`` Hz carrier for ``n`` samples from ``pos``,
+        in [0, 4 pi) (float32): continuous from one read to the next."""
+        table = self._table(freq, rate)[0]
+        starts = self._block_starts(freq, rate, pos, n).astype(np.float32)
+        return (starts[:, None] + table[None, :]).ravel()[:n]
 
-        if kind == "am":
-            f1, f2 = 450.0 + 300 * wobble, 1700.0
-            envelope = (
-                1.0
-                + 0.35 * np.sin(two_pi * f1 * t + now)
-                + 0.2 * np.sin(two_pi * f2 * t + 3 * now)
-            )
-            return amp * envelope * np.exp(1j * carrier_phase)
+    def _carrier(
+        self, freq: float, amp: float, rate: float, pos: int, n: int
+    ) -> np.ndarray:
+        """``amp * exp(j * phase)`` of a ``freq`` Hz carrier (complex64)."""
+        table = self._table(freq, rate)[1]
+        starts = (amp * np.exp(1j * self._block_starts(freq, rate, pos, n))).astype(
+            np.complex64
+        )
+        return (starts[:, None] * table[None, :]).ravel()[:n]
 
-        if kind == "cw":
-            unit = int(now / _CW_DIT_S) % len(_CW_KEYING)
-            if not _CW_KEYING[unit]:
-                return None
-            return amp * np.exp(1j * carrier_phase)
+    def _add_signal(self, out, kind, offset, amp, seed, rate, pos, stereo) -> None:
+        """Add one signal to ``out`` (starting at stream position ``pos``).
 
+        ``stereo`` gives the broadcast FM pilot/RDS phase and sin(2 theta)
+        for the same samples.
+        """
+        n = len(out)
         if kind == "cw_steady":
-            return amp * np.exp(1j * carrier_phase)
+            out += self._carrier(offset, amp, rate, pos, n)
+            return
+        if kind in ("am", "cw", "pulse"):
+            envelope = _loops(kind, seed, rate).read(pos, n)
+            wave = self._carrier(
+                offset, amp * (3.0 if kind == "pulse" else 1.0), rate, pos, n
+            )
+            wave *= envelope
+            out += wave
+            return
+        # Angle modulation: wfm, nfm, burst.
+        loops = _loops(kind, seed, rate)
+        phase = self._phase(offset, rate, pos, n)
+        if kind == "wfm":
+            program, subcarrier = loops
+            pilot_rds, sin2 = stereo
+            phase += program.read(pos, n)
+            phase += pilot_rds
+            diff = subcarrier.read(pos, n)
+            diff *= sin2
+            phase += diff
+        else:
+            phase += loops.read(pos, n)
+        part = np.cos(phase)
+        part *= amp
+        out.real += part
+        np.sin(phase, out=phase)
+        phase *= amp
+        out.imag += phase
 
-        if kind == "burst":
-            # 2-FSK data burst at 9.6 kbit/s, +/-20 kHz shift.
-            bits_per_block = max(1, int(n * 9600 / self._sample_rate) + 1)
-            bits = self._rng.integers(0, 2, bits_per_block) * 2 - 1
-            idx = (np.arange(n) * bits_per_block) // n
-            inst = offset + 20e3 * bits[idx]
-            phase = two_pi * np.cumsum(inst) / self._sample_rate
-            return amp * np.exp(1j * phase)
+    def _stereo_terms(self, rate: float, pos: int, n: int):
+        """Broadcast FM pilot + RDS phase and sin(2 theta), theta the pilot's
+        phase, shared by every FM station (they are locked to the stream)."""
+        theta = self._phase(_PILOT_HZ, rate, pos, n)
+        sin1 = np.sin(theta)
+        sin2 = np.cos(theta)
+        sin2 *= sin1
+        sin2 *= 2.0
+        # sin(3 theta) = sin(theta) * (3 - 4 sin^2(theta))
+        sin3 = sin1 * sin1
+        sin3 *= -4.0
+        sin3 += 3.0
+        sin3 *= sin1
+        sin3 *= _RDS_SHARE * _WFM_DEVIATION_HZ / (3 * _PILOT_HZ)
+        sin1 *= _PILOT_SHARE * _WFM_DEVIATION_HZ / _PILOT_HZ
+        sin1 += sin3
+        return sin1, sin2
 
-        if kind == "pulse":
-            # ADS-B-like 1 us pulse-position bursts: wide, short and spiky.
-            chips = self._rng.random(n) < 0.35
-            return amp * 3.0 * chips * np.exp(1j * carrier_phase)
-
-        return None
+    def _noise(self, n: int, sigma: float) -> np.ndarray:
+        """``n`` samples of the noise floor (complex64)."""
+        pool = _noise_pool()
+        size = len(pool)
+        out = np.empty(n, dtype=np.complex64)
+        done = 0
+        while done < n:
+            start = int(self._rng.integers(size - min(n - done, size // 2) + 1))
+            count = min(n - done, size - start)
+            scale = np.complex64(sigma * np.exp(2j * np.pi * self._rng.random()))
+            np.multiply(
+                pool[start : start + count], scale, out=out[done : done + count]
+            )
+            done += count
+        return out
 
     def read_samples(self, num_samples: int):
         if not self._running:
@@ -869,25 +1235,34 @@ class MockDevice:
         rate = float(self._sample_rate) or 2.4e6
         center = float(self._frequency)
         gain_lin = 10.0 ** ((self._gain_db(center, rate) - self._REF_GAIN_DB) / 20.0)
-        now = time.monotonic()
+        pos = self._advance(n, rate)
 
         sigma_ant = self._noise_sigma(self._NOISE_FLOOR_DB)
         sigma = math.hypot(sigma_ant * gain_lin, self._noise_sigma(self._ADC_NOISE_DB))
-        samples = self._rng.standard_normal(2 * n).view(np.complex128) * sigma
+        samples = self._noise(n, sigma)
 
-        t = (self._sample_clock + np.arange(n)) / rate
-        self._sample_clock = (self._sample_clock + n) % (1 << 40)
+        t0 = pos / rate
+        stereo = None
         for offset, kind, amp, duty, seed in self._visible_signals(center, rate):
-            if not self._active(duty, seed, now):
-                continue
-            wave = self._modulated(kind, offset, amp * gain_lin, seed, t, now, n)
-            if wave is not None:
-                samples += wave
+            for a, b in _on_ranges(duty, seed, t0, n, rate):
+                if kind == "wfm" and stereo is None:
+                    stereo = self._stereo_terms(rate, pos, n)
+                terms = None if stereo is None else (stereo[0][a:b], stereo[1][a:b])
+                self._add_signal(
+                    samples[a:b],
+                    kind,
+                    offset,
+                    amp * gain_lin,
+                    seed,
+                    rate,
+                    pos + a,
+                    terms,
+                )
 
         # An 8-bit ADC clips at full scale: overdriving the gain distorts.
-        np.clip(samples.real, -1.0, 1.0, out=samples.real)
-        np.clip(samples.imag, -1.0, 1.0, out=samples.imag)
-        return samples.astype(np.complex64)
+        flat = samples.view(np.float32)
+        np.clip(flat, -1.0, 1.0, out=flat)
+        return samples
 
     def close(self):
         self._running = False

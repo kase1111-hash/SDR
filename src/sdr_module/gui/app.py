@@ -10,13 +10,14 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .. import __version__
+from .settings_store import DEFAULT_FREQUENCY_HZ
 from .themes import apply_theme
 
 logger = logging.getLogger(__name__)
 
 # Defaults the GUI launchers pass when no value is given on the command line.
 _LAUNCH_DEFAULTS: Dict[str, float] = {
-    "frequency": 100e6,
+    "frequency": DEFAULT_FREQUENCY_HZ,
     "gain": 20.0,
     "sample_rate": 2.4e6,
 }
@@ -290,9 +291,10 @@ class SDRApplication:
         """Whether a launch setting should override the persisted value.
 
         ``python -m sdr_module.gui`` and ``sdr-scan gui`` always pass their
-        argparse defaults (100 MHz, 20 dB). A value that differs from the
-        default was clearly requested; one equal to it only counts if its flag
-        was actually typed on the command line.
+        argparse defaults (``_LAUNCH_DEFAULTS``: 100.1 MHz, 20 dB, 2.4 MS/s).
+        A value that differs from the default was clearly requested; one
+        equal to it only counts if its flag was actually typed on the command
+        line.
         """
         value = settings.get(key)
         if value is None or key not in _LAUNCH_DEFAULTS:

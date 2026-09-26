@@ -8,6 +8,7 @@ plain-text log that is easy to copy, and running statistics.
 from __future__ import annotations
 
 import csv
+import html
 import math
 import os
 from collections import Counter
@@ -45,6 +46,7 @@ try:
         QScrollArea,
         QSizePolicy,
         QStyledItemDelegate,
+        QTabBar,
         QTableWidget,
         QTableWidgetItem,
         QTabWidget,
@@ -116,11 +118,13 @@ PROTOCOL_BANDS: Dict[str, Tuple[Tuple[float, float], ...]] = {
 
 #: Protocols listed but not decodable from live signals yet (shown disabled).
 PROTOCOL_UNAVAILABLE: Dict[str, str] = {
-    "RDS": "Live RDS decoding isn't available yet: it needs 57 kHz "
+    "RDS": "Live RDS decoding isn't available yet: it needs 57\u00a0kHz "
     "subcarrier recovery, which the receiver doesn't do.",
 }
 
 _START_HINT = "press Start (Space)"
+# Shown for a value that isn't there (no message text, no last message).
+_NO_VALUE = "–"
 
 # Table columns.
 COL_TIME, COL_PROTOCOL, COL_ADDRESS, COL_MESSAGE = range(4)
@@ -142,13 +146,33 @@ _DETAIL_LINES = 3
 _INVALID_ROLE = Qt.ItemDataRole.UserRole.value + 1 if HAS_PYQT6 else 0
 
 
+def placeholder_html(text: str) -> str:
+    """Rich text for an empty-state message ``"Title\\nHint ..."``.
+
+    The first line is the title, shown bold and upright like the painted
+    placeholders of the plots ("No spectrum yet"); the lines after it are
+    the hint. Titles are short phrases without a final period. A single
+    line is shown as it is. Everything is escaped: the text is never markup.
+    """
+    title, sep, hint = text.partition("\n")
+    if not sep:
+        return html.escape(text)
+    hint_html = "<br>".join(html.escape(line) for line in hint.split("\n"))
+    return (
+        '<p style="margin: 0 0 4px 0; font-weight: 600; font-style: normal;">'
+        f'{html.escape(title)}</p><p style="margin: 0;">{hint_html}</p>'
+    )
+
+
 class ViewPlaceholder(QObject if HAS_PYQT6 else object):
     """Centered empty-state text laid over an item view's viewport.
 
     The label uses the ``placeholder`` role, lets clicks through and follows
-    the viewport size. Call :meth:`set_text` and :meth:`set_visible` to
-    update it. :meth:`set_action` adds an optional button under the text
-    (e.g. "Tune to 1090.000 MHz"); clicking it emits :attr:`action_triggered`.
+    the viewport size. The text's first line is a title over the hint lines
+    (see :func:`placeholder_html`). Call :meth:`set_text` and
+    :meth:`set_visible` to update it. :meth:`set_action` adds an optional
+    button under the text (e.g. "Tune to 1090.000 MHz"); clicking it emits
+    :attr:`action_triggered`.
     """
 
     if HAS_PYQT6:
@@ -160,7 +184,9 @@ class ViewPlaceholder(QObject if HAS_PYQT6 else object):
         super().__init__(view)
         viewport = view.viewport()
         self._viewport = viewport
-        self.label = QLabel(text, viewport)
+        self._text = text
+        self.label = QLabel(placeholder_html(text), viewport)
+        self.label.setTextFormat(Qt.TextFormat.RichText)
         self.label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.label.setWordWrap(True)
         self.label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -200,8 +226,9 @@ class ViewPlaceholder(QObject if HAS_PYQT6 else object):
         )
 
     def set_text(self, text: str) -> None:
-        if text != self.label.text():
-            self.label.setText(text)
+        if text != self._text:
+            self._text = text
+            self.label.setText(placeholder_html(text))
             self._layout()
 
     def set_action(self, text: Optional[str], tip: str = "") -> None:
@@ -226,7 +253,8 @@ class ViewPlaceholder(QObject if HAS_PYQT6 else object):
         return not self.label.isHidden()
 
     def text(self) -> str:
-        return self.label.text()
+        """The message as plain text (``"Title\\nHint ..."``)."""
+        return self._text
 
 
 class _MessageDelegate(QStyledItemDelegate if HAS_PYQT6 else object):
@@ -399,6 +427,35 @@ class TailFollower(QObject if HAS_PYQT6 else object):
         self.following = True
 
 
+class _CornerTabBar(QTabBar if HAS_PYQT6 else object):
+    """Tab bar whose tabs are as tall as the tab widget's corner widget.
+
+    QTabWidget squeezes a corner widget into the tab bar's height. The
+    underline (document mode) tabs are shorter than a push button, so the
+    Clear / Export buttons in the corner were cut off at the bottom and
+    read as two more tabs. Growing the tabs instead keeps the buttons whole
+    and lines their text up with the tab titles.
+    """
+
+    # Rows QTabWidget takes from the tab bar's height before sizing the
+    # corner widget (the tab/pane overlap).
+    _OVERLAP = 1
+
+    def tabSizeHint(self, index: int) -> Any:  # noqa: N802 (Qt API)
+        hint = super().tabSizeHint(index)
+        tabs = self.parentWidget()
+        corner = (
+            tabs.cornerWidget(Qt.Corner.TopRightCorner)
+            if isinstance(tabs, QTabWidget)
+            else None
+        )
+        if corner is not None and not corner.isHidden():
+            hint.setHeight(
+                max(hint.height(), corner.sizeHint().height() + self._OVERLAP)
+            )
+        return hint
+
+
 class DecoderPanel(QWidget if HAS_PYQT6 else object):
     """
     Protocol decoder panel.
@@ -498,10 +555,28 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # Output tabs, with Clear / Export in the tab bar's corner so the
         # table keeps as much height as possible in the short right column.
         self._tabs = QTabWidget()
+        self._tabs.setTabBar(_CornerTabBar(self._tabs))
         self._tabs.setDocumentMode(True)
         # No base line: it drew an empty tab-like outline between the last
         # tab and the corner buttons.
         self._tabs.tabBar().setDrawBase(False)
+
+        # Regular push buttons, the same size as every other panel action.
+        # The corner is set before any tab is added, so the tabs are sized
+        # to fit it from the start (see _CornerTabBar).
+        corner = QWidget()
+        corner_row = QHBoxLayout(corner)
+        corner_row.setContentsMargins(0, 0, 0, 2)
+        corner_row.setSpacing(4)
+        self._clear_btn = QPushButton("Clear")
+        self._clear_btn.clicked.connect(lambda _checked=False: self.clear())
+        corner_row.addWidget(self._clear_btn)
+        self._export_btn = QPushButton("Export...")
+        self._export_btn.clicked.connect(lambda _checked=False: self._export_messages())
+        corner_row.addWidget(self._export_btn)
+        for button in (self._clear_btn, self._export_btn):
+            button.setAutoDefault(False)
+        self._tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
 
         self._table = _MessageTable(self)
         self._table.setAccessibleName("Decoded messages")
@@ -563,8 +638,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         set_role(self._raw_output, "terminal")
         self._log_empty = ViewPlaceholder(
             self._raw_output,
-            "Every decoded message is also listed here in full as plain "
-            "text, easy to select and copy.",
+            "No messages yet\nEvery decoded message is also listed here in "
+            "full as plain text, easy to select and copy.",
         )
         self._log_tail = TailFollower(self._raw_output.verticalScrollBar())
         self._tabs.addTab(self._raw_output, "Log")
@@ -572,21 +647,6 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
         self._tabs.addTab(self._build_stats(), "Stats")
         self._tabs.setTabToolTip(2, "Message counts since the last Clear")
-
-        # Regular push buttons, the same size as every other panel action.
-        corner = QWidget()
-        corner_row = QHBoxLayout(corner)
-        corner_row.setContentsMargins(0, 0, 0, 2)
-        corner_row.setSpacing(4)
-        self._clear_btn = QPushButton("Clear")
-        self._clear_btn.clicked.connect(lambda _checked=False: self.clear())
-        corner_row.addWidget(self._clear_btn)
-        self._export_btn = QPushButton("Export...")
-        self._export_btn.clicked.connect(lambda _checked=False: self._export_messages())
-        corner_row.addWidget(self._export_btn)
-        for button in (self._clear_btn, self._export_btn):
-            button.setAutoDefault(False)
-        self._tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
 
         layout.addWidget(self._tabs, 1)
 
@@ -623,7 +683,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         set_role(by_proto, "caption")
         by_proto.setContentsMargins(0, 8, 0, 0)
         form.addRow(by_proto)
-        self._proto_none = QLabel("No messages yet.")
+        self._proto_none = QLabel("No messages yet")
         set_role(self._proto_none, "hint")
         form.addRow(self._proto_none)
         # One "name  count" row per protocol seen, added as they appear.
@@ -777,24 +837,22 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
     def _waiting_text(self, proto: str, where: str) -> str:
         """Empty-table hint for a selected, decoding protocol."""
         if proto in PROTOCOL_UNAVAILABLE:
-            return f"{proto} can't be decoded yet.\n{PROTOCOL_UNAVAILABLE[proto]}"
+            return f"{proto} can't be decoded yet\n{PROTOCOL_UNAVAILABLE[proto]}"
         if self._tuned_for(proto):
             here = _format_mhz(self._tuned_hz or 0.0)
             if self._receiving:
-                return (
-                    f"Listening for {proto} on {here}…\nDecoded messages appear here."
-                )
+                return f"Listening for {proto} on {here}\nDecoded messages appear here."
             return (
-                f"Waiting for {proto} messages.\n"
+                f"Waiting for {proto} messages\n"
                 f"Tuned to {here}: {_START_HINT} to decode."
             )
         if not where:
             return (
-                f"Waiting for {proto} messages.\n{_START_HINT.capitalize()} to decode."
+                f"Waiting for {proto} messages\n{_START_HINT.capitalize()} to decode."
             )
         if self._receiving:
-            return f"Waiting for {proto} messages.\nTune to {where} to decode."
-        return f"Waiting for {proto} messages.\nTune to {where}, then {_START_HINT}."
+            return f"Waiting for {proto} messages\nTune to {where} to decode."
+        return f"Waiting for {proto} messages\nTune to {where}, then {_START_HINT}."
 
     def _update_state(self, *_args: Any) -> None:
         """Refresh tooltips, enabled states and the empty-table hint."""
@@ -816,9 +874,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             )
             check.setToolTip("Choose a protocol first")
             empty = (
-                "No decoder selected.\n"
+                "No decoder selected\n"
                 f"Choose a protocol above, tune to its frequency and "
-                f"{_START_HINT}. Decoded messages appear here."
+                f"{_START_HINT}."
             )
         else:
             what, where = PROTOCOL_INFO.get(proto, ("", ""))
@@ -830,7 +888,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 empty = self._waiting_text(proto, where)
                 action = self._tune_action(proto)
             else:
-                empty = "Decoding is paused.\nTick Decode to resume."
+                empty = "Decoding paused\nTick Decode to resume."
         self._empty.set_text(empty)
         self._empty.set_action(*action)
         self._empty.set_visible(self._table.rowCount() == 0)
@@ -907,7 +965,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             COL_TIME: (short_time, f"{msg['date']} {timestamp}"),
             COL_PROTOCOL: (protocol, protocol),
             COL_ADDRESS: (address, address),
-            COL_MESSAGE: (content or "(empty)", content),
+            # A dash (like Stats) rather than "(empty)", which read as an error.
+            COL_MESSAGE: (content or _NO_VALUE, content or "No message text"),
         }
         for col, (text, tip) in cells.items():
             item = QTableWidgetItem(text)
@@ -971,7 +1030,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             parts.append(f"{speed:.0f} kt")
 
         # Many replies carry only the aircraft's address; say so rather than
-        # showing a bare "(empty)".
+        # showing a bare dash.
         content = "  ·  ".join(parts) or "(aircraft address only)"
         self.add_message("ADS-B", str(icao), content)
 
@@ -1003,9 +1062,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         set_tone(self._invalid_count_label, "danger" if invalid else None)
 
         if self._messages:
-            self._last_msg_label.setText(self._messages[-1].get("time", "–"))
+            self._last_msg_label.setText(self._messages[-1].get("time", _NO_VALUE))
         else:
-            self._last_msg_label.setText("–")
+            self._last_msg_label.setText(_NO_VALUE)
 
         if not self._per_protocol and self._proto_rows:
             for label in self._proto_rows.values():

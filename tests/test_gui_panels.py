@@ -496,7 +496,7 @@ class TestBookmarksReview(unittest.TestCase):
 
     def test_spinbox_shows_three_to_six_decimals_but_keeps_hz(self):
         spin = self.make()._freq_input
-        self.assertEqual(spin.text(), "100.000 MHz")
+        self.assertEqual(spin.text(), "100.100 MHz")  # DEFAULT_FREQUENCY_HZ
         spin.setValue(145.8125)
         self.assertEqual(spin.text(), "145.8125 MHz")
         spin.setValue(1090.000001)

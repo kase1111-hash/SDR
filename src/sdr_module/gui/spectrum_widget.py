@@ -68,6 +68,21 @@ AXIS_FONT_PT = 8.0
 #: Right plot margin in pixels (room for a clamped last tick label).
 PLOT_MARGIN_RIGHT = 12
 
+#: Content margins (left, top, right, bottom) of the header strip above each
+#: plot. The right margin puts the last header control's right edge on the
+#: plot frame (drawn one pixel outside the plot area), so they line up.
+HEADER_MARGINS = (10, 3, PLOT_MARGIN_RIGHT - 1, 3)
+
+#: Palette token that shades the demodulated channel (the passband).
+PASSBAND_TOKEN = "accent"
+
+#: Opacity (0-255) of the spectrum's passband (fill, edge lines) by theme
+#: darkness: calmer on a white plot, where the accent is close to the trace.
+PASSBAND_ALPHAS = {True: (40, 150), False: (34, 110)}
+
+#: Narrowest the passband shading gets, in pixels.
+PASSBAND_MIN_PX = 3.0
+
 #: Floor used for "no peak yet" in the peak-hold trace.
 _PEAK_FLOOR_DB = -120.0
 
@@ -215,9 +230,15 @@ def draw_placeholder(
 
     The text sits on a plot-colored backdrop so grid lines and the tuned
     frequency marker don't run through it. The hint wraps on narrow plots.
+    The title is bold and a step larger than ``font`` (the hint's font),
+    whether ``font`` is sized in pixels (as the stylesheet sizes widget
+    fonts) or in points.
     """
     title_font = QFont(font)
-    title_font.setPointSizeF(max(8.0, font.pointSizeF() + 1))
+    if font.pixelSize() > 0:
+        title_font.setPixelSize(font.pixelSize() + 2)
+    else:
+        title_font.setPointSizeF(max(8.0, font.pointSizeF() + 1))
     title_font.setBold(True)
     tfm = QFontMetrics(title_font)
     hfm = QFontMetrics(font)
@@ -258,6 +279,85 @@ def draw_placeholder(
         wrap,
         hint,
     )
+
+
+def normalize_passband(
+    low_hz: Optional[float], high_hz: Optional[float]
+) -> Optional[Tuple[float, float]]:
+    """``(low_hz, high_hz)`` as floats, or None when it describes no band.
+
+    None for either bound, a non-numeric or non-finite bound, or
+    ``low_hz >= high_hz`` all mean "hide the passband".
+    """
+    if low_hz is None or high_hz is None:
+        return None
+    try:
+        low, high = float(low_hz), float(high_hz)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(low) and math.isfinite(high)) or low >= high:
+        return None
+    return low, high
+
+
+def passband_px(
+    passband: Optional[Tuple[float, float]], plot: "QRectF", span_hz: float
+) -> Optional[Tuple[float, float]]:
+    """Canvas x extent ``(left, right)`` of a passband drawn on ``plot``.
+
+    ``passband`` holds offsets (Hz) from the tuned frequency, which sits at the
+    plot's horizontal center; ``plot`` shows ``span_hz``. The extent is snapped
+    to whole pixels and at least :data:`PASSBAND_MIN_PX` wide (a CW or SSB
+    channel on a 2.4 MHz span is narrower than one pixel), growing away from
+    the tuned frequency for a one-sided (SSB) band. It is not clipped to the
+    plot. None when there is no passband or nothing to map it onto.
+    """
+    if passband is None or span_hz <= 0 or plot.width() <= 0:
+        return None
+    low, high = passband
+    scale = plot.width() / span_hz
+    center = plot.center().x()
+    x0, x1 = center + low * scale, center + high * scale
+    if x1 - x0 < PASSBAND_MIN_PX:
+        if low >= 0:  # upper sideband: grow to the right of the marker
+            x1 = x0 + PASSBAND_MIN_PX
+        elif high <= 0:  # lower sideband: grow to the left
+            x0 = x1 - PASSBAND_MIN_PX
+        else:
+            mid = (x0 + x1) / 2
+            x0, x1 = mid - PASSBAND_MIN_PX / 2, mid + PASSBAND_MIN_PX / 2
+    return float(math.floor(x0 + 0.5)), float(math.floor(x1 + 0.5))
+
+
+def draw_passband(
+    painter: "QPainter",
+    plot: "QRectF",
+    extent: Tuple[float, float],
+    palette,
+    fill_alpha: int,
+    edge_alpha: int,
+) -> None:
+    """Shade ``extent`` (see :func:`passband_px`) over the full plot height.
+
+    Edge lines mark the band's ends when it is wide enough to have visible
+    ends; everything is clipped to ``plot``.
+    """
+    x0, x1 = extent
+    if x1 <= plot.left() or x0 >= plot.right():
+        return
+    painter.save()
+    painter.setClipRect(plot)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    if fill_alpha > 0:
+        painter.fillRect(
+            QRectF(x0, plot.top(), x1 - x0, plot.height()),
+            palette.qcolor(PASSBAND_TOKEN, fill_alpha),
+        )
+    if x1 - x0 >= 6:
+        painter.setPen(QPen(palette.qcolor(PASSBAND_TOKEN, edge_alpha), 1))
+        for x in (x0 + 0.5, x1 - 0.5):
+            painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
+    painter.restore()
 
 
 def draw_focus_frame(painter: "QPainter", plot: "QRectF", palette) -> None:
@@ -398,6 +498,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
         # Markers
         self._markers: List[Tuple[float, float]] = []  # (freq, power)
+        # Demodulated channel: (low, high) Hz offsets from the center.
+        self._passband: Optional[Tuple[float, float]] = None
 
         # Paint caches (rebuilt on resize, theme, range or axis changes)
         self._font = axis_font()
@@ -428,7 +530,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         set_role(header, "header-strip")
         self._header = header
         controls = QHBoxLayout(header)
-        controls.setContentsMargins(10, 3, 8, 3)
+        controls.setContentsMargins(*HEADER_MARGINS)
         controls.setSpacing(8)
 
         title = QLabel("SPECTRUM")
@@ -438,8 +540,10 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         hint = QLabel("Click to tune")
         set_role(hint, "hint")
         hint.setToolTip(
-            "Click the plot to tune to that frequency. With the plot focused, "
-            "Left/Right step 10 kHz (Shift: 100 kHz, Ctrl: 1 MHz)."
+            "Click the plot to tune to that frequency. The dashed line marks "
+            "the tuned frequency and the shaded band the channel being "
+            "demodulated. With the plot focused, Left/Right step 10 kHz "
+            "(Shift: 100 kHz, Ctrl: 1 MHz)."
         )
         # Never let the optional hint raise the widget's minimum width:
         # fit_header_hint() hides it before it would be squeezed.
@@ -492,7 +596,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._canvas = _SpectrumCanvas(self)
         self._canvas.setAccessibleName("Spectrum plot")
         self._canvas.setAccessibleDescription(
-            "Power versus frequency. Click to tune to a frequency."
+            "Power versus frequency. A shaded band marks the demodulated "
+            "channel. Click to tune to a frequency."
         )
         layout.addWidget(self._canvas, 1)
 
@@ -616,6 +721,26 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         """Set the displayed span (equal to the complex sample rate)."""
         self.set_frequency_range(self._center_freq, sample_rate)
 
+    def set_passband(self, low_hz: Optional[float], high_hz: Optional[float]) -> None:
+        """Shade the demodulated channel, ``low_hz`` to ``high_hz`` around the
+        tuned (center) frequency.
+
+        Both are offsets in Hz from the center frequency, e.g.
+        ``(-12500, 12500)`` for 25 kHz FM, ``(0, 2800)`` for USB or
+        ``(-250, 250)`` for CW. ``None`` for either, a non-finite value or
+        ``low_hz >= high_hz`` hides the shading.
+        """
+        band = normalize_passband(low_hz, high_hz)
+        if band == self._passband:
+            return
+        self._passband = band
+        self._invalidate_background()
+        self._canvas.update()
+
+    def passband(self) -> Optional[Tuple[float, float]]:
+        """The shaded channel as (low, high) Hz offsets, or None when hidden."""
+        return self._passband
+
     def set_db_range(self, min_db: float, max_db: float):
         """Set dB range for display."""
         self._db_range = (min_db, max_db)
@@ -704,6 +829,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             self._center_freq,
             self._sample_rate,
             self._grid_enabled,
+            self._passband,
         )
         if key == self._bg_key and self._bg_pixmap is not None:
             return
@@ -719,6 +845,11 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         painter = QPainter(pix)
         try:
             self._draw_axes(painter, self._plot_rect, p)
+            # Under the traces and the tuned-frequency marker (drawn per frame).
+            extent = passband_px(self._passband, self._plot_rect, self._sample_rate)
+            if extent is not None:
+                fill, edge = PASSBAND_ALPHAS[bool(p.is_dark)]
+                draw_passband(painter, self._plot_rect, extent, p, fill, edge)
         finally:
             painter.end()
         self._bg_pixmap = pix

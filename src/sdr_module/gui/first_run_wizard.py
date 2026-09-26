@@ -29,19 +29,24 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
+from .settings_store import DEFAULT_FREQUENCY_HZ
+
 if HAS_PYQT6:
     from .themes import set_role
 
 
+# Starting bands: the same presets, in the same order and under the same
+# names, as the main window's Radio > Band Presets (main_window.BAND_PRESETS,
+# not imported here: main_window imports this module), each with its band.
 BAND_PRESETS = {
-    "FM Broadcast (88–108 MHz)": 100.1e6,
+    "FM Broadcast (88–108 MHz)": DEFAULT_FREQUENCY_HZ,
     "NOAA Weather (162 MHz)": 162.55e6,
     "2m Ham (144–148 MHz)": 146.52e6,
-    "Airband AM (118–137 MHz)": 125.0e6,
     "70cm Ham (420–450 MHz)": 446.0e6,
+    "Airband AM (118–137 MHz)": 125.0e6,
     "ADS-B (1090 MHz)": 1090e6,
-    "ISM 433 MHz": 433.92e6,
-    "ISM 915 MHz": 915e6,
+    "ISM 433 (433.05–434.79 MHz)": 433.92e6,
+    "ISM 915 (902–928 MHz)": 915e6,
 }
 
 # Glyphs that lead the status callout, as in the app's other callouts.
@@ -89,7 +94,7 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
         self.setWindowTitle("Welcome to SDR Module")
         self.setMinimumWidth(540)
 
-        self._selected_freq = 100.1e6
+        self._selected_freq = DEFAULT_FREQUENCY_HZ
         self._hardware_found = bool(hardware_found)
         self._device_name = str(device_name or "").strip()
         # Reopened (Help > Welcome) while real hardware is already open.

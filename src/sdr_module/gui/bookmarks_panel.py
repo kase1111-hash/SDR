@@ -51,7 +51,7 @@ from ..core.chirp_csv import (
 )
 from .control_panel import DEMOD_MODES, MAX_FREQUENCY_HZ, MIN_FREQUENCY_HZ
 from .decoder_panel import ViewPlaceholder
-from .settings_store import GuiSettings
+from .settings_store import DEFAULT_FREQUENCY_HZ, GuiSettings
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ CSV_FILTER = "CHIRP CSV (*.csv);;All files (*)"
 COL_NAME, COL_FREQ, COL_MODE = range(3)
 
 _EMPTY_TEXT = (
-    "No bookmarks yet.\n"
+    "No bookmarks yet\n"
     "Press Ctrl+B to bookmark the current frequency, or enter one above "
     "and click Add. Use CSV to import a CHIRP channel list."
 )
@@ -261,7 +261,8 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         # Same range as the tuner, so Add never saves a clamped frequency.
         self._freq_input.setRange(MIN_FREQUENCY_HZ / 1e6, MAX_FREQUENCY_HZ / 1e6)
         self._freq_input.setDecimals(6)
-        self._freq_input.setValue(100.0)
+        # Follows the tuner (set_current_frequency); this is its start-up value.
+        self._freq_input.setValue(DEFAULT_FREQUENCY_HZ / 1e6)
         self._freq_input.setSuffix(" MHz")
         self._freq_input.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._freq_input.setAccelerated(True)

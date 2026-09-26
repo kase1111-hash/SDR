@@ -222,18 +222,20 @@ class TestSSTVAudio(_WindowTestCase):
         self.assertTrue(self.panel.is_receiving())
         # Below squelch too: the decoder needs every block for its timing.
         self.win._control_panel.set_squelch_db(0)
+        # (The demo device is read in real time: blocks vary in length.)
+        device = self.win._device
+        read, reads = device.read_samples, []
+        device.read_samples = lambda n: reads.append(read(n)) or reads[-1]
         for _ in range(3):
             self.win._update_display()
         self.assertEqual(len(self.fed), 3)
         self.assertEqual({rate for _a, rate in self.fed}, {48000.0})
         for audio, _rate in self.fed:
             self.assertEqual(audio.dtype, np.float32)
-        # Gap-free: 3 blocks of 2048 I/Q samples give one audio sample per
-        # 50, the decimation phase carried into the next block.
-        from sdr_module.gui.main_window import DISPLAY_BLOCK
-
+        # Gap-free: the I/Q blocks give one audio sample per 50, the
+        # decimation phase carried into the next block.
         total = sum(len(a) for a, _r in self.fed)
-        self.assertEqual(total, -(-3 * DISPLAY_BLOCK // 50))
+        self.assertEqual(total, -(-sum(len(r) for r in reads) // 50))
         self.assertEqual(self.spoken, [])  # speaker stays silent
 
     def test_non_fm_mode_hints_and_feeds_nothing(self):

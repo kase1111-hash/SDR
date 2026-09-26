@@ -85,7 +85,7 @@ from .audio_sink import AudioSink
 from .bookmarks_panel import BookmarksPanel
 from .control_panel import ControlPanel
 from .decoder_panel import DecoderPanel
-from .settings_store import GuiSettings
+from .settings_store import DEFAULT_FREQUENCY_HZ, GuiSettings
 from .spectrum_widget import SpectrumWidget
 from .themes import (
     apply_theme,
@@ -145,10 +145,23 @@ _NO_VALUE = "—"  # em dash for "not available"
 _TX_UNAVAILABLE = "Connect a HackRF One to transmit an ID."
 _DEFAULT_VOLUME = 70  # percent
 # Audio is only played while the device delivers at least this fraction of
-# its sample rate: less than that (e.g. the demo device, which simulates a
-# few ms per display frame) would come out as a buzz of short bursts.
+# its sample rate: less than that (a device or computer that can't keep up)
+# would come out as a buzz of short bursts.
 _REALTIME_FRACTION = 0.5
 _REALTIME_WINDOW_S = 2.0
+# The most signal one display frame takes from the device, in seconds (a
+# stalled window catches up in steps), and the most until frames are known
+# to keep up with real time (so finding out stalls a slow computer only
+# briefly). See _Pacer.
+_MAX_READ_S = 0.25
+_PROBE_READ_S = 0.05
+# A display frame (reading and processing its samples) that takes more than
+# this fraction of the time its samples cover means this computer can't keep
+# up; below the second fraction it can again. Frames shorter than
+# _TIMED_FRAME samples aren't timed (their per-frame overhead dominates).
+_OVERLOAD_RATIO = 0.8
+_RECOVER_RATIO = 0.5
+_TIMED_FRAME = 8 * DISPLAY_BLOCK
 
 # Hardware drivers scanned for devices: (package, name the driver imports
 # from it, driver module, driver class), matching the imports in
@@ -164,7 +177,7 @@ _HARDWARE_DRIVERS = (
 try:
     from ..ham.gui.callsign_panel import CallsignPanel
     from ..ham.gui.qrp_panel import QRPPanel
-    from ..ham.gui.radio_tuner import RadioTunerWidget, band_for_frequency
+    from ..ham.gui.radio_tuner import RadioTunerWidget
     from ..ham.gui.signal_meter_widget import SignalMeterPanel
     from ..ham.gui.sstv_panel import SSTVPanel
 
@@ -504,6 +517,76 @@ class _ReceiverChain:
         return np.clip(out, -1.0, 1.0).astype(np.float32)
 
 
+class _Pacer:
+    """Keeps the display loop in step with real time, as far as this
+    computer can.
+
+    Each display frame takes what the device delivered since the last one:
+    every queued hardware transfer, or as many demo samples as the time
+    since the last frame covers (:meth:`demo_request`), up to
+    :meth:`read_limit`: ``_MAX_READ_S`` of signal, ``_PROBE_READ_S`` until
+    frames are known to keep up.
+
+    :meth:`measured` times whole frames (reading, filtering, demodulating)
+    against the time their samples cover. While frames take more than
+    ``_OVERLOAD_RATIO`` of it, this computer can't keep up (``overloaded``):
+    each frame then reads one block, as it used to, so the window stays
+    responsive, and as samples no longer arrive in real time, audio is
+    muted with a hint. Full frames resume below ``_RECOVER_RATIO``.
+    """
+
+    def __init__(self) -> None:
+        self._last: Optional[float] = None
+        self._ratios: Deque[float] = deque(maxlen=5)
+        self.overloaded = False
+
+    def reset(self) -> None:
+        """Forget everything (new device or sample rate)."""
+        self._last = None
+        self._ratios.clear()
+        self.overloaded = False
+
+    def restart(self) -> None:
+        """Reading pauses (receiver stopped): the next demo read starts
+        afresh."""
+        self._last = None
+
+    def read_limit(self, rate: float) -> float:
+        """The most samples one frame may take (0 while overloaded: one
+        block)."""
+        if self.overloaded:
+            return 0.0
+        return rate * (_MAX_READ_S if self._keeps_up() else _PROBE_READ_S)
+
+    def demo_request(self, rate: float, now: float) -> int:
+        """Demo samples to read at monotonic time ``now``: the time since
+        the previous read times the rate, at least one display block."""
+        last, self._last = self._last, now
+        if last is None or rate <= 0:
+            return DISPLAY_BLOCK
+        wanted = round(rate * max(0.0, now - last))
+        return int(max(DISPLAY_BLOCK, min(wanted, self.read_limit(rate))))
+
+    def measured(self, count: int, rate: float, seconds: float) -> None:
+        """A frame of ``count`` samples took ``seconds`` to read and process."""
+        if count < _TIMED_FRAME or rate <= 0:
+            return
+        self._ratios.append(seconds * rate / count)
+        if len(self._ratios) < 3:
+            return
+        load = float(np.median(self._ratios))
+        if load > _OVERLOAD_RATIO:
+            self.overloaded = True
+        elif load < _RECOVER_RATIO:
+            self.overloaded = False
+
+    def _keeps_up(self) -> bool:
+        """Frames are known to take under ``_OVERLOAD_RATIO`` of real time."""
+        return (
+            len(self._ratios) >= 3 and float(np.median(self._ratios)) <= _OVERLOAD_RATIO
+        )
+
+
 def _driver_importable(package: str, name: str) -> bool:
     """True if ``from package import name`` works, checked without logging.
 
@@ -581,7 +664,7 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
             "Receiver",
             (
                 ("device", "Device", "The SDR samples are read from."),
-                ("state", "State", "Whether samples are being acquired."),
+                ("state", "State", "Whether the receiver is running."),
                 ("frequency", "Center frequency", get_short_tip("center_frequency")),
                 ("sample_rate", "Sample rate", get_short_tip("sample_rate")),
                 (
@@ -649,10 +732,7 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
     TIPS: Tuple[Tuple[str, str], ...] = (
         ("Click", "Tune to a signal on the spectrum or waterfall."),
         ("Ctrl+L", "Type a frequency (or click the FREQ readout)."),
-        (
-            "← / →",
-            "Tune in 10 kHz steps; add Shift for 100 kHz, Ctrl for 1 MHz.",
-        ),
+        ("← / →", "Tune in 10 kHz steps. Add Shift for 100 kHz, Ctrl for 1 MHz."),
         ("Space", "Start or stop the receiver."),
         ("F6", "Put the keyboard focus on the spectrum (Esc also returns there)."),
         ("Ctrl+B", "Bookmark the current frequency."),
@@ -711,7 +791,7 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
         keycaps = []
         for row, (keys, text) in enumerate(self.TIPS):
             key_label = QLabel(keys)
-            set_role(key_label, "badge", "muted")
+            set_role(key_label, "keycap")
             key_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
             tips.addWidget(key_label, row, 0, top_left)
             keycaps.append(key_label)
@@ -827,6 +907,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # delivers samples in real time (audio needs it).
         self._rx_history: Deque[Tuple[float, int]] = deque()
         self._realtime_hint_shown = False
+        self._pacer = _Pacer()  # how much each display frame reads
         self._entry_returns_focus = False  # Ctrl+L: Enter goes back to the plots
         self._restoring = False  # True while _restore_state applies settings
         self._layout_initialized = False
@@ -970,8 +1051,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "decoder",
             self._decoder_panel,
             "Decoder",
-            "Live protocol decoder output (POCSAG, FLEX, ADS-B, ACARS, "
-            "AX.25/APRS, RDS)",
+            "Live protocol decoder output (POCSAG, FLEX, ADS-B, ACARS, " "AX.25/APRS)",
         )
 
         self._bookmarks_panel = BookmarksPanel()
@@ -1180,7 +1260,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             radio_menu,
             "&Start Receiving\tSpace",
             self._toggle_acquisition,
-            tip="Start or stop acquiring samples",
+            tip="Start or stop receiving",
         )
         self._record_action = QAction("&Record I/Q", self)
         self._record_action.setCheckable(True)
@@ -1418,7 +1498,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         freq_caption = QLabel("FREQ")
         set_role(freq_caption, "caption")
         toolbar.addWidget(freq_caption)
-        self._freq_label = QLabel(format_frequency(100e6))
+        self._freq_label = QLabel(format_frequency(DEFAULT_FREQUENCY_HZ))
         set_role(self._freq_label, "lcd")
         self._freq_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -1542,7 +1622,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # The decoder panel's protocol selector drives a live decoder over the
         # acquired samples (the panel was previously fed no data at all).
         self._decoder_panel.protocol_changed.connect(self._on_decoder_protocol_changed)
+        # Bookmarks and the Decoder panel's "Tune to ..." tune the receiver
+        # (and select the mode they listen with); "Add" saves that mode.
         self._bookmarks_panel.tune_requested.connect(self._on_bookmark_tune)
+        self._decoder_panel.tune_requested.connect(self._on_bookmark_tune)
+        self._bookmarks_panel.set_mode_source(self._listening_mode)
         # The license class decides where transmitting is allowed; remember it.
         self._control_panel.license_changed.connect(self._on_license_changed)
         # Remembered between sessions, like the mode they belong to.
@@ -1792,9 +1876,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._decoder is not None and self._decoder_rate != rate:
             self._rebuild_decoder()
 
+        # The Decoder panel's hint says whether it is listening.
+        self._decoder_panel.set_receiving(running)
+
         if self._recording:
             self._update_rec_clock()
-            self._update_recording_status()
+            self._update_recording_status()  # also armed / capturing
+        else:
+            self._sync_recording_armed()
 
         self._update_window_title()
         if self._info_panel.isVisible():
@@ -2017,6 +2106,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._recording_info_label.setVisible(recording)
         if recording:
             self._update_recording_status()
+        else:
+            self._sync_recording_armed()
 
     def _update_record_button_tip(self) -> None:
         if self._recording:
@@ -2188,16 +2279,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._freq_label.setText(format_frequency(freq_hz))
         self._spectrum.set_center_freq(freq_hz)
         self._waterfall.set_center_freq(freq_hz)
-        # The Bookmarks "Add" field offers the frequency being listened to.
+        # The Bookmarks "Add" field offers the frequency being listened to;
+        # the Decoder panel says whether it is where the protocol is heard.
         self._bookmarks_panel.set_current_frequency(freq_hz)
-        # An open radio tuner follows tuning inside its broadcast bands.
+        self._decoder_panel.set_current_frequency(freq_hz)
+        # An open radio tuner follows tuning (outside its broadcast bands it
+        # shows that the receiver is elsewhere).
         tuner = self._radio_tuner
-        if (
-            tuner is not None
-            and tuner.isVisible()
-            and band_for_frequency(freq_hz) is not None
-            and tuner.get_frequency() != freq_hz
-        ):
+        if tuner is not None and tuner.isVisible():
             tuner.set_frequency(freq_hz)  # does not emit frequency_changed
 
         logger.debug(f"Frequency changed to {freq_hz/1e6:.3f} MHz")
@@ -2350,13 +2439,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._audio.stop()
             return True
         problem = self._audio_output_problem()
-        if problem is None:
-            started = self._audio.start(int(_AUDIO_RATE))
-            # AudioSink reports success even when Qt couldn't open the device
-            # (it then has no output stream).
-            if not started or getattr(self._audio, "_io", True) is None:
-                self._audio.stop()
-                problem = "The audio output could not be opened"
+        if problem is None and not self._audio.start(int(_AUDIO_RATE)):
+            problem = "The audio output could not be opened"
         self._audio_problem = problem
         return problem is None
 
@@ -2373,10 +2457,34 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             logger.debug(f"Audio device check failed: {e}")
         return None
 
-    def _on_bookmark_tune(self, freq_hz: float, label: str):
-        """Tune to a bookmarked frequency."""
+    def _listening_mode(self) -> Tuple[str, str]:
+        """The current ``(demod mode, FM deviation)``, as bookmarks save it
+        (the deviation only in FM)."""
+        panel = self._control_panel
+        mode = panel.get_demod_mode()
+        return mode, panel.get_fm_deviation_text() if mode == "FM" else ""
+
+    @staticmethod
+    def _mode_text(mode: str) -> str:
+        """Short mode name for messages: ``"None (I/Q)"`` -> ``"I/Q"``."""
+        return "I/Q" if mode.startswith("None") else mode
+
+    def _on_bookmark_tune(
+        self, freq_hz: float, label: str, mode: str = "", deviation: str = ""
+    ) -> None:
+        """Tune to a bookmark (or the Decoder panel's suggested channel), in
+        its mode when it names one."""
         self.set_frequency(freq_hz)
-        self._show_status_message(f"Tuned to {label}", "info", 2500)
+        if not mode:
+            self._show_status_message(f"Tuned to {label}", "info", 2500)
+            return
+        self._set_demod_mode(mode, deviation or None)
+        mode = self._mode_text(mode)
+        if label.endswith(")"):  # "ACARS (131.550 MHz)" -> "(131.550 MHz, AM)"
+            text = f"Tuned to {label[:-1]}, {mode})"
+        else:
+            text = f"Tuned to {label} ({mode})"
+        self._show_status_message(text, "info", 2500)
 
     # ------------------------------------------------------------------
     # Acquisition
@@ -2442,6 +2550,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         self._is_running = True
         self._rx_history.clear()
+        self._pacer.restart()
         self._refresh_state_ui()
         logger.info("Acquisition started")
 
@@ -2683,9 +2792,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _confirm_discard_recording(self, doing: str) -> bool:
         """Before ``doing`` (e.g. "closing") drops the unsaved recording,
         offer to save it. True to go ahead: saved, discarded or nothing to
-        lose; False to cancel."""
+        lose; False to cancel.
+
+        A recording still capturing is included: Save and Don't Save stop
+        it first, Cancel leaves it running.
+        """
         if not (self._buffer_unsaved and self._samples_buffer):
             return True
+        live = self._recording and not self._capture_pending
         count = self._buffer_sample_count()
         freq, _rate = self._buffer_meta
         # (A non-breaking space keeps "100.000 MHz" on one line.)
@@ -2696,10 +2810,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("Unsaved Recording")
         box.setText(f"Save the recording before {doing}?")
-        box.setInformativeText(
-            f"{count:,} I/Q samples ({count * 8 / 1e6:.1f} MB) recorded{where} "
-            "haven't been saved. If you don't save them, they are lost."
-        )
+        if live:
+            state = "paused" if self._recording_paused else "in progress"
+            box.setInformativeText(
+                f"A recording is {state}: {count:,} I/Q samples "
+                f"({count * 8 / 1e6:.1f} MB) so far{where}. Save and Don't Save "
+                "stop it; Cancel keeps it going."
+            )
+        else:
+            box.setInformativeText(
+                f"{count:,} I/Q samples ({count * 8 / 1e6:.1f} MB) "
+                f"recorded{where} haven't been saved. If you don't save them, "
+                "they are lost."
+            )
         save_btn = box.addButton("&Save...", QMessageBox.ButtonRole.AcceptRole)
         set_role(save_btn, "primary")
         discard_btn = box.addButton(
@@ -2710,12 +2833,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         box.setEscapeButton(cancel_btn)
         self._exec_dialog(box)
         clicked = box.clickedButton()
+        if clicked not in (save_btn, discard_btn):
+            return False  # Cancel: a running recording keeps going
+        if self._recording:
+            self._toggle_recording(False)
         if clicked is save_btn:
             return self._save_recording()
-        if clicked is discard_btn:
-            self._discard_recording()
-            return True
-        return False
+        self._discard_recording()
+        return True
 
     def _discard_recording(self) -> None:
         """Empty the recording buffer."""
@@ -2732,6 +2857,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             and self._is_running
             and self._device is not None
         )
+
+    def _recording_armed(self) -> bool:
+        """True while a recording waits for the receiver to run (it captures
+        nothing until then). A pause is shown as such, not as armed."""
+        return self._recording and not (self._is_running and self._device is not None)
+
+    def _sync_recording_armed(self) -> None:
+        """Show on the Recording panel whether the recording is armed or
+        capturing, as the status bar's REC badge does."""
+        self._control_panel.set_recording_armed(self._recording_armed())
 
     def _update_rec_clock(self) -> None:
         """Bank the running stretch of the recording clock and restart it if
@@ -2776,6 +2911,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             badge.setText(f"REC {elapsed}")
             set_tone(badge, "danger")
             badge.setToolTip("Recording raw I/Q samples")
+        self._sync_recording_armed()
         self._control_panel.update_record_time(int(self._recording_elapsed()))
 
         mb = self._recording_bytes / (1024 * 1024)
@@ -2792,17 +2928,44 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # ------------------------------------------------------------------
 
     def _read_block(self) -> Optional[np.ndarray]:
-        """The next block of samples, without stalling the window.
+        """The samples received since the last display frame, without
+        stalling the window (None when nothing new has arrived).
 
-        Hardware devices queue whole USB blocks from a background thread and
-        ``read_samples`` waits up to a second for one by default. The display
-        timer runs faster than blocks arrive, so waiting froze the GUI for
-        most of every second; poll without waiting instead.
+        Hardware drivers queue whole USB transfers from a background thread,
+        and ``read_samples`` waits up to a second for one by default, which
+        froze the GUI: poll without waiting. Take every queued transfer, not
+        just one: at 8 MS/s and more a HackRF delivers 60 to 150 transfers a
+        second, more than the display frames, and reading one per frame fell
+        behind (and muted the audio as "not real time").
+
+        The demo device makes samples on request: it is asked for as many as
+        the time since the last frame covers, so it runs in real time too.
+        Other sources give one display block per frame. :class:`_Pacer`
+        limits how much one frame takes.
         """
         dev = self._device
         if isinstance(dev, SDRDevice):
-            return dev.read_samples(DISPLAY_BLOCK, timeout=0.0)
+            return self._drain_device(dev)
+        if self._demo_mode:
+            rate = self._device_sample_rate()
+            return dev.read_samples(self._pacer.demo_request(rate, time.monotonic()))
         return dev.read_samples(DISPLAY_BLOCK)
+
+    def _drain_device(self, dev: SDRDevice) -> Optional[np.ndarray]:
+        """The transfers a hardware driver has queued, joined, up to the
+        pacer's limit (the rest stays queued for the next frame)."""
+        limit = self._pacer.read_limit(self._device_sample_rate())
+        blocks: List[np.ndarray] = []
+        total = 0
+        while not blocks or total < limit:
+            block = dev.read_samples(DISPLAY_BLOCK, timeout=0.0)
+            if block is None or len(block) == 0:
+                break
+            blocks.append(block)
+            total += len(block)
+        if len(blocks) <= 1:
+            return blocks[0] if blocks else None
+        return np.concatenate(blocks)
 
     def _stream_died(self) -> bool:
         """Stop and tell the user if a hardware stream ended on its own
@@ -2831,12 +2994,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if not self._is_running or not self._device:
             return
 
+        started = time.perf_counter()
         samples = self._read_block()
         if samples is None or len(samples) == 0:
             self._stream_died()
             return
         self._note_block(len(samples))
+        self._process_block(samples)
+        # How long the frame took against the time its samples cover.
+        self._pacer.measured(
+            len(samples), self._device_sample_rate(), time.perf_counter() - started
+        )
 
+    def _process_block(self, samples: np.ndarray) -> None:
+        """Plots, level, audio, recording, S-meter and decoder for one frame."""
         # The plots show the newest DISPLAY_BLOCK samples (a fixed FFT size, so
         # the RBW shown in the Info tab holds); everything else gets the block.
         display = samples[-DISPLAY_BLOCK:] if len(samples) > DISPLAY_BLOCK else samples
@@ -2889,6 +3060,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._samples_buffer = []
             self._buffer_meta = tuned
             self._retune_warned = False
+            self._sync_recording_armed()
         elif not self._retune_warned and any(
             known is not None and abs(known - now) > 0.5
             for known, now in zip(self._buffer_meta, tuned, strict=True)
@@ -3067,9 +3239,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _realtime_hint(self) -> str:
         if self._demo_mode:
             return (
-                "The demo device simulates only a few milliseconds of signal "
-                "per screen update, too little to hear. Connect an RTL-SDR or "
+                "This computer can't simulate the demo device's signals in "
+                "real time, so demo audio is paused. Connect an RTL-SDR or "
                 "HackRF One to listen."
+            )
+        if self._pacer.overloaded:
+            return (
+                "This computer can't process "
+                f"{format_rate(self._device_sample_rate())} in real time, so "
+                "audio is paused. Try a lower sample rate in Device > Connect..."
             )
         return (
             "The device isn't delivering samples in real time, so audio is "
@@ -3223,6 +3401,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._demo_mode = False
         self._realtime_hint_shown = False
         self._rx_history.clear()
+        self._pacer.reset()
 
     def _disconnect_device(self):
         """Disconnect from device."""
@@ -3386,6 +3565,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             except Exception as e:
                 self._show_status_error(f"Could not set the sample rate: {e}")
         self._reset_demodulator()
+        # Whether frames keep up depends on the rate: find out anew.
+        self._pacer.reset()
+        self._realtime_hint_shown = False
+        self._rx_history.clear()
         self._refresh_state_ui()
 
     # ------------------------------------------------------------------
@@ -3633,10 +3816,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._on_radio_frequency_changed
             )
 
-        # Open on the station being received, when it is in a broadcast band.
-        freq = self._current_frequency()
-        if band_for_frequency(freq) is not None:
-            self._radio_tuner.set_frequency(freq)  # does not emit
+        # Open on the station being received (or, outside the broadcast
+        # bands, showing that the receiver is elsewhere).
+        self._radio_tuner.set_frequency(self._current_frequency())  # no emit
 
         self._radio_tuner.show()
         self._radio_tuner.raise_()
@@ -3671,8 +3853,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "<p><b>Hardware:</b> RTL-SDR and HackRF One, or the built-in "
             "demo device.</p>"
             "<p><b>Features:</b> spectrum and waterfall displays; AM, FM, SSB "
-            "and CW demodulation; POCSAG, FLEX, ADS-B, ACARS, AX.25/APRS and "
-            "RDS decoders; I/Q recording; ham radio tools.</p>"
+            "and CW demodulation; POCSAG, FLEX, ADS-B, ACARS and AX.25/APRS "
+            "decoders; I/Q recording; ham radio tools.</p>"
             f"<p>Qt {QT_VERSION_STR} &middot; PyQt {PYQT_VERSION_STR}</p>",
         )
 
@@ -3735,11 +3917,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
 
     def _bookmark_current_frequency(self) -> None:
-        """Save the current tuner frequency into bookmarks."""
+        """Ctrl+B: bookmark the tuned frequency with the mode (and FM
+        deviation) it is listened to in."""
         freq = self._current_frequency()
         label = format_frequency(freq)
-        self._bookmarks_panel.add_bookmark(label, freq)
-        self._show_status_message(f"Bookmarked {label}", "success", 2500)
+        mode, deviation = self._listening_mode()
+        self._bookmarks_panel.add_bookmark(label, freq, mode, deviation)
+        self._show_status_message(
+            f"Bookmarked {label} ({self._mode_text(mode)})", "success", 2500
+        )
 
     # ------------------------------------------------------------------
     # Theme and audio
@@ -3932,7 +4118,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _restore_state(self) -> None:
         """Restore persisted user settings on startup."""
         try:
-            freq = self._settings.get_float("frequency_hz", 100e6)
+            freq = self._settings.get_float("frequency_hz", DEFAULT_FREQUENCY_HZ)
             gain = self._settings.get_float("gain_db", 20.0)
             squelch = self._settings.get_float("squelch_db", -80.0)
             agc = self._settings.get_bool("agc_enabled", False)
@@ -3944,7 +4130,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             panel = self._settings.get_str("panel", "")
         except Exception as e:
             logger.debug(f"Settings restore failed: {e}")
-            freq, gain, squelch, agc, demod = 100e6, 20.0, -80.0, False, "FM"
+            freq, gain, squelch, agc, demod = (
+                DEFAULT_FREQUENCY_HZ,
+                20.0,
+                -80.0,
+                False,
+                "FM",
+            )
             deviation = bandwidth = rec_format = panel = ""
         if not deviation and _FM_BROADCAST_BAND[0] <= freq <= _FM_BROADCAST_BAND[1]:
             deviation = _BROADCAST_FM_DEVIATION  # broadcast FM is wideband
@@ -4052,12 +4244,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         from .first_run_wizard import FirstRunWizard
 
         # A connected radio counts as hardware, so the wizard doesn't offer
-        # to replace it with the demo device.
-        hardware = (self._device is not None and not self._demo_mode) or bool(
-            self._scan_hardware()
-        )
-        wiz = FirstRunWizard(self, hardware_found=hardware)
+        # to replace it with the demo device; the wizard names the radio.
+        if self._device is not None and not self._demo_mode:
+            hardware, device_name = True, self._device_display_name()
+        else:
+            found = self._scan_hardware()
+            hardware, device_name = bool(found), (found[0][1] if found else "")
+        wiz = FirstRunWizard(self, hardware_found=hardware, device_name=device_name)
         wiz.demo_mode_requested.connect(self._start_demo_mode)
+        # "Connect ... and start receiving": open Device > Connect once the
+        # starting band is tuned, so receiving starts there.
+        connect_wanted: List[bool] = []
+        connect_signal = getattr(wiz, "connect_requested", None)
+        if connect_signal is not None:
+            connect_signal.connect(lambda: connect_wanted.append(True))
         if self._exec_dialog(wiz):
             freq = wiz.selected_frequency()
             self.set_frequency(freq)
@@ -4065,18 +4265,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if preset is not None:
                 self._set_demod_mode(preset.mode, preset.fm_deviation, preset.bandwidth)
         self._settings.mark_first_run_done()
+        if connect_wanted and (self._device is None or self._demo_mode):
+            self._show_device_dialog(start_after=True)
 
     def _show_welcome(self) -> None:
         """Help > Welcome and Quick Start: the first-run wizard again."""
         self._run_first_run_wizard()
 
     def closeEvent(self, event):
-        """Handle window close (offering to save an unsaved recording)."""
-        if self._recording:
-            self._toggle_recording(False)
+        """Handle window close (offering to save an unsaved recording).
+
+        The prompt comes first and covers a recording still in progress:
+        Save or Don't Save stop it, Cancel keeps it recording and the window
+        open.
+        """
         if not self._confirm_discard_recording("closing SDR Module"):
             event.ignore()
             return
+        if self._recording:
+            self._toggle_recording(False)  # armed, or nothing left to lose
         self._persist_state()
         for timer in (self._display_timer, self._status_timer, self._hotplug_timer):
             timer.stop()

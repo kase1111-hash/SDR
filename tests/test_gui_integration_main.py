@@ -606,7 +606,7 @@ class TestSmallFixes(_WindowTestCase):
         caps = [
             label.text()
             for label in self.win._info_panel.findChildren(type(self.win._freq_label))
-            if label.property("role") == "badge"
+            if label.property("role") == "keycap"
         ]
         self.assertEqual(caps, [keys for keys, _text in InfoPanel.TIPS])
 

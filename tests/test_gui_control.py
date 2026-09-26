@@ -380,7 +380,7 @@ class TestPresets(_PanelTestCase):
         self.panel.frequency_changed.connect(events.append)
         self.select("Broadcast", "FM Broadcast")
         self.panel._apply_preset()
-        self.assertEqual(events, [100e6])
+        self.assertEqual(events, [100.1e6])
         self.assertEqual(self.panel.get_fm_deviation(), 75e3)
         self.select("Amateur", "2m Calling")
         self.panel._apply_preset()

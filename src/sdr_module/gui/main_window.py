@@ -40,7 +40,7 @@ from .control_panel import ControlPanel
 from .decoder_panel import DecoderPanel
 from .settings_store import GuiSettings
 from .spectrum_widget import SpectrumWidget
-from .themes import get_stylesheet
+from .themes import apply_theme
 from .waterfall_widget import WaterfallWidget
 
 # Band presets shown in the Tools → Bands menu
@@ -1299,7 +1299,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._settings.set("theme", self._theme)
         app = QApplication.instance()
         if app is not None:
-            app.setStyleSheet(get_stylesheet(self._theme))
+            apply_theme(app, self._theme)
         self._show_status_error(f"Theme: {self._theme}", duration_ms=1500)
 
     def _show_help(self) -> None:

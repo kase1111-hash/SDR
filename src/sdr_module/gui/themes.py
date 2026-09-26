@@ -45,6 +45,7 @@ the stylesheet and the generated indicator/arrow icons in one step.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import tempfile
@@ -77,6 +78,7 @@ class Palette:
     surface1: str
     surface2: str
     field: str  # background of text inputs, spin boxes and combo boxes
+    border_strong: str  # outlines of inputs/indicators (>= 3:1 on base)
     button: str  # resting fill of push/tool buttons
     button_hover: str
     button_pressed: str
@@ -152,16 +154,17 @@ DARK = Palette(
     surface1="#45475a",
     surface2="#585b70",
     field="#313244",
+    border_strong="#6c7086",
     button="#313244",
     button_hover="#45475a",
     button_pressed="#585b70",
     text="#cdd6f4",
     subtext="#a6adc8",
-    caption="#7f849c",
+    caption="#868ba3",
     disabled="#6c7086",
     accent="#89b4fa",
     accent_hover="#b4befe",
-    accent_muted="#3f5f93",
+    accent_muted="#3a578a",
     on_accent="#1e1e2e",
     success="#a6e3a1",
     warning="#f9e2af",
@@ -185,8 +188,8 @@ DARK = Palette(
     series=("#89b4fa", "#a6e3a1", "#f9e2af", "#f38ba8", "#cba6f7", "#94e2d5"),
 )
 
-# Catppuccin Latte. Latte's own green/yellow are too pale for text on its
-# light base, so the text tones are darkened to stay above ~4.4:1.
+# Catppuccin Latte. Latte's own text tones are too pale on its light base,
+# so they are darkened to at least 4.6:1 on base, mantle and their tints.
 LIGHT = Palette(
     name="light",
     is_dark=False,
@@ -197,21 +200,22 @@ LIGHT = Palette(
     surface1="#bcc0cc",
     surface2="#acb0be",
     field="#ffffff",
+    border_strong="#868aa0",
     button="#ffffff",
     button_hover="#e6e9ef",
     button_pressed="#ccd0da",
     text="#4c4f69",
     subtext="#5c5f77",
-    caption="#6c6f85",
+    caption="#63667a",
     disabled="#9ca0b0",
-    accent="#1e66f5",
-    accent_hover="#3b7bf7",
+    accent="#1c5ee1",
+    accent_hover="#1a55cc",
     accent_muted="#a9c3fb",
     on_accent="#ffffff",
-    success="#2d7a1f",
-    warning="#a15c00",
-    danger="#d20f39",
-    info="#0e7c86",
+    success="#2c761e",
+    warning="#995700",
+    danger="#ca0e37",
+    info="#0d727b",
     success_bg="#e3f1de",
     warning_bg="#f8ecd9",
     danger_bg="#f9e1e6",
@@ -221,13 +225,13 @@ LIGHT = Palette(
     plot_axis="#6c6f85",
     plot_trace="#1e66f5",
     plot_peak="#d20f39",
-    plot_marker="#df8e1d",
+    plot_marker="#a15c00",
     plot_text="#4c4f69",
     lcd_bg="#ffffff",
     lcd_border="#bcc0cc",
-    lcd_text="#2d7a1f",
+    lcd_text="#2c761e",
     lcd_alt="#a15c00",
-    series=("#1e66f5", "#2d7a1f", "#df8e1d", "#d20f39", "#8839ef", "#179299"),
+    series=("#1c5ee1", "#2c761e", "#df8e1d", "#ca0e37", "#8839ef", "#179299"),
 )
 
 _PALETTES: Dict[str, Palette] = {"dark": DARK, "light": LIGHT}
@@ -254,11 +258,22 @@ def get_palette(theme: Optional[str] = None) -> Palette:
 # Generated indicator / arrow icons
 # ---------------------------------------------------------------------------
 
-_ICON_VERSION = "v1"
+_ICON_VERSION = "v2"
+_icon_dirs: Dict[str, str] = {}
 
 
 def _icon_dir(p: Palette) -> str:
-    """Directory holding this palette's generated icons (created on demand)."""
+    """Directory holding this palette's generated icons (created on demand).
+
+    The folder name hashes the colors the icons are drawn with, so a palette
+    change regenerates them instead of reusing stale files.
+    """
+    key = hashlib.sha1(
+        "|".join((_ICON_VERSION, p.on_accent, p.disabled, p.subtext)).encode()
+    ).hexdigest()[:10]
+    cached = _icon_dirs.get(key)
+    if cached and os.path.isdir(cached):
+        return cached
     base = ""
     try:
         from PyQt6.QtCore import QStandardPaths
@@ -273,14 +288,17 @@ def _icon_dir(p: Palette) -> str:
         candidates.append(os.path.join(base, "theme-icons"))
     candidates.append(os.path.join(tempfile.gettempdir(), "sdr-module-theme-icons"))
     for root in candidates:
-        path = os.path.join(root, f"{p.name}-{_ICON_VERSION}")
+        path = os.path.join(root, f"{p.name}-{key}")
         try:
             os.makedirs(path, exist_ok=True)
             if os.access(path, os.W_OK):
+                _icon_dirs[key] = path
                 return path
         except OSError:
             continue
-    return tempfile.mkdtemp(prefix="sdr-theme-")
+    path = tempfile.mkdtemp(prefix="sdr-theme-")
+    _icon_dirs[key] = path
+    return path
 
 
 def _render_icon(out_path: str, kind: str, color: str) -> bool:
@@ -398,7 +416,11 @@ QMenu::separator {{ height: 1px; background-color: {p.surface0}; margin: 4px 8px
 QMenu::indicator {{ width: 14px; height: 14px; left: 4px; border-radius: 3px; }}
 QMenu::indicator:non-exclusive:checked {{ background-color: {p.accent};
     image: url("{i['check']}"); }}
-QMenu::indicator:non-exclusive:unchecked {{ border: 1px solid {p.surface2}; }}
+QMenu::indicator:non-exclusive:unchecked {{ border: 1px solid {p.border_strong}; }}
+QMenu::indicator:exclusive:checked {{ background-color: {p.accent}; border-radius: 7px;
+    image: url("{i['dot']}"); }}
+QMenu::indicator:exclusive:unchecked {{ border: 1px solid {p.border_strong};
+    border-radius: 7px; }}
 QToolBar {{ background-color: {p.mantle}; border: none;
     border-bottom: 1px solid {p.surface0}; spacing: 6px; padding: 4px 6px; }}
 QToolBar::separator {{ background-color: {p.surface0}; width: 1px; margin: 4px 6px; }}
@@ -450,17 +472,20 @@ QPushButton[role="danger"]:checked, QToolButton[role="danger"]:checked {{
 QPushButton[role="danger"]:disabled, QToolButton[role="danger"]:disabled {{
     background-color: {p.mantle}; color: {p.disabled};
     border-color: {p.surface0}; }}
-QPushButton[role="compact"] {{ padding: 3px 4px; font-family: {MONO_FONT_STACK};
-    font-size: 11px; }}
+QPushButton[role="compact"] {{ padding: 3px 6px; font-size: 11px; }}
+QWidget[role="header-strip"] QPushButton[role="compact"],
+QFrame[role="header-strip"] QPushButton[role="compact"] {{ min-height: 20px;
+    padding: 3px 8px; }}
 QDialogButtonBox QPushButton {{ min-width: 72px; }}
 
 /* ---- Inputs -------------------------------------------------------- */
 QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QDateTimeEdit {{
-    background-color: {p.field}; color: {p.text}; border: 1px solid {p.surface1};
+    background-color: {p.field}; color: {p.text}; border: 1px solid {p.border_strong};
+    placeholder-text-color: {p.subtext};
     border-radius: 4px; padding: 3px 6px; min-height: 20px;
     selection-background-color: {p.accent}; selection-color: {p.on_accent}; }}
 QLineEdit:hover, QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover {{
-    border-color: {p.surface2}; }}
+    border-color: {p.subtext}; }}
 QLineEdit:focus, QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {{
     border-color: {p.accent}; }}
 QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled,
@@ -508,7 +533,7 @@ QSpinBox::down-arrow:off, QDoubleSpinBox::down-arrow:off {{
 /* ---- Check boxes and radio buttons --------------------------------- */
 QCheckBox, QRadioButton {{ spacing: 6px; color: {p.text}; }}
 QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 3px;
-    border: 1px solid {p.surface2}; background-color: {p.surface0}; }}
+    border: 1px solid {p.border_strong}; background-color: {p.field}; }}
 QCheckBox::indicator:hover {{ border-color: {p.accent}; }}
 QCheckBox::indicator:checked {{ background-color: {p.accent}; border-color: {p.accent};
     image: url("{i['check']}"); }}
@@ -519,7 +544,7 @@ QCheckBox::indicator:disabled {{ background-color: {p.mantle};
 QCheckBox::indicator:checked:disabled {{ background-color: {p.surface0};
     image: url("{i['check_disabled']}"); }}
 QRadioButton::indicator {{ width: 16px; height: 16px; border-radius: 8px;
-    border: 1px solid {p.surface2}; background-color: {p.surface0}; }}
+    border: 1px solid {p.border_strong}; background-color: {p.field}; }}
 QRadioButton::indicator:hover {{ border-color: {p.accent}; }}
 QRadioButton::indicator:checked {{ background-color: {p.accent};
     border-color: {p.accent}; image: url("{i['dot']}"); }}
@@ -561,6 +586,13 @@ QTabBar::tab:selected {{ background-color: {p.base}; color: {p.accent};
 QTabBar::tab:hover:!selected {{ background-color: {p.surface0}; color: {p.text}; }}
 QTabBar::tab:disabled {{ color: {p.disabled}; }}
 QTabBar QToolButton {{ padding: 2px; }}
+QTabBar[documentMode="true"]::tab {{ background-color: transparent; border: none;
+    border-bottom: 2px solid transparent; border-radius: 0; padding: 4px 8px;
+    margin-right: 4px; color: {p.subtext}; }}
+QTabBar[documentMode="true"]::tab:selected {{ background-color: transparent;
+    color: {p.accent}; border-bottom: 2px solid {p.accent}; }}
+QTabBar[documentMode="true"]::tab:hover:!selected {{ background-color: transparent;
+    color: {p.text}; border-bottom: 2px solid {p.surface1}; }}
 
 /* ---- Item views and text ------------------------------------------- */
 QListWidget, QListView, QTreeWidget, QTreeView, QTableWidget, QTableView {{
@@ -580,7 +612,7 @@ QHeaderView::section {{ background-color: {p.mantle}; color: {p.subtext}; border
     padding: 4px 8px; font-weight: bold; }}
 QTableCornerButton::section {{ background-color: {p.mantle}; border: none; }}
 QTextEdit, QPlainTextEdit, QTextBrowser {{ background-color: {p.mantle};
-    color: {p.text}; border: 1px solid {p.surface1}; border-radius: 4px;
+    color: {p.text}; placeholder-text-color: {p.subtext}; border: 1px solid {p.surface1}; border-radius: 4px;
     selection-background-color: {p.accent}; selection-color: {p.on_accent}; }}
 QTextEdit[role="terminal"], QPlainTextEdit[role="terminal"] {{
     background-color: {p.lcd_bg}; color: {p.lcd_text};
@@ -631,7 +663,7 @@ QLabel[role="badge"] {{ color: {p.on_accent}; background-color: {p.accent};
     border-radius: 3px; padding: 1px 6px; font-weight: bold; }}
 QLabel[role="keycap"] {{ color: {p.text}; background-color: {p.surface0};
     border: 1px solid {p.surface2}; border-bottom-width: 2px; border-radius: 4px;
-    padding: 0 5px; font-family: {MONO_FONT_STACK}; font-size: 11px; }}
+    padding: 0 5px; font-size: 12px; }}
 QFrame[role="divider"] {{ background-color: {p.surface1}; border: none;
     min-height: 1px; max-height: 1px; }}
 QFrame[role="vdivider"] {{ background-color: {p.surface1}; border: none;
@@ -670,6 +702,35 @@ QLabel[role="badge"][tone="accent"] {{ background-color: {p.accent};
     color: {p.on_accent}; }}
 QLabel[role="badge"][tone="muted"] {{ background-color: {p.surface1};
     color: {p.text}; }}
+
+/* ---- Keyboard focus (last, so it wins over roles and hover) --------- */
+/* A 2 px ring (padding shrinks by 1 px so the size never changes). The
+   accent-filled states get a double ring in the on-accent color so focus
+   stays distinct from the accent border of the default button. */
+QPushButton:focus {{ border: 2px solid {p.accent}; padding: 4px 13px; }}
+QToolButton:focus {{ border: 2px solid {p.accent}; padding: 3px 7px; }}
+QToolBar QToolButton:focus {{ padding: 3px 13px; }}
+QPushButton[role="compact"]:focus {{ padding: 2px 5px; }}
+QWidget[role="header-strip"] QPushButton[role="compact"]:focus,
+QFrame[role="header-strip"] QPushButton[role="compact"]:focus {{ padding: 2px 7px; }}
+QPushButton[role="primary"]:focus, QToolButton[role="primary"]:focus,
+QPushButton:checked:focus, QToolButton:checked:focus {{
+    border: 3px double {p.on_accent}; padding: 3px 12px; }}
+QPushButton[role="danger"]:focus, QToolButton[role="danger"]:focus {{
+    border: 2px solid {p.text}; padding: 4px 13px; }}
+QCheckBox::indicator:focus, QRadioButton::indicator:focus {{
+    border: 2px solid {p.accent}; width: 14px; height: 14px; }}
+QCheckBox::indicator:checked:focus, QCheckBox::indicator:indeterminate:focus,
+QRadioButton::indicator:checked:focus {{ border: 2px solid {p.text}; }}
+QSlider::handle:horizontal:focus, QSlider::handle:vertical:focus {{
+    border: 2px solid {p.text}; }}
+QTabBar::tab:selected:focus {{ background-color: {p.surface0};
+    border: 1px solid {p.accent}; border-bottom: 2px solid {p.accent}; }}
+QTabBar[documentMode="true"]::tab:selected:focus {{ background-color: {p.surface0};
+    border: none; border-bottom: 2px solid {p.accent}; }}
+QListWidget:focus, QListView:focus, QTreeWidget:focus, QTreeView:focus,
+QTableWidget:focus, QTableView:focus, QTextEdit:focus, QPlainTextEdit:focus,
+QTextBrowser:focus {{ border-color: {p.accent}; }}
 """
 
 
@@ -698,7 +759,7 @@ def build_qpalette(theme: Optional[str] = None) -> Any:
         role.AlternateBase: p.mantle,
         role.ToolTipBase: p.surface0,
         role.ToolTipText: p.text,
-        role.PlaceholderText: p.caption,
+        role.PlaceholderText: p.subtext,
         role.Text: p.text,
         role.Button: p.surface0,
         role.ButtonText: p.text,

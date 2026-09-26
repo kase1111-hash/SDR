@@ -796,7 +796,7 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         RadioPreset(1260e3, RadioBand.AM, "Oldies"),
     ]
 
-    _FOOTER_HINT = "Tunes the main receiver. Turn on Radio > Audio Output to listen."
+    _FOOTER_HINT = "Tunes the main receiver. Use the toolbar's Audio button to listen."
 
     def __init__(self, parent=None, sample_rate: float = 2.4e6):
         if not HAS_PYQT6:

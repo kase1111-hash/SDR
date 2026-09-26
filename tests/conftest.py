@@ -20,6 +20,21 @@ def _qt_app():
     return QApplication.instance()
 
 
+def _current_theme():
+    try:
+        from sdr_module.gui import themes
+    except ImportError:
+        return None
+    return themes.current_theme()
+
+
+def _restore_theme_name(theme: str) -> None:
+    """Reset the theme module's notion of the active theme (no restyle)."""
+    from sdr_module.gui import themes
+
+    themes._current_theme = theme
+
+
 def _flush_deferred_deletes() -> None:
     from PyQt6.QtCore import QCoreApplication, QEvent
 
@@ -36,9 +51,17 @@ def _qt_flush_deferred_deletes():
 
 @pytest.fixture(autouse=True, scope="module")
 def _qt_close_module_windows():
-    """Close and delete top-level widgets created by the test module."""
+    """Close top-level widgets a test module created and undo its theming.
+
+    A module that applies a theme would otherwise leave the full application
+    stylesheet in place, which makes every later widget construction several
+    times slower.
+    """
     app = _qt_app()
     before = {id(w) for w in app.topLevelWidgets()} if app is not None else set()
+    style_sheet = app.styleSheet() if app is not None else ""
+    palette = app.palette() if app is not None else None
+    theme = _current_theme()
     yield
     app = _qt_app()
     if app is None:
@@ -52,3 +75,10 @@ def _qt_close_module_windows():
         except RuntimeError:  # already deleted on the C++ side
             pass
     _flush_deferred_deletes()
+    # Restyle only after the module's windows are gone.
+    if app.styleSheet() != style_sheet:
+        app.setStyleSheet(style_sheet)
+    if palette is not None:
+        app.setPalette(palette)
+    if theme is not None:
+        _restore_theme_name(theme)

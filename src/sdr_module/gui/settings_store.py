@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 ORG = "SDR Module Team"
 APP = "SDR Module"
 
+# Frequency the GUI starts on when nothing is saved: a standard FM broadcast
+# channel, and where demo mode's strongest station sits.
+DEFAULT_FREQUENCY_HZ = 100.1e6
+
 
 class GuiSettings:
     """Typed wrapper over QSettings for GUI state persistence."""

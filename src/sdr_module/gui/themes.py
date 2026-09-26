@@ -30,11 +30,14 @@ Roles (typography / shape):
     card          boxed surface (QFrame)
     callout       boxed note; its colors come from ``tone`` (default info)
     badge         small pill; its colors come from ``tone``
-    primary       (buttons) accent-filled call to action
-    danger        (buttons) destructive / transmit action
+    keycap        keyboard-key label (help dialog, wizard)
+    divider       1 px horizontal rule (QFrame); ``vdivider`` is vertical
+    primary       (QPushButton/QToolButton) accent-filled call to action
+    danger        (QPushButton/QToolButton) destructive / transmit action
     compact       (buttons) dense button, e.g. tuning step buttons
 
-Tones (color): success, warning, danger, info, accent, muted.
+Tones (color): success, warning, danger, info, accent, muted. On QLineEdit,
+QSpinBox and QComboBox a tone colors the border (inline validation).
 
 Apply a theme with :func:`apply_theme`, which sets the application palette,
 the stylesheet and the generated indicator/arrow icons in one step.
@@ -74,6 +77,9 @@ class Palette:
     surface1: str
     surface2: str
     field: str  # background of text inputs, spin boxes and combo boxes
+    button: str  # resting fill of push/tool buttons
+    button_hover: str
+    button_pressed: str
 
     # Text.
     text: str
@@ -84,6 +90,7 @@ class Palette:
     # Accent (selection, focus, primary actions).
     accent: str
     accent_hover: str
+    accent_muted: str  # low-emphasis accent fill that body text stays legible on
     on_accent: str  # text/icons drawn on an accent (or tone) fill
 
     # Semantic tones (text-safe on base) and their tinted backgrounds.
@@ -145,12 +152,16 @@ DARK = Palette(
     surface1="#45475a",
     surface2="#585b70",
     field="#313244",
+    button="#313244",
+    button_hover="#45475a",
+    button_pressed="#585b70",
     text="#cdd6f4",
     subtext="#a6adc8",
     caption="#7f849c",
     disabled="#6c7086",
     accent="#89b4fa",
     accent_hover="#b4befe",
+    accent_muted="#3f5f93",
     on_accent="#1e1e2e",
     success="#a6e3a1",
     warning="#f9e2af",
@@ -186,12 +197,16 @@ LIGHT = Palette(
     surface1="#bcc0cc",
     surface2="#acb0be",
     field="#ffffff",
+    button="#ffffff",
+    button_hover="#e6e9ef",
+    button_pressed="#ccd0da",
     text="#4c4f69",
     subtext="#5c5f77",
     caption="#6c6f85",
     disabled="#9ca0b0",
     accent="#1e66f5",
     accent_hover="#3b7bf7",
+    accent_muted="#a9c3fb",
     on_accent="#ffffff",
     success="#2d7a1f",
     warning="#a15c00",
@@ -388,11 +403,12 @@ QToolBar {{ background-color: {p.mantle}; border: none;
     border-bottom: 1px solid {p.surface0}; spacing: 6px; padding: 4px 6px; }}
 QToolBar::separator {{ background-color: {p.surface0}; width: 1px; margin: 4px 6px; }}
 QToolBar QLabel {{ color: {p.subtext}; padding: 0 2px; }}
-QToolBar QToolButton {{ background-color: {p.surface0}; color: {p.text};
+QToolBar QToolButton {{ background-color: {p.button}; color: {p.text};
     border: 1px solid {p.surface1}; border-radius: 4px; padding: 4px 14px;
     font-weight: bold; }}
-QToolBar QToolButton:hover {{ background-color: {p.surface1}; border-color: {p.surface2}; }}
-QToolBar QToolButton:pressed {{ background-color: {p.surface2}; }}
+QToolBar QToolButton:hover {{ background-color: {p.button_hover};
+    border-color: {p.surface2}; }}
+QToolBar QToolButton:pressed {{ background-color: {p.button_pressed}; }}
 QToolBar QToolButton:checked {{ background-color: {p.danger}; color: {p.on_accent};
     border-color: {p.danger}; }}
 QToolBar QToolButton:disabled {{ color: {p.disabled}; background-color: {p.mantle};
@@ -403,32 +419,37 @@ QStatusBar QLabel {{ color: {p.subtext}; padding: 0 6px; }}
 QStatusBar::item {{ border: none; }}
 
 /* ---- Buttons ------------------------------------------------------- */
-QPushButton, QToolButton {{ background-color: {p.surface0}; color: {p.text};
+QPushButton, QToolButton {{ background-color: {p.button}; color: {p.text};
     border: 1px solid {p.surface1}; border-radius: 4px; padding: 5px 14px; }}
+QPushButton {{ min-height: 16px; }}
 QToolButton {{ padding: 4px 8px; }}
-QPushButton:hover, QToolButton:hover {{ background-color: {p.surface1};
+QPushButton:hover, QToolButton:hover {{ background-color: {p.button_hover};
     border-color: {p.surface2}; }}
-QPushButton:pressed, QToolButton:pressed {{ background-color: {p.surface2}; }}
+QPushButton:pressed, QToolButton:pressed {{ background-color: {p.button_pressed}; }}
 QPushButton:focus, QToolButton:focus {{ border-color: {p.accent}; }}
 QPushButton:checked, QToolButton:checked {{ background-color: {p.accent};
     color: {p.on_accent}; border-color: {p.accent}; }}
 QPushButton:disabled, QToolButton:disabled {{ background-color: {p.mantle};
     color: {p.disabled}; border-color: {p.surface0}; }}
 QPushButton:default {{ border-color: {p.accent}; }}
-QPushButton[role="primary"] {{ background-color: {p.accent}; color: {p.on_accent};
+QPushButton[role="primary"], QToolButton[role="primary"] {{
+    background-color: {p.accent}; color: {p.on_accent};
     border-color: {p.accent}; font-weight: bold; }}
-QPushButton[role="primary"]:hover {{ background-color: {p.accent_hover};
-    border-color: {p.accent_hover}; }}
-QPushButton[role="primary"]:disabled {{ background-color: {p.surface0};
-    color: {p.disabled}; border-color: {p.surface0}; }}
-QPushButton[role="danger"] {{ background-color: {p.danger_bg}; color: {p.danger};
+QPushButton[role="primary"]:hover, QToolButton[role="primary"]:hover {{
+    background-color: {p.accent_hover}; border-color: {p.accent_hover}; }}
+QPushButton[role="primary"]:disabled, QToolButton[role="primary"]:disabled {{
+    background-color: {p.surface0}; color: {p.disabled};
+    border-color: {p.surface0}; }}
+QPushButton[role="danger"], QToolButton[role="danger"] {{
+    background-color: {p.danger_bg}; color: {p.danger};
     border-color: {p.danger}; font-weight: bold; }}
-QPushButton[role="danger"]:hover {{ background-color: {p.danger};
-    color: {p.on_accent}; }}
-QPushButton[role="danger"]:checked {{ background-color: {p.danger};
-    color: {p.on_accent}; border-color: {p.danger}; }}
-QPushButton[role="danger"]:disabled {{ background-color: {p.mantle};
-    color: {p.disabled}; border-color: {p.surface0}; }}
+QPushButton[role="danger"]:hover, QToolButton[role="danger"]:hover {{
+    background-color: {p.danger}; color: {p.on_accent}; }}
+QPushButton[role="danger"]:checked, QToolButton[role="danger"]:checked {{
+    background-color: {p.danger}; color: {p.on_accent}; border-color: {p.danger}; }}
+QPushButton[role="danger"]:disabled, QToolButton[role="danger"]:disabled {{
+    background-color: {p.mantle}; color: {p.disabled};
+    border-color: {p.surface0}; }}
 QPushButton[role="compact"] {{ padding: 3px 4px; font-family: {MONO_FONT_STACK};
     font-size: 11px; }}
 QDialogButtonBox QPushButton {{ min-width: 72px; }}
@@ -446,6 +467,12 @@ QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled,
 QComboBox:disabled {{ background-color: {p.mantle}; color: {p.disabled};
     border-color: {p.surface0}; }}
 QLineEdit:read-only {{ background-color: {p.mantle}; }}
+QLineEdit[tone="success"], QSpinBox[tone="success"], QDoubleSpinBox[tone="success"],
+QComboBox[tone="success"] {{ border-color: {p.success}; }}
+QLineEdit[tone="warning"], QSpinBox[tone="warning"], QDoubleSpinBox[tone="warning"],
+QComboBox[tone="warning"] {{ border-color: {p.warning}; }}
+QLineEdit[tone="danger"], QSpinBox[tone="danger"], QDoubleSpinBox[tone="danger"],
+QComboBox[tone="danger"] {{ border-color: {p.danger}; }}
 QComboBox {{ padding-right: 22px; }}
 QComboBox::drop-down {{ subcontrol-origin: padding; subcontrol-position: center right;
     width: 20px; border: none; }}
@@ -454,7 +481,8 @@ QComboBox::down-arrow:disabled {{ image: url("{i['down_disabled']}"); }}
 QComboBox QAbstractItemView {{ background-color: {p.base}; color: {p.text};
     border: 1px solid {p.surface1}; outline: none; padding: 2px;
     selection-background-color: {p.surface0}; selection-color: {p.text}; }}
-QSpinBox, QDoubleSpinBox {{ padding-right: 20px; }}
+QSpinBox, QDoubleSpinBox {{ padding-top: 2px; padding-bottom: 2px;
+    padding-right: 20px; min-height: 19px; }}
 QSpinBox::up-button, QDoubleSpinBox::up-button {{ subcontrol-origin: border;
     subcontrol-position: top right; width: 18px; border: none;
     border-left: 1px solid {p.surface1}; border-top-right-radius: 4px;
@@ -518,7 +546,7 @@ QSlider::handle:disabled {{ background-color: {p.surface1}; }}
 QProgressBar {{ background-color: {p.surface0}; border: 1px solid {p.surface1};
     border-radius: 4px; text-align: center; color: {p.text}; font-size: 10px;
     min-height: 12px; }}
-QProgressBar::chunk {{ background-color: {p.accent}; border-radius: 3px; }}
+QProgressBar::chunk {{ background-color: {p.accent_muted}; border-radius: 3px; }}
 
 /* ---- Tabs ---------------------------------------------------------- */
 QTabWidget::pane {{ border: 1px solid {p.surface1}; border-radius: 4px;
@@ -541,6 +569,7 @@ QListWidget, QListView, QTreeWidget, QTreeView, QTableWidget, QTableView {{
     gridline-color: {p.surface0}; outline: none;
     selection-background-color: {p.surface1}; selection-color: {p.text}; }}
 QListView::item, QTreeView::item {{ padding: 3px 4px; }}
+QTableView::item {{ padding: 0 4px; }}
 QListView::item:hover, QTreeView::item:hover, QTableView::item:hover {{
     background-color: {p.surface0}; }}
 QListView::item:selected, QTreeView::item:selected, QTableView::item:selected {{
@@ -600,6 +629,13 @@ QLabel[role="callout"], QFrame[role="callout"] {{ color: {p.info};
     padding: 6px 8px; }}
 QLabel[role="badge"] {{ color: {p.on_accent}; background-color: {p.accent};
     border-radius: 3px; padding: 1px 6px; font-weight: bold; }}
+QLabel[role="keycap"] {{ color: {p.text}; background-color: {p.surface0};
+    border: 1px solid {p.surface2}; border-bottom-width: 2px; border-radius: 4px;
+    padding: 0 5px; font-family: {MONO_FONT_STACK}; font-size: 11px; }}
+QFrame[role="divider"] {{ background-color: {p.surface1}; border: none;
+    min-height: 1px; max-height: 1px; }}
+QFrame[role="vdivider"] {{ background-color: {p.surface1}; border: none;
+    min-width: 1px; max-width: 1px; }}
 
 /* ---- Tones (after roles so they override role colors) -------------- */
 QLabel[tone="success"] {{ color: {p.success}; }}
@@ -614,6 +650,8 @@ QLabel[role="lcd"][tone="warning"], QLabel[role="lcd-small"][tone="warning"] {{
     color: {p.warning}; }}
 QLabel[role="lcd"][tone="danger"], QLabel[role="lcd-small"][tone="danger"] {{
     color: {p.danger}; }}
+QLabel[role="lcd"][tone="muted"], QLabel[role="lcd-small"][tone="muted"] {{
+    color: {p.caption}; }}
 QLabel[role="callout"][tone="success"], QFrame[role="callout"][tone="success"] {{
     color: {p.success}; background-color: {p.success_bg}; border-color: {p.success}; }}
 QLabel[role="callout"][tone="warning"], QFrame[role="callout"][tone="warning"] {{

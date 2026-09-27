@@ -1940,6 +1940,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         for action in (self._spectrum_action, self._waterfall_action):
             action.toggled.connect(self._sync_plot_actions)
+        # Without the spectrum above it, the waterfall labels its frequencies.
+        self._spectrum_action.toggled.connect(
+            lambda shown: self._waterfall.set_frequency_axis_visible(not shown)
+        )
         view_menu.addSeparator()
         panels_menu = view_menu.addMenu("&Panels")
         for index, (key, title, tip) in enumerate(self._panel_specs):
@@ -2266,6 +2270,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # control panel, toolbar readout and plot axes in step.
         self._spectrum.frequency_clicked.connect(self.set_frequency)
         self._waterfall.frequency_clicked.connect(self.set_frequency)
+        self._waterfall.bookmark_requested.connect(self._bookmark_frequency)
+        self._waterfall.display_settings_changed.connect(self._save_waterfall_settings)
         self._right_tabs.currentChanged.connect(self._on_panel_tab_changed)
 
     # ------------------------------------------------------------------
@@ -2703,6 +2709,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             action.setChecked(True)
         self._spectrum.setVisible(True)
         self._waterfall.setVisible(True)
+        self._waterfall.set_frequency_axis_visible(False)
         self._apply_default_splitter_sizes()
         self._show_status_message("Layout reset")
 
@@ -4741,7 +4748,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _bookmark_current_frequency(self) -> None:
         """Ctrl+B: bookmark the tuned frequency with the mode (and FM
         deviation) it is listened to in."""
-        freq = self._current_frequency()
+        self._bookmark_frequency(self._current_frequency())
+
+    def _bookmark_frequency(self, freq: float) -> None:
+        """Bookmark ``freq`` (Hz) in the current listening mode (Ctrl+B, or a
+        signal right-clicked on the waterfall)."""
         label = format_frequency(freq)
         mode, deviation = self._listening_mode()
         self._bookmarks_panel.add_bookmark(label, freq, mode, deviation)
@@ -4978,6 +4989,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._show_panel(panel)
             self._restore_license_class()
             self._restore_ham_id_settings()
+            self._restore_waterfall_settings()
         finally:
             self._restoring = False
 
@@ -5006,6 +5018,33 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 ok = False
             restored_all = restored_all and ok
         self._splitters_restored = restored_all
+
+    #: Waterfall display defaults when nothing is saved: levels that follow
+    #: the noise floor and the strongest signal, and a minute of history.
+    _WATERFALL_DEFAULTS = {"auto_levels": True, "history_s": 60.0}
+
+    def _restore_waterfall_settings(self) -> None:
+        settings = dict(self._WATERFALL_DEFAULTS)
+        raw = self._settings.get_str("waterfall_display", "")
+        if raw:
+            try:
+                saved = json.loads(raw)
+            except ValueError:
+                logger.debug("Ignoring unreadable waterfall settings: %r", raw)
+            else:
+                if isinstance(saved, dict):
+                    settings.update(saved)
+        self._waterfall.apply_display_settings(settings)
+
+    def _save_waterfall_settings(self) -> None:
+        if getattr(self, "_restoring", False):
+            return
+        try:
+            self._settings.set(
+                "waterfall_display", json.dumps(self._waterfall.display_settings())
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug(f"Could not save waterfall settings: {e}")
 
     def _restore_license_class(self) -> None:
         from ..core.frequency_manager import LicenseClass
@@ -5052,6 +5091,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if current:
                 self._settings.set("panel", current)
             self._save_ham_id_settings()
+            self._save_waterfall_settings()
             self._settings.save_geometry("main", self.saveGeometry())
             if self._spectrum.isVisible() and self._waterfall.isVisible():
                 for name, splitter in self._splitters().items():

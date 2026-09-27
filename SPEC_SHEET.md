@@ -408,7 +408,7 @@ being crushed.
 |-----------|-------------|
 | Toolbar | Start/Stop; Record (red while recording); Audio on/off with a volume slider; FREQ readout (click it, or press `Ctrl+L`, to type a frequency); LEVEL readout: strongest signal inside the tuned channel in dBFS, green while above squelch |
 | Spectrum Analyzer | 2048-point Hann-windowed FFT in dBFS; peak hold (with Reset) and averaging (Off, 2–32 frames); hover readout; dashed tuned-frequency marker and a shaded band for the demodulated channel (passband); left-click to tune |
-| Waterfall | Newest line at the top with a time axis; colormap (Turbo, Viridis, Plasma, Grayscale, Classic) and dynamic range (60–120 dB); Clear; left-click to tune. Its frequency axis lines up with the spectrum's |
+| Waterfall | Newest line at the top with a time axis (pauses in reception drawn as separators). Header: Pause (`P`); History (Live, 1 min, 5 min, 15 min, 1 h; slower rows keep the per-bin maximum of their interval, and rows keep an exact cadence); LEVELS, a draggable color-scale legend in dBFS with Auto (floor 6 dB under the median-bin noise floor, ceiling 4 dB over the strongest signal, at least 30 dB apart, moving only on 3 dB changes); ⋯ menu. Hover readout: frequency, level, SNR over the noise floor, age. Left-click tunes; dragging measures a box (Δf, Δt, center, peak and SNR) that follows its rows as they scroll (`Esc` clears it). Right-click: tune/bookmark/copy the frequency, measurement actions, pause, history, levels (Auto, 60–120 dB presets, fit once), colors (Turbo, Viridis, Plasma, Grayscale, Classic), Clear History, Save Image (PNG with axes). Its frequency axis lines up with the spectrum's, and it draws its own when the spectrum is hidden. Colors, history and levels persist |
 | Control Panel | **Frequency** (entry with Hz/kHz/MHz/GHz units, −1M … +1M step buttons); **Presets** (category and preset, with listen/transmit status, Apply Preset); **Demodulation** (None (I/Q), AM, FM, USB, LSB, CW; FM deviation; squelch); **Receiver** (RF gain, automatic gain (AGC), channel bandwidth); **Recording** (format, Record/Pause, status and elapsed time); **License Profile** (class, TX privileges, dummy-load reminder) |
 | Decoder tab | Live protocol decoder: POCSAG, FLEX, AX.25/APRS, ADS-B, ACARS (RDS is listed but needs 57 kHz subcarrier recovery, so it cannot be decoded live yet); Messages table, plain-text Log and Stats; Clear and Export (CSV); a one-click "Tune to …" for protocols with a well-known channel (ADS-B, APRS, ACARS) |
 | Bookmarks tab | Saved channels with name, frequency and mode; Add (name and frequency), Tune, Rename, Remove; double-click or `Enter` tunes (restoring the saved mode), `F2` renames, `Delete` removes; CSV button to import/export CHIRP-compatible CSV |
@@ -476,6 +476,9 @@ an unsaved recording offers to save it first.
 | `Ctrl+E` | Error history |
 | `F1` | Keyboard shortcut reference |
 | Click on spectrum / waterfall | Tune to the clicked frequency |
+| Drag on the waterfall | Measure bandwidth, duration and peak |
+| Right-click on the waterfall | Tune, bookmark or copy that frequency; display options |
+| `P` (waterfall focused) | Pause or resume the waterfall |
 
 `Space` and the arrow keys act when the focused control does not use them
 itself (a focused slider, list or text field keeps its usual keys); press

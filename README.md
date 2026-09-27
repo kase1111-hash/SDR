@@ -212,6 +212,7 @@ free disk space while recording.
 | Feature | How |
 |---|---|
 | Click-to-tune | Left-click anywhere on the spectrum or waterfall; the shaded band on the spectrum is the channel being demodulated |
+| Waterfall | The LEVELS color scale in its header is the legend (which color each dBFS level gets); **Auto** keeps its floor just under the noise and its ceiling over the strongest signal, or drag its ends (or scroll over it) to set them. **History** spans Live (a row per update), 1 min, 5 min, 15 min or 1 h, and slower rows keep each interval's strongest level so bursts stay visible. **Pause** (or `P`) freezes it to study. Hover for frequency, level, SNR and age; drag a box to measure bandwidth, duration and peak (`Esc` clears it); right-click to tune, bookmark or copy a frequency, pick colors or save the image with axes. Hide the spectrum and the waterfall labels its own frequencies |
 | Type a frequency | `Ctrl+L` (Radio → Enter Frequency) or click the FREQ readout; Enter tunes and returns to the plots |
 | Keyboard tuning | `←`/`→` ±10 kHz, `Shift+←`/`→` ±100 kHz, `Ctrl+←`/`→` ±1 MHz while the plots have focus (`F6` or `Esc` focuses the spectrum) |
 | Start / stop receiving | `Space`, the toolbar's Start button, or Radio → Start Receiving |

@@ -139,8 +139,7 @@ class TestPlotLayout(unittest.TestCase):
     def test_combos_are_not_truncated(self):
         combos = (
             self.spectrum._avg_combo,
-            self.waterfall._color_combo,
-            self.waterfall._range_combo,
+            self.waterfall._history_combo,
         )
         for combo in combos:
             self.assertNotEqual(combo.minimumWidth(), combo.maximumWidth())
@@ -337,24 +336,38 @@ class TestWaterfallBehavior(unittest.TestCase):
         w._render_image()
         np.testing.assert_array_equal(incremental, w._image_rgb)
 
-    def test_clear_button_state_and_tooltip(self):
+    def test_clear_action_state_and_tooltip(self):
         w = self.widget
-        self.assertFalse(w._clear_btn.isEnabled())
-        self.assertIn("empty", w._clear_btn.toolTip())
+        self.assertFalse(w._clear_action.isEnabled())
+        self.assertIn("empty", w._clear_action.toolTip())
         w.add_line(np.zeros(2048))
-        self.assertTrue(w._clear_btn.isEnabled())
-        w._clear_btn.click()
+        self.assertTrue(w._clear_action.isEnabled())
+        w._clear_action.trigger()
         self.assertEqual(len(w._history), 0)
+        self.assertFalse(w._clear_action.isEnabled())
         self.assertIsNone(w._image)
-        self.assertFalse(w._clear_btn.isEnabled())
 
-    def test_colormap_combo_shows_title_case_names(self):
+    def test_colors_menu_shows_title_case_names(self):
+        from PyQt6.QtWidgets import QMenu
+
         w = self.widget
-        self.assertEqual(w._color_combo.currentText(), "Turbo")
-        w._color_combo.setCurrentIndex(w._color_combo.findData("viridis"))
-        self.assertEqual(w._colormap_name, "viridis")
-        w._on_colormap_changed("plasma")
-        self.assertEqual(w._color_combo.currentData(), "plasma")
+        self.assertEqual(w.colormap_name(), "turbo")
+        menu = QMenu()
+        w._display_menu(menu)
+        colors = next(
+            a.menu()
+            for a in menu.actions()
+            if a.menu() and a.text().replace("&", "") == "Colors"
+        )
+        names = [a.text() for a in colors.actions()]
+        self.assertIn("Turbo", names)
+        self.assertIn("Viridis", names)
+        self.assertEqual(
+            [a.text() for a in colors.actions() if a.isChecked()], ["Turbo"]
+        )
+        next(a for a in colors.actions() if a.text() == "Viridis").trigger()
+        self.assertEqual(w.colormap_name(), "viridis")
+        menu.deleteLater()
 
     def test_time_labels_fit_the_shared_left_margin(self):
         from sdr_module.gui.spectrum_widget import axis_font, plot_side_margins
@@ -575,7 +588,7 @@ class TestReviewFixes(unittest.TestCase):
                 mod.draw_readout = original
             self.assertTrue(seen, cls.__name__)
             self.assertTrue(seen[-1][0].endswith("MHz"), seen[-1])
-            self.assertEqual(seen[-1][-1], "Click to tune")
+            self.assertTrue(seen[-1][-1].startswith("Click to tune"), seen[-1])
             self.assertFalse(any("dBFS" in s for s in seen[-1]), seen[-1])
 
     def test_placeholder_masks_marker_and_grid(self):

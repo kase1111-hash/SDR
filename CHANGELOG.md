@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — Waterfall
+- **Color-scale legend with Auto levels** — the waterfall header's LEVELS
+  bar shows which color each dBFS level gets. Auto (the app default) keeps
+  the floor just under the noise floor and the ceiling over the strongest
+  signal, so weak signals stand out instead of sitting in the bottom of a
+  fixed 0 to −100 dBFS scale; drag the bar's ends (or scroll, or use the
+  arrow keys) for manual levels. Level changes re-map colors in about
+  1.5 ms instead of re-rendering the history (about 35 ms before).
+- **History length** — Live, 1 min (the default), 5 min, 15 min or 1 h;
+  slower rows keep the strongest level of their interval, so short bursts
+  stay visible.
+- **Pause** (`P`) to study the display while the receiver keeps running.
+- **Measure** — drag a box for bandwidth, duration, center, peak and SNR;
+  it follows its rows as they scroll. Clicking still tunes (now on release).
+- **Right-click menu** — tune, bookmark or copy the frequency under the
+  cursor, measurement actions, history, levels, colors, clear, and Save
+  Image (a PNG with time and frequency axes).
+- The hover readout adds SNR over the noise floor and a row crosshair; the
+  waterfall labels its own frequency axis when the spectrum is hidden; its
+  colors, history and levels are saved between sessions.
+
 ### Changed — GUI overhaul
 - **Layout** — resizable splitters whose sizes persist (View → Reset Layout
   restores them); the window fits a 1366×768 screen and the control panel

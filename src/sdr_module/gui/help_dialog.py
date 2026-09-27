@@ -74,14 +74,24 @@ _WINDOW_KEYS: Dict[str, str] = {"Esc": "_focus_plots"}
 # Submenus whose items are described as "Show the <item> panel".
 _PANEL_MENUS = ("Panels",)
 
+Entry = Tuple[str, Tuple[str, ...], str]
+
+# Keys a plot handles while it has the keyboard focus (click it, or F6):
+# always listed, since they belong to the plot rather than the window.
+PLOT_KEYS: Tuple[Entry, ...] = (
+    ("Waterfall", ("P",), "Pause or resume the waterfall"),
+    ("Waterfall", ("Esc",), "Clear the waterfall measurement, if one is shown"),
+)
+
 # Mouse gestures: (gesture shown as a keycap, description).
 MOUSE_ACTIONS: Tuple[Tuple[str, str], ...] = (
     ("Click", "Tune to the clicked frequency on the spectrum or waterfall"),
+    ("Drag", "Measure a signal's bandwidth, duration and peak on the waterfall"),
+    ("Right-click", "Tune, bookmark or copy a waterfall frequency; display options"),
+    ("Scroll", "Shift the waterfall's color levels (over its LEVELS scale)"),
 )
 
 _ARROWS = {"Left": "←", "Right": "→", "Up": "↑", "Down": "↓"}
-
-Entry = Tuple[str, Tuple[str, ...], str]
 
 
 def _portable(key: str) -> str:
@@ -438,6 +448,8 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
         order: List[str] = []
         items: List[Tuple[str, List[str], str, str]] = []
         for category, keys, description in self._entries:
+            items.append((category, list(keys), description, "keys"))
+        for category, keys, description in PLOT_KEYS:
             items.append((category, list(keys), description, "keys"))
         for gesture, description in MOUSE_ACTIONS:
             items.append(("Mouse", [gesture], description, "mouse"))

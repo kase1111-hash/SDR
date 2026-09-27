@@ -11,7 +11,7 @@ A dual-SDR framework for simultaneous RTL-SDR + HackRF One operation, with signa
 - **Dual-SDR control**: Operate RTL-SDR and HackRF One simultaneously in five modes (dual RX, full-duplex, TX monitor, wideband scan, relay)
 - **Signal processing**: Spectrum analysis, demodulation (AM/FM/SSB/CW/OOK/FSK/PSK/QAM), filtering, AGC, and signal classification
 - **Protocol decoding**: ADS-B, POCSAG, FLEX, AX.25/APRS, RDS, ACARS
-- **GUI**: PyQt6 application with spectrum analyzer, waterfall, click-to-tune, bookmarks, band presets, audio output, light/dark themes, keyboard shortcuts, and persisted state
+- **GUI**: PyQt6 application with spectrum analyzer, waterfall, click-to-tune, live protocol decoder, bookmarks, band presets, audio output, ham radio tools, dark/light themes, keyboard shortcuts, a no-hardware demo mode, and persisted state
 
 ## Hardware Support
 
@@ -82,8 +82,21 @@ sdr-scan gui              # Launch with connected hardware
 sdr-scan gui --demo       # Demo mode (no hardware required)
 ```
 
-On first launch the GUI shows a welcome wizard that offers demo mode and a
-starting band. Press **F1** at any time for the shortcut reference.
+On first launch the GUI shows a welcome wizard that says whether it found an
+SDR, offers to connect it or start demo mode, and picks a starting band
+(Help → Welcome and Quick Start shows it again). With nothing saved yet the
+receiver starts on **100.1 MHz in FM**. `--frequency`/`-f` (Hz) and
+`--gain`/`-g` override the remembered values; `--sample-rate`/`-s` sets the
+demo device's rate and the one Device → Connect preselects. Press **F1** at
+any time for the shortcut reference.
+
+**Demo mode** (`--demo`, Device → Use Demo Device, or the Demo Device entry
+in Device → Connect) simulates FM broadcast stations, airband AM, 2 m, 70 cm
+and NOAA weather FM, ISM and APRS bursts, ADS-B frames from a simulated
+flight (KLM1023) that the ADS-B decoder follows, and a CW beacon on a
+realistic noise floor, streamed in real time. The strongest station,
+100.1 MHz, plays a looping tune in FM, so audio works without hardware; gain,
+AGC and the frequency scanner behave as they would with a real receiver.
 
 ### Command line
 
@@ -188,26 +201,45 @@ for msg in messages:
 
 ## GUI Features
 
+The window has a toolbar (Start/Stop, Record, Audio on/off with volume, the
+FREQ readout and the tuned channel's LEVEL in dBFS), the spectrum over the
+waterfall on the left, the control panel on the right, and below it the tool
+tabs: **Decoder**, **Bookmarks**, **Ham Radio** (S-Meter, Ham ID, SSTV, QRP)
+and **Info**. The status bar shows the receiver state, device and sample
+rate, short feedback messages, and a REC badge with the recorded size and
+free disk space while recording.
+
 | Feature | How |
 |---|---|
-| Click-to-tune | Left-click anywhere on the spectrum or waterfall |
-| Keyboard tuning | `←`/`→` ±10 kHz, `Shift+←`/`→` ±100 kHz, `Ctrl+←`/`→` ±1 MHz |
-| Start / stop acquisition | `Space` |
-| Record I/Q | `Ctrl+Shift+R` (live duration + size + free-space shown in status bar) |
-| Open / save recording | `Ctrl+O` / `Ctrl+S` (cf32, cs16, raw, WAV) |
-| Screenshot | `Ctrl+P` (captures the whole window) |
-| Bookmarks | `Ctrl+B` adds current frequency; double-click a row to tune |
-| Import / export channels | Bookmarks tab → Import/Export CSV, or File → Import/Export Channels — CHIRP-compatible CSV |
-| Band presets | Tools → Bands (FM Broadcast, NOAA Weather, 2 m, 70 cm, Airband, ADS-B, ISM 433/915) |
-| Frequency scanner | `Ctrl+F` — non-blocking sweep with progress bar and hit list |
-| Audio output | Tools → Audio Output — squelch-gated demodulation to the default sound device |
-| Squelch + AGC | Control panel sliders; squelch gates audio output |
-| Light / dark theme | `Ctrl+T` |
-| Error history | `Ctrl+E` shows the last 500 warning / error log records |
-| Help / shortcuts | `F1` |
+| Click-to-tune | Left-click anywhere on the spectrum or waterfall; the shaded band on the spectrum is the channel being demodulated |
+| Type a frequency | `Ctrl+L` (Radio → Enter Frequency) or click the FREQ readout; Enter tunes and returns to the plots |
+| Keyboard tuning | `←`/`→` ±10 kHz, `Shift+←`/`→` ±100 kHz, `Ctrl+←`/`→` ±1 MHz while the plots have focus (`F6` or `Esc` focuses the spectrum) |
+| Start / stop receiving | `Space`, the toolbar's Start button, or Radio → Start Receiving |
+| Record I/Q | `Ctrl+Shift+R`, the toolbar's Record button, or the control panel's Recording section (with Pause); samples stream to a temporary file on disk until saved with File → Save Recording, and recording stops if the drive gets nearly full |
+| Save / import recording | `Ctrl+S` File → Save Recording (cf32, cs16, SigMF, 16-bit I/Q WAV, raw); `Ctrl+O` File → Import Recording loads a file to save it in another format (no playback yet) |
+| Screenshot | `Ctrl+P` File → Save Screenshot (PNG of the whole window) |
+| Bookmarks | `Ctrl+B` (Radio → Bookmark Current Frequency) saves the frequency with its mode; in the Bookmarks tab double-click or `Enter` tunes, `F2` renames, `Delete` removes |
+| Import / export channels | Bookmarks tab → CSV button, or File → Import/Export Channels (CHIRP CSV) |
+| Band presets | Radio → Band Presets (FM Broadcast, NOAA Weather, 2m Ham, 70cm Ham, Airband AM, ADS-B, ISM 433, ISM 915), which also set mode and bandwidth; the control panel's Presets section has the full categorized list |
+| Protocol decoder | Decoder tab: POCSAG, FLEX, AX.25/APRS, ADS-B, ACARS from the live signal, with message table, log, stats and CSV export |
+| Frequency scanner | `Ctrl+F` Tools → Frequency Scanner: non-blocking sweep with band presets, progress bar and hit list; double-click a hit to tune |
+| Audio output | On by default: toolbar Audio button and volume slider, or Radio → Audio Output. AM, FM, USB, LSB and CW play through the default sound device while the channel is above squelch |
+| Squelch + AGC | Control panel: Demodulation → Squelch, Receiver → Automatic gain (AGC); the LEVEL readout turns green above squelch |
+| AM/FM radio tuner | `Ctrl+R` Tools → AM/FM Radio Tuner (see [Ham Radio Features](#optional-ham-radio-features)) |
+| Tool panels | `Ctrl+1` … `Ctrl+7` (View → Panels) jump to Decoder, Bookmarks, S-Meter, Ham ID, SSTV, QRP and Info |
+| Dark / light theme | `Ctrl+T` or View → Theme; switches live |
+| Error history | `Ctrl+E` Tools → Error History: the last 500 warning / error log records, with copy and export |
+| Help / shortcuts | `F1`: every shortcut, grouped by menu and filterable |
 
-Settings (frequency, gain, squelch, AGC, demod mode, theme, window
-geometry, bookmarks) persist across launches via `QSettings`.
+Settings persist across launches via `QSettings`: frequency, gain, AGC,
+squelch, bandwidth, demodulation mode and FM deviation, theme, audio on/off
+and volume, recording format, the open tool tab, license class, Ham ID
+settings, window and splitter sizes, and bookmarks.
+
+The GUI has a dark (default) and a light theme, both built from the palette
+tokens in `sdr_module/gui/themes.py`; widgets take their colors from style
+roles and tones there rather than hard-coding them, so custom-painted views
+(spectrum, waterfall axes, S-meter, radio tuner) follow a theme switch too.
 
 ## Supported Protocols
 
@@ -238,17 +270,23 @@ bands. License-class enforcement blocks TX on ham bands unless the
 configured class has privileges there. See
 [SPEC_SHEET.md](SPEC_SHEET.md) for the full list.
 
-The lockout path is covered by `tests/test_frequency_manager.py` (58 tests).
+The lockout path is covered by `tests/test_frequency_manager.py` (61 tests).
 
 ## Optional: Ham Radio Features
 
 The `sdr_module.ham` subpackage provides amateur radio functionality:
 
-- **AM/FM Radio Tuner** with vintage car radio styling
+- **AM/FM Radio Tuner** laid out like a car radio (frequency display,
+  slide-rule dial, AM/FM buttons, six presets per band); it tunes the main
+  receiver, and audio plays through the main window's Audio button
 - **Signal Meter** with S-units (S1-S9, S9+dB) and RST reporting
-- **Callsign ID** for automatic CW identification
+- **Callsign ID** for automatic CW identification (transmitting needs a HackRF One)
 - **SSTV Decoder** for ISS image reception
 - **QRP Operations** with power calculations
+
+In the GUI the meter, callsign ID, SSTV and QRP tools are the S-Meter,
+Ham ID, SSTV and QRP sub-tabs of the **Ham Radio** tab; the tuner opens from
+Tools → AM/FM Radio Tuner (`Ctrl+R`).
 
 ```python
 from sdr_module.ham import SignalMeter, QRPController
@@ -282,7 +320,7 @@ sdr-module/
 │   └── utils/         # Helper utilities
 ├── packages/
 │   └── sdr-antenna-array/  # Standalone antenna array package
-├── tests/             # Test suite (~970 tests, plus ~125 in sdr-antenna-array)
+├── tests/             # Test suite (~1,550 tests, plus ~130 in sdr-antenna-array)
 ├── examples/          # Example scripts
 └── tools/             # Dev helpers
 ```

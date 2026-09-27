@@ -124,7 +124,7 @@ This system is designed for a **dual-SDR setup** using:
 |---------|-------------|
 | I/Q Recording | Raw baseband signal capture |
 | Audio Recording | Demodulated audio capture |
-| Playback | Replay recorded I/Q files |
+| Playback | Replay recorded I/Q files (Python API; the GUI imports a file only to convert its format) |
 | File Formats | WAV, raw I/Q, SigMF |
 
 ### 5.3 Demodulation
@@ -284,7 +284,7 @@ This system is designed for a **dual-SDR setup** using:
 | Layer | Component | Purpose |
 |-------|-----------|---------|
 | Driver | pyrtlsdr | RTL-SDR Python bindings |
-| Driver | hackrf (Python) | HackRF Python bindings |
+| Driver | python_hackrf | HackRF Python bindings |
 | DSP | NumPy / SciPy | Signal processing |
 | GUI | PyQt6 | User interface |
 | Application | sdr-module | This project |
@@ -382,71 +382,160 @@ Combine devices to cover wider spectrum.
 
 ## 8. User Interface Components
 
-### 8.1 Display panels
+### 8.1 Main window
+
+```
++------------------------------------------------------------------+
+| File  Device  Radio  View  Tools  Help                           |
+| [Start] [Record] | [Audio] vol | FREQ 100.100 MHz | LEVEL dBFS   |
++---------------------------------------+--------------------------+
+| spectrum                              | control panel (scrolls)  |
+|---------------------------------------|--------------------------|
+| waterfall                             | tabs: Decoder, Bookmarks,|
+|                                       |       Ham Radio, Info    |
++---------------------------------------+--------------------------+
+| RUNNING  Demo Device  2.4 MS/s  messages...      REC 00:01:23    |
++------------------------------------------------------------------+
+```
+
+The three splitters (plots | right column, spectrum / waterfall, control
+panel / tabs) are resizable; their sizes persist and View → Reset Layout
+restores the defaults. The minimum window size (1024 × 640) fits a
+1366 × 768 screen; the control panel and the tool tabs scroll instead of
+being crushed.
 
 | Component | Description |
 |-----------|-------------|
-| Spectrum Analyzer | FFT display with adjustable span, averaging, peak hold; left-click to tune |
-| Waterfall | Scrolling time-frequency display with selectable colormap and dB range; left-click to tune; image export |
-| Control Panel | Frequency, gain, bandwidth, demodulator, squelch, AGC, license class, TX/RX presets |
-| Protocol Decoder | Tabbed view of decoded messages (ADS-B, POCSAG, FLEX, AX.25/APRS, RDS, ACARS) |
-| Bookmarks / Memory | Saved channels with labels; persists across launches; import/export as CHIRP-compatible CSV |
-| Status Bar | Device status, sample rate, buffer fill, recording HH:MM:SS / size / free space, transient error toast |
+| Toolbar | Start/Stop; Record (red while recording); Audio on/off with a volume slider; FREQ readout (click it, or press `Ctrl+L`, to type a frequency); LEVEL readout: strongest signal inside the tuned channel in dBFS, green while above squelch |
+| Spectrum Analyzer | 2048-point Hann-windowed FFT in dBFS; peak hold (with Reset) and averaging (Off, 2–32 frames); hover readout; dashed tuned-frequency marker and a shaded band for the demodulated channel (passband); left-click to tune |
+| Waterfall | Newest line at the top with a time axis; colormap (Turbo, Viridis, Plasma, Grayscale, Classic) and dynamic range (60–120 dB); Clear; left-click to tune. Its frequency axis lines up with the spectrum's |
+| Control Panel | **Frequency** (entry with Hz/kHz/MHz/GHz units, −1M … +1M step buttons); **Presets** (category and preset, with listen/transmit status, Apply Preset); **Demodulation** (None (I/Q), AM, FM, USB, LSB, CW; FM deviation; squelch); **Receiver** (RF gain, automatic gain (AGC), channel bandwidth); **Recording** (format, Record/Pause, status and elapsed time); **License Profile** (class, TX privileges, dummy-load reminder) |
+| Decoder tab | Live protocol decoder: POCSAG, FLEX, AX.25/APRS, ADS-B, ACARS (RDS is listed but needs 57 kHz subcarrier recovery, so it cannot be decoded live yet); Messages table, plain-text Log and Stats; Clear and Export (CSV); a one-click "Tune to …" for protocols with a well-known channel (ADS-B, APRS, ACARS) |
+| Bookmarks tab | Saved channels with name, frequency and mode; Add (name and frequency), Tune, Rename, Remove; double-click or `Enter` tunes (restoring the saved mode), `F2` renames, `Delete` removes; CSV button to import/export CHIRP-compatible CSV |
+| Ham Radio tab | Sub-tabs **S-Meter** (analog meter of the tuned channel, RST and verbal report, peak hold), **Ham ID** (callsign, CW speed and tone, preview, Send ID Now; transmits with a HackRF One only), **SSTV** (decoder fed with FM audio, live image, history, auto-save) and **QRP** (TX power, amplifier chain, power limit, miles per watt) |
+| Info tab | Live summary: device, state, center frequency, sample rate, span, RBW, demodulation, bandwidth, gain, squelch, channel level; audio, recording and buffer state; version, Qt/PyQt and theme; quick tips |
+| Status Bar | State badge (NO DEVICE / STOPPED / RUNNING), device name and sample rate; short feedback messages colored by tone (info, success, warning, error) that clear themselves; while recording, a REC badge with the elapsed time (REC ARMED until the receiver runs, PAUSED while paused) plus recorded size and free disk space |
 
 ### 8.2 Menus and dialogs
 
 | Menu / Dialog | Purpose |
 |---|---|
-| File → Open / Save Recording | Load and save I/Q files (cf32, cs16, raw, WAV) |
-| File → Import / Export Channels | Memory channels as CHIRP-compatible CSV (replace or append on import) |
-| Device → Connect / Disconnect / Refresh | Open the device selection dialog, manage hardware |
-| Tools → Bands | Preset tuner + demod mode for FM Broadcast, NOAA Weather, 2 m, 70 cm, Airband AM, ADS-B, ISM 433/915 |
-| Tools → Frequency Scanner | Non-blocking sweep dialog with progress bar and hit table |
-| Tools → Audio Output (toggle) | Enable in-GUI demodulation to the default audio device; gated by squelch |
-| Tools → AM/FM Radio Tuner | Pop-out vintage-radio tuner (`Ctrl+R`) |
-| Tools → Save Screenshot | PNG of the current window (`Ctrl+P`) |
-| Tools → Bookmark Current Frequency | `Ctrl+B`; double-click a row to tune |
-| Tools → Toggle Light/Dark Theme | `Ctrl+T`; persists across launches |
-| Tools → Error History | `Ctrl+E`; last 500 warning/error log records |
-| Help → Keyboard Shortcuts | `F1`; full shortcut reference |
-| Help → About | Version and feature summary |
+| File → Import Recording (convert format) | `Ctrl+O`; load an I/Q file (cf32, cs16, cs8, cu8, cf64, raw, SigMF, WAV) into the recording buffer so it can be saved in another format (no playback yet) |
+| File → Save Recording | `Ctrl+S`; write the recording as Complex Float32 (.cf32), Complex Int16 (.cs16), SigMF (.sigmf-data plus .sigmf-meta), 16-bit I/Q WAV or raw float32, with the frequency and sample rate it was captured at |
+| File → Import / Export Channels (CHIRP CSV) | Memory channels as CHIRP-compatible CSV (replace or append on import) |
+| File → Save Screenshot | `Ctrl+P`; PNG of the whole window |
+| File → Exit | `Ctrl+Q` (or the platform's Quit key); offers to save an unsaved recording first |
+| Device → Connect... | Device dialog: detected RTL-SDR / HackRF One plus the Demo Device, and the sample rate |
+| Device → Disconnect | Stop receiving and close the device |
+| Device → Use Demo Device | Simulated signals, no hardware needed (see 8.7) |
+| Device → Scan for Devices | List the SDRs plugged in (when none are found, also which drivers are not installed) |
+| Radio → Start / Stop Receiving | `Space` |
+| Radio → Record I/Q | `Ctrl+Shift+R`; the same recording as the toolbar and the control panel |
+| Radio → Audio Output (toggle) | Same switch as the toolbar's Audio button; on by default; plays AM, FM, USB, LSB and CW through the default audio device while the channel is above squelch |
+| Radio → Band Presets | FM Broadcast, NOAA Weather, 2m Ham, 70cm Ham, Airband AM, ADS-B, ISM 433, ISM 915: tunes and sets the mode, FM deviation and bandwidth |
+| Radio → Enter Frequency | `Ctrl+L`; focus the Frequency field; Enter tunes and returns to the plots |
+| Radio → Bookmark Current Frequency | `Ctrl+B`; saved with the current mode |
+| View → Spectrum / Waterfall | Show or hide each plot (one always stays visible) |
+| View → Panels | `Ctrl+1` … `Ctrl+7`: Decoder, Bookmarks, S-Meter, Ham ID, SSTV, QRP, Info |
+| View → Focus Spectrum | `F6` |
+| View → Theme → Dark / Light / Toggle Theme | `Ctrl+T` toggles; persists across launches |
+| View → Reset Layout | Default panel sizes, both plots shown |
+| Tools → Frequency Scanner | `Ctrl+F`; non-blocking sweep dialog with band presets, progress bar and hit table (Frequency, Peak Level, SNR); double-click or Tune to Signal tunes the receiver |
+| Tools → Protocol Decoder | Brings the Decoder tab to the front |
+| Tools → AM/FM Radio Tuner | `Ctrl+R`; pop-out broadcast tuner (Section 12) |
+| Tools → Error History | `Ctrl+E`; last 500 warning/error log records, Copy All, Export, Clear |
+| Help → Welcome and Quick Start | The first-run wizard again |
+| Help → Keyboard Shortcuts | `F1`; every shortcut, grouped by menu and filterable |
+| Help → About SDR Module | Version and feature summary |
+
+Pressing Start with no device asks whether to connect one or start Demo
+Mode. Starting a new recording, importing a file or closing the window with
+an unsaved recording offers to save it first.
 
 ### 8.3 Keyboard shortcuts
 
 | Shortcut | Action |
 |---|---|
-| `Space` | Start / stop acquisition |
-| `Ctrl+Shift+R` | Toggle recording |
-| `←` / `→` | Tune ±10 kHz |
-| `Shift+←` / `Shift+→` | Tune ±100 kHz |
-| `Ctrl+←` / `Ctrl+→` | Tune ±1 MHz |
-| Click on spectrum / waterfall | Tune to clicked frequency |
-| `Ctrl+O` / `Ctrl+S` | Open / Save recording |
-| `Ctrl+P` | Save screenshot |
-| `Ctrl+B` | Bookmark current frequency |
+| `Space` | Start / stop receiving |
+| `Ctrl+Shift+R` | Start / stop recording |
+| `Ctrl+L` | Type a new center frequency (Enter tunes and returns to the plots) |
+| `Ctrl+B` | Bookmark the current frequency |
+| `←` / `→` | Tune down / up 10 kHz |
+| `Shift+←` / `Shift+→` | Tune down / up 100 kHz |
+| `Ctrl+←` / `Ctrl+→` | Tune down / up 1 MHz |
+| `F6` | Put the keyboard focus on the spectrum |
+| `Esc` | Return the keyboard focus to the spectrum |
+| `Ctrl+1` … `Ctrl+7` | Show the Decoder, Bookmarks, S-Meter, Ham ID, SSTV, QRP or Info panel |
+| `Ctrl+T` | Switch between the dark and light themes |
+| `Ctrl+O` | Import a recording to convert its format |
+| `Ctrl+S` | Save the recording |
+| `Ctrl+P` | Save a screenshot |
+| `Ctrl+Q` | Exit |
 | `Ctrl+F` | Frequency scanner |
-| `Ctrl+T` | Toggle theme |
+| `Ctrl+R` | AM/FM radio tuner |
 | `Ctrl+E` | Error history |
-| `Ctrl+R` | AM/FM Radio Tuner (ham module) |
-| `F1` | Shortcut reference |
+| `F1` | Keyboard shortcut reference |
+| Click on spectrum / waterfall | Tune to the clicked frequency |
+
+`Space` and the arrow keys act when the focused control does not use them
+itself (a focused slider, list or text field keeps its usual keys); press
+`F6` or `Esc`, or click a plot, first. Without the optional ham radio
+panels the Info panel is `Ctrl+3`. In the Bookmarks list, `Enter` tunes,
+`F2` renames and `Delete` removes.
 
 ### 8.4 Persisted state
 
-Stored via `QSettings` (platform-specific backing store — Windows registry,
-macOS plist, Linux `~/.config/SDR Module/`):
+Stored via `QSettings` (platform-specific backing store: Windows registry,
+macOS plist, Linux `~/.config/SDR Module Team/SDR Module.conf`):
 
-- Center frequency, gain, bandwidth, squelch threshold, AGC enable.
-- Demodulation mode, theme, audio-output enable.
+- Center frequency (100.1 MHz, in FM, when nothing is saved yet), RF gain,
+  AGC, squelch threshold, channel bandwidth.
+- Demodulation mode and FM deviation, recording format.
+- Theme, audio output on/off and volume.
+- The tool tab that was open, license class and Ham ID settings (callsign,
+  CW speed and tone, automatic ID).
 - Main window geometry and splitter sizes.
-- Saved channels (frequency, label, and CHIRP fields: mode, duplex/offset,
-  tone, tuning step, skip, power, comment).
+- Saved channels (frequency, label, demodulation mode and FM deviation, and
+  CHIRP fields: mode, duplex/offset, tone, tuning step, skip, power,
+  comment).
 - First-run wizard completion flag.
 
 ### 8.5 First-run wizard
 
-Launched automatically the first time the GUI starts. Detects whether any
-SDR hardware is attached, offers Demo Mode (synthetic signals) if not, and
-lets the user pick a starting band.
+Launched automatically the first time the GUI starts, and again from
+Help → Welcome and Quick Start. It says whether SDR hardware was found (and
+how to install a missing driver), offers to connect the device it found or
+start Demo Mode (simulated signals), and tunes to a chosen starting band in
+that band's mode. It also shows a few quick tips.
+
+### 8.6 Themes
+
+Two themes, dark (the default) and light, switch live from View → Theme or
+`Ctrl+T` and persist across launches. Every color comes from the palette
+tokens in `sdr_module/gui/themes.py`: widgets are tagged with style roles
+and tones (`set_role` / `set_tone`) instead of hard-coded colors, and the
+custom-painted views (spectrum, waterfall axes, S-meter, radio tuner) read
+the active palette and repaint when the theme changes. Keyboard focus is
+always visible: a 2 px ring on buttons, check boxes and slider handles, an
+accent outline on tabs, lists and text views, and a focus frame on the
+plots. The waterfall colormaps are the same in both themes.
+
+### 8.7 Demo mode
+
+Started with `--demo`, Device → Use Demo Device, the Demo Device entry in
+Device → Connect, or the first-run wizard. The simulated receiver produces
+FM broadcast stations across 88–108 MHz, airband AM, 2 m and 70 cm FM,
+NOAA weather, APRS and ISM bursts, decodable ADS-B frames at 1090 MHz
+(flight KLM1023 with position, speed and squawk), a CW beacon
+and weak carriers elsewhere on a realistic noise floor. The signals sit at
+fixed frequencies and move across the display as you tune, so click-to-tune
+and the frequency scanner work as with real hardware; raising the gain lifts
+signals and noise together and too much gain clips, while AGC keeps the
+signals clear of clipping. The strongest station, 100.1 MHz, carries a
+looping tune in stereo FM, so listening in FM mode plays music. Samples
+stream in real time for gap-free audio; a computer too slow to keep up gets
+a status-bar hint and muted audio instead of a stutter. Starting the demo
+from "None (I/Q)" switches the mode to FM.
 
 ---
 
@@ -566,7 +655,7 @@ For amateur radio compliance, the software includes automatic callsign identific
 | CW Mode | Morse code identification at configurable WPM (5-50) |
 | Tone Frequency | Configurable sidetone (default: 700 Hz) |
 | "DE" Prefix | Proper amateur radio format: "DE [CALLSIGN]" |
-| GUI Panel | Callsign input, countdown timer, manual ID button |
+| GUI Panel | Ham Radio → Ham ID tab: callsign input, CW speed and tone, Preview ID, Send ID Now (HackRF One only), countdown to the next automatic ID while transmitting |
 
 ### 11.6 SSTV Image Reception (ISS/Space)
 
@@ -580,6 +669,7 @@ The software includes an SSTV (Slow Scan Television) decoder for receiving image
 | Auto-Save | Automatic saving of completed images |
 | Image History | Browse previously received images |
 | VIS Detection | Automatic mode detection from VIS header |
+| GUI Panel | Ham Radio → SSTV tab (Start Decoder); decodes the receiver's FM audio (Demodulation → Mode: FM), whether or not the speaker is on |
 
 **Space Frequency Presets:**
 
@@ -725,27 +815,31 @@ Power limits allow 150% of the legal limit to account for:
 
 ## 12. AM/FM Radio Tuner
 
-The software includes a vintage car radio-style AM/FM tuner widget for broadcast radio reception.
+The software includes a car-radio-style AM/FM tuner for broadcast radio: a
+pop-out window (Tools → AM/FM Radio Tuner, `Ctrl+R`) that tunes the main
+receiver. Audio plays through the main window, with its toolbar Audio button
+and volume slider.
 
 ### 12.1 Frequency Bands
 
 | Band | Frequency Range | Step Size | Modulation |
 |------|-----------------|-----------|------------|
 | AM | 530 kHz - 1700 kHz | 10 kHz | Amplitude Modulation |
-| FM | 87.5 MHz - 108 MHz | 100/200 kHz | Frequency Modulation |
+| FM | 87.5 MHz - 108 MHz | 100 kHz | Frequency Modulation |
 
 ### 12.2 User Interface Features
 
 | Feature | Description |
 |---------|-------------|
-| **LED Display** | Amber/orange segmented display showing frequency and band |
-| **Tuning Dial** | Analog-style slider with frequency scale markings |
-| **Preset Buttons** | 6 station presets per band (12 total) |
-| **Volume/Tone/Balance** | Classic rotary-style slider controls |
-| **Seek Buttons** | Auto-scan up/down for next station |
-| **AM/FM Selector** | Toggle between bands with visual indicator |
-| **Stereo Indicator** | Green LED when stereo signal detected |
-| **Power/Mute** | Power toggle and mute controls |
+| **Frequency Display** | LCD-style readout: band badge, large frequency digits and a station line (the matching preset, or the band's range) |
+| **Tuning Dial** | Slide-rule scale with dots marking the band's presets; drag or click to tune; mouse wheel or `←`/`→` step one channel, `Page Up`/`Page Down` ten, `Home`/`End` jump to the band edges |
+| **Step Buttons** | ◀ / ▶ either side of the dial tune one channel; hold to keep tuning |
+| **AM/FM Buttons** | Switch bands; each band returns to the last station tuned on it |
+| **Preset Buttons** | 6 station presets per band (12 total); click to tune; right-click or press and hold to store the current station |
+| **Receiver Link** | Tuning here retunes the main receiver and sets FM (75 kHz deviation, 200 kHz bandwidth) or AM (10 kHz bandwidth). The tuner opens on the receiver's frequency and follows it; while the receiver is outside both broadcast bands the display dims and shows the receiver's frequency instead of a station |
+
+Stored presets are kept until SDR Module closes; they are not saved between
+launches.
 
 ### 12.3 Default Presets
 
@@ -773,12 +867,13 @@ The software includes a vintage car radio-style AM/FM tuner widget for broadcast
 
 ### 12.4 Styling
 
-The tuner widget uses a vintage 1970s-80s car radio aesthetic:
-- Dark metallic gradient background
-- Chrome-look bezels and buttons
-- Amber LED-style frequency display with glow effect
-- Red tuning indicator line
-- Metallic slider controls
+The tuner is laid out like a car radio: band buttons beside the frequency
+display, the dial between its step buttons, and two rows of preset buttons.
+It is drawn entirely from the active theme palette (Section 8.6), so it
+follows the dark or light theme and switches live:
+- The display uses the theme's LCD colors (the same as the toolbar's FREQ readout)
+- The dial uses the plot colors, with the tuned-frequency marker color for its pointer
+- The selected band and the preset on the tuned station are accent-filled
 
 ### 12.5 Integration
 
@@ -788,15 +883,20 @@ from sdr_module.ham.gui.radio_tuner import RadioTunerWidget, show_radio_tuner
 # Launch as standalone window
 tuner = show_radio_tuner(sample_rate=2.4e6)
 
-# Or integrate into existing application
-tuner_widget = RadioTunerWidget(parent=main_window, sample_rate=2.4e6)
+# Or create it for an existing window (it is a pop-out dialog)
+tuner = RadioTunerWidget(parent=main_window, sample_rate=2.4e6)
+tuner.frequency_changed.connect(on_station)  # (freq_hz, "AM" or "FM")
+tuner.set_frequency(98.3e6)  # follow the receiver (does not emit)
 
 # Process samples through tuner
-audio = tuner.process_samples(iq_samples)
+audio = tuner.process_samples(iq_samples)  # scaled by set_volume() / set_muted()
 
 # Get current frequency
 freq = tuner.get_frequency()
 band = tuner.get_band()  # RadioBand.AM or RadioBand.FM
+
+# Show the STEREO badge on the display (no stereo detection is built in)
+tuner.set_stereo(True)
 ```
 
 ---
@@ -918,8 +1018,8 @@ If not using the installer:
 
 ---
 
-*Document Version: 4.2*
-*Last Updated: 2026-01-01*
+*Document Version: 4.3*
+*Last Updated: 2026-09-26*
 
 ---
 
@@ -942,3 +1042,4 @@ If not using the installer:
 | 4.0 | 2025-12-26 | Added 150% power headroom for TX limits (accounts for cable/filter losses); dummy load testing warning; shows legal vs effective power limits in GUI |
 | 4.1 | 2025-12-26 | Removed NatLangChain blockchain radio protocol integration |
 | 4.2 | 2026-01-01 | Added AM/FM Radio Tuner documentation (Section 12); vintage car radio-style interface with presets, tuning dial, and volume controls |
+| 4.3 | 2026-09-26 | Section 8 rewritten for the reworked GUI: window layout, Radio menu, tool tabs (Decoder, Bookmarks, Ham Radio, Info), full shortcut list, status bar, persisted state, themes and demo mode; SigMF recording; Section 12 matched to the current radio tuner (volume, tone, balance, seek and power controls removed; audio via the main window) |

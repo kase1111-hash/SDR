@@ -6,12 +6,82 @@ Provides the main application class and initialization.
 
 import logging
 import sys
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from .. import __version__
-from .themes import get_stylesheet
+from .settings_store import DEFAULT_FREQUENCY_HZ
+from .themes import apply_theme
 
 logger = logging.getLogger(__name__)
+
+# Defaults the GUI launchers pass when no value is given on the command line.
+_LAUNCH_DEFAULTS: Dict[str, float] = {
+    "frequency": DEFAULT_FREQUENCY_HZ,
+    "gain": 20.0,
+    "sample_rate": 2.4e6,
+}
+_LAUNCH_FLAGS: Dict[str, Tuple[str, str]] = {
+    "frequency": ("-f", "--frequency"),
+    "gain": ("-g", "--gain"),
+    "sample_rate": ("-s", "--sample-rate"),
+}
+
+
+# Normalized (x, y) points of the spectrum trace drawn on the app icon.
+_ICON_TRACE = (
+    (0.14, 0.72),
+    (0.27, 0.70),
+    (0.35, 0.52),
+    (0.41, 0.68),
+    (0.50, 0.24),
+    (0.59, 0.68),
+    (0.65, 0.56),
+    (0.73, 0.70),
+    (0.86, 0.72),
+)
+
+
+def make_app_icon() -> Any:
+    """The window/taskbar icon: a spectrum peak on an accent tile.
+
+    Drawn from the active theme palette, so no image file is needed.
+    """
+    from PyQt6.QtCore import QPointF, QRectF, Qt
+    from PyQt6.QtGui import QIcon, QPainter, QPainterPath, QPen, QPixmap
+
+    from .themes import get_palette
+
+    palette = get_palette()
+    icon = QIcon()
+    for size in (16, 24, 32, 48, 64, 128, 256):
+        pixmap = QPixmap(size, size)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        inset = size * 0.04
+        tile = QRectF(inset, inset, size - 2 * inset, size - 2 * inset)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(palette.qcolor("accent"))
+        painter.drawRoundedRect(tile, size * 0.22, size * 0.22)
+
+        path = QPainterPath()
+        for i, (x, y) in enumerate(_ICON_TRACE):
+            point = QPointF(x * size, y * size)
+            if i == 0:
+                path.moveTo(point)
+            else:
+                path.lineTo(point)
+        pen = QPen(palette.qcolor("on_accent"))
+        pen.setWidthF(max(1.5, size * 0.06))
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        painter.end()
+        icon.addPixmap(pixmap)
+    return icon
 
 
 def check_pyqt6() -> bool:
@@ -22,296 +92,6 @@ def check_pyqt6() -> bool:
         return True
     except ImportError:
         return False
-
-
-_DARK_STYLESHEET = """
-QMainWindow, QDialog {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-}
-QWidget {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-    font-size: 12px;
-}
-QGroupBox {
-    border: 1px solid #45475a;
-    border-radius: 6px;
-    margin-top: 8px;
-    padding: 12px 6px 6px 6px;
-    font-weight: bold;
-    color: #89b4fa;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 4px;
-}
-QToolBar {
-    background-color: #181825;
-    border-bottom: 1px solid #313244;
-    spacing: 6px;
-    padding: 4px;
-}
-QToolBar QLabel {
-    background: transparent;
-    color: #a6adc8;
-    padding: 0 2px;
-}
-QToolBar QToolButton {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    padding: 4px 12px;
-    font-weight: bold;
-}
-QToolBar QToolButton:hover {
-    background-color: #45475a;
-    border-color: #585b70;
-}
-QToolBar QToolButton:pressed {
-    background-color: #585b70;
-}
-QToolBar QToolButton:checked {
-    background-color: #f38ba8;
-    color: #1e1e2e;
-    border-color: #f38ba8;
-}
-QStatusBar {
-    background-color: #181825;
-    border-top: 1px solid #313244;
-    color: #a6adc8;
-    font-size: 11px;
-}
-QStatusBar QLabel {
-    background: transparent;
-    color: #a6adc8;
-    padding: 0 6px;
-}
-QStatusBar::item {
-    border: none;
-}
-QMenuBar {
-    background-color: #181825;
-    color: #cdd6f4;
-    border-bottom: 1px solid #313244;
-}
-QMenuBar::item:selected {
-    background-color: #313244;
-    border-radius: 4px;
-}
-QMenu {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    padding: 4px;
-}
-QMenu::item:selected {
-    background-color: #313244;
-    border-radius: 3px;
-}
-QMenu::separator {
-    height: 1px;
-    background-color: #313244;
-    margin: 4px 8px;
-}
-QPushButton {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    padding: 5px 14px;
-}
-QPushButton:hover {
-    background-color: #45475a;
-    border-color: #585b70;
-}
-QPushButton:pressed {
-    background-color: #585b70;
-}
-QPushButton:checked {
-    background-color: #89b4fa;
-    color: #1e1e2e;
-    border-color: #89b4fa;
-}
-QPushButton:disabled {
-    background-color: #1e1e2e;
-    color: #585b70;
-    border-color: #313244;
-}
-QComboBox {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    padding: 3px 8px;
-    min-height: 20px;
-}
-QComboBox:hover {
-    border-color: #585b70;
-}
-QComboBox::drop-down {
-    border: none;
-    width: 20px;
-}
-QComboBox QAbstractItemView {
-    background-color: #1e1e2e;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    selection-background-color: #313244;
-}
-QSpinBox, QDoubleSpinBox {
-    background-color: #313244;
-    color: #cdd6f4;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    padding: 3px 6px;
-    min-height: 20px;
-}
-QSpinBox:hover, QDoubleSpinBox:hover {
-    border-color: #585b70;
-}
-QSlider::groove:horizontal {
-    height: 6px;
-    background-color: #313244;
-    border-radius: 3px;
-}
-QSlider::handle:horizontal {
-    background-color: #89b4fa;
-    width: 14px;
-    height: 14px;
-    margin: -4px 0;
-    border-radius: 7px;
-}
-QSlider::handle:horizontal:hover {
-    background-color: #b4d0fb;
-}
-QSlider::sub-page:horizontal {
-    background-color: #45475a;
-    border-radius: 3px;
-}
-QCheckBox {
-    spacing: 6px;
-    color: #cdd6f4;
-}
-QCheckBox::indicator {
-    width: 16px;
-    height: 16px;
-    border-radius: 3px;
-    border: 1px solid #45475a;
-    background-color: #313244;
-}
-QCheckBox::indicator:checked {
-    background-color: #89b4fa;
-    border-color: #89b4fa;
-}
-QTabWidget::pane {
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    background-color: #1e1e2e;
-    top: -1px;
-}
-QTabBar::tab {
-    background-color: #181825;
-    color: #a6adc8;
-    border: 1px solid #45475a;
-    border-bottom: none;
-    border-top-left-radius: 4px;
-    border-top-right-radius: 4px;
-    padding: 5px 12px;
-    margin-right: 2px;
-}
-QTabBar::tab:selected {
-    background-color: #1e1e2e;
-    color: #89b4fa;
-    border-bottom: 2px solid #89b4fa;
-}
-QTabBar::tab:hover:!selected {
-    background-color: #313244;
-}
-QTableWidget {
-    background-color: #181825;
-    color: #cdd6f4;
-    gridline-color: #313244;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    selection-background-color: #313244;
-}
-QTableWidget::item:alternate {
-    background-color: #1e1e2e;
-}
-QHeaderView::section {
-    background-color: #181825;
-    color: #a6adc8;
-    border: none;
-    border-bottom: 1px solid #45475a;
-    border-right: 1px solid #313244;
-    padding: 4px 8px;
-    font-weight: bold;
-}
-QTextEdit {
-    background-color: #181825;
-    color: #a6e3a1;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    selection-background-color: #313244;
-}
-QProgressBar {
-    background-color: #313244;
-    border: 1px solid #45475a;
-    border-radius: 4px;
-    text-align: center;
-    color: #cdd6f4;
-    font-size: 10px;
-}
-QProgressBar::chunk {
-    background-color: #89b4fa;
-    border-radius: 3px;
-}
-QSplitter::handle {
-    background-color: #313244;
-}
-QSplitter::handle:horizontal {
-    width: 3px;
-}
-QSplitter::handle:vertical {
-    height: 3px;
-}
-QScrollBar:vertical {
-    background-color: #181825;
-    width: 10px;
-    border: none;
-}
-QScrollBar::handle:vertical {
-    background-color: #45475a;
-    border-radius: 5px;
-    min-height: 20px;
-}
-QScrollBar::handle:vertical:hover {
-    background-color: #585b70;
-}
-QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
-    height: 0;
-}
-QScrollBar:horizontal {
-    background-color: #181825;
-    height: 10px;
-    border: none;
-}
-QScrollBar::handle:horizontal {
-    background-color: #45475a;
-    border-radius: 5px;
-    min-width: 20px;
-}
-QScrollBar::handle:horizontal:hover {
-    background-color: #585b70;
-}
-QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
-    width: 0;
-}
-"""
 
 
 class SDRApplication:
@@ -335,6 +115,9 @@ class SDRApplication:
         self._args = args if args is not None else sys.argv
         self._app = None
         self._main_window = None
+        # Last unhandled error: (signature, monotonic time), to log a
+        # repeating one (e.g. in the 30 Hz display timer) only now and then.
+        self._last_error: Optional[Tuple[Any, float]] = None
 
         # Configure logging
         logging.basicConfig(
@@ -353,7 +136,8 @@ class SDRApplication:
         Args:
             settings: Optional settings dictionary with keys:
                 - frequency: Initial frequency in Hz
-                - sample_rate: Sample rate in Hz
+                - sample_rate: Sample rate in Hz, used by the demo device and
+                  preselected in Device > Connect (hardware is opened there)
                 - gain: RF gain in dB
                 - demo_mode: Run in demo mode
 
@@ -369,7 +153,77 @@ class SDRApplication:
             return 1
 
         settings = settings or {}
+        previous_hook = sys.excepthook
+        # PyQt6 aborts the process on an exception escaping a slot, virtual
+        # or thread unless a hook is installed: log it and carry on instead.
+        sys.excepthook = self._handle_exception
 
+        try:
+            return self._run(settings)
+        finally:
+            sys.excepthook = previous_hook
+
+    def _handle_exception(self, exc_type, exc, tb) -> None:
+        """sys.excepthook while the GUI runs.
+
+        An unhandled error inside Qt (a slot, paint event or worker thread)
+        is logged, so it shows in Tools > Error History, and reported in the
+        status bar, instead of aborting the app and losing unsaved work.
+        """
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            if self._app is not None:
+                self._app.quit()
+            return
+        frame = tb
+        while frame is not None and frame.tb_next is not None:
+            frame = frame.tb_next
+        where = (
+            (frame.tb_frame.f_code.co_filename, frame.tb_lineno)
+            if frame is not None
+            else None
+        )
+        signature = (exc_type, where)
+        now = time.monotonic()
+        last = self._last_error
+        if last is not None and last[0] == signature and now - last[1] < 5.0:
+            logger.debug("Unhandled error again: %s", exc)
+            return
+        self._last_error = (signature, now)
+        logger.error(
+            "Unhandled error: %s: %s",
+            exc_type.__name__,
+            exc,
+            exc_info=(exc_type, exc, tb),
+        )
+        # Widgets may only be touched from the GUI thread; an error in a
+        # worker thread is logged only.
+        if not self._in_gui_thread():
+            return
+        window = self._main_window
+        report = getattr(window, "_show_status_error", None)
+        if callable(report):
+            try:
+                report(
+                    f"Internal error: {exc_type.__name__}: {exc}. Details are in "
+                    "Tools > Error History.",
+                    10000,
+                )
+            except Exception as e:  # pragma: no cover - window already gone
+                logger.debug(f"Could not report the error in the window: {e}")
+
+    def _in_gui_thread(self) -> bool:
+        if self._app is None:
+            return False
+        try:
+            from PyQt6.QtCore import QThread
+
+            return QThread.currentThread() is self._app.thread()
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    def _run(self, settings: Dict[str, Any]) -> int:
+        """Create the application and main window and run the event loop."""
         try:
             from PyQt6.QtWidgets import QApplication
 
@@ -391,7 +245,11 @@ class SDRApplication:
                 theme = GuiSettings().get_str("theme", "dark")
             except Exception:
                 theme = "dark"
-            self._app.setStyleSheet(get_stylesheet(theme))
+            apply_theme(self._app, theme)
+            try:
+                self._app.setWindowIcon(make_app_icon())
+            except Exception as e:  # pragma: no cover - cosmetic only
+                logger.debug(f"App icon not set: {e}")
 
             # Install error-history handler so the Error History dialog works
             try:
@@ -405,11 +263,15 @@ class SDRApplication:
             demo_mode = settings.get("demo_mode", False)
             self._main_window = SDRMainWindow(demo_mode=demo_mode)
 
-            # Apply initial settings
-            if "frequency" in settings:
-                self._main_window.set_frequency(settings["frequency"])
-            if "gain" in settings:
-                self._main_window.set_gain(settings["gain"])
+            # Apply command-line values, but don't let a launcher default
+            # override the frequency/gain restored from the last session (or
+            # chosen in the first-run wizard).
+            if self._should_apply(settings, "frequency"):
+                self._main_window.set_frequency(float(settings["frequency"]))
+            if self._should_apply(settings, "gain"):
+                self._main_window.set_gain(float(settings["gain"]))
+            if self._should_apply(settings, "sample_rate"):
+                self._main_window.set_sample_rate(float(settings["sample_rate"]))
 
             self._main_window.show()
 
@@ -422,7 +284,51 @@ class SDRApplication:
 
         except Exception as e:
             logger.exception(f"Application error: {e}")
+            self._show_fatal_error(e)
             return 1
+
+    def _should_apply(self, settings: Dict[str, Any], key: str) -> bool:
+        """Whether a launch setting should override the persisted value.
+
+        ``python -m sdr_module.gui`` and ``sdr-scan gui`` always pass their
+        argparse defaults (``_LAUNCH_DEFAULTS``: 100.1 MHz, 20 dB, 2.4 MS/s).
+        A value that differs from the default was clearly requested; one
+        equal to it only counts if its flag was actually typed on the command
+        line.
+        """
+        value = settings.get(key)
+        if value is None or key not in _LAUNCH_DEFAULTS:
+            return False
+        try:
+            if float(value) != _LAUNCH_DEFAULTS[key]:
+                return True
+        except (TypeError, ValueError):
+            return False
+        short, long_ = _LAUNCH_FLAGS[key]
+        for arg in self._args[1:]:
+            name = str(arg).split("=", 1)[0]
+            if name == short or (arg.startswith(short) and not arg.startswith("--")):
+                return True  # -f 144e6 or -f144e6
+            if name.startswith("--") and len(name) > 3 and long_.startswith(name):
+                return True  # --frequency, --frequency=..., or a prefix (--freq)
+        return False
+
+    def _show_fatal_error(self, error: Exception) -> None:
+        """Tell the user why the GUI could not start (not only the log)."""
+        if self._app is None:
+            return
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+
+            detail = str(error) or type(error).__name__
+            QMessageBox.critical(
+                None,
+                "SDR Module Could Not Start",
+                f"SDR Module could not start:\n\n{detail}\n\n"
+                "The full error report is in the terminal output.",
+            )
+        except Exception as exc:  # pragma: no cover - best effort only
+            logger.debug(f"Could not show the startup error dialog: {exc}")
 
     def quit(self) -> None:
         """Quit the application."""

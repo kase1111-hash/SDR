@@ -248,8 +248,8 @@ class TestWaterfallWidgetLogic(unittest.TestCase):
             colormap = self.widget._build_colormap(name)
             self.assertEqual(colormap.shape, (256, 3))
 
-    def test_render_newest_line_at_bottom(self):
-        """Newest line renders at the bottom row with the correct colormap color."""
+    def test_render_newest_line_at_top(self):
+        """Newest line renders at the top row with the correct colormap color."""
         from PyQt6.QtGui import QColor
 
         from sdr_module.gui.waterfall_widget import WaterfallWidget
@@ -262,14 +262,14 @@ class TestWaterfallWidgetLogic(unittest.TestCase):
         self.assertEqual((image.width(), image.height()), (2048, 10))
 
         r, g, b = (int(v) for v in widget._colormap[255])
-        bottom = QColor(image.pixel(1024, image.height() - 1))
-        self.assertEqual((bottom.red(), bottom.green(), bottom.blue()), (r, g, b))
-
-        # With only one line of history, the top row is still background.
         top = QColor(image.pixel(1024, 0))
+        self.assertEqual((top.red(), top.green(), top.blue()), (r, g, b))
+
+        # With only one line of history, the bottom row is still background.
+        bottom = QColor(image.pixel(1024, image.height() - 1))
         bg = widget._bg_color
         self.assertEqual(
-            (top.red(), top.green(), top.blue()),
+            (bottom.red(), bottom.green(), bottom.blue()),
             (bg.red(), bg.green(), bg.blue()),
         )
 
@@ -310,7 +310,9 @@ class TestFrequencyInputLogic(unittest.TestCase):
 
     def test_initialization(self):
         """Test widget initializes correctly."""
-        self.assertEqual(self.widget._frequency_hz, 100e6)
+        from sdr_module.gui.settings_store import DEFAULT_FREQUENCY_HZ
+
+        self.assertEqual(self.widget._frequency_hz, DEFAULT_FREQUENCY_HZ)
 
     def test_set_frequency(self):
         """Test setting frequency."""
@@ -770,7 +772,8 @@ class TestBookmarksPanelCsv(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as handle:
             handle.write("Name,Frequency,Mode\nTower,118.300000,AM\n")
         self.assertEqual(self.panel.import_csv(path), 1)
-        self.assertIn("AM", self.panel._list.item(0).text())
+        # The list shows name | frequency | mode columns.
+        self.assertIn("AM", self.panel._list.topLevelItem(0).text(2))
 
 
 def run_tests():
@@ -875,6 +878,9 @@ class TestDecoderPanelWiring(unittest.TestCase):
             sample_rate = 38400.0
 
         win._device = FakeDevice()
+        # As in the app: the protocol is chosen in the panel (which ticks
+        # Decode), and the panel's signal builds the decoder.
+        win._decoder_panel._proto_combo.setCurrentText("POCSAG")
         win._on_decoder_protocol_changed("POCSAG")
         self.assertIsNotNone(win._decoder)
 

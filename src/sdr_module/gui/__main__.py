@@ -14,6 +14,7 @@ import logging
 import sys
 
 from .app import SDRApplication
+from .settings_store import DEFAULT_FREQUENCY_HZ
 
 
 def parse_args():
@@ -24,7 +25,7 @@ def parse_args():
         epilog="""
 Examples:
     python -m sdr_module.gui              # Normal mode
-    python -m sdr_module.gui --demo       # Demo mode with synthetic signals
+    python -m sdr_module.gui --demo       # Demo mode with simulated signals
     python -m sdr_module.gui -v           # Verbose logging
     python -m sdr_module.gui -f 144.8e6   # Start at specific frequency
         """,
@@ -34,15 +35,18 @@ Examples:
         "--demo",
         "-d",
         action="store_true",
-        help="Run in demo mode with synthetic signals (no hardware required)",
+        help="Run in demo mode with simulated signals (no hardware required)",
     )
 
     parser.add_argument(
         "--frequency",
         "-f",
         type=float,
-        default=100e6,
-        help="Initial frequency in Hz (default: 100 MHz)",
+        default=DEFAULT_FREQUENCY_HZ,
+        help=(
+            "Initial frequency in Hz (default: the last one used, or "
+            f"{DEFAULT_FREQUENCY_HZ / 1e6:g} MHz)"
+        ),
     )
 
     parser.add_argument(
@@ -50,7 +54,10 @@ Examples:
         "-s",
         type=float,
         default=2.4e6,
-        help="Sample rate in Hz (default: 2.4 MHz)",
+        help=(
+            "Sample rate in Hz for the demo device; also preselected in "
+            "Device > Connect (default: 2.4 MHz)"
+        ),
     )
 
     parser.add_argument(

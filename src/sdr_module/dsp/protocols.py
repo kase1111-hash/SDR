@@ -1196,21 +1196,37 @@ class ADSBDecoder(ProtocolDecoder):
     """
     ADS-B (Mode S) decoder.
 
-    Decodes ADS-B messages broadcast by aircraft transponders at 1090 MHz.
+    Decodes the Mode S replies and ADS-B extended squitters that aircraft
+    transponders send on 1090 MHz. Validation follows dump1090, because a
+    preamble-like burst turns up in receiver noise many times a second and
+    every one of them carries some "address":
+
+    - DF17/18 (extended squitter) must have a CRC residual of 0.
+    - DF11 (all-call reply) may carry an interrogator code (IID) in the low
+      7 bits of the residual; the other 17 bits must be 0. A reply with a
+      non-zero IID is only accepted from an aircraft already known.
+    - DF0/4/5/16/20/21 (address/parity) carry the aircraft address XORed
+      into the parity, so the address is recovered as CRC XOR parity. Such a
+      reply is accepted only if that address was seen in a CRC-checked
+      DF17/18 (or a DF11 with IID 0) within ``ICAO_TIMEOUT_S`` seconds of
+      signal time.
+    - Anything else (other formats, failed checks) is dropped, not returned.
 
     Features:
-    - Mode S preamble detection
-    - CRC-24 validation
+    - Mode S preamble detection (dump1090's pulse/quiet test) on the
+      magnitude signal at 2 MHz; other sample rates are resampled to 2 MHz
+    - Frames that straddle two ``decode()`` calls are still found
     - Aircraft identification (callsign)
     - Airborne position decoding (CPR)
     - Velocity decoding
-    - Altitude extraction
+    - Altitude (DF17 position messages and the AC13 field of DF0/4/16/20)
+    - Squawk (identity field of DF5/21)
     """
 
     # Mode S constants
     PREAMBLE_US = 8.0  # Preamble duration in microseconds
     SHORT_MSG_BITS = 56  # Short message (DF 0, 4, 5, 11)
-    LONG_MSG_BITS = 112  # Long message (DF 16, 17, 18, 19, 20, 21)
+    LONG_MSG_BITS = 112  # Long message (DF 16, 17, 18, 20, 21)
 
     # CRC-24 polynomial (0x1FFF409)
     CRC_POLY = 0x1FFF409
@@ -1219,35 +1235,54 @@ class ADSBDecoder(ProtocolDecoder):
     # Character lookup for callsign
     CHARSET = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ##### ###############0123456789######"
 
+    # The decoder works on 0.5 us slots: 2 per bit, 16 per preamble.
+    WORK_RATE = 2e6
+    # How long an aircraft address stays "known" for address/parity replies.
+    ICAO_TIMEOUT_S = 60.0
+
+    _PREAMBLE_SLOTS = 16  # 8 us
+    _FRAME_SLOTS = 16 + 2 * 112  # preamble + long message
+    _SHORT_FORMATS = (0, 4, 5, 11)
+    _LONG_FORMATS = (16, 17, 18, 20, 21)
+    _BATCH = 4096  # candidates demodulated per numpy batch
+
     def __init__(self, sample_rate: float):
         """
         Initialize ADS-B decoder.
 
         Args:
-            sample_rate: Sample rate in Hz (typically 2 MHz for ADS-B)
+            sample_rate: Sample rate in Hz (at least 2 MHz; 2 MHz is native,
+                other rates are resampled to it)
         """
         super().__init__(sample_rate)
 
-        # 1090 MHz Mode S: 1 us per bit, 2 samples per bit at 2 MHz.
-        # Below 2 MHz there are not enough samples to resolve the PPM
-        # half-bit positions (and at <1 MHz the preamble scan cannot
-        # advance at all), so reject unusable rates up front.
+        # 1090 MHz Mode S: 1 us per bit, sent as a pulse in one of its two
+        # 0.5 us halves. Below 2 MHz the halves cannot be told apart, so
+        # reject unusable rates up front.
         if sample_rate < 2e6:
             raise ValueError(
                 f"ADS-B (Mode S) requires a sample rate of at least 2 MHz, "
                 f"got {sample_rate:g} Hz"
             )
-        self._samples_per_bit = int(sample_rate / 1e6)
-        self._preamble_samples = int(self.PREAMBLE_US * sample_rate / 1e6)
+        self._ratio = sample_rate / self.WORK_RATE
 
         # Generate CRC table
         if not ADSBDecoder.CRC_TABLE:
             ADSBDecoder.CRC_TABLE = self._generate_crc_table()
 
         # State
-        self._bit_buffer: List[int] = []
         self._messages: List[ADSBMessage] = []
         self._timestamp = 0.0
+        # Resampler carry-over: input samples not yet used and the fractional
+        # position of the next 2 MHz slot inside them.
+        self._rest = np.zeros(0, dtype=np.float32)
+        self._phase = 0.0
+        # Unscanned end of the previous block (2 MHz slots) and how many of
+        # its slots belong to a frame that was already decoded.
+        self._tail = np.zeros(0, dtype=np.float32)
+        self._skip = 0
+        # Addresses from CRC-checked replies: icao (int) -> signal time seen.
+        self._known_icao: Dict[int, float] = {}
 
         # CPR position cache for decoding (icao -> (even_msg, odd_msg, timestamp))
         self._cpr_cache: Dict[str, Tuple[Any, Any, float]] = {}
@@ -1272,71 +1307,73 @@ class ADSBDecoder(ProtocolDecoder):
             crc = ((crc << 8) ^ self.CRC_TABLE[(crc >> 16) ^ byte]) & 0xFFFFFF
         return crc
 
-    def _detect_preamble(self, samples: np.ndarray, start: int) -> bool:
+    # -- Demodulation -----------------------------------------------------
+
+    def _to_work_rate(self, mag: np.ndarray) -> np.ndarray:
+        """Magnitude averaged over consecutive 0.5 us slots (2 MHz).
+
+        Each input sample is treated as the mean over its sample period, so a
+        slot's value is the exact area under the input across the slot. At
+        2 MHz this is the identity; at integer multiples it is a block
+        average. The unused end of the input carries over to the next call.
         """
-        Detect Mode S preamble pattern.
+        if self._ratio == 1.0:
+            return mag
+        if len(self._rest):
+            mag = np.concatenate((self._rest, mag))
+        ratio = self._ratio
+        n_out = int(np.floor((len(mag) - self._phase) / ratio))
+        if n_out <= 0:
+            self._rest = mag.copy()
+            return np.zeros(0, dtype=np.float32)
+        edges = self._phase + np.arange(n_out + 1) * ratio
+        area = np.concatenate(([0.0], np.cumsum(mag, dtype=np.float64)))
+        slots = np.diff(np.interp(edges, np.arange(len(area)), area)) / ratio
+        end = float(edges[-1])
+        keep_from = min(int(np.floor(end)), len(mag))
+        self._rest = mag[keep_from:].copy()
+        self._phase = end - keep_from
+        return slots.astype(np.float32)
 
-        Preamble: 8 us total
-        Pattern: |1|0|1|0|0|0|0|1|0|1|0|0|0|0|0|0| (at 2 MHz sample rate)
+    def _find_preambles(self, m: np.ndarray, count: int) -> np.ndarray:
+        """Indices below ``count`` where a Mode S preamble starts in ``m``.
+
+        ``m`` holds 0.5 us slots. dump1090's test: the pulses in slots 0, 2,
+        7 and 9 (0, 1, 3.5 and 4.5 us) stand above their neighbours, and the
+        quiet slots 4-5 and 11-14 stay below 2/3 of the mean pulse level.
         """
-        sps = self._samples_per_bit
+        s = [m[i : i + count] for i in range(15)]
+        ok = (
+            (s[0] > s[1])
+            & (s[1] < s[2])
+            & (s[2] > s[3])
+            & (s[3] < s[0])
+            & (s[4] < s[0])
+            & (s[5] < s[0])
+            & (s[6] < s[0])
+            & (s[7] > s[8])
+            & (s[8] < s[9])
+            & (s[9] > s[6])
+        )
+        starts = np.flatnonzero(ok)
+        if not len(starts):
+            return starts
+        high = (m[starts] + m[starts + 2] + m[starts + 7] + m[starts + 9]) / 6.0
+        for quiet in (4, 5, 11, 12, 13, 14):
+            keep = m[starts + quiet] < high
+            starts, high = starts[keep], high[keep]
+        return starts
 
-        if start + 16 * sps > len(samples):
-            return False
+    def _demodulate(self, m: np.ndarray, starts: np.ndarray) -> np.ndarray:
+        """112-bit frames (14 bytes per row) after the preambles at ``starts``.
 
-        # Expected pattern positions (in half-bit units at 2MHz)
-        # High: 0, 2, 7, 9 (0-0.5, 1-1.5, 3.5-4, 4.5-5 us)
-        # Low: 1, 3-6, 8, 10-15
+        Bit n is a 1 when the first half of its 1 us period holds the pulse.
+        """
+        first = starts[:, None] + self._PREAMBLE_SLOTS + 2 * np.arange(112)[None, :]
+        bits = m[first] > m[first + 1]
+        return np.packbits(bits, axis=1)
 
-        threshold = np.mean(np.abs(samples[start : start + 16 * sps]))
-
-        # Check high positions
-        for pos in [0, 2, 7, 9]:
-            idx = start + pos * sps
-            if idx < len(samples) and samples[idx] < threshold:
-                return False
-
-        # Check some low positions
-        for pos in [1, 4, 5, 8, 12]:
-            idx = start + pos * sps
-            if idx < len(samples) and samples[idx] > threshold:
-                return False
-
-        return True
-
-    def _extract_bits(
-        self, samples: np.ndarray, start: int, num_bits: int
-    ) -> List[int]:
-        """Extract bits from PPM (Pulse Position Modulation) samples."""
-        bits = []
-        sps = self._samples_per_bit
-
-        for i in range(num_bits):
-            # Each bit is 1 us, first half high = 1, second half high = 0
-            pos = start + i * sps
-            if pos + sps > len(samples):
-                break
-
-            first_half = samples[pos : pos + sps // 2]
-            second_half = samples[pos + sps // 2 : pos + sps]
-
-            if len(first_half) > 0 and len(second_half) > 0:
-                if np.mean(first_half) > np.mean(second_half):
-                    bits.append(1)
-                else:
-                    bits.append(0)
-
-        return bits
-
-    def _bits_to_bytes(self, bits: List[int]) -> bytes:
-        """Convert bit list to bytes."""
-        result = []
-        for i in range(0, len(bits) - 7, 8):
-            byte = 0
-            for j in range(8):
-                byte = (byte << 1) | bits[i + j]
-            result.append(byte)
-        return bytes(result)
+    # -- Field decoding ---------------------------------------------------
 
     def _decode_callsign(self, data: bytes) -> str:
         """Decode aircraft identification (callsign)."""
@@ -1377,6 +1414,38 @@ class ADSBDecoder(ProtocolDecoder):
             altitude = alt_bits * 100 - 1300
 
         return altitude
+
+    @staticmethod
+    def _field13(data: bytes) -> int:
+        """The 13-bit AC/ID field (message bits 20-32) of a surveillance reply."""
+        return ((data[2] & 0x1F) << 8) | data[3]
+
+    def _decode_ac13(self, data: bytes) -> int:
+        """Altitude (ft) from the AC13 field of DF0/4/16/20, 0 if unknown.
+
+        Only the common 25 ft coding (M=0, Q=1) is decoded; metric and
+        Gillham-coded altitudes read as unknown.
+        """
+        ac13 = self._field13(data)
+        if not ac13 or ac13 & 0x40 or not ac13 & 0x10:
+            return 0
+        n = ((ac13 & 0x1F80) >> 2) | ((ac13 & 0x20) >> 1) | (ac13 & 0x0F)
+        return n * 25 - 1000
+
+    def _decode_squawk(self, data: bytes) -> str:
+        """Squawk code from the ID13 field of DF5/21 (e.g. "7000")."""
+        id13 = self._field13(data)
+
+        def bit(n: int) -> int:
+            return (id13 >> n) & 1
+
+        # Field order, most significant first: C1 A1 C2 A2 C4 A4 X B1 D1 B2
+        # D2 B4 D4.
+        a = bit(11) | bit(9) << 1 | bit(7) << 2
+        b = bit(5) | bit(3) << 1 | bit(1) << 2
+        c = bit(12) | bit(10) << 1 | bit(8) << 2
+        d = bit(4) | bit(2) << 1 | bit(0) << 2
+        return f"{a}{b}{c}{d}"
 
     def _decode_cpr_position(
         self, icao: str, lat_cpr: int, lon_cpr: int, odd: bool, airborne: bool
@@ -1516,147 +1585,187 @@ class ADSBDecoder(ProtocolDecoder):
 
         return 0.0, 0.0, 0
 
-    def _parse_message(self, bits: List[int]) -> Optional[ADSBMessage]:
-        """Parse Mode S message from bits."""
-        if len(bits) < self.SHORT_MSG_BITS:
-            return None
+    # -- Frame validation -------------------------------------------------
 
-        data = self._bits_to_bytes(bits)
-        if len(data) < 7:
-            return None
+    def _is_known(self, address: int) -> bool:
+        """True if ``address`` was seen in a checked reply recently enough."""
+        seen = self._known_icao.get(address)
+        return seen is not None and self._timestamp - seen <= self.ICAO_TIMEOUT_S
 
-        # Downlink Format (first 5 bits)
-        df = (data[0] >> 3) & 0x1F
-
-        # Determine message length
-        if df in (0, 4, 5, 11):
-            msg_bits = self.SHORT_MSG_BITS
-            msg_bytes = 7
-        elif df in (16, 17, 18, 19, 20, 21):
-            msg_bits = self.LONG_MSG_BITS
-            msg_bytes = 14
+    def _parse_frame(self, frame: bytes) -> Optional[ADSBMessage]:
+        """The message in a demodulated frame, or None if it fails its checks."""
+        df = frame[0] >> 3
+        if df in self._SHORT_FORMATS:
+            data = frame[:7]
+        elif df in self._LONG_FORMATS:
+            data = frame[:14]
         else:
             return None
 
-        if len(bits) < msg_bits or len(data) < msg_bytes:
-            return None
-
-        data = data[:msg_bytes]
-
-        # CRC check
-        crc = self._compute_crc(data[:-3])
-        received_crc = int.from_bytes(data[-3:], "big")
-
-        # For DF17/18, CRC should be zero or match ICAO address
-        if df == 17 or df == 18:
-            if crc != received_crc:
+        residual = self._compute_crc(data[:-3]) ^ int.from_bytes(data[-3:], "big")
+        if df in (17, 18):
+            if residual:
+                return None
+            address = int.from_bytes(data[1:4], "big")
+            self._known_icao[address] = self._timestamp
+        elif df == 11:
+            address = int.from_bytes(data[1:4], "big")
+            iid = residual & 0x7F
+            if residual & ~0x7F or (iid and not self._is_known(address)):
+                return None
+            if not iid:
+                self._known_icao[address] = self._timestamp
+        else:
+            # Address/parity: the parity is CRC XOR address.
+            address = residual
+            if not self._is_known(address):
                 return None
 
-        # Extract ICAO address
-        icao = f"{data[1]:02X}{data[2]:02X}{data[3]:02X}"
-
-        # Create base message
+        icao = f"{address:06X}"
         msg = ADSBMessage(
             protocol=ProtocolType.ADSB,
             timestamp=self._timestamp,
-            raw_bits=bytes(bits[:msg_bits]),
+            raw_bits=bytes(data),
             valid=True,
             icao_address=icao,
             downlink_format=df,
         )
 
-        # Parse DF17/18 extended squitter
-        if df in (17, 18) and len(data) >= 11:
-            tc = (data[4] >> 3) & 0x1F
-            msg.type_code = tc
+        if df in (0, 4, 16, 20):
+            msg.altitude = self._decode_ac13(data)
+        if df in (5, 21):
+            msg.squawk = self._decode_squawk(data)
+        if df == 0:
+            msg.on_ground = bool(data[0] & 0x04)  # VS: vertical status
+        elif df in (4, 5, 20, 21):
+            msg.on_ground = (data[0] & 0x07) in (1, 3)  # FS: flight status
+        elif df in (11, 17):
+            msg.on_ground = (data[0] & 0x07) == 4  # CA: capability
 
-            # Aircraft identification (TC 1-4)
-            if 1 <= tc <= 4:
-                msg.callsign = self._decode_callsign(data[4:])
-                categories = [
-                    "",
-                    "Light",
-                    "Medium 1",
-                    "Medium 2",
-                    "High vortex",
-                    "Heavy",
-                    "High perf",
-                    "Rotorcraft",
-                ]
-                cat_idx = data[4] & 0x07
-                msg.category = categories[cat_idx] if cat_idx < len(categories) else ""
-
-            # Airborne position (TC 9-18)
-            elif 9 <= tc <= 18:
-                msg.altitude = self._decode_altitude(data[4:])
-                msg.on_ground = False
-
-                # CPR position
-                lat_cpr = ((data[6] & 0x03) << 15) | (data[7] << 7) | (data[8] >> 1)
-                lon_cpr = ((data[8] & 0x01) << 16) | (data[9] << 8) | data[10]
-                odd = bool((data[6] >> 2) & 0x01)
-
-                lat, lon = self._decode_cpr_position(icao, lat_cpr, lon_cpr, odd, True)
-                if lat != 0.0 or lon != 0.0:
-                    msg.latitude = lat
-                    msg.longitude = lon
-
-            # Airborne velocity (TC 19)
-            elif tc == 19:
-                velocity, heading, vrate = self._decode_velocity(data[4:])
-                msg.velocity = velocity
-                msg.heading = heading
-                msg.vertical_rate = vrate
-
-            # Surface position (TC 5-8)
-            elif 5 <= tc <= 8:
-                msg.on_ground = True
-
+        if df in (17, 18):
+            self._parse_extended_squitter(msg, data, icao)
         return msg
+
+    def _parse_extended_squitter(
+        self, msg: ADSBMessage, data: bytes, icao: str
+    ) -> None:
+        """Fill ``msg`` from the ME field of a DF17/18 extended squitter."""
+        tc = (data[4] >> 3) & 0x1F
+        msg.type_code = tc
+
+        # Aircraft identification (TC 1-4)
+        if 1 <= tc <= 4:
+            msg.callsign = self._decode_callsign(data[4:])
+            categories = [
+                "",
+                "Light",
+                "Medium 1",
+                "Medium 2",
+                "High vortex",
+                "Heavy",
+                "High perf",
+                "Rotorcraft",
+            ]
+            cat_idx = data[4] & 0x07
+            msg.category = categories[cat_idx] if cat_idx < len(categories) else ""
+
+        # Airborne position (TC 9-18)
+        elif 9 <= tc <= 18:
+            msg.altitude = self._decode_altitude(data[4:])
+            msg.on_ground = False
+
+            # CPR position
+            lat_cpr = ((data[6] & 0x03) << 15) | (data[7] << 7) | (data[8] >> 1)
+            lon_cpr = ((data[8] & 0x01) << 16) | (data[9] << 8) | data[10]
+            odd = bool((data[6] >> 2) & 0x01)
+
+            lat, lon = self._decode_cpr_position(icao, lat_cpr, lon_cpr, odd, True)
+            if lat != 0.0 or lon != 0.0:
+                msg.latitude = lat
+                msg.longitude = lon
+
+        # Airborne velocity (TC 19)
+        elif tc == 19:
+            velocity, heading, vrate = self._decode_velocity(data[4:])
+            msg.velocity = velocity
+            msg.heading = heading
+            msg.vertical_rate = vrate
+
+        # Surface position (TC 5-8)
+        elif 5 <= tc <= 8:
+            msg.on_ground = True
+
+    # -- Public API ---------------------------------------------------------
 
     def decode(self, samples: np.ndarray) -> List[ADSBMessage]:
         """
         Decode ADS-B messages from raw samples.
 
         Args:
-            samples: Magnitude samples from 1090 MHz
+            samples: Magnitude samples from 1090 MHz (complex I/Q is
+                converted to magnitude). Consecutive calls are treated as one
+                continuous stream.
 
         Returns:
-            List of decoded ADS-B messages
+            List of decoded ADS-B messages (only ones that passed the checks)
         """
         self._messages = []
+        samples = np.asarray(samples)
         self._timestamp += len(samples) / self._sample_rate
+        if not samples.size:
+            return self._messages
 
-        # Scan for preambles
-        i = 0
-        while i < len(samples) - (
-            self._preamble_samples + self.LONG_MSG_BITS * self._samples_per_bit
-        ):
-            if self._detect_preamble(samples, i):
-                # Try to extract message
-                msg_start = i + self._preamble_samples
+        mag = np.abs(samples) if np.iscomplexobj(samples) else samples
+        mag = mag.astype(np.float32, copy=False).ravel()
+        if not np.all(np.isfinite(mag)):
+            mag = np.nan_to_num(mag, nan=0.0, posinf=0.0, neginf=0.0)
+        work = self._to_work_rate(mag)
+        if len(self._tail):
+            work = np.concatenate((self._tail, work))
 
-                # Try long message first
-                bits = self._extract_bits(samples, msg_start, self.LONG_MSG_BITS)
+        # Start positions with room for a whole long frame after them; the
+        # rest is scanned next time, when the following samples are there.
+        count = len(work) - self._FRAME_SLOTS + 1
+        if count <= 0:
+            self._tail = work.copy()
+            return self._messages
 
-                if len(bits) >= self.SHORT_MSG_BITS:
-                    msg = self._parse_message(bits)
-                    if msg:
-                        self._messages.append(msg)
-                        self._notify_callbacks(msg)
-                        # Skip past this message
-                        i = msg_start + len(bits) * self._samples_per_bit
-                        continue
+        self._forget_old_aircraft()
+        starts = self._find_preambles(work, count)
+        next_free = self._skip
+        for first in range(0, len(starts), self._BATCH):
+            batch = starts[first : first + self._BATCH]
+            frames = self._demodulate(work, batch)
+            for start, frame in zip(batch.tolist(), frames, strict=True):
+                if start < next_free:
+                    continue  # inside a frame already decoded
+                msg = self._parse_frame(frame.tobytes())
+                if msg is None:
+                    continue
+                self._messages.append(msg)
+                self._notify_callbacks(msg)
+                next_free = start + self._PREAMBLE_SLOTS + 16 * len(msg.raw_bits)
 
-            i += self._samples_per_bit
-
+        self._tail = work[count:].copy()
+        self._skip = max(0, next_free - count)
         return self._messages
+
+    def _forget_old_aircraft(self) -> None:
+        """Drop addresses not seen for longer than ``ICAO_TIMEOUT_S``."""
+        cutoff = self._timestamp - self.ICAO_TIMEOUT_S
+        stale = [a for a, seen in self._known_icao.items() if seen < cutoff]
+        for address in stale:
+            del self._known_icao[address]
 
     def reset(self) -> None:
         """Reset decoder state."""
-        self._bit_buffer = []
         self._cpr_cache.clear()
+        self._known_icao.clear()
         self._timestamp = 0.0
+        self._rest = np.zeros(0, dtype=np.float32)
+        self._phase = 0.0
+        self._tail = np.zeros(0, dtype=np.float32)
+        self._skip = 0
 
 
 # ============================================================================

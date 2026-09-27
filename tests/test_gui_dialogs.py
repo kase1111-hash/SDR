@@ -254,10 +254,10 @@ class TestScanner(unittest.TestCase):
 
         host = Host()
         dialog = ScannerDialog(host, device=MockDevice())
-        self.assertFalse(dialog._empty.isHidden())
+        self.assertTrue(dialog._empty.is_visible())
         self.assertFalse(dialog._tune_btn.isEnabled())
         dialog._on_hit(101.1e6, -40.0, -90.0)
-        self.assertTrue(dialog._empty.isHidden())
+        self.assertFalse(dialog._empty.is_visible())
         self.assertEqual(dialog._table.item(0, 2).text(), "50.0 dB")
         dialog._table.selectRow(0)
         self.assertTrue(dialog._tune_btn.isEnabled())

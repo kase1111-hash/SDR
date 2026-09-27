@@ -286,12 +286,14 @@ class TestRecordingProtection(_WindowTestCase):
     def test_armed_recording_that_captures_nothing_keeps_the_previous_one(self):
         self._record()
         self.win._buffer_unsaved = False  # e.g. it was saved
-        before = list(self.win._samples_buffer)
+        store = self.win._samples_buffer
+        before = list(store)
         self.win._stop_acquisition()
         self.win._record_button.click()  # armed, nothing arrives
         self.win._record_button.click()
+        self.assertIs(self.win._samples_buffer, store)
         self.assertEqual(len(self.win._samples_buffer), len(before))
-        self.assertIs(self.win._samples_buffer[0], before[0])
+        np.testing.assert_array_equal(self.win._samples_buffer[0], before[0])
 
     def test_closing_with_an_unsaved_recording_can_be_cancelled(self):
         self._record()

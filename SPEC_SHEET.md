@@ -525,7 +525,8 @@ plots. The waterfall colormaps are the same in both themes.
 Started with `--demo`, Device → Use Demo Device, the Demo Device entry in
 Device → Connect, or the first-run wizard. The simulated receiver produces
 FM broadcast stations across 88–108 MHz, airband AM, 2 m and 70 cm FM,
-NOAA weather, APRS and ISM bursts, ADS-B pulses at 1090 MHz, a CW beacon
+NOAA weather, APRS and ISM bursts, decodable ADS-B frames at 1090 MHz
+(flight KLM1023 with position, speed and squawk), a CW beacon
 and weak carriers elsewhere on a realistic noise floor. The signals sit at
 fixed frequencies and move across the display as you tune, so click-to-tune
 and the frequency scanner work as with real hardware; raising the gain lifts

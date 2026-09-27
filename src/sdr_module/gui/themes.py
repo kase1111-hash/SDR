@@ -612,7 +612,8 @@ QHeaderView::section {{ background-color: {p.mantle}; color: {p.subtext}; border
     padding: 4px 8px; font-weight: bold; }}
 QTableCornerButton::section {{ background-color: {p.mantle}; border: none; }}
 QTextEdit, QPlainTextEdit, QTextBrowser {{ background-color: {p.mantle};
-    color: {p.text}; placeholder-text-color: {p.subtext}; border: 1px solid {p.surface1}; border-radius: 4px;
+    color: {p.text}; placeholder-text-color: {p.subtext};
+    border: 1px solid {p.surface1}; border-radius: 4px;
     selection-background-color: {p.accent}; selection-color: {p.on_accent}; }}
 QTextEdit[role="terminal"], QPlainTextEdit[role="terminal"] {{
     background-color: {p.lcd_bg}; color: {p.lcd_text};

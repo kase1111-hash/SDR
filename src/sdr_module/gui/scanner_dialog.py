@@ -12,7 +12,7 @@ import logging
 from typing import List, Optional, Tuple
 
 try:
-    from PyQt6.QtCore import QEvent, QObject, Qt, QThread, pyqtSignal
+    from PyQt6.QtCore import QEvent, Qt, QThread, pyqtSignal
     from PyQt6.QtWidgets import (
         QAbstractItemView,
         QComboBox,
@@ -40,6 +40,7 @@ import numpy as np
 from ..utils.tooltips import get_short_tip
 
 if HAS_PYQT6:
+    from .decoder_panel import ViewPlaceholder
     from .themes import set_role, set_tone
 
 logger = logging.getLogger(__name__)
@@ -421,20 +422,6 @@ class _NumericItem(QTableWidgetItem if HAS_PYQT6 else object):
             return super().__lt__(other)
 
 
-class _ViewportResizeWatcher(QObject if HAS_PYQT6 else object):
-    """Keeps an overlay label covering a table's viewport."""
-
-    def __init__(self, viewport, overlay):
-        super().__init__(viewport)
-        self._overlay = overlay
-        viewport.installEventFilter(self)
-
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.Type.Resize:
-            self._overlay.setGeometry(obj.rect())
-        return False
-
-
 class ScannerDialog(QDialog if HAS_PYQT6 else object):
     """Non-blocking frequency sweep dialog."""
 
@@ -592,15 +579,9 @@ class ScannerDialog(QDialog if HAS_PYQT6 else object):
         self._table.installEventFilter(self)
         layout.addWidget(self._table, 1)
 
-        # Empty-state overlay on the table
-        self._empty = QLabel(self._table.viewport())
-        self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty.setWordWrap(True)
-        self._empty.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        set_role(self._empty, "placeholder")
-        self._empty_watcher = _ViewportResizeWatcher(
-            self._table.viewport(), self._empty
-        )
+        # Empty-state overlay on the table: a bold title over an italic hint,
+        # like the Decoder and Bookmarks panels' empty tables.
+        self._empty = ViewPlaceholder(self._table)
 
         # Buttons
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
@@ -770,27 +751,32 @@ class ScannerDialog(QDialog if HAS_PYQT6 else object):
         self._update_empty_state(scanning)
 
     def _update_empty_state(self, scanning: bool) -> None:
+        """The table's placeholder: a short title over what to do next."""
         if self._table.rowCount():
-            self._empty.hide()
+            self._empty.set_visible(False)
             return
         if self._device is None:
-            # The status line beside Start Scan already says why it is off.
+            # The status line beside Start Scan already says that no device
+            # is connected; this says how to connect one.
             text = (
-                "To scan, close the scanner and choose Device > Connect...\n"
+                "Connect a device to scan\n"
+                "Close the scanner and choose Device > Connect...\n"
                 "or Device > Use Demo Device, then open it again."
             )
         elif scanning:
-            text = "Scanning... signals above the threshold will appear here."
+            text = (
+                "Scanning for signals\n"
+                "Those above the threshold will appear here as they are found."
+            )
         elif self._worker is not None:
             text = (
-                "No signals above the threshold.\n"
+                "No signals above the threshold\n"
                 "Lower the threshold or pick another range and scan again."
             )
         else:
-            text = "No results yet.\nChoose a range and click Start Scan."
-        self._empty.setText(text)
-        self._empty.setGeometry(self._table.viewport().rect())
-        self._empty.show()
+            text = "No results yet\nChoose a range and click Start Scan."
+        self._empty.set_text(text)
+        self._empty.set_visible(True)
 
     # ------------------------------------------------------------------ #
     # Scanning

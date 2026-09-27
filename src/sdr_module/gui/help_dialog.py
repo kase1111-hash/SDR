@@ -4,8 +4,9 @@ Help dialog — keyboard shortcuts reference.
 The list comes from one table, :data:`SHORTCUTS`, and is checked against the
 shortcuts the parent window has actually installed: its ``QAction`` and
 ``QShortcut`` key bindings, keys a menu item advertises after a tab
-(``"&Start Receiving\tSpace"``, for keys the window handles itself) and the
-window's ``_TUNE_STEPS_HZ`` arrow-key tuning table. Entries whose keys are
+(``"&Start Receiving\tSpace"``, for keys the window handles itself), the
+window's ``_TUNE_STEPS_HZ`` arrow-key tuning table and the keys its own
+``keyPressEvent`` handles (``_WINDOW_KEYS``: Esc). Entries whose keys are
 not bound are left out, and bound menu shortcuts missing from the table are
 added under their menu's name, so the dialog stays accurate when the main
 window's shortcuts change (and on platforms without, say, a Quit key).
@@ -59,9 +60,16 @@ SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
     ("Tools", ("Ctrl+R",), "Open the AM/FM radio tuner"),
     ("Tools", ("Ctrl+E",), "Show the error history"),
     ("View", ("F6",), "Put the keyboard focus on the spectrum"),
+    ("View", ("Esc",), "Return the keyboard focus to the spectrum"),
     ("View", ("Ctrl+T",), "Switch between the light and dark themes"),
     ("Help", ("F1",), "Show this list of keyboard shortcuts"),
 )
+
+# Keys the main window handles in its own keyPressEvent rather than as a
+# menu or shortcut binding, each with the window method that key calls: a
+# window with that method handles the key (Esc returns the keyboard focus to
+# the spectrum, like View > Focus Spectrum).
+_WINDOW_KEYS: Dict[str, str] = {"Esc": "_focus_plots"}
 
 # Submenus whose items are described as "Show the <item> panel".
 _PANEL_MENUS = ("Panels",)
@@ -170,7 +178,9 @@ def collect_bindings(window) -> Optional[Dict[str, Tuple[str, str]]]:
     ``category`` is the top-level menu title for menu actions and ``""``
     otherwise; ``text`` is the action's text prefixed with any submenu
     (``"Panels › Decoder"``), or a ``QShortcut``'s What's This text (usually
-    ``""``). Returns ``None`` when there is no window to inspect.
+    ``""``). Keys the window handles itself (see ``_WINDOW_KEYS``) are
+    included with an empty category and text. Returns ``None`` when there is
+    no window to inspect.
     """
     if window is None or not HAS_PYQT6:
         return None
@@ -197,6 +207,9 @@ def collect_bindings(window) -> Optional[Dict[str, Tuple[str, str]]]:
             key = seq.toString(QKeySequence.SequenceFormat.PortableText)
             if key:
                 bindings.setdefault(key, ("", shortcut.whatsThis()))
+    for key, handler in _WINDOW_KEYS.items():
+        if callable(getattr(window, handler, None)):
+            bindings.setdefault(_portable(key), ("", ""))
     return bindings
 
 
@@ -402,8 +415,8 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
 
         note = QLabel(
             "Space and the arrow keys act when the focused control does not "
-            "use them itself. If they seem to do nothing, press F6 (or click "
-            "the spectrum) first."
+            "use them itself. If they seem to do nothing, press F6 or Esc (or "
+            "click the spectrum) first."
         )
         note.setWordWrap(True)
         set_role(note, "hint")

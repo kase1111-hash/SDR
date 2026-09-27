@@ -88,7 +88,8 @@ class TestShortcutTable(unittest.TestCase):
         dialog = HelpDialog()
         texts = [label.text() for label in dialog.findChildren(QLabel)]
         self.assertTrue(
-            any("press F6 (or click the spectrum) first." in t for t in texts), texts
+            any("press F6 or Esc (or click the spectrum) first." in t for t in texts),
+            texts,
         )
         dialog.deleteLater()
 

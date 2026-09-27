@@ -58,8 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Demo audio** — the demo device streams in real time and its strongest
   station, 100.1 MHz, plays a looping tune in stereo FM, so audio works
   without hardware. It also simulates airband AM, 2 m, 70 cm and NOAA FM,
-  ISM and APRS bursts, ADS-B pulses and a CW beacon. A computer that can't
-  keep up gets a hint and muted audio instead of a stutter.
+  ISM and APRS bursts, a CW beacon, and real ADS-B frames at 1090 MHz
+  (flight KLM1023 with position, speed and squawk) for the ADS-B decoder.
+  A computer that can't keep up gets a hint and paused audio instead of a
+  stutter, and audio resumes by itself once it catches up.
+- **Recording to disk** — I/Q recordings stream to a temporary file in the
+  user cache folder instead of memory (about 19 MB/s at 2.4 MS/s used to
+  accumulate in RAM). Save moves or converts it, temporary files are
+  removed on discard and exit, and recording stops with a warning when the
+  drive has less than 500 MB free.
 - **Decoder and bookmarks** — the Decoder tab offers a one-click "Tune to …"
   for ADS-B, APRS and ACARS, says whether the receiver is tuned where the
   protocol is heard, and marks RDS as not decodable live. Bookmarks save the
@@ -84,6 +91,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frequency scan; hot-plug polling stays quiet without drivers; dialogs are
   freed after use instead of piling up as hidden windows; audio output
   says when no output device can be opened.
+- Broadcast FM gets 75 µs de-emphasis and the 19 kHz stereo pilot is
+  filtered out of the audio; the receiver resamples to exactly 48 kHz and
+  needs about a quarter of the CPU it did at 8 and 20 MS/s. Every queued
+  HackRF transfer is processed each frame, so high sample rates no longer
+  fall behind and mute audio (a slow computer falls back to fewer samples
+  per frame and keeps the window responsive).
+- The channel width no longer drives the HackRF's analog baseband filter
+  (any change clamped it to 1.75 MHz and dimmed most of the span); the
+  filter follows 0.75 × the sample rate.
+- Tuning a bookmark or the Decoder's "Tune to …" picks a channel width that
+  fits the mode (25 kHz for 2 m FM, 10 kHz for AM and SSB) instead of
+  keeping 200 kHz.
+
+### Fixed — Decoding, drivers and band plan (found through the GUI)
+- **ADS-B** accepts only CRC-valid DF11/17/18 frames, and parity formats
+  (DF0/4/5/16/20/21) only from aircraft already seen, so receiver noise no
+  longer produces a stream of phantom aircraft. Squawk codes from DF5/21
+  are decoded and shown.
+- **RTL-SDR** `set_bandwidth()` sets the tuner's IF filter and never
+  changes the sample rate (the GUI's channel width used to become the
+  sample rate).
+- **License privileges**: higher classes inherit lower-class segments;
+  General and Amateur Extra were refused the 10 m 28.3–28.5 MHz phone
+  segment open to Technicians.
+- The FM Broadcast preset is 100.1 MHz, the ADS-B preset points to the
+  Decoder tab, and the sample-rate and bandwidth tooltips distinguish the
+  span shown from the channel demodulated.
 
 ### Removed — GUI
 - The radio tuner's volume, tone, balance, seek and power/mute controls,

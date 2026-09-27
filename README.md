@@ -92,7 +92,8 @@ any time for the shortcut reference.
 
 **Demo mode** (`--demo`, Device → Use Demo Device, or the Demo Device entry
 in Device → Connect) simulates FM broadcast stations, airband AM, 2 m, 70 cm
-and NOAA weather FM, ISM and APRS bursts, ADS-B pulses and a CW beacon on a
+and NOAA weather FM, ISM and APRS bursts, ADS-B frames from a simulated
+flight (KLM1023) that the ADS-B decoder follows, and a CW beacon on a
 realistic noise floor, streamed in real time. The strongest station,
 100.1 MHz, plays a looping tune in FM, so audio works without hardware; gain,
 AGC and the frequency scanner behave as they would with a real receiver.
@@ -214,7 +215,7 @@ free disk space while recording.
 | Type a frequency | `Ctrl+L` (Radio → Enter Frequency) or click the FREQ readout; Enter tunes and returns to the plots |
 | Keyboard tuning | `←`/`→` ±10 kHz, `Shift+←`/`→` ±100 kHz, `Ctrl+←`/`→` ±1 MHz while the plots have focus (`F6` or `Esc` focuses the spectrum) |
 | Start / stop receiving | `Space`, the toolbar's Start button, or Radio → Start Receiving |
-| Record I/Q | `Ctrl+Shift+R`, the toolbar's Record button, or the control panel's Recording section (with Pause); samples are held in memory until saved |
+| Record I/Q | `Ctrl+Shift+R`, the toolbar's Record button, or the control panel's Recording section (with Pause); samples stream to a temporary file on disk until saved with File → Save Recording, and recording stops if the drive gets nearly full |
 | Save / import recording | `Ctrl+S` File → Save Recording (cf32, cs16, SigMF, 16-bit I/Q WAV, raw); `Ctrl+O` File → Import Recording loads a file to save it in another format (no playback yet) |
 | Screenshot | `Ctrl+P` File → Save Screenshot (PNG of the whole window) |
 | Bookmarks | `Ctrl+B` (Radio → Bookmark Current Frequency) saves the frequency with its mode; in the Bookmarks tab double-click or `Enter` tunes, `F2` renames, `Delete` removes |

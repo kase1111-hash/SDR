@@ -694,9 +694,11 @@ class TestCloseWhileRecording(_WindowTestCase):
         folder = tempfile.mkdtemp(prefix="sdr-round3-")
         path = os.path.join(folder, "take.cf32")
         states = []
+        recorded = []
 
         def fake_save(*_args):
             states.append(self.win._recording)
+            recorded.append(sum(len(b) for b in self.win._samples_buffer))
             return path, ""
 
         self._use_real_prompt("Save...")
@@ -708,7 +710,7 @@ class TestCloseWhileRecording(_WindowTestCase):
         self.assertEqual(states, [False])  # stopped before the file dialog
         self.assertFalse(self.win.isVisible())
         samples, _meta = load_iq_file(path)
-        self.assertEqual(len(samples), sum(len(b) for b in self.win._samples_buffer))
+        self.assertEqual(len(samples), recorded[0])
 
     def test_armed_recording_with_nothing_to_lose_just_closes(self):
         self.win._stop_acquisition()

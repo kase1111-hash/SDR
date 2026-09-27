@@ -25,17 +25,26 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 import time
+import uuid
+import weakref
 from collections import deque
 from typing import Any, Deque, Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
+
+try:  # POSIX: a recording file is locked while a session uses it
+    import fcntl
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore[assignment]
 
 try:
     from PyQt6.QtCore import (
         PYQT_VERSION_STR,
         QT_VERSION_STR,
         QEvent,
+        QPoint,
         QPointF,
         Qt,
         QTimer,
@@ -162,6 +171,9 @@ _PROBE_READ_S = 0.05
 _OVERLOAD_RATIO = 0.8
 _RECOVER_RATIO = 0.5
 _TIMED_FRAME = 8 * DISPLAY_BLOCK
+# While frames can't keep up, one frame this often reads (and times) a full
+# frame's worth again, to find out when the computer keeps up once more.
+_OVERLOAD_PROBE_S = 1.0
 
 # Hardware drivers scanned for devices: (package, name the driver imports
 # from it, driver module, driver class), matching the imports in
@@ -236,13 +248,78 @@ _SSB_LOW_HZ = 200.0
 _SSB_HIGH_HZ = 2800.0
 _CW_HALF_WIDTH_HZ = 250.0
 _CW_PITCH_HZ = 700.0
-# Highest audio frequency kept after AM/FM detection (broadcast FM is 15 kHz).
+# Highest audio frequency kept after AM/FM detection (broadcast FM is 15 kHz),
+# and where the audio low-pass stops: below broadcast FM's 19 kHz stereo
+# pilot tone, which would otherwise come through as a faint whistle.
 _MAX_AUDIO_HZ = 15e3
+_AUDIO_STOP_HZ = 18.5e3
 _MAX_TAPS = 2047
+# Broadcast FM (an FM deviation of at least this much) is sent with 75 us
+# pre-emphasis (50 us in Europe; the difference is a slight treble tilt),
+# which the receiver undoes with the matching de-emphasis.
+_BROADCAST_DEVIATION_HZ = 50e3
+_DEEMPHASIS_S = 75e-6
+# The de-emphasis runs at no less than this rate, where its FIR matches the
+# analog response to within 0.1 dB up to 15 kHz.
+_MIN_DEEMPHASIS_RATE = 192e3
 
 
 def _next_pow2(n: int) -> int:
     return 1 << max(0, int(n) - 1).bit_length()
+
+
+def _polyphase_is_cheaper(groups: int, factor: int) -> bool:
+    """Whether a decimating FIR of ``groups`` x ``factor`` taps costs less
+    computed per kept output (one row-by-row dot product per group) than
+    by FFT overlap-save. Measured per input sample: about 0.7 + 7 / factor
+    units per group against 25 for the FFT."""
+    return groups * (0.7 + 7.0 / max(1, factor)) <= 25.0
+
+
+_VECDOT = getattr(np, "vecdot", None)  # numpy 2.0+
+
+
+def _row_dot(rows: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """``rows @ weights`` for real ``weights``, without BLAS: a threaded
+    BLAS spins its worker threads on every core after each call, which
+    costs several times the work itself and stalls when other programs
+    are busy."""
+    if _VECDOT is not None:
+        return _VECDOT(weights, rows)  # conj(weights) . row, weights are real
+    return np.einsum("ij,j->i", rows, weights)
+
+
+def _smooth_factor(ratio: float) -> int:
+    """The largest integer <= ``ratio`` with no prime factor above 5 (at
+    least 1). Decimating by such a factor splits into cheap short stages,
+    unlike a prime like 167 (8 MS/s to 48 kHz), which needs one long filter
+    at the full sample rate."""
+    limit = max(1, int(np.floor(ratio + 1e-9)))
+    best = 1
+    power2 = 1
+    while power2 <= limit:
+        power3 = power2
+        while power3 <= limit:
+            value = power3
+            while value * 5 <= limit:
+                value *= 5
+            best = max(best, value)
+            power3 *= 3
+        power2 *= 2
+    return best
+
+
+def _deemphasis_taps(rate_hz: float, tau_s: float = _DEEMPHASIS_S) -> np.ndarray:
+    """The broadcast FM de-emphasis (a one-pole low-pass with time constant
+    ``tau_s``) as an FIR: its exponential impulse response, sampled at
+    ``rate_hz`` and cut off 80 dB down. At the channel rate (hundreds of
+    kHz) this matches the analog response to within 0.1 dB up to 15 kHz,
+    and as an FIR it folds into the audio filter, whose history carries it
+    across blocks."""
+    decay = float(np.exp(-1.0 / (tau_s * rate_hz)))
+    length = int(np.ceil(np.log(1e-4) / np.log(decay))) + 1
+    taps = decay ** np.arange(length)
+    return (taps / np.sum(taps)).astype(np.float32)
 
 
 def _lowpass_taps(
@@ -271,8 +348,14 @@ class _FirDecimator:
 
     The filter history and the decimation phase carry over between blocks,
     so a stream split into blocks gives exactly the output of one long
-    block. Filtering uses FFT overlap-save, cheap enough for full-rate
-    hardware blocks.
+    block.
+
+    A decimating filter with few taps per kept sample only computes the
+    samples it keeps (polyphase: the block, viewed as rows of ``factor``
+    samples, dotted with the taps one group of ``factor`` taps at a time),
+    several times cheaper than filtering every sample by FFT and discarding
+    most. Longer filters, and filters that don't decimate, use FFT
+    overlap-save.
     """
 
     def __init__(self, taps: Optional[np.ndarray], factor: int = 1):
@@ -281,12 +364,56 @@ class _FirDecimator:
         self._history: Optional[np.ndarray] = None
         self._phase = 0  # index, in the next block, of the next kept sample
         self._spectra: Dict[Tuple[int, bool], np.ndarray] = {}
+        # Polyphase: the reversed taps (zero-padded to whole groups) as
+        # (groups, factor) rows, by sample dtype.
+        self._groups = 0
+        self._weights: Dict[Any, np.ndarray] = {}
+        if self._taps is not None and self._factor > 1:
+            groups = -(-len(self._taps) // self._factor)
+            if _polyphase_is_cheaper(groups, self._factor):
+                self._groups = groups
+
+    def reset(self) -> None:
+        """Forget the stream (history and decimation phase); keep the design."""
+        self._history = None
+        self._phase = 0
 
     def process(self, x: np.ndarray) -> np.ndarray:
-        if self._taps is not None and len(x):
-            x = self._filter(x)
-        out = x[self._phase :: self._factor]
+        if self._groups and len(x):
+            out = self._polyphase(x)
+        else:
+            if self._taps is not None and len(x):
+                x = self._filter(x)
+            out = x[self._phase :: self._factor]
         self._phase = (self._phase - len(x)) % self._factor
+        return out
+
+    def _polyphase(self, x: np.ndarray) -> np.ndarray:
+        """The kept outputs of the filter, computed directly."""
+        factor, groups = self._factor, self._groups
+        length = groups * factor  # taps, padded with zeros
+        dtype = np.result_type(x.dtype, np.float32)
+        if self._history is None or self._history.dtype != dtype:
+            self._history = np.zeros(length - 1, dtype=dtype)
+        padded = np.concatenate((self._history, x.astype(dtype, copy=False)))
+        self._history = padded[len(padded) - (length - 1) :].copy()
+        phase = self._phase
+        count = -(-(len(x) - phase) // factor) if len(x) > phase else 0
+        if count <= 0:
+            return np.empty(0, dtype=dtype)
+        # Output j is padded[phase + j*factor : ... + length] . reversed taps,
+        # i.e. the sum over groups g of row (j + g) times that group's taps.
+        rows = count + groups - 1
+        view = padded[phase : phase + rows * factor].reshape(rows, factor)
+        weights = self._weights.get(dtype)
+        if weights is None:
+            padded_taps = np.zeros(length, dtype=np.float32)
+            padded_taps[: len(self._taps)] = self._taps
+            weights = padded_taps[::-1].reshape(groups, factor).astype(dtype)
+            self._weights[dtype] = weights
+        out = _row_dot(view[0:count], weights[0])
+        for g in range(1, groups):
+            out += _row_dot(view[g : g + count], weights[g])
         return out
 
     def _filter(self, x: np.ndarray) -> np.ndarray:
@@ -324,6 +451,70 @@ class _FirDecimator:
         return self._spectra[key]
 
 
+class _Resampler:
+    """Streaming fractional resampler for real audio (numpy only).
+
+    Each output sample is interpolated at its exact time in the input with a
+    Kaiser-windowed sinc, whose taps come from a table of 256 fractional
+    offsets (interpolated between neighbors). Flat to about 0.38x the input
+    rate and 65 dB down above 0.6x, so audio that is already low-passed (to
+    18.5 kHz at most) goes from a rate of 48-64 kHz to exactly 48 kHz
+    without images or aliases. The time of the next output carries over
+    between blocks, so the output rate is exact on average and the audio is
+    continuous.
+    """
+
+    _TAPS = 24
+    _PHASES = 256
+    _BETA = 0.1102 * (60.0 - 8.7)  # Kaiser window for about 60 dB
+
+    def __init__(self, in_rate: float, out_rate: float):
+        self.step = float(in_rate) / float(out_rate)  # input samples per output
+        taps, phases = self._TAPS, self._PHASES
+        # Cutoff (cycles per input sample) a little inside half the lower rate.
+        cutoff = 0.5 * 0.95 * min(1.0, 1.0 / self.step)
+        frac = np.arange(phases + 1)[:, None] / phases
+        tau = frac + (taps // 2 - 1) - np.arange(taps)[None, :]
+        # Kaiser window, shifted to reach zero at its ends: the last row
+        # (offset 1) is then exactly the first one a sample later.
+        edge = np.sqrt(np.clip(1.0 - (tau / (taps / 2.0)) ** 2, 0.0, 1.0))
+        window = (np.i0(self._BETA * edge) - 1.0) / (np.i0(self._BETA) - 1.0)
+        table = 2.0 * cutoff * np.sinc(2.0 * cutoff * tau) * window
+        table /= np.sum(table, axis=1, keepdims=True)  # unity gain at DC
+        self._table = table.astype(np.float32)
+        self.reset()
+
+    def reset(self) -> None:
+        """Start a new stream; the (costly) tap table is kept."""
+        self._history = np.zeros(self._TAPS - 1, dtype=np.float32)
+        # Position of the next output in the buffer (history + block).
+        self._time = float(self._TAPS // 2 - 1)
+
+    def process(self, x: np.ndarray) -> np.ndarray:
+        taps, phases = self._TAPS, self._PHASES
+        buffer = np.concatenate((self._history, np.asarray(x, dtype=np.float32)))
+        # An output at time t uses buffer[floor(t) - taps/2 + 1 ...
+        # floor(t) + taps/2]: those before `limit` are complete.
+        limit = len(buffer) - taps // 2
+        count = 0
+        if self._time < limit:
+            count = int(np.ceil((limit - self._time) / self.step))
+        times = self._time + self.step * np.arange(count)
+        times = times[times < limit]  # (rounding at the edge)
+        count = len(times)
+        whole = np.floor(times).astype(np.int64)
+        position = (times - whole) * phases
+        phase = np.minimum(position.astype(np.int64), phases - 1)
+        blend = (position - phase).astype(np.float32)[:, None]
+        weights = self._table[phase] * (1.0 - blend) + self._table[phase + 1] * blend
+        index = (whole - (taps // 2 - 1))[:, None] + np.arange(taps)[None, :]
+        out = np.sum(buffer[index] * weights, axis=1, dtype=np.float32)
+        consumed = len(buffer) - (taps - 1)
+        self._history = buffer[consumed:].copy()
+        self._time = self._time + self.step * count - consumed
+        return out.astype(np.float32, copy=False)
+
+
 def _channel_edges(mode: str, bandwidth: float, rate: float) -> Tuple[float, float]:
     """Offsets from the tuned frequency (Hz) of what ``mode`` demodulates
     (and LEVEL, the squelch and the S-meter measure)."""
@@ -342,27 +533,36 @@ class _ReceiverChain:
 
     ``channelize`` low-pass filters the I/Q block to the channel (the
     Bandwidth control) and decimates it; the S-meter measures that and
-    ``demodulate`` turns it into mono audio at about 48 kHz. Without the
+    ``demodulate`` turns it into mono audio at exactly 48 kHz. Without the
     channel filter the FM discriminator locks onto the strongest station
     anywhere in the 2.4 MHz span and the AM detector hears them all.
 
-    USB/LSB keep 200-2800 Hz on their side of the carrier; CW keeps
-    +/-250 Hz around it and adds a 700 Hz beat note (BFO).
+    The sample rate comes down to an intermediate rate of 48-64 kHz by an
+    integer factor with no prime factor above 5, in short stages (so 8 or 20
+    MS/s cost little more per sample than 2.4 MS/s), and a fractional
+    resampler takes that to 48 kHz (not needed at 2.4 MS/s).
+
+    AM and FM audio is low-passed to at most 15 kHz, 60 dB down by 18.5 kHz
+    (below broadcast FM's 19 kHz stereo pilot); FM with a broadcast
+    deviation (50 kHz or more) is also de-emphasized (75 us). USB/LSB keep
+    200-2800 Hz on their side of the carrier; CW keeps +/-250 Hz around it
+    and adds a 700 Hz beat note (BFO).
     """
 
     def __init__(self, rate: float, mode: str, bandwidth: float):
         self.rate = float(rate)
         self.mode = mode
         self.bandwidth = min(max(float(bandwidth), 1e3), self.rate)
-        total = max(1, int(round(self.rate / _AUDIO_RATE)))
-        self.audio_rate = self.rate / total
+        self.audio_rate = _AUDIO_RATE
+        total = _smooth_factor(self.rate / _AUDIO_RATE)
+        self.intermediate_rate = self.rate / total
         half = self.bandwidth / 2.0
         if mode in ("USB", "LSB", "CW"):
-            first = total  # straight to the audio rate; the sideband is cut there
-            need = self.audio_rate
+            # Straight to the intermediate rate; the sideband is cut there.
+            first = total
         else:
             # Keep the whole channel (plus a guard band) for AM/FM detection.
-            need = max(1.25 * self.bandwidth, self.audio_rate)
+            need = max(1.25 * self.bandwidth, self.intermediate_rate)
             first = max(
                 (d for d in range(1, total + 1) if total % d == 0),
                 key=lambda d: d if self.rate / d >= need else 0,
@@ -372,8 +572,19 @@ class _ReceiverChain:
         self.channel_rate = self.rate / first
         self._channel = self._channel_stages(first, half, mode)
         self._audio_factor = total // first
-        self._audio_cutoff = min(half, _MAX_AUDIO_HZ, 0.45 * self.audio_rate)
+        self._audio_cutoff = min(half, _MAX_AUDIO_HZ, 0.45 * self.intermediate_rate)
+        self._deemphasis = False  # set by demodulate() for broadcast FM
         self._design_demodulator()
+        # Stream objects are built once and only reset after a gap: muted or
+        # squelched frames reset the demodulator every frame, and rebuilding
+        # the resampler table and filter designs each time cost ~0.6 ms.
+        self._audio_cache: Dict[bool, List[_FirDecimator]] = {}
+        self._sideband: Optional[_FirDecimator] = None
+        if self._sideband_taps is not None:
+            self._sideband = _FirDecimator(self._sideband_taps)
+        self._resampler: Optional[_Resampler] = None
+        if abs(self.intermediate_rate - self.audio_rate) > 1e-6 * self.audio_rate:
+            self._resampler = _Resampler(self.intermediate_rate, self.audio_rate)
         self.reset_demodulator()
 
     def _channel_stages(
@@ -422,17 +633,19 @@ class _ReceiverChain:
     def _design_demodulator(self) -> None:
         """Design the filters after detection (once per chain)."""
         rate = self.channel_rate
-        # AM/FM: audio low-pass + decimation to the audio rate.
+        # AM/FM: an optional coarse decimation, then the audio low-pass (with
+        # the de-emphasis, for broadcast FM) and decimation to the
+        # intermediate rate.
+        self._audio_coarse: Optional[np.ndarray] = None
+        self._audio_coarse_factor = 1
         self._audio_taps: Optional[np.ndarray] = None
+        self._audio_rate_in = rate  # the rate the audio low-pass runs at
         # USB/LSB: complex band-pass for one sideband; CW: narrow low-pass.
         self._sideband_taps: Optional[np.ndarray] = None
         if self.mode in ("AM", "FM") and (
             self._audio_factor > 1 or self._audio_cutoff < 0.45 * rate
         ):
-            stop = rate / self._audio_factor - self._audio_cutoff
-            if self._audio_factor == 1:
-                stop = self._audio_cutoff * 1.3
-            self._audio_taps = _lowpass_taps(self._audio_cutoff, stop, rate)
+            self._design_audio_filters()
         elif self.mode in ("USB", "LSB"):
             width = (_SSB_HIGH_HZ - _SSB_LOW_HZ) / 2.0
             center = (_SSB_HIGH_HZ + _SSB_LOW_HZ) / 2.0
@@ -447,17 +660,75 @@ class _ReceiverChain:
                 _CW_HALF_WIDTH_HZ, _CW_HALF_WIDTH_HZ + 250.0, rate
             )
 
+    def _design_audio_filters(self) -> None:
+        """AM/FM audio: low-pass to ``_audio_cutoff`` (stopping below the
+        19 kHz pilot) and decimate by ``_audio_factor``.
+
+        A wide channel (a high channel rate) first comes down by a coarse
+        stage, like the channel filter's, to no less than 192 kHz: the
+        sharp filter is then short, and the de-emphasis, an FIR sampled at
+        that rate, stays within 0.1 dB of the analog response.
+        """
+        rate, factor, cutoff = self.channel_rate, self._audio_factor, self._audio_cutoff
+        floor = max(4.0 * _AUDIO_STOP_HZ, _MIN_DEEMPHASIS_RATE)
+        coarse = max(
+            (d for d in range(1, factor + 1) if factor % d == 0),
+            key=lambda d: d if rate / d >= floor else 0,
+        )
+        if rate / coarse < floor:
+            coarse = 1
+        fine_rate, fine_factor = rate / coarse, factor // coarse
+        if fine_factor > 1:
+            stop = fine_rate / fine_factor - cutoff  # where aliases start
+        else:
+            stop = cutoff * 1.3
+        stop = min(stop, _AUDIO_STOP_HZ)
+        if coarse > 1:
+            # Removes only what would alias below the sharp filter's stopband.
+            self._audio_coarse = _lowpass_taps(stop, fine_rate - cutoff, rate)
+            self._audio_coarse_factor = coarse
+        self._audio_rate_in = fine_rate
+        self._audio_taps = _lowpass_taps(cutoff, stop, fine_rate)
+
+    def _audio_stages(self) -> List[_FirDecimator]:
+        """The audio filters (with de-emphasis for broadcast FM) and the
+        decimation to the intermediate rate, reset to a fresh stream.
+
+        Built once per de-emphasis setting and reused."""
+        cached = self._audio_cache.get(self._deemphasis)
+        if cached is None:
+            cached = self._audio_cache[self._deemphasis] = self._build_audio_stages()
+        for stage in cached:
+            stage.reset()
+        return cached
+
+    def _build_audio_stages(self) -> List[_FirDecimator]:
+        stages = []
+        if self._audio_coarse_factor > 1:
+            stages.append(_FirDecimator(self._audio_coarse, self._audio_coarse_factor))
+        taps = self._audio_taps
+        if self._deemphasis:
+            deemphasis = _deemphasis_taps(self._audio_rate_in)
+            taps = (
+                deemphasis
+                if taps is None
+                else np.convolve(taps, deemphasis).astype(np.float32)
+            )
+        fine_factor = self._audio_factor // self._audio_coarse_factor
+        if taps is not None or fine_factor > 1:
+            stages.append(_FirDecimator(taps, fine_factor))
+        return stages
+
     def reset_demodulator(self) -> None:
         """Forget the audio state (after a gap); the channel filter keeps its."""
         self._prev: Optional[complex] = None
         self._level = 0.0  # AGC / AM carrier level
         self._bfo_phase = 0.0
-        self._audio: Optional[_FirDecimator] = None
-        self._sideband: Optional[_FirDecimator] = None
-        if self._audio_taps is not None or self._audio_factor > 1:
-            self._audio = _FirDecimator(self._audio_taps, self._audio_factor)
-        if self._sideband_taps is not None:
-            self._sideband = _FirDecimator(self._sideband_taps)
+        self._audio = self._audio_stages()
+        if self._sideband is not None:
+            self._sideband.reset()
+        if self._resampler is not None:
+            self._resampler.reset()
 
     def channelize(self, samples: np.ndarray) -> np.ndarray:
         """The tuned channel of an I/Q block, at ``channel_rate``."""
@@ -467,10 +738,14 @@ class _ReceiverChain:
         return out
 
     def demodulate(self, channel: np.ndarray, fm_deviation: float) -> np.ndarray:
-        """Mono float32 audio in [-1, 1] at ``audio_rate``."""
+        """Mono float32 audio in [-1, 1] at ``audio_rate`` (48 kHz)."""
         if len(channel) == 0:
             return np.empty(0, dtype=np.float32)
         if self.mode == "FM":
+            broadcast = float(fm_deviation) >= _BROADCAST_DEVIATION_HZ
+            if broadcast != self._deemphasis:
+                self._deemphasis = broadcast
+                self._audio = self._audio_stages()
             # Discriminator; the previous block's last sample keeps the phase
             # difference continuous. Scaled so +/- the deviation is full scale.
             if self._prev is not None:
@@ -480,7 +755,7 @@ class _ReceiverChain:
             self._prev = complex(channel[-1])
             detected = np.angle(channel * np.conj(prior)).astype(np.float32)
             gain = self.channel_rate / (2.0 * np.pi * max(float(fm_deviation), 1.0))
-            audio = self._to_audio_rate(detected * gain)
+            audio = self._to_audio_rate(detected * np.float32(gain))
             return np.clip(audio, -1.0, 1.0).astype(np.float32)
         if self.mode == "AM":
             # Envelope relative to the carrier: loudness follows the
@@ -501,10 +776,18 @@ class _ReceiverChain:
                 (self._bfo_phase + step * len(narrow)) % (2 * np.pi)
             )
             narrow = narrow * np.exp(1j * phase)
-        return self._agc(np.real(narrow).astype(np.float32))
+        audio = np.real(narrow).astype(np.float32)
+        if self._resampler is not None:
+            audio = self._resampler.process(audio)
+        return self._agc(audio)
 
     def _to_audio_rate(self, audio: np.ndarray) -> np.ndarray:
-        return self._audio.process(audio) if self._audio else audio
+        """Audio filter, decimation and resampling to exactly 48 kHz."""
+        for stage in self._audio:
+            audio = stage.process(audio)
+        if self._resampler is not None:
+            audio = self._resampler.process(audio)
+        return audio
 
     def _agc(self, audio: np.ndarray) -> np.ndarray:
         """Bring SSB/CW to a steady level: fast attack, ~1 s release."""
@@ -532,53 +815,90 @@ class _Pacer:
     ``_OVERLOAD_RATIO`` of it, this computer can't keep up (``overloaded``):
     each frame then reads one block, as it used to, so the window stays
     responsive, and as samples no longer arrive in real time, audio is
-    muted with a hint. Full frames resume below ``_RECOVER_RATIO``.
+    muted with a hint. One-block frames are too short to time, so once
+    every ``_OVERLOAD_PROBE_S`` a frame reads a full frame's worth again
+    (a probe, timed like any frame; after a fast one the next frame probes
+    too). Full frames resume below ``_RECOVER_RATIO``, so a passing hiccup
+    (another program busy for a moment) doesn't mute the audio for good.
+    Start (:meth:`restart`) finds out anew.
     """
 
     def __init__(self) -> None:
         self._last: Optional[float] = None
         self._ratios: Deque[float] = deque(maxlen=5)
         self.overloaded = False
+        # While overloaded: when the next probe frame is due (None: not
+        # scheduled yet), or probe on the next frame.
+        self._next_probe: Optional[float] = None
+        self._probe_now = False
 
     def reset(self) -> None:
         """Forget everything (new device or sample rate)."""
         self._last = None
         self._ratios.clear()
         self.overloaded = False
+        self._next_probe = None
+        self._probe_now = False
 
     def restart(self) -> None:
         """Reading pauses (receiver stopped): the next demo read starts
-        afresh."""
-        self._last = None
+        afresh, and whether frames keep up is found out anew."""
+        self.reset()
 
-    def read_limit(self, rate: float) -> float:
-        """The most samples one frame may take (0 while overloaded: one
-        block)."""
+    def read_limit(self, rate: float, now: Optional[float] = None) -> float:
+        """The most samples one frame may take.
+
+        While overloaded that is 0 (one block), except, given the monotonic
+        time ``now``, for a probe frame: at least ``_TIMED_FRAME`` samples.
+        """
         if self.overloaded:
+            if now is not None and self._probe_due(now):
+                return max(float(_TIMED_FRAME), rate * _PROBE_READ_S)
             return 0.0
         return rate * (_MAX_READ_S if self._keeps_up() else _PROBE_READ_S)
 
+    def _probe_due(self, now: float) -> bool:
+        if self._probe_now or (
+            self._next_probe is not None and now >= self._next_probe
+        ):
+            self._probe_now = False
+            self._next_probe = now + _OVERLOAD_PROBE_S
+            return True
+        if self._next_probe is None:
+            self._next_probe = now + _OVERLOAD_PROBE_S
+        return False
+
     def demo_request(self, rate: float, now: float) -> int:
         """Demo samples to read at monotonic time ``now``: the time since
-        the previous read times the rate, at least one display block."""
+        the previous read times the rate, at least one display block (and
+        a probe frame at least ``_TIMED_FRAME``, so it is timed)."""
         last, self._last = self._last, now
         if last is None or rate <= 0:
             return DISPLAY_BLOCK
         wanted = round(rate * max(0.0, now - last))
-        return int(max(DISPLAY_BLOCK, min(wanted, self.read_limit(rate))))
+        limit = self.read_limit(rate, now)
+        smallest = _TIMED_FRAME if self.overloaded and limit > 0 else DISPLAY_BLOCK
+        return int(max(smallest, min(wanted, limit)))
 
     def measured(self, count: int, rate: float, seconds: float) -> None:
         """A frame of ``count`` samples took ``seconds`` to read and process."""
         if count < _TIMED_FRAME or rate <= 0:
             return
-        self._ratios.append(seconds * rate / count)
+        ratio = seconds * rate / count
+        self._ratios.append(ratio)
+        if self.overloaded and ratio < _RECOVER_RATIO:
+            self._probe_now = True  # looks better: check again right away
         if len(self._ratios) < 3:
             return
         load = float(np.median(self._ratios))
         if load > _OVERLOAD_RATIO:
+            if not self.overloaded:
+                self._next_probe = None
+                self._probe_now = False
             self.overloaded = True
         elif load < _RECOVER_RATIO:
             self.overloaded = False
+            self._probe_now = False
 
     def _keeps_up(self) -> bool:
         """Frames are known to take under ``_OVERLOAD_RATIO`` of real time."""
@@ -602,6 +922,288 @@ def _driver_importable(package: str, name: str) -> bool:
         return True
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Recording buffer
+# ---------------------------------------------------------------------------
+
+_CF32 = np.dtype("<c8")  # complex64, little-endian: the .cf32 layout
+_RECORDING_PREFIX = "sdr-recording-"
+_RECORDING_SUFFIX = ".cf32"
+# A recording stops, with a warning, when the drive it is written to has
+# less than this much free space left.
+_MIN_FREE_BYTES = 500 * 1024 * 1024
+_FREE_SPACE_CHECK_S = 0.5
+_SAVE_CHUNK = 1 << 20  # samples converted and written per step when saving
+_cleaned_folders: set = set()
+
+
+def _recording_dir() -> str:
+    """The folder recordings are captured into (created if needed): the
+    user cache folder, which is on disk (a system temp folder is often in
+    RAM), else the system temp folder."""
+    candidates = []
+    try:
+        from PyQt6.QtCore import QStandardPaths
+
+        cache = QStandardPaths.writableLocation(
+            QStandardPaths.StandardLocation.GenericCacheLocation
+        )
+        if cache:
+            candidates.append(os.path.join(cache, "sdr-module", "recordings"))
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(f"No user cache folder: {e}")
+    candidates.append(os.path.join(tempfile.gettempdir(), "sdr-module-recordings"))
+    for folder in candidates:
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError:
+            continue
+        if os.access(folder, os.W_OK):
+            return folder
+    return tempfile.gettempdir()
+
+
+def _file_in_use(path: str) -> bool:
+    """Whether a running session holds this recording file: it keeps it
+    open and locked (POSIX). On Windows an open file can't be deleted, so
+    the attempt to delete it tells."""
+    if fcntl is None:
+        return False
+    try:
+        with open(path, "rb") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle, fcntl.LOCK_UN)
+    except OSError:
+        return True
+    return False
+
+
+def _remove_stale_recordings(folder: str) -> int:
+    """Delete the temporary recordings of sessions that ended without
+    cleaning up (a crash, a killed process); returns how many.
+
+    Only this app's own files (``sdr-recording-*.cf32`` in its own folder)
+    that no running session holds are touched.
+    """
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return 0
+    removed = 0
+    for name in names:
+        if not (
+            name.startswith(_RECORDING_PREFIX) and name.endswith(_RECORDING_SUFFIX)
+        ):
+            continue
+        path = os.path.join(folder, name)
+        if not os.path.isfile(path) or _file_in_use(path):
+            continue
+        try:
+            os.remove(path)
+        except OSError:  # in use (Windows) or not ours to delete
+            continue
+        removed += 1
+        logger.info(f"Removed a stale temporary recording: {path}")
+    return removed
+
+
+def _close_and_delete(handle: Any, path: str) -> None:
+    """Finalizer of a temporary recording: close and delete its file."""
+    try:
+        handle.close()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug(f"Could not close the temporary recording {path}: {e}")
+    try:
+        os.remove(path)
+    except OSError as e:
+        logger.debug(f"Could not delete the temporary recording {path}: {e}")
+
+
+class _SampleStore:
+    """The recording buffer's I/Q samples.
+
+    A live recording streams to a temporary complex64 file (``.cf32``) as
+    it is captured, so recording takes disk space rather than memory (19 MB
+    a second at 2.4 MS/s, 160 MB at 20 MS/s). An imported file is held in
+    memory as it was loaded. Either way the samples read back as the list
+    of blocks they arrived in, like the list this replaces: ``len()`` is
+    the number of blocks, and iterating or indexing gives each block (a
+    read-only view of the file). :meth:`samples` gives them all and
+    :meth:`chunks` a piece at a time.
+
+    The temporary file stays open (and locked, on POSIX) until the store is
+    discarded, which deletes it; so does the interpreter exiting, and
+    :func:`_remove_stale_recordings` removes files a crash left behind.
+    """
+
+    def __init__(self, folder: Optional[str] = None):
+        self._folder = folder
+        self._path: Optional[str] = None
+        self._file: Any = None
+        self._finalizer: Any = None
+        self._memory: Optional[np.ndarray] = None
+        self._blocks: List[Tuple[int, int]] = []  # (first sample, length)
+        self._count = 0
+        self._map: Optional[np.ndarray] = None
+
+    @classmethod
+    def from_samples(cls, samples: np.ndarray) -> "_SampleStore":
+        """A store holding ``samples`` in memory (an imported file)."""
+        store = cls()
+        data = np.asarray(samples)
+        store._memory = data
+        store._count = len(data)
+        store._blocks = [(0, len(data))] if len(data) else []
+        return store
+
+    @property
+    def sample_count(self) -> int:
+        return self._count
+
+    @property
+    def nbytes(self) -> int:
+        """Size of the samples as complex64."""
+        return self._count * _CF32.itemsize
+
+    @property
+    def path(self) -> Optional[str]:
+        """The file holding the samples (None in memory or empty)."""
+        return self._path
+
+    @property
+    def folder(self) -> Optional[str]:
+        """Where the samples are (or will be) written."""
+        if self._path:
+            return os.path.dirname(self._path)
+        return self._folder
+
+    def append(self, block: np.ndarray) -> None:
+        """Add a block after the others. The file is created with the first
+        one. Raises OSError when it can't be written (e.g. a full disk)."""
+        data = np.ascontiguousarray(block, dtype=_CF32)
+        if len(data) == 0:
+            return
+        if self._memory is not None:
+            raise ValueError("an imported recording can't be added to")
+        if self._file is None:
+            self._create_file()
+        self._file.write(data.data)
+        self._blocks.append((self._count, len(data)))
+        self._count += len(data)
+        self._map = None
+
+    def _create_file(self) -> None:
+        folder = self._folder or _recording_dir()
+        os.makedirs(folder, exist_ok=True)
+        if folder not in _cleaned_folders:
+            _cleaned_folders.add(folder)
+            _remove_stale_recordings(folder)
+        unique = f"{os.getpid()}-{uuid.uuid4().hex[:12]}"
+        path = os.path.join(folder, f"{_RECORDING_PREFIX}{unique}{_RECORDING_SUFFIX}")
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        fd = os.open(path, flags, 0o666)  # the usual permissions, once saved
+        handle = os.fdopen(fd, "wb", buffering=1 << 20)
+        if fcntl is not None:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:  # pragma: no cover - e.g. a filesystem without locks
+                pass
+        self._folder, self._path, self._file = folder, path, handle
+        self._finalizer = weakref.finalize(self, _close_and_delete, handle, path)
+
+    def finish(self) -> None:
+        """Nothing more will be added for now: write out what is buffered."""
+        if self._file is not None:
+            self._file.flush()
+
+    def samples(self) -> np.ndarray:
+        """Every sample: the loaded array or a read-only map of the file."""
+        if self._memory is not None:
+            return self._memory
+        if self._count == 0 or self._path is None:
+            return np.empty(0, dtype=_CF32)
+        if self._map is None:
+            self.finish()
+            self._map = np.memmap(
+                self._path, dtype=_CF32, mode="r", shape=(self._count,)
+            )
+        return self._map
+
+    def chunks(self, size: int = _SAVE_CHUNK):
+        """The samples, ``size`` at a time (each read from disk as needed)."""
+        data = self.samples()
+        for start in range(0, len(data), size):
+            yield np.asarray(data[start : start + size])
+
+    def save_raw(self, filename: str, move: bool = False) -> None:
+        """Put the samples in ``filename`` as raw complex64 (``.cf32``),
+        the layout they are captured in, so no conversion is needed.
+
+        With ``move`` (nothing more will be recorded to this store) the
+        temporary file itself is moved there, instantly on the same drive,
+        and the store reads from ``filename`` from then on. Otherwise, or
+        when it can't be moved (another drive), it is copied.
+        """
+        if self._path is None:
+            raise ValueError("the samples are not in a file")
+        self.finish()
+        if os.path.exists(filename) and os.path.samefile(filename, self._path):
+            return
+        if move and self._finalizer is not None and self._finalizer.alive:
+            self._map = None
+            try:
+                os.replace(self._path, filename)
+            except OSError as e:  # another drive, or open elsewhere (Windows)
+                logger.debug(f"Copying the recording instead of moving it: {e}")
+            else:
+                # The file is the user's now: never delete it.
+                self._finalizer.detach()
+                self._finalizer = None
+                self._file.close()
+                self._file = None
+                self._path = os.path.abspath(filename)
+                return
+        shutil.copyfile(self._path, filename)
+
+    def discard(self) -> None:
+        """Forget the samples, deleting the temporary file (not a saved one)."""
+        self._map = None
+        if self._finalizer is not None:
+            self._finalizer()  # closes and deletes the temporary file
+        elif self._file is not None:
+            self._file.close()
+        self._finalizer = self._file = self._path = None
+        self._memory = None
+        self._blocks = []
+        self._count = 0
+
+    # The list of blocks it replaces -----------------------------------------
+
+    def __len__(self) -> int:
+        return len(self._blocks)
+
+    def __bool__(self) -> bool:
+        return bool(self._blocks)
+
+    def __iter__(self):
+        data = self.samples()
+        for start, length in self._blocks:
+            yield data[start : start + length]
+
+    def __getitem__(self, index: int) -> np.ndarray:
+        start, length = self._blocks[index]
+        return self.samples()[start : start + length]
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (list, tuple)):
+            return len(other) == len(self) and all(
+                np.array_equal(a, b) for a, b in zip(self, other, strict=True)
+            )
+        return other is self
+
+    __hash__ = object.__hash__
 
 
 # ---------------------------------------------------------------------------
@@ -712,8 +1314,9 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
                 (
                     "buffer",
                     "Buffer",
-                    "I/Q samples held in memory. File > Save Recording writes "
-                    "them to disk.",
+                    "The recorded (or imported) I/Q samples. A recording is "
+                    "kept in a temporary file until File > Save Recording "
+                    "writes it where you choose.",
                 ),
             ),
         ),
@@ -866,7 +1469,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._device = None
         self._is_running = False
         self._recording = False
-        self._samples_buffer: List[np.ndarray] = []
+        # The recording buffer: captured samples stream to a temporary file
+        # (in _recording_folder, resolved on first use), imported ones are
+        # held in memory.
+        self._recording_folder: Optional[str] = None
+        self._samples_buffer = _SampleStore()
+        self._next_space_check = 0.0
         # What the buffer holds: (center frequency, sample rate) of the
         # capture or loaded file (None where unknown), and whether it holds
         # live samples that haven't been saved yet.
@@ -907,6 +1515,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # delivers samples in real time (audio needs it).
         self._rx_history: Deque[Tuple[float, int]] = deque()
         self._realtime_hint_shown = False
+        self._realtime_hint_text = ""
         self._pacer = _Pacer()  # how much each display frame reads
         self._entry_returns_focus = False  # Ctrl+L: Enter goes back to the plots
         self._restoring = False  # True while _restore_state applies settings
@@ -1265,7 +1874,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._record_action = QAction("&Record I/Q", self)
         self._record_action.setCheckable(True)
         self._record_action.setShortcut(QKeySequence("Ctrl+Shift+R"))
-        self._record_action.setStatusTip("Capture raw I/Q samples into memory")
+        self._record_action.setStatusTip(
+            "Capture raw I/Q samples (to a temporary file until you save them)"
+        )
         self._record_action.triggered.connect(self._toggle_recording)
         radio_menu.addAction(self._record_action)
         radio_menu.addSeparator()
@@ -1584,7 +2195,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         statusbar.addPermanentWidget(self._recording_label)
         self._recording_info_label = QLabel("")
         self._recording_info_label.setToolTip(
-            "Recorded size and free disk space in the working directory"
+            "Recorded size, and the free space left on the drive the "
+            "recording is written to (it stops below 500 MB)"
         )
         self._recording_info_label.setVisible(False)
         statusbar.addPermanentWidget(self._recording_info_label)
@@ -1860,10 +2472,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._level_label.setText(f"{_NO_VALUE} dBFS")
             set_tone(self._level_label, None)
 
-        # Plot axes / click-to-tune span
+        # Plot axes / click-to-tune span, and the channel marked on them
         center = self._current_frequency()
         self._spectrum.set_frequency_range(center, rate)
         self._waterfall.set_frequency_range(center, rate)
+        self._update_passband()
 
         # Only a HackRF One can send the Ham ID.
         if HAS_HAM_RADIO:
@@ -1957,7 +2570,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             p.set_value("recording", "Armed, waiting for the receiver", "warning")
         else:
             p.set_value("recording", self._recording_elapsed_text(), "danger")
-        count = sum(len(block) for block in self._samples_buffer)
+        count = self._buffer_sample_count()
         if count:
             p.set_value("buffer", f"{count:,} samples ({count * 8 / 1e6:.1f} MB)")
         else:
@@ -2029,7 +2642,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         height = self._right_splitter.height()
         if height < 300:
             height = self.height() - 120
-        top = int(height * 0.55)
+        top = self._snap_to_section_gap(int(height * 0.55), height)
         self._right_splitter.setSizes([top, max(120, height - top)])
 
         height = self._display_splitter.height()
@@ -2037,6 +2650,43 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             height = self.height() - 120
         spectrum = int(height * 0.4)
         self._display_splitter.setSizes([spectrum, max(120, height - spectrum)])
+
+    def _snap_to_section_gap(self, top: int, height: int) -> int:
+        """Move the control pane's lower edge into the gap after a section.
+
+        A split that falls inside a group box leaves a sliver of its title or
+        border showing above the tool tabs, which looks broken. Use the gap
+        nearest to ``top`` that keeps the pane between 40% and 70% of the
+        column; otherwise keep ``top``.
+        """
+        pane = self._right_splitter.widget(0)
+        if pane is None:
+            return top
+        try:
+            if pane.layout() is not None:
+                pane.layout().activate()
+            self._control_panel.layout().activate()
+            gaps = []
+            for group in self._control_panel.findChildren(QGroupBox):
+                if not group.isVisibleTo(self._control_panel):
+                    continue
+                # Only top-level sections, not group boxes nested in one.
+                outer = group.parentWidget()
+                while outer is not None and outer is not self._control_panel:
+                    if isinstance(outer, QGroupBox):
+                        break
+                    outer = outer.parentWidget()
+                if isinstance(outer, QGroupBox):
+                    continue
+                bottom = group.mapTo(pane, QPoint(0, group.height())).y()
+                gaps.append(bottom + 3)  # half the usual layout spacing
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("Could not measure control panel sections: %s", exc)
+            return top
+        usable = [g for g in gaps if 0.4 * height <= g <= 0.7 * height]
+        if not usable:
+            return top
+        return min(usable, key=lambda g: abs(g - top))
 
     def _sync_plot_actions(self, _checked: bool = True) -> None:
         """Keep at least one plot visible: the last visible plot's menu item
@@ -2114,7 +2764,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             tip = "Stop recording (Ctrl+Shift+R)"
         else:
             tip = (
-                "Record raw I/Q samples to memory (Ctrl+Shift+R). "
+                "Record raw I/Q samples (Ctrl+Shift+R). "
                 "Save them with File > Save Recording."
             )
         self._record_button.setToolTip(tip)
@@ -2240,11 +2890,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if name == "ADSBMessage":
             altitude = getattr(msg, "altitude", 0) or 0
             speed = getattr(msg, "velocity", 0.0) or 0.0
+            squawk = text("squawk")
             return text("icao_address"), joined(
                 text("callsign"),
                 f"{altitude:,} ft" if altitude else "",
                 position(),
                 f"{speed:.0f} kt" if speed else "",
+                f"Squawk {squawk}" if squawk else "",
             )
         if name in ("AX25Frame", "APRSMessage"):
             source, dest = text("source"), text("destination")
@@ -2303,25 +2955,29 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _apply_controls_to_device(self) -> None:
         """Bring a newly connected device to what the controls show:
         frequency, then the AGC mode, then the manual gain (only while AGC
-        is off; with AGC on the tuner owns the gain)."""
+        is off; with AGC on the tuner owns the gain), and a HackRF's
+        baseband filter to its sample rate."""
         self._on_frequency_changed(self._current_frequency())
         agc = self._control_panel.is_agc_enabled()
         self._on_agc_changed(agc)
         if not agc:
             self._on_gain_changed(float(self._control_panel._gain_slider.value()))
+        self._apply_baseband_filter()
 
     def _on_bandwidth_changed(self, bw_hz: float):
         """The channel width: it sets the demodulator's channel filter and
         what LEVEL, the squelch and the S-meter measure.
 
-        A device with an analog baseband filter (HackRF) gets it too. An
-        RTL-SDR's "bandwidth" is its sample rate, which is chosen in Device >
-        Connect, so it is left alone (changing it silently narrowed the span
-        while the axes, rate label and decoder kept the old rate).
+        It is not sent to hardware: an RTL-SDR's or HackRF's
+        ``set_bandwidth`` sets the analog filter in front of the ADC, which
+        must pass the whole span (a HackRF rounded 25 kHz up to its
+        narrowest filter, 1.75 MHz, and darkened most of a 10 MHz span).
+        A HackRF's filter follows its sample rate instead
+        (:meth:`_apply_baseband_filter`).
         """
         self._save_setting("bandwidth", self._control_panel._bw_combo.currentText())
         dev = self._device
-        if dev is not None and not self._bandwidth_is_sample_rate(dev):
+        if dev is not None and self._forwards_channel_width(dev):
             rate = self._device_sample_rate()
             try:
                 dev.set_bandwidth(bw_hz)
@@ -2336,13 +2992,40 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         logger.debug(f"Bandwidth changed to {bw_hz/1e3:.1f} kHz")
 
     @staticmethod
-    def _bandwidth_is_sample_rate(device: Any) -> bool:
-        """True for drivers whose set_bandwidth changes the sample rate."""
+    def _forwards_channel_width(device: Any) -> bool:
+        """Whether ``device.set_bandwidth`` gets the channel width.
+
+        Never for a hardware driver (RTL-SDR, HackRF): their filter is the
+        analog anti-alias filter for the whole span, not the channel.
+        """
+        return not isinstance(device, SDRDevice)
+
+    # A HackRF's baseband filter as a fraction of its sample rate, as
+    # hackrf_transfer sets it: most of the span, while keeping out what
+    # would alias into it.
+    _BASEBAND_FILTER_FRACTION = 0.75
+
+    @staticmethod
+    def _has_baseband_filter(device: Any) -> bool:
+        """True for a HackRF, whose baseband filter follows its sample rate."""
         try:
-            from ..devices.rtlsdr import RTLSDRDevice
+            from ..devices.hackrf import HackRFDevice
         except Exception:  # pragma: no cover - defensive
             return False
-        return isinstance(device, RTLSDRDevice)
+        return isinstance(device, HackRFDevice)
+
+    def _apply_baseband_filter(self) -> None:
+        """Set a HackRF's baseband filter to 0.75x its sample rate (the
+        driver rounds it to a width the hardware has, 1.75-28 MHz)."""
+        dev = self._device
+        if dev is None or not self._has_baseband_filter(dev):
+            return
+        width = self._BASEBAND_FILTER_FRACTION * self._device_sample_rate()
+        try:
+            if dev.set_bandwidth(width) is False:
+                logger.warning("Could not set the HackRF baseband filter")
+        except Exception as e:
+            logger.warning(f"Could not set the HackRF baseband filter: {e}")
 
     def _save_setting(self, key: str, value: Any) -> None:
         """Persist a control's value (not while restoring them)."""
@@ -2464,6 +3147,39 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         mode = panel.get_demod_mode()
         return mode, panel.get_fm_deviation_text() if mode == "FM" else ""
 
+    def _bandwidth_for_mode(self, mode: str, deviation: str = "") -> Optional[str]:
+        """The Bandwidth option to listen to ``mode`` with (None: keep).
+
+        FM: the narrowest option at least 80% of Carson's bandwidth, twice
+        the deviation plus the highest audio frequency (15 kHz for
+        broadcast, 3 kHz for voice): 200 kHz for broadcast FM, 50 kHz at 25
+        kHz deviation, 25 kHz at 12.5 or 5 kHz (2 m, APRS, NOAA) and 10 kHz
+        at 2.5 kHz. AM: 10 kHz (airband and broadcast AM). USB/LSB/CW: the
+        narrowest option (the demodulator cuts the sideband itself).
+        """
+        if mode == "FM":
+            hz = _parse_hz(deviation) if deviation else None
+            if hz is None:
+                hz = float(self._control_panel.get_fm_deviation())
+            audio = _MAX_AUDIO_HZ if hz >= _BROADCAST_DEVIATION_HZ else 3e3
+            need = 0.8 * 2.0 * (hz + audio)
+        elif mode == "AM":
+            need = 10e3
+        elif mode in ("USB", "LSB", "CW"):
+            need = _SSB_HIGH_HZ
+        else:
+            return None
+        combo = self._control_panel._bw_combo
+        options = []
+        for i in range(combo.count()):
+            width = _parse_hz(combo.itemText(i))
+            if width:
+                options.append((width, combo.itemText(i)))
+        if not options:
+            return None
+        fitting = [option for option in options if option[0] >= need]
+        return min(fitting)[1] if fitting else max(options)[1]
+
     @staticmethod
     def _mode_text(mode: str) -> str:
         """Short mode name for messages: ``"None (I/Q)"`` -> ``"I/Q"``."""
@@ -2473,12 +3189,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self, freq_hz: float, label: str, mode: str = "", deviation: str = ""
     ) -> None:
         """Tune to a bookmark (or the Decoder panel's suggested channel), in
-        its mode when it names one."""
+        its mode when it names one, with a channel width that suits it."""
         self.set_frequency(freq_hz)
         if not mode:
             self._show_status_message(f"Tuned to {label}", "info", 2500)
             return
-        self._set_demod_mode(mode, deviation or None)
+        self._set_demod_mode(
+            mode, deviation or None, self._bandwidth_for_mode(mode, deviation)
+        )
         mode = self._mode_text(mode)
         if label.endswith(")"):  # "ACARS (131.550 MHz)" -> "(131.550 MHz, AM)"
             text = f"Tuned to {label[:-1]}, {mode})"
@@ -2727,18 +3445,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._control_panel.set_recording_state(self._recording)
 
     def _start_recording(self) -> bool:
-        """Start (or arm) a recording. False if the user kept an unsaved one.
+        """Start (or arm) a recording. False if the user kept an unsaved one
+        or the disk is nearly full.
 
         The buffer is replaced when the first samples arrive, so arming and
         stopping without capturing anything keeps the previous recording.
         """
         if self._recording:
             return True
+        free = self._free_recording_space()
+        if free is not None and free < _MIN_FREE_BYTES:
+            self._show_status_error(
+                f"Can't record: only {free / 1024**2:.0f} MB of disk space is "
+                "left. Free up some space, then record again.",
+                10000,
+            )
+            return False
         if not self._confirm_discard_recording("starting a new recording"):
             return False
         self._recording = True
         self._recording_paused = False
         self._capture_pending = True
+        self._next_space_check = 0.0  # check the free space right away
         self._recording_bytes = 0
         self._rec_accum = 0.0
         self._rec_since = None
@@ -2769,6 +3497,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._capture_pending = False
         self._update_rec_clock()
         self._sync_record_ui(False)
+        try:
+            self._samples_buffer.finish()
+        except OSError as e:  # pragma: no cover - disk trouble
+            logger.warning(f"Could not write the end of the recording: {e}")
         count = self._buffer_sample_count()
         if captured and count:
             self._show_status_message(
@@ -2787,7 +3519,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         logger.info("Recording stopped")
 
     def _buffer_sample_count(self) -> int:
-        return sum(len(block) for block in self._samples_buffer)
+        return self._samples_buffer.sample_count
+
+    def _replace_buffer(self, store: "_SampleStore") -> None:
+        """Make ``store`` the recording buffer, deleting the old one's
+        temporary file."""
+        old, self._samples_buffer = self._samples_buffer, store
+        if old is not store:
+            old.discard()
+
+    def _capture_folder(self) -> str:
+        """The folder recordings are captured into."""
+        if self._recording_folder is None:
+            self._recording_folder = _recording_dir()
+        return self._recording_folder
 
     def _confirm_discard_recording(self, doing: str) -> bool:
         """Before ``doing`` (e.g. "closing") drops the unsaved recording,
@@ -2843,8 +3588,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return True
 
     def _discard_recording(self) -> None:
-        """Empty the recording buffer."""
-        self._samples_buffer = []
+        """Empty the recording buffer (deleting its temporary file)."""
+        self._replace_buffer(_SampleStore())
         self._buffer_meta = (None, None)
         self._buffer_unsaved = False
         self._clear_status_message()  # e.g. "Use File > Save Recording"
@@ -2915,13 +3660,51 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._control_panel.update_record_time(int(self._recording_elapsed()))
 
         mb = self._recording_bytes / (1024 * 1024)
-        # Recorded size + free space on the working-directory volume
-        try:
-            free_gb = shutil.disk_usage(".").free / (1024**3)
-            info = f"{mb:.1f} MB · {free_gb:.1f} GB free"
-        except OSError:
+        # Recorded size + free space on the drive the recording goes to
+        free = self._free_recording_space()
+        if free is None:
             info = f"{mb:.1f} MB"
+        else:
+            info = f"{mb:.1f} MB · {free / 1024**3:.1f} GB free"
         self._recording_info_label.setText(info)
+
+    def _free_recording_space(self) -> Optional[int]:
+        """Free bytes on the drive recordings are written to."""
+        try:
+            return int(shutil.disk_usage(self._capture_folder()).free)
+        except OSError:
+            return None
+
+    def _check_recording_space(self) -> bool:
+        """Stop the recording, with a warning, when its drive is nearly
+        full (checked twice a second). False when it was stopped."""
+        now = time.monotonic()
+        if now < self._next_space_check:
+            return True
+        self._next_space_check = now + _FREE_SPACE_CHECK_S
+        free = self._free_recording_space()
+        if free is None or free >= _MIN_FREE_BYTES:
+            return True
+        self._stop_recording_with_warning(
+            f"only {free / 1024**2:.0f} MB of disk space is left"
+        )
+        return False
+
+    def _stop_recording_with_warning(self, reason: str) -> None:
+        """Stop recording because it can't go on (``reason``), keeping what
+        was captured."""
+        captured = self._recording and not self._capture_pending
+        self._toggle_recording(False)
+        size = self._samples_buffer.nbytes / 1024**2
+        kept = (
+            f" The {size:,.0f} MB recorded so far are kept: save them with File "
+            "> Save Recording (Ctrl+S)."
+            if captured and self._samples_buffer
+            else ""
+        )
+        message = f"Recording stopped: {reason}.{kept}"
+        logger.warning(message)
+        self._show_status_error(message, 20000)
 
     # ------------------------------------------------------------------
     # Periodic updates
@@ -2954,7 +3737,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _drain_device(self, dev: SDRDevice) -> Optional[np.ndarray]:
         """The transfers a hardware driver has queued, joined, up to the
         pacer's limit (the rest stays queued for the next frame)."""
-        limit = self._pacer.read_limit(self._device_sample_rate())
+        limit = self._pacer.read_limit(self._device_sample_rate(), time.monotonic())
         blocks: List[np.ndarray] = []
         total = 0
         while not blocks or total < limit:
@@ -3054,10 +3837,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _capture(self, samples: np.ndarray) -> None:
         """Add a block to the recording (the first one replaces the buffer)."""
+        if not self._check_recording_space():
+            return
         tuned = (self._current_frequency(), self._device_sample_rate())
         if self._capture_pending:
             self._capture_pending = False
-            self._samples_buffer = []
+            self._replace_buffer(_SampleStore(self._capture_folder()))
             self._buffer_meta = tuned
             self._retune_warned = False
             self._sync_recording_armed()
@@ -3076,7 +3861,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "warning",
                 10000,
             )
-        self._samples_buffer.append(samples)
+        try:
+            self._samples_buffer.append(samples)
+        except (OSError, ValueError) as e:
+            self._stop_recording_with_warning(
+                f"the recording file can't be written ({e})"
+            )
+            return
         self._buffer_unsaved = True
         # complex64 = 8 bytes/sample
         self._recording_bytes += len(samples) * 8
@@ -3115,20 +3906,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return float(np.max(power_db[first : last + 1]))
 
     def _update_passband(self) -> None:
-        """Show the demodulated channel on the spectrum, when it can."""
-        show = getattr(self._spectrum, "set_passband", None)
-        if not callable(show):
-            return
-        try:
-            show(
-                *_channel_edges(
-                    self._control_panel._demod_combo.currentText(),
-                    self._channel_bandwidth(),
-                    self._device_sample_rate(),
-                )
-            )
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Could not show the passband: %s", exc)
+        """Mark the demodulated channel on the spectrum and the waterfall."""
+        edges = _channel_edges(
+            self._control_panel._demod_combo.currentText(),
+            self._channel_bandwidth(),
+            self._device_sample_rate(),
+        )
+        for plot in (self._spectrum, self._waterfall):
+            show = getattr(plot, "set_passband", None)
+            if not callable(show):
+                continue
+            try:
+                show(*edges)
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.debug("Could not show the passband: %s", exc)
 
     def _note_block(self, count: int) -> None:
         """Remember when samples arrived (for ``_realtime``)."""
@@ -3213,7 +4004,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             speaker = False
             if not self._realtime_hint_shown:
                 self._realtime_hint_shown = True
-                self._show_status_message(self._realtime_hint(), "info", 10000)
+                self._realtime_hint_text = self._realtime_hint()
+                self._show_status_message(self._realtime_hint_text, "info", 10000)
+        elif speaker and self._realtime_hint_shown:
+            # Keeping up again (e.g. after another program hogged the
+            # computer for a moment): say so, and hint again next time.
+            self._realtime_hint_shown = False
+            if self._message_label.text() == self._realtime_hint_text:
+                self._show_status_message("Audio resumed", "success", 2500)
         # SSTV is FM; it gets every block (no squelch) so its line timing
         # stays intact, and it listens even with the speaker off.
         sstv = mode == "FM" and self._sstv_listening()
@@ -3239,15 +4037,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _realtime_hint(self) -> str:
         if self._demo_mode:
             return (
-                "This computer can't simulate the demo device's signals in "
-                "real time, so demo audio is paused. Connect an RTL-SDR or "
-                "HackRF One to listen."
+                "The demo device can't keep up in real time right now, so "
+                "its audio is paused. It resumes by itself when the computer "
+                "catches up (a lower sample rate in Device > Connect... helps)."
             )
         if self._pacer.overloaded:
             return (
                 "This computer can't process "
-                f"{format_rate(self._device_sample_rate())} in real time, so "
-                "audio is paused. Try a lower sample rate in Device > Connect..."
+                f"{format_rate(self._device_sample_rate())} in real time right "
+                "now, so audio is paused until it catches up. A lower sample "
+                "rate in Device > Connect... helps."
             )
         return (
             "The device isn't delivering samples in real time, so audio is "
@@ -3564,6 +4363,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._device.set_sample_rate(rate)
             except Exception as e:
                 self._show_status_error(f"Could not set the sample rate: {e}")
+            self._apply_baseband_filter()
         self._reset_demodulator()
         # Whether frames keep up depends on the rate: find out anew.
         self._pacer.reset()
@@ -3611,7 +4411,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._toggle_recording(False)
         if not self._confirm_discard_recording("importing another file"):
             return
-        self._samples_buffer = [samples]
+        self._replace_buffer(_SampleStore.from_samples(samples))
         rate = float(metadata.sample_rate or 0.0)
         center = float(metadata.center_frequency or 0.0)
         # Saved with the file's own rate and frequency (not the receiver's).
@@ -3720,31 +4520,53 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if not filename:
             return False
 
-        from ..dsp.recording import FileFormat, SampleFormat, save_iq_file
+        from ..dsp.recording import FileFormat, IQRecorder, SampleFormat
 
         filename, spec = self._resolve_save_format(filename, selected_filter)
         fmt, sample_fmt = FileFormat[spec[2]], SampleFormat[spec[3]]
+        store = self._samples_buffer
+        count = store.sample_count
 
-        samples = np.concatenate(self._samples_buffer).astype(np.complex64)
-
+        error: Optional[Exception] = None
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            save_iq_file(
-                filename,
-                samples,
-                sample_rate=sample_rate,
-                center_frequency=center_freq,
-                sample_format=sample_fmt,
-                file_format=fmt,
-            )
+            if (
+                fmt is FileFormat.RAW
+                and sample_fmt is SampleFormat.FLOAT32
+                and store.path is not None
+            ):
+                # Already in this layout: move (or copy) the file itself.
+                store.save_raw(filename, move=not self._recording)
+            else:
+                recorder = IQRecorder(
+                    sample_rate=sample_rate,
+                    center_frequency=center_freq,
+                    sample_format=sample_fmt,
+                    file_format=fmt,
+                )
+                # A chunk at a time, so a recording larger than memory saves
+                # too; the same file as save_iq_file (SigMF metadata too).
+                recorder.start(filename)
+                try:
+                    for chunk in store.chunks():
+                        recorder.write(chunk)
+                finally:
+                    recorder.stop()
         except Exception as e:
-            logger.error(f"Failed to save recording: {e}")
-            QMessageBox.warning(self, "Save Failed", f"Could not save recording:\n{e}")
+            error = e
+        finally:
+            QApplication.restoreOverrideCursor()
+        if error is not None:
+            logger.error(f"Failed to save recording: {error}")
+            QMessageBox.warning(
+                self, "Save Failed", f"Could not save recording:\n{error}"
+            )
             return False
 
         self._buffer_unsaved = False
-        logger.info(f"Saved {len(samples)} samples to {filename}")
+        logger.info(f"Saved {count} samples to {filename}")
         self._show_status_message(
-            f"Saved {len(samples):,} samples to {filename}", "success", 6000
+            f"Saved {count:,} samples to {filename}", "success", 6000
         )
         return True
 
@@ -4291,6 +5113,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Stops receiving and closes the device; a failing close() is logged
         # instead of leaving the window impossible to close.
         self._release_device()
+        # Saved or declined by now: delete the temporary recording file.
+        self._samples_buffer.discard()
 
         logger.info("Application closing")
         event.accept()

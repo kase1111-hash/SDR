@@ -535,7 +535,9 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
 
 # Simulated band plan: (frequency Hz, kind, level dBFS at 20 dB gain,
 # (period s, on s) for intermittent signals or None for continuous).
-# Levels are per-bin peaks on the main display's dBFS scale.
+# Levels are per-bin peaks on the main display's dBFS scale; for the Mode S
+# replies on 1090 MHz ("modes"), the amplitude of the decodable airliner's
+# pulses (see _SQUITTERS).
 #
 # Stations sit where the app sends people: the strongest one is on 100.1 MHz,
 # the start-up frequency and the "FM Broadcast" preset of the welcome screen
@@ -588,7 +590,7 @@ _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ..
     (446.1e6, "nfm", -58.0, (9.0, 3.0)),
     # ISM 915 MHz and ADS-B
     (915.0e6, "burst", -50.0, (1.5, 0.2)),
-    (1090.0e6, "pulse", -42.0, (0.5, 0.12)),
+    (1090.0e6, "modes", -26.0, None),
 )
 
 # Morse keying for the CW beacon ("VVV DE SDR"): 1 = key down, one dit each.
@@ -636,6 +638,11 @@ _PILOT_HZ = 19e3
 _PILOT_SHARE = 0.09
 _RDS_SHARE = 0.04
 _PROGRAM_SHARE = 1.0 - _PILOT_SHARE - _RDS_SHARE
+# Broadcast FM pre-emphasis time constant (Americas and Korea): the
+# station boosts the treble of its program audio before modulating, and the
+# receiver's matching 75 us de-emphasis restores the balance (and cuts the
+# hiss FM adds at high audio frequencies).
+_EMPHASIS_TAU_S = 75e-6
 
 # Modulation (audio, keying, data) is computed once per station as a loop at
 # about this rate, then read back at the device rate by linear
@@ -753,7 +760,46 @@ def _midi_hz(note: int) -> float:
     return 440.0 * 2.0 ** ((note - 69) / 12.0)
 
 
+def _pre_emphasis(signal: np.ndarray, rate: float) -> np.ndarray:
+    """One loop of ``signal`` through 75 us FM pre-emphasis, ``1 + j 2 pi f
+    tau``: the exact inverse of the receiver's one-pole de-emphasis.
+
+    The filter is applied around the loop (by FFT, once per loop), so the
+    loop stays seamless and reading it costs nothing extra.
+    """
+    spectrum = np.fft.rfft(np.asarray(signal, dtype=float))
+    freqs = np.fft.rfftfreq(len(signal), 1.0 / rate)
+    spectrum *= 1.0 + (2j * np.pi * _EMPHASIS_TAU_S) * freqs
+    return np.fft.irfft(spectrum, len(signal))
+
+
+def _music_broadcast(
+    loop_rate: float, size: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """``(left, right, left_pre, right_pre)`` of the demo tune.
+
+    ``left_pre``/``right_pre`` are the channels as broadcast, 75 us
+    pre-emphasized and scaled so the louder one peaks at 1 (full
+    deviation); ``left``/``right`` are the same channels as a listener hears
+    them after the receiver's de-emphasis.
+    """
+    left, right = _music_tune(loop_rate, size)
+    left_pre = _pre_emphasis(left, loop_rate)
+    right_pre = _pre_emphasis(right, loop_rate)
+    peak = max(float(np.max(np.abs(left_pre))), float(np.max(np.abs(right_pre))))
+    scale = 1.0 / max(peak, 1e-9)
+    return left * scale, right * scale, left_pre * scale, right_pre * scale
+
+
 def _music_channels(loop_rate: float, size: int) -> Tuple[np.ndarray, np.ndarray]:
+    """Left and right channels of the demo tune as a listener hears them
+    (after the receiver's 75 us de-emphasis), at the level the station
+    broadcasts them: see :func:`_music_broadcast`."""
+    left, right, _left_pre, _right_pre = _music_broadcast(loop_rate, size)
+    return left, right
+
+
+def _music_tune(loop_rate: float, size: int) -> Tuple[np.ndarray, np.ndarray]:
     """Left and right channels of the demo tune, peak-normalized to 1."""
     left = np.zeros(size, dtype=np.float32)
     right = np.zeros(size, dtype=np.float32)
@@ -812,10 +858,12 @@ def _build_loops(kind: str, variant: Any, rate: float):
     if kind == "wfm":
         # (program phase, L-R subcarrier amplitude as a phase multiplier)
         if variant == "music":
+            # The tune as broadcast: 75 us pre-emphasized, like the
+            # receiver's broadcast FM de-emphasis expects.
             factor, loop_rate, t = _loop_timebase(
                 rate, _MUSIC_STEP_S * 8 * len(_MUSIC_BARS)
             )
-            left, right = _music_channels(loop_rate, len(t))
+            *_heard, left, right = _music_broadcast(loop_rate, len(t))
             mono = (left + right) * (_PROGRAM_SHARE / 2)
             diff = (left - right) * (_PROGRAM_SHARE / 2)
         else:
@@ -866,10 +914,8 @@ def _build_loops(kind: str, variant: Any, rate: float):
             sums = np.cumsum(np.concatenate((keyed[-width:], keyed)))
             keyed = (sums[width:] - sums[:-width]) / width
         return _Loop(keyed, factor)
-    if kind == "pulse":
-        # ADS-B-like 1 us pulse chips, at the device rate.
-        chips = np.random.default_rng(1090).random(1 << 16) < 0.35
-        return _Loop(chips.astype(np.float32), 1)
+    if kind == "modes":
+        return _other_replies(rate)
     return None
 
 
@@ -877,7 +923,7 @@ def _loops(kind: str, seed: int, rate: float):
     """Cached modulation loop(s) of a demo signal at ``rate``."""
     if kind == "wfm" and seed == _MUSIC_SEED:
         variant: Any = "music"
-    elif kind in ("cw", "pulse"):
+    elif kind in ("cw", "modes"):
         variant = 0
     else:
         variant = seed % 3
@@ -891,6 +937,332 @@ def _loops(kind: str, seed: int, rate: float):
                 _LOOP_CACHE.pop(next(iter(_LOOP_CACHE)))
             _LOOP_CACHE[key] = loops
     return loops
+
+
+# --------------------------------------------------------------------------- #
+# ADS-B: Mode S replies on 1090 MHz
+# --------------------------------------------------------------------------- #
+# 1090 MHz carries real Mode S frames, so the Decoder panel's ADS-B decoder
+# has an aircraft to follow: an airliner whose transponder squitters its
+# identification, position and velocity (DF17 extended squitters) and
+# answers with its squawk (DF5), over weaker replies from other aircraft
+# that no decoder can use (Mode A/C replies, and Mode S replies whose parity
+# carries addresses never heard in a squitter).
+_MODES_CRC_POLY = 0x1FFF409
+_CPR_SCALE = 1 << 17  # 17-bit CPR coordinates
+_M_PER_DEGREE = 111_195.0  # metres per degree of latitude
+_CALLSIGN_CHARS = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ##### ###############0123456789######"
+
+# The airliner: its identification squitter is the classic example frame
+# 8D4840D6202CC371C32CE0576098 ("The 1090 MHz Riddle"), and it cruises
+# west at FL380 from where that book's position example puts it, over the
+# North Sea. The flight repeats every _FLIGHT_LOOP_S.
+_AIRCRAFT_ICAO = 0x4840D6
+_AIRCRAFT_CALLSIGN = "KLM1023"
+_AIRCRAFT_SQUAWK = "3472"
+_AIRCRAFT_ALTITUDE_FT = 38000
+_AIRCRAFT_START = (52.2572, 3.9194)  # degrees north, east
+_AIRCRAFT_TRACK_DEG = 265.0
+_AIRCRAFT_SPEED_KT = 450.0
+_FLIGHT_LOOP_S = 1200.0
+
+# What it sends in each _SQUITTER_CYCLE_S: (time s, message). Each one is
+# moved by up to +/- _SQUITTER_JITTER_S, as transponders randomize their
+# squitter timing (which also puts its pulses at every phase of a
+# receiver's sample clock).
+_SQUITTER_CYCLE_S = 2.0
+_SQUITTERS: Tuple[Tuple[float, str], ...] = (
+    (0.10, "ident"),
+    (0.35, "even"),
+    (0.60, "velocity"),
+    (0.85, "odd"),
+    (1.10, "squawk"),
+    (1.35, "even"),
+    (1.60, "velocity"),
+    (1.85, "odd"),
+)
+_SQUITTER_JITTER_S = 0.04
+_LONGEST_REPLY_S = 120e-6  # 8 us preamble + 112 bits
+
+# Other traffic: replies per second, the loop they repeat in (samples are
+# made once per sample rate), and their levels relative to the airliner.
+_REPLIES_PER_S = 300
+_REPLY_LOOP_S = 3.1
+_REPLY_DB = (-30.0, -6.0)
+
+
+def _crc24(data: bytes) -> int:
+    """Mode S parity (CRC-24, generator 0x1FFF409) of ``data``."""
+    crc = 0
+    for byte in data:
+        crc ^= byte << 16
+        for _ in range(8):
+            crc <<= 1
+            if crc & 0x1000000:
+                crc ^= _MODES_CRC_POLY
+    return crc
+
+
+def _extended_squitter(icao: int, me: int) -> bytes:
+    """DF17 frame (capability 5: airborne) carrying the 56-bit ME field."""
+    head = bytes([17 << 3 | 5]) + icao.to_bytes(3, "big") + me.to_bytes(7, "big")
+    return head + _crc24(head).to_bytes(3, "big")
+
+
+def _address_parity_reply(word: int, icao: int, long: bool = False) -> bytes:
+    """A reply whose parity is its CRC XOR the aircraft address (DF0/4/5
+    short, DF16/20/21 long); ``word`` is everything before the parity."""
+    head = word.to_bytes(11 if long else 4, "big")
+    return head + (_crc24(head) ^ icao).to_bytes(3, "big")
+
+
+def _ident_me(callsign: str) -> int:
+    """Aircraft identification (TC 4), eight 6-bit characters."""
+    me = 4 << 3
+    for char in callsign.upper().ljust(8)[:8]:
+        index = _CALLSIGN_CHARS.find(char) if char != "#" else -1
+        me = me << 6 | (index if index > 0 else 32)  # else a space
+    return me
+
+
+def _altitude_code(feet: int) -> int:
+    """12-bit altitude field in 25 ft steps (Q bit set)."""
+    n = (int(feet) + 1000) // 25
+    return (n >> 4) << 5 | 0x10 | (n & 0x0F)
+
+
+def _cpr_nl(lat: float) -> int:
+    """Number of CPR longitude zones at latitude ``lat``."""
+    if abs(lat) >= 87.0:
+        return 1
+    a = 1.0 - math.cos(math.pi / 30.0)
+    return int(
+        math.floor(
+            2.0 * math.pi / math.acos(1.0 - a / math.cos(math.radians(lat)) ** 2)
+        )
+    )
+
+
+def _position_me(lat: float, lon: float, feet: int, odd: bool) -> int:
+    """Airborne position (TC 11) as an even or odd CPR frame."""
+    i = int(odd)
+    dlat = 360.0 / (60 - i)
+    yz = math.floor(_CPR_SCALE * (lat % dlat) / dlat + 0.5)
+    rlat = dlat * (yz / _CPR_SCALE + math.floor(lat / dlat))
+    dlon = 360.0 / max(_cpr_nl(rlat) - i, 1)
+    xz = math.floor(_CPR_SCALE * (lon % dlon) / dlon + 0.5)
+    return (
+        11 << 51
+        | _altitude_code(feet) << 36
+        | i << 34
+        | (yz % _CPR_SCALE) << 17
+        | (xz % _CPR_SCALE)
+    )
+
+
+def _velocity_me(speed_kt: float, track_deg: float) -> int:
+    """Airborne velocity (TC 19, subtype 1: subsonic ground speed), level."""
+    east = round(speed_kt * math.sin(math.radians(track_deg)))
+    north = round(speed_kt * math.cos(math.radians(track_deg)))
+    return (
+        19 << 51
+        | 1 << 48
+        | int(east < 0) << 42
+        | (abs(east) + 1) << 32
+        | int(north < 0) << 31
+        | (abs(north) + 1) << 21
+        | 1 << 10  # vertical rate 0 ft/min
+    )
+
+
+def _identity_code(squawk: str) -> int:
+    """13-bit identity field of a 4-digit (octal) squawk code, in the order
+    C1 A1 C2 A2 C4 A4 X B1 D1 B2 D2 B4 D4."""
+    a, b, c, d = (int(digit, 8) for digit in squawk)
+    code = 0
+    for digit, weight in (
+        (c, 1), (a, 1), (c, 2), (a, 2), (c, 4), (a, 4), (0, 0),
+        (b, 1), (d, 1), (b, 2), (d, 2), (b, 4), (d, 4),
+    ):  # fmt: skip
+        code = code << 1 | int(bool(digit & weight))
+    return code
+
+
+def _aircraft_position(t: float) -> Tuple[float, float]:
+    """The airliner's latitude and longitude ``t`` s into the stream."""
+    flown = (t % _FLIGHT_LOOP_S) * _AIRCRAFT_SPEED_KT * 1852.0 / 3600.0
+    track = math.radians(_AIRCRAFT_TRACK_DEG)
+    lat = _AIRCRAFT_START[0] + flown * math.cos(track) / _M_PER_DEGREE
+    east = flown * math.sin(track) / (_M_PER_DEGREE * math.cos(math.radians(lat)))
+    return lat, _AIRCRAFT_START[1] + east
+
+
+def _aircraft_frame(message: str, t: float) -> bytes:
+    """The airliner's ``message`` (see _SQUITTERS) sent at ``t`` s."""
+    icao = _AIRCRAFT_ICAO
+    if message == "ident":
+        return _extended_squitter(icao, _ident_me(_AIRCRAFT_CALLSIGN))
+    if message == "velocity":
+        me = _velocity_me(_AIRCRAFT_SPEED_KT, _AIRCRAFT_TRACK_DEG)
+        return _extended_squitter(icao, me)
+    if message == "squawk":
+        # DF5 surveillance identity reply, airborne (FS 0).
+        return _address_parity_reply(5 << 27 | _identity_code(_AIRCRAFT_SQUAWK), icao)
+    lat, lon = _aircraft_position(t)
+    me = _position_me(lat, lon, _AIRCRAFT_ALTITUDE_FT, message == "odd")
+    return _extended_squitter(icao, me)
+
+
+def _chip_pulses(chips: np.ndarray, chip_us: float) -> np.ndarray:
+    """``(start us, width us)`` rows of the runs of 1s in ``chips``."""
+    edges = np.flatnonzero(np.diff(np.concatenate(([0], chips, [0]))))
+    starts, ends = edges[::2], edges[1::2]
+    return np.column_stack((starts, ends - starts)) * chip_us
+
+
+def _modes_pulses(frame: bytes) -> np.ndarray:
+    """Pulses of a Mode S reply: the 8 us preamble (pulses at 0, 1, 3.5 and
+    4.5 us), then 1 us per bit, pulse-position modulated: a 0.5 us pulse in
+    the first half of the bit for a 1, in the second half for a 0."""
+    bits = np.unpackbits(np.frombuffer(frame, dtype=np.uint8)).astype(np.int8)
+    chips = np.zeros(16 + 2 * len(bits), dtype=np.int8)
+    chips[[0, 2, 7, 9]] = 1
+    chips[16::2] = bits
+    chips[17::2] = 1 - bits
+    return _chip_pulses(chips, 0.5)
+
+
+def _mode_ac_pulses(code: int) -> np.ndarray:
+    """Pulses of a Mode A/C reply: framing pulses 20.3 us apart with the 12
+    code pulses between them, 1.45 us apart (the middle, X, left empty),
+    each 0.45 us long."""
+    slots = [0, 14] + [
+        slot
+        for bit, slot in enumerate((1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13))
+        if code >> bit & 1
+    ]
+    starts = np.sort(np.asarray(slots, dtype=float)) * 1.45
+    return np.column_stack((starts, np.full(len(starts), 0.45)))
+
+
+def _pulse_envelope(
+    pulses: np.ndarray, start: float, rate: float
+) -> Tuple[int, np.ndarray]:
+    """First sample and envelope (float32, 0 to 1) of ``pulses`` sent from
+    stream position ``start`` (samples, fractional).
+
+    Each sample holds the fraction of its period the pulses cover, as an
+    integrating ADC sees them.
+    """
+    per_us = rate * 1e-6
+    begin = pulses[:, 0]
+    covered = np.cumsum(pulses[:, 1])
+    first = int(math.floor(start))
+    last = int(math.ceil(start + (begin[-1] + pulses[-1, 1]) * per_us))
+    edges = (np.arange(first, last + 1) - start) / per_us
+    knots = np.column_stack((begin, begin + pulses[:, 1])).ravel()
+    area = np.column_stack((covered - pulses[:, 1], covered)).ravel()
+    on = np.interp(edges, knots, area)
+    return first, (np.diff(on) * per_us).astype(np.float32)
+
+
+def _squitter_jitter(cycle: int, slot: int) -> float:
+    """Timing offset (s) of one of the airliner's transmissions."""
+    h = (cycle * 2654435761 + slot * 40503 + 0x5D12) & 0xFFFFFFFF
+    h ^= h >> 15
+    h = (h * 2246822519) & 0xFFFFFFFF
+    h ^= h >> 13
+    return (h / 0xFFFFFFFF * 2.0 - 1.0) * _SQUITTER_JITTER_S
+
+
+def _squitter_spans(pos: int, n: int, rate: float) -> List[tuple]:
+    """``(a, b, envelope)`` of the airliner's transmissions overlapping the
+    ``n`` samples from stream position ``pos`` (``a:b`` in the block)."""
+    t0, t1 = pos / rate, (pos + n) / rate
+    cycle = _SQUITTER_CYCLE_S
+    first = math.floor((t0 - _SQUITTER_JITTER_S - _LONGEST_REPLY_S) / cycle)
+    last = math.floor((t1 + _SQUITTER_JITTER_S) / cycle)
+    spans = []
+    for c in range(first, last + 1):
+        for slot, (offset, message) in enumerate(_SQUITTERS):
+            t = c * cycle + offset + _squitter_jitter(c, slot)
+            if t >= t1 or t + _LONGEST_REPLY_S <= t0:
+                continue
+            frame = _aircraft_frame(message, t)
+            start, env = _pulse_envelope(_modes_pulses(frame), t * rate, rate)
+            a, b = max(start, pos), min(start + len(env), pos + n)
+            if b > a:
+                spans.append((a - pos, b - pos, env[a - start : b - start]))
+    return spans
+
+
+class _Bursts:
+    """Short transmissions at fixed places in a loop of ``period`` samples,
+    stored sparsely (the loop is mostly silence)."""
+
+    __slots__ = ("period", "starts", "ends", "offsets", "values", "longest")
+
+    def __init__(self, period: int, bursts: List[Tuple[int, np.ndarray]]):
+        bursts = sorted(bursts, key=lambda burst: burst[0])
+        lengths = np.array([len(env) for _start, env in bursts], dtype=np.int64)
+        self.period = int(period)
+        self.starts = np.array([start for start, _env in bursts], dtype=np.int64)
+        self.ends = self.starts + lengths
+        self.offsets = np.concatenate(([0], np.cumsum(lengths)[:-1])).astype(np.int64)
+        self.values = np.concatenate(
+            [env for _start, env in bursts] or [np.zeros(0, dtype=np.float32)]
+        )
+        self.longest = int(lengths.max()) if len(lengths) else 0
+
+    def spans(self, pos: int, n: int) -> List[tuple]:
+        """``(a, b, envelope)`` of the bursts overlapping the ``n`` samples
+        from stream position ``pos`` (``a:b`` in the block)."""
+        spans = []
+        end = pos + n
+        base = (pos // self.period) * self.period
+        while base < end:
+            lo, hi = pos - base, end - base
+            first = int(np.searchsorted(self.starts, lo - self.longest))
+            last = int(np.searchsorted(self.starts, hi))
+            for i in range(first, last):
+                start, stop = int(self.starts[i]), int(self.ends[i])
+                a, b = max(start, lo), min(stop, hi)
+                if b > a:
+                    at = int(self.offsets[i]) - start
+                    spans.append(
+                        (base + a - pos, base + b - pos, self.values[at + a : at + b])
+                    )
+            base += self.period
+        return spans
+
+
+def _other_replies(rate: float) -> _Bursts:
+    """A loop of replies from other aircraft at ``rate``: Mode A/C replies
+    and Mode S replies to addresses that never squitter, so a decoder drops
+    them all."""
+    rng = np.random.default_rng(1090)
+    addresses = [
+        a for a in rng.integers(1, 1 << 24, 12).tolist() if a != _AIRCRAFT_ICAO
+    ]
+    count = int(_REPLIES_PER_S * _REPLY_LOOP_S)
+    times = np.sort(rng.uniform(0.0, _REPLY_LOOP_S - 2 * _LONGEST_REPLY_S, count))
+    bursts = []
+    for t in times.tolist():
+        if rng.random() < 0.5:
+            pulses = _mode_ac_pulses(int(rng.integers(0, 1 << 12)))
+        else:
+            df = int(rng.choice((0, 4, 5, 16, 20, 21)))
+            long = df >= 16
+            bits = 88 if long else 32
+            payload = int.from_bytes(rng.bytes(11), "big") & ((1 << (bits - 5)) - 1)
+            frame = _address_parity_reply(
+                df << (bits - 5) | payload, int(rng.choice(addresses)), long
+            )
+            pulses = _modes_pulses(frame)
+        start, env = _pulse_envelope(pulses, t * rate, rate)
+        env *= np.float32(10.0 ** (rng.uniform(*_REPLY_DB) / 20.0))
+        bursts.append((start, env))
+    return _Bursts(int(round(_REPLY_LOOP_S * rate)), bursts)
 
 
 def _on_ranges(
@@ -921,17 +1293,22 @@ class MockDevice:
 
     Generates a band of plausible signals at fixed frequencies (FM broadcast
     stations, airband AM, 2 m and 70 cm FM, NOAA weather, ISM bursts, a CW
-    beacon and a few weak carriers everywhere else) on top of a realistic
-    noise floor. Signals move across the display as you tune, so
-    click-to-tune and the frequency scanner behave as they would with real
-    hardware. Raising the gain lifts signals and noise together and, as on a
+    beacon, Mode S and Mode A/C replies on 1090 MHz and a few weak carriers
+    everywhere else) on top of a realistic noise floor. Signals move across
+    the display as you tune, so click-to-tune and the frequency scanner
+    behave as they would with real hardware. Raising the gain lifts signals and noise together and, as on a
     real receiver, too much gain clips the ADC. With automatic gain
     (``set_gain_mode(True)``) the device picks the gain itself, keeping the
     signals in the passband clear of clipping.
 
     The strongest station, 100.1 MHz, broadcasts a looping tune in stereo
-    FM, so listening to it in FM mode plays music; the others carry tones,
-    voice-like modulation, keyed CW or data bursts.
+    FM with the usual 75 us pre-emphasis, so listening to it in FM mode
+    (with the receiver's matching de-emphasis) plays music; the others carry
+    tones, voice-like modulation, keyed CW or data bursts. On 1090 MHz an
+    airliner's transponder sends real ADS-B frames a few times a second
+    (KLM1023, ICAO 4840D6: identification, position, velocity and a squawk
+    reply) that the ADS-B decoder decodes, among weaker replies from other
+    aircraft that it drops.
 
     The samples form one continuous stream: each read carries on where the
     last one ended, so demodulated audio has no clicks between reads, and
@@ -1027,8 +1404,8 @@ class MockDevice:
         # Worst case, every signal peaks at once: keep that sum (plus the
         # noise peaks) the headroom below the ADC's full scale.
         peak = sum(
-            amp * (3.0 if kind == "pulse" else 1.0)
-            for _offset, kind, amp, _duty, _seed in self._visible_signals(center, rate)
+            amp
+            for _offset, _kind, amp, _duty, _seed in self._visible_signals(center, rate)
         )
         peak += 4.0 * math.sqrt(2.0) * self._noise_sigma(self._NOISE_FLOOR_DB)
         gain = self._REF_GAIN_DB - self._AGC_HEADROOM_DB - 20.0 * math.log10(peak)
@@ -1163,13 +1540,20 @@ class MockDevice:
         if kind == "cw_steady":
             out += self._carrier(offset, amp, rate, pos, n)
             return
-        if kind in ("am", "cw", "pulse"):
+        if kind in ("am", "cw"):
             envelope = _loops(kind, seed, rate).read(pos, n)
-            wave = self._carrier(
-                offset, amp * (3.0 if kind == "pulse" else 1.0), rate, pos, n
-            )
+            wave = self._carrier(offset, amp, rate, pos, n)
             wave *= envelope
             out += wave
+            return
+        if kind == "modes":
+            # Short pulsed replies: only the samples they cover.
+            spans = _loops(kind, seed, rate).spans(pos, n)
+            spans += _squitter_spans(pos, n, rate)
+            for a, b, envelope in spans:
+                wave = self._carrier(offset, amp, rate, pos + a, b - a)
+                wave *= envelope
+                out[a:b] += wave
             return
         # Angle modulation: wfm, nfm, burst.
         loops = _loops(kind, seed, rate)

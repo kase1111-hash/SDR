@@ -393,9 +393,16 @@ class TestDemoAgcInTheWindow(_WindowTestCase):
     demo = True
 
     def _level(self):
-        for _ in range(10):
+        """Mean power (dB) of the per-frame channel peaks over 30 frames.
+
+        One frame's peak bin of FM music swings by 10 dB or more, so a single
+        reading made this comparison flaky; the linear mean is stable.
+        """
+        levels = []
+        for _ in range(30):
             self.win._update_display()
-        return self.win._last_peak_db
+            levels.append(self.win._last_peak_db)
+        return 10.0 * np.log10(np.mean(10.0 ** (np.asarray(levels) / 10.0)))
 
     def test_agc_changes_what_the_demo_receives(self):
         self.win.set_frequency(100.1e6)
@@ -405,6 +412,7 @@ class TestDemoAgcInTheWindow(_WindowTestCase):
         self.assertEqual(self.win._device.gain_mode, "auto")
         agc = self._level()
         self.assertLess(agc, manual - 6.0)
+        self.assertLess(self.win._device.gain, 45.0 - 6.0)
         self.win._control_panel.set_agc_enabled(False)
         self.assertEqual(self.win._device.gain, 45.0)
 

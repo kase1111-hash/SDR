@@ -62,6 +62,7 @@ try:
         QPixmap,
         QPolygonF,
     )
+    from PyQt6.QtWidgets import QFileDialog  # noqa: F401 (tests patch it here)
     from PyQt6.QtWidgets import (
         QAbstractButton,
         QAbstractItemView,
@@ -69,7 +70,6 @@ try:
         QAbstractSpinBox,
         QApplication,
         QComboBox,
-        QFileDialog,
         QFormLayout,
         QFrame,
         QGridLayout,
@@ -110,6 +110,7 @@ from ..dsp.nco import Nco
 from ..dsp.stereo_pilot import StereoPilotDetector
 from ..utils.tooltips import get_short_tip
 from . import file_dialogs
+from . import presets as preset_table
 from .audio_chain import (
     AGC_SPEEDS,
     AM_CARRIER_TIME_S,
@@ -173,6 +174,8 @@ from .settings_store import DEFAULT_FREQUENCY_HZ, GuiSettings
 from .signal_panel import SignalPanel
 from .signal_tools import SignalTools
 from .spectrum_widget import SpectrumWidget, format_hz
+from .status_history import CAPACITY as STATUS_HISTORY_SIZE
+from .status_history import StatusHistory, StatusHistoryPopup
 from .themes import (
     apply_theme,
     current_theme,
@@ -182,6 +185,7 @@ from .themes import (
     set_tone,
     theme_notifier,
 )
+from .tool_tabs import ToolTabsMaximizer
 from .transmitter import ArraySource, TxJob
 from .tuning import (
     STEP_CHOICES_HZ,
@@ -201,28 +205,40 @@ from .waterfall_widget import WaterfallWidget
 
 
 class BandPreset(NamedTuple):
-    """One entry of the Radio > Band Presets menu (and the first-run
-    wizard's starting bands)."""
+    """One favourite of the Radio > Band Presets menu (the first-run
+    wizard's starting bands tune the same presets)."""
 
     label: str  # menu text; "&" marks the mnemonic
     frequency_hz: float
     mode: str  # Demodulation > Mode item text
     fm_deviation: Optional[str]  # FM deviation item text, None to keep
-    bandwidth: str  # Bandwidth item text (channel width)
+    bandwidth: str  # Filter (Bandwidth) item text
 
 
-# Modes and channel widths match the Control Panel's presets (the frequency
-# manager) where both list a band.
-BAND_PRESETS: List[BandPreset] = [
-    BandPreset("&FM Broadcast", 100.1e6, "FM", "75 kHz", "200 kHz"),
-    BandPreset("&NOAA Weather", 162.55e6, "FM", "5 kHz", "25 kHz"),
-    BandPreset("&2m Ham", 146.52e6, "FM", "5 kHz", "25 kHz"),
-    BandPreset("&70cm Ham", 446.0e6, "FM", "5 kHz", "25 kHz"),
-    BandPreset("&Airband AM", 125.0e6, "AM", None, "10 kHz"),
-    BandPreset("A&DS-B", 1090e6, "None (I/Q)", None, "2.4 MHz"),
-    BandPreset("ISM &433", 433.92e6, "None (I/Q)", None, "500 kHz"),
-    BandPreset("ISM &915", 915e6, "None (I/Q)", None, "2 MHz"),
-]
+def _band_preset_menu() -> Tuple[List[BandPreset], Dict[str, str]]:
+    """Radio > Band Presets from the one preset table (gui/presets.py, the
+    frequency manager's presets): the favourites, named as the Presets
+    group names them and listened to as its Apply Preset does, and the
+    category submenus' titles, every item with its own mnemonic."""
+    favourites = preset_table.favourites()
+    categories = preset_table.categories()
+    labels = preset_table.assign_mnemonics(
+        [p.name for p in favourites] + list(categories)
+    )
+    items = []
+    for label, preset in zip(labels, favourites, strict=False):
+        mode, deviation, width = preset_table.listening(preset)
+        items.append(
+            BandPreset(
+                label, float(preset.frequency_hz), mode, deviation or None, width
+            )
+        )
+    return items, dict(zip(categories, labels[len(favourites) :], strict=True))
+
+
+# The favourites (Radio > Band Presets' first items; the welcome screen's
+# starting bands tune the same presets), and the category submenus' titles.
+BAND_PRESETS, _PRESET_CATEGORY_LABELS = _band_preset_menu()
 # Broadcast (wideband) FM: used by the AM/FM radio tuner and the defaults.
 _BROADCAST_FM_DEVIATION = "75 kHz"
 _BROADCAST_FM_BANDWIDTH = "200 kHz"
@@ -248,8 +264,8 @@ _DEFAULT_SAMPLE_RATE = 2.4e6
 _AUDIBLE_MODES = ("AM", "FM", "USB", "LSB", "CW")
 _AUDIO_RATE = 48000.0  # target rate of the demodulated audio
 _NO_VALUE = "—"  # em dash for "not available"
-_TX_UNAVAILABLE = "Connect a HackRF One to transmit an ID."
 _DEFAULT_VOLUME = 70  # percent
+_VOLUME_STEP = 10  # percent: Radio > Audio > Volume Up / Down
 # Audio is only played while the device delivers at least this fraction of
 # its sample rate: less than that (a device or computer that can't keep up)
 # would come out as a buzz of short bursts.
@@ -363,6 +379,7 @@ _SSB_TRANSITION_HZ = 150.0
 _SSB_WIDTH_RANGE = (300.0, 10e3)
 _CW_WIDTH_RANGE = (50.0, 3e3)
 _NARROW_MODES = ("USB", "LSB", "CW")
+_SIDEBANDS = ("USB", "LSB")
 # DC blocking of the demodulated audio: below the lowest broadcast bass
 # for FM, above the hum of a fading carrier for the other modes.
 _FM_DC_CORNER_HZ = 15.0
@@ -1674,6 +1691,14 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
                     "measured (FREQ in the toolbar).",
                 ),
                 (
+                    "band",
+                    "Band plan",
+                    "The band plan at the tuned frequency: the band and its "
+                    "segment, who may transmit there (US amateur license "
+                    "classes), in which modes and with how much power, and "
+                    "where transmitting is locked out. Also in FREQ's tooltip.",
+                ),
+                (
                     "lo",
                     "Center (LO)",
                     get_short_tip("center_frequency")
@@ -1695,9 +1720,9 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
                 ("demod", "Demodulation", "Selected in the Demodulation panel."),
                 (
                     "bandwidth",
-                    "Bandwidth",
+                    "Filter",
                     "Width of the tuned channel that is demodulated and measured "
-                    "(Receiver > Bandwidth); in USB, LSB and CW the filter "
+                    "(Receiver > Filter); in USB, LSB and CW the filter "
                     "width, with the audio passband it gives.",
                 ),
                 ("gain", "Gain", get_short_tip("gain")),
@@ -1727,8 +1752,9 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
                 (
                     "audio",
                     "Audio output",
-                    "Toggle with the Audio button in the toolbar or Radio > "
-                    "Audio Output.",
+                    "Mute or unmute with the Audio button, Radio > Audio > "
+                    "Mute (Ctrl+M) or M with the plots focused; choose the "
+                    "output in Tools > Preferences.",
                 ),
                 (
                     "recording",
@@ -1763,17 +1789,26 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
             "Scroll over the plots to tune by the step, or over a digit of the "
             "FREQ readout to tune that digit.",
         ),
+        ("Ctrl+Wheel", "Zoom the plots around the pointer (Ctrl+0: the whole span)."),
         ("Ctrl+L", "Type a frequency (or click the FREQ readout): 145.8, 7074k."),
-        (
-            "← / →",
-            "Tune by the step (STEP in the toolbar). Add Shift for ten steps, "
-            "Ctrl for 1 MHz.",
-        ),
-        ("[ / ]", "Smaller / larger tuning step."),
+        ("← / →", "Tune by the step (Shift: ten steps, Ctrl: 1 MHz)."),
+        ("[ / ]", "Smaller / larger tuning step (STEP in the toolbar)."),
         ("Alt+← / →", "Back / forward through the frequencies you tuned."),
         ("Space", "Start or stop the receiver."),
-        ("F6", "Put the keyboard focus on the spectrum (Esc also returns there)."),
+        ("M", "Mute or unmute (Ctrl+M anywhere)."),
+        ("Ctrl+I", "What is this signal? (the Signal tab: identify, list, scope)."),
+        ("Ctrl+F", "Scan a band or your bookmarks (the Scanner tab)."),
+        (
+            "Ctrl+1…9",
+            "Show a tool tab. Double-click a tab to give the tools the whole "
+            "column.",
+        ),
         ("Ctrl+B", "Bookmark the current frequency."),
+        (
+            "Ctrl+Shift+N",
+            "A second receiver: another frequency at the same time.",
+        ),
+        ("F6", "Put the keyboard focus on the spectrum (Esc also returns there)."),
         ("F1", "Show all keyboard shortcuts."),
     )
 
@@ -1891,13 +1926,31 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             Qt.KeyboardModifier.ControlModifier: 1e6,
         }
 
+    # The FREQ readout's tooltip (the band plan here follows it).
+    _FREQ_TIP = (
+        "Tuned frequency. Click here (or press Ctrl+L) to type a new one; "
+        "scroll over a digit to tune that digit. You can also click the "
+        "spectrum or waterfall, scroll over them, or use Left/Right while "
+        "they have the focus (the STEP in the receiver bar; Shift: ten "
+        "steps, Ctrl: 1 MHz)."
+    )
+
     # Toolbar button captions.
     _START_TEXT = "▶  Start"
     _STOP_TEXT = "■  Stop"
     _RECORD_TEXT = "●  Record"
-    # (A leading space: Qt leaves almost no gap after a button's icon.)
+    # The Audio button's four states (see _audio_state). (A leading space:
+    # Qt leaves almost no gap after a button's icon.)
     _AUDIO_ON_TEXT = " Audio"
-    _AUDIO_OFF_TEXT = " Muted"
+    _AUDIO_OFF_TEXT = " Muted"  # muted by you
+    _AUDIO_NO_OUTPUT_TEXT = " No output"  # no audio output device
+    _AUDIO_SILENT_TEXT = " No audio"  # on, but None (I/Q) mode has no audio
+    _AUDIO_TEXTS = (
+        _AUDIO_ON_TEXT,
+        _AUDIO_OFF_TEXT,
+        _AUDIO_NO_OUTPUT_TEXT,
+        _AUDIO_SILENT_TEXT,
+    )
 
     def __init__(self, parent=None, demo_mode: bool = False):
         if not HAS_PYQT6:
@@ -2026,6 +2079,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder_unread = 0
         self._rds_listener = RdsListener()
         self._rds_shown: Tuple[str, str] = ("", "")
+        # The band plan at the tuned frequency: (line, what your license
+        # allows there), for the Info tab and FREQ's tooltip.
+        self._band_plan_text: Tuple[str, str] = ("", "")
+        # The frequency last tuned (the Frequency field shows a typed one
+        # before the window tunes it): where a far tune comes from.
+        self._shown_freq_hz: Optional[float] = None
 
         # Persisted settings (frequency, gain, theme, bookmarks live here)
         self._settings = GuiSettings()
@@ -2163,6 +2222,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._right_splitter.addWidget(self._scrollable(self._control_panel))
         self._right_tabs = self._build_panel_tabs()
         self._right_splitter.addWidget(self._right_tabs)
+        # The tool tabs can take the whole column (the corner arrows, a
+        # double-click on a tab, View > Maximize Tool Tabs).
+        self._tool_tabs = ToolTabsMaximizer(self)
+        # The License Profile is about transmitting: it sits in Ham > Ham ID,
+        # next to your callsign, not among the receive controls (ux:UX-U08).
+        if HAS_HAM_RADIO:
+            license_group = self._control_panel.take_license_group()
+            if license_group is not None:
+                self._callsign_panel.layout().insertWidget(1, license_group)
         # The Signal tab's work and Radio > Track Signal (T10).
         self._signal_tools = SignalTools(self, self._signal_panel)
         self._right_splitter.setStretchFactor(0, 1)
@@ -2270,8 +2338,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "Low-power (QRP) transmit power tools and compliance check",
             )
 
-            index = tabs.addTab(self._ham_tabs, "Ham Radio")
-            tabs.setTabToolTip(index, "S-meter, station ID, SSTV and QRP tools")
+            # "Ham" (not "Ham Radio"): the bar keeps every tab in view at
+            # 1366x768 with the maximize arrows and the Decoder's count.
+            index = tabs.addTab(self._ham_tabs, "Ham")
+            tabs.setTabToolTip(
+                index,
+                "Ham radio tools: S-Meter, Ham ID (your callsign and station "
+                "ID), SSTV pictures and the QRP calculator (Ctrl+3 to Ctrl+6)",
+            )
 
         self._info_panel = InfoPanel()
         self._add_panel(
@@ -2347,6 +2421,34 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._panel_owners[key] = tabs
         self._panel_specs.append((key, title, tip))
 
+    def _panel_index(self, key: str) -> int:
+        """The panel's place in ``_panel_specs``: its View > Panels key is
+        Ctrl+(index + 1) (9 or more: none)."""
+        return next(
+            (i for i, spec in enumerate(self._panel_specs) if spec[0] == key), 9
+        )
+
+    def _panel_menu_groups(self) -> List[List[str]]:
+        """The panel keys in the tab bar's order, grouped as View > Panels
+        shows them: a group of its own for the Ham tab's panels."""
+        tabs = self._right_tabs
+        groups: List[List[str]] = []
+        for index in range(tabs.count()):
+            page = tabs.widget(index)
+            nested = [k for k, owner in self._panel_owners.items() if owner is page]
+            if nested:
+                ham = tabs.widget(index)
+                nested.sort(key=lambda k: ham.indexOf(self._panel_pages[k]))
+                groups.append(nested)
+                groups.append([])
+                continue
+            key = next((k for k, p in self._panel_pages.items() if p is page), "")
+            if key:
+                if not groups:
+                    groups.append([])
+                groups[-1].append(key)
+        return [group for group in groups if group]
+
     def _add_action(
         self,
         menu: Any,
@@ -2374,6 +2476,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         elif slot is not None:
             action.triggered.connect(lambda _checked=False: slot())
         menu.addAction(action)
+        return action
+
+    def _tool_panel_action(
+        self, menu: Any, key: str, text: str, tip: str
+    ) -> Optional["QAction"]:
+        """A menu item that shows the tool panel ``key`` (like View > Panels,
+        which owns its Ctrl+number: shown here after a tab, not bound
+        twice). None when the panel doesn't exist."""
+        if key not in self._panel_pages:
+            return None
+        index = self._panel_index(key)
+        if index < 9:
+            text += f"\tCtrl+{index + 1}"
+        action = self._add_action(
+            menu, text, lambda k=key: self._show_panel(k, focus=True), tip=tip
+        )
+        action.setData(f"panel:{key}")
         return action
 
     def _setup_menus(self):
@@ -2438,13 +2557,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         file_menu.addSeparator()
         self._add_action(
             file_menu,
-            "&Import Channels (CHIRP CSV)...",
+            "Import &Bookmarks (CHIRP CSV)...",
             self._import_channels_csv,
-            tip="Load memory channels from a CHIRP-compatible CSV file",
+            tip="Add bookmarks from a CHIRP-compatible CSV file (a radio's "
+            "memory channels)",
         )
         self._add_action(
             file_menu,
-            "&Export Channels (CHIRP CSV)...",
+            "&Export Bookmarks (CHIRP CSV)...",
             self._export_channels_csv,
             tip="Save the bookmarks as a CHIRP-compatible CSV file",
         )
@@ -2454,7 +2574,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "Save S&creenshot...",
             self._save_screenshot,
             "Ctrl+P",
-            "Save a PNG image of the window",
+            "Save an image of the window (PNG, JPEG or BMP)",
         )
         file_menu.addSeparator()
         # Some platforms (e.g. Windows) have no standard Quit key; use Ctrl+Q.
@@ -2496,12 +2616,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._demo_action.triggered.connect(lambda _c=False: self._use_demo_device())
         self._add_action(
             device_menu,
-            "&Scan for Devices",
+            "&Find Connected Devices...",
             self._refresh_devices,
-            tip="List the SDR devices currently plugged in",
+            tip="List the SDR devices plugged in now, to connect one (or the "
+            "drivers to install when none is found)",
         )
         device_menu.addSeparator()
         self._second_rx.add_menu_action(device_menu)  # Second Receiver... (T13)
+        # A key of its own, so F1 and the quick tips name it like the other
+        # tools.
+        second = getattr(self._second_rx, "action", None)
+        if second is not None:
+            second.setShortcut(QKeySequence("Ctrl+Shift+N"))
 
         # ---- Radio ----
         radio_menu = menubar.addMenu("&Radio")
@@ -2531,31 +2657,59 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             checkable=True,
         )
         radio_menu.addSeparator()
-        self._audio_action = self._add_action(
-            radio_menu,
-            "&Audio Output",
-            self._set_audio_enabled,
-            tip="Play the tuned signal (AM, FM, SSB or CW) through your "
-            "speakers while it is above squelch",
+        # Audio: Mute (the toolbar's Audio button; M with the plots
+        # focused), the volume, and where it plays.
+        audio_menu = radio_menu.addMenu("A&udio")
+        audio_menu.setToolTipsVisible(True)
+        self._mute_action = self._add_action(
+            audio_menu,
+            "&Mute",
+            lambda muted: self._set_audio_enabled(not muted),
+            "Ctrl+M",
+            "Silence the speaker, or play the tuned signal (AM, FM, SSB or CW) "
+            "again while it is above squelch (also M with the plots focused, "
+            "and the Audio button)",
             checkable=True,
-            checked=self._audio_enabled and self._audio.available,
+            checked=not (self._audio_enabled and self._audio.available),
         )
-        self._audio_action.setEnabled(self._audio.available)
+        self._mute_action.setEnabled(self._audio.available)
+        self._volume_up_action = self._add_action(
+            audio_menu,
+            "Volume &Up",
+            lambda: self._step_volume(1),
+            "Ctrl+Up",
+            f"{_VOLUME_STEP}% louder (the volume slider next to the Audio button)",
+        )
+        self._volume_down_action = self._add_action(
+            audio_menu,
+            "Volume &Down",
+            lambda: self._step_volume(-1),
+            "Ctrl+Down",
+            f"{_VOLUME_STEP}% quieter",
+        )
+        audio_menu.addSeparator()
+        self._add_action(
+            audio_menu,
+            "&Output Device...",
+            self._show_preferences,
+            tip="Choose the speakers, headset or other output the audio plays "
+            "through (Tools > Preferences)",
+        )
         radio_menu.addSeparator()
+        # The one preset table (gui/presets.py): the favourites, then every
+        # preset by category, as the Presets group lists them.
         bands_menu = radio_menu.addMenu("Band &Presets")
-        for preset in BAND_PRESETS:
-            freq_text = format_frequency(preset.frequency_hz)
-            act = QAction(f"{preset.label}\t{freq_text}", self)
-            act.setStatusTip(
-                f"Tune to {freq_text} in {preset.mode} mode, "
-                f"{preset.bandwidth} bandwidth"
+        bands_menu.setToolTipsVisible(True)
+        for item, preset in zip(BAND_PRESETS, preset_table.favourites(), strict=True):
+            self._add_preset_action(bands_menu, preset, item.label)
+        bands_menu.addSeparator()
+        for category in preset_table.categories():
+            submenu = bands_menu.addMenu(
+                _PRESET_CATEGORY_LABELS.get(category, category)
             )
-            act.triggered.connect(
-                lambda _c=False, p=preset: self._apply_band_preset(
-                    p.frequency_hz, p.mode, p.label
-                )
-            )
-            bands_menu.addAction(act)
+            submenu.setToolTipsVisible(True)
+            for preset in preset_table.presets(category):
+                self._add_preset_action(submenu, preset, preset.name.replace("&", "&&"))
         self._add_action(
             radio_menu,
             "Enter &Frequency",
@@ -2628,9 +2782,21 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             checkable=True,
             checked=self._settings.get_bool("tuning/keep_centered", False),
         )
+        self._band_plan_action = self._add_action(
+            radio_menu,
+            "Choose &Mode From Band Plan",
+            lambda on: self._save_setting("tuning/band_plan_mode", bool(on)),
+            tip="When you type a frequency (or pick a bookmark without a mode) "
+            "in another band, listen the way that band usually is heard: its "
+            "mode, filter and FM deviation (broadcast FM settings on a 2 m "
+            "repeater are about 23 dB too quiet). Presets and bookmarks with "
+            "a mode keep theirs",
+            checkable=True,
+            checked=self._settings.get_bool("tuning/band_plan_mode", True),
+        )
         self._rds_auto_action = self._add_action(
             radio_menu,
-            "&RDS Station Names",
+            "R&DS Station Names",
             self._set_rds_auto,
             tip="While you listen to broadcast FM, decode the station's RDS in "
             "the background: its name next to FREQ (the RadioText in its "
@@ -2640,7 +2806,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         self._track_action = self._add_action(
             radio_menu,
-            "Track Signal (AF&C)",
+            "Track Si&gnal (AFC)",
             lambda on: self._signal_tools.set_tracking(on),
             tip="Keep a drifting signal centred: the tuned frequency follows it "
             "(narrow FM, AM and CW; the receiver retunes only at the span's "
@@ -2657,16 +2823,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._spectrum_action = self._add_action(
             view_menu,
             "&Spectrum",
-            self._spectrum.setVisible,
-            tip="Show or hide the spectrum plot",
+            lambda shown: self._set_plot_visible(self._spectrum, shown),
+            tip="Show or hide the spectrum plot (remembered)",
             checkable=True,
             checked=True,
         )
         self._waterfall_action = self._add_action(
             view_menu,
             "&Waterfall",
-            self._waterfall.setVisible,
-            tip="Show or hide the waterfall",
+            lambda shown: self._set_plot_visible(self._waterfall, shown),
+            tip="Show or hide the waterfall (remembered)",
             checkable=True,
             checked=True,
         )
@@ -2679,15 +2845,36 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._add_zoom_menu(view_menu)
         view_menu.addSeparator()
         panels_menu = view_menu.addMenu("&Panels")
-        for index, (key, title, tip) in enumerate(self._panel_specs):
-            shortcut = f"Ctrl+{index + 1}" if index < 9 else None
-            self._add_action(
-                panels_menu,
-                self._PANEL_MENU_TEXT.get(key, title),
-                lambda k=key: self._show_panel(k, focus=True),
-                shortcut,
-                tip,
-            )
+        panels_menu.setToolTipsVisible(True)
+        # In the tab bar's order (the Ham group's panels between
+        # separators); each keeps its Ctrl+number: Ctrl+1 Decoder, Ctrl+2
+        # Bookmarks, Ctrl+3-6 the Ham panels, Ctrl+7 Info, Ctrl+8
+        # Scanner, Ctrl+9 Signal.
+        self._panel_actions: Dict[str, QAction] = {}
+        for group in self._panel_menu_groups():
+            if panels_menu.actions():
+                panels_menu.addSeparator()
+            for key in group:
+                index = self._panel_index(key)
+                title, tip = next((t, tp) for k, t, tp in self._panel_specs if k == key)
+                action = self._add_action(
+                    panels_menu,
+                    self._PANEL_MENU_TEXT.get(key, title),
+                    lambda k=key: self._show_panel(k, focus=True),
+                    f"Ctrl+{index + 1}" if index < 9 else None,
+                    tip,
+                )
+                action.setData(f"panel:{key}")
+                self._panel_actions[key] = action
+        self._tools_max_action = self._add_action(
+            view_menu,
+            "&Maximize Tool Tabs",
+            tip="Give the tool tabs (Decoder, Bookmarks, ...) the whole right "
+            "column; the control panel steps aside until you turn this off. "
+            "Double-clicking a tab does the same",
+            checkable=True,
+        )
+        self._tool_tabs.set_action(self._tools_max_action)
         self._add_action(
             view_menu,
             "&Focus Spectrum",
@@ -2735,35 +2922,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "Show the Scanner tab: sweep a band, stop on signals or scan your "
             "bookmarks",
         )
-        self._add_action(
+        self._tool_panel_action(
             tools_menu,
+            "decoder",
             "Protocol &Decoder",
-            self._show_decoder_config,
-            tip="Show the Decoder panel",
+            "Show the Decoder tab: POCSAG, FLEX, ADS-B, ACARS, AX.25/APRS, RDS "
+            "and Morse code from the live signal",
         )
-        if HAS_HAM_RADIO:
-            self._add_action(
-                tools_menu,
-                "AM/FM Radio &Tuner...",
-                self._show_radio_tuner,
-                "Ctrl+R",
-                "Open the broadcast radio tuner window",
-            )
-            self._add_action(
-                tools_menu,
-                "SSTV: Tune to &ISS (145.800 MHz)",
-                self._tune_iss_from_menu,
-                tip="Tune to the ISS SSTV downlink (FM, 5 kHz deviation), start "
-                "receiving and listen for images in the SSTV panel",
-            )
-            self._add_action(
-                tools_menu,
-                "Transmit Te&xt...",
-                self._show_transmit_text,
-                "Ctrl+Shift+T",
-                "Send text in Morse code (CW), RTTY, PSK31 or ASCII FSK: preview "
-                "it, save it as audio or I/Q, or transmit it on a HackRF One",
-            )
         self._add_action(
             tools_menu,
             "&Identify Signal",
@@ -2789,15 +2954,68 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Home, Page Up and Page Down are handled in keyPressEvent (plots
         # focused, like Space); the suffix shows the key here and in F1.
         for text, step, tip in (
-            ("Tune to Strongest Signal\tHome", "strongest", "The strongest in view"),
-            ("Next Signal Up\tPgUp", "up", "The next signal above the tuned one"),
-            ("Next Signal Down\tPgDown", "down", "The next signal below"),
+            ("Tune to S&trongest Signal\tHome", "strongest", "The strongest in view"),
+            ("Next Signal &Up\tPgUp", "up", "The next signal above the tuned one"),
+            ("Next Signal Do&wn\tPgDown", "down", "The next signal below"),
         ):
             self._add_action(
                 signal_menu,
                 text,
                 lambda s=step: self._signal_tools.step(s),
                 tip=tip + " (keys work while the plots have the focus)",
+            )
+        if HAS_HAM_RADIO:
+            self._add_action(
+                tools_menu,
+                "AM/FM Radio &Tuner...",
+                self._show_radio_tuner,
+                "Ctrl+R",
+                "Open the broadcast radio tuner window",
+            )
+            # The Ham tab's tools (also View > Panels).
+            tools_menu.addSeparator()
+            self._tool_panel_action(
+                tools_menu,
+                "s_meter",
+                "S-&Meter",
+                "Show the S-Meter tab (Ham): signal strength in S-units, "
+                "with the RST report",
+            )
+            self._tool_panel_action(
+                tools_menu,
+                "sstv",
+                "SST&V Decoder",
+                "Show the SSTV tab (Ham): decode slow-scan TV pictures, "
+                "e.g. from the ISS",
+            )
+            self._add_action(
+                tools_menu,
+                "SSTV: Tune t&o ISS (145.800 MHz)",
+                self._tune_iss_from_menu,
+                tip="Tune to the ISS SSTV downlink (FM, 5 kHz deviation), start "
+                "receiving and listen for images in the SSTV tab",
+            )
+            self._tool_panel_action(
+                tools_menu,
+                "ham_id",
+                "Ham ID (St&ation ID)",
+                "Show the Ham ID tab (Ham): your callsign, license class, "
+                "how your station ID is sent, and Send ID Now",
+            )
+            self._tool_panel_action(
+                tools_menu,
+                "qrp",
+                "&QRP Calculator",
+                "Show the QRP tab (Ham): output power through your "
+                "amplifier chain, the legal limit here, miles per watt",
+            )
+            self._add_action(
+                tools_menu,
+                "Transmit Te&xt...",
+                self._show_transmit_text,
+                "Ctrl+Shift+T",
+                "Send text in Morse code (CW), RTTY, PSK31 or ASCII FSK: preview "
+                "it, save it as audio or I/Q, or transmit it on a HackRF One",
             )
         tools_menu.addSeparator()
         self._add_action(
@@ -2834,7 +3052,26 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "List every keyboard shortcut",
         )
         help_menu.addSeparator()
-        self._add_action(help_menu, "&About SDR Module...", self._show_about)
+        self._add_action(
+            help_menu,
+            "Online &Documentation",
+            self._open_documentation,
+            tip="Open the user guide (the project's README) in your browser",
+        )
+        self._add_action(
+            help_menu,
+            "&Report a Problem...",
+            self._report_problem,
+            tip="Open the issue tracker in your browser with the version info "
+            "filled in (also copied to the clipboard)",
+        )
+        help_menu.addSeparator()
+        self._add_action(
+            help_menu,
+            "&About SDR Module...",
+            self._show_about,
+            tip="Versions, links, and Copy Version Info for a bug report",
+        )
 
     def _setup_toolbar(self):
         """Setup toolbar."""
@@ -2878,30 +3115,27 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # never falls into the toolbar's overflow); a click stops it.
         self._tx_station.add_toolbar_badge(toolbar)
 
-        toolbar.addSeparator()
-
-        # Audio on/off (the same switch as Radio > Audio Output) and volume.
+        # Audio (on, muted, no output device, no audio in I/Q mode; the same
+        # switch as Radio > Audio > Mute) and the volume: in the receiver
+        # bar's row, with MODE, FILTER and STEP (how you listen), so this
+        # row fits a 1024 px window (see _setup_receiver_bar).
         self._audio_button = QPushButton(self._AUDIO_ON_TEXT)
         self._audio_button.setCheckable(True)
         self._audio_button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._audio_button.setAccessibleName("Audio output")
         self._audio_button.setMinimumWidth(
-            self._text_width(
-                self._audio_button, self._AUDIO_ON_TEXT, self._AUDIO_OFF_TEXT
-            )
-            + 20  # icon
+            self._text_width(self._audio_button, *self._AUDIO_TEXTS) + 20  # icon
         )
-        self._audio_button.clicked.connect(self._audio_action.setChecked)
-        toolbar.addWidget(self._audio_button)
+        self._audio_button.clicked.connect(self._on_audio_button)
         self._volume_slider = QSlider(Qt.Orientation.Horizontal)
         self._volume_slider.setRange(0, 100)
-        self._volume_slider.setPageStep(10)
+        self._volume_slider.setSingleStep(_VOLUME_STEP)
+        self._volume_slider.setPageStep(_VOLUME_STEP)
         self._volume_slider.setValue(self._saved_volume())
         self._volume_slider.setFixedWidth(96)
         self._volume_slider.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self._volume_slider.setAccessibleName("Volume")
         self._volume_slider.valueChanged.connect(self._on_volume_changed)
-        toolbar.addWidget(self._volume_slider)
         self._on_volume_changed(self._volume_slider.value(), save=False)
 
         toolbar.addSeparator()
@@ -2916,13 +3150,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._freq_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self._freq_label.setToolTip(
-            "Tuned frequency. Click here (or press Ctrl+L) to type a new one; "
-            "scroll over a digit to tune that digit. You can also click the "
-            "spectrum or waterfall, scroll over them, or use Left/Right while "
-            "they have the focus (the STEP in the receiver bar; Shift: ten "
-            "steps, Ctrl: 1 MHz)."
-        )
+        self._freq_label.setToolTip(self._FREQ_TIP)
         self._freq_label.setAccessibleName("Tuned frequency")
         # Clicking the readout jumps to the Frequency field.
         self._freq_label.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2960,6 +3188,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._receiver_bar = ReceiverBar(panel._demod_combo, panel._bw_combo, self)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._receiver_bar)
         self._receiver_bar.step_changed.connect(self._set_step)
+        # How you listen, all in this row: the Audio button and the volume
+        # follow MODE, FILTER and STEP (T12: the top row then fits 1024 px).
+        self._receiver_bar.addSeparator()
+        self._receiver_bar.addWidget(self._audio_button)
+        self._receiver_bar.addWidget(self._volume_slider)
 
     def _setup_statusbar(self):
         """Setup status bar."""
@@ -2970,21 +3203,29 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         statusbar.setSizeGripEnabled(False)
         self.setStatusBar(statusbar)
 
-        # Device state badge + device name + sample rate (left)
+        # Device state badge + device name + sample rate (left). A click on
+        # the badge or the name does what helps next (connect or use the demo
+        # device, start receiving, Device > Connect...; see
+        # _on_state_badge_clicked); a click on the rate opens its menu.
         self._state_badge = QLabel("NO DEVICE")
         set_role(self._state_badge, "badge", "warning")
         self._state_badge.setAccessibleName("Receiver state")
+        self._state_badge.installEventFilter(self)
         statusbar.addWidget(self._state_badge)
 
         self._device_label = QLabel("No device")
         set_role(self._device_label, "value")
         self._device_label.setToolTip(
-            "Current device. Change it with Device > Connect..."
+            "Current device. Click to change it (Device > Connect...)."
         )
+        self._device_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._device_label.installEventFilter(self)
         statusbar.addWidget(self._device_label)
 
         self._rate_label = QLabel("")
-        self._rate_label.setToolTip(get_short_tip("sample_rate"))
+        self._rate_label.setToolTip(
+            get_short_tip("sample_rate") + " Click to change it (Device > Sample Rate)."
+        )
         # A click opens the sample rate menu (Device > Sample Rate).
         self._rate_label.setAccessibleName("Sample rate")
         self._rate_label.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2993,8 +3234,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         # Transient messages (neutral, success or error), auto-clearing. A
         # long message ends in "…" instead of raising the window's minimum
-        # width; the full text is also in the tooltip.
+        # width; the full text is also in the tooltip. A click lists the
+        # last messages (they vanish after a few seconds).
+        self._status_history = StatusHistory()
+        self._status_popup: Optional[StatusHistoryPopup] = None
         self._message_label = _ElidedLabel("")
+        self._message_label.setAccessibleName("Status messages")
+        self._message_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._message_label.setToolTip(
+            f"Click for the last {STATUS_HISTORY_SIZE} status messages."
+        )
+        self._message_label.installEventFilter(self)
         statusbar.addWidget(self._message_label, 1)
         self._message_timer = QTimer(self)
         self._message_timer.setSingleShot(True)
@@ -3094,11 +3344,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder_panel.decode_file_requested.connect(
             lambda: self._decode_recording()
         )
-        # Apply Preset tunes silently; confirm it in the status bar. (The
-        # panel's own handler is connected first, so this runs after it.)
-        self._control_panel._apply_preset_btn.clicked.connect(
-            self._on_panel_preset_applied
-        )
+        # A preset applied (Apply Preset, Radio > Band Presets, the welcome
+        # screen): its decoder, and the status bar says what was set.
+        self._control_panel.preset_applied.connect(self._on_preset_applied)
         # After Ctrl+L, Enter in the Frequency field returns to the plots.
         entry = self._frequency_field()
         if hasattr(entry, "editingFinished"):
@@ -3146,7 +3394,36 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         ):
             self._device_controls.popup_rate_menu(self._rate_label)
             return True
+        if (
+            event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            if obj is self._own("_message_label"):
+                self._show_status_history()
+                return True
+            if obj is self._own("_state_badge"):
+                self._on_state_badge_clicked()
+                return True
+            if obj is self._own("_device_label"):
+                self._on_device_label_clicked()
+                return True
         return super().eventFilter(obj, event)
+
+    def _on_state_badge_clicked(self) -> None:
+        """The status bar's state badge: NO DEVICE connects one (or the
+        demo device), STOPPED starts receiving, ON AIR stops transmitting."""
+        if self._tx_busy():
+            self._tx_station.stop()
+        elif not (self._is_running and self._device is not None):
+            self._start_acquisition()
+
+    def _on_device_label_clicked(self) -> None:
+        """The status bar's device name: connect one (no device: the same
+        choice as Start), or Device > Connect... to change it."""
+        if self._device is None:
+            self._start_acquisition()
+        else:
+            self._show_device_dialog()
 
     def _frequency_field(self) -> "QWidget":
         """The Frequency spin box of the control panel."""
@@ -3156,6 +3433,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _focus_frequency_entry(self) -> None:
         """Put the cursor in the Frequency field, ready to type. Enter then
         tunes and returns the focus to the plots."""
+        # The field is in the control panel: back from Maximize Tool Tabs.
+        tool_tabs = self._own("_tool_tabs")
+        if tool_tabs is not None:
+            tool_tabs.restore()
         field = self._frequency_field()
         area = self._control_panel.findChild(QScrollArea)
         if area is None and isinstance(self._right_splitter.widget(0), QScrollArea):
@@ -3293,6 +3574,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._waterfall.set_paused(not self._waterfall.is_paused())
             event.accept()
             return
+        if (
+            key == Qt.Key.Key_M
+            and mods == Qt.KeyboardModifier.NoModifier
+            and self._plots_focused()
+        ):
+            # M mutes / unmutes, like Ctrl+M (Radio > Audio > Mute).
+            if self._focus_uses_key(key):
+                event.ignore()
+                return
+            if not event.isAutoRepeat():
+                self._mute_action.trigger()
+            event.accept()
+            return
         steps = {
             Qt.Key.Key_Home: "strongest",
             Qt.Key.Key_PageUp: "up",
@@ -3314,7 +3608,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # ------------------------------------------------------------------
 
     def _show_status_message(
-        self, message: str, tone: Optional[str] = None, duration_ms: int = 4000
+        self,
+        message: str,
+        tone: Optional[str] = None,
+        duration_ms: int = 4000,
+        history: bool = True,
+        log: bool = True,
     ) -> None:
         """Show a transient message in the status bar.
 
@@ -3323,11 +3622,21 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             tone: ``None`` (neutral), ``"success"``, ``"info"``, ``"warning"``
                 or ``"danger"``
             duration_ms: How long to show before auto-clearing
+            history: Keep it in the last 20 messages (a click on the message
+                area lists them); False for passing flashes ("Volume 60%").
+            log: A warning also goes to Tools > Error History; False when
+                the caller logged it already (so it is listed once).
         """
         self._message_label.setText(message)
-        self._message_label.setToolTip(message)
+        self._message_label.setToolTip(
+            f"{message}\n\nClick for the last {STATUS_HISTORY_SIZE} messages."
+        )
         set_tone(self._message_label, tone)
         self._message_timer.start(max(500, int(duration_ms)))
+        if history:
+            self._status_history.add(message, tone)
+        if log and tone == "warning":
+            logger.warning(message)
 
     def _show_status_error(
         self, message: str, duration_ms: int = 6000, log: bool = True
@@ -3337,12 +3646,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         already, so the event is listed once)."""
         self._show_status_message(message, "danger", duration_ms)
         if log:
-            logger.warning(f"Status bar error: {message}")
+            logger.warning(message)
 
     def _clear_status_message(self) -> None:
         self._message_label.setText("")
-        self._message_label.setToolTip("")
+        self._message_label.setToolTip(
+            f"Click for the last {STATUS_HISTORY_SIZE} status messages."
+        )
         set_tone(self._message_label, None)
+
+    def _show_status_history(self) -> None:
+        """A click on the message area: the last messages, newest first."""
+        popup = StatusHistoryPopup(
+            self._status_history, self, open_error_history=self._show_error_history
+        )
+        self._status_popup = popup
+        popup.show_above(self._message_label)
 
     # ------------------------------------------------------------------
     # State presentation
@@ -3414,28 +3733,41 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "&Stop Receiving\tSpace" if running else "&Start Receiving\tSpace"
         )
 
-        # Status bar
+        # Status bar (the badge and the device name are clickable where a
+        # click helps: see _on_state_badge_clicked)
+        badge = self._state_badge
         if not has_device:
-            self._state_badge.setText("NO DEVICE")
-            set_tone(self._state_badge, "warning")
-            self._state_badge.setToolTip(
-                "Use Device > Connect... or Device > Use Demo Device"
+            badge.setText("NO DEVICE")
+            set_tone(badge, "warning")
+            badge.setToolTip(
+                "No device. Click to connect an SDR or use the demo device "
+                "(Device > Connect..., Device > Use Demo Device)."
             )
         elif running:
-            self._state_badge.setText("RUNNING")
-            set_tone(self._state_badge, "success")
-            self._state_badge.setToolTip("Receiving samples")
+            badge.setText("RUNNING")
+            set_tone(badge, "success")
+            badge.setToolTip("Receiving samples (Space stops)")
         else:
-            self._state_badge.setText("STOPPED")
-            set_tone(self._state_badge, "muted")
-            self._state_badge.setToolTip("Press Start or Space to receive")
+            badge.setText("STOPPED")
+            set_tone(badge, "muted")
+            badge.setToolTip("Stopped. Click (or press Space) to receive.")
+        badge.setCursor(
+            Qt.CursorShape.ArrowCursor if running else Qt.CursorShape.PointingHandCursor
+        )
         if self._tx_busy():
             self._show_tx_state(True)
         if has_device:
             self._device_label.setText(self._device_display_name())
+            self._device_label.setToolTip(
+                "Current device. Click to change it (Device > Connect...)."
+            )
         else:
             self._device_label.setText(
-                "Press Start to connect a device or run the demo"
+                "No device: click to connect one or use the demo"
+            )
+            self._device_label.setToolTip(
+                "Click to connect an SDR or use the demo device (the same "
+                "choice as Start)."
             )
         label_role = "value" if has_device else "muted"
         if self._device_label.property("role") != label_role:
@@ -3474,8 +3806,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._sync_plot_state(running, has_device)
 
         # Only a HackRF One can send the Ham ID: what Send ID Now would do
-        # (or why it can't), and the QRP calculator's SDR output.
+        # (or why it can't), and the QRP calculator's SDR output. The
+        # presets' transmit line shows only with one (ux:UX-U08).
         self._tx_station.refresh()
+        self._control_panel.set_transmit_info_visible(self._device_can_transmit())
         # An open radio tuner: what the device can tune; no STEREO when idle.
         self._sync_tuner_device()
 
@@ -3528,12 +3862,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return isinstance(self._device, HackRFDevice)
 
     def _update_window_title(self) -> None:
-        if self._device is None:
-            self.setWindowTitle("SDR Module")
-        elif self._demo_mode:
-            self.setWindowTitle("Demo Mode — SDR Module")
-        else:
-            self.setWindowTitle(f"{self._device_display_name()} — SDR Module")
+        """What the taskbar shows: ``"● REC · 100.100 MHz FM — Demo Mode —
+        SDR Module"`` (REC only while a recording captures), so a minimized
+        window still says where it is tuned and that it records."""
+        parts = []
+        if self._device is not None:
+            mode = self._mode_text(self._control_panel.get_demod_mode())
+            head = f"{format_frequency(self._current_frequency())} {mode}"
+            if self._recording_capturing() or self._own("_audio_take") is not None:
+                head = f"● REC · {head}"
+            parts.append(head)
+            parts.append(
+                "Demo Mode" if self._demo_mode else self._device_display_name()
+            )
+        parts.append("SDR Module")
+        title = " — ".join(parts)
+        if self.windowTitle() != title:
+            self.setWindowTitle(title)
 
     def _refresh_info_panel(self) -> None:
         """Fill the Info tab from the current state."""
@@ -3555,6 +3900,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         else:
             p.set_value("state", "Stopped", "muted")
         p.set_value("frequency", format_frequency(self._current_frequency()))
+        line, _note = self._band_plan_text
+        p.set_value("band", line or "Not in a band the app knows")
         p.set_value("lo", format_frequency(self._lo_frequency()))
         p.set_value("sample_rate", format_rate(rate) if has_device else _NO_VALUE)
         p.set_value("span", format_bandwidth(rate) if has_device else _NO_VALUE)
@@ -3627,7 +3974,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         owner = self._panel_owners.get(key, self._right_tabs)
         if owner is not self._right_tabs:
-            # A nested panel (e.g. the Ham Radio group): show its group first.
+            # A nested panel (e.g. the Ham group): show its group first.
             self._right_tabs.setCurrentWidget(owner)
         owner.setCurrentWidget(page)
         if focus:
@@ -3665,18 +4012,27 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._apply_default_splitter_sizes()
 
     def _apply_default_splitter_sizes(self) -> None:
-        """Default proportions: controls ~30% (380-440 px) wide, the control
+        """Default proportions: controls ~30% (400-440 px) wide, the control
         panel over ~55% of the right column, spectrum over 40% of the plots."""
         width = self._main_splitter.width()
         if width < 400:
             width = self.width() - 12
-        right = int(min(440, max(380, width * 0.3)))
+        # (At least 400 px: the tool-tab bar shows every tab, with the
+        # maximize arrows and the Decoder's count, at 1024 px too.)
+        right = int(min(440, max(400, width * 0.3)))
         self._main_splitter.setSizes([max(200, width - right), right])
 
         height = self._right_splitter.height()
         if height < 300:
             height = self.height() - 120
-        top = self._snap_to_section_gap(int(height * 0.55), height)
+        # The tool tabs need their minimum height: a split lower than this
+        # would be pushed up by QSplitter, into a group (Presets at 640 px).
+        limit = (
+            height
+            - self._right_splitter.handleWidth()
+            - self._right_tabs.minimumSizeHint().height()
+        )
+        top = self._snap_to_section_gap(int(height * 0.55), height, limit)
         self._right_splitter.setSizes([top, max(120, height - top)])
 
         height = self._display_splitter.height()
@@ -3685,13 +4041,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         spectrum = int(height * 0.4)
         self._display_splitter.setSizes([spectrum, max(120, height - spectrum)])
 
-    def _snap_to_section_gap(self, top: int, height: int) -> int:
+    def _snap_to_section_gap(
+        self, top: int, height: int, limit: Optional[int] = None
+    ) -> int:
         """Move the control pane's lower edge into the gap after a section.
 
         A split that falls inside a group box leaves a sliver of its title or
         border showing above the tool tabs, which looks broken. Use the gap
         nearest to ``top`` that keeps the pane between 40% and 70% of the
-        column; otherwise keep ``top``.
+        column; otherwise keep ``top``. Gaps lower than ``limit`` (where the
+        tool tabs' minimum height would push the split back up, into a
+        group) don't count: then the deepest gap above it is used (at 640 px
+        the one after Frequency), or ``limit`` itself.
         """
         pane = self._right_splitter.widget(0)
         if pane is None:
@@ -3717,10 +4078,30 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Could not measure control panel sections: %s", exc)
             return top
+        if limit is not None:
+            gaps = [g for g in gaps if g <= limit]
         usable = [g for g in gaps if 0.4 * height <= g <= 0.7 * height]
-        if not usable:
+        if usable:
+            return min(usable, key=lambda g: abs(g - top))
+        if limit is None:
             return top
-        return min(usable, key=lambda g: abs(g - top))
+        if gaps:
+            return max(gaps)  # never through a group, even if lower
+        return max(0, min(top, limit))
+
+    def _set_plot_visible(self, plot: "QWidget", shown: bool) -> None:
+        """View > Spectrum / Waterfall. Hiding the plot with the keyboard
+        focus gives it to the other plot (Qt would move it on to the
+        Frequency field, where Space typed and Up retuned 10 kHz), and the
+        choice is remembered."""
+        focus = QApplication.focusWidget()
+        had_focus = focus is not None and (focus is plot or plot.isAncestorOf(focus))
+        plot.setVisible(bool(shown))
+        if had_focus and not shown:
+            self._focus_plots()
+        if not self._restoring:
+            key = "spectrum" if plot is self._spectrum else "waterfall"
+            self._save_setting(f"layout/{key}_visible", bool(shown))
 
     def _sync_plot_actions(self, _checked: bool = True) -> None:
         """Keep at least one plot visible: the last visible plot's menu item
@@ -3738,6 +4119,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._spectrum.setVisible(True)
         self._waterfall.setVisible(True)
         self._waterfall.set_frequency_axis_visible(False)
+        self._tool_tabs.restore()
         self._apply_default_splitter_sizes()
         self._show_status_message("Layout reset")
 
@@ -3946,7 +4328,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # E.g. ADS-B at 1.8 MS/s: say so instead of "listening" forever.
             logger.warning("%s decoder: %s", text, status.problem)
             remedy = f" {status.remedy}" if status.remedy else ""
-            self._show_status_message(f"{status.problem}.{remedy}", "warning", 10000)
+            self._show_status_message(  # (logged just above: listed once)
+                f"{status.problem}.{remedy}", "warning", 10000, log=False
+            )
 
     def _decoder_offset_hz(self) -> float:
         """The tuned channel's offset from the LO (0 until the window tunes
@@ -4108,7 +4492,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             (t for k, t, _tip in self._panel_specs if k == "decoder"), "Decoder"
         )
         count = self._decoder_unread
-        title = f"{base} ({count:,})" if count else base
+        # (Capped at "99+": the bar keeps every tab in view; the tooltip
+        # and the status-bar chip give the number.)
+        shown = f"{count:,}" if count < 100 else "99+"
+        title = f"{base} ({shown})" if count else base
         if owner.tabText(index) != title:
             owner.setTabText(index, title)
             owner.setTabToolTip(
@@ -4259,8 +4646,35 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         signal_tools = self._own("_signal_tools")
         if signal_tools is not None:
             signal_tools.frequency_changed(freq_hz)
+        # The taskbar says where it is tuned; the Info tab (and FREQ's
+        # tooltip) the band plan here; the Presets group the preset here.
+        self._update_window_title()
+        self._update_band_plan(freq_hz)
+        self._control_panel.show_preset_for(freq_hz)
+        self._shown_freq_hz = float(freq_hz)
 
         logger.debug(f"Frequency changed to {freq_hz/1e6:.3f} MHz")
+
+    def _update_band_plan(self, freq_hz: float) -> None:
+        """The band plan at the tuned frequency (its band and segment, who
+        may transmit there, the modes and power limit): the Info tab's Band
+        plan row and FREQ's tooltip."""
+        from ..core.band_info import band_plan_details
+        from ..core.frequency_manager import get_frequency_manager
+
+        line, note = band_plan_details(
+            freq_hz, get_frequency_manager().get_license_class()
+        )
+        self._band_plan_text = (line, note)
+        tip = self._FREQ_TIP
+        if line:
+            tip += f"\n\nBand plan: {line}." + (f"\n{note}" if note else "")
+        label = self._own("_freq_label")
+        if label is not None and label.toolTip() != tip:
+            label.setToolTip(tip)
+        info = self._own("_info_panel")
+        if info is not None:
+            info.set_value("band", line or "Not in a band the app knows")
 
     # ------------------------------------------------------------------
     # Tuning: the LO and the VFO
@@ -4269,7 +4683,70 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _on_panel_frequency_changed(self, freq_hz: float) -> None:
         """The control panel asks for ``freq_hz`` (typed, the Frequency
         field's arrows, a quick-tune button, Apply Preset)."""
-        self._tune_to(freq_hz)
+        # (The field shows the new frequency already: where it came from is
+        # the frequency last tuned.)
+        before = self.__dict__.get("_shown_freq_hz")
+        if before is None:
+            before = self._current_frequency()
+        if self._tune_to(freq_hz) and not self._control_panel._applying_preset:
+            # (A preset sets its own mode right after.)
+            self._listen_by_band_plan(before, self._current_frequency())
+
+    def _listen_by_band_plan(self, before_hz: float, freq_hz: float) -> bool:
+        """After a far tune with no mode of its own (a typed frequency, a
+        bookmark or recent frequency without one): in another band whose
+        usual listening differs from the current mode profile, listen the
+        band's way (its mode, filter and FM deviation) and say so. Radio >
+        Choose Mode From Band Plan turns this off. True when it changed."""
+        action = self._own("_band_plan_action")
+        if action is not None and not action.isChecked():
+            return False
+        from ..core.band_plan import band_for
+
+        band = band_for(freq_hz)
+        if band is None or not band.mode:
+            return False
+        before = band_for(before_hz)
+        if before is not None and before.name == band.name:
+            return False  # the same band: the mode you chose there stays
+        mode, deviation = self._listening_mode()
+        broadcast = _BROADCAST_FM_DEVIATION
+        if mode == band.mode:
+            if mode != "FM" or (deviation == broadcast) == (
+                band.fm_deviation == broadcast
+            ):
+                return False  # already listening that way
+        elif mode in _SIDEBANDS and band.mode in _SIDEBANDS:
+            return False  # SSB: the sideband is yours (FT8 is USB on 40 m too)
+        elif mode == "CW" and self._segment_allows_cw(freq_hz):
+            return False  # Morse code in a CW segment stays CW
+        self._set_demod_mode(
+            band.mode, band.fm_deviation or None, band.bandwidth or None
+        )
+        how = self._mode_text(band.mode)
+        if band.mode == "FM":
+            kind = "broadcast" if band.fm_deviation == broadcast else "narrow"
+            how = (
+                f"FM ({kind}, {self._control_panel.get_fm_deviation_text()} deviation)"
+            )
+        self._show_status_message(
+            f"{band.name}: listening in {how} with a "
+            f"{self._control_panel._bw_combo.currentText()} filter, as the band is "
+            "usually heard (Radio > Choose Mode From Band Plan)",
+            "info",
+            6000,
+        )
+        return True
+
+    @staticmethod
+    def _segment_allows_cw(freq_hz: float) -> bool:
+        """Whether an amateur band segment at ``freq_hz`` lists CW."""
+        from ..core.frequency_manager import AMATEUR_BAND_PRIVILEGES
+
+        return any(
+            band.start_hz <= freq_hz <= band.end_hz and "CW" in band.modes
+            for band in AMATEUR_BAND_PRIVILEGES
+        )
 
     def _keep_centered(self) -> bool:
         """Radio > Keep Tuned Frequency Centered: every tune retunes the LO."""
@@ -4422,7 +4899,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     return self._refuse_tuning(
                         f"A {width} channel at {format_frequency(freq)} doesn't "
                         f"fit inside {why} ({covered}): choose a narrower "
-                        "Bandwidth, or tune nearer its middle."
+                        "Filter, or tune nearer its middle."
                     )
                 return self._refuse_tuning(
                     f"{format_frequency(freq)} is outside {why}, which covers "
@@ -4622,9 +5099,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._commit_history_entry()
 
     def _tune_entry(self, entry: "TunedEntry") -> bool:
-        """Tune to a history or recent entry, in its mode."""
+        """Tune to a history or recent entry, in its mode (one saved
+        without a mode: the band plan's, in another band)."""
+        before = self._current_frequency()
         if not self.set_frequency(entry.freq_hz):
             return False
+        if not entry.mode:
+            self._listen_by_band_plan(before, self._current_frequency())
         if entry.mode and self._listening_mode() != (entry.mode, entry.deviation):
             self._set_demod_mode(
                 entry.mode,
@@ -5031,6 +5512,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._load_step_for_mode()
         self._ensure_vfo_fits()
         self._note_tuned()
+        self._update_window_title()
+        self._sync_audio_ui()  # (no audio in I/Q mode)
         if not self._restoring and mode in _AUDIBLE_MODES:
             self._show_status_message(f"{mode}: {self._filter_summary()}", None, 3000)
         if mode != "FM" and self._sstv_listening():
@@ -5110,6 +5593,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if HAS_HAM_RADIO:
             self._qrp_panel.refresh_license()  # the legal limit here
         self._tx_station.refresh()  # what Send ID Now may do now
+        self._update_band_plan(self._current_frequency())  # (your license here)
 
     def _save_ham_id_settings(self, *_args) -> None:
         """Persist the Ham ID panel (callsign, CW speed/tone, auto-ID)."""
@@ -5257,10 +5741,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     ) -> None:
         """Tune to a bookmark (or the Decoder panel's suggested channel), in
         its mode when it names one, with a channel width that suits it."""
+        before = self._current_frequency()
         if not self.set_frequency(freq_hz):
             return  # refused: the status bar says why
         if not mode:
-            self._show_status_message(f"Tuned to {label}", "info", 2500)
+            # No mode of its own: the band plan's, in another band.
+            if not self._listen_by_band_plan(before, self._current_frequency()):
+                self._show_status_message(f"Tuned to {label}", "info", 2500)
             return
         self._set_demod_mode(
             mode, deviation or None, self._bandwidth_for_mode(mode, deviation)
@@ -5286,21 +5773,41 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _prompt_no_device(self) -> str:
         """Ask how to proceed when Start is pressed with no device.
 
+        It looks for SDR hardware first: when some is plugged in, Connect...
+        (which opens it) is the default button; when none is found, Demo
+        Mode is, and the box says so.
+
         Returns ``"connect"``, ``"demo"`` or ``"cancel"``.
         """
+        try:
+            hardware = [name for _key, name in self._scan_hardware()]
+        except Exception as e:  # pragma: no cover - enumeration is defensive
+            logger.debug(f"Hardware scan failed: {e}")
+            hardware = []
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("No Device Connected")
-        box.setText("No SDR device is connected.")
-        box.setInformativeText(
-            "Connect opens an RTL-SDR or HackRF One. Demo Mode explores the "
-            "app with simulated signals, no hardware needed."
-        )
+        if hardware:
+            found = hardware[0] if len(hardware) == 1 else f"{len(hardware)} devices"
+            box.setText(f"Found {found}, not opened yet.")
+            box.setInformativeText(
+                "Connect opens it and starts receiving. Demo Mode explores the "
+                "app with simulated signals instead."
+            )
+        else:
+            box.setText("No SDR hardware detected.")
+            box.setInformativeText(
+                "Demo Mode explores the app with simulated signals, no hardware "
+                "needed. To use an RTL-SDR or HackRF One, plug it in and choose "
+                "Connect... (it also says when a driver is missing)."
+            )
         connect_btn = box.addButton("&Connect...", QMessageBox.ButtonRole.AcceptRole)
-        set_role(connect_btn, "primary")  # the recommended path, as elsewhere
         demo_btn = box.addButton("&Demo Mode", QMessageBox.ButtonRole.ActionRole)
         cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(connect_btn)
+        # The recommended path is the default (Enter) and the primary button.
+        recommended = connect_btn if hardware else demo_btn
+        set_role(recommended, "primary")
+        box.setDefaultButton(recommended)
         box.setEscapeButton(cancel_btn)
         self._exec_dialog(box)
         clicked = box.clickedButton()
@@ -5384,8 +5891,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._state_badge.setText("ON AIR")
             set_tone(self._state_badge, "danger")
             self._state_badge.setToolTip(
-                "Transmitting; receiving resumes when the transmission ends"
+                "Transmitting; receiving resumes when the transmission ends. "
+                "Click to stop transmitting."
             )
+            self._state_badge.setCursor(Qt.CursorShape.PointingHandCursor)
 
     def _transmit_job(self, job: "TxJob", confirm: bool = True) -> bool:
         """Transmit ``job`` (see :class:`~.transmitter.TxJob`) on the HackRF:
@@ -6891,6 +7400,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # (T6) Messages counted while the window was minimized are seen once
         # it is back with the Decoder tab in front.
         self._decoder_tab_seen()
+        # "● REC" in the title while a recording captures (it pauses, waits
+        # for the receiver, ends).
+        self._update_window_title()
 
     # ------------------------------------------------------------------
     # Devices
@@ -7134,7 +7646,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return found
 
     def _refresh_devices(self):
-        """Device > Scan for Devices: list the SDR hardware plugged in, with
+        """Device > Find Connected Devices: list the SDR hardware plugged in, with
         Connect... (and, when nothing was found, Use Demo Device and the
         commands that install a missing driver, selectable)."""
         logger.info("Scanning for devices...")
@@ -7181,10 +7693,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._start_demo_mode()
         self._refresh_state_ui()  # the menu item ticked (or not, if cancelled)
 
-    def _start_demo_mode(self) -> bool:
+    def _start_demo_mode(self, announce: bool = True) -> bool:
         """Start demo mode with simulated signals. A connected SDR is
         released first; if a recording runs on it, the user is asked (the
-        recording would go on with simulated samples). False if cancelled."""
+        recording would go on with simulated samples). False if cancelled.
+
+        ``announce=False`` (the welcome screen, which tunes a band in its
+        own mode next): no switch from None (I/Q) to FM, no message."""
         from .device_dialog import MockDevice
 
         if (
@@ -7208,7 +7723,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._demo_mode = True
         # The demo is about seeing (and demodulating) stations: leave the
         # "no audio" mode for FM.
-        switched = self._control_panel._demod_combo.currentText() == "None (I/Q)"
+        switched = (
+            announce and self._control_panel._demod_combo.currentText() == "None (I/Q)"
+        )
         if switched:
             freq = self._current_frequency()
             broadcast = _FM_BROADCAST_BAND[0] <= freq <= _FM_BROADCAST_BAND[1]
@@ -7219,6 +7736,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
         self._apply_controls_to_device()
         self._start_acquisition()
+        if not announce:
+            logger.info("Demo mode started")
+            return True
         # (The status bar already names the "Demo Device (simulated signals)".)
         self._show_status_message(
             "Demo mode: no hardware needed. "
@@ -7971,11 +8491,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return True
 
     def _import_channels_csv(self) -> None:
-        """Import memory channels from a CHIRP CSV into the bookmarks panel."""
+        """File > Import Bookmarks: a CHIRP CSV's memory channels become
+        bookmarks."""
         count = self._bookmarks_panel.import_csv()
         if count:
             self._show_panel("bookmarks")
-            self._show_status_message(f"Imported {count} channel(s)", "success")
+            noun = "bookmark" if count == 1 else "bookmarks"
+            self._show_status_message(f"Imported {count} {noun}", "success")
 
     def _export_channels_csv(self) -> None:
         """Export the saved channels to a CHIRP-compatible CSV file.
@@ -7985,26 +8507,44 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """
         self._bookmarks_panel.export_csv()
 
+    # File > Save Screenshot: the formats offered (the first is the default).
+    _SCREENSHOT_FILTERS = (
+        "PNG image (*.png);;JPEG image (*.jpg *.jpeg);;BMP image (*.bmp)"
+    )
+    _SCREENSHOT_FORMATS = {
+        ".png": "PNG",
+        ".jpg": "JPEG",
+        ".jpeg": "JPEG",
+        ".bmp": "BMP",
+    }
+
     def _save_screenshot(self) -> None:
-        """Save a PNG of the window (spectrum + waterfall + panels), in the
-        screenshots folder (Tools > Preferences; then the last one used)."""
+        """Save an image of the window (spectrum + waterfall + panels), named
+        after the frequency and the time, in the screenshots folder (Tools >
+        Preferences; then the last one used). The format follows the file's
+        extension (PNG, JPEG or BMP); another or none gets the chosen
+        filter's (PNG by default)."""
         name = (
             f"sdr_{self._current_frequency() / 1e6:.3f}MHz_"
             f"{time.strftime('%Y%m%d_%H%M%S')}.png"
         )
-        folder = file_dialogs.start_folder(self._settings, "screenshot", create=True)
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "Save Screenshot", os.path.join(folder, name), "PNG (*.png)"
+        filename, chosen = file_dialogs.save_file(
+            self,
+            self._settings,
+            "screenshot",
+            "Save Screenshot",
+            name,
+            self._SCREENSHOT_FILTERS,
         )
         if not filename:
             return
-        file_dialogs.remember_folder(self._settings, "screenshot", filename)
-        # Qt's own file dialog doesn't add the filter's extension.
-        if not os.path.splitext(filename)[1]:
-            filename += ".png"
+        filename = self._screenshot_path(filename, chosen)
+        fmt = self._SCREENSHOT_FORMATS[os.path.splitext(filename)[1].lower()]
         pixmap = self.grab()
-        if pixmap.save(filename, "PNG"):
-            self._show_status_message(f"Screenshot saved to {filename}", "success")
+        if pixmap.save(filename, fmt, 92 if fmt == "JPEG" else -1):
+            self._show_status_message(
+                f"Screenshot saved to {file_dialogs.display_path(filename)}", "success"
+            )
         else:
             QMessageBox.warning(
                 self,
@@ -8012,6 +8552,21 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 f"Could not save the screenshot to:\n{filename}\n\n"
                 "Check that the folder exists and you can write to it.",
             )
+
+    @classmethod
+    def _screenshot_path(cls, filename: str, chosen_filter: str = "") -> str:
+        """``filename`` with an image extension: its own when it is one of
+        the formats offered, else the chosen filter's (Qt's dialog doesn't
+        add it), else .png ("shot.jpg" stays JPEG; "shot" and "shot.txt"
+        become "shot.png" / "shot.txt.png")."""
+        if os.path.splitext(filename)[1].lower() in cls._SCREENSHOT_FORMATS:
+            return filename
+        ext = ".png"
+        if "jpg" in chosen_filter.lower():
+            ext = ".jpg"
+        elif "bmp" in chosen_filter.lower():
+            ext = ".bmp"
+        return filename + ext
 
     # ------------------------------------------------------------------
     # Tools and dialogs
@@ -8286,20 +8841,46 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._show_panel("decoder")
 
     def _show_about(self):
-        """Show about dialog."""
-        QMessageBox.about(
-            self,
-            "About SDR Module",
-            f"<h3>SDR Module {__version__}</h3>"
-            "<p>Software-defined radio for signal visualization, frequency "
-            "analysis and protocol decoding.</p>"
-            "<p><b>Hardware:</b> RTL-SDR and HackRF One, or the built-in "
-            "demo device.</p>"
-            "<p><b>Features:</b> spectrum and waterfall displays; AM, FM, SSB "
-            "and CW demodulation; POCSAG, FLEX, ADS-B, ACARS, AX.25/APRS, RDS "
-            "and Morse code decoders; I/Q recording; ham radio tools.</p>"
-            f"<p>Qt {QT_VERSION_STR} &middot; PyQt {PYQT_VERSION_STR}</p>",
-        )
+        """Help > About: versions, links and Copy Version Info."""
+        from .version_info import AboutDialog
+
+        self._exec_dialog(AboutDialog(self))
+
+    def _open_documentation(self) -> None:
+        """Help > Online Documentation: the README in the browser."""
+        from .version_info import DOCS_URL, open_url
+
+        if open_url(DOCS_URL):
+            self._show_status_message(
+                "Opened the documentation in your browser", None, 3000
+            )
+        else:
+            self._show_status_message(
+                f"Couldn't open a browser. The documentation is at {DOCS_URL}",
+                "warning",
+                10000,
+            )
+
+    def _report_problem(self) -> None:
+        """Help > Report a Problem: the issue tracker's new-issue page with
+        the version info filled in (and on the clipboard)."""
+        from .version_info import ISSUES_URL, copy_version_info, open_url, report_url
+
+        info = copy_version_info(self)
+        if open_url(report_url(info)):
+            self._show_status_message(
+                "Opened the issue tracker in your browser; the version info is "
+                "filled in (and on the clipboard)",
+                "info",
+                6000,
+            )
+        else:
+            self._show_status_message(
+                f"Couldn't open a browser. Report problems at {ISSUES_URL} (the "
+                "version info is on the clipboard).",
+                "warning",
+                10000,
+            )
 
     def _show_help(self) -> None:
         """Open the keyboard shortcuts reference."""
@@ -8318,41 +8899,100 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # Tuning helpers
     # ------------------------------------------------------------------
 
+    def _add_preset_action(self, menu: Any, preset: Any, label: str) -> "QAction":
+        """A Radio > Band Presets item: the preset's name, its frequency in
+        the shortcut column, what Apply does in the tooltip."""
+        freq_text = format_frequency(preset.frequency_hz)
+        action = QAction(f"{label}\t{freq_text}", self)
+        tip = f"{preset_table.describe(preset)}. {preset.description}".strip()
+        action.setStatusTip(tip)
+        action.setToolTip(tip)
+        action.triggered.connect(
+            lambda _c=False, n=preset.name: self._apply_preset_named(n)
+        )
+        menu.addAction(action)
+        return action
+
+    def _apply_preset_named(self, name: str) -> bool:
+        """Apply the preset ``name`` (Radio > Band Presets, the welcome
+        screen) the way the Presets group's Apply Preset does it: tune,
+        set the mode, FM deviation and filter, and turn its decoder on.
+        False when there is no such preset or tuning there is refused."""
+        preset = preset_table.preset_by_name(name)
+        panel = self._control_panel
+        if preset is None or not panel.select_preset(name):
+            return False
+        panel._apply_preset()  # -> preset_applied -> _on_preset_applied
+        return abs(self._current_frequency() - preset.frequency_hz) < 1.0
+
+    def _on_preset_applied(self, name: str) -> None:
+        """A preset was applied (by any of the above): turn its decoder on
+        (ADS-B, APRS, ACARS, POCSAG, FLEX; SSTV) and say what was set."""
+        preset = preset_table.preset_by_name(name)
+        if preset is None:
+            return
+        panel = self._control_panel
+        decoder = preset_table.decoder_for(preset)
+        note = ""
+        if decoder == "SSTV":
+            if HAS_HAM_RADIO:
+                self._show_panel("sstv")
+                if self._device is not None and self._is_running:
+                    self._sstv_panel.start_listening()
+                    note = " · SSTV decoder listening"
+                else:
+                    note = " · SSTV tab (press Start Decoder once receiving)"
+        elif decoder:
+            if self._select_decoder(decoder):
+                self._show_panel("decoder")
+                note = f" · {decoder} decoder on"
+        mode = self._mode_text(panel.get_demod_mode())
+        prefix = str(self.__dict__.get("_preset_message_prefix", "") or "")
+        self._show_status_message(
+            f"{prefix}{name}: {format_frequency(self._current_frequency())}, "
+            f"{mode}, {panel._bw_combo.currentText()} filter{note}",
+            "info",
+            8000 if prefix else 4000,
+        )
+
+    def _select_decoder(self, protocol: str) -> bool:
+        """Choose ``protocol`` in the Decoder panel and tick Decode (a
+        preset's decoder). False when the panel doesn't offer it."""
+        panel = self._decoder_panel
+        combo = panel._proto_combo
+        index = combo.findText(protocol)
+        if index < 0:
+            return False
+        item = combo.model().item(index)
+        if item is not None and not item.isEnabled():
+            return False
+        combo.setCurrentIndex(index)
+        panel._enabled_check.setChecked(True)
+        return True
+
     def _apply_band_preset(self, freq_hz: float, mode: str, label: str) -> None:
-        """Tune to a band preset in its mode, FM deviation and bandwidth."""
+        """Tune to ``freq_hz`` in ``mode``: the preset there when there is one
+        in that mode (its deviation, filter and decoder; see
+        _apply_preset_named), else just the frequency and the mode."""
+        preset = preset_table.preset_at(freq_hz, tolerance_hz=1.0)
+        if preset is not None and preset_table.listening(preset)[0] == mode:
+            self._apply_preset_named(preset.name)
+            return
         if not self.set_frequency(freq_hz):
             return  # refused: the status bar says why
-        preset = self._preset_for(freq_hz)
-        if preset is not None and preset.mode == mode:
-            self._set_demod_mode(mode, preset.fm_deviation, preset.bandwidth)
-        else:
-            self._set_demod_mode(mode)
+        self._set_demod_mode(mode)
         self._show_status_message(
-            f"{_plain(label)}: {format_frequency(freq_hz)}, {mode}, "
-            f"{self._control_panel._bw_combo.currentText()} bandwidth",
+            f"{_plain(label)}: {format_frequency(freq_hz)}, {self._mode_text(mode)}, "
+            f"{self._control_panel._bw_combo.currentText()} filter",
             "info",
             3000,
         )
 
     @staticmethod
     def _preset_for(freq_hz: float) -> Optional[BandPreset]:
-        """The band preset tuned to exactly ``freq_hz``, if any."""
+        """The favourite (Radio > Band Presets) at exactly ``freq_hz``."""
         return next(
             (p for p in BAND_PRESETS if abs(p.frequency_hz - freq_hz) < 1.0), None
-        )
-
-    def _on_panel_preset_applied(self) -> None:
-        """Confirm the control panel's Apply Preset in the status bar."""
-        panel = self._control_panel
-        name = panel._preset_combo.currentText()
-        if not name:
-            return
-        self._show_status_message(
-            f"{name}: {format_frequency(self._current_frequency())}, "
-            f"{panel._demod_combo.currentText()}, "
-            f"{panel._bw_combo.currentText()} bandwidth",
-            "info",
-            3000,
         )
 
     def _bookmark_current_frequency(self) -> None:
@@ -8428,11 +9068,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             action.setChecked(True)
 
     def _set_audio_enabled(self, enabled: bool) -> None:
-        """Turn the speaker on or off (toolbar Audio button, Radio > Audio
-        Output) and remember the choice."""
+        """Turn the speaker on or off (the Audio button, Radio > Audio >
+        Mute, M) and remember the choice."""
         self._audio_enabled = bool(enabled)
         mode = self._control_panel._demod_combo.currentText()
         ok = self._start_or_stop_audio(mode)
+        if ok and self._audio_enabled and mode not in _AUDIBLE_MODES:
+            # (Nothing opened in I/Q mode: is there an output to open?)
+            self._audio_problem = self._audio_output_problem()
+            ok = self._audio_problem is None
         if self._audio_enabled and not ok:
             # Nothing can play: say why and switch back off, but keep the
             # saved preference so audio is on once a device is plugged in.
@@ -8440,7 +9084,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._sync_audio_ui()
             self._show_status_message(
                 f"{self._audio_problem}. Plug in speakers or headphones, then "
-                "turn Audio on again.",
+                "click the Audio button again.",
                 "warning",
                 8000,
             )
@@ -8449,15 +9093,68 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._sync_audio_ui()
         if self._audio_enabled and mode not in _AUDIBLE_MODES:
             self._show_status_message(
-                "Audio on. Choose AM, FM, USB, LSB or CW in Demodulation to hear "
-                "signals.",
+                "Audio on. None (I/Q) mode has no audio: choose AM, FM, USB, LSB "
+                "or CW (MODE) to hear signals.",
                 "info",
                 6000,
             )
         else:
             self._show_status_message(
-                "Audio on" if self._audio_enabled else "Audio off", None, 2000
+                "Audio on" if self._audio_enabled else "Muted (Ctrl+M unmutes)",
+                None,
+                2000,
             )
+
+    def _audio_state(self) -> str:
+        """What the Audio button shows: ``"on"``, ``"muted"`` (by you),
+        ``"no_output"`` (no audio output device, or no QtMultimedia) or
+        ``"silent"`` (on, but None (I/Q) mode has no audio)."""
+        if not self._audio.available:
+            return "no_output"
+        if not self._audio_enabled:
+            return "no_output" if self._audio_problem else "muted"
+        if self._control_panel.get_demod_mode() not in _AUDIBLE_MODES:
+            return "silent"
+        return "on"
+
+    def _on_audio_button(self, _checked: bool = False) -> None:
+        """The Audio button: mute or unmute. With no output device it tries
+        again, and says why it can't (opening Preferences' output choice
+        when there are outputs to choose from)."""
+        if self._audio_state() != "no_output":
+            self._set_audio_enabled(not self._audio_enabled)
+            return
+        if not self._audio.available:
+            self._sync_audio_ui()  # (a click toggled the button's check)
+            self._show_status_message(
+                "Audio needs the PyQt6 QtMultimedia module (it comes with "
+                "PyQt6 on Windows and macOS; on Linux install your "
+                "distribution's QtMultimedia package).",
+                "warning",
+                10000,
+            )
+            return
+        self._set_audio_enabled(True)  # try the output again
+        if self._audio_enabled:
+            return  # it plays now
+        from .audio_sink import output_devices
+
+        if output_devices():
+            # The chosen output is gone: Preferences lists the others.
+            self._show_preferences()
+
+    def _step_volume(self, steps: int) -> None:
+        """Radio > Audio > Volume Up / Down (Ctrl+Up / Ctrl+Down)."""
+        slider = self._volume_slider
+        slider.setValue(slider.value() + int(steps) * _VOLUME_STEP)
+        note = ""
+        if self._audio_state() == "muted":
+            note = " (muted: Ctrl+M unmutes)"
+        elif self._audio_state() == "no_output":
+            note = " (no audio output device)"
+        self._show_status_message(
+            f"Volume {slider.value()}%{note}", None, 1500, history=False
+        )
 
     def _saved_volume(self) -> int:
         try:
@@ -8503,36 +9200,58 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._sync_audio_ui()
 
     def _sync_audio_ui(self) -> None:
-        """Show the audio state on the toolbar button and the menu item."""
+        """Show the audio state on the Audio button (four states, see
+        _audio_state) and Radio > Audio > Mute."""
+        state = self._audio_state()
         on = bool(self._audio_enabled and self._audio.available)
-        for control in (self._audio_action, self._audio_button):
-            if control.isChecked() != on:
+        controls = ((self._mute_action, not on), (self._audio_button, on))
+        for control, checked in controls:
+            if control.isChecked() != checked:
                 control.blockSignals(True)
-                control.setChecked(on)
+                control.setChecked(checked)
                 control.blockSignals(False)
         button = self._audio_button
-        button.setText(self._AUDIO_ON_TEXT if on else self._AUDIO_OFF_TEXT)
-        button.setIcon(self._speaker_icon(on))
-        available = self._audio.available
-        button.setEnabled(available)
-        self._volume_slider.setEnabled(available)
-        if not available:
-            tip = "Audio output needs the PyQt6 QtMultimedia module."
-        elif on and self._control_panel.get_demod_mode() not in _AUDIBLE_MODES:
-            tip = (
-                "Audio is on, but None (I/Q) mode has no audio: choose AM, FM, "
-                "USB, LSB or CW in Demodulation to hear the tuned signal. "
-                "Click to mute (Radio > Audio Output)."
-            )
-        elif on:
-            tip = (
+        text, name, tip = {
+            "on": (
+                self._AUDIO_ON_TEXT,
+                "Audio on",
                 "Audio is on: the tuned signal plays through your speakers "
-                "while it is above squelch. Click to mute (Radio > Audio Output)."
-            )
-        else:
-            tip = "Audio is off. Click to play the tuned signal through your speakers."
-            if self._audio_problem is not None:
-                tip += f" ({self._audio_problem}.)"
+                "while it is above squelch. Click to mute (Ctrl+M).",
+            ),
+            "muted": (
+                self._AUDIO_OFF_TEXT,
+                "Audio muted",
+                "Muted (by you). Click to play the tuned signal through your "
+                "speakers (Ctrl+M).",
+            ),
+            "silent": (
+                self._AUDIO_SILENT_TEXT,
+                "No audio in I/Q mode",
+                "Audio is on, but None (I/Q) mode has no audio: choose AM, FM, "
+                "USB, LSB or CW (MODE) to hear the tuned signal. Click to mute "
+                "(Ctrl+M).",
+            ),
+            "no_output": (
+                self._AUDIO_NO_OUTPUT_TEXT,
+                "No audio output device",
+                (
+                    (
+                        f"Nothing can play: {self._audio_problem or 'no output'}. "
+                        "Plug in speakers or headphones and click here to try "
+                        "again (Radio > Audio > Output Device chooses one)."
+                    )
+                    if self._audio.available
+                    else "Audio output needs the PyQt6 QtMultimedia module. Click "
+                    "for details."
+                ),
+            ),
+        }[state]
+        button.setText(text)
+        button.setAccessibleName(name)
+        button.setIcon(self._speaker_icon(state))
+        set_tone(button, "warning" if state == "no_output" else None)
+        available = self._audio.available
+        self._volume_slider.setEnabled(available)
         if available:
             # Which sound card plays it (Tools > Preferences chooses).
             tip += f"\nOutput: {self._audio.output_name()}"
@@ -8540,11 +9259,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._info_panel.isVisible():
             self._refresh_info_panel()
 
-    def _speaker_icon(self, on: bool) -> "QIcon":
-        """A speaker with sound waves (on) or a cross (muted), drawn in the
-        color of the button's text for the current theme."""
+    def _speaker_icon(self, state: Any) -> "QIcon":
+        """A speaker drawn in the button's text color for the current
+        theme: with sound waves ("on"), a cross ("muted"), an exclamation
+        mark in the warning color ("no_output") or nothing ("silent", no
+        audio in this mode). (True / False: "on" / "muted".)"""
+        if isinstance(state, bool):
+            state = "on" if state else "muted"
+        on = state in ("on", "silent")  # the button is checked (accent fill)
         p = get_palette()
-        color = p.qcolor("on_accent" if on else "text")
+        color = p.qcolor(
+            "warning" if state == "no_output" else "on_accent" if on else "text"
+        )
         icon = QIcon()
         for size in (16, 32):
             pixmap = QPixmap(size, size)
@@ -8571,7 +9297,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            if on:
+            if state == "on":
                 for radius in (3.0, 5.5):
                     painter.drawArc(
                         int(round((8.5 - radius) * k)),
@@ -8581,9 +9307,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                         -50 * 16,
                         100 * 16,
                     )
-            else:
+            elif state == "muted":
                 painter.drawLine(QPointF(10.5 * k, 5.5 * k), QPointF(15 * k, 10.5 * k))
                 painter.drawLine(QPointF(15 * k, 5.5 * k), QPointF(10.5 * k, 10.5 * k))
+            elif state == "no_output":
+                pen.setWidthF(1.8 * k)
+                painter.setPen(pen)
+                painter.drawLine(QPointF(13 * k, 3.0 * k), QPointF(13 * k, 9.5 * k))
+                painter.drawPoint(QPointF(13 * k, 13.0 * k))
             painter.end()
             icon.addPixmap(pixmap)
         return icon
@@ -8604,7 +9335,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             deviation = self._settings.get_str("fm_deviation", "")
             bandwidth = self._settings.get_str("bandwidth", "")
             rec_format = self._settings.get_str("recording_format", "")
-            panel = self._settings.get_str("panel", "")
+            # First launch: Bookmarks (not an empty Decoder; the status
+            # bar's chip shows a running decoder from any tab).
+            panel = self._settings.get_str("panel", "") or "bookmarks"
         except Exception as e:
             logger.debug(f"Settings restore failed: {e}")
             freq, gain, squelch, agc, demod = (
@@ -8614,7 +9347,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 False,
                 "FM",
             )
-            deviation = bandwidth = rec_format = panel = ""
+            deviation = bandwidth = rec_format = ""
+            panel = "bookmarks"
         if not deviation and _FM_BROADCAST_BAND[0] <= freq <= _FM_BROADCAST_BAND[1]:
             deviation = _BROADCAST_FM_DEVIATION  # broadcast FM is wideband
         if math.isfinite(freq):  # (a damaged setting: the nearest end)
@@ -8689,10 +9423,38 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 ok = False
             restored_all = restored_all and ok
         self._splitters_restored = restored_all
+        # The plots shown, the Frequency field's unit and the tool tabs
+        # filling the right column, as they were left (after the splitters,
+        # whose state keeps a hidden pane's size).
+        self._restoring = True
+        try:
+            self._restore_view_layout()
+            self._tool_tabs.restore_saved()
+        finally:
+            self._restoring = False
 
     #: Waterfall display defaults when nothing is saved: levels that follow
     #: the noise floor and the strongest signal, and a minute of history.
     _WATERFALL_DEFAULTS = {"auto_levels": True, "history_s": 60.0}
+
+    def _restore_view_layout(self) -> None:
+        """The plots shown (View > Spectrum / Waterfall) and the Frequency
+        field's unit, as they were left."""
+        for action, key in (
+            (self._spectrum_action, "layout/spectrum_visible"),
+            (self._waterfall_action, "layout/waterfall_visible"),
+        ):
+            shown = self._settings.get_bool(key, True)
+            if action.isChecked() != shown:
+                action.setChecked(shown)  # -> _set_plot_visible
+        if not (
+            self._spectrum_action.isChecked() or self._waterfall_action.isChecked()
+        ):
+            self._waterfall_action.setChecked(True)  # (never no plot at all)
+        unit = self._settings.get_str("layout/freq_unit", "")
+        combo = self._control_panel._freq_input._unit_combo
+        if unit and combo.findText(unit) >= 0 and combo.currentText() != unit:
+            combo.setCurrentText(unit)
 
     def _restore_waterfall_settings(self) -> None:
         settings = dict(self._WATERFALL_DEFAULTS)
@@ -8962,39 +9724,64 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._save_waterfall_settings()
             self._save_spectrum_settings()
             self._settings.save_geometry("main", self.saveGeometry())
-            if self._spectrum.isVisible() and self._waterfall.isVisible():
-                for name, splitter in self._splitters().items():
-                    self._settings.save_geometry(name, splitter.saveState())
+            # The splitters of the layout in use (a hidden plot or control
+            # panel keeps its size in the state, for when it is shown again).
+            for name, splitter in self._splitters().items():
+                self._settings.save_geometry(name, splitter.saveState())
+            self._settings.set(
+                "layout/freq_unit",
+                self._control_panel._freq_input._unit_combo.currentText(),
+            )
             self._settings.sync()
         except Exception as e:
             logger.debug(f"Settings save failed: {e}")
 
     def _run_first_run_wizard(self) -> None:
-        """Show the welcome wizard, then tune to the chosen starting band in
-        the mode that suits it (starting Demo Mode first if asked)."""
+        """Show the welcome wizard. Once it is closed: start Demo Mode if
+        asked (and not already running), then apply the chosen band's preset
+        (its mode, filter and decoder), then say what was set, in one
+        message that is true (before, the demo's "Mode set to FM" came after
+        the band had set another mode)."""
         from .first_run_wizard import FirstRunWizard
 
         # A connected radio counts as hardware, so the wizard doesn't offer
         # to replace it with the demo device; the wizard names the radio.
+        demo_running = bool(self._demo_mode and self._device is not None)
         if self._device is not None and not self._demo_mode:
             hardware, device_name = True, self._device_display_name()
         else:
             found = self._scan_hardware()
             hardware, device_name = bool(found), (found[0][1] if found else "")
-        wiz = FirstRunWizard(self, hardware_found=hardware, device_name=device_name)
-        wiz.demo_mode_requested.connect(self._start_demo_mode)
-        # "Connect ... and start receiving": open Device > Connect once the
-        # starting band is tuned, so receiving starts there.
+        wiz = FirstRunWizard(
+            self,
+            hardware_found=hardware,
+            device_name=device_name,
+            demo_running=demo_running,
+        )
+        # Both acted on once the dialog is closed: the demo starts before
+        # the band is tuned; "Connect ... and start receiving" opens Device
+        # > Connect once the starting band is tuned, so receiving starts
+        # there.
+        demo_wanted: List[bool] = []
+        wiz.demo_mode_requested.connect(lambda: demo_wanted.append(True))
         connect_wanted: List[bool] = []
         connect_signal = getattr(wiz, "connect_requested", None)
         if connect_signal is not None:
             connect_signal.connect(lambda: connect_wanted.append(True))
         if self._exec_dialog(wiz):
-            freq = wiz.selected_frequency()
-            self.set_frequency(freq)
-            preset = self._preset_for(freq)
-            if preset is not None:
-                self._set_demod_mode(preset.mode, preset.fm_deviation, preset.bandwidth)
+            started = False
+            if demo_wanted and not (self._demo_mode and self._device is not None):
+                started = self._start_demo_mode(announce=False)
+            name = wiz.selected_preset()
+            self._preset_message_prefix = (
+                "Demo mode (simulated signals). " if started else ""
+            )
+            try:
+                applied = bool(name) and self._apply_preset_named(name)
+            finally:
+                self._preset_message_prefix = ""
+            if not applied:
+                self.set_frequency(wiz.selected_frequency())
         self._settings.mark_first_run_done()
         if connect_wanted and (self._device is None or self._demo_mode):
             self._show_device_dialog(start_after=True)

@@ -3043,7 +3043,7 @@ if HAS_PYQT6:
             """Device > Second Receiver..."""
             self.action = self._win._add_action(
                 menu,
-                "Second &Receiver...",
+                "&Second Receiver...",
                 self.show,
                 tip="Open a second receiver window on another device (or a "
                 "second demo device): its own frequency, mode, squelch, "

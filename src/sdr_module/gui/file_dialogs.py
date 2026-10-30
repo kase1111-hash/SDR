@@ -64,6 +64,7 @@ KIND_DEFAULTS: Dict[str, str] = {
     "decode": "recordings",
     "screenshot": "pictures",
     "channels": "documents",
+    "error_log": "documents",  # Tools > Error History > Export (T12)
 }
 
 

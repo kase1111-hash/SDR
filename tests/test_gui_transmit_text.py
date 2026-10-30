@@ -544,7 +544,7 @@ class TestTransmit(_TextCase):
             self.line(),
             (
                 "Can't send on 14.080 MHz: an amateur transmission must be "
-                "identified: enter your callsign in Ham Radio > Ham ID first.",
+                "identified: enter your callsign in Ham > Ham ID first.",
                 "danger",
             ),
         )

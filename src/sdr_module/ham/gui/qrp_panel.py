@@ -706,7 +706,7 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
                 self._input_spin.setValue(max(-90.0, min(20.0, float(dbm))))
                 self._input_spin.setToolTip(
                     (tip or "From the connected HackRF's TX power")
-                    + ". Change it in Ham Radio > Ham ID > TX Power."
+                    + ". Change it in Ham > Ham ID > TX Power."
                 )
         finally:
             self._applying = False

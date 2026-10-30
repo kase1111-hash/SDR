@@ -372,7 +372,7 @@ class _SecondCase(_WindowTestCase):
 class TestOpening(_SecondCase):
     def test_device_menu_opens_it(self):
         action = self.host.action
-        self.assertEqual(action.text(), "Second &Receiver...")
+        self.assertEqual(action.text(), "&Second Receiver...")
         self.assertTrue(action.toolTip())
         device_menu = next(
             a.menu()

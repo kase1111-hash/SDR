@@ -845,7 +845,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
 
         controls.addSpacing(4)
 
-        self._levels_caption = QLabel("LEVELS")
+        self._levels_caption = QLabel("COLORS")
         set_role(self._levels_caption, "caption")
         controls.addWidget(self._levels_caption)
         self._level_bar = _LevelBar(self)

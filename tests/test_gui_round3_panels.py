@@ -121,12 +121,14 @@ class TestControlPanel(_Themed):
                 first_line = p._preset_info.text().split("\n")[0]
                 p._apply_preset()
                 applied = p._bw_combo.currentText()
-                self.assertIn(f" · {applied} · ", first_line, name)
+                # ("146.520 MHz · FM, 5 kHz deviation, 25 kHz filter": the
+                # Filter, as the control panel calls it now.)
+                self.assertIn(f" {applied} filter", first_line, name)
 
     def test_2m_calling_promises_25_khz_and_explains_the_channel(self):
         self.select("Amateur", "2m Calling")
         info = self.panel._preset_info
-        self.assertIn("· 25 kHz ·", info.text())
+        self.assertIn(", 25 kHz filter", info.text())
         self.assertNotIn("15 kHz", info.text())
         # The nominal channel width is still available, in the tooltip.
         self.assertIn("15 kHz", info.toolTip())
@@ -136,7 +138,7 @@ class TestControlPanel(_Themed):
 
     def test_no_tooltip_when_the_channel_matches_an_option(self):
         self.select("Broadcast", "FM Broadcast")
-        self.assertIn("· 200 kHz ·", self.panel._preset_info.text())
+        self.assertIn(", 200 kHz filter", self.panel._preset_info.text())
         self.assertEqual(self.panel._preset_info.toolTip(), "")
 
     def test_starts_on_the_default_frequency(self):

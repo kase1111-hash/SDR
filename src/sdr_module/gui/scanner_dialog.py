@@ -23,6 +23,7 @@ except ImportError:
     HAS_PYQT6 = False
 
 from ..dsp import sweep
+from .presets import scan_bands
 
 
 class ScanPreset(NamedTuple):
@@ -46,21 +47,10 @@ class ScanPreset(NamedTuple):
         return self.mode, self.fm_deviation, self.bandwidth
 
 
-# Scan presets, named and ordered like the band presets of the welcome
-# screen and Radio > Band Presets. The first one is the default range.
-SCAN_PRESETS: Tuple[ScanPreset, ...] = (
-    ScanPreset(
-        "FM Broadcast (88–108 MHz)", 88.0, 108.0, 200.0, "FM", "75 kHz", "200 kHz", 30.0
-    ),
-    ScanPreset("NOAA Weather (162 MHz)", 162.4, 162.55, 25.0, "FM", "5 kHz", "25 kHz"),
-    ScanPreset("2m Ham (144–148 MHz)", 144.0, 148.0, 12.5, "FM", "5 kHz", "25 kHz"),
-    ScanPreset("70cm Ham (420–450 MHz)", 420.0, 450.0, 25.0, "FM", "5 kHz", "25 kHz"),
-    ScanPreset("Airband AM (118–137 MHz)", 118.0, 137.0, 25.0, "AM", "", "10 kHz"),
-    ScanPreset(
-        "ISM 433 (433.05–434.79 MHz)", 433.05, 434.79, 25.0, "None (I/Q)", "", "500 kHz"
-    ),
-    ScanPreset("ISM 915 (902–928 MHz)", 902.0, 928.0, 100.0, "None (I/Q)", "", "2 MHz"),
-)
+# Scan presets: the bands of the window's favourite presets (the welcome
+# screen's starting bands, in the same order and under the same names; see
+# gui/presets.py, the one preset table). The first one is the default range.
+SCAN_PRESETS: Tuple[ScanPreset, ...] = tuple(ScanPreset(*band) for band in scan_bands())
 _CUSTOM = "Custom range"
 
 

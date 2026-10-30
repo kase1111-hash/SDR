@@ -93,8 +93,8 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             menu,
             "Send Station &ID",
             self.send_station_id,
-            tip="Transmit your callsign in Morse on the tuned frequency (Ham "
-            "Radio > Ham ID: callsign, speed, how it is sent, TX power)",
+            tip="Transmit your callsign in Morse on the tuned frequency (Ham > "
+            "Ham ID: callsign, speed, how it is sent, TX power)",
         )
         self._stop_action = win._add_action(
             menu,
@@ -414,7 +414,7 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             return False
         if panel is None or not panel.is_callsign_valid():
             win._show_status_message(
-                "ID not sent: enter your callsign in Ham Radio > Ham ID first.",
+                "ID not sent: enter your callsign in Ham > Ham ID first.",
                 "warning",
                 6000,
             )
@@ -460,7 +460,7 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         ):
             problem = (
                 "an amateur transmission must be identified: enter your callsign "
-                "in Ham Radio > Ham ID first"
+                "in Ham > Ham ID first"
             )
         if problem is None:
             problem = self.engine.check(job, self._device(), id_jobs)

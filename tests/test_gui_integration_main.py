@@ -433,10 +433,15 @@ class TestAudioOutput(_WindowTestCase):
             "_audio_output_problem",
             return_value="No audio output device",
         ):
-            self.win._audio_action.setChecked(True)
+            # Radio > Audio > Mute off: audio on (it was off: no device).
+            self.win._mute_action.setChecked(True)
+            self.win._mute_action.setChecked(False)
         self.assertFalse(self.win._audio_enabled)
-        self.assertFalse(self.win._audio_action.isChecked())
+        self.assertTrue(self.win._mute_action.isChecked())
         self.assertFalse(self.win._audio_button.isChecked())
+        # The button says there is no output (not "Muted", as if by you).
+        self.assertEqual(self.win._audio_button.text().strip(), "No output")
+        self.assertEqual(self.win._audio_button.property("tone"), "warning")
         self.assertIn("No audio output device", self.win._message_label.text())
         self.assertEqual(self.win._message_label.property("tone"), "warning")
         self.assertNotEqual(self.store.values.get("audio_enabled"), False)
@@ -455,9 +460,9 @@ class TestAudioOutput(_WindowTestCase):
             self.win._set_demod_mode("FM")
             self.win._audio_button.click()  # on
             self.assertTrue(self.win._audio_enabled)
-            self.assertTrue(self.win._audio_action.isChecked())
+            self.assertFalse(self.win._mute_action.isChecked())
             self.assertEqual(self.win._audio_button.text().strip(), "Audio")
-            self.win._audio_action.trigger()  # off from the menu
+            self.win._mute_action.trigger()  # Radio > Audio > Mute
         self.assertFalse(self.win._audio_enabled)
         self.assertFalse(self.win._audio_button.isChecked())
         self.assertEqual(self.win._audio_button.text().strip(), "Muted")
@@ -484,7 +489,8 @@ class TestPresetsAndDefaults(_WindowTestCase):
             self.assertEqual(panel._bw_combo.currentText(), preset.bandwidth)
             if preset.fm_deviation:
                 self.assertEqual(panel._fm_dev_combo.currentText(), preset.fm_deviation)
-            self.assertIn("bandwidth", self.win._message_label.text())
+            # (The control panel calls it the Filter now: ux:UX-U13.)
+            self.assertIn("filter", self.win._message_label.text())
             self.assertNotIn("&", self.win._message_label.text())
         # ISM matches the Control Panel presets: raw I/Q.
         ism = [p for p in BAND_PRESETS if "ISM" in p.label]
@@ -496,7 +502,11 @@ class TestPresetsAndDefaults(_WindowTestCase):
             for a in self.win.findChildren(QAction)
             if a.menu() is not None and a.text() == "Band &Presets"
         )
-        labels = [a.text().split("\t")[0] for a in menu.actions()]
+        # The favourites, a separator, then a submenu per category: every
+        # item with its own mnemonic.
+        labels = [
+            a.text().split("\t")[0] for a in menu.actions() if not a.isSeparator()
+        ]
         keys = [label[label.index("&") + 1].lower() for label in labels]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertFalse(any("(" in label for label in labels))
@@ -597,18 +607,39 @@ class TestSmallFixes(_WindowTestCase):
         self.assertTrue(self.win._is_running)
         self.assertNotIn("Press Start", self.win._message_label.text())
 
-    def test_no_device_prompt_recommends_connect(self):
+    def _prompt_buttons(self, hardware):
         seen = {}
 
         def fake_exec(box):
             seen.update(
                 {b.text().replace("&", ""): b.property("role") for b in box.buttons()}
             )
+            seen["default"] = box.defaultButton().text().replace("&", "")
+            seen["text"] = box.text()
             return 0
 
-        with mock.patch.object(QMessageBox, "exec", fake_exec):
-            self.win._prompt_no_device()
+        with (
+            mock.patch.object(QMessageBox, "exec", fake_exec),
+            mock.patch.object(self.win, "_scan_hardware", return_value=hardware),
+        ):
+            self.assertEqual(self.win._prompt_no_device(), "cancel")
+        return seen
+
+    def test_no_device_prompt_recommends_connect(self):
+        # With an SDR plugged in (not opened yet), Connect... opens it.
+        seen = self._prompt_buttons([("RtlSdrDevice:0001#1", "Generic RTL2832U")])
         self.assertEqual(seen["Connect..."], "primary")
+        self.assertEqual(seen["default"], "Connect...")
+        self.assertIn("Generic RTL2832U", seen["text"])
+
+    def test_no_device_prompt_recommends_demo_without_hardware(self):
+        # mc:MC-U02: with nothing found, Connect... led to a dialog whose only
+        # row was the demo device: Demo Mode is the default then.
+        seen = self._prompt_buttons([])
+        self.assertEqual(seen["Demo Mode"], "primary")
+        self.assertNotEqual(seen["Connect..."], "primary")
+        self.assertEqual(seen["default"], "Demo Mode")
+        self.assertEqual(seen["text"], "No SDR hardware detected.")
 
     def test_info_quick_tips_are_keycap_rows(self):
         from sdr_module.gui.main_window import InfoPanel

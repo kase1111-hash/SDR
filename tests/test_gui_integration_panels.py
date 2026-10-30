@@ -307,8 +307,8 @@ class TestBookmarksPanelFixes(unittest.TestCase):
         self.assertEqual(
             texts,
             [
-                "Import Channels (CHIRP CSV)...",
-                "Export Channels (CHIRP CSV)...",
+                "Import Bookmarks (CHIRP CSV)...",
+                "Export Bookmarks (CHIRP CSV)...",
                 "",  # separator
                 "Export Built-in Presets (CHIRP CSV)...",  # FG-G28
             ],

@@ -137,9 +137,11 @@ class TestErrorLogKeyboard(_DialogCase):
         self.assertFalse(dialog._table.tabKeyNavigation())
         self.assertEqual(dialog._table.accessibleName(), "Logged warnings and errors")
         self.assertEqual(dialog._details.accessibleName(), "Message details")
-        stops = _tab_stops(dialog, dialog._table, 8)
+        stops = _tab_stops(dialog, dialog._table, 9)
+        # (Copy Version Info, for a bug report: mc:MC-G12.)
         self.assertEqual(
-            set(_button_texts(stops)), {"Copy All", "Export...", "Clear", "Close"}
+            set(_button_texts(stops)),
+            {"Copy All", "Copy Version Info", "Export...", "Clear", "Close"},
         )
         dialog.done(0)
 

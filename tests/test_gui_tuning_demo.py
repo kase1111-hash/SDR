@@ -63,7 +63,10 @@ class TestDemoThroughConnectDialog(_WindowTestCase):
         self.assertEqual(
             self.win._device_display_name(), "Demo Device (simulated signals)"
         )
-        self.assertEqual(self.win.windowTitle(), "Demo Mode — SDR Module")
+        # (The title names the frequency and mode too: mc:MC-U11.)
+        self.assertEqual(
+            self.win.windowTitle(), "100.100 MHz FM — Demo Mode — SDR Module"
+        )
         # A frame takes what the time since the last one covers (capped at
         # the pacer's probe limit, 0.05 s, until frames are known to keep
         # up), not one 2048-sample display block.

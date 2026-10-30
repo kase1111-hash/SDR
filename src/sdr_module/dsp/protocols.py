@@ -17,6 +17,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
+from fractions import Fraction
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
@@ -2186,7 +2187,10 @@ class ADSBDecoder(ProtocolDecoder):
 
     Features:
     - Mode S preamble detection (dump1090's pulse/quiet test) on the
-      magnitude signal at 2 MHz; other sample rates are resampled to 2 MHz
+      magnitude signal in 0.5 us slots. Above about 2.3 MS/s the slots are
+      read at 4 or 5 phases (every 0.1-0.125 us), so a reply decodes
+      wherever it starts between two samples; the best-aligned phase of
+      each reply is demodulated
     - Frames that straddle two ``decode()`` calls are still found
     - Aircraft identification (callsign)
     - Airborne position decoding (CPR)
@@ -2245,6 +2249,9 @@ class ADSBDecoder(ProtocolDecoder):
 
     # The decoder works on 0.5 us slots: 2 per bit, 16 per preamble.
     WORK_RATE = 2e6
+    # Below this many samples per slot the slots are the samples (2 MS/s,
+    # 2.048 MS/s): there is nothing between them to read other phases at.
+    _PHASED_FROM = 1.15
     # How long an aircraft address stays "known" for address/parity replies.
     ICAO_TIMEOUT_S = 60.0
 
@@ -2259,8 +2266,8 @@ class ADSBDecoder(ProtocolDecoder):
         Initialize ADS-B decoder.
 
         Args:
-            sample_rate: Sample rate in Hz (at least 2 MHz; 2 MHz is native,
-                other rates are resampled to it)
+            sample_rate: Sample rate in Hz (at least 2 MHz; the magnitude is
+                read in 0.5 us slots at any rate, see ``_plan_slots``)
         """
         super().__init__(sample_rate)
 
@@ -2273,6 +2280,7 @@ class ADSBDecoder(ProtocolDecoder):
                 f"got {sample_rate:g} Hz"
             )
         self._ratio = sample_rate / self.WORK_RATE
+        self._plan_slots()
 
         # Generate CRC table
         if not ADSBDecoder.CRC_TABLE:
@@ -2281,12 +2289,11 @@ class ADSBDecoder(ProtocolDecoder):
         # State
         self._messages: List[ADSBMessage] = []
         self._timestamp = 0.0
-        # Resampler carry-over: input samples not yet used and the fractional
-        # position of the next 2 MHz slot inside them.
+        # Input samples not yet turned into slots (they start a period of
+        # the slot pattern, see _plan_slots).
         self._rest = np.zeros(0, dtype=np.float32)
-        self._phase = 0.0
-        # Unscanned end of the previous block (2 MHz slots) and how many of
-        # its slots belong to a frame that was already decoded.
+        # Unscanned end of the previous block (slot values) and how many of
+        # its positions belong to a frame that was already decoded.
         self._tail = np.zeros(0, dtype=np.float32)
         self._skip = 0
         # Addresses from CRC-checked replies: icao (int) -> signal time seen.
@@ -2317,58 +2324,133 @@ class ADSBDecoder(ProtocolDecoder):
 
     # -- Demodulation -----------------------------------------------------
 
-    def _to_work_rate(self, mag: np.ndarray) -> np.ndarray:
-        """Magnitude averaged over consecutive 0.5 us slots (2 MHz).
+    def _plan_slots(self) -> None:
+        """How input samples become slot values.
 
-        Each input sample is treated as the mean over its sample period, so a
-        slot's value is the exact area under the input across the slot. At
-        2 MHz this is the identity; at integer multiples it is a block
-        average. The unused end of the input carries over to the next call.
+        The decoder reads the magnitude in 0.5 us slots, each input sample
+        counting as the mean over its own sample period (a slot's value is
+        the area under the input across it). A reply starts anywhere
+        between two slot edges, and one that starts half a slot off the
+        grid splits every pulse over two slots, so its bits can't be told
+        apart. Above about 2.3 MS/s the slots are therefore read at
+        ``_phases`` offsets per slot (every 0.125 us, or 0.1 us when 5
+        divides the samples per slot): slot values ``_phases`` times a slot
+        apart are the slots of one phase, and each reply is demodulated at
+        the phase that fits it best.
+
+        The offsets repeat every ``_period`` input samples (``_points``
+        slot values per period), so each value is a fixed weighting of a
+        few consecutive samples: ``_weights[l, k]`` for sample ``_base[l]
+        + k`` of the period, for its ``l``-th value.
         """
-        if self._ratio == 1.0:
-            return mag
+        ratio = self._ratio
+        phases = 1
+        if ratio >= self._PHASED_FROM:
+            whole = round(ratio)
+            phases = 5 if abs(ratio - whole) < 1e-9 and whole % 5 == 0 else 4
+        self._phases = phases
+        step = Fraction(ratio / phases).limit_denominator(250)
+        self._period, self._points = step.numerator, step.denominator
+        span = float(step) * phases  # samples per slot
+        starts = [float(step * i) for i in range(self._points)]
+        self._base = [int(math.floor(x)) for x in starts]
+        width = int(math.ceil(span)) + 1
+        self._weights = np.zeros((self._points, width), dtype=np.float32)
+        for row, (x, base) in enumerate(zip(starts, self._base, strict=True)):
+            for k in range(width):
+                left, right = max(x, base + k), min(x + span, base + k + 1)
+                if right > left:
+                    self._weights[row, k] = (right - left) / span
+        self._need = max(
+            base + int(np.flatnonzero(row)[-1]) + 1
+            for base, row in zip(self._base, self._weights, strict=True)
+        )
+        # The same weights as one matrix: sample j of a period's window ->
+        # its values (used when the pattern is small).
+        self._matrix = np.zeros((self._need, self._points), dtype=np.float32)
+        for row, base in enumerate(self._base):
+            for k, weight in enumerate(self._weights[row].tolist()):
+                if weight:
+                    self._matrix[base + k, row] = weight
+
+    def _to_work_rate(self, mag: np.ndarray) -> np.ndarray:
+        """Slot values (mean magnitude over 0.5 us) starting every
+        1/``_phases`` of a slot (see :meth:`_plan_slots`).
+
+        Each value is computed from the samples it covers alone, so the
+        blocks the input comes in make no difference. Samples that start a
+        period not yet complete carry over to the next call.
+        """
         if len(self._rest):
             mag = np.concatenate((self._rest, mag))
-        ratio = self._ratio
-        n_out = int(np.floor((len(mag) - self._phase) / ratio))
-        if n_out <= 0:
+        period, points, need = self._period, self._points, self._need
+        count = (len(mag) - need) // period + 1 if len(mag) >= need else 0
+        if count <= 0:
             self._rest = mag.copy()
             return np.zeros(0, dtype=np.float32)
-        edges = self._phase + np.arange(n_out + 1) * ratio
-        area = np.concatenate(([0.0], np.cumsum(mag, dtype=np.float64)))
-        slots = np.diff(np.interp(edges, np.arange(len(area)), area)) / ratio
-        end = float(edges[-1])
-        keep_from = min(int(np.floor(end)), len(mag))
-        self._rest = mag[keep_from:].copy()
-        self._phase = end - keep_from
-        return slots.astype(np.float32)
+        self._rest = mag[count * period :].copy()
+        mag = np.ascontiguousarray(mag, dtype=np.float32)
+        if points == 1:
+            # Whole samples per offset (8, 10, 20 MS/s...): sums of chunks.
+            end = (count + self._phases - 1) * period
+            sums = mag[0:end:period].copy()
+            for k in range(1, period):
+                sums += mag[k:end:period]
+            out = sums[:count].copy()
+            for q in range(1, self._phases):
+                out += sums[q : q + count]
+            return out / np.float32(period * self._phases)
+        if self._matrix.size <= 4096:
+            # Each period's samples (overlapping windows) times the weights.
+            windows = np.lib.stride_tricks.as_strided(
+                mag,
+                shape=(count, need),
+                strides=(period * mag.itemsize, mag.itemsize),
+                writeable=False,
+            )
+            return np.einsum("ij,jk->ik", windows, self._matrix).ravel()
+        out = np.empty((count, points), dtype=np.float32)
+        for row, base in enumerate(self._base):
+            col = out[:, row]
+            col[:] = 0.0
+            for k, weight in enumerate(self._weights[row].tolist()):
+                if weight:
+                    start = base + k
+                    col += (
+                        weight * mag[start : start + (count - 1) * period + 1 : period]
+                    )
+        return out.ravel()
 
     def _find_preambles(self, m: np.ndarray, count: int) -> np.ndarray:
-        """Indices below ``count`` where a Mode S preamble starts in ``m``.
+        """Positions below ``count`` where a Mode S preamble starts in ``m``.
 
-        ``m`` holds 0.5 us slots. dump1090's test: the pulses in slots 0, 2,
-        7 and 9 (0, 1, 3.5 and 4.5 us) stand above their neighbours, and the
-        quiet slots 4-5 and 11-14 stay below 2/3 of the mean pulse level.
+        ``m`` holds slot values (``_phases`` per slot). dump1090's test: the
+        pulses in slots 0, 2, 7 and 9 (0, 1, 3.5 and 4.5 us) stand above
+        their neighbours, and the quiet slots 4-5 and 11-14 stay below 2/3
+        of the mean pulse level.
         """
-        s = [m[i : i + count] for i in range(15)]
-        ok = (
-            (s[0] > s[1])
-            & (s[1] < s[2])
-            & (s[2] > s[3])
-            & (s[3] < s[0])
-            & (s[4] < s[0])
-            & (s[5] < s[0])
-            & (s[6] < s[0])
-            & (s[7] > s[8])
-            & (s[8] < s[9])
-            & (s[9] > s[6])
-        )
+        p = self._phases
+        ok = m[0:count] > m[p : p + count]
+        for high, low in (
+            (2, 1),
+            (2, 3),
+            (0, 3),
+            (0, 4),
+            (0, 5),
+            (0, 6),
+            (7, 8),
+            (9, 8),
+            (9, 6),
+        ):
+            ok &= m[high * p : high * p + count] > m[low * p : low * p + count]
         starts = np.flatnonzero(ok)
         if not len(starts):
             return starts
-        high = (m[starts] + m[starts + 2] + m[starts + 7] + m[starts + 9]) / 6.0
+        high = (
+            m[starts] + m[starts + 2 * p] + m[starts + 7 * p] + m[starts + 9 * p]
+        ) / 6.0
         for quiet in (4, 5, 11, 12, 13, 14):
-            keep = m[starts + quiet] < high
+            keep = m[starts + quiet * p] < high
             starts, high = starts[keep], high[keep]
         return starts
 
@@ -2377,9 +2459,22 @@ class ADSBDecoder(ProtocolDecoder):
 
         Bit n is a 1 when the first half of its 1 us period holds the pulse.
         """
-        first = starts[:, None] + self._PREAMBLE_SLOTS + 2 * np.arange(112)[None, :]
-        bits = m[first] > m[first + 1]
-        return np.packbits(bits, axis=1)
+        return np.packbits(self._halves(m, starts, 112)[0], axis=1)
+
+    def _halves(
+        self, m: np.ndarray, starts: np.ndarray, bits: int
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """The first ``bits`` bits after the preambles at ``starts`` (True:
+        the pulse is in the first half) and how clearly one half stood out
+        from the other over the 56 bits every frame has (highest at the
+        phase whose slots fit the pulses)."""
+        p = self._phases
+        first = starts[:, None] + p * (
+            self._PREAMBLE_SLOTS + 2 * np.arange(bits)[None, :]
+        )
+        a, b = m[first], m[first + p]
+        clear = min(bits, self.SHORT_MSG_BITS)
+        return a > b, np.abs(a[:, :clear] - b[:, :clear]).sum(axis=1)
 
     # -- Field decoding ---------------------------------------------------
 
@@ -2723,30 +2818,59 @@ class ADSBDecoder(ProtocolDecoder):
 
         # Start positions with room for a whole long frame after them; the
         # rest is scanned next time, when the following samples are there.
-        count = len(work) - self._FRAME_SLOTS + 1
+        phases = self._phases
+        count = len(work) - self._FRAME_SLOTS * phases + 1
         if count <= 0:
             self._tail = work.copy()
             return self._messages
 
         self._forget_old_aircraft()
         starts = self._find_preambles(work, count)
+        # A reply passes the preamble test at the phases near its own: the
+        # positions closer than a slot to the one before are one reply.
+        groups = np.cumsum(np.diff(starts, prepend=-phases) >= phases)
+        if len(starts) and starts[-1] >= count - phases:
+            # Its other phases may come after ``count``: next time.
+            count = int(starts[groups == groups[-1]][0])
+            keep = groups != groups[-1]
+            starts, groups = starts[keep], groups[keep]
         next_free = self._skip
         for first in range(0, len(starts), self._BATCH):
             batch = starts[first : first + self._BATCH]
-            frames = self._demodulate(work, batch)
-            for start, frame in zip(batch.tolist(), frames, strict=True):
+            bits, clarity = self._halves(work, batch, 112)
+            frames = np.packbits(bits, axis=1)
+            # The clearest phase of each reply; formats that are never
+            # accepted are not parsed.
+            best = self._clearest(groups[first : first + self._BATCH], clarity)
+            df = frames[best, 0] >> 3
+            for index in best[np.isin(df, self._FORMATS)].tolist():
+                start = int(batch[index])
                 if start < next_free:
                     continue  # inside a frame already decoded
-                msg = self._parse_frame(frame.tobytes())
+                msg = self._parse_frame(frames[index].tobytes())
                 if msg is None:
                     continue
                 self._messages.append(msg)
                 self._notify_callbacks(msg)
-                next_free = start + self._PREAMBLE_SLOTS + 16 * len(msg.raw_bits)
+                next_free = start + phases * (
+                    self._PREAMBLE_SLOTS + 16 * len(msg.raw_bits)
+                )
 
         self._tail = work[count:].copy()
         self._skip = max(0, next_free - count)
         return self._messages
+
+    _FORMATS = np.array(_SHORT_FORMATS + _LONG_FORMATS)
+
+    @staticmethod
+    def _clearest(groups: np.ndarray, clarity: np.ndarray) -> np.ndarray:
+        """Index of the clearest candidate of each group (consecutive runs
+        of equal ``groups``), in order."""
+        if not len(groups):
+            return np.zeros(0, dtype=np.int64)
+        order = np.lexsort((-clarity, groups))
+        first = np.flatnonzero(np.diff(groups[order], prepend=groups[order][0] - 1))
+        return np.sort(order[first])
 
     def _forget_old_aircraft(self) -> None:
         """Drop addresses not seen for longer than ``ICAO_TIMEOUT_S``."""
@@ -2761,7 +2885,6 @@ class ADSBDecoder(ProtocolDecoder):
         self._known_icao.clear()
         self._timestamp = 0.0
         self._rest = np.zeros(0, dtype=np.float32)
-        self._phase = 0.0
         self._tail = np.zeros(0, dtype=np.float32)
         self._skip = 0
 

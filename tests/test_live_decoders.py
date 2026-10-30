@@ -34,6 +34,7 @@ from sdr_module.dsp.live_decoders import (
 )
 from sdr_module.dsp.protocols import (
     ACARSDecoder,
+    ADSBDecoder,
     ADSBMessage,
     AX25Decoder,
     BitSlicer,
@@ -218,6 +219,47 @@ def test_ads_b_in_gui_sized_blocks_away_from_the_lo():
         ("4840D6", "KLM1023")
     ] * 5
     assert decoder.status.valid == 5
+
+
+@pytest.mark.parametrize("rate", [2.4e6, 2.56e6, 8e6, 20e6])
+def test_ads_b_replies_decode_wherever_they_start(rate):
+    # DEC-06: the magnitude was read in 0.5 us slots on one fixed grid, so
+    # a reply starting between two slot edges spread every pulse over two
+    # slots: at 2.4 MS/s about half of the strong replies were lost (none
+    # that started 0.2-0.3 us into a slot). Here 20 replies start 0 to
+    # 0.475 us into a slot.
+    from sdr_module.gui import device_dialog as dd
+
+    frame = dd._extended_squitter(0x4840D6, dd._ident_me("KLM1023"))
+    pulses = dd._modes_pulses(frame)
+    rng = np.random.default_rng(16)
+    x = (0.02 * rng.standard_normal(int(0.012 * rate))).astype(np.complex64)
+    x += (0.02j * rng.standard_normal(len(x))).astype(np.complex64)
+    slot = 0.5e-6 * rate  # samples
+    for k in range(20):
+        start, env = dd._pulse_envelope(pulses, (100 + 400 * k + k / 20) * slot, rate)
+        x[start : start + len(env)] += 0.5 * env
+    rows = []
+    for block in (len(x), int(rate * GUI_BLOCK_S), 997):
+        decoder = create_live_decoder("ADS-B", rate)
+        rows.append([(m.icao_address, m.callsign) for m in _decode(decoder, x, block)])
+    assert rows[0] == [("4840D6", "KLM1023")] * 20
+    assert rows[1] == rows[0] and rows[2] == rows[0]
+
+
+@pytest.mark.parametrize("rate, phases", [(8e6, 4), (10e6, 5), (20e6, 5)])
+def test_ads_b_sums_whole_samples_at_whole_ratios(rate, phases):
+    # DEC-07: at 4, 5 or 10 samples per 0.5 us slot every block still went
+    # through a float64 running sum and an interpolation: 9-12 ms of each
+    # 33 ms frame at 20 MS/s. Now the slot values are sums of whole
+    # samples (one value per offset, every 0.1-0.125 us).
+    decoder = ADSBDecoder(rate)
+    assert (decoder._phases, decoder._points) == (phases, 1)
+    x = np.zeros(int(rate * GUI_BLOCK_S), dtype=np.float32)
+    x[1000:1004] = 1.0
+    slots = decoder._to_work_rate(x)
+    assert len(slots) == (len(x) - decoder._need) // decoder._period + 1
+    assert slots.max() == pytest.approx(4 / (rate * 0.5e-6), rel=1e-6)
 
 
 def test_noise_alone_decodes_nothing_and_fails_nothing():

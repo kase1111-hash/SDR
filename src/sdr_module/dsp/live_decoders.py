@@ -827,7 +827,7 @@ class ADSBLiveDecoder(LiveDecoder):
         if self._decoder is None:
             return []
         if np.iscomplexobj(iq):
-            magnitude = np.abs(iq).astype(np.float32)
+            magnitude = np.abs(iq).astype(np.float32, copy=False)
         else:
             magnitude = np.abs(np.asarray(iq, dtype=np.float32))
         return list(self._decoder.decode(magnitude))

@@ -107,8 +107,8 @@ _SAVED_RESULTS = 500
 _FREQ_RANGE_MHZ = (0.1, 6000.0)
 _STEP_RANGE_KHZ = (1.0, 10000.0)
 _RESUME_RANGE_S = (0.5, 60.0)
-#: Saved result times later than this (the year 3000), or before 1970, or
-#: not numbers at all (damaged settings) read as "never": no clock shows them.
+#: Saved result times later than this (the year 3000), before 1970 or NaN
+#: (damaged settings) read as "never": no clock shows them.
 _LAST_TIMESTAMP = 32503680000.0
 
 _EMPTY_TEXTS = {

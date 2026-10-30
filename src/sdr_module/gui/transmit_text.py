@@ -81,7 +81,13 @@ from ..protocols.text_modes import (
 )
 from .audio_sink import AudioSink
 from .themes import mono_font, set_role, set_tone
-from .transmitter import TxJob, format_dbm_power, format_mhz, legality_problem
+from .transmitter import (
+    TxJob,
+    format_dbm_power,
+    format_mhz,
+    id_goes_first,
+    legality_problem,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,13 +110,15 @@ FILE_RATE = 48000
 AUDIO_LEVEL = 0.5
 
 # "Sent as" per mode: (text, value, tooltip). "auto" (CW only) picks CW
-# below 30 MHz and an FM tone above, as the station ID does.
+# below 30 MHz and in the CW-only segments, an FM tone elsewhere above, as
+# Send ID Now does.
 _CW_EMISSIONS = (
     (
         "Auto (by frequency)",
         "auto",
-        "A keyed carrier (CW) below 30 MHz, where CW is heard in CW or SSB; "
-        "an FM tone (MCW) above, which FM receivers hear",
+        "A keyed carrier (CW) below 30 MHz and in the CW-only parts of 6 m "
+        "and 2 m, where CW is heard in CW or SSB; an FM tone (MCW) elsewhere "
+        "above, which FM receivers hear",
     ),
     (
         "CW (keyed carrier)",
@@ -212,8 +220,9 @@ def _in_amateur_band(freq_hz: float) -> bool:
 
 
 def resolve_emission(mode: str, choice: str, freq_hz: float) -> str:
-    """``"direct"`` or ``"fm"``: "auto" (CW) by frequency, as the station
-    ID does (a keyed carrier below 30 MHz, an FM tone above)."""
+    """``"direct"`` or ``"fm"``: "auto" (CW) by frequency, as Send ID Now
+    does (a keyed carrier below 30 MHz and in the CW-only segments, an FM
+    tone elsewhere above)."""
     if choice in (EMISSION_DIRECT, EMISSION_FM):
         return choice
     if mode != MODE_CW:
@@ -662,7 +671,31 @@ if HAS_PYQT6:
                     data = loaded if isinstance(loaded, dict) else {}
                 except ValueError:
                     logger.warning("Ignoring unreadable Transmit Text settings")
-            for mode, values in (data.get("modes") or {}).items():
+            try:
+                self._load_mode_settings(data)
+            except (TypeError, AttributeError, ValueError) as e:
+                # (A value of a shape this doesn't know: the defaults stay.)
+                logger.warning(f"Ignoring Transmit Text settings it can't use: {e}")
+            mode = data.get("mode", MODE_RTTY)
+            if not isinstance(mode, str) or mode not in TEXT_MODES:
+                mode = MODE_RTTY
+            index = self._mode_combo.findData(mode)
+            self._loading = True
+            try:
+                self._mode_combo.setCurrentIndex(max(0, index))
+                self._show_mode(self.mode())
+                text = data.get("text", "")
+                if isinstance(text, str):
+                    self._text_edit.setPlainText(text[:MAX_TEXT_CHARS])
+            finally:
+                self._loading = False
+            self._update_text_info()
+
+        def _load_mode_settings(self, data: Dict[str, Any]) -> None:
+            """Each mode's saved settings and the file format, where they
+            are of the right type (anything else keeps the default)."""
+            modes = data.get("modes")
+            for mode, values in (modes if isinstance(modes, dict) else {}).items():
                 if mode not in self._mode_settings or not isinstance(values, dict):
                     continue
                 current = self._mode_settings[mode]
@@ -680,20 +713,11 @@ if HAS_PYQT6:
                 if emission in ("auto", EMISSION_DIRECT, EMISSION_FM):
                     if emission != "auto" or mode == MODE_CW:
                         self._emission_choice[mode] = emission
-            if data.get("save_format") in {key for key, _f, _e in _SAVE_FORMATS}:
-                self._save_format = str(data["save_format"])
-            mode = data.get("mode", MODE_RTTY)
-            index = self._mode_combo.findData(mode if mode in TEXT_MODES else MODE_RTTY)
-            self._loading = True
-            try:
-                self._mode_combo.setCurrentIndex(max(0, index))
-                self._show_mode(self.mode())
-                text = data.get("text", "")
-                if isinstance(text, str):
-                    self._text_edit.setPlainText(text[:MAX_TEXT_CHARS])
-            finally:
-                self._loading = False
-            self._update_text_info()
+            save_format = data.get("save_format")
+            if isinstance(save_format, str) and save_format in {
+                key for key, _f, _e in _SAVE_FORMATS
+            }:
+                self._save_format = save_format
 
         def _save_settings(self) -> None:
             if self._loading:
@@ -1173,7 +1197,8 @@ if HAS_PYQT6:
                 problem = legality_problem(freq, width, mode, quiet=True)
             if problem is not None:
                 return f"Can't send on {where}: {problem}.", "danger", False
-            ids, id_problem = self._id_words(freq)
+            job_s = signal.source(TX_SAMPLE_RATE, emission).duration_s
+            ids, id_problem = self._id_words(freq, mode, job_s)
             if id_problem is not None:
                 return f"Can't send on {where}: {id_problem}.", "danger", False
             problem = station.power_problem(freq, mode)
@@ -1188,9 +1213,13 @@ if HAS_PYQT6:
                 True,
             )
 
-        def _id_words(self, freq: float) -> Tuple[str, Optional[str]]:
-            """How the transmission is identified ("with your ID at the
-            start and end"), and why it can't be (None: it can)."""
+        def _id_words(
+            self, freq: float, job_mode: Optional[str] = None, job_s: float = 0.0
+        ) -> Tuple[str, Optional[str]]:
+            """How the transmission is identified ("ID DE W1AW (CW, 20 WPM)
+            at the start and end": the ID it gets, ``job_mode`` being its
+            mode and ``job_s`` its air time), and why it can't be (None: it
+            can)."""
             station = self._station()
             panel = getattr(self._win, "_callsign_panel", None)
             call = self._callsign()
@@ -1206,16 +1235,27 @@ if HAS_PYQT6:
             interval = values.get("interval_s")
             if not (start or end or interval):
                 return "no automatic ID (Ham ID > Automatic ID is off)", None
-            _emission, id_mode, id_width, _summary = station.id_spec(freq)
+            _emission, id_mode, id_width, summary = station.id_spec(freq, job_mode)
             problem = legality_problem(freq, id_width, id_mode, quiet=True)
             if problem is not None:
                 return "", f"your station ID can't go there: {problem}"
+            since = station.engine.seconds_since_last_id()
+            due_first = bool(
+                not start
+                and interval
+                and since is not None
+                and id_goes_first(float(interval) - since, float(interval) / 2.0, job_s)
+            )
             if start and end and not interval:
                 when = "at the start and end"
             else:
                 parts = []
                 if start:
                     parts.append("at the start")
+                elif due_first:  # (the interval since the last ID runs out)
+                    parts.append(
+                        f"at the start ({int(since // 60)} min since the last)"
+                    )
                 if interval:
                     parts.append(f"every {int(float(interval) // 60)} min")
                 if end:
@@ -1225,7 +1265,7 @@ if HAS_PYQT6:
                     if len(parts) == 1
                     else (", ".join(parts[:-1]) + " and " + parts[-1])
                 )
-            return f"ID DE {call} {when}", None
+            return f"ID DE {call} ({summary}) {when}", None
 
         def refresh(self) -> None:
             """Bring the line above the buttons and the buttons up to date."""

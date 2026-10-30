@@ -348,7 +348,12 @@ class TestTxSource:
         sig = _signal("RYRY DE N0CALL", MODE_RTTY)
         src = sig.source(RATE, EMISSION_FM, deviation_hz=2500.0)
         iq = _read_all(src)
-        assert np.allclose(np.abs(iq), 0.9, atol=1e-4)  # constant envelope
+        # A constant envelope, the carrier rising and falling over 5 ms at
+        # the ends (never on or off in one sample: no key clicks).
+        ramp = int(round(0.005 * RATE))
+        assert np.allclose(np.abs(iq[ramp:-ramp]), 0.9, atol=1e-4)
+        assert np.abs(iq[0]) < 0.01 and np.abs(iq[-1]) < 0.01
+        assert np.max(np.abs(np.diff(np.abs(iq)))) < 0.9 * 4 / ramp
         audio = _fm_audio(iq, RATE) / 2500.0
         # The FM audio is the AFSK audio (after the unmodulated lead-in);
         # the discriminator's value k is the phase step into sample k + 1.

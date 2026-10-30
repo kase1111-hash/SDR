@@ -27,6 +27,7 @@ Threading model:
 import logging
 import queue
 import threading
+import time
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -55,6 +56,11 @@ HACKRF_SPEC = DeviceSpec(
     tx_power_min=-10.0,  # -10 dBm
     tx_power_max=15.0,  # +15 dBm (frequency dependent)
 )
+
+# libhackrf keeps up to this many samples in flight (four USB transfers of
+# 131072): once the last samples are handed over, they take this long at the
+# sample rate to go out, and hackrf_stop_tx() cancels whatever is left.
+TX_IN_FLIGHT_SAMPLES = 4 * 131072
 
 _INSTALL_HINT = (
     "HackRF support is not installed. Install it with "
@@ -562,6 +568,13 @@ class HackRFDevice(SDRDevice):
             self._device.pyhackrf_start_rx()
         except Exception as e:
             logger.error(f"Failed to start RX: {e}")
+            # libhackrf may have switched to RX and submitted transfers
+            # before it failed: stop them.
+            self._stop_event.set()
+            try:
+                self._device.pyhackrf_stop_rx()
+            except Exception as stop_error:
+                logger.warning(f"Could not stop the failed reception: {stop_error}")
             return False
 
         with self._state_lock:
@@ -808,6 +821,16 @@ class HackRFDevice(SDRDevice):
         except Exception as e:
             logger.error(f"Failed to start TX: {e}")
             self._last_tx_error = f"The HackRF didn't start transmitting: {e}"
+            # libhackrf puts the radio in TX and submits transfers before it
+            # can fail part-way (a USB error): stop it, so nothing more goes
+            # out while the app says nothing was sent.
+            self._stop_event.set()
+            self._tx_done.set()
+            try:
+                self._device.pyhackrf_stop_tx()
+            except Exception as stop_error:
+                logger.warning(f"Could not stop the failed transmission: {stop_error}")
+            self._tx_callback = None
             self._tx_bandwidth, self._tx_modes = None, ()
             return False
 
@@ -851,10 +874,11 @@ class HackRFDevice(SDRDevice):
         """
         Transmit a fixed block of complex samples once, blocking until done.
 
-        Returns True only after the samples have been handed to libhackrf and
-        transmission has stopped. Returns False if TX is not currently allowed
-        (device closed, RX active, or a frequency/bandwidth lockout; the
-        reason is in :attr:`last_tx_error`).
+        Returns True only after all the samples have gone out (the ones
+        libhackrf still holds in its USB transfers when the last are handed
+        over included) and transmission has stopped. Returns False if TX is
+        not currently allowed (device closed, RX active, or a
+        frequency/bandwidth lockout; the reason is in :attr:`last_tx_error`).
 
         ``bandwidth_hz`` and ``mode`` describe the emission, as for
         :meth:`start_tx`. ``timeout`` is the extra time allowed beyond the
@@ -903,6 +927,11 @@ class HackRFDevice(SDRDevice):
         limit = air_time + max(0.0, float(timeout))
         sent.wait(timeout=limit)
         finished = self._tx_done.wait(timeout=limit)
+        if finished and sent.is_set() and not self._stop_event.is_set():
+            # The last samples are still in libhackrf's transfers: let them
+            # go out (stop_tx cancels them).
+            in_flight = TX_IN_FLIGHT_SAMPLES / rate if rate and rate > 0 else 0.0
+            time.sleep(min(1.0, in_flight + 0.05))
         self.stop_tx()
         if not finished:
             logger.warning("write_samples timed out waiting for TX to drain")

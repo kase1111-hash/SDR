@@ -17,6 +17,7 @@ for.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import Any, Optional, Tuple
 
@@ -70,6 +71,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             amp=settings.get_bool(KEY_AMP, False),
         ).clamped()
         self._resume_rx = False
+        # The power of the transmission on the air (the HackRF keeps it
+        # until the end, whatever the setting does meanwhile).
+        self._air_power: Optional[TxPower] = None
         self._badge: Optional[QLabel] = None
         self._badge_action: Any = None
         self._send_action: Any = None
@@ -171,9 +175,13 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             return f"the {name} can only receive. Connect a HackRF One"
         return None
 
-    def id_spec(self, freq_hz: float) -> Tuple[str, str, float, str]:
+    def id_spec(
+        self, freq_hz: float, job_mode: Optional[str] = None
+    ) -> Tuple[str, str, float, str]:
         """``(emission, mode, occupied bandwidth, summary)`` of the station
-        ID at ``freq_hz`` with the Ham ID panel's settings."""
+        ID at ``freq_hz`` with the Ham ID panel's settings: Send ID Now's,
+        or (``job_mode``) the one Automatic ID adds to a transmission in
+        that mode ("Auto" sends it the way the transmission is sent)."""
         from ..ham.callsign import (
             EMISSION_MCW,
             choose_id_emission,
@@ -183,9 +191,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
 
         panel = self._panel()
         pref = panel.emission_preference() if panel is not None else "auto"
-        wpm = panel.cw_wpm() if panel is not None else 20
+        wpm = self._id_wpm()
         tone = panel.cw_tone() if panel is not None else 700
-        emission = choose_id_emission(freq_hz, pref)
+        emission = choose_id_emission(freq_hz, pref, job_mode)
         if emission == EMISSION_MCW:
             return (
                 emission,
@@ -195,13 +203,32 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             )
         return emission, "CW", cw_occupied_bandwidth(wpm), f"CW, {wpm} WPM"
 
-    def power_problem(self, freq_hz: float, mode: str) -> Optional[str]:
+    def _id_wpm(self) -> int:
+        """The ID's speed: the Ham ID panel's, at most 20 WPM (an ID keyed
+        by an automatic device, FCC 97.119(b)(1))."""
+        from ..ham.callsign import MAX_ID_WPM
+
+        panel = self._panel()
+        wpm = int(panel.cw_wpm()) if panel is not None else MAX_ID_WPM
+        return max(1, min(wpm, MAX_ID_WPM))
+
+    def _shown_power(self) -> TxPower:
+        """The power the Output line and the QRP tab show: the running
+        transmission's while one is on the air, else the setting."""
+        if self._air_power is not None and self.busy:
+            return self._air_power
+        return self.power
+
+    def power_problem(
+        self, freq_hz: float, mode: str, power: Optional[TxPower] = None
+    ) -> Optional[str]:
         """Why the calculated output is too high (None: it isn't): over the
-        QRP panel's power limit, or over the legal limit at ``freq_hz``."""
+        QRP panel's power limit, or over the legal limit at ``freq_hz``
+        (with ``power``, the TX power setting by default)."""
         qrp = self._qrp()
         if qrp is None:
             return None
-        sdr_dbm = self.power.output_dbm(freq_hz)
+        sdr_dbm = (power or self.power).output_dbm(freq_hz)
         try:
             watts = qrp.calculated_output_watts(sdr_dbm)
         except Exception:  # pragma: no cover - defensive
@@ -295,14 +322,15 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
 
     def _update_power_label(self, freq: float) -> None:
         panel = self._panel()
-        dbm = self.power.output_dbm(freq)
+        power = self._shown_power()
+        dbm = power.output_dbm(freq)
         text = f"about {format_dbm_power(dbm)}"
         tip = (
             f"Estimated output at the HackRF's antenna port on {format_mhz(freq)} "
-            f"({self.power.describe(freq)}). Units differ by a few dB: "
+            f"({power.describe(freq)}). Units differ by a few dB: "
             "measure it before adding an amplifier."
         )
-        problem = self.power_problem(freq, self.id_spec(freq)[1])
+        problem = self.power_problem(freq, self.id_spec(freq)[1], power)
         tone = "danger" if problem else None
         if problem:
             tip += f"\n\n{problem[:1].upper()}{problem[1:]}."
@@ -317,9 +345,10 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         if qrp is None:
             return
         if can_transmit(self._device()):
+            power = self._shown_power()
             qrp.set_sdr_output(
-                self.power.output_dbm(freq),
-                f"From Ham ID > TX Power: {self.power.describe(freq)}",
+                power.output_dbm(freq),
+                f"From Ham ID > TX Power: {power.describe(freq)}",
             )
         else:
             qrp.set_sdr_output(None)
@@ -347,7 +376,7 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         callsign = panel.get_callsign()
         source = MorseIdSource(
             f"DE {callsign}",
-            panel.cw_wpm(),
+            self._id_wpm(),
             rate,
             emission=emission,
             tone_hz=panel.cw_tone(),
@@ -373,11 +402,12 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         panel = self._panel()
         if panel is None or not panel.is_callsign_valid():
             return None
-        callsign, wpm, tone = panel.get_callsign(), panel.cw_wpm(), panel.cw_tone()
+        callsign, wpm, tone = panel.get_callsign(), self._id_wpm(), panel.cw_tone()
         pref = panel.emission_preference()
 
         def make(job: TxJob) -> TxJob:
-            emission = choose_id_emission(job.center_hz, pref)
+            # (Sent the way the job is: FM tone with FM, else CW.)
+            emission = choose_id_emission(job.center_hz, pref, job.mode)
             source = MorseIdSource(
                 f"DE {callsign}",
                 wpm,
@@ -471,10 +501,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             return False
         on_air_s = job.duration_s
         if id_jobs and policy is not None:
-            # The station IDs Automatic ID adds go on the air too.
-            ids = int(policy.at_start) + int(policy.at_end)
-            if policy.interval_s:
-                ids += int(job.duration_s // float(policy.interval_s))
+            # The station IDs Automatic ID adds go on the air too (an
+            # interval ID due early in the job goes before it).
+            ids = self.engine.expected_ids(job, policy)
             on_air_s += ids * id_jobs[0].duration_s
         if confirm and not self.confirm(job, on_air_s):
             win._show_status_message(f"{what} not sent: cancelled.", None, 4000)
@@ -488,14 +517,16 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         self._resume_rx = bool(win._is_running)
         if self._resume_rx:
             win._stop_acquisition()
+        self._air_power = self.power
         started = self.engine.start(
             job,
             self._device(),
-            self.power,
+            self._air_power,
             policy=policy,
             make_id=make_id,
         )
         if not started:
+            self._air_power = None
             self._refuse(what, job.center_hz, self.engine.last_refusal)
             if self._resume_rx:
                 self._resume_rx = False
@@ -520,15 +551,40 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             self._result_line = (self._inputs(), line, tone)
             panel.set_tx_status(line, tone, can)
 
+    def _station_output(self, freq_hz: float) -> Tuple[str, str]:
+        """``(what the station puts out, how)`` at ``freq_hz``: the HackRF's
+        estimated output, or through the QRP tab's amplifier chain (the
+        figure the power check uses) the chain's output, with " at about 10
+        mW, which the amplifiers on the QRP tab take to about 100 W" as
+        how."""
+        sdr_dbm = self.power.output_dbm(freq_hz)
+        hackrf = format_dbm_power(sdr_dbm).split(" (")[0]
+        qrp = self._qrp()
+        if qrp is None:
+            return hackrf, ""
+        try:
+            watts = float(qrp.calculated_output_watts(sdr_dbm))
+        except Exception:  # pragma: no cover - defensive
+            return hackrf, ""
+        if not watts > 0 or abs(10.0 * math.log10(watts) + 30.0 - sdr_dbm) < 0.5:
+            return hackrf, ""  # (no amplifier in the chain)
+        station = qrp.watts_text(watts)
+        return (
+            station,
+            f" at about {hackrf}, which the amplifiers on the QRP tab take to "
+            f"about {station}",
+        )
+
     def confirm(self, job: TxJob, on_air_s: Optional[float] = None) -> bool:
         """The first-use question ("Transmit DE W1AW on 146.520 MHz (FM
-        tone, 20 WPM, about 1 mW)?"); "Don't ask again" skips it from then
-        on. ``on_air_s``: the whole air time, station IDs included (the
-        job's own by default). True to transmit."""
+        tone, 20 WPM, about 1 mW)?", with the station's output through the
+        QRP tab's amplifiers when there are any); "Don't ask again" skips it
+        from then on. ``on_air_s``: the whole air time, station IDs included
+        (the job's own by default). True to transmit."""
         settings = self._win._settings
-        if not settings.get_bool(KEY_CONFIRM, True):
+        if not asks_before_transmitting(settings):
             return True
-        estimate = format_dbm_power(self.power.output_dbm(job.center_hz)).split(" (")[0]
+        estimate, chain = self._station_output(job.center_hz)
         how = job.summary or job.mode
         seconds = job.duration_s if on_air_s is None else float(on_air_s)
         ids = " with your station ID" if seconds > job.duration_s + 0.05 else ""
@@ -540,8 +596,8 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             f"({how}, about {estimate})?"
         )
         box.setInformativeText(
-            f"The HackRF will transmit for about {seconds:.1f} s{ids}. Make sure "
-            "an antenna or a dummy load is connected and that your license "
+            f"The HackRF will transmit for about {seconds:.1f} s{ids}{chain}. Make "
+            "sure an antenna or a dummy load is connected and that your license "
             "allows this frequency. Stop ends it at any time."
         )
         check = QCheckBox("Don't ask again")
@@ -624,6 +680,7 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
 
     def _on_finished(self, result: TxResult) -> None:
         win = self._win
+        self._air_power = None  # (the setting shows again)
         if self._badge_action is not None:
             self._badge_action.setVisible(False)
         if self._stop_action is not None:
@@ -661,6 +718,18 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         self.refresh()
 
 
+def asks_before_transmitting(settings: Any) -> bool:
+    """Whether the first-use question is asked (``tx/confirm``): only an
+    explicit no ("Don't ask again": False, or "false", "0", "no", "off")
+    turns it off. Anything else asks, a missing, empty or unreadable value
+    included, so a damaged settings file never turns the question off."""
+    try:
+        raw = settings.get_str(KEY_CONFIRM, "true")
+    except Exception:  # pragma: no cover - defensive
+        return True
+    return str(raw).strip().lower() not in ("false", "0", "no", "off")
+
+
 def _in_amateur_band(freq_hz: float) -> bool:
     """Whether ``freq_hz`` is in an amateur band (for any license class)."""
     from ..core.frequency_manager import AMATEUR_BAND_PRIVILEGES
@@ -668,4 +737,4 @@ def _in_amateur_band(freq_hz: float) -> bool:
     return any(b.start_hz <= freq_hz <= b.end_hz for b in AMATEUR_BAND_PRIVILEGES)
 
 
-__all__ = ["ID_DEVIATION_HZ", "ID_SAMPLE_RATE", "StationTx"]
+__all__ = ["ID_DEVIATION_HZ", "ID_SAMPLE_RATE", "StationTx", "asks_before_transmitting"]

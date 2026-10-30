@@ -46,7 +46,7 @@ except ImportError:  # pragma: no cover - the GUI needs PyQt6
 
 from . import file_dialogs
 from .audio_sink import default_output_name, output_devices
-from .tx_station import KEY_CONFIRM
+from .tx_station import KEY_CONFIRM, asks_before_transmitting
 
 if HAS_PYQT6:
     from .themes import set_role, set_tone
@@ -171,7 +171,7 @@ class PreferencesDialog(QDialog if HAS_PYQT6 else object):
             recordings_folder=file_dialogs.recordings_folder(s),
             screenshots_folder=file_dialogs.start_folder(s, "screenshot"),
             capture_folder=str(s.get_str(KEY_CAPTURE_FOLDER, "") or ""),
-            tx_confirm=bool(s.get_bool(KEY_TX_CONFIRM, True)),
+            tx_confirm=asks_before_transmitting(s),
         )
 
     # ----------------------------------------------------------------- build

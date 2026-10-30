@@ -257,7 +257,7 @@ class TestCallsignPanel(unittest.TestCase):
             "id_at_end": True,
             "mode": "CW",
             "interval_minutes": 5,
-            "cw_wpm": 25,
+            "cw_wpm": 15,  # (at most 20: an automatic CW ID)
             "cw_tone": 650,
         }
         self.panel.set_settings(settings)
@@ -265,7 +265,7 @@ class TestCallsignPanel(unittest.TestCase):
         self.assertEqual(result["callsign"], "G3ABC")
         for key in ("auto_id", "id_at_start", "id_at_end", "interval_minutes"):
             self.assertEqual(result[key], settings[key])
-        self.assertEqual(result["cw_wpm"], 25)
+        self.assertEqual(result["cw_wpm"], 15)
         self.assertEqual(result["cw_tone"], 650)
 
     def test_form_labels_centred_on_fields(self):
@@ -278,9 +278,9 @@ class TestCallsignPanel(unittest.TestCase):
         self.type_callsign("w1aw")
         self.assertRegex(self.panel._morse_label.text(), r"^[.\- /]+$")
         self.assertIn("20\u00a0WPM", self.panel._status_label.text())
-        self.panel._wpm_spin.setValue(30)
-        self.assertIn("30\u00a0WPM", self.panel._status_label.text())
-        self.assertIn("30 WPM", self.panel._morse_label.toolTip())
+        self.panel._wpm_spin.setValue(15)  # (at most 20: an automatic CW ID)
+        self.assertIn("15\u00a0WPM", self.panel._status_label.text())
+        self.assertIn("15 WPM", self.panel._morse_label.toolTip())
 
     def test_interval_tooltip_explains_when_disabled(self):
         self.panel._auto_id_check.setChecked(False)

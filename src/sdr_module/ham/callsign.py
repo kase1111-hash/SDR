@@ -625,6 +625,10 @@ CW_ID_MAX_HZ = 30e6
 EMISSION_CW = "cw"
 EMISSION_MCW = "mcw"
 
+#: The fastest a station ID keyed by an automatic device may be sent: 20 WPM
+#: (47 CFR 97.119(b)(1)). The app's IDs are, whatever the speed set.
+MAX_ID_WPM = 20
+
 # The rate the keying and the MCW phase are worked out at; every block is
 # interpolated from it to the transmit rate (so memory stays small at any
 # transmit rate: a 30 s ID is 1.4 M samples here, not 60 M at 2 MS/s).
@@ -640,6 +644,13 @@ _MCW_LEAD_S = 0.3
 _MCW_TAIL_S = 0.15
 # Digital level of the transmitted carrier (headroom below full scale).
 _ID_AMPLITUDE = 0.9
+
+
+def _raised(k: np.ndarray, length: int) -> np.ndarray:
+    """Raised-cosine rise over ``length`` samples at sample(s) ``k`` (1
+    from ``length`` on, 0 before 0)."""
+    x = np.clip((np.asarray(k, np.float64) + 0.5) / max(1, int(length)), 0.0, 1.0)
+    return 0.5 - 0.5 * np.cos(np.pi * x)
 
 
 def morse_units(text: str) -> List[Tuple[bool, int]]:
@@ -714,18 +725,41 @@ def mcw_occupied_bandwidth(tone_hz: float, deviation_hz: float) -> float:
     return 2.0 * (abs(float(deviation_hz)) + abs(float(tone_hz)))
 
 
-def choose_id_emission(freq_hz: float, preference: str = "auto") -> str:
+def choose_id_emission(
+    freq_hz: float, preference: str = "auto", job_mode: Optional[str] = None
+) -> str:
     """``"cw"`` or ``"mcw"`` for an ID at ``freq_hz``.
 
-    ``preference`` "cw" or "mcw" is used as given; "auto" picks CW (a
-    keyed carrier) below 30 MHz, where CW is how HF stations identify and
-    FM is rarely allowed, and MCW (FM with a keyed tone) above, where
-    stations listen in FM.
+    ``preference`` "cw" or "mcw" is used as given. "auto" with ``job_mode``
+    (the mode of the transmission the ID goes with) sends the ID the way
+    that is sent, so its listeners can read it: MCW (FM with a keyed tone)
+    with an FM transmission, CW (a keyed carrier) with anything else (CW
+    or data on the carrier, SSB). "auto" on its own picks CW below 30 MHz,
+    where CW is how HF stations identify and FM is rarely allowed, and in
+    the CW-only segments above (50.0-50.1 and 144.0-144.1 MHz); MCW
+    elsewhere above, where stations listen in FM.
     """
     pref = (preference or "auto").lower()
     if pref in (EMISSION_CW, EMISSION_MCW):
         return pref
-    return EMISSION_CW if float(freq_hz) < CW_ID_MAX_HZ else EMISSION_MCW
+    if job_mode:
+        return EMISSION_MCW if str(job_mode).upper() == "FM" else EMISSION_CW
+    if float(freq_hz) < CW_ID_MAX_HZ or _cw_only(float(freq_hz)):
+        return EMISSION_CW
+    return EMISSION_MCW
+
+
+def _cw_only(freq_hz: float) -> bool:
+    """Whether every amateur segment at ``freq_hz`` allows only CW (for any
+    license class)."""
+    from ..core.frequency_manager import AMATEUR_BAND_PRIVILEGES
+
+    segments = [
+        band
+        for band in AMATEUR_BAND_PRIVILEGES
+        if band.start_hz <= freq_hz <= band.end_hz
+    ]
+    return bool(segments) and all(band.modes == {"CW"} for band in segments)
 
 
 def describe_id_emission(emission: str) -> str:
@@ -786,12 +820,16 @@ class MorseIdSource:
             audio = env * np.sin(2.0 * np.pi * self.tone_hz * t)
             phase = np.cumsum(audio) * (2.0 * np.pi * self.deviation_hz / base)
             # One sample past the end, so interpolation never runs out.
-            self._table = np.append(phase, phase[-1] if len(phase) else 0.0)
+            table = np.append(phase, phase[-1] if len(phase) else 0.0)
         else:
-            self._table = np.append(env, np.float32(0.0)).astype(np.float64)
+            table = np.append(env, np.float32(0.0))
+        # (float32: an ID's table is a few MB even at 5 WPM.)
+        self._table = table.astype(np.float32)
         self._base_count = len(env)
         self.total_samples = int(math.floor(len(env) * self.sample_rate / base))
         self._step = base / self.sample_rate
+        # The FM carrier rises and falls over this many samples.
+        self._ramp = max(1, int(round(_KEY_RISE_S * self.sample_rate)))
         self._pos = 0
 
     @property
@@ -810,6 +848,12 @@ class MorseIdSource:
     def mode(self) -> str:
         """The mode the frequency manager knows it by ("CW" or "FM")."""
         return "FM" if self.emission == EMISSION_MCW else "CW"
+
+    @property
+    def word_space_s(self) -> float:
+        """A word space at the ID's speed (seven dits): the key-up that
+        sets the ID apart when it goes into another transmission."""
+        return 7.0 * 1.2 / max(1.0, self.wpm)
 
     @property
     def position(self) -> int:
@@ -833,6 +877,14 @@ class MorseIdSource:
         self._pos += count
         if self.emission == EMISSION_MCW:
             out = np.exp(1j * value) * self.amplitude
+            # The carrier rises and falls over 5 ms (raised cosine), inside
+            # the unmodulated lead-in and tail: it never switches on or off
+            # in one sample (no key clicks next to another transmission).
+            start = self._pos - count
+            ramp = self._ramp
+            if start < ramp or self._pos > self.total_samples - ramp:
+                k = start + np.arange(count)
+                out *= _raised(k, ramp) * _raised(self.total_samples - 1 - k, ramp)
             return out.astype(np.complex64)
         out = np.empty(count, dtype=np.complex64)
         out.real = value * self.amplitude
@@ -851,6 +903,7 @@ __all__ = [
     "CW_ID_MAX_HZ",
     "EMISSION_CW",
     "EMISSION_MCW",
+    "MAX_ID_WPM",
     "MorseIdSource",
     "choose_id_emission",
     "cw_occupied_bandwidth",

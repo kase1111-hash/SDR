@@ -89,11 +89,15 @@ class TestDecoderPanel(unittest.TestCase):
         self.assertIn("paused", p._empty.text())
 
     def test_protocol_names_match_main_window_mapping(self):
+        from sdr_module.gui.decoder_panel import PROTOCOL_AUTO, PROTOCOL_OFF
         from sdr_module.gui.main_window import SDRMainWindow
 
+        # Every entry but Off and Auto (which picks one of the others) is a
+        # protocol the window builds a decoder for.
         names = [
             self.panel._proto_combo.itemText(i)
-            for i in range(1, self.panel._proto_combo.count())
+            for i in range(self.panel._proto_combo.count())
+            if self.panel._proto_combo.itemText(i) not in (PROTOCOL_OFF, PROTOCOL_AUTO)
         ]
         self.assertEqual(sorted(names), sorted(SDRMainWindow._DECODER_PROTOCOLS))
 

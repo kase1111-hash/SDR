@@ -20,6 +20,11 @@ ACARS       channel (+/-5 kHz) -> AM envelope -> 1800 Hz complex mix and
             low-pass -> coherent MSK (rotation by 600 Hz, phase from a
             squaring loop) -> slicer -> ACARSDecoder
 ADS-B       |I/Q| at the full device rate (at least 2 MS/s) -> ADSBDecoder
+CW (Morse)  channel (+/-250 Hz, ~2 kHz) -> envelope -> KeyingDetector (peak
+            and noise trackers, hysteresis) -> MorseDecoder (timing, speed)
+RDS         channel (+/-100 kHz, ~240 kHz) -> FM discriminator (multiplex)
+            -> RDSDemodulator (57 kHz locked to 3x the 19 kHz pilot, biphase,
+            clock recovery, differential decoding) -> RDSDecoder
 ==========  =============================================================
 
 Each decoder reports its health in :attr:`LiveDecoder.status` (frames
@@ -50,7 +55,9 @@ from .channelizer import (
     Nco,
     lowpass_taps,
 )
+from .morse import KeyingDetector, MorseDecoder
 from .protocols import (
+    APRS_TYPE_NAMES,
     ACARSDecoder,
     ADSBDecoder,
     AX25Decoder,
@@ -58,7 +65,11 @@ from .protocols import (
     FLEXDecoder,
     POCSAGDecoder,
     ProtocolDecoder,
+    RDSData,
+    RDSDecoder,
+    parse_aprs_info,
 )
+from .rds import RDSDemodulator
 
 __all__ = [
     "LiveDecoderStatus",
@@ -69,9 +80,12 @@ __all__ = [
     "AX25LiveDecoder",
     "ACARSLiveDecoder",
     "ADSBLiveDecoder",
+    "CWLiveDecoder",
+    "RDSLiveDecoder",
     "LIVE_DECODERS",
     "create_live_decoder",
     "describe_message",
+    "message_details",
     "format_rate",
 ]
 
@@ -117,6 +131,11 @@ class LiveDecoderStatus:
     offset_hz: float = 0.0
     #: Seconds of samples processed.
     stream_s: float = 0.0
+    #: A short summary of what is being decoded, shown after the protocol
+    #: name (e.g. "18 WPM" for Morse, the station name for RDS), or "".
+    detail: str = ""
+    #: Text still being received (Morse: the line in progress), or "".
+    live_text: str = ""
 
 
 class LiveDecoder:
@@ -185,6 +204,12 @@ class LiveDecoder:
             self._last_time = self._clock()
             self._on_valid()
         return messages
+
+    def flush(self) -> List[DecodedMessage]:
+        """The end of the stream (e.g. of a recording): messages still being
+        assembled, such as a line of Morse code in progress. Most decoders
+        have none."""
+        return []
 
     def reset(self) -> None:
         """Forget the stream and the counts (the settings stay)."""
@@ -515,6 +540,245 @@ class ACARSLiveDecoder(ChannelDecoder):
         return list(self._decoder.decode(data))
 
 
+class CWLiveDecoder(ChannelDecoder):
+    """Morse code (CW): an on/off keyed carrier at the tuned frequency.
+
+    The channel is +/-250 Hz around the VFO at about 2 kHz (tune the
+    carrier to within about 200 Hz, as the CW mode's 500 Hz filter hears
+    it). Its envelope keys a :class:`~sdr_module.dsp.morse.KeyingDetector`
+    and a :class:`~sdr_module.dsp.morse.MorseDecoder` turns the marks and
+    gaps into text, learning the speed as it goes.
+
+    Messages are lines of text (:class:`~sdr_module.dsp.morse.MorseMessage`):
+    a line ends after a pause of 2.5 s, a long carrier or about 60
+    characters. The status counts characters; its ``detail`` is the speed
+    ("18 WPM") and its ``live_text`` the line still being received.
+    Retuning ends the line heard on the old channel and learns the new
+    channel's levels and speed afresh.
+    """
+
+    name = "CW (Morse)"
+    unit = "character"
+    PASS_HZ = 250.0
+    STOP_HZ = 450.0
+    TARGET_RATE = 2000.0
+    MIN_SAMPLE_RATE = 4e3
+
+    def _build(self) -> None:
+        rate = self.channel_rate
+        self._keyer = KeyingDetector(rate)
+        self._morse = MorseDecoder(rate)
+        self._held: List[DecodedMessage] = []  # lines ended by a retune
+        self._chars = 0  # characters decoded (all channels)
+        self._char_time: Optional[float] = None
+
+    def channel_changed(self) -> None:
+        super().channel_changed()
+        # Another station: its line ends here, and its levels and speed
+        # are its own.
+        self._held.extend(self._morse.flush())
+        self._keyer.reset()
+        self._morse.reset()
+
+    def _demodulate(self, channel: np.ndarray) -> List[DecodedMessage]:
+        before = self._morse.characters
+        lines: List[DecodedMessage] = list(self._held)
+        self._held = []
+        lines += self._morse.process(self._keyer.process(np.abs(channel)))
+        new = self._morse.characters - before
+        if new > 0:
+            self._chars += new
+            self._char_time = self._clock()
+            self._undecoded = 0.0  # it decodes
+        return lines
+
+    def flush(self) -> List[DecodedMessage]:
+        lines: List[DecodedMessage] = list(self._held)
+        self._held = []
+        return lines + list(self._morse.flush())
+
+    def reset(self) -> None:
+        super().reset()  # rebuilds the keyer and the decoder
+
+    @property
+    def wpm(self) -> Optional[float]:
+        """The measured speed, or None before there is one."""
+        return self._morse.wpm if self._morse.calibrated else None
+
+    @property
+    def status(self) -> LiveDecoderStatus:
+        base = super().status
+        wpm = self.wpm
+        return replace(
+            base,
+            frames=self._chars,
+            valid=self._chars,
+            last_time=self._char_time,
+            detail=f"{wpm:.0f} WPM" if wpm else "",
+            live_text=self._morse.line,
+        )
+
+
+class RDSLiveDecoder(LiveDecoder):
+    """RDS (station name, RadioText, program type, clock) from the FM
+    broadcast station at the tuned frequency.
+
+    The station's channel (+/-100 kHz) is picked out at about 240 kS/s and
+    FM-discriminated; :class:`~sdr_module.dsp.rds.RDSDemodulator` recovers
+    the RDS bits from the multiplex (57 kHz locked to the 19 kHz pilot
+    where there is one) and :class:`~sdr_module.dsp.protocols.RDSDecoder`
+    finds the groups. With ``channel_ready`` the input already is the
+    station's channel at 0 Hz (e.g. the receiver's own broadcast FM
+    channel, at 192 kS/s or more), so none is picked out.
+
+    Messages are the changes (an :class:`~sdr_module.dsp.protocols.RDSData`
+    with ``update`` set): a whole new station name or RadioText, the
+    program type and its name, the clock time. They wait until the
+    station's PI code is known (it is in every one), and the program type
+    waits for the station name, so the name comes first. The status counts
+    groups; its ``detail`` is the station name. Retuning
+    (``channel_changed``) forgets the station.
+    """
+
+    name = "RDS"
+    unit = "group"
+    PASS_HZ = 100e3
+    STOP_HZ = 140e3
+    TARGET_RATE = 240e3
+    MIN_SAMPLE_RATE = 200e3
+    #: Updates that are rows of their own (the PI code is in all of them).
+    ROW_UPDATES = ("ps", "radio_text", "pty", "ptyn", "clock_time")
+
+    def __init__(
+        self,
+        sample_rate: float,
+        offset_hz: float = 0.0,
+        clock: Callable[[], float] = time.monotonic,
+        channel_ready: bool = False,
+    ):
+        super().__init__(sample_rate, offset_hz, clock)
+        self._channelizer: Optional[Channelizer] = None
+        if channel_ready:
+            self.channel_rate = self.sample_rate
+        else:
+            self._channelizer = Channelizer(
+                self.sample_rate,
+                offset_hz,
+                self.PASS_HZ,
+                self.STOP_HZ,
+                self.TARGET_RATE,
+            )
+            self.channel_rate = self._channelizer.output_rate
+        self._group_time: Optional[float] = None
+        self._pilot_s = 0.0  # seconds of pilot without RDS sync
+        self._build()
+
+    def _build(self) -> None:
+        self._fm = FMDiscriminator(self.channel_rate)
+        self._demod = RDSDemodulator(self.channel_rate)
+        self._decoder = RDSDecoder(self._demod.work_rate)
+        self._held: List[RDSData] = []  # updates waiting for the PI or PS
+
+    def _decoders(self) -> List[ProtocolDecoder]:
+        return [self._decoder]
+
+    def set_offset(self, offset_hz: float) -> None:
+        changed = float(offset_hz) != self._offset
+        super().set_offset(offset_hz)
+        if self._channelizer is not None:
+            self._channelizer.set_offset(offset_hz)
+        if changed:
+            self.channel_changed()
+
+    def channel_changed(self) -> None:
+        """Another station: forget this one's name, text and sync."""
+        self._fm.reset()
+        self._demod.reset()
+        self._decoder.reset()
+        self._held = []
+        self._pilot_s = 0.0
+
+    def reset(self) -> None:
+        super().reset()
+        if self._channelizer is not None:
+            self._channelizer.reset()
+        self._group_time = None
+        self._pilot_s = 0.0
+        self._build()
+
+    @property
+    def station(self) -> RDSData:
+        """What is known about the station now (empty fields: not yet)."""
+        return self._decoder.station()
+
+    @property
+    def synced(self) -> bool:
+        return self._decoder.synced
+
+    @property
+    def pilot(self) -> bool:
+        """Whether the station sends a 19 kHz stereo pilot."""
+        return self._demod.pilot
+
+    def _decode(self, iq: np.ndarray) -> List[DecodedMessage]:
+        if self._channelizer is not None:
+            channel = self._channelizer.process(iq)
+        else:
+            channel = np.asarray(iq, dtype=np.complex64)
+        if not len(channel):
+            return []
+        groups = self._decoder.frames_seen - self._decoder.frames_failed
+        updates = self._decoder.decode_bits(
+            self._demod.process(self._fm.process(channel)), updates_only=True
+        )
+        if self._decoder.frames_seen - self._decoder.frames_failed > groups:
+            self._group_time = self._clock()
+        seconds = len(channel) / self.channel_rate
+        if self._decoder.synced:
+            self._pilot_s = 0.0
+        elif self._demod.pilot:
+            self._pilot_s += seconds
+        return self._rows([u for u in updates if u.update in self.ROW_UPDATES])
+
+    def _rows(self, updates: List[RDSData]) -> List[DecodedMessage]:
+        """The updates that can be shown now: once the PI code is known
+        (filled in), and the program type once the station name is."""
+        self._held.extend(updates)
+        station = self._decoder.station()
+        if not self._decoder.pi_known:
+            return []
+        ready: List[DecodedMessage] = []
+        waiting: List[RDSData] = []
+        for update in self._held:
+            if update.update in ("pty", "ptyn") and not station.ps_complete:
+                waiting.append(update)
+                continue
+            ready.append(replace(update, pi_code=station.pi_code))
+        # The name first: an earlier program type follows it.
+        ready.sort(key=lambda u: 0 if getattr(u, "update", "") == "ps" else 1)
+        self._held = waiting
+        return ready
+
+    @property
+    def status(self) -> LiveDecoderStatus:
+        base = super().status
+        decoder = self._decoder
+        station = decoder.station()
+        good = decoder.frames_seen - decoder.frames_failed
+        return replace(
+            base,
+            frames=decoder.frames_seen,
+            valid=good,
+            failed=decoder.frames_failed,
+            last_time=self._group_time,
+            channel_rate=self.channel_rate,
+            signal_present=decoder.synced or self._demod.pilot,
+            signal_measured=True,
+            undecoded_signal_s=self._pilot_s,
+            detail=station.ps_name if station.ps_complete else "",
+        )
+
+
 class ADSBLiveDecoder(LiveDecoder):
     """ADS-B / Mode S on 1090 MHz: the pulse envelope at the full rate.
 
@@ -558,13 +822,15 @@ class ADSBLiveDecoder(LiveDecoder):
         return list(self._decoder.decode(magnitude))
 
 
-#: Decoder panel name -> live decoder class. T6 adds "RDS" and "CW (Morse)".
+#: Decoder panel name -> live decoder class.
 LIVE_DECODERS: Dict[str, Type[LiveDecoder]] = {
     "POCSAG": POCSAGLiveDecoder,
     "FLEX": FLEXLiveDecoder,
     "AX.25/APRS": AX25LiveDecoder,
     "ADS-B": ADSBLiveDecoder,
     "ACARS": ACARSLiveDecoder,
+    "RDS": RDSLiveDecoder,
+    "CW (Morse)": CWLiveDecoder,
 }
 
 # Other names a protocol is known by (the CLI's and ProtocolType values).
@@ -577,6 +843,9 @@ _ALIASES = {
     "adsb": "ADS-B",
     "ads-b": "ADS-B",
     "acars": "ACARS",
+    "cw": "CW (Morse)",
+    "morse": "CW (Morse)",
+    "rds": "RDS",
 }
 
 
@@ -614,50 +883,266 @@ def create_live_decoder(
     return cls(rate, offset_hz)
 
 
+def _text(msg: Any, attr: str) -> str:
+    return str(getattr(msg, attr, "") or "").strip()
+
+
+def _joined(*parts: str) -> str:
+    return "  ·  ".join(p for p in parts if p)
+
+
+def _position(msg: Any) -> str:
+    lat = getattr(msg, "latitude", 0.0) or 0.0
+    lon = getattr(msg, "longitude", 0.0) or 0.0
+    return f"{lat:.4f}, {lon:.4f}" if lat and lon else ""
+
+
+def _vertical(rate: int) -> str:
+    """``1200 -> "climbing 1,200 ft/min"``, ``0 -> "level"``."""
+    if rate > 0:
+        return f"climbing {rate:,} ft/min"
+    if rate < 0:
+        return f"descending {-rate:,} ft/min"
+    return "level"
+
+
+def _adsb_content(msg: Any) -> str:
+    altitude = int(getattr(msg, "altitude", 0) or 0)
+    speed = float(getattr(msg, "velocity", 0.0) or 0.0)
+    parts = [_text(msg, "callsign"), _text(msg, "category")]
+    if altitude:
+        parts.append(f"{altitude:,} ft")
+    parts.append(_position(msg))
+    if speed and getattr(msg, "type_code", 0) == 19:
+        heading = float(getattr(msg, "heading", 0.0) or 0.0)
+        parts += [
+            f"{speed:.0f} kt",
+            f"track {heading:.0f}°",
+            _vertical(int(getattr(msg, "vertical_rate", 0) or 0)),
+        ]
+    elif speed:
+        parts.append(f"{speed:.0f} kt")
+    squawk = _text(msg, "squawk")
+    if squawk:
+        parts.append(f"Squawk {squawk}")
+    if getattr(msg, "on_ground", False):
+        parts.append("on the ground")
+    content = _joined(*parts)
+    if content:
+        return content
+    if getattr(msg, "downlink_format", 0) == 11:
+        return "Address only (all-call reply)"
+    return "Address only"
+
+
+def _aprs_fields(msg: Any) -> Optional[Dict[str, Any]]:
+    """APRS fields of an AX.25 frame or APRS message (None: not APRS)."""
+    if type(msg).__name__ == "APRSMessage":
+        return {
+            key: getattr(msg, key, "")
+            for key in (
+                "data_type",
+                "latitude",
+                "longitude",
+                "altitude",
+                "speed",
+                "course",
+                "symbol",
+                "symbol_name",
+                "addressee",
+                "comment",
+            )
+        }
+    info = _text(msg, "info")
+    if not info or not getattr(msg, "valid", True):
+        return None
+    fields = parse_aprs_info(info)
+    kind = str(fields["data_type"])
+    if kind == "unknown" or (kind.startswith("position") and not fields["symbol"]):
+        return None  # not APRS, or a position that doesn't read: as sent
+    return fields
+
+
+def _aprs_content(fields: Dict[str, Any]) -> str:
+    kind = fields.get("data_type", "")
+    comment = str(fields.get("comment", "") or "")
+    addressee = str(fields.get("addressee", "") or "")
+    if kind == "message":
+        return f"To {addressee}: {comment}" if addressee else comment
+    if kind == "mic-e":
+        return "Mic-E position report (not decoded)"
+    lat = float(fields.get("latitude", 0.0) or 0.0)
+    lon = float(fields.get("longitude", 0.0) or 0.0)
+    speed = float(fields.get("speed", 0.0) or 0.0)
+    course = float(fields.get("course", 0.0) or 0.0)
+    altitude = float(fields.get("altitude", 0.0) or 0.0)
+    moving = ""
+    if speed or course:
+        moving = f"{speed:.0f} kt, course {course:.0f}°"
+    return _joined(
+        f"Object {addressee}" if kind in ("object", "item") and addressee else "",
+        f"{lat:.4f}, {lon:.4f}" if lat and lon else "",
+        str(fields.get("symbol_name", "") or ""),
+        moving,
+        f"{altitude:,.0f} ft" if altitude else "",
+        comment,
+    )
+
+
 def describe_message(msg: Any) -> Tuple[str, str]:
     """``(address, content)`` text for a decoded message, as the Decoder
     panel's table and the command line show it."""
     name = type(msg).__name__
 
     def text(attr: str) -> str:
-        return str(getattr(msg, attr, "") or "").strip()
-
-    def position() -> str:
-        lat = getattr(msg, "latitude", 0.0) or 0.0
-        lon = getattr(msg, "longitude", 0.0) or 0.0
-        return f"{lat:.4f}, {lon:.4f}" if lat and lon else ""
-
-    def joined(*parts: str) -> str:
-        return "  ·  ".join(p for p in parts if p)
+        return _text(msg, attr)
 
     if name == "POCSAGMessage":
         return f"{msg.address} (F{msg.function})", text("content")
     if name == "FLEXMessage":
         return str(getattr(msg, "capcode", "") or ""), text("content")
     if name == "ADSBMessage":
-        altitude = getattr(msg, "altitude", 0) or 0
-        speed = getattr(msg, "velocity", 0.0) or 0.0
-        squawk = text("squawk")
-        return text("icao_address"), joined(
-            text("callsign"),
-            f"{altitude:,} ft" if altitude else "",
-            position(),
-            f"{speed:.0f} kt" if speed else "",
-            f"Squawk {squawk}" if squawk else "",
-        )
+        return text("icao_address"), _adsb_content(msg)
     if name in ("AX25Frame", "APRSMessage"):
         source, dest = text("source"), text("destination")
         address = f"{source}>{dest}" if source or dest else ""
-        return address, joined(position(), text("info") or text("comment"))
+        fields = _aprs_fields(msg)
+        if fields is not None:
+            return address, _aprs_content(fields)
+        return address, _joined(_position(msg), text("info") or text("comment"))
     if name == "ACARSMessage":
-        return text("registration") or text("flight_id"), joined(
-            text("label"), text("text")
+        registration, flight = text("registration"), text("flight_id")
+        return registration or flight, _joined(
+            f"Flight {flight}" if flight and registration else "",
+            text("label"),
+            text("text"),
         )
+    if name == "MorseMessage":
+        wpm = getattr(msg, "wpm", 0.0) or 0.0
+        return (f"{wpm:.0f} WPM" if wpm else ""), text("text")
     if name == "RDSData":
         pi_code = getattr(msg, "pi_code", 0) or 0
-        return (
-            f"PI {pi_code:04X}" if pi_code else "",
-            joined(text("ps_name"), text("radio_text")),
-        )
+        address = f"PI {pi_code:04X}" if pi_code else ""
+        update = text("update")
+        labelled = {
+            "ps": ("Station name", text("ps_name")),
+            "radio_text": ("Radio text", text("radio_text")),
+            "pty": ("Program type", text("pty_name")),
+            "ptyn": ("Program type name", text("ptyn")),
+            "clock_time": ("Clock", text("clock_time")),
+        }.get(update)
+        if labelled is not None:
+            label, value = labelled
+            return address, f"{label}: {value}" if value else label
+        return address, _joined(text("ps_name"), text("radio_text"))
     address = text("address") or text("icao_address")
     return address, text("content") or text("info")
+
+
+#: ADS-B type codes -> what the message is.
+_ADSB_KINDS = {
+    **{tc: "identification" for tc in range(1, 5)},
+    **{tc: "surface position" for tc in range(5, 9)},
+    **{tc: "airborne position" for tc in range(9, 19)},
+    19: "airborne velocity",
+    **{tc: "airborne position (GNSS height)" for tc in range(20, 23)},
+    28: "aircraft status",
+    29: "target state",
+    31: "operational status",
+}
+_ADSB_FORMATS = {
+    0: "short air-air surveillance",
+    4: "altitude reply",
+    5: "identity reply",
+    11: "all-call reply",
+    16: "long air-air surveillance",
+    17: "extended squitter",
+    18: "extended squitter (non-transponder)",
+    20: "altitude reply (Comm-B)",
+    21: "identity reply (Comm-B)",
+}
+
+
+def message_details(msg: Any) -> List[str]:
+    """Lines that say more about a decoded message than its row (for the
+    Decoder panel's detail card): the path of an APRS packet, the kind of
+    an ADS-B message, an ACARS message's flight and label, an RDS
+    station's codes."""
+    name = type(msg).__name__
+    lines: List[str] = []
+    if name == "ADSBMessage":
+        df = int(getattr(msg, "downlink_format", 0) or 0)
+        tc = int(getattr(msg, "type_code", 0) or 0)
+        kind = f"DF{df} {_ADSB_FORMATS.get(df, '')}".strip()
+        if df in (17, 18) and tc:
+            kind += f", type code {tc}"
+            if tc in _ADSB_KINDS:
+                kind += f" ({_ADSB_KINDS[tc]})"
+        lines.append(kind)
+        category = _text(msg, "category")
+        if category:
+            lines.append(f"Category: {category}")
+    elif name in ("AX25Frame", "APRSMessage"):
+        path = list(
+            getattr(msg, "digipeaters", None) or getattr(msg, "path", None) or []
+        )
+        lines.append(f"Path: via {', '.join(path)}" if path else "Path: direct")
+        fields = _aprs_fields(msg)
+        if fields is not None:
+            kind = APRS_TYPE_NAMES.get(str(fields["data_type"]), "Other")
+            symbol = str(fields.get("symbol") or "")
+            if symbol:
+                label = fields.get("symbol_name") or "symbol"
+                kind += f" · {label} ({symbol})"
+            lines.append(f"APRS: {kind}")
+        info = _text(msg, "info")
+        if info:
+            lines.append(f"Sent: {info}")
+    elif name == "ACARSMessage":
+        parts = [
+            (
+                f"Registration {_text(msg, 'registration')}"
+                if _text(msg, "registration")
+                else ""
+            ),
+            f"flight {_text(msg, 'flight_id')}" if _text(msg, "flight_id") else "",
+        ]
+        if any(parts):
+            lines.append(", ".join(p for p in parts if p))
+        codes = [
+            f"label {_text(msg, 'label')}" if _text(msg, "label") else "",
+            f"block {_text(msg, 'block_id')}" if _text(msg, "block_id") else "",
+            (
+                f"message {_text(msg, 'message_number')}"
+                if _text(msg, "message_number")
+                else ""
+            ),
+            f"mode {_text(msg, 'mode')}" if _text(msg, "mode") else "",
+        ]
+        if any(codes):
+            text = ", ".join(c for c in codes if c)
+            lines.append(text[0].upper() + text[1:])
+    elif name == "RDSData":
+        pi_code = int(getattr(msg, "pi_code", 0) or 0)
+        pty = int(getattr(msg, "pty", 0) or 0)
+        pty_name = _text(msg, "pty_name")
+        if pi_code:
+            lines.append(
+                f"PI {pi_code:04X} · program type {pty}"
+                + (f" ({pty_name})" if pty_name else "")
+            )
+        flags = []
+        if getattr(msg, "tp", False):
+            flags.append("traffic program")
+        if getattr(msg, "ta", False):
+            flags.append("traffic announcement now")
+        flags.append("music" if getattr(msg, "ms", False) else "speech")
+        lines.append(", ".join(flags).capitalize())
+        afs = list(getattr(msg, "af_list", None) or [])
+        if afs:
+            lines.append("Also on " + ", ".join(f"{f:.1f}" for f in afs) + " MHz")
+    elif name == "MorseMessage":
+        wpm = float(getattr(msg, "wpm", 0.0) or 0.0)
+        if wpm:
+            lines.append(f"Sent at {wpm:.0f} words per minute")
+    return lines

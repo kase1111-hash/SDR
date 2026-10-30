@@ -50,7 +50,8 @@ def test_counts_only_valid_messages(tmp_path, capsys):
     assert main(["decode", "aprs", "--input", str(path)]) == 0
     out = capsys.readouterr().out
     assert "Decoded 1 APRS message(s) (1 failed their checks; --show-invalid" in out
-    assert "  [0] N0CALL-9>APZ001  !4903.50N/07201.75W>Good packet" in out
+    # The APRS report is read: position, symbol and comment.
+    assert "  [0] N0CALL-9>APZ001  49.0583, -72.0292  ·  Car  ·  Good packet" in out
     assert "AX25Frame(" not in out  # readable lines, not reprs
     assert main(["decode", "aprs", "--input", str(path), "--show-invalid"]) == 0
     out = capsys.readouterr().out
@@ -82,7 +83,7 @@ def test_offset_picks_the_channel(tmp_path, capsys):
     assert main(["decode", "acars", "--input", str(path), "--offset", "-40000"]) == 0
     out = capsys.readouterr().out
     assert "Decoded 1 ACARS message(s)" in out
-    assert "N601SD  H1  ·  CLI TEST" in out
+    assert "N601SD  Flight SD0601  ·  H1  ·  CLI TEST" in out  # with the flight
 
 
 def test_ads_b_needs_2_ms_s(tmp_path, capsys):

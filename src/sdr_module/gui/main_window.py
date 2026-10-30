@@ -128,6 +128,7 @@ from .control_panel import (
 )
 from .decoder_panel import DecoderPanel
 from .level_meter import LevelMeter
+from .rds_station import RdsListener, badge_text, badge_tooltip, tuner_text
 from .receiver_bar import FrequencyDigits, ReceiverBar
 from .settings_store import DEFAULT_FREQUENCY_HZ, GuiSettings
 from .spectrum_widget import SpectrumWidget
@@ -1878,6 +1879,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder: Any = None
         self._decoder_protocol: Any = None
         self._decoder_rate = 0.0  # sample rate the live decoder was built for
+        # Messages decoded while the Decoder tab was out of sight (its title
+        # counts them), the background RDS of the tuned broadcast station
+        # (Radio > RDS Station Names) and what its badge shows.
+        self._decoder_unread = 0
+        self._rds_listener = RdsListener()
+        self._rds_shown: Tuple[str, str] = ("", "")
 
         # Persisted settings (frequency, gain, theme, bookmarks live here)
         self._settings = GuiSettings()
@@ -1920,6 +1927,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._setup_toolbar()
         self._setup_receiver_bar()
         self._setup_statusbar()
+        self._setup_decoder_chip()
         self._setup_timers()
 
         # Connect signals
@@ -2032,7 +2040,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "decoder",
             self._decoder_panel,
             "Decoder",
-            "Live protocol decoder output (POCSAG, FLEX, ADS-B, ACARS, " "AX.25/APRS)",
+            "Live protocol decoder output (POCSAG, FLEX, ADS-B, ACARS, "
+            "AX.25/APRS, RDS, Morse code)",
         )
 
         self._bookmarks_panel = BookmarksPanel()
@@ -2349,6 +2358,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             checkable=True,
             checked=self._settings.get_bool("tuning/keep_centered", False),
         )
+        self._rds_auto_action = self._add_action(
+            radio_menu,
+            "&RDS Station Names",
+            self._set_rds_auto,
+            tip="While you listen to broadcast FM, decode the station's RDS in "
+            "the background: its name next to FREQ (the RadioText in its "
+            "tooltip) and on the radio tuner",
+            checkable=True,
+            checked=self._settings.get_bool("decoder/rds_auto", True),
+        )
         self._rebuild_recent_menu()
         self._update_history_actions()
 
@@ -2572,6 +2591,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._freq_digits = FrequencyDigits(self._freq_label)
         self._freq_digits.digit_tuned.connect(self._nudge_frequency)
         toolbar.addWidget(self._freq_label)
+        # The broadcast station's name from its RDS, while there is one.
+        self._rds_badge = QLabel("")
+        set_role(self._rds_badge, "badge", "info")
+        self._rds_badge.setAccessibleName("Station name (RDS)")
+        self._rds_badge_action = toolbar.addWidget(self._rds_badge)
+        self._rds_badge_action.setVisible(False)
 
         toolbar.addSeparator()
 
@@ -3034,8 +3059,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._decoder_panel.protocol() is not None and self._decoder_rate != rate:
             self._rebuild_decoder()
 
-        # The Decoder panel's hint says whether it is listening.
+        # The Decoder panel's hint says whether it is listening; its
+        # messages note the sample rate, and Auto follows the mode.
         self._decoder_panel.set_receiving(running)
+        self._decoder_panel.set_sample_rate(rate)
+        self._decoder_panel.set_demod_mode(self._control_panel.get_demod_mode())
+        self._update_decoder_chip()
         if HAS_HAM_RADIO:
             self._sync_signal_meter(running, has_device)
 
@@ -3131,6 +3160,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _on_panel_tab_changed(self, _index: int) -> None:
         if self._right_tabs.currentWidget() is self._panel_pages.get("info"):
             self._refresh_info_panel()
+        if self._own("_decoder_unread") and self._decoder_page_visible():
+            self._decoder_unread = 0
+            self._update_decoder_tab_title()
 
     def _show_panel(self, key: str, focus: bool = False) -> None:
         """Bring one of the right-hand tool panels to the front; with
@@ -3326,6 +3358,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         "ADS-B": "adsb",
         "ACARS": "acars",
         "RDS": "rds",
+        "CW (Morse)": "cw",
     }
 
     def _on_decoder_protocol_changed(self, text: str) -> None:
@@ -3339,14 +3372,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         from ..dsp.protocols import ProtocolType
 
         proto_value = self._DECODER_PROTOCOLS.get(text)
+        # The badge's station came from the old decoder (if it was RDS).
+        self._show_rds_station(None)
         if proto_value is None:
             # "Off" (or unknown): no live decoder.
             self._decoder = None
             self._decoder_protocol = None
             self._decoder_panel.set_decoder_status(None)
+            self._update_decoder_chip()
             return
 
         rate = self._device_sample_rate()
+        self._decoder_panel.set_sample_rate(rate)
         # Remember the rate even if there is no decoder or its build fails,
         # so a later rate change retries it (and an unchanged rate doesn't).
         self._decoder_rate = rate
@@ -3375,6 +3412,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder_error_logged = False
         status = self._decoder.status
         self._decoder_panel.set_decoder_status(status)
+        self._update_decoder_chip()
         if status.problem:
             # E.g. ADS-B at 1.8 MS/s: say so instead of "listening" forever.
             logger.warning("%s decoder: %s", text, status.problem)
@@ -3402,9 +3440,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _rebuild_decoder(self) -> None:
         """Recreate the live decoder for the current device's sample rate."""
-        self._on_decoder_protocol_changed(
-            self._decoder_panel._proto_combo.currentText()
-        )
+        self._on_decoder_protocol_changed(self._decoder_panel.protocol() or "Off")
 
     def _run_decoder(self, samples: np.ndarray) -> None:
         """Feed a raw block to the live decoder and show what it decoded."""
@@ -3430,6 +3466,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         for msg in messages:
             self._push_decoded_message(msg)
         self._decoder_panel.set_decoder_status(decoder.status)
+        self._update_decoder_chip()
+        if getattr(decoder, "name", "") == "RDS":
+            # The Decoder's own RDS names the station (the background
+            # listener rests meanwhile).
+            self._show_rds_station(decoder.station)
 
     def _push_decoded_message(self, msg: Any) -> None:
         """Render one decoded message into the decoder panel.
@@ -3455,9 +3496,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     content = f"{content}  ({error})" if content else error
             raw = getattr(msg, "raw_bits", b"")
             raw_text = raw[:32].hex() if isinstance(raw, (bytes, bytearray)) else ""
+            from ..dsp.live_decoders import message_details
+
             self._decoder_panel.add_message(
-                self._protocol_label(msg), address, content, valid, raw_text
+                self._protocol_label(msg),
+                address,
+                content,
+                valid,
+                raw_text,
+                message=msg,
+                details=message_details(msg),
             )
+            self._note_decoded()
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Could not render decoded message: %s", exc)
 
@@ -3478,6 +3528,158 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         from ..dsp.live_decoders import describe_message
 
         return describe_message(msg)
+
+    # ------------------------------------------------------------------
+    # Decoder activity (unread count, status-bar chip) and the RDS station
+    # ------------------------------------------------------------------
+
+    def _setup_decoder_chip(self) -> None:
+        """A status-bar chip while a decoder runs ("ADS-B · 37 msgs");
+        clicking it opens the Decoder tab."""
+        chip = QPushButton("")
+        set_role(chip, "compact")
+        chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        chip.setAccessibleName("Decoder activity")
+        chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        chip.clicked.connect(lambda _checked=False: self._show_panel("decoder"))
+        chip.hide()
+        self.statusBar().addPermanentWidget(chip)
+        self._decoder_chip = chip
+
+    def _own(self, name: str) -> Any:
+        """An attribute this window set, or None. (Reading a missing one
+        through PyQt raises RuntimeError on a window whose Qt part is not
+        built, as in tests that build parts of it.)"""
+        return self.__dict__.get(name)
+
+    def _decoder_page_visible(self) -> bool:
+        """Whether the Decoder tab is on screen."""
+        page = (self._own("_panel_pages") or {}).get("decoder")
+        return bool(page is not None and page.isVisible() and not self.isMinimized())
+
+    def _note_decoded(self) -> None:
+        """A message was decoded: count it on the tab title if the Decoder
+        tab is out of sight."""
+        if self._own("_panel_pages") is None or self._decoder_page_visible():
+            return
+        self._decoder_unread += 1
+        self._update_decoder_tab_title()
+
+    def _update_decoder_tab_title(self) -> None:
+        page = (self._own("_panel_pages") or {}).get("decoder")
+        owner = (self._own("_panel_owners") or {}).get("decoder")
+        if page is None or owner is None:
+            return
+        index = owner.indexOf(page)
+        base = next(
+            (t for k, t, _tip in self._panel_specs if k == "decoder"), "Decoder"
+        )
+        count = self._decoder_unread
+        title = f"{base} ({count:,})" if count else base
+        if owner.tabText(index) != title:
+            owner.setTabText(index, title)
+            owner.setTabToolTip(
+                index,
+                (
+                    f"{count:,} new decoded message{'s' if count != 1 else ''}. "
+                    if count
+                    else ""
+                )
+                + next((tip for k, _t, tip in self._panel_specs if k == "decoder"), ""),
+            )
+
+    def _update_decoder_chip(self) -> None:
+        """The status-bar chip: the protocol being decoded and what it has
+        found, while one is (hidden otherwise)."""
+        chip = self._own("_decoder_chip")
+        if chip is None:
+            return
+        panel = self._decoder_panel
+        proto = panel.protocol()
+        if proto is None or self._decoder is None:
+            if not chip.isHidden():
+                chip.hide()
+            return
+        count = panel.count_for(proto)
+        status = getattr(self._decoder, "status", None)
+        detail = str(getattr(status, "detail", "") or "")
+        parts = [proto]
+        if detail:
+            parts.append(detail)
+        if not panel._enabled_check.isChecked():
+            parts.append("paused")
+        else:
+            parts.append(f"{count:,} msg{'' if count == 1 else 's'}")
+        text = " · ".join(parts)
+        if chip.text() != text:
+            chip.setText(text)
+            chip.setToolTip(
+                f"Decoder: {proto}"
+                + (" (chosen by Auto)" if panel.is_auto() else "")
+                + f", {count:,} message{'' if count == 1 else 's'} since "
+                "Clear. Click to open the Decoder tab (Ctrl+1)."
+            )
+        if chip.isHidden():
+            chip.show()
+
+    def _set_rds_auto(self, on: bool) -> None:
+        """Radio > RDS Station Names."""
+        self._settings.set("decoder/rds_auto", bool(on))
+        if not on:
+            self._rds_listener.reset()
+            self._show_rds_station(None)
+
+    def _listen_rds(self, channel: np.ndarray, chain: "_ReceiverChain") -> None:
+        """Broadcast FM: decode the station's RDS from the receiver's own
+        channel (Radio > RDS Station Names), unless the Decoder's RDS does."""
+        action = self._own("_rds_auto_action")
+        listener = self._own("_rds_listener")
+        if listener is None:
+            return
+        panel = self._decoder_panel
+        if (
+            action is None
+            or not action.isChecked()
+            or chain.mode != "FM"
+            or self._control_panel.get_fm_deviation() < _BROADCAST_DEVIATION_HZ
+        ):
+            if listener.decoder is not None:
+                listener.reset()
+                self._show_rds_station(None)
+            return
+        if (
+            panel.protocol() == "RDS"
+            and self._decoder is not None
+            and panel.is_decoding()
+        ):
+            return  # the Decoder's RDS decoder names the station
+        station = listener.process(
+            channel, chain.channel_rate, self._current_frequency()
+        )
+        self._show_rds_station(station)
+
+    def _show_rds_station(self, station: Any) -> None:
+        """Name the station next to FREQ and on the radio tuner (None:
+        no station known)."""
+        badge = self._own("_rds_badge")
+        if badge is None:
+            return
+        text = badge_text(station)
+        tip = badge_tooltip(station) if text else ""
+        if (text, tip) == self._rds_shown:
+            return
+        self._rds_shown = (text, tip)
+        badge.setText(text)
+        badge.setToolTip(tip)
+        self._rds_badge_action.setVisible(bool(text))
+        self._rds_station = station if text else None
+        self._update_tuner_station()
+
+    def _update_tuner_station(self) -> None:
+        tuner = self._own("_radio_tuner")
+        setter = getattr(tuner, "set_rds_text", None)
+        if setter is not None:
+            setter(tuner_text(self._own("_rds_station")))
 
     # ------------------------------------------------------------------
     # Control panel handlers
@@ -3502,6 +3704,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tuner = self._radio_tuner
         if tuner is not None and tuner.isVisible():
             tuner.set_frequency(freq_hz)  # does not emit frequency_changed
+        # Another station: its RDS name is not known yet.
+        self._show_rds_station(None)
         self._reset_signal_meter_peak()
 
         logger.debug(f"Frequency changed to {freq_hz/1e6:.3f} MHz")
@@ -4241,6 +4445,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         already applied the mode's Bandwidth choices and the width (and FM
         deviation) last used with it; say what they are."""
         self._save_setting("demod_mode", mode)
+        self._decoder_panel.set_demod_mode(mode)  # Auto: Morse code in CW
         self._refresh_audio_output(announce=not self._restoring)
         self._update_passband()
         # Each mode tunes by its own step; its channel may need the LO
@@ -5063,6 +5268,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Audio: the speaker (while the signal is above squelch) and the SSTV
         # decoder (whenever it listens, speaker on or off).
         self._route_audio(channel, level)
+        # Broadcast FM: the station's name from its RDS, in the background.
+        self._listen_rds(channel, chain)
 
         # Record if active (and not paused). The REC badge and the Recording
         # panel's timer are refreshed by the status timer.
@@ -6255,8 +6462,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
 
         # Open on the station being received (or, outside the broadcast
-        # bands, showing that the receiver is elsewhere).
+        # bands, showing that the receiver is elsewhere), with its RDS name.
         self._radio_tuner.set_frequency(self._current_frequency())  # no emit
+        self._update_tuner_station()
 
         self._radio_tuner.show()
         self._radio_tuner.raise_()
@@ -6294,8 +6502,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "<p><b>Hardware:</b> RTL-SDR and HackRF One, or the built-in "
             "demo device.</p>"
             "<p><b>Features:</b> spectrum and waterfall displays; AM, FM, SSB "
-            "and CW demodulation; POCSAG, FLEX, ADS-B, ACARS and AX.25/APRS "
-            "decoders; I/Q recording; ham radio tools.</p>"
+            "and CW demodulation; POCSAG, FLEX, ADS-B, ACARS, AX.25/APRS, RDS "
+            "and Morse code decoders; I/Q recording; ham radio tools.</p>"
             f"<p>Qt {QT_VERSION_STR} &middot; PyQt {PYQT_VERSION_STR}</p>",
         )
 

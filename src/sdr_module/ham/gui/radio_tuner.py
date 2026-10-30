@@ -1035,7 +1035,24 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
                 station = f"Preset {i + 1}" + (
                     f" · {preset.name}" if preset.name else ""
                 )
-        self._freq_display.set_station(station)
+        self._freq_display.set_station(self._with_rds(station))
+
+    def set_rds_text(self, text: str) -> None:
+        """Show the station's RDS name (and RadioText) on the display's
+        station line, after the preset it matches ("" for none). The main
+        window sends it while broadcast FM is received."""
+        text = str(text or "")
+        if text != getattr(self, "_rds_text", ""):
+            self._rds_text = text
+            self._refresh_preset_states()
+
+    def _with_rds(self, station: str) -> str:
+        """The station line: the matching preset (if any), then the RDS
+        name."""
+        rds = str(getattr(self, "_rds_text", "") or "")
+        if not rds or self._off_band_hz is not None or self._band != RadioBand.FM:
+            return station
+        return f"{station} · {rds}" if station else rds
 
     def _on_frequency_changed(self, freq: float) -> None:
         """Handle frequency change from tuning dial."""

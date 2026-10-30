@@ -497,14 +497,20 @@ class TestDecoderPanelFixes(unittest.TestCase):
         tuned = self.connect_tuning()
         p = self.panel
         p._proto_combo.setCurrentText("ADS-B")
-        button = p._empty.button
+        # ADS-B opens on its Aircraft view, whose empty state offers the
+        # channel too (as the message table behind it does).
         self.assertEqual(p._empty.action_text(), "Tune to 1090.000 MHz")
+        empty = p._aircraft_view.placeholder()
+        button = empty.button
+        self.assertEqual(empty.action_text(), "Tune to 1090.000 MHz")
         self.assertTrue(button.isVisible())
         # Laid out under the message, inside the table.
         self.assertGreaterEqual(
-            button.geometry().top(), p._empty.label.geometry().bottom()
+            button.geometry().top(), empty.label.geometry().bottom()
         )
-        self.assertTrue(p._table.viewport().rect().contains(button.geometry()))
+        self.assertTrue(
+            p._aircraft_view.table.viewport().rect().contains(button.geometry())
+        )
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
         # ADS-B selects I/Q: no audio from the pulse bursts (UX-B11).
         self.assertEqual(tuned, [(1090e6, "ADS-B (1090.000 MHz)", "None (I/Q)", "")])
@@ -535,20 +541,30 @@ class TestDecoderPanelFixes(unittest.TestCase):
         self.assertEqual(p._empty.action_text(), "Tune to 1090.000 MHz")
         p.set_current_frequency(float("nan"))
         self.assertEqual(p._tuned_hz, 100e6)
-        # The button disappears with the empty state.
+        # The button disappears with the empty state. (ADS-B shows its
+        # Aircraft view in front, with the same hint and button.)
+        self.assertEqual(
+            p._aircraft_view.placeholder().action_text(), "Tune to 1090.000 MHz"
+        )
+        self.assertTrue(p._aircraft_view.placeholder().button.isVisible())
         p.add_message("ADS-B", "ABC123", "hello")
         self.assertTrue(p._empty.button.isHidden())
         p.clear()
+        self.assertFalse(p._empty.button.isHidden())
+        p._tabs.setCurrentWidget(p._messages_page)
         self.assertTrue(p._empty.button.isVisible())
 
-    def test_rds_is_listed_but_not_selectable(self):
+    def test_rds_and_morse_are_selectable(self):
+        # RDS used to be listed disabled ("isn't available yet"): it decodes
+        # now, and Morse code (CW) joined the list.
         combo = self.panel._proto_combo
-        index = combo.findText("RDS")
-        self.assertGreater(index, 0)
-        self.assertFalse(combo.model().item(index).isEnabled())
-        self.assertIn(
-            "isn't available", combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
-        )
+        for name in ("RDS", "CW (Morse)"):
+            index = combo.findText(name)
+            self.assertGreater(index, 0, name)
+            self.assertTrue(combo.model().item(index).isEnabled(), name)
+            tip = combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
+            self.assertNotIn("isn't available", tip)
+        self.assertIn("Station name", combo.itemData(combo.findText("RDS"), 3))
 
     def test_tab_leaves_the_message_table(self):
         p = self.panel

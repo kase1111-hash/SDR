@@ -23,9 +23,11 @@ from sdr_module.dsp.live_decoders import (
     ACARSLiveDecoder,
     ADSBLiveDecoder,
     AX25LiveDecoder,
+    CWLiveDecoder,
     FLEXLiveDecoder,
     LiveDecoderStatus,
     POCSAGLiveDecoder,
+    RDSLiveDecoder,
     create_live_decoder,
     describe_message,
     live_decoder_class,
@@ -63,16 +65,17 @@ CASES = {
         [("1234567", "FLEX TEST PAGE")],
         25e3,
     ),
+    # (Rows read the APRS position and symbol, and the ACARS flight.)
     "AX.25/APRS": (
         lambda rate: enc.aprs_baseband(
             "N0CALL-9", "APZ001", APRS_INFO, rate, ["WIDE1-1"]
         ),
-        [("N0CALL-9>APZ001", APRS_INFO)],
+        [("N0CALL-9>APZ001", "49.0583, -72.0292  ·  Car  ·  Test station")],
         25e3,
     ),
     "ACARS": (
         lambda rate: enc.acars_baseband(ACARS_BLOCK, rate),
-        [("N601SD", "H1  ·  TEST MESSAGE")],
+        [("N601SD", "Flight SD0601  ·  H1  ·  TEST MESSAGE")],
         10e3,
     ),
 }
@@ -271,7 +274,10 @@ class TestFactory:
             ("adsb", ADSBLiveDecoder),
         ):
             assert live_decoder_class(alias) is cls
-        assert live_decoder_class("rds") is None
+        # RDS decodes from raw I/Q now (it needed 57 kHz subcarrier recovery).
+        assert live_decoder_class("rds") is RDSLiveDecoder
+        assert live_decoder_class("cw") is CWLiveDecoder
+        assert live_decoder_class("teletext") is None
         with pytest.raises(ValueError):
             create_live_decoder("Off", 2.4e6)
 

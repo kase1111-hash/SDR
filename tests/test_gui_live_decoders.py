@@ -236,7 +236,12 @@ class TestDemoDecodesInTheWindow(_WindowTestCase):
     # stream that holds them, counting from the start of the schedule)
     EXPECTED = {
         "AX.25/APRS": (
-            [("N0CALL-9>APZ001", "!4903.50N/07201.75W>Demo mobile on 144.390 MHz")],
+            [
+                (
+                    "N0CALL-9>APZ001",
+                    "49.0583, -72.0292  ·  Car  ·  Demo mobile on 144.390 MHz",
+                )
+            ],
             2.5,
         ),
         "POCSAG": (
@@ -248,7 +253,12 @@ class TestDemoDecodesInTheWindow(_WindowTestCase):
             7.5,
         ),
         "ACARS": (
-            [("N601SD", "H1  ·  DEMO MESSAGE FROM SDR MODULE - ETA 1435Z")],
+            [
+                (
+                    "N601SD",
+                    "Flight SD0601  ·  H1  ·  DEMO MESSAGE FROM SDR MODULE - ETA 1435Z",
+                )
+            ],
             7.8,
         ),
     }

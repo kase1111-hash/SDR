@@ -869,6 +869,34 @@ class TestListen(_SecondCase):
         self.assertEqual(len(self.second_sink.samples()), 0)
         self.assertIn("Audio is off in the main window", self.rx._audio_note.text())
 
+    def test_it_plays_through_the_main_windows_output(self):
+        """Where the sink can choose an output device (Tools > Preferences),
+        this receiver uses the one the main window plays through."""
+
+        class ChoosingSink(_FakeSink):
+            def __init__(self, output_id=""):
+                super().__init__()
+                self.output_id = output_id
+                self.chosen = []
+
+            def set_output_device(self, device_id, name=""):
+                self.output_id = device_id
+                self.chosen.append(device_id)
+
+        self.win._audio = ChoosingSink("usb-headset")
+        sink = ChoosingSink()
+        self.rx._audio = sink
+        self.rx._audio_open = False
+        self.rx.set_listen("main")
+        self.rx.set_listen("both")  # (opens this receiver's output)
+        self.assertTrue(sink.open)
+        self.assertEqual(sink.output_id, "usb-headset")
+        self.win._audio.output_id = "speakers"  # chosen meanwhile
+        self.rx._update_status()
+        self.assertEqual(sink.chosen, ["usb-headset", "speakers"])
+        self.rx._update_status()  # (no change: not chosen again)
+        self.assertEqual(len(sink.chosen), 2)
+
     def test_volume_is_its_own(self):
         self.rx._volume_slider.setValue(35)
         self.assertAlmostEqual(self.second_sink.volume, 0.35)
@@ -1238,7 +1266,12 @@ class TestTxListening(unittest.TestCase):
         self.assertEqual(listen("AM", 6e3), ("AM", "", "6 kHz"))
         self.assertEqual(listen("SSB", 2.7e3), ("USB", "", ""))
         self.assertEqual(listen("LSB", 2.7e3), ("LSB", "", ""))
-        self.assertEqual(listen("DATA", 500.0), ("USB", "", ""))
+        # Text modes sent on the carrier (RTTY, PSK31, ASCII FSK: a few
+        # hundred Hz around it) are heard with the CW beat note; wider data
+        # (an AFSK FM carrier) in FM.
+        self.assertEqual(listen("DATA", 500.0), ("CW", "", "1 kHz"))
+        self.assertEqual(listen("DATA", 62.5), ("CW", "", "250 Hz"))
+        self.assertEqual(listen("DATA", 6e3), ("FM", "2.5 kHz", "12.5 kHz"))
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")

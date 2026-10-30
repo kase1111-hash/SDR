@@ -29,9 +29,10 @@ The signal path is the main window's: :class:`~.main_window._ReceiverChain`
 helpers of :mod:`.audio_chain`, and the main window's display loop pacing
 (:class:`~.main_window._Pacer`), in :class:`ReceiverDsp` (no Qt).
 
-Settings: ``device/second_receiver/*`` (device, frequency, mode, filter,
-squelch, Listen, volume, gain) and ``layout/second_receiver/*`` (window
-geometry and splitters).
+Settings: ``device/second_receiver/*`` (device, sample rate per kind of
+device, frequency, mode, filter, step per mode, squelch, Listen, volume,
+gain, Follow transmissions) and ``layout/second_receiver/*`` (window
+geometry, splitters and the waterfall's look).
 """
 
 from __future__ import annotations
@@ -204,7 +205,6 @@ DEFAULT_LISTEN = LISTEN_BOTH
 
 _DEFAULT_MODE = "FM"
 _DEFAULT_FREQUENCY_HZ = 145.8e6  # (the main window starts on 100.1 MHz)
-_NO_VALUE = "—"
 
 #: How a transmission is listened to: TxJob mode -> (Mode list name, FM
 #: deviation value or "").
@@ -216,6 +216,8 @@ _TX_MODES = {
     "SSB": ("USB", ""),
     "LSB": ("LSB", ""),
 }
+#: Data transmissions up to this wide are sent on the carrier (heard in CW).
+_CW_DATA_HZ = 1e3
 #: FM deviation for a transmission's occupied width: (up to width, value).
 _FM_BY_WIDTH = (
     (10e3, "2.5 kHz"),  # the FM tone ID (2.5 kHz, 700 Hz tone: 6.4 kHz)
@@ -1983,6 +1985,7 @@ if HAS_PYQT6:
                 # every status tick.)
                 now = time.monotonic()
                 if now >= self._audio_retry_at:
+                    self._follow_main_output()
                     self._audio_open = self._audio.start(int(_AUDIO_RATE))
                     if not self._audio_open:
                         self._audio_retry_at = now + _AUDIO_RETRY_S
@@ -1998,6 +2001,18 @@ if HAS_PYQT6:
                 self._audio.stop()
                 self._audio_open = False
             self._update_audio_note()
+
+        def _follow_main_output(self) -> None:
+            """Play through the output the main window plays through (the
+            one chosen in its preferences), where the sink can choose one
+            (``output_id`` / ``set_output_device``)."""
+            setter = getattr(self._audio, "set_output_device", None)
+            main_sink = getattr(self._win, "_audio", None)
+            device_id = getattr(main_sink, "output_id", None)
+            if not callable(setter) or not isinstance(device_id, str):
+                return
+            if getattr(self._audio, "output_id", None) != device_id:
+                setter(device_id)  # (an open stream reopens on it)
 
         def _on_volume_changed(self, value: int) -> None:
             self._audio.set_volume(int(value) / 100.0)
@@ -2460,10 +2475,18 @@ if HAS_PYQT6:
             TxJob ``mode`` and occupied ``bandwidth_hz``: FM with the
             deviation its width suggests (Carson's rule: about twice the
             deviation plus the audio), AM and FM in the narrowest channel
-            that holds it; CW, USB and LSB with their own filter."""
+            that holds it; CW, USB and LSB with their own filter; narrow
+            data (text modes sent on the carrier) in CW, wider data in FM."""
             mode = mode.upper()
             if mode == "DATA":
-                mode = "USB" if bandwidth_hz <= 3.6e3 else "FM"
+                if bandwidth_hz <= _CW_DATA_HZ:
+                    # FSK or PSK on the carrier (RTTY, PSK31, ASCII FSK):
+                    # the CW beat note makes its tones heard.
+                    width = closest_bandwidth(
+                        bandwidth_options("CW"), max(1.2 * bandwidth_hz, 250.0)
+                    )
+                    return "CW", "", width
+                mode = "FM"  # (tones on an FM carrier)
             demod, deviation = _TX_MODES.get(mode, ("FM", "5 kHz"))
             if demod == "FM":
                 deviation = next(
@@ -2619,6 +2642,7 @@ if HAS_PYQT6:
                 self._update_rec_label()
             self._update_tx_group()
             self._update_audio_note()
+            self._follow_main_output()  # (the output chosen meanwhile)
             want = self._running and self._plays_here() and self._dsp.audible
             if want != self._audio_open:
                 self._sync_audio_output()

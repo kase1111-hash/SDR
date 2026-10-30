@@ -63,6 +63,16 @@ _INSTALL_HINT = (
     "libhackrf-dev` plus a C compiler; macOS: `brew install hackrf`)."
 )
 
+# What a HackRF One has: no automatic gain (no AGC), antenna port power
+# (the "bias tee", 3.3 V at most 50 mA).
+_CAPABILITIES = [
+    DeviceCapability.RX,
+    DeviceCapability.TX,
+    DeviceCapability.HALF_DUPLEX,
+    DeviceCapability.EXT_CLOCK,
+    DeviceCapability.BIAS_TEE,
+]
+
 # libhackrf must be initialised once per process before any device is opened.
 _init_lock = threading.Lock()
 _initialized = False
@@ -130,6 +140,9 @@ class HackRFDevice(SDRDevice):
         self._vga_gain = 20
         self._tx_vga_gain = 20
         self._amp_enabled = False
+        # Antenna port power while receiving (the firmware switches it off
+        # whenever the HackRF goes idle, so start_rx switches it on again).
+        self._bias_tee = False
         self._tx_callback: Optional[Callable[[], Optional[np.ndarray]]] = None
         # Leftover int8 I/Q bytes not yet handed to a TX transfer.
         self._tx_leftover: np.ndarray = np.empty(0, dtype=np.int8)
@@ -169,12 +182,7 @@ class HackRFDevice(SDRDevice):
                         manufacturer="Great Scott Gadgets",
                         product="HackRF One",
                         index=i,
-                        capabilities=[
-                            DeviceCapability.RX,
-                            DeviceCapability.TX,
-                            DeviceCapability.HALF_DUPLEX,
-                            DeviceCapability.EXT_CLOCK,
-                        ],
+                        capabilities=list(_CAPABILITIES),
                     )
                 )
         except Exception as e:
@@ -221,12 +229,7 @@ class HackRFDevice(SDRDevice):
                 manufacturer="Great Scott Gadgets",
                 product="HackRF One",
                 index=index,
-                capabilities=[
-                    DeviceCapability.RX,
-                    DeviceCapability.TX,
-                    DeviceCapability.HALF_DUPLEX,
-                    DeviceCapability.EXT_CLOCK,
-                ],
+                capabilities=list(_CAPABILITIES),
             )
 
             # Apply defaults. If any of these fail, the open has not really
@@ -264,6 +267,8 @@ class HackRFDevice(SDRDevice):
             self.stop_rx()
         if self._state.is_transmitting:
             self.stop_tx()
+        if self._device is not None and self._bias_tee:
+            self.set_bias_tee(False)  # don't leave the antenna port powered
 
         if self._device is not None:
             try:
@@ -412,12 +417,60 @@ class HackRFDevice(SDRDevice):
             return False
 
     def set_gain_mode(self, auto: bool) -> bool:
-        """HackRF has no hardware AGC; gain is always manual."""
+        """The HackRF One has no automatic gain (AGC): the gain is always
+        set by hand (LNA and VGA), so asking for automatic gain is refused
+        (False) and the gain stays as it was."""
         if not self._is_open or self._device is None:
             return False
-        if auto:
-            logger.warning("HackRF does not support automatic gain control")
         self._state.gain_mode = "manual"
+        if auto:
+            logger.info(
+                "The HackRF One has no automatic gain; set the LNA and VGA "
+                "gains by hand"
+            )
+            return False
+        return True
+
+    @property
+    def lna_gain(self) -> int:
+        """The RX LNA ("IF") gain in use: 0-40 dB in 8 dB steps."""
+        return int(self._lna_gain)
+
+    @property
+    def vga_gain(self) -> int:
+        """The RX VGA (baseband) gain in use: 0-62 dB in 2 dB steps."""
+        return int(self._vga_gain)
+
+    def set_bias_tee(self, enabled: bool) -> bool:
+        """Power the antenna port (3.3 V, at most 50 mA) for an LNA or an
+        active antenna while receiving, or switch that power off.
+
+        The HackRF's firmware switches it off whenever the HackRF stops
+        receiving or transmitting, so :meth:`start_rx` switches it on again;
+        it stays off while transmitting (an LNA must not be fed the
+        transmitter's power), and switching it on mid-transmission is
+        refused.
+        """
+        if not self._is_open or self._device is None:
+            return False
+        enabled = bool(enabled)
+        if enabled and self._state.is_transmitting:
+            logger.error("Antenna power refused: the HackRF is transmitting")
+            return False
+        try:
+            self._device.pyhackrf_set_antenna_enable(enabled)
+        except AttributeError:
+            logger.warning(
+                "This python_hackrf can't switch the antenna port power "
+                "(pyhackrf_set_antenna_enable)"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to set the antenna port power: {e}")
+            return False
+        self._bias_tee = enabled
+        self._state.bias_tee_enabled = enabled
+        logger.info(f"Antenna port power {'on' if enabled else 'off'}")
         return True
 
     def set_amp(self, enabled: bool) -> bool:
@@ -493,6 +546,13 @@ class HackRFDevice(SDRDevice):
                     self._state.is_streaming = False
                 return -1
 
+        if self._bias_tee:
+            # The firmware switched the antenna power off when the HackRF
+            # last went idle: on again for this reception.
+            try:
+                self._device.pyhackrf_set_antenna_enable(True)
+            except Exception as e:
+                logger.warning(f"Could not switch the antenna port power on: {e}")
         try:
             self._device.set_rx_callback(rx_callback)
             self._device.pyhackrf_start_rx()

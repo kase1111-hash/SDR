@@ -19,7 +19,7 @@ import logging
 import math
 import os
 from contextlib import contextmanager
-from typing import Dict, Iterator, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Sequence, Tuple
 
 try:
     from PyQt6.QtCore import QEvent, QObject, QSize, Qt, pyqtSignal
@@ -64,6 +64,34 @@ from .audio_chain import (
     DEFAULT_AGC_SPEED,
     DEFAULT_CW_PITCH_HZ,
     NOISE_REDUCTION_LEVELS,
+)
+from .device_settings import (
+    ADSB_MIN_RATE,
+    ADSB_RATE_TIP,
+    AGC_TIP,
+    AMP_TEXT,
+    AMP_TIP,
+    AMP_WARNING,
+    BIAS_TEE_TEXT,
+    BIAS_TEE_TIPS,
+    BIAS_TEE_WARNING,
+    DEFAULT_GAIN_MODEL,
+    DIRECT_SAMPLING_CHOICES,
+    DIRECT_SAMPLING_TIP,
+    HACKRF_AMP_DB,
+    HACKRF_DEFAULT_LNA,
+    HACKRF_DEFAULT_VGA,
+    HACKRF_LNA_STEPS,
+    HACKRF_VGA_STEPS,
+    PPM_HINT,
+    PPM_RANGE,
+    PPM_TIP,
+    FrontEnd,
+    GainModel,
+    format_db,
+    front_end_features,
+    rate_choice_label,
+    split_hackrf_gain,
 )
 from .settings_store import DEFAULT_FREQUENCY_HZ
 from .themes import set_role, set_tone
@@ -528,6 +556,13 @@ class _FrequencySpinBox(QDoubleSpinBox if HAS_PYQT6 else object):
             self.selectAll()
 
 
+class SignedSpinBox(QSpinBox if HAS_PYQT6 else object):
+    """A spin box that shows the sign: "+12 ppm", "-7 ppm", "0 ppm"."""
+
+    def textFromValue(self, value: int) -> str:  # noqa: N802 (Qt API)
+        return f"{value:+d}" if value else "0"
+
+
 class _ValueComboBox(QComboBox if HAS_PYQT6 else object):
     """A combo box whose items show a label for a plain value, e.g.
     "75 kHz (broadcast)" for "75 kHz".
@@ -795,6 +830,16 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         audio_agc_changed = pyqtSignal(str)  # off / fast / medium / slow
         tone_squelch_changed = pyqtSignal(float)  # Hz, 0 = off
         iq_options_changed = pyqtSignal(bool, bool)  # remove DC, balance I/Q
+        # Receiver > Sample rate: a rate picked (applied live by the window).
+        sample_rate_selected = pyqtSignal(float)
+        # HackRF One: LNA and VGA gains (dB), and the +14 dB RF amp.
+        hackrf_gain_changed = pyqtSignal(int, int)
+        amp_changed = pyqtSignal(bool)
+        # Front end of the connected device: frequency correction (ppm),
+        # direct sampling ("q", "i" or "off") and the bias tee.
+        ppm_changed = pyqtSignal(int)
+        direct_sampling_changed = pyqtSignal(str)
+        bias_tee_changed = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -816,6 +861,18 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         # threshold set by hand turns Auto off (and is emitted once).
         self._following_auto = False
         self._manual_threshold = False
+        # How the RF gain is set on the connected device (its steps, or the
+        # HackRF's LNA/VGA/amp), the gain an automatic gain chose (when the
+        # device says) and the sample rate choices shown (to skip refilling
+        # them).
+        self._gain_model: GainModel = DEFAULT_GAIN_MODEL
+        # The dB of each RF gain slider position (a HackRF hides the slider
+        # and leaves it on the steps it had).
+        self._slider_steps: Tuple[float, ...] = DEFAULT_GAIN_MODEL.steps
+        self._auto_gain_db: Optional[float] = None
+        self._rate_choices: Tuple = ()
+        self._current_rate = 0.0
+        self._front_end_kind = ""
         self._setup_ui()
 
     # ------------------------------------------------------------------
@@ -1024,6 +1081,15 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     def _build_receiver_group(self) -> "QGroupBox":
         group = QGroupBox("Receiver")
         form = self._make_form(group)
+        self._receiver_form = form
+
+        # The sample rate (the span), changed live: the connected device's
+        # choices (set_sample_rates).
+        self._rate_combo = self._shrinkable_combo(QComboBox(), 8)
+        self._rate_combo.setAccessibleName("Sample rate")
+        self._rate_combo.setToolTip(self._RATE_TIP)
+        self._rate_combo.activated.connect(self._on_rate_activated)
+        self._add_row(form, "Sample rate:", self._rate_combo)
 
         gain_row = QWidget()
         row = QHBoxLayout(gain_row)
@@ -1041,11 +1107,34 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         row.addWidget(self._gain_label)
         self._add_row(form, "RF gain:", gain_row).setBuddy(self._gain_slider)
 
-        self._agc_check = QCheckBox("Automatic gain (AGC)")
-        self._agc_check.setToolTip(
-            "Let the tuner set its gain automatically. The RF gain slider is "
-            "disabled while AGC is on."
+        # HackRF One: its two gain stages and the RF amplifier (instead of
+        # the RF gain slider).
+        lna_row, self._lna_slider, self._lna_label = self._stage_slider(
+            "LNA gain",
+            HACKRF_LNA_STEPS,
+            HACKRF_DEFAULT_LNA,
+            "The HackRF's RF (LNA) gain: 0-40 dB in 8 dB steps. Raise it first "
+            "for weak signals, then the VGA gain.",
         )
+        self._add_row(form, "LNA gain:", lna_row).setBuddy(self._lna_slider)
+        vga_row, self._vga_slider, self._vga_label = self._stage_slider(
+            "VGA gain",
+            HACKRF_VGA_STEPS,
+            HACKRF_DEFAULT_VGA,
+            "The HackRF's baseband (VGA) gain: 0-62 dB in 2 dB steps, after "
+            "the LNA.",
+        )
+        self._add_row(form, "VGA gain:", vga_row).setBuddy(self._vga_slider)
+        self._amp_check = QCheckBox(AMP_TEXT)
+        self._amp_check.setToolTip(AMP_TIP)
+        self._amp_check.toggled.connect(self._on_amp_toggled)
+        form.addRow("", self._amp_check)
+        self._amp_warning = self._hint(AMP_WARNING)
+        set_tone(self._amp_warning, "warning")
+        form.addRow(self._amp_warning)
+
+        self._agc_check = QCheckBox("Tuner AGC")
+        self._agc_check.setToolTip(AGC_TIP)
         self._agc_check.toggled.connect(self._on_agc_changed)
         form.addRow("", self._agc_check)
 
@@ -1078,7 +1167,83 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             row.addWidget(check)
         row.addStretch(1)
         form.addRow(iq_row)  # full width: the two say what they do
+
+        # The connected device's front end (shown for the devices that have
+        # each setting: see set_front_end).
+        self._ppm_spin = SignedSpinBox()
+        self._ppm_spin.setRange(*PPM_RANGE)
+        self._ppm_spin.setSuffix(" ppm")
+        self._ppm_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._ppm_spin.setKeyboardTracking(False)  # applied on Enter, not per digit
+        self._ppm_spin.setAccessibleName("Frequency correction")
+        self._ppm_spin.setToolTip(PPM_TIP)
+        self._ppm_spin.valueChanged.connect(self._on_ppm_changed)
+        self._add_row(form, "Correction:", self._ppm_spin).setToolTip(PPM_TIP)
+        self._ppm_hint = self._hint(PPM_HINT)
+        self._ppm_hint.setToolTip(PPM_TIP)
+        form.addRow(self._ppm_hint)  # full width: wraps like the other hints
+
+        self._direct_combo = self._shrinkable_combo(_ValueComboBox(), 8)
+        for value, label, tip in DIRECT_SAMPLING_CHOICES:
+            self._direct_combo.add_value(value, label, tip)
+        self._direct_combo.setAccessibleName("Direct sampling")
+        self._direct_combo.setToolTip(DIRECT_SAMPLING_TIP)
+        self._direct_combo.currentIndexChanged.connect(self._on_direct_changed)
+        self._add_row(form, "Direct sampling:", self._direct_combo).setToolTip(
+            DIRECT_SAMPLING_TIP
+        )
+
+        self._bias_check = QCheckBox(BIAS_TEE_TEXT)
+        self._bias_check.setToolTip(BIAS_TEE_TIPS["rtlsdr"])
+        self._bias_check.toggled.connect(self._on_bias_toggled)
+        form.addRow(self._bias_check)  # full width: it says what it does
+        self._bias_warning = self._hint(BIAS_TEE_WARNING)
+        set_tone(self._bias_warning, "warning")
+        form.addRow(self._bias_warning)
+
+        # Nothing connected yet: the RF gain slider, no device settings.
+        for widget in (
+            self._lna_slider.parentWidget(),
+            self._vga_slider.parentWidget(),
+            self._amp_check,
+            self._amp_warning,
+            self._ppm_spin,
+            self._ppm_hint,
+            self._direct_combo,
+            self._bias_check,
+            self._bias_warning,
+        ):
+            form.setRowVisible(widget, False)
+        self.set_sample_rates((), 0.0, False)
         return group
+
+    _RATE_TIP = (
+        "Samples per second the receiver takes: the span shown (2.4 MS/s = "
+        "2.4 MHz). A wider span shows more, a narrower one uses less CPU. "
+        "Changing it doesn't reconnect the device (also: click the rate in "
+        "the status bar, or Device > Sample Rate)."
+    )
+
+    def _stage_slider(
+        self, name: str, steps: Tuple[int, ...], value: int, tip: str
+    ) -> Tuple["QWidget", "QSlider", "QLabel"]:
+        """A row widget with a slider over a gain stage's steps (its index)
+        and a dB readout."""
+        row_widget = QWidget()
+        row = QHBoxLayout(row_widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, len(steps) - 1)
+        slider.setPageStep(1 if len(steps) < 10 else 5)
+        slider.setValue(steps.index(value))
+        slider.setToolTip(tip)
+        slider.setAccessibleName(name)
+        slider.valueChanged.connect(self._on_stage_changed)
+        row.addWidget(slider, 1)
+        label = self._value_label(format_db(value), _VALUE_LABEL_WIDEST)
+        row.addWidget(label)
+        return row_widget, slider, label
 
     # -- Demodulation ----------------------------------------------------
 
@@ -1391,34 +1556,61 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     # Gain / AGC / bandwidth
     # ------------------------------------------------------------------
 
+    def _step_db(self, index: int) -> float:
+        """The gain (dB) of a step of the RF gain slider."""
+        steps = self._slider_steps
+        if not steps:
+            return float(index)
+        return float(steps[max(0, min(len(steps) - 1, int(index)))])
+
     def _on_gain_changed(self, value: int):
         """Handle gain change."""
         if self._agc_check.isChecked():
             # The tuner owns the gain while AGC is on; the new value is
             # applied when AGC is switched off.
             return
-        self._gain_label.setText(f"{value} dB")
-        self.gain_changed.emit(float(value))
+        db = self._step_db(value)
+        self._gain_label.setText(format_db(db))
+        self.gain_changed.emit(db)
 
     def _on_agc_changed(self, enabled: bool):
         """Handle AGC toggle."""
         enabled = bool(enabled)
-        self._gain_slider.setEnabled(not enabled)
-        if enabled:
-            self._gain_label.setText("Auto")
-            self._gain_slider.setToolTip(
-                "Gain is set automatically while AGC is on. Untick AGC to set "
-                "it by hand."
-            )
-        else:
-            self._gain_label.setText(f"{self._gain_slider.value()} dB")
-            self._gain_slider.setToolTip(get_short_tip("gain"))
+        self._show_agc_state(enabled)
         self.agc_changed.emit(enabled)
-        if not enabled:
+        if not enabled and self._gain_model.kind != "hackrf":
             # Back to manual: re-apply the slider's gain. (Enabling AGC used
             # to emit gain_changed(-1), which set a fixed 0 dB manual gain
             # on the device and so switched AGC straight back off.)
-            self.gain_changed.emit(float(self._gain_slider.value()))
+            self.gain_changed.emit(self._step_db(self._gain_slider.value()))
+
+    def _show_agc_state(self, enabled: bool) -> None:
+        """The RF gain slider and readout for AGC on or off."""
+        self._gain_slider.setEnabled(not enabled)
+        if enabled:
+            auto = self._auto_gain_db
+            self._gain_label.setText(
+                "Auto" if auto is None else f"Auto ({format_db(round(auto, 1))})"
+            )
+            self._gain_slider.setToolTip(
+                "Gain is set automatically while Tuner AGC is on. Untick it to "
+                "set it by hand."
+            )
+        else:
+            self._gain_label.setText(
+                format_db(self._step_db(self._gain_slider.value()))
+            )
+            self._gain_slider.setToolTip(self._gain_tip())
+
+    def _gain_tip(self) -> str:
+        model = self._gain_model
+        if model.name and len(model.steps) > 1:
+            return (
+                f"{get_short_tip('gain')} The {model.name} has "
+                f"{len(model.steps)} steps from {format_db(model.low)} to "
+                f"{format_db(model.high)}."
+            )
+        return get_short_tip("gain")
 
     def is_agc_enabled(self) -> bool:
         """Whether AGC is currently enabled."""
@@ -1428,9 +1620,254 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         """Toggle AGC."""
         self._agc_check.setChecked(bool(enabled))
 
+    def set_agc_silently(self, enabled: bool) -> None:
+        """Show AGC on or off without emitting anything (the window applies
+        it to the device itself)."""
+        self._agc_check.blockSignals(True)
+        self._agc_check.setChecked(bool(enabled))
+        self._agc_check.blockSignals(False)
+        self._show_agc_state(bool(enabled))
+
+    def show_auto_gain(self, gain_db: Optional[float]) -> None:
+        """The gain the automatic gain chose (None: not known), shown as
+        "Auto (25.9 dB)" while AGC is on."""
+        self._auto_gain_db = None if gain_db is None else float(gain_db)
+        if self._agc_check.isChecked():
+            self._show_agc_state(True)
+
     def set_gain(self, gain_db: float):
-        """Set gain."""
-        self._gain_slider.setValue(int(round(gain_db)))
+        """Set gain (the nearest step the device has)."""
+        if self._gain_model.kind == "hackrf":
+            lna, vga = split_hackrf_gain(gain_db)
+            self._lna_slider.setValue(HACKRF_LNA_STEPS.index(lna))
+            self._vga_slider.setValue(HACKRF_VGA_STEPS.index(vga))
+            return
+        self._gain_slider.setValue(self._gain_model.nearest_index(gain_db))
+
+    def set_gain_silently(self, gain_db: float) -> None:
+        """Show ``gain_db`` (its nearest step) without emitting anything."""
+        slider = self._gain_slider
+        slider.blockSignals(True)
+        slider.setValue(self._gain_model.nearest_index(gain_db))
+        slider.blockSignals(False)
+        self._show_agc_state(self._agc_check.isChecked())
+
+    def gain_db(self) -> float:
+        """The RF gain set by hand, in dB (a HackRF: LNA + VGA, plus 14 dB
+        with the RF amp on)."""
+        if self._gain_model.kind == "hackrf":
+            lna, vga, amp = self.hackrf_gains()
+            return float(lna + vga + (HACKRF_AMP_DB if amp else 0))
+        return self._step_db(self._gain_slider.value())
+
+    def slider_gain_db(self) -> float:
+        """The RF gain slider's gain in dB (what the window saves as the
+        gain to start with; a HackRF's LNA/VGA are remembered apart)."""
+        return self._step_db(self._gain_slider.value())
+
+    def gain_model(self) -> GainModel:
+        return self._gain_model
+
+    def set_gain_model(self, model: GainModel, locked: str = "") -> None:
+        """Show the RF gain controls ``model`` describes (one slider over
+        the device's gain steps, or a HackRF's LNA, VGA and RF amp), with
+        Tuner AGC only where the hardware has it. The gain stays as close
+        as the new steps allow. ``locked``: why the gain can't be set (a
+        recording playing back), shown on the disabled controls. Nothing is
+        emitted: the window applies the gain to the device itself."""
+        old_db = self.slider_gain_db()
+        changed = model != self._gain_model
+        self._gain_model = model
+        hackrf = model.kind == "hackrf"
+        form = self._receiver_form
+        form.setRowVisible(self._gain_slider.parentWidget(), not hackrf)
+        for widget in (
+            self._lna_slider.parentWidget(),
+            self._vga_slider.parentWidget(),
+            self._amp_check,
+        ):
+            form.setRowVisible(widget, hackrf)
+        if changed and not hackrf:
+            slider = self._gain_slider
+            slider.blockSignals(True)
+            slider.setRange(0, max(0, len(model.steps) - 1))
+            slider.setPageStep(max(1, len(model.steps) // 10))
+            self._slider_steps = tuple(model.steps)
+            slider.setValue(model.nearest_index(old_db))
+            slider.blockSignals(False)
+        if not model.agc and self._agc_check.isChecked():
+            self.set_agc_silently(False)
+        rows = [
+            self._gain_slider.parentWidget(),
+            self._lna_slider.parentWidget(),
+            self._vga_slider.parentWidget(),
+        ]
+        for widget in rows + [self._amp_check]:
+            widget.setEnabled(not locked)
+            if locked:
+                widget.setToolTip(locked)
+            elif widget in rows:
+                widget.setToolTip("")
+            else:
+                widget.setToolTip(AMP_TIP)
+        self._agc_check.setEnabled(not locked and model.agc)
+        if locked:
+            self._agc_check.setToolTip(locked)
+        else:
+            self._agc_check.setToolTip(AGC_TIP if model.agc else model.agc_tip)
+        self._show_agc_state(self._agc_check.isChecked())
+        self._update_amp_warning()
+
+    # -- HackRF One: LNA, VGA and the RF amp --------------------------------
+
+    def hackrf_gains(self) -> Tuple[int, int, bool]:
+        """``(lna, vga, amp)``: the HackRF gains shown."""
+        lna = HACKRF_LNA_STEPS[self._lna_slider.value()]
+        vga = HACKRF_VGA_STEPS[self._vga_slider.value()]
+        return int(lna), int(vga), bool(self._amp_check.isChecked())
+
+    def set_hackrf_gains(self, lna: int, vga: int, amp: bool) -> None:
+        """Show HackRF gains (snapped to their steps) without emitting."""
+        lna_i = min(
+            range(len(HACKRF_LNA_STEPS)), key=lambda i: abs(HACKRF_LNA_STEPS[i] - lna)
+        )
+        vga_i = min(
+            range(len(HACKRF_VGA_STEPS)), key=lambda i: abs(HACKRF_VGA_STEPS[i] - vga)
+        )
+        for widget, value in (
+            (self._lna_slider, lna_i),
+            (self._vga_slider, vga_i),
+        ):
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+        self._amp_check.blockSignals(True)
+        self._amp_check.setChecked(bool(amp))
+        self._amp_check.blockSignals(False)
+        self._show_stage_values()
+        self._update_amp_warning()
+
+    def _show_stage_values(self) -> None:
+        lna, vga, _amp = self.hackrf_gains()
+        self._lna_label.setText(format_db(lna))
+        self._vga_label.setText(format_db(vga))
+
+    def _on_stage_changed(self, _index: int) -> None:
+        self._show_stage_values()
+        lna, vga, _amp = self.hackrf_gains()
+        self.hackrf_gain_changed.emit(lna, vga)
+
+    def _on_amp_toggled(self, on: bool) -> None:
+        self._update_amp_warning()
+        self.amp_changed.emit(bool(on))
+
+    def _update_amp_warning(self) -> None:
+        show = self._gain_model.kind == "hackrf" and self._amp_check.isChecked()
+        self._receiver_form.setRowVisible(self._amp_warning, show)
+
+    # -- Sample rate ------------------------------------------------------------
+
+    def set_sample_rates(
+        self,
+        rates: Sequence[float],
+        current: float,
+        enabled: bool = True,
+        tip: str = "",
+    ) -> None:
+        """Offer ``rates`` (the connected device's) with ``current`` chosen
+        (added when it isn't one of them, e.g. set on the command line).
+        ``enabled`` False: shown but not changeable, ``tip`` says why."""
+        values = sorted({float(r) for r in rates})
+        if current > 0 and not any(abs(r - current) < 1.0 for r in values):
+            values = sorted(values + [float(current)])
+        key = (tuple(values), float(current), bool(enabled), tip)
+        self._current_rate = float(current)
+        combo = self._rate_combo
+        if key == self._rate_choices:
+            # The same choices: only show the rate in use again (a pick
+            # that was refused goes back).
+            index = combo.findData(float(current)) if current > 0 else -1
+            if index >= 0 and index != combo.currentIndex():
+                combo.blockSignals(True)
+                combo.setCurrentIndex(index)
+                combo.blockSignals(False)
+            return
+        self._rate_choices = key
+        combo.blockSignals(True)
+        combo.clear()
+        for rate in values:
+            combo.addItem(rate_choice_label(rate), rate)
+            if rate < ADSB_MIN_RATE:
+                combo.setItemData(
+                    combo.count() - 1, ADSB_RATE_TIP, Qt.ItemDataRole.ToolTipRole
+                )
+        if values:
+            best = min(range(len(values)), key=lambda i: abs(values[i] - current))
+            combo.setCurrentIndex(best)
+        else:
+            combo.addItem("—", 0.0)
+        combo.setEnabled(bool(enabled and values))
+        combo.setToolTip(tip or self._RATE_TIP)
+        combo.blockSignals(False)
+
+    def _on_rate_activated(self, index: int) -> None:
+        rate = float(self._rate_combo.itemData(index) or 0.0)
+        if rate > 0 and abs(rate - self._current_rate) >= 1.0:
+            self.sample_rate_selected.emit(rate)
+
+    # -- Front end: frequency correction, direct sampling, bias tee ---------
+
+    def set_front_end(self, kind: str, front: FrontEnd) -> None:
+        """Show the front-end settings device ``kind`` has (an RTL-SDR: ppm,
+        direct sampling, bias tee; a HackRF: bias tee; others: none) with
+        ``front``'s values, without emitting anything."""
+        features = front_end_features(kind)
+        self._front_end_kind = kind
+        widgets = (
+            (self._ppm_spin, front.ppm),
+            (self._direct_combo, front.direct_sampling),
+            (self._bias_check, front.bias_tee),
+        )
+        for widget, _value in widgets:
+            widget.blockSignals(True)
+        self._ppm_spin.setValue(int(front.ppm))
+        self._direct_combo.setCurrentText(front.direct_sampling)
+        self._bias_check.setChecked(bool(front.bias_tee))
+        for widget, _value in widgets:
+            widget.blockSignals(False)
+        if kind in BIAS_TEE_TIPS:
+            self._bias_check.setToolTip(BIAS_TEE_TIPS[kind])
+        form = self._receiver_form
+        form.setRowVisible(self._ppm_spin, "ppm" in features)
+        form.setRowVisible(self._ppm_hint, "ppm" in features)
+        form.setRowVisible(self._direct_combo, "direct" in features)
+        form.setRowVisible(self._bias_check, "bias_tee" in features)
+        self._update_bias_warning()
+
+    def front_end(self) -> FrontEnd:
+        """The front-end settings shown."""
+        return FrontEnd(
+            ppm=int(self._ppm_spin.value()),
+            direct_sampling=self._direct_combo.currentText(),
+            bias_tee=bool(self._bias_check.isChecked()),
+        )
+
+    def _on_ppm_changed(self, value: int) -> None:
+        self.ppm_changed.emit(int(value))
+
+    def _on_direct_changed(self, _index: int) -> None:
+        self.direct_sampling_changed.emit(self._direct_combo.currentText())
+
+    def _on_bias_toggled(self, on: bool) -> None:
+        self._update_bias_warning()
+        self.bias_tee_changed.emit(bool(on))
+
+    def _update_bias_warning(self) -> None:
+        show = (
+            "bias_tee" in front_end_features(self._front_end_kind)
+            and self._bias_check.isChecked()
+        )
+        self._receiver_form.setRowVisible(self._bias_warning, show)
 
     def _on_bandwidth_changed(self, text: str):
         """Handle bandwidth change (remembered for the mode)."""

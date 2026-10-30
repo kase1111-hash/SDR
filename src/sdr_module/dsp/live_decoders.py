@@ -813,7 +813,10 @@ class ADSBLiveDecoder(LiveDecoder):
                 f"ADS-B needs at least {format_rate(self.MIN_SAMPLE_RATE)}; "
                 f"the device runs at {format_rate(self.sample_rate)}"
             )
-            self._remedy = "Choose a higher sample rate in Device > Connect..."
+            self._remedy = (
+                "Choose a higher sample rate in Receiver > Sample rate (or "
+                "click the rate in the status bar)."
+            )
         else:
             self._decoder = ADSBDecoder(self.sample_rate)
 

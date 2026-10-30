@@ -24,6 +24,8 @@ class DeviceCapability(Enum):
     BIAS_TEE = auto()  # Bias tee for active antennas
     EXT_CLOCK = auto()  # External clock reference
     DIRECT_SAMPLE = auto()  # Direct sampling mode (HF)
+    AGC = auto()  # Automatic gain in the hardware (set_gain_mode(True))
+    FREQ_CORRECTION = auto()  # Crystal error correction (set_freq_correction)
 
 
 @dataclass
@@ -250,6 +252,17 @@ class SDRDevice(ABC):
             return self._sample_queue.get(timeout=timeout)
         except queue.Empty:
             return None
+
+    def discard_queued_samples(self) -> int:
+        """Drop the sample blocks waiting for :meth:`read_samples` (e.g.
+        taken at a sample rate no longer in use). Returns how many."""
+        dropped = 0
+        while True:
+            try:
+                self._sample_queue.get_nowait()
+            except queue.Empty:
+                return dropped
+            dropped += 1
 
     def has_capability(self, cap: DeviceCapability) -> bool:
         """Check if device has a specific capability."""

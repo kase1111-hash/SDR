@@ -23,6 +23,7 @@ try:
     from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWidgets import (
         QAbstractItemView,
+        QCheckBox,
         QComboBox,
         QDialog,
         QDialogButtonBox,
@@ -32,7 +33,6 @@ try:
         QLabel,
         QMessageBox,
         QPushButton,
-        QSpinBox,
         QTableWidget,
         QTableWidgetItem,
         QVBoxLayout,
@@ -45,34 +45,42 @@ except ImportError:
 import numpy as np
 
 from ..utils.tooltips import get_short_tip
+from . import device_settings
 from .settings_store import DEFAULT_FREQUENCY_HZ
 
 if HAS_PYQT6:
+    from .control_panel import SignedSpinBox
     from .themes import set_role, set_tone
 
 logger = logging.getLogger(__name__)
 
 # Sample rates offered in the dialog. Each device type only shows the ones
-# inside its supported range (see _RATE_LIMITS).
-_SAMPLE_RATES = (1.0e6, 1.4e6, 1.8e6, 2.0e6, 2.4e6, 2.56e6, 3.2e6, 4e6, 8e6, 10e6, 20e6)
-_DEFAULT_RATE = 2.4e6
+# inside its supported range (see _RATE_LIMITS). The same table gives the
+# Receiver group's and the status bar's choices (gui/device_settings.py).
+_SAMPLE_RATES = device_settings.SAMPLE_RATES
+_DEFAULT_RATE = device_settings.DEFAULT_RATE
 
 # (min, max) sample rate per device type, in samples/second.
-_RATE_LIMITS: Dict[str, Tuple[float, float]] = {
-    "rtlsdr": (0.9e6, 2.56e6),
-    "hackrf": (2.0e6, 20e6),
-    "demo": (1.0e6, 3.2e6),
-}
+_RATE_LIMITS: Dict[str, Tuple[float, float]] = device_settings.RATE_LIMITS
 
-# Python packages that provide each hardware driver, and how to install them.
+# Python packages that provide each hardware driver, and how to install them
+# (the one text Device > Connect..., Device > Scan for Devices and the
+# welcome screen show).
 _DRIVERS = {
-    "rtlsdr": ("rtlsdr", "RTL-SDR", 'pip install "sdr-module[rtlsdr]"'),
+    "rtlsdr": ("rtlsdr", "RTL-SDR", 'python -m pip install "sdr-module[rtlsdr]"'),
     "hackrf": (
         "python_hackrf",
         "HackRF",
-        'pip install "sdr-module[hackrf]" (needs the libhackrf system library)',
+        'python -m pip install "sdr-module[hackrf]" (needs the libhackrf system '
+        "library)",
     ),
 }
+
+
+def install_command(kind: str) -> str:
+    """How to install the driver for ``kind`` ("rtlsdr" or "hackrf")."""
+    entry = _DRIVERS.get(kind)
+    return entry[2] if entry else ""
 
 
 def _driver_installed(module_name: str) -> bool:
@@ -95,7 +103,7 @@ def missing_drivers() -> List[Tuple[str, str]]:
 
 def _format_rate(rate: float) -> str:
     """``2400000.0`` -> ``"2.4 MS/s"``."""
-    return f"{rate / 1e6:g} MS/s"
+    return device_settings.format_rate(rate)
 
 
 class DeviceDialog(QDialog if HAS_PYQT6 else object):
@@ -114,6 +122,12 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         self._selected_device = None
         self._devices: List[dict] = []
         self._missing_drivers: List[Tuple[str, str]] = []
+        # Per device type: the sample rate to preselect and the front end
+        # to show (set_preferences; edits are kept while switching rows),
+        # and the type whose settings are shown.
+        self._rates: Dict[str, float] = {}
+        self._fronts: Dict[str, device_settings.FrontEnd] = {}
+        self._shown_kind = ""
 
         self.setWindowTitle("Connect SDR Device")
         self.setMinimumSize(540, 480)
@@ -193,20 +207,39 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         form.setVerticalSpacing(8)
 
         self._rate_combo = QComboBox()
-        self._rate_combo.setToolTip(get_short_tip("sample_rate"))
+        self._rate_combo.setToolTip(
+            get_short_tip("sample_rate")
+            + " It can be changed later without reconnecting (Receiver > "
+            "Sample rate)."
+        )
+        self._rate_combo.activated.connect(self._on_rate_chosen)
         self._populate_rates("demo")
         form.addRow("&Sample rate:", self._rate_combo)
 
-        self._ppm_spin = QSpinBox()
-        self._ppm_spin.setRange(-100, 100)
+        # The device's front end (shown for the devices that have each; the
+        # Receiver group changes them later without reconnecting).
+        self._ppm_spin = SignedSpinBox()
+        self._ppm_spin.setRange(*device_settings.PPM_RANGE)
         self._ppm_spin.setValue(0)
         self._ppm_spin.setSuffix(" ppm")
         self._ppm_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
         form.addRow("&Frequency correction:", self._ppm_spin)
 
         self._direct_combo = QComboBox()
-        self._direct_combo.addItems(["Off", "I-ADC", "Q-ADC"])
+        for value, label, tip in device_settings.DIRECT_SAMPLING_CHOICES:
+            self._direct_combo.addItem(label, value)
+            self._direct_combo.setItemData(
+                self._direct_combo.count() - 1, tip, Qt.ItemDataRole.ToolTipRole
+            )
         form.addRow("&Direct sampling:", self._direct_combo)
+
+        self._bias_check = QCheckBox(device_settings.BIAS_TEE_TEXT)
+        self._bias_check.toggled.connect(lambda _on: self._show_bias_warning())
+        form.addRow(self._bias_check)
+        self._bias_warning = QLabel(device_settings.BIAS_TEE_WARNING)
+        self._bias_warning.setWordWrap(True)
+        set_role(self._bias_warning, "hint", "warning")
+        form.addRow(self._bias_warning)
 
         layout.addWidget(settings_group)
 
@@ -237,8 +270,13 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         self._update_setting_controls(None)
 
     def _populate_rates(self, dev_kind: str) -> None:
-        """Fill the sample-rate combo with the rates ``dev_kind`` supports."""
-        current = self._rate_combo.currentData() or _DEFAULT_RATE
+        """Fill the sample-rate combo with the rates ``dev_kind`` supports
+        (the one it had last, from set_preferences, chosen)."""
+        current = (
+            getattr(self, "_rates", {}).get(dev_kind)
+            or self._rate_combo.currentData()
+            or _DEFAULT_RATE
+        )
         low, high = _RATE_LIMITS.get(dev_kind, _RATE_LIMITS["demo"])
         rates = [r for r in _SAMPLE_RATES if low <= r <= high] or [_DEFAULT_RATE]
         self._rate_combo.blockSignals(True)
@@ -371,59 +409,98 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         """Handle selection change."""
         self._update_setting_controls(self._selected_entry())
 
+    @staticmethod
+    def _kind_of(dev: Optional[dict]) -> str:
+        dev_type = (dev or {}).get("type", "")
+        kind = "rtlsdr" if "rtlsdr" in dev_type else dev_type
+        return kind if kind in _RATE_LIMITS else "demo"
+
     def _update_setting_controls(self, dev: Optional[dict]) -> None:
-        """Enable only the settings the selected device's driver can apply."""
+        """Show only the settings the selected device has (an RTL-SDR:
+        frequency correction, direct sampling and bias tee; a HackRF One:
+        bias tee; the demo device: the sample rate alone), with what that
+        type used last."""
         self._connect_btn.setEnabled(dev is not None)
         self._connect_btn.setToolTip(
             "" if dev is not None else "Select a device in the list first"
         )
-        dev_type = (dev or {}).get("type", "")
-        kind = "rtlsdr" if "rtlsdr" in dev_type else dev_type
-        if kind not in _RATE_LIMITS:
-            kind = "demo"
+        kind = self._kind_of(dev)
+        if self._shown_kind and self._shown_kind != kind:
+            # Keep what was set for the type shown before.
+            self._fronts[self._shown_kind] = self._front_end_shown()
+        self._shown_kind = kind
         self._populate_rates(kind)
 
-        device_class = self._device_class(dev_type)
-        name = {"rtlsdr": "RTL-SDR", "hackrf": "HackRF"}.get(kind, "")
-        unsupported = (
-            f"Not supported by the {name} driver yet."
-            if name
-            else "Not needed for the Demo Device."
-        )
+        features = device_settings.front_end_features(kind)
+        front = self._fronts.get(kind) or device_settings.FrontEnd()
+        self._ppm_spin.setValue(int(front.ppm))
+        index = self._direct_combo.findData(front.direct_sampling)
+        self._direct_combo.setCurrentIndex(max(0, index))
+        self._bias_check.setChecked(bool(front.bias_tee) and "bias_tee" in features)
 
-        ppm_ok = device_class is not None and hasattr(
-            device_class, "set_freq_correction"
+        name = {"rtlsdr": "RTL-SDR", "hackrf": "HackRF One"}.get(kind, "Demo Device")
+        rows = (
+            (self._ppm_spin, "ppm", device_settings.PPM_TIP),
+            (
+                self._direct_combo,
+                "direct",
+                device_settings.DIRECT_SAMPLING_TIP
+                + " Above 24 MHz the tuner is always used.",
+            ),
+            (
+                self._bias_check,
+                "bias_tee",
+                device_settings.BIAS_TEE_TIPS.get(kind, ""),
+            ),
         )
-        self._ppm_spin.setEnabled(ppm_ok)
-        self._ppm_spin.setToolTip(
-            "Corrects the tuner's crystal error, in parts per million."
-            if ppm_ok
-            else unsupported
-        )
-
-        direct_ok = (
-            kind == "rtlsdr"
-            and device_class is not None
-            and hasattr(device_class, "set_direct_sampling")
-        )
-        self._direct_combo.setEnabled(direct_ok)
-        if not direct_ok:
-            self._direct_combo.setCurrentIndex(0)
-        self._direct_combo.setToolTip(
-            get_short_tip("direct_sampling")
-            if direct_ok
-            else (
-                unsupported
-                if kind == "rtlsdr"
-                else "RTL-SDR only. " + get_short_tip("direct_sampling")
-            )
-        )
-        # Dim each label with its field so unavailable settings read as such.
-        for field in (self._ppm_spin, self._direct_combo):
+        for field, feature, tip in rows:
+            has = feature in features
+            field.setEnabled(has)
+            field.setToolTip(tip if has else f"The {name} doesn't have this setting.")
+            self._settings_form.setRowVisible(field, has)
+            # Dim each label with its field so unavailable settings read as such.
             label = self._settings_form.labelForField(field)
             if label is not None:
-                label.setEnabled(field.isEnabled())
+                label.setEnabled(has)
                 label.setToolTip(field.toolTip())
+        self._show_bias_warning()
+
+    def _show_bias_warning(self) -> None:
+        """The bias tee's warning while it is ticked (and offered)."""
+        show = self._bias_check.isEnabled() and self._bias_check.isChecked()
+        self._settings_form.setRowVisible(self._bias_warning, show)
+
+    def _front_end_shown(self) -> "device_settings.FrontEnd":
+        return device_settings.FrontEnd(
+            ppm=int(self._ppm_spin.value()),
+            direct_sampling=str(self._direct_combo.currentData() or "q"),
+            bias_tee=bool(self._bias_check.isChecked()),
+        )
+
+    def _on_rate_chosen(self, _index: int) -> None:
+        rate = self._rate_combo.currentData()
+        if rate and self._shown_kind:
+            self._rates[self._shown_kind] = float(rate)
+
+    def set_preferences(
+        self,
+        rates: Dict[str, float],
+        fronts: Dict[str, "device_settings.FrontEnd"],
+    ) -> None:
+        """Per device type: the sample rate to preselect and the front end
+        to show (what it had last; the main window passes them)."""
+        self._rates = {kind: float(rate) for kind, rate in rates.items() if rate}
+        self._fronts = dict(fronts)
+        self._shown_kind = ""
+        self._update_setting_controls(self._selected_entry())
+
+    def front_end_choice(self) -> Tuple[str, Optional["device_settings.FrontEnd"]]:
+        """``(device type, front end)`` set for the device opened (None for
+        a type without front-end settings)."""
+        kind = self._shown_kind
+        if not device_settings.front_end_features(kind):
+            return kind, None
+        return kind, self._front_end_shown()
 
     @staticmethod
     def _device_class(dev_type: str) -> Any:
@@ -521,19 +598,25 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         return device
 
     def _apply_optional_settings(self, device) -> None:
-        """Apply PPM / direct sampling when the driver supports them."""
-        ppm = self._ppm_spin.value()
-        if ppm and self._ppm_spin.isEnabled():
+        """Apply the front end shown (direct sampling, frequency correction,
+        bias tee) where the device has it."""
+        features = device_settings.front_end_features(
+            device_settings.device_kind(device)
+        )
+        front = self._front_end_shown()
+        steps = (
+            ("direct", "set_direct_sampling", front.direct_sampling, True),
+            ("ppm", "set_freq_correction", front.ppm, bool(front.ppm)),
+            ("bias_tee", "set_bias_tee", True, front.bias_tee),
+        )
+        for feature, method, value, wanted in steps:
+            if feature not in features or not wanted:
+                continue
             try:
-                device.set_freq_correction(ppm)
+                if getattr(device, method)(value) is False:
+                    logger.warning(f"The device refused {method}({value!r})")
             except Exception as e:
-                logger.warning(f"Could not apply {ppm} ppm correction: {e}")
-        mode = self._direct_combo.currentIndex()
-        if mode and self._direct_combo.isEnabled():
-            try:
-                device.set_direct_sampling(mode)
-            except Exception as e:
-                logger.warning(f"Could not enable direct sampling: {e}")
+                logger.warning(f"Could not apply {method}({value!r}): {e}")
 
     def get_selected_device(self):
         """Get the selected and opened device."""
@@ -611,7 +694,7 @@ _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ..
 )
 
 # The ADS-B decoder's lowest usable rate (its 0.5 us pulses need 2 MS/s).
-_ADSB_MIN_RATE = 2.0e6
+_ADSB_MIN_RATE = device_settings.ADSB_MIN_RATE
 
 # --------------------------------------------------------------------------- #
 # Decodable data: APRS, POCSAG, FLEX and ACARS transmissions

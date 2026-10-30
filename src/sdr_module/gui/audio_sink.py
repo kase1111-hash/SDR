@@ -2,9 +2,11 @@
 Audio output sink.
 
 Thin wrapper around QAudioSink (PyQt6.QtMultimedia). Accepts a mono
-int16 stream and plays it on the default output device. Absent a working
-Qt multimedia backend, falls back to a no-op so the rest of the GUI
-still works.
+int16 stream and plays it on the output device chosen in Tools >
+Preferences (:meth:`AudioSink.set_output_device`), the system default
+unless one is chosen or when the chosen one isn't there (unplugged).
+Absent a working Qt multimedia backend, falls back to a no-op so the rest
+of the GUI still works.
 
 ``start()`` reports whether the output really opened: it returns False when
 there is no output device or Qt could not open it, so callers can tell the
@@ -24,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Any, List, Optional, Tuple
 
 import numpy as np
 
@@ -37,6 +39,37 @@ try:
     HAS_QT_AUDIO = True
 except ImportError:  # pragma: no cover - environment-dependent
     HAS_QT_AUDIO = False
+
+
+def _device_id(device: Any) -> str:
+    """A QAudioDevice's id as text (what Tools > Preferences stores)."""
+    try:
+        return bytes(device.id()).decode("utf-8", "replace")
+    except Exception:  # pragma: no cover - backend-dependent
+        return ""
+
+
+def output_devices() -> List[Tuple[str, str]]:
+    """``(id, description)`` of the audio outputs there are now."""
+    if not HAS_QT_AUDIO:
+        return []
+    try:
+        devices = QMediaDevices.audioOutputs()
+    except Exception as e:  # pragma: no cover - backend-dependent
+        logger.debug(f"Could not list the audio outputs: {e}")
+        return []
+    return [(_device_id(device), str(device.description())) for device in devices]
+
+
+def default_output_name() -> str:
+    """The system default output's name ("" when there is none)."""
+    if not HAS_QT_AUDIO:
+        return ""
+    try:
+        device = QMediaDevices.defaultAudioOutput()
+    except Exception:  # pragma: no cover - backend-dependent
+        return ""
+    return "" if device.isNull() else str(device.description())
 
 
 class AudioSink:
@@ -67,6 +100,12 @@ class AudioSink:
         self._last_write: Optional[float] = None
         self.underruns = 0  # the output ran dry mid-stream (padded)
         self.overruns = 0  # too much queued (oldest audio dropped)
+        # The output chosen in Tools > Preferences ("" = the system
+        # default), its name, and whether it was missing when the stream
+        # last opened (it then plays through the default).
+        self._output_id = ""
+        self._output_label = ""
+        self.output_missing = False
 
     @property
     def available(self) -> bool:
@@ -77,8 +116,58 @@ class AudioSink:
         """True while an output stream is open (``write`` plays sound)."""
         return self._io is not None
 
+    @property
+    def output_id(self) -> str:
+        """The chosen output's id ("" = the system default)."""
+        return self._output_id
+
+    def set_output_device(self, device_id: str, name: str = "") -> None:
+        """Play through the output ``device_id`` ("" = the system default;
+        ``name`` is shown while it is missing). An open stream reopens on
+        it at once."""
+        device_id = str(device_id or "")
+        self._output_label = str(name or "")
+        if device_id == self._output_id and not (self.output_missing and self.is_open):
+            return  # (one that was missing is looked for again)
+        self._output_id = device_id
+        if self.is_open:
+            rate = self._sample_rate
+            self.stop()
+            self.start(rate)
+
+    def output_name(self) -> str:
+        """What plays the audio: the chosen output's name, or "System
+        default (<name>)"; says when the chosen one is missing."""
+        if self._output_id:
+            for device_id, description in output_devices():
+                if device_id == self._output_id:
+                    return description
+            missing = self._output_label or "The chosen output"
+            default = default_output_name()
+            return f"{missing} (not found; using {default or 'the default'})"
+        default = default_output_name()
+        return f"System default ({default})" if default else "System default"
+
+    def _output_device(self) -> Any:
+        """The QAudioDevice to open: the chosen one, else the default."""
+        self.output_missing = False
+        if self._output_id:
+            try:
+                for device in QMediaDevices.audioOutputs():
+                    if _device_id(device) == self._output_id:
+                        return device
+            except Exception as e:  # pragma: no cover - backend-dependent
+                logger.debug(f"Could not list the audio outputs: {e}")
+            self.output_missing = True
+            logger.info(
+                "The chosen audio output (%s) isn't there; using the default",
+                self._output_label or self._output_id,
+            )
+        return QMediaDevices.defaultAudioOutput()
+
     def start(self, sample_rate: int = 48000) -> bool:
-        """Open the default output at ``sample_rate`` Hz.
+        """Open the output (the chosen one, else the default) at
+        ``sample_rate`` Hz.
 
         Returns True when the output is open, False when nothing can play:
         no QtMultimedia, no output device, or Qt could not open it.
@@ -90,7 +179,7 @@ class AudioSink:
             return True
         self.stop()
         try:
-            device = QMediaDevices.defaultAudioOutput()
+            device = self._output_device()
             if device.isNull():
                 logger.info("No audio output device; audio output disabled")
                 return False

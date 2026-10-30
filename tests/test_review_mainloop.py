@@ -798,5 +798,62 @@ class TestRdsBadgeFollowsTheSource(_WindowTestCase):
         self.assertEqual(self.win._rds_badge.text(), "")
 
 
+# ---------------------------------------------------------------------------
+# mainloop-stale-pre-nr-audio-replayed
+# ---------------------------------------------------------------------------
+
+
+class TestNoStaleAudio(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_an_empty_channel_block_leaves_no_audio_behind(self):
+        mw = _mw()
+        chain = mw._ReceiverChain(2.4e6, "FM", 25e3)
+        rng = np.random.default_rng(5)
+        block = (rng.standard_normal(80000) + 1j * rng.standard_normal(80000)).astype(
+            np.complex64
+        )
+        audio = chain.demodulate(chain.channelize(block), 5e3)
+        self.assertTrue(len(audio))
+        self.assertTrue(len(chain.pre_nr_audio))
+        chain.last_clip_fraction = 0.5
+        audio = chain.demodulate(np.empty(0, np.complex64), 5e3)
+        self.assertEqual(len(audio), 0)
+        self.assertEqual(len(chain.pre_nr_audio), 0)
+        self.assertEqual(chain.last_clip_fraction, 0.0)
+
+
+class TestNoStaleAudioInTheWindow(_WindowTestCase):
+    demo = True
+
+    def test_sstv_and_the_tone_detector_get_each_block_once(self):
+        self.win._stop_acquisition()
+        self.win.set_frequency(145.8e6)
+        self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        self.win._sstv_panel._on_start_clicked()
+        self.assertTrue(self.win._sstv_listening())
+        heard, tones = [], []
+        self.win._sstv_panel.process_audio = lambda audio, sample_rate=None: (
+            heard.append(audio)
+        )
+        tone_process = self.win._tone_squelch.process
+        self.win._tone_squelch.process = lambda audio: (
+            tones.append(audio),
+            tone_process(audio),
+        )[1]
+        dev = self.win._device
+        dev.start_rx()
+        # (25 kHz FM at 2.4 MS/s: 1:50 to the channel; 20 samples after an
+        # odd-sized block give no channel sample.)
+        for size in (80000, 80013, 20, 80000):
+            self.win._process_block(dev.read_samples(size))
+        given = [a for a in heard if len(a)]
+        self.assertEqual(len({id(a) for a in given}), len(given))
+        checked = [a for a in tones if len(a)]
+        self.assertEqual(len({id(a) for a in checked}), len(checked))
+        self.assertEqual(sum(len(a) for a in given), sum(len(a) for a in checked))
+
+
 if __name__ == "__main__":
     unittest.main()

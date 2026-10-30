@@ -1055,6 +1055,10 @@ class _ReceiverChain:
     def demodulate(self, channel: np.ndarray, fm_deviation: float) -> np.ndarray:
         """Mono float32 audio in [-1, 1] at ``audio_rate`` (48 kHz)."""
         if len(channel) == 0:
+            # No audio from this block: what the last one saw (its audio for
+            # the SSTV decoder and the tone squelch) isn't this one's.
+            self.pre_nr_audio = np.empty(0, dtype=np.float32)
+            self.last_clip_fraction = 0.0
             return np.empty(0, dtype=np.float32)
         if self.mode == "FM":
             broadcast = float(fm_deviation) >= _BROADCAST_DEVIATION_HZ
@@ -1081,6 +1085,8 @@ class _ReceiverChain:
             if audio.size:
                 over = np.count_nonzero(np.abs(audio) > 1.0)
                 self.last_clip_fraction = float(over) / audio.size
+            else:
+                self.last_clip_fraction = 0.0
             audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
             self.pre_nr_audio = audio
             return self._reduce_noise(audio)

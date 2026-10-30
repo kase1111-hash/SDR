@@ -185,24 +185,32 @@ class TestHistoryAndPause(_WaterfallCase):
         self.assertEqual(len(self.w._history), 40)
 
     def test_one_minute_spans_a_minute_at_30_fps(self):
+        # The first 500 rows arrive at the live rate (the plot fills in
+        # about 17 s instead of a minute); then rows settle into 0.12 s, and
+        # once those fast rows have scrolled out the history is a minute.
         self.w.set_history_seconds(60)
-        self.feed(30 * 60)
+        self.feed(30 * 90)
         self.assertEqual(len(self.w._history), 500)
         ages = self.w._row_ages()
         self.assertAlmostEqual(ages[-1], 60.0 - 0.12, delta=0.2)
 
     def test_slow_rows_keep_the_strongest_level(self):
         self.w.set_history_seconds(300)  # 0.6 s per row
-        self.clock.t += 1
         quiet = np.full(2048, -90.0)
+        for _ in range(500):  # the plot fills at the live rate first
+            self.clock.t += 1 / 30
+            self.w.add_line(quiet)
+        self.clock.t += 1
         burst = quiet.copy()
         burst[500] = -25.0  # one frame of a short burst
+        before = list(self.w._times)
         self.w.add_line(quiet)
         self.clock.t += 0.1
         self.w.add_line(burst)
         self.clock.t += 0.1
         self.w.add_line(quiet)
-        self.assertEqual(len(self.w._history), 1)
+        self.assertEqual(list(self.w._times)[:-1], before[1:])  # one new row
+        self.assertEqual(self.w._row_steps[-1], 0.6)
         self.assertEqual(self.w._history[-1][500], -25.0)
 
     def test_history_menu_and_combo_agree(self):

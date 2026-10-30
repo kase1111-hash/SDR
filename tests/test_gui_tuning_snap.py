@@ -195,7 +195,8 @@ class TestWaterfallSnap(_PlotCase):
         empty = _spectrum([], seed=9)
         w = self.make([burst] * 40 + [empty] * 40, step=12.5e3, mode="nfm")
         plot = w.plot_rect()
-        row_px = plot.height() / w._history_size
+        # (While the history fills, its rows are stretched over the plot.)
+        row_px = plot.height() / w._rows_shown()
         burst_y = plot.top() + 60 * row_px  # among the burst's rows
         empty_y = plot.top() + 5 * row_px
         self.assertEqual(self.click(w, 100.304e6, burst_y), 100.3e6)

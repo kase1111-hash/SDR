@@ -49,8 +49,14 @@ SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
     ("Radio", ("Ctrl+Shift+R",), "Start or stop recording"),
     ("Radio", ("Ctrl+L",), "Type a new center frequency"),
     ("Radio", ("Ctrl+B",), "Bookmark the current frequency"),
-    ("Tuning", ("Left", "Right"), "Tune down / up by 10 kHz"),
-    ("Tuning", ("Shift+Left", "Shift+Right"), "Tune down / up by 100 kHz"),
+    (
+        "Radio",
+        ("Alt+Left", "Alt+Right"),
+        "Go back / forward through the frequencies you tuned",
+    ),
+    ("Radio", ("[", "]"), "Smaller / larger tuning step (with the plots focused)"),
+    ("Tuning", ("Left", "Right"), "Tune down / up by one tuning step"),
+    ("Tuning", ("Shift+Left", "Shift+Right"), "Tune down / up by ten tuning steps"),
     ("Tuning", ("Ctrl+Left", "Ctrl+Right"), "Tune down / up by 1 MHz"),
     ("File", ("Ctrl+O",), "Import a recording to convert its format"),
     ("File", ("Ctrl+S",), "Save the recording"),
@@ -85,7 +91,10 @@ PLOT_KEYS: Tuple[Entry, ...] = (
 
 # Mouse gestures: (gesture shown as a keycap, description).
 MOUSE_ACTIONS: Tuple[Tuple[str, str], ...] = (
-    ("Click", "Tune to the clicked frequency on the spectrum or waterfall"),
+    ("Click", "Tune to the signal clicked on the spectrum or waterfall"),
+    ("Alt+Click", "Tune exactly where you click, without snapping to a signal"),
+    ("Scroll", "Tune by the step over the spectrum or waterfall (Shift: ten steps)"),
+    ("Scroll", "Tune one digit over a digit of the FREQ readout"),
     ("Drag", "Measure a signal's bandwidth, duration and peak on the waterfall"),
     ("Right-click", "Tune, bookmark or copy a waterfall frequency; display options"),
     ("Scroll", "Shift the waterfall's color levels (over its LEVELS scale)"),

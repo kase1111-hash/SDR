@@ -57,7 +57,11 @@ _INFO_GLYPH = "\u24d8"  # circled i
 # main window installs (see help_dialog.SHORTCUTS).
 _TIPS = (
     ("Click", "Tune to a signal on the spectrum or waterfall."),
-    ("← / →", "Tune in 10 kHz steps. Add Shift for 100 kHz, Ctrl for 1 MHz."),
+    (
+        "← / →",
+        "Tune by the step (STEP in the toolbar). Add Shift for ten steps, "
+        "Ctrl for 1 MHz.",
+    ),
     ("Space", "Start or stop the receiver."),
     ("F1", "Show all keyboard shortcuts."),
 )

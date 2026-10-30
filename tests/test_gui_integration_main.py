@@ -316,6 +316,10 @@ class TestRecordingProtection(_WindowTestCase):
     def test_save_uses_the_capture_frequency_and_rate(self):
         from sdr_module.dsp.recording import load_iq_file
 
+        # The file is labelled with the LO the samples were captured at (the
+        # VFO only moves within them): with every tune retuning the LO,
+        # 100 MHz is the capture's center.
+        self.win._keep_centered_action.setChecked(True)
         self.win.set_frequency(100e6)
         self._record()
         self.win.set_frequency(433.92e6)  # retuned after recording

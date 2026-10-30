@@ -23,6 +23,7 @@ import importlib
 import importlib.util
 import json
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -62,22 +63,31 @@ try:
         QPolygonF,
     )
     from PyQt6.QtWidgets import (
+        QAbstractButton,
+        QAbstractItemView,
+        QAbstractSlider,
+        QAbstractSpinBox,
         QApplication,
+        QComboBox,
         QFileDialog,
         QFormLayout,
         QFrame,
         QGridLayout,
         QGroupBox,
         QLabel,
+        QLineEdit,
         QMainWindow,
         QMessageBox,
+        QPlainTextEdit,
         QPushButton,
         QScrollArea,
         QSizePolicy,
         QSlider,
         QSplitter,
         QStatusBar,
+        QTabBar,
         QTabWidget,
+        QTextEdit,
         QToolBar,
         QVBoxLayout,
         QWidget,
@@ -89,11 +99,13 @@ except ImportError:
 
 from .. import __version__
 from ..devices.base import SDRDevice
+from ..dsp.nco import Nco
 from ..utils.tooltips import get_short_tip
 from .audio_sink import AudioSink
 from .bookmarks_panel import BookmarksPanel
-from .control_panel import ControlPanel
+from .control_panel import MAX_FREQUENCY_HZ, MIN_FREQUENCY_HZ, ControlPanel
 from .decoder_panel import DecoderPanel
+from .receiver_bar import FrequencyDigits, ReceiverBar
 from .settings_store import DEFAULT_FREQUENCY_HZ, GuiSettings
 from .spectrum_widget import SpectrumWidget
 from .themes import (
@@ -104,6 +116,19 @@ from .themes import (
     set_role,
     set_tone,
     theme_notifier,
+)
+from .tuning import (
+    STEP_CHOICES_HZ,
+    STEP_MODE_NAMES,
+    TunedEntry,
+    TuningHistory,
+    default_step_hz,
+    format_mhz_range,
+    format_step,
+    nearest_step,
+    step_frequency,
+    step_index,
+    step_mode_key,
 )
 from .waterfall_widget import WaterfallWidget
 
@@ -174,6 +199,17 @@ _TIMED_FRAME = 8 * DISPLAY_BLOCK
 # While frames can't keep up, one frame this often reads (and times) a full
 # frame's worth again, to find out when the computer keeps up once more.
 _OVERLOAD_PROBE_S = 1.0
+
+# Tuning (see SDRMainWindow.set_frequency): the tuned channel may sit
+# anywhere in this inner fraction of the span (the receiver's anti-alias
+# filter rolls off at its edges) before the LO is retuned to center it.
+_USABLE_SPAN_FRACTION = 0.8
+# A frequency joins the Back/Forward history and Recent Frequencies once
+# the receiver has stayed on it this long (so stepping through a band
+# doesn't fill them with every step).
+_HISTORY_DWELL_MS = 1000
+# Short model names, for "RTL-SDR tunes 0.5–1766 MHz".
+_DEVICE_MODELS = {"RTLSDRDevice": "RTL-SDR", "HackRFDevice": "HackRF One"}
 
 # Hardware drivers scanned for devices: (package, name the driver imports
 # from it, driver module, driver class), matching the imports in
@@ -547,11 +583,20 @@ class _ReceiverChain:
     deviation (50 kHz or more) is also de-emphasized (75 us). USB/LSB keep
     200-2800 Hz on their side of the carrier; CW keeps +/-250 Hz around it
     and adds a 700 Hz beat note (BFO).
+
+    The tuned channel need not be at the center of the span: ``offset_hz``
+    (set with :meth:`set_offset`) is the VFO's offset from the LO, and
+    ``channelize`` first mixes every block down by it with a
+    phase-continuous NCO. Changing it keeps the filters' state, so retuning
+    inside the span doesn't click.
     """
 
-    def __init__(self, rate: float, mode: str, bandwidth: float):
+    def __init__(
+        self, rate: float, mode: str, bandwidth: float, offset_hz: float = 0.0
+    ):
         self.rate = float(rate)
         self.mode = mode
+        self._nco = Nco(self.rate, offset_hz)
         self.bandwidth = min(max(float(bandwidth), 1e3), self.rate)
         self.audio_rate = _AUDIO_RATE
         total = _smooth_factor(self.rate / _AUDIO_RATE)
@@ -629,6 +674,21 @@ class _ReceiverChain:
     def band_edges(self) -> Tuple[float, float]:
         """Offsets from the tuned frequency (Hz) of what is demodulated."""
         return _channel_edges(self.mode, self.bandwidth, self.rate)
+
+    @property
+    def offset_hz(self) -> float:
+        """The tuned (VFO) frequency minus the LO, in Hz: where in the span
+        the channel is."""
+        return self._nco.frequency_hz
+
+    @offset_hz.setter
+    def offset_hz(self, value: float) -> None:
+        self._nco.frequency_hz = value
+
+    def set_offset(self, offset_hz: float) -> None:
+        """Move the channel to ``offset_hz`` from the LO. The NCO's phase and
+        the filters' state carry on, so the audio doesn't click."""
+        self._nco.frequency_hz = offset_hz
 
     def _design_demodulator(self) -> None:
         """Design the filters after detection (once per chain)."""
@@ -732,7 +792,8 @@ class _ReceiverChain:
 
     def channelize(self, samples: np.ndarray) -> np.ndarray:
         """The tuned channel of an I/Q block, at ``channel_rate``."""
-        out = np.asarray(samples, dtype=np.complex64)
+        # The VFO's channel to 0 Hz (nothing to do at the LO itself).
+        out = self._nco.mix(np.asarray(samples, dtype=np.complex64))
         for stage in self._channel:
             out = stage.process(out)
         return out
@@ -905,6 +966,16 @@ class _Pacer:
         return (
             len(self._ratios) >= 3 and float(np.median(self._ratios)) <= _OVERLOAD_RATIO
         )
+
+
+def _is_demo_device(device: Any) -> bool:
+    """True for the simulated Demo Device, however it was opened (Device >
+    Use Demo Device, or the Demo row of Device > Connect...)."""
+    if device is None:
+        return False
+    from .device_dialog import MockDevice
+
+    return isinstance(device, MockDevice)
 
 
 def _driver_importable(package: str, name: str) -> bool:
@@ -1267,7 +1338,19 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
             (
                 ("device", "Device", "The SDR samples are read from."),
                 ("state", "State", "Whether the receiver is running."),
-                ("frequency", "Center frequency", get_short_tip("center_frequency")),
+                (
+                    "frequency",
+                    "Tuned",
+                    "The tuned frequency: what is demodulated, decoded and "
+                    "measured (FREQ in the toolbar).",
+                ),
+                (
+                    "lo",
+                    "Center (LO)",
+                    get_short_tip("center_frequency")
+                    + " The middle of the spectrum and waterfall; recordings "
+                    "are labelled with it.",
+                ),
                 ("sample_rate", "Sample rate", get_short_tip("sample_rate")),
                 (
                     "span",
@@ -1334,8 +1417,19 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
     # Quick Tips.
     TIPS: Tuple[Tuple[str, str], ...] = (
         ("Click", "Tune to a signal on the spectrum or waterfall."),
-        ("Ctrl+L", "Type a frequency (or click the FREQ readout)."),
-        ("← / →", "Tune in 10 kHz steps. Add Shift for 100 kHz, Ctrl for 1 MHz."),
+        (
+            "Wheel",
+            "Scroll over the plots to tune by the step, or over a digit of the "
+            "FREQ readout to tune that digit.",
+        ),
+        ("Ctrl+L", "Type a frequency (or click the FREQ readout): 145.8, 7074k."),
+        (
+            "← / →",
+            "Tune by the step (STEP in the toolbar). Add Shift for ten steps, "
+            "Ctrl for 1 MHz.",
+        ),
+        ("[ / ]", "Smaller / larger tuning step."),
+        ("Alt+← / →", "Back / forward through the frequencies you tuned."),
         ("Space", "Start or stop the receiver."),
         ("F6", "Put the keyboard focus on the spectrum (Esc also returns there)."),
         ("Ctrl+B", "Bookmark the current frequency."),
@@ -1441,16 +1535,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     - Recording controls
     """
 
-    # Frequency step for Left/Right, by modifier.
-    _TUNE_STEPS_HZ = (
-        {
-            Qt.KeyboardModifier.NoModifier: 10e3,
-            Qt.KeyboardModifier.ShiftModifier: 100e3,
+    @property
+    def _TUNE_STEPS_HZ(self) -> Dict[Any, float]:  # noqa: N802 - existing name
+        """How far Left/Right tune, by modifier: one tuning step, ten with
+        Shift, 1 MHz with Ctrl. (F1 lists the arrow keys from this.)"""
+        step = float(getattr(self, "_step_hz", 10e3))
+        return {
+            Qt.KeyboardModifier.NoModifier: step,
+            Qt.KeyboardModifier.ShiftModifier: 10.0 * step,
             Qt.KeyboardModifier.ControlModifier: 1e6,
         }
-        if HAS_PYQT6
-        else {}
-    )
 
     # Toolbar button captions.
     _START_TEXT = "▶  Start"
@@ -1533,6 +1627,31 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         # Persisted settings (frequency, gain, theme, bookmarks live here)
         self._settings = GuiSettings()
+
+        # Tuning (see set_frequency). The LO is the device's center (the
+        # middle of the plots); the tuned frequency (the VFO, which the
+        # Frequency field shows) is what is demodulated, anywhere in the
+        # span. _tuned_hz is the last frequency tuned, to go back to when a
+        # new one is refused. _lo_lock fixes the LO: (center, span, why),
+        # e.g. while a recording plays back.
+        self._lo_hz = float(DEFAULT_FREQUENCY_HZ)
+        self._tuned_hz = float(DEFAULT_FREQUENCY_HZ)
+        self._lo_lock: Optional[Tuple[float, float, str]] = None
+        # The tuning step and the mode it was chosen for (tuning/step/<key>).
+        self._step_hz = 10e3
+        self._step_key = ""
+        # Typed text the Frequency field refused (keep the focus there).
+        self._entry_rejected = False
+        # Mixes blocks to the VFO for the live decoder (see _run_decoder).
+        self._decoder_nco: Optional[Nco] = None
+        # Back/forward and Recent Frequencies (tuning/recent): a frequency
+        # joins them once the receiver stays on it (_note_tuned).
+        self._tuning_history = TuningHistory(
+            TuningHistory.entries_from_json(self._settings.get_str("tuning/recent", ""))
+        )
+        self._history_timer = QTimer(self)
+        self._history_timer.setSingleShot(True)
+        self._history_timer.timeout.connect(self._commit_history_entry)
         # SDRApplication applies the persisted theme before the window exists;
         # mirror whatever is actually on screen.
         self._theme = current_theme()
@@ -1547,6 +1666,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._setup_ui()
         self._setup_menus()
         self._setup_toolbar()
+        self._setup_receiver_bar()
         self._setup_statusbar()
         self._setup_timers()
 
@@ -1910,7 +2030,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "Enter &Frequency",
             self._focus_frequency_entry,
             "Ctrl+L",
-            "Jump to the Frequency field to type a new center frequency",
+            "Jump to the Frequency field to type a new frequency",
         )
         self._add_action(
             radio_menu,
@@ -1919,6 +2039,66 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "Ctrl+B",
             "Add the current frequency to the Bookmarks panel",
         )
+        radio_menu.addSeparator()
+        self._back_action = self._add_action(
+            radio_menu,
+            "Tune Ba&ck",
+            self._tune_back,
+            "Alt+Left",
+            "Go back to the frequency (and mode) you were on before",
+        )
+        self._forward_action = self._add_action(
+            radio_menu,
+            "Tune For&ward",
+            self._tune_forward,
+            "Alt+Right",
+            "Go forward again after Tune Back",
+        )
+        self._recent_menu = radio_menu.addMenu("Recent Fre&quencies")
+        self._recent_menu.setToolTipsVisible(True)
+        self._step_menu = radio_menu.addMenu("Tuning S&tep")
+        self._step_menu.setToolTipsVisible(True)
+        # [ and ] are handled in keyPressEvent (plots focused only, like
+        # Space); the "\t[" suffix shows the key in the menu and in F1.
+        self._add_action(
+            self._step_menu,
+            "&Smaller Step\t[",
+            lambda: self._change_step(-1),
+            tip="Tune in finer steps (the [ key while the plots have the focus)",
+        )
+        self._add_action(
+            self._step_menu,
+            "&Larger Step\t]",
+            lambda: self._change_step(1),
+            tip="Tune in coarser steps (the ] key while the plots have the focus)",
+        )
+        self._step_menu.addSeparator()
+        step_group = QActionGroup(self)
+        step_group.setExclusive(True)
+        self._step_actions: Dict[float, QAction] = {}
+        for step in STEP_CHOICES_HZ:
+            act = QAction(format_step(step), self)
+            act.setCheckable(True)
+            act.setStatusTip(
+                f"Left/Right and the mouse wheel tune by {format_step(step)}"
+            )
+            act.triggered.connect(lambda _c=False, s=step: self._set_step(s))
+            step_group.addAction(act)
+            self._step_menu.addAction(act)
+            self._step_actions[step] = act
+        radio_menu.addSeparator()
+        self._keep_centered_action = self._add_action(
+            radio_menu,
+            "&Keep Tuned Frequency Centered",
+            self._set_keep_centered,
+            tip="Retune the receiver for every new frequency, so the tuned "
+            "frequency is always in the middle of the spectrum (off: tuning "
+            "moves within the span and the receiver retunes only at its edges)",
+            checkable=True,
+            checked=self._settings.get_bool("tuning/keep_centered", False),
+        )
+        self._rebuild_recent_menu()
+        self._update_history_actions()
 
         # ---- View ----
         view_menu = menubar.addMenu("&View")
@@ -2109,7 +2289,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         toolbar.addSeparator()
 
-        # Frequency readout
+        # Frequency readout: the tuned frequency, in a fixed width (the
+        # toolbar after it never shifts); scrolling over a digit tunes it.
         freq_caption = QLabel("FREQ")
         set_role(freq_caption, "caption")
         toolbar.addWidget(freq_caption)
@@ -2118,19 +2299,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._freq_label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        self._freq_label.setMinimumWidth(
-            self._freq_label.fontMetrics().horizontalAdvance("0000.000 MHz") + 26
-        )
         self._freq_label.setToolTip(
-            "Center frequency. Click here (or press Ctrl+L) to type a new one. "
-            "You can also click the spectrum or waterfall, or use Left/Right "
-            "(10 kHz), Shift (100 kHz) and Ctrl (1 MHz) while the plots have "
-            "focus."
+            "Tuned frequency. Click here (or press Ctrl+L) to type a new one; "
+            "scroll over a digit to tune that digit. You can also click the "
+            "spectrum or waterfall, scroll over them, or use Left/Right while "
+            "they have the focus (the STEP in the receiver bar; Shift: ten "
+            "steps, Ctrl: 1 MHz)."
         )
-        self._freq_label.setAccessibleName("Center frequency")
+        self._freq_label.setAccessibleName("Tuned frequency")
         # Clicking the readout jumps to the Frequency field.
         self._freq_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self._freq_label.installEventFilter(self)
+        self._freq_digits = FrequencyDigits(self._freq_label)
+        self._freq_digits.digit_tuned.connect(self._nudge_frequency)
         toolbar.addWidget(self._freq_label)
 
         toolbar.addSeparator()
@@ -2154,6 +2335,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         self._level_label.setAccessibleName("Signal level")
         toolbar.addWidget(self._level_label)
+
+    def _setup_receiver_bar(self) -> None:
+        """Second toolbar row: MODE and FILTER (mirroring the control panel's
+        Mode and Bandwidth) and the tuning STEP."""
+        self.addToolBarBreak(Qt.ToolBarArea.TopToolBarArea)
+        panel = self._control_panel
+        self._receiver_bar = ReceiverBar(panel._demod_combo, panel._bw_combo, self)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self._receiver_bar)
+        self._receiver_bar.step_changed.connect(self._set_step)
 
     def _setup_statusbar(self):
         """Setup status bar."""
@@ -2224,7 +2414,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _connect_signals(self):
         """Connect control panel signals."""
-        self._control_panel.frequency_changed.connect(self._on_frequency_changed)
+        # Typed, stepped, quick-tuned or preset frequencies: the tuning rules
+        # of set_frequency apply (and a refused one is put back).
+        self._control_panel.frequency_changed.connect(self._on_panel_frequency_changed)
+        self._control_panel._freq_input.entry_rejected.connect(
+            self._on_frequency_entry_rejected
+        )
         self._control_panel.gain_changed.connect(self._on_gain_changed)
         self._control_panel.bandwidth_changed.connect(self._on_bandwidth_changed)
         self._control_panel.squelch_changed.connect(self._on_squelch_changed)
@@ -2249,6 +2444,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._control_panel._fm_dev_combo.currentTextChanged.connect(
             lambda text: self._save_setting("fm_deviation", text)
         )
+        # Broadcast and narrow FM remember their own tuning step.
+        self._control_panel._fm_dev_combo.currentTextChanged.connect(
+            lambda _text: self._load_step_for_mode()
+        )
         self._control_panel._format_combo.currentTextChanged.connect(
             lambda text: self._save_setting("recording_format", text)
         )
@@ -2267,9 +2466,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._callsign_panel.settings_changed.connect(self._save_ham_id_settings)
             self._sstv_panel.start_requested.connect(self._on_sstv_start_requested)
         # Click-to-tune from spectrum and waterfall. set_frequency keeps the
-        # control panel, toolbar readout and plot axes in step.
+        # control panel, toolbar readout and plot axes in step. The mouse
+        # wheel over them tunes by the step.
         self._spectrum.frequency_clicked.connect(self.set_frequency)
         self._waterfall.frequency_clicked.connect(self.set_frequency)
+        self._spectrum.tune_steps.connect(self._tune_steps)
+        self._waterfall.tune_steps.connect(self._tune_steps)
         self._waterfall.bookmark_requested.connect(self._bookmark_frequency)
         self._waterfall.display_settings_changed.connect(self._save_waterfall_settings)
         self._right_tabs.currentChanged.connect(self._on_panel_tab_changed)
@@ -2309,13 +2511,27 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._entry_returns_focus = True
 
     def _on_frequency_entry_finished(self) -> None:
-        """Enter in the Frequency field after Ctrl+L: back to the plots."""
+        """Enter in the Frequency field after Ctrl+L: back to the plots
+        (unless what was typed was refused: then it stays, to retype)."""
+        field = self._frequency_field()
+        if self._entry_rejected:
+            self._entry_rejected = False
+            if field.hasFocus():
+                select_all = getattr(field, "selectAll", None)
+                if callable(select_all):
+                    select_all()
+                return
         returns = self._entry_returns_focus
         self._entry_returns_focus = False
         # editingFinished also fires when the field loses focus; only move
         # the focus when Enter was pressed (the field still has it).
-        if returns and self._frequency_field().hasFocus():
+        if returns and field.hasFocus():
             self._focus_plots()
+
+    def _on_frequency_entry_rejected(self, reason: str) -> None:
+        """The Frequency field dropped text it can't tune: say why."""
+        self._entry_rejected = self._frequency_field().hasFocus()
+        self._show_status_error(reason)  # "... is out of range: ..."
 
     def _focus_plots(self) -> None:
         """Give the keyboard focus to the spectrum (or the waterfall when the
@@ -2323,34 +2539,87 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         plot = self._spectrum if self._spectrum.isVisible() else self._waterfall
         plot.setFocus(Qt.FocusReason.ShortcutFocusReason)
 
+    def _plots_focused(self) -> bool:
+        """Whether the keyboard focus is on (or inside) a plot."""
+        focus = QApplication.focusWidget()
+        return focus is not None and any(
+            focus is plot or plot.isAncestorOf(focus)
+            for plot in (self._spectrum, self._waterfall)
+        )
+
+    @staticmethod
+    def _focus_uses_key(key: int) -> bool:
+        """Whether the focused widget has its own use for ``key``, so the
+        window must not act on it even though the widget let it through
+        (Space on a slider or tab bar, Left/Right on a combo box or
+        button)."""
+        focus = QApplication.focusWidget()
+        owners: Tuple[type, ...] = (
+            QAbstractSlider,
+            QTabBar,
+            QComboBox,
+            QAbstractItemView,
+            QAbstractSpinBox,
+            QLineEdit,
+            QTextEdit,
+            QPlainTextEdit,
+        )
+        if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+            owners += (QAbstractButton,)
+        return isinstance(focus, owners)
+
     def keyPressEvent(self, event):
-        """Space starts/stops receiving; Left/Right tune; Esc returns the
-        focus to the plots.
+        """Space starts/stops receiving; Left/Right tune; [ and ] change the
+        tuning step; Esc cancels typing in the Frequency field and returns
+        the focus to the plots.
 
         These are handled here instead of as window-wide shortcuts, so they
         only act when the focused widget does not use the key itself: a
         focused slider, combo box, list, tab bar, button or text field keeps
         its normal arrow/Space behavior, and the key only reaches the window
-        when nothing else consumed it (e.g. with the spectrum focused).
+        when nothing else consumed it (e.g. with the spectrum focused). Keys
+        such a widget ignores (Space on a slider) are not acted on either.
+        [ and ] act only while a plot has the focus.
         """
         key = event.key()
         mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
         if key == Qt.Key.Key_Escape and mods == Qt.KeyboardModifier.NoModifier:
+            if self._frequency_field().hasFocus():
+                # Esc cancels the edit (moving the focus would commit it).
+                self._control_panel._freq_input.cancel_edit()
             self._entry_returns_focus = False
+            self._entry_rejected = False
             self._focus_plots()
             event.accept()
             return
         if key == Qt.Key.Key_Space and mods == Qt.KeyboardModifier.NoModifier:
+            if self._focus_uses_key(key):
+                event.ignore()
+                return
             if not event.isAutoRepeat():
                 self._toggle_acquisition()
             event.accept()
             return
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
-            step = self._TUNE_STEPS_HZ.get(mods)
-            if step is not None:
-                self._nudge_frequency(step if key == Qt.Key.Key_Right else -step)
-                event.accept()
+            if self._focus_uses_key(key):
+                event.ignore()
                 return
+            sign = 1 if key == Qt.Key.Key_Right else -1
+            if mods == Qt.KeyboardModifier.NoModifier:
+                self._tune_steps(sign)
+            elif mods == Qt.KeyboardModifier.ShiftModifier:
+                self._tune_steps(10 * sign)
+            elif mods == Qt.KeyboardModifier.ControlModifier:
+                self._nudge_frequency(sign * self._TUNE_STEPS_HZ[mods])
+            else:
+                super().keyPressEvent(event)
+                return
+            event.accept()
+            return
+        if event.text() in ("[", "]") and self._plots_focused():
+            self._change_step(1 if event.text() == "]" else -1)
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
@@ -2388,7 +2657,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # ------------------------------------------------------------------
 
     def _current_frequency(self) -> float:
+        """The tuned frequency (the VFO): what is demodulated, decoded and
+        measured, and what FREQ and the Frequency field show."""
         return float(self._control_panel._freq_input.get_frequency())
+
+    def _lo_frequency(self) -> float:
+        """The LO: the device's center frequency, the middle of the
+        spectrum and waterfall."""
+        return float(self._lo_hz)
+
+    def _vfo_offset_hz(self) -> float:
+        """The tuned frequency minus the LO: where in the span the tuned
+        channel is."""
+        return self._current_frequency() - self._lo_hz
 
     def _device_sample_rate(self) -> float:
         """Sample rate of the current device (default 2.4 MS/s)."""
@@ -2478,8 +2759,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._level_label.setText(f"{_NO_VALUE} dBFS")
             set_tone(self._level_label, None)
 
-        # Plot axes / click-to-tune span, and the channel marked on them
-        center = self._current_frequency()
+        # Plot axes / click-to-tune span (centered on the LO), and the tuned
+        # channel marked on them
+        center = self._lo_frequency()
         self._spectrum.set_frequency_range(center, rate)
         self._waterfall.set_frequency_range(center, rate)
         self._update_passband()
@@ -2543,6 +2825,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         else:
             p.set_value("state", "Stopped", "muted")
         p.set_value("frequency", format_frequency(self._current_frequency()))
+        p.set_value("lo", format_frequency(self._lo_frequency()))
         p.set_value("sample_rate", format_rate(rate) if has_device else _NO_VALUE)
         p.set_value("span", format_bandwidth(rate) if has_device else _NO_VALUE)
         p.set_value(
@@ -2820,6 +3103,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         if not self._decoder_panel._enabled_check.isChecked():
             return
+        samples = self._samples_at_vfo(samples)
 
         from ..dsp.protocols import demodulate_for_protocol
 
@@ -2833,6 +3117,24 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         for msg in messages:
             self._push_decoded_message(msg)
+
+    def _samples_at_vfo(self, samples: np.ndarray) -> np.ndarray:
+        """The block mixed so the tuned frequency is at 0 Hz (these
+        decoders expect their signal at the center of the block)."""
+        try:
+            offset = float(self._vfo_offset_hz())
+        except (AttributeError, RuntimeError):  # a window still being built
+            return samples
+        nco = getattr(self, "_decoder_nco", None)
+        rate = float(self._device_sample_rate())
+        if abs(offset) < 0.5:
+            if nco is not None:
+                nco.reset()
+            return samples
+        if nco is None or nco.sample_rate != rate:
+            nco = self._decoder_nco = Nco(rate)
+        nco.frequency_hz = offset
+        return nco.mix(samples)
 
     def _push_decoded_message(self, msg: Any) -> None:
         """Render one decoded message into the decoder panel.
@@ -2927,17 +3229,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # ------------------------------------------------------------------
 
     def _on_frequency_changed(self, freq_hz: float):
-        """Handle frequency change."""
-        if self._device:
-            try:
-                self._device.set_frequency(freq_hz)
-            except Exception as e:
-                self._show_status_error(f"Could not tune the device: {e}")
+        """The tuned frequency is now ``freq_hz``: show it everywhere.
 
-        # Update the readout and the plots' axes / click-to-tune mapping
+        Tuning itself (the LO, the device) is :meth:`_tune_to`'s; this
+        updates what shows the tuned frequency.
+        """
+        # The readout, and the channel marked on the plots (their axes follow
+        # the LO, see _retune_lo)
         self._freq_label.setText(format_frequency(freq_hz))
-        self._spectrum.set_center_freq(freq_hz)
-        self._waterfall.set_center_freq(freq_hz)
+        self._update_passband()
         # The Bookmarks "Add" field offers the frequency being listened to;
         # the Decoder panel says whether it is where the protocol is heard.
         self._bookmarks_panel.set_current_frequency(freq_hz)
@@ -2950,6 +3250,441 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         logger.debug(f"Frequency changed to {freq_hz/1e6:.3f} MHz")
 
+    # ------------------------------------------------------------------
+    # Tuning: the LO and the VFO
+    # ------------------------------------------------------------------
+
+    def _on_panel_frequency_changed(self, freq_hz: float) -> None:
+        """The control panel asks for ``freq_hz`` (typed, the Frequency
+        field's arrows, a quick-tune button, Apply Preset)."""
+        self._tune_to(freq_hz)
+
+    def _keep_centered(self) -> bool:
+        """Radio > Keep Tuned Frequency Centered: every tune retunes the LO."""
+        action = getattr(self, "_keep_centered_action", None)
+        return bool(action is not None and action.isChecked())
+
+    def _set_keep_centered(self, on: bool) -> None:
+        on = bool(on)
+        self._save_setting("tuning/keep_centered", on)
+        if on:
+            self._ensure_vfo_fits()  # center now, as every tune will
+            text = (
+                "Keep tuned frequency centered: the receiver retunes for every "
+                "new frequency"
+            )
+        else:
+            text = (
+                "Tuning now moves within the span; the receiver retunes only "
+                "near its edges"
+            )
+        self._show_status_message(text, None, 4000)
+
+    def _channel_fits(self, offset_hz: float, rate: Optional[float] = None) -> bool:
+        """Whether the tuned channel, ``offset_hz`` from the LO, lies inside
+        the usable inner part (``_USABLE_SPAN_FRACTION``) of a span of
+        ``rate`` Hz (the device's). At the LO itself it always does (a
+        channel wider than that is best centered)."""
+        if abs(offset_hz) < 0.5:
+            return True
+        rate = float(rate or self._device_sample_rate())
+        low, high = _channel_edges(
+            self._control_panel._demod_combo.currentText(),
+            self._channel_bandwidth(),
+            rate,
+        )
+        half = 0.5 * _USABLE_SPAN_FRACTION * rate
+        return -half <= offset_hz + low and offset_hz + high <= half
+
+    def _device_model_name(self) -> str:
+        """``"RTL-SDR"``, ``"HackRF One"`` or the device's name, for messages."""
+        dev = self._device
+        if dev is None:
+            return "The receiver"
+        for cls in type(dev).__mro__:
+            if cls.__name__ in _DEVICE_MODELS:
+                return _DEVICE_MODELS[cls.__name__]
+        return self._device_display_name()
+
+    def _device_tuning_range(self) -> Optional[Tuple[float, float]]:
+        """The connected device's tuning range (its driver's spec), if any."""
+        if self._device is None:
+            return None
+        spec = getattr(self._device, "spec", None)
+        low = getattr(spec, "freq_min", None)
+        high = getattr(spec, "freq_max", None)
+        if not (isinstance(low, (int, float)) and isinstance(high, (int, float))):
+            return None
+        if not (math.isfinite(low) and math.isfinite(high) and 0 < low < high):
+            return None
+        return float(low), float(high)
+
+    def _tuning_limits(self) -> Tuple[float, float]:
+        """The frequencies that can be tuned now, in Hz."""
+        return self._device_tuning_range() or (MIN_FREQUENCY_HZ, MAX_FREQUENCY_HZ)
+
+    def _range_text(self) -> str:
+        """``"RTL-SDR tunes 0.5–1766 MHz"``, for messages and the tooltip."""
+        low, high = self._tuning_limits()
+        if self._device_tuning_range() is None:
+            return f"the receiver tunes {format_mhz_range(low, high)}"
+        return f"{self._device_model_name()} tunes {format_mhz_range(low, high)}"
+
+    def _apply_tuning_range(self) -> None:
+        """Let the Frequency field accept the connected device's range (its
+        tooltip and messages say what it is)."""
+        low, high = self._tuning_limits()
+        text = self._range_text() if self._device_tuning_range() else ""
+        self._control_panel._freq_input.set_tuning_range(low, high, text)
+
+    def _device_frequency(self) -> Optional[float]:
+        """The frequency the device is actually tuned to, if it says."""
+        dev = self._device
+        if dev is None:
+            return None
+        for value in (
+            getattr(getattr(dev, "state", None), "frequency", None),
+            getattr(dev, "frequency", None),
+        ):
+            if isinstance(value, (int, float)) and math.isfinite(value) and value > 0:
+                return float(value)
+        return None
+
+    def _retune_lo(self, lo_hz: float) -> bool:
+        """Tune the device (if any) to ``lo_hz`` and center the plots on it.
+
+        False, leaving everything as it was, when the device refuses (its
+        ``set_frequency`` returns False or raises: out of its range, or it
+        can't right now).
+        """
+        lo = float(lo_hz)
+        dev = self._device
+        if dev is not None:
+            try:
+                ok = dev.set_frequency(lo)
+            except Exception as e:
+                logger.error(
+                    f"Could not tune the device to {format_frequency(lo)}: {e}"
+                )
+                ok = False
+            if ok is False:
+                return False
+        self._lo_hz = lo
+        self._spectrum.set_center_freq(lo)
+        self._waterfall.set_center_freq(lo)
+        return True
+
+    def _tune_to(
+        self, freq_hz: float, recenter: bool = False, force_lo: bool = False
+    ) -> bool:
+        """Tune to ``freq_hz`` by the rules of :meth:`set_frequency`.
+
+        ``recenter`` puts the LO on the tuned frequency whatever the span;
+        ``force_lo`` sends the LO to the device even when it is unchanged.
+        True when tuned; otherwise the reason is in the status bar and
+        everything stays on the frequency tuned.
+        """
+        try:
+            freq = float(freq_hz)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(freq):
+            return False
+        low, high = self._tuning_limits()
+        if not low <= freq <= high:
+            return self._refuse_tuning(
+                f"{format_frequency(freq)} is out of range: {self._range_text()}."
+            )
+        lo = self._lo_hz
+        lock = self._lo_lock
+        if lock is not None:
+            center, span, why = lock
+            if not self._channel_fits(freq - center, rate=span):
+                covered = format_mhz_range(center - span / 2, center + span / 2)
+                return self._refuse_tuning(
+                    f"{format_frequency(freq)} is outside {why}, which covers "
+                    f"{covered}."
+                )
+            lo = center
+        elif recenter or self._keep_centered() or not self._channel_fits(freq - lo):
+            lo = freq
+        if force_lo or abs(lo - self._lo_hz) >= 0.5:
+            if not self._retune_lo(lo):
+                return self._refuse_tuning(
+                    f"{self._device_model_name()} didn't tune to "
+                    f"{format_frequency(lo)}; it stays on "
+                    f"{format_frequency(self._lo_hz)}. Details are in Tools > "
+                    "Error History."
+                )
+        self._finish_tune(freq)
+        return True
+
+    def _finish_tune(self, freq_hz: float) -> None:
+        """``freq_hz`` is tuned: the Frequency field, every view of it, and
+        (after a moment on it) the tuning history."""
+        self._tuned_hz = float(freq_hz)
+        self._control_panel.set_frequency(freq_hz)  # no signal
+        self._on_frequency_changed(self._current_frequency())
+        self._note_tuned()
+
+    def _refuse_tuning(self, reason: str) -> bool:
+        """A frequency can't be tuned: say why, and put the Frequency field
+        (and anything that showed the new frequency) back on the one tuned."""
+        self._control_panel.set_frequency(self._tuned_hz)
+        self._on_frequency_changed(self._current_frequency())
+        self._show_status_error(reason)
+        return False
+
+    def _ensure_vfo_fits(self) -> None:
+        """Center the LO on the tuned frequency when the tuned channel no
+        longer fits the usable span (a wider channel, a smaller sample
+        rate), or Keep Tuned Frequency Centered asks for it."""
+        if self._lo_lock is not None:
+            return
+        offset = self._vfo_offset_hz()
+        if abs(offset) < 0.5:
+            return
+        if self._keep_centered() or not self._channel_fits(offset):
+            self._tune_to(self._current_frequency(), recenter=True)
+
+    def _lock_lo(self, center_hz: float, span_hz: float, why: str) -> None:
+        """Fix the LO at ``center_hz`` with a ``span_hz`` span (e.g. while a
+        recording plays back: ``why`` = "the recording"). Tuning then moves
+        only the VFO, and frequencies outside the span are refused."""
+        self._lo_lock = (float(center_hz), float(span_hz), str(why))
+        self._lo_hz = float(center_hz)
+        self._spectrum.set_center_freq(center_hz)
+        self._waterfall.set_center_freq(center_hz)
+        if not self._channel_fits(self._vfo_offset_hz(), rate=span_hz):
+            self._finish_tune(center_hz)
+        else:
+            self._update_passband()
+
+    def _unlock_lo(self) -> None:
+        """Let the LO follow tuning again (see :meth:`_lock_lo`)."""
+        self._lo_lock = None
+        self._ensure_vfo_fits()
+
+    def _sync_device_tuning(self) -> str:
+        """Bring a device just connected to the plots' LO and the tuned
+        frequency (recentering when the channel doesn't fit its span).
+
+        When it can't tune there (out of its range, or refused) it stays
+        where it is: the plots and the tuned frequency go there too, and the
+        returned note says why ("" when all went to plan).
+        """
+        self._apply_tuning_range()
+        wanted = self._current_frequency()
+        low, high = self._tuning_limits()
+        if low <= wanted <= high:
+            lo = self._lo_hz
+            if (
+                not low <= lo <= high
+                or self._keep_centered()
+                or not self._channel_fits(wanted - lo)
+            ):
+                lo = wanted
+            if self._retune_lo(lo):
+                self._finish_tune(wanted)
+                return ""
+            problem = f"it didn't tune to {format_frequency(lo)}"
+        else:
+            problem = (
+                f"{format_frequency(wanted)} is out of its range "
+                f"({self._range_text()})"
+            )
+        actual = self._device_frequency()
+        if actual is None or not low <= actual <= high:
+            actual = min(max(wanted, low), high)
+        if not self._retune_lo(actual):
+            # The device says where it is; show that.
+            self._lo_hz = actual
+            self._spectrum.set_center_freq(actual)
+            self._waterfall.set_center_freq(actual)
+        self._finish_tune(actual)
+        return f"Tuned to {format_frequency(actual)}: {problem}."
+
+    def _nudge_frequency(self, offset_hz: float) -> None:
+        """Tune ``offset_hz`` away from the tuned frequency."""
+        self._tune_to(self._current_frequency() + float(offset_hz))
+
+    def _tune_steps(self, steps: int) -> None:
+        """Tune ``steps`` tuning steps up (negative: down): Left/Right, the
+        mouse wheel over the plots."""
+        steps = int(steps)
+        if steps:
+            self._tune_to(
+                step_frequency(self._current_frequency(), self._step_hz, steps)
+            )
+
+    # -- tuning step ------------------------------------------------------------
+
+    def _step_mode(self) -> str:
+        """The key the current mode's tuning step is remembered under."""
+        panel = self._control_panel
+        return step_mode_key(panel.get_demod_mode(), panel.get_fm_deviation())
+
+    def _load_step_for_mode(self) -> None:
+        """Use the step the current mode remembers (or starts with)."""
+        key = self._step_mode()
+        if key == self._step_key:
+            return
+        self._step_key = key
+        saved = self._settings.get_float(f"tuning/step/{key}", default_step_hz(key))
+        self._apply_step(nearest_step(saved))
+
+    def _apply_step(self, step_hz: float) -> None:
+        """Show and use ``step_hz`` everywhere that tunes by the step."""
+        self._step_hz = float(step_hz)
+        self._receiver_bar.set_step(step_hz)
+        action = self._step_actions.get(step_hz)
+        if action is not None and not action.isChecked():
+            action.setChecked(True)
+        self._control_panel._freq_input.set_step_hz(step_hz)
+        for plot in (self._spectrum, self._waterfall):
+            snap = getattr(plot, "set_click_snap", None)
+            if callable(snap):
+                snap(step_hz, self._step_key)
+
+    def _set_step(self, step_hz: float) -> None:
+        """The user picked a step (receiver bar, Radio > Tuning Step, [ or
+        ]): use it, and remember it for the current mode."""
+        step = nearest_step(step_hz)
+        if self._step_key != self._step_mode():
+            self._load_step_for_mode()
+        self._apply_step(step)
+        self._save_setting(f"tuning/step/{self._step_key}", step)
+
+    def _change_step(self, delta: int) -> None:
+        """One step choice finer (-1) or coarser (+1): [ and ]."""
+        index = step_index(self._step_hz) + int(delta)
+        index = min(max(index, 0), len(STEP_CHOICES_HZ) - 1)
+        step = STEP_CHOICES_HZ[index]
+        if step != self._step_hz:
+            self._set_step(step)
+        mode = STEP_MODE_NAMES.get(self._step_key, self._step_key)
+        self._show_status_message(
+            f"Tuning step {format_step(self._step_hz)} (for {mode})", None, 2000
+        )
+
+    # -- tuning history -----------------------------------------------------------
+
+    def _note_tuned(self) -> None:
+        """A frequency was tuned: it joins the history once the receiver
+        stays on it a moment (stepping through a band doesn't add each
+        step)."""
+        self._history_timer.start(_HISTORY_DWELL_MS)
+
+    def _commit_history_entry(self) -> None:
+        """Record where the receiver is (frequency and mode) now."""
+        self._history_timer.stop()
+        mode, deviation = self._listening_mode()
+        entry = TunedEntry(self._current_frequency(), mode, deviation)
+        if self._tuning_history.visit(entry):
+            self._save_setting("tuning/recent", self._tuning_history.to_json())
+            self._rebuild_recent_menu()
+        self._update_history_actions()
+
+    def _commit_pending_history(self) -> None:
+        if self._history_timer.isActive():
+            self._commit_history_entry()
+
+    def _tune_entry(self, entry: "TunedEntry") -> bool:
+        """Tune to a history or recent entry, in its mode."""
+        if not self.set_frequency(entry.freq_hz):
+            return False
+        if entry.mode and self._listening_mode() != (entry.mode, entry.deviation):
+            self._set_demod_mode(
+                entry.mode,
+                entry.deviation or None,
+                self._bandwidth_for_mode(entry.mode, entry.deviation),
+            )
+        return True
+
+    def _entry_text(self, entry: "TunedEntry") -> str:
+        text = format_frequency(entry.freq_hz)
+        if entry.mode:
+            text += f" ({self._mode_text(entry.mode)})"
+        return text
+
+    def _tune_back(self) -> None:
+        """Radio > Tune Back (Alt+Left): the frequency before this one."""
+        self._commit_pending_history()
+        entry = self._tuning_history.back()
+        if entry is None:
+            self._show_status_message("Nothing to go back to yet", None, 2500)
+        elif self._tune_entry(entry):
+            self._show_status_message(
+                f"Back to {self._entry_text(entry)}", "info", 2500
+            )
+        self._update_history_actions()
+
+    def _tune_forward(self) -> None:
+        """Radio > Tune Forward (Alt+Right): undo Tune Back."""
+        self._commit_pending_history()
+        entry = self._tuning_history.forward()
+        if entry is None:
+            self._show_status_message("Nothing to go forward to", None, 2500)
+        elif self._tune_entry(entry):
+            self._show_status_message(
+                f"Forward to {self._entry_text(entry)}", "info", 2500
+            )
+        self._update_history_actions()
+
+    def _tune_recent(self, entry: "TunedEntry") -> None:
+        """Radio > Recent Frequencies > an entry."""
+        self._commit_pending_history()
+        if self._tune_entry(entry):
+            self._show_status_message(
+                f"Tuned to {self._entry_text(entry)}", "info", 2500
+            )
+
+    def _clear_recent(self) -> None:
+        self._tuning_history.clear_recent()
+        self._save_setting("tuning/recent", self._tuning_history.to_json())
+        self._rebuild_recent_menu()
+        self._update_history_actions()
+        self._show_status_message("Recent frequencies cleared", None, 2500)
+
+    def _rebuild_recent_menu(self) -> None:
+        """Radio > Recent Frequencies: the last frequencies tuned."""
+        menu = self._recent_menu
+        menu.clear()
+        entries = self._tuning_history.recent()
+        if not entries:
+            empty = menu.addAction("No recent frequencies yet")
+            empty.setEnabled(False)
+        for entry in entries:
+            text = self._entry_text(entry)
+            act = menu.addAction(text)
+            act.setToolTip(f"Tune to {text}")
+            act.setStatusTip(f"Tune to {text}")
+            act.triggered.connect(lambda _c=False, e=entry: self._tune_recent(e))
+        menu.addSeparator()
+        clear = menu.addAction("&Clear Recent Frequencies")
+        clear.setStatusTip("Forget the recent frequencies")
+        clear.setEnabled(bool(entries))
+        clear.triggered.connect(lambda _c=False: self._clear_recent())
+
+    def _update_history_actions(self) -> None:
+        """Enable Tune Back/Forward when there is somewhere to go, and say
+        where in their tooltips."""
+        history = self._tuning_history
+        for action, can, delta, verb in (
+            (self._back_action, history.can_go_back(), -1, "Go back to"),
+            (self._forward_action, history.can_go_forward(), 1, "Go forward to"),
+        ):
+            action.setEnabled(can)
+            entry = history.peek(delta) if can else None
+            if entry is not None:
+                tip = f"{verb} {self._entry_text(entry)}"
+            elif delta < 0:
+                tip = "Go back to the frequency you were on before (none yet)"
+            else:
+                tip = "Go forward again after Tune Back"
+            action.setToolTip(tip)
+            action.setStatusTip(tip)
+
     def _on_gain_changed(self, gain_db: float):
         """Apply a manual gain (the panel only emits this while AGC is off)."""
         if self._device:
@@ -2959,17 +3694,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._show_status_error(f"Could not set the gain: {e}")
         logger.debug(f"Gain changed to {gain_db:.1f} dB")
 
-    def _apply_controls_to_device(self) -> None:
+    def _apply_controls_to_device(self) -> str:
         """Bring a newly connected device to what the controls show:
-        frequency, then the AGC mode, then the manual gain (only while AGC
-        is off; with AGC on the tuner owns the gain), and a HackRF's
-        baseband filter to its sample rate."""
-        self._on_frequency_changed(self._current_frequency())
+        frequency (the Frequency field takes the device's range), then the
+        AGC mode, then the manual gain (only while AGC is off; with AGC on
+        the tuner owns the gain), and a HackRF's baseband filter to its
+        sample rate.
+
+        Returns a note for the user when the tuned frequency had to change
+        (the device can't tune it), else "".
+        """
+        note = self._sync_device_tuning()
         agc = self._control_panel.is_agc_enabled()
         self._on_agc_changed(agc)
         if not agc:
             self._on_gain_changed(float(self._control_panel._gain_slider.value()))
         self._apply_baseband_filter()
+        return note
 
     def _on_bandwidth_changed(self, bw_hz: float):
         """The channel width: it sets the demodulator's channel filter and
@@ -2994,6 +3735,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._refresh_state_ui()  # axes, rate label, decoder
         self._rx_chain = None  # rebuilt for the new channel
         self._update_passband()
+        self._ensure_vfo_fits()  # a wider channel may need the LO centered
         if self._info_panel.isVisible():
             self._refresh_info_panel()
         logger.debug(f"Bandwidth changed to {bw_hz/1e3:.1f} kHz")
@@ -3061,6 +3803,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._save_setting("demod_mode", mode)
         self._refresh_audio_output(announce=not self._restoring)
         self._update_passband()
+        # Each mode tunes by its own step; its channel may need the LO
+        # centered; the tuning history remembers the mode.
+        self._load_step_for_mode()
+        self._ensure_vfo_fits()
+        self._note_tuned()
         if mode != "FM" and self._sstv_listening():
             self._hint_sstv_needs_fm()
 
@@ -3197,7 +3944,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     ) -> None:
         """Tune to a bookmark (or the Decoder panel's suggested channel), in
         its mode when it names one, with a channel width that suits it."""
-        self.set_frequency(freq_hz)
+        if not self.set_frequency(freq_hz):
+            return  # refused: the status bar says why
         if not mode:
             self._show_status_message(f"Tuned to {label}", "info", 2500)
             return
@@ -3377,6 +4125,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "Connected device does not support transmission.\n"
                 "HackRF One is required for TX operations.",
             )
+            return
+
+        # The HackRF transmits at its center frequency (the LO): center it on
+        # the tuned frequency first, so it sends where it is checked below.
+        if abs(self._vfo_offset_hz()) >= 0.5 and not self._tune_to(
+            self._current_frequency(), recenter=True
+        ):
             return
 
         # Get current frequency for TX validation
@@ -3729,14 +4484,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         behind (and muted the audio as "not real time").
 
         The demo device makes samples on request: it is asked for as many as
-        the time since the last frame covers, so it runs in real time too.
-        Other sources give one display block per frame. :class:`_Pacer`
-        limits how much one frame takes.
+        the time since the last frame covers, so it runs in real time too,
+        however it was opened (Use Demo Device, or its row in Device >
+        Connect...). Other sources give one display block per frame.
+        :class:`_Pacer` limits how much one frame takes.
         """
         dev = self._device
         if isinstance(dev, SDRDevice):
             return self._drain_device(dev)
-        if self._demo_mode:
+        if self._demo_mode or _is_demo_device(dev):
             rate = self._device_sample_rate()
             return dev.read_samples(self._pacer.demo_request(rate, time.monotonic()))
         return dev.read_samples(DISPLAY_BLOCK)
@@ -3846,7 +4602,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Add a block to the recording (the first one replaces the buffer)."""
         if not self._check_recording_space():
             return
-        tuned = (self._current_frequency(), self._device_sample_rate())
+        # The samples are centered on the LO (not the tuned frequency).
+        tuned = (self._lo_frequency(), self._device_sample_rate())
         if self._capture_pending:
             self._capture_pending = False
             self._replace_buffer(_SampleStore(self._capture_folder()))
@@ -3891,6 +4648,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             or (chain.bandwidth != min(max(bandwidth, 1e3), rate))
         ):
             chain = self._rx_chain = _ReceiverChain(rate, mode, bandwidth)
+        # The channel is where the VFO is (moving it keeps the filters).
+        chain.set_offset(self._vfo_offset_hz())
         return chain
 
     def _channel_bandwidth(self) -> float:
@@ -3899,32 +4658,41 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return hz if hz else 200e3
 
     def _channel_level(self, power_db: np.ndarray, chain: "_ReceiverChain") -> float:
-        """Strongest spectrum bin inside the tuned channel, in dBFS."""
+        """Strongest spectrum bin inside the tuned channel (at the VFO's
+        offset from the LO), in dBFS."""
         n = len(power_db)
         if n == 0:
             return -120.0
         bin_hz = chain.rate / n
         low, high = chain.band_edges()
-        center = n // 2  # fftshift puts 0 Hz here
-        first = max(0, center + int(np.floor(low / bin_hz + 0.5)))
-        last = min(n - 1, center + int(np.ceil(high / bin_hz - 0.5)))
+        offset = float(getattr(chain, "offset_hz", 0.0))
+        center = n // 2  # fftshift puts the LO (0 Hz) here
+        first = max(0, center + int(np.floor((offset + low) / bin_hz + 0.5)))
+        last = min(n - 1, center + int(np.ceil((offset + high) / bin_hz - 0.5)))
         if last < first:
-            first = last = center
+            first = last = min(max(center + int(round(offset / bin_hz)), 0), n - 1)
         return float(np.max(power_db[first : last + 1]))
 
     def _update_passband(self) -> None:
-        """Mark the demodulated channel on the spectrum and the waterfall."""
-        edges = _channel_edges(
+        """Mark the demodulated channel on the spectrum and the waterfall:
+        the passband at the VFO's offset from the LO (the plots' center) and
+        the tuned-frequency marker."""
+        low, high = _channel_edges(
             self._control_panel._demod_combo.currentText(),
             self._channel_bandwidth(),
             self._device_sample_rate(),
         )
+        offset = float(self._vfo_offset_hz())
+        edges = (offset + low, offset + high)
+        tuned = float(self._lo_frequency()) + offset
         for plot in (self._spectrum, self._waterfall):
             show = getattr(plot, "set_passband", None)
-            if not callable(show):
-                continue
+            mark = getattr(plot, "set_tuned_frequency", None)
             try:
-                show(*edges)
+                if callable(show):
+                    show(*edges)
+                if callable(mark):
+                    mark(tuned)
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("Could not show the passband: %s", exc)
 
@@ -4081,6 +4849,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             chain = self._rx_chain = _ReceiverChain(
                 rate, mode, self._channel_bandwidth()
             )
+        chain.set_offset(self._vfo_offset_hz())
         try:
             audio = chain.demodulate(
                 chain.channelize(samples), self._control_panel.get_fm_deviation()
@@ -4165,19 +4934,34 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._device is not None and device is not self._device:
             self._release_device()
         self._device = device
-        self._demo_mode = False
-        self._apply_controls_to_device()
+        # The dialog's Demo row opens the same simulated device as Device >
+        # Use Demo Device: it is paced in real time, and named, the same way.
+        self._demo_mode = _is_demo_device(device)
+        if self._demo_mode:
+            # A later Use Demo Device keeps the rate chosen here.
+            self._preferred_rate = self._device_sample_rate()
+        # A new device: whether it keeps up is found out afresh.
+        self._pacer.reset()
+        self._rx_history.clear()
+        self._realtime_hint_shown = False
+        note = self._apply_controls_to_device()
         name = self._device_display_name()
         logger.info(f"Connected to {name}")
         self._refresh_state_ui()
         if not (was_running or start_after):
+            text = f"Connected to {name}. Press Start or Space to receive."
+            if note:
+                text = f"Connected to {name}. {note} Press Start or Space to receive."
             self._show_status_message(
-                f"Connected to {name}. Press Start or Space to receive.", "success"
+                text, "warning" if note else "success", 10000 if note else 4000
             )
         else:
             self._start_acquisition()  # reports its own failure
             if self._is_running:
-                self._show_status_message(f"Receiving from {name}", "success")
+                text = f"Receiving from {name}" + (f". {note}" if note else "")
+                self._show_status_message(
+                    text, "warning" if note else "success", 10000 if note else 4000
+                )
         return True
 
     def _preselect_rate(self, dialog: Any) -> None:
@@ -4208,6 +4992,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._realtime_hint_shown = False
         self._rx_history.clear()
         self._pacer.reset()
+        self._apply_tuning_range()  # back to every receiver's range
 
     def _disconnect_device(self):
         """Disconnect from device."""
@@ -4346,7 +5131,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._show_status_message(
             "Demo mode: no hardware needed. "
             + ("Mode set to FM. " if switched else "")
-            + "Click a peak to tune to it; Device > Connect... opens a real SDR.",
+            + "Click a signal to tune to it and scroll to fine-tune; Device > "
+            "Connect... opens a real SDR.",
             "info",
             8000,
         )
@@ -4377,6 +5163,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._realtime_hint_shown = False
         self._rx_history.clear()
         self._refresh_state_ui()
+        # A smaller span may no longer hold the tuned channel.
+        self._ensure_vfo_fits()
 
     # ------------------------------------------------------------------
     # Files
@@ -4507,7 +5295,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         center_freq, sample_rate = self._buffer_meta
         if not center_freq:
-            center_freq = self._current_frequency()
+            center_freq = self._lo_frequency()
         if not sample_rate:
             sample_rate = self._device_sample_rate()
 
@@ -4656,8 +5444,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _on_radio_frequency_changed(self, freq_hz: float, band: str):
         """Tune the receiver to the radio tuner's station, in its mode."""
         # set_frequency tunes the device (if any) and updates the control
-        # panel, toolbar readout and plot axes together.
-        self.set_frequency(freq_hz)
+        # panel, toolbar readout and plot axes together. A frequency the
+        # device can't tune is refused (the status bar says why) and the
+        # tuner shows the frequency still tuned.
+        if not self.set_frequency(freq_hz):
+            return
         if band == "FM":
             self._set_demod_mode("FM", _BROADCAST_FM_DEVIATION, _BROADCAST_FM_BANDWIDTH)
         elif band == "AM":
@@ -4704,14 +5495,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # Tuning helpers
     # ------------------------------------------------------------------
 
-    def _nudge_frequency(self, offset_hz: float) -> None:
-        """Adjust the center frequency by the given offset."""
-        new_freq = max(0.0, self._current_frequency() + offset_hz)
-        self.set_frequency(new_freq)
-
     def _apply_band_preset(self, freq_hz: float, mode: str, label: str) -> None:
         """Tune to a band preset in its mode, FM deviation and bandwidth."""
-        self.set_frequency(freq_hz)
+        if not self.set_frequency(freq_hz):
+            return  # refused: the status bar says why
         preset = self._preset_for(freq_hz)
         if preset is not None and preset.mode == mode:
             self._set_demod_mode(mode, preset.fm_deviation, preset.bandwidth)
@@ -4973,6 +5760,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             deviation = bandwidth = rec_format = panel = ""
         if not deviation and _FM_BROADCAST_BAND[0] <= freq <= _FM_BROADCAST_BAND[1]:
             deviation = _BROADCAST_FM_DEVIATION  # broadcast FM is wideband
+        # The view as it was left: the LO where it was, if the tuned
+        # frequency is still inside its span (else centered on it).
+        lo = self._settings.get_float("tuning/lo_hz", freq)
+        if not (math.isfinite(lo) and lo > 0 and self._channel_fits(freq - lo)):
+            lo = freq
+        if math.isfinite(lo) and MIN_FREQUENCY_HZ <= lo <= MAX_FREQUENCY_HZ:
+            self._lo_hz = float(lo)
         # set_frequency also updates the toolbar readout and plot axes.
         self.set_frequency(freq)
         self._control_panel.set_gain(gain)
@@ -4990,6 +5784,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._restore_license_class()
             self._restore_ham_id_settings()
             self._restore_waterfall_settings()
+            self._load_step_for_mode()  # the restored mode's tuning step
         finally:
             self._restoring = False
 
@@ -5077,6 +5872,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             freq = self._current_frequency()
             gain = float(self._control_panel._gain_slider.value())
             self._settings.set("frequency_hz", freq)
+            self._settings.set("tuning/lo_hz", self._lo_frequency())
             self._settings.set("gain_db", gain)
             self._settings.set("squelch_db", self._squelch_db)
             self._settings.set("agc_enabled", self._agc_enabled)
@@ -5163,12 +5959,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # Public API
     # ------------------------------------------------------------------
 
-    def set_frequency(self, freq_hz: float):
-        """Set the center frequency (clamped to the tuning range)."""
-        self._control_panel.set_frequency(freq_hz)
-        # Use the value the control panel accepted, so the device, toolbar
-        # readout and plot axes never disagree with the Frequency field.
-        self._on_frequency_changed(self._current_frequency())
+    def set_frequency(self, freq_hz: float) -> bool:
+        """Tune to ``freq_hz`` (the VFO). True when tuned.
+
+        While the tuned channel fits inside the usable inner part of the span
+        (``_USABLE_SPAN_FRACTION``), only the VFO moves: the channel slides
+        across the plots, which stay put. Otherwise the LO (the device) is
+        retuned so the VFO sits in the middle. With Radio > Keep Tuned
+        Frequency Centered the LO always follows (every tune retunes the
+        device). While the LO is locked (:meth:`_lock_lo`, a recording
+        playing back) frequencies outside its span are refused.
+
+        A frequency outside the connected device's range, or one the device
+        rejects, is refused: the status bar says why ("RTL-SDR tunes
+        0.5–1766 MHz") and the Frequency field, FREQ and the plots stay on
+        the frequency actually tuned.
+        """
+        return self._tune_to(freq_hz)
 
     def set_gain(self, gain_db: float):
         """Set the RF gain slider.

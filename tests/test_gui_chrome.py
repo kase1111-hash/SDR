@@ -227,6 +227,9 @@ class TestShortcuts(_WindowTestCase):
         self.assertEqual(len(self.store.bookmarks), before + 1)
 
     def test_arrows_tune_when_plot_has_focus(self):
+        # Left/Right tune by the tuning step (per mode; 100 kHz for broadcast
+        # FM): pick 10 kHz, so Shift is 100 kHz and Ctrl stays 1 MHz.
+        self.win._set_step(10e3)
         self.win._spectrum.setFocus()
         self.settle()
         start = self.freq()

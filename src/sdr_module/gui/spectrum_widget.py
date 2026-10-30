@@ -26,6 +26,7 @@ import numpy as np
 
 from ..utils.tooltips import get_short_tip
 from .themes import get_palette, mono_font, set_role, theme_notifier
+from .tuning import snap_click_frequency
 
 if TYPE_CHECKING:
     from PyQt6.QtGui import QPainter
@@ -36,6 +37,7 @@ try:
         QBrush,
         QFont,
         QFontMetrics,
+        QGuiApplication,
         QLinearGradient,
         QPainter,
         QPen,
@@ -184,6 +186,44 @@ def freq_ticks(
     return nice_ticks(f_start, f_end, step), decimals
 
 
+def tuned_mhz_text(freq_hz: float, min_decimals: int = 3) -> str:
+    """``"146.520 MHz"``, ``"99.82001 MHz"``: up to 1 Hz, at least
+    ``min_decimals`` decimals (like the toolbar's FREQ readout)."""
+    text = f"{float(freq_hz) / 1e6:.6f}".rstrip("0")
+    whole, _, frac = text.partition(".")
+    return f"{whole}.{frac.ljust(min_decimals, '0')} MHz"
+
+
+class WheelTuner:
+    """Turns mouse wheel turns over a plot into tuning steps: one per notch
+    (high-resolution wheels and touchpads add up to notches), ten with
+    Shift. Ctrl+wheel is not tuning (it is left for zooming)."""
+
+    NOTCH = 120  # angleDelta of one wheel notch (eighths of a degree)
+
+    def __init__(self) -> None:
+        self._accum = 0
+
+    def steps(self, event) -> Optional[int]:
+        """Steps to tune for this wheel event (0: not a whole notch yet),
+        or None when the event is not for tuning."""
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ControlModifier:
+            return None
+        angle = event.angleDelta()
+        delta = angle.y() or angle.x()  # Shift turns some wheels sideways
+        if not delta:
+            return None
+        if (delta > 0) != (self._accum > 0):
+            self._accum = 0  # turned the other way: start afresh
+        self._accum += delta
+        notches = int(self._accum / self.NOTCH)
+        self._accum -= notches * self.NOTCH
+        if notches and mods & Qt.KeyboardModifier.ShiftModifier:
+            notches *= 10
+        return notches
+
+
 def draw_readout(
     painter: "QPainter",
     lines: List[str],
@@ -301,16 +341,21 @@ def normalize_passband(
 
 
 def passband_px(
-    passband: Optional[Tuple[float, float]], plot: "QRectF", span_hz: float
+    passband: Optional[Tuple[float, float]],
+    plot: "QRectF",
+    span_hz: float,
+    anchor_hz: float = 0.0,
 ) -> Optional[Tuple[float, float]]:
     """Canvas x extent ``(left, right)`` of a passband drawn on ``plot``.
 
-    ``passband`` holds offsets (Hz) from the tuned frequency, which sits at the
-    plot's horizontal center; ``plot`` shows ``span_hz``. The extent is snapped
-    to whole pixels and at least :data:`PASSBAND_MIN_PX` wide (a CW or SSB
-    channel on a 2.4 MHz span is narrower than one pixel), growing away from
-    the tuned frequency for a one-sided (SSB) band. It is not clipped to the
-    plot. None when there is no passband or nothing to map it onto.
+    ``passband`` holds offsets (Hz) from the plot's center frequency (the
+    LO); ``plot`` shows ``span_hz``. ``anchor_hz`` is the tuned frequency's
+    offset from the center (the VFO's; 0 when it is at the center). The
+    extent is snapped to whole pixels and at least :data:`PASSBAND_MIN_PX`
+    wide (a CW or SSB channel on a 2.4 MHz span is narrower than one pixel),
+    growing away from the tuned frequency for a one-sided (SSB) band. It is
+    not clipped to the plot. None when there is no passband or nothing to
+    map it onto.
     """
     if passband is None or span_hz <= 0 or plot.width() <= 0:
         return None
@@ -319,9 +364,9 @@ def passband_px(
     center = plot.center().x()
     x0, x1 = center + low * scale, center + high * scale
     if x1 - x0 < PASSBAND_MIN_PX:
-        if low >= 0:  # upper sideband: grow to the right of the marker
+        if low >= anchor_hz:  # upper sideband: grow to the right of the marker
             x1 = x0 + PASSBAND_MIN_PX
-        elif high <= 0:  # lower sideband: grow to the left
+        elif high <= anchor_hz:  # lower sideband: grow to the left
             x0 = x1 - PASSBAND_MIN_PX
         else:
             mid = (x0 + x1) / 2
@@ -357,6 +402,29 @@ def draw_passband(
         painter.setPen(QPen(palette.qcolor(PASSBAND_TOKEN, edge_alpha), 1))
         for x in (x0 + 0.5, x1 - 0.5):
             painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
+    painter.restore()
+
+
+def draw_landing_mark(painter: "QPainter", plot: "QRectF", x: float, palette) -> None:
+    """Where a click would tune, when that isn't under the cursor (it snaps
+    onto a signal): a thin accent line with a small flag at the top."""
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    xi = round(x) + 0.5
+    painter.setPen(QPen(palette.qcolor(PASSBAND_TOKEN, 170), 1))
+    painter.drawLine(QPointF(xi, plot.top()), QPointF(xi, plot.bottom()))
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.setBrush(palette.qcolor(PASSBAND_TOKEN))
+    painter.drawPolygon(
+        QPolygonF(
+            [
+                QPointF(xi - 4, plot.top()),
+                QPointF(xi + 4, plot.top()),
+                QPointF(xi, plot.top() + 5),
+            ]
+        )
+    )
     painter.restore()
 
 
@@ -453,10 +521,20 @@ class _SpectrumCanvas(QWidget if HAS_PYQT6 else object):
 
     def mousePressEvent(self, event):  # noqa: N802 - Qt override
         if event.button() == Qt.MouseButton.LeftButton:
-            if self._owner._click_at(event.position()):
+            exact = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+            if self._owner._click_at(event.position(), exact=exact):
                 event.accept()
                 return
         super().mousePressEvent(event)
+
+    def wheelEvent(self, event):  # noqa: N802 - Qt override
+        steps = self._owner._wheel_tuner.steps(event)
+        if steps is None:
+            super().wheelEvent(event)
+            return
+        if steps:
+            self._owner.tune_steps.emit(steps)
+        event.accept()
 
 
 class SpectrumWidget(QWidget if HAS_PYQT6 else object):
@@ -465,11 +543,17 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
     Shows power spectrum with configurable averaging and peak hold. Hovering
     the plot shows the frequency and level under the cursor; clicking emits
-    :attr:`frequency_clicked` with that frequency (Hz).
+    :attr:`frequency_clicked` with that frequency (Hz), moved onto the signal
+    under the click and the tuning step's raster once
+    :meth:`set_click_snap` gave a step (Alt+click: exactly where clicked).
+    The mouse wheel emits :attr:`tune_steps`. The dashed marker is the tuned
+    frequency (:meth:`set_tuned_frequency`, the center until set).
     """
 
     if HAS_PYQT6:
         frequency_clicked = pyqtSignal(float)  # Hz
+        #: Tuning steps the mouse wheel asked for (negative: down).
+        tune_steps = pyqtSignal(int)
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -500,6 +584,12 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._markers: List[Tuple[float, float]] = []  # (freq, power)
         # Demodulated channel: (low, high) Hz offsets from the center.
         self._passband: Optional[Tuple[float, float]] = None
+        # The tuned frequency (None: the center), and how clicks snap: the
+        # tuning step (0: to the pixel resolution only) and the mode's key.
+        self._tuned_freq: Optional[float] = None
+        self._snap_step = 0.0
+        self._snap_mode = ""
+        self._wheel_tuner = WheelTuner()
 
         # Paint caches (rebuilt on resize, theme, range or axis changes)
         self._font = axis_font()
@@ -537,13 +627,14 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         set_role(title, "caption")
         controls.addWidget(title)
 
-        hint = QLabel("Click to tune")
+        hint = QLabel("Click to tune · scroll to step")
         set_role(hint, "hint")
         hint.setToolTip(
-            "Click the plot to tune to that frequency. The dashed line marks "
-            "the tuned frequency and the shaded band the channel being "
-            "demodulated. With the plot focused, Left/Right step 10 kHz "
-            "(Shift: 100 kHz, Ctrl: 1 MHz)."
+            "Click a signal to tune to it (Alt+click tunes exactly where you "
+            "click). The dashed line marks the tuned frequency and the shaded "
+            "band the channel being demodulated. The mouse wheel and, with the "
+            "plot focused, Left/Right tune by the STEP in the receiver bar "
+            "(Shift: ten steps; Ctrl+Left/Right: 1 MHz)."
         )
         # Never let the optional hint raise the widget's minimum width:
         # fit_header_hint() hides it before it would be squeezed.
@@ -597,7 +688,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._canvas.setAccessibleName("Spectrum plot")
         self._canvas.setAccessibleDescription(
             "Power versus frequency. A shaded band marks the demodulated "
-            "channel. Click to tune to a frequency."
+            "channel. Click to tune to a frequency; scroll to tune by the step."
         )
         layout.addWidget(self._canvas, 1)
 
@@ -741,6 +832,32 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         """The shaded channel as (low, high) Hz offsets, or None when hidden."""
         return self._passband
 
+    def set_tuned_frequency(self, freq_hz: Optional[float]) -> None:
+        """Put the tuned-frequency marker at ``freq_hz`` (the VFO, anywhere
+        in the span); None puts it at the center frequency."""
+        value: Optional[float] = None
+        if freq_hz is not None:
+            value = float(freq_hz)
+            if not math.isfinite(value):
+                value = None
+        if value != self._tuned_freq:
+            self._tuned_freq = value
+            self._invalidate_background()  # the passband's direction
+            self._canvas.update()
+
+    def tuned_frequency(self) -> float:
+        """The frequency the marker shows (Hz)."""
+        return self._center_freq if self._tuned_freq is None else self._tuned_freq
+
+    def set_click_snap(self, step_hz: float, mode_key: str = "") -> None:
+        """Make clicks tune onto the signal near them and the ``step_hz``
+        raster (see :func:`~sdr_module.gui.tuning.snap_click_frequency`);
+        ``mode_key`` (e.g. ``"usb"``) decides whether a click moves onto a
+        signal. A step of 0 snaps to the pixel resolution only."""
+        self._snap_step = float(step_hz) if step_hz and step_hz > 0 else 0.0
+        self._snap_mode = str(mode_key or "")
+        self._canvas.update()
+
     def set_db_range(self, min_db: float, max_db: float):
         """Set dB range for display."""
         self._db_range = (min_db, max_db)
@@ -781,13 +898,46 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         step = snap_step_hz(self._hz_per_px())
         return round(freq / step) * step
 
+    def landing_frequency(self, x: float, exact: bool = False) -> Optional[float]:
+        """Where a click at canvas x ``x`` tunes (None outside the plot):
+        onto the signal there and the step's raster, or with ``exact``
+        (Alt+click) just to the pixel's resolution."""
+        if exact or self._snap_step <= 0:
+            return self._snapped_frequency_at(x)
+        freq = self.frequency_at(x)
+        if freq is None:
+            return None
+        return snap_click_frequency(
+            freq,
+            self._main_trace() if self._has_data else None,
+            self._center_freq - self._sample_rate / 2,
+            self._sample_rate,
+            self._hz_per_px(),
+            self._snap_step,
+            self._snap_mode,
+        )
+
+    def _tuned_offset(self) -> float:
+        """The tuned frequency's offset from the center (Hz)."""
+        return 0.0 if self._tuned_freq is None else self._tuned_freq - self._center_freq
+
+    def _freq_x(self, freq_hz: float, plot: "QRectF") -> Optional[float]:
+        """Canvas x of ``freq_hz`` (None outside the plot)."""
+        if self._sample_rate <= 0 or plot.width() <= 0:
+            return None
+        start = self._center_freq - self._sample_rate / 2
+        x = plot.left() + (freq_hz - start) / self._sample_rate * plot.width()
+        if x < plot.left() - 0.5 or x > plot.right() + 0.5:
+            return None
+        return x
+
     def _set_hover(self, pos: Optional["QPointF"]) -> None:
         self._hover = QPointF(pos) if pos is not None else None
         self._canvas.update()
 
-    def _click_at(self, pos: "QPointF") -> bool:
+    def _click_at(self, pos: "QPointF", exact: bool = False) -> bool:
         """Emit frequency_clicked for a click inside the plot area."""
-        freq = self._snapped_frequency_at(pos.x())
+        freq = self.landing_frequency(pos.x(), exact=exact)
         if freq is None:
             return False
         self.frequency_clicked.emit(float(freq))
@@ -830,6 +980,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             self._sample_rate,
             self._grid_enabled,
             self._passband,
+            self._tuned_freq,
         )
         if key == self._bg_key and self._bg_pixmap is not None:
             return
@@ -846,7 +997,12 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         try:
             self._draw_axes(painter, self._plot_rect, p)
             # Under the traces and the tuned-frequency marker (drawn per frame).
-            extent = passband_px(self._passband, self._plot_rect, self._sample_rate)
+            extent = passband_px(
+                self._passband,
+                self._plot_rect,
+                self._sample_rate,
+                self._tuned_offset(),
+            )
             if extent is not None:
                 fill, edge = PASSBAND_ALPHAS[bool(p.is_dark)]
                 draw_passband(painter, self._plot_rect, extent, p, fill, edge)
@@ -1084,8 +1240,11 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             painter.drawPolyline(self._polyline(main))
 
     def _draw_center_marker(self, painter: "QPainter", plot: "QRectF", p) -> None:
-        """Dashed line + small flag at the tuned (center) frequency."""
-        x = round(plot.center().x()) + 0.5
+        """Dashed line + small flag at the tuned frequency (the VFO)."""
+        tuned = self._freq_x(self.tuned_frequency(), plot)
+        if tuned is None:
+            return  # tuned outside the span shown
+        x = round(tuned) + 0.5
         painter.setPen(self._pens["marker"])
         painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
         tri = QPolygonF(
@@ -1130,21 +1289,27 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             x += w + gap
 
     def _draw_hover(self, painter: "QPainter", plot: "QRectF", p) -> None:
-        """Cursor line, a dot on the trace and a frequency/level readout."""
+        """Cursor line, a dot on the trace and a readout of where a click
+        tunes (marked when it snaps away from the cursor) and the level."""
         pos = self._hover
         if pos is None or not plot.contains(pos):
             return
-        freq = self._snapped_frequency_at(pos.x())
+        exact = bool(
+            QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier
+        )
+        freq = self.landing_frequency(pos.x(), exact=exact)
         if freq is None:
             return
         x = pos.x()
         painter.setPen(self._pens["cursor"])
         painter.drawLine(QPointF(x, plot.top()), QPointF(x, plot.bottom()))
+        landing_x = self._freq_x(freq, plot)
+        if landing_x is not None and abs(landing_x - x) >= 2:
+            draw_landing_mark(painter, plot, landing_x, p)
 
         data = self._main_trace()
-        lines = [
-            f"{format_mhz(freq, readout_decimals(snap_step_hz(self._hz_per_px())))} MHz"
-        ]
+        decimals = readout_decimals(snap_step_hz(self._hz_per_px()))
+        lines = [tuned_mhz_text(freq, decimals)]
         if self._has_data and len(data):
             frac = (x - plot.left()) / plot.width()
             n = len(data)
@@ -1167,5 +1332,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
                     painter.setBrush(p.qcolor("plot_text"))
                     painter.drawEllipse(QPointF(x, y), 3.0, 3.0)
                     painter.setBrush(Qt.BrushStyle.NoBrush)
-        lines.append("Click to tune")
+        lines.append(
+            "Click to tune here"
+            if exact or self._snap_step <= 0
+            else "Click to tune · Alt: exact"
+        )
         draw_readout(painter, lines, x, plot, self._fm, p)

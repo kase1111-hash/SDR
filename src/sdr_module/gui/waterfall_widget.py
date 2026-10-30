@@ -35,9 +35,11 @@ import numpy as np
 from .spectrum_widget import (
     HEADER_MARGINS,
     PASSBAND_TOKEN,
+    WheelTuner,
     axis_font,
     columns_max,
     draw_focus_frame,
+    draw_landing_mark,
     draw_placeholder,
     draw_readout,
     format_mhz,
@@ -48,8 +50,10 @@ from .spectrum_widget import (
     plot_side_margins,
     readout_decimals,
     snap_step_hz,
+    tuned_mhz_text,
 )
 from .themes import get_palette, set_role, theme_notifier
+from .tuning import snap_click_frequency
 
 try:
     from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, pyqtSignal
@@ -477,6 +481,7 @@ class _WaterfallCanvas(QWidget if HAS_PYQT6 else object):
         super().__init__(owner)
         self._owner = owner
         self._press: Optional[QPointF] = None
+        self._press_exact = False  # Alt held: tune exactly where clicked
         self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -502,6 +507,9 @@ class _WaterfallCanvas(QWidget if HAS_PYQT6 else object):
         if event.button() == Qt.MouseButton.LeftButton:
             # Tune on release, so a drag can measure instead.
             self._press = QPointF(event.position())
+            self._press_exact = bool(
+                event.modifiers() & Qt.KeyboardModifier.AltModifier
+            )
             event.accept()
             return
         super().mousePressEvent(event)
@@ -511,11 +519,20 @@ class _WaterfallCanvas(QWidget if HAS_PYQT6 else object):
             press, self._press = self._press, None
             if self._owner._measuring:
                 self._owner._finish_measure()
-            elif self._owner._click_at(press):
+            elif self._owner._click_at(press, exact=self._press_exact):
                 self._owner.clear_measurement()
             event.accept()
             return
         super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event):  # noqa: N802 - Qt override
+        steps = self._owner._wheel_tuner.steps(event)
+        if steps is None:
+            super().wheelEvent(event)
+            return
+        if steps:
+            self._owner.tune_steps.emit(steps)
+        event.accept()
 
     def contextMenuEvent(self, event):  # noqa: N802 - Qt override
         self._owner._show_context_menu(QPointF(event.pos()), event.globalPos())
@@ -600,6 +617,8 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
 
     if HAS_PYQT6:
         frequency_clicked = pyqtSignal(float)  # Hz
+        #: Tuning steps the mouse wheel asked for (negative: down).
+        tune_steps = pyqtSignal(int)
         #: A frequency (Hz) the user asked to bookmark from the context menu.
         bookmark_requested = pyqtSignal(float)
         #: Colors, history length or levels changed by the user (to persist).
@@ -661,6 +680,12 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._highlights: List[Tuple[int, int, int, int, Any]] = []
         # Demodulated channel: (low, high) Hz offsets from the center.
         self._passband: Optional[Tuple[float, float]] = None
+        # The tuned frequency (None: the center), and how clicks snap: the
+        # tuning step (0: to the pixel resolution only) and the mode's key.
+        self._tuned_freq: Optional[float] = None
+        self._snap_step = 0.0
+        self._snap_mode = ""
+        self._wheel_tuner = WheelTuner()
 
         # Measurement: absolute frequencies (Hz) and row start times, so the
         # box follows the signal as rows scroll. None when there is none.
@@ -709,9 +734,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         set_role(hint, "hint")
         hint.setToolTip(
             "Each row is one spectrum; the newest row is at the top and older "
-            "rows scroll down.\nClick to tune to a frequency; drag a box to "
-            "measure a signal's bandwidth, duration and peak;\nright-click "
-            "to bookmark, copy or change the display."
+            "rows scroll down.\nClick a signal to tune to it (Alt+click: "
+            "exactly where you click) and scroll to tune by the STEP; drag a "
+            "box to measure a signal's bandwidth, duration and peak;\n"
+            "right-click to bookmark, copy or change the display."
         )
         # Never let the optional hint raise the widget's minimum width:
         # _fit_header() hides it before it would be squeezed.
@@ -1038,6 +1064,68 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
     def passband(self) -> Optional[Tuple[float, float]]:
         """The marked channel as (low, high) Hz offsets, or None when hidden."""
         return self._passband
+
+    def set_tuned_frequency(self, freq_hz: Optional[float]) -> None:
+        """Put the tuned-frequency flag at ``freq_hz`` (the VFO, anywhere in
+        the span); None puts it at the center frequency."""
+        value: Optional[float] = None
+        if freq_hz is not None:
+            value = float(freq_hz)
+            if not math.isfinite(value):
+                value = None
+        if value != self._tuned_freq:
+            self._tuned_freq = value
+            self._canvas.update()
+
+    def tuned_frequency(self) -> float:
+        """The frequency the flag shows (Hz)."""
+        return self._center_freq if self._tuned_freq is None else self._tuned_freq
+
+    def set_click_snap(self, step_hz: float, mode_key: str = "") -> None:
+        """Make clicks tune onto the signal near them and the ``step_hz``
+        raster, like :meth:`SpectrumWidget.set_click_snap
+        <sdr_module.gui.spectrum_widget.SpectrumWidget.set_click_snap>`."""
+        self._snap_step = float(step_hz) if step_hz and step_hz > 0 else 0.0
+        self._snap_mode = str(mode_key or "")
+        self._canvas.update()
+
+    def landing_frequency(
+        self, x: float, y: Optional[float] = None, exact: bool = False
+    ) -> Optional[float]:
+        """Where a click at canvas ``(x, y)`` tunes (None outside the plot):
+        onto the signal in the rows there and the step's raster, or with
+        ``exact`` (Alt+click) just to the pixel's resolution."""
+        if exact or self._snap_step <= 0:
+            return self._snapped_frequency_at(x)
+        freq = self.frequency_at(x)
+        if freq is None:
+            return None
+        return snap_click_frequency(
+            freq,
+            self._rows_near(y),
+            self._center_freq - self._sample_rate / 2,
+            self._sample_rate,
+            self._hz_per_px(),
+            self._snap_step,
+            self._snap_mode,
+        )
+
+    def _rows_near(self, y: Optional[float], spread: int = 2) -> Optional[np.ndarray]:
+        """The strongest level per bin over the rows around canvas ``y`` (the
+        newest rows without one): the signal a click there points at."""
+        count = len(self._history)
+        if count == 0:
+            return None
+        row = 0
+        plot = self._plot_rect()
+        if y is not None and plot.height() > 0:
+            row = int((y - plot.top()) / plot.height() * self._history_size)
+        row = min(max(row, 0), count - 1)
+        rows = [
+            np.asarray(self._history[count - 1 - r], dtype=np.float64)
+            for r in range(max(0, row - spread), min(count, row + spread + 1))
+        ]
+        return np.max(np.stack(rows), axis=0)
 
     def set_db_range(self, min_db: float, max_db: float):
         """Show ``min_db``..``max_db`` dBFS across the colors (manual levels)."""
@@ -1516,12 +1604,18 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._hover = QPointF(pos) if pos is not None else None
         self._canvas.update()
 
-    def _click_at(self, pos: "QPointF") -> bool:
-        freq = self._snapped_frequency_at(pos.x())
+    def _click_at(self, pos: "QPointF", exact: bool = False) -> bool:
+        freq = self.landing_frequency(pos.x(), pos.y(), exact=exact)
         if freq is None:
             return False
         self.frequency_clicked.emit(float(freq))
         return True
+
+    def _tuned_offset(self) -> float:
+        """The tuned frequency's offset from the center (Hz)."""
+        if self._tuned_freq is None:
+            return 0.0
+        return self._tuned_freq - self._center_freq
 
     # -- rows and times ----------------------------------------------------
     def _arrival_times(self) -> np.ndarray:
@@ -2019,7 +2113,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         Drawn with a plot-colored halo so it reads on any colormap, and only
         over the newest few rows, so it never hides the signal history.
         """
-        extent = passband_px(self._passband, plot, self._sample_rate)
+        extent = passband_px(
+            self._passband, plot, self._sample_rate, self._tuned_offset()
+        )
         if extent is None:
             return
         x0, x1 = extent
@@ -2044,8 +2140,11 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         painter.restore()
 
     def _draw_center_marker(self, painter: "QPainter", plot: "QRectF", p) -> None:
-        """Small flag on the top edge at the tuned (center) frequency."""
-        x = round(plot.center().x()) + 0.5
+        """Small flag on the top edge at the tuned frequency (the VFO)."""
+        tuned = self._freq_to_x(self.tuned_frequency(), plot)
+        if not plot.left() - 0.5 <= tuned <= plot.right() + 0.5:
+            return  # tuned outside the span shown
+        x = round(tuned) + 0.5
         tri = QPolygonF(
             [
                 QPointF(x - 5, plot.top()),
@@ -2135,7 +2234,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         pos = self._hover
         if pos is None or not plot.contains(pos):
             return
-        freq = self._snapped_frequency_at(pos.x())
+        exact = bool(
+            QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier
+        )
+        freq = self.landing_frequency(pos.x(), pos.y(), exact=exact)
         if freq is None:
             return
         x, y = pos.x(), pos.y()
@@ -2148,8 +2250,12 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         painter.setPen(QPen(p.qcolor("plot_text", 90), 1))
         painter.drawLine(QPointF(plot.left(), y), QPointF(plot.right(), y))
 
+        landing_x = self._freq_to_x(freq, plot)
+        if abs(landing_x - x) >= 2:
+            draw_landing_mark(painter, plot, landing_x, p)
+
         decimals = readout_decimals(snap_step_hz(self._hz_per_px()))
-        lines = [f"{format_mhz(freq, decimals)} MHz"]
+        lines = [tuned_mhz_text(freq, decimals)]
         row = int((y - plot.top()) / plot.height() * self._history_size)
         if 0 <= row < len(self._history):
             line = self._history[len(self._history) - 1 - row]
@@ -2171,5 +2277,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             lines.append(detail)
             age = self._times[-1] - self._times[len(self._times) - 1 - row]
             lines.append(f"{format_elapsed(age)} ago")
-        lines.append("Click to tune · drag to measure")
+        lines.append(
+            "Click to tune · drag to measure"
+            if exact or self._snap_step <= 0
+            else "Click to tune (Alt: exact) · drag to measure"
+        )
         draw_readout(painter, lines, x, plot, self._fm, p)

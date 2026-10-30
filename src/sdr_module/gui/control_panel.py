@@ -22,6 +22,7 @@ from typing import Dict, Iterator, List, Optional, Tuple
 
 try:
     from PyQt6.QtCore import QEvent, QObject, QSize, Qt, pyqtSignal
+    from PyQt6.QtGui import QValidator
     from PyQt6.QtWidgets import (
         QAbstractSpinBox,
         QCheckBox,
@@ -56,6 +57,14 @@ from ..core.frequency_manager import (
 from ..utils.tooltips import get_short_tip
 from .settings_store import DEFAULT_FREQUENCY_HZ
 from .themes import set_role, set_tone
+from .tuning import (
+    ACCEPTABLE,
+    INTERMEDIATE,
+    ParsedFrequency,
+    format_mhz_range,
+    parse_frequency_text,
+    step_frequency,
+)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -276,7 +285,28 @@ class _FrequencySpinBox(QDoubleSpinBox if HAS_PYQT6 else object):
     In MHz that reads "100.000" or "137.9125", like the toolbar, the Bookmarks
     list and every other MHz readout, instead of an unreadable "100.000000".
     Units with three decimals or fewer (Hz, kHz) are shown unchanged.
+
+    Typing understands units and notations (:func:`parse_frequency_text`:
+    ``433.92M``, ``7074k``, ``7.074e6``, ``144,39``, ``162550000`` in Hz).
+    Out-of-range text is kept (a red frame says it can't be tuned) instead of
+    dropping the digit just typed; Enter or leaving the field with it keeps
+    the tuned frequency and emits :attr:`text_rejected` with the reason. Esc
+    cancels the edit. The arrows step by the tuning step.
     """
+
+    if HAS_PYQT6:
+        #: Typed text that can't be tuned was dropped (Enter or focus out):
+        #: why, in plain words.
+        text_rejected = pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._unit_hz = 1e6
+        self._min_hz = MIN_FREQUENCY_HZ
+        self._max_hz = MAX_FREQUENCY_HZ
+        self._range_text = ""
+        self._step_hz = FREQ_STEP_HZ
+        self.lineEdit().textChanged.connect(self._update_tone)
 
     def textFromValue(self, value: float) -> str:  # noqa: N802 (Qt API)
         text = super().textFromValue(value)
@@ -285,6 +315,94 @@ class _FrequencySpinBox(QDoubleSpinBox if HAS_PYQT6 else object):
             return text
         return f"{whole}{point}{frac.rstrip('0').ljust(3, '0')}"
 
+    # -- reading typed text ------------------------------------------------
+    def _parse(self, text: str) -> ParsedFrequency:
+        return parse_frequency_text(
+            text,
+            self._unit_hz,
+            self._min_hz,
+            self._max_hz,
+            grouped=self.isGroupSeparatorShown(),
+            group_separator=self.locale().groupSeparator(),
+            range_text=self._range_text,
+        )
+
+    def validate(self, text: str, pos: int):  # noqa: N802 (Qt API)
+        state = self._parse(text).state
+        if state == ACCEPTABLE:
+            return QValidator.State.Acceptable, text, pos
+        if state == INTERMEDIATE:
+            return QValidator.State.Intermediate, text, pos
+        return QValidator.State.Invalid, text, pos
+
+    def valueFromText(self, text: str) -> float:  # noqa: N802 (Qt API)
+        parsed = self._parse(text)
+        if parsed.state != ACCEPTABLE or parsed.hz is None:
+            return self.value()
+        return parsed.hz / self._unit_hz
+
+    def fixup(self, text: str) -> str:  # noqa: D102 (Qt API)
+        # Nothing to repair: text that can't be tuned is reported (Enter or
+        # focus out) and the field goes back to the tuned frequency.
+        return text
+
+    def _edited(self) -> bool:
+        """Whether the text differs from the tuned value (typing pending)."""
+        return self.lineEdit().text() != self.textFromValue(self.value())
+
+    def _update_tone(self, text: str = "") -> None:
+        """A red frame while the text is a number that can't be tuned."""
+        parsed = self._parse(self.lineEdit().text())
+        bad = parsed.state != ACCEPTABLE and parsed.hz is not None
+        set_tone(self, "danger" if bad else None)  # (no-op when unchanged)
+
+    def _report_unusable_text(self) -> None:
+        text = self.lineEdit().text()
+        if not text.strip() or not self._edited():
+            return
+        parsed = self._parse(text)
+        if parsed.state != ACCEPTABLE:
+            self.text_rejected.emit(parsed.problem or f"Can't tune to “{text}”.")
+
+    def cancel_edit(self) -> None:
+        """Drop typed text: show the tuned frequency again."""
+        if self._edited():
+            self.setValue(self.value())  # rewrites the text, emits nothing
+        self._update_tone()
+
+    # -- keys and stepping --------------------------------------------------
+    def keyPressEvent(self, event):  # noqa: N802 (Qt API)
+        key = event.key()
+        if key == Qt.Key.Key_Escape:
+            # Cancel the edit; the key goes on to the window, which returns
+            # the focus to the plots.
+            self.cancel_edit()
+        elif key in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self._report_unusable_text()
+        super().keyPressEvent(event)
+        # Qt rewrites the text (e.g. back to the tuned value) with the line
+        # edit's signals blocked: refresh the frame here.
+        self._update_tone()
+
+    def focusOutEvent(self, event):  # noqa: N802 (Qt API)
+        self._report_unusable_text()
+        super().focusOutEvent(event)
+        self._update_tone()
+
+    def stepBy(self, steps: int) -> None:  # noqa: N802 (Qt API)
+        """Arrows, Page Up/Down and the wheel: whole tuning steps (like
+        Left/Right on the plots), free of the rounding drift a step that
+        isn't whole Hz (8.33 kHz) would collect."""
+        if self._edited():
+            super().stepBy(steps)  # interprets the typed text first
+            return
+        current = round(self.value() * self._unit_hz)
+        target = step_frequency(current, self._step_hz, steps)
+        target = min(max(target, self._min_hz), self._max_hz)
+        self.setValue(target / self._unit_hz)
+        if self.style().styleHint(QStyle.StyleHint.SH_SpinBox_SelectOnStep, None, self):
+            self.selectAll()
+
 
 class FrequencyInput(QWidget if HAS_PYQT6 else object):
     """Frequency input widget with unit selection.
@@ -292,10 +410,18 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
     Typing a value and pressing Enter (or leaving the field) tunes once,
     rather than retuning on every keystroke. Switching the unit keeps the
     tuned frequency and only changes how it is shown.
+
+    The field accepts the connected receiver's tuning range
+    (:meth:`set_tuning_range`); its arrows step by the tuning step
+    (:meth:`set_step_hz`). Text that can't be tuned is reported through
+    :attr:`entry_rejected` instead of being cut down to something that can.
     """
 
     if HAS_PYQT6:
         frequency_changed = pyqtSignal(float)
+        #: Typed text was not tuned: why (e.g. "2400 MHz is out of range:
+        #: RTL-SDR tunes 0.5–1766 MHz.").
+        entry_rejected = pyqtSignal(str)
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -304,6 +430,10 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
         super().__init__(parent)
 
         self._frequency_hz = float(DEFAULT_FREQUENCY_HZ)
+        self._min_hz = MIN_FREQUENCY_HZ
+        self._max_hz = MAX_FREQUENCY_HZ
+        self._range_text = ""
+        self._step_hz = FREQ_STEP_HZ
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -319,12 +449,8 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         self._freq_input.setMinimumWidth(96)
-        self._freq_input.setToolTip(
-            get_short_tip("center_frequency")
-            + "\nType a value and press Enter. Arrow keys step 10 kHz "
-            "(Page Up/Down: 100 kHz); click first to step with the wheel."
-        )
-        self._freq_input.setAccessibleName("Center frequency")
+        self._freq_input.setAccessibleName("Tuned frequency")
+        self._freq_input.text_rejected.connect(self.entry_rejected)
         layout.addWidget(self._freq_input, 1)
 
         # Unit selector
@@ -342,6 +468,7 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
         layout.addWidget(self._unit_combo)
 
         self._apply_unit()
+        self._update_tooltip()
         self._freq_input.valueChanged.connect(self._on_value_changed)
         self._unit_combo.currentIndexChanged.connect(self._on_unit_changed)
 
@@ -355,12 +482,71 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
         mult, decimals = _UNITS.get(unit, _UNITS["MHz"])
         spin = self._freq_input
         spin.blockSignals(True)
+        spin._unit_hz = mult
+        spin._min_hz, spin._max_hz = self._min_hz, self._max_hz
+        spin._range_text = self._range_text
+        spin._step_hz = self._step_hz
         spin.setGroupSeparatorShown(unit in _GROUPED_UNITS)
         spin.setDecimals(decimals)
-        spin.setRange(MIN_FREQUENCY_HZ / mult, MAX_FREQUENCY_HZ / mult)
-        spin.setSingleStep(FREQ_STEP_HZ / mult)
+        spin.setRange(self._min_hz / mult, self._max_hz / mult)
+        spin.setSingleStep(self._step_hz / mult)
         spin.setValue(self._frequency_hz / mult)
         spin.blockSignals(False)
+        spin._update_tone()
+
+    def _update_tooltip(self) -> None:
+        step = _format_bandwidth(self._step_hz)
+        page = _format_bandwidth(10 * self._step_hz)
+        limits = self._range_text or (
+            f"Tunes {format_mhz_range(self._min_hz, self._max_hz)}"
+        )
+        self._freq_input.setToolTip(
+            "Tuned frequency: what you listen to, decode and measure.\n"
+            "Type a value and press Enter (Esc cancels): 145.8, 433.92M, "
+            "7074k, or 162550000 in Hz.\n"
+            f"{limits}. The arrow keys step {step} (the tuning step; Page "
+            f"Up/Down: {page}); click first to step with the wheel."
+        )
+
+    def set_tuning_range(
+        self, minimum_hz: float, maximum_hz: float, range_text: str = ""
+    ) -> None:
+        """Accept ``minimum_hz`` to ``maximum_hz`` (the connected receiver's
+        range). ``range_text`` explains it in messages and the tooltip, e.g.
+        ``"RTL-SDR tunes 0.5–1766 MHz"``. The tuned frequency is kept: the
+        caller retunes when it lies outside."""
+        low, high = float(minimum_hz), float(maximum_hz)
+        if not (math.isfinite(low) and math.isfinite(high) and 0 < low < high):
+            return
+        self._min_hz, self._max_hz = low, high
+        self._range_text = str(range_text or "")
+        self._apply_unit()
+        self._update_tooltip()
+
+    def tuning_range(self) -> Tuple[float, float]:
+        """The frequencies the field accepts, in Hz."""
+        return self._min_hz, self._max_hz
+
+    def set_step_hz(self, step_hz: float) -> None:
+        """Make the arrows (and Page Up/Down, ten steps) tune by ``step_hz``."""
+        try:
+            step = float(step_hz)
+        except (TypeError, ValueError):
+            return
+        if not (math.isfinite(step) and step > 0) or step == self._step_hz:
+            return
+        self._step_hz = step
+        self._freq_input._step_hz = step
+        self._freq_input.setSingleStep(step / self._get_multiplier())
+        self._update_tooltip()
+
+    def step_hz(self) -> float:
+        """The step the arrows tune by, in Hz."""
+        return self._step_hz
+
+    def cancel_edit(self) -> None:
+        """Drop any typed text and show the tuned frequency again."""
+        self._freq_input.cancel_edit()
 
     def _on_value_changed(self, value: float):
         """Handle value change."""
@@ -386,11 +572,12 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
             return
         if not math.isfinite(freq_hz):
             return
-        self._frequency_hz = min(max(freq_hz, MIN_FREQUENCY_HZ), MAX_FREQUENCY_HZ)
+        self._frequency_hz = min(max(freq_hz, self._min_hz), self._max_hz)
         mult = self._get_multiplier()
         self._freq_input.blockSignals(True)
         self._freq_input.setValue(self._frequency_hz / mult)
         self._freq_input.blockSignals(False)
+        self._freq_input._update_tone()
 
     def get_frequency(self) -> float:
         """Get frequency in Hz."""

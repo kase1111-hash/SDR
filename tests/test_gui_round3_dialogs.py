@@ -99,15 +99,30 @@ class TestShortcutsMatchTheMainWindow(_WindowTestCase):
     and every menu shortcut has a written description."""
 
     def test_table_matches_the_menus(self):
-        from sdr_module.gui.help_dialog import SHORTCUTS, HelpDialog, collect_bindings
+        from sdr_module.gui.help_dialog import (
+            SHORTCUTS,
+            HelpDialog,
+            collect_bindings,
+            tuning_entries,
+            tuning_steps,
+        )
 
         bindings = collect_bindings(self.win)
         entries = HelpDialog(self.win).shortcut_entries()
         listed = {keys: (cat, desc) for cat, keys, desc in entries}
+        # The arrow keys tune by the tuning step, which depends on the mode:
+        # they are listed with the window's steps of the moment.
+        live = {
+            keys: (cat, desc)
+            for cat, keys, desc in tuning_entries(tuning_steps(self.win))
+        }
         for category, keys, description in SHORTCUTS:
             if keys == ("Ctrl+R",) and not self.mw.HAS_HAM_RADIO:
                 continue
             self.assertIn(keys, listed, f"{keys} is not bound by the window")
+            if category == "Tuning":
+                self.assertEqual(listed[keys], live[keys])
+                continue
             self.assertEqual(listed[keys], (category, description))
             # Arrow keys are handled by the window itself, not a menu.
             menu = bindings.get(keys[0], ("",))[0]

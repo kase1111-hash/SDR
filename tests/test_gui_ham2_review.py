@@ -58,7 +58,37 @@ class TestSignalMeterPanelFits(unittest.TestCase):
         _settle()
 
     def test_report_fits_default_tab_height(self):
-        self.assertLessEqual(self.panel.sizeHint().height(), _TAB_PAGE_HEIGHT_1400x900)
+        # The full layout (gauge, level history, report) fits the tab at its
+        # minimum gauge height; every readout is in view without scrolling.
+        from PyQt6.QtCore import QRect
+        from PyQt6.QtWidgets import QFrame, QScrollArea
+
+        self.assertLessEqual(
+            self.panel.minimumSizeHint().height(), _TAB_PAGE_HEIGHT_1400x900
+        )
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setWidget(self.panel)
+        area.resize(360, _TAB_PAGE_HEIGHT_1400x900)
+        area.show()
+        self.panel.update_samples(_tone(0.05))
+        self.panel._update_display()
+        _settle(5)
+        self.assertFalse(self.panel.is_compact())
+        self.assertEqual(area.verticalScrollBar().maximum(), 0)
+        viewport = area.viewport()
+        for label in (
+            self.panel._s_meter_label,
+            self.panel._rst_label,
+            self.panel._dbm_label,
+            self.panel._snr_label,
+            self.panel._peak_label,
+        ):
+            rect = QRect(label.mapTo(viewport, QPoint(0, 0)), label.size())
+            self.assertLessEqual(rect.bottom(), viewport.height(), label.text())
+        area.takeWidget()
+        area.deleteLater()
 
     def test_mode_combo_sits_in_the_rst_row(self):
         panel = self.panel
@@ -80,7 +110,7 @@ class TestSignalMeterPanelFits(unittest.TestCase):
         combo = self.panel._mode_combo
         self.assertEqual(
             [combo.itemText(i) for i in range(combo.count())],
-            ["Phone", "CW", "Digital"],
+            ["Auto (follow demodulation)", "Phone", "CW", "Digital"],
         )
         for i in range(combo.count()):
             tip = combo.itemData(i, Qt.ItemDataRole.ToolTipRole)

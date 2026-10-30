@@ -254,7 +254,10 @@ class TestSignalMeterShortTab(unittest.TestCase):
 
     def test_gauge_shrinks_but_keeps_a_wide_scale(self):
         meter = self.panel._analog_meter
-        self.assertLess(meter.height(), 100)
+        # The compact layout (short tab) leaves the gauge more room than the
+        # full report did, but it is still below its preferred height.
+        self.assertTrue(self.panel.is_compact())
+        self.assertLess(meter.height(), meter.sizeHint().height())
         fm = QFontMetricsF(meter._label_font())
         _cx, _cy, radius = meter._geometry(fm)
         self.assertGreaterEqual(

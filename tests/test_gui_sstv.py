@@ -630,8 +630,9 @@ class TestSSTVInTheWindow(_WindowTestCase):
         self.assertEqual(self.win._control_panel._demod_combo.currentText(), "FM")
         self.assertEqual(self.win._control_panel.get_fm_deviation_text(), "5 kHz")
         self.assertTrue(self.panel._fm_callout.isHidden())
-        # Leaving FM while listening brings the hint back.
-        self.win._set_demod_mode("USB")
+        # A mode whose audio can't carry SSTV brings the hint back (USB and
+        # LSB can: HF SSTV, HAMDSP-3).
+        self.win._set_demod_mode("CW")
         settle()
         self.assertFalse(self.panel._fm_callout.isHidden())
 

@@ -13,6 +13,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_chrome import HAS_PYQT6, _WindowTestCase  # noqa: E402
@@ -158,6 +160,93 @@ class TestSstvImageKeptWhenAudioEnds(_HamWindowCase):
         self.assertTrue(self.sstv._progress_bar.isHidden())
 
 
+class TestSstvOnHf(_HamWindowCase):
+    """HAMDSP-3: only FM audio reached the SSTV decoder, so HF SSTV (sent
+    in USB or LSB) could never be decoded, and the panel said SSTV is FM
+    audio and offered Switch to FM, which makes an HF image undecodable."""
+
+    def tone_heard(self, freq_hz: float, mode: str, audio_hz: float) -> float:
+        """Feed a steady SSB tone through the window; the decoder's tone."""
+        win = self.win
+        self.assertTrue(win.set_frequency(freq_hz))
+        win._set_demod_mode(mode)
+        self.sstv._start_btn.click()
+        rate = win._device_sample_rate()
+        offset = win._vfo_offset_hz() + (audio_hz if mode == "USB" else -audio_hz)
+        n = int(rate / 30)
+        phase = 0.0
+        step = 2 * np.pi * offset / rate
+        for _ in range(20):
+            iq = (0.05 * np.exp(1j * (phase + step * np.arange(n)))).astype(
+                np.complex64
+            )
+            phase += step * n
+            win._process_block(iq)
+        tone = self.sstv._decoder.get_tone()["tone_hz"]
+        self.assertIsNotNone(tone, f"no tone reached the decoder in {mode}")
+        return tone
+
+    def test_usb_audio_reaches_the_decoder(self):
+        self.assertAlmostEqual(self.tone_heard(14.230e6, "USB", 1900.0), 1900, delta=30)
+        self.assertTrue(self.sstv._fm_callout.isHidden())
+
+    def test_lsb_audio_reaches_the_decoder(self):
+        self.assertAlmostEqual(self.tone_heard(7.171e6, "LSB", 1900.0), 1900, delta=30)
+        self.assertTrue(self.sstv._fm_callout.isHidden())
+
+    def test_start_in_usb_asks_for_nothing(self):
+        win = self.win
+        self.assertTrue(win.set_frequency(14.230e6))
+        win._set_demod_mode("USB")
+        self.sstv._start_btn.click()
+        settle()
+        self.assertTrue(self.sstv._fm_callout.isHidden())
+        self.assertNotIn("needs FM", win._message_label.text())
+
+    def switch_offered(self, freq_hz: float) -> str:
+        win = self.win
+        self.assertTrue(win.set_frequency(freq_hz))
+        win._set_demod_mode("AM")
+        self.sstv._start_btn.click()
+        settle()
+        self.assertFalse(self.sstv._fm_callout.isHidden())
+        return self.sstv._switch_fm_btn.text()
+
+    def test_am_on_20m_offers_usb(self):
+        self.assertEqual(self.switch_offered(14.230e6), "Switch to USB")
+        self.assertIn("USB", self.sstv._fm_label.text())
+        self.assertIn("USB", self.win._message_label.text())
+        self.sstv._switch_fm_btn.click()
+        settle()
+        self.assertEqual(self.win._control_panel.get_demod_mode(), "USB")
+        self.assertTrue(self.sstv._fm_callout.isHidden())
+
+    def test_am_on_40m_offers_lsb(self):
+        self.assertEqual(self.switch_offered(7.171e6), "Switch to LSB")
+        self.sstv._switch_fm_btn.click()
+        self.assertEqual(self.win._control_panel.get_demod_mode(), "LSB")
+
+    def test_am_on_2m_still_offers_narrow_fm(self):
+        self.assertEqual(self.switch_offered(145.8e6), "Switch to FM")
+        self.assertIn("FM", self.win._message_label.text())
+        self.sstv._switch_fm_btn.click()
+        panel = self.win._control_panel
+        self.assertEqual(panel.get_demod_mode(), "FM")
+        self.assertEqual(panel.get_fm_deviation_text(), "5 kHz")
+
+    def test_cw_brings_the_hint_back(self):
+        win = self.win
+        self.assertTrue(win.set_frequency(14.230e6))
+        win._set_demod_mode("USB")
+        self.sstv._start_btn.click()
+        win._set_demod_mode("CW")
+        settle()
+        self.assertFalse(self.sstv._fm_callout.isHidden())
+        win._set_demod_mode("LSB")
+        settle()
+        self.assertTrue(self.sstv._fm_callout.isHidden())
+
+
 class _SeekCase(unittest.TestCase):
     """The tuner alone, its seek driven by hand (a fake receiver)."""
 
@@ -217,9 +306,7 @@ class TestSeekWithinReach(_SeekCase):
         self.assertGreaterEqual(min(self.emitted), 1e6, "below the HackRF's range")
         self.assertEqual(self.emitted[:2], [1000e3, 1700e3])
         self.assertAlmostEqual(self.tuner.get_frequency(), 1260e3)
-        self.assertEqual(
-            self.tuner._hint_label.text(), "Found a station on 1260 kHz."
-        )
+        self.assertEqual(self.tuner._hint_label.text(), "Found a station on 1260 kHz.")
 
     def test_seek_up_wraps_inside_the_device_range(self):
         self.am_from(1260e3)

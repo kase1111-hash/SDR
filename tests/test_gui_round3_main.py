@@ -308,11 +308,13 @@ class TestHardwareDrain(_WindowTestCase):
         got = self.win._read_block()
         self.assertGreaterEqual(len(got), mw._PROBE_READ_S * rate)
         self.assertLess(len(got), mw._PROBE_READ_S * rate + transfer)
-        # ...then at most a quarter second; the rest waits for the next one.
+        # ...then at most a quarter second (and at most _MAX_READ_SAMPLES:
+        # 0.21 s at 10 MS/s); the rest waits for the next one.
         self._keeps_up(rate)
         got = self.win._read_block()
-        self.assertGreaterEqual(len(got), mw._MAX_READ_S * rate)
-        self.assertLess(len(got), mw._MAX_READ_S * rate + transfer)
+        most = min(mw._MAX_READ_S * rate, mw._MAX_READ_SAMPLES)
+        self.assertGreaterEqual(len(got), most)
+        self.assertLess(len(got), most + transfer)
         self.assertGreater(60 - len(dev.timeouts), 0)
 
     def test_fast_device_counts_as_real_time(self):

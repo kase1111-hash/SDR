@@ -65,6 +65,9 @@ def _mw():
 
 
 TRANSFER = 131072  # one HackRF USB transfer
+# Frames of more samples than this cost more per sample (they no longer fit
+# the processor's caches): see TestPacerRecovers.
+_BIG_FRAME = 2_600_000
 
 
 class _Clock(_FakeClock):
@@ -378,12 +381,15 @@ def _simulate(
     seconds=20.0,
     warm_frames=0,
     judge_from=None,
+    big_load=None,
 ):
     """The real pacer on a virtual clock. The display timer fires every
     33 ms (or when the last frame ends, if later); a frame of ``n`` samples
-    costs ``fixed + load * n / rate`` seconds; ``stall_frames`` frames
-    from ``stall_at`` take ``stall_s`` each (another program busy), and the
-    first ``warm_frames`` frames 60 ms more (filter designs after Start).
+    costs ``fixed + load * n / rate`` seconds (``big_load`` instead of
+    ``load`` above ``_BIG_FRAME`` samples, if given); ``stall_frames``
+    frames from ``stall_at`` take ``stall_s`` each (another program busy),
+    and the first ``warm_frames`` frames 60 ms more (filter designs after
+    Start).
     The source is the demo device (``demo_request``) or a hardware queue of
     100 transfers drained as the window does. Returns the fraction of the
     stream processed from ``judge_from`` (3 s after the stall, or after
@@ -411,7 +417,10 @@ def _simulate(
                 continue
         else:
             count = pacer.demo_request(rate, t)
-        cost = fixed + load * count / rate
+        per_sample = load
+        if big_load is not None and count > _BIG_FRAME:
+            per_sample = big_load
+        cost = fixed + per_sample * count / rate
         if frames < warm_frames:
             cost += 0.06
         if stall_at is not None and t >= stall_at and stalled < stall_frames:
@@ -510,6 +519,73 @@ class TestPacerRecovers(unittest.TestCase):
         self.assertTrue(pacer.overloaded)
         self.assertEqual(pacer.read_limit(rate, 11.1), 0.0)  # not right away
         self.assertGreater(pacer.read_limit(rate, 12.1), 0.0)  # a second later
+
+    def test_a_stall_at_20_msps_is_caught_up_in_frames_that_keep_up(self):
+        """Frames of more than a few million samples cost more per sample
+        (measured at 20 MS/s on a 4-core computer: 0.61-0.74x real time up
+        to 2.6 M samples, 0.82-1.31x at 5.1 M). After a stall, catching up
+        in quarter-second frames (5.1 M samples) went back into overload
+        again and again (40-80 % of the stream processed)."""
+        for load in (0.55, 0.62):
+            with self.subTest(load=load):
+                processed, overloaded = _simulate(
+                    "hw", 20e6, load, 0.004, stall_at=5.0, big_load=0.95
+                )
+                self.assertFalse(overloaded)
+                self.assertGreater(processed, 0.95)
+
+    def test_frames_read_at_most_a_few_million_samples(self):
+        mw = _mw()
+        pacer = mw._Pacer()
+        for _ in range(mw._WARM_UP_FRAMES + 3):
+            pacer.measured(TRANSFER * 5, 20e6, 0.02)  # keeps up
+        self.assertEqual(pacer.read_limit(20e6), mw._MAX_READ_SAMPLES)
+        # (A quarter second at the usual rates.)
+        self.assertEqual(pacer.read_limit(2.4e6), 2.4e6 * mw._MAX_READ_S)
+
+
+class TestCatchingUpInTheWindow(_HardwareCase):
+    """The window on a 20 MS/s HackRF-like device, on a computer whose
+    frames take 0.6x real time up to ``_BIG_FRAME`` samples and 0.95x
+    above (see TestPacerRecovers), with the driver delivering in real time
+    (by the fake clock)."""
+
+    def setUp(self):
+        super().setUp()
+        self.sizes = []
+        self.stall_s = 0.0
+
+        def process(samples):  # (the cost only: the frames themselves are fine)
+            count = len(samples)
+            self.sizes.append((self.clock.now, count))
+            load = 0.95 if count > _BIG_FRAME else 0.6
+            self.clock.advance(0.004 + load * count / self.RATE + self.stall_s)
+            self.stall_s = 0.0
+
+        self.win._process_block = process
+        self.produced = int(self.clock.now * self.RATE // TRANSFER)
+
+    def run_for(self, seconds):
+        end = self.clock.now + seconds
+        while self.clock.now < end:
+            due = int(self.clock.now * self.RATE // TRANSFER)
+            self.dev.deliver(due - self.produced)
+            self.produced = due
+            tick = self.clock.now
+            self.win._update_display()
+            self.clock.now = max(self.clock.now, tick + 0.033)
+
+    def test_a_stall_is_caught_up_without_going_back_into_overload(self):
+        self.run_for(2.0)
+        self.assertFalse(self.win._pacer.overloaded)
+        self.stall_s = 1.0  # another program holds the computer for a second
+        self.run_for(4.0)
+        start = self.clock.now
+        self.run_for(3.0)
+        self.assertFalse(self.win._pacer.overloaded)
+        late = [count for t, count in self.sizes if t >= start]
+        self.assertGreater(sum(late), 0.95 * 3.0 * self.RATE)  # all of it
+        self.assertLessEqual(max(late), self.mw._MAX_READ_SAMPLES + TRANSFER)
 
 
 class TestDemoRecoversFromAHiccup(_WindowTestCase):

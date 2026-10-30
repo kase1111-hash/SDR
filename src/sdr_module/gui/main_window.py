@@ -261,6 +261,12 @@ _REALTIME_WINDOW_S = 2.0
 # briefly). See _Pacer.
 _MAX_READ_S = 0.25
 _PROBE_READ_S = 0.05
+# ...and the most samples: a bigger frame costs more per sample (it no
+# longer fits the processor's caches; at 20 MS/s on a 4-core computer,
+# 0.6-0.75x real time up to 2.6 M samples but 0.8-1.3x at 5.1 M, a quarter
+# second), so catching up after a stall in bigger frames looked like a
+# computer that can't keep up, again and again.
+_MAX_READ_SAMPLES = 1 << 21
 # The most queued transfers one frame takes while an I/Q recording reads
 # them all (a driver queues 100 at most; this only guards against a source
 # that never runs dry).
@@ -1179,7 +1185,7 @@ class _Pacer:
     every queued hardware transfer, or as many demo samples as the time
     since the last frame covers (:meth:`demo_request`), up to
     :meth:`read_limit`: ``_MAX_READ_S`` of signal, ``_PROBE_READ_S`` until
-    frames are known to keep up.
+    frames are known to keep up, and never more than ``_MAX_READ_SAMPLES``.
 
     :meth:`measured` times whole frames (reading, filtering, demodulating)
     against the time their samples cover (not the first
@@ -1244,7 +1250,8 @@ class _Pacer:
             if self._probing:
                 return max(float(_TIMED_FRAME), rate * _PROBE_READ_S)
             return 0.0
-        return rate * (_MAX_READ_S if self._keeps_up() else _PROBE_READ_S)
+        seconds = _MAX_READ_S if self._keeps_up() else _PROBE_READ_S
+        return min(rate * seconds, float(_MAX_READ_SAMPLES))
 
     def _probe_due(self, now: float) -> bool:
         if self._probe_now or (

@@ -969,7 +969,9 @@ class AGCConfig:
     max_gain: float = 100.0  # Maximum gain (linear)
     min_gain: float = 0.001  # Minimum gain (linear)
     mode: AGCMode = AGCMode.RMS  # Detection mode
-    reference_level: float = 0.0  # Reference level for log mode (dB)
+    # Log mode only: offsets the target level by this many dB (0 = the
+    # target itself). The level is always tracked in dB in log mode.
+    reference_level: float = 0.0
 
 
 class AGC:
@@ -1016,6 +1018,8 @@ class AGC:
 
         # For RMS calculation (exponential moving average)
         self._rms_squared = 0.0
+        # Log mode: the tracked level in dB (None until the first sample).
+        self._level_db: Optional[float] = None
 
     def _update_coefficients(self) -> None:
         """Calculate filter coefficients from time constants."""
@@ -1125,19 +1129,41 @@ class AGC:
         elif self._config.mode == AGCMode.MAGNITUDE:
             return self._detect_level_magnitude(sample)
         elif self._config.mode == AGCMode.LOG:
-            # Log-domain: work in dB
-            magnitude = np.abs(sample)
-            if magnitude > 0:
-                level_db = 20 * np.log10(magnitude)
-                if level_db > self._config.reference_level:
-                    return 10 ** (level_db / 20)
-            return self._level
+            return self._detect_level_log(sample)
         return np.abs(sample)
+
+    def _detect_level_log(self, sample: complex) -> float:
+        """Log-domain detection: the level is smoothed in dB (with the
+        attack and decay coefficients) and returned as a linear amplitude.
+
+        (It used to keep the previous level, initially 0, for any sample
+        below the 0 dB reference, i.e. every sample of a normal signal,
+        which sent the gain to ``max_gain``.)
+        """
+        magnitude = float(np.abs(sample))
+        level_db = 20.0 * float(np.log10(max(magnitude, 1e-10)))
+        current = self._level_db
+        if current is None:
+            current = level_db
+        elif level_db > current:
+            current += self._attack_coeff * (level_db - current)
+        else:
+            current += self._decay_coeff * (level_db - current)
+        self._level_db = current
+        return float(10.0 ** (current / 20.0))
+
+    def _target_level(self) -> float:
+        """The output level aimed at (log mode: offset by the reference)."""
+        if self._config.mode == AGCMode.LOG and self._config.reference_level:
+            return self._config.target_level * 10.0 ** (
+                self._config.reference_level / 20.0
+            )
+        return self._config.target_level
 
     def _compute_gain(self, level: float) -> float:
         """Compute required gain from detected level."""
         if level > 1e-10:
-            desired_gain = self._config.target_level / level
+            desired_gain = self._target_level() / level
         else:
             desired_gain = self._config.max_gain
 
@@ -1295,6 +1321,7 @@ class AGC:
         self._hang_counter = 0
         self._peak_hold = 0.0
         self._rms_squared = 0.0
+        self._level_db = None
 
     def freeze(self) -> None:
         """Freeze AGC at current gain (disable adaptation)."""
@@ -1411,7 +1438,9 @@ class SquelchMode(Enum):
     CARRIER = "carrier"  # Signal amplitude based
     NOISE = "noise"  # Noise level based (opens on low noise)
     CTCSS = "ctcss"  # Continuous Tone-Coded Squelch System
-    DCS = "dcs"  # Digital-Coded Squelch
+    # Digital-Coded Squelch: not implemented (no 134.4 bit/s Golay decoder);
+    # Squelch refuses it rather than acting as a carrier squelch.
+    DCS = "dcs"
     VOX = "vox"  # Voice-operated (audio activity)
 
 
@@ -1426,7 +1455,14 @@ class SquelchState(Enum):
 
 @dataclass
 class SquelchConfig:
-    """Squelch configuration parameters."""
+    """Squelch configuration parameters.
+
+    ``threshold`` is a linear amplitude in CARRIER, CTCSS and VOX mode
+    (open above it). In NOISE mode it is the most FM-discriminator noise
+    (radians per sample, RMS) that still counts as a signal: the squelch
+    opens while the noise is below it (a signal quiets an FM receiver) and
+    closes once it rises ``hysteresis`` above it.
+    """
 
     threshold: float = 0.1  # Open threshold (linear amplitude)
     hysteresis: float = 0.02  # Close offset below threshold
@@ -1471,6 +1507,7 @@ class Squelch:
         """
         self._sample_rate = sample_rate
         self._config = config or SquelchConfig()
+        self._check_mode(self._config)
 
         # State
         self._state = SquelchState.CLOSED
@@ -1479,13 +1516,23 @@ class Squelch:
         self._noise_level = 1.0  # Estimated noise floor
         self._tail_counter = 0  # Samples remaining in tail time
         self._ctcss_detected = False  # CTCSS tone present
+        self._ctcss_detector: Optional["CTCSSDetector"] = None
+        self._ctcss_magnitude = 0.0
+        # Noise squelch: the discriminator's last input sample and outputs.
+        self._noise_prev: Optional[complex] = None
+        self._noise_hist = np.zeros(2)
+        self._noise_power: Optional[float] = None
 
         # Calculate coefficients
         self._update_coefficients()
 
-        # CTCSS detector state
-        self._ctcss_filter_state = 0.0 + 0.0j
-        self._ctcss_magnitude = 0.0
+    @staticmethod
+    def _check_mode(config: SquelchConfig) -> None:
+        if config.mode == SquelchMode.DCS:
+            raise NotImplementedError(
+                "DCS (digital-coded squelch) is not implemented; use CTCSS or "
+                "a carrier squelch"
+            )
 
     def _update_coefficients(self) -> None:
         """Calculate time-domain coefficients."""
@@ -1510,17 +1557,12 @@ class Squelch:
         # Noise estimation coefficient (slow tracking)
         self._noise_alpha = 1.0 - np.exp(-1.0 / (0.5 * self._sample_rate))
 
-        # CTCSS Goertzel coefficient
-        if self._config.ctcss_freq > 0:
-            k = int(
-                0.5
-                + (self._sample_rate * 0.02)
-                * self._config.ctcss_freq
-                / self._sample_rate
-            )
-            self._ctcss_coeff = 2.0 * np.cos(
-                2.0 * np.pi * k / (self._sample_rate * 0.02)
-            )
+        # CTCSS: a tone detector over a sliding window (see CTCSSDetector).
+        if self._config.mode == SquelchMode.CTCSS and self._config.ctcss_freq > 0:
+            if self._ctcss_detector is None:
+                self._ctcss_detector = CTCSSDetector(self._sample_rate)
+        else:
+            self._ctcss_detector = None
 
     @property
     def sample_rate(self) -> float:
@@ -1576,6 +1618,7 @@ class Squelch:
 
     def set_config(self, config: SquelchConfig) -> None:
         """Update configuration."""
+        self._check_mode(config)
         self._config = config
         self._update_coefficients()
 
@@ -1585,66 +1628,84 @@ class Squelch:
         self._signal_level += self._level_alpha * (magnitude - self._signal_level)
         return self._signal_level
 
+    # The second difference of white noise has sqrt(6) times its RMS.
+    _NOISE_DIFF_GAIN = float(np.sqrt(6.0))
+
+    def _discriminator_noise(self, samples: np.ndarray) -> np.ndarray:
+        """The high-frequency part of the FM discriminator output, per
+        sample (radians per sample, scaled so white discriminator noise
+        reads its own RMS).
+
+        Complex I/Q goes through a discriminator (the phase step between
+        samples); real input is taken as discriminator audio already. The
+        second difference keeps the noise above a few kHz (where an FM
+        signal quiets the receiver) and drops speech, which is 30 dB down
+        at 1 kHz and 16 dB down at 3 kHz at a 48 kHz sample rate.
+        """
+        x = np.asarray(samples)
+        if x.size == 0:
+            return np.zeros(0)
+        if np.iscomplexobj(x):
+            prev = x[0] if self._noise_prev is None else self._noise_prev
+            prior = np.concatenate(([prev], x[:-1]))
+            self._noise_prev = complex(x[-1])
+            d = np.angle(x * np.conj(prior)).astype(np.float64)
+        else:
+            d = x.astype(np.float64)
+        if self._noise_power is None:
+            # A stream starts without a step in its history.
+            self._noise_hist = np.full(2, d[0])
+        buf = np.concatenate((self._noise_hist, d))
+        self._noise_hist = buf[-2:].copy()
+        return (buf[2:] - 2.0 * buf[1:-1] + buf[:-2]) / self._NOISE_DIFF_GAIN
+
     def _detect_noise_level(self, sample: complex) -> float:
         """
-        Detect noise level for noise squelch.
-
-        Noise squelch opens when noise floor drops (signal present).
+        Detect noise level for noise squelch: the RMS discriminator noise
+        (see :meth:`_discriminator_noise`), smoothed over 10 ms. It is
+        high on an empty channel and drops when a signal quiets the FM
+        receiver, so the squelch opens while it is below the threshold.
+        (It used to compare a carrier-to-noise ratio of the I/Q magnitude
+        against the inverted threshold, which never opened on a signal.)
         """
-        magnitude = np.abs(sample)
+        hf = self._discriminator_noise(np.asarray([sample]))
+        power = float(hf[0] ** 2)
+        if self._noise_power is None:
+            self._noise_power = 1.0  # start closed until it settles
+        self._noise_power += self._level_alpha * (power - self._noise_power)
+        self._noise_level = float(np.sqrt(self._noise_power))
+        self._signal_level += self._level_alpha * (
+            float(np.abs(sample)) - self._signal_level
+        )
+        return self._noise_level
 
-        # Track signal level
-        self._signal_level += self._level_alpha * (magnitude - self._signal_level)
-
-        # Slowly track noise floor (only when it drops)
-        if magnitude < self._noise_level:
-            self._noise_level += self._noise_alpha * (magnitude - self._noise_level)
-        else:
-            # Very slow rise for noise floor
-            self._noise_level += (self._noise_alpha * 0.1) * (
-                magnitude - self._noise_level
-            )
-
-        # Signal-to-noise ratio indicator
-        if self._noise_level > 1e-10:
-            return self._signal_level / self._noise_level
-        return self._signal_level
+    def _block_noise_level(self, samples: np.ndarray) -> float:
+        """RMS discriminator noise of a whole block (noise squelch)."""
+        hf = self._discriminator_noise(samples)
+        if hf.size == 0:
+            return self._noise_level
+        self._noise_power = float(np.mean(hf**2))
+        self._noise_level = float(np.sqrt(self._noise_power))
+        return self._noise_level
 
     def _detect_ctcss(self, samples: np.ndarray) -> bool:
         """
-        Detect CTCSS sub-audible tone.
+        Detect the configured CTCSS sub-audible tone in the (FM) audio.
 
-        Uses Goertzel algorithm for efficient single-frequency detection.
+        A :class:`CTCSSDetector` low-passes the audio below 300 Hz and
+        compares every EIA tone over a sliding window of about a second,
+        so it opens for its own tone only (not for the adjacent ones 2-4 %
+        away, as the old one-block correlation did).
         """
-        if self._config.ctcss_freq <= 0:
+        detector = self._ctcss_detector
+        if detector is None or self._config.ctcss_freq <= 0:
             return False
-
-        # Simple CTCSS detection using bandpass energy
-        # Generate CTCSS reference
-        n = len(samples)
-        t = np.arange(n) / self._sample_rate
-        ref_i = np.cos(2 * np.pi * self._config.ctcss_freq * t)
-        ref_q = np.sin(2 * np.pi * self._config.ctcss_freq * t)
-
-        # Correlate (assumes real audio input)
-        if np.iscomplexobj(samples):
-            audio = samples.real
-        else:
-            audio = samples
-
-        # Integrate over block
-        corr_i: float = float(np.sum(audio * ref_i))
-        corr_q: float = float(np.sum(audio * ref_q))
-        magnitude = np.sqrt(corr_i**2 + corr_q**2) / n
-
-        # Smooth magnitude
-        self._ctcss_magnitude += 0.1 * (magnitude - self._ctcss_magnitude)
-
-        # Compare to threshold (CTCSS is typically 10-15% modulation)
-        # Threshold relative to signal level
-        ctcss_threshold = self._signal_level * 0.05
-        self._ctcss_detected = self._ctcss_magnitude > ctcss_threshold
-
+        audio = np.asarray(samples)
+        if np.iscomplexobj(audio):
+            audio = audio.real
+        detector.process(audio)
+        self._ctcss_detected = detector.is_present(self._config.ctcss_freq)
+        self._ctcss_magnitude = 1.0 if self._ctcss_detected else 0.0
         return self._ctcss_detected
 
     def _detect_vox(self, samples: np.ndarray) -> float:
@@ -1670,8 +1731,9 @@ class Squelch:
             return level > self._config.threshold
 
         elif self._config.mode == SquelchMode.NOISE:
-            # Noise squelch: open when SNR is high (noise drops)
-            return level > (1.0 / self._config.threshold)  # Invert threshold meaning
+            # Noise squelch: open while the discriminator noise is low (a
+            # signal quiets the receiver).
+            return level < self._config.threshold
 
         elif self._config.mode == SquelchMode.CTCSS:
             # Must have both signal AND correct tone
@@ -1690,7 +1752,8 @@ class Squelch:
             return level < close_threshold
 
         elif self._config.mode == SquelchMode.NOISE:
-            return level < (1.0 / close_threshold)
+            # The noise must rise past the threshold plus the hysteresis.
+            return level > self._config.threshold + self._config.hysteresis
 
         elif self._config.mode == SquelchMode.CTCSS:
             # Close if signal drops OR tone disappears
@@ -1804,15 +1867,9 @@ class Squelch:
 
         # Block level detection
         if self._config.mode == SquelchMode.NOISE:
-            magnitudes = np.abs(samples)
-            block_level = float(np.mean(magnitudes))
-            self._signal_level = block_level
-            # Simple noise estimate
-            noise_est: float = float(np.percentile(magnitudes, 10))
-            if noise_est > 1e-10:
-                level = block_level / noise_est
-            else:
-                level = block_level
+            if len(samples):
+                self._signal_level = float(np.mean(np.abs(samples)))
+            level = self._block_noise_level(samples)
         else:
             level = np.sqrt(np.mean(np.abs(samples) ** 2))
             self._signal_level = level
@@ -1881,6 +1938,11 @@ class Squelch:
         self._tail_counter = 0
         self._ctcss_detected = False
         self._ctcss_magnitude = 0.0
+        if self._ctcss_detector is not None:
+            self._ctcss_detector.reset()
+        self._noise_prev = None
+        self._noise_hist = np.zeros(2)
+        self._noise_power = None
 
     def force_open(self) -> None:
         """Force squelch open (bypass)."""
@@ -1950,6 +2012,222 @@ def find_ctcss_tone(frequency: float, tolerance: float = 1.0) -> Optional[str]:
     return None
 
 
+#: The 50 standard CTCSS tones (Hz), lowest first: the EIA tones above
+#: plus the ones added later without letter codes.
+CTCSS_FREQUENCIES: Tuple[float, ...] = (
+    67.0,
+    69.3,
+    71.9,
+    74.4,
+    77.0,
+    79.7,
+    82.5,
+    85.4,
+    88.5,
+    91.5,
+    94.8,
+    97.4,
+    100.0,
+    103.5,
+    107.2,
+    110.9,
+    114.8,
+    118.8,
+    123.0,
+    127.3,
+    131.8,
+    136.5,
+    141.3,
+    146.2,
+    151.4,
+    156.7,
+    159.8,
+    162.2,
+    165.5,
+    167.9,
+    171.3,
+    173.8,
+    177.3,
+    179.9,
+    183.5,
+    186.2,
+    189.9,
+    192.8,
+    196.6,
+    199.5,
+    203.5,
+    206.5,
+    210.7,
+    218.1,
+    225.7,
+    229.1,
+    233.6,
+    241.8,
+    250.3,
+    254.1,
+)
+
+
+def ctcss_label(frequency: float) -> str:
+    """``100.0 -> "100.0 Hz (1Z)"``: the tone with its EIA code, if any."""
+    code = find_ctcss_tone(frequency, tolerance=0.05)
+    text = f"{frequency:.1f} Hz"
+    return f"{text} ({code})" if code else text
+
+
+def _kaiser_lowpass(
+    pass_hz: float, stop_hz: float, rate: float, atten_db: float = 60.0
+) -> np.ndarray:
+    """Kaiser-windowed sinc low-pass, unity gain at DC."""
+    width = max(stop_hz - pass_hz, 1e-6) / rate
+    taps = int(np.ceil((atten_db - 7.95) / (2.285 * 2.0 * np.pi * width))) + 1
+    taps = min(max(taps, 15), 4095) | 1
+    cutoff = (pass_hz + stop_hz) / 2.0 / rate
+    t = np.arange(taps) - (taps - 1) / 2.0
+    h = 2.0 * cutoff * np.sinc(2.0 * cutoff * t)
+    h *= np.kaiser(taps, 0.1102 * (atten_db - 8.7))
+    return np.asarray(h / np.sum(h), dtype=np.float64)
+
+
+class CTCSSDetector:
+    """
+    Finds the CTCSS (sub-audible) tone in FM audio, a block at a time.
+
+    The audio is low-passed below 300 Hz (voice is above it) and decimated
+    to about 1.2 kHz, and the last ``window_s`` of it (Hann-windowed) is
+    compared at every standard tone. Adjacent tones are only 2.3-3.5 %
+    apart (2.3 Hz at 67 Hz), so it takes about a second of audio to tell
+    them apart; a one-block correlation (33 ms) could not.
+
+    A tone counts as present when it is the strongest of the 50, at least
+    ``select_db`` above every other tone (the adjacent ones only leak in
+    far below that) and ``snr_db`` above the noise in the 60-270 Hz band,
+    once at least ``min_window_s`` of audio has been seen. It stays
+    reported for ``hold_s`` after it was last found, so a short fade
+    doesn't drop it.
+
+    :attr:`detected_tone` is the tone found (Hz) or None; :meth:`is_present`
+    asks about one tone (the tone squelch).
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        window_s: float = 1.0,
+        min_window_s: float = 0.5,
+        hold_s: float = 0.25,
+        select_db: float = 6.0,
+        snr_db: float = 10.0,
+        update_s: float = 0.05,
+    ):
+        self._rate = float(sample_rate)
+        self._factor = max(1, int(self._rate // 1200.0))
+        self._out_rate = self._rate / self._factor
+        stop = max(self._out_rate - 300.0, 400.0)
+        self._taps = _kaiser_lowpass(270.0, stop, self._rate)[::-1].copy()
+        self._window_n = max(16, int(round(window_s * self._out_rate)))
+        self._min_n = max(8, int(round(min_window_s * self._out_rate)))
+        self._update_n = max(1, int(round(update_s * self._out_rate)))
+        self._hold_s = float(hold_s)
+        self._select = 10.0 ** (select_db / 10.0)
+        self._snr = 10.0 ** (snr_db / 10.0)
+        n = np.arange(self._window_n)
+        window = np.hanning(self._window_n)
+        tones = np.asarray(CTCSS_FREQUENCIES)
+        self._tones = tones
+        # Real cosine and sine bases (Hann-windowed): einsum with them is
+        # cheaper than a complex matrix product, which wakes threaded BLAS.
+        phase = 2.0 * np.pi * tones[:, None] * n[None, :] / self._out_rate
+        self._cos = window * np.cos(phase)
+        self._sin = window * np.sin(phase)
+        self.reset()
+
+    def reset(self) -> None:
+        """Forget the audio (a new stream)."""
+        self._history = np.zeros(len(self._taps) - 1)
+        self._position = 0  # samples of input seen
+        self._buffer = np.zeros(self._window_n)
+        self._filled = 0
+        self._detected: Optional[float] = None
+        self._hold = 0.0
+        self._since_update = 0  # decimated samples since the last check
+        self._found: Optional[float] = None
+        self.tone_powers: Optional[np.ndarray] = None
+
+    @property
+    def detected_tone(self) -> Optional[float]:
+        """The tone (Hz) heard in the last second, or None."""
+        return self._detected
+
+    def is_present(self, frequency: float) -> bool:
+        """Whether ``frequency`` (Hz) is the tone being heard."""
+        return self._detected is not None and abs(self._detected - frequency) < 0.05
+
+    def _decimate(self, x: np.ndarray) -> np.ndarray:
+        """Low-pass and keep every ``factor``-th sample (streaming)."""
+        length = len(self._taps)
+        buf = np.concatenate((self._history, x))
+        self._history = buf[len(buf) - (length - 1) :].copy()
+        start = self._position
+        self._position += len(x)
+        first = -(-start // self._factor) * self._factor  # next kept sample
+        rows = np.arange(first - start, len(x), self._factor)
+        if rows.size == 0:
+            return np.zeros(0)
+        windows = np.lib.stride_tricks.sliding_window_view(buf, length)[rows]
+        return np.einsum("ij,j->i", windows, self._taps)
+
+    def process(self, audio: np.ndarray) -> Optional[float]:
+        """Feed a block of (real) audio; returns :attr:`detected_tone`."""
+        x = np.asarray(audio, dtype=np.float64).ravel()
+        if x.size == 0:
+            return self._detected
+        low = self._decimate(x)
+        if low.size:
+            if low.size >= self._window_n:
+                self._buffer = low[-self._window_n :].copy()
+            else:
+                self._buffer = np.concatenate((self._buffer[low.size :], low))
+            self._filled = min(self._window_n, self._filled + low.size)
+        seconds = x.size / self._rate
+        self._since_update += low.size
+        if self._filled >= self._min_n and (
+            self._since_update >= self._update_n or self.tone_powers is None
+        ):
+            self._since_update = 0
+            self._found = self._strongest_tone()
+        found = self._found if self._filled >= self._min_n else None
+        if found is not None:
+            self._detected = found
+            self._hold = self._hold_s
+        else:
+            self._hold -= seconds
+            if self._hold <= 0.0:
+                self._detected = None
+        return self._detected
+
+    def _strongest_tone(self) -> Optional[float]:
+        """The tone that stands out in the window now, or None."""
+        buf = self._buffer
+        re = np.einsum("ij,j->i", self._cos, buf)
+        im = np.einsum("ij,j->i", self._sin, buf)
+        powers = re * re + im * im
+        self.tone_powers = powers
+        best = int(np.argmax(powers))
+        peak = float(powers[best])
+        others = np.delete(powers, best)
+        # Most of the 50 tones aren't there: the median of the others is
+        # the noise in the CTCSS band.
+        noise = float(np.median(others))
+        if (
+            peak > 1e-18
+            and peak >= self._select * float(np.max(others))
+            and peak >= self._snr * noise
+        ):
+            return float(self._tones[best])
+        return None
+
+
 class NoiseReductionMethod(Enum):
     """Noise reduction algorithms."""
 
@@ -1970,11 +2248,17 @@ class NoiseReductionConfig:
     # Spectral subtraction parameters
     fft_size: int = 1024  # FFT size for spectral analysis
     overlap: float = 0.5  # FFT overlap (0.0-0.9)
-    noise_estimation_frames: int = 10  # Frames for initial noise estimation
+    # Frames before the running noise estimate counts as known
+    # (``noise_estimated``); the estimate itself never relies on them.
+    noise_estimation_frames: int = 10
     subtraction_factor: float = 1.0  # Over-subtraction factor (1.0-3.0)
     floor_factor: float = 0.01  # Spectral floor to prevent musical noise
     # Wiener filter parameters
-    wiener_alpha: float = 0.98  # Noise estimate smoothing
+    wiener_alpha: float = 0.98  # Decision-directed a priori SNR smoothing
+    gain_floor: float = 0.1  # Lowest Wiener gain (0.1 = -20 dB)
+    # Noise tracking (spectral methods): the minimum of the smoothed
+    # spectrum over this window is the noise.
+    noise_window_s: float = 1.5
     # LMS/NLMS parameters
     lms_step_size: float = 0.01  # Adaptation step size (mu)
     lms_filter_length: int = 32  # Adaptive filter length
@@ -2001,12 +2285,35 @@ class NoiseReduction:
     - Median filter: Impulse noise removal
     - Real and complex signal support
 
+    The spectral methods stream: a block at a time gives exactly the output
+    of one long block, ``len(input)`` samples per call, delayed by
+    :attr:`latency_samples` (the FFT size). They use a periodic sqrt-Hann
+    analysis and synthesis window, so with every gain at 1 the output is
+    the input, delayed; there is no division by the window that could blow
+    up the block edges (it used to amplify them 40-100 dB).
+
+    The noise is tracked continuously, by minimum statistics: per bin, the
+    lowest value over :attr:`NoiseReductionConfig.noise_window_s` of the
+    smoothed power spectrum, after a median across neighbouring bins (so a
+    steady tone, which is narrow, is not mistaken for noise), corrected for
+    its bias. :meth:`estimate_noise` sets a fixed noise spectrum instead.
+
     Typical use cases:
     - Improving weak signal reception
     - Reducing background noise in voice
     - Cleaning up noisy data signals
     - Pre-processing before demodulation
     """
+
+    # Minimum statistics: the window is split into this many sub-windows.
+    _SUBWINDOWS = 8
+    # Smoothing of the power spectrum before the minimum is taken.
+    _SMOOTHING = 0.8
+    # The noise is the median of the bins within this many Hz.
+    _MEDIAN_SPAN_HZ = 400.0
+    # The minimum of the smoothed, median-filtered noise spectrum is this
+    # much below its mean (measured on white noise; see the tests).
+    _BIAS = 1.5
 
     def __init__(
         self, sample_rate: float, config: Optional[NoiseReductionConfig] = None
@@ -2021,21 +2328,6 @@ class NoiseReduction:
         self._sample_rate = sample_rate
         self._config = config or NoiseReductionConfig()
 
-        # FFT parameters
-        self._fft_size = self._config.fft_size
-        self._hop_size = int(self._fft_size * (1 - self._config.overlap))
-        self._window = np.hanning(self._fft_size)
-
-        # Noise estimation state
-        self._noise_spectrum: Optional[np.ndarray] = None
-        self._noise_frames_collected = 0
-        self._noise_estimated = False
-
-        # Processing buffers
-        self._input_buffer = np.array([], dtype=np.complex128)
-        self._output_buffer = np.array([], dtype=np.complex128)
-        self._overlap_buffer: np.ndarray = np.zeros(self._fft_size - self._hop_size)
-
         # LMS state
         self._lms_weights = np.zeros(self._config.lms_filter_length)
         self._lms_buffer: np.ndarray = np.zeros(self._config.lms_filter_length)
@@ -2049,13 +2341,17 @@ class NoiseReduction:
             -1.0 / (self._config.gate_release * sample_rate)
         )
 
-        # Wiener state
-        self._wiener_noise_psd: Optional[np.ndarray] = None
-
         # Statistics
         self._input_power = 0.0
         self._output_power = 0.0
         self._noise_reduction_db = 0.0
+
+        # Noise estimate (spectral methods)
+        self._noise_spectrum: Optional[np.ndarray] = None
+        self._wiener_noise_psd: Optional[np.ndarray] = None
+        self._noise_fixed = False
+        self._noise_estimated = False
+        self._setup_stft()
 
     @property
     def sample_rate(self) -> float:
@@ -2077,198 +2373,239 @@ class NoiseReduction:
         """Get estimated noise reduction in dB."""
         return self._noise_reduction_db
 
+    @property
+    def latency_samples(self) -> int:
+        """How many samples the spectral methods delay the signal."""
+        return self._fft_size
+
     def set_config(self, config: NoiseReductionConfig) -> None:
-        """Update configuration."""
+        """Update configuration (the spectral stream starts afresh)."""
         self._config = config
-        self._fft_size = config.fft_size
-        self._hop_size = int(self._fft_size * (1 - config.overlap))
-        self._window = np.hanning(self._fft_size)
+        self._noise_spectrum = None
+        self._wiener_noise_psd = None
+        self._noise_fixed = False
+        self._noise_estimated = False
+        self._setup_stft()
+
+    # -- spectral methods: streaming weighted overlap-add ----------------
+
+    def _setup_stft(self) -> None:
+        """Window, hop and the overlap-add normalization for the config."""
+        size = max(16, int(self._config.fft_size))
+        hop = int(round(size * (1.0 - float(self._config.overlap))))
+        hop = min(max(1, hop), size)
+        self._fft_size = size
+        self._hop_size = hop
+        if hop >= size:
+            window = np.ones(size)
+        else:
+            k = np.arange(size)
+            window = np.sqrt(0.5 - 0.5 * np.cos(2.0 * np.pi * k / size))
+        self._window = window
+        # sum over the overlapping frames of analysis x synthesis window:
+        # constant (1) for hops of size/2, size/4, ...; otherwise divided
+        # out, with a floor so no sample is divided by a tiny number.
+        norm = np.zeros(hop)
+        for start in range(0, size, hop):
+            part = window[start : start + hop] ** 2
+            norm[: len(part)] += part
+        self._norm = np.maximum(norm, 1e-3 * float(np.max(norm)))
+        self._reset_noise_tracking()
+        self.reset_stream()
+
+    def _reset_noise_tracking(self) -> None:
+        self._smoothed: Optional[np.ndarray] = None
+        self._sub_min: Optional[np.ndarray] = None
+        self._sub_count = 0
+        self._minima: list = []
+        self._frames_seen = 0
+        self._prev_gain: Optional[np.ndarray] = None
+        self._prev_snr: Optional[np.ndarray] = None
+        if not self._noise_fixed:
+            self._noise_estimated = False
+
+    def reset_stream(self) -> None:
+        """Start a new stream (after a gap) but keep the noise estimate."""
+        self._stream_complex: Optional[bool] = None
+        self._frame = np.zeros(self._fft_size)
+        self._pending = np.zeros(0)
+        self._acc = np.zeros(self._fft_size)
+        self._out = np.zeros(self._hop_size)
+        self._prev_gain = None
+        self._prev_snr = None
+
+    def _bins(self, complex_input: bool) -> int:
+        return self._fft_size if complex_input else self._fft_size // 2 + 1
+
+    def _forward(self, frames: np.ndarray, complex_input: bool) -> np.ndarray:
+        if complex_input:
+            return np.fft.fft(frames, axis=-1)
+        return np.fft.rfft(frames, axis=-1)
+
+    def _inverse(self, spectra: np.ndarray, complex_input: bool) -> np.ndarray:
+        if complex_input:
+            return np.fft.ifft(spectra, axis=-1)
+        return np.fft.irfft(spectra, n=self._fft_size, axis=-1)
 
     def estimate_noise(self, noise_samples: np.ndarray) -> None:
         """
-        Estimate noise spectrum from a noise-only segment.
+        Set the noise spectrum from a noise-only segment (real audio or
+        complex I/Q); the spectral methods then use it instead of tracking
+        the noise themselves.
 
         Args:
             noise_samples: Samples containing only noise (no signal)
         """
-        # Compute average power spectrum of noise
-        n_frames = len(noise_samples) // self._hop_size
-        if n_frames < 1:
-            return
-
-        noise_psd = np.zeros(self._fft_size // 2 + 1)
-
-        for i in range(n_frames):
-            start = i * self._hop_size
-            end = start + self._fft_size
-            if end > len(noise_samples):
-                break
-
-            frame = noise_samples[start:end]
-            if len(frame) < self._fft_size:
-                frame = np.pad(frame, (0, self._fft_size - len(frame)))
-
-            windowed = frame * self._window
-            spectrum = np.fft.rfft(windowed)
-            noise_psd += np.abs(spectrum) ** 2
-
-        noise_psd /= n_frames
+        x = np.asarray(noise_samples)
+        complex_input = bool(np.iscomplexobj(x))
+        size, hop = self._fft_size, self._hop_size
+        if x.size < size:
+            x = np.concatenate((x, np.zeros(size - x.size, dtype=x.dtype)))
+        frames = np.lib.stride_tricks.sliding_window_view(x, size)[::hop]
+        spectra = self._forward(frames * self._window, complex_input)
+        noise_psd = np.mean(np.abs(spectra) ** 2, axis=0)
         self._noise_spectrum = np.sqrt(noise_psd)
         self._wiener_noise_psd = noise_psd
+        self._noise_fixed = True
         self._noise_estimated = True
 
-    def _stft_process(self, samples, gain_fn):
-        """
-        Short-time Fourier transform processing with weighted overlap-add.
+    def _track_noise(self, power: np.ndarray) -> np.ndarray:
+        """Update the running noise estimate with one frame's power
+        spectrum and return it (per bin)."""
+        if self._smoothed is None or self._smoothed.shape != power.shape:
+            self._smoothed = power.copy()
+            self._sub_min = None
+            self._minima = []
+            self._sub_count = 0
+        else:
+            a = self._SMOOTHING
+            self._smoothed = a * self._smoothed + (1.0 - a) * power
+        bin_hz = self._sample_rate / self._fft_size
+        half = max(1, int(round(self._MEDIAN_SPAN_HZ / max(bin_hz, 1e-9))))
+        padded = np.pad(self._smoothed, half, mode="edge")
+        windows = np.lib.stride_tricks.sliding_window_view(padded, 2 * half + 1)
+        # (The window is odd: its median is the middle element.)
+        local = np.partition(windows, half, axis=1)[:, half]
+        if self._sub_min is None:
+            self._sub_min = local.copy()
+        else:
+            self._sub_min = np.minimum(self._sub_min, local)
+        self._sub_count += 1
+        frame_s = self._hop_size / self._sample_rate
+        window_frames = max(
+            self._SUBWINDOWS, int(self._config.noise_window_s / max(frame_s, 1e-9))
+        )
+        if self._sub_count >= max(1, window_frames // self._SUBWINDOWS):
+            self._minima.append(self._sub_min)
+            if len(self._minima) > self._SUBWINDOWS:
+                self._minima.pop(0)
+            self._sub_min = local.copy()
+            self._sub_count = 0
+        lowest = self._sub_min
+        for minimum in self._minima:
+            lowest = np.minimum(lowest, minimum)
+        noise = self._BIAS * lowest
+        self._frames_seen += 1
+        if self._frames_seen >= self._config.noise_estimation_frames:
+            self._noise_estimated = True
+        return noise
 
-        Runs ``gain_fn(spectrum) -> cleaned_spectrum`` on each windowed frame
-        and reconstructs the signal with a proper analysis/synthesis window so
-        the output has exactly ``len(samples)`` samples. Works for both real
-        audio and complex I/Q (the previous rfft-based loop crashed on complex
-        input and returned fewer samples than it was given).
-        """
+    def _frame_gain(self, power: np.ndarray, noise: np.ndarray) -> np.ndarray:
+        """Spectral gain (0..1 per bin) for one frame."""
+        tiny = 1e-30
+        if self._config.method == NoiseReductionMethod.WIENER:
+            # Decision-directed a priori SNR (Ephraim-Malah): smooth gains,
+            # little musical noise.
+            gamma = power / np.maximum(noise, tiny)
+            ml = np.maximum(gamma - 1.0, 0.0)
+            if self._prev_gain is None or self._prev_snr is None:
+                xi = ml
+            else:
+                a = self._config.wiener_alpha
+                xi = a * (self._prev_gain**2) * self._prev_snr + (1.0 - a) * ml
+            gain = xi / (1.0 + xi)
+            gain = np.clip(gain, self._config.gain_floor, 1.0)
+            self._prev_gain = gain
+            self._prev_snr = gamma
+            return gain
+        # Magnitude spectral subtraction with over-subtraction and a floor.
+        ratio = np.sqrt(noise / np.maximum(power, tiny))
+        gain = 1.0 - self._config.subtraction_factor * ratio
+        return np.clip(gain, self._config.floor_factor, 1.0)
+
+    def _stft_process(self, samples: np.ndarray) -> np.ndarray:
+        """Run the spectral method on a block: exactly ``len(samples)``
+        out, continuing the stream (see the class notes)."""
         x = np.asarray(samples)
-        is_complex = np.iscomplexobj(x)
+        complex_input = bool(np.iscomplexobj(x))
+        dtype = np.complex128 if complex_input else np.float64
+        if self._stream_complex is not None and self._stream_complex != complex_input:
+            self.reset_stream()
+        if self._stream_complex is None:
+            self._stream_complex = complex_input
+            self._frame = np.zeros(self._fft_size, dtype=dtype)
+            self._pending = np.zeros(0, dtype=dtype)
+            self._acc = np.zeros(self._fft_size, dtype=dtype)
+            self._out = np.zeros(self._hop_size, dtype=dtype)
         n = int(x.size)
-        out_dtype = np.complex128 if is_complex else np.float64
         if n == 0:
-            return np.zeros(0, dtype=out_dtype)
-
-        fft_size = self._fft_size
-        hop = self._hop_size
-        win = self._window
-        buf = x.astype(out_dtype)
-
-        # Pad so the frames tile the whole signal (at least one full frame,
-        # and a whole number of hops past the start of the last frame).
-        if n < fft_size:
-            pad = fft_size - n
-        else:
-            rem = (n - fft_size) % hop
-            pad = (hop - rem) if rem else 0
-        if pad:
-            buf = np.concatenate([buf, np.zeros(pad, dtype=out_dtype)])
-
-        out = np.zeros(buf.size, dtype=out_dtype)
-        norm = np.zeros(buf.size, dtype=np.float64)
-
-        if is_complex:
-
-            def fwd(w):
-                return np.fft.fft(w)
-
-            def inv(s):
-                return np.fft.ifft(s)
-
-        else:
-
-            def fwd(w):
-                return np.fft.rfft(w)
-
-            def inv(s):
-                return np.fft.irfft(s, n=fft_size)
-
-        for i in range(0, buf.size - fft_size + 1, hop):
-            frame = buf[i : i + fft_size]
-            windowed = frame * win
-            cleaned = gain_fn(fwd(windowed))
-            rec = inv(cleaned)
-            if not is_complex:
-                rec = np.real(rec)
-            contrib = (rec * win).astype(out.dtype)
-            # Explicit add (not +=): the in-place operator's stub rejects a
-            # float contribution into a complex slice under some numpy versions.
-            out[i : i + fft_size] = out[i : i + fft_size] + contrib
-            norm[i : i + fft_size] = norm[i : i + fft_size] + win**2
-
-        norm[norm < 1e-12] = 1.0
-        normalized = out / norm
-        result = normalized[:n]
-        if is_complex:
-            return result.astype(np.complex128)
-        return np.real(result).astype(np.float64)
+            return np.zeros(0, dtype=dtype)
+        size, hop = self._fft_size, self._hop_size
+        data = np.concatenate((self._pending, x.astype(dtype, copy=False)))
+        count = len(data) // hop
+        produced = [self._out]
+        if count:
+            tail = self._frame[hop:] if hop < size else np.zeros(0, dtype=dtype)
+            stream = np.concatenate((tail, data[: count * hop]))
+            frames = np.lib.stride_tricks.sliding_window_view(stream, size)[::hop]
+            frames = frames[:count]
+            spectra = self._forward(frames * self._window, complex_input)
+            power = np.abs(spectra) ** 2
+            noise_fixed = self._wiener_noise_psd if self._noise_fixed else None
+            if noise_fixed is not None and noise_fixed.shape != power.shape[1:]:
+                noise_fixed = None  # estimated on the other kind of input
+            for i in range(count):
+                if noise_fixed is not None:
+                    noise = noise_fixed
+                else:
+                    noise = self._track_noise(power[i])
+                spectra[i] *= self._frame_gain(power[i], noise)
+            if noise_fixed is None:
+                self._wiener_noise_psd = noise
+                self._noise_spectrum = np.sqrt(noise)
+            rebuilt = self._inverse(spectra, complex_input) * self._window
+            out = np.empty(count * hop, dtype=dtype)
+            acc = self._acc
+            for i in range(count):
+                acc = acc + rebuilt[i]
+                out[i * hop : (i + 1) * hop] = acc[:hop] / self._norm
+                acc = np.concatenate((acc[hop:], np.zeros(hop, dtype=dtype)))
+            self._acc = acc
+            self._frame = stream[len(stream) - size :].copy()
+            produced.append(out)
+        self._pending = data[count * hop :].copy()
+        available = np.concatenate(produced)
+        self._out = available[n:].copy()
+        return available[:n]
 
     def _spectral_subtraction(self, samples: np.ndarray) -> np.ndarray:
         """
         Spectral subtraction noise reduction.
 
-        Estimates the noise spectrum and subtracts it from the signal
-        spectrum, with over-subtraction and a spectral floor to limit musical
-        noise. Uses weighted overlap-add so the output length matches the
-        input and complex I/Q is handled without crashing.
+        Subtracts the noise magnitude (times ``subtraction_factor``) from
+        each bin, down to ``floor_factor`` of it (which limits musical
+        noise). Streaming, see :meth:`_stft_process`.
         """
-
-        def gain_fn(spectrum):
-            magnitude = np.abs(spectrum)
-            phase = np.angle(spectrum)
-
-            # A running noise estimate stored per shape (real rfft bins differ
-            # from complex fft bins); reset if the shape changed.
-            if (
-                self._noise_spectrum is not None
-                and self._noise_spectrum.shape != magnitude.shape
-            ):
-                self._noise_spectrum = None
-                self._noise_estimated = False
-                self._noise_frames_collected = 0
-
-            if not self._noise_estimated:
-                if self._noise_spectrum is None:
-                    self._noise_spectrum = magnitude.copy()
-                else:
-                    alpha = 1.0 / (self._noise_frames_collected + 1)
-                    self._noise_spectrum = (
-                        1 - alpha
-                    ) * self._noise_spectrum + alpha * magnitude
-                self._noise_frames_collected += 1
-                if self._noise_frames_collected >= self._config.noise_estimation_frames:
-                    self._noise_estimated = True
-
-            if self._noise_estimated and self._noise_spectrum is not None:
-                subtracted = (
-                    magnitude - self._config.subtraction_factor * self._noise_spectrum
-                )
-                floor = self._config.floor_factor * magnitude
-                subtracted = np.maximum(subtracted, floor)
-                return subtracted * np.exp(1j * phase)
-            return spectrum
-
-        return self._stft_process(samples, gain_fn)
+        return self._stft_process(samples)
 
     def _wiener_filter(self, samples: np.ndarray) -> np.ndarray:
         """
         Wiener filter noise reduction.
 
-        Optimal linear filter that minimises mean-square error. Uses weighted
-        overlap-add so the output length matches the input and complex I/Q is
-        handled without crashing.
+        Gains from the decision-directed a priori SNR, no lower than
+        ``gain_floor``. Streaming, see :meth:`_stft_process`.
         """
-
-        def gain_fn(spectrum):
-            power = np.abs(spectrum) ** 2
-
-            if (
-                self._wiener_noise_psd is not None
-                and self._wiener_noise_psd.shape != power.shape
-            ):
-                self._wiener_noise_psd = None
-            if self._wiener_noise_psd is None:
-                self._wiener_noise_psd = power.copy()
-            wiener_noise = self._wiener_noise_psd
-
-            signal_power = float(np.mean(power))
-            noise_power = float(np.mean(wiener_noise))
-            if signal_power < noise_power * 1.5:  # likely noise-only frame
-                a = self._config.wiener_alpha
-                self._wiener_noise_psd = a * wiener_noise + (1 - a) * power
-                wiener_noise = self._wiener_noise_psd
-
-            snr = power / (wiener_noise + 1e-10)
-            gain = np.maximum(0.0, 1 - 1 / (snr + 1e-10))
-            gain = np.sqrt(gain)
-            return spectrum * gain
-
-        return self._stft_process(samples, gain_fn)
+        return self._stft_process(samples)
 
     def _lms_filter(self, samples: np.ndarray, normalized: bool = False) -> np.ndarray:
         """
@@ -2459,17 +2796,16 @@ class NoiseReduction:
         }
 
     def reset(self) -> None:
-        """Reset noise reduction state."""
+        """Reset noise reduction state (the noise estimate too)."""
         self._noise_spectrum = None
-        self._noise_frames_collected = 0
+        self._noise_fixed = False
         self._noise_estimated = False
-        self._input_buffer = np.array([], dtype=np.complex128)
-        self._output_buffer = np.array([], dtype=np.complex128)
-        self._overlap_buffer = np.zeros(self._fft_size - self._hop_size)
         self._lms_weights = np.zeros(self._config.lms_filter_length)
         self._lms_buffer = np.zeros(self._config.lms_filter_length)
         self._gate_level = 0.0
         self._wiener_noise_psd = None
+        self._reset_noise_tracking()
+        self.reset_stream()
 
 
 class SpectralSubtraction(NoiseReduction):

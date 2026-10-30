@@ -258,13 +258,16 @@ class TestSpectrumPassband(_PlotCase):
         stub = mock.Mock()
         stub._spectrum = w
         stub._control_panel._demod_combo.currentText.return_value = "USB"
-        stub._channel_bandwidth.return_value = 25e3
+        # In USB the Bandwidth is the SSB filter width (RX-11): 2.7 kHz
+        # keeps 200-2900 Hz.
+        stub._channel_bandwidth.return_value = 2.7e3
         stub._device_sample_rate.return_value = 2.4e6
         stub._vfo_offset_hz.return_value = 0.0
         stub._lo_frequency.return_value = 100e6
         main_window.SDRMainWindow._update_passband(stub)
-        self.assertEqual(w.passband(), (0.0, 2800.0))
+        self.assertEqual(w.passband(), (200.0, 2900.0))
         stub._control_panel._demod_combo.currentText.return_value = "FM"
+        stub._channel_bandwidth.return_value = 25e3
         main_window.SDRMainWindow._update_passband(stub)
         self.assertEqual(w.passband(), (-12500.0, 12500.0))
         self.assertEqual(w.tuned_frequency(), 100e6)

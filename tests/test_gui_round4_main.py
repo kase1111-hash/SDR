@@ -609,18 +609,20 @@ class TestTuningBandwidth(_WindowTestCase):
         self.assertEqual(self.win._control_panel.get_demod_mode(), "AM")
 
     def test_bookmark_modes(self):
+        # The Bandwidth choices depend on the mode (RX-11, UX-B02): FM's
+        # start at 12.5 kHz, and SSB and CW keep their own filter (the
+        # width last used with them, here their defaults).
         cases = (
             ("FM", "75 kHz", "200 kHz"),
             ("FM", "25 kHz", "50 kHz"),
             ("FM", "12.5 kHz", "25 kHz"),
-            ("FM", "2.5 kHz", "10 kHz"),
+            ("FM", "2.5 kHz", "12.5 kHz"),
             ("AM", "", "10 kHz"),
-            ("USB", "", "10 kHz"),
-            ("LSB", "", "10 kHz"),
-            ("CW", "", "10 kHz"),
+            ("USB", "", "2.7 kHz"),
+            ("LSB", "", "2.7 kHz"),
+            ("CW", "", "500 Hz"),
         )
         for mode, deviation, expected in cases:
-            self.win._control_panel._bw_combo.setCurrentText("2 MHz")
             self.win._on_bookmark_tune(146.52e6, "Test", mode, deviation)
             self.assertEqual(self.bandwidth(), expected, (mode, deviation))
 
@@ -630,7 +632,9 @@ class TestTuningBandwidth(_WindowTestCase):
         self.assertEqual(self.bandwidth(), "200 kHz")
 
     def test_no_mode_or_iq_keeps_the_bandwidth(self):
-        self.win._control_panel._bw_combo.setCurrentText("2 MHz")
+        # (2 MHz is one of I/Q mode's choices; the others have their own.)
+        self.win._set_demod_mode("None (I/Q)", bandwidth="2 MHz")
+        self.assertEqual(self.bandwidth(), "2 MHz")
         self.win._on_bookmark_tune(433.92e6, "Old bookmark", "", "")
         self.assertEqual(self.bandwidth(), "2 MHz")
         self.win._on_bookmark_tune(1090e6, "ADS-B", "None (I/Q)", "")
@@ -746,9 +750,10 @@ class TestPassbandOnBothPlots(_WindowTestCase):
         self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
         self.assertEqual(self.win._spectrum._passband, (-12500.0, 12500.0))
         self.assertEqual(self.win._waterfall._passband, (-12500.0, 12500.0))
+        # USB's default 2.7 kHz filter keeps 200-2900 Hz (RX-11, RX-12).
         self.win._set_demod_mode("USB")
-        self.assertEqual(self.win._waterfall._passband, (0.0, 2800.0))
-        self.assertEqual(self.win._spectrum._passband, (0.0, 2800.0))
+        self.assertEqual(self.win._waterfall._passband, (200.0, 2900.0))
+        self.assertEqual(self.win._spectrum._passband, (200.0, 2900.0))
 
 
 # ---------------------------------------------------------------------------

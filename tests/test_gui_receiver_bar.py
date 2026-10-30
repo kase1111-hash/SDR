@@ -87,8 +87,11 @@ class TestReceiverBar(_WindowTestCase):
         bar_combo.setCurrentText("25 kHz")
         self.assertEqual(panel_combo.currentText(), "25 kHz")
         self.assertEqual(self.win._channel_bandwidth(), 25e3)
-        panel_combo.setCurrentText("2.4 MHz")
-        self.assertEqual(bar_combo.currentText(), "2.4 MHz")
+        # The widest choice the current mode offers (the list follows the
+        # mode, so a fixed text such as "2.4 MHz" may not be in it).
+        widest = panel_combo.itemText(panel_combo.count() - 1)
+        panel_combo.setCurrentText(widest)
+        self.assertEqual(bar_combo.currentText(), widest)
 
     def test_filter_copies_the_bandwidth_items_whenever_they_change(self):
         panel_combo = self.win._control_panel._bw_combo

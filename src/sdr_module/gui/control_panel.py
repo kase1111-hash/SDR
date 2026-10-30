@@ -37,6 +37,7 @@ try:
         QScrollArea,
         QSizePolicy,
         QSlider,
+        QSpinBox,
         QStyle,
         QVBoxLayout,
         QWidget,
@@ -54,7 +55,15 @@ from ..core.frequency_manager import (
     LicenseClass,
     get_frequency_manager,
 )
+from ..dsp.filters import CTCSS_FREQUENCIES, ctcss_label
 from ..utils.tooltips import get_short_tip
+from .audio_chain import (
+    AGC_SPEED_LABELS,
+    CW_PITCH_RANGE,
+    DEFAULT_AGC_SPEED,
+    DEFAULT_CW_PITCH_HZ,
+    NOISE_REDUCTION_LEVELS,
+)
 from .settings_store import DEFAULT_FREQUENCY_HZ
 from .themes import set_role, set_tone
 from .tuning import (
@@ -96,6 +105,7 @@ _GROUPED_UNITS = ("Hz", "kHz")
 QUICK_TUNE_STEPS = (-1e6, -100e3, -10e3, 10e3, 100e3, 1e6)
 _MINUS = "−"  # typographic minus for the step buttons' labels
 
+# The channel widths of "None (I/Q)" mode (the wide list).
 BANDWIDTH_OPTIONS = (
     "10 kHz",
     "25 kHz",
@@ -109,6 +119,62 @@ BANDWIDTH_OPTIONS = (
 )
 DEFAULT_BANDWIDTH = "200 kHz"
 
+# The Bandwidth choices of each mode: the channel for AM and FM, the filter
+# for SSB and CW (what is heard, and what LEVEL, the squelch and the
+# S-meter measure).
+_SSB_WIDTHS = ("1.8 kHz", "2.4 kHz", "2.7 kHz", "3.0 kHz", "3.6 kHz")
+MODE_BANDWIDTHS: Dict[str, Tuple[str, ...]] = {
+    "None (I/Q)": BANDWIDTH_OPTIONS,
+    "AM": ("5 kHz", "6 kHz", "8 kHz", "10 kHz", "12 kHz", "15 kHz"),
+    "FM": ("12.5 kHz", "25 kHz", "50 kHz", "100 kHz", "200 kHz"),
+    "USB": _SSB_WIDTHS,
+    "LSB": _SSB_WIDTHS,
+    "CW": ("100 Hz", "250 Hz", "500 Hz", "1 kHz"),
+}
+
+# FM is two different things: broadcast stations (wide, 75 kHz deviation)
+# in the broadcast band, voice and data (narrow) elsewhere. Picking FM
+# uses the settings of the one the tuned frequency is in.
+FM_BROADCAST_PROFILE = "FM broadcast"
+FM_BROADCAST_BAND = (87.5e6, 108e6)
+
+# Bandwidth and FM deviation a mode starts with, until the user changes
+# them (then they are remembered per mode): by filter profile.
+MODE_FILTER_DEFAULTS: Dict[str, Tuple[str, str]] = {
+    "None (I/Q)": (DEFAULT_BANDWIDTH, ""),
+    "AM": ("10 kHz", ""),
+    "FM": ("25 kHz", "5 kHz"),
+    FM_BROADCAST_PROFILE: ("200 kHz", "75 kHz"),
+    "USB": ("2.7 kHz", ""),
+    "LSB": ("2.7 kHz", ""),
+    "CW": ("500 Hz", ""),
+}
+
+
+def bandwidth_options(mode: str) -> Tuple[str, ...]:
+    """The Bandwidth choices for ``mode`` (the wide list for I/Q)."""
+    return MODE_BANDWIDTHS.get(mode, BANDWIDTH_OPTIONS)
+
+
+def filter_profile(mode: str, freq_hz: float) -> str:
+    """Which remembered filter settings ``mode`` uses at ``freq_hz``:
+    the mode itself, or :data:`FM_BROADCAST_PROFILE` for FM in the
+    broadcast band."""
+    low, high = FM_BROADCAST_BAND
+    if mode == "FM" and low <= float(freq_hz) <= high:
+        return FM_BROADCAST_PROFILE
+    return mode
+
+
+def closest_bandwidth(options: Tuple[str, ...], bw_hz: float) -> str:
+    """The narrowest of ``options`` that holds ``bw_hz``, else the widest."""
+    values = [(_parse_hz(text), text) for text in options]
+    if not values:
+        return ""
+    fitting = [v for v in values if v[0] >= float(bw_hz) * (1 - 1e-9)]
+    return min(fitting)[1] if fitting else max(values)[1]
+
+
 # Item text (read by the main window), item tooltip key.
 DEMOD_MODES: Tuple[Tuple[str, str], ...] = (
     ("None (I/Q)", ""),
@@ -119,13 +185,32 @@ DEMOD_MODES: Tuple[Tuple[str, str], ...] = (
     ("CW", ""),
 )
 
-FM_DEVIATIONS: Tuple[Tuple[str, str], ...] = (
-    ("5 kHz", "Narrowband FM: amateur, marine, NOAA weather, PMR"),
-    ("12.5 kHz", "Mid deviation"),
-    ("25 kHz", "Wide deviation (e.g. weather-satellite APT)"),
-    ("75 kHz", "Broadcast (wideband) FM"),
+# (value, item text, item tooltip). The value ("75 kHz") is what settings,
+# bookmarks and presets store; the item says what it is for.
+FM_DEVIATIONS: Tuple[Tuple[str, str, str], ...] = (
+    (
+        "2.5 kHz",
+        "2.5 kHz (narrow, 12.5 kHz channels)",
+        "Narrow FM on 12.5 kHz channels: PMR446, business and public radio",
+    ),
+    (
+        "5 kHz",
+        "5 kHz (narrow voice)",
+        "Narrowband FM voice on 25 kHz channels: amateur 2 m and 70 cm, NOAA "
+        "weather, marine",
+    ),
+    ("12.5 kHz", "12.5 kHz (wide voice)", "Wide FM voice and data links"),
+    (
+        "25 kHz",
+        "25 kHz (satellite APT)",
+        "Wide FM: NOAA weather-satellite APT, analog TV sound",
+    ),
+    ("75 kHz", "75 kHz (broadcast)", "Broadcast FM radio (87.5-108 MHz)"),
 )
 DEFAULT_FM_DEVIATION = "25 kHz"
+
+# Squelch threshold range (dBFS) of the slider and the toolbar meter.
+SQUELCH_RANGE = (-120, 0)
 
 # Named like File > Save Recording's filters, which preselect the choice.
 RECORDING_FORMATS = (
@@ -404,6 +489,46 @@ class _FrequencySpinBox(QDoubleSpinBox if HAS_PYQT6 else object):
             self.selectAll()
 
 
+class _ValueComboBox(QComboBox if HAS_PYQT6 else object):
+    """A combo box whose items show a label for a plain value, e.g.
+    "75 kHz (broadcast)" for "75 kHz".
+
+    Python code works with the value: :meth:`currentText` returns it, and
+    :meth:`findText` and :meth:`setCurrentText` accept the value (or the
+    label), so settings, bookmarks and presets keep storing "75 kHz".
+    """
+
+    def add_value(self, value: str, label: str, tip: str = "") -> None:
+        self.addItem(label, value)
+        if tip:
+            self.setItemData(self.count() - 1, tip, Qt.ItemDataRole.ToolTipRole)
+
+    def current_label(self) -> str:
+        """The text shown, e.g. ``"75 kHz (broadcast)"``."""
+        return super().currentText()
+
+    def currentText(self) -> str:  # noqa: N802 (Qt API)
+        value = self.currentData()
+        return value if isinstance(value, str) else super().currentText()
+
+    def findText(  # noqa: N802 (Qt API)
+        self,
+        text: str,
+        flags: "Qt.MatchFlag" = (
+            Qt.MatchFlag.MatchExactly | Qt.MatchFlag.MatchCaseSensitive
+            if HAS_PYQT6
+            else None
+        ),
+    ) -> int:
+        index = self.findData(text)
+        return index if index >= 0 else super().findText(text, flags)
+
+    def setCurrentText(self, text: str) -> None:  # noqa: N802 (Qt API)
+        index = self.findText(text)
+        if index >= 0:
+            self.setCurrentIndex(index)
+
+
 class FrequencyInput(QWidget if HAS_PYQT6 else object):
     """Frequency input widget with unit selection.
 
@@ -610,6 +735,18 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         license_changed = pyqtSignal(object)  # LicenseClass
         squelch_changed = pyqtSignal(float)  # dB
         agc_changed = pyqtSignal(bool)
+        # Squelch on/off and Auto (the threshold follows the noise).
+        squelch_enabled_changed = pyqtSignal(bool)
+        squelch_auto_changed = pyqtSignal(bool)
+        # The remembered Bandwidth / FM deviation of a mode changed.
+        filter_memory_changed = pyqtSignal()
+        # The Bandwidth choices were replaced (a mode with other widths).
+        bandwidth_options_changed = pyqtSignal()
+        cw_pitch_changed = pyqtSignal(int)  # Hz
+        noise_reduction_changed = pyqtSignal(str)  # off / light / strong
+        audio_agc_changed = pyqtSignal(str)  # off / fast / medium / slow
+        tone_squelch_changed = pyqtSignal(float)  # Hz, 0 = off
+        iq_options_changed = pyqtSignal(bool, bool)  # remove DC, balance I/Q
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -617,10 +754,18 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
         super().__init__(parent)
 
-        self._form_labels: List[QLabel] = []
+        self._form_labels: List[QWidget] = []
         self._wheel_guard = _WheelGuard(self)
         # A recording is "armed" while it waits for the receiver to start.
         self._armed = False
+        # Bandwidth and FM deviation last used with each filter profile
+        # (see filter_profile), and whether a mode change is applying them.
+        self._filter_memory: Dict[str, Dict[str, str]] = {}
+        self._applying_filter = False
+        # The squelch slider shows the Auto threshold without emitting; a
+        # threshold set by hand turns Auto off (and is emitted once).
+        self._following_auto = False
+        self._manual_threshold = False
         self._setup_ui()
 
     # ------------------------------------------------------------------
@@ -654,6 +799,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         layout.addWidget(self._build_frequency_group())
         layout.addWidget(self._build_presets_group())
         layout.addWidget(self._build_demod_group())
+        layout.addWidget(self._build_audio_group())
         layout.addWidget(self._build_receiver_group())
         layout.addWidget(self._build_recording_group())
         layout.addWidget(self._build_license_group())
@@ -668,6 +814,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._populate_preset_categories()
         self._sync_license_combo()
         self._update_fm_dev_enabled()
+        self._update_mode_controls()
         self._update_record_controls(False)
 
     def minimumSizeHint(self) -> "QSize":  # noqa: N802 (Qt API)
@@ -858,6 +1005,29 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._bw_combo.setToolTip(get_short_tip("bandwidth"))
         self._bw_combo.currentTextChanged.connect(self._on_bandwidth_changed)
         self._add_row(form, "Bandwidth:", self._bw_combo)
+
+        # Corrections of the raw samples (off by default).
+        iq_row = QWidget()
+        row = QHBoxLayout(iq_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(12)
+        self._dc_check = QCheckBox("Remove DC spike")
+        self._dc_check.setToolTip(
+            "Removes the spike most SDRs show at the center of the span (the "
+            "tuner's own leakage). It also removes a carrier exactly at the "
+            "center, so leave it off for an AM station tuned there."
+        )
+        self._iq_check = QCheckBox("Balance I/Q")
+        self._iq_check.setToolTip(
+            "Measures and corrects the I/Q gain and phase error, which shows "
+            "as faint mirror images of strong signals on the other side of "
+            "the center."
+        )
+        for check in (self._dc_check, self._iq_check):
+            check.toggled.connect(self._on_iq_options_changed)
+            row.addWidget(check)
+        row.addStretch(1)
+        form.addRow(iq_row)  # full width: the two say what they do
         return group
 
     # -- Demodulation ----------------------------------------------------
@@ -883,32 +1053,110 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._demod_combo.currentTextChanged.connect(self._on_demod_changed)
         self._add_row(form, "Mode:", self._demod_combo)
 
-        self._fm_dev_combo = self._shrinkable_combo(QComboBox(), 6)
-        for index, (text, tip) in enumerate(FM_DEVIATIONS):
-            self._fm_dev_combo.addItem(text)
-            self._fm_dev_combo.setItemData(index, tip, Qt.ItemDataRole.ToolTipRole)
+        self._fm_dev_combo = self._shrinkable_combo(_ValueComboBox(), 6)
+        for value, text, tip in FM_DEVIATIONS:
+            self._fm_dev_combo.add_value(value, text, tip)
         self._fm_dev_combo.setCurrentText(DEFAULT_FM_DEVIATION)
+        self._fm_dev_combo.currentIndexChanged.connect(self._on_fm_deviation_changed)
         self._add_row(form, "FM deviation:", self._fm_dev_combo)
 
+        # The CW beat note: only shown in CW.
+        self._cw_pitch_spin = QSpinBox()
+        self._cw_pitch_spin.setRange(*CW_PITCH_RANGE)
+        self._cw_pitch_spin.setSingleStep(10)
+        self._cw_pitch_spin.setValue(DEFAULT_CW_PITCH_HZ)
+        self._cw_pitch_spin.setSuffix(" Hz")
+        self._cw_pitch_spin.setToolTip(
+            "Pitch of the CW tone you hear: the carrier comes out at this "
+            "audio frequency (400-1000 Hz)."
+        )
+        self._cw_pitch_spin.setAccessibleName("CW pitch")
+        self._cw_pitch_spin.valueChanged.connect(self.cw_pitch_changed)
+        self._add_row(form, "CW pitch:", self._cw_pitch_spin)
+        self._demod_form = form
+
+        # Squelch: the row's label is its on/off switch; Auto follows the
+        # channel's noise; the slider is the threshold (and shows the Auto
+        # one while Auto is on).
+        self._squelch_check = QCheckBox("Squelch:")
+        self._squelch_check.setChecked(True)
+        self._squelch_check.setToolTip(
+            "Squelch on: the audio is muted while the tuned channel is "
+            "quieter than the threshold. Off: everything plays, noise too."
+        )
+        self._squelch_check.toggled.connect(self._on_squelch_enabled)
         squelch_row = QWidget()
         row = QHBoxLayout(squelch_row)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
+        self._squelch_auto = QCheckBox("Auto")
+        self._squelch_auto.setChecked(True)
+        self._squelch_auto.setToolTip(
+            "Sets the threshold a little (7 dB) above the channel's noise and "
+            "keeps it there when the gain, the AGC or the Bandwidth change. "
+            "Moving the slider sets it by hand instead."
+        )
+        self._squelch_auto.toggled.connect(self._on_squelch_auto)
+        row.addWidget(self._squelch_auto)
         self._squelch_slider = QSlider(Qt.Orientation.Horizontal)
-        self._squelch_slider.setRange(-120, 0)
+        self._squelch_slider.setRange(*SQUELCH_RANGE)
         self._squelch_slider.setValue(-80)
         self._squelch_slider.setPageStep(5)
         self._squelch_slider.setToolTip(
             "Mutes audio while the tuned channel's level is below this "
-            "threshold (dBFS). The LEVEL readout in the toolbar shows that "
-            "level."
+            "threshold (dBFS). The LEVEL meter in the toolbar shows that "
+            "level and this threshold; you can also drag it there."
         )
         self._squelch_slider.setAccessibleName("Squelch threshold")
         self._squelch_slider.valueChanged.connect(self._on_squelch_changed)
         row.addWidget(self._squelch_slider, 1)
         self._squelch_label = self._value_label("-80 dBFS", _VALUE_LABEL_WIDEST)
         row.addWidget(self._squelch_label)
-        self._add_row(form, "Squelch:", squelch_row).setBuddy(self._squelch_slider)
+        form.addRow(self._squelch_check, squelch_row)
+        self._form_labels.append(self._squelch_check)
+        return group
+
+    # -- Audio -----------------------------------------------------------
+
+    def _build_audio_group(self) -> "QGroupBox":
+        group = QGroupBox("Audio")
+        form = self._make_form(group)
+
+        self._nr_combo = self._shrinkable_combo(_ValueComboBox(), 6)
+        for key, text, tip in NOISE_REDUCTION_LEVELS:
+            self._nr_combo.add_value(key, text, tip)
+        self._nr_combo.setToolTip(
+            "Reduces steady hiss in the audio. It learns the noise by "
+            "itself; Strong removes more but can make voices sound watery."
+        )
+        self._nr_combo.currentIndexChanged.connect(
+            lambda _i: self.noise_reduction_changed.emit(self._nr_combo.currentText())
+        )
+        self._add_row(form, "Noise reduction:", self._nr_combo)
+
+        self._audio_agc_combo = self._shrinkable_combo(_ValueComboBox(), 6)
+        for key, text, tip in AGC_SPEED_LABELS:
+            self._audio_agc_combo.add_value(key, text, tip)
+        self._audio_agc_combo.setCurrentText(DEFAULT_AGC_SPEED)
+        self._audio_agc_combo.currentIndexChanged.connect(
+            lambda _i: self.audio_agc_changed.emit(self._audio_agc_combo.currentText())
+        )
+        self._add_row(form, "Audio AGC:", self._audio_agc_combo)
+
+        self._tone_combo = self._shrinkable_combo(_ValueComboBox(), 6)
+        self._tone_combo.add_value("off", "Off", "Plays whatever is on the channel")
+        for freq in CTCSS_FREQUENCIES:
+            self._tone_combo.add_value(f"{freq:.1f}", ctcss_label(freq))
+        self._tone_combo.setAccessibleName("Tone squelch")
+        self._tone_combo.currentIndexChanged.connect(self._on_tone_changed)
+        self._add_row(form, "Tone squelch:", self._tone_combo)
+
+        # The CTCSS tone the station sends (FM only, like the tone squelch).
+        self._tone_heard = QLabel("—")
+        self._tone_heard.setAccessibleName("Tone heard")
+        self._add_row(form, "Tone heard:", self._tone_heard)
+        self._audio_form = form
+        self.set_detected_tone(None)
         return group
 
     # -- Recording -------------------------------------------------------
@@ -1057,26 +1305,177 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._gain_slider.setValue(int(round(gain_db)))
 
     def _on_bandwidth_changed(self, text: str):
-        """Handle bandwidth change."""
+        """Handle bandwidth change (remembered for the mode)."""
+        if not text or self._applying_filter:
+            return
+        self._remember_filter("width", text)
+        self.bandwidth_changed.emit(_parse_hz(text))
+
+    # ------------------------------------------------------------------
+    # Mode-dependent filter widths
+    # ------------------------------------------------------------------
+
+    def _profile(self, mode: Optional[str] = None) -> str:
+        mode = self._demod_combo.currentText() if mode is None else mode
+        return filter_profile(mode, self._freq_input.get_frequency())
+
+    def _remember_filter(self, key: str, value: str) -> None:
+        if not value:
+            return
+        memory = self._filter_memory.setdefault(self._profile(), {})
+        if memory.get(key) != value:
+            memory[key] = value
+            self.filter_memory_changed.emit()
+
+    def filter_memory(self) -> Dict[str, Dict[str, str]]:
+        """The Bandwidth and FM deviation last used with each filter
+        profile (a mode, or "FM broadcast"), for saving."""
+        return {k: dict(v) for k, v in self._filter_memory.items()}
+
+    def set_filter_memory(self, memory: Dict[str, Dict[str, str]]) -> None:
+        """Restore :meth:`filter_memory` (ignores what doesn't fit)."""
+        self._filter_memory = {}
+        for profile, values in dict(memory or {}).items():
+            if profile not in MODE_FILTER_DEFAULTS or not isinstance(values, dict):
+                continue
+            mode = "FM" if profile == FM_BROADCAST_PROFILE else profile
+            kept: Dict[str, str] = {}
+            width = values.get("width")
+            if isinstance(width, str) and width in bandwidth_options(mode):
+                kept["width"] = width
+            deviation = values.get("deviation")
+            if (
+                isinstance(deviation, str)
+                and self._fm_dev_combo.findText(deviation) >= 0
+            ):
+                kept["deviation"] = deviation
+            if kept:
+                self._filter_memory[profile] = kept
+
+    def mode_filter(self, mode: str) -> Tuple[str, str]:
+        """``(bandwidth, FM deviation)`` picking ``mode`` would apply at the
+        tuned frequency: the ones last used with it, else its defaults."""
+        profile = self._profile(mode)
+        width, deviation = MODE_FILTER_DEFAULTS.get(profile, (DEFAULT_BANDWIDTH, ""))
+        remembered = self._filter_memory.get(profile, {})
+        return (
+            remembered.get("width", width),
+            remembered.get("deviation", deviation) if mode == "FM" else "",
+        )
+
+    def _set_bandwidth_options(self, options: Tuple[str, ...], selected: str) -> None:
+        """Show ``options`` in the Bandwidth list with ``selected`` chosen
+        (the caller sets ``_applying_filter``)."""
+        combo = self._bw_combo
+        current = tuple(combo.itemText(i) for i in range(combo.count()))
+        if current != tuple(options):
+            combo.clear()
+            combo.addItems(list(options))
+            self.bandwidth_options_changed.emit()
+        index = combo.findText(selected)
+        if index < 0:
+            index = combo.findText(closest_bandwidth(options, _parse_hz(selected)))
+        combo.setCurrentIndex(max(index, 0))
+
+    def _apply_mode_filter(self, mode: str) -> None:
+        """A new mode: its Bandwidth choices, and the width and FM
+        deviation last used with it (or its defaults)."""
+        width, deviation = self.mode_filter(mode)
+        self._applying_filter = True
+        try:
+            if mode == "FM" and deviation:
+                self._fm_dev_combo.setCurrentText(deviation)
+            self._set_bandwidth_options(bandwidth_options(mode), width)
+        finally:
+            self._applying_filter = False
+        self._update_bandwidth_tip()
+        text = self._bw_combo.currentText()
         if text:
             self.bandwidth_changed.emit(_parse_hz(text))
+
+    def _update_bandwidth_tip(self) -> None:
+        mode = self._demod_combo.currentText()
+        if mode in ("USB", "LSB"):
+            side = "above" if mode == "USB" else "below"
+            tip = (
+                "Width of the SSB filter: it keeps from 200 Hz to 200 Hz plus "
+                f"this {side} the carrier. Narrower cuts more noise and "
+                "neighbours, wider sounds fuller."
+            )
+        elif mode == "CW":
+            tip = (
+                "Width of the CW filter around the carrier: narrower picks "
+                "one signal out of a crowd, wider is easier to tune."
+            )
+        elif mode.startswith("None"):
+            tip = (
+                "Width of the channel the level meter measures (nothing is "
+                "demodulated in I/Q mode)."
+            )
+        else:
+            tip = get_short_tip("bandwidth")
+        self._bw_combo.setToolTip(tip)
+
+    def bandwidth_choices(self) -> Tuple[str, ...]:
+        """The Bandwidth choices shown now (they depend on the mode)."""
+        combo = self._bw_combo
+        return tuple(combo.itemText(i) for i in range(combo.count()))
 
     # ------------------------------------------------------------------
     # Demodulation / squelch
     # ------------------------------------------------------------------
 
     def _on_demod_changed(self, text: str):
-        """Handle demodulation mode change."""
+        """Handle demodulation mode change: the mode's filter choices and
+        the width and deviation last used with it."""
         self._update_fm_dev_enabled()
+        self._update_mode_controls()
+        self._apply_mode_filter(text)
         self.demod_changed.emit(text)
+
+    def _on_fm_deviation_changed(self, _index: int) -> None:
+        if not self._applying_filter and self._demod_combo.currentText() == "FM":
+            self._remember_filter("deviation", self._fm_dev_combo.currentText())
+
+    def _update_mode_controls(self) -> None:
+        """Controls that only apply to some modes."""
+        mode = self._demod_combo.currentText()
+        self._demod_form.setRowVisible(self._cw_pitch_spin, mode == "CW")
+        agc_modes = ("AM", "USB", "LSB", "CW")
+        self._audio_agc_combo.setEnabled(mode in agc_modes)
+        if mode in agc_modes:
+            self._audio_agc_combo.setToolTip(
+                "How fast the audio level recovers after a loud signal "
+                "(AM, SSB and CW)."
+            )
+        else:
+            self._audio_agc_combo.setToolTip(
+                "Only used in AM, USB, LSB and CW (FM audio is steady)."
+            )
+        is_fm = mode == "FM"
+        self._tone_combo.setEnabled(is_fm)
+        self._audio_form.setRowVisible(self._tone_heard, is_fm)
+        self._tone_combo.setToolTip(
+            "CTCSS tone squelch: only play stations that send this "
+            "sub-audible tone (repeaters, PMR). Tone heard shows the one on "
+            "the channel."
+            if is_fm
+            else "Only used in FM mode"
+        )
+        audible = not mode.startswith("None")
+        self._nr_combo.setEnabled(audible)
+        self._squelch_check.setEnabled(audible)
+        self._update_squelch_controls()
+        self._update_bandwidth_tip()
 
     def _update_fm_dev_enabled(self) -> None:
         is_fm = self._demod_combo.currentText() == "FM"
         self._fm_dev_combo.setEnabled(is_fm)
         if is_fm:
             self._fm_dev_combo.setToolTip(
-                "Peak FM deviation: sets the audio level of the FM "
-                "demodulator. 5 kHz for narrowband FM, 75 kHz for broadcast."
+                "Peak FM deviation of the station: it sets the audio level. "
+                "75 kHz for broadcast FM, 5 kHz for narrowband voice. Too "
+                "small a value distorts (the status bar warns)."
             )
         else:
             self._fm_dev_combo.setToolTip("Only used in FM mode")
@@ -1098,17 +1497,160 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             return 25e3
 
     def _on_squelch_changed(self, value: int):
-        """Handle squelch slider change."""
+        """Handle squelch slider change: a threshold set by hand (Auto
+        goes off)."""
         self._squelch_label.setText(f"{value} dBFS")
+        if self._following_auto:
+            return
+        self._auto_off_by_hand()
         self.squelch_changed.emit(float(value))
+
+    def _auto_off_by_hand(self) -> None:
+        """A threshold set by hand ends Auto (the caller emits it)."""
+        if self._squelch_auto.isChecked():
+            self._manual_threshold = True
+            try:
+                self._squelch_auto.setChecked(False)  # -> squelch_auto_changed
+            finally:
+                self._manual_threshold = False
 
     def get_squelch_db(self) -> float:
         """Return the current squelch threshold in dB."""
         return float(self._squelch_slider.value())
 
     def set_squelch_db(self, db: float) -> None:
-        """Set the squelch threshold in dB."""
-        self._squelch_slider.setValue(int(round(db)))
+        """Set the squelch threshold in dB (a manual threshold: Auto goes
+        off)."""
+        value = int(round(db))
+        low, high = SQUELCH_RANGE
+        if self._squelch_slider.value() == min(max(value, low), high):
+            # Same position: still a manual threshold from now on.
+            self._squelch_label.setText(f"{self._squelch_slider.value()} dBFS")
+            self._auto_off_by_hand()
+            self.squelch_changed.emit(float(self._squelch_slider.value()))
+            return
+        self._squelch_slider.setValue(value)
+
+    def show_auto_threshold(self, db: Optional[float]) -> None:
+        """While Auto is on, show its threshold on the slider (no signal)."""
+        if db is None or not self._squelch_auto.isChecked():
+            return
+        low, high = SQUELCH_RANGE
+        value = int(round(min(max(db, low), high)))
+        if value == self._squelch_slider.value():
+            return
+        self._following_auto = True
+        try:
+            self._squelch_slider.setValue(value)
+        finally:
+            self._following_auto = False
+
+    def _on_squelch_enabled(self, enabled: bool) -> None:
+        self._update_squelch_controls()
+        self.squelch_enabled_changed.emit(bool(enabled))
+
+    def _on_squelch_auto(self, auto: bool) -> None:
+        self._update_squelch_controls()
+        self.squelch_auto_changed.emit(bool(auto))
+        if not auto and not self._manual_threshold:
+            # Auto off keeps the threshold where Auto had it.
+            self.squelch_changed.emit(float(self._squelch_slider.value()))
+
+    def _update_squelch_controls(self) -> None:
+        on = self._squelch_check.isChecked() and self._squelch_check.isEnabled()
+        self._squelch_auto.setEnabled(on)
+        self._squelch_slider.setEnabled(on)
+        self._squelch_label.setEnabled(on)
+
+    def is_squelch_enabled(self) -> bool:
+        return bool(self._squelch_check.isChecked())
+
+    def set_squelch_enabled(self, enabled: bool) -> None:
+        self._squelch_check.setChecked(bool(enabled))
+
+    def is_squelch_auto(self) -> bool:
+        return bool(self._squelch_auto.isChecked())
+
+    def set_squelch_auto(self, auto: bool) -> None:
+        self._squelch_auto.setChecked(bool(auto))
+
+    # ------------------------------------------------------------------
+    # Audio options
+    # ------------------------------------------------------------------
+
+    def _on_tone_changed(self, _index: int) -> None:
+        self.tone_squelch_changed.emit(self.tone_squelch_hz())
+
+    def tone_squelch_hz(self) -> float:
+        """The tone squelch's tone (Hz), 0 when it is off."""
+        value = self._tone_combo.currentText()
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+
+    def set_tone_squelch_hz(self, freq: float) -> None:
+        """Choose the tone squelch's tone (0 or an unknown tone: off)."""
+        index = self._tone_combo.findText(f"{float(freq):.1f}") if freq else -1
+        self._tone_combo.setCurrentIndex(max(index, 0))
+
+    def set_detected_tone(self, freq: Optional[float], checked: bool = True) -> None:
+        """Show the sub-audible tone heard on the channel (None: none;
+        ``checked`` False: tones aren't looked for, at a broadcast FM
+        deviation without a tone squelch)."""
+        if not checked:
+            text = "Not checked"
+            tip = (
+                "Tones aren't looked for at a broadcast FM deviation "
+                "(broadcast stations send none). Choose 5 kHz (narrow voice) "
+                "for a repeater or PMR channel to see the tone it sends."
+            )
+        elif freq is None:
+            text = "None"
+            tip = (
+                "No sub-audible (CTCSS) tone heard on the channel. Repeaters "
+                "and PMR radios often send one; set the tone squelch to it to "
+                "hear only them."
+            )
+        else:
+            text = ctcss_label(freq)
+            tip = f"The station sends a {text} CTCSS tone"
+        if self._tone_heard.text() != text:
+            self._tone_heard.setText(text)
+            self._tone_heard.setToolTip(tip)
+            heard = checked and freq is not None
+            set_tone(self._tone_heard, "success" if heard else "muted")
+
+    def noise_reduction(self) -> str:
+        return self._nr_combo.currentText()
+
+    def set_noise_reduction(self, level: str) -> None:
+        self._nr_combo.setCurrentText(level)
+
+    def audio_agc_speed(self) -> str:
+        return self._audio_agc_combo.currentText()
+
+    def set_audio_agc_speed(self, speed: str) -> None:
+        self._audio_agc_combo.setCurrentText(speed)
+
+    def cw_pitch(self) -> int:
+        return int(self._cw_pitch_spin.value())
+
+    def set_cw_pitch(self, hz: float) -> None:
+        self._cw_pitch_spin.setValue(int(round(hz)))
+
+    def _on_iq_options_changed(self, _checked: bool = False) -> None:
+        self.iq_options_changed.emit(
+            self._dc_check.isChecked(), self._iq_check.isChecked()
+        )
+
+    def iq_options(self) -> Tuple[bool, bool]:
+        """``(remove DC spike, balance I/Q)``."""
+        return self._dc_check.isChecked(), self._iq_check.isChecked()
+
+    def set_iq_options(self, remove_dc: bool, balance_iq: bool) -> None:
+        self._dc_check.setChecked(bool(remove_dc))
+        self._iq_check.setChecked(bool(balance_iq))
 
     # ------------------------------------------------------------------
     # Recording
@@ -1274,15 +1816,18 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         mode = _PRESET_MODE_LABEL.get(preset.mode, preset.mode)
         # Show the Bandwidth option Apply Preset will select (the narrowest
         # that fits the channel), not the channel's nominal width: "15 kHz"
-        # here while Apply set 25 kHz made the details look wrong.
-        bandwidth = self._preset_bandwidth_text(preset.bandwidth_hz)
+        # here while Apply set 25 kHz made the details look wrong. (The
+        # choices depend on the preset's mode.)
+        bandwidth = self._preset_bandwidth_text(
+            preset.bandwidth_hz, self._preset_mode(preset)
+        )
         self._preset_info.setText(
             f"{_format_mhz(preset.frequency_hz)} · {bandwidth} · {mode}\n"
             f"{preset.description}"
         )
         nominal = _format_bandwidth(preset.bandwidth_hz)
         tip = ""
-        if nominal != bandwidth:
+        if abs(_parse_hz(bandwidth) - preset.bandwidth_hz) > 0.5:
             fits = _parse_hz(bandwidth) >= preset.bandwidth_hz
             tip = (
                 f"The channel is {nominal} wide; Apply Preset sets Bandwidth "
@@ -1360,15 +1905,25 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             return min(fitting, key=lambda i: values[i])
         return max(range(len(values)), key=lambda i: values[i])
 
-    def _preset_bandwidth_text(self, bw_hz: float) -> str:
-        """The Bandwidth option Apply Preset picks for ``bw_hz``, as shown."""
-        index = self._closest_bandwidth_index(bw_hz)
-        if index < 0:
-            return _format_bandwidth(bw_hz)
-        return self._bw_combo.itemText(index)
+    def _preset_bandwidth_text(self, bw_hz: float, mode: Optional[str] = None) -> str:
+        """The Bandwidth option Apply Preset picks for ``bw_hz``, as shown:
+        the narrowest of ``mode``'s choices (the current ones without a
+        mode) that holds it, else the widest."""
+        if mode is None:
+            index = self._closest_bandwidth_index(bw_hz)
+            if index < 0:
+                return _format_bandwidth(bw_hz)
+            return self._bw_combo.itemText(index)
+        return closest_bandwidth(bandwidth_options(mode), bw_hz)
+
+    @staticmethod
+    def _preset_mode(preset) -> str:
+        """The Mode list entry a preset listens with."""
+        return _PRESET_DEMOD.get(preset.mode, preset.mode)
 
     def _apply_preset(self):
-        """Apply the selected preset: frequency, bandwidth and mode."""
+        """Apply the selected preset: frequency, mode, FM deviation and
+        bandwidth."""
         preset_name = self._preset_combo.currentText()
         if not preset_name:
             return
@@ -1382,11 +1937,11 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._freq_input.set_frequency(preset.frequency_hz)
         self.frequency_changed.emit(self._freq_input.get_frequency())
 
-        # Bandwidth: the narrowest option that fits the preset (the old
-        # substring match picked 25 kHz for 2.7 kHz SSB and missed 2 MHz).
-        index = self._closest_bandwidth_index(preset.bandwidth_hz)
-        if index >= 0:
-            self._bw_combo.setCurrentIndex(index)
+        # Mode first: the Bandwidth choices depend on it.
+        if preset.mode in _PRESET_DEMOD:
+            idx = self._demod_combo.findText(_PRESET_DEMOD[preset.mode])
+            if idx >= 0:
+                self._demod_combo.setCurrentIndex(idx)
 
         # FM deviation that suits the channel width
         if preset.mode in ("FM", "WFM"):
@@ -1397,11 +1952,12 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             else:
                 self._fm_dev_combo.setCurrentText("5 kHz")
 
-        # Set demodulation mode
-        if preset.mode in _PRESET_DEMOD:
-            idx = self._demod_combo.findText(_PRESET_DEMOD[preset.mode])
-            if idx >= 0:
-                self._demod_combo.setCurrentIndex(idx)
+        # Bandwidth: the narrowest of the mode's options that fits the
+        # preset (the old substring match picked 25 kHz for 2.7 kHz SSB
+        # and missed 2 MHz).
+        index = self._closest_bandwidth_index(preset.bandwidth_hz)
+        if index >= 0:
+            self._bw_combo.setCurrentIndex(index)
 
     # ------------------------------------------------------------------
     # License profile

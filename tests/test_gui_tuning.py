@@ -344,20 +344,30 @@ class TestNoClickWhenTheVfoMoves(unittest.TestCase):
         chain = mw._ReceiverChain(rate, "FM", 25e3, offset_hz=300e3)
         n = 12 * block
         tone = np.exp(2j * np.pi * 300e3 * np.arange(n) / rate).astype(np.complex64)
-        audio = []
+        audio, channel = [], []
         for i in range(12):
             if i == 6:
                 chain.set_offset(300.5e3)  # 500 Hz: a small, steady step
             part = tone[i * block : (i + 1) * block]
-            audio.append(chain.demodulate(chain.channelize(part), 5e3))
+            channel.append(chain.channelize(part))
+            audio.append(chain.demodulate(channel[-1], 5e3))
         audio = np.concatenate(audio)
         settled = audio[len(audio) // 10 :]
-        # A 500 Hz step at 5 kHz deviation is 0.1 of full scale; a phase
-        # jump in the mixer would spike toward full scale.
+        # A 500 Hz step at 5 kHz deviation is at most 0.1 of full scale
+        # (and the audio's DC blocker takes even that away); a phase jump in
+        # the mixer would spike toward full scale.
         self.assertLess(float(np.max(np.abs(settled))), 0.2)
-        before = float(np.mean(audio[len(audio) // 4 : len(audio) // 2 - 2000]))
-        after = float(np.mean(audio[-len(audio) // 4 :]))
-        self.assertAlmostEqual(after - before, -0.1, delta=0.03)
+
+        # The step really moved the channel: the tone now sits 500 Hz below
+        # the VFO (measured on the channel, as the audio is DC-blocked).
+        def mean_hz(blocks):
+            x = np.concatenate(blocks)
+            step = np.angle(x[1:] * np.conj(x[:-1]))
+            return float(np.mean(step)) * chain.channel_rate / (2 * np.pi)
+
+        self.assertAlmostEqual(
+            mean_hz(channel[8:]) - mean_hz(channel[3:6]), -500.0, delta=20.0
+        )
 
     def test_fine_tuning_across_the_lo_does_not_click(self):
         """USB in 10 Hz steps through offset 0 (the LO itself): the beat

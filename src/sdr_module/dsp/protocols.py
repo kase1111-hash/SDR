@@ -2807,12 +2807,17 @@ def create_protocol_decoder(
 def demodulate_for_protocol(
     samples: np.ndarray, protocol: ProtocolType
 ) -> Optional[np.ndarray]:
-    """Demodulate raw I/Q into the baseband a protocol decoder expects.
+    """Demodulate I/Q into a baseband for a protocol decoder (low level).
 
-    The decoders operate on demodulated baseband, not raw I/Q: the FSK/AFSK/
-    MSK pager and packet decoders want an FM discriminator output
-    (positive = mark, negative = space) and ADS-B wants the pulse envelope.
-    Passing raw complex I/Q straight in yields zero messages on real captures.
+    The decoders operate on demodulated baseband, not raw I/Q. This returns
+    the pulse envelope for ADS-B and an FM discriminator output for the
+    others, which is what the POCSAG and FLEX decoders (FSK) and direct-FSK
+    packet want. It does not select a channel, so give it I/Q that holds
+    just the channel. AX.25 at 1200 baud (APRS) is AFSK and ACARS is MSK on
+    AM: their decoders need a tone detector's or an MSK demodulator's
+    output, which a discriminator is not. For raw receiver I/Q of any
+    protocol use :func:`sdr_module.dsp.live_decoders.create_live_decoder`,
+    which selects the channel and demodulates each protocol properly.
 
     Returns None when the required baseband cannot be produced for the protocol
     (currently RDS, which needs 57 kHz subcarrier recovery), so callers can say

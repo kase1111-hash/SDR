@@ -68,15 +68,30 @@ def lowpass_taps(
     return (h / np.sum(h)).astype(np.float32)
 
 
+_VECDOT = getattr(np, "vecdot", None)  # numpy 2.0+
+
+
+def _row_dot(rows: np.ndarray, weights: np.ndarray) -> np.ndarray:
+    """``rows @ weights`` for real ``weights``, without BLAS (a threaded BLAS
+    spins its worker threads after every call, costing more than the work)."""
+    if _VECDOT is not None:
+        return _VECDOT(weights, rows)  # conj(weights) . row; weights are real
+    return np.einsum("ij,j->i", rows, weights)
+
+
 class FirDecimator:
     """Streaming FIR low-pass followed by integer decimation.
 
-    Only the kept outputs are computed: each tap multiplies a strided view
-    of the block (every ``factor``-th sample) and the products are summed,
-    one vectorised pass per tap, which beats a polyphase matrix product for
-    the short filters used here. The filter history and the decimation
-    phase carry over between calls, so block boundaries leave no trace.
+    Only the kept outputs are computed. A large factor works polyphase: the
+    block is viewed as contiguous rows of ``factor`` samples and each group
+    of ``factor`` (reversed) taps is dotted with every row. A small factor
+    would make those rows too short to be efficient, so there each tap
+    multiplies a strided view of the block instead. The filter history and
+    the decimation phase carry over between calls, so block boundaries
+    leave no trace.
     """
+
+    _POLYPHASE_FROM = 8  # smallest factor computed row by row
 
     def __init__(self, taps: np.ndarray, factor: int = 1):
         taps = np.asarray(taps, dtype=np.float32).ravel()
@@ -87,6 +102,16 @@ class FirDecimator:
         # Output j is the window of len(taps) samples ending at its input
         # sample, dotted with the reversed taps.
         self._reversed = [float(w) for w in taps[::-1]]
+        self._groups = 0
+        if self.factor >= self._POLYPHASE_FROM:
+            self._groups = -(-len(taps) // self.factor)
+            padded = np.zeros(self._groups * self.factor, dtype=np.float32)
+            padded[: len(taps)] = taps[::-1]
+            # Row g multiplies input row (j + g) for output j.
+            self._weights = padded.reshape(self._groups, self.factor)
+        self._length = (
+            self._groups * self.factor if self._groups else len(self._reversed)
+        )
         self._history: Optional[np.ndarray] = None
         self._phase = 0  # index, in the next block, of the next kept sample
 
@@ -99,7 +124,7 @@ class FirDecimator:
         x = np.asarray(x)
         dtype = np.complex64 if np.iscomplexobj(x) else np.float32
         factor = self.factor
-        length = len(self._reversed)
+        length = self._length
         if self._history is None or self._history.dtype != dtype:
             self._history = np.zeros(length - 1, dtype=dtype)
         n = len(x)
@@ -112,6 +137,14 @@ class FirDecimator:
         self._phase = phase + count * factor - n
         if count <= 0:
             return np.zeros(0, dtype=dtype)
+        if self._groups:
+            rows = count + self._groups - 1
+            view = padded[phase : phase + rows * factor].reshape(rows, factor)
+            weights = self._weights
+            out = _row_dot(view[0:count], weights[0])
+            for g in range(1, self._groups):
+                out += _row_dot(view[g : g + count], weights[g])
+            return out.astype(dtype, copy=False)
         stop = phase + (count - 1) * factor + 1
         out = np.zeros(count, dtype=dtype)
         scratch = np.empty(count, dtype=dtype)
@@ -221,17 +254,6 @@ def decimation_factor(rate: float, target: float, min_rate: float) -> int:
     return best
 
 
-def _prime_factors(n: int) -> List[int]:
-    factors = []
-    for p in (5, 3, 2):
-        while n % p == 0 and n > 1:
-            factors.append(p)
-            n //= p
-    if n > 1:
-        factors.append(n)
-    return sorted(factors, reverse=True)
-
-
 class Channelizer:
     """Mix a channel at ``offset_hz`` to 0 Hz and decimate it to about
     ``target_rate`` (an integer factor of the input rate), keeping
@@ -266,21 +288,31 @@ class Channelizer:
         self._stages = self._design(factor)
 
     def _design(self, factor: int) -> List[FirDecimator]:
-        stages: List[FirDecimator] = []
+        """A coarse stage, then the sharp channel filter.
+
+        The coarse stage takes the largest divisor of the factor that still
+        leaves 8 times the stopband edge as room: its filter only has to
+        protect the final channel from what would fold onto it, so it is
+        short for its factor, and it reads the full-rate samples just once.
+        The sharp stage, at the lower rate, removes everything beyond
+        ``stop_hz`` and does the rest of the decimation.
+        """
         rate = self.rate
-        factors = _prime_factors(factor) if factor > 1 else []
-        for i, step in enumerate(factors):
-            out_rate = rate / step
-            last = i == len(factors) - 1
-            if last:
-                taps = lowpass_taps(self.pass_hz, self.stop_hz, rate)
-            else:
-                # Only what would fold onto the final channel matters here.
-                taps = lowpass_taps(self.pass_hz, out_rate - self.stop_hz, rate)
-            stages.append(FirDecimator(taps, step))
+        stages: List[FirDecimator] = []
+        coarse = 1
+        for d in range(2, factor + 1):
+            if factor % d == 0 and rate / d >= 8.0 * self.stop_hz:
+                coarse = d
+        if coarse > 1:
+            out_rate = rate / coarse
+            taps = lowpass_taps(self.pass_hz, out_rate - self.stop_hz, rate)
+            stages.append(FirDecimator(taps, coarse))
             rate = out_rate
-        if not factors and self.stop_hz < 0.45 * rate:
-            stages.append(FirDecimator(lowpass_taps(self.pass_hz, self.stop_hz, rate)))
+        rest = factor // coarse
+        if rest > 1 or self.stop_hz < 0.45 * rate:
+            stages.append(
+                FirDecimator(lowpass_taps(self.pass_hz, self.stop_hz, rate), rest)
+            )
         return stages
 
     @property

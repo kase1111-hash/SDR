@@ -134,6 +134,7 @@ class TestLiveDecoderRates(_WindowTestCase):
         self.assertEqual(panel.decoder_status_text(), problem)
         self.assertEqual(panel._status_label.property("tone"), "warning")
         self.assertIn("ADS-B can't decode here", panel._empty.text())
+        self.assertIn("Choose a higher sample rate", panel._empty.text())
         self.assertIn("Choose a higher sample rate", win._message_label.text())
         # A valid rate rebuilds it (TOOLS-04).
         win.set_sample_rate(2.4e6)
@@ -252,6 +253,30 @@ class TestDemoDecodesInTheWindow(_WindowTestCase):
         self.assertEqual(rows[: len(expected)], expected, name)
         self.assertIn(f"{name}  ·  ", panel.decoder_status_text())
 
+    def test_ads_b_keeps_the_speaker_quiet(self):
+        # UX-B11: "Tune to 1090.000 MHz" kept FM, so the pulse bursts were
+        # played as noise; I/Q mode sends nothing to the speaker.
+        win = self.win
+        written = []
+        win._audio.write = lambda audio: written.append(len(audio))
+        win._audio_enabled = True
+        win._realtime = lambda: True
+        panel = win._decoder_panel
+        panel._proto_combo.setCurrentText("ADS-B")
+        win.set_frequency(100.1e6)
+        _settle(2)
+        panel._empty.button.click()
+        _settle(2)
+        self.assertEqual(win._control_panel.get_demod_mode(), "None (I/Q)")
+        dev = win._device
+        if not dev.is_streaming:
+            dev.start_rx()
+        block = int(win._device_sample_rate() * 0.1)
+        for _ in range(30):
+            win._process_block(dev.read_samples(block))
+        self.assertEqual(written, [])
+        self.assertEqual({m["address"] for m in panel._messages}, {"4840D6"})
+
     def test_aprs(self):
         self.run_protocol("AX.25/APRS")
 
@@ -313,7 +338,7 @@ class TestDecoderPanelStatus(unittest.TestCase):
         self.assertEqual(self.show(self.status()), ("Listening on 152.240 MHz", None))
         self.assertEqual(
             self.show(self.status(), freq=100e6)[0],
-            "Listening on 100.000 MHz, not a POCSAG channel",
+            "Not tuned to POCSAG: listening on 100.000 MHz",
         )
 
     def test_counts_and_age(self):
@@ -332,17 +357,20 @@ class TestDecoderPanelStatus(unittest.TestCase):
         self.assertEqual(tone, "warning")
         text, tone = self.show(self.status(signal_present=True, undecoded_signal_s=1))
         self.assertEqual(
-            (text, tone), ("Signal on 152.240 MHz: waiting for a POCSAG page", "info")
+            (text, tone), ("Signal on 152.240 MHz: waiting for POCSAG pages", "info")
+        )
+        warning = (
+            "Signal present but nothing decodes: check the frequency and "
+            "the protocol",
+            "warning",
         )
         text, tone = self.show(self.status(signal_present=True, undecoded_signal_s=9))
-        self.assertEqual(
-            (text, tone),
-            (
-                "Signal present but nothing decodes: check the frequency and "
-                "the protocol",
-                "warning",
-            ),
+        self.assertEqual((text, tone), warning)
+        # Also after earlier successes (e.g. retuned to another signal).
+        status = self.status(
+            valid=4, last_time=self.now - 30, signal_present=True, undecoded_signal_s=9
         )
+        self.assertEqual(self.show(status), warning)
 
     def test_a_problem_wins_and_reaches_the_empty_table(self):
         text, tone = self.show(self.status(problem="Something is wrong"))
@@ -375,6 +403,30 @@ class TestDecoderPanelStatus(unittest.TestCase):
         self.assertEqual(p._tabs.tabText(index), "Aircraft")
         self.assertEqual(p._tabs.tabText(p._tabs.count() - 1), "Stats")
         self.assertEqual(p._tabs.tabToolTip(index), "Aircraft heard")
+
+    def test_a_short_table_keeps_the_tune_button_whole(self):
+        # At 1024x640 the table is about 86 px tall: the hint lines give way
+        # to the button (it used to be cut off at the bottom).
+        p = self.panel
+        p.tune_requested.connect(lambda *_args: None)
+        p._proto_combo.setCurrentText("AX.25/APRS")
+        p.set_receiving(True)
+        p.set_current_frequency(100e6)
+        p.show()
+        p._table.setFixedHeight(90)  # (about what the themed window leaves)
+        _settle(3)
+        viewport = p._table.viewport().rect()
+        button = p._empty.button.geometry()
+        self.assertTrue(viewport.contains(button), (viewport, button))
+        self.assertIn("Waiting for AX.25/APRS messages", p._empty.label.text())
+        self.assertNotIn("(N. America)", p._empty.label.text())  # title only
+        self.assertIn("Tune to 144.390 MHz", p._empty.text())  # the full text
+        p._table.setMinimumHeight(110)
+        p._table.setMaximumHeight(16777215)
+        p.resize(380, 520)
+        _settle(3)
+        self.assertGreater(p._table.viewport().height(), 200)
+        self.assertIn("(N. America)", p._empty.label.text())  # room again
 
     def test_pager_wording(self):
         # UX-10: two bands are alternatives, not both at once.

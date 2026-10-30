@@ -2798,17 +2798,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         from ..dsp.protocols import ProtocolType
 
         proto_value = self._DECODER_PROTOCOLS.get(text)
-        if proto_value is None or live_decoder_class(text) is None:
-            # "Off" (or a protocol without a live decoder): no live decoder.
+        if proto_value is None:
+            # "Off" (or unknown): no live decoder.
             self._decoder = None
             self._decoder_protocol = None
             self._decoder_panel.set_decoder_status(None)
             return
 
         rate = self._device_sample_rate()
-        # Remember the rate even if the build fails, so a later rate change
-        # retries it.
+        # Remember the rate even if there is no decoder or its build fails,
+        # so a later rate change retries it (and an unchanged rate doesn't).
         self._decoder_rate = rate
+        if live_decoder_class(text) is None:
+            # Listed, but without a live decoder (yet).
+            self._decoder = None
+            self._decoder_protocol = None
+            self._decoder_panel.set_decoder_status(None)
+            return
         try:
             self._decoder = create_live_decoder(
                 text, float(rate), self._decoder_offset_hz()
@@ -2817,26 +2823,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         except Exception as exc:
             from ..dsp.live_decoders import LiveDecoderStatus
 
-            logger.warning("Could not start the %s decoder: %s", text, exc)
             self._decoder = None
             self._decoder_protocol = None
             problem = f"The {text} decoder could not start: {exc}"
             self._decoder_panel.set_decoder_status(
                 LiveDecoderStatus(name=text, problem=problem)
             )
-            self._show_status_error(problem)
+            self._show_status_error(problem)  # (also logged)
             return
+        self._decoder_error_logged = False
         status = self._decoder.status
         self._decoder_panel.set_decoder_status(status)
         if status.problem:
             # E.g. ADS-B at 1.8 MS/s: say so instead of "listening" forever.
             logger.warning("%s decoder: %s", text, status.problem)
-            self._show_status_message(
-                f"{status.problem}. Choose a higher sample rate in "
-                "Device > Connect...",
-                "warning",
-                10000,
-            )
+            remedy = f" {status.remedy}" if status.remedy else ""
+            self._show_status_message(f"{status.problem}.{remedy}", "warning", 10000)
 
     def _decoder_offset_hz(self) -> float:
         """The tuned channel's offset from the LO (0 until the window tunes

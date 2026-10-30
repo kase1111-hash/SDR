@@ -107,6 +107,8 @@ class LiveDecoderStatus:
     undecoded_signal_s: float = 0.0
     #: Why the decoder cannot work (shown instead of the counts), or None.
     problem: Optional[str] = None
+    #: What to do about the problem (a sentence), or None.
+    remedy: Optional[str] = None
     #: Rate of the samples given to :meth:`LiveDecoder.process`.
     sample_rate: float = 0.0
     #: Rate the channel is decoded at (the full rate for ADS-B).
@@ -149,6 +151,7 @@ class LiveDecoder:
         self._last_time: Optional[float] = None
         self._stream_s = 0.0
         self._problem: Optional[str] = None
+        self._remedy: Optional[str] = None
 
     # -- API ----------------------------------------------------------------
 
@@ -203,6 +206,7 @@ class LiveDecoder:
             failed=failed,
             last_time=self._last_time,
             problem=self._problem,
+            remedy=self._remedy,
             sample_rate=self.sample_rate,
             channel_rate=self.sample_rate,
             offset_hz=self._offset,
@@ -517,6 +521,7 @@ class ADSBLiveDecoder(LiveDecoder):
                 f"ADS-B needs at least {format_rate(self.MIN_SAMPLE_RATE)}; "
                 f"the device runs at {format_rate(self.sample_rate)}"
             )
+            self._remedy = "Choose a higher sample rate in Device > Connect..."
         else:
             self._decoder = ADSBDecoder(self.sample_rate)
 

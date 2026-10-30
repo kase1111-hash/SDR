@@ -186,6 +186,11 @@ _DETAIL_LINES = 3
 _INVALID_ROLE = Qt.ItemDataRole.UserRole.value + 1 if HAS_PYQT6 else 0
 
 
+def html_escape(text: str) -> str:
+    """``text`` escaped for rich text (never markup)."""
+    return html.escape(text)
+
+
 def placeholder_html(text: str) -> str:
     """Rich text for an empty-state message ``"Title\\nHint ..."``.
 
@@ -246,14 +251,32 @@ class ViewPlaceholder(QObject if HAS_PYQT6 else object):
         return False
 
     def _layout(self) -> None:
-        """Center the text (and the action button under it) in the view."""
+        """Center the text (and the action button under it) in the view.
+
+        When the view is too short for the text and the button, only the
+        title is shown with the button, so the button is never cut off.
+        """
         rect = self._viewport.rect()
+        full = placeholder_html(self._text)
         if not self._has_action:
+            if self.label.text() != full:
+                self.label.setText(full)
             self.label.setGeometry(rect)
             return
         hint = self.button.sizeHint()
         width = rect.width()
-        text_h = min(self.label.heightForWidth(width), rect.height())
+        room = rect.height() - self._ACTION_GAP - hint.height()
+        html = full
+        if self.label.text() != html:
+            self.label.setText(html)
+        title, sep, _hint = self._text.partition("\n")
+        if sep and self.label.heightForWidth(width) > room:
+            html = (
+                '<p style="margin: 0; font-weight: 600; font-style: normal;">'
+                f"{html_escape(title)}</p>"
+            )
+            self.label.setText(html)
+        text_h = max(0, min(self.label.heightForWidth(width), room))
         total = text_h + self._ACTION_GAP + hint.height()
         top = max(0, (rect.height() - total) // 2)
         self.label.setGeometry(0, top, width, text_h)
@@ -964,7 +987,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             return f"{proto} can't be decoded yet\n{PROTOCOL_UNAVAILABLE[proto]}"
         problem = getattr(self._decoder_status, "problem", None)
         if problem:
-            return f"{proto} can't decode here\n{problem}."
+            remedy = getattr(self._decoder_status, "remedy", None)
+            return f"{proto} can't decode here\n{problem}." + (
+                f" {remedy}" if remedy else ""
+            )
         if self._tuned_for(proto):
             here = _format_mhz(self._tuned_hz or 0.0)
             if self._receiving:
@@ -1047,6 +1073,16 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             f"Since the decoder started: {_plural(frames, 'frame')} heard, "
             f"{valid:,} decoded, {failed:,} failed their checks."
         )
+        # Seconds of signal since the last valid message: a channel that
+        # decoded before but carries something else now says so too.
+        undecoded = float(getattr(status, "undecoded_signal_s", 0.0) or 0.0)
+        if undecoded >= _UNDECODED_SIGNAL_S:
+            return (
+                "Signal present but nothing decodes: check the frequency and "
+                "the protocol",
+                "warning",
+                tip,
+            )
         if valid:
             last = getattr(status, "last_time", None)
             age = self._clock() - last if last is not None else 0.0
@@ -1061,19 +1097,11 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 "warning",
                 tip,
             )
-        undecoded = float(getattr(status, "undecoded_signal_s", 0.0) or 0.0)
-        if undecoded >= _UNDECODED_SIGNAL_S:
-            return (
-                "Signal present but nothing decodes: check the frequency and "
-                "the protocol",
-                "warning",
-                tip,
-            )
         if getattr(status, "signal_present", False):
-            text = f"Signal on {here}: waiting for a {proto} {unit}"
+            text = f"Signal on {here}: waiting for {proto} {unit}s"
             return text, "info", tip
         if here and not self._tuned_for(proto) and proto in PROTOCOL_BANDS:
-            return f"Listening on {here}, not a {proto} channel", None, tip
+            return f"Not tuned to {proto}: listening on {here}", None, tip
         return (f"Listening on {here}" if here else "Listening"), None, tip
 
     def _update_status_line(self) -> None:

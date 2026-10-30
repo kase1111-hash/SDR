@@ -574,12 +574,7 @@ _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ..
     (124.35e6, "am", -50.0, (8.0, 5.0)),
     (125.0e6, "am", -44.0, None),
     (127.85e6, "am", -48.0, (13.0, 6.0)),
-    # Decodable data (see _DATA_SCHEDULE): ACARS, APRS, POCSAG and FLEX,
-    # each timed by its own schedule (so no duty cycle here).
-    (131.55e6, "acars", -52.0, None),
-    (152.24e6, "pocsag", -48.0, None),
-    (931.9375e6, "flex", -50.0, None),
-    # 2 m amateur band
+    # 2 m amateur band (APRS: see _DATA_SCHEDULE)
     (144.39e6, "aprs", -50.0, None),
     (146.52e6, "nfm", -46.0, (12.0, 6.0)),
     (146.94e6, "nfm", -38.0, (10.0, 7.0)),
@@ -596,6 +591,12 @@ _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ..
     # ISM 915 MHz and ADS-B
     (915.0e6, "burst", -50.0, (1.5, 0.2)),
     (1090.0e6, "modes", -26.0, None),
+    # Decodable data (see _DATA_SCHEDULE; timed by their own schedules, so
+    # no duty cycle here): ACARS, POCSAG and FLEX. Appended, so the signals
+    # above keep their index (their seed).
+    (131.55e6, "acars", -52.0, None),
+    (152.24e6, "pocsag", -48.0, None),
+    (931.9375e6, "flex", -50.0, None),
 )
 
 # --------------------------------------------------------------------------- #

@@ -568,5 +568,46 @@ class TestSecondReceiverRetuneDropsStaleSamples(unittest.TestCase):
         self.assertGreater(rows, 0)
 
 
+class TestWaterfallExport(_PlotPair):
+    """PLOT-4: Save Image keeps the rows, not the status overlays of the
+    live view (the dimmed Stopped veil and its badge, PAUSED, the focus
+    frame); the view itself keeps them."""
+
+    def image(self, path):
+        from PyQt6.QtGui import QImage
+
+        image = QImage(path)
+        self.assertFalse(image.isNull())
+        return image
+
+    def test_a_stopped_or_paused_waterfall_saves_like_a_live_one(self):
+        import tempfile
+
+        rng = np.random.default_rng(4)
+        self.wf.set_frequency_range(CENTER, 2.4e6)
+        for _ in range(40):
+            self.clock.t += 1 / 30
+            line = rng.normal(-90.0, 2.0, 2048)
+            line[1200:1210] = -30.0
+            self.wf.add_line(line)
+        _settle()
+        folder = tempfile.mkdtemp(prefix="wf-export-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(folder, True))
+        live = os.path.join(folder, "live.png")
+        self.assertTrue(self.wf.export_image(live))
+        self.wf.set_stale("Stopped - press Space")
+        self.wf.set_paused(True)
+        self.wf.setFocus()
+        _settle()
+        frozen = os.path.join(folder, "frozen.png")
+        self.assertTrue(self.wf.export_image(frozen))
+        self.assertEqual(self.image(frozen), self.image(live))
+        # The view still says why it is frozen.
+        self.assertEqual(self.wf.stale_text(), "Stopped - press Space")
+        self.assertTrue(self.wf.is_paused())
+        shown = self.wf._canvas.grab().toImage()
+        self.assertNotEqual(shown, self.image(live).convertToFormat(shown.format()))
+
+
 if __name__ == "__main__":
     unittest.main()

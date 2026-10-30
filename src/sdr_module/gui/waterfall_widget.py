@@ -755,6 +755,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._unit_font.setBold(True)
         self._fm = QFontMetrics(self._font)
         self._hover: Optional[QPointF] = None
+        self._exporting = False  # painting for Save Image (export_image)
 
         self.setMinimumHeight(200)
         self._setup_ui()
@@ -1489,13 +1490,23 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         return bool(image.save(path))
 
     def export_image(self, path: str) -> bool:
-        """Save the plot as shown, with time and frequency axes (PNG)."""
-        hover, axis = self._hover, self._freq_axis
-        self._hover, self._freq_axis = None, True
+        """Save the plot as shown, with time and frequency axes (PNG): the
+        rows and a measurement, without what only concerns the live view
+        (the hover, the dimmed "Stopped" veil and its badge, PAUSED, the
+        focus frame), so a stopped or paused waterfall saves clean."""
+        saved = (self._hover, self._freq_axis, self._stale, self._paused)
+        self._hover, self._freq_axis, self._stale, self._paused = (
+            None,
+            True,
+            None,
+            False,
+        )
+        self._exporting = True
         try:
             return bool(self._canvas.grab().save(path))
         finally:
-            self._hover, self._freq_axis = hover, axis
+            self._hover, self._freq_axis, self._stale, self._paused = saved
+            self._exporting = False
             self._canvas.update()
 
     def frequency_at(self, x: float) -> Optional[float]:
@@ -2352,7 +2363,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             painter.setPen(QPen(p.qcolor("plot_grid"), 1))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(plot.adjusted(-0.5, -0.5, 0.5, 0.5))
-            if self.hasFocus():
+            if self.hasFocus() and not self._exporting:
                 draw_focus_frame(painter, plot, p)
 
             self._draw_highlights(painter, plot)

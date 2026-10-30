@@ -536,6 +536,17 @@ class TestBandPlanLine(unittest.TestCase):
         self.assertTrue(band_plan_line(433.92e6).startswith("70cm Ham"))
         self.assertEqual(band_plan_line(300e6), "")
 
+    def test_an_amateur_band_is_named_as_one(self):
+        # T12 review: 902-928 MHz, the 33 cm amateur band, was named after
+        # the receive band "ISM 915" that spans the same range.
+        from sdr_module.core.band_info import band_plan_line
+
+        line = band_plan_line(915e6)
+        self.assertTrue(line.startswith("33cm Ham · 902–928 MHz · "), line)
+        self.assertTrue(line.endswith(" · in ISM 915 (902–928 MHz)"), line)
+        self.assertTrue(band_plan_line(1270e6).startswith("23cm Ham · "))
+        self.assertTrue(band_plan_line(2400e6).startswith("13cm Ham · "))
+
     def test_license_note(self):
         from sdr_module.core.band_info import license_note
         from sdr_module.core.frequency_manager import LicenseClass

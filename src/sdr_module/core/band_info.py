@@ -123,11 +123,17 @@ def _lockout_note(freq_hz: float) -> str:
 def _ham_band_name(segment: BandPrivilege) -> str:
     """The amateur band a segment belongs to ("40m Ham"), from the receive
     bands (looked up in the middle of the segment, so the ISM 433 band
-    inside 70 cm doesn't name the 70 cm segment)."""
+    inside 70 cm doesn't name the 70 cm segment; a receive band that isn't
+    an amateur one, ISM 915 over 33 cm, doesn't either), else from the
+    segment's name ("33cm Ham")."""
     band = band_for(0.5 * (segment.start_hz + segment.end_hz))
-    if band is not None and band.start_hz <= segment.start_hz <= band.end_hz:
+    if (
+        band is not None
+        and band.name.endswith(" Ham")
+        and band.start_hz <= segment.start_hz <= band.end_hz
+    ):
         return band.name
-    return segment.name.split(" ")[0]
+    return f"{segment.name.split(' ')[0]} Ham"
 
 
 def _segment_text(segment: BandPrivilege, with_range: bool) -> str:

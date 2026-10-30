@@ -228,6 +228,36 @@ class TestModulationLabels:
         assert classify(np.ones(10, dtype=np.complex64)).kind == "unknown"
 
 
+class TestTransmissionInTheCapture:
+    """A voice transmission that starts or stops during the capture is that
+    transmission, not Morse code: the clicks the noise makes in the quiet
+    part are not keying. (An AM station keying up read "CW (Morse code)",
+    confident 95 %, so Identify on an airband channel between overs said
+    CW: the first capture with the signal holds its start.)"""
+
+    @pytest.mark.parametrize(
+        "on,snr", [((0.3, 1.0), 15), ((0.8, 1.0), 30), ((0.0, 0.6), 30)]
+    )
+    def test_am_keying_up_or_down_is_am(self, on, snr):
+        n = int(1.0 * FS)
+        sig = S.am(n, FS, 0.7, S.voice(n, FS, seed=4))
+        gate = np.zeros(n)
+        gate[int(on[0] * n) : int(on[1] * n)] = 1.0
+        power = float(np.mean(np.abs(sig) ** 2))
+        x, _ = S.add_noise(sig * gate, FS, snr, 6e3, seed=snr, on_power=power)
+        r = classify(x)
+        assert r.kind == "am", (r.kind, r.confidence, r.features.get("scores"))
+        assert r.features["transmission"]
+
+
+def test_demo_airband_keying_up_is_am():
+    """The demo's 119.1 MHz airband station keys up about 0.7 s into the
+    window's listening: AM (it read CW, 95 %)."""
+    ident = identify_demo(119.1e6, 119.1e6, "AM", 10e3, start_s=5.0)
+    assert ident.kind == "am", ident.summary()
+    assert ident.mode == "AM"
+
+
 # --------------------------------------------------------------------------- #
 # Listening suggestions
 # --------------------------------------------------------------------------- #
@@ -268,6 +298,18 @@ class TestListening:
         assert ident.label == "Mode S / ADS-B replies"
         assert ident.mode == "None (I/Q)"
 
+    @pytest.mark.parametrize("mode,channel", [("FM", 12.5e3), ("None (I/Q)", 25e3)])
+    def test_mode_s_through_a_narrow_filter(self, mode, channel):
+        """Identify at 1090 MHz with the usual narrow filter: each reply
+        shows as one burst, which read "OOK data bursts, as remote controls
+        and sensors send", confident 95 %, with a remote's pulse analysis.
+        It is Mode S, and Apply Mode widens the filter to see the pulses."""
+        ident = identify_demo(1090e6, 1090e6, mode, channel)
+        assert ident.label == "Mode S / ADS-B replies", ident.summary()
+        assert (ident.mode, ident.filter_hz) == ("None (I/Q)", 2e6)
+        assert ident.pulses is None
+        assert not any("remote controls" in d for d in ident.details)
+
     def test_confidence_words(self):
         assert confidence_words(0.9) == "confident"
         assert confidence_words(0.6) == "probably"
@@ -294,16 +336,18 @@ def _demo_never_skips(monkeypatch):
     monkeypatch.setattr(device_dialog, "_MAX_LAG_S", 1e9)
 
 
-def identify_demo(freq, lo, mode, channel_hz, rate=2.4e6):
+def identify_demo(freq, lo, mode, channel_hz, rate=2.4e6, start_s=0.0):
     """The window's policy: listen in 33 ms blocks, judge every half
     second, stop at a confident signal (or after three judgements of one,
-    or WAIT_S seconds)."""
+    or WAIT_S seconds). ``start_s``: seconds of the demo let go by first."""
     from sdr_module.gui.device_dialog import MockDevice
 
     dev = MockDevice()
     dev.set_sample_rate(rate)
     dev.set_frequency(lo)
     dev.start_rx()
+    for _ in range(int(round(start_s * rate / 240000))):
+        dev.read_samples(240000)
     width, reach = analysis_band(mode, channel_hz, rate)
     ident = SignalIdentifier(rate, freq - lo, width)
     best, takes = None, 0

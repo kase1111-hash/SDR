@@ -174,6 +174,16 @@ def listening_for(result: ClassificationResult, freq_hz: float) -> Identificatio
         deviation = next(text for limit, text in _DEVIATIONS if peak < limit)
         mode, filter_hz = "FM", max(1.2 * width, 12.5e3)
         details.append("Data: the Decoder tab decodes POCSAG, FLEX and similar")
+    elif kind == "ook" and _mode_s_band(freq_hz):
+        # 1090 MHz carries radar replies only. Through a filter narrower
+        # than their 0.5 us pulses, each 64-120 us reply is one burst.
+        label = "Mode S / ADS-B replies"
+        mode, filter_hz = "None (I/Q)", 2e6
+        details.append(
+            "Each reply shows as one burst through this filter: Apply Mode "
+            "widens it to 2 MHz, where its pulses show"
+        )
+        details.append("Decode them with the Decoder tab's ADS-B")
     elif kind == "ook":
         if width <= 14e3:
             mode, filter_hz = "AM", max(1.1 * width, 5e3)
@@ -182,7 +192,7 @@ def listening_for(result: ClassificationResult, freq_hz: float) -> Identificatio
         details.append("On/off keyed data, as remote controls and sensors send")
     elif kind == "pulsed":
         mode, filter_hz = "None (I/Q)", max(1.2 * width, 2e6)
-        if abs(freq_hz - 1090e6) < 2e6:
+        if _mode_s_band(freq_hz):
             label = "Mode S / ADS-B replies"
             details.append("Decode them with the Decoder tab's ADS-B")
     elif kind == "psk":
@@ -201,6 +211,11 @@ def listening_for(result: ClassificationResult, freq_hz: float) -> Identificatio
     )
     ident.details = _details(ident) + details
     return ident
+
+
+def _mode_s_band(freq_hz: float) -> bool:
+    """Whether ``freq_hz`` is on 1090 MHz (secondary radar replies)."""
+    return abs(float(freq_hz) - 1090e6) < 2e6
 
 
 def _band_listening(freq_hz: float) -> Optional[Tuple[str, str, str]]:
@@ -300,7 +315,8 @@ def identify(
         samples = near
     ident = listening_for(result, tuned_hz)
     ident.seconds = len(samples) / rate if rate > 0 else 0.0
-    if result.kind == "ook":
+    if result.kind == "ook" and not _mode_s_band(tuned_hz):
+        # (Not radar replies: their bits aren't a remote's.)
         try:
             from .bursts import analyze_capture
 

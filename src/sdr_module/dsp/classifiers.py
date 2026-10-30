@@ -1008,6 +1008,12 @@ class SignalClassifier:
         min_run = 1 if wide else 3 * span
         real = on_lengths >= min_run
         features["on_runs_real"] = int(np.count_nonzero(real))
+        # The stretches that hold something: not the noise's clicks (a
+        # sample or two) beside a transmission starting or ending.
+        if len(on_lengths):
+            longest = float(np.max(on_lengths))
+            held = on_lengths >= max(min_run, 0.1 * longest)
+            features["on_runs_long"] = int(np.count_nonzero(held))
         enough = True
         if span == 1:
             expected = n * math.exp(-high_ratio)
@@ -1433,7 +1439,8 @@ class SignalClassifier:
         if keyed:
             on_s = float(f.get("on_median_s", 0.0))
             on_max = float(f.get("on_max_s", 0.0))
-            runs = int(f.get("on_runs", 0))
+            # (Clicks of the noise in the gap don't count as stretches.)
+            runs = int(f.get("on_runs_long", f.get("on_runs", 0)))
             total_on = float(f.get("on_fraction", 0.0)) * float(f.get("duration_s", 0))
             transmission = (
                 runs <= 3

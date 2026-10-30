@@ -212,9 +212,16 @@ def apply_iq_imbalance_correction(
     """
     Correct I/Q gain and phase imbalance.
 
+    The model (the same one :func:`estimate_iq_imbalance` measures):
+    ``I = cos(t)``, ``Q = (1 + gain_imbalance) * sin(t + phase_imbalance)``,
+    so ``gain_imbalance`` is Q's gain error relative to I (+0.1: Q is 10 %
+    too strong). Q is divided by ``1 + gain_imbalance`` and then I and Q
+    are made orthogonal again. Remove DC first
+    (:func:`apply_dc_offset_correction`).
+
     Args:
         samples: Complex samples
-        gain_imbalance: Gain imbalance factor
+        gain_imbalance: Q's gain relative to I, minus 1
         phase_imbalance: Phase imbalance in radians
 
     Returns:
@@ -238,6 +245,14 @@ def estimate_iq_imbalance(samples: np.ndarray) -> Tuple[float, float]:
     """
     Estimate I/Q gain and phase imbalance.
 
+    Returns them in the convention :func:`apply_iq_imbalance_correction`
+    takes: ``gain_imbalance`` is Q's gain relative to I, minus 1 (+0.1 when
+    Q is 10 % stronger), so passing the estimate to the correction removes
+    the image. (It used to return I's gain relative to Q, the opposite, so
+    "correcting" doubled the error.) It assumes a circular signal (noise,
+    or signals spread over the band) and samples with no DC: remove DC
+    first.
+
     Args:
         samples: Complex samples
 
@@ -247,10 +262,10 @@ def estimate_iq_imbalance(samples: np.ndarray) -> Tuple[float, float]:
     i = samples.real
     q = samples.imag
 
-    # Estimate gain imbalance
+    # Estimate gain imbalance (Q relative to I)
     i_power = np.mean(i**2)
     q_power = np.mean(q**2)
-    gain_imbalance = np.sqrt(i_power / (q_power + 1e-10)) - 1
+    gain_imbalance = np.sqrt(q_power / (i_power + 1e-10)) - 1
 
     # Estimate phase imbalance
     cross_corr = np.mean(i * q)

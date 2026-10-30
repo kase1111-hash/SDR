@@ -467,7 +467,7 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
         self._label_column = [preset_label, sdr_label]
         layout.addWidget(sdr_label, 1, 0)
         self._input_spin = QDoubleSpinBox()
-        self._input_spin.setRange(-60.0, 20.0)
+        self._input_spin.setRange(-90.0, 20.0)
         self._input_spin.setDecimals(1)
         self._input_spin.setSingleStep(1.0)
         self._input_spin.setValue(0)
@@ -676,7 +676,7 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
                 self._input_spin.setButtonSymbols(
                     QDoubleSpinBox.ButtonSymbols.NoButtons
                 )
-                self._input_spin.setValue(max(-60.0, min(20.0, float(dbm))))
+                self._input_spin.setValue(max(-90.0, min(20.0, float(dbm))))
                 self._input_spin.setToolTip(
                     (tip or "From the connected HackRF's TX power")
                     + ". Change it in Ham Radio > Ham ID > TX Power."

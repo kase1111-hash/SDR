@@ -3775,11 +3775,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._finish_tune(center_hz)
         else:
             self._update_passband()
+        self._tx_station.refresh()  # (no transmitting during playback)
 
     def _unlock_lo(self) -> None:
         """Let the LO follow tuning again (see :meth:`_lock_lo`)."""
         self._lo_lock = None
         self._ensure_vfo_fits()
+        self._tx_station.refresh()
 
     def _sync_device_tuning(self) -> str:
         """Bring a device just connected to the plots' LO and the tuned

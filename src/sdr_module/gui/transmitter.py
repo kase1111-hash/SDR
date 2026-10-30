@@ -727,6 +727,15 @@ class Transmitter(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         run.cancel.set()
         if run.thread is not None:
             run.thread.join(timeout)
+        if not run.done.is_set():
+            # The radio didn't let go (a hung USB link): give up on it, so
+            # the window can close the device and transmit again later.
+            logger.warning("The transmit thread didn't stop in time")
+            run.status = "failed"
+            run.message = "the HackRF didn't stop in time"
+            if run.ended_at is None:
+                run.ended_at = time.monotonic()
+            run.done.set()
         self._poll()
 
     def wait(self, timeout: float = 10.0) -> bool:

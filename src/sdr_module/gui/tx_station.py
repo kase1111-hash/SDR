@@ -154,6 +154,8 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         """Why the connected device can't transmit (None: it can)."""
         win = self._win
         dev = self._device()
+        if getattr(win, "_lo_lock", None) is not None:
+            return "a recording is playing back. Stop it to transmit"
         if dev is None:
             return "no device is connected. Connect a HackRF One (Device > Connect...)"
         if getattr(win, "_demo_mode", False):
@@ -164,8 +166,6 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             )
             name = name or "this device"
             return f"the {name} can only receive. Connect a HackRF One"
-        if getattr(win, "_lo_lock", None) is not None:
-            return "a recording is playing back. Stop it to transmit"
         return None
 
     def id_spec(self, freq_hz: float) -> Tuple[str, str, float, str]:
@@ -221,7 +221,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         return None
 
     def _inputs(self) -> tuple:
-        """What the TX line depends on (a change replaces an old outcome)."""
+        """What the TX line depends on (a change replaces an old outcome):
+        the settings below, and what the line would say now (so a change
+        of the QRP limit or chain counts too)."""
         win = self._win
         panel = self._panel()
         from ..core import frequency_manager
@@ -230,10 +232,12 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             round(float(win._current_frequency())),
             id(self._device()),
             bool(getattr(win, "_demo_mode", False)),
+            getattr(win, "_lo_lock", None) is not None,
             str(frequency_manager.get_license_class().value),
             panel.get_callsign() if panel is not None else "",
             tuple(sorted((panel.get_settings() if panel is not None else {}).items())),
             (self.power.gain_db, self.power.amp),
+            self.readiness(),
         )
 
     def readiness(self) -> Tuple[str, Optional[str], Optional[bool]]:

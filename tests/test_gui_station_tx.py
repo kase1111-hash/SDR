@@ -184,6 +184,18 @@ class TestTxLine(_TxCase):
         self.assertFalse(self.win._transmit_job(job))
         self.assertIn("an amateur transmission must be identified", self.status()[0])
 
+    def test_no_transmitting_while_a_recording_plays_back(self):
+        self.panel.set_callsign("W1AW")
+        self.hackrf()
+        self.win._lock_lo(146.52e6, 2.4e6, "the recording")
+        self.assertEqual(
+            self.panel.tx_status_text(),
+            "Can't send: a recording is playing back. Stop it to transmit.",
+        )
+        self.assertFalse(self.station.send_station_id())
+        self.win._unlock_lo()
+        self.assertTrue(self.panel.tx_status_text().startswith("Will send"))
+
     def test_license_is_checked_at_the_tuned_frequency(self):
         from sdr_module.core.frequency_manager import LicenseClass
 
@@ -431,6 +443,8 @@ class TestTxPower(_TxCase):
         self.assertFalse(self.station.send_station_id())
         qrp._limit_check.setChecked(False)
         self.assertTrue(self.panel._id_now_btn.isEnabled())
+        # The refusal doesn't linger once the limit no longer applies.
+        self.assertTrue(self.panel.tx_status_text().startswith("Will send"))
         # Without a HackRF the field is the user's again.
         self.win._release_device()
         self.win._refresh_state_ui()

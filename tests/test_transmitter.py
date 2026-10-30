@@ -9,6 +9,7 @@ what it "transmits" is demodulated and measured.
 from __future__ import annotations
 
 import os
+import threading
 import time
 
 import numpy as np
@@ -324,6 +325,28 @@ class TestTransmitter:
         assert "stopped taking samples" in result.message
         assert not dev.state.is_transmitting
         assert dev.state.sample_rate == 2.4e6
+
+    def test_shutdown_gives_up_on_a_hung_radio(self, monkeypatch, _license):
+        _license.set_license_class(LicenseClass.TECHNICIAN)
+        dev, fake = open_hackrf(monkeypatch, rate=2.4e6)
+        dev.set_frequency(146.52e6)
+        release = threading.Event()
+        real_stop = fake.pyhackrf_stop_tx
+
+        def hung_stop():
+            release.wait(5)
+            real_stop()
+
+        fake.pyhackrf_stop_tx = hung_stop
+        engine = Transmitter()
+        results = []
+        engine.finished.connect(results.append)
+        assert engine.start(_id_job(146.52e6, text="DE VE3ABC/P", wpm=5), dev)
+        engine.shutdown(timeout=0.3)
+        assert not engine.busy
+        assert results[0].status == "failed"
+        assert "didn't stop in time" in results[0].message
+        release.set()
 
     def test_power_and_amp_are_set_and_the_amp_put_back(self, monkeypatch, _license):
         _license.set_license_class(LicenseClass.TECHNICIAN)

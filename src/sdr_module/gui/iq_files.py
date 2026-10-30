@@ -373,6 +373,13 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
             "it has one channel: it is audio, not I/Q (an I/Q WAV file has two, "
             "I and Q)"
         )
+    width = meta.get("wav_sample_width")
+    if info.file_format is FileFormat.WAV and width not in (None, 1, 2):
+        # (The reader takes them for 16-bit: they would play as noise.)
+        raise ValueError(
+            f"its samples are {8 * int(width)}-bit, and this app reads 8- and "
+            "16-bit I/Q WAV files"
+        )
     datatype = str(meta.get("sigmf_datatype", "") or "")
     if datatype and sigmf_format(datatype) is None:
         raise ValueError(
@@ -631,7 +638,7 @@ if HAS_PYQT6:
             if from_name:
                 return from_name, "from the file name"
             if guess and key in self._required:
-                what = "rate" if key == "rate" else "frequency"
+                what = "rate" if key == "rate" else "center frequency"
                 return guess, f"a guess: the receiver's {what}"
             return 0.0, "not stored in the file"
 
@@ -1106,22 +1113,27 @@ if HAS_PYQT6:
             form.addRow("Sample &rate:", self._rate)
             form.addRow("&Center frequency:", self._center)
             layout.addLayout(form)
-            if receiver_rate or receiver_center:
-                use = QPushButton(
-                    f"Use the receiver's ({format_rate(receiver_rate)}, "
-                    f"{format_mhz(receiver_center)})"
-                )
+            # The receiver's values for what is missing, as far as it knows
+            # them (no rate without a device).
+            offer_rate = receiver_rate if receiver_rate > 0 and not rate else 0.0
+            offer_center = (
+                receiver_center if receiver_center > 0 and not center else 0.0
+            )
+            offered = [format_rate(offer_rate)] if offer_rate else []
+            offered += [format_mhz(offer_center)] if offer_center else []
+            if offered:
+                use = QPushButton(f"Use the receiver's ({', '.join(offered)})")
                 use.setAutoDefault(False)
                 use.setToolTip(
                     "Only if this recording was made at what the receiver is "
-                    "set to now"
+                    "set to now (its center frequency and sample rate)"
                 )
 
                 def fill() -> None:
-                    if self._rate.isEnabled():
-                        self._rate.setText(format_rate(receiver_rate))
-                    if self._center.isEnabled():
-                        self._center.setText(format_mhz(receiver_center))
+                    if offer_rate:
+                        self._rate.setText(format_rate(offer_rate))
+                    if offer_center:
+                        self._center.setText(format_mhz(offer_center))
 
                 use.clicked.connect(lambda _c=False: fill())
                 layout.addWidget(use)

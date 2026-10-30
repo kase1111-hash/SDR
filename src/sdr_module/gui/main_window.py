@@ -1133,6 +1133,9 @@ class _Pacer:
         # scheduled yet), or probe on the next frame.
         self._next_probe: Optional[float] = None
         self._probe_now = False
+        # Samples a paced source (a recording playing back) is owed but not
+        # yet given: less than a block, or a little ahead (negative).
+        self._owed = 0.0
 
     def reset(self) -> None:
         """Forget everything (new device or sample rate)."""
@@ -1141,6 +1144,7 @@ class _Pacer:
         self.overloaded = False
         self._next_probe = None
         self._probe_now = False
+        self._owed = 0.0
 
     def restart(self) -> None:
         """Reading pauses (receiver stopped): the next demo read starts
@@ -1181,6 +1185,28 @@ class _Pacer:
         limit = self.read_limit(rate, now)
         smallest = _TIMED_FRAME if self.overloaded and limit > 0 else DISPLAY_BLOCK
         return int(max(smallest, min(wanted, limit)))
+
+    def paced_request(self, rate: float, now: float) -> int:
+        """Like :meth:`demo_request`, for a source that must not run ahead
+        of real time (a recording playing back, ``rate`` times its speed):
+        a frame owed less than a display block reads nothing (0) and the
+        time carries over, so a source slower than a block a frame (a 48
+        kHz recording, or half speed) keeps its own pace."""
+        last, self._last = self._last, now
+        if last is None or rate <= 0:
+            self._owed = 0.0
+            return DISPLAY_BLOCK
+        owed = self._owed + rate * max(0.0, now - last)
+        if owed < DISPLAY_BLOCK:
+            self._owed = owed
+            return 0
+        limit = self.read_limit(rate, now)
+        smallest = _TIMED_FRAME if self.overloaded and limit > 0 else DISPLAY_BLOCK
+        count = int(max(smallest, min(owed, limit)))
+        # What a frame couldn't take (a stall) is dropped, as for the demo;
+        # a block read early is made up by the next frames.
+        self._owed = min(owed - count, float(DISPLAY_BLOCK))
+        return count
 
     def measured(self, count: int, rate: float, seconds: float) -> None:
         """A frame of ``count`` samples took ``seconds`` to read and process."""
@@ -5143,7 +5169,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             set_tone(badge, "danger")
             badge.setToolTip("Recording raw I/Q samples")
         self._sync_recording_armed()
-        self._control_panel.update_record_time(int(self._recording_elapsed()))
+        if self._record_kind() != "audio":  # (else the group times the audio)
+            self._control_panel.update_record_time(int(self._recording_elapsed()))
 
         mb = self._recording_bytes / (1024 * 1024)
         # Recorded size + free space on the drive the recording goes to
@@ -5529,9 +5556,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         dev = self._device
         if isinstance(dev, SDRDevice):
             return self._drain_device(dev)
-        if self._demo_mode or _is_demo_device(dev) or getattr(dev, "paced", False):
-            # (A recording playing back is paced like the demo, times its
-            # playback speed.)
+        if getattr(dev, "paced", False):
+            # A recording playing back: in real time times its speed, never
+            # ahead of it (a slow one skips frames; an empty read is fine).
+            rate = self._pacing_rate()
+            return dev.read_samples(self._pacer.paced_request(rate, time.monotonic()))
+        if self._demo_mode or _is_demo_device(dev):
             rate = self._pacing_rate()
             return dev.read_samples(self._pacer.demo_request(rate, time.monotonic()))
         return dev.read_samples(DISPLAY_BLOCK)
@@ -6324,17 +6354,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         from .device_dialog import DeviceDialog
 
         was_running = self._is_running and self._device is not None
-        # Choosing a device ends a playback: back to the device from before
-        # (it may be the one chosen again, which must be free to open); the
-        # new one receives if the file was playing.
-        self._playback.close(restore=True, resume=False)
         released: List[str] = []
+        ended: List[str] = []
         dialog = DeviceDialog(self)
         self._preselect_rate(dialog)
         open_device = getattr(dialog, "_open_device", None)
         driver_class = getattr(DeviceDialog, "_device_class", None)
 
+        def end_playback() -> None:
+            # Connecting a device ends a recording playing back (Cancel keeps
+            # it playing): back to the device from before, which may be the
+            # one chosen again and must then be free to open (below). The
+            # new device receives if the file was playing.
+            playing = self._playback.device
+            if playing is not None:
+                ended.append(playing.options.name)
+                self._playback.close(restore=True, resume=False, quiet=True)
+
         def open_replacing_current(entry: Dict[str, Any]) -> Any:
+            end_playback()
             try:
                 device_class = driver_class(str(entry.get("type", "")))
             except Exception:  # pragma: no cover - defensive
@@ -6360,8 +6398,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     "warning",
                     8000,
                 )
+            elif ended:  # (connecting failed after the file was closed)
+                back = (
+                    f"Press Start (Space) to receive from {self._device_display_name()}."
+                    if self._device is not None
+                    else "No device is connected."
+                )
+                self._show_status_message(f"Closed {ended[0]}. {back}", "warning", 8000)
             return False
 
+        end_playback()
         if self._device is not None and device is not self._device:
             self._release_device()
         self._device = device
@@ -6398,8 +6444,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _preselect_rate(self, dialog: Any) -> None:
         """Preselect the current device's (or the --sample-rate) rate."""
         combo = getattr(dialog, "_rate_combo", None)
-        if self._device is not None:
-            wanted: Optional[float] = self._device_sample_rate()
+        wanted: Optional[float]
+        if self._playback.active:
+            # Not the recording's rate: the device's from before it.
+            wanted = self._playback.previous_rate() or self._preferred_rate
+        elif self._device is not None:
+            wanted = self._device_sample_rate()
         else:
             wanted = self._preferred_rate
         if combo is None or not wanted or combo.count() == 0:
@@ -6662,9 +6712,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
             return None
         if needs_options(missing, purpose):
+            # (An I/Q file's center is where the LO was: the receiver's is
+            # the middle of the plots, not the tuned frequency.)
             guesses = {
-                "rate": self._device_sample_rate(),
-                "center": self._current_frequency(),
+                "rate": self._device_sample_rate() if self._device else 0.0,
+                "center": self._lo_frequency(),
             }
             dialog = ImportOptionsDialog(options, missing, purpose, guesses, self)
             if not self._exec_dialog(dialog):
@@ -6709,6 +6761,36 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._recording:
             self._toggle_recording(False)
         self._stop_audio_recording()
+        return True
+
+    def _confirm_stop_auto_saved(self, doing: str, verb: str) -> bool:
+        """Before ``doing`` (e.g. "convert x.cu8") replaces the recording
+        buffer while an I/Q recording runs with Save automatically on: it
+        is saved when it stops, but it does stop, so ask. True to go ahead
+        (stopped and saved, or nothing running); Cancel keeps it going."""
+        live = self._recording and not self._capture_pending
+        if not (live and self._control_panel.is_auto_save()):
+            return True
+        folder = file_dialogs.display_path(
+            file_dialogs.recordings_folder(self._settings)
+        )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Recording in Progress")
+        box.setText(f"Stop recording and {doing}?")
+        box.setInformativeText(
+            f"The recording stops here and is saved automatically to {folder}. "
+            "Cancel keeps it going."
+        )
+        go_btn = box.addButton(f"Stop and {verb}", QMessageBox.ButtonRole.AcceptRole)
+        set_role(go_btn, "primary")
+        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(go_btn)
+        box.setEscapeButton(cancel_btn)
+        self._exec_dialog(box)
+        if box.clickedButton() is not go_btn:
+            return False
+        self._toggle_recording(False)  # saves it (Save automatically)
         return True
 
     def _open_recording(
@@ -6756,7 +6838,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if options is None:
             return False
         # First the unsaved take (Cancel keeps a running recording going),
-        # then the work: Cancel there costs nothing.
+        # then the work: Cancel there costs nothing. A recording saved
+        # automatically is no loss, but it stops: asked about too.
+        if not self._confirm_stop_auto_saved(f"convert {options.name}", "&Convert"):
+            return False
         if not self._confirm_discard_recording(f"converting {options.name}"):
             return False
         if self._recording:
@@ -6850,7 +6935,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         save_btn = box.addButton("&Save As...", QMessageBox.ButtonRole.AcceptRole)
         set_role(save_btn, "primary")
         play_btn = box.addButton("&Play", QMessageBox.ButtonRole.ActionRole)
-        play_btn.setEnabled(bool(rate and center))
+        if not (rate and center):
+            play_btn.setToolTip(
+                "Play the recording (you'll be asked for the sample rate and "
+                "center frequency it doesn't say)"
+            )
         tune_btn = None
         if center:
             tune_btn = box.addButton("&Tune There", QMessageBox.ButtonRole.ActionRole)
@@ -7117,7 +7206,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             rate or 0.0,
             center or 0.0,
             self._device_sample_rate() if self._device is not None else 0.0,
-            self._current_frequency(),
+            self._lo_frequency(),  # (an I/Q recording's center: the LO)
             exec_dialog=self._exec_dialog,
         )
         if values is None:

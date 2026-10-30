@@ -332,6 +332,31 @@ class TestSampleCheck:
         assert check.samples == 0
         assert "no I/Q samples" in check.problem
 
+    def test_a_format_the_file_states_isnt_one_to_choose(self, tmp_path):
+        # A SigMF (or WAV, or sidecar) file says its own format: its check
+        # used to advise choosing another sample format, which can't be.
+        loud = _tone(48000) * 1000
+        sigmf = tmp_path / "loud.sigmf-data"
+        save_iq_file(sigmf, loud, RATE, 100e6, SampleFormat.FLOAT32, FileFormat.SIGMF)
+        check = check_iq_samples(sigmf)
+        assert not check.ok
+        assert "Choose another sample format" not in check.problem
+        assert "another scale" in check.problem
+        bad = np.full(48000, np.nan, np.complex64)
+        sigmf_nan = tmp_path / "nan.sigmf-data"
+        save_iq_file(
+            sigmf_nan, bad, RATE, 100e6, SampleFormat.FLOAT32, FileFormat.SIGMF
+        )
+        check = check_iq_samples(sigmf_nan)
+        assert "Choose another sample format" not in check.problem
+        assert "damaged" in check.problem
+        # The same samples in a headerless file: choosing another format is
+        # the advice.
+        raw = tmp_path / "loud.cf32"
+        loud.tofile(raw)
+        check = check_iq_samples(raw, SampleFormat.FLOAT32)
+        assert "Choose another sample format" in check.problem
+
 
 def test_reading_releases_the_file(tmp_path):
     path = tmp_path / "x.cf32"

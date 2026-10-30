@@ -124,6 +124,37 @@ class TestFilePlaybackDevice(unittest.TestCase):
         self.assertLess(peak, 4e6)
 
 
+class TestPacedRequests(unittest.TestCase):
+    """The display loop's reads of a recording keep to real time."""
+
+    def setUp(self):
+        if not HAS_PYQT6:
+            self.skipTest("PyQt6 not available")
+
+    def read(self, rate, seconds, fps=30.0):
+        from sdr_module.gui.main_window import _Pacer
+
+        pacer = _Pacer()
+        now, counts = 100.0, []
+        for _ in range(int(seconds * fps) + 1):
+            counts.append(pacer.paced_request(rate, now))
+            now += 1.0 / fps
+        return counts
+
+    def test_a_source_slower_than_a_block_a_frame_skips_frames(self):
+        from sdr_module.gui.main_window import DISPLAY_BLOCK
+
+        counts = self.read(48e3, 3.0)
+        self.assertIn(0, counts)  # nothing owed yet: no read this frame
+        self.assertTrue(all(c == 0 or c >= DISPLAY_BLOCK for c in counts))
+        self.assertAlmostEqual(sum(counts) / 48e3, 3.0, delta=DISPLAY_BLOCK / 48e3)
+
+    def test_a_fast_source_reads_what_each_frame_covers(self):
+        counts = self.read(2.4e6, 1.0)
+        self.assertNotIn(0, counts)
+        self.assertAlmostEqual(sum(counts) / 2.4e6, 1.0, delta=0.01)
+
+
 class _PlaybackCase(_WindowTestCase):
     demo = True
 
@@ -247,6 +278,37 @@ class TestOpenRecording(_PlaybackCase):
         elapsed = time.monotonic() - start
         played = dev.position / RATE
         self.assertAlmostEqual(played, elapsed, delta=0.12)
+
+    def _play_for(self, seconds):
+        """Run the display loop on the real clock; seconds of file played."""
+        win = self.win
+        dev = win._device
+        win._update_display()  # first frame: one block
+        first = dev.position
+        start = time.monotonic()
+        while time.monotonic() - start < seconds:
+            time.sleep(0.03)
+            win._update_display()
+        return (dev.position - first) / dev.sample_rate, time.monotonic() - start
+
+    def test_a_slow_recording_isnt_read_faster_than_real_time(self):
+        # A 48 kHz I/Q recording (HDSDR, SDR#) is less than a display block
+        # a frame: it used to get a whole block every frame, 1.3x too fast.
+        rate = 48e3
+        self.play(
+            self.make_file(_fm_tone(3.0, rate=rate), name="hf.sigmf-data", rate=rate)
+        )
+        played, elapsed = self._play_for(0.5)
+        self.assertAlmostEqual(played, elapsed, delta=0.08)
+
+    def test_half_speed_of_a_slow_recording_is_half_speed(self):
+        rate = 96e3
+        self.play(
+            self.make_file(_fm_tone(3.0, rate=rate), name="hf.sigmf-data", rate=rate)
+        )
+        self.win._playback_bar.set_speed(0.5)
+        played, elapsed = self._play_for(0.5)
+        self.assertAlmostEqual(played, 0.5 * elapsed, delta=0.08)
 
     def test_speed_reads_faster_and_mutes_the_speaker(self):
         self.play()
@@ -374,6 +436,77 @@ class TestOpenRecording(_PlaybackCase):
         self.assertIs(self.win._device, demo)
 
 
+class TestDeviceDialogDuringPlayback(_PlaybackCase):
+    """Device > Connect... while a recording plays."""
+
+    def test_cancel_keeps_the_recording_playing(self):
+        # It used to close the recording before the dialog even opened, so
+        # Cancel left the receiver stopped on the device from before.
+        self.play()
+        win = self.win
+        win._exec_dialog = lambda dialog: 0  # Cancel
+        self.assertFalse(win._show_device_dialog())
+        self.assertTrue(win._playback.active)
+        self.assertTrue(win._is_running)
+        self.assertEqual(win._device_label.text(), "Playback: fm.sigmf-data")
+        self.assertEqual(win._lo_frequency(), CENTER)
+
+    def test_connecting_ends_it_and_the_new_device_receives(self):
+        from sdr_module.gui.device_dialog import MockDevice
+
+        demo = self.win._device
+        self.play()
+        win = self.win
+
+        def connect_the_demo_row(dialog):
+            dialog._device_table.selectRow(dialog._device_table.rowCount() - 1)
+            dialog._on_accept()
+            return dialog.result()
+
+        win._exec_dialog = connect_the_demo_row
+        self.assertTrue(win._show_device_dialog())
+        self.assertFalse(win._playback.active)
+        self.assertIsInstance(win._device, MockDevice)
+        self.assertIsNot(win._device, demo)  # the one from before is released
+        self.assertTrue(win._is_running)
+        self.assertIsNone(win._lo_lock)
+        self.assertFalse(win._playback_bar.isVisible())
+
+    def test_a_failed_connect_says_the_recording_was_closed(self):
+        from sdr_module.gui import device_dialog
+
+        self.play()
+        win = self.win
+
+        def try_and_give_up(dialog):
+            dialog._device_table.selectRow(dialog._device_table.rowCount() - 1)
+            dialog._on_accept()  # opening fails: the dialog stays open
+            return 0  # then Cancel
+
+        win._exec_dialog = try_and_give_up
+        with (
+            mock.patch.object(
+                device_dialog.DeviceDialog, "_open_device", return_value=None
+            ),
+            mock.patch.object(device_dialog.QMessageBox, "warning"),
+        ):
+            self.assertFalse(win._show_device_dialog())
+        self.assertFalse(win._playback.active)
+        self.assertIn("Closed fm.sigmf-data. Press Start (Space)", self.message())
+
+    def test_the_rate_offered_is_the_device_s_not_the_recording_s(self):
+        self.play()  # 240 kS/s; the demo ran at 2.4 MS/s
+        seen = {}
+
+        def look(dialog):
+            seen["rate"] = float(dialog._rate_combo.currentData())
+            return 0
+
+        self.win._exec_dialog = look
+        self.win._show_device_dialog()
+        self.assertEqual(seen["rate"], 2.4e6)
+
+
 class TestOpenWhileRecording(_PlaybackCase):
     def _answer(self, button_text):
         """Answer the next question box with the button named so."""
@@ -455,6 +588,28 @@ class TestHeaderlessPlayback(_PlaybackCase):
         self.assertEqual(self.win._lo_frequency(), 433.92e6)
         self.assertEqual(self.win._device_sample_rate(), 1.024e6)
 
+    def test_the_guess_for_an_unknown_center_is_the_receiver_s_center(self):
+        # An I/Q file's center is the LO (the middle of the plots), not the
+        # tuned frequency.
+        from sdr_module.gui import iq_files
+
+        self.assertTrue(self.win.set_frequency(100.3e6))
+        self.assertEqual(self.win._lo_frequency(), 100.1e6)
+        path = os.path.join(self.folder, "capture.cs16")
+        np.zeros(4000, np.int16).tofile(path)
+        seen = {}
+
+        def fake_exec(dialog):
+            if isinstance(dialog, iq_files.ImportOptionsDialog):
+                seen["center"] = dialog.center_hz()
+                seen["note"] = dialog._center_hint.text()
+            return 0  # Cancel
+
+        self.win._exec_dialog = fake_exec
+        self.play(path)
+        self.assertEqual(seen["center"], 100.1e6)
+        self.assertEqual(seen["note"], "a guess: the receiver's center frequency")
+
     def test_an_empty_file_is_refused(self):
         path = os.path.join(self.folder, "empty.cf32")
         open(path, "wb").close()
@@ -486,10 +641,6 @@ class TestDecodersOnPlayback(_PlaybackCase):
         self.assertTrue(any("Played back" in t for t in texts), texts)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestPlaybackWithoutDevice(_PlaybackCase):
     demo = False
 
@@ -508,3 +659,7 @@ class TestPlaybackWithoutDevice(_PlaybackCase):
         self.assertEqual(win._state_badge.text(), "NO DEVICE")
         self.assertEqual(win._current_frequency(), 433.92e6)
         self.assertEqual(win._lo_frequency(), 433.92e6)
+
+
+if __name__ == "__main__":
+    unittest.main()

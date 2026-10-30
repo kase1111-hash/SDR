@@ -192,6 +192,23 @@ class TestConvertRecording(_FilesCase):
         self.assertTrue(self.win._playback.active)
         self.win._playback.close()
 
+    def test_play_from_the_summary_asks_for_what_the_file_doesnt_say(self):
+        # Play was greyed out (without a word) for a file without its rate
+        # and center; Recording Info's Play asks for them, so does this.
+        path = self.path("plain.cs16")
+        x = _tone()
+        raw = np.empty(2 * len(x), np.int16)
+        raw[0::2] = np.rint(x.real * 32767)
+        raw[1::2] = np.rint(x.imag * 32767)
+        raw.tofile(path)
+        self.answer("Play")
+        with self.open_dialog(path):
+            self.assertTrue(self.win._convert_recording())
+        asked = [b for b in self.boxes if type(b).__name__ == "ImportOptionsDialog"]
+        self.assertEqual(len(asked), 2)  # to convert, then to play
+        self.assertTrue(self.win._playback.active)
+        self.win._playback.close()
+
     def test_a_running_recording_is_asked_about_first_and_cancel_keeps_it(self):
         win = self.win
         win._record_button.click()
@@ -231,6 +248,37 @@ class TestConvertRecording(_FilesCase):
         self.assertTrue(win._recording)
         win._confirm_discard_recording = lambda *_a: True
         win._record_button.click()
+
+    def test_saving_automatically_a_running_recording_is_still_asked_about(self):
+        # With Save automatically on, converting used to stop a running
+        # recording without a word (it was saved, but it stopped).
+        from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
+        from sdr_module.gui.main_window import SDRMainWindow
+
+        win = self.win
+        win._confirm_discard_recording = (
+            lambda doing: SDRMainWindow._confirm_discard_recording(win, doing)
+        )
+        win._control_panel.set_auto_save(True)
+        path = self.path("z.sigmf-data")
+        save_iq_file(path, _tone(), RATE, 145e6, SampleFormat.FLOAT32, FileFormat.SIGMF)
+        win._record_button.click()
+        win._update_display()
+        self.answer("Cancel")
+        with self.open_dialog(path):
+            self.assertFalse(win._convert_recording())
+        box = [b for b in self.boxes if isinstance(b, QMessageBox)][0]
+        self.assertEqual(box.text(), "Stop recording and convert z.sigmf-data?")
+        self.assertIn("saved automatically", box.informativeText())
+        self.assertTrue(win._recording)  # Cancel: still recording
+        win._update_display()
+        self.answer("Stop and Convert", "Close")
+        with self.open_dialog(path):
+            self.assertTrue(win._convert_recording())
+        self.assertFalse(win._recording)
+        saved = os.listdir(self.path("recordings"))
+        self.assertTrue(any(name.endswith(".sigmf-data") for name in saved), saved)
+        self.assertEqual(win._buffer_source, "z.sigmf-data")
 
     def test_an_empty_file_is_refused_and_the_buffer_kept(self):
         win = self.win
@@ -376,6 +424,79 @@ class TestSaving(_FilesCase):
         self.assertNotIn("core:sample_rate", meta["global"])
         self.assertNotIn("core:frequency", meta["captures"][0])
 
+    def test_a_wav_without_a_rate_is_refused_clearly_and_leaves_no_file(self):
+        # A WAV header must hold the rate: saving one left unknown failed
+        # with "bad frame rate" and left a broken out.wav behind.
+        path = self.path("u.cs16")
+        np.zeros(2000, np.int16).tofile(path)
+        from sdr_module.gui import iq_files
+
+        def fake_exec(dialog):
+            if isinstance(
+                dialog, (iq_files.ImportOptionsDialog, iq_files.RecordingDetailsDialog)
+            ):
+                dialog._on_accept()  # rate and center left unknown
+                return dialog.result()
+            if isinstance(dialog, QMessageBox):
+                dialog.buttons()[-1].click()
+            return 0
+
+        self.win._exec_dialog = fake_exec
+        with self.open_dialog(path):
+            self.win._convert_recording()
+        target = self.path("u_out.wav")
+        with (
+            self.save_dialog(target),
+            mock.patch.object(QMessageBox, "warning") as warn,
+        ):
+            self.assertFalse(self.win._save_recording())
+        self.assertIn("needs the sample rate", warn.call_args[0][2])
+        self.assertFalse(os.path.exists(target))
+        self.assertFalse(os.path.exists(target + ".sigmf-meta"))
+
+    def test_the_receiver_s_values_offered_are_its_center_and_known_rate(self):
+        # "Use the receiver's" offered the tuned frequency, not the center
+        # of the samples (the LO), and "0 kS/s" with no device connected.
+        from PyQt6.QtWidgets import QPushButton
+
+        from sdr_module.gui import iq_files
+
+        win = self.win
+        self.assertTrue(win.set_frequency(100.3e6))  # the VFO moves, not the LO
+        self.assertEqual(win._lo_frequency(), 100.1e6)
+        offered = []
+
+        def fake_exec(dialog):
+            if isinstance(dialog, iq_files.RecordingDetailsDialog):
+                use = [
+                    b
+                    for b in dialog.findChildren(QPushButton)
+                    if b.text().startswith("Use")
+                ]
+                offered.append(use[0].text() if use else "")
+                if use:
+                    use[0].click()
+                offered.append((dialog._rate.text(), dialog._center.text()))
+            return 0
+
+        win._exec_dialog = fake_exec
+        for device in ("demo", None):
+            if device is None:
+                win._release_device()
+                self.assertIsNone(win._device)
+            win._replace_buffer(self.mw._SampleStore.from_samples(_tone(1000)))
+            win._buffer_meta = (None, None)
+            self.assertFalse(win._save_recording())  # (cancelled)
+        self.assertEqual(
+            offered,
+            [
+                "Use the receiver's (2.4 MS/s, 100.100 MHz)",
+                ("2.4 MS/s", "100.100 MHz"),
+                "Use the receiver's (100.100 MHz)",  # no device: no rate
+                ("", "100.100 MHz"),
+            ],
+        )
+
     def test_raw_saves_keep_rate_and_frequency(self):
         from sdr_module.dsp.recording import load_iq_file
 
@@ -478,6 +599,33 @@ class TestUnreadableFiles(_FilesCase):
         with self.open_dialog(path), mock.patch.object(QMessageBox, "warning") as warn:
             self.assertFalse(self.win._open_recording())
         self.assertIn("it is audio, not I/Q", warn.call_args[0][2])
+
+    def test_wav_samples_wider_than_16_bits_are_refused_not_misread(self):
+        # 24- and 32-bit I/Q WAV files (HDSDR can write them) were read as
+        # 16-bit: garbage, with "the samples look right".
+        import wave
+
+        x = _tone(4800)
+        for width in (3, 4):
+            full = 2 ** (8 * width - 1) - 1
+            ints = np.empty(2 * len(x), np.int32)
+            ints[0::2] = np.rint(x.real * full)
+            ints[1::2] = np.rint(x.imag * full)
+            data = ints.astype("<i4").view(np.uint8).reshape(-1, 4)[:, :width]
+            path = self.path(f"iq_{8 * width}bit.wav")
+            with wave.open(path, "wb") as handle:
+                handle.setnchannels(2)
+                handle.setsampwidth(width)
+                handle.setframerate(48000)
+                handle.writeframes(data.tobytes())
+            for action in (self.win._open_recording, self.win._show_recording_info):
+                with (
+                    self.open_dialog(path),
+                    mock.patch.object(QMessageBox, "warning") as warn,
+                ):
+                    action()
+                self.assertIn(f"its samples are {8 * width}-bit", warn.call_args[0][2])
+            self.assertFalse(self.win._playback.active)
 
 
 class TestRecordingInfo(_FilesCase):
@@ -739,6 +887,45 @@ class TestFileNameHints(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInputWhileAJobRuns(_FilesCase):
+    """run_job keeps the window's event loop going; until its progress
+    dialog shows (after a moment) nothing else blocked the window, so a
+    click on Record during a Convert started a recording that then went on
+    into the converted file's buffer."""
+
+    def test_clicks_and_keys_wait_until_the_job_is_done(self):
+        import time
+
+        from PyQt6.QtCore import Qt, QTimer
+        from PyQt6.QtTest import QTest
+
+        from sdr_module.gui.file_jobs import run_job
+
+        win = self.win
+        win._update_display()
+        self.assertTrue(win._is_running)
+
+        def press():
+            QTest.mouseClick(win._record_button, Qt.MouseButton.LeftButton)
+            win._spectrum.setFocus()
+            QTest.keyClick(win._spectrum, Qt.Key.Key_Space)
+
+        def work(report):
+            for i in range(30):  # 0.3 s: the progress dialog doesn't show
+                time.sleep(0.01)
+                report(i / 30)
+            return "done"
+
+        QTimer.singleShot(50, press)
+        self.assertEqual(run_job(win, "Test", "Working…", work).value, "done")
+        self.assertFalse(win._recording)
+        self.assertTrue(win._is_running)
+        # Afterwards the window takes input as before.
+        QTest.mouseClick(win._record_button, Qt.MouseButton.LeftButton)
+        self.assertTrue(win._recording)
+        win._record_button.click()
 
 
 class TestRunJob(unittest.TestCase):

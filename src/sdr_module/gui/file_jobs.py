@@ -31,8 +31,8 @@ from ..dsp.recording import FileFormat, IQRecorder, SampleFormat
 from .iq_files import IqFileOptions
 
 try:
-    from PyQt6.QtCore import QEventLoop, Qt, QThread, pyqtSignal
-    from PyQt6.QtWidgets import QProgressDialog
+    from PyQt6.QtCore import QEvent, QEventLoop, QObject, Qt, QThread, pyqtSignal
+    from PyQt6.QtWidgets import QApplication, QProgressDialog
 
     HAS_PYQT6 = True
 except ImportError:  # pragma: no cover - the GUI needs PyQt6
@@ -131,16 +131,24 @@ def write_recording(
     """Write ``chunks`` (``total`` samples) to ``filename``; a cancelled or
     failed write leaves no partial file behind. Returns the samples
     written."""
+    if file_format is FileFormat.WAV and not sample_rate > 0:
+        # (Its header must hold one: nothing is written.)
+        raise ValueError(
+            "a WAV file needs the sample rate, and this recording doesn't say "
+            "it. Save again and enter it, or choose another format (SigMF can "
+            "leave it unknown)."
+        )
     recorder = IQRecorder(
         sample_rate=sample_rate,
         center_frequency=center_frequency,
         sample_format=sample_format,
         file_format=file_format,
     )
-    recorder.start(filename)
     written = 0
-    finished = False
+    started = finished = False
     try:
+        recorder.start(filename)
+        started = True
         report(0.0)
         for chunk in chunks:
             recorder.write(chunk)
@@ -148,7 +156,8 @@ def write_recording(
             report(min(1.0, written / max(1, total)))
         finished = True
     finally:
-        recorder.stop()
+        if started:
+            recorder.stop()
         if not finished:
             _remove_partial(filename, file_format)
     return written
@@ -234,6 +243,39 @@ if HAS_PYQT6:
                 self.result = JobResult(ok=not self._cancel, value=value)
                 self.result.cancelled = self._cancel
 
+    class _HoldInput(QObject):
+        """Keyboard and mouse input waits while a job runs: the window's
+        event loop goes on (the spectrum keeps running), but a click on
+        Record or a shortcut must not start something under the job's feet
+        (a recording going into the buffer being converted). Once the
+        progress dialog is up its modality does this; before (the first
+        moment) this filter swallows the input."""
+
+        _INPUT = frozenset(
+            {
+                QEvent.Type.KeyPress,
+                QEvent.Type.KeyRelease,
+                QEvent.Type.ShortcutOverride,
+                QEvent.Type.Shortcut,
+                QEvent.Type.MouseButtonPress,
+                QEvent.Type.MouseButtonRelease,
+                QEvent.Type.MouseButtonDblClick,
+                QEvent.Type.Wheel,
+                QEvent.Type.ContextMenu,
+            }
+        )
+
+        def __init__(self, dialog: "QProgressDialog"):
+            super().__init__(dialog)
+            self._dialog = dialog
+
+        def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802 - Qt
+            if event.type() not in self._INPUT or self._dialog.isVisible():
+                return False
+            if event.type() == QEvent.Type.ShortcutOverride:
+                event.accept()  # (taken as a key press: no shortcut fires)
+            return True
+
     def run_job(
         parent: Any,
         title: str,
@@ -246,7 +288,8 @@ if HAS_PYQT6:
         ``on_partial``, which then gets what ``partial(...)`` is called
         with, on the GUI thread) in a worker thread, with a progress dialog
         (shown once it takes longer than ``show_after_ms``) and Cancel.
-        Returns once it is done."""
+        Keyboard and mouse input to the app waits meanwhile (see
+        :class:`_HoldInput`). Returns once it is done."""
         worker = _Worker(work, on_partial is not None)
         dialog = QProgressDialog(label, "Cancel", 0, 1000, parent)
         dialog.setWindowTitle(title)
@@ -261,11 +304,19 @@ if HAS_PYQT6:
         dialog.canceled.connect(worker.cancel)
         loop = QEventLoop()
         worker.finished.connect(loop.quit)
-        worker.start()
-        loop.exec()
-        worker.wait()
-        # Deliver what the worker queued just before it finished.
-        loop.processEvents()
+        hold = _HoldInput(dialog)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(hold)
+        try:
+            worker.start()
+            loop.exec()
+            worker.wait()
+            # Deliver what the worker queued just before it finished.
+            loop.processEvents()
+        finally:
+            if app is not None:
+                app.removeEventFilter(hold)
         dialog.close()
         dialog.deleteLater()
         result = worker.result

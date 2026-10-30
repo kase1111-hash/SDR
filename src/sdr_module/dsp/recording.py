@@ -3447,12 +3447,15 @@ def check_iq_samples(
     """Read a few stretches of a recording (its start, middle and end) as
     ``sample_format`` and say whether they look like I/Q samples: finite
     numbers within a few times full scale. Data read in the wrong format
-    (an rtl_sdr ``.bin`` read as cf32) gives NaNs or values like 1e31."""
+    (an rtl_sdr ``.bin`` read as cf32) gives NaNs or values like 1e31.
+    A file that states its own format (SigMF, WAV, a sidecar) can't be
+    read in another one: its problem says so instead."""
     pieces = []
     try:
         with IQPlayer(filepath, sample_format) as player:
             total = player.total_samples
             name = (player.sample_format or SampleFormat.FLOAT32).value
+            stated = player.metadata_path is not None or player._wav_file is not None
             if total == 0:
                 return SampleCheck(problem="The file holds no I/Q samples.")
             per = max(1, int(max_samples) // 3)
@@ -3472,12 +3475,24 @@ def check_iq_samples(
         rms = float(np.sqrt(np.mean(magnitude**2))) if magnitude.size else 0.0
     nonfinite = int(samples.size - good.size)
     problem = ""
-    if nonfinite:
+    beyond = max_abs > 4.0 or not np.isfinite(max_abs)
+    if nonfinite and stated:
+        problem = (
+            "Some samples aren't numbers (NaN or infinity): the file may be "
+            f"damaged, or its metadata gives the wrong sample format ({name})."
+        )
+    elif nonfinite:
         problem = (
             f"Some samples aren't numbers (NaN or infinity), so this is "
             f"probably not {name} data. Choose another sample format."
         )
-    elif max_abs > 4.0 or not np.isfinite(max_abs):
+    elif beyond and stated:
+        problem = (
+            f"The samples reach {max_abs:.3g}, far beyond full scale (1.0): "
+            "they were saved with another scale (levels read high), or the "
+            "file is damaged."
+        )
+    elif beyond:
         problem = (
             f"The samples reach {max_abs:.3g}, far beyond full scale (1.0), so "
             f"this is probably not {name} data. Choose another sample format."

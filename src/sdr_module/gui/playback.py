@@ -254,6 +254,7 @@ class _PreviousSource:
     tuned_hz: float
     lo_hz: float
     name: str
+    rate: float = 0.0  # the device's sample rate
 
 
 if HAS_PYQT6:
@@ -559,6 +560,12 @@ if HAS_PYQT6:
             prev = self._previous
             return prev.name if prev is not None and prev.device is not None else ""
 
+        def previous_rate(self) -> float:
+            """The sample rate of the device used before the recording (0
+            if there was none)."""
+            prev = self._previous
+            return prev.rate if prev is not None and prev.device is not None else 0.0
+
         def back_to_text(self) -> str:
             name = self.previous_name()
             return name or "no device"
@@ -593,6 +600,7 @@ if HAS_PYQT6:
                     tuned_hz=float(win._current_frequency()),
                     lo_hz=float(win._lo_frequency()),
                     name=win._device_display_name() if win._device else "",
+                    rate=float(win._device_sample_rate()) if win._device else 0.0,
                 )
                 if running:
                     win._stop_acquisition()

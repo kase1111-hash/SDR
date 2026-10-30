@@ -194,6 +194,23 @@ class TestRecordAudio(_AudioCase):
         self.assertGreater(win._buffer_sample_count(), 0)
         self.assertEqual(len(self.wavs()), 1)
 
+    def test_with_audio_chosen_an_iq_recording_leaves_the_group_timer_alone(self):
+        # The group's Record buttons and timer are the audio's then: an I/Q
+        # recording started from Radio > Record I/Q used to show its time
+        # there, next to "Ready".
+        win = self.win
+        panel = win._control_panel
+        panel.set_record_kind("audio")
+        win._record_action.trigger()  # Radio > Record I/Q
+        self.frames(3)
+        self.assertTrue(win._recording)
+        win._recording_elapsed = lambda: 65.0
+        win._update_status()
+        self.assertTrue(win._recording_label.text().startswith("REC 00:01:05"))
+        self.assertEqual(panel._record_status.text(), "Ready")
+        self.assertEqual(panel._record_time.text(), "00:00:00")
+        win._record_action.trigger()
+
     def test_works_during_playback(self):
         from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
 

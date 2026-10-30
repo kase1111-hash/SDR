@@ -765,6 +765,9 @@ class SSTVState:
     vis_detected: bool = False
     complete: bool = False
     vis_code: Optional[int] = None
+    # The whole calibration header was heard: leader, 10 ms break, leader
+    # (the first leader and the break often fade; the VIS alone is enough).
+    vis_header: bool = False
     sync_locked: bool = False
 
 
@@ -984,6 +987,7 @@ class SSTVDecoder:
             "signal_strength": self.state.signal_strength,
             "sync_locked": self.state.sync_locked,
             "vis_code": self.state.vis_code,
+            "vis_header": self.state.vis_header,
             "tone_hz": tone["tone_hz"],
             "activity": tone["activity"],
         }
@@ -1268,6 +1272,19 @@ class SSTVDecoder:
             return None
         return code
 
+    def _heard_break(self, edge: int) -> bool:
+        """The 10 ms 1200 Hz break between the two leaders, 300 ms before
+        the start bit at coarse index ``edge``, with the first leader."""
+        coarse = self._coarse
+        gap = coarse.get(edge - 308, edge - 302)
+        lead = coarse.get(edge - 560, edge - 320)
+        if len(gap) < 4 or len(lead) < 120:
+            return False
+        return (
+            abs(float(np.median(gap)) - FREQ_SYNC_HZ) < 100.0
+            and abs(float(np.median(lead)) - FREQ_LEADER_HZ) < 80.0
+        )
+
     def _on_vis(self, edge: int, code: int) -> None:
         # Refine the start bit's leading edge on the full-rate track.
         spm = self._spm
@@ -1285,10 +1302,16 @@ class SSTVDecoder:
                 refined = lo + i + frac
         vis_end = refined + 10 * VIS_BIT_MS * spm
         spec = self._forced_mode or SSTV_MODES[code]
-        logger.info(f"SSTV VIS {code} ({SSTV_MODES[code].name}); decoding {spec.name}")
+        header = self._heard_break(edge)
+        logger.info(
+            f"SSTV VIS {code} ({SSTV_MODES[code].name}"
+            f"{', full header' if header else ', break not heard'}); "
+            f"decoding {spec.name}"
+        )
         if self._rx is not None:
             self._lose_image("a new image started")
         self._begin(spec, vis_code=code, first_end=vis_end)
+        self.state.vis_header = header
         self._vis_lockout = edge + 300
 
     # ------------------------------------------------------------------

@@ -283,6 +283,18 @@ class TestRoundTrip:
         assert events.modes == ["Robot 36", "Robot 36"]
         assert len(events.complete) == 2
 
+    def test_vis_header_with_and_without_the_break(self):
+        audio = encode_sstv(card_for("Martin 2"), "Martin 2", FS, lines=3)
+        decoder = SSTVDecoder(FS)
+        feed(decoder, padded(audio, after=0.0))
+        assert decoder.state.vis_code == 40 and decoder.state.vis_header
+        # The first leader and the break faded: the VIS alone still starts
+        # the image.
+        decoder = SSTVDecoder(FS)
+        feed(decoder, padded(audio[int(0.4 * FS) :], after=0.0))
+        assert decoder.state.vis_code == 40
+        assert not decoder.state.vis_header
+
     def test_parity_error_is_rejected(self):
         spec = find_mode("Martin 2")
         freqs, durs = segment_plan(card_for("Martin 2"), spec, lines=4)

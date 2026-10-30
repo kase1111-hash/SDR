@@ -8348,10 +8348,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
 
     def _on_panel_preset_applied(self) -> None:
-        """Confirm the control panel's Apply Preset in the status bar."""
+        """Confirm the control panel's Apply Preset in the status bar (not
+        when its frequency was refused: the status bar says why)."""
+        from ..core.frequency_manager import get_frequency_manager
+
         panel = self._control_panel
         name = panel._preset_combo.currentText()
         if not name:
+            return
+        preset = get_frequency_manager().get_preset_by_name(name)
+        if preset is None or abs(self._current_frequency() - preset.frequency_hz) > 1.0:
             return
         self._show_status_message(
             f"{name}: {format_frequency(self._current_frequency())}, "

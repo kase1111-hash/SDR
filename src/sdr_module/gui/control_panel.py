@@ -2601,6 +2601,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         # Set frequency
         self._freq_input.set_frequency(preset.frequency_hz)
         self.frequency_changed.emit(self._freq_input.get_frequency())
+        if abs(self._freq_input.get_frequency() - preset.frequency_hz) > 1.0:
+            return  # refused (the window says why): the mode stays as it is too
 
         # Mode first: the Bandwidth choices depend on it.
         if preset.mode in _PRESET_DEMOD:

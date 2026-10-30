@@ -6,6 +6,8 @@ regression tests for the confirmed findings.
 * MS-1: a scan stopped by a new sample rate, or by opening a recording,
   goes back to where it started (frequency, mode, filter and tone squelch),
   unless it stopped on a channel being listened to.
+* MS-2: Apply Preset with a frequency that is refused changes nothing
+  else, and the refusal is not replaced by an "applied" confirmation.
 
 Run offscreen: ``QT_QPA_PLATFORM=offscreen python -m pytest
 tests/test_review_mainstate.py``
@@ -195,6 +197,47 @@ class TestScanStoppedByTheWindow(_MainStateCase):
         self.assertEqual(
             self.scanner._status.text(), "Scan stopped: a recording is playing."
         )
+
+
+# ---------------------------------------------------------------------------
+# MS-2: the control panel's Apply Preset, refused
+# ---------------------------------------------------------------------------
+
+
+class TestApplyPresetRefused(_MainStateCase):
+    """Presets > Aviation > ACARS (131.550 MHz, AM) while a 145 MHz
+    recording plays: the frequency is refused (outside the recording). The
+    panel still switched to AM, 15 kHz, and the window then replaced the
+    refusal with "ACARS: 145.000 MHz, AM, 15 kHz bandwidth"."""
+
+    def choose(self, category, name):
+        panel = self.win._control_panel
+        panel._category_combo.setCurrentText(category)
+        panel._preset_combo.setCurrentText(name)
+        self.assertEqual(panel._preset_combo.currentText(), name)
+        return panel
+
+    def test_a_refused_preset_changes_nothing_and_says_why(self):
+        win = self.win
+        self.assertTrue(win._open_recording(self.recording(145.0e6, 2.4e6)))
+        win._set_demod_mode("FM", "5 kHz", "12.5 kHz")
+        before = self.listening()
+        panel = self.choose("Aviation", "ACARS")
+        self.messages.clear()
+        panel._apply_preset_btn.click()
+        self.assertEqual(self.listening(), before)
+        refusal = "131.550 MHz is outside the recording, which covers 143.8–146.2 MHz."
+        self.assertEqual(self.messages, [(refusal, "danger")])
+        self.assertEqual(self.status(), (refusal, "danger"))
+
+    def test_a_preset_tuned_still_sets_its_mode_and_says_so(self):
+        panel = self.choose("Aviation", "ACARS")
+        panel._apply_preset_btn.click()
+        self.assertEqual(self.win._current_frequency(), 131.55e6)
+        self.assertEqual(panel.get_demod_mode(), "AM")
+        text, tone = self.status()
+        self.assertIn("ACARS", text)
+        self.assertNotEqual(tone, "danger")
 
 
 if __name__ == "__main__":  # pragma: no cover

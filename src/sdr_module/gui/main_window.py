@@ -7490,10 +7490,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if not self._confirm_stop_recordings(options.name):
             return False
         # A scan ends first (back to where it started, unless a channel is
-        # being listened to): Close Recording goes back to that.
+        # being listened to): Close Recording goes back to that. (Said so
+        # that it stays true if the file then can't be opened.)
         scanner = getattr(self, "_scanner_panel", None)
         if scanner is not None:
-            scanner.stop_scan("Scan stopped: a recording is playing.", "warning")
+            scanner.stop_scan("Scan stopped: you opened a recording.", "warning")
         if not self._playback.open(options):
             return False
         half = options.sample_rate / 2.0

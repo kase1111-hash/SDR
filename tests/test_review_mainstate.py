@@ -182,21 +182,47 @@ class TestScanStoppedByTheWindow(_MainStateCase):
         self.assertTrue(self.win._open_recording(path))
         self.assertFalse(self.scanner.engine.active)
         self.assertEqual(
-            self.scanner._status.text(), "Scan stopped: a recording is playing."
+            self.scanner._status.text(), "Scan stopped: you opened a recording."
         )
         self.win._playback.close(restore=True)
         self.assertEqual(self.listening(), self.BEFORE)
         self.assertAlmostEqual(self.win._lo_frequency(), 100.1e6)
 
     def test_a_recording_at_another_rate_says_a_recording_is_playing(self):
-        """It said 'the sample rate changed' (that check came first)."""
+        """It said 'the sample rate changed' (that check came first): the
+        reason given is the recording."""
         self.scan_to_the_repeater()
         self.assertTrue(self.win._open_recording(self.recording(145.0e6, 1.0e6)))
         self.frames(0.1)
         self.assertEqual(
-            self.scanner._status.text(), "Scan stopped: a recording is playing."
+            self.scanner._status.text(), "Scan stopped: you opened a recording."
         )
         self.win._playback.close(restore=True)
+        self.assertEqual(self.listening(), self.BEFORE)
+
+    def test_a_recording_that_cant_be_opened(self):
+        """(Second checker) The scan ends before the file is opened: when
+        it then can't be (it went away, no permission), the Scanner tab
+        said "a recording is playing" next to "Can't play ...". The
+        receiver is back where the scan started either way."""
+        from sdr_module.gui import iq_files
+
+        self.scan_to_the_repeater()
+        path = self.recording(145.0e6, 2.4e6)
+        with mock.patch.object(
+            iq_files.IqFileOptions,
+            "open_player",
+            side_effect=OSError("Permission denied"),
+        ):
+            self.assertFalse(self.win._open_recording(path))
+        self.assertFalse(self.win._playback.active)
+        self.assertFalse(self.scanner.engine.active)
+        self.assertEqual(
+            self.scanner._status.text(), "Scan stopped: you opened a recording."
+        )
+        self.assertEqual(
+            self.status(), ("Can't play take.sigmf-data: Permission denied", "danger")
+        )
         self.assertEqual(self.listening(), self.BEFORE)
 
     def test_the_window_checks_the_recording_before_the_rate(self):

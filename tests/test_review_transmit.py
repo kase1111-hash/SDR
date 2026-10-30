@@ -310,3 +310,157 @@ class TestConfirmationCountsTheIds(_TxCase):
         text = self._confirmation(job)
         self.assertIn(f"about {7.0 + id_s:.1f} s with your station ID", text)
 
+# --------------------------------------------------------------------------- #
+# TX-2 and TX-12: the HackRF driver's start and end of a transmission
+# --------------------------------------------------------------------------- #
+
+import time  # noqa: E402
+
+from tests.hackrf_fakes import (  # noqa: E402
+    BUFFER_LENGTH,
+    ThreadedFakeHackRF,
+    _CInt,
+    install_fake_backend,
+)
+
+
+class _StartFailsHackRF(ThreadedFakeHackRF):
+    """pyhackrf_start_tx() puts the radio in TX and submits transfers (the
+    pump pulls samples), then fails part-way (HACKRF_ERROR_LIBUSB)."""
+
+    def __init__(self):
+        super().__init__(pace=True)
+        self.stops = 0
+        self.rx_stops = 0
+
+    def pyhackrf_start_tx(self):
+        super().pyhackrf_start_tx()
+        time.sleep(0.05)
+        raise RuntimeError("pyhackrf_start_tx() failed: HACKRF_ERROR_LIBUSB (-1000)")
+
+    def pyhackrf_stop_tx(self):
+        self.stops += 1
+        super().pyhackrf_stop_tx()
+
+    def pyhackrf_start_rx(self):
+        raise RuntimeError("pyhackrf_start_rx() failed: HACKRF_ERROR_LIBUSB (-1000)")
+
+    def pyhackrf_stop_rx(self):
+        self.rx_stops += 1
+
+
+class _QueuedHackRF(ThreadedFakeHackRF):
+    """libhackrf's TX transfers (hackrf.c): four of 131072 samples are filled
+    ahead; the radio sends each at the sample rate and the callback refills
+    it; once the callback has no more, the ones still queued go out unless
+    pyhackrf_stop_tx() cancels them first."""
+
+    def __init__(self):
+        super().__init__()
+        self.queue = []
+        self.sent = 0
+        self.cancelled = 0
+        self._run = False
+
+    def _fill(self):
+        buf = np.zeros(BUFFER_LENGTH, dtype=np.int8)
+        length = _CInt(0)
+        rc = self._tx_cb(self, buf, BUFFER_LENGTH, length)
+        return rc, buf[: int(length.value)]
+
+    def pyhackrf_start_tx(self):
+        self.queue, self._run, streaming = [], True, True
+        for _ in range(4):
+            rc, data = self._fill()
+            if rc or not len(data):
+                streaming = False
+                break
+            self.queue.append(data)
+        self._streaming = streaming
+        self._thread = threading.Thread(target=self._device, daemon=True)
+        self._thread.start()
+
+    def _device(self):
+        rate = float(self.sample_rate or 2e6)
+        while self._run and self.queue:
+            time.sleep(len(self.queue[0]) / 2 / rate)  # (on the air)
+            if not self._run:
+                break
+            self.sent += len(self.queue.pop(0)) // 2
+            if self._streaming:
+                rc, data = self._fill()
+                if rc or not len(data):
+                    self._streaming = False
+                else:
+                    self.queue.append(data)
+
+    def pyhackrf_stop_tx(self):
+        self._run = False
+        self.cancelled += sum(len(d) for d in self.queue) // 2
+        self.queue = []
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(5)
+
+
+def _open(monkeypatch, fake, rate=2e6):
+    from sdr_module.core import frequency_manager as fm
+    from sdr_module.core.frequency_manager import LicenseClass
+    from sdr_module.devices.hackrf import HackRFDevice
+
+    # (The license, put back after the test.)
+    manager = fm.get_frequency_manager()
+    monkeypatch.setattr(manager, "_license_class", LicenseClass.TECHNICIAN)
+    install_fake_backend(monkeypatch, fake)
+    device = HackRFDevice()
+    assert device.open(0)
+    device.set_sample_rate(rate)
+    device.set_bandwidth(1.75e6)
+    device.set_frequency(146.52e6)
+    return device
+
+
+class TestDriverStartAndEnd:
+    def test_a_failed_start_stops_the_radio(self, monkeypatch):
+        """TX-2: if pyhackrf_start_tx() fails after the radio went into TX,
+        the driver stops it: nothing more is pulled, the engine says it
+        failed."""
+        from PyQt6.QtWidgets import QApplication
+
+        from sdr_module.gui.transmitter import Transmitter
+
+        QApplication.instance() or QApplication([])
+        fake = _StartFailsHackRF()
+        device = _open(monkeypatch, fake)
+        carrier = np.full(int(5 * 2e6), 0.5, np.complex64)
+        job = TxJob(carrier, 2e6, 146.52e6, "FM", 12.5e3, "a test carrier")
+        engine = Transmitter()
+        results = []
+        engine.finished.connect(results.append)
+        assert engine.start(job, device)
+        assert engine.wait(10)
+        assert results[0].status == "failed"
+        assert "didn't start transmitting" in results[0].message
+        assert fake.stops >= 1  # (the radio left TX)
+        pulled = fake.tx_count()
+        time.sleep(0.3)
+        assert fake.tx_count() == pulled  # (nothing more goes out)
+        assert not device.state.is_transmitting
+
+    def test_a_failed_receive_start_stops_the_radio(self, monkeypatch):
+        fake = _StartFailsHackRF()
+        device = _open(monkeypatch, fake)
+        assert device.start_rx(lambda samples: None) is False
+        assert fake.rx_stops == 1
+        assert not device.state.is_streaming
+
+    def test_write_samples_sends_the_whole_block(self, monkeypatch):
+        """TX-12: the transfers libhackrf still holds when the callback runs
+        dry go out before the radio is stopped (the last 0.15 s of an ID was
+        cancelled: "DE W1AR")."""
+        fake = _QueuedHackRF()
+        device = _open(monkeypatch, fake)
+        samples = np.full(400000, 0.5, np.complex64)  # 0.2 s
+        assert device.write_samples(samples, bandwidth_hz=10e3, mode="FM")
+        assert fake.cancelled == 0
+        assert fake.sent == len(samples)

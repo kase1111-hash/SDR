@@ -652,6 +652,54 @@ class TestFrequencyRangeText(unittest.TestCase):
 
         self.assertEqual(format_mhz_range(143.8005e6, 146.2005e6), "143.801–146.2 MHz")
 
+    def test_not_a_number_reads_as_such(self):
+        """(Second checker) A recording's damaged centre (NaN or Infinity)
+        made it raise: it reads as it did before rounding to the kHz."""
+        from sdr_module.gui.tuning import format_mhz_range
+
+        nan, inf = float("nan"), float("inf")
+        for (low, high), text in (
+            ((nan, nan), "nan–nan MHz"),
+            ((inf, inf), "inf–inf MHz"),
+            ((-inf, inf), "-inf–inf MHz"),
+            ((144e6, inf), "144–inf MHz"),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(format_mhz_range(low, high), text)
+
+
+class TestARecordingWithADamagedCentre(_MainStateCase):
+    """(Second checker) A SigMF whose core:frequency is NaN or Infinity
+    (Python's json writes and reads those): Open Recording raised half way
+    once the range text was given to the kHz (the LO on the file, the
+    receiver stopped, the strip not shown). It opens as it did before, and
+    Close Recording goes back to the receiver."""
+
+    def damaged(self, value):
+        path = self.recording(145.0e6, 2.4e6, f"damaged_{value}.sigmf-data")
+        meta = path[: -len("data")] + "meta"
+        with open(meta, encoding="utf-8") as f:
+            data = json.load(f)
+        data["captures"][0]["core:frequency"] = float(value)
+        with open(meta, "w", encoding="utf-8") as f:
+            json.dump(data, f)  # ("NaN", "Infinity")
+        return path
+
+    def test_it_opens_and_closes(self):
+        win = self.win
+        before = (win._device, win._is_running, self.listening())
+        for value in ("nan", "inf"):
+            with self.subTest(value=value):
+                win._open_recording(self.damaged(value))
+                self.assertTrue(win._playback.active)
+                win._playback.close(restore=True)
+                self.assertFalse(win._playback.active)
+                self.assertIsNone(win._lo_lock)
+                self.assertEqual(win._lo_frequency(), 100.1e6)
+                self.assertEqual(
+                    (win._device, win._is_running, self.listening()), before
+                )
+
 
 class TestTheSpanOfARecordingAbove6GHz(_MainStateCase):
     """The QO-100 recording (10488.55–10490.95 MHz) once MS-4 made it

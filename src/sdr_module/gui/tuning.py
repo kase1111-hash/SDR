@@ -200,6 +200,9 @@ def format_mhz_range(low_hz: float, high_hz: float) -> str:
     """``(500e3, 1.766e9) -> "0.5–1766 MHz"``: to the kHz, rounded inwards
     (``10488.55–10490.95 MHz``, not the ``10488.5–10491`` of six significant
     digits), so a frequency outside the range never reads as inside it."""
+    if not (math.isfinite(low_hz) and math.isfinite(high_hz)):
+        # (A recording's damaged metadata: "nan–nan MHz", not an error.)
+        return f"{low_hz / 1e6:g}–{high_hz / 1e6:g} MHz"
     low = math.ceil(round(low_hz / 1e3, 6))
     high = math.floor(round(high_hz / 1e3, 6))
     if low > high:  # (narrower than a kHz)

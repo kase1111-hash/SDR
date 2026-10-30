@@ -71,13 +71,29 @@ class WindowScannerHost(ScannerHost):
         # Scan steps don't join Tune Back / Recent Frequencies (where the
         # scan ends does, see scan_end).
         win._history_timer.stop()
-        # A new channel: its squelch decides afresh (the last channel's
-        # hang time must not count as this one's signal).
-        win._squelch.reset()
-        win._level_average.reset()
+        self._fresh_channel()
         self.expected_hz = win._current_frequency()
         if self._lo_moved:
             self._drop_stale_transfers()
+
+    def _fresh_channel(self) -> None:
+        """A new channel: its squelch decides afresh. Neither the last
+        channel's hang time nor its samples still in the channel filter
+        count as this one's signal (a station just left, by Skip or for its
+        tone, opened the squelch on a quiet channel after it)."""
+        win = self._win
+        win._squelch.reset()
+        win._level_average.reset()
+        chain = getattr(win, "_rx_chain", None)
+        if chain is not None:
+            chain.reset_channel()
+
+    def scan_settled(self) -> None:
+        # The blocks dropped while settling may hold the last channel (a
+        # hardware receiver's transfer in flight): what they opened, or
+        # the tone they showed, doesn't count.
+        self._fresh_channel()
+        self._win._tone_squelch.reset()
 
     def _drop_stale_transfers(self) -> None:
         """After a retune, the transfers a hardware receiver has queued hold

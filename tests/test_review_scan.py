@@ -1188,6 +1188,204 @@ class TestScanToneBlockStaysOnItsFmChannel(_BookmarkScanCase):
         self.scan_while_recording(squelch=False)
 
 
+class TestScanTheNextChannelIsJudgedAfresh(_BookmarkScanCase):
+    """Found checking the fixes: a bookmark scan that left a station (Skip,
+    or a tone that isn't the bookmark's) kept it in the channel filter, so
+    the first block of the next bookmark listened to the same way opened
+    the squelch on it, and the hang time held it open: a quiet channel was
+    "heard", listed and listened to for the resume time. A hardware
+    receiver's transfer still in flight after a retune did the same."""
+
+    _TOWER = {
+        "label": "Tower",
+        "freq_hz": 125.0e6,  # the demo's steady AM station
+        "demod": "AM",
+        "mode": "AM",
+        "bandwidth": "10 kHz",
+    }
+
+    def skip_to(self, quiet):
+        """Stop on the Tower, Skip it, and check ``quiet`` a while: whether
+        the receiver retuned for it, whether it was heard, and the results."""
+        from sdr_module.gui.scan_engine import DWELL_S, LISTEN
+
+        win, panel = self.win, self.win._scanner_panel
+        engine = panel.engine
+        _pretend_audio(win)
+        self.frames(1.0)  # (the noise floor known)
+        self.assertTrue(self.scan([self._TOWER, quiet]))
+        self.assertEqual(engine.current.label, "Tower")
+        panel._skip_btn.click()
+        self.assertEqual(engine.current.label, quiet["label"])
+        retuned = win._scanner_host.scan_lo_moved()
+        heard = self.frames(4 * DWELL_S, until=lambda: engine.state == LISTEN)
+        hits = [h.label for h in panel.hits()]
+        panel.stop_scan()
+        return retuned, heard, hits
+
+    def test_skip_to_a_quiet_channel_in_the_span(self):
+        quiet = dict(self._TOWER, label="Quiet 125.5", freq_hz=125.5e6)
+        self.assertEqual(self.skip_to(quiet), (False, False, ["Tower"]))
+
+    def test_skip_to_a_quiet_channel_the_receiver_retunes_for(self):
+        quiet = dict(self._TOWER, label="Quiet 133", freq_hz=133.0e6)
+        self.assertEqual(self.skip_to(quiet), (True, False, ["Tower"]))
+
+    def test_after_a_station_sending_another_tone(self):
+        """The demo repeater (145.290 MHz) sends 100.0 Hz: the bookmark with
+        123.0 Hz passes it by, and the quiet one after it isn't heard."""
+        _pretend_audio(self.win)
+        self.frames(1.0)
+        wrong = dict(_CLUB, label="Club, wrong tone", tone_mode="TSQL", ctone=123.0)
+        quiet = dict(_CLUB, label="Quiet 145.5", freq_hz=145.5e6)
+        self.assertFalse(self.scan([wrong, quiet], seconds=2.5))
+        self.assertEqual(self.win._scanner_panel.hits(), [])
+        self.win._scanner_panel.stop_scan()
+
+    def test_a_transfer_from_before_the_retune(self):
+        """A hardware receiver: the transfer in flight when it retuned still
+        holds the last channel (the scan settles for it, and the squelch
+        must not go by it either)."""
+        import numpy as np
+
+        from sdr_module.devices.base import SDRDevice
+        from sdr_module.gui.scan_engine import DWELL_S, LISTEN
+
+        rate, station = 2.4e6, 145.29e6
+
+        class InFlight(SDRDevice):
+            """A carrier on ``station``; the first block read after a
+            retune was made at the LO before it (none are queued)."""
+
+            def __init__(self):
+                super().__init__()
+                self._state.sample_rate = rate
+                self._state.is_streaming = True
+                self.lo, self.in_flight = station, None
+                self.rng = np.random.default_rng(1)
+
+            def read_samples(self, num_samples, timeout=1.0):
+                if timeout == 0.0:
+                    return np.empty(0, dtype=np.complex64)  # (none queued)
+                lo, self.in_flight = self.in_flight or self.lo, None
+                n = int(num_samples)
+                t = np.arange(n) / rate
+                noise = self.rng.standard_normal(n) + 1j * self.rng.standard_normal(n)
+                x = 1e-4 * noise
+                if abs(station - lo) < rate / 2:
+                    x = x + 0.02 * np.exp(2j * np.pi * (station - lo) * t)
+                return x.astype(np.complex64)
+
+            def set_frequency(self, freq_hz):
+                if abs(freq_hz - self.lo) >= 0.5:
+                    self.in_flight = self.lo
+                self.lo = float(freq_hz)
+                return True
+
+            def open(self, index=0):
+                return True
+
+            def close(self):
+                pass
+
+            def set_sample_rate(self, rate_hz):
+                return True
+
+            def set_bandwidth(self, bw_hz):
+                return True
+
+            def set_gain(self, gain_db):
+                return True
+
+            def set_gain_mode(self, auto):
+                return True
+
+            def start_rx(self, callback=None):
+                return True
+
+            def stop_rx(self):
+                return True
+
+        win, panel = self.win, self.win._scanner_panel
+        engine = panel.engine
+        win._stop_acquisition()
+        win._device = InFlight()
+        win._start_acquisition()
+        self.addCleanup(setattr, win, "_device", None)
+        self.addCleanup(win._stop_acquisition)
+        _pretend_audio(win)
+        win.set_frequency(station)
+        win._set_demod_mode("FM", "5 kHz", "12.5 kHz")
+        self.frames(1.0)  # (the noise floor known)
+        carrier = dict(_CLUB, label="Carrier")
+        quiet = dict(_CLUB, label="Quiet 147.3", freq_hz=147.3e6)  # (a retune)
+        self.assertTrue(self.scan([carrier, quiet]))
+        panel._skip_btn.click()
+        self.assertEqual(engine.current.label, "Quiet 147.3")
+        self.assertTrue(win._scanner_host.scan_lo_moved())
+        heard = self.frames(6 * DWELL_S, until=lambda: engine.state == LISTEN)
+        self.assertFalse(heard)
+        self.assertEqual([h.label for h in panel.hits()], ["Carrier"])
+        panel.stop_scan()
+
+
+class TestScanSettledHook(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_a_host_hears_when_the_blocks_after_a_retune_are_over(self):
+        """scan_settled() comes once the blocks dropped after a retune are
+        over, before the channel is checked (not after a move inside the
+        span, which drops none); a host without it still scans."""
+        from sdr_module.gui.scan_engine import SETTLE, ScanEngine, ScanSettings
+
+        class Host(_DemoHost):
+            def __init__(self, dev):
+                super().__init__(dev)
+                self.events = []
+                self.engine = None
+
+            def scan_tune_channel(self, freq, listening, tone=0.0):
+                self.events.append(("tune", round(freq)))
+                return super().scan_tune_channel(freq, listening, tone)
+
+            def scan_settled(self):
+                self.events.append(("settled", round(self.vfo)))
+                self.states.append(self.engine.state)
+
+        dev = _demo(145.5e6)
+        host = Host(dev)
+        host.states = []
+        engine = host.engine = ScanEngine(host)
+        marks = [
+            {"label": "A", "freq_hz": 145.5e6, "demod": "FM"},
+            {"label": "B", "freq_hz": 145.6e6, "demod": "FM"},  # (in the span)
+            {"label": "C", "freq_hz": 150.0e6, "demod": "FM"},  # (a retune)
+        ]
+        settings = ScanSettings("bookmarks", bookmarks=marks)
+        self.assertEqual(engine.start(settings, dev.sample_rate, 0.0), "")
+        _run(engine, dev, until=lambda: ("tune", 145500000) in host.events[1:])
+        self.assertEqual(
+            host.events[:5],
+            [
+                ("tune", 145500000),
+                ("tune", 145600000),
+                ("tune", 150000000),
+                ("settled", 150000000),
+                ("tune", 145500000),
+            ],
+        )
+        self.assertEqual(host.states[0], SETTLE)  # (C not checked yet)
+        engine.stop()
+        # (The test hosts of before have no scan_settled: they still scan.)
+        plain = _DemoHost(dev)
+        engine = ScanEngine(plain)
+        self.assertEqual(engine.start(settings, dev.sample_rate, 0.0), "")
+        _run(engine, dev, seconds=1.0)
+        self.assertTrue(engine.active)
+        engine.stop()
+
+
 # --------------------------------------------------------------------------- #
 # SCAN-17: at 20 MS/s the FM Broadcast preset listed a stray carrier
 # --------------------------------------------------------------------------- #

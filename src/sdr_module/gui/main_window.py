@@ -941,6 +941,12 @@ class _ReceiverChain:
         the filters' state carry on, so the audio doesn't click."""
         self._nco.frequency_hz = offset_hz
 
+    def reset_channel(self) -> None:
+        """Forget the channel filter's history: the next block measures only
+        its own samples (the Scanner's next channel, not the one it left)."""
+        for stage in self._channel:
+            stage.reset()
+
     def _design_demodulator(self) -> None:
         """Design the filters after detection (once per chain)."""
         rate = self.channel_rate

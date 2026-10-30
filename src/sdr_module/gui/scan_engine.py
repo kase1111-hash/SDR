@@ -122,6 +122,10 @@ class ScanHost:
     def scan_set_muted(self, muted: bool) -> None:
         """Mute the speaker while the scan moves between channels."""
 
+    def scan_settled(self) -> None:
+        """The blocks dropped after a retune are over (they may have held
+        the last channel): what is heard is decided afresh from here."""
+
 
 @dataclass
 class ScanSettings:
@@ -366,6 +370,10 @@ class ScanEngine:
             self._averager.reset()
             self._measured = 0
         else:
+            # (A host written before this hook may not have it.)
+            settled = getattr(self.host, "scan_settled", None)
+            if settled is not None:
+                settled()
             self._begin_dwell()
 
     def _measure(self, samples: np.ndarray) -> None:

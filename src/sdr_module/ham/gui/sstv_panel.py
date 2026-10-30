@@ -78,14 +78,14 @@ _ASPECT = 256.0 / 320.0
 _NO_VALUE = "—"  # em dash
 ISS_FREQUENCY_HZ = 145.800e6
 ISS_SSTV_HINT = (
-    "Press Tune to ISS (145.800 MHz), or tune to an SSTV signal in FM and "
-    "press Start Decoder."
+    "Press Tune to ISS (145.800 MHz), or tune to an SSTV signal (FM on VHF "
+    "and UHF, USB or LSB on HF) and press Start Decoder."
 )
 # Seconds of silence while listening before the panel says no audio arrives.
 NO_AUDIO_TIMEOUT_S = 3.0
 NO_AUDIO_TEXT = (
-    "⚠ No audio is reaching the decoder. Start the receiver in FM mode, "
-    "tuned to the SSTV signal."
+    "⚠ No audio is reaching the decoder. Start the receiver, tuned to the "
+    "SSTV signal in FM (or USB or LSB on HF)."
 )
 # An image in progress ends (kept as a partial image) when the audio stops
 # for this long: its line timing can't be trusted afterwards.
@@ -511,8 +511,8 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
     SSTV receiver panel.
 
     Displays received SSTV images and provides controls for reception.
-    Feed FM-demodulated audio to :meth:`process_audio` while
-    :meth:`is_receiving` is true.
+    Feed the demodulated audio (FM, or USB or LSB on HF) to
+    :meth:`process_audio` while :meth:`is_receiving` is true.
     """
 
     if HAS_PYQT6:
@@ -553,6 +553,8 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         self._history_loaded_from: Optional[Path] = None
         # The scroll area's viewport, followed so the picture fits it.
         self._watched: Optional[QWidget] = None
+        # The mode the hint's Switch button asks for (see show_fm_needed).
+        self._switch_to = "FM"
 
         self._setup_ui()
 
@@ -638,7 +640,8 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         mode_row.addStretch(1)
         layout.addLayout(mode_row)
 
-        # Shown when the receiver is not in FM: SSTV is FM audio.
+        # Shown when the receiver is in a mode whose audio can't carry SSTV
+        # (AM, CW, I/Q): SSTV is FM on VHF/UHF, USB or LSB on HF.
         self._fm_callout = QFrame()
         t.set_role(self._fm_callout, "callout", "warning")
         fm_row = QHBoxLayout(self._fm_callout)
@@ -830,19 +833,43 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         if not self._is_receiving:
             self._on_start_clicked()
 
-    def show_fm_needed(self, mode: Optional[str]) -> None:
-        """Say in the panel that SSTV needs FM while the receiver is in
-        ``mode`` (None hides the hint)."""
+    def end_image(self, why: str) -> Optional[str]:
+        """End the image coming in (if any) now, e.g. because the app
+        closes: the lines received so far are kept as a partial image in
+        Received Images (and auto-saved), as when the decoder is stopped.
+        ``why`` completes "The image ended: ...". The decoder keeps
+        listening. Returns the status note (None if nothing was kept)."""
+        return self._end_image_early(why)
+
+    def show_fm_needed(self, mode: Optional[str], switch_to: str = "FM") -> None:
+        """Say in the panel that the receiver's ``mode`` (AM, CW, I/Q) can't
+        carry SSTV, offering to switch to ``switch_to``: "FM" (VHF/UHF, e.g.
+        the ISS) or "USB"/"LSB" (HF). None hides the hint."""
+        wanted = switch_to if switch_to in ("USB", "LSB") else "FM"
+        self._switch_to = wanted
         if mode:
-            self._fm_label.setText(
-                f"SSTV images are sent as FM audio; the receiver is in {mode}."
-            )
+            if wanted == "FM":
+                text = (
+                    "SSTV on VHF and UHF (such as the ISS) is sent as FM audio; "
+                    f"the receiver is in {mode}."
+                )
+                tip = "Set Demodulation > Mode to FM with 5 kHz deviation (narrowband)"
+            else:
+                text = f"SSTV on HF is sent in {wanted}; the receiver is in {mode}."
+                tip = f"Set Demodulation > Mode to {wanted} (2.7 kHz filter)"
+            self._fm_label.setText(text)
+            self._switch_fm_btn.setText(f"Switch to {wanted}")
+            self._switch_fm_btn.setToolTip(tip)
         self._fm_callout.setVisible(bool(mode))
+
+    def switch_mode(self) -> str:
+        """The mode the hint's Switch button asks for: "FM", "USB" or "LSB"."""
+        return self._switch_to
 
     def process_audio(
         self, samples: np.ndarray, sample_rate: Optional[float] = None
     ) -> None:
-        """Process FM-demodulated audio samples through the decoder.
+        """Process demodulated audio (FM, USB or LSB) through the decoder.
 
         Args:
             samples: Mono float audio.
@@ -1087,13 +1114,11 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
             t.set_role(self._start_btn, None)
             self._image_display.set_placeholder(
                 "Listening…",
-                "Waiting for an SSTV start tone (VIS header) on the FM audio.",
+                "Waiting for an SSTV start tone (VIS header) in the audio.",
             )
         else:
             self._start_btn.setText("Start Decoder")
-            self._start_btn.setToolTip(
-                "Listen for SSTV images on the demodulated FM audio"
-            )
+            self._start_btn.setToolTip("Listen for SSTV images in the receiver's audio")
             t.set_role(self._start_btn, "primary")
             self._image_display.set_placeholder("No image yet", ISS_SSTV_HINT)
             self._tone_meter.set_reading(None, active=False)
@@ -1269,7 +1294,7 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
             self._set_status("")
             self._image_display.set_placeholder(
                 "Listening…",
-                "Waiting for an SSTV start tone (VIS header) on the FM audio.",
+                "Waiting for an SSTV start tone (VIS header) in the audio.",
             )
         else:
             self._set_idle_status()
@@ -1296,7 +1321,7 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         self._mode_label.setText(_NO_VALUE)
         self._resolution_label.setText(_NO_VALUE)
         self._image_display.set_placeholder(
-            "Listening…", "Waiting for an SSTV start tone (VIS header) on the FM audio."
+            "Listening…", "Waiting for an SSTV start tone (VIS header) in the audio."
         )
 
     def _on_prev_clicked(self) -> None:
@@ -1326,14 +1351,23 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         if image is None and entry.get("filename"):
             image = qimage_to_rgb(QImage(str(entry["filename"])))
             if image is not None:
-                # Keep one image read from disk in memory at a time.
-                for other in self._viewer.images:
-                    if other.get("from_disk"):
-                        other["image"] = None
                 entry["image"] = image
                 entry["height"] = entry.get("height") or image.shape[0]
                 entry["width"] = entry.get("width") or image.shape[1]
+        # In memory: this image, the newest and those without a file.
+        self._drop_saved_pixels(keep=entry)
         return image
+
+    def _drop_saved_pixels(self, keep: Optional[Dict[str, Any]] = None) -> None:
+        """Free the pixels of the listed images that have a file (they are
+        read back from it when shown), except ``keep`` and the newest one.
+        Images without a file (auto-save off, or the save failed) keep
+        theirs: there is no other copy."""
+        entries = self._viewer.images
+        newest = entries[-1] if entries else None
+        for entry in entries:
+            if entry is not keep and entry is not newest and entry.get("filename"):
+                entry["image"] = None
 
     def _show_viewer_image(self) -> None:
         """Display the viewer's current image and sync the history UI."""
@@ -1433,6 +1467,9 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
                 if path
                 else " It could not be saved automatically."
             )
+        # Only the newest saved image stays in memory: the others are read
+        # back from their files (a long ISS event lists hundreds).
+        self._drop_saved_pixels()
         item = QListWidgetItem(history_label(entry))
         if entry.get("filename"):
             item.setToolTip(entry["filename"])
@@ -1533,6 +1570,13 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         note = self._keep_partial(image.copy(), lines)
         if why and note:
             self._set_status(f"The image ended: {why}. {note}", "warning")
+        elif why and self._is_receiving:
+            # Too few lines to keep: back to "Listening…", not a stale
+            # "Receiving …: line N" for an image that is over.
+            self._show_listening_viewer()
+            self._set_status(
+                f"The image ended: {why}. Listening for the next one…", "warning"
+            )
         self._update_action_buttons()
         return note
 
@@ -1585,6 +1629,10 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         decoder = self._decoder
         if decoder is None:
             return
+        if silent > AUDIO_GAP_S and decoder.is_receiving():
+            # The audio stopped (the receiver stopped, or left the SSTV
+            # modes): keep what came in now, not when audio comes back.
+            self._end_image_early("the audio stopped for a while")
         if self._display_dirty:
             self._refresh_partial_display()
         status = decoder.get_status()

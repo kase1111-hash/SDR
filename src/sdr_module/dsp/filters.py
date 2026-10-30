@@ -2287,7 +2287,10 @@ class NoiseReduction:
 
     The spectral methods stream: a block at a time gives exactly the output
     of one long block, ``len(input)`` samples per call, delayed by
-    :attr:`latency_samples` (the FFT size). They use a periodic sqrt-Hann
+    :attr:`latency_samples` (the FFT size). After the last block,
+    :meth:`flush` returns the rest of the signal; :meth:`process_clip`
+    does a whole recording with its output lined up with the input (for
+    offline use). They use a periodic sqrt-Hann
     analysis and synthesis window, so with every gain at 1 the output is
     the input, delayed; there is no division by the window that could blow
     up the block edges (it used to amplify them 40-100 dB).
@@ -2739,6 +2742,58 @@ class NoiseReduction:
                 self._noise_reduction_db = -10 * np.log10(ratio)
 
         return output
+
+    def flush(self) -> np.ndarray:
+        """The rest of the stream, then a fresh one (the noise estimate is
+        kept).
+
+        The spectral methods hold back the last :attr:`latency_samples` of
+        the signal; this returns them, processed. Call it after the last
+        :meth:`process` block of a recording: everything returned, in
+        order, is the whole input delayed by :attr:`latency_samples` (drop
+        that many samples from the front to line it up, or use
+        :meth:`process_clip`). The other methods hold nothing back: an empty
+        array.
+        """
+        method = self._config.method
+        spectral = method in (
+            NoiseReductionMethod.SPECTRAL_SUBTRACTION,
+            NoiseReductionMethod.WIENER,
+        )
+        complex_input = self._stream_complex
+        dtype = np.complex128 if complex_input else np.float64
+        if not spectral or complex_input is None:
+            self.reset_stream()
+            return np.zeros(0, dtype=dtype)
+        # The zeros that push the tail out are not quiet to learn from.
+        fixed = self._noise_fixed
+        learned = self._wiener_noise_psd is not None
+        if learned:
+            self._noise_fixed = True
+        try:
+            tail = self._stft_process(np.zeros(self.latency_samples, dtype=dtype))
+        finally:
+            self._noise_fixed = fixed
+        if not learned:
+            # (A stream shorter than a hop: nothing was heard before the
+            # zeros, so there is still no estimate.)
+            self._wiener_noise_psd = None
+            self._noise_spectrum = None
+            self._reset_noise_tracking()
+        self.reset_stream()
+        return tail
+
+    def process_clip(self, samples: np.ndarray) -> np.ndarray:
+        """Noise-reduce a whole recording in one call (offline use): the
+        output has the same length as ``samples`` and lines up with it (no
+        :attr:`latency_samples` delay). It runs as a stream of its own
+        (a stream in progress starts afresh; the noise estimate is kept)."""
+        x = np.asarray(samples)
+        self.reset_stream()
+        if x.size == 0:
+            return np.zeros(0, np.complex128 if np.iscomplexobj(x) else np.float64)
+        out = np.concatenate((self.process(x), self.flush()))
+        return out[len(out) - x.size :]
 
     def process_with_reference(
         self, signal: np.ndarray, noise_reference: np.ndarray

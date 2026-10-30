@@ -262,6 +262,8 @@ _HANN_ENBW_BINS = 1.5
 _CHANNEL_NOISE_WIDTH = 1.1
 _DEFAULT_SAMPLE_RATE = 2.4e6
 _AUDIBLE_MODES = ("AM", "FM", "USB", "LSB", "CW")
+# Modes whose audio carries SSTV: FM (VHF/UHF, the ISS), USB or LSB (HF).
+_SSTV_MODES = ("FM", "USB", "LSB")
 _AUDIO_RATE = 48000.0  # target rate of the demodulated audio
 _NO_VALUE = "—"  # em dash for "not available"
 _DEFAULT_VOLUME = 70  # percent
@@ -2009,6 +2011,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._tuner_blocks = 0
         self._tuner_signal = False
         self._tuner_centered = False
+        # The receiver refused the tuner's last station (seek stops there).
+        self._tuner_refused = False
         self._pilot: Optional[StereoPilotDetector] = None
         self._squelch_db = -80.0  # the manual squelch threshold (dBFS)
         # What happens after the channel filter: the squelch (hysteresis,
@@ -4668,6 +4672,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # the legal limit here.
         if HAS_HAM_RADIO:
             self._qrp_panel.set_station(freq_hz)
+            # SSTV's mode hint: FM on VHF/UHF, USB or LSB on HF.
+            self._show_sstv_mode_needed(self._control_panel._demod_combo.currentText())
         self._tx_station.refresh()
         self._tuner_retuned()
         # Identify listens afresh; Track Signal starts over from here (T10).
@@ -5604,17 +5610,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._sync_audio_ui()  # (no audio in I/Q mode)
         if not self._restoring and mode in _AUDIBLE_MODES:
             self._show_status_message(f"{mode}: {self._filter_summary()}", None, 3000)
-        if mode != "FM" and self._sstv_listening():
+        if mode not in _SSTV_MODES and self._sstv_listening():
             self._hint_sstv_needs_fm()
         if HAS_HAM_RADIO:
             self._signal_meter_panel.set_demod_mode(mode)
             self._qrp_panel.set_demod_mode(mode)  # QRP's Auto mode follows
             self._reset_signal_meter_peak()
-            self._sstv_panel.show_fm_needed(
-                self._mode_text(mode)
-                if mode != "FM" and self._sstv_listening()
-                else None
-            )
+            self._show_sstv_mode_needed(mode)
         if self._info_panel.isVisible():
             self._refresh_info_panel()
 
@@ -5759,7 +5761,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             logger.warning("Ignoring unreadable saved QRP settings")
             return
         if isinstance(saved, dict):
-            self._qrp_panel.set_state(saved)
+            # (A value of another shape must not stop the app from starting.)
+            try:
+                self._qrp_panel.set_state(saved)
+            except Exception as e:
+                logger.warning(f"Ignoring the saved QRP settings that failed: {e}")
 
     def _start_or_stop_audio(self, mode: str) -> bool:
         """Open the speaker for audible modes, close it otherwise.
@@ -7025,18 +7031,41 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """True while the SSTV panel's decoder waits for or receives audio."""
         return HAS_HAM_RADIO and self._sstv_panel.is_receiving()
 
+    def _sstv_mode_for(self, freq_hz: float) -> str:
+        """The mode SSTV is usually sent in at ``freq_hz``: the sideband of
+        an HF ham band (USB; LSB on 160, 80 and 40 m), USB elsewhere below
+        30 MHz, else FM (VHF and UHF, e.g. the ISS)."""
+        from ..core.band_plan import band_for
+
+        band = band_for(freq_hz)
+        if band is not None and band.mode in ("USB", "LSB"):
+            return band.mode
+        return "USB" if freq_hz < 30e6 else "FM"
+
     def _hint_sstv_needs_fm(self) -> None:
+        """The status bar's hint: the mode can't carry SSTV (AM, CW, I/Q).
+        (The SSTV panel's hint names the mode for the frequency tuned.)"""
         self._show_status_message(
-            "SSTV decoding needs FM audio: set Demodulation > Mode to FM.",
+            "SSTV decoding needs FM audio (VHF/UHF) or USB/LSB (HF): set "
+            "Demodulation > Mode.",
             "warning",
             8000,
         )
 
+    def _show_sstv_mode_needed(self, mode: str) -> None:
+        """The SSTV panel's callout, while it listens in a mode whose audio
+        can't carry SSTV, offering the mode SSTV is sent in here."""
+        if mode in _SSTV_MODES or not self._sstv_listening():
+            self._sstv_panel.show_fm_needed(None)
+            return
+        wanted = self._sstv_mode_for(self._current_frequency())
+        self._sstv_panel.show_fm_needed(self._mode_text(mode), wanted)
+
     def _on_sstv_start_requested(self) -> None:
         """Tell the user what the SSTV decoder still needs to get audio."""
         mode = self._control_panel._demod_combo.currentText()
-        self._sstv_panel.show_fm_needed(None if mode == "FM" else self._mode_text(mode))
-        if mode != "FM":
+        self._show_sstv_mode_needed(mode)
+        if mode not in _SSTV_MODES:
             self._hint_sstv_needs_fm()
         elif not (self._is_running and self._device is not None):
             self._show_status_message(
@@ -7074,8 +7103,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _on_sstv_tune_iss(self) -> None:
         """Tune to ISS: 145.800 MHz, FM with narrowband deviation, then start
-        the receiver and the SSTV decoder."""
-        self.set_frequency(ISS_FREQUENCY_HZ)
+        the receiver and the SSTV decoder. When the tune is refused (outside
+        a recording being played, transmitting, out of the device's range)
+        nothing else changes and the status bar keeps the reason."""
+        if not self.set_frequency(ISS_FREQUENCY_HZ):
+            return
         self._set_demod_mode("FM", "5 kHz", self._bandwidth_for_mode("FM", "5 kHz"))
         if self._device is not None and not self._is_running:
             self._start_acquisition()
@@ -7102,10 +7134,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._on_sstv_tune_iss()
 
     def _on_sstv_switch_to_fm(self) -> None:
-        """The SSTV panel's "Switch to FM": narrowband FM, as SSTV is sent."""
-        self._set_demod_mode("FM", "5 kHz", self._bandwidth_for_mode("FM", "5 kHz"))
+        """The SSTV panel's "Switch to FM" (on HF "Switch to USB" or LSB):
+        the mode SSTV is sent in there, narrowband FM or an SSB filter."""
+        wanted = self._sstv_panel.switch_mode()
+        if wanted == "FM":
+            width = self._bandwidth_for_mode("FM", "5 kHz")
+            self._set_demod_mode("FM", "5 kHz", width)
+        else:
+            # (Wide enough for the 1100-2300 Hz tones.)
+            width = closest_bandwidth(bandwidth_options(wanted), 2.7e3) or None
+            self._set_demod_mode(wanted, bandwidth=width)
         self._sstv_panel.show_fm_needed(None)
-        self._show_status_message("Demodulation set to FM for SSTV.", "info", 3000)
+        self._show_status_message(
+            f"Demodulation set to {wanted} for SSTV.", "info", 3000
+        )
 
     def _reset_signal_meter_peak(self) -> None:
         """A retune or a new mode or channel: the S-meter starts afresh."""
@@ -7227,9 +7269,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._realtime_hint_shown = False
             if self._message_label.text() == self._realtime_hint_text:
                 self._show_status_message("Audio resumed", "success", 2500)
-        # SSTV is FM; it gets every block (no squelch) so its line timing
-        # stays intact, and it listens even with the speaker off.
-        sstv = mode == "FM" and self._sstv_listening()
+        # SSTV is FM (VHF/UHF) or USB/LSB (HF); it gets every block (no
+        # squelch) so its line timing stays intact, and it listens even with
+        # the speaker off.
+        sstv = mode in _SSTV_MODES and self._sstv_listening()
         # Record Audio gets every block too: what is heard, and silence
         # while the squelch is closed (or there is no audio in this mode).
         take = self._audio_take
@@ -8797,8 +8840,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # Stored presets (and names) are kept between sessions.
             self._restore_radio_presets()
             tuner.presets_changed.connect(self._save_radio_presets)
-            # Seek steps until a signal opens the squelch.
+            # Seek steps until a signal opens the squelch, over the channels
+            # the receiver can tune.
             tuner.set_signal_probe(self._tuner_probe)
+            tuner.set_tune_check(self._tuner_can_tune)
         self._sync_tuner_device()
         self._pilot = None  # (a fresh detector for the station shown)
 
@@ -8828,8 +8873,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # set_frequency tunes the device (if any) and updates the control
         # panel, toolbar readout and plot axes together. A frequency the
         # device can't tune is refused (the status bar says why) and the
-        # tuner shows the frequency still tuned.
-        if not self.set_frequency(freq_hz):
+        # tuner shows the frequency still tuned (its seek then stops).
+        self._tuner_refused = not self.set_frequency(freq_hz)
+        if self._tuner_refused:
             return
         if band == "FM":
             self._set_demod_mode("FM", _BROADCAST_FM_DEVIATION, _BROADCAST_FM_BANDWIDTH)
@@ -8887,6 +8933,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         pilot is listened for afresh."""
         self._tuner_blocks = 0
         self._tuner_signal = False
+        self._tuner_refused = False  # (set again when the tuner's was refused)
         if self._pilot is not None:
             self._pilot.reset()
         tuner = self._radio_tuner
@@ -8943,11 +8990,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tuner = self._radio_tuner
         if not self._is_running or self._device is None or tuner is None:
             return None
-        if abs(self._current_frequency() - tuner.get_frequency()) > 1.0:
+        # (A refused tune puts the tuner back on the frequency still tuned,
+        # so the two agree: the refusal itself is remembered.)
+        if self._tuner_refused or (
+            abs(self._current_frequency() - tuner.get_frequency()) > 1.0
+        ):
             return "refused"
         if self._tuner_blocks < 3:
             return "wait"
         return "signal" if self._tuner_signal and self._tuner_centered else "quiet"
+
+    def _tuner_can_tune(self, freq_hz: float) -> bool:
+        """For the tuner's seek: whether ``freq_hz`` can be tuned now (inside
+        the device's range and, while a recording plays back, inside its
+        span), by the rules :meth:`_tune_to` refuses with."""
+        low, high = self._tuning_limits()
+        if not low <= freq_hz <= high:
+            return False
+        lock = self._lo_lock
+        if lock is not None:
+            center, span, _why = lock
+            return self._channel_fits(freq_hz - center, rate=span)
+        return True
 
     def _show_decoder_config(self):
         """Bring the Decoder panel to the front."""
@@ -9973,6 +10037,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # its settings saved (T13).
         self._second_rx.shutdown()
         self._signal_tools.shutdown()  # (T10) no identification left running
+        if HAS_HAM_RADIO:
+            # An SSTV image coming in: its lines so far are kept (auto-saved).
+            self._sstv_panel.end_image("the app closed")
         self._commit_pending_history()  # the last frequency joins Recent
         if self._transmit_text is not None:
             self._transmit_text.shutdown()  # (its preview; the draft is kept)

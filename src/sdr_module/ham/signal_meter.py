@@ -21,8 +21,13 @@ Until the meter is calibrated (:meth:`SignalMeter.set_calibration`) dBm is
 only a rough guess (0 dBFS taken as -30 dBm), so S-units are relative too.
 Signal-to-noise and the readability digit need a noise reference: pass the
 channel's noise power to :meth:`SignalMeter.update` (the GUI measures it
-from the spectrum around the channel), or the meter estimates it from the
-samples' own spectrum.
+from the spectrum around the channel), set one with
+:meth:`SignalMeter.set_noise_floor` (it stays until cleared), or the meter
+estimates it from the samples themselves: from their spectrum's median bin,
+which needs the signal to fill less than half of the samples' band, or from
+their envelope for a constant-envelope signal (FM, CW, FSK, PSK) that fills
+it. An AM or SSB signal that fills the samples' band reads too little SNR
+without a reference: measure a wider span, or pass the noise.
 
 Usage:
     meter = SignalMeter()
@@ -181,10 +186,12 @@ class SignalMeter:
         self._peak_decay_db_per_s = PEAK_DECAY_DB_PER_S
 
         # Noise floor in the channel, in dBFS: given with each update (from
-        # the spectrum around the channel) or, failing that, estimated from
-        # the samples' own spectrum. None until known.
+        # the spectrum around the channel), else the floor set with
+        # set_noise_floor (dBm, kept until cleared), else estimated from the
+        # samples themselves. None until known.
         self._noise_dbfs: Optional[float] = None
         self._noise_external_time = 0.0
+        self._noise_set_dbm: Optional[float] = None
         self._settle_until = 0.0
         # The first block after a reset starts with the old channel (the
         # channel filter's memory): only its second half is measured.
@@ -259,10 +266,22 @@ class SignalMeter:
         return float(dbm) - (dbfs + UNCALIBRATED_DBFS_TO_DBM)
 
     def set_noise_floor(self, noise_dbm: float) -> None:
-        """Set noise floor estimate for SNR calculation (channel noise, dBm)."""
+        """Set noise floor estimate for SNR calculation (channel noise, dBm).
+
+        It stays the reference until :meth:`clear_noise_floor` (a retune's
+        :meth:`reset_peak` keeps it); a ``noise_dbfs`` given to
+        :meth:`update` is used instead while it keeps coming.
+        """
+        self._noise_set_dbm = float(noise_dbm)
         self._noise_floor_dbm = float(noise_dbm)
         self._noise_dbfs = float(noise_dbm) - self._dbfs_to_dbm_offset()
-        self._noise_external_time = time.time()
+
+    def clear_noise_floor(self) -> None:
+        """Forget the floor set with :meth:`set_noise_floor`: the noise comes
+        from :meth:`update` again (its ``noise_dbfs``, else an estimate from
+        the samples)."""
+        self._noise_set_dbm = None
+        self._noise_dbfs = None
 
     @property
     def settling(self) -> bool:
@@ -276,11 +295,12 @@ class SignalMeter:
 
     def reset_peak(self) -> None:
         """Forget the peak hold, the averaging and the noise estimate (after
-        a retune, a mode change, or Stop): the next reading starts afresh."""
+        a retune, a mode change, or Stop): the next reading starts afresh.
+        A floor set with :meth:`set_noise_floor` is kept."""
         self._avg_window.clear()
         self._peak_hold_dbm = -130.0
         self._peak_hold_time = 0.0
-        self._noise_dbfs = None
+        self._noise_dbfs = self._set_noise_dbfs()
         self._noise_external_time = 0.0
         self._settle_until = time.time() + _PEAK_SETTLE_S
         self._trim_next = True
@@ -335,14 +355,19 @@ class SignalMeter:
 
         self._power_dbm = float(np.mean(self._avg_window))
 
-        # Noise reference: the caller's, else the samples' own spectrum.
+        # Noise reference: the caller's, else the floor set with
+        # set_noise_floor, else the samples' own estimate.
         if noise_dbfs is not None and math.isfinite(noise_dbfs):
             self._track_noise(float(noise_dbfs))
             self._noise_external_time = now
         elif now - self._noise_external_time > _NOISE_STALE_S:
-            estimate = self._spectral_noise_dbfs(samples)
-            if estimate is not None:
-                self._track_noise(estimate)
+            floor = self._set_noise_dbfs()
+            if floor is not None:
+                self._noise_dbfs = floor
+            else:
+                estimate = self._blind_noise_dbfs(samples)
+                if estimate is not None:
+                    self._track_noise(estimate)
         if self._noise_dbfs is not None:
             self._noise_floor_dbm = self._noise_dbfs + to_dbm
 
@@ -374,6 +399,50 @@ class SignalMeter:
             self._noise_dbfs = noise_dbfs
         else:
             self._noise_dbfs += 0.2 * (noise_dbfs - self._noise_dbfs)
+
+    def _set_noise_dbfs(self) -> Optional[float]:
+        """The floor set with :meth:`set_noise_floor`, in dBFS (None: none)."""
+        if self._noise_set_dbm is None:
+            return None
+        return self._noise_set_dbm - self._dbfs_to_dbm_offset()
+
+    @classmethod
+    def _blind_noise_dbfs(cls, samples: np.ndarray) -> Optional[float]:
+        """Noise power of ``samples`` from the samples alone: the spectral
+        estimate, or the envelope's when that is lower (a constant-envelope
+        signal that fills the band leaves no bins of noise alone)."""
+        estimates = [
+            value
+            for value in (
+                cls._spectral_noise_dbfs(samples),
+                cls._envelope_noise_dbfs(samples),
+            )
+            if value is not None
+        ]
+        return min(estimates) if estimates else None
+
+    @staticmethod
+    def _envelope_noise_dbfs(samples: np.ndarray) -> Optional[float]:
+        """Noise power of complex ``samples`` from their envelope, for a
+        constant-envelope signal (FM, CW, FSK, PSK) in Gaussian noise.
+
+        With signal power S and noise power N, mean |x|^2 = S + N and mean
+        |x|^4 = S^2 + 4SN + 2N^2, so S = sqrt(2 M2^2 - M4) (the M2M4
+        estimate). None for real samples and short blocks (whose M4 / M2^2
+        strays too far), and unless the envelope is nearly constant
+        (M4 / M2^2 below 1.5, about 4 dB SNR; noise alone gives 2).
+        """
+        x = np.asarray(samples)
+        if len(x) < 512 or not np.iscomplexobj(x):
+            return None
+        x = x[-65536:].astype(np.complex128, copy=False)
+        power = x.real * x.real + x.imag * x.imag
+        m2 = float(np.mean(power))
+        m4 = float(np.mean(power * power))
+        if not (m2 > 0.0 and math.isfinite(m4)) or m4 >= 1.5 * m2 * m2:
+            return None
+        noise = m2 - math.sqrt(max(2.0 * m2 * m2 - m4, 0.0))
+        return 10.0 * math.log10(max(noise, 0.0) + 1e-20)
 
     @staticmethod
     def _spectral_noise_dbfs(samples: np.ndarray) -> Optional[float]:

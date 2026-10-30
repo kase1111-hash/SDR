@@ -7,6 +7,7 @@ Provides access to scanning, encoding, and signal analysis tools.
 """
 
 import argparse
+import math
 import sys
 from pathlib import Path
 from typing import Any, List, Optional
@@ -595,6 +596,31 @@ def cmd_encode(args: argparse.Namespace) -> int:
         encoder = encoder_class(config, wpm=args.wpm)
     else:
         encoder = encoder_class(config)
+
+    # The signal must stay inside +-sample_rate/2, or it aliases (mark and
+    # space swap, a carrier lands on 0 Hz). The output is I/Q: a negative
+    # carrier is fine. Its edges (of its 99% power bandwidth) may reach
+    # +-sample_rate/2, so what the error suggests is accepted.
+    width = round(encoder.text_signal("").occupied_bandwidth_hz())
+    half_rate = args.sample_rate / 2.0
+    reach = abs(args.carrier) + width / 2.0
+    if reach > half_rate + 1e-6:
+        # (Rounded inwards to the 0.01 Hz shown, so each suggestion fits.)
+        room = math.floor((half_rate - width / 2.0) * 100.0) / 100.0
+        least = math.ceil(2.0 * reach * 100.0) / 100.0
+        carriers = (
+            f"a --carrier from {format_number(-room)} to {format_number(room)} Hz, or "
+            if room > 0
+            else ""
+        )
+        print(
+            f"Error: the {name} signal ({format_number(width)} Hz wide) at "
+            f"--carrier {format_number(args.carrier)} Hz reaches "
+            f"{format_number(reach)} Hz, more than --sample-rate "
+            f"{format_number(args.sample_rate)} can hold (±{format_number(half_rate)}"
+            f" Hz): use {carriers}a --sample-rate of at least {format_number(least)}."
+        )
+        return 1
 
     text = args.text or sys.stdin.read().strip()
     if not text:

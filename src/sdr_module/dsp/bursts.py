@@ -45,6 +45,7 @@ __all__ = [
     "format_analysis",
     "BurstReport",
     "BurstWatcher",
+    "analyze_report",
     "frame_rows",
 ]
 
@@ -945,6 +946,30 @@ class _Capture:
         return np.concatenate(self.parts)[: self.max]
 
 
+def analyze_report(report: BurstReport) -> BurstReport:
+    """Analyse a finished burst from the samples kept with it: its pulses
+    (rtl_433 style) and its modulation (``report`` is filled in and
+    returned). Takes 50-200 ms for a long burst: the window runs it off
+    its display loop (see :class:`BurstWatcher`'s ``defer``)."""
+    samples = report.samples
+    if samples is None or not len(samples) or not report.sample_rate > 0:
+        return report
+    rate = float(report.sample_rate)
+    try:
+        report.analysis = analyze_pulses(samples, rate)
+    except Exception:  # pragma: no cover - a bonus, never fatal
+        report.analysis = None
+    try:
+        from .classifiers import SignalClassifier
+
+        report.classification = SignalClassifier(rate).classify(
+            samples, search_hz=0.5 * report.burst.width_hz + 5e3
+        )
+    except Exception:  # pragma: no cover - a bonus, never fatal
+        report.classification = None
+    return report
+
+
 class BurstWatcher:
     """Bursts in the span, from the receiver's raw blocks (see the module
     docstring). Feed every block with :meth:`feed`; it returns the bursts
@@ -952,7 +977,11 @@ class BurstWatcher:
 
     ``analyze``: cut each burst's channel out and analyse its pulses
     (rtl_433 style) and its modulation; ``max_capture_s`` caps how much of
-    one burst is kept.
+    one burst is kept, ``max_captures`` how many are cut out at once (each
+    costs a channel filter on every block: on a busy band the others are
+    listed without an analysis). ``defer``: hand the reports out with their
+    samples but not analysed yet, for :func:`analyze_report` elsewhere (a
+    worker thread: the analysis takes too long for a display loop).
     """
 
     #: Rows are made from FFTs this long.
@@ -964,11 +993,15 @@ class BurstWatcher:
         analyze: bool = True,
         max_capture_s: float = 1.0,
         max_segments: int = 128,
+        defer: bool = False,
+        max_captures: int = 4,
     ):
         self.detector = BurstDetector(snr_db=snr_db)
         self.analyze = bool(analyze)
+        self.defer = bool(defer)
         self.max_capture_s = float(max_capture_s)
         self.max_segments = int(max_segments)
+        self.max_captures = int(max_captures)
         self._captures: Dict[int, _Capture] = {}
         self._previous: Optional[np.ndarray] = None
         self._key: Optional[Tuple[float, float]] = None
@@ -1014,6 +1047,9 @@ class BurstWatcher:
             for burst in self.detector.active:
                 capture = self._captures.get(burst.ident)
                 if capture is None:
+                    taking = sum(1 for c in self._captures.values() if c.count < c.max)
+                    if taking >= self.max_captures:
+                        continue  # a busy band: listed without its samples
                     capture = _Capture(
                         rate, burst.offset_hz, burst.width_hz, self.max_capture_s
                     )
@@ -1038,20 +1074,9 @@ class BurstWatcher:
             capture = self._captures.pop(burst.ident, None)
             report = BurstReport(burst)
             if capture is not None and capture.count > 0:
-                samples = capture.samples()
-                report.samples = samples
+                report.samples = capture.samples()
                 report.sample_rate = capture.rate
-                try:
-                    report.analysis = analyze_pulses(samples, capture.rate)
-                except Exception:  # pragma: no cover - a bonus, never fatal
-                    report.analysis = None
-                try:
-                    from .classifiers import SignalClassifier
-
-                    report.classification = SignalClassifier(capture.rate).classify(
-                        samples, search_hz=0.5 * burst.width_hz + 5e3
-                    )
-                except Exception:  # pragma: no cover - a bonus, never fatal
-                    report.classification = None
+                if not self.defer:
+                    analyze_report(report)
             reports.append(report)
         return reports

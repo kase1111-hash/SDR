@@ -75,6 +75,14 @@ class _SignalCase(_WindowTestCase):
         self.assertTrue(done, self.panel.identify_status.text())
         return self.panel.identification()
 
+    def bursts_done(self):
+        """Wait for the bursts being taken apart (on their worker) and list
+        them, as the window's timer does."""
+        for job, _report, _when in list(self.tools._burst_jobs):
+            job.result(timeout=30)
+        self.tools._collect_bursts()
+        self.assertFalse(self.tools._burst_jobs)
+
 
 class TestPlace(_SignalCase):
     def test_a_tab_before_info_on_ctrl_9(self):
@@ -314,6 +322,26 @@ class TestSignalsInView(_SignalCase):
         self.assertEqual(self.tools._heard, [])
         self.assertIsNone(self.tools._acc)
 
+    def test_the_keys_never_use_an_old_list(self):
+        """Off the Signals page the list is kept for 30 s after a key; a
+        key long after that (here: in another band) used the old list, and
+        Page Down at 433.92 MHz tuned back to 101.1 MHz. It measures the
+        signals in view afresh instead."""
+        win = self.win
+        win._show_panel("info")
+        self.tools._listing_until = time.monotonic() - 1.0  # 30 s are over
+        win.set_frequency(433.92e6)
+        win._set_demod_mode("None (I/Q)", None, None)
+        self.frames(0.3)
+        self.assertTrue(self.tools._heard)  # (what was heard on the FM band)
+        self.assertFalse(self.tools.step("down"))
+        self.assertAlmostEqual(win._current_frequency(), 433.92e6)
+        self.assertIn("Looking for signals", win._message_label.text())
+        self.frames(0.6)  # measured now, in this span
+        self.assertTrue(self.tools.step("up"), win._message_label.text())
+        self.assertGreater(win._current_frequency(), 433.92e6)
+        self.assertLess(win._current_frequency(), 433.92e6 + 1.2e6)
+
 
 class TestScope(_SignalCase):
     def test_only_while_on_screen(self):
@@ -405,6 +433,7 @@ class TestBursts(_SignalCase):
         self.listen(433.92e6, ("None (I/Q)", None, None))
         self.win._show_signal_page("bursts")
         self.frames(3.4)
+        self.bursts_done()
         reports = [r for _stamp, r in self.panel.bursts()]
         remote = [r for r in reports if abs(r.burst.center_hz - 433.92e6) < 20e3]
         self.assertTrue(remote, [r.burst.center_hz for r in reports])
@@ -430,9 +459,41 @@ class TestBursts(_SignalCase):
         self.win._show_signal_page("identify")
         self.frames(3.0)
         self.assertEqual(self.panel.bursts(), [])
+        self.assertFalse(self.tools._burst_jobs)
         self.panel.watch_check.setChecked(True)  # "Watch in the background"
         self.frames(3.4)
+        self.bursts_done()
         self.assertTrue(self.panel.bursts())
+
+    def test_taken_apart_off_the_display_loop(self):
+        """A finished burst's pulse analysis and classification take 50 to
+        300 ms: they ran in the display loop, which stalled for that long
+        every time a burst ended. They run on the bursts worker, and the
+        list gets them in order."""
+        import threading
+
+        from sdr_module.gui import signal_tools
+
+        threads = []
+
+        def analyze(report):
+            threads.append(threading.current_thread())
+            return real(report)
+
+        real = signal_tools.analyze_report
+        self.listen(433.92e6, ("None (I/Q)", None, None))
+        self.win._show_signal_page("bursts")
+        with mock.patch.object(signal_tools, "analyze_report", analyze):
+            self.frames(3.4)
+            self.bursts_done()
+        self.assertTrue(threads)
+        self.assertNotIn(threading.main_thread(), threads)
+        reports = [r for _stamp, r in self.panel.bursts()]
+        self.assertTrue(reports)
+        self.assertTrue(all(r.analysis is not None for r in reports), reports)
+        # Newest first, as they ended.
+        starts = [r.burst.start_s for r in reports]
+        self.assertEqual(starts, sorted(starts, reverse=True))
 
 
 class TestTrackSignal(_SignalCase):
@@ -482,6 +543,38 @@ class TestTrackSignal(_SignalCase):
         self.win.set_frequency(438.6e6)
         self.assertEqual(self.tools.badge_text(), "AFC +0 Hz")
         self.assertAlmostEqual(self.win._current_frequency(), 438.6e6)
+        # Nothing measured here yet: not shown as locked on (it was green,
+        # "locked on", before anything was heard).
+        badge = self.tools._afc_badge
+        self.assertNotEqual(badge.property("tone"), "success")
+        self.assertNotIn("locked on", badge.toolTip())
+
+    def test_drifting_out_of_a_recording_turns_it_off(self):
+        """Playing a recording, Track Signal stops when the signal drifts
+        out of the file's span: the menu item went on looking checked and
+        the badge on showing the last correction."""
+        win = self.win
+        self.listen(438.5e6, ("FM", "5 kHz", "12.5 kHz"))
+        win._track_action.trigger()
+        self.assertTrue(win._track_action.isChecked())
+        # (A recording whose span ends just above the signal.)
+        win._lo_lock = (438.5e6 - 1e6 + 4e3, 2e6, "the recording")
+        try:
+            self.frames(8.0, until=lambda: not self.tools.tracking)
+        finally:
+            win._lo_lock = None
+        self.assertFalse(self.tools.tracking)
+        self.assertFalse(win._track_action.isChecked())
+        self.assertEqual(self.tools.badge_text(), "")
+        self.assertIn("drifted out of the recording", win._message_label.text())
+
+    def test_turned_on_while_stopped_says_paused(self):
+        self.listen(438.5e6, ("FM", "5 kHz", "12.5 kHz"))
+        self.win._stop_acquisition()
+        self.assertFalse(self.win._is_running)
+        self.win._track_action.trigger()
+        self.assertTrue(self.tools.tracking)
+        self.assertEqual(self.tools.badge_text(), "AFC paused")
 
 
 class TestFindSignalsInRecording(_SignalCase):

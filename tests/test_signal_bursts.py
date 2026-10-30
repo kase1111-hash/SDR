@@ -22,6 +22,7 @@ from sdr_module.dsp.bursts import (  # noqa: E402
     BurstDetector,
     BurstWatcher,
     analyze_pulses,
+    analyze_report,
     bits_to_hex,
     format_analysis,
     frame_rows,
@@ -185,6 +186,29 @@ def test_frame_rows_show_a_short_burst_anywhere_in_the_block():
     assert top[peak] - mean[peak] > 10.0  # the mean dilutes it, the top not
 
 
+def test_a_busy_band_cuts_out_a_few_bursts_at_once():
+    """Each burst being cut out runs a channel filter over every block (up
+    to 100 ms a block at 20 MS/s): six at once take four captures and the
+    other two are listed without an analysis, so a busy band can't slow
+    the display loop without bound."""
+    rate, n = 2.4e6, 80_000
+    t = np.arange(n) / rate
+    watcher = BurstWatcher(defer=True, max_captures=4)
+    reports, most = [], 0
+    for k in range(20):
+        x = S.noise(n, 1e-6, seed=k)
+        if 5 <= k < 12:
+            for f in (-900e3, -600e3, -300e3, 300e3, 600e3, 900e3):
+                x = x + 0.05 * np.exp(2j * np.pi * f * (t + k * n / rate))
+        reports += watcher.feed(x.astype(np.complex64), 433.92e6, rate)
+        taking = [c for c in watcher._captures.values() if c.count < c.max]
+        most = max(most, len(taking))
+    reports += watcher.flush()
+    assert len(reports) == 6
+    assert most == 4
+    assert sum(r.samples is not None for r in reports) == 4
+
+
 # --------------------------------------------------------------------------- #
 # On the demo device
 # --------------------------------------------------------------------------- #
@@ -237,6 +261,10 @@ class TestDemo:
         assert len(at[434.10]) == pytest.approx(5, abs=1)
         assert len(at["other"]) < 3
         assert found and found[0][0] < 1.5  # no 12 s warm-up
+        # Its attributes stay (the FG-B14 repro script reads .spectrum).
+        from sdr_module.dsp.spectrum import SpectrumAnalyzer
+
+        assert isinstance(disp.spectrum, SpectrumAnalyzer)
 
     def test_burst_watcher_takes_the_remote_apart(self):
         dev = _demo(self.CENTRE, self.RATE)
@@ -256,6 +284,27 @@ class TestDemo:
         fsk = [r for r in reports if abs(r.burst.center_hz - 434.10e6) < 30e3]
         assert fsk and fsk[0].analysis is not None
         assert fsk[0].kind_text == "FSK PCM"  # both tones cut out together
+
+    def test_deferred_analysis_for_a_worker(self):
+        """``defer``: the reports come out with their samples but not taken
+        apart (that takes 50-300 ms, too long for a display loop);
+        analyze_report() does it later, on a worker."""
+        dev = _demo(self.CENTRE, self.RATE)
+        watcher = BurstWatcher(defer=True)
+        reports = []
+        for _ in range(int(3 * self.RATE / self.FRAME)):
+            reports += watcher.feed(
+                dev.read_samples(self.FRAME), self.CENTRE, self.RATE
+            )
+        reports += watcher.flush()
+        remote = [r for r in reports if abs(r.burst.center_hz - self.CENTRE) < 20e3]
+        assert remote
+        for report in remote:
+            assert report.analysis is None and report.classification is None
+            assert report.samples is not None and len(report.samples)
+            assert analyze_report(report) is report
+            assert report.analysis.distinct_rows()[0][0] == CODE_BITS
+            assert report.classification.kind == "ook"
 
     def test_the_t10_demo_signals_keep_read_samples_fast(self):
         """The OOK remote and the drifting 70 cm handheld are precomputed

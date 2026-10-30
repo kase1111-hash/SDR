@@ -15,6 +15,7 @@ import numpy as np
 
 from ..dsp.bursts import Burst, BurstDetector, frame_rows
 from ..dsp.classifiers import ClassificationResult, SignalClassifier, SignalType
+from ..dsp.spectrum import SpectrumAnalyzer
 from ..protocols.detector import ProtocolDetector
 from .waterfall import PacketHighlight, WaterfallDisplay
 
@@ -373,6 +374,8 @@ class LivePacketDisplay:
         self.waterfall.set_frequency_range(center_freq, sample_rate)
 
         self.highlighter = PacketHighlighter(self.waterfall, sample_rate)
+        # (Kept for callers that read it; the lines are frame_rows' now.)
+        self.spectrum = SpectrumAnalyzer(fft_size=width)
 
         self._width = width
         self._sample_rate = sample_rate

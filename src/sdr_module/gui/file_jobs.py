@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 #: Samples read (and converted) per step.
 CHUNK_SAMPLES = 1 << 20
 
+#: Decode Recording feeds the decoder this much of the file at a time, so
+#: each message is placed in the file to within it.
+DECODE_STEP_S = 0.1
+
 #: The most sample data one WAV file holds: its header counts the file's
 #: size in 32 bits (4 GiB), and Python's wave module refuses more.
 WAV_MAX_DATA_BYTES = 0xFFFFFFFF - 36
@@ -244,12 +248,17 @@ def decode_recording(
         raise ValueError(status.problem)
     result = DecodeResult()
     rate = float(options.sample_rate)
+    # A message is stamped with the end of the stretch it was found in: a
+    # short one (a whole chunk is 22 s at 48 kS/s).
+    step = max(4096, int(DECODE_STEP_S * rate))
     position = 0
     for chunk in _chunks(options, report):
-        position += len(chunk)
-        messages = decoder.process(chunk)
-        if messages:
-            stamped = [(msg, position / rate) for msg in messages]
+        stamped = []
+        for start in range(0, len(chunk), step):
+            part = chunk[start : start + step]
+            position += len(part)
+            stamped += [(msg, position / rate) for msg in decoder.process(part)]
+        if stamped:
             result.messages.extend(stamped)
             if found is not None:
                 found(stamped)

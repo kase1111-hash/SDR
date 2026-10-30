@@ -19,6 +19,8 @@
 * REC-08 / REC-09: Convert then Save as SigMF stamped the time of saving as
   the recording's time and dropped its hardware and description; Save As
   suggested (and wrote over) the converted file itself.
+* REC-10: Decode Recording placed each message at the end of its 1M-sample
+  chunk (up to 22 s late), not where it is in the file.
 * REC-12: cu8/cs8/cs16 saves truncated instead of rounding (a DC offset).
 * REC-14: the recording buffer kept a Python tuple per display frame.
 """
@@ -635,6 +637,49 @@ class TestConvertKeepsTheRecording(_ReviewCase):
             self.assertFalse(self.win._save_recording())
         self.assertIn("the recording you converted", warn.call_args[0][2])
         np.testing.assert_array_equal(np.fromfile(path, np.complex64), x)
+
+
+# ---------------------------------------------------------------------------
+# REC-10: Decode Recording says where in the file each message is
+# ---------------------------------------------------------------------------
+
+
+class TestDecodeTimes(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="sdr-review-rec-")
+        self.addCleanup(shutil.rmtree, self.folder, True)
+
+    def _aprs_file(self, rate, seconds, at):
+        from sdr_module.dsp import protocol_encoders as enc
+        from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
+
+        burst = enc.aprs_baseband(
+            "N0CALL-9", "APZ001", "!4903.50N/07201.75W>Where", rate, ["WIDE1-1"]
+        ).astype(np.complex64)
+        x = np.zeros(int(seconds * rate), np.complex64)
+        start = int(at * rate)
+        x[start : start + len(burst)] = burst
+        path = os.path.join(self.folder, "aprs.sigmf-data")
+        save_iq_file(path, x, rate, 144.39e6, SampleFormat.FLOAT32, FileFormat.SIGMF)
+        return path, len(burst) / rate
+
+    def test_a_message_is_placed_where_it_ends_in_the_file(self):
+        from sdr_module.gui.file_jobs import decode_recording
+        from sdr_module.gui.iq_files import describe_iq_file
+
+        for rate, seconds in ((48e3, 30.0), (240e3, 8.0)):
+            path, length = self._aprs_file(rate, seconds, at=2.0)
+            options, _missing = describe_iq_file(path)
+            found = []
+            result = decode_recording(
+                options, "AX.25/APRS", 0.0, lambda _f: None, found.extend
+            )
+            self.assertEqual(result.valid, 1, rate)
+            when = [t for _msg, t in result.messages]
+            self.assertEqual([t for _msg, t in found], when)
+            # It ends at 2.0 s + its length; reported within 0.25 s of that
+            # (it was 21.8 s at 48 kS/s: the end of its 1M-sample chunk).
+            self.assertAlmostEqual(when[0], 2.0 + length, delta=0.25, msg=rate)
 
 
 # ---------------------------------------------------------------------------

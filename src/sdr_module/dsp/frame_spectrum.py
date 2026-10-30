@@ -103,7 +103,7 @@ def normalize_fft_size(size: object) -> int:
     number)."""
     try:
         value = float(size)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # (OverflowError: a huge int)
         return DEFAULT_FFT_SIZE
     if not math.isfinite(value) or value <= 0:
         return DEFAULT_FFT_SIZE

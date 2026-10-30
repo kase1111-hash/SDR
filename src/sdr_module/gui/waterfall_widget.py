@@ -1402,9 +1402,16 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
 
     def set_history_seconds(self, seconds: float) -> None:
         """Span of the waterfall: 0 (Live, one row per update) or seconds of
-        history (each row keeps the strongest level of its interval)."""
+        history (each row keeps the strongest level of its interval).
+        Anything else that isn't a number is ignored."""
+        try:
+            wanted = float(seconds)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not math.isfinite(wanted):
+            return
         values = [value for _label, value in _HISTORY_CHOICES]
-        seconds = min(values, key=lambda v: abs(v - float(seconds)))
+        seconds = min(values, key=lambda v: abs(v - wanted))
         changed = seconds != self._history_s
         self._history_s = seconds
         self._row_open = False  # the next line starts a row at the new pace
@@ -1477,14 +1484,14 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 self.set_history_seconds(
                     float(settings.get("history_s", self._history_s))
                 )
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass
             try:
                 floor = float(settings.get("floor_db", self._db_range[0]))
                 ceiling = float(settings.get("ceiling_db", self._db_range[1]))
                 if math.isfinite(floor) and math.isfinite(ceiling):
                     self._set_levels(floor, ceiling)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass
             if "auto_levels" in settings:
                 self.set_auto_levels(bool(settings.get("auto_levels")))

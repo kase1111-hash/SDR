@@ -30,7 +30,7 @@ def normalize_zoom(zoom: Any) -> int:
     """The nearest of :data:`ZOOM_LEVELS` to ``zoom`` (1 if not a number)."""
     try:
         value = float(zoom)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # (OverflowError: a huge int)
         return 1
     if not math.isfinite(value) or value <= 1:
         return 1

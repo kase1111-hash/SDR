@@ -1379,7 +1379,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         values = [f for _t, f in _AVG_CHOICES]
         try:
             frames = int(frames)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # (inf, NaN, junk)
             frames = 0
         index = min(range(len(values)), key=lambda i: abs(values[i] - frames))
         self._avg_combo.setCurrentIndex(index)
@@ -1470,7 +1470,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
                 top = float(settings.get("range_top", self._db_range[1]))
                 if math.isfinite(floor) and math.isfinite(top):
                     self._set_range(floor, top)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass
             if "range_auto" in settings:
                 self.set_auto_range(bool(settings.get("range_auto")))

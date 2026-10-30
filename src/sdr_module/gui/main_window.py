@@ -8747,7 +8747,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             else:
                 if isinstance(saved, dict):
                     settings.update(saved)
-        self._waterfall.apply_display_settings(settings)
+        try:
+            self._waterfall.apply_display_settings(settings)
+        except Exception as e:
+            # (A damaged setting must never stop the app from starting.)
+            logger.warning(f"Ignoring the saved waterfall settings: {e}")
+            self._waterfall.apply_display_settings(dict(self._WATERFALL_DEFAULTS))
 
     def _save_waterfall_settings(self) -> None:
         if getattr(self, "_restoring", False):
@@ -8957,6 +8962,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             else:
                 if isinstance(saved, dict):
                     settings.update(saved)
+        try:
+            self._apply_spectrum_settings(settings)
+        except Exception as e:
+            # (A damaged setting must never stop the app from starting.)
+            logger.warning(f"Ignoring the saved spectrum settings: {e}")
+            self._apply_spectrum_settings(dict(self._SPECTRUM_DEFAULTS))
+
+    def _apply_spectrum_settings(self, settings: Dict[str, Any]) -> None:
         self._spectrum.apply_display_settings(settings)
         self._apply_plot_resolution(
             settings.get("fft_size", DEFAULT_FFT_SIZE),

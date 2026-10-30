@@ -928,5 +928,91 @@ class TestPeakHoldStartsEmpty(unittest.TestCase):
         self.assertTrue(np.all(sp._peak_hold == -140.0))
 
 
+BIG = "1" + "0" * 400  # a number no float holds
+
+
+class TestDamagedPlotSettings(unittest.TestCase):
+    """PLOT-9: a damaged spectrum_display or waterfall_display setting
+    holding an out-of-range number (inf, a 400-digit integer) no longer
+    stops the app from starting; the helpers return their defaults."""
+
+    def test_the_normalizers_return_their_defaults(self):
+        from sdr_module.dsp.frame_spectrum import DEFAULT_FFT_SIZE, normalize_fft_size
+        from sdr_module.gui.plot_view import normalize_zoom
+
+        for value in (int(BIG), float("inf"), float("nan"), -int(BIG)):
+            self.assertEqual(normalize_fft_size(value), DEFAULT_FFT_SIZE)
+            self.assertEqual(normalize_zoom(value), 1)
+
+    def test_the_widgets_ignore_them(self):
+        require_pyqt6(self)
+        sp, wf = swm.SpectrumWidget(), wfm.WaterfallWidget()
+        self.addCleanup(sp.deleteLater)
+        self.addCleanup(wf.deleteLater)
+        for value in (float("inf"), float("nan"), int(BIG), -int(BIG)):
+            sp.set_average_frames(value)
+            sp.apply_display_settings({"avg": value, "range_top": value})
+            wf.set_history_seconds(value)
+            wf.apply_display_settings({"history_s": value, "floor_db": value})
+        self.assertEqual(sp.average_frames(), 0)
+        self.assertTrue(all(np.isfinite(sp.db_range())))
+        self.assertEqual(wf.history_seconds(), 0.0)
+        self.assertTrue(all(np.isfinite(wf.levels())))
+
+    def window(self, key, raw):
+        from sdr_module.gui import bookmarks_panel, main_window
+        from tests.test_gui_chrome import _FakeSettings
+
+        store = _FakeSettings()
+        store.values[key] = raw
+        patches = [
+            mock.patch.object(main_window, "GuiSettings", lambda: store),
+            mock.patch.object(bookmarks_panel, "GuiSettings", lambda: store),
+        ]
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        win = main_window.SDRMainWindow(demo_mode=False)
+        for timer in (win._display_timer, win._status_timer, win._hotplug_timer):
+            timer.stop()
+        self.addCleanup(win.deleteLater)
+        self.addCleanup(win.close)
+        return win
+
+    def test_the_window_starts(self):
+        require_pyqt6(self)
+        cases = [
+            ("spectrum_display", '{"avg": 1e999}'),
+            ("spectrum_display", '{"avg": Infinity}'),
+            ("spectrum_display", '{"range_top": %s}' % BIG),
+            ("spectrum_display", '{"fft_size": %s}' % BIG),
+            ("spectrum_display", '{"zoom": %s}' % BIG),
+            ("waterfall_display", '{"history_s": %s}' % BIG),
+            ("waterfall_display", '{"floor_db": %s}' % BIG),
+            ("waterfall_display", '{"history_s": Infinity, "floor_db": NaN}'),
+        ]
+        for key, raw in cases:
+            with self.subTest(key=key, raw=raw[:30]):
+                win = self.window(key, raw)
+                self.assertEqual(win._spectrum.fft_size(), 2048)
+                self.assertEqual(win._plot_view.zoom, 1)
+                self.assertTrue(all(np.isfinite(win._spectrum.db_range())))
+                self.assertTrue(all(np.isfinite(win._waterfall.levels())))
+
+    def test_a_setting_that_cant_be_applied_falls_back_to_the_defaults(self):
+        require_pyqt6(self)
+        from sdr_module.gui import main_window
+
+        boom = mock.patch.object(
+            swm.SpectrumWidget,
+            "apply_display_settings",
+            side_effect=[RuntimeError("damaged"), None],
+        )
+        with boom, self.assertLogs(main_window.logger, "WARNING") as logs:
+            win = self.window("spectrum_display", '{"avg": 4}')
+        self.assertIn("spectrum", "\n".join(logs.output))
+        self.assertEqual(win._spectrum.fft_size(), 2048)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -6711,7 +6711,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 last[0] is chain and last[1] == deviation and last[2] is nr
             )
             take.stream_key = (chain, deviation, nr)
-            self._record_audio_block(audio, gate.is_open and tone_ok, seconds, joined)
+            # (Silence, as heard, while the Scanner moves between channels.)
+            heard = gate.is_open and tone_ok and not self._scan_muted
+            self._record_audio_block(audio, heard, seconds, joined)
         if speaker:
             if join.playing and new_stream:
                 out = join.join(audio)  # crossfade from the last sample

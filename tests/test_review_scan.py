@@ -1076,5 +1076,50 @@ class TestScan14ReadingsCostTheSame(_PanelCase):
         panel.stop_scan()
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-15: Record Audio during a sweep recorded what the scan had muted
+# --------------------------------------------------------------------------- #
+class TestScan15RecordAudioDuringASweep(_ScanWindowCase):
+    def test_the_recording_is_silent_where_the_speaker_was_muted(self):
+        import tempfile
+
+        import numpy as np
+
+        from sdr_module.gui import file_dialogs
+
+        win, panel = self.win, self.win._scanner_panel
+        folder = tempfile.mkdtemp(prefix="scan15-")
+        self.addCleanup(__import__("shutil").rmtree, folder, True)
+        file_dialogs.set_recordings_folder(self.store, folder)
+        _pretend_audio(win)
+        heard = []
+        win._audio.write = lambda block, *_a, **_k: heard.append(len(block))
+        win.set_frequency(100.1e6)
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        self.assertTrue(win._start_audio_recording())
+        take = win._audio_take
+        written = []
+        write = take.write
+
+        def spy(audio, open_, continuous=True):
+            loud = float(np.max(np.abs(audio))) if len(audio) else 0.0
+            written.append((bool(win._scan_muted), bool(open_), loud))
+            return write(audio, open_, continuous=continuous)
+
+        take.write = spy
+        panel._preset.setCurrentIndex(_preset_index(panel, "FM Broadcast"))
+        panel.set_scan_mode("once")
+        self.assertTrue(panel.start_scan())
+        heard.clear()
+        self.frames(6.0, until=lambda: not panel.engine.active)
+        self.assertFalse(panel.engine.active)
+        self.assertTrue(any(muted for muted, _o, _l in written))
+        self.assertEqual(heard, [])  # (the speaker played nothing meanwhile)
+        self.assertEqual(
+            [entry for entry in written if entry[0] and entry[1]], []
+        )  # nothing recorded as heard while muted
+        self.assertTrue(win._stop_audio_recording())
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

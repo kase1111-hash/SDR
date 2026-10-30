@@ -310,12 +310,6 @@ class TestFreqReadout(_WindowTestCase):
         self.settle(10)
         label = self.win._freq_label
         self.assertEqual(label.minimumWidth(), label.maximumWidth())
-        fm = label.fontMetrics()
-        self.assertGreaterEqual(
-            label.width()
-            - (label.sizeHint().width() - fm.horizontalAdvance(label.text())),
-            fm.horizontalAdvance("0000.000000 MHz"),
-        )
         level_x = self.win._level_label.mapTo(self.win, QPoint(0, 0)).x()
         for freq in (1090.000001e6, 146.5125e6, 24e6, 5999.999999e6):
             self.win.set_frequency(freq)
@@ -323,6 +317,11 @@ class TestFreqReadout(_WindowTestCase):
             self.assertEqual(
                 self.win._level_label.mapTo(self.win, QPoint(0, 0)).x(), level_x
             )
+            # Every frequency's text fits inside the frame. (Not checked with
+            # the size hint: QLabel never hints less than its fixed width.)
+            spans = self.win._freq_digits.char_spans()
+            self.assertGreaterEqual(spans[0][0], label.contentsRect().left())
+            self.assertLessEqual(spans[-1][1], label.contentsRect().right() + 1)
 
     def test_the_wheel_over_a_digit_tunes_that_digit(self):
         self.win.resize(1366, 768)
@@ -369,6 +368,36 @@ class TestFreqReadout(_WindowTestCase):
         for _ in range(6):  # 146.5125 -> 146.512 (shorter text) -> 146.5119
             _wheel(label, -1, pos=where)
         self.assertAlmostEqual(self.freq(), 146.5119e6, places=0)
+
+    def test_theme_switches_and_refits_keep_the_width(self):
+        """Each refit measured the label's size hint, which QLabel never
+        lets fall below the width fixed before: every theme switch added the
+        width of the characters FREQ wasn't showing (about 59 px)."""
+        self.win.resize(1366, 768)
+        self.win.show()
+        self.settle(10)
+        label = self.win._freq_label
+        digits = self.win._freq_digits
+        self.win._toggle_theme()  # a real theme's style (the tests start bare)
+        self.settle(5)
+        width = label.width()
+        self.assertEqual(digits.fit_width(), width)
+        self.assertEqual(digits.fit_width(), width)
+        level_x = self.win._level_label.mapTo(self.win, QPoint(0, 0)).x()
+        for _ in range(4):  # the other theme and back, twice
+            self.win._toggle_theme()
+            self.settle(5)
+        self.assertEqual(label.width(), width)
+        self.assertEqual(
+            self.win._level_label.mapTo(self.win, QPoint(0, 0)).x(), level_x
+        )
+        # The widest frequency fits inside the frame.
+        self.win.set_frequency(5999.999999e6)
+        self.settle(3)
+        self.assertEqual(label.text(), "5999.999999 MHz")
+        spans = digits.char_spans()
+        self.assertGreaterEqual(spans[0][0], label.contentsRect().left())
+        self.assertLessEqual(spans[-1][1], label.contentsRect().right() + 1)
 
     def test_the_width_follows_a_new_font(self):
         from PyQt6.QtGui import QFont

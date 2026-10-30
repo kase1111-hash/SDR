@@ -81,12 +81,31 @@ class FrequencyDigits(QObject if HAS_PYQT6 else object):
             label.ensurePolished()
         except RuntimeError:  # deleted before a deferred refit ran
             return 0
-        fm = label.fontMetrics()
-        frame = label.sizeHint().width() - fm.horizontalAdvance(label.text())
-        width = max(1, frame + fm.horizontalAdvance(WIDEST_FREQUENCY_TEXT))
+        width = max(1, self._natural_width(WIDEST_FREQUENCY_TEXT))
         if label.minimumWidth() != width or label.maximumWidth() != width:
             label.setFixedWidth(width)
         return width
+
+    def _natural_width(self, text: str) -> int:
+        """The width the label asks for to show ``text``, worked out as
+        QLabel's size hint does. (The hint itself can't be used: it never
+        reports less than the label's minimum width, so once the width was
+        fixed every refit, e.g. on a theme switch, made the label wider.)"""
+        label = self._label
+        fm = label.fontMetrics()
+        flags = int(label.alignment().value) & ~int(
+            (Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter).value
+        )
+        extra = 2 * label.margin()
+        indent = label.indent()
+        if indent < 0 and label.frameWidth() > 0:
+            # QLabel's default indent inside a frame, as in its size hint.
+            indent = fm.horizontalAdvance("x") - 2 * label.margin()
+        if indent > 0:
+            extra += indent
+        margins = label.contentsMargins()  # frame: border and padding
+        text_width = fm.boundingRect(0, 0, 2000, 2000, flags, text).width()
+        return text_width + extra + margins.left() + margins.right()
 
     def _text_left(self) -> float:
         """Where the (right-aligned) text starts, in label coordinates."""

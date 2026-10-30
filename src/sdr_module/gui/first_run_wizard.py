@@ -20,6 +20,7 @@ try:
         QFormLayout,
         QGridLayout,
         QGroupBox,
+        QHBoxLayout,
         QLabel,
         QPushButton,
         QVBoxLayout,
@@ -53,12 +54,12 @@ _TIPS = (
     ("Click", "Tune to a signal on the spectrum or waterfall."),
     ("← / →", "Tune by the step (Shift: ten steps, Ctrl: 1 MHz)."),
     ("Space", "Start or stop the receiver."),
-    ("M", "Mute or unmute (Ctrl+M anywhere)."),
     ("Ctrl+I", "What is this signal? (the Signal tab: identify, list, scope)."),
-    ("Ctrl+F", "Scan a band or your bookmarks (the Scanner tab)."),
     ("Ctrl+Shift+N", "A second receiver: another frequency at the same time."),
     ("F1", "Show all keyboard shortcuts."),
 )
+# (Six, one line each: the welcome screen fits a 1024x640 screen. The Info
+# tab's quick tips have more: M, Ctrl+F, Ctrl+1…9...)
 
 
 class FirstRunWizard(QDialog if HAS_PYQT6 else object):
@@ -188,7 +189,7 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
         tips_group = QGroupBox("Quick Tips")
         tips = QGridLayout(tips_group)
         tips.setHorizontalSpacing(12)
-        tips.setVerticalSpacing(6)
+        tips.setVerticalSpacing(4)
         tips.setColumnStretch(1, 1)
         top_left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
         keycaps = []
@@ -207,11 +208,13 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
             key_label.setFixedWidth(width)
         layout.addWidget(tips_group)
 
+        # The footer shares the buttons' row (the dialog fits 640 px).
         footer = QLabel("Your settings are remembered for next time.")
         set_role(footer, "hint")
-        layout.addWidget(footer)
-
-        layout.addSpacing(4)
+        footer.setWordWrap(True)
+        bottom = QHBoxLayout()
+        bottom.setSpacing(12)
+        bottom.addWidget(footer, 1)
 
         btns = QDialogButtonBox()
         self._skip_btn = btns.addButton("&Skip", QDialogButtonBox.ButtonRole.RejectRole)
@@ -222,7 +225,8 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
         btns.addButton(self._start_btn, QDialogButtonBox.ButtonRole.AcceptRole)
         btns.accepted.connect(self._on_accept)
         btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
+        bottom.addWidget(btns)
+        layout.addLayout(bottom)
 
         self._start_btn.setFocus()
 

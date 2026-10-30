@@ -707,6 +707,30 @@ class TestWelcomeAgain(_WindowTestCase):
         )
 
 
+class TestWelcomeFitsTheSmallestScreen(unittest.TestCase, _ThemedSizes):
+    """The welcome screen (with its new tips) fits a 1024x640 screen: under
+    560 px, title bar aside, in every state and both themes."""
+
+    def test_height(self):
+        if not HAS_PYQT6:
+            self.skipTest("PyQt6 not available")
+        from sdr_module.gui.first_run_wizard import FirstRunWizard
+
+        def check(theme):
+            for missing in ([], [("RTL-SDR", "pip install pyrtlsdr")]):
+                for demo in (False, True):
+                    wiz = FirstRunWizard(
+                        None, hardware_found=False, missing_drivers=missing,
+                        demo_running=demo,
+                    )  # fmt: skip
+                    self.addCleanup(wiz.deleteLater)
+                    self.assertLessEqual(
+                        wiz.minimumSizeHint().height(), 560, (theme, missing, demo)
+                    )
+
+        self.each_theme(check)
+
+
 # ---------------------------------------------------------------------------
 # Small chrome bugs (MUST 6)
 # ---------------------------------------------------------------------------

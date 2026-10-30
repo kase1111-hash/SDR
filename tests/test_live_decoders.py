@@ -192,6 +192,31 @@ def test_fm_protocols_tolerate_a_tuning_error(name, error_hz):
     assert _rows(messages) == CASES[name][1]
 
 
+def test_ads_b_in_gui_sized_blocks_away_from_the_lo():
+    # ADS-B is decoded from the pulse envelope at the full rate, which does
+    # not depend on where in the span the replies are.
+    from sdr_module.gui import device_dialog as dd
+
+    rate = 2.4e6
+    frame = dd._extended_squitter(0x4840D6, dd._ident_me("KLM1023"))
+    pulses = dd._modes_pulses(frame)
+    rng = np.random.default_rng(6)
+    x = (0.02 * (rng.standard_normal(int(0.2 * rate)) + 0j)).astype(np.complex64)
+    x += (0.02j * rng.standard_normal(len(x))).astype(np.complex64)
+    t = np.arange(len(x)) / rate
+    carrier = np.exp(2j * np.pi * 300e3 * t).astype(np.complex64)
+    for k in range(5):
+        # On the decoder's 0.5 us slot grid (1.2 samples), across blocks.
+        start, env = dd._pulse_envelope(pulses, 7200.0 + k * 90_000.0, rate)
+        x[start : start + len(env)] += 0.5 * env * carrier[start : start + len(env)]
+    decoder = create_live_decoder("ADS-B", rate, offset_hz=300e3)
+    messages = _decode(decoder, x, int(rate * GUI_BLOCK_S))
+    assert [(m.icao_address, m.callsign) for m in messages] == [
+        ("4840D6", "KLM1023")
+    ] * 5
+    assert decoder.status.valid == 5
+
+
 def test_noise_alone_decodes_nothing_and_fails_nothing():
     rate = 240e3
     rng = np.random.default_rng(9)

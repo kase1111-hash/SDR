@@ -563,6 +563,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # and the clock its last_time is measured with.
         self._decoder_status: Any = None
         self._clock = time.monotonic
+        # The decoder's (frames, valid, failed) at the last Clear: the
+        # status line and Stats count from there.
+        self._count_base = (0, 0, 0)
 
         self._setup_ui()
         self._update_state()
@@ -762,7 +765,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         decoder_caption.setContentsMargins(0, 8, 0, 0)
         decoder_caption.setToolTip(
             "What the decoder found in the signal since it was started "
-            "(choosing a protocol or changing the sample rate restarts it)"
+            "(choosing a protocol or changing the sample rate restarts it) "
+            "or since Clear"
         )
         form.addRow(decoder_caption)
         self._frames_label = value_label()
@@ -887,6 +891,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # The old decoder's status no longer applies; the main window sends
         # the new one's (or none) while handling the signal.
         self._decoder_status = None
+        self._count_base = (0, 0, 0)
         self._update_state()
         self.protocol_changed.emit(text)
 
@@ -931,6 +936,19 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         else:
             self._update_status_line()
         self._update_decoder_stats()
+
+    def _decoder_counts(self) -> Tuple[int, int, int]:
+        """The decoder's (frames, valid, failed) since the last Clear."""
+        status = self._decoder_status
+        counts = tuple(
+            int(getattr(status, attr, 0) or 0) for attr in ("frames", "valid", "failed")
+        )
+        if any(now < base for now, base in zip(counts, self._count_base, strict=True)):
+            self._count_base = (0, 0, 0)  # a new decoder counts from zero
+        frames, valid, failed = (
+            now - base for now, base in zip(counts, self._count_base, strict=True)
+        )
+        return frames, valid, failed
 
     def decoder_status_text(self) -> str:
         """The status line's text ("" when hidden)."""
@@ -1066,12 +1084,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         if status is None:
             return (f"Listening on {here}" if here else "Listening"), None, ""
         unit = str(getattr(status, "unit", "message") or "message")
-        valid = int(getattr(status, "valid", 0) or 0)
-        failed = int(getattr(status, "failed", 0) or 0)
-        frames = int(getattr(status, "frames", 0) or 0)
+        frames, valid, failed = self._decoder_counts()
         tip = (
-            f"Since the decoder started: {_plural(frames, 'frame')} heard, "
-            f"{valid:,} decoded, {failed:,} failed their checks."
+            f"Since the decoder started (or Clear): {_plural(frames, 'frame')} "
+            f"heard, {valid:,} decoded, {failed:,} failed their checks."
         )
         # Seconds of signal since the last valid message: a channel that
         # decoded before but carries something else now says so too.
@@ -1126,9 +1142,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         }
         failed = 0
         if status is not None and not getattr(status, "problem", None):
-            failed = int(getattr(status, "failed", 0) or 0)
-            values[self._frames_label] = f"{int(getattr(status, 'frames', 0) or 0):,}"
-            values[self._decoded_label] = f"{int(getattr(status, 'valid', 0) or 0):,}"
+            frames, valid, failed = self._decoder_counts()
+            values[self._frames_label] = f"{frames:,}"
+            values[self._decoded_label] = f"{valid:,}"
             values[self._failed_label] = f"{failed:,}"
             if getattr(status, "signal_measured", False):
                 values[self._signal_label] = (
@@ -1364,7 +1380,11 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             self._table.scrollTo(rows[0])
 
     def clear(self):
-        """Clear all messages."""
+        """Clear all messages (and count the decoder's from here)."""
+        status = self._decoder_status
+        self._count_base = tuple(
+            int(getattr(status, attr, 0) or 0) for attr in ("frames", "valid", "failed")
+        )
         self._messages.clear()
         self._total = 0
         self._invalid = 0

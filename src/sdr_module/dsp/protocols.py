@@ -369,8 +369,9 @@ class POCSAGDecoder(ProtocolDecoder):
     # Sync word bit errors tolerated when searching (and between batches).
     _SYNC_ERRORS = 2
     _NEXT_SYNC_ERRORS = 4
-    # Longest page assembled (message codewords) before it is cut.
-    _MAX_PAGE_WORDS = 80
+    # Longest page assembled (message codewords, about 570 characters)
+    # before it is cut.
+    _MAX_PAGE_WORDS = 200
 
     def __init__(
         self,
@@ -2584,7 +2585,6 @@ class ACARSDecoder(ProtocolDecoder):
         self._nbits = 0
         self._block = bytearray()
         self._crc_bytes = bytearray()
-        self._byte_buffer: List[int] = []
 
         # Messages
         self._messages: List[ACARSMessage] = []
@@ -2873,4 +2873,9 @@ __all__ = [
     # Factory
     "create_protocol_decoder",
     "demodulate_for_protocol",
+    # Building blocks
+    "BitSlicer",
+    "bch3121_encode",
+    "bch3121_syndrome",
+    "bch3121_correct",
 ]

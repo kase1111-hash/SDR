@@ -8,9 +8,11 @@ packet station or an ACARS burst occupies only a few kHz somewhere in it.
 
 1. a phase-continuous NCO mixes the block by minus the channel's offset
    from the centre (the VFO offset), so the channel sits at 0 Hz;
-2. a few short polyphase FIR stages low-pass and decimate it to a protocol
-   rate of about 48 kHz, so a much stronger station elsewhere in the span
-   is removed (60 dB down) before anything is demodulated.
+2. two FIR stages low-pass and decimate it to a protocol rate of about
+   48 kHz: a coarse polyphase stage that reads the full-rate block once,
+   then the sharp channel filter at the lower rate. A much stronger
+   station elsewhere in the span is removed (60 dB down) before anything
+   is demodulated.
 
 Everything carries its state between calls: a stream split into blocks of
 any size gives the same output as the whole stream processed at once (to
@@ -260,9 +262,8 @@ class Channelizer:
     +/- ``pass_hz`` and removing everything beyond +/- ``stop_hz`` (60 dB).
 
     ``output_rate`` is the exact rate of what :meth:`process` returns. The
-    decimation runs in stages (largest factors first, each with a short
-    filter that only protects the final channel); the last stage holds the
-    sharp channel filter.
+    decimation runs in two stages (see :meth:`_design`): a coarse one whose
+    filter only protects the final channel, then the sharp channel filter.
     """
 
     def __init__(

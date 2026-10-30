@@ -351,6 +351,27 @@ class TestDecoderPanelStatus(unittest.TestCase):
         )
         self.assertIsNone(tone)
 
+    def test_clear_counts_from_zero_again(self):
+        p = self.panel
+        self.show(self.status(frames=6, valid=5, failed=1, last_time=self.now - 3))
+        p.clear()
+        p.set_decoder_status(
+            self.status(frames=6, valid=5, failed=1, last_time=self.now)
+        )
+        self.assertEqual(p.decoder_status_text(), "Listening on 152.240 MHz")
+        self.assertEqual(
+            (p._frames_label.text(), p._decoded_label.text(), p._failed_label.text()),
+            ("0", "0", "0"),
+        )
+        p.set_decoder_status(
+            self.status(frames=7, valid=6, failed=1, last_time=self.now)
+        )
+        self.assertEqual(p.decoder_status_text(), "POCSAG  ·  1 page  ·  last just now")
+        # A new decoder (fewer counts than at Clear) counts from its own zero.
+        p.set_decoder_status(self.status(frames=1, valid=1, last_time=self.now))
+        self.assertEqual(p.decoder_status_text(), "POCSAG  ·  1 page  ·  last just now")
+        self.assertEqual(p._frames_label.text(), "1")
+
     def test_failures_and_undecodable_signal_are_flagged(self):
         text, tone = self.show(self.status(failed=2, frames=2))
         self.assertTrue(text.startswith("2 pages failed their checks"), text)

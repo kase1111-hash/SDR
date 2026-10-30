@@ -1210,7 +1210,9 @@ class TestScannerInTheWindow(_ScanWindowCase):
         self.assertIn("recording", panel._status.text())
         self.assertAlmostEqual(win._lo_frequency(), lo)  # no more retunes
         self.assertGreater(win._buffer_sample_count(), before)
-        self.assertTrue(win._display_timer is not None)
+        # One centre frequency for the whole take, never retuned during it.
+        self.assertAlmostEqual(win._buffer_meta[0], lo)
+        self.assertFalse(win._retune_warned)
         win._toggle_recording(False)
 
     def test_tuning_by_hand_stops_the_scan_where_you_tuned(self):

@@ -163,15 +163,19 @@ class TestBandPresetOrder(unittest.TestCase):
         require_pyqt6(self)
 
     def test_welcome_bands_follow_the_band_presets_menu(self):
-        from sdr_module.gui import main_window
+        # One table (gui/presets.py, mc:MC-U06 / ux:UX-U07): the welcome
+        # screen offers each favourite's band ("2m Ham (144–148 MHz)") and
+        # tunes the favourite the menu lists ("2m Calling"), in its order.
+        from sdr_module.gui import main_window, presets
         from sdr_module.gui.first_run_wizard import BAND_PRESETS
 
         menu = main_window.BAND_PRESETS
         self.assertEqual(list(BAND_PRESETS.values()), [p.frequency_hz for p in menu])
-        for name, preset in zip(BAND_PRESETS, menu, strict=True):
-            self.assertTrue(
-                name.startswith(main_window._plain(preset.label) + " ("), name
-            )
+        for name, favourite in zip(BAND_PRESETS, presets.FAVOURITES, strict=True):
+            self.assertEqual(name, presets.band_label(favourite))
+            self.assertTrue(name.startswith(favourite.band + " ("), name)
+        for preset, favourite in zip(menu, presets.FAVOURITES, strict=True):
+            self.assertEqual(main_window._plain(preset.label), favourite.preset)
 
     def test_scanner_bands_keep_the_same_order_and_names(self):
         from sdr_module.gui.first_run_wizard import BAND_PRESETS

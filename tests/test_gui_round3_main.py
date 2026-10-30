@@ -562,10 +562,19 @@ class TestCopy(_WindowTestCase):
         tabs = self.win._right_tabs
         index = tabs.indexOf(self.win._panel_pages["decoder"])
         self.assertIn("RDS", tabs.tabToolTip(index))
+        # (Help > About is a dialog of its own now, with Copy Version Info:
+        # mc:MC-G12.)
+        from PyQt6.QtWidgets import QLabel
+
+        from sdr_module.gui.version_info import AboutDialog
+
         shown = []
-        with mock.patch.object(
-            QMessageBox, "about", side_effect=lambda *a: shown.append(a[2])
-        ):
+
+        def fake_exec(dialog):
+            shown.append(" ".join(lb.text() for lb in dialog.findChildren(QLabel)))
+            return 0
+
+        with mock.patch.object(AboutDialog, "exec", fake_exec):
             self.win._show_about()
         for name in ("AX.25/APRS", "RDS", "Morse code"):
             self.assertIn(name, shown[0])
@@ -818,7 +827,9 @@ class TestAudioFailureInTheWindow(_WindowTestCase):
             mock.patch.object(self.win._audio, "start", return_value=False),
         ):
             self.win._set_demod_mode("FM")
-            self.win._audio_action.setChecked(True)
+            # Radio > Audio > Mute off: audio on.
+            self.win._mute_action.setChecked(True)
+            self.win._mute_action.setChecked(False)
         self.assertFalse(self.win._audio_enabled)
         self.assertIn("could not be opened", self.win._message_label.text())
 
@@ -830,7 +841,9 @@ class TestAudioFailureInTheWindow(_WindowTestCase):
             mock.patch.object(self.win._audio, "start", return_value=True),
         ):
             self.win._set_demod_mode("FM")
-            self.win._audio_action.setChecked(True)
+            # Radio > Audio > Mute off: audio on.
+            self.win._mute_action.setChecked(True)
+            self.win._mute_action.setChecked(False)
         self.assertTrue(self.win._audio_enabled)
 
 

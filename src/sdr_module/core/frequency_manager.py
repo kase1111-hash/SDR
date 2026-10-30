@@ -180,6 +180,10 @@ class FrequencyPreset:
     mode: str = "FM"  # Demodulation mode
     description: str = ""
     category: str = "General"
+    #: The live decoder that reads it ("ADS-B", "AX.25/APRS", "POCSAG", ...,
+    #: the Decoder panel's names; "SSTV" for the SSTV decoder; "" for none):
+    #: applying the preset turns it on.
+    decoder: str = ""
 
 
 # =============================================================================
@@ -858,8 +862,9 @@ RX_PRESETS: List[FrequencyPreset] = [
         frequency_hz=1090e6,
         bandwidth_hz=2.4e6,
         mode="RAW",
-        description="Aircraft transponders: choose ADS-B in the Decoder tab",
+        description="Aircraft transponders: turns on the ADS-B decoder (Decoder tab)",
         category="Aviation",
+        decoder="ADS-B",
     ),
     FrequencyPreset(
         name="ACARS",
@@ -868,6 +873,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         mode="AM",
         description="Aircraft communications",
         category="Aviation",
+        decoder="ACARS",
     ),
     FrequencyPreset(
         name="Aviation Emergency",
@@ -959,6 +965,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         mode="FM",
         description="APRS packet radio (North America)",
         category="Amateur",
+        decoder="AX.25/APRS",
     ),
     # ISM Bands
     FrequencyPreset(
@@ -985,6 +992,25 @@ RX_PRESETS: List[FrequencyPreset] = [
         mode="FM",
         description="Paging frequencies",
         category="Paging",
+        decoder="FLEX",
+    ),
+    FrequencyPreset(
+        name="POCSAG",
+        frequency_hz=152.24e6,
+        bandwidth_hz=25e3,
+        mode="FM",
+        description="A common VHF pager channel (POCSAG pagers use 152-159 MHz)",
+        category="Paging",
+        decoder="POCSAG",
+    ),
+    FrequencyPreset(
+        name="FLEX",
+        frequency_hz=931.9375e6,
+        bandwidth_hz=25e3,
+        mode="FM",
+        description="A common 900 MHz pager channel (FLEX pagers use 929-932 MHz)",
+        category="Paging",
+        decoder="FLEX",
     ),
     # Marine
     FrequencyPreset(
@@ -1003,6 +1029,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         mode="FM",
         description="ISS Slow Scan TV images & voice - use SSTV decoder",
         category="Space",
+        decoder="SSTV",
     ),
     FrequencyPreset(
         name="ISS APRS",
@@ -1011,6 +1038,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         mode="FM",
         description="ISS packet radio / APRS digipeater",
         category="Space",
+        decoder="AX.25/APRS",
     ),
     FrequencyPreset(
         name="ISS Packet (UHF)",

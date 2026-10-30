@@ -9,7 +9,7 @@ in view while it is open):
   how it goes on the air: on the carrier, or as audio on an FM carrier);
 * the text, with its length and air time, the characters the mode can't
   send (with a button that removes them) and macros that fill in your
-  callsign from Ham Radio > Ham ID;
+  callsign from Ham > Ham ID;
 * **Preview** plays it through the speakers (what a receiver would play),
   **Save...** writes it as WAV audio (for a radio's data input) or as I/Q
   (SigMF or cf32, centered on the tuned frequency), and **Transmit** sends it
@@ -575,7 +575,7 @@ if HAS_PYQT6:
             self._ham_id_button = QPushButton("Ham ID…")
             set_role(self._ham_id_button, "compact")
             self._ham_id_button.setToolTip(
-                "Open Ham Radio > Ham ID to enter your callsign (the macros and "
+                "Open Ham > Ham ID to enter your callsign (the macros and "
                 "your automatic station ID use it)"
             )
             self._ham_id_button.clicked.connect(self._show_ham_id)
@@ -1041,15 +1041,15 @@ if HAS_PYQT6:
                     button.setToolTip(f"{tip}: inserts “{template.format(call=call)}”")
                 else:
                     button.setToolTip(
-                        f"{tip}. Enter your callsign in Ham Radio > Ham ID first"
+                        f"{tip}. Enter your callsign in Ham > Ham ID first"
                     )
             if call:
                 self._callsign_hint.setText(f"as {call}")
-                self._callsign_hint.setToolTip("Your callsign, from Ham Radio > Ham ID")
+                self._callsign_hint.setToolTip("Your callsign, from Ham > Ham ID")
             else:
                 self._callsign_hint.setText("Needs your callsign:")
                 self._callsign_hint.setToolTip(
-                    "The macros fill in your callsign from Ham Radio > Ham ID"
+                    "The macros fill in your callsign from Ham > Ham ID"
                 )
             self._ham_id_button.setVisible(not call)
 
@@ -1059,7 +1059,7 @@ if HAS_PYQT6:
             call = self._callsign()
             if not call:
                 self._win._show_status_message(
-                    "Enter your callsign in Ham Radio > Ham ID to use the macros.",
+                    "Enter your callsign in Ham > Ham ID to use the macros.",
                     "warning",
                     5000,
                 )
@@ -1198,7 +1198,7 @@ if HAS_PYQT6:
                 if _in_amateur_band(freq):
                     return "", (
                         "an amateur transmission must be identified: enter your "
-                        "callsign in Ham Radio > Ham ID first"
+                        "callsign in Ham > Ham ID first"
                     )
                 return "no station ID (no callsign in Ham ID)", None
             values = panel.auto_id_settings() if panel is not None else {}

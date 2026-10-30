@@ -325,6 +325,14 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         # table row needs a matching entry in self._devices: _on_accept
         # rejects a selected row whose index has no entry.
         self._add_device("Demo", "Demo Device", "—", "Simulated signals")
+        demo_row = self._device_table.rowCount() - 1
+        for col in range(self._device_table.columnCount()):
+            item = self._device_table.item(demo_row, col)
+            if item is not None:
+                item.setToolTip(
+                    "Simulated signals, no hardware needed: the same as Device > "
+                    "Use Demo Device"
+                )
         self._devices.append({"type": "demo", "index": 0, "info": {}})
 
         self._device_table.selectRow(0)

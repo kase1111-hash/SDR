@@ -490,15 +490,17 @@ class TestFirstRunWizard(_WindowTestCase):
     def test_airband_with_demo_mode(self):
         from sdr_module.gui.first_run_wizard import FirstRunWizard
 
-        self._run("Airband AM (118–137 MHz)", demo=True)
+        # (The welcome screen's bands tune the band's favourite preset:
+        # Air Traffic Control, on a demo AM station.)
+        self._run("Airband (118–137 MHz)", demo=True)
         self.assertTrue(self.win._demo_mode)
         self.assertTrue(self.win._is_running)
-        self.assertAlmostEqual(self.freq(), 125e6)
+        self.assertAlmostEqual(self.freq(), 127.85e6)
         self.assertEqual(self.win._control_panel._demod_combo.currentText(), "AM")
         self.assertEqual(self.win.findChildren(FirstRunWizard), [])
 
     def test_noaa_selects_narrowband_fm(self):
-        self._run("NOAA Weather (162 MHz)", demo=False)
+        self._run("NOAA Weather (162.4–162.55 MHz)", demo=False)
         self.assertIsNone(self.win._device)
         self.assertAlmostEqual(self.freq(), 162.55e6)
         panel = self.win._control_panel

@@ -93,6 +93,11 @@ from .device_settings import (
     rate_choice_label,
     split_hackrf_gain,
 )
+from .presets import FAVOURITES_CATEGORY
+from .presets import categories as preset_categories
+from .presets import describe as describe_preset
+from .presets import is_favourite, preset_at, preset_by_name
+from .presets import presets as category_presets
 from .settings_store import DEFAULT_FREQUENCY_HZ
 from .themes import set_role, set_tone
 from .tuning import (
@@ -293,8 +298,6 @@ _PRESET_DEMOD = {
     "CW": "CW",
     "RAW": "None (I/Q)",
 }
-# How a preset's mode is shown in its details, in the Mode list's words.
-_PRESET_MODE_LABEL = {"WFM": "FM (broadcast)", "RAW": "None (I/Q)"}
 
 # Compact dummy-load reminder shown in the panel (full text in the tooltip).
 TX_POWER_REMINDER = (
@@ -458,6 +461,10 @@ class _FrequencySpinBox(QDoubleSpinBox if HAS_PYQT6 else object):
         self._max_hz = MAX_FREQUENCY_HZ
         self._range_text = ""
         self._step_hz = FREQ_STEP_HZ
+        # True while the arrows, Page Up/Down or the wheel step the value
+        # (the window then keeps the mode: only a typed frequency is a far
+        # tune that may pick one from the band plan).
+        self.stepping = False
         self.lineEdit().textChanged.connect(self._update_tone)
 
     def textFromValue(self, value: float) -> str:  # noqa: N802 (Qt API)
@@ -545,13 +552,17 @@ class _FrequencySpinBox(QDoubleSpinBox if HAS_PYQT6 else object):
         """Arrows, Page Up/Down and the wheel: whole tuning steps (like
         Left/Right on the plots), free of the rounding drift a step that
         isn't whole Hz (8.33 kHz) would collect."""
-        if self._edited():
-            super().stepBy(steps)  # interprets the typed text first
-            return
-        current = round(self.value() * self._unit_hz)
-        target = step_frequency(current, self._step_hz, steps)
-        target = min(max(target, self._min_hz), self._max_hz)
-        self.setValue(target / self._unit_hz)
+        self.stepping = True
+        try:
+            if self._edited():
+                super().stepBy(steps)  # interprets the typed text first
+                return
+            current = round(self.value() * self._unit_hz)
+            target = step_frequency(current, self._step_hz, steps)
+            target = min(max(target, self._min_hz), self._max_hz)
+            self.setValue(target / self._unit_hz)
+        finally:
+            self.stepping = False
         if self.style().styleHint(QStyle.StyleHint.SH_SpinBox_SelectOnStep, None, self):
             self.selectAll()
 
@@ -782,6 +793,11 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
         """Get frequency in Hz."""
         return self._frequency_hz
 
+    def is_stepping(self) -> bool:
+        """True while the arrows, Page Up/Down or the wheel step the field
+        (not a frequency typed in)."""
+        return bool(self._freq_input.stepping)
+
 
 # ---------------------------------------------------------------------------
 # Control panel
@@ -816,6 +832,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         folder_change_requested = pyqtSignal()
         auto_save_changed = pyqtSignal(bool)
         license_changed = pyqtSignal(object)  # LicenseClass
+        # Apply Preset tuned and set up a preset (its name): the window turns
+        # its decoder on and says so (T12: one preset system).
+        preset_applied = pyqtSignal(str)
         squelch_changed = pyqtSignal(float)  # dB
         agc_changed = pyqtSignal(bool)
         # Squelch on/off and Auto (the threshold follows the noise).
@@ -873,6 +892,16 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._rate_choices: Tuple = ()
         self._current_rate = 0.0
         self._front_end_kind = ""
+        # True while Apply Preset applies one (the window doesn't pick a mode
+        # from the band plan for that tune: the preset has its own).
+        self._applying_preset = False
+        # True while a quick-tune button (+10k...) steps the frequency (a
+        # step, not a far tune: see tuning_by_step).
+        self._quick_tuning = False
+        # The tuned frequency the Presets group last matched (show_preset_for)
+        # and whether its transmit lines are shown (a TX-capable device).
+        self._preset_freq_hz: Optional[float] = None
+        self._transmit_info = True
         self._setup_ui()
 
     # ------------------------------------------------------------------
@@ -1143,7 +1172,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._bw_combo.setCurrentText(DEFAULT_BANDWIDTH)
         self._bw_combo.setToolTip(get_short_tip("bandwidth"))
         self._bw_combo.currentTextChanged.connect(self._on_bandwidth_changed)
-        self._add_row(form, "Bandwidth:", self._bw_combo)
+        # "Filter" here, in the receiver bar (FILTER), the Info tab and the
+        # bookmarks: one name for the channel filter's width.
+        self._add_row(form, "Filter:", self._bw_combo)
 
         # Corrections of the raw samples (off by default).
         iq_row = QWidget()
@@ -1308,7 +1339,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._squelch_auto.setChecked(True)
         self._squelch_auto.setToolTip(
             "Sets the threshold a little (7 dB) above the channel's noise and "
-            "keeps it there when the gain, the AGC or the Bandwidth change. "
+            "keeps it there when the gain, the AGC or the Filter change. "
             "Moving the slider sets it by hand instead."
         )
         self._squelch_auto.toggled.connect(self._on_squelch_auto)
@@ -1500,6 +1531,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
     def _build_license_group(self) -> "QGroupBox":
         group = QGroupBox("License Profile")
+        self._license_group = group
         form = self._make_form(group)
 
         self._license_combo = self._shrinkable_combo(QComboBox())
@@ -1546,7 +1578,18 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._freq_input.set_frequency(current + offset)
         new = self._freq_input.get_frequency()  # clamped to the tuning range
         if new != current:
-            self.frequency_changed.emit(new)
+            self._quick_tuning = True
+            try:
+                self.frequency_changed.emit(new)
+            finally:
+                self._quick_tuning = False
+
+    def tuning_by_step(self) -> bool:
+        """True while the frequency changes by a step: the Frequency field's
+        arrows, Page Up/Down or wheel, or a quick-tune button (not a
+        frequency typed in, nor a preset). A step keeps the mode, as
+        Left/Right on the plots do."""
+        return self._quick_tuning or self._freq_input.is_stepping()
 
     def set_frequency(self, freq_hz: float):
         """Set frequency (no ``frequency_changed`` signal)."""
@@ -2438,29 +2481,94 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     # ------------------------------------------------------------------
 
     def _populate_preset_categories(self):
-        """Populate the preset category dropdown."""
-        fm = get_frequency_manager()
-        categories = fm.get_preset_categories()
+        """Populate the preset category dropdown: the favourites first (the
+        presets Radio > Band Presets and the welcome screen offer), then the
+        frequency manager's categories."""
         self._category_combo.blockSignals(True)
         self._category_combo.clear()
-        self._category_combo.addItems(categories)
+        self._category_combo.addItem(FAVOURITES_CATEGORY)
+        self._category_combo.setItemData(
+            0,
+            "The presets Radio > Band Presets lists first: a station or channel "
+            "in each of the common bands, all with something to hear on the "
+            "demo device",
+            Qt.ItemDataRole.ToolTipRole,
+        )
+        self._category_combo.addItems(preset_categories())
         self._category_combo.blockSignals(False)
         self._on_category_changed(self._category_combo.currentText())
 
     def _on_category_changed(self, category: str):
         """Handle category selection change."""
-        presets = get_frequency_manager().get_rx_presets(category) if category else []
+        presets = category_presets(category) if category else []
         self._preset_combo.blockSignals(True)
         self._preset_combo.clear()
         for preset in presets:
             self._preset_combo.addItem(preset.name)
             self._preset_combo.setItemData(
                 self._preset_combo.count() - 1,
-                f"{_format_mhz(preset.frequency_hz)}: {preset.description}",
+                f"{describe_preset(preset)}\n{preset.description}",
                 Qt.ItemDataRole.ToolTipRole,
             )
         self._preset_combo.blockSignals(False)
         self._on_preset_changed(self._preset_combo.currentText())
+
+    def select_preset(self, name: str) -> bool:
+        """Show the preset ``name`` (in the current category when it is
+        there, else among the favourites, else in its own category). False
+        when there is no such preset."""
+        preset = preset_by_name(name)
+        if preset is None:
+            return False
+        category = self._category_combo.currentText()
+        if name not in [p.name for p in category_presets(category)]:
+            category = (
+                FAVOURITES_CATEGORY if is_favourite(name) else str(preset.category)
+            )
+            self._category_combo.setCurrentText(category)
+        self._preset_combo.setCurrentText(name)
+        return self._preset_combo.currentText() == name
+
+    def show_preset_for(self, freq_hz: float) -> None:
+        """Show the preset tuned to ``freq_hz`` (the tuned frequency), or,
+        when there is none, no preset (the details say so): the group never
+        shows an unrelated preset as if it were what you listen to."""
+        try:
+            freq = float(freq_hz)
+        except (TypeError, ValueError):
+            return
+        if self._preset_freq_hz is not None and abs(freq - self._preset_freq_hz) < 1.0:
+            return
+        self._preset_freq_hz = freq
+        shown = preset_by_name(self._preset_combo.currentText())
+        if shown is not None and abs(shown.frequency_hz - freq) <= 500.0:
+            return
+        preset = preset_at(freq, self._category_combo.currentText())
+        if preset is not None and self.select_preset(preset.name):
+            return
+        self._preset_combo.blockSignals(True)
+        self._preset_combo.setCurrentIndex(-1)
+        self._preset_combo.blockSignals(False)
+        self._on_preset_changed("")
+
+    def set_transmit_info_visible(self, visible: bool) -> None:
+        """Show the presets' transmit line ("Listen ✓ · Transmit ...") only
+        while a device that can transmit (a HackRF One) is connected."""
+        self._transmit_info = bool(visible)
+        self._preset_tx.setVisible(self._transmit_info and bool(self._preset_tx.text()))
+
+    def take_license_group(self) -> Optional["QGroupBox"]:
+        """Take the License Profile group out of the panel (the window puts
+        it in Ham > Ham ID, next to your callsign: it is about transmitting,
+        which the receive controls don't need)."""
+        group = getattr(self, "_license_group", None)
+        if group is None:
+            return None
+        layout = self._content.layout()
+        if layout is not None:
+            layout.removeWidget(group)
+        group.setParent(None)
+        return group
 
     def _on_preset_changed(self, preset_name: str):
         """Show the selected preset's details and whether TX is allowed."""
@@ -2471,14 +2579,20 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             _APPLY_PRESET_TIP if preset is not None else "Choose a preset first"
         )
         if preset is None:
-            self._preset_info.setText("Choose a category and a preset to see it here.")
+            if self._preset_freq_hz is not None:
+                self._preset_info.setText(
+                    f"No preset at {_format_mhz(self._preset_freq_hz)}. Choose "
+                    "one to tune to it."
+                )
+            else:
+                self._preset_info.setText("Choose a preset to tune to it.")
             self._preset_info.setToolTip("")
             self._preset_tx.setText("")
             self._preset_tx.setToolTip("")
+            self._preset_tx.setVisible(False)
             set_tone(self._preset_tx, None)
             return
 
-        mode = _PRESET_MODE_LABEL.get(preset.mode, preset.mode)
         # Show the Bandwidth option Apply Preset will select (the narrowest
         # that fits the channel), not the channel's nominal width: "15 kHz"
         # here while Apply set 25 kHz made the details look wrong. (The
@@ -2486,16 +2600,13 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         bandwidth = self._preset_bandwidth_text(
             preset.bandwidth_hz, self._preset_mode(preset)
         )
-        self._preset_info.setText(
-            f"{_format_mhz(preset.frequency_hz)} · {bandwidth} · {mode}\n"
-            f"{preset.description}"
-        )
+        self._preset_info.setText(f"{describe_preset(preset)}\n{preset.description}")
         nominal = _format_bandwidth(preset.bandwidth_hz)
         tip = ""
         if abs(_parse_hz(bandwidth) - preset.bandwidth_hz) > 0.5:
             fits = _parse_hz(bandwidth) >= preset.bandwidth_hz
             tip = (
-                f"The channel is {nominal} wide; Apply Preset sets Bandwidth "
+                f"The channel is {nominal} wide; Apply Preset sets the Filter "
                 f"to {bandwidth}, the "
                 + ("narrowest option that fits it." if fits else "widest option.")
             )
@@ -2537,6 +2648,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._preset_tx.setText(text)
         self._preset_tx.setToolTip(tip)
         set_tone(self._preset_tx, tone)
+        self._preset_tx.setVisible(self._transmit_info)
 
     @staticmethod
     def _license_block_text(reason: str, freq_hz: float = 0.0, mode: str = "") -> str:
@@ -2598,9 +2710,16 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         if not preset:
             return
 
-        # Set frequency
+        # Set frequency (the window tunes; it may refuse, e.g. out of the
+        # device's range: then the mode stays as it was too).
         self._freq_input.set_frequency(preset.frequency_hz)
-        self.frequency_changed.emit(self._freq_input.get_frequency())
+        self._applying_preset = True
+        try:
+            self.frequency_changed.emit(self._freq_input.get_frequency())
+        finally:
+            self._applying_preset = False
+        if abs(self._freq_input.get_frequency() - preset.frequency_hz) > 1.0:
+            return
 
         # Mode first: the Bandwidth choices depend on it.
         if preset.mode in _PRESET_DEMOD:
@@ -2623,6 +2742,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         index = self._closest_bandwidth_index(preset.bandwidth_hz)
         if index >= 0:
             self._bw_combo.setCurrentIndex(index)
+        self._preset_freq_hz = float(preset.frequency_hz)
+        self.preset_applied.emit(preset.name)
 
     # ------------------------------------------------------------------
     # License profile

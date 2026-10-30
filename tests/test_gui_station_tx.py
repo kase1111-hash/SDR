@@ -169,7 +169,7 @@ class TestTxLine(_TxCase):
         self.assertEqual(
             self.status(),
             (
-                "ID not sent: enter your callsign in Ham Radio > Ham ID first.",
+                "ID not sent: enter your callsign in Ham > Ham ID first.",
                 "warning",
             ),
         )

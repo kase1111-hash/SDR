@@ -247,7 +247,7 @@ class ReceiverBar(QToolBar if HAS_PYQT6 else object):
     )
     FILTER_TIP = (
         "Channel filter: the width that is demodulated and measured around "
-        "the tuned frequency (the same as Receiver > Bandwidth)"
+        "the tuned frequency (the same as Receiver > Filter)"
     )
     STEP_TIP = (
         "Tuning step: Left/Right, the mouse wheel over the spectrum or "

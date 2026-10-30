@@ -30,7 +30,6 @@ try:
         QAbstractItemView,
         QComboBox,
         QDoubleSpinBox,
-        QFileDialog,
         QHBoxLayout,
         QHeaderView,
         QInputDialog,
@@ -60,6 +59,7 @@ from ..core.chirp_csv import (
     read_chirp_csv,
     write_chirp_csv,
 )
+from . import file_dialogs
 from .bookmark_editor import bookmark_tone_hz
 from .bookmark_editor import edit_bookmark as _edit_dialog
 from .control_panel import DEMOD_MODES, MAX_FREQUENCY_HZ, MIN_FREQUENCY_HZ
@@ -499,16 +499,20 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
 
         # Named like the File menu's commands (and the dialogs they open).
         self._csv_menu = QMenu(self)
-        self._import_action = self._csv_menu.addAction("Import Channels (CHIRP CSV)...")
+        self._import_action = self._csv_menu.addAction(
+            "Import Bookmarks (CHIRP CSV)..."
+        )
         self._import_action.setToolTip(
-            "Import memory channels from a CHIRP CSV file (commas, semicolons "
-            "or tabs between the columns); channels already bookmarked are "
-            "skipped when adding to the list"
+            "Add a CHIRP CSV file's memory channels as bookmarks (commas, "
+            "semicolons or tabs between the columns); frequencies already "
+            "bookmarked are skipped when adding to the list"
         )
         self._import_action.triggered.connect(lambda _checked=False: self.import_csv())
-        self._export_action = self._csv_menu.addAction("Export Channels (CHIRP CSV)...")
+        self._export_action = self._csv_menu.addAction(
+            "Export Bookmarks (CHIRP CSV)..."
+        )
         self._export_action.setToolTip(
-            "Export saved channels as a CHIRP-compatible CSV file"
+            "Save the bookmarks as a CHIRP-compatible CSV file"
         )
         self._export_action.triggered.connect(lambda _checked=False: self.export_csv())
         self._csv_menu.addSeparator()
@@ -516,7 +520,7 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             "Export Built-in Presets (CHIRP CSV)..."
         )
         self._presets_action.setToolTip(
-            "Save the application's built-in channel presets (NOAA weather, "
+            "Save the application's built-in presets (NOAA weather, "
             "calling frequencies, ACARS...) as a CHIRP CSV file, e.g. to load "
             "them into a handheld radio with CHIRP"
         )
@@ -529,8 +533,8 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         self._csv_btn.setMenu(self._csv_menu)
         self._csv_btn.setAutoDefault(False)
         self._csv_btn.setToolTip(
-            "Import or export channels as a CHIRP-compatible CSV file, to move "
-            "memories between this app, CHIRP and a handheld radio"
+            "Import or export the bookmarks as a CHIRP-compatible CSV file, to "
+            "move them between this app, CHIRP and a handheld radio's memories"
         )
         btn_row.addWidget(self._csv_btn)
         layout.addLayout(btn_row)
@@ -704,8 +708,14 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             Number of channels imported (0 if cancelled or on error).
         """
         if not path:
-            path, _ = QFileDialog.getOpenFileName(
-                self, "Import Channels (CHIRP CSV)", "", CSV_FILTER
+            # (In the folder last used for CHIRP files, else Documents: not
+            # the folder the app was started from. mc:MC-U07)
+            path, _ = file_dialogs.open_file(
+                self,
+                self._settings,
+                "channels",
+                "Import Bookmarks (CHIRP CSV)",
+                CSV_FILTER,
             )
         if not path:
             return 0
@@ -719,7 +729,7 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
 
         if not report.channels:
             QMessageBox.information(
-                self, "Import Channels", "No channels found in that file."
+                self, "Import Bookmarks", "No channels found in that file."
             )
             return 0
 
@@ -762,12 +772,12 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             )
         if notes:
             first = (
-                f"Imported {_plural(len(imported), 'channel')}."
+                f"Imported {_plural(len(imported), 'bookmark')}."
                 if imported
                 else "Nothing new to import."
             )
             QMessageBox.information(
-                self, "Import Channels", first + "\n" + "\n".join(notes)
+                self, "Import Bookmarks", first + "\n" + "\n".join(notes)
             )
         return len(imported)
 
@@ -775,12 +785,12 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         """Ask how to merge imported channels: "replace", "append" or None."""
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Question)
-        box.setWindowTitle("Import Channels")
-        box.setText(f"Import {_plural(count, 'channel')}.")
+        box.setWindowTitle("Import Bookmarks")
+        box.setText(f"Import {_plural(count, 'bookmark')}.")
         box.setInformativeText(
-            f"Replace the existing {_plural(len(self._bookmarks), 'channel')}, "
-            "or add the new ones after them (channels already bookmarked are "
-            "skipped)?"
+            f"Replace the existing {_plural(len(self._bookmarks), 'bookmark')}, "
+            "or add the new ones after them (frequencies already bookmarked "
+            "are skipped)?"
         )
         replace_btn = box.addButton("Replace", QMessageBox.ButtonRole.DestructiveRole)
         append_btn = box.addButton("Append", QMessageBox.ButtonRole.AcceptRole)
@@ -807,13 +817,18 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         """
         if not self._bookmarks:
             QMessageBox.information(
-                self, "Export Channels", "There are no saved channels to export."
+                self, "Export Bookmarks", "There are no bookmarks to export."
             )
             return 0
 
         if not path:
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Export Channels (CHIRP CSV)", "channels.csv", CSV_FILTER
+            path, _ = file_dialogs.save_file(
+                self,
+                self._settings,
+                "channels",
+                "Export Bookmarks (CHIRP CSV)",
+                "bookmarks.csv",
+                CSV_FILTER,
             )
         if not path:
             return 0
@@ -828,7 +843,9 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             return 0
 
         QMessageBox.information(
-            self, "Export Channels", f"Exported {_plural(count, 'channel')} to:\n{path}"
+            self,
+            "Export Bookmarks",
+            f"Exported {_plural(count, 'bookmark')} to:\n{path}",
         )
         return count
 
@@ -838,8 +855,10 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         from ..core.frequency_manager import RX_PRESETS
 
         if not path:
-            path, _ = QFileDialog.getSaveFileName(
+            path, _ = file_dialogs.save_file(
                 self,
+                self._settings,
+                "channels",
                 "Export Built-in Presets (CHIRP CSV)",
                 "sdr-module-presets.csv",
                 CSV_FILTER,
@@ -860,7 +879,7 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             self,
             "Export Built-in Presets",
             f"Exported {_plural(count, 'preset')} to:\n{path}\n\nIt opens in "
-            "CHIRP (File > Open), or import it here with CSV > Import Channels.",
+            "CHIRP (File > Open), or import it here with CSV > Import Bookmarks.",
         )
         return count
 
@@ -996,9 +1015,9 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         has_any = bool(self._bookmarks)
         self._export_action.setEnabled(has_any)
         self._export_action.setToolTip(
-            "Export saved channels as a CHIRP-compatible CSV file"
+            "Save the bookmarks as a CHIRP-compatible CSV file"
             if has_any
-            else "There are no saved channels to export yet"
+            else "There are no bookmarks to export yet"
         )
 
     def _selected_index(self) -> int:

@@ -398,8 +398,12 @@ class TestHelpDialog(unittest.TestCase):
         dialog = HelpDialog()
         self.assertEqual(len(dialog.shortcut_entries()), len(SHORTCUTS))
         dialog._filter.setText("scanner")
-        visible = [row for row, _s, _sec in dialog._rows if not row.isHidden()]
-        self.assertEqual(len(visible), 1)
+        visible = [s for row, s, _sec in dialog._rows if not row.isHidden()]
+        # Ctrl+F, and Enter in the Scanner tab's results (mc:MC-11: the keys
+        # lists handle themselves are listed too).
+        self.assertEqual(len(visible), 2, visible)
+        self.assertTrue(any("ctrl+f" in s for s in visible))
+        self.assertTrue(any(s.startswith("scanner results") for s in visible))
         dialog._filter.setText("no such thing")
         self.assertFalse(dialog._no_match.isHidden())
 
@@ -621,7 +625,7 @@ class TestHelpReview(unittest.TestCase):
     def test_static_categories_match_the_menus(self):
         from sdr_module.gui.help_dialog import SHORTCUTS
 
-        menus = {"File", "Radio", "View", "Tools", "Help", "Tuning"}
+        menus = {"File", "Device", "Radio", "View", "Tools", "Help", "Tuning"}
         self.assertTrue({cat for cat, _k, _d in SHORTCUTS} <= menus)
 
     def test_panel_shortcuts_read_naturally(self):

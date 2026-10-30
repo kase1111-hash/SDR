@@ -4350,12 +4350,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _apply_tuning_range(self) -> None:
         """Let the Frequency field accept the connected device's range (its
         tooltip and messages say what it is), and the span of a recording
-        playing back even where it lies beyond (a 10 GHz downlink)."""
+        playing back even where it lies above (a 10 GHz downlink)."""
         low, high = self._tuning_limits()
         text = self._range_text() if self._device_tuning_range() else ""
         if self._lo_lock is not None:
             center, span, _why = self._lo_lock
-            low = min(low, max(center - span / 2, MIN_FREQUENCY_HZ))
             high = max(high, center + span / 2)
         self._control_panel._freq_input.set_tuning_range(low, high, text)
 
@@ -4416,9 +4415,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "transmission to end) first."
             )
         low, high = self._tuning_limits()
-        if self._lo_lock is None and not low <= freq <= high:
-            # (A recording playing has its own span, checked below: nothing
-            # is retuned, and it may lie beyond the receiver's range.)
+        if self._lo_lock is not None:
+            # A recording plays: nothing is retuned, so its span (checked
+            # below) may lie above the receiver's range.
+            high = math.inf
+        if not low <= freq <= high:
             return self._refuse_tuning(
                 f"{format_frequency(freq)} is out of range: {self._range_text()}."
             )
@@ -9091,7 +9092,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         retuned so the VFO sits in the middle. With Radio > Keep Tuned
         Frequency Centered the LO always follows (every tune retunes the
         device). While the LO is locked (:meth:`_lock_lo`, a recording
-        playing back) frequencies outside its span are refused.
+        playing back) frequencies outside its span are refused, and those
+        inside it are tuned even above the receiver's range.
 
         A frequency outside the connected device's range, or one the device
         rejects, is refused: the status bar says why ("RTL-SDR tunes

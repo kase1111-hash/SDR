@@ -328,6 +328,22 @@ class TestRecordingAbove6GHz(_MainStateCase):
         self.settle()
         self.assertEqual(self.win._current_frequency(), 10490.5e6)
 
+    def test_below_the_receivers_range_is_still_refused(self):
+        """Only the top of the receiver's range gives way to a recording: a
+        recording centred at 0.5 MHz doesn't make 0 Hz and below tunable
+        (the Frequency field can't hold them)."""
+        win = self.win
+        win._playback.close(restore=True)
+        self.assertTrue(
+            win._open_recording(self.recording(0.5e6, 2.4e6, "mw.sigmf-data"))
+        )
+        win._set_demod_mode("AM", None, "5 kHz")
+        self.assertFalse(win.set_frequency(-100e3))
+        self.assertIn("is out of range", self.status()[0])
+        self.assertEqual((win._tuned_hz, win._current_frequency()), (0.5e6, 0.5e6))
+        self.assertTrue(win.set_frequency(0.1e6))
+        self.assertEqual((win._tuned_hz, win._current_frequency()), (0.1e6, 0.1e6))
+
     def test_closing_it_goes_back_to_the_receiver_and_its_range(self):
         win = self.win
         win._playback.close(restore=True)

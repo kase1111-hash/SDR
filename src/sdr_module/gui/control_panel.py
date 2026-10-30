@@ -857,7 +857,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         # (see filter_profile), and whether a mode change is applying them.
         self._filter_memory: Dict[str, Dict[str, str]] = {}
         self._applying_filter = False
-        # False while something else than you sets the filters (a scan's
+        # False while something other than you sets the filters (a scan's
         # channels): they don't become the widths each mode remembers.
         self.remember_filters = True
         # The squelch slider shows the Auto threshold without emitting; a

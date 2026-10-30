@@ -1082,6 +1082,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
     def _on_reset_peak_clicked(self) -> None:
         self.reset_peak()
+        self._refit_range()  # (Range Auto lets go of what was held)
 
     def _on_avg_changed(self, index: int):
         """Handle averaging mode change."""
@@ -1175,12 +1176,11 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         """Reset peak hold (and min hold: they start over together)."""
         self._peak_hold = np.full(self._fft_size, np.nan)
         self._min_hold = np.full(self._fft_size, np.nan)
-        self._refit_range()
         self._canvas.update()
 
     def _refit_range(self) -> None:
-        """Range Auto: fit the traces drawn at once (the holds were reset,
-        shown or hidden) instead of easing toward them."""
+        """Range Auto: fit the traces drawn at once (the user reset the
+        holds, or showed or hid one) instead of easing toward them."""
         if self._auto_range and self._has_data:
             self._observe_range(self._main_trace(), force=True)
 
@@ -1823,7 +1823,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         low.toggled.connect(self.set_min_hold)
         clear_peak = menu.addAction("R&eset Holds")
         clear_peak.setEnabled(self._show_peak or self._show_min)
-        clear_peak.triggered.connect(lambda _c=False: self.reset_peak())
+        clear_peak.triggered.connect(lambda _c=False: self._on_reset_peak_clicked())
 
         floor, top = self._db_range
         ranges = menu.addMenu("&Range")

@@ -752,13 +752,27 @@ class TestAutoRangeFramesTheHolds(unittest.TestCase):
             self.frame()
             self.assertGreaterEqual(sp.db_range()[1], held)
         # Reset (or Peak hold off) lets the top come down at once.
-        sp.reset_peak()
+        sp._peak_reset_btn.click()
         self.assertLess(sp.db_range()[1], held)
         self.frame(burst=True)
         self.assertGreaterEqual(sp.db_range()[1], float(np.nanmax(sp._peak_hold)))
         self.frame()  # (the live trace without the burst)
         sp.set_peak_hold(False)
         self.assertLess(sp.db_range()[1], held)
+
+    def test_a_retune_doesnt_jolt_the_range(self):
+        # The holds start over on a retune, but the range eases down as
+        # before (no jump at every wheel step with Keep Centered).
+        sp = self.sp
+        sp.set_peak_hold(True)
+        for _ in range(30):
+            self.frame()
+        self.frame(burst=True)
+        for _ in range(10):
+            self.frame()
+        before = sp.db_range()
+        sp.set_center_freq(CENTER + 1e6)
+        self.assertEqual(sp.db_range(), before)
 
     def test_turning_peak_hold_on_shows_what_it_held(self):
         sp = self.sp

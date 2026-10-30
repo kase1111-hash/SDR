@@ -5,7 +5,16 @@ Provides coordinated control of both devices for:
 - Dual RX monitoring
 - Full-duplex operation (RTL-SDR RX + HackRF TX)
 - TX monitoring
-- Wideband scanning
+
+:class:`OperationMode` also names wideband scanning and relaying, which are
+not implemented: :meth:`DualSDRController.set_mode` refuses them with a
+``NotImplementedError`` that says what to use instead (see
+:data:`NOT_IMPLEMENTED_MODES`).
+
+In the GUI, Device > Second Receiver... gives the same uses with any two
+devices: a second receiver window next to the main one (dual watch), which
+keeps receiving while the main window's HackRF transmits (full duplex) and
+can follow the transmit frequency (TX monitor).
 """
 
 import logging
@@ -26,13 +35,42 @@ logger = logging.getLogger(__name__)
 
 
 class OperationMode(Enum):
-    """Dual-SDR operation modes."""
+    """Dual-SDR operation modes.
+
+    Only :attr:`implemented` modes can be chosen with
+    :meth:`DualSDRController.set_mode`; WIDEBAND_SCAN and RELAY are listed
+    for configuration files and are refused (see
+    :data:`NOT_IMPLEMENTED_MODES`).
+    """
 
     DUAL_RX = "dual_rx"  # Both devices receiving
     FULL_DUPLEX = "full_duplex"  # RTL-SDR RX + HackRF TX
     TX_MONITOR = "tx_monitor"  # Monitor own transmission
-    WIDEBAND_SCAN = "wideband_scan"  # Coordinated scanning
-    RELAY = "relay"  # Receive and retransmit
+    WIDEBAND_SCAN = "wideband_scan"  # Coordinated scanning (not implemented)
+    RELAY = "relay"  # Receive and retransmit (not implemented)
+
+    @property
+    def implemented(self) -> bool:
+        """Whether :class:`DualSDRController` can run in this mode."""
+        return self not in NOT_IMPLEMENTED_MODES
+
+
+#: Modes the controller doesn't implement, and what to use instead (the
+#: text of the ``NotImplementedError`` that ``set_mode`` raises for them).
+NOT_IMPLEMENTED_MODES: Dict[OperationMode, str] = {
+    OperationMode.WIDEBAND_SCAN: (
+        "Wideband scan mode is not implemented by DualSDRController. Scan with "
+        "one device at a time instead: the GUI's Scanner tab (Tools > "
+        "Frequency Scanner), or `sdr-scan scan --device rtlsdr` and "
+        "`sdr-scan scan --device hackrf` for each device's range."
+    ),
+    OperationMode.RELAY: (
+        "Relay mode (receive and retransmit) is not implemented: "
+        "retransmitting what is received needs checks this controller "
+        "doesn't make. To transmit, use the GUI's transmit engine (Radio > "
+        "Send Station ID), which checks the license, mode and power first."
+    ),
+}
 
 
 @dataclass
@@ -188,6 +226,11 @@ class DualSDRController:
 
         logger.info("Dual-SDR system shutdown complete")
 
+    @staticmethod
+    def supported_modes() -> Tuple[OperationMode, ...]:
+        """The operation modes :meth:`set_mode` accepts."""
+        return tuple(mode for mode in OperationMode if mode.implemented)
+
     def set_mode(self, mode: OperationMode) -> bool:
         """
         Set the operation mode.
@@ -196,8 +239,16 @@ class DualSDRController:
             mode: Desired operation mode
 
         Returns:
-            True if mode change successful
+            True if mode change successful (False while streaming, or when
+            the devices the mode needs aren't there)
+
+        Raises:
+            NotImplementedError: for a mode the controller doesn't implement
+                (WIDEBAND_SCAN, RELAY); the message says what to use instead.
         """
+        reason = NOT_IMPLEMENTED_MODES.get(mode)
+        if reason is not None:
+            raise NotImplementedError(reason)
         with self._lock:
             if self._state.rtlsdr_streaming or self._state.hackrf_streaming:
                 logger.warning("Stop streaming before changing mode")

@@ -565,5 +565,73 @@ class TestScan07HoldWhileChecking(_PanelCase):
         self.assertNotIn("(held)", panel._listen_label.text())
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-08: transmitting while a scan is stopped on a channel
+# --------------------------------------------------------------------------- #
+class TestScan08TransmittingDuringAScan(_BookmarkScanCase):
+    def setUp(self):
+        super().setUp()
+        win = self.win
+        # The user was listening to airband in AM before scanning.
+        win.set_frequency(125.0e6)
+        win._set_demod_mode("AM", None, "10 kHz")
+        self.messages = []
+        show = win._show_status_message
+
+        def spy(text, *args, **kwargs):
+            self.messages.append(text)
+            return show(text, *args, **kwargs)
+
+        win._show_status_message = spy
+
+    def transmit(self):
+        """What StationTx.transmit does: the HackRF is busy (sending where
+        the receiver is tuned) and the receiver stops for it."""
+        self.win._tx_busy = lambda: True
+        self.win._stop_acquisition()
+
+    def receive_again(self):
+        self.win._tx_busy = lambda: False
+        self.win._start_acquisition()
+
+    def test_answering_the_channel_the_scan_stopped_on_stays_on_it(self):
+        win, panel = self.win, self.win._scanner_panel
+        self.assertTrue(self.scan([_CLUB], seconds=4.0))  # the demo repeater
+        self.transmit()
+        self.messages.clear()
+        panel.refresh()  # (the tab's 500 ms timer)
+        self.assertFalse(panel.engine.active)
+        self.assertEqual(panel._status.text(), "Scan stopped: transmitting.")
+        self.assertEqual(self.messages, [])  # no "Can't tune while transmitting"
+        self.assertAlmostEqual(win._current_frequency(), 145.29e6)
+        self.assertEqual(win._listening_mode(), ("FM", "5 kHz"))
+        self.receive_again()
+        self.assertAlmostEqual(win._current_frequency(), 145.29e6)
+        self.assertEqual(win._listening_mode(), ("FM", "5 kHz"))
+        # No scan while transmitting: Start says why.
+        self.transmit()
+        panel.refresh()
+        self.assertFalse(panel._start_btn.isEnabled())
+        self.assertIn("transmitting", panel._start_btn.toolTip())
+        self.assertFalse(panel.start_scan())
+        self.receive_again()
+        panel.refresh()
+        self.assertTrue(panel._start_btn.isEnabled())
+
+    def test_a_scan_that_cant_go_back_keeps_the_channels_mode(self):
+        """Stopping where the receiver can't be retuned: it stays on the
+        channel in the channel's mode, not in the mode of where it began."""
+        from sdr_module.gui.scan_engine import DWELL
+
+        win, panel = self.win, self.win._scanner_panel
+        quiet = dict(_QUIET_TONE, label="Quiet FM", tone_mode="")
+        self.scan([quiet], seconds=1.0, until=lambda: panel.engine.state == DWELL)
+        self.assertEqual(win._listening_mode(), ("FM", "5 kHz"))
+        win._tune_to = lambda *_a, **_k: False  # the receiver refuses
+        panel.stop_scan()  # (stay=False: not listening to anything)
+        self.assertAlmostEqual(win._current_frequency(), 145.5e6)
+        self.assertEqual(win._listening_mode(), ("FM", "5 kHz"))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

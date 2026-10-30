@@ -212,8 +212,8 @@ class ScannerHost(ScanHost):
 
     def scan_blocker(self) -> Tuple[str, str]:
         """``("", "")`` when a scan can start, else ``(kind, reason)``:
-        kind "device" (none connected), "recording" or "locked" (a
-        recording plays back)."""
+        kind "device" (none connected), "recording", "locked" (a
+        recording plays back) or "transmitting"."""
         return "", ""
 
     def scan_receiving(self) -> bool:
@@ -1003,6 +1003,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             True,
         ),
         "locked": ("Scan stopped: a recording is playing.", True),
+        # Answering the channel the scan stopped on: the receiver comes back
+        # on it when the transmission ends.
+        "transmitting": ("Scan stopped: transmitting.", True),
     }
 
     def refresh(self) -> None:

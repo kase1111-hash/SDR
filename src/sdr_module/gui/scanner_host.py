@@ -218,6 +218,11 @@ class WindowScannerHost(ScannerHost):
                 "Stop recording to scan: a scan retunes the receiver, so the "
                 "recording would mix frequencies."
             )
+        if win._tx_busy():
+            return "transmitting", (
+                "Scanning needs the receiver, which is off while transmitting: "
+                "scan when the transmission ends."
+            )
         return "", ""
 
     def scan_receiving(self) -> bool:
@@ -267,27 +272,37 @@ class WindowScannerHost(ScannerHost):
         win._scan_checks_tone = False
         saved, self._saved = self._saved, None
         self.expected_hz = None
-        if not stay and saved is not None:
-            freq, lo, mode, deviation, width, tone = saved
-
-            def back() -> bool:
-                # The plots where they were too: the LO, then the VFO in it.
-                if abs(lo - freq) >= 0.5 and win._tune_to(lo, recenter=True):
-                    return bool(win._tune_to(freq))
-                return bool(win._tune_to(freq, recenter=True))
-
-            self._quietly(back)
-            if mode:
-                self._quietly(
-                    lambda: (
-                        win._set_demod_mode(mode, deviation or None, width or None),
-                        True,
-                    )[1]
-                )
-            # (Whatever the mode: the scan sets it for the FM channels it
-            # visits, and it is kept, and saved, for when FM is next used.)
-            win._control_panel.set_tone_squelch_hz(tone)
+        # (A transmission stays where the scan is: it can't be retuned.)
+        if not stay and saved is not None and not win._tx_busy():
+            self._go_back(*saved)
         win._note_tuned()
+
+    def _go_back(
+        self, freq: float, lo: float, mode: str, deviation: str, width: str, tone: float
+    ) -> None:
+        """To where the scan began, in the mode, filter and tone squelch it
+        began with. A receiver that can't go back (it refused) stays on the
+        scan's channel, in that channel's mode."""
+        win = self._win
+
+        def back() -> bool:
+            # The plots where they were too: the LO, then the VFO in it.
+            if abs(lo - freq) >= 0.5 and win._tune_to(lo, recenter=True):
+                return bool(win._tune_to(freq))
+            return bool(win._tune_to(freq, recenter=True))
+
+        if not self._quietly(back):
+            return
+        if mode:
+            self._quietly(
+                lambda: (
+                    win._set_demod_mode(mode, deviation or None, width or None),
+                    True,
+                )[1]
+            )
+        # (Whatever the mode: the scan sets it for the FM channels it visits,
+        # and it is kept, and saved, for when FM is next used.)
+        win._control_panel.set_tone_squelch_hz(tone)
 
     # ---- results ---------------------------------------------------------- #
     def scan_listen(self, hit: ScanHit) -> bool:

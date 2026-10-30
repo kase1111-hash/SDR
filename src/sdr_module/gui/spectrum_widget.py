@@ -877,6 +877,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         # main window; see set_view_model).
         self._view = PlotView(self._center_freq, self._sample_rate)
         self._view.subscribe(self._on_view_changed)
+        # (Tuned frequency, LO, span) the view last followed: it follows
+        # again only when one of them changes (see set_tuned_frequency).
+        self._follow_key: Optional[Tuple[float, float, float]] = None
         # Bookmarks labelled along the top: (freq Hz, name, index).
         self._bookmarks: List[Tuple[float, str, int]] = []
         self._show_bookmarks = True
@@ -1207,6 +1210,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         if view is self._view:
             return
         self._view = view
+        self._follow_key = None
         view.subscribe(self._on_view_changed)
         view.set_full(self._center_freq, self._sample_rate)
         self._on_view_changed()
@@ -1237,7 +1241,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
     def set_tuned_frequency(self, freq_hz: Optional[float]) -> None:
         """Put the tuned-frequency marker at ``freq_hz`` (the VFO, anywhere
         in the span); None puts it at the center frequency. A zoomed view
-        follows it when it goes out of sight."""
+        follows it when tuning (or a retune) takes it out of sight."""
         value: Optional[float] = None
         if freq_hz is not None:
             value = float(freq_hz)
@@ -1247,7 +1251,15 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             self._tuned_freq = value
             self._invalidate_background()  # the passband's direction
             self._canvas.update()
-        self._view.follow(self.tuned_frequency())
+        # Follow only when the tuning (or the receiver's span) changed: the
+        # window also sends the same frequency again on Stop, a mode or
+        # filter change..., and a view zoomed elsewhere (Ctrl+wheel, Zoom In
+        # Here) must stay where the user put it.
+        tuned = self.tuned_frequency()
+        key = (tuned, self._view.full_center, self._view.full_span)
+        if key != self._follow_key:
+            self._follow_key = key
+            self._view.follow(tuned)
 
     def tuned_frequency(self) -> float:
         """The frequency the marker shows (Hz)."""

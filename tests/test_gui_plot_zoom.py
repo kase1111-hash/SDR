@@ -220,6 +220,25 @@ class TestZoomedPlots(_PlotPair):
         self.sp.set_tuned_frequency(100.9e6)  # tuned out of sight
         self.assertTrue(self.view.contains(100.9e6))
 
+    def test_a_view_zoomed_elsewhere_stays_until_the_tuning_changes(self):
+        # Zoomed around the pointer (Ctrl+wheel, Zoom In Here) away from the
+        # tuned frequency: the window sends the same tuned frequency again
+        # (Stop, a mode change...) and the view must not jump back to it.
+        self.sp.set_tuned_frequency(100.0e6)
+        self.sp.zoom_to(99.3e6, 3)  # x8 around 99.3 MHz
+        self.assertFalse(self.view.contains(100.0e6))
+        where = (self.view.zoom, self.view.start)
+        self.sp.set_tuned_frequency(100.0e6)
+        self.assertEqual((self.view.zoom, self.view.start), where)
+        self.sp.set_tuned_frequency(100.05e6)  # tuned: now it follows
+        self.assertTrue(self.view.contains(100.05e6))
+        # A retune (another LO) with the VFO out of sight follows it too.
+        self.sp.zoom_to(99.3e6, 0)
+        self.assertFalse(self.view.contains(100.05e6))
+        self.sp.set_frequency_range(100.2e6, RATE)
+        self.sp.set_tuned_frequency(100.05e6)
+        self.assertTrue(self.view.contains(100.05e6))
+
     def test_zoom_in_here_from_either_context_menu(self):
         def actions(widget, pos):
             captured = {}
@@ -324,6 +343,22 @@ class TestWindowZoom(_WindowTestCase):
         finally:
             other.close()
             other.deleteLater()
+
+    def test_a_view_zoomed_off_the_vfo_survives_stop_and_a_mode_change(self):
+        win = self.win
+        win.set_frequency(100.1e6)
+        view = win._plot_view
+        win._spectrum.zoom_to(99.5e6, 3)  # x8 around 99.5 MHz (Zoom In Here)
+        self.assertFalse(view.contains(100.1e6))
+        where = (view.zoom, view.start)
+        win._refresh_state_ui()  # what Start, Stop and device changes do
+        self.assertEqual((view.zoom, view.start), where)
+        combo = win._control_panel._demod_combo
+        combo.setCurrentIndex(combo.findText("AM"))
+        self.settle()
+        self.assertEqual((view.zoom, view.start), where)
+        win._tune_steps(1)  # tuning brings the VFO back into view
+        self.assertTrue(view.contains(win._current_frequency()))
 
     def test_tuning_while_zoomed_keeps_the_vfo_in_view(self):
         win = self.win

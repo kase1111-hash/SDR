@@ -1,5 +1,10 @@
 """Regression tests for the recordings code review (findings REC-xx).
 
+* REC-01 / REC-13: a take whose sample rate (or frequency) is unknown
+  couldn't be saved as SigMF, cs16, cu8 or cs8 ("float division by zero"),
+  and SigMF wrote an unknown frequency as 0 Hz.
+* REC-04: a save that failed (a full disk) left a truncated data file and an
+  empty ``.sigmf-meta`` behind.
 * REC-12: cu8/cs8/cs16 saves truncated instead of rounding (a DC offset).
 """
 
@@ -18,7 +23,7 @@ import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
-from tests.test_gui_recording_files import _FilesCase  # noqa: E402
+from tests.test_gui_recording_files import RATE, _FilesCase  # noqa: E402
 
 try:
     import resource
@@ -102,6 +107,138 @@ class _ReviewCase(_FilesCase):
 
     def warnings(self):
         return mock.patch.object(QMessageBox, "warning")
+
+
+# ---------------------------------------------------------------------------
+# REC-01 / REC-13: unknown sample rate and frequency
+# ---------------------------------------------------------------------------
+
+
+class TestUnknownRate(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="sdr-review-rec-")
+        self.addCleanup(shutil.rmtree, self.folder, True)
+
+    def test_every_format_but_wav_saves_with_the_rate_unknown(self):
+        from sdr_module.dsp.recording import FileFormat, SampleFormat
+        from sdr_module.gui.file_jobs import write_recording
+
+        x = (0.3 * np.exp(2j * np.pi * 0.01 * np.arange(10000))).astype(np.complex64)
+        for fmt, sample_fmt, name in (
+            (FileFormat.SIGMF, SampleFormat.FLOAT32, "take.sigmf-data"),
+            (FileFormat.RAW, SampleFormat.INT16, "take.cs16"),
+            (FileFormat.RAW, SampleFormat.UINT8, "take.cu8"),
+            (FileFormat.RAW, SampleFormat.INT8, "take.cs8"),
+            (FileFormat.RAW, SampleFormat.FLOAT32, "take.raw"),
+        ):
+            path = os.path.join(self.folder, name)
+            written = write_recording(
+                iter([x]), len(x), path, fmt, sample_fmt, 0.0, 0.0, lambda _f: None
+            )
+            self.assertEqual(written, len(x), name)
+        meta = _read_json(os.path.join(self.folder, "take.sigmf-meta"))
+        self.assertNotIn("core:sample_rate", meta["global"])  # unknown, not 0
+        self.assertNotIn("core:frequency", meta["captures"][0])  # REC-13
+
+    def test_recorder_duration_with_an_unknown_rate(self):
+        from sdr_module.dsp.recording import AudioRecorder, IQRecorder
+
+        self.assertEqual(IQRecorder(0.0).duration_seconds, 0.0)
+        self.assertEqual(AudioRecorder(sample_rate=0).duration_seconds, 0.0)
+
+
+class TestUnknownRateInTheWindow(_ReviewCase):
+    def test_a_converted_capture_left_unknown_saves_as_sigmf_and_cs16(self):
+        from sdr_module.gui import iq_files
+
+        path = self.path("capture.cs16")
+        np.zeros(2000, np.int16).tofile(path)
+
+        def fake_exec(dialog):
+            if isinstance(
+                dialog, (iq_files.ImportOptionsDialog, iq_files.RecordingDetailsDialog)
+            ):
+                dialog._on_accept()  # rate and center left blank
+                return dialog.result()
+            if isinstance(dialog, QMessageBox):
+                dialog.buttons()[-1].click()
+            return 0
+
+        self.win._exec_dialog = fake_exec
+        with self.open_dialog(path):
+            self.assertTrue(self.win._convert_recording())
+        self.assertEqual(self.win._buffer_meta, (None, None))
+        for name, meta_name in (
+            ("out.sigmf-data", "out.sigmf-meta"),
+            ("out.cs16", "out.cs16.sigmf-meta"),
+        ):
+            with self.save_dialog(self.path(name)), self.warnings() as warn:
+                self.assertTrue(self.win._save_recording(), name)
+            warn.assert_not_called()
+            meta = _read_json(self.path(meta_name))
+            self.assertNotIn("core:sample_rate", meta["global"], name)
+            self.assertNotIn("core:frequency", meta["captures"][0], name)
+
+
+# ---------------------------------------------------------------------------
+# REC-04: a failed save leaves nothing behind
+# ---------------------------------------------------------------------------
+
+
+class TestFailedSavesLeaveNothing(unittest.TestCase):
+    def setUp(self):
+        if not _can_limit_file_size():
+            self.skipTest("needs RLIMIT_FSIZE (POSIX)")
+        self.folder = tempfile.mkdtemp(prefix="sdr-review-rec-")
+        self.addCleanup(shutil.rmtree, self.folder, True)
+
+    def test_a_disk_filling_up_mid_save(self):
+        from sdr_module.dsp.recording import FileFormat, SampleFormat
+        from sdr_module.gui.file_jobs import write_recording
+
+        x = np.full(1 << 16, 0.25 + 0.5j, np.complex64)  # 512 KB as cf32
+        # (A full disk takes nothing more, not even SigMF's small metadata
+        # when the write is being closed: 300 bytes is less than it needs.)
+        for fmt, sample_fmt, name, room in (
+            (FileFormat.SIGMF, SampleFormat.FLOAT32, "take.sigmf-data", 300),
+            (FileFormat.SIGMF, SampleFormat.FLOAT32, "take.sigmf-data", 100_000),
+            (FileFormat.WAV, SampleFormat.INT16, "take.wav", 100_000),
+            (FileFormat.RAW, SampleFormat.INT16, "take.cs16", 100_000),
+        ):
+            path = os.path.join(self.folder, name)
+            with self.assertRaises(OSError), file_size_limit(room):
+                write_recording(
+                    iter([x[:30000], x[30000:]]),
+                    len(x),
+                    path,
+                    fmt,
+                    sample_fmt,
+                    RATE,
+                    100e6,
+                    lambda _f: None,
+                )
+            self.assertEqual(_listing(self.folder), {}, name)
+
+    def test_sigmf_metadata_that_cant_be_written_leaves_no_empty_file(self):
+        from sdr_module.dsp.recording import FileFormat, IQRecorder, SampleFormat
+
+        path = os.path.join(self.folder, "take.sigmf-data")
+        meta_path = os.path.join(self.folder, "take.sigmf-meta")
+        with open(meta_path, "w") as handle:
+            handle.write('{"global": {}, "captures": [], "annotations": []}')
+        recorder = IQRecorder(RATE, 100e6, SampleFormat.FLOAT32, FileFormat.SIGMF)
+        recorder.set_metadata(description="x" * 4000)
+        recorder.start(path)
+        recorder.write(np.zeros(16, np.complex64))
+        with self.assertRaises(OSError), file_size_limit(1000):
+            recorder.stop()
+        self.assertFalse(recorder.is_recording)
+        # The old metadata is as it was (not emptied), and no temporary
+        # file is left beside it.
+        self.assertEqual(_read_json(meta_path)["captures"], [])
+        self.assertEqual(
+            sorted(_listing(self.folder)), ["take.sigmf-data", "take.sigmf-meta"]
+        )
 
 
 # ---------------------------------------------------------------------------

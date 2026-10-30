@@ -147,24 +147,37 @@ def write_recording(
         file_format=file_format,
     )
     written = 0
-    started = finished = False
+    opened = complete = False
     try:
         recorder.start(filename)
-        started = True
+        opened = True
         if start_time:
             recorder.set_metadata(start_time=start_time)
-        report(0.0)
-        for chunk in chunks:
-            recorder.write(chunk)
-            written += len(chunk)
-            report(min(1.0, written / max(1, total)))
-        finished = True
+        try:
+            report(0.0)
+            for chunk in chunks:
+                recorder.write(chunk)
+                written += len(chunk)
+                report(min(1.0, written / max(1, total)))
+        except BaseException:
+            _stop_quietly(recorder)  # (the file is removed below)
+            raise
+        # Flushes and closes the file and writes SigMF's metadata: a full
+        # disk can fail here too.
+        recorder.stop()
+        complete = True
     finally:
-        if started:
-            recorder.stop()
-        if not finished:
+        if opened and not complete:
             _remove_partial(filename, file_format)
     return written
+
+
+def _stop_quietly(recorder: IQRecorder) -> None:
+    """Close a write that failed (its own error is the one reported)."""
+    try:
+        recorder.stop()
+    except Exception as e:
+        logger.debug(f"Closing the failed recording write also failed: {e}")
 
 
 def _remove_partial(filename: str, file_format: FileFormat) -> None:

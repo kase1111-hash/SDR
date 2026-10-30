@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, BinaryIO, Dict, Optional, Tuple, Union
+from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -199,6 +199,52 @@ def _dataset_path(meta_path: Path, meta: Dict[str, Any]) -> Optional[Path]:
     return meta_path.with_name(Path(str(dataset)).name)
 
 
+def _write_json(path: Path, data: Dict[str, Any]) -> None:
+    """Write ``data`` as JSON to ``path`` through a temporary file beside
+    it, so a write that fails (a full disk) leaves no empty or half-written
+    file behind (and an older one as it was)."""
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        raise
+
+
+#: (first sample, UTC start time) of a stretch of a recording made after a
+#: gap in time (a pause): a SigMF capture segment of its own.
+Segment = Tuple[int, str]
+
+
+def _capture_segments(
+    center_frequency: float,
+    start_time: str = "",
+    segments: Sequence[Segment] = (),
+    header_bytes: int = 0,
+) -> List[Dict[str, Any]]:
+    """SigMF ``captures``: the first from sample 0 (when ``start_time``),
+    then one per ``segments`` entry, each with its own start time. An
+    unknown (0) frequency or time is left out rather than written as 0."""
+    center = _positive(center_frequency)
+    starts = sorted({int(first): str(when or "") for first, when in segments}.items())
+    captures: List[Dict[str, Any]] = []
+    for first, when in [(0, start_time)] + [s for s in starts if s[0] > 0]:
+        capture: Dict[str, Any] = {"core:sample_start": first}
+        if center:
+            capture["core:frequency"] = center
+        if when:
+            capture["core:datetime"] = when
+        if first == 0 and header_bytes:
+            capture["core:header_bytes"] = int(header_bytes)
+        captures.append(capture)
+    return captures
+
+
 def find_sidecar(data_path: Union[str, Path]) -> Optional[SidecarInfo]:
     """The SigMF metadata describing a recording that isn't SigMF itself.
 
@@ -257,18 +303,12 @@ def write_sidecar(
         global_meta["core:description"] = description
     if hardware:
         global_meta["core:hw"] = hardware
-    capture: Dict[str, Any] = {"core:sample_start": 0}
-    center = _positive(center_frequency)
-    if center:
-        capture["core:frequency"] = center
-    if start_time:
-        capture["core:datetime"] = start_time
-    if header_bytes:
-        capture["core:header_bytes"] = int(header_bytes)
-    meta = {"global": global_meta, "captures": [capture], "annotations": []}
+    captures = _capture_segments(
+        center_frequency, start_time, header_bytes=header_bytes
+    )
+    meta = {"global": global_meta, "captures": captures, "annotations": []}
     meta_path = sidecar_path(path)
-    with open(meta_path, "w", encoding="utf-8") as handle:
-        json.dump(meta, handle, indent=2)
+    _write_json(meta_path, meta)
     return meta_path
 
 
@@ -429,7 +469,9 @@ class IQRecorder:
 
     @property
     def duration_seconds(self) -> float:
-        """Get recording duration in seconds."""
+        """Get recording duration in seconds (0 while the rate is unknown)."""
+        if not self._sample_rate > 0:
+            return 0.0
         return self._samples_written / self._sample_rate
 
     @property
@@ -620,32 +662,49 @@ class IQRecorder:
         """
         if not self._recording:
             raise RuntimeError("Not recording")
+        # Stopped even when finishing the file fails (a full disk): the
+        # files are closed either way, then the error is raised.
+        self._recording = False
 
         # Update metadata
         self._metadata.num_samples = self._samples_written
         self._metadata.duration_seconds = self.duration_seconds
 
         # Close files
-        if self._wav_file is not None:
-            self._wav_file.close()
-            self._wav_file = None
-
-        if self._file is not None:
-            self._file.close()
-            self._file = None
+        wav_file, self._wav_file = self._wav_file, None
+        raw_file, self._file = self._file, None
+        try:
+            if wav_file is not None:
+                wav_file.close()
+        finally:
+            if raw_file is not None:
+                raw_file.close()
 
         # Write SigMF metadata if using that format
         if self._file_format == FileFormat.SIGMF:
             self._write_sigmf_metadata()
 
-        self._recording = False
         return self._metadata
 
     def _write_sigmf_metadata(self) -> None:
-        """Write SigMF metadata file."""
+        """Write SigMF metadata file (through a temporary file: a failed
+        write leaves no empty or half-written one)."""
         if self._filepath is None:
             return
 
+        # Write metadata file
+        meta_path = self._filepath.with_suffix(".sigmf-meta")
+        _write_json(meta_path, self._sigmf_meta())
+
+        # Rename data file for SigMF
+        data_path = self._filepath.with_suffix(".sigmf-data")
+        if self._filepath.exists() and self._filepath != data_path:
+            self._filepath.rename(data_path)
+
+    def _sigmf_meta(self) -> Dict[str, Any]:
+        """The SigMF metadata. A rate, frequency or time that is unknown (0
+        or empty) is left out rather than written as 0 (as write_sidecar
+        does)."""
         # SigMF format type string
         format_map = {
             SampleFormat.UINT8: "cu8",
@@ -664,31 +723,20 @@ class IQRecorder:
             "core:recorder": "SDR Module IQRecorder",
         }
 
+        if not _positive(self._sample_rate):
+            del global_meta["core:sample_rate"]
+
         # Add optional fields
         if self._metadata.hardware:
             global_meta["core:hw"] = self._metadata.hardware
 
-        sigmf_meta: Dict[str, Any] = {
+        return {
             "global": global_meta,
-            "captures": [
-                {
-                    "core:sample_start": 0,
-                    "core:frequency": self._center_frequency,
-                    "core:datetime": self._metadata.start_time,
-                }
-            ],
+            "captures": _capture_segments(
+                self._center_frequency, self._metadata.start_time
+            ),
             "annotations": [],
         }
-
-        # Write metadata file
-        meta_path = self._filepath.with_suffix(".sigmf-meta")
-        with open(meta_path, "w") as f:
-            json.dump(sigmf_meta, f, indent=2)
-
-        # Rename data file for SigMF
-        data_path = self._filepath.with_suffix(".sigmf-data")
-        if self._filepath.exists() and self._filepath != data_path:
-            self._filepath.rename(data_path)
 
     def get_metadata(self) -> RecordingMetadata:
         """Get current metadata."""
@@ -1413,7 +1461,9 @@ class AudioRecorder:
 
     @property
     def duration_seconds(self) -> float:
-        """Get recording duration in seconds."""
+        """Get recording duration in seconds (0 while the rate is unknown)."""
+        if not self._sample_rate > 0:
+            return 0.0
         return self._samples_written / self._sample_rate
 
     @property

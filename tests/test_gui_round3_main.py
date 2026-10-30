@@ -556,17 +556,19 @@ class TestCopy(_WindowTestCase):
         state_tip = self.win._info_panel._values["state"].toolTip()
         self.assertEqual(state_tip, "Whether the receiver is running.")
 
-    def test_rds_is_not_advertised(self):
+    def test_decoders_advertised_are_the_ones_that_work(self):
+        # RDS was left out while it could not decode; it does now, and so
+        # does Morse code.
         tabs = self.win._right_tabs
         index = tabs.indexOf(self.win._panel_pages["decoder"])
-        self.assertNotIn("RDS", tabs.tabToolTip(index))
+        self.assertIn("RDS", tabs.tabToolTip(index))
         shown = []
         with mock.patch.object(
             QMessageBox, "about", side_effect=lambda *a: shown.append(a[2])
         ):
             self.win._show_about()
-        self.assertNotIn("RDS", shown[0])
-        self.assertIn("AX.25/APRS", shown[0])
+        for name in ("AX.25/APRS", "RDS", "Morse code"):
+            self.assertIn(name, shown[0])
 
     def test_quick_tips_use_keycaps_and_the_wizard_wording(self):
         from sdr_module.gui import first_run_wizard

@@ -54,7 +54,7 @@ def cmd_info(args: argparse.Namespace) -> int:
     print("Features:")
     print("  - Frequency scanning and signal detection (live or from a recording)")
     print("  - Spectrum analysis and visualization")
-    print("  - Protocol decoding (POCSAG, FLEX, AX.25/APRS, RDS, ADS-B, ACARS)")
+    print("  - Protocol decoding (POCSAG, FLEX, AX.25/APRS, RDS, ADS-B, ACARS, CW)")
     print("  - Text encoding (RTTY, Morse, PSK31, ASCII)")
     print("  - I/Q recording and playback")
     return 0
@@ -214,6 +214,7 @@ def cmd_decode(args: argparse.Namespace) -> int:
     block = max(1, int(sample_rate))
     for start in range(0, len(samples), block):
         messages += decoder.process(samples[start : start + block])
+    messages += decoder.flush()  # e.g. the last line of Morse code
     valid = [m for m in messages if getattr(m, "valid", True)]
     invalid = [m for m in messages if not getattr(m, "valid", True)]
 
@@ -548,7 +549,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     decode_parser.add_argument(
         "protocol",
-        choices=["pocsag", "flex", "ax25", "aprs", "rds", "adsb", "acars"],
+        choices=["pocsag", "flex", "ax25", "aprs", "rds", "adsb", "acars", "cw"],
         help="Protocol to decode",
     )
     decode_parser.add_argument(

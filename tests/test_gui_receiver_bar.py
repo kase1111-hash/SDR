@@ -170,11 +170,14 @@ class TestReceiverBar(_WindowTestCase):
         self.win.resize(1024, 640)
         self.win.show()
         self.settle(10)
+        # (Actions hidden on purpose don't count: e.g. the RDS station badge
+        # while no station names itself.)
+        self.assertFalse(self.win._rds_badge_action.isVisible())
         for toolbar in (self.win._toolbar, self.bar()):
             widgets = [
                 toolbar.widgetForAction(a)
                 for a in toolbar.actions()
-                if toolbar.widgetForAction(a) is not None
+                if toolbar.widgetForAction(a) is not None and a.isVisible()
             ]
             self.assertTrue(widgets)
             for widget in widgets:

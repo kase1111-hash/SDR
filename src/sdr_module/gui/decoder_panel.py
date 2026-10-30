@@ -2,7 +2,9 @@
 Protocol decoder output panel.
 
 Shows what the live protocol decoder produces: a message table, a
-plain-text log that is easy to copy, and running statistics.
+plain-text log that is easy to copy, and running statistics; for ADS-B an
+Aircraft view (one row per aircraft) and for Morse code a Text view with
+the speed. "Auto" picks the protocol from where the receiver is tuned.
 """
 
 from __future__ import annotations
@@ -74,6 +76,10 @@ def _format_mhz(freq_hz: float) -> str:
 #: does not know (this one included) to "no live decoder".
 PROTOCOL_OFF = "Off"
 
+#: Selector entry that picks the protocol from the tuned frequency and mode
+#: (see :func:`auto_protocol`); the panel then reports that protocol.
+PROTOCOL_AUTO = "Auto"
+
 #: Protocol name -> (what it carries, where to listen). The names are the
 #: ones the main window maps to decoder implementations (and the keys of
 #: ``sdr_module.dsp.live_decoders.LIVE_DECODERS``); keep them in step.
@@ -90,6 +96,10 @@ PROTOCOL_INFO: Dict[str, Tuple[str, str]] = {
     "ADS-B": ("Aircraft identity, altitude and position", "1090 MHz"),
     "ACARS": ("Aircraft data-link text messages (AM)", "129–137 MHz"),
     "RDS": ("Station name and radio text from FM broadcasts", "88–108 MHz"),
+    "CW (Morse)": (
+        "Morse code as text, with its speed",
+        "a CW signal tuned in CW mode",
+    ),
 }
 
 #: Protocol name -> (frequency in Hz, demod mode, FM deviation, what it is)
@@ -120,6 +130,12 @@ PROTOCOL_TUNE: Dict[str, Tuple[float, str, str, str]] = {
         "the North American APRS frequency (Europe: 144.800 MHz)",
     ),
     "ACARS": (131.55e6, "AM", "", "the primary ACARS channel"),
+    "RDS": (
+        100.1e6,
+        "FM",
+        "75 kHz",
+        "an FM broadcast station (any station that sends RDS will do)",
+    ),
 }
 
 #: Protocol name -> tuning ranges (Hz) in which the receiver counts as
@@ -134,10 +150,53 @@ PROTOCOL_BANDS: Dict[str, Tuple[Tuple[float, float], ...]] = {
 }
 
 #: Protocols listed but not decodable from live signals yet (shown disabled).
-PROTOCOL_UNAVAILABLE: Dict[str, str] = {
-    "RDS": "Live RDS decoding isn't available yet: it needs 57\u00a0kHz "
-    "subcarrier recovery, which the receiver doesn't do.",
+PROTOCOL_UNAVAILABLE: Dict[str, str] = {}
+
+#: Empty-table hint per protocol whose signal is not at one frequency.
+PROTOCOL_HINTS: Dict[str, str] = {
+    "CW (Morse)": (
+        "Tune to a CW signal in CW mode (the demo device has a beacon on 99.820 MHz)"
+    ),
 }
+
+#: What the status line says when a protocol's decoder hears a signal it
+#: can't decode for a while (default: check the frequency and protocol).
+PROTOCOL_UNDECODED: Dict[str, str] = {
+    "RDS": "No RDS from this station: not every station sends it",
+}
+
+#: What "Auto" picks, in order (the first that matches wins): Morse code
+#: in CW mode, then by the tuned frequency.
+_AUTO_BANDS: Tuple[Tuple[str, Tuple[Tuple[float, float], ...]], ...] = (
+    ("ADS-B", ((1089e6, 1091e6),)),
+    ("AX.25/APRS", ((144.3775e6, 144.4025e6), (144.7875e6, 144.8125e6))),
+    ("ACARS", ((129e6, 137e6),)),
+    ("POCSAG", ((152e6, 159e6),)),
+    ("FLEX", ((929e6, 932e6),)),
+    ("RDS", ((87.5e6, 108e6),)),
+)
+_AUTO_TIP = (
+    "Pick the protocol from where the receiver is tuned: ADS-B on 1090 MHz, "
+    "APRS on 144.390 or 144.800 MHz, ACARS on 129–137 MHz, POCSAG on "
+    "152–159 MHz, FLEX on 929–932 MHz, RDS on FM broadcast (88–108 MHz), "
+    "and Morse code in CW mode."
+)
+
+
+def auto_protocol(
+    freq_hz: Optional[float], mode: Optional[str] = None
+) -> Optional[str]:
+    """The protocol "Auto" decodes when tuned to ``freq_hz`` in demod
+    ``mode`` (None: nothing usually decodes there)."""
+    if mode == "CW":
+        return "CW (Morse)"
+    if freq_hz is None:
+        return None
+    for name, bands in _AUTO_BANDS:
+        if any(lo <= freq_hz <= hi for lo, hi in bands):
+            return name
+    return None
+
 
 _START_HINT = "press Start (Space)"
 # Shown for a value that isn't there (no message text, no last message).
@@ -414,24 +473,41 @@ class _MessageDetail(QFrame if HAS_PYQT6 else object):
             Qt.TextInteractionFlag.TextSelectableByMouse
             | Qt.TextInteractionFlag.TextSelectableByKeyboard
         )
-        # Both wrap and never ask for more width than the panel has. Decoded
+        # More about the message (an APRS path, an ADS-B message's kind...).
+        self.details = QLabel()
+        set_role(self.details, "hint")
+        self.details.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        # All wrap and never ask for more width than the panel has. Decoded
         # text is data, never markup ("<b>" in a page stays literal).
-        for label in (self.meta, self.body):
+        for label in (self.meta, self.body, self.details):
             label.setTextFormat(Qt.TextFormat.PlainText)
             label.setWordWrap(True)
             label.setSizePolicy(
                 QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
             )
             layout.addWidget(label)
+        self.details.hide()
         self._full = ""
         self.hide()
 
-    def show_text(self, meta: str, body: str, tone: Optional[str] = None) -> None:
-        """Show ``body`` under a ``meta`` line (``tone`` colors the meta)."""
+    def show_text(
+        self,
+        meta: str,
+        body: str,
+        tone: Optional[str] = None,
+        details: Optional[List[str]] = None,
+    ) -> None:
+        """Show ``body`` under a ``meta`` line (``tone`` colors the meta),
+        with ``details`` lines under it."""
         self.meta.setText(meta)
         set_tone(self.meta, tone)
         self._full = body
         self.body.setVisible(bool(body))
+        text = "\n".join(details or [])
+        self.details.setText(text)
+        self.details.setVisible(bool(text))
         self._render()
         self.show()
 
@@ -548,6 +624,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._total = 0
         self._invalid = 0
         self._per_protocol: Counter = Counter()
+        # _per_protocol when the protocol being decoded was chosen: what
+        # it decoded since then (or since Clear) is what the status line
+        # and the window's status-bar chip count.
+        self._chosen_counts: Counter = Counter()
         # Widest cell text seen per size-to-contents column, in px.
         self._col_content: Dict[int, int] = {}
         # Receiver state, when the main window reports it (None: unknown).
@@ -562,8 +642,19 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # The decoder's (frames, valid, failed) at the last Clear: the
         # status line and Stats count from there.
         self._count_base = (0, 0, 0)
+        # The demodulation mode and the sample rate, when the main window
+        # reports them (Auto reads the mode; messages keep the rate).
+        self._mode: Optional[str] = None
+        self._sample_rate: Optional[float] = None
+        # What Auto chose (None: nothing to decode where it is tuned).
+        self._auto_choice: Optional[str] = None
+        # Messages shows only this address (an aircraft picked under
+        # Aircraft), or "" for all, and how many of its messages are there.
+        self._filter_address = ""
+        self._filter_count = 0
 
         self._setup_ui()
+        self._update_views()  # the protocol views hide until chosen
         self._update_state()
         self._update_stats()
 
@@ -590,6 +681,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             "No decoder. Choose a protocol to start decoding.",
             Qt.ItemDataRole.ToolTipRole,
         )
+        self._proto_combo.addItem(PROTOCOL_AUTO)
+        self._proto_combo.setItemData(1, _AUTO_TIP, Qt.ItemDataRole.ToolTipRole)
         for name, (what, where) in PROTOCOL_INFO.items():
             self._proto_combo.addItem(name)
             index = self._proto_combo.count() - 1
@@ -666,6 +759,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         for button in (self._clear_btn, self._export_btn):
             button.setAutoDefault(False)
         self._tabs.setCornerWidget(corner, Qt.Corner.TopRightCorner)
+        # Their width as regular buttons (they turn compact when a narrow
+        # panel would otherwise hide a tab behind scroll arrows).
+        self._corner_width = corner.sizeHint().width()
 
         self._table = _MessageTable(self)
         self._table.setAccessibleName("Decoded messages")
@@ -711,11 +807,35 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         page_layout = QVBoxLayout(messages_page)
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(4)
+        # While an aircraft is picked under Aircraft, only its messages show.
+        self._filter_bar = QWidget()
+        filter_row = QHBoxLayout(self._filter_bar)
+        filter_row.setContentsMargins(2, 0, 0, 0)
+        filter_row.setSpacing(6)
+        self._filter_label = QLabel()
+        set_role(self._filter_label, "hint")
+        set_tone(self._filter_label, "info")
+        self._filter_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._filter_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        filter_row.addWidget(self._filter_label, 1)
+        self._filter_clear = QPushButton("Show All")
+        set_role(self._filter_clear, "compact")
+        self._filter_clear.setAutoDefault(False)
+        self._filter_clear.setToolTip("Show the messages of every aircraft again")
+        self._filter_clear.clicked.connect(
+            lambda _checked=False: self.set_address_filter("")
+        )
+        filter_row.addWidget(self._filter_clear)
+        self._filter_bar.hide()
+        page_layout.addWidget(self._filter_bar)
         page_layout.addWidget(self._table, 1)
         self._detail = _MessageDetail()
         page_layout.addWidget(self._detail)
         self._tabs.addTab(messages_page, "Messages")
         self._tabs.setTabToolTip(0, "Decoded messages as a table")
+        self._messages_page = messages_page
         self._fit_columns()
 
         # Plain-text log of every message, wrapped so nothing is cut off.
@@ -736,6 +856,28 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
         self._tabs.addTab(self._build_stats(), "Stats")
         self._tabs.setTabToolTip(2, "Message counts since the last Clear")
+
+        # Views for one protocol each, in front while it is chosen.
+        from .decoder_views import AircraftView, MorseTextView
+
+        self._aircraft_view = AircraftView(clock=lambda: self._clock())
+        self._aircraft_view.aircraft_selected.connect(self.set_address_filter)
+        self._aircraft_view.aircraft_activated.connect(self._show_aircraft_messages)
+        self._aircraft_view.tune_requested.connect(self._tune_to_protocol)
+        self._tabs.insertTab(0, self._aircraft_view, "Aircraft")
+        self._tabs.setTabToolTip(
+            0, "One row per aircraft heard (ADS-B), with its latest position"
+        )
+        self._cw_view = MorseTextView()
+        self._cw_view.tune_requested.connect(self._tune_to_protocol)
+        self._tabs.insertTab(0, self._cw_view, "Text")
+        self._tabs.setTabToolTip(0, "The decoded Morse code as running text")
+        # Which view belongs to which protocol.
+        self._protocol_views = {
+            "ADS-B": self._aircraft_view,
+            "CW (Morse)": self._cw_view,
+        }
+        self._tabs.setCurrentWidget(self._messages_page)
 
         layout.addWidget(self._tabs, 1)
 
@@ -886,9 +1028,19 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
     # ------------------------------------------------------------------
 
     def protocol(self) -> Optional[str]:
-        """Selected protocol name, or ``None`` when decoding is off."""
+        """The protocol being decoded: the selected one, or Auto's choice;
+        ``None`` when decoding is off (or Auto finds nothing to decode)."""
         text = self._proto_combo.currentText()
+        if text == PROTOCOL_AUTO:
+            return self._auto_choice
         return None if text == PROTOCOL_OFF else text
+
+    def selection(self) -> str:
+        """The selector's entry ("Off", "Auto" or a protocol name)."""
+        return self._proto_combo.currentText()
+
+    def is_auto(self) -> bool:
+        return self.selection() == PROTOCOL_AUTO
 
     def is_decoding(self) -> bool:
         """True when a protocol is selected and Decode is ticked."""
@@ -896,22 +1048,84 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
     def _on_protocol_changed(self, text: str):
         """Handle protocol change."""
+        if text == PROTOCOL_AUTO:
+            self._auto_choice = auto_protocol(self._tuned_hz, self._mode)
+        self._protocol_now_is(self.protocol())
+
+    def _protocol_now_is(self, proto: Optional[str]) -> None:
+        """The decoded protocol changed (to ``proto``; None: none)."""
         # The old decoder's status no longer applies; the main window sends
         # the new one's (or none) while handling the signal.
         self._decoder_status = None
         self._count_base = (0, 0, 0)
+        self._chosen_counts = Counter(self._per_protocol)
+        self._update_views()
         self._update_state()
-        self.protocol_changed.emit(text)
+        self.protocol_changed.emit(proto or PROTOCOL_OFF)
+
+    def _update_auto(self) -> None:
+        """Auto: follow the tuned frequency and mode to another protocol."""
+        if not self.is_auto():
+            return
+        choice = auto_protocol(self._tuned_hz, self._mode)
+        if choice != self._auto_choice:
+            self._auto_choice = choice
+            self._protocol_now_is(choice)
+
+    def _update_views(self) -> None:
+        """Show the protocol's own view (Aircraft, Text), in front when the
+        protocol was just chosen; the others' tabs hide."""
+        proto = self.protocol()
+        chosen = proto != getattr(self, "_views_for", None)
+        self._views_for = proto
+        current = self._tabs.currentWidget()
+        for name, view in self._protocol_views.items():
+            index = self._tabs.indexOf(view)
+            shown = name == proto
+            if self._tabs.isTabVisible(index) != shown:
+                self._tabs.setTabVisible(index, shown)
+            if shown and chosen:
+                self._tabs.setCurrentWidget(view)
+        if current in self._protocol_views.values() and not self._tabs.isTabVisible(
+            self._tabs.indexOf(current)
+        ):
+            self._tabs.setCurrentWidget(self._messages_page)
+        if proto != "ADS-B" and self._filter_address:
+            self.set_address_filter("")
+        self._fit_tab_bar()
+
+    def resizeEvent(self, event: Any) -> None:  # noqa: N802 (Qt API)
+        super().resizeEvent(event)
+        self._fit_tab_bar()
+
+    def _fit_tab_bar(self) -> None:
+        """Every tab title in sight: in a panel too narrow for the tabs and
+        the regular Clear / Export buttons, the buttons turn compact."""
+        tabs = getattr(self, "_tabs", None)
+        if tabs is None:
+            return
+        bar = tabs.tabBar()
+        needed = sum(
+            bar.tabSizeHint(i).width()
+            for i in range(bar.count())
+            if tabs.isTabVisible(i)
+        )
+        compact = needed + self._corner_width + 8 > tabs.width()
+        role = "compact" if compact else ""
+        for button in (self._clear_btn, self._export_btn):
+            if (button.property("role") or "") != role:
+                set_role(button, role or None)
 
     def _on_decode_toggled(self, checked: bool) -> None:
         # Only a choice made with a protocol selected counts; while Off the
         # box is unticked by the panel itself.
-        if self.protocol() is not None:
+        if self.selection() != PROTOCOL_OFF:
             self._decode_wanted = bool(checked)
         self._update_state()
 
     def set_current_frequency(self, freq_hz: float) -> None:
-        """Tell the panel the tuned frequency (updates the empty-table hint)."""
+        """Tell the panel the tuned frequency (updates the empty-table hint;
+        Auto may pick another protocol)."""
         try:
             freq_hz = float(freq_hz)
         except (TypeError, ValueError):
@@ -919,6 +1133,81 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         if math.isfinite(freq_hz) and freq_hz != self._tuned_hz:
             self._tuned_hz = freq_hz
             self._update_state()
+            self._update_auto()
+
+    def set_demod_mode(self, mode: Optional[str]) -> None:
+        """Tell the panel the demodulation mode (Auto decodes Morse code
+        in CW)."""
+        if mode != self._mode:
+            self._mode = mode
+            self._update_auto()
+
+    def set_sample_rate(self, rate_hz: Optional[float]) -> None:
+        """Tell the panel the receiver's sample rate (kept with each
+        message, and in the CSV export)."""
+        self._sample_rate = float(rate_hz) if rate_hz else None
+
+    # ------------------------------------------------------------------
+    # Aircraft filter (ADS-B)
+    # ------------------------------------------------------------------
+
+    def set_address_filter(self, address: str) -> None:
+        """Show only the messages from ``address`` ("" shows all) and say
+        so above the table."""
+        address = str(address or "")
+        if address == self._filter_address:
+            return
+        self._filter_address = address
+        for row, msg in enumerate(self._messages):
+            hide = bool(address) and msg["address"] != address
+            if self._table.isRowHidden(row) != hide:
+                self._table.setRowHidden(row, hide)
+        if address:
+            self._filter_count = sum(
+                1 for m in self._messages if m["address"] == address
+            )
+            self._show_filter_label()
+            self._filter_bar.show()
+            self._tabs.setTabText(self._tabs.indexOf(self._messages_page), "Messages*")
+            self._tabs.setTabToolTip(
+                self._tabs.indexOf(self._messages_page),
+                f"Decoded messages from {self._filter_name()} only (Show All "
+                "shows every one)",
+            )
+        else:
+            self._filter_bar.hide()
+            self._tabs.setTabText(self._tabs.indexOf(self._messages_page), "Messages")
+            self._tabs.setTabToolTip(
+                self._tabs.indexOf(self._messages_page), "Decoded messages as a table"
+            )
+            if self._aircraft_view.selected_icao():
+                self._aircraft_view.select("")
+        self._table.clearSelection()
+        self._fit_tab_bar()
+
+    def address_filter(self) -> str:
+        return self._filter_address
+
+    def _filter_name(self) -> str:
+        """The filtered aircraft: its callsign and address, once heard."""
+        address = self._filter_address
+        aircraft = self._aircraft_view.tracker.get(address)
+        if aircraft is not None and aircraft.callsign:
+            return f"{aircraft.callsign} ({address})"
+        return address
+
+    def _show_filter_label(self) -> None:
+        """Say whose messages show and how many (kept up to date as they
+        come in)."""
+        text = f"Messages from {self._filter_name()} only ({self._filter_count:,} here)"
+        if self._filter_label.text() != text:
+            self._filter_label.setText(text)
+
+    def _show_aircraft_messages(self, icao: str) -> None:
+        """Double-click (or Enter) on an aircraft: its messages."""
+        if icao:
+            self.set_address_filter(icao)
+            self._tabs.setCurrentWidget(self._messages_page)
 
     def set_receiving(self, receiving: bool) -> None:
         """Tell the panel whether the receiver is running."""
@@ -944,6 +1233,12 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         else:
             self._update_status_line()
         self._update_decoder_stats()
+        if self.protocol() == "CW (Morse)":
+            self._cw_view.set_live(str(getattr(status, "live_text", "") or ""))
+            self._cw_view.set_speed(
+                str(getattr(status, "detail", "") or ""),
+                bool(getattr(status, "signal_present", False)),
+            )
 
     def _decoder_counts(self) -> Tuple[int, int, int]:
         """The decoder's (frames, valid, failed) since the last Clear."""
@@ -1025,6 +1320,11 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 f"Waiting for {proto} messages\n"
                 f"Tuned to {here}: {_START_HINT} to decode."
             )
+        hint = PROTOCOL_HINTS.get(proto)
+        if hint:
+            if self._receiving:
+                return f"Waiting for {proto} messages\n{hint}."
+            return f"Waiting for {proto} messages\n{hint}, then {_START_HINT}."
         if not where:
             return (
                 f"Waiting for {proto} messages\n{_START_HINT.capitalize()} to decode."
@@ -1036,17 +1336,28 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
     def _update_state(self, *_args: Any) -> None:
         """Refresh tooltips, enabled states and the empty-table hint."""
         proto = self.protocol()
+        selected = self.selection() != PROTOCOL_OFF
         check = self._enabled_check
-        check.setEnabled(proto is not None)
+        check.setEnabled(selected)
         # Unticked while Off (nothing decodes); the user's choice returns
         # once a protocol is selected.
-        wanted = proto is not None and self._decode_wanted
+        wanted = selected and self._decode_wanted
         if check.isChecked() != wanted:
             check.blockSignals(True)
             check.setChecked(wanted)
             check.blockSignals(False)
         action: Tuple[Optional[str], str] = (None, "")
-        if proto is None:
+        if proto is None and self.is_auto():
+            here = _format_mhz(self._tuned_hz) if self._tuned_hz else "here"
+            self._proto_combo.setToolTip(_AUTO_TIP)
+            check.setToolTip("Untick to pause decoding without changing the protocol")
+            empty = (
+                f"Nothing to decode on {here}\n"
+                "Auto decodes ADS-B on 1090 MHz, APRS on 144.390 MHz, ACARS on "
+                "129–137 MHz, pagers on 152–159 and 929–932 MHz, RDS on FM "
+                "broadcast and Morse code in CW mode."
+            )
+        elif proto is None:
             self._proto_combo.setToolTip(
                 "Protocol to decode. Off: no decoder runs. After choosing one, "
                 "the message table says where to listen."
@@ -1059,9 +1370,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             )
         else:
             what, where = PROTOCOL_INFO.get(proto, ("", ""))
-            self._proto_combo.setToolTip(
-                f"{proto}: {what}. Usually {where}." if what else proto
-            )
+            tip = f"{proto}: {what}. Usually {where}." if what else proto
+            if self.is_auto():
+                tip = f"Auto chose {proto} for where the receiver is tuned. {tip}"
+            self._proto_combo.setToolTip(tip)
             check.setToolTip("Untick to pause decoding without changing the protocol")
             if check.isChecked():
                 empty = self._waiting_text(proto, where)
@@ -1071,13 +1383,45 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._empty.set_text(empty)
         self._empty.set_action(*action)
         self._empty.set_visible(self._table.rowCount() == 0)
+        # The protocol's own view (in front) says the same while empty.
+        view = self._protocol_views.get(proto or "")
+        if view is not None:
+            view.set_waiting(self._view_hint(proto, empty), *action)
         self._update_buttons()
         self._update_status_line()
         self._update_decoder_stats()
 
+    def _view_hint(self, proto: Optional[str], empty: str) -> str:
+        """The empty-state text for a protocol's view: the table's, but
+        about that view once the receiver listens in the right place."""
+        if proto == "ADS-B" and empty.startswith("Listening for"):
+            title = empty.partition("\n")[0]
+            return (
+                f"{title}\nEach aircraft gets a row here as its messages are decoded."
+            )
+        if proto == "CW (Morse)" and empty.startswith("Listening for"):
+            title = empty.partition("\n")[0]
+            return f"{title}\nThe text appears here as it is received."
+        return empty
+
     def _status_parts(self) -> Tuple[str, Optional[str], str]:
         """``(text, tone, tooltip)`` of the status line ("" hides it)."""
+        text, tone, tip = self._status_core()
+        if text and self.is_auto() and self.protocol() is not None:
+            text = f"Auto: {text}"
+        return text, tone, tip
+
+    def _status_core(self) -> Tuple[str, Optional[str], str]:
         proto = self.protocol()
+        if proto is None and self.is_auto():
+            if not self._enabled_check.isChecked():
+                return "Paused: tick Decode to resume", "muted", ""
+            here = _format_mhz(self._tuned_hz) if self._tuned_hz else ""
+            return (
+                f"Auto: nothing to decode on {here}" if here else "Auto: waiting",
+                "muted",
+                _AUTO_TIP,
+            )
         if proto is None or proto in PROTOCOL_UNAVAILABLE:
             return "", None, ""
         if not self._enabled_check.isChecked():
@@ -1102,15 +1446,20 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         undecoded = float(getattr(status, "undecoded_signal_s", 0.0) or 0.0)
         if undecoded >= _UNDECODED_SIGNAL_S:
             return (
-                "Signal present but nothing decodes: check the frequency and "
-                "the protocol",
+                PROTOCOL_UNDECODED.get(
+                    proto,
+                    "Signal present but nothing decodes: check the frequency "
+                    "and the protocol",
+                ),
                 "warning",
                 tip,
             )
+        detail = str(getattr(status, "detail", "") or "")
         if valid:
             last = getattr(status, "last_time", None)
             age = self._clock() - last if last is not None else 0.0
-            parts = [proto, _plural(valid, unit), f"last {_format_age(age)}"]
+            parts = [proto, detail, _plural(valid, unit), f"last {_format_age(age)}"]
+            parts = [p for p in parts if p]
             if failed:
                 parts.append(f"{failed:,} failed check{'' if failed == 1 else 's'}")
             return "  ·  ".join(parts), ("success" if age < _FRESH_S else None), tip
@@ -1189,6 +1538,11 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         content: str,
         valid: bool = True,
         raw: str = "",
+        *,
+        message: Any = None,
+        details: Optional[List[str]] = None,
+        freq_hz: Optional[float] = None,
+        sample_rate: Optional[float] = None,
     ):
         """
         Add a decoded message.
@@ -1199,11 +1553,20 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             content: Message content
             valid: Whether message was valid
             raw: Raw hex data
+            message: The decoded message itself (ADS-B messages feed the
+                Aircraft view, Morse lines the Text view)
+            details: More lines about it, for the card under the table
+            freq_hz: Where it was received (default: the tuned frequency)
+            sample_rate: The receiver's sample rate (default: as reported)
         """
         now = datetime.now()
         timestamp = now.strftime("%H:%M:%S.%f")[:-3]
         protocol, address, content = str(protocol), str(address), str(content)
         valid = bool(valid)
+        if freq_hz is None:
+            freq_hz = self._tuned_hz
+        if sample_rate is None:
+            sample_rate = self._sample_rate
 
         msg = {
             "time": timestamp,
@@ -1213,6 +1576,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             "content": content,
             "valid": valid,
             "raw": raw,
+            "freq_hz": freq_hz,
+            "sample_rate": sample_rate,
+            "details": list(details or []),
         }
         self._messages.append(msg)
         self._total += 1
@@ -1223,6 +1589,12 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # Keep the table and the stored list the same length.
         overflow = len(self._messages) - self._max_messages
         if overflow > 0:
+            if self._filter_address:
+                self._filter_count -= sum(
+                    1
+                    for m in self._messages[:overflow]
+                    if m["address"] == self._filter_address
+                )
             del self._messages[:overflow]
             for _ in range(overflow):
                 self._table.removeRow(0)
@@ -1246,8 +1618,20 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 item.setToolTip(tip)
             self._table.setItem(row, col, item)
         self._grow_columns({COL_PROTOCOL: protocol, COL_ADDRESS: address})
+        if self._filter_address and address != self._filter_address:
+            self._table.setRowHidden(row, True)
+        elif self._filter_address:
+            self._filter_count += 1
 
         self._append_log(msg)
+
+        kind = type(message).__name__ if message is not None else ""
+        if kind == "ADSBMessage" and valid:
+            self._aircraft_view.update_message(message)
+        elif kind == "MorseMessage":
+            self._cw_view.add_line(str(getattr(message, "text", "") or content))
+        if self._filter_address:
+            self._show_filter_label()  # its count (and the callsign, once heard)
 
         self._empty.set_visible(False)
         self._log_empty.set_visible(False)
@@ -1371,12 +1755,15 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         meta = [msg["time"], msg["protocol"]]
         if msg["address"]:
             meta.append(msg["address"])
+        if msg.get("freq_hz"):
+            meta.append(_format_mhz(msg["freq_hz"]))
         if not msg["valid"]:
             meta.append("failed checks")
         self._detail.show_text(
             "  ·  ".join(meta),
             msg["content"] or "(no message text)",
             None if msg["valid"] else "danger",
+            msg.get("details"),
         )
         # The card takes height from the table; once that layout settles,
         # keep the selected row in view.
@@ -1397,6 +1784,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._total = 0
         self._invalid = 0
         self._per_protocol.clear()
+        self._chosen_counts.clear()
         self._table.setRowCount(0)
         self._table_tail.reset()
         self._col_content.clear()
@@ -1405,6 +1793,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._raw_output.clear()
         self._log_tail.reset()
         self._log_empty.set_visible(True)
+        self.set_address_filter("")
+        self._aircraft_view.clear()
+        self._cw_view.clear()
         self._update_stats()
         self._update_state()
 
@@ -1413,7 +1804,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         rows = sorted(i.row() for i in self._table.selectionModel().selectedRows())
         lines = []
         for row in rows:
-            if 0 <= row < len(self._messages):
+            if 0 <= row < len(self._messages) and not self._table.isRowHidden(row):
                 m = self._messages[row]
                 lines.append(
                     "\t".join((m["time"], m["protocol"], m["address"], m["content"]))
@@ -1452,10 +1843,24 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         try:
             with open(path, "w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
+                # The receive frequency and sample rate come last, so the
+                # columns of older exports keep their places.
                 writer.writerow(
-                    ["Date", "Time", "Protocol", "Address", "Content", "Valid", "Raw"]
+                    [
+                        "Date",
+                        "Time",
+                        "Protocol",
+                        "Address",
+                        "Content",
+                        "Valid",
+                        "Raw",
+                        "Frequency (MHz)",
+                        "Sample rate (MS/s)",
+                    ]
                 )
                 for msg in self._messages:
+                    freq = msg.get("freq_hz")
+                    rate = msg.get("sample_rate")
                     writer.writerow(
                         [
                             msg.get("date", ""),
@@ -1465,6 +1870,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                             msg.get("content", ""),
                             msg.get("valid", True),
                             msg.get("raw", ""),
+                            f"{freq / 1e6:.6f}" if freq else "",
+                            f"{rate / 1e6:g}" if rate else "",
                         ]
                     )
         except OSError as exc:
@@ -1484,3 +1891,13 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
     def get_message_count(self) -> int:
         """Get total message count."""
         return len(self._messages)
+
+    def count_for(self, protocol: Optional[str]) -> int:
+        """Messages of ``protocol`` since it was chosen or since the last
+        Clear, whichever came later (what the status line counts too)."""
+        name = protocol or ""
+        return max(
+            0,
+            int(self._per_protocol.get(name, 0))
+            - int(self._chosen_counts.get(name, 0)),
+        )

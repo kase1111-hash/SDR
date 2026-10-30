@@ -833,6 +833,76 @@ _SSTV_CACHE: Dict[float, Tuple[Any, int]] = {}
 _DEMO_SIGNALS = _DEMO_SIGNALS + ((_SSTV_HZ, "sstv", _SSTV_LEVEL_DB, None),)
 # --- end SSTV demo ----------------------------------------------------------- #
 
+# --- T6: RDS on the 100.1 MHz music station ---------------------------------- #
+# The music station sends real RDS on its 57 kHz subcarrier, locked to its
+# pilot (the subcarrier is sin(3 theta), theta the pilot's phase, and its
+# bit clock is 57 kHz / 48): the station name, a RadioText, the program type
+# (Top 40) and the extended country code (USA). The data signal (biphase,
+# shaped, before the subcarrier) is precomputed as a seamless loop of
+# _RDS_LOOP_GROUPS groups, about 5 s, stored at about 48 kHz (see _rds_loop),
+# and multiplied by the subcarrier as the station is read.
+_RDS_PI = 0xC0DE
+_RDS_PS = "SDR DEMO"
+_RDS_PTY = 9  # "Top 40" (RBDS program types, as the country code says)
+_RDS_TEXT = "Now playing: the SDR Module demo tune (I-vi-IV-V in C)"
+_RDS_ECC = 0xA0  # USA
+_RDS_LOOP_GROUPS = 57  # 4.992 s: whole samples at any rate a multiple of 125 Hz
+
+
+def _rds_groups() -> List[Tuple[int, int, int, int]]:
+    """The demo station's RDS groups, one loop: a whole station name, then
+    four RadioText segments, seven times over, and the country code. The
+    loop has an even number of ones, so its differential coding repeats."""
+    from ..dsp import protocol_encoders as enc
+
+    ps = enc.rds_ps_groups(_RDS_PI, _RDS_PS, pty=_RDS_PTY)
+    text = enc.rds_radiotext_groups(_RDS_PI, _RDS_TEXT, pty=_RDS_PTY)
+    groups: List[Tuple[int, int, int, int]] = []
+    segment = 0
+    while len(groups) < _RDS_LOOP_GROUPS - 1:
+        groups += ps
+        for _ in range(4):
+            groups.append(text[segment % len(text)])
+            segment += 1
+    pi, b, c, _d = enc.rds_ecc_group(_RDS_PI, _RDS_ECC, _RDS_PTY)
+    # Block D of group 1A is the program item number; any value whose
+    # bits make the loop's count of ones even (0 = none sent).
+    for pin in range(64):
+        last = (pi, b, c, pin)
+        if sum(enc.rds_bits(groups + [last])) % 2 == 0:
+            break
+    return groups + [last]
+
+
+def _rds_loop(rate: float) -> "_Loop":
+    """The demo station's RDS data signal as a phase term (the subcarrier
+    multiplies it as it is read), one loop at about 48 kHz.
+
+    The loop rate divides the loop's length in device samples exactly, so
+    the bit timing has no seam (falling back to the nearest rate when the
+    device rate has no such divisor)."""
+    from ..dsp import protocol_encoders as enc
+
+    bits = enc.rds_bits(_rds_groups())
+    total = rate * len(bits) / enc.RDS_BAUD  # device samples per loop
+    ideal = max(1, int(round(rate / _LOOP_RATE_HZ)))
+    factor = ideal
+    if abs(total - round(total)) < 1e-6:
+        candidates = [
+            f
+            for f in range(max(1, ideal // 2), 2 * ideal + 1)
+            if int(round(total)) % f == 0
+        ]
+        if candidates:
+            factor = min(candidates, key=lambda f: abs(f - ideal))
+    data = enc.rds_baseband(bits, rate / factor, periodic=True)
+    # Phase of a deviation of _RDS_SHARE of 75 kHz on a 57 kHz carrier.
+    scale = _RDS_SHARE * _WFM_DEVIATION_HZ / enc.RDS_CARRIER_HZ
+    return _Loop(scale * data, factor)
+
+
+# --- end T6 ------------------------------------------------------------------ #
+
 # Morse keying for the CW beacon ("VVV DE SDR"): 1 = key down, one dit each.
 _MORSE = {"V": "...-", "D": "-..", "E": ".", "S": "...", "R": ".-."}
 
@@ -871,8 +941,9 @@ _MUSIC_BARS: Tuple[Tuple[Tuple[int, ...], int, Tuple[int, ...]], ...] = (
 _MUSIC_STEP_S = 0.25  # one arpeggio note (120 BPM eighth notes)
 
 # Broadcast FM composite, as fractions of the 75 kHz peak deviation: the
-# 19 kHz stereo pilot and the 57 kHz RDS subcarrier; program audio (L+R)
-# and the L-R subcarrier at 38 kHz share the rest.
+# 19 kHz stereo pilot and the 57 kHz RDS subcarrier (only the 100.1 MHz
+# station sends RDS); program audio (L+R) and the L-R subcarrier at 38 kHz
+# share the rest.
 _WFM_DEVIATION_HZ = 75e3
 _PILOT_HZ = 19e3
 _PILOT_SHARE = 0.09
@@ -1165,6 +1236,8 @@ def _build_loops(kind: str, variant: Any, rate: float):
         return _Loop(keyed, factor)
     if kind == "modes":
         return _other_replies(rate)
+    if kind == "rds":
+        return _rds_loop(rate)  # T6
     if kind in _DATA_KINDS:
         return _data_transmitter(kind, rate)
     return None
@@ -1589,7 +1662,9 @@ class MockDevice:
 
     The strongest station, 100.1 MHz, broadcasts a looping tune in stereo
     FM with the usual 75 us pre-emphasis, so listening to it in FM mode
-    (with the receiver's matching de-emphasis) plays music; the others carry
+    (with the receiver's matching de-emphasis) plays music, and sends RDS
+    (station name "SDR DEMO", a RadioText, program type Top 40) on its
+    57 kHz subcarrier, locked to its pilot; the others carry
     tones, voice-like modulation, keyed CW or data bursts. On 145.800 MHz
     (the ISS SSTV downlink) a Robot 36 test card is sent in NBFM every 75
     seconds, the first 8 seconds into the demo, for the SSTV decoder. On
@@ -1825,8 +1900,8 @@ class MockDevice:
     def _add_signal(self, out, kind, offset, amp, seed, rate, pos, stereo) -> None:
         """Add one signal to ``out`` (starting at stream position ``pos``).
 
-        ``stereo`` gives the broadcast FM pilot/RDS phase and sin(2 theta)
-        for the same samples.
+        ``stereo`` gives the broadcast FM pilot's phase term, sin(2 theta)
+        and sin(3 theta) (theta: the pilot's phase) for the same samples.
         """
         n = len(out)
         if kind == "sstv":
@@ -1870,12 +1945,17 @@ class MockDevice:
         phase = self._phase(offset, rate, pos, n)
         if kind == "wfm":
             program, subcarrier = loops
-            pilot_rds, sin2 = stereo
+            pilot, sin2, sin3 = stereo
             phase += program.read(pos, n)
-            phase += pilot_rds
+            phase += pilot
             diff = subcarrier.read(pos, n)
             diff *= sin2
             phase += diff
+            if seed == _MUSIC_SEED:
+                # (T6) RDS on the 57 kHz subcarrier, locked to the pilot.
+                rds = _loops("rds", 0, rate).read(pos, n)
+                rds *= sin3
+                phase += rds
         else:
             phase += loops.read(pos, n)
         part = np.cos(phase)
@@ -1907,8 +1987,9 @@ class MockDevice:
             done += count
 
     def _stereo_terms(self, rate: float, pos: int, n: int):
-        """Broadcast FM pilot + RDS phase and sin(2 theta), theta the pilot's
-        phase, shared by every FM station (they are locked to the stream)."""
+        """Broadcast FM pilot phase, sin(2 theta) and sin(3 theta), theta
+        the pilot's phase, shared by every FM station (they are locked to
+        the stream). The RDS station's data rides on sin(3 theta)."""
         theta = self._phase(_PILOT_HZ, rate, pos, n)
         sin1 = np.sin(theta)
         sin2 = np.cos(theta)
@@ -1919,10 +2000,8 @@ class MockDevice:
         sin3 *= -4.0
         sin3 += 3.0
         sin3 *= sin1
-        sin3 *= _RDS_SHARE * _WFM_DEVIATION_HZ / (3 * _PILOT_HZ)
         sin1 *= _PILOT_SHARE * _WFM_DEVIATION_HZ / _PILOT_HZ
-        sin1 += sin3
-        return sin1, sin2
+        return sin1, sin2, sin3
 
     def _noise(self, n: int, sigma: float) -> np.ndarray:
         """``n`` samples of the noise floor (complex64)."""
@@ -1962,7 +2041,7 @@ class MockDevice:
             for a, b in _on_ranges(duty, seed, t0, n, rate):
                 if kind == "wfm" and stereo is None:
                     stereo = self._stereo_terms(rate, pos, n)
-                terms = None if stereo is None else (stereo[0][a:b], stereo[1][a:b])
+                terms = None if stereo is None else tuple(t[a:b] for t in stereo)
                 self._add_signal(
                     samples[a:b],
                     kind,

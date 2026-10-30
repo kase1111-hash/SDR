@@ -207,6 +207,14 @@ def decode_recording(
             result.messages.extend(stamped)
             if found is not None:
                 found(stamped)
+    # What the decoder still holds at the end of the file (e.g. the last
+    # line of Morse code), as the command line's decode does.
+    tail = decoder.flush()
+    if tail:
+        stamped = [(msg, position / rate) for msg in tail]
+        result.messages.extend(stamped)
+        if found is not None:
+            found(stamped)
     result.seconds = position / rate
     return result
 

@@ -1335,10 +1335,12 @@ class TestProtocolType:
         assert ProtocolType.RDS.value == "rds"
         assert ProtocolType.ADSB.value == "adsb"
         assert ProtocolType.ACARS.value == "acars"
+        assert ProtocolType.CW.value == "cw"
 
     def test_enum_count(self):
-        """ProtocolType has the expected number of members."""
-        assert len(ProtocolType) == 7
+        """ProtocolType has the expected number of members (CW, Morse code,
+        joined the decoded protocols with the streaming Morse decoder)."""
+        assert len(ProtocolType) == 8
 
     def test_enum_uniqueness(self):
         """All enum values are unique."""

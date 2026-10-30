@@ -12,11 +12,12 @@ Supports:
 
 import logging
 import math
+import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -33,6 +34,7 @@ class ProtocolType(Enum):
     RDS = "rds"
     ADSB = "adsb"
     ACARS = "acars"
+    CW = "cw"  # Morse code (sdr_module.dsp.morse)
 
 
 @dataclass
@@ -158,6 +160,11 @@ class BitSlicer:
 
     def process(self, samples: Any) -> List[int]:
         """Bits (0/1) decided in ``samples``."""
+        return [1 if value > 0 else 0 for value in self.process_values(samples)]
+
+    def process_values(self, samples: Any) -> List[float]:
+        """The filtered signal at each decision in ``samples`` (positive:
+        1), for a decoder that wants soft decisions."""
         x = _as_real(samples)
         n = len(x)
         if n == 0:
@@ -185,7 +192,7 @@ class BitSlicer:
             a, b = edge[idx], edge[idx + 1]
             crossings = crossings + (idx - 1 + a / (a - b)).tolist()
 
-        bits: List[int] = []
+        values: List[float] = []
         t = self._t
         adjusted = self._adjusted
         sps = self.sps
@@ -210,13 +217,13 @@ class BitSlicer:
             i = int(at)
             frac = at - i
             value = yy[i] if frac == 0.0 else yy[i] + frac * (yy[i + 1] - yy[i])
-            bits.append(1 if value > 0 else 0)
+            values.append(float(value))
             t += sps
             adjusted = False
         self._t = t - n
         self._adjusted = adjusted
         self._carried = [c - n for c in crossings[ci:]]
-        return bits
+        return values
 
 
 def _bch_mod(value: int, top: int) -> int:
@@ -785,6 +792,184 @@ class APRSMessage(DecodedMessage):
     course: float = 0.0
     symbol: str = ""
     comment: str = ""
+    #: What the symbol shows ("Car", "Home"...), "" when not known.
+    symbol_name: str = ""
+    #: Messages: whom it is for; objects and items: their name.
+    addressee: str = ""
+
+
+#: APRS data type (first character of the information field) -> name.
+APRS_DATA_TYPES = {
+    "!": "position",
+    "=": "position_msg",
+    "/": "position_timestamp",
+    "@": "position_timestamp_msg",
+    ":": "message",
+    ">": "status",
+    "_": "weather",
+    "T": "telemetry",
+    "`": "mic-e",
+    "'": "mic-e",
+    ";": "object",
+    ")": "item",
+}
+
+#: APRS data type -> what it is, for people.
+APRS_TYPE_NAMES = {
+    "position": "Position",
+    "position_msg": "Position (accepts messages)",
+    "position_timestamp": "Position with time",
+    "position_timestamp_msg": "Position with time (accepts messages)",
+    "message": "Message",
+    "status": "Status",
+    "weather": "Weather report",
+    "telemetry": "Telemetry",
+    "mic-e": "Mic-E position",
+    "object": "Object",
+    "item": "Item",
+    "unknown": "Other",
+}
+
+#: Common APRS symbols (table "/" or "\\", then the code) -> what they show.
+APRS_SYMBOLS = {
+    "/!": "Police station",
+    "/#": "Digipeater",
+    "/$": "Phone",
+    "/'": "Small aircraft",
+    "/-": "Home",
+    "/<": "Motorcycle",
+    "/=": "Train",
+    "/>": "Car",
+    "/O": "Balloon",
+    "/P": "Police",
+    "/R": "Recreational vehicle",
+    "/U": "Bus",
+    "/X": "Helicopter",
+    "/Y": "Sailboat",
+    "/[": "Person",
+    "/^": "Large aircraft",
+    "/_": "Weather station",
+    "/a": "Ambulance",
+    "/b": "Bicycle",
+    "/f": "Fire truck",
+    "/h": "Hospital",
+    "/j": "Jeep",
+    "/k": "Truck",
+    "/l": "Laptop",
+    "/n": "Node",
+    "/r": "Repeater",
+    "/s": "Boat",
+    "/u": "Truck",
+    "/v": "Van",
+    "/y": "Yagi antenna",
+    "\\#": "Digipeater",
+    "\\-": "Home (HF)",
+    "\\>": "Car",
+    "\\_": "Weather station",
+}
+
+
+def _aprs_base91(text: str) -> int:
+    value = 0
+    for char in text:
+        value = value * 91 + (ord(char) - 33)
+    return value
+
+
+def _aprs_position(body: str, out: Dict[str, Any]) -> str:
+    """Read a position (uncompressed or compressed) at the start of
+    ``body`` into ``out``; returns what follows it."""
+    if len(body) >= 19 and body[:2].replace(" ", "0").isdigit():
+        lat_text, table, lon_text, code = body[0:8], body[8], body[9:18], body[18]
+        try:
+            # Spaces are position ambiguity: read them as zeros.
+            lat = int(lat_text[0:2]) + float(lat_text[2:7].replace(" ", "0")) / 60
+            lon = int(lon_text[0:3]) + float(lon_text[3:8].replace(" ", "0")) / 60
+        except ValueError:
+            return body
+        if lat_text[7] not in "NSns" or lon_text[8] not in "EWew":
+            return body
+        out["latitude"] = -lat if lat_text[7] in "Ss" else lat
+        out["longitude"] = -lon if lon_text[8] in "Ww" else lon
+        out["symbol"] = table + code
+        return body[19:]
+    if len(body) >= 13 and (body[0] in "/\\" or body[0].isalnum()):
+        chunk = body[1:13]
+        if not all(33 <= ord(c) <= 124 for c in chunk[:8]):
+            return body
+        out["latitude"] = 90.0 - _aprs_base91(body[1:5]) / 380926.0
+        out["longitude"] = -180.0 + _aprs_base91(body[5:9]) / 190463.0
+        out["symbol"] = body[0] + body[9]
+        cs, kind = body[10:12], body[12]
+        if (
+            cs[0] != " "
+            and 0 <= ord(cs[0]) - 33 <= 89
+            and (ord(kind) - 33) & 0x18 != 0x10
+        ):
+            out["course"] = float((ord(cs[0]) - 33) * 4)
+            out["speed"] = round(1.08 ** (ord(cs[1]) - 33) - 1.0, 1)
+        return body[13:]
+    return body
+
+
+def parse_aprs_info(info: str) -> Dict[str, Any]:
+    """The APRS content of an AX.25 information field: ``data_type`` (see
+    :data:`APRS_DATA_TYPES`), position (``latitude``, ``longitude``,
+    uncompressed or compressed), ``symbol`` and ``symbol_name``, course
+    (degrees) and speed (knots) when sent, ``altitude`` (feet, from
+    "/A="), ``addressee`` (messages: to whom; objects and items: their
+    name) and the ``comment`` (or the message or status text). Fields not
+    sent are 0 or ""."""
+    out: Dict[str, Any] = {
+        "data_type": "unknown",
+        "latitude": 0.0,
+        "longitude": 0.0,
+        "altitude": 0.0,
+        "speed": 0.0,
+        "course": 0.0,
+        "symbol": "",
+        "symbol_name": "",
+        "addressee": "",
+        "comment": "",
+    }
+    info = str(info or "")
+    if not info:
+        return out
+    data_type = APRS_DATA_TYPES.get(info[0], "unknown")
+    out["data_type"] = data_type
+    body = info[1:]
+    rest = body
+    if data_type.startswith("position"):
+        if data_type.startswith("position_timestamp"):
+            body = body[7:]  # DDHHMMz, HHMMSSh or DDHHMM/
+        rest = _aprs_position(body, out)
+    elif data_type == "object" and len(body) >= 17:
+        out["addressee"] = body[0:9].strip()
+        rest = _aprs_position(body[17:], out)  # after the name, * or _, time
+    elif data_type == "item":
+        name, _sep, after = (
+            body.partition("!") if "!" in body[:10] else body.partition("_")
+        )
+        out["addressee"] = name.strip()
+        rest = _aprs_position(after, out)
+    elif data_type == "message" and len(body) >= 10 and body[9] == ":":
+        out["addressee"] = body[0:9].strip()
+        rest = body[10:].split("{", 1)[0]
+    elif data_type == "unknown":
+        rest = info
+    if out["symbol"] and data_type != "mic-e":
+        # Course and speed after the symbol: "ddd/sss".
+        if len(rest) >= 7 and rest[3] == "/" and (rest[:3] + rest[4:7]).isdigit():
+            out["course"] = float(int(rest[:3]) % 360)
+            out["speed"] = float(int(rest[4:7]))
+            rest = rest[7:]
+        out["symbol_name"] = APRS_SYMBOLS.get(out["symbol"], "")
+    altitude = re.search(r"/A=(-?\d{5,6})", rest)
+    if altitude:
+        out["altitude"] = float(int(altitude.group(1)))
+        rest = rest[: altitude.start()] + rest[altitude.end() :]
+    out["comment"] = rest.strip()
+    return out
 
 
 class AX25Decoder(ProtocolDecoder):
@@ -956,7 +1141,8 @@ class AX25Decoder(ProtocolDecoder):
                 digi_call, digi_ssid = self._decode_callsign(
                     payload[addr_end : addr_end + 7]
                 )
-                digipeaters.append(digi_call)
+                # "*": this digipeater has already repeated the frame.
+                digipeaters.append(digi_call + ("*" if digi_ssid & 0x80 else ""))
                 addr_end += 7
                 if digi_ssid & 0x01:  # Last address
                     break
@@ -999,90 +1185,11 @@ class AX25Decoder(ProtocolDecoder):
             frame: AX.25 frame
 
         Returns:
-            APRS message or None
+            APRS message or None (see :func:`parse_aprs_info` for the fields)
         """
         if not frame.valid or not frame.info:
             return None
-
-        info = frame.info
-        data_type = ""
-        lat = 0.0
-        lon = 0.0
-        alt = 0.0
-        speed = 0.0
-        course = 0.0
-        symbol = ""
-        comment = ""
-
-        # Detect data type from first character
-        if len(info) > 0:
-            type_char = info[0]
-
-            if type_char == "!":
-                data_type = "position"
-            elif type_char == "=":
-                data_type = "position_msg"
-            elif type_char == "/":
-                data_type = "position_timestamp"
-            elif type_char == "@":
-                data_type = "position_timestamp_msg"
-            elif type_char == ":":
-                data_type = "message"
-            elif type_char == ">":
-                data_type = "status"
-            elif type_char == "_":
-                data_type = "weather"
-            elif type_char == "T":
-                data_type = "telemetry"
-            elif type_char == "`" or type_char == "'":
-                data_type = "mic-e"
-            else:
-                data_type = "unknown"
-
-            # Parse position if present
-            if data_type in [
-                "position",
-                "position_msg",
-                "position_timestamp",
-                "position_timestamp_msg",
-            ]:
-                try:
-                    # Find position data (format: DDMM.MMN/DDDMM.MMW)
-                    pos_start = 1
-                    if data_type.startswith("position_timestamp"):
-                        pos_start = 8  # Skip timestamp
-
-                    if len(info) > pos_start + 18:
-                        lat_str = info[pos_start : pos_start + 8]
-                        lon_str = info[pos_start + 9 : pos_start + 18]
-                        symbol = (
-                            info[pos_start + 8] + info[pos_start + 18]
-                            if len(info) > pos_start + 18
-                            else ""
-                        )
-
-                        # Parse latitude
-                        lat_deg = float(lat_str[0:2])
-                        lat_min = float(lat_str[2:7])
-                        lat = lat_deg + lat_min / 60
-                        if lat_str[7] == "S":
-                            lat = -lat
-
-                        # Parse longitude
-                        lon_deg = float(lon_str[0:3])
-                        lon_min = float(lon_str[3:8])
-                        lon = lon_deg + lon_min / 60
-                        if lon_str[8] == "W":
-                            lon = -lon
-
-                        # Comment is rest of info
-                        comment = (
-                            info[pos_start + 19 :] if len(info) > pos_start + 19 else ""
-                        )
-
-                except (ValueError, IndexError):
-                    pass
-
+        fields = parse_aprs_info(frame.info)
         return APRSMessage(
             protocol=ProtocolType.APRS,
             timestamp=frame.timestamp,
@@ -1090,15 +1197,8 @@ class AX25Decoder(ProtocolDecoder):
             valid=True,
             source=frame.source,
             destination=frame.destination,
-            path=frame.digipeaters,
-            data_type=data_type,
-            latitude=lat,
-            longitude=lon,
-            altitude=alt,
-            speed=speed,
-            course=course,
-            symbol=symbol,
-            comment=comment,
+            path=list(frame.digipeaters),
+            **fields,
         )
 
     def decode(self, samples: np.ndarray) -> List[AX25Frame]:
@@ -1191,26 +1291,123 @@ class RDSData(DecodedMessage):
     radio_text: str = ""  # Radio Text (64 chars)
     clock_time: str = ""  # CT (Clock Time)
     af_list: List[float] = field(default_factory=list)  # Alternative Frequencies
+    #: Group type this came from, e.g. "0A".
+    group: str = ""
+    #: What changed ("pi", "ps", "radio_text", "pty", "ptyn", "clock_time"),
+    #: for the updates of ``RDSDecoder.decode_bits(updates_only=True)``.
+    update: str = ""
+    #: The PS name has all four segments (``ps_name`` is a whole name).
+    ps_complete: bool = False
+    #: The RadioText has every segment up to its end.
+    radio_text_complete: bool = False
+    #: Name of the program type (``pty``), RBDS or RDS (see ``rbds``).
+    pty_name: str = ""
+    #: Program type name the station sends itself (group 10A), or "".
+    ptyn: str = ""
+    #: Program type names are RBDS (North America) rather than RDS.
+    rbds: bool = True
+    #: Extended country code (group 1A), 0 when not received.
+    ecc: int = 0
+
+
+def _rds_poly_mod(value: int) -> int:
+    """``value`` (up to 27 bits) modulo the RDS generator polynomial
+    g(x) = x^10 + x^8 + x^7 + x^5 + x^4 + x^3 + 1."""
+    poly = 0x5B9
+    for i in range(value.bit_length() - 1, 9, -1):
+        if (value >> i) & 1:
+            value ^= poly << (i - 10)
+    return value & 0x3FF
+
+
+def _build_rds_charset() -> Dict[int, str]:
+    """RDS byte -> character: 0x20-0x7E read as ASCII, 0x80-0xFF from the
+    RDS character table (IEC 62106 Annex E)."""
+    rows = [
+        "áàéèíìóòúùÑÇŞß¡Ĳ",
+        "âäêëîïôöûüñçşğıĳ",
+        "ªα©‰Ğěňőπ€£$←↑→↓",
+        "º¹²³±İńűµ¿÷°¼½¾§",
+        "ÁÀÉÈÍÌÓÒÚÙŘČŠŽÐĿ",
+        "ÂÄÊËÎÏÔÖÛÜřčšžđŀ",
+        "ÃÅÆŒŷÝÕØÞŊŔĆŚŹŦð",
+        "ãåæœŵýõøþŋŕćśźŧ ",
+    ]
+    table = {code: chr(code) for code in range(0x20, 0x7F)}
+    for row, chars in enumerate(rows):
+        for col, char in enumerate(chars):
+            table[0x80 + 16 * row + col] = char
+    return table
+
+
+_RDS_CHARSET = _build_rds_charset()
+
+
+def rds_char(code: int) -> str:
+    """The character an RDS byte stands for ("" for codes that print
+    nothing; unknown codes as a space)."""
+    if code in (0x0A, 0x0B):  # line break, end of headline
+        return " "
+    if code == 0x1F:  # soft hyphen
+        return ""
+    return _RDS_CHARSET.get(code, " ")
+
+
+def _mjd_date(mjd: int) -> Optional[Tuple[int, int, int]]:
+    """(year, month, day) of a Modified Julian Day (IEC 62106 Annex G)."""
+    if mjd <= 15079:
+        return None
+    yp = int((mjd - 15078.2) / 365.25)
+    mp = int((mjd - 14956.1 - int(yp * 365.25)) / 30.6001)
+    day = mjd - 14956 - int(yp * 365.25) - int(mp * 30.6001)
+    k = 1 if mp in (14, 15) else 0
+    year = 1900 + yp + k
+    month = mp - 1 - k * 12
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    return year, month, day
 
 
 class RDSDecoder(ProtocolDecoder):
     """
-    RDS (Radio Data System) decoder.
+    RDS (Radio Data System) decoder: groups from the RDS bit stream.
 
-    RDS is broadcast on FM radio at 57 kHz subcarrier.
+    RDS is broadcast on FM radio on a 57 kHz subcarrier at 1187.5 bit/s
+    (:class:`sdr_module.dsp.rds.RDSDemodulator` turns the FM composite into
+    those bits). Every group is four 26-bit blocks: 16 data bits and a
+    10-bit check word with an offset word (A, B, C or C', D) added, which
+    tells the block's place in the group.
+
+    Two ways in, both streaming (the bits carry over between calls):
+
+    - :meth:`decode_bits`: the data bits (after biphase and differential
+      decoding);
+    - :meth:`decode`: a baseband of NRZ bit levels (positive: 1) at
+      ``sample_rate``, sliced at 1187.5 bit/s with clock recovery.
 
     Features:
-    - Block synchronization
-    - Error detection and correction
-    - PI code extraction
-    - PS (Program Service) name decoding
-    - RT (Radio Text) decoding
-    - Clock time decoding
+    - Block synchronization: until in sync, a block is recognised only by
+      an exact check word; two blocks in a row, 26 bits apart and in order,
+      give sync. In sync, every block is checked against the offset word
+      expected next, and error bursts of up to ``MAX_BURST`` bits are
+      corrected (one wrong bit on the air becomes two after differential
+      decoding). Sync is lost after ``SYNC_LOSS_BLOCKS`` bad blocks in a
+      row, and found again at once if the stream slipped a bit.
+    - Error detection and correction (see above)
+    - PI code extraction (block A, or block C' of version B groups)
+    - PS (Program Service) name decoding (groups 0A/0B), whole once all
+      four segments arrived
+    - RT (Radio Text) decoding (groups 2A/2B), whole once every segment up
+      to its end arrived
+    - Clock time decoding (group 4A), PTY (every group), PTYN (10A), TA,
+      MS, TP, alternative frequencies (0A) and the extended country code
+      (1A), which picks RDS or RBDS program type names
     """
 
     # RDS constants
     BLOCK_SIZE = 26  # bits
     GROUP_SIZE = 4  # blocks
+    BAUD_RATE = 1187.5
 
     # Syndrome values for block types. For an error-free block the syndrome
     # (the 26-bit block reduced modulo the generator polynomial) equals the
@@ -1233,6 +1430,14 @@ class RDSDecoder(ProtocolDecoder):
         "C'": 0x350,
         "D": 0x1B4,
     }
+
+    # Place of each block type in a group.
+    _SLOT = {"A": 0, "B": 1, "C": 2, "C'": 2, "D": 3}
+
+    #: Longest burst of wrong bits corrected in a block (while in sync).
+    MAX_BURST = 2
+    #: Bad blocks in a row that lose sync.
+    SYNC_LOSS_BLOCKS = 8
 
     # PTY codes (North America)
     PTY_CODES = [
@@ -1270,34 +1475,137 @@ class RDSDecoder(ProtocolDecoder):
         "Emergency",
     ]
 
+    # PTY codes (RDS, outside North America)
+    PTY_CODES_RDS = [
+        "None",
+        "News",
+        "Current Affairs",
+        "Information",
+        "Sport",
+        "Education",
+        "Drama",
+        "Culture",
+        "Science",
+        "Varied",
+        "Pop Music",
+        "Rock Music",
+        "Easy Listening",
+        "Light Classical",
+        "Serious Classical",
+        "Other Music",
+        "Weather",
+        "Finance",
+        "Children's Programmes",
+        "Social Affairs",
+        "Religion",
+        "Phone-in",
+        "Travel",
+        "Leisure",
+        "Jazz Music",
+        "Country Music",
+        "National Music",
+        "Oldies Music",
+        "Folk Music",
+        "Documentary",
+        "Alarm Test",
+        "Alarm",
+    ]
+
+    # Extended country codes of the countries that use RBDS program types.
+    RBDS_ECC = frozenset({0xA0, 0xA1, 0xA5})  # USA, Canada, Mexico
+
+    _BURSTS: Dict[int, int] = {}  # syndrome of an error burst -> the burst
+
     def __init__(self, sample_rate: float):
         """
         Initialize RDS decoder.
 
         Args:
-            sample_rate: Sample rate in Hz (RDS is 1187.5 baud)
+            sample_rate: Sample rate in Hz of the baseband given to
+                :meth:`decode` (RDS is 1187.5 baud)
         """
         super().__init__(sample_rate)
-        self._baud_rate = 1187.5
+        self._baud_rate = self.BAUD_RATE
         self._samples_per_bit = sample_rate / self._baud_rate
-
-        # State
-        self._bit_buffer: List[int] = []
+        self._slicer = BitSlicer(sample_rate, self._baud_rate)
+        if not RDSDecoder._BURSTS:
+            RDSDecoder._BURSTS = self._burst_table(5)
+        # x^26 mod g: the bit leaving the 26-bit window, in the syndrome.
+        self._x26 = _rds_poly_mod(1 << 26)
+        self._timestamp = 0.0
+        # Counters for the live decoder's status: groups found in sync,
+        # groups whose block B (the group type) could not be read, and
+        # blocks received good, corrected and failed while in sync.
+        self.frames_seen = 0
+        self.frames_failed = 0
+        self.blocks_good = 0
+        self.blocks_corrected = 0
+        self.blocks_failed = 0
+        # The bit stream: bits so far, the last 26 bits and their syndrome,
+        # the blocks that checked exactly in the last 26 positions, the sync
+        # and the group being received ((data, block type, corrected) per
+        # block; partial: it began before the sync).
+        self._bit_index = 0
+        self._reg = 0
+        self._syn = 0
+        self._hits: List[Optional[Tuple[str, int]]] = []
         self._synced = False
-        self._block_count = 0
-        self._current_group: List[Tuple[int, str]] = []
-
-        # Decoded data
+        self._in_block = 0
+        self._bad_run = 0
+        self._expect = 0
+        self._partial = False
+        self._group: List[Optional[Tuple[int, str, bool]]] = []
+        self._snapshots: List[RDSData] = []
+        self._updates: List[RDSData] = []
+        # The station: codes (PI and PTY change when seen twice in a row),
+        # name, RadioText, clock, program type name, frequencies, country.
         self._pi_code = 0
         self._pty = 0
         self._tp = False
         self._ta = False
         self._ms = False
-        self._ps_name = [" "] * 8
-        self._radio_text = [" "] * 64
-        self._rt_ab = 0
+        self._known: Dict[str, bool] = {}
+        self._pending: Dict[str, Optional[int]] = {}
+        self._ps: List[str] = []
+        self._ps_seen = 0
+        self._ps_done = ""
+        self._rt: List[str] = []
+        self._rt_seen = 0
+        self._rt_flag: Optional[int] = None
+        self._rt_version: Optional[int] = None
+        self._rt_end: Optional[int] = None
+        self._rt_done = ""
+        self._ct = ""
+        self._ptyn: List[str] = []
+        self._ptyn_seen = 0
+        self._ptyn_flag: Optional[int] = None
+        self._ptyn_done = ""
+        self._text_fixed = False  # the group's text blocks were corrected
+        self._af: Set[float] = set()
+        self._ecc = 0
+        self.reset()
 
-        self._timestamp = 0.0
+    # -- the code ------------------------------------------------------------
+
+    @classmethod
+    def _burst_table(cls, longest: int) -> Dict[int, int]:
+        """Syndrome -> error pattern for every burst of 1..``longest`` bits
+        (the code tells them all apart up to 5 bits); shorter bursts first."""
+        table: Dict[int, int] = {}
+        for length in range(1, longest + 1):
+            if length == 1:
+                patterns = [1]
+            else:
+                inner = length - 2
+                patterns = [
+                    (1 << (length - 1)) | (middle << 1) | 1
+                    for middle in range(1 << inner)
+                ]
+            for pattern in patterns:
+                for shift in range(cls.BLOCK_SIZE - length + 1):
+                    error = pattern << shift
+                    table.setdefault(_rds_poly_mod(error), error)
+        return table
 
     def _syndrome(self, block: int) -> int:
         """Return the RDS block syndrome: the 26-bit block reduced modulo the
@@ -1343,63 +1651,409 @@ class RDSDecoder(ProtocolDecoder):
 
         return 0, ""
 
-    def _process_group(self, blocks: List[Tuple[int, str]]) -> Optional[RDSData]:
-        """Process a complete RDS group (4 blocks)."""
-        if len(blocks) != 4:
+    def _correct(
+        self, block: int, syndrome: int, kinds: Sequence[str]
+    ) -> Optional[Tuple[int, str, bool]]:
+        """``(data, kind, corrected)`` of a block expected to be one of
+        ``kinds``: exact, or with a short error burst corrected; None when
+        it cannot be read."""
+        for kind in kinds:
+            if syndrome == self.OFFSETS[kind]:
+                return (block >> 10) & 0xFFFF, kind, False
+        other = self.SYNDROMES.get(syndrome)
+        if other is not None and all(self._SLOT[other] != self._SLOT[k] for k in kinds):
+            # It checks exactly as another block of the group: a block out
+            # of place (whole blocks were lost), not a damaged one. (Offset
+            # words A, B, C' and D are only a one- or two-bit burst from
+            # their neighbours', so "correcting" it would make, e.g., the
+            # PI code of block A into a block B of garbage.)
             return None
+        for kind in kinds:
+            error = self._BURSTS.get(syndrome ^ self.OFFSETS[kind])
+            if error is not None and self._burst_length(error) <= self.MAX_BURST:
+                return ((block ^ error) >> 10) & 0xFFFF, kind, True
+        return None
 
-        data_a, type_a = blocks[0]
-        data_b, type_b = blocks[1]
-        data_c, type_c = blocks[2]
-        data_d, type_d = blocks[3]
+    @staticmethod
+    def _burst_length(error: int) -> int:
+        low = (error & -error).bit_length()
+        return error.bit_length() - low + 1
 
-        if type_a != "A" or type_b != "B":
+    # -- the stream ----------------------------------------------------------
+
+    @property
+    def synced(self) -> bool:
+        """Whether the decoder is in block sync."""
+        return self._synced
+
+    @property
+    def pi_known(self) -> bool:
+        """Whether the station's PI code has been received."""
+        return self._known["pi"]
+
+    def decode(self, samples: np.ndarray) -> List[RDSData]:
+        """
+        Decode RDS from a baseband of NRZ bit levels.
+
+        Args:
+            samples: Bit levels (positive = 1) at ``sample_rate``, e.g. a
+                BPSK-demodulated, biphase- and differentially decoded RDS
+                signal resampled to bit levels
+
+        Returns:
+            The state after every group decoded in these samples (see
+            :meth:`decode_bits`)
+        """
+        x = _as_real(samples)
+        self._timestamp += len(x) / self._sample_rate
+        return self.decode_bits(self._slicer.process(x))
+
+    def decode_bits(
+        self, bits: Sequence[int], updates_only: bool = False
+    ) -> List[RDSData]:
+        """
+        Decode RDS data bits (0/1), any number per call.
+
+        Args:
+            bits: The data bits, after biphase and differential decoding
+            updates_only: Return only what changed (one :class:`RDSData`
+                per change, its ``update`` naming it: the station's PI code,
+                a whole new PS name or RadioText, the program type, the
+                program type name or the clock time) instead of the state
+                after every group
+
+        Returns:
+            :class:`RDSData` snapshots (see ``updates_only``)
+        """
+        self._snapshots = []
+        self._updates = []
+        reg, syn = self._reg, self._syn
+        x26 = self._x26
+        hits = self._hits
+        for bit in bits:
+            bit = 1 if bit else 0
+            index = self._bit_index
+            self._bit_index = index + 1
+            leaving = (reg >> 25) & 1
+            reg = ((reg << 1) | bit) & 0x3FFFFFF
+            syn = (syn << 1) | bit
+            if syn & 0x400:
+                syn ^= 0x5B9
+            if leaving:
+                syn ^= x26
+            # A block that checks exactly, ending at this bit.
+            kind = self.SYNDROMES.get(syn) if index >= 25 else None
+            slot = index % self.BLOCK_SIZE
+            previous = hits[slot]  # what ended 26 bits ago
+            hits[slot] = (kind, reg) if kind else None
+            if self._synced:
+                self._in_block += 1
+                if self._in_block == self.BLOCK_SIZE:
+                    self._in_block = 0
+                    if (
+                        kind
+                        and previous
+                        and self._SLOT[kind] != self._expect
+                        and self._SLOT[previous[0]] == (self._SLOT[kind] - 1) % 4
+                    ):
+                        # Two good blocks in a row, in order, but not the
+                        # ones expected here: whole blocks were lost (a
+                        # dropout). Sync on them.
+                        self._acquire(previous, kind, reg)
+                    else:
+                        self._synced_block(reg, syn)
+                elif (
+                    kind
+                    and previous
+                    and self._bad_run >= 2
+                    and self._SLOT[previous[0]] == (self._SLOT[kind] - 1) % 4
+                ):
+                    # The stream slipped: two good blocks in a row at
+                    # another place. Sync there.
+                    self._acquire(previous, kind, reg)
+            elif (
+                kind
+                and previous
+                and self._SLOT[previous[0]] == (self._SLOT[kind] - 1) % 4
+            ):
+                self._acquire(previous, kind, reg)
+        self._reg, self._syn = reg, syn
+        return list(self._updates if updates_only else self._snapshots)
+
+    def _acquire(self, previous: Tuple[str, int], kind: str, reg: int) -> None:
+        """Block sync from two good blocks in a row."""
+        self._synced = True
+        self._in_block = 0
+        self._bad_run = 0
+        self._group = [None] * self.GROUP_SIZE
+        prev_kind, prev_reg = previous
+        prev_slot, slot = self._SLOT[prev_kind], self._SLOT[kind]
+        if prev_slot < slot:  # the same group
+            self._group[prev_slot] = ((prev_reg >> 10) & 0xFFFF, prev_kind, False)
+        self._group[slot] = ((reg >> 10) & 0xFFFF, kind, False)
+        self.blocks_good += 1
+        self._expect = (slot + 1) % self.GROUP_SIZE
+        # Blocks of this group before the sync were not seen: a missing B
+        # there is no failure.
+        self._partial = self._group[1] is None
+        if slot == self.GROUP_SIZE - 1:
+            self._group_done()
+
+    def _synced_block(self, reg: int, syn: int) -> None:
+        """The next block, in sync."""
+        slot = self._expect
+        if slot == 2:
+            version = self._group_version()
+            kinds: Tuple[str, ...] = (
+                ("C",) if version == 0 else ("C'",) if version == 1 else ("C", "C'")
+            )
+        else:
+            kinds = (("A", "B", "", "D")[slot],)
+        read = self._correct(reg, syn, kinds)
+        if read is None:
+            self.blocks_failed += 1
+            self._bad_run += 1
+            self._group[slot] = None
+        else:
+            data, kind, corrected = read
+            if corrected:
+                self.blocks_corrected += 1
+            else:
+                self.blocks_good += 1
+            self._bad_run = 0
+            self._group[slot] = (data, kind, corrected)
+        self._expect = (slot + 1) % self.GROUP_SIZE
+        if slot == self.GROUP_SIZE - 1:
+            self._group_done()
+        if self._bad_run >= self.SYNC_LOSS_BLOCKS:
+            self._synced = False
+            self._group = [None] * self.GROUP_SIZE
+
+    def _group_version(self) -> Optional[int]:
+        block_b = self._group[1]
+        return None if block_b is None else (block_b[0] >> 11) & 1
+
+    def _group_done(self) -> None:
+        group = self._group
+        self._group = [None] * self.GROUP_SIZE
+        partial, self._partial = self._partial, False
+        if group[1] is None:
+            if not partial:
+                self.frames_seen += 1
+                self.frames_failed += 1  # no group type: nothing to read
+            return
+        self.frames_seen += 1
+        rds = self._process_blocks(group)
+        if rds is not None:
+            self._snapshots.append(rds)
+            self._notify_callbacks(rds)
+
+    # -- groups --------------------------------------------------------------
+
+    def _process_blocks(
+        self, group: Sequence[Optional[Tuple[int, str, bool]]]
+    ) -> Optional[RDSData]:
+        """Read a group (blocks A to D as (data, type, corrected); None for
+        one that could not be read); returns the decoder's state after it.
+
+        A block whose errors were corrected may fill in text not received
+        yet, but not change text already received: a wrong correction (rare,
+        but possible in noise) does not garble the station name."""
+        block_b = group[1]
+        if block_b is None:
             return None
-
-        # Block A: PI code
-        self._pi_code = data_a
-
-        # Block B: Group type, PTY, TP, etc.
+        data_b = block_b[0]
         group_type = (data_b >> 12) & 0x0F
         version = (data_b >> 11) & 0x01
+        name = f"{group_type}{'AB'[version]}"
+        c = group[2][0] if group[2] is not None else None
+        d = group[3][0] if group[3] is not None else None
+        self._text_fixed = any(
+            block is not None and block[2] for block in (group[2], group[3])
+        )
+
+        # PI: block A, or block C' of a version B group.
+        pi_code = None
+        if group[0] is not None:
+            pi_code = group[0][0]
+        elif group[2] is not None and group[2][1] == "C'":
+            pi_code = group[2][0]
+        if pi_code is not None:
+            self._confirm("pi", pi_code)
+
         self._tp = bool((data_b >> 10) & 0x01)
-        self._pty = (data_b >> 5) & 0x1F
+        self._confirm("pty", (data_b >> 5) & 0x1F)
 
-        # Process based on group type
-        if group_type == 0:  # Basic tuning and switching
-            self._ta = bool((data_b >> 4) & 0x01)
-            self._ms = bool((data_b >> 3) & 0x01)
+        if group_type == 0:
+            self._group_0(data_b, version, c, d)
+        elif group_type == 1 and version == 0 and c is not None:
+            if (c >> 12) & 0x07 == 0:  # variant 0: the ECC
+                self._ecc = c & 0xFF
+        elif group_type == 2:
+            self._group_2(data_b, version, c, d)
+        elif group_type == 4 and version == 0 and c is not None and d is not None:
+            self._group_4a(data_b, c, d)
+        elif group_type == 10 and version == 0 and c is not None and d is not None:
+            self._group_10a(data_b, c, d)
+        return self._snapshot(name)
 
-            # PS name (2 characters per group 0)
-            ps_addr = (data_b & 0x03) * 2
-            if type_d == "D":
-                char1 = (data_d >> 8) & 0xFF
-                char2 = data_d & 0xFF
-                if 32 <= char1 < 127:
-                    self._ps_name[ps_addr] = chr(char1)
-                if 32 <= char2 < 127:
-                    self._ps_name[ps_addr + 1] = chr(char2)
+    def _confirm(self, what: str, value: int) -> None:
+        """PI and PTY change only when the new value comes twice in a row
+        (a wrongly corrected block does not change the station)."""
+        current = self._pi_code if what == "pi" else self._pty
+        if value == current and self._known[what]:
+            self._pending[what] = None
+            return
+        if self._pending.get(what) == value or not self._known[what]:
+            if what == "pi":
+                self._pi_code = value
+            else:
+                self._pty = value
+            self._pending[what] = None
+            self._known[what] = True
+            self._changed(what)
+        else:
+            self._pending[what] = value
 
-        elif group_type == 2:  # Radio Text
-            rt_ab = (data_b >> 4) & 0x01
-            if rt_ab != self._rt_ab:
-                self._radio_text = [" "] * 64
-                self._rt_ab = rt_ab
+    def _group_0(
+        self, data_b: int, version: int, c: Optional[int], d: Optional[int]
+    ) -> None:
+        self._ta = bool((data_b >> 4) & 0x01)
+        self._ms = bool((data_b >> 3) & 0x01)
+        if version == 0 and c is not None:
+            for code in ((c >> 8) & 0xFF, c & 0xFF):
+                if 1 <= code <= 204:
+                    self._af.add(round(87.5 + 0.1 * code, 1))
+        if d is None:
+            return
+        segment = data_b & 0x03
+        chars = rds_char((d >> 8) & 0xFF) or " ", rds_char(d & 0xFF) or " "
+        at = 2 * segment
+        if (self._ps_seen >> segment) & 1 and (self._ps[at], self._ps[at + 1]) != chars:
+            if self._text_fixed:
+                return  # a corrected block does not change a name
+            # A new name is coming: the other segments are the old one's.
+            self._ps_seen = 0
+        self._ps[at], self._ps[at + 1] = chars
+        self._ps_seen |= 1 << segment
+        if self._ps_seen == 0x0F:
+            name = "".join(self._ps)
+            if name != self._ps_done:
+                self._ps_done = name
+                self._changed("ps")
 
-            rt_addr = (data_b & 0x0F) * 4
-            if version == 0 and type_c == "C" and type_d == "D":
-                # Version A: 4 characters
-                chars = [
-                    (data_c >> 8) & 0xFF,
-                    data_c & 0xFF,
-                    (data_d >> 8) & 0xFF,
-                    data_d & 0xFF,
-                ]
-                for i, char in enumerate(chars):
-                    if rt_addr + i < 64 and 32 <= char < 127:
-                        self._radio_text[rt_addr + i] = chr(char)
+    def _group_2(
+        self, data_b: int, version: int, c: Optional[int], d: Optional[int]
+    ) -> None:
+        flag = (data_b >> 4) & 0x01
+        segment = data_b & 0x0F
+        if flag != self._rt_flag or version != self._rt_version:
+            # A new text (the A/B flag toggled): start afresh.
+            self._rt_flag = flag
+            self._rt_version = version
+            self._rt = [" "] * 64
+            self._rt_seen = 0
+            self._rt_end = None
+        if version == 0:
+            if c is None or d is None:
+                return
+            codes = [(c >> 8) & 0xFF, c & 0xFF, (d >> 8) & 0xFF, d & 0xFF]
+            width = 4
+        else:
+            if d is None:
+                return
+            codes = [(d >> 8) & 0xFF, d & 0xFF]
+            width = 2
+        at = segment * width
+        chars: List[str] = []
+        end = None
+        for i, code in enumerate(codes):
+            if code == 0x0D:  # end of the text
+                end = at + i
+                break
+            chars.append(rds_char(code) or " ")
+        if (self._rt_seen >> segment) & 1 and (
+            self._rt[at : at + len(chars)] != chars
+            or (end is not None and end != self._rt_end)
+        ):
+            if self._text_fixed:
+                return  # a corrected block does not change the text
+            # The text changed without the A/B flag: start it afresh.
+            self._rt_seen = 0
+            self._rt_end = None
+        self._rt[at : at + len(chars)] = chars
+        if end is not None:
+            self._rt_end = end if self._rt_end is None else min(self._rt_end, end)
+        self._rt_seen |= 1 << segment
+        length = self._rt_end if self._rt_end is not None else 16 * width
+        needed = (1 << (-(-length // width))) - 1 if length else 1
+        if self._rt_seen & needed == needed:
+            text = "".join(self._rt[:length]).rstrip()
+            if text and text != self._rt_done:
+                self._rt_done = text
+                self._changed("radio_text")
 
-        # Return current state
+    def _group_4a(self, data_b: int, c: int, d: int) -> None:
+        mjd = ((data_b & 0x03) << 15) | (c >> 1)
+        hour = ((c & 0x01) << 4) | (d >> 12)
+        minute = (d >> 6) & 0x3F
+        offset = (d & 0x1F) * (-1 if (d >> 5) & 0x01 else 1)  # half hours
+        date = _mjd_date(mjd)
+        if date is None or hour > 23 or minute > 59 or abs(offset) > 28:
+            return
+        from datetime import datetime, timedelta
+
+        try:
+            utc = datetime(*date, hour, minute)
+        except ValueError:
+            return
+        local = utc + timedelta(minutes=30 * offset)
+        sign = "-" if offset < 0 else "+"
+        minutes = abs(offset) * 30
+        text = (
+            f"{local:%Y-%m-%d %H:%M} (UTC{sign}{minutes // 60:02d}:{minutes % 60:02d})"
+        )
+        if text != self._ct:
+            self._ct = text
+            self._changed("clock_time")
+
+    def _group_10a(self, data_b: int, c: int, d: int) -> None:
+        flag = (data_b >> 4) & 0x01
+        segment = data_b & 0x01
+        if flag != self._ptyn_flag:
+            self._ptyn_flag = flag
+            self._ptyn = [" "] * 8
+            self._ptyn_seen = 0
+        codes = [(c >> 8) & 0xFF, c & 0xFF, (d >> 8) & 0xFF, d & 0xFF]
+        for i, code in enumerate(codes):
+            self._ptyn[4 * segment + i] = rds_char(code) or " "
+        self._ptyn_seen |= 1 << segment
+        if self._ptyn_seen == 0x03:
+            name = "".join(self._ptyn).strip()
+            if name != self._ptyn_done:
+                self._ptyn_done = name
+                self._changed("ptyn")
+
+    # -- state ---------------------------------------------------------------
+
+    @property
+    def rbds(self) -> bool:
+        """Whether program types are named as RBDS (North America): yes
+        unless the station's extended country code says otherwise."""
+        return not self._ecc or self._ecc in self.RBDS_ECC
+
+    def get_pty_name(self, pty: int, rbds: Optional[bool] = None) -> str:
+        """Get PTY name from code (RBDS names unless ``rbds`` is False)."""
+        names = self.PTY_CODES if rbds is None or rbds else self.PTY_CODES_RDS
+        if 0 <= pty < len(names):
+            return names[pty]
+        return "Unknown"
+
+    def _changed(self, what: str) -> None:
+        self._updates.append(self._snapshot("", update=what))
+
+    def _snapshot(self, group: str, update: str = "") -> RDSData:
+        rbds = self.rbds
         return RDSData(
             protocol=ProtocolType.RDS,
             timestamp=self._timestamp,
@@ -1410,75 +2064,63 @@ class RDSDecoder(ProtocolDecoder):
             tp=self._tp,
             ta=self._ta,
             ms=self._ms,
-            ps_name="".join(self._ps_name).strip(),
-            radio_text="".join(self._radio_text).strip(),
+            ps_name=(self._ps_done if self._ps_done else "".join(self._ps)).strip(),
+            radio_text=(self._rt_done or "".join(self._rt).rstrip()).strip(),
+            clock_time=self._ct,
+            af_list=sorted(self._af),
+            group=group,
+            update=update,
+            ps_complete=bool(self._ps_done),
+            radio_text_complete=bool(self._rt_done),
+            pty_name=self.get_pty_name(self._pty, rbds),
+            ptyn=self._ptyn_done,
+            rbds=rbds,
+            ecc=self._ecc,
         )
 
-    def decode(self, samples: np.ndarray) -> List[RDSData]:
-        """
-        Decode RDS from demodulated samples.
-
-        Args:
-            samples: BPSK-demodulated RDS samples
-
-        Returns:
-            List of RDS data updates
-        """
-        results = []
-        self._timestamp += len(samples) / self._sample_rate
-
-        # Convert to bits
-        sps = self._samples_per_bit
-        i = 0.0
-        while i < len(samples) - sps:
-            center = int(i + sps / 2)
-            if center < len(samples):
-                bit = 1 if samples[center] > 0 else 0
-                self._bit_buffer.append(bit)
-            i += sps
-
-        # Process bits into blocks
-        while len(self._bit_buffer) >= self.BLOCK_SIZE:
-            block_bits = self._bit_buffer[: self.BLOCK_SIZE]
-            data, block_type = self._decode_block(block_bits)
-
-            if block_type:
-                if block_type == "A":
-                    self._current_group = [(data, block_type)]
-                    self._synced = True
-                elif self._synced:
-                    self._current_group.append((data, block_type))
-
-                    if len(self._current_group) == 4:
-                        rds_data = self._process_group(self._current_group)
-                        if rds_data:
-                            results.append(rds_data)
-                            self._notify_callbacks(rds_data)
-                        self._current_group = []
-
-                self._bit_buffer = self._bit_buffer[self.BLOCK_SIZE :]
-            else:
-                # No sync, shift by 1 bit
-                self._bit_buffer.pop(0)
-                if self._synced:
-                    self._synced = False
-                    self._current_group = []
-
-        return results
-
-    def get_pty_name(self, pty: int) -> str:
-        """Get PTY name from code."""
-        if 0 <= pty < len(self.PTY_CODES):
-            return self.PTY_CODES[pty]
-        return "Unknown"
+    def station(self) -> RDSData:
+        """What is known about the station now."""
+        return self._snapshot("")
 
     def reset(self) -> None:
-        """Reset decoder state."""
-        self._bit_buffer = []
+        """Reset decoder state (the bit stream and the station's data)."""
+        self._slicer.reset()
+        self._bit_index = 0
+        self._reg = 0
+        self._syn = 0
+        self._hits = [None] * self.BLOCK_SIZE
         self._synced = False
-        self._current_group = []
-        self._ps_name = [" "] * 8
-        self._radio_text = [" "] * 64
+        self._in_block = 0
+        self._bad_run = 0
+        self._expect = 0
+        self._partial = False
+        self._group = [None] * self.GROUP_SIZE
+        self._snapshots = []
+        self._updates = []
+        self._pi_code = 0
+        self._pty = 0
+        self._tp = False
+        self._ta = False
+        self._ms = False
+        self._known = {"pi": False, "pty": False}
+        self._pending = {"pi": None, "pty": None}
+        self._ps = [" "] * 8
+        self._ps_seen = 0
+        self._ps_done = ""
+        self._rt = [" "] * 64
+        self._rt_seen = 0
+        self._rt_flag = None
+        self._rt_version = None
+        self._rt_end = None
+        self._rt_done = ""
+        self._ct = ""
+        self._ptyn = [" "] * 8
+        self._ptyn_seen = 0
+        self._ptyn_flag = None
+        self._ptyn_done = ""
+        self._text_fixed = False
+        self._af = set()
+        self._ecc = 0
         self._timestamp = 0.0
 
 
@@ -1504,6 +2146,9 @@ class ADSBMessage(DecodedMessage):
     squawk: str = ""  # Transponder code
     on_ground: bool = False
     category: str = ""  # Aircraft category
+    #: The velocity message carried a vertical rate (an all-zero field
+    #: means "no information").
+    vertical_rate_known: bool = True
 
 
 class ADSBDecoder(ProtocolDecoder):
@@ -1548,6 +2193,42 @@ class ADSBDecoder(ProtocolDecoder):
 
     # Character lookup for callsign
     CHARSET = "#ABCDEFGHIJKLMNOPQRSTUVWXYZ##### ###############0123456789######"
+
+    # Emitter category names by identification type code (sets D, C, B, A)
+    # and category number (DO-260B); "" for none or reserved.
+    CATEGORIES = {
+        1: ("",) * 8,
+        2: (
+            "",
+            "Emergency vehicle",
+            "Service vehicle",
+            "Ground obstruction",
+            "Ground obstruction",
+            "Ground obstruction",
+            "Ground obstruction",
+            "Ground obstruction",
+        ),
+        3: (
+            "",
+            "Glider",
+            "Lighter than air",
+            "Parachutist",
+            "Ultralight",
+            "",
+            "Unmanned aircraft",
+            "Space vehicle",
+        ),
+        4: (
+            "",
+            "Light",
+            "Small",
+            "Large",
+            "High vortex large",
+            "Heavy",
+            "High performance",
+            "Rotorcraft",
+        ),
+    }
 
     # The decoder works on 0.5 us slots: 2 per bit, 16 per preamble.
     WORK_RATE = 2e6
@@ -1888,10 +2569,10 @@ class ADSBDecoder(ProtocolDecoder):
             if heading < 0:
                 heading += 360
 
-            # Vertical rate
+            # Vertical rate (an all-zero field: no information)
             vr_sign = (data[4] >> 3) & 0x01
             vr_value = ((data[4] & 0x07) << 6) | (data[5] >> 2)
-            vertical_rate = (vr_value - 1) * 64
+            vertical_rate = (vr_value - 1) * 64 if vr_value else 0
             if vr_sign:
                 vertical_rate = -vertical_rate
 
@@ -1970,18 +2651,7 @@ class ADSBDecoder(ProtocolDecoder):
         # Aircraft identification (TC 1-4)
         if 1 <= tc <= 4:
             msg.callsign = self._decode_callsign(data[4:])
-            categories = [
-                "",
-                "Light",
-                "Medium 1",
-                "Medium 2",
-                "High vortex",
-                "Heavy",
-                "High perf",
-                "Rotorcraft",
-            ]
-            cat_idx = data[4] & 0x07
-            msg.category = categories[cat_idx] if cat_idx < len(categories) else ""
+            msg.category = self.CATEGORIES.get(tc, ("",) * 8)[data[4] & 0x07]
 
         # Airborne position (TC 9-18)
         elif 9 <= tc <= 18:
@@ -2004,6 +2674,7 @@ class ADSBDecoder(ProtocolDecoder):
             msg.velocity = velocity
             msg.heading = heading
             msg.vertical_rate = vrate
+            msg.vertical_rate_known = bool(((data[8] & 0x07) << 6) | (data[9] >> 2))
 
         # Surface position (TC 5-8)
         elif 5 <= tc <= 8:
@@ -2910,9 +3581,13 @@ __all__ = [
     "AX25Frame",
     "APRSMessage",
     "AX25Decoder",
+    "parse_aprs_info",
+    "APRS_TYPE_NAMES",
+    "APRS_SYMBOLS",
     # RDS
     "RDSData",
     "RDSDecoder",
+    "rds_char",
     # ADS-B
     "ADSBMessage",
     "ADSBDecoder",

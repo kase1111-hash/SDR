@@ -1,6 +1,7 @@
 """
 Transmitters for the protocols the live decoders read: POCSAG and FLEX
-pagers, AX.25/APRS packet (Bell 202 AFSK on FM) and ACARS (MSK on AM).
+pagers, AX.25/APRS packet (Bell 202 AFSK on FM), ACARS (MSK on AM),
+Morse code (on/off keyed carrier) and RDS (on the FM broadcast composite).
 
 Each protocol is built in layers, the way a real transmitter builds it:
 
@@ -42,6 +43,17 @@ __all__ = [
     "acars_bits",
     "msk_audio",
     "acars_baseband",
+    "morse_units",
+    "morse_keying",
+    "cw_baseband",
+    "rds_block",
+    "rds_ps_groups",
+    "rds_radiotext_groups",
+    "rds_clock_group",
+    "rds_ecc_group",
+    "rds_bits",
+    "rds_baseband",
+    "fm_broadcast_composite",
 ]
 
 POCSAG_DEVIATION_HZ = 4500.0
@@ -455,3 +467,295 @@ def acars_baseband(
     MSK audio at ``depth``."""
     audio = msk_audio(acars_bits(block, prekey_bits), rate)
     return (1.0 + depth * audio).astype(np.complex64)
+
+
+# --------------------------------------------------------------------------- #
+# Morse code (CW)
+# --------------------------------------------------------------------------- #
+
+
+def morse_units(text: str) -> List[int]:
+    """The keying of ``text`` in dit units (1: key down): a dit is one unit
+    and a dash three, with one unit between the elements of a letter, three
+    between letters and seven between words. Characters without a Morse
+    code are left out."""
+    from .morse import MORSE_CODE
+
+    codes = {char: code for code, char in MORSE_CODE.items() if len(char) == 1}
+    units: List[int] = []
+    words = [w for w in str(text).upper().split() if any(c in codes for c in w)]
+    for wi, word in enumerate(words):
+        letters = [codes[c] for c in word if c in codes]
+        for li, code in enumerate(letters):
+            for ei, element in enumerate(code):
+                units += [1] * (1 if element == "." else 3)
+                if ei < len(code) - 1:
+                    units.append(0)
+            if li < len(letters) - 1:
+                units += [0] * 3
+        if wi < len(words) - 1:
+            units += [0] * 7
+    return units
+
+
+def morse_keying(
+    text: str,
+    rate: float,
+    wpm: float = 20.0,
+    edge_s: float = 0.005,
+    lead_s: float = 0.5,
+    tail_s: float = 0.5,
+) -> np.ndarray:
+    """The key envelope (0 to 1, float64) of ``text`` sent at ``wpm`` words
+    per minute, sampled at ``rate``: smooth edges about ``edge_s`` long (no
+    key clicks; two centred moving averages, so the timing is kept) and
+    silence before and after."""
+    rate = float(rate)
+    unit = 1.2 / float(wpm) * rate  # samples per dit
+    units = morse_units(text)
+    count = int(round(len(units) * unit))
+    index = np.minimum((np.arange(count) / unit).astype(np.int64), len(units) - 1)
+    key = np.asarray(units, dtype=np.float64)[index] if units else np.zeros(0)
+    half = int(round(edge_s * rate / 4.0))
+    if half > 0 and len(key):
+        length = 2 * half + 1
+        for _ in range(2):
+            padded = np.concatenate((np.zeros(half), key, np.zeros(half)))
+            sums = np.concatenate(([0.0], np.cumsum(padded)))
+            key = (sums[length:] - sums[:-length]) / length
+    lead = np.zeros(int(round(lead_s * rate)))
+    tail = np.zeros(int(round(tail_s * rate)))
+    return np.concatenate((lead, key, tail))
+
+
+def cw_baseband(
+    text: str,
+    rate: float,
+    wpm: float = 20.0,
+    offset_hz: float = 0.0,
+    amplitude: float = 1.0,
+) -> np.ndarray:
+    """A CW transmission of ``text`` as complex baseband (complex64): a
+    carrier ``offset_hz`` from 0 Hz keyed by :func:`morse_keying`."""
+    key = morse_keying(text, rate, wpm)
+    t = np.arange(len(key)) / float(rate)
+    carrier = np.exp(2j * np.pi * float(offset_hz) * t)
+    return (float(amplitude) * key * carrier).astype(np.complex64)
+
+
+# --------------------------------------------------------------------------- #
+# RDS (on the FM broadcast composite)
+# --------------------------------------------------------------------------- #
+
+RDS_BAUD = 1187.5
+RDS_CARRIER_HZ = 57e3
+RDS_PILOT_HZ = 19e3
+#: Group type codes (block B bits 15-11).
+_RDS_GROUP = {"0A": 0x00, "0B": 0x01, "1A": 0x02, "2A": 0x04, "2B": 0x05, "4A": 0x08}
+
+
+def rds_block(data: int, offset: str) -> int:
+    """A 26-bit RDS block: the 16 data bits and the check word with offset
+    word ``offset`` ("A", "B", "C", "C'" or "D") added."""
+    from .protocols import RDSDecoder, _rds_poly_mod
+
+    data &= 0xFFFF
+    return (data << 10) | (_rds_poly_mod(data << 10) ^ RDSDecoder.OFFSETS[offset])
+
+
+def _rds_b(group: str, pty: int, tp: bool, low5: int) -> int:
+    """Block B: group type and version, TP, PTY and the low five bits."""
+    return (
+        (_RDS_GROUP[group] << 11)
+        | (int(bool(tp)) << 10)
+        | ((int(pty) & 0x1F) << 5)
+        | (low5 & 0x1F)
+    )
+
+
+def _rds_chars(text: str, length: int) -> List[int]:
+    """``text`` as RDS bytes (ASCII; others as spaces), padded to ``length``."""
+    codes = [ord(c) if 32 <= ord(c) < 127 else 0x20 for c in str(text)[:length]]
+    return codes + [0x20] * (length - len(codes))
+
+
+def rds_ps_groups(
+    pi: int,
+    ps: str,
+    pty: int = 0,
+    tp: bool = False,
+    ta: bool = False,
+    music: bool = True,
+    af_mhz: Sequence[float] = (),
+) -> List[Tuple[int, int, int, int]]:
+    """The four type 0A groups that send the station name ``ps`` (8
+    characters), with the alternative frequencies ``af_mhz`` in block C."""
+    chars = _rds_chars(ps, 8)
+    afs = [int(round((f - 87.5) * 10)) for f in af_mhz if 87.6 <= f <= 107.9]
+    codes = ([224 + len(afs)] + afs) if afs else [224]
+    codes += [205] * (8 - len(codes) % 8)  # fillers
+    groups = []
+    for segment in range(4):
+        b = _rds_b("0A", pty, tp, (int(ta) << 4) | (int(music) << 3) | segment)
+        c = (codes[2 * segment % len(codes)] << 8) | codes[
+            (2 * segment + 1) % len(codes)
+        ]
+        d = (chars[2 * segment] << 8) | chars[2 * segment + 1]
+        groups.append((pi, b, c, d))
+    return groups
+
+
+def rds_radiotext_groups(
+    pi: int, text: str, pty: int = 0, tp: bool = False, ab: int = 0
+) -> List[Tuple[int, int, int, int]]:
+    """The type 2A groups that send RadioText ``text`` (up to 64
+    characters; a shorter text ends with a carriage return)."""
+    codes = _rds_chars(text, min(len(text), 64))
+    if len(codes) < 64:
+        codes.append(0x0D)
+    codes += [0x20] * (-len(codes) % 4)
+    groups = []
+    for segment in range(len(codes) // 4):
+        b = _rds_b("2A", pty, tp, ((ab & 1) << 4) | segment)
+        part = codes[4 * segment : 4 * segment + 4]
+        groups.append((pi, b, (part[0] << 8) | part[1], (part[2] << 8) | part[3]))
+    return groups
+
+
+def rds_clock_group(
+    pi: int,
+    year: int,
+    month: int,
+    day: int,
+    hour: int,
+    minute: int,
+    offset_half_hours: int = 0,
+    pty: int = 0,
+    tp: bool = False,
+) -> Tuple[int, int, int, int]:
+    """A type 4A group: UTC date and time and the local offset (half hours)."""
+    import datetime as _dt
+
+    mjd = (_dt.date(year, month, day) - _dt.date(1858, 11, 17)).days
+    b = _rds_b("4A", pty, tp, (mjd >> 15) & 0x03)
+    c = ((mjd & 0x7FFF) << 1) | ((hour >> 4) & 0x01)
+    sign = 1 if offset_half_hours < 0 else 0
+    d = ((hour & 0x0F) << 12) | ((minute & 0x3F) << 6) | (sign << 5)
+    d |= abs(int(offset_half_hours)) & 0x1F
+    return (pi, b, c, d)
+
+
+def rds_ecc_group(pi: int, ecc: int, pty: int = 0) -> Tuple[int, int, int, int]:
+    """A type 1A group carrying the extended country code (variant 0)."""
+    return (pi, _rds_b("1A", pty, False, 0), ecc & 0xFF, 0)
+
+
+def rds_bits(groups: Sequence[Tuple[int, int, int, int]]) -> List[int]:
+    """The data bits of ``groups`` (block C of a version B group gets the
+    C' offset)."""
+    bits: List[int] = []
+    for a, b, c, d in groups:
+        third = "C'" if (b >> 11) & 1 else "C"
+        for data, offset in ((a, "A"), (b, "B"), (c, third), (d, "D")):
+            block = rds_block(data, offset)
+            bits.extend((block >> (25 - i)) & 1 for i in range(26))
+    return bits
+
+
+def _rds_pulse(t: np.ndarray) -> np.ndarray:
+    """Impulse response of the RDS data-shaping filter, cos(pi f td / 4)
+    up to 2/td (td: one bit), for times ``t`` in seconds."""
+    a = 1.0 / (4.0 * RDS_BAUD)
+    return np.sinc(t / a + 0.5) + np.sinc(t / a - 0.5)
+
+
+def rds_baseband(
+    bits: Sequence[int], rate: float, periodic: bool = False, span_bits: int = 8
+) -> np.ndarray:
+    """The RDS data signal (before the 57 kHz carrier) for data ``bits``
+    at ``rate``: differentially encoded, biphase (an impulse pair per bit)
+    and shaped by the RDS filter, peaking at about 1 (float64).
+
+    With ``periodic`` the bits repeat forever: the result is one seamless
+    period of ``len(bits) / 1187.5`` seconds (the demo device loops it).
+    """
+    rate = float(rate)
+    count = len(bits)
+    if not count:
+        return np.zeros(0)
+    level = np.empty(2 * count)
+    last = 0
+    for k, bit in enumerate(bits):
+        last ^= 1 if bit else 0  # differential coding
+        level[2 * k] = 1.0 if last else -1.0
+    level[1::2] = -level[0::2]  # biphase: the second half is the opposite
+    half = 1.0 / (2.0 * RDS_BAUD)  # seconds per half bit
+    samples = int(round(count / RDS_BAUD * rate))
+    # A lone bit's peak: the scale for a peak of about 1.
+    probe = np.linspace(-half, 2 * half, 301)
+    peak = np.max(
+        np.abs(_rds_pulse(probe - 0.5 * half) - _rds_pulse(probe - 1.5 * half))
+    )
+    if periodic and samples > 4 * count + 1:
+        # One period exactly, by its Fourier series: the impulses' spectrum
+        # (a DFT of their levels) times the filter's, cos(pi f td / 4) up to
+        # 2/td (2 * count harmonics of the period).
+        period = count / RDS_BAUD
+        k = np.arange(2 * count + 1)
+        impulses = np.fft.fft(level)[k % (2 * count)] * np.exp(
+            -1j * np.pi * k / (2 * count)
+        )
+        a = 1.0 / (4.0 * RDS_BAUD)
+        spectrum = np.zeros(samples, dtype=np.complex128)
+        spectrum[k] = 2 * a * np.cos(np.pi * a * k / period) * impulses / period
+        spectrum[samples - k[1:]] = np.conj(spectrum[k[1:]])
+        return np.real(np.fft.ifft(spectrum)) * samples / peak
+    span = 2 * span_bits
+    out = np.empty(samples)
+    chunk = 65536
+    for start in range(0, samples, chunk):
+        t = np.arange(start, min(start + chunk, samples)) / rate
+        centre = np.floor(t / half).astype(np.int64)
+        j = centre[:, None] + np.arange(-span, span + 1)[None, :]
+        dt = t[:, None] - (j + 0.5) * half
+        if periodic:
+            weights = level[np.mod(j, 2 * count)]
+        else:
+            inside = (j >= 0) & (j < 2 * count)
+            weights = np.where(inside, level[np.clip(j, 0, 2 * count - 1)], 0.0)
+        out[start : start + len(t)] = np.sum(weights * _rds_pulse(dt), axis=1)
+    return out / peak
+
+
+def fm_broadcast_composite(
+    rate: float,
+    seconds: float,
+    rds_bits_: Optional[Sequence[int]] = None,
+    pilot: bool = True,
+    audio_hz: Sequence[float] = (440.0, 1300.0),
+    audio_level: float = 0.7,
+    pilot_level: float = 0.09,
+    rds_level: float = 0.04,
+    rds_phase: float = 0.0,
+    deviation_hz: float = 75e3,
+) -> np.ndarray:
+    """An FM broadcast multiplex (the instantaneous frequency, Hz): program
+    audio, the 19 kHz stereo pilot and the RDS signal on a 57 kHz carrier
+    locked to the pilot's third harmonic (``rds_phase`` from it: 0 in
+    phase, pi/2 in quadrature). Levels are fractions of the peak
+    deviation."""
+    rate = float(rate)
+    n = int(round(seconds * rate))
+    t = np.arange(n) / rate
+    composite = np.zeros(n)
+    for i, freq in enumerate(audio_hz):
+        composite += audio_level / len(audio_hz) * np.sin(2 * np.pi * freq * t + i)
+    theta = 2 * np.pi * RDS_PILOT_HZ * t
+    if pilot:
+        composite += pilot_level * np.cos(theta)
+    if rds_bits_ is not None and len(rds_bits_):
+        data = rds_baseband(rds_bits_, rate, periodic=True)
+        reps = -(-n // len(data))
+        data = np.tile(data, reps)[:n]
+        composite += rds_level * data * np.cos(3 * theta + rds_phase)
+    return deviation_hz * composite

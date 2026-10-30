@@ -51,6 +51,7 @@ from .spectrum_widget import (
     WheelTuner,
     add_zoom_menu,
     axis_font,
+    bins_start,
     columns_max,
     draw_focus_frame,
     draw_landing_mark,
@@ -1335,7 +1336,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         codes = ring[int(self._ring_rows(row))]
         n = codes.shape[0]
         bin_hz = self._sample_rate / n
-        pos = (freq - (self._center_freq - self._sample_rate / 2)) / bin_hz
+        # (In bins from the first bin's lower edge: bin k is centered at
+        # center - span/2 + k * bin_hz.)
+        pos = (freq - (self._center_freq - self._sample_rate / 2)) / bin_hz + 0.5
         half = max(0.5, self._hz_per_px() / bin_hz / 2)
         lo = int(math.floor(pos - half))
         hi = int(math.floor(pos + half)) + 1
@@ -1754,7 +1757,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         n = self._fft_size
         found = visible_bins(
             n,
-            self._center_freq - self._sample_rate / 2,
+            bins_start(self._center_freq, self._sample_rate, n),
             self._sample_rate,
             self._view.start,
             self._view.span,
@@ -1764,13 +1767,21 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
     def _display_target(self, plot: "QRectF") -> "QRectF":
         """Where the bins in view are drawn: the plot, widened to the edges
         of the first and last bin (clipped to the plot when painted), so a
-        zoomed view lines up exactly with the frequency axis."""
+        zoomed view lines up exactly with the frequency axis. (Bin k is
+        centered at its frequency, center - span/2 + k * bin.)"""
         first, stop = self._view_bins()
         n = self._fft_size
-        start = self._center_freq - self._sample_rate / 2
+        edge = bins_start(self._center_freq, self._sample_rate, n)
         bin_hz = self._sample_rate / n
-        x0 = self._freq_to_x(start + first * bin_hz, plot)
-        x1 = self._freq_to_x(start + stop * bin_hz, plot)
+        x0 = self._freq_to_x(edge + first * bin_hz, plot)
+        x1 = self._freq_to_x(edge + stop * bin_hz, plot)
+        dpr = self._canvas.devicePixelRatioF() or 1.0
+        if math.ceil((x1 - x0) * dpr) < stop - first:
+            # Bins narrower than a pixel (the image is decimated to one
+            # column per pixel): on whole pixels, so no column is blended
+            # into its neighbours (a one-bin carrier would dim). That moves
+            # it less than half a pixel.
+            x0, x1 = round(x0 * dpr) / dpr, round(x1 * dpr) / dpr
         return QRectF(x0, plot.top(), max(1.0, x1 - x0), plot.height())
 
     def _display_columns(self, plot: "QRectF") -> int:
@@ -1910,10 +1921,13 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             return False
         src_start = src_center - src_span / 2
         dst_start = dst_center - dst_span / 2
-        if src_start >= dst_start + dst_span or src_start + src_span <= dst_start:
-            return False  # retuned beyond: nothing of it is on this span
         src_bin = src_span / n_src
         dst_bin = dst_span / n_dst
+        # Where each line's bins begin: bin k is centered at start + k * bin.
+        src_edge = bins_start(src_center, src_span, n_src)
+        dst_edge = bins_start(dst_center, dst_span, n_dst)
+        if src_edge >= dst_edge + dst_span or src_edge + src_span <= dst_edge:
+            return False  # retuned beyond: nothing of it is on this span
         if abs(src_bin - dst_bin) <= 1e-9 * dst_bin:
             # Same bins, another center: a shift (the gap left empty), one
             # row's copy at a time (no temporary copy of the whole block).
@@ -1924,9 +1938,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             for i, row in enumerate(codes):
                 out[i, lo:hi] = row[lo - shift : hi - shift]
             return True
-        edges = dst_start + np.arange(n_dst + 1) * dst_bin
-        first = np.floor((edges[:-1] - src_start) / src_bin + 1e-9).astype(np.intp)
-        stop = np.ceil((edges[1:] - src_start) / src_bin - 1e-9).astype(np.intp)
+        edges = dst_edge + np.arange(n_dst + 1) * dst_bin
+        first = np.floor((edges[:-1] - src_edge) / src_bin + 1e-9).astype(np.intp)
+        stop = np.ceil((edges[1:] - src_edge) / src_bin - 1e-9).astype(np.intp)
         valid = (stop > 0) & (first < n_src)
         if not valid.any():
             return False
@@ -2132,9 +2146,12 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             # really was. Code 0 is "not covered".
             newest, oldest = rows
             n_bins = ring.shape[1]
+            bin_hz = self._sample_rate / n_bins
+            # The bins whose span overlaps f_low..f_high (bin k is centered
+            # at f_start + k * bin_hz).
             f_start = self._center_freq - self._sample_rate / 2
-            lo = int(math.floor((f_low - f_start) / self._sample_rate * n_bins))
-            hi = int(math.ceil((f_high - f_start) / self._sample_rate * n_bins))
+            lo = int(math.floor((f_low - f_start) / bin_hz + 0.5))
+            hi = int(math.ceil((f_high - f_start) / bin_hz + 0.5))
             lo, hi = max(0, lo), min(n_bins, max(hi, lo + 1))
             newest = max(0, newest)
             oldest = min(oldest, len(self._history) - 1)
@@ -2144,7 +2161,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                     code = int(block.max())
                     peak = _Q_MIN_DB + code / _Q_PER_DB
                     col = int(np.unravel_index(np.argmax(block), block.shape)[1])
-                    peak_freq = f_start + (lo + col + 0.5) / n_bins * self._sample_rate
+                    peak_freq = f_start + (lo + col) * bin_hz
         return {
             "f_low": f_low,
             "f_high": f_high,
@@ -2494,9 +2511,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
     def _draw_highlights(self, painter: "QPainter", plot: "QRectF") -> None:
         if not self._highlights:
             return
-        # (Image rows and bins of the current span.)
+        # (Image rows and bins of the current span, from the first bin's
+        # lower edge to the last one's upper edge.)
         sy = plot.height() / self._rows_shown()
-        start = self._center_freq - self._sample_rate / 2
+        start = bins_start(self._center_freq, self._sample_rate, self._fft_size)
         bin_hz = self._sample_rate / self._fft_size
         for time_start, time_end, freq_start, freq_end, color in self._highlights:
             x0 = self._freq_to_x(start + freq_start * bin_hz, plot)

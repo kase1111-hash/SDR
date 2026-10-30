@@ -648,12 +648,23 @@ def columns_max(data: np.ndarray, cols: int, axis: int = -1) -> np.ndarray:
     return out
 
 
+def bins_start(center_hz: float, span_hz: float, n: int) -> float:
+    """Lower edge (Hz) of the first of the ``n`` FFT bins of a line received
+    over ``span_hz`` around ``center_hz``. In ``fftshift`` order bin ``k``
+    is centered at ``center - span/2 + k * span/n`` (the center frequency
+    is bin ``n // 2``), so the bins start half a bin below
+    ``center - span/2``."""
+    return center_hz - span_hz / 2 - (span_hz / n / 2 if n > 0 else 0.0)
+
+
 def visible_bins(
     n: int, data_start: float, data_span: float, view_start: float, view_span: float
 ) -> Optional[Tuple[int, int]]:
     """``(first, stop)``: the bins of an ``n``-bin line covering
     ``data_start`` .. ``data_start + data_span`` that overlap the view
-    ``view_start`` .. ``view_start + view_span`` (None: none do)."""
+    ``view_start`` .. ``view_start + view_span`` (None: none do).
+    ``data_start`` is the lower edge of the first bin (for an FFT line,
+    :func:`bins_start`)."""
     if n <= 0 or data_span <= 0 or view_span <= 0:
         return None
     bin_hz = data_span / n
@@ -1615,7 +1626,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         if freq is None or n == 0 or span <= 0:
             return None
         bin_hz = span / n
-        pos = (freq - (center - span / 2)) / bin_hz
+        # (In bins from the first bin's lower edge: bin k is centered at
+        # center - span/2 + k * bin_hz.)
+        pos = (freq - (center - span / 2)) / bin_hz + 0.5
         half = max(0.5, self._hz_per_px() / bin_hz / 2)
         lo = int(math.floor(pos - half))
         hi = int(math.floor(pos + half)) + 1
@@ -2089,7 +2102,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         center, span = axis if axis is not None else self._trace_axis
         start = center - span / 2
         v_start, v_span = self._view.start, self._view.span
-        bins = visible_bins(n, start, span, v_start, v_span)
+        bins = visible_bins(n, bins_start(center, span, n), span, v_start, v_span)
         if bins is None:
             return None
         # One bin beyond each edge, so the line runs to the plot's edges
@@ -2105,14 +2118,16 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         m = stop - first
         px_per_bin = bin_hz / v_span * plot.width()
         out_cols = max(1, min(int(math.ceil(m * px_per_bin)), cols + 2))
+        # (Bin k is centered at start + k * bin_hz; a column of bins
+        # edges..ends-1 at the middle of their centers.)
         if m > out_cols:
             edges = (np.arange(out_cols) * m // out_cols).astype(np.intp)
             values = np.maximum.reduceat(clean, edges)
             ends = np.append(edges[1:], m)
-            centers = first + (edges + ends) / 2.0
+            centers = first + (edges + ends - 1) / 2.0
         else:
             values = clean
-            centers = first + np.arange(m) + 0.5
+            centers = first + np.arange(m, dtype=np.float64)
         values = np.clip(values, min_db - 2.0, max_db + 2.0)
         xs = plot.left() + (start + centers * bin_hz - v_start) / v_span * plot.width()
         ys = plot.bottom() - (values - min_db) / span_db * plot.height()
@@ -2250,9 +2265,10 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             x = self._freq_x(freq, plot)
             if x is None:
                 continue
-            # The trace covers the whole band whatever the zoom.
+            # The trace covers the whole band whatever the zoom (its bin k
+            # is centered at start + k * bin).
             start = self._center_freq - self._sample_rate / 2
-            k = int((freq - start) / max(self._sample_rate, 1.0) * n)
+            k = int(round((freq - start) / max(self._sample_rate, 1.0) * n))
             lo, hi = max(0, k - 2), min(n, k + 3)
             level = float(np.nanmax(data[lo:hi])) if hi > lo else min_db
             level = min(max(level, min_db), max_db)
@@ -2313,7 +2329,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         return (
             visible_bins(
                 len(self._spectrum),
-                center - span / 2,
+                bins_start(center, span, len(self._spectrum)),
                 span,
                 self._view.start,
                 self._view.span,

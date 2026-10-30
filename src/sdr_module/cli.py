@@ -9,7 +9,7 @@ Provides access to scanning, encoding, and signal analysis tools.
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, List, Optional
 
 from . import __version__
 
@@ -60,31 +60,257 @@ def cmd_info(args: argparse.Namespace) -> int:
     return 0
 
 
+#: ``--threshold`` not given: auto for a live scan, -60 dBFS for --input.
+_DEFAULT_THRESHOLD: Any = object()
+_FILE_THRESHOLD_DB = -60.0
+
+
+def _threshold_arg(text: str) -> Optional[float]:
+    """``--threshold``: a level in dBFS, or "auto" (None)."""
+    if str(text).strip().lower() == "auto":
+        return None
+    try:
+        return float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"expected a level in dBFS or 'auto', not {text!r}"
+        ) from exc
+
+
+# Live sweep timing: after each retune, queued samples are thrown away and
+# the tuner gets this long to settle (an RTL-SDR's transfer in flight, 0.11 s
+# at 2.4 MS/s, still holds the old frequency); then at least this many
+# samples are averaged, waiting at most this long for them.
+_LIVE_SETTLE_S = 0.12
+_LIVE_MEASURE_SAMPLES = 65536
+_LIVE_READ_TIMEOUT_S = 1.0
+
+
 def cmd_scan(args: argparse.Namespace) -> int:
     """Scan a frequency range (live) or analyze a recorded I/Q file (offline)."""
     if args.input:
         return _scan_file(args)
+    return _scan_live(args)
 
-    # Live sweep: requires hardware. Validate the config so bad ranges are
-    # caught even without a device attached.
-    from .dsp.scanner import FrequencyScanner, ScanConfig, ScanMode
 
-    config = ScanConfig(
-        start_freq_hz=args.start * 1e6,
-        end_freq_hz=args.end * 1e6,
-        step_hz=args.step * 1e3,
-        threshold_db=args.threshold,
-        mode=ScanMode.SINGLE if args.single else ScanMode.CONTINUOUS,
+def _drain(device) -> None:
+    """Throw away the samples a device has queued."""
+    for _ in range(1000):
+        try:
+            block = device.read_samples(4096, timeout=0.0)
+        except Exception:  # pragma: no cover - driver specific
+            return
+        if block is None or len(block) == 0:
+            return
+
+
+def _open_first_receiver(args: argparse.Namespace):
+    """``(manager, device, name)`` for the first SDR found (of
+    ``--device``'s type), or ``(manager, None, error message)``."""
+    from .core.device_manager import DeviceManager
+
+    manager = DeviceManager()
+    detected = list(manager.scan_devices())
+    types = {cls: key for key, cls in manager.DEVICE_TYPES.items()}
+    if args.device:
+        detected = [d for d in detected if types.get(d.device_class) == args.device]
+    detected = [d for d in detected if d.is_available and d.device_class in types]
+    if not detected:
+        which = {"rtlsdr": "RTL-SDR", "hackrf": "HackRF One"}.get(
+            args.device or "", "SDR device"
+        )
+        return (
+            manager,
+            None,
+            (
+                f"No {which} is connected, so there is nothing to scan with. Plug "
+                "one in ('sdr-scan devices' lists what is found), or analyze a "
+                "recording instead with --input FILE."
+            ),
+        )
+    found = detected[0]
+    name = str(getattr(found.info, "name", "") or types[found.device_class])
+    device = manager.open_device(types[found.device_class], found.info.index)
+    if device is None:
+        return (
+            manager,
+            None,
+            (f"Could not open {name}. Check that no other program is using it."),
+        )
+    return manager, device, name
+
+
+def _scan_live(args: argparse.Namespace) -> int:
+    """Sweep a connected receiver across the range and list the signals.
+
+    The receiver steps by about 80 % of its sample rate; at each step the
+    queued samples are dropped, the tuner settles, about 64k samples are
+    averaged into a spectrum and every channel of that step is checked
+    (see :mod:`sdr_module.dsp.sweep`). It sweeps once with ``--single``,
+    else until Ctrl+C.
+    """
+    import time
+
+    import numpy as np
+
+    from .core.band_plan import band_for
+    from .dsp.sweep import (
+        AUTO_MARGIN_DB,
+        SpectrumAverager,
+        format_duration,
+        measure_page,
+        plan_sweep,
+        same_signal,
     )
 
-    FrequencyScanner(config)
+    start_hz, end_hz, step_hz = args.start * 1e6, args.end * 1e6, args.step * 1e3
+    if step_hz <= 0 or end_hz <= start_hz:
+        print("Error: --end must be above --start, and --step above 0.")
+        return 1
 
-    print(f"Scanning {args.start:.3f} - {args.end:.3f} MHz")
-    print(f"Step: {args.step} kHz, Threshold: {args.threshold} dB")
-    print()
-    print("Note: A live sweep requires connected SDR hardware.")
-    print("To analyze a recorded capture offline, pass --input FILE.")
+    manager, device, name = _open_first_receiver(args)
+    if device is None:
+        print(f"Error: {name}")
+        return 1
 
+    hits: List[Any] = []
+    try:
+        rate = float(args.rate)
+        if device.set_sample_rate(rate) is False:
+            print(f"Error: {name} can't run at {rate / 1e6:g} MS/s (--rate).")
+            return 1
+        if args.gain is None:
+            device.set_gain_mode(True)
+        else:
+            device.set_gain_mode(False)
+            device.set_gain(float(args.gain))
+        spec = getattr(device, "spec", None)
+        low = float(getattr(spec, "freq_min", 0.0) or 0.0)
+        high = float(getattr(spec, "freq_max", 0.0) or 0.0)
+        if high > low:
+            if end_hz < low or start_hz > high:
+                print(
+                    f"Error: {name} tunes {low / 1e6:.3f} - {high / 1e6:.3f} MHz; "
+                    "choose a range inside it."
+                )
+                return 1
+            if start_hz < low or end_hz > high:
+                start_hz, end_hz = max(start_hz, low), min(end_hz, high)
+                print(
+                    f"Note: limited to {name}'s range, {start_hz / 1e6:.3f} - "
+                    f"{end_hz / 1e6:.3f} MHz."
+                )
+        pages = plan_sweep(start_hz, end_hz, step_hz, rate)
+        per_page = _LIVE_SETTLE_S + _LIVE_MEASURE_SAMPLES / rate + 0.02
+        channels = sum(len(p.channels) for p in pages)
+        threshold = None if args.threshold is _DEFAULT_THRESHOLD else args.threshold
+        print(
+            f"Scanning {start_hz / 1e6:.3f} - {end_hz / 1e6:.3f} MHz with {name} "
+            f"({rate / 1e6:g} MS/s): {channels:,} channels of {args.step:g} kHz "
+            f"in {len(pages):,} steps, {format_duration(len(pages) * per_page)} "
+            "per sweep."
+        )
+        print(
+            "Threshold: "
+            + (
+                f"auto (the noise floor + {AUTO_MARGIN_DB:.0f} dB)"
+                if threshold is None
+                else f"{threshold:.1f} dBFS"
+            )
+            + (". Press Ctrl+C to stop." if not args.single else ".")
+        )
+        if device.start_rx() is False:
+            print(f"Error: {name} did not start streaming.")
+            return 1
+        print()
+        print(f"  {'Frequency':>14}  {'Level':>11}  {'SNR':>7}  Band")
+        sweep = 0
+        measured = 0
+        while True:
+            sweep += 1
+            began = time.monotonic()
+            new = 0
+            for page in pages:
+                if device.set_frequency(page.lo_hz) is False:
+                    continue
+                _drain(device)
+                time.sleep(_LIVE_SETTLE_S)
+                _drain(device)
+                averager = SpectrumAverager(max_segments=64)
+                taken = 0
+                deadline = time.monotonic() + _LIVE_READ_TIMEOUT_S
+                while taken < _LIVE_MEASURE_SAMPLES and time.monotonic() < deadline:
+                    block = device.read_samples(
+                        _LIVE_MEASURE_SAMPLES, timeout=_LIVE_READ_TIMEOUT_S
+                    )
+                    if block is None or len(block) == 0:
+                        continue
+                    averager.add(np.asarray(block))
+                    taken += len(block)
+                power = averager.power_db()
+                if power is None:
+                    continue
+                measured += 1
+                readings, _noise, _thr = measure_page(
+                    power, page.lo_hz, rate, page.channels, step_hz, threshold
+                )
+                for reading in readings:
+                    if not (
+                        start_hz - step_hz / 2
+                        <= reading.frequency_hz
+                        <= end_hz + step_hz / 2
+                    ):
+                        continue
+                    known = next(
+                        (
+                            h
+                            for h in hits
+                            if same_signal(
+                                h.frequency_hz,
+                                h.width_hz,
+                                reading.frequency_hz,
+                                step_hz,
+                            )
+                        ),
+                        None,
+                    )
+                    if known is not None:
+                        if reading.peak_db > known.peak_db:
+                            hits[hits.index(known)] = reading
+                        continue
+                    hits.append(reading)
+                    new += 1
+                    band = band_for(reading.frequency_hz)
+                    print(
+                        f"  {reading.frequency_hz / 1e6:10.4f} MHz  "
+                        f"{reading.peak_db:6.1f} dBFS  {reading.snr_db:4.0f} dB  "
+                        f"{band.name if band else ''}".rstrip(),
+                        flush=True,
+                    )
+            if not measured:
+                print(
+                    f"Error: {name} returned no samples. Check that it is plugged "
+                    "in and not used by another program."
+                )
+                return 1
+            print(
+                f"Sweep {sweep} done in {time.monotonic() - began:.1f} s: "
+                f"{len(hits)} signal(s), {new} new.",
+                flush=True,
+            )
+            if args.single:
+                break
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        try:
+            device.stop_rx()
+        except Exception as exc:  # pragma: no cover - driver specific
+            print(f"Note: {name} did not stop cleanly: {exc}")
+        manager.close_all()
+
+    if not hits:
+        print("No signals above the threshold.")
     return 0
 
 
@@ -121,8 +347,15 @@ def _scan_file(args: argparse.Namespace) -> int:
     result = analyzer.compute_spectrum(
         samples, center_freq=center_freq, sample_rate=sample_rate
     )
+    threshold = args.threshold
+    if threshold is _DEFAULT_THRESHOLD:
+        threshold = _FILE_THRESHOLD_DB
+    elif threshold is None:  # auto: the noise floor plus the usual margin
+        from .dsp.sweep import AUTO_MARGIN_DB, noise_floor_db
+
+        threshold = round(noise_floor_db(result.power_db) + AUTO_MARGIN_DB, 1)
     peaks = analyzer.find_peaks(
-        result, threshold_db=args.threshold, min_distance_hz=args.step * 1e3
+        result, threshold_db=threshold, min_distance_hz=args.step * 1e3
     )
 
     print(
@@ -131,7 +364,7 @@ def _scan_file(args: argparse.Namespace) -> int:
     )
     print(
         f"Center: {center_freq / 1e6:.4f} MHz, "
-        f"RBW: {result.rbw:.1f} Hz, Threshold: {args.threshold} dB"
+        f"RBW: {result.rbw:.1f} Hz, Threshold: {threshold} dB"
     )
     print()
 
@@ -483,7 +716,15 @@ def create_parser() -> argparse.ArgumentParser:
     devices_parser.set_defaults(func=cmd_devices)
 
     # Scan command
-    scan_parser = subparsers.add_parser("scan", help="Scan frequency range")
+    scan_parser = subparsers.add_parser(
+        "scan",
+        help="Scan a frequency range with a connected SDR, or a recording",
+        description=(
+            "Sweep a connected RTL-SDR or HackRF One across a range and list "
+            "the signals found (continuously until Ctrl+C, or once with "
+            "--single), or find the signals in a recorded I/Q file with --input."
+        ),
+    )
     scan_parser.add_argument(
         "--start",
         type=float,
@@ -494,16 +735,38 @@ def create_parser() -> argparse.ArgumentParser:
         "--end", type=float, default=108.0, help="End frequency in MHz (default: 108.0)"
     )
     scan_parser.add_argument(
-        "--step", type=float, default=100.0, help="Step size in kHz (default: 100.0)"
+        "--step",
+        type=float,
+        default=100.0,
+        help="Channel spacing in kHz: each channel reports the strongest "
+        "signal within half a step (default: 100.0)",
     )
     scan_parser.add_argument(
         "--threshold",
-        type=float,
-        default=-60.0,
-        help="Detection threshold in dB (default: -60.0)",
+        type=_threshold_arg,
+        default=_DEFAULT_THRESHOLD,
+        help="Detection threshold in dBFS, or 'auto' for the noise floor + 12 dB "
+        "(default: auto for a live scan, -60 for --input)",
     )
     scan_parser.add_argument(
         "--single", action="store_true", help="Single scan (default: continuous)"
+    )
+    scan_parser.add_argument(
+        "--device",
+        choices=["rtlsdr", "hackrf"],
+        help="Live scan: which kind of SDR to use (default: the first found)",
+    )
+    scan_parser.add_argument(
+        "--rate",
+        type=float,
+        default=2.4e6,
+        help="Live scan: sample rate in Hz (default: 2.4e6)",
+    )
+    scan_parser.add_argument(
+        "--gain",
+        type=float,
+        default=None,
+        help="Live scan: RF gain in dB (default: automatic gain)",
     )
     scan_parser.add_argument(
         "--input",

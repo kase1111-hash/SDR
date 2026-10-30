@@ -118,7 +118,8 @@ from .audio_chain import (
     make_noise_reduction,
 )
 from .audio_sink import AudioSink
-from .bookmarks_panel import BookmarksPanel
+from .bookmarks_panel import BookmarksPanel, default_bookmark_name
+from .bookmarks_panel import listening as bookmark_listening
 from .control_panel import (
     MAX_FREQUENCY_HZ,
     MIN_FREQUENCY_HZ,
@@ -129,6 +130,8 @@ from .control_panel import (
 from .decoder_panel import DecoderPanel
 from .level_meter import LevelMeter
 from .receiver_bar import FrequencyDigits, ReceiverBar
+from .scanner_host import WindowScannerHost
+from .scanner_panel import ScannerPanel
 from .settings_store import DEFAULT_FREQUENCY_HZ, GuiSettings
 from .spectrum_widget import SpectrumWidget
 from .themes import (
@@ -1835,6 +1838,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._iq_conditioner = IqConditioner()
         self._clip_s = 0.0
         self._clip_warn_due = 0.0
+        # The Scanner tab mutes the speaker while it moves between channels.
+        self._scan_muted = False
         # Cached analysis window for the spectrum display (built lazily to
         # match the sample-block length).
         self._spectrum_window: Optional[np.ndarray] = None
@@ -2099,6 +2104,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "Info",
             "Live receiver status, versions and quick tips",
         )
+
+        # Scanner (T8): its panel spec comes after the others (Ctrl+8), its
+        # tab before Info.
+        self._scanner_panel = ScannerPanel(settings=self._settings)
+        self._add_panel(
+            tabs,
+            "scanner",
+            self._scanner_panel,
+            "Scanner",
+            "Sweep a band, stop on signals or scan your bookmarks, while you "
+            "keep listening (Ctrl+F)",
+        )
+        tabs.tabBar().moveTab(
+            tabs.indexOf(self._panel_pages["scanner"]),
+            tabs.indexOf(self._panel_pages["info"]),
+        )
         return tabs
 
     # View > Panels menu text (mnemonics) by panel key; the tab keeps its title.
@@ -2110,6 +2131,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         "sstv": "&SSTV",
         "qrp": "&QRP",
         "info": "&Info",
+        "scanner": "S&canner",
     }
 
     def _add_panel(
@@ -2428,10 +2450,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tools_menu = menubar.addMenu("&Tools")
         self._add_action(
             tools_menu,
-            "Frequency &Scanner...",
+            "Frequency &Scanner",
             self._show_scanner,
             "Ctrl+F",
-            "Sweep a frequency range and list active channels",
+            "Show the Scanner tab: sweep a band, stop on signals or scan your "
+            "bookmarks",
         )
         self._add_action(
             tools_menu,
@@ -2730,6 +2753,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._waterfall.bookmark_requested.connect(self._bookmark_frequency)
         self._waterfall.display_settings_changed.connect(self._save_waterfall_settings)
         self._right_tabs.currentChanged.connect(self._on_panel_tab_changed)
+        self._connect_bookmarks_and_scanner()
 
     # ------------------------------------------------------------------
     # Keyboard
@@ -5080,6 +5104,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Feed the live protocol decoder (if the Decoder panel selected one).
         self._run_decoder(samples)
 
+        # The Scanner tab's scan runs on the same blocks.
+        self._scan_frame(samples)
+
     def _capture(self, samples: np.ndarray) -> None:
         """Add a block to the recording (the first one replaces the buffer)."""
         if not self._check_recording_space():
@@ -5448,6 +5475,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._control_panel.show_auto_threshold(gate.last_threshold_db)
         self._update_level_meter(level_db, noise_db, audible)
         speaker = self._audio_enabled and audible and gate.is_open
+        # (Muted while the Scanner moves between channels.)
+        speaker = speaker and not self._scan_muted
         if speaker and not self._realtime():
             # A few ms of signal per display frame would play as a buzz.
             speaker = False
@@ -6227,23 +6256,91 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # ------------------------------------------------------------------
 
     def _show_scanner(self):
-        """Show the frequency scanner dialog.
+        """Tools > Frequency Scanner (Ctrl+F): bring up the Scanner tab.
 
-        The sweep reads the device from a worker thread, so the display loop
-        pauses while the dialog is open. Tuning to a result tunes the
-        receiver.
+        The scan runs in the display loop (see ``_scan_frame``), so the
+        plots, the audio and the decoders keep running while it scans.
         """
-        from .scanner_dialog import ScannerDialog
+        self._show_panel("scanner", focus=True)
 
-        dialog = ScannerDialog(self, device=self._device)
-        dialog.frequency_selected.connect(self.set_frequency)
-        display_was_active = self._display_timer.isActive()
-        self._display_timer.stop()
+    # ------------------------------------------------------------------
+    # Scanner tab and bookmarks (T8)
+    # ------------------------------------------------------------------
+
+    def _connect_bookmarks_and_scanner(self) -> None:
+        """Bookmarks: a tuned bookmark's filter and tone, status messages,
+        the Add row's mode, Scan from Here. Scanner: its host (the window)."""
+        bookmarks = self._bookmarks_panel
+        bookmarks.bookmark_tuned.connect(self._on_bookmark_tuned)
+        bookmarks.message.connect(
+            lambda text, tone: self._show_status_message(text, tone or None, 3000)
+        )
+        bookmarks.set_width_source(lambda: self._control_panel._bw_combo.currentText())
+        self._control_panel.demod_changed.connect(lambda _m: bookmarks.refresh_mode())
+        self._control_panel._fm_dev_combo.currentTextChanged.connect(
+            lambda _t: bookmarks.refresh_mode()
+        )
+        self._scanner_host = WindowScannerHost(self)
+        self._scanner_panel.set_host(self._scanner_host)
+        bookmarks.bookmarks_changed.connect(self._scanner_panel.bookmarks_changed)
+        bookmarks.scan_requested.connect(self._scan_bookmarks_from)
+
+    def _scan_frame(self, samples: np.ndarray) -> None:
+        """Hand a block to a running scan (after everything else saw it).
+
+        The scan stops when the user tunes elsewhere, or a recording starts
+        (it keeps the receiver on one frequency).
+        """
+        panel = getattr(self, "_scanner_panel", None)
+        if panel is None or not panel.engine.active:
+            return
+        host = self._scanner_host
+        tuned = self._current_frequency()
+        if host.expected_hz is not None and abs(tuned - host.expected_hz) > 1.0:
+            panel.stop_scan(
+                f"Scan stopped: you tuned to {format_frequency(tuned)}.",
+                "info",
+                stay=True,
+            )
+            return
+        if self._recording:
+            panel.stop_scan(
+                "Scan stopped: the recording keeps the receiver on one frequency.",
+                "warning",
+                stay=True,
+            )
+            return
+        panel.engine.frame(samples)
+
+    def _scan_bookmarks_from(self, index: int) -> None:
+        """Bookmarks > Scan Bookmarks from Here: a bookmark scan from it."""
+        panel = self._scanner_panel
+        self._show_panel("scanner")
+        panel.stop_scan(stay=True)
+        panel.set_scan_mode("bookmarks")
+        panel.start_scan(start_index=index)
+
+    def _on_bookmark_tuned(self, bookmark: Dict[str, Any]) -> None:
+        """After a bookmark's ``tune_requested``: its own filter width and
+        CTCSS tone squelch (FM: its tone, or none)."""
         try:
-            self._exec_dialog(dialog)
-        finally:
-            if display_was_active:
-                self._display_timer.start()
+            freq = float(bookmark.get("freq_hz") or 0.0)
+        except (TypeError, ValueError):
+            return
+        if abs(self._current_frequency() - freq) >= 0.5:
+            return  # refused: the status bar says why
+        demod, deviation, width, tone = bookmark_listening(bookmark)
+        if not demod:
+            return  # it keeps the mode, filter and tone squelch
+        if width:
+            self._set_demod_mode(demod, deviation or None, width)
+        if demod == "FM":
+            self._control_panel.set_tone_squelch_hz(tone)
+            if tone:
+                label = str(bookmark.get("label") or format_frequency(freq))
+                self._show_status_message(
+                    f"Tuned to {label} (FM, tone squelch {tone:.1f} Hz)", "info", 3000
+                )
 
     def _show_radio_tuner(self):
         """Show the AM/FM radio tuner pop-out window."""
@@ -6359,13 +6456,33 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._bookmark_frequency(self._current_frequency())
 
     def _bookmark_frequency(self, freq: float) -> None:
-        """Bookmark ``freq`` (Hz) in the current listening mode (Ctrl+B, or a
-        signal right-clicked on the waterfall)."""
-        label = format_frequency(freq)
+        """Bookmark ``freq`` (Hz) in the current listening mode, filter and
+        tone squelch (Ctrl+B, or a signal right-clicked on the waterfall).
+
+        It is named after its preset or band ("FM Broadcast 100.1"). A
+        frequency already bookmarked in this mode isn't added twice: that
+        bookmark is selected instead.
+        """
         mode, deviation = self._listening_mode()
-        self._bookmarks_panel.add_bookmark(label, freq, mode, deviation)
+        panel = self._bookmarks_panel
+        index = panel.find_bookmark(freq, mode, deviation)
+        if index >= 0:
+            panel.select_bookmark(index)
+            existing = panel.bookmark(index) or {}
+            name = str(existing.get("label") or format_frequency(freq))
+            self._show_status_message(f"Already bookmarked: {name}", "info", 3000)
+            return
+        label = default_bookmark_name(freq)
+        width = self._control_panel._bw_combo.currentText() if mode else ""
+        index = panel.add_bookmark(label, freq, mode, deviation, width)
+        tone = self._control_panel.tone_squelch_hz() if mode == "FM" else 0.0
+        if tone:
+            panel.set_tone(index, tone)
         self._show_status_message(
-            f"Bookmarked {label} ({self._mode_text(mode)})", "success", 2500
+            f"Bookmarked {label} ({self._mode_text(mode)}). Rename it with F2 "
+            "in the Bookmarks tab.",
+            "success",
+            3000,
         )
 
     # ------------------------------------------------------------------
@@ -6778,6 +6895,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         if self._recording:
             self._toggle_recording(False)  # armed, or nothing left to lose
+        # A scan running: back to where it started, so that is saved.
+        self._scanner_panel.stop_scan(stay=False)
         self._commit_pending_history()  # the last frequency joins Recent
         self._persist_state()
         for timer in (self._display_timer, self._status_timer, self._hotplug_timer):

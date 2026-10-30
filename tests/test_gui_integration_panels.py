@@ -303,7 +303,12 @@ class TestBookmarksPanelFixes(unittest.TestCase):
         texts = [a.text() for a in self.panel._csv_menu.actions()]
         self.assertEqual(
             texts,
-            ["Import Channels (CHIRP CSV)...", "Export Channels (CHIRP CSV)..."],
+            [
+                "Import Channels (CHIRP CSV)...",
+                "Export Channels (CHIRP CSV)...",
+                "",  # separator
+                "Export Built-in Presets (CHIRP CSV)...",  # FG-G28
+            ],
         )
 
     def test_add_field_covers_the_whole_tuning_range(self):
@@ -385,10 +390,13 @@ class TestBookmarksPanelFixes(unittest.TestCase):
         self.panel.set_current_frequency(14.2e6)
         self.panel._add_btn.click()
         self.assertEqual(self.store.bookmarks[-1]["demod"], "USB")
-        # A typed-in frequency: how it is listened to is unknown.
+        # A typed-in frequency is saved in its band's usual mode, which the
+        # Add row's Mode shows (TOOLS-14, UX-07: it used to be saved without
+        # one, and turned into FM after a CHIRP round trip).
         self.panel._freq_input.setValue(7.1)
+        self.assertEqual(self.panel._mode_input.currentData(), "LSB")
         self.panel._add_btn.click()
-        self.assertNotIn("demod", self.store.bookmarks[-1])
+        self.assertEqual(self.store.bookmarks[-1]["demod"], "LSB")
 
     def test_exported_bookmark_keeps_its_mode(self):
         self.panel.add_bookmark("Tower", 118.3e6, "AM")

@@ -178,101 +178,145 @@ class TestDeviceDialog(unittest.TestCase):
         self.assertTrue(self.dialog._direct_combo.toolTip())
 
 
+def _scanner_panel(device_range=None, blocker=("", ""), receiving=True):
+    """A Scanner tab over a demo device (its host is a small fake window)."""
+    from sdr_module.gui.device_dialog import MockDevice
+    from sdr_module.gui.scanner_panel import ScannerHost, ScannerPanel
+
+    dev = MockDevice()
+    dev.start_rx()
+
+    class Host(ScannerHost):
+        listened = []
+        started = 0
+        state = {"receiving": receiving, "blocker": blocker}
+
+        def scan_tune_lo(self, center_hz):
+            dev.set_frequency(center_hz)
+            return True
+
+        def scan_tune_channel(self, freq_hz, listening, tone_hz=0.0):
+            return True
+
+        def scan_lo_hz(self):
+            return dev.frequency
+
+        def scan_signal_present(self):
+            return False
+
+        def scan_blocker(self):
+            return self.state["blocker"]
+
+        def scan_receiving(self):
+            return self.state["receiving"]
+
+        def scan_start_receiver(self):
+            Host.started += 1
+            self.state["receiving"] = True
+            return True
+
+        def scan_sample_rate(self):
+            return dev.sample_rate
+
+        def scan_device_range(self):
+            return device_range
+
+        def scan_listen(self, hit):
+            Host.listened.append(hit.frequency_hz)
+            return True
+
+    panel = ScannerPanel()
+    host = Host()
+    panel.set_host(host)
+    return panel, host, dev
+
+
+def _feed(panel, dev, seconds=10.0):
+    for _ in range(int(seconds / 0.034)):
+        if not panel.engine.active:
+            break
+        panel.engine.frame(dev.read_samples(int(dev.sample_rate * 0.034)))
+
+
 class TestScanner(unittest.TestCase):
+    """The frequency scanner (now the Scanner tab, scanning in the display
+    loop; its measurements are in sdr_module.dsp.sweep)."""
+
     def setUp(self):
         require_pyqt6(self)
 
     def test_scan_reports_each_station_once_at_its_frequency(self):
         from sdr_module.gui.device_dialog import MockDevice
-        from sdr_module.gui.scanner_dialog import _ScanWorker
+        from sdr_module.gui.scan_engine import ScanEngine, ScanSettings
+        from tests.test_gui_scanner import _DemoHost
 
         dev = MockDevice()
         dev.start_rx()
         dev.set_frequency(145e6)
+        engine = ScanEngine(_DemoHost(dev))
         hits = []
-        worker = _ScanWorker(dev, 99.9e6, 100.7e6, 200e3, -60.0)
-        worker.detected.connect(lambda f, p, n: hits.append((f, p, n)))
-        worker.run()  # synchronous: signals are delivered directly
-        near = [f for f, _p, _n in hits if abs(f - 100.1e6) < 150e3]
-        self.assertTrue(near, f"100.1 MHz station not found in {hits}")
-        # Only the steps whose slice holds the station report it.
-        self.assertLessEqual(len(near), 2)
-        # The receiver is put back where it was tuned.
-        self.assertEqual(dev.frequency, 145e6)
-        self.assertIsNotNone(worker.noise_floor_db)
+        engine.on_found = hits.append
+        engine.start(ScanSettings("once", 99.9e6, 100.7e6, 200e3), dev.sample_rate, 0.0)
+        for _ in range(40):
+            engine.frame(dev.read_samples(int(dev.sample_rate * 0.034)))
+        near = [h.frequency_hz for h in hits if abs(h.frequency_hz - 100.1e6) < 150e3]
+        self.assertEqual(near, [100.1e6])  # once, on its channel
+        self.assertIsNotNone(engine.noise_db)
 
     def test_measure_limits_peak_to_the_step(self):
-        from sdr_module.gui.scanner_dialog import _ScanWorker
+        from sdr_module.dsp.sweep import SpectrumAverager, measure_page
 
-        class Tone:
-            sample_rate = 2.4e6
-
-            def set_frequency(self, freq):
-                pass
-
-            def read_samples(self, n):
-                t = np.arange(n)
-                return np.exp(2j * np.pi * 0.1 * t).astype(np.complex64)
-
-        worker = _ScanWorker(Tone(), 88e6, 108e6, 200e3, -20.0)
-        # The tone sits 240 kHz off center: outside a 200 kHz step...
-        freq, peak, _noise = worker._measure(100e6, 200e3)
-        self.assertLess(peak, -60)
+        t = np.arange(2048 * 8)
+        tone = np.exp(2j * np.pi * 0.1 * t).astype(np.complex64)
+        averager = SpectrumAverager()
+        averager.add(tone)
+        power = averager.power_db()
+        # The tone sits 240 kHz off center: outside a 200 kHz step's slice...
+        readings, _n, _t = measure_page(power, 100e6, 2.4e6, [100e6], 200e3, -20.0)
+        self.assertEqual(readings, [])
         # ...but inside a 600 kHz one, at the right frequency.
-        freq, peak, _noise = worker._measure(100e6, 600e3)
-        self.assertAlmostEqual(freq, 100.24e6, delta=2e3)
-        self.assertGreater(peak, -3)
+        readings, _n, _t = measure_page(power, 100e6, 2.4e6, [100e6], 600e3, -20.0)
+        self.assertAlmostEqual(readings[0].frequency_hz, 100.24e6, delta=2e3)
+        self.assertGreater(readings[0].peak_db, -3)
 
     def test_range_validation_and_presets(self):
-        from sdr_module.gui.device_dialog import MockDevice
-        from sdr_module.gui.scanner_dialog import SCAN_PRESETS, ScannerDialog
+        from sdr_module.gui.scanner_dialog import SCAN_PRESETS
 
-        dialog = ScannerDialog(device=MockDevice())
-        self.assertTrue(dialog._start_btn.isEnabled())
-        dialog._end.setValue(50.0)  # below start
-        self.assertFalse(dialog._start_btn.isEnabled())
-        self.assertEqual(dialog._preset.currentIndex(), 0)  # now "Custom"
-        dialog._preset.setCurrentIndex(2)
-        _label, start, end, step = SCAN_PRESETS[1]
+        panel, _host, _dev = _scanner_panel()
+        self.assertTrue(panel._start_btn.isEnabled())
+        panel._end.setValue(50.0)  # below start
+        self.assertFalse(panel._start_btn.isEnabled())
+        self.assertEqual(panel._preset.currentIndex(), 0)  # now "Custom"
+        panel._preset.setCurrentIndex(2)
+        preset = SCAN_PRESETS[1]
         self.assertEqual(
-            (dialog._start.value(), dialog._end.value(), dialog._step.value()),
-            (start, end, step),
+            (panel._start.value(), panel._end.value(), panel._step.value()),
+            (preset.start_mhz, preset.end_mhz, preset.step_khz),
         )
-        self.assertTrue(dialog._start_btn.isEnabled())
+        self.assertTrue(panel._start_btn.isEnabled())
 
     def test_empty_state_and_tune_to_result(self):
-        from PyQt6.QtWidgets import QWidget
+        from sdr_module.gui.scan_engine import Found
 
-        from sdr_module.gui.device_dialog import MockDevice
-        from sdr_module.gui.scanner_dialog import ScannerDialog
-
-        class Host(QWidget):
-            tuned = None
-
-            def set_frequency(self, freq):
-                self.tuned = freq
-
-        host = Host()
-        dialog = ScannerDialog(host, device=MockDevice())
-        self.assertTrue(dialog._empty.is_visible())
-        self.assertFalse(dialog._tune_btn.isEnabled())
-        dialog._on_hit(101.1e6, -40.0, -90.0)
-        self.assertFalse(dialog._empty.is_visible())
-        self.assertEqual(dialog._table.item(0, 2).text(), "50.0 dB")
-        dialog._table.selectRow(0)
-        self.assertTrue(dialog._tune_btn.isEnabled())
-        dialog._tune_selected()
-        self.assertEqual(host.tuned, 101.1e6)
+        panel, host, _dev = _scanner_panel()
+        self.assertTrue(panel._empty.is_visible())
+        self.assertFalse(panel._listen_btn.isEnabled())
+        panel._on_found(Found(101.1e6, -40.0, -90.0, 150e3, ("FM", "75 kHz", "")))
+        self.assertFalse(panel._empty.is_visible())
+        self.assertEqual(panel._table.item(0, 2).text(), "50.0 dB")
+        panel._table.selectRow(0)
+        self.assertTrue(panel._listen_btn.isEnabled())
+        panel.listen_selected()
+        self.assertEqual(host.listened[-1], 101.1e6)
 
     def test_neighbouring_steps_merge_into_one_row(self):
-        from sdr_module.gui.device_dialog import MockDevice
-        from sdr_module.gui.scanner_dialog import ScannerDialog
+        from sdr_module.gui.scan_engine import Found
 
-        dialog = ScannerDialog(device=MockDevice())
-        dialog._on_hit(100.29e6, -35.0, -90.0)
-        dialog._on_hit(100.31e6, -30.0, -90.0)
-        self.assertEqual(dialog._table.rowCount(), 1)
-        self.assertEqual(dialog._hits[0][1], -30.0)
+        panel, _host, _dev = _scanner_panel()
+        panel._on_found(Found(100.29e6, -35.0, -90.0, 5e3, ("", "", "")))
+        panel._on_found(Found(100.31e6, -30.0, -90.0, 5e3, ("", "", "")))
+        self.assertEqual(panel._table.rowCount(), 1)
+        self.assertEqual(panel.hits()[0].peak_db, -30.0)
 
 
 class TestFirstRunWizard(unittest.TestCase):
@@ -424,124 +468,110 @@ class TestScannerReview(unittest.TestCase):
         require_pyqt6(self)
 
     @staticmethod
-    def _noise_device(block, limit_hz=None):
-        class Device:
-            frequency = 100e6
-            sample_rate = 2.4e6
-            tuned = []
-
-            def set_frequency(self, freq):
-                if limit_hz is not None and freq > limit_hz:
-                    return False
-                self.tuned.append(freq)
-                return True
-
-            def read_samples(self, n):
-                rng = np.random.default_rng(1)
-                noise = rng.standard_normal(2 * block).view(np.complex128)
-                return (noise * 1e-3).astype(np.complex64)
-
-        return Device()
+    def _noise_block(block):
+        rng = np.random.default_rng(1)
+        noise = rng.standard_normal(2 * block).view(np.complex128)
+        return (noise * 1e-3).astype(np.complex64)
 
     def test_steps_outside_the_tuning_range_are_skipped(self):
-        from sdr_module.gui.scanner_dialog import _ScanWorker
+        from sdr_module.gui.scan_engine import ScanEngine, ScanSettings
+        from tests.test_gui_scanner import _demo, _DemoHost
 
-        dev = self._noise_device(8192, limit_hz=1766e6)
+        dev = _demo(1760e6)
+        host = _DemoHost(dev)
+        host.refuse_above = 1766e6  # where the receiver stops tuning
+        engine = ScanEngine(host)
         hits = []
-        worker = _ScanWorker(dev, 1760e6, 1780e6, 1e6, -200.0)
-        worker.detected.connect(lambda f, p, n: hits.append(f))
-        worker.run()
-        self.assertEqual(worker.steps_out_of_range, 14)
-        self.assertEqual(worker.steps_measured, 7)
-        # Nothing is reported at a frequency the device never tuned to.
-        self.assertTrue(all(f < 1766.6e6 for f in hits), hits)
+        engine.on_found = hits.append
+        engine.start(
+            ScanSettings("once", 1760e6, 1780e6, 1e6, -200.0), dev.sample_rate, 0.0
+        )
+        for _ in range(200):
+            if not engine.active:
+                break
+            engine.frame(dev.read_samples(int(dev.sample_rate * 0.034)))
+        self.assertGreater(engine.steps_refused, 0)
+        self.assertGreater(engine.steps_measured, 0)
+        # Nothing is reported at a frequency the device never tuned near.
+        self.assertTrue(all(h.frequency_hz < 1766.6e6 for h in hits), hits)
 
     def test_dead_device_gives_up_after_two_steps(self):
-        from sdr_module.gui.scanner_dialog import _ScanWorker
-
-        class Dead:
-            reads = 0
-
-            def set_frequency(self, freq):
-                return True
-
-            def read_samples(self, n):
-                Dead.reads += 1
-                return None
-
-        worker = _ScanWorker(Dead(), 88e6, 108e6, 200e3, -60.0)
-        worker.run()
-        self.assertTrue(worker.no_samples)
-        self.assertEqual(Dead.reads, 2)  # one read per step, two steps
+        # A device that delivers nothing gives the scan no blocks: nothing is
+        # reported, and when the window stops the dead stream (as it does
+        # for a hardware stream that died) the scan stops and says so.
+        panel, host, dev = _scanner_panel()
+        self.assertTrue(panel.start_scan())
+        for _ in range(10):
+            panel.engine.frame(np.zeros(0, np.complex64))
+        self.assertEqual(panel.hits(), [])
+        host.state["receiving"] = False
+        panel.refresh()
+        self.assertFalse(panel.engine.active)
+        self.assertIn("the receiver was stopped", panel._status.text())
 
     def test_stopped_demo_device_is_started_for_the_sweep_only(self):
-        from sdr_module.gui.device_dialog import MockDevice
-        from sdr_module.gui.scanner_dialog import _ScanWorker
-
-        dev = MockDevice()
-        self.assertFalse(dev.is_streaming)
-        hits = []
-        worker = _ScanWorker(dev, 100.1e6, 100.5e6, 200e3, -60.0)
-        worker.detected.connect(lambda f, p, n: hits.append(f))
-        worker.run()
-        self.assertTrue(worker.started_stream)
-        self.assertFalse(dev.is_streaming)  # stopped again afterwards
-        self.assertTrue(any(abs(f - 100.1e6) < 50e3 for f in hits), hits)
+        # The scan runs in the display loop, so a stopped receiver is
+        # started for it (and keeps running, to listen to what it finds).
+        panel, host, dev = _scanner_panel(receiving=False)
+        panel._start.setValue(100.1)
+        panel._end.setValue(100.5)
+        self.assertTrue(panel.start_scan())
+        self.assertEqual(host.started, 1)
+        _feed(panel, dev)
+        self.assertTrue(
+            any(abs(h.frequency_hz - 100.1e6) < 50e3 for h in panel.hits()),
+            panel.hits(),
+        )
 
     def test_levels_do_not_depend_on_the_device_block_size(self):
-        from sdr_module.gui.scanner_dialog import _ScanWorker
+        from sdr_module.dsp.sweep import SpectrumAverager, noise_floor_db
 
         floors = []
         for block in (8192, 262144):
-            worker = _ScanWorker(self._noise_device(block), 0, 1, 1, 0.0)
-            floors.append(worker._measure(100e6, 200e3)[2])
+            averager = SpectrumAverager()
+            averager.add(self._noise_block(block))
+            floors.append(noise_floor_db(averager.power_db()))
         self.assertAlmostEqual(floors[0], floors[1], delta=1.0)
 
     def test_dialog_keeps_the_sweep_inside_the_device_range(self):
-        from sdr_module.gui.scanner_dialog import ScannerDialog
-
-        class Spec:
-            freq_min, freq_max = 24e6, 1766e6
-
-        dev = self._noise_device(8192, limit_hz=1766e6)
-        dev.spec = Spec()
-        dialog = ScannerDialog(device=dev)
+        panel, _host, _dev = _scanner_panel(device_range=(24e6, 1766e6))
         # Partly outside: the hint says so before the scan starts.
-        dialog._start.setValue(1700.0)
-        dialog._end.setValue(1800.0)
-        dialog._step.setValue(1000.0)
-        self.assertIn("67 steps", dialog._steps_hint.text())
-        self.assertIn("Limited to the device's range", dialog._steps_hint.text())
-        self.assertTrue(dialog._start_btn.isEnabled())
+        panel._start.setValue(1700.0)
+        panel._end.setValue(1800.0)
+        panel._step.setValue(1000.0)
+        self.assertIn("67 channels", panel._hint.text())
+        self.assertIn("Limited to the device's range", panel._hint.text())
+        self.assertTrue(panel._start_btn.isEnabled())
         # Entirely outside: Start is disabled and says why.
-        dialog._start.setValue(1800.0)
-        dialog._end.setValue(1900.0)
-        self.assertFalse(dialog._start_btn.isEnabled())
-        self.assertIn("1766.000 MHz", dialog._start_btn.toolTip())
-        dialog._toggle_scan()
-        self.assertIsNone(dialog._worker)
-        self.assertEqual(dialog._status.property("tone"), "danger")
-        self.assertIn("1766.000 MHz", dialog._status.text())
+        panel._start.setValue(1800.0)
+        panel._end.setValue(1900.0)
+        self.assertFalse(panel._start_btn.isEnabled())
+        self.assertIn("1766.000 MHz", panel._start_btn.toolTip())
+        panel.toggle_scan()
+        self.assertFalse(panel.engine.active)
+        self.assertEqual(panel._status.property("tone"), "danger")
+        self.assertIn("1766.000 MHz", panel._status.text())
 
     def test_no_device_explains_how_to_connect(self):
-        from sdr_module.gui.scanner_dialog import ScannerDialog
-
-        dialog = ScannerDialog(device=None)
-        self.assertIn("Use Demo Device", dialog._empty.text())
-        self.assertIn("Device > Connect", dialog._start_btn.toolTip())
+        panel, _host, _dev = _scanner_panel(
+            blocker=(
+                "device",
+                "No receiver: use the demo device or connect an SDR to scan.",
+            )
+        )
+        self.assertIn("Use Demo Device", panel._empty.text())
+        self.assertIn("Connect...", panel._empty.text())
+        self.assertFalse(panel._demo_btn.isHidden())
+        self.assertFalse(panel._connect_btn.isHidden())
 
     def test_start_button_keeps_its_width(self):
-        from sdr_module.gui.device_dialog import MockDevice
-        from sdr_module.gui.scanner_dialog import ScannerDialog
-
-        dialog = ScannerDialog(device=MockDevice())
-        width = dialog._start_btn.minimumWidth()
-        dialog._scanning = True
-        dialog._update_controls()
-        self.assertEqual(dialog._start_btn.text(), "Stop Scan")
-        self.assertEqual(dialog._start_btn.minimumWidth(), width)
-        self.assertGreaterEqual(width, dialog._start_btn.sizeHint().width())
-        dialog._scanning = False
+        panel, _host, _dev = _scanner_panel()
+        width = panel._start_btn.minimumWidth()
+        self.assertTrue(panel.start_scan())
+        self.assertEqual(panel._start_btn.text(), "Stop Scan")
+        self.assertEqual(panel._start_btn.minimumWidth(), width)
+        self.assertGreaterEqual(width, panel._start_btn.sizeHint().width())
+        panel.stop_scan()
 
 
 class TestFirstRunDemoMode(unittest.TestCase):

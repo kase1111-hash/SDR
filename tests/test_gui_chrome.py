@@ -173,8 +173,16 @@ class TestLayout(_WindowTestCase):
         titles = [tabs.tabText(i) for i in range(tabs.count())]
         self.assertIn("Decoder", titles)
         self.assertIn("Info", titles)
+        # Every tab shows (no scroll arrows) in the right column at the
+        # smallest window size, 1024x640, where the default layout gives the
+        # column 380 px. (It was 360 px of tabs before the Scanner tab.)
+        self.win.resize(1024, 640)
+        self.settle()
+        self.win._apply_default_splitter_sizes()
+        self.settle()
         total = sum(tabs.tabBar().tabRect(i).width() for i in range(tabs.count()))
-        self.assertLessEqual(total, 360)
+        self.assertLessEqual(total, 376)
+        self.assertLessEqual(total, tabs.width() - 4)
         for i in range(tabs.count()):
             self.assertTrue(tabs.tabToolTip(i))
 

@@ -661,37 +661,39 @@ class TestHotplug(_WindowTestCase):
 
 
 class TestScanner(_WindowTestCase):
+    """Tools > Frequency Scanner shows the non-modal Scanner tab; the scan
+    runs in the display loop, which is never paused (it used to stop while
+    a modal dialog was open, freezing plots and audio)."""
+
     demo = True
 
     def _run(self, display_active):
-        from sdr_module.gui.scanner_dialog import ScannerDialog
-
-        seen = {}
         if display_active:
             self.win._display_timer.start()
-
-        def fake_exec(dialog):
-            seen["display_active"] = self.win._display_timer.isActive()
-            dialog.frequency_selected.emit(433.92e6)
-            return 0
-
-        with mock.patch.object(ScannerDialog, "exec", fake_exec):
-            self.win._show_scanner()
+        self.win._show_scanner()
         _flush_deletes()
-        self.assertEqual(self.win.findChildren(ScannerDialog), [])
+        seen = {"display_active": self.win._display_timer.isActive()}
+        self.assertEqual(self.win._current_panel_key(), "scanner")
+        self.assertIsNone(QApplication.activeModalWidget())
         return seen
 
     def test_display_pauses_and_tuning_a_result_tunes_the_receiver(self):
+        from sdr_module.gui.scanner_panel import ScanHit
+
         seen = self._run(display_active=True)
-        self.assertFalse(seen["display_active"])
-        self.assertTrue(self.win._display_timer.isActive())
+        self.assertTrue(seen["display_active"])  # no longer paused
         self.assertEqual(self.win._display_timer.interval(), 33)
+        # Listening to a result tunes the receiver, in the result's mode.
+        hit = ScanHit(433.92e6, -40.0, 40.0, 5e3, "None (I/Q)", "", "500 kHz")
+        self.assertTrue(self.win._scanner_host.scan_listen(hit))
         self.assertAlmostEqual(self.freq(), 433.92e6)
         self.assertAlmostEqual(self.win._device.frequency, 433.92e6)
+        self.assertEqual(self.win._control_panel.get_demod_mode(), "None (I/Q)")
         self.win._display_timer.stop()
 
     def test_a_stopped_display_stays_stopped(self):
-        self._run(display_active=False)
+        seen = self._run(display_active=False)
+        self.assertFalse(seen["display_active"])
         self.assertFalse(self.win._display_timer.isActive())
 
 
@@ -890,9 +892,10 @@ class TestEveryMenuActionAndThemeSwitching(unittest.TestCase):
         _flush_deletes()
 
         self.assertGreater(triggered, 30)
+        # Tools > Frequency Scanner shows the Scanner tab: no modal dialog.
+        self.assertNotIn("ScannerDialog", opened)
         for expected in (
             "DeviceDialog",
-            "ScannerDialog",
             "HelpDialog",
             "ErrorLogDialog",
             "RadioTunerWidget",

@@ -95,10 +95,20 @@ class TestScanOffline:
         assert rc == 1
         assert "sample rate unknown" in capsys.readouterr().out
 
-    def test_live_mode_without_input_is_informative(self, capsys):
-        rc = main(["scan", "--start", "88", "--end", "108"])
-        assert rc == 0
-        assert "--input" in capsys.readouterr().out
+    def test_live_mode_without_a_device_fails_and_says_why(self, capsys):
+        # A live scan sweeps a connected SDR (tests/test_cli_scan.py); with
+        # none it is an error that says what to do instead.
+        from unittest import mock
+
+        with mock.patch(
+            "sdr_module.core.device_manager.DeviceManager.scan_devices",
+            return_value=[],
+        ):
+            rc = main(["scan", "--start", "88", "--end", "108"])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "No SDR device is connected" in out
+        assert "--input" in out
 
 
 def _pocsag_iq_capture(path, fs=38400.0, baud=1200.0, deviation=2400.0):

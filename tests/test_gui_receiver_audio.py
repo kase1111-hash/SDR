@@ -397,13 +397,40 @@ class TestAudioHelpers(unittest.TestCase):
                 atol=1e-5,
             )
 
+    @staticmethod
+    def _balance(iq):
+        """``iq`` through Balance I/Q alone, in 33 ms blocks, and the
+        imbalance it tracked."""
+        from sdr_module.gui.audio_chain import IqConditioner
+
+        conditioner = IqConditioner()
+        conditioner.balance_iq = True  # (Remove DC spike stays off)
+        out = np.concatenate(
+            [
+                conditioner.process(iq[i : i + 80000], RATE)
+                for i in range(0, len(iq), 80000)
+            ]
+        )
+        return out, conditioner.imbalance
+
+    @staticmethod
+    def _image_dbc(iq, freq=300e3):
+        """The mirror image of the signal at ``freq``, in dBc."""
+        y = iq[-131072:]
+        spectrum = np.abs(np.fft.fft(y * np.hanning(len(y)))) ** 2
+        freqs = np.fft.fftfreq(len(y), 1 / RATE)
+        tone = np.argmin(abs(freqs - freq))
+        mirror = np.argmin(abs(freqs + freq))
+        return 10 * np.log10(
+            spectrum[mirror - 2 : mirror + 3].sum()
+            / spectrum[tone - 2 : tone + 3].sum()
+        )
+
     def test_balance_iq_ignores_a_dc_offset(self):
         # The I/Q imbalance estimate assumes no DC; with Remove DC spike off
         # a hardware DC offset biased it, and "balancing" made the mirror
         # image worse (-28.9 dBc before, -25.3 dBc after, with a -35 dBFS
         # offset).
-        from sdr_module.gui.audio_chain import IqConditioner
-
         rng = np.random.default_rng(12)
         n = int(1.0 * RATE)
         t = np.arange(n) / RATE
@@ -412,28 +439,36 @@ class TestAudioHelpers(unittest.TestCase):
         x = 0.05 * np.exp(2j * np.pi * 300e3 * t) + noise
         q = (1 + eps) * (x.imag * np.cos(phi) + x.real * np.sin(phi))
         iq = (x.real + 1j * q + 10 ** (-35 / 20) * np.exp(0.3j)).astype(np.complex64)
-
-        def image_dbc(y):
-            y = y[-131072:]
-            spectrum = np.abs(np.fft.fft(y * np.hanning(len(y)))) ** 2
-            freqs = np.fft.fftfreq(len(y), 1 / RATE)
-            tone = np.argmin(abs(freqs - 300e3))
-            mirror = np.argmin(abs(freqs + 300e3))
-            return 10 * np.log10(
-                spectrum[mirror - 2 : mirror + 3].sum()
-                / spectrum[tone - 2 : tone + 3].sum()
-            )
-
-        conditioner = IqConditioner()
-        conditioner.balance_iq = True  # (Remove DC spike stays off)
-        out = np.concatenate(
-            [conditioner.process(iq[i : i + 80000], RATE) for i in range(0, n, 80000)]
-        )
-        gain, phase = conditioner.imbalance
+        out, (gain, phase) = self._balance(iq)
         self.assertAlmostEqual(gain, eps, delta=0.005)
         self.assertAlmostEqual(phase, phi, delta=np.deg2rad(0.2))
-        self.assertGreater(image_dbc(iq), -30)
-        self.assertLess(image_dbc(out), -60)
+        self.assertGreater(self._image_dbc(iq), -30)
+        self.assertLess(self._image_dbc(out), -60)
+
+    def test_balance_iq_ignores_the_station_at_the_center(self):
+        # The station tuned at the center is no spread-out signal: an AM
+        # station there is a real envelope, which the blind estimate took
+        # for an imbalance (a gain error of -0.35 on the demo's 125.0 MHz
+        # station), so "balancing" gave every other signal a mirror image
+        # (a -60 dBc floor became a -37 dBc image).
+        rng = np.random.default_rng(13)
+        n = int(1.0 * RATE)
+        t = np.arange(n) / RATE
+        am = 0.03 * (1 + 0.5 * np.sin(2 * np.pi * 1000 * t)) * np.exp(0.6j)
+        other = 0.02 * np.exp(2j * np.pi * 300e3 * t)
+        noise = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 1e-3
+        iq = (am + other + noise).astype(np.complex64)  # no imbalance at all
+        out, (gain, phase) = self._balance(iq)
+        self.assertLess(abs(gain), 0.01)
+        self.assertLess(abs(phase), np.deg2rad(0.5))
+        self.assertLess(self._image_dbc(out), -55)
+        # ...and a real imbalance next to it is still found.
+        eps, phi = 0.05, np.deg2rad(3.0)
+        q = (1 + eps) * (iq.imag * np.cos(phi) + iq.real * np.sin(phi))
+        out, (gain, phase) = self._balance((iq.real + 1j * q).astype(np.complex64))
+        self.assertAlmostEqual(gain, eps, delta=0.005)
+        self.assertAlmostEqual(phase, phi, delta=np.deg2rad(0.2))
+        self.assertLess(self._image_dbc(out), -55)
 
     def test_dc_blocker_chunks_stay_finite_for_high_corners(self):
         from sdr_module.gui.audio_chain import DcBlocker

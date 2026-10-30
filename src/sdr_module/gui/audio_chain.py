@@ -670,12 +670,16 @@ class IqConditioner:
             # The statistics are averaged over seconds: a contiguous slice
             # of each block is plenty, and keeps this cheap at 20 MS/s.
             # (Taking every n-th sample instead would alias a strong tone,
-            # possibly to DC, and wreck the estimate.) The estimate assumes
-            # no DC, and with Remove DC spike off the hardware's DC offset
-            # would bias it (a -35 dBFS offset made the image worse than
-            # uncorrected): it gets the slice without its mean.
-            part = x[: self.IQ_SLICE]
-            gain, phase = estimate_iq_imbalance(part - part.mean())
+            # possibly to DC, and wreck the estimate.)
+            # The estimate is blind: it takes whatever makes I and Q differ
+            # for an imbalance, which only holds for signals spread around
+            # the center. The hardware's DC offset, and the station tuned at
+            # the center (an AM station there is a real envelope: -0.35 of
+            # "gain error" on the demo), are not; the slice's first
+            # difference leaves both out (it is zero at DC and 40 dB down
+            # within 5 kHz of it) and keeps the imbalance, which every real
+            # filter of I and Q alike preserves.
+            gain, phase = estimate_iq_imbalance(np.diff(x[: self.IQ_SLICE]))
             gain, phase = float(gain), float(phase)
             if self._gain is None or self._phase is None:
                 self._gain, self._phase = gain, phase

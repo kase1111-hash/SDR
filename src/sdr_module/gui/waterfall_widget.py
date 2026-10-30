@@ -683,12 +683,12 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._times: deque = deque(maxlen=history_size)
         self._row_steps: deque = deque(maxlen=history_size)
         self._row_axes: deque = deque(maxlen=history_size)
+        # (line, its level codes on its own span): quantized once, when the
+        # row arrives, so re-mapping the history after a retune or a span
+        # change only moves codes (found by the line's identity).
+        self._row_codes: deque = deque(maxlen=history_size)
         self._row_open = False  # the newest row may still gather lines
         self._row_end = 0.0  # when the newest row stops gathering
-        # Bumped whenever a row is added or merged; the ring of codes below
-        # notes the one it shows (so a re-map can reuse its codes).
-        self._history_version = 0
-        self._ring_version = -1
         # Why the rows are no longer live ("Stopped - press Space"), or None.
         self._stale: Optional[str] = None
 
@@ -1062,10 +1062,15 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             and self._newest_axis() == axis
             and len(self._history[-1]) == len(line)
         ):
-            merged = np.fmax(self._history[-1], line)
+            previous = self._history[-1]
+            merged = np.fmax(previous, line)
             self._history[-1] = merged
-            self._history_version += 1
-            self._write_top_row(merged, scroll=False)
+            codes = quantize_db(merged)
+            if self._row_codes and self._row_codes[-1][0] is previous:
+                self._row_codes[-1] = (merged, codes)
+            else:
+                self._row_codes.append((merged, codes))
+            self._write_top_row(codes, scroll=False)
         else:
             # Rows keep an exact cadence (each ends one interval after the
             # previous one ended), so N rows span N intervals even though
@@ -1079,9 +1084,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             self._times.append(now)
             self._row_steps.append(step)
             self._row_axes.append(axis)
-            self._history_version += 1
+            codes = quantize_db(line)
+            self._row_codes.append((line, codes))
             self._row_open = True
-            self._write_top_row(line, scroll=True)
+            self._write_top_row(codes, scroll=True)
         self._stale = None
         self._observe_levels(self._history[-1])
         if not self._clear_action.isEnabled():
@@ -1094,8 +1100,8 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._times.clear()
         self._row_steps.clear()
         self._row_axes.clear()
+        self._row_codes.clear()
         self._row_open = False
-        self._history_version += 1
         self._ring = None
         self._head = -1
         self._codes_axis = None
@@ -1785,8 +1791,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             self._regather_display()
         return self._disp_image
 
-    def _write_top_row(self, line: np.ndarray, scroll: bool) -> None:
-        """Put ``line`` in row 0, scrolling the older rows down if ``scroll``."""
+    def _write_top_row(self, row: np.ndarray, scroll: bool) -> None:
+        """Put the level codes ``row`` (on the current span) in row 0,
+        scrolling the older rows down if ``scroll``."""
         ring = self._ring
         axis = (self._center_freq, self._sample_rate, self._fft_size)
         if (
@@ -1797,12 +1804,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             self._render_image()
             return
         self._ensure_lut()
-        row = quantize_db(line)
         if scroll:
             # The oldest row's slot becomes the newest row.
             self._head = (self._head + 1) % self._history_size
         ring[self._head] = row
-        self._ring_version = self._history_version
         self._version += 1
         disp, pixels, key = self._disp_codes, self._disp_rgb, self._disp_key
         if disp is not None and pixels is not None and key is not None:
@@ -1821,9 +1826,12 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         current span, with the newest line at the top. Each row is mapped
         from the span it was received on (see :meth:`_map_codes`), so after
         a retune its signals are where they were and what it didn't cover
-        is empty. New lines only scroll the codes (see :meth:`add_line`);
-        colors come from a lookup table, so a change of levels, colors or
-        theme re-maps pixels without coming here.
+        is empty. The rows' codes were quantized when they arrived, so this
+        only moves codes (a retune at 32k points re-maps 16 M of them, while
+        the scanner retunes several times a second). New lines only scroll
+        the codes (see :meth:`add_line`); colors come from a lookup table,
+        so a change of levels, colors or theme re-maps pixels without coming
+        here.
         """
         self._disp_codes = None
         self._disp_rgb = None
@@ -1840,102 +1848,86 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         axes = list(self._row_axes)
         if len(axes) != len(rows):  # (rows added without their span)
             axes = [dst[:2]] * (len(rows) - len(axes)) + axes
+        own = {id(line): codes for line, codes in self._row_codes}
         count = len(rows)
-        # Rows received on the span the old codes were on are those codes
-        # exactly: they are moved, not quantized again (a retune at 32k
-        # points re-maps 16 M values).
-        old_ring, old_axis, old_head = self._ring, self._codes_axis, self._head
-        reuse = (
-            old_ring is not None
-            and old_axis is not None
-            and self._ring_version == self._history_version
-            and old_ring.shape[0] == self._history_size
-        )
         # Ring slot h holds history row h (oldest first); the newest is at
-        # the head.
-        ring = np.zeros((self._history_size, dst[2]), dtype=np.uint16)
+        # the head. (The old ring's memory is reused: it is all rewritten.)
+        ring = self._ring
+        if ring is None or ring.shape != (self._history_size, dst[2]):
+            ring = np.zeros((self._history_size, dst[2]), dtype=np.uint16)
+        else:
+            ring.fill(0)
         start = 0
         while start < count:
             key = (axes[start], len(rows[start]))
             stop = start + 1
             while stop < count and (axes[stop], len(rows[stop])) == key:
                 stop += 1
-            old_codes = None
-            if reuse and old_axis is not None and key == (old_axis[:2], old_axis[2]):
-                age = count - 1 - np.arange(start, stop)
-                old_codes = (old_ring, (old_head - age) % self._history_size)
-            mapped = self._map_codes(rows[start:stop], axes[start], dst, old_codes)
-            if mapped is not None:
-                ring[start:stop] = mapped
+            codes = []
+            for line in rows[start:stop]:
+                found = own.get(id(line))
+                # (A line put in the history without its codes: quantize it.)
+                codes.append(found if found is not None else quantize_db(line))
+            self._map_codes(codes, axes[start], dst, ring[start:stop])
             start = stop
         self._ring = ring
         self._head = count - 1
         self._codes_axis = dst
-        self._ring_version = self._history_version
         self._ensure_lut()
 
     @staticmethod
     def _map_codes(
-        rows: List[np.ndarray],
+        codes: List[np.ndarray],
         src: Tuple[float, float],
         dst: Tuple[float, float, int],
-        codes: Optional[Tuple[np.ndarray, np.ndarray]] = None,
-    ) -> Optional[np.ndarray]:
-        """Level codes of ``rows`` (dB lines of one length, received over
-        ``src`` = (center, span)) on the bins of ``dst`` = (center, span,
-        bins), oldest first. Each bin gets the strongest level of the row's
-        bins that fall in it (or of the row's bin it falls in); bins the row
-        didn't cover get code 0 (no data). None when nothing overlaps.
-
-        ``codes`` = (ring, slots): the rows' codes already quantized on
-        their own span (``ring[slots]``), used instead of quantizing them."""
+        out: np.ndarray,
+    ) -> bool:
+        """Write the level codes ``codes`` (rows of one length, oldest
+        first, received over ``src`` = (center, span)) into ``out`` (as many
+        rows of zeros, on the bins of ``dst`` = (center, span, bins)). Each
+        bin gets the strongest level of the row's bins that fall in it (or
+        of the row's bin it falls in); bins the row didn't cover stay 0 (no
+        data). False when nothing overlaps."""
         src_center, src_span = src
         dst_center, dst_span, n_dst = dst
-        n_src = len(rows[0])
+        n_src = len(codes[0])
         if n_src == 0 or src_span <= 0 or dst_span <= 0 or n_dst <= 0:
-            return None
+            return False
         src_start = src_center - src_span / 2
         dst_start = dst_center - dst_span / 2
         if src_start >= dst_start + dst_span or src_start + src_span <= dst_start:
-            return None  # retuned beyond: nothing of it is on this span
+            return False  # retuned beyond: nothing of it is on this span
         src_bin = src_span / n_src
         dst_bin = dst_span / n_dst
-        out = np.zeros((len(rows), n_dst), dtype=np.uint16)
         if abs(src_bin - dst_bin) <= 1e-9 * dst_bin:
-            # Same bins, another center: a shift (the gap left empty).
+            # Same bins, another center: a shift (the gap left empty), one
+            # row's copy at a time (no temporary copy of the whole block).
             shift = int(round((src_start - dst_start) / dst_bin))
             lo, hi = max(0, shift), min(n_dst, shift + n_src)
             if hi <= lo:
-                return None
-            if codes is not None:
-                ring, slots = codes
-                out[:, lo:hi] = ring[slots, lo - shift : hi - shift]
-            else:
-                block = np.stack([np.asarray(r)[lo - shift : hi - shift] for r in rows])
-                out[:, lo:hi] = quantize_db(block)
-            return out
+                return False
+            for i, row in enumerate(codes):
+                out[i, lo:hi] = row[lo - shift : hi - shift]
+            return True
         edges = dst_start + np.arange(n_dst + 1) * dst_bin
         first = np.floor((edges[:-1] - src_start) / src_bin + 1e-9).astype(np.intp)
         stop = np.ceil((edges[1:] - src_start) / src_bin - 1e-9).astype(np.intp)
         valid = (stop > 0) & (first < n_src)
         if not valid.any():
-            return None
+            return False
         first = np.clip(first, 0, n_src - 1)
         stop = np.maximum(np.clip(stop, 1, n_src), first + 1)
-        if codes is not None:
-            ring, slots = codes
-            quantized = ring[slots]
-        else:
-            quantized = quantize_db(np.stack([np.asarray(r) for r in rows]))
-        mapped = np.take(quantized, first, axis=1)
+        block = np.stack(codes)
+        mapped = np.take(block, first, axis=1)
         for k in range(1, int((stop - first).max())):
             np.maximum(
                 mapped,
-                np.take(quantized, np.minimum(first + k, stop - 1), axis=1),
+                np.take(block, np.minimum(first + k, stop - 1), axis=1),
                 out=mapped,
             )
         mapped[:, ~valid] = 0
-        return mapped
+        out[...] = mapped
+        return True
 
     # ------------------------------------------------------------------
     # Internals: interaction

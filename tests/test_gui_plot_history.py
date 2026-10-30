@@ -253,12 +253,15 @@ class TestWaterfallRowsKeepTheirFrequency(_WaterfallHistoryCase):
 
 
 class TestRemapReusesCodes(_WaterfallHistoryCase):
-    """Rows still on the span the codes were on are moved, not quantized
-    again: the result is exactly what a full rebuild gives."""
+    """Each row's codes are quantized once, when it arrives: a re-map only
+    moves them, and the result is exactly what quantizing every row's line
+    again gives."""
 
     def rebuilt(self):
         reused = self.w._codes.copy()
-        self.w._ring = None  # no old codes to reuse: quantize every row
+        # No codes to reuse: quantize every row's line again.
+        self.w._row_codes.clear()
+        self.w._ring = None
         fresh = self.w._codes.copy()
         return reused, fresh
 
@@ -267,6 +270,22 @@ class TestRemapReusesCodes(_WaterfallHistoryCase):
         self.w.set_center_freq(100.6e6)
         self.feed(20, carriers=[(100.3e6, -30.0)])
         self.w.set_center_freq(100.2e6)  # rows from two spans now
+        reused, fresh = self.rebuilt()
+        np.testing.assert_array_equal(reused, fresh)
+
+    def test_a_retune_never_quantizes_the_history_again(self):
+        # The scanner retunes the LO several times a second. Quantizing the
+        # rows from older spans again took ~100 ms a retune at 32k points
+        # (the sweep slowed to a step a second).
+        self.w.set_history_seconds(300)  # merged rows keep their codes too
+        self.feed(130, carriers=[(100.3e6, -30.0)])
+        self.w.set_center_freq(100.6e6)
+        self.feed(20, carriers=[(100.3e6, -30.0)])
+        with mock.patch.object(wfm, "quantize_db", wraps=wfm.quantize_db) as q:
+            self.w.set_center_freq(100.2e6)  # rows from two spans
+            self.w.set_center_freq(99.9e6)
+            self.w.set_sample_rate(1.2e6)  # and a span change
+        q.assert_not_called()
         reused, fresh = self.rebuilt()
         np.testing.assert_array_equal(reused, fresh)
 
@@ -279,6 +298,17 @@ class TestRemapReusesCodes(_WaterfallHistoryCase):
         self.w.set_fft_size(4096)
         reused, fresh = self.rebuilt()
         np.testing.assert_array_equal(reused, fresh)
+
+    def test_long_rows_decimate_like_one_row_at_a_time(self):
+        # A whole history of 16k- and 32k-point rows is decimated another
+        # way (reduceat); new rows are added one at a time: same pixels.
+        rng = np.random.default_rng(4)
+        for bins in (16384, 32768):
+            data = rng.integers(1, 2047, (6, bins), dtype=np.uint16)
+            for cols in (1300, 2600, 777):
+                whole = swm.columns_max(data, cols, axis=1)
+                rows = np.stack([swm.columns_max(row, cols) for row in data])
+                np.testing.assert_array_equal(whole, rows)
 
     def test_quantize_works_on_a_copy(self):
         line = np.array([-50.0, np.nan, np.inf, -np.inf], dtype=np.float32)

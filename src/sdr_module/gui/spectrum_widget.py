@@ -143,6 +143,10 @@ STALE_VEIL_ALPHA = 150
 #: Widest a bookmark label gets (its name is elided past that), in pixels.
 BOOKMARK_LABEL_MAX_PX = 120
 
+#: Rows at least this long (FFT bins) are decimated with reduceat (see
+#: columns_max).
+_REDUCEAT_MIN_BINS = 16384
+
 
 def axis_font() -> "QFont":
     """Monospace font for plot tick labels and readouts."""
@@ -619,8 +623,10 @@ def columns_max(data: np.ndarray, cols: int, axis: int = -1) -> np.ndarray:
     if n <= cols:
         return data
     edges = (np.arange(cols) * n // cols).astype(np.intp)
-    if data.ndim == 1:
-        return np.maximum.reduceat(data, edges)
+    if data.ndim == 1 or n >= _REDUCEAT_MIN_BINS:
+        # (2-D: a whole history of long rows streams through reduceat about
+        # twice as fast as through the dozens of gathers below.)
+        return np.maximum.reduceat(data, edges, axis=axis)
     # 2-D: reduceat along an inner axis is slow; each column spans only a
     # few bins, so a handful of strided gathers is 3-4x faster.
     ends = np.append(edges[1:], n)

@@ -8112,10 +8112,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if error is not None:
             logger.error(f"Failed to save recording: {error}")
             if quiet:
+                # (Nobody watches an automatic save: shown as long as the
+                # warning it may replace, "Recording stopped: ...".)
                 reason = str(error).rstrip(".")
                 self._show_status_error(
                     f"Could not save the recording to {name}: {reason}. It is "
                     "kept: save it elsewhere with Save... in the Recording group.",
+                    20000,
                     log=False,
                 )
             else:

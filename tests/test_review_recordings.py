@@ -194,6 +194,9 @@ class TestAutoSaveOnANearlyFullDisk(_ReviewCase):
         # (Said once: what to do is the auto-save's own advice.)
         self.assertNotIn("free up some space", text)
         self.assertIn("It is kept: save it elsewhere", text)
+        # Nobody watches an automatic save: it stays as long as the warning
+        # it replaces ("Recording stopped: ..."), not a 6 s blink.
+        self.assertEqual(self.win._message_timer.interval(), 20000)
 
     def test_another_drive_with_room_still_gets_a_copy(self):
         self.set_format(".cs16")

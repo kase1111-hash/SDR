@@ -2027,6 +2027,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Transmitting (Send ID Now, Transmit Text): the transmit engine,
         # the ON AIR badge and the Ham ID panel's TX side (T7).
         self._tx_station = StationTx(self)
+        # Device > Second Receiver... (T13): a second receiver window, whose
+        # Listen choice can mute this one. (Imported here: it reuses this
+        # module's receiver chain.)
+        from .second_receiver import SecondReceiverHost
+
+        self._second_rx = SecondReceiverHost(self)
         self._setup_menus()
         self._setup_toolbar()
         self._setup_receiver_bar()
@@ -2403,6 +2409,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._refresh_devices,
             tip="List the SDR devices currently plugged in",
         )
+        device_menu.addSeparator()
+        self._second_rx.add_menu_action(device_menu)  # Second Receiver... (T13)
 
         # ---- Radio ----
         radio_menu = menubar.addMenu("&Radio")
@@ -6347,6 +6355,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         speaker = self._audio_enabled and audible and gate.is_open
         # (Muted while the Scanner moves between channels.)
         speaker = speaker and not self._scan_muted
+        # (And while the second receiver's Listen plays only that one.)
+        speaker = speaker and not self._second_rx.mutes_main()
         if speaker and not self._realtime():
             # A few ms of signal per display frame would play as a buzz.
             speaker = False
@@ -6667,6 +6677,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._playback.close(restore=True, resume=False, quiet=True)
 
         def open_replacing_current(entry: Dict[str, Any]) -> Any:
+            # (T13) The second receiver's device stays its own: refused
+            # before anything here is closed (the dialog shows why).
+            problem = self._second_rx.entry_problem(entry)
+            if problem:
+                raise RuntimeError(problem)
             end_playback()
             try:
                 device_class = driver_class(str(entry.get("type", "")))
@@ -8444,6 +8459,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._scanner_panel.stop_scan(stay=False)
         # A recording playing back: the tuning from before it is saved.
         self._playback.shutdown()
+        # The second receiver: its recording finished, its device closed and
+        # its settings saved (T13).
+        self._second_rx.shutdown()
         self._commit_pending_history()  # the last frequency joins Recent
         self._persist_state()
         for timer in (self._display_timer, self._status_timer, self._hotplug_timer):

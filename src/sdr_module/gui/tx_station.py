@@ -71,6 +71,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             amp=settings.get_bool(KEY_AMP, False),
         ).clamped()
         self._resume_rx = False
+        # The power of the transmission on the air (the HackRF keeps it
+        # until the end, whatever the setting does meanwhile).
+        self._air_power: Optional[TxPower] = None
         self._badge: Optional[QLabel] = None
         self._badge_action: Any = None
         self._send_action: Any = None
@@ -209,13 +212,23 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         wpm = int(panel.cw_wpm()) if panel is not None else MAX_ID_WPM
         return max(1, min(wpm, MAX_ID_WPM))
 
-    def power_problem(self, freq_hz: float, mode: str) -> Optional[str]:
+    def _shown_power(self) -> TxPower:
+        """The power the Output line and the QRP tab show: the running
+        transmission's while one is on the air, else the setting."""
+        if self._air_power is not None and self.busy:
+            return self._air_power
+        return self.power
+
+    def power_problem(
+        self, freq_hz: float, mode: str, power: Optional[TxPower] = None
+    ) -> Optional[str]:
         """Why the calculated output is too high (None: it isn't): over the
-        QRP panel's power limit, or over the legal limit at ``freq_hz``."""
+        QRP panel's power limit, or over the legal limit at ``freq_hz``
+        (with ``power``, the TX power setting by default)."""
         qrp = self._qrp()
         if qrp is None:
             return None
-        sdr_dbm = self.power.output_dbm(freq_hz)
+        sdr_dbm = (power or self.power).output_dbm(freq_hz)
         try:
             watts = qrp.calculated_output_watts(sdr_dbm)
         except Exception:  # pragma: no cover - defensive
@@ -309,14 +322,15 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
 
     def _update_power_label(self, freq: float) -> None:
         panel = self._panel()
-        dbm = self.power.output_dbm(freq)
+        power = self._shown_power()
+        dbm = power.output_dbm(freq)
         text = f"about {format_dbm_power(dbm)}"
         tip = (
             f"Estimated output at the HackRF's antenna port on {format_mhz(freq)} "
-            f"({self.power.describe(freq)}). Units differ by a few dB: "
+            f"({power.describe(freq)}). Units differ by a few dB: "
             "measure it before adding an amplifier."
         )
-        problem = self.power_problem(freq, self.id_spec(freq)[1])
+        problem = self.power_problem(freq, self.id_spec(freq)[1], power)
         tone = "danger" if problem else None
         if problem:
             tip += f"\n\n{problem[:1].upper()}{problem[1:]}."
@@ -331,9 +345,10 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         if qrp is None:
             return
         if can_transmit(self._device()):
+            power = self._shown_power()
             qrp.set_sdr_output(
-                self.power.output_dbm(freq),
-                f"From Ham ID > TX Power: {self.power.describe(freq)}",
+                power.output_dbm(freq),
+                f"From Ham ID > TX Power: {power.describe(freq)}",
             )
         else:
             qrp.set_sdr_output(None)
@@ -502,14 +517,16 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         self._resume_rx = bool(win._is_running)
         if self._resume_rx:
             win._stop_acquisition()
+        self._air_power = self.power
         started = self.engine.start(
             job,
             self._device(),
-            self.power,
+            self._air_power,
             policy=policy,
             make_id=make_id,
         )
         if not started:
+            self._air_power = None
             self._refuse(what, job.center_hz, self.engine.last_refusal)
             if self._resume_rx:
                 self._resume_rx = False
@@ -663,6 +680,7 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
 
     def _on_finished(self, result: TxResult) -> None:
         win = self._win
+        self._air_power = None  # (the setting shows again)
         if self._badge_action is not None:
             self._badge_action.setVisible(False)
         if self._stop_action is not None:

@@ -668,6 +668,25 @@ class TestPowerWhileOnTheAir(_TxCase):
         self.assertTrue(all(w.isEnabled() for w in controls))
         self.assertEqual([w.toolTip() for w in controls], tips)
 
+    def test_the_estimate_shows_the_power_on_the_air(self):
+        """Even a setting changed some other way while on the air shows
+        only once the transmission ends: the Output line and the QRP tab
+        give the power that is going out."""
+        panel = self.panel
+        panel.set_callsign("W1AW")
+        self.hackrf(pace=True)
+        before = panel._power_label.text()
+        qrp_before = self.win._qrp_panel._amp_calc.sdr_dbm()
+        self.assertTrue(self.station.send_station_id())
+        panel._tx_gain_spin.setValue(47)  # (programmatically: it's disabled)
+        panel._amp_check.setChecked(True)
+        self.assertEqual(panel._power_label.text(), before)
+        self.assertEqual(self.win._qrp_panel._amp_calc.sdr_dbm(), qrp_before)
+        self.station.stop()
+        self.wait_done(10)
+        self.assertEqual(panel._power_label.text(), "about 10 mW (+10 dBm)")
+        self.assertEqual(self.station.power.gain_db, 47)  # (the next one's)
+
 
 class TestConfirmationPower(_TxCase):
     def test_the_question_gives_the_station_output(self):

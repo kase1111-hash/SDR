@@ -5560,9 +5560,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._recording_info_label.setText(info)
 
     def _free_recording_space(self) -> Optional[int]:
-        """Free bytes on the drive recordings are written to."""
+        """Free bytes on the drive recordings are written to: the running
+        take's own (a temp folder chosen in Tools > Preferences meanwhile is
+        for the next one)."""
+        folder = None
+        if self._recording and not self._capture_pending:
+            folder = getattr(self._samples_buffer, "folder", None)
         try:
-            return int(shutil.disk_usage(self._capture_folder()).free)
+            return int(shutil.disk_usage(folder or self._capture_folder()).free)
         except OSError:
             return None
 
@@ -7808,12 +7813,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._bookmarks_panel.export_csv()
 
     def _save_screenshot(self) -> None:
-        """Save a PNG of the window (spectrum + waterfall + panels)."""
+        """Save a PNG of the window (spectrum + waterfall + panels), in the
+        screenshots folder (Tools > Preferences; then the last one used)."""
+        name = (
+            f"sdr_{self._current_frequency() / 1e6:.3f}MHz_"
+            f"{time.strftime('%Y%m%d_%H%M%S')}.png"
+        )
+        folder = file_dialogs.start_folder(self._settings, "screenshot", create=True)
         filename, _ = QFileDialog.getSaveFileName(
-            self, "Save Screenshot", "sdr.png", "PNG (*.png)"
+            self, "Save Screenshot", os.path.join(folder, name), "PNG (*.png)"
         )
         if not filename:
             return
+        file_dialogs.remember_folder(self._settings, "screenshot", filename)
         # Qt's own file dialog doesn't add the filter's extension.
         if not os.path.splitext(filename)[1]:
             filename += ".png"

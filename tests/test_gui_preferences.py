@@ -300,6 +300,82 @@ class TestPreferences(_PrefsCase):
         self.run_dialog(check)
         self.assertEqual(self.store.values["prefs/capture_folder"], "")
 
+    def test_every_button_says_what_it_does(self):
+        """(Review) The three Change... buttons had no tooltip."""
+        from PyQt6.QtWidgets import QPushButton
+
+        def check(dialog):
+            standard = set(dialog._buttons.buttons())
+            buttons = [b for b in dialog.findChildren(QPushButton) if b not in standard]
+            self.assertGreaterEqual(len(buttons), 5)
+            for button in buttons:
+                self.assertTrue(button.toolTip(), button.text())
+
+        self.run_dialog(check, accept=False)
+
+    def test_save_screenshot_starts_in_the_screenshots_folder(self):
+        """(Review) File > Save Screenshot... ignored the Screenshots folder
+        chosen here: it opened in the working directory, suggesting
+        "sdr.png"."""
+        shots = os.path.join(self.folder, "shots")
+        os.makedirs(shots)
+
+        def change(dialog):
+            with self.folder_dialog(shots):
+                dialog._choose_screenshots()
+
+        self.run_dialog(change)
+        starts = []
+
+        def save(parent, caption, start, *args, **kwargs):
+            starts.append(start)
+            return os.path.join(shots, "window"), "PNG (*.png)"
+
+        with mock.patch(
+            "sdr_module.gui.file_dialogs.QFileDialog.getSaveFileName",
+            side_effect=save,
+        ):
+            self.win._save_screenshot()
+        self.assertEqual(os.path.dirname(starts[0]), shots)
+        self.assertRegex(
+            os.path.basename(starts[0]), r"^sdr_\d+\.\d{3}MHz_\d{8}_\d{6}\.png$"
+        )
+        self.assertTrue(os.path.exists(os.path.join(shots, "window.png")))
+
+    def test_a_running_recording_keeps_watching_its_own_drive(self):
+        """(Review) A temp folder chosen while an I/Q recording runs is for
+        the next one: the running take's free space (it stops below 500 MB)
+        is still checked where it is written, not in the new folder."""
+        import numpy as np
+
+        first = os.path.join(self.folder, "first")
+        second = os.path.join(self.folder, "second")
+        for path in (first, second):
+            os.makedirs(path)
+        self.store.values["prefs/capture_folder"] = first
+        self.win._recording_folder = None
+        self.win._start_demo_mode()
+        self.win._toggle_recording(True)
+        self.win._capture(np.zeros(4096, np.complex64))  # the take's file
+        self.assertEqual(self.win._samples_buffer.folder, first)
+
+        def change(dialog):
+            with self.folder_dialog(second):
+                dialog._choose_capture()
+
+        self.run_dialog(change)
+        self.assertEqual(self.win._capture_folder(), second)  # the next take
+        checked = []
+        real = shutil.disk_usage
+        with mock.patch(
+            "sdr_module.gui.main_window.shutil.disk_usage",
+            side_effect=lambda path: checked.append(path) or real(path),
+        ):
+            self.assertIsNotNone(self.win._free_recording_space())
+        self.assertEqual(checked, [first])
+        self.win._toggle_recording(False)
+        self.win._release_device()
+
     def test_saved_output_is_used_at_start(self):
         self.store.values["prefs/audio_output"] = "usb.headset"
         self.store.values["prefs/audio_output_name"] = "USB Headset"

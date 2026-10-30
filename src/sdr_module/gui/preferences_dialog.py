@@ -265,8 +265,11 @@ class PreferencesDialog(QDialog if HAS_PYQT6 else object):
             )
             set_tone(self._output_hint, None)
 
-    def _folder_row(self, form: "QFormLayout", text: str, slot: Any) -> "QLabel":
-        """A row with a folder (elided path) and a Change... button."""
+    def _folder_row(
+        self, form: "QFormLayout", text: str, slot: Any, tip: str = ""
+    ) -> "QLabel":
+        """A row with a folder (elided path) and a Change... button (``tip``
+        its tooltip)."""
         row = QWidget()
         box = QHBoxLayout(row)
         box.setContentsMargins(0, 0, 0, 0)
@@ -278,6 +281,7 @@ class PreferencesDialog(QDialog if HAS_PYQT6 else object):
         box.addWidget(path, 1)
         change = QPushButton("Change...")
         change.setAutoDefault(False)
+        change.setToolTip(tip)
         change.clicked.connect(slot)
         box.addWidget(change)
         label = QLabel(text)
@@ -291,14 +295,20 @@ class PreferencesDialog(QDialog if HAS_PYQT6 else object):
         group = QGroupBox("Folders")
         form = self._form(group)
         self._recordings_label = self._folder_row(
-            form, "&Recordings:", self._choose_recordings
+            form,
+            "&Recordings:",
+            self._choose_recordings,
+            "Choose the folder recordings go to",
         )
         self._recordings_label.setToolTip(
             "Where audio recordings and automatically saved I/Q recordings go "
             "(also the Recording group's Folder)"
         )
         self._screenshots_label = self._folder_row(
-            form, "&Screenshots:", self._choose_screenshots
+            form,
+            "&Screenshots:",
+            self._choose_screenshots,
+            "Choose the folder File > Save Screenshot... starts in",
         )
         self._screenshots_label.setToolTip(
             "Where File > Save Screenshot... starts (it then remembers where you "
@@ -309,7 +319,12 @@ class PreferencesDialog(QDialog if HAS_PYQT6 else object):
     def _build_capture(self) -> "QGroupBox":
         group = QGroupBox("Recording Temp Folder")
         form = self._form(group)
-        self._capture_label = self._folder_row(form, "&Folder:", self._choose_capture)
+        self._capture_label = self._folder_row(
+            form,
+            "&Folder:",
+            self._choose_capture,
+            "Choose the folder I/Q recordings are written to while they record",
+        )
         self._capture_label.setToolTip(
             "Where an I/Q recording is written while it records, until you save "
             "it. Pick a drive with room: recordings stop when less than 500 MB "

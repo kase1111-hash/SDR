@@ -6694,6 +6694,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 tones.reset()
             snr = None if noise_db is None else level_db - noise_db
             self._check_fm_clipping(chain, seconds, snr)
+        else:
+            # Only FM has a tone squelch: nothing here is held back by one
+            # (Record Audio demodulates every block, so the FM channel tuned
+            # before mustn't leave its verdict for the Scanner and the meter).
+            self._tone_blocked = False
         self._show_detected_tone()
         join = self._audio_join
         nr = self._audio_options.noise_reduction

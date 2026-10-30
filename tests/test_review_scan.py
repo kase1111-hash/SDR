@@ -1122,6 +1122,53 @@ class TestScan15RecordAudioDuringASweep(_ScanWindowCase):
         self.assertTrue(win._stop_audio_recording())
 
 
+class TestScanToneBlockStaysOnItsFmChannel(_BookmarkScanCase):
+    """Found checking the fixes: Record Audio demodulates every block, and
+    outside FM nothing cleared "the tone squelch holds this signal back",
+    so the FM channel's verdict stuck to the AM channel after it. A bookmark
+    scan never stopped on an active AM channel that followed a channel
+    sending the wrong tone (squelch on, and since SCAN-04 squelch off)."""
+
+    def scan_while_recording(self, squelch):
+        import tempfile
+
+        from sdr_module.gui import file_dialogs
+
+        win, panel = self.win, self.win._scanner_panel
+        folder = tempfile.mkdtemp(prefix="scan-tone-")
+        self.addCleanup(__import__("shutil").rmtree, folder, True)
+        file_dialogs.set_recordings_folder(self.store, folder)
+        _pretend_audio(win)
+        win._control_panel.set_squelch_enabled(squelch)
+        self.settle()
+        # (A second of signal first: the squelch knows the noise floor, so
+        # it opens on the repeater at once and its tone is checked.)
+        self.frames(1.0)
+        self.assertTrue(win._start_audio_recording())
+        wrong = dict(_CLUB, label="Club, wrong tone", tone_mode="TSQL", ctone=123.0)
+        tower = {
+            "label": "Tower",
+            "freq_hz": 125.0e6,  # the demo's steady AM station
+            "demod": "AM",
+            "mode": "AM",
+            "bandwidth": "10 kHz",
+        }
+        heard = self.scan([wrong, tower], seconds=4.0)
+        hits = [h.label for h in panel.hits()]
+        blocked = win._tone_blocked
+        panel.stop_scan()
+        self.assertTrue(win._stop_audio_recording())
+        self.assertTrue(heard, "the scan never stopped on the AM station")
+        self.assertEqual(hits, ["Tower"])
+        self.assertFalse(blocked)
+
+    def test_squelch_on(self):
+        self.scan_while_recording(squelch=True)
+
+    def test_squelch_off(self):
+        self.scan_while_recording(squelch=False)
+
+
 # --------------------------------------------------------------------------- #
 # SCAN-17: at 20 MS/s the FM Broadcast preset listed a stray carrier
 # --------------------------------------------------------------------------- #

@@ -159,6 +159,27 @@ class TestPeakHold(unittest.TestCase):
         self.assertAlmostEqual(reading.power_dbm, -76.0, delta=0.05)
         self.assertAlmostEqual(reading.peak_hold_dbm, reading.power_dbm, places=6)
 
+    def test_old_channel_at_the_start_of_the_first_block_is_not_a_signal(self):
+        """ux:UX-B04: the first block after a retune starts with the channel
+        filter's memory of the old station. Averaged in, it made an empty
+        channel read 'S7, RST 37, Three and seven' in green for several
+        frames."""
+        hiss = noise(16000)
+        floor = power_dbfs(hiss)
+        for _ in range(12):
+            self.clock.now += 0.033
+            self.meter.update(tone(0.3, 16000) + hiss, floor)
+        self.meter.reset_peak()  # retuned to an empty channel
+        first = hiss.copy()
+        first[:800] += tone(0.3, 800)  # the old station's last samples
+        blocks = [first] + [noise(16000) for _ in range(8)]
+        for block in blocks:
+            self.clock.now += 0.033
+            reading = self.meter.update(block, floor)
+            self.assertFalse(reading.signal_present)
+            self.assertEqual(reading.readability, 1)
+            self.assertLess(reading.power_dbfs, floor + 1.0)
+
 
 class TestCalibration(unittest.TestCase):
     def test_uncalibrated_is_dbfs_minus_30(self):
@@ -237,6 +258,53 @@ class TestPanelStates(_PanelCase):
         )
         self.assertIsNone(self.panel._last_reading)
         self.assertFalse(self.panel._analog_meter._active)
+
+    def test_empty_gauge_fades_the_dial_without_its_numbers(self):
+        """The empty-state message box cut through the scale's numbers
+        ('+40' read as '0', half a '3')."""
+        meter = self.panel._analog_meter
+        meter.resize(390, 140)
+        self.panel.set_receiving(False, has_device=False)
+        with mock.patch.object(
+            meter, "_scale_labels", wraps=meter._scale_labels
+        ) as labels:
+            self.assertFalse(meter.grab().isNull())
+            self.assertFalse(labels.called)
+            self.panel.set_receiving(True)
+            self.show_reading(tone(0.05) + noise())
+            self.assertFalse(meter.grab().isNull())
+            self.assertTrue(labels.called)
+
+    def test_compact_peak_reading_resets_on_click(self):
+        """hm:UX-08: in the compact layout (what 1366x768 and 1024x640 get)
+        the peak is on the summary line, whose tooltip said 'Click to reset',
+        but clicking it did nothing."""
+        p = self.panel
+        p.set_compact(True)
+        self.show_reading(tone(0.5))
+        self.show_reading(tone(0.005), times=10)
+        self.assertIn("peak S9+", p._summary_label.text())
+        self.assertIn("Click to reset", p._summary_label.toolTip())
+        QTest.mouseClick(p._summary_label, Qt.MouseButton.LeftButton)
+        self.show_reading(tone(0.005), times=1)
+        self.assertNotIn("peak S9+", p._summary_label.text())
+
+    def test_peak_hold_tooltips_say_the_history_resets_too(self):
+        tip = self.panel._peak_label.toolTip()
+        self.assertIn("Click to reset", tip)
+        self.assertIn("level history", tip)
+        self.assertIn("peak hold", self.panel._sparkline.toolTip())
+
+    def test_context_menu_is_freed_after_use(self):
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QMenu
+
+        before = len(self.panel.findChildren(QMenu))
+        with mock.patch.object(QMenu, "exec", lambda *args, **kwargs: None):
+            for _ in range(3):
+                self.panel._s_meter_label.customContextMenuRequested.emit(QPoint(2, 2))
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        self.assertEqual(len(self.panel.findChildren(QMenu)), before)
 
     def test_no_device_says_what_to_do(self):
         """hm:UX-08."""
@@ -502,6 +570,22 @@ class TestSignalMeterInTheWindow(_WindowTestCase):
         # Channel SNR (200 kHz of noise), not "power + 120".
         self.assertGreater(p._last_reading.snr_db, 40)
         self.assertLess(p._last_reading.snr_db, 60)
+
+    def test_retune_from_a_station_never_flashes_a_report(self):
+        """ux:UX-B04: just after retuning from the S9+25 station to an empty
+        channel, the meter read 'S6-S8, RST 26-59' in green for a few
+        frames (the old station in the channel filter's memory)."""
+        p = self.panel
+        self.settle_on(100.1e6)
+        self.assertEqual(p._rst_label.text(), "59")
+        self.win.set_frequency(100.6e6)
+        for frame in range(12):
+            self.win._update_display()
+            p._update_display()
+            reading = p._last_reading
+            self.assertFalse(reading.signal_present, f"frame {frame}")
+            self.assertEqual(p._rst_label.text(), "—", f"frame {frame}")
+            self.assertEqual(p._s_meter_label.property("tone"), "muted")
 
     def test_noise_reference_matches_an_empty_channel(self):
         for freq, bandwidth in ((100.6e6, "200 kHz"), (145.5e6, "25 kHz")):

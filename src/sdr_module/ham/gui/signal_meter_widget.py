@@ -413,35 +413,41 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
         fm = QFontMetricsF(font)
         cx, cy, radius = self._geometry(fm)
 
-        self._draw_scale(painter, p, cx, cy, radius, fm)
-        if self._active and self._noise_s_units is not None:
-            self._draw_noise(painter, p, cx, cy, radius)
+        if not self._active and self._placeholder[0]:
+            # Nothing to measure: a faded dial without its numbers (the
+            # message would cut through them) or needles, and the message.
+            painter.save()
+            painter.setOpacity(0.35)
+            self._draw_scale(painter, p, cx, cy, radius, fm, labels=False)
+            painter.restore()
+            self._draw_placeholder(painter, p, face)
+        else:
+            self._draw_scale(painter, p, cx, cy, radius, fm)
+            if self._active and self._noise_s_units is not None:
+                self._draw_noise(painter, p, cx, cy, radius)
 
-        if self._show_peak and self._active and self._peak_s_units > self._s_units:
+            if self._show_peak and self._active and self._peak_s_units > self._s_units:
+                self._draw_needle(
+                    painter,
+                    cx,
+                    cy,
+                    self._peak_s_units,
+                    p.qcolor("plot_marker"),
+                    radius,
+                    1.6,
+                    start=radius * 0.72,
+                )
+
+            needle_color = p.qcolor("text") if self._active else p.qcolor("disabled")
             self._draw_needle(
                 painter,
                 cx,
                 cy,
-                self._peak_s_units,
-                p.qcolor("plot_marker"),
+                self._s_units if self._active else 0.0,
+                needle_color,
                 radius,
-                1.6,
-                start=radius * 0.72,
+                4.0,
             )
-
-        needle_color = p.qcolor("text") if self._active else p.qcolor("disabled")
-        self._draw_needle(
-            painter,
-            cx,
-            cy,
-            self._s_units if self._active else 0.0,
-            needle_color,
-            radius,
-            4.0,
-        )
-
-        if not self._active and self._placeholder[0]:
-            self._draw_placeholder(painter, p, face)
 
         painter.setClipping(False)
         painter.setPen(QPen(p.qcolor("surface1"), 1))
@@ -518,8 +524,9 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
             labels.append((label, box, s > 9.0))
         return labels
 
-    def _draw_scale(self, painter, p, cx, cy, radius, fm) -> None:
-        """Draw the zone band, ticks, labels and the S / dB legends."""
+    def _draw_scale(self, painter, p, cx, cy, radius, fm, labels: bool = True) -> None:
+        """Draw the zone band, ticks, labels and the S / dB legends (the
+        band and ticks only with ``labels`` False)."""
         band_w = self._band_width(self.width())
         arc_rect = QRectF(cx - radius, cy - radius, radius * 2, radius * 2)
 
@@ -551,6 +558,8 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
                 ),
             )
 
+        if not labels:
+            return
         for label, box, over in self._scale_labels(fm, cx, cy, radius):
             painter.setPen(p.qcolor("danger" if over else "plot_text"))
             painter.drawText(box, Qt.AlignmentFlag.AlignCenter, label)
@@ -629,7 +638,7 @@ class LevelSparkline(QWidget if HAS_PYQT6 else object):
         self.setToolTip(
             f"Signal level over the last {HISTORY_S:.0f} seconds (fading at a "
             "glance); the dashed line is the noise in the channel when the "
-            "signal is near it. Cleared when you retune."
+            "signal is near it. Cleared when you retune or reset the peak hold."
         )
 
     def sizeHint(self) -> "QSize":
@@ -878,7 +887,8 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
         )
         peak_tip = (
             f"Strongest recent reading: held {PEAK_HOLD_S:.0f} s, then falls "
-            "back. Click to reset; it also resets when you retune or stop."
+            "back. Click to reset it and the level history; both also reset "
+            "when you retune or stop."
         )
         self._s_tip = s_tip
 
@@ -968,13 +978,16 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
         self._compact_row.setSpacing(12)
         self._compact_row.addStretch(1)
         compact.addLayout(self._compact_row)
-        self._summary_label = set_role(QLabel(), "muted")
+        # (Clickable like PEAK HOLD, whose reading it carries here.)
+        self._summary_label = set_role(_ClickableLabel(), "muted")
         self._summary_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
         self._summary_label.setToolTip(
             f"Power, SNR and peak hold. Right-click to copy the report. {peak_tip}"
         )
+        self._summary_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._summary_label.clicked.connect(self.reset_peak)
         compact.addWidget(self._summary_label)
         # Added when there is room: the spoken report with Copy / Calibrate.
         self._compact_extra = QWidget()
@@ -996,7 +1009,7 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
         ):
             label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
             label.customContextMenuRequested.connect(
-                lambda pos, w=label: self._copy_menu().exec(w.mapToGlobal(pos))
+                lambda pos, w=label: self._show_copy_menu(w, pos)
             )
 
         self._update_units()
@@ -1023,6 +1036,12 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
         menu.addAction("Copy RST", self.copy_rst)
         menu.addAction("Copy Contest Report (59/599)", self.copy_contest_report)
         return menu
+
+    def _show_copy_menu(self, widget: "QWidget", pos) -> None:
+        """The readouts' right-click menu (freed after use)."""
+        menu = self._copy_menu()
+        menu.exec(widget.mapToGlobal(pos))
+        menu.deleteLater()
 
     def _build_calibration_button(self) -> "QToolButton":
         button = QToolButton()

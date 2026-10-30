@@ -186,6 +186,9 @@ class SignalMeter:
         self._noise_dbfs: Optional[float] = None
         self._noise_external_time = 0.0
         self._settle_until = 0.0
+        # The first block after a reset starts with the old channel (the
+        # channel filter's memory): only its second half is measured.
+        self._trim_next = False
         # Kept for compatibility: the noise floor in dBm.
         self._noise_floor_dbm = -120.0
 
@@ -280,6 +283,7 @@ class SignalMeter:
         self._noise_dbfs = None
         self._noise_external_time = 0.0
         self._settle_until = time.time() + _PEAK_SETTLE_S
+        self._trim_next = True
 
     def update(
         self, samples: np.ndarray, noise_dbfs: Optional[float] = None
@@ -302,6 +306,12 @@ class SignalMeter:
 
         # Calculate power
         samples = np.asarray(samples)
+        if self._trim_next and len(samples):
+            # Just after a reset (retune): the start of this block can still
+            # be the old channel, ringing out of the channel filter.
+            self._trim_next = False
+            if len(samples) >= 64:
+                samples = samples[len(samples) // 2 :]
         power_watts = float(np.mean(np.abs(samples) ** 2)) if len(samples) else 0.0
         power_dbfs = 10 * np.log10(power_watts + 1e-20)
 
@@ -314,6 +324,10 @@ class SignalMeter:
         settled = bool(self._settle_until) and now >= self._settle_until
         if settled:
             self._settle_until = 0.0
+            self._avg_window.clear()
+        elif now < self._settle_until:
+            # Settling: each block stands alone, so old-channel samples
+            # can't linger in the average (as a signal on an empty channel).
             self._avg_window.clear()
         self._avg_window.append(power_dbm)
         if len(self._avg_window) > self._avg_size:

@@ -23,6 +23,7 @@ from tests.test_gui_scanner import (  # noqa: E402
 )
 
 if HAS_PYQT6:
+    from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QApplication
 
 
@@ -899,6 +900,180 @@ class TestScan13NoStepTuned(_PanelCase):
             panel._status.text(),
             "The receiver could not tune to any step of this range.",
         )
+
+
+# --------------------------------------------------------------------------- #
+# SCAN-14: each reading cost time in proportion to the results listed
+# --------------------------------------------------------------------------- #
+def _merged_like_before(readings, step_hz, bookmarks=False):
+    """The results the Scanner tab listed for ``readings`` before the
+    index: each reading merges into the first result it repeats."""
+    from sdr_module.dsp.sweep import same_signal
+
+    hits = []  # [frequency, peak, width, label, listening, count]
+    for found in readings:
+        for hit in hits:
+            if bookmarks:
+                same = (
+                    abs(hit[0] - found.frequency_hz) < 10.0
+                    and hit[3] == found.label
+                    and hit[4] == tuple(found.listening)
+                )
+            else:
+                same = same_signal(hit[0], hit[2], found.frequency_hz, step_hz)
+            if same:
+                hit[5] += 1
+                if found.peak_db > hit[1]:
+                    hit[0], hit[1], hit[2] = (
+                        found.frequency_hz,
+                        found.peak_db,
+                        found.width_hz,
+                    )
+                break
+        else:
+            hits.append(
+                [
+                    found.frequency_hz,
+                    found.peak_db,
+                    found.width_hz,
+                    found.label,
+                    tuple(found.listening),
+                    1,
+                ]
+            )
+    return [(h[0], h[1], h[2], h[3], h[5]) for h in hits]
+
+
+class TestScan14ReadingsCostTheSame(_PanelCase):
+    def readings(self, count, seed, bookmarks=False):
+        import numpy as np
+
+        from sdr_module.gui.scan_engine import Found
+
+        rng = np.random.default_rng(seed)
+        out = []
+        for _ in range(count):
+            if bookmarks:
+                k = int(rng.integers(0, 12))
+                out.append(
+                    Found(
+                        145.0e6 + (k % 4) * 25e3,
+                        float(rng.uniform(-80, -20)),
+                        -90.0,
+                        10e3,
+                        ("FM", "5 kHz", ""),
+                        label=f"B{k}",
+                    )
+                )
+            else:
+                width = float(rng.choice([5e3, 12e3, 150e3, 400e3]))
+                out.append(
+                    Found(
+                        100e6 + float(rng.integers(0, 400)) * 37e3,
+                        float(rng.uniform(-80, -20)),
+                        -90.0,
+                        width,
+                        ("FM", "75 kHz", ""),
+                    )
+                )
+        return out
+
+    def test_readings_merge_as_they_did(self):
+        panel = self.panel()
+        panel._step.setValue(25.0)
+        readings = self.readings(600, seed=7)
+        for found in readings:
+            panel._on_found(found)
+        got = [
+            (h.frequency_hz, h.peak_db, h.width_hz, h.label, h.count)
+            for h in panel.hits()
+        ]
+        self.assertEqual(got, _merged_like_before(readings, 25e3))
+        self.assertEqual(panel._table.rowCount(), len(got))
+        # Every row shows its own result.
+        for row in range(panel._table.rowCount()):
+            cell = panel._table.item(row, 0)
+            hit = panel.hits()[cell.data(Qt.ItemDataRole.UserRole + 1)]
+            self.assertEqual(cell.text(), f"{hit.frequency_hz / 1e6:.3f} MHz")
+
+    def test_bookmark_readings_merge_as_they_did(self):
+        self.host.bookmarks = [
+            {"index": 0, "label": "B", "freq_hz": 145.0e6, "demod": "FM"}
+        ]
+        panel = self.panel()
+        panel.set_scan_mode("bookmarks")
+        self.assertTrue(panel.start_scan())
+        readings = self.readings(200, seed=3, bookmarks=True)
+        for found in readings:
+            panel._on_found(found)
+        got = [
+            (h.frequency_hz, h.peak_db, h.width_hz, h.label, h.count)
+            for h in panel.hits()
+        ]
+        self.assertEqual(got, _merged_like_before(readings, 1.0, bookmarks=True))
+        panel.stop_scan()
+
+    def test_a_reading_doesnt_visit_every_result(self):
+        from unittest import mock
+
+        from sdr_module.gui import scanner_panel
+        from sdr_module.gui.scan_engine import Found
+        from sdr_module.gui.scanner_panel import ScanHit
+
+        panel = self.panel()
+        panel.set_scan_mode("continuous")
+        panel._step.setValue(150.0)
+        panel._hits = [
+            ScanHit(30e6 + i * 150e3, -60.0, 20.0, 5e3, "FM", "5 kHz", "25 kHz")
+            for i in range(2000)
+        ]
+        panel._rebuild_table()
+        panel._table.setSortingEnabled(False)  # (as during a scan)
+        compared, cells, refreshed = [], [], []
+        same = scanner_panel.same_signal
+        item = panel._table.item
+        with (
+            mock.patch.object(
+                scanner_panel,
+                "same_signal",
+                side_effect=lambda *a: compared.append(a) or same(*a),
+            ),
+            mock.patch.object(
+                panel._table, "item", side_effect=lambda *a: cells.append(a) or item(*a)
+            ),
+            mock.patch.object(
+                panel, "_update_controls", side_effect=lambda: refreshed.append(1)
+            ),
+        ):
+            for i in range(0, 2000, 50):  # repeats, spread over the list
+                panel._on_found(
+                    Found(30e6 + i * 150e3, -59.0, -80.0, 5e3, ("FM", "5 kHz", ""))
+                )
+            for i in range(40):  # and new ones
+                panel._on_found(
+                    Found(400e6 + i * 150e3, -59.0, -80.0, 5e3, ("FM", "5 kHz", ""))
+                )
+        self.assertLessEqual(len(compared), 4 * 80)
+        self.assertLessEqual(len(cells), 80)
+        self.assertEqual(refreshed, [])  # (once a page, by the engine's on_state)
+        self.assertEqual(len(panel.hits()), 2040)
+        self.assertEqual(panel.hits()[0].count, 2)
+
+    def test_the_status_still_counts_every_signal_found(self):
+        from sdr_module.gui.scanner_dialog import SCAN_PRESETS
+
+        panel = self.panel()
+        index = [p.label for p in SCAN_PRESETS].index(SCAN_PRESETS[0].label) + 1
+        panel._preset.setCurrentIndex(index)  # FM broadcast
+        panel.set_scan_mode("continuous")
+        self.assertTrue(panel.start_scan())
+        self.run_scan(panel, seconds=3.0)
+        count = len(panel.hits())
+        self.assertGreater(count, 10)
+        self.assertIn(f"{count} signals found", panel._status.text())
+        self.assertFalse(panel._empty.is_visible())
+        self.assertTrue(panel._bookmark_all_btn.isEnabled())
+        panel.stop_scan()
 
 
 if __name__ == "__main__":  # pragma: no cover

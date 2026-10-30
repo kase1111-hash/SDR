@@ -4344,9 +4344,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _apply_tuning_range(self) -> None:
         """Let the Frequency field accept the connected device's range (its
-        tooltip and messages say what it is)."""
+        tooltip and messages say what it is), and the span of a recording
+        playing back even where it lies beyond (a 10 GHz downlink)."""
         low, high = self._tuning_limits()
         text = self._range_text() if self._device_tuning_range() else ""
+        if self._lo_lock is not None:
+            center, span, _why = self._lo_lock
+            low = min(low, max(center - span / 2, MIN_FREQUENCY_HZ))
+            high = max(high, center + span / 2)
         self._control_panel._freq_input.set_tuning_range(low, high, text)
 
     def _device_frequency(self) -> Optional[float]:
@@ -4406,7 +4411,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "transmission to end) first."
             )
         low, high = self._tuning_limits()
-        if not low <= freq <= high:
+        if self._lo_lock is None and not low <= freq <= high:
+            # (A recording playing has its own span, checked below: nothing
+            # is retuned, and it may lie beyond the receiver's range.)
             return self._refuse_tuning(
                 f"{format_frequency(freq)} is out of range: {self._range_text()}."
             )
@@ -4483,6 +4490,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         only the VFO, and frequencies outside the span are refused."""
         self._lo_lock = (float(center_hz), float(span_hz), str(why))
         self._lo_hz = float(center_hz)
+        self._apply_tuning_range()  # (the Frequency field takes the span)
         self._spectrum.set_center_freq(center_hz)
         self._waterfall.set_center_freq(center_hz)
         if not self._channel_fits(self._vfo_offset_hz(), rate=span_hz):
@@ -4494,6 +4502,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _unlock_lo(self) -> None:
         """Let the LO follow tuning again (see :meth:`_lock_lo`)."""
         self._lo_lock = None
+        self._apply_tuning_range()
         self._ensure_vfo_fits()
         self._tx_station.refresh()
 

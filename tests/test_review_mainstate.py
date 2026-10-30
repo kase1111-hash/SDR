@@ -8,6 +8,8 @@ regression tests for the confirmed findings.
   unless it stopped on a channel being listened to.
 * MS-2: Apply Preset with a frequency that is refused changes nothing
   else, and the refusal is not replaced by an "applied" confirmation.
+* MS-4: a recording made above 6 GHz plays at its own frequency and is
+  tuned inside its span.
 
 Run offscreen: ``QT_QPA_PLATFORM=offscreen python -m pytest
 tests/test_review_mainstate.py``
@@ -238,6 +240,87 @@ class TestApplyPresetRefused(_MainStateCase):
         text, tone = self.status()
         self.assertIn("ACARS", text)
         self.assertNotEqual(tone, "danger")
+
+
+# ---------------------------------------------------------------------------
+# MS-4: a recording above the receiver's 6 GHz
+# ---------------------------------------------------------------------------
+
+
+class TestRecordingAbove6GHz(_MainStateCase):
+    """A SigMF capture of the QO-100 downlink (center 10489.75 MHz) played
+    with the tuned frequency clamped to 6000 MHz: FREQ read 6000.000 MHz,
+    the receiver mixed 4.5 GHz off, and every frequency in the file was
+    refused as out of range."""
+
+    CENTER = 10489.75e6
+
+    def setUp(self):
+        super().setUp()
+        path = self.recording(self.CENTER, 2.4e6, seconds=1.0, offset_hz=50e3)
+        self.assertTrue(self.win._open_recording(path))
+
+    def covered(self):
+        from sdr_module.gui.tuning import format_mhz_range
+
+        return format_mhz_range(self.CENTER - 1.2e6, self.CENTER + 1.2e6)
+
+    def test_it_plays_at_its_own_frequency(self):
+        win = self.win
+        self.assertEqual(win._lo_frequency(), self.CENTER)
+        self.assertEqual(win._current_frequency(), self.CENTER)
+        self.assertEqual(win._vfo_offset_hz(), 0.0)
+        self.assertEqual(win._freq_label.text(), "10489.750 MHz")
+        self.assertIn(f"Playing take.sigmf-data ({self.covered()})", self.status()[0])
+
+    def test_a_signal_in_it_is_tuned_and_heard(self):
+        win = self.win
+        win._set_demod_mode("AM")
+        self.assertTrue(win.set_frequency(self.CENTER + 50e3))
+        self.assertEqual(win._current_frequency(), self.CENTER + 50e3)
+        self.assertEqual(win._lo_frequency(), self.CENTER)
+        self.assertEqual(win._vfo_offset_hz(), 50e3)
+        self.assertEqual(win._receiver_chain().offset_hz, 50e3)
+        self.assertEqual(win._freq_label.text(), "10489.800 MHz")
+        for _ in range(6):
+            win._process_block(win._device.read_samples(80000))
+        self.assertGreater(win._last_peak_db, -20.0)  # the carrier, in the channel
+
+    def test_frequencies_outside_it_are_refused_as_outside_the_recording(self):
+        win = self.win
+        self.assertFalse(win.set_frequency(10495e6))
+        self.assertEqual(win._current_frequency(), self.CENTER)
+        self.assertEqual(
+            self.status(),
+            (
+                "10495.000 MHz is outside the recording, which covers "
+                f"{self.covered()}.",
+                "danger",
+            ),
+        )
+
+    def test_typing_a_frequency_in_it(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QApplication
+
+        self.win._focus_frequency_entry()
+        self.settle()
+        field = QApplication.focusWidget()
+        QTest.keyClicks(field, "10490.5")
+        self.assertFalse(field.property("tone"))  # (no red frame: it can be tuned)
+        QTest.keyClick(field, Qt.Key.Key_Return)
+        self.settle()
+        self.assertEqual(self.win._current_frequency(), 10490.5e6)
+
+    def test_closing_it_goes_back_to_the_receiver_and_its_range(self):
+        win = self.win
+        win._playback.close(restore=True)
+        self.assertEqual(win._control_panel._freq_input.tuning_range(), (1e3, 6e9))
+        self.assertEqual(win._current_frequency(), 100.1e6)
+        self.assertEqual(win._lo_frequency(), 100.1e6)
+        self.assertFalse(win.set_frequency(self.CENTER))  # the demo device: no
+        self.assertIn("is out of range", self.status()[0])
 
 
 if __name__ == "__main__":  # pragma: no cover

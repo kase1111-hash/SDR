@@ -414,6 +414,11 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         )
         self._amp_check.toggled.connect(self._on_tx_power_changed)
         self._add_row(power_form, "RF amp:", self._amp_check)
+        # (Their tips when not on the air: see _lock_tx_power.)
+        self._power_tips = [
+            widget.toolTip()
+            for widget in (self._tx_gain_spin, self._tx_gain_slider, self._amp_check)
+        ]
 
         self._power_label = QLabel("—")
         self._power_label.setWordWrap(True)
@@ -833,6 +838,7 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         self._sending_id = bool(is_id)
         self._sending_text = text if self._is_transmitting else ""
         self._tx_progress.setVisible(self._is_transmitting)
+        self._lock_tx_power(self._is_transmitting)
         if self._is_transmitting:
             self._tx_progress.setValue(0)
             self._tx_progress.setFormat("Starting…")
@@ -846,6 +852,20 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
 
     def is_transmitting(self) -> bool:
         return self._is_transmitting
+
+    def _lock_tx_power(self, on_air: bool) -> None:
+        """The HackRF keeps the power a transmission started with: while
+        one is on the air the TX gain and the amplifier can't change (what
+        they show is what goes out), and say so."""
+        widgets = (self._tx_gain_spin, self._tx_gain_slider, self._amp_check)
+        for widget, tip in zip(widgets, self._power_tips, strict=True):
+            widget.setEnabled(not on_air)
+            widget.setToolTip(
+                "The power can't change while transmitting: it applies to the "
+                "next transmission once this one ends."
+                if on_air
+                else tip
+            )
 
     def _show_stop(self) -> None:
         """Scroll the tab (if it scrolls) so Stop and the progress show."""

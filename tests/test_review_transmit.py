@@ -641,3 +641,169 @@ class TestDriverStartAndEnd:
         assert device.write_samples(samples, bandwidth_hz=10e3, mode="FM")
         assert fake.cancelled == 0
         assert fake.sent == len(samples)
+
+
+# --------------------------------------------------------------------------- #
+# TX-6 to TX-10: power on the air, the confirmation, settings, a sent job
+# --------------------------------------------------------------------------- #
+
+
+class TestPowerWhileOnTheAir(_TxCase):
+    def test_power_controls_wait_for_the_end(self):
+        """TX-6: the HackRF keeps the power a transmission started with, so
+        the TX gain and the amplifier can't be changed while it is on the
+        air (the estimate showed a power that wasn't)."""
+        panel = self.panel
+        panel.set_callsign("W1AW")
+        self.hackrf(pace=True)
+        controls = (panel._tx_gain_spin, panel._tx_gain_slider, panel._amp_check)
+        tips = [w.toolTip() for w in controls]
+        self.assertTrue(all(w.isEnabled() for w in controls))
+        self.assertTrue(self.station.send_station_id())
+        for widget in controls:
+            self.assertFalse(widget.isEnabled())
+            self.assertIn("while transmitting", widget.toolTip())
+        self.station.stop()
+        self.wait_done(10)
+        self.assertTrue(all(w.isEnabled() for w in controls))
+        self.assertEqual([w.toolTip() for w in controls], tips)
+
+
+class TestConfirmationPower(_TxCase):
+    def test_the_question_gives_the_station_output(self):
+        """TX-7: through the QRP tab's 100 W linear, the question states the
+        100 W the power check uses, and the HackRF's own 10 mW."""
+        self.panel.set_callsign("W1AW")
+        self.hackrf()
+        self.panel._tx_gain_spin.setValue(47)
+        self.panel._amp_check.setChecked(True)
+        self.win._qrp_panel._amp_calc.apply_preset("HackRF → 100 W linear")
+        self.store.values["tx/confirm"] = True
+        seen = []
+
+        def answer(box):
+            seen.append(f"{box.text()} {box.informativeText()}")
+            box.clickedButton = lambda: box.escapeButton()  # Cancel
+            return 0
+
+        self.win._exec_dialog = answer
+        self.assertFalse(self.station.send_station_id())
+        self.assertIn("about 100 W", seen[-1])
+        self.assertIn("10 mW", seen[-1])
+
+
+class TestTransmitTextSettings(_TxCase):
+    def test_wrong_types_in_the_saved_settings_are_ignored(self):
+        """TX-8: a tx/text value of the wrong shape doesn't stop Tools >
+        Transmit Text from opening; the defaults are used."""
+        from sdr_module.gui.transmit_text import TransmitTextDialog
+
+        for raw in (
+            '{"modes": [1]}',
+            '{"modes": "CW"}',
+            '{"save_format": ["wav"]}',
+            '{"mode": {"x": 1}, "text": 5}',
+            '{"modes": {"CW": {"wpm": [1], "emission": 3}}}',
+        ):
+            self.store.values["tx/text"] = raw
+            dialog = TransmitTextDialog(self.win)
+            try:
+                self.assertEqual(dialog.mode(), "RTTY", raw)
+                self.assertEqual(dialog.text(), "", raw)
+            finally:
+                dialog.close()
+                dialog.deleteLater()
+
+
+class TestConfirmSetting(_TxCase):
+    def test_only_an_explicit_no_skips_the_question(self):
+        """TX-9: an empty, unknown or unreadable tx/confirm asks (it turned
+        the confirmation off); "Don't ask again" (False) still skips it."""
+        from sdr_module.gui.preferences_dialog import PreferencesDialog
+
+        self.panel.set_callsign("W1AW")
+        self.hackrf()
+        asked = []
+
+        def answer(box):
+            asked.append(True)
+            box.clickedButton = lambda: box.escapeButton()  # Cancel
+            return 0
+
+        self.win._exec_dialog = answer
+        job = self.station.make_id_job(146.52e6)
+        for raw, asks in (
+            ("", True),
+            ("ja", True),
+            (None, True),
+            ("true", True),
+            (False, False),
+            ("false", False),
+            ("0", False),
+            ("Off", False),
+        ):
+            self.store.values["tx/confirm"] = raw
+            asked.clear()
+            self.assertEqual(self.station.confirm(job), not asks, raw)
+            self.assertEqual(bool(asked), asks, raw)
+            dialog = PreferencesDialog(self.store)
+            self.assertEqual(dialog.preferences().tx_confirm, asks, raw)
+            dialog.deleteLater()
+
+
+class TestSentJobs:
+    def test_a_job_sent_again_goes_out_again(self, monkeypatch):
+        """TX-10: a job whose source was read is sent from its start again
+        (it reported "Sent ... (0.0 s)" with nothing on the air)."""
+        from PyQt6.QtWidgets import QApplication
+
+        from sdr_module.gui.transmitter import Transmitter
+
+        QApplication.instance() or QApplication([])
+        fake = ThreadedFakeHackRF()
+        device = _open(monkeypatch, fake)
+        job = TxJob(
+            MorseIdSource("DE W1AW", 20, 2e6, emission="mcw"),
+            2e6,
+            146.52e6,
+            "FM",
+            6.4e3,
+            "DE W1AW",
+            is_id=True,
+        )
+        engine = Transmitter()
+        results = []
+        engine.finished.connect(results.append)
+        for _ in range(2):
+            assert engine.start(job, device)
+            assert engine.wait(30)
+            assert fake.tx_count() == job.total_samples
+            assert results[-1].ok and results[-1].seconds > 4.0
+
+    def test_a_used_source_that_cant_start_again_is_refused(self, monkeypatch):
+        from PyQt6.QtWidgets import QApplication
+
+        from sdr_module.gui.transmitter import Transmitter
+
+        QApplication.instance() or QApplication([])
+
+        class OneShot:
+            total_samples = 1000
+
+            def __init__(self):
+                self.position = 0
+
+            def read(self, count):
+                n = max(0, min(count, self.total_samples - self.position))
+                self.position += n
+                return np.full(n, 0.5, np.complex64)
+
+        device = _open(monkeypatch, ThreadedFakeHackRF())
+        source = OneShot()
+        source.read(1000)
+        job = TxJob(source, 2e6, 146.52e6, "FM", 12.5e3, "a used carrier")
+        engine = Transmitter()
+        assert engine.check(job, device) == (
+            "this transmission was already sent: make a new one to send it again"
+        )
+        assert not engine.start(job, device)

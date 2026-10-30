@@ -259,6 +259,14 @@ class ArraySource:
         return block
 
 
+def _was_read(source: Any) -> bool:
+    """Whether ``source`` has been read (its ``position`` is past 0)."""
+    try:
+        return int(getattr(source, "position", 0) or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def as_source(source: Any) -> Any:
     """A job's source as an object with ``read(n)`` and ``total_samples``
     (a plain array is wrapped in :class:`ArraySource`)."""
@@ -276,7 +284,9 @@ class TxJob:
     Attributes:
         source: The samples: a complex array, or an object with
             ``read(n) -> complex64 array`` (empty at the end) and
-            ``total_samples`` (generated as it is read).
+            ``total_samples`` (generated as it is read). Sending reads it;
+            a job sent again starts it again with its ``reset()`` (the
+            built-in sources have one; one without is refused once read).
         sample_rate: The rate the samples are for (the HackRF is put at it).
         center_hz: Where the emission is centered (the HackRF's frequency;
             the samples are at baseband around 0 Hz).
@@ -843,6 +853,8 @@ class Transmitter(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             return f"the HackRF transmits on {freq_low / 1e6:g}-{freq_high / 1e6:g} MHz"
         if job.total_samples <= 0:
             return "there is nothing to send"
+        if _was_read(job.source) and not callable(getattr(job.source, "reset", None)):
+            return "this transmission was already sent: make a new one to send it again"
         for item in (job, *id_jobs):
             problem = legality_problem(item.center_hz, item.bandwidth_hz, item.mode)
             if problem:
@@ -867,6 +879,13 @@ class Transmitter(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         duplex).
         """
         self.last_refusal = ""
+        if self.busy:  # (before touching a job that may be the one on the air)
+            self.last_refusal = "a transmission is already on the air"
+            logger.info(f"Transmission refused: {self.last_refusal}")
+            return False
+        reset = getattr(job.source, "reset", None)
+        if _was_read(job.source) and callable(reset):
+            reset()  # (sent before: from its start again)
         power = (power or TxPower()).clamped()
         cancel = threading.Event()
         since = self.seconds_since_last_id()

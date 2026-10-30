@@ -668,7 +668,31 @@ if HAS_PYQT6:
                     data = loaded if isinstance(loaded, dict) else {}
                 except ValueError:
                     logger.warning("Ignoring unreadable Transmit Text settings")
-            for mode, values in (data.get("modes") or {}).items():
+            try:
+                self._load_mode_settings(data)
+            except (TypeError, AttributeError, ValueError) as e:
+                # (A value of a shape this doesn't know: the defaults stay.)
+                logger.warning(f"Ignoring Transmit Text settings it can't use: {e}")
+            mode = data.get("mode", MODE_RTTY)
+            if not isinstance(mode, str) or mode not in TEXT_MODES:
+                mode = MODE_RTTY
+            index = self._mode_combo.findData(mode)
+            self._loading = True
+            try:
+                self._mode_combo.setCurrentIndex(max(0, index))
+                self._show_mode(self.mode())
+                text = data.get("text", "")
+                if isinstance(text, str):
+                    self._text_edit.setPlainText(text[:MAX_TEXT_CHARS])
+            finally:
+                self._loading = False
+            self._update_text_info()
+
+        def _load_mode_settings(self, data: Dict[str, Any]) -> None:
+            """Each mode's saved settings and the file format, where they
+            are of the right type (anything else keeps the default)."""
+            modes = data.get("modes")
+            for mode, values in (modes if isinstance(modes, dict) else {}).items():
                 if mode not in self._mode_settings or not isinstance(values, dict):
                     continue
                 current = self._mode_settings[mode]
@@ -686,20 +710,11 @@ if HAS_PYQT6:
                 if emission in ("auto", EMISSION_DIRECT, EMISSION_FM):
                     if emission != "auto" or mode == MODE_CW:
                         self._emission_choice[mode] = emission
-            if data.get("save_format") in {key for key, _f, _e in _SAVE_FORMATS}:
-                self._save_format = str(data["save_format"])
-            mode = data.get("mode", MODE_RTTY)
-            index = self._mode_combo.findData(mode if mode in TEXT_MODES else MODE_RTTY)
-            self._loading = True
-            try:
-                self._mode_combo.setCurrentIndex(max(0, index))
-                self._show_mode(self.mode())
-                text = data.get("text", "")
-                if isinstance(text, str):
-                    self._text_edit.setPlainText(text[:MAX_TEXT_CHARS])
-            finally:
-                self._loading = False
-            self._update_text_info()
+            save_format = data.get("save_format")
+            if isinstance(save_format, str) and save_format in {
+                key for key, _f, _e in _SAVE_FORMATS
+            }:
+                self._save_format = save_format
 
         def _save_settings(self) -> None:
             if self._loading:

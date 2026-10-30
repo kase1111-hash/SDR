@@ -364,7 +364,7 @@ class TestMinHold(_SpectrumCase):
             sp.update_spectrum(np.full(N, level))
         sp._choose_resolution(window="flat-top")
         self.assertTrue(np.all(np.isnan(sp._min_hold)))
-        self.assertTrue(np.all(sp._peak_hold <= -120.0))
+        self.assertTrue(np.all(np.isnan(sp._peak_hold)))  # (nothing held)
         self.assertEqual(sp._avg_count, 0)
 
     def test_reset_button_follows_either_hold_and_the_setting_persists(self):
@@ -414,7 +414,7 @@ class TestClear(_SpectrumCase):
         sp.clear()
         self.assertFalse(sp._has_data)
         self.assertIsNone(sp.stale_text())
-        self.assertTrue(np.all(sp._peak_hold <= -120.0))
+        self.assertTrue(np.all(np.isnan(sp._peak_hold)))  # (nothing held)
         sp._canvas.grab()  # the "No spectrum yet" placeholder paints
 
 

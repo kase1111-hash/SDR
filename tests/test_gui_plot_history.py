@@ -513,7 +513,7 @@ class TestStoppedPlots(_WindowTestCase):
         self.run_frames()
         win._disconnect_device()
         self.settle()
-        self.assertTrue(np.all(win._spectrum._peak_hold <= -120.0))
+        self.assertTrue(np.all(np.isnan(win._spectrum._peak_hold)))  # (nothing held)
         self.assertIn("No device", win._spectrum.stale_text() or "")
 
 

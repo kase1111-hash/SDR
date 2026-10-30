@@ -880,5 +880,53 @@ class TestWaterfallSnr(unittest.TestCase):
         self.check(2.4e6, 32768)
 
 
+class TestPeakHoldStartsEmpty(unittest.TestCase):
+    """PLOT-8: Peak hold starts with no level at all (it started at -120
+    dBFS, drawn as a flat line above the noise of a quiet recording at a
+    large FFT size, whose noise per bin is lower)."""
+
+    def setUp(self):
+        require_pyqt6(self)
+        self.sp = swm.SpectrumWidget()
+        self.addCleanup(self.sp.deleteLater)
+        self.sp.set_frequency_range(CENTER, 2.4e6)
+        self.sp.set_fft_size(32768)
+        self.sp.resize(1000, 360)
+        self.sp.show()
+        _settle()
+        self.sp.set_auto_range(True)
+        self.sp.set_peak_hold(True)
+
+    def test_quiet_noise_is_held_at_its_level(self):
+        sp = self.sp
+        analyzer = FrameSpectrumAnalyzer(32768)
+        rng = np.random.default_rng(8)
+        sigma = 2.3e-5  # about -133 dBFS per bin at 32768 points
+        for _ in range(30):
+            n = 65536
+            x = (rng.normal(size=n) + 1j * rng.normal(size=n)) * sigma
+            sp.update_spectrum(analyzer.process(x.astype(np.complex64)).mean_db)
+        live = float(np.median(sp._spectrum))
+        held = float(np.median(sp._peak_hold))
+        self.assertLess(live, -130.0)
+        self.assertLess(held, -125.0)  # was exactly -120.0 everywhere
+        self.assertGreater(held, live)  # (it is the strongest of 30 frames)
+        self.assertLess(sp.db_range()[0], held)  # drawn inside the range
+
+    def test_nothing_is_held_before_the_first_frame(self):
+        sp = self.sp
+        sp.update_spectrum(np.full(32768, -90.0))
+        sp.reset_peak()
+        self.assertFalse(np.isfinite(sp._peak_hold).any())
+        drawn = []
+        with mock.patch.object(
+            swm.QPainter, "drawPolyline", lambda _p, poly: drawn.append(poly)
+        ):
+            sp._canvas.repaint()
+        self.assertEqual(len(drawn), 1)  # the live trace only
+        sp.update_spectrum(np.full(32768, -140.0))
+        self.assertTrue(np.all(sp._peak_hold == -140.0))
+
+
 if __name__ == "__main__":
     unittest.main()

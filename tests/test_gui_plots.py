@@ -412,10 +412,10 @@ class TestSpectrumBehavior(unittest.TestCase):
         w.set_center_freq(w._center_freq)  # unchanged: keep the peak
         self.assertTrue(np.all(w._peak_hold == -40.0))
         w.set_center_freq(145e6)
-        self.assertTrue(np.all(w._peak_hold == -120.0))
+        self.assertTrue(np.all(np.isnan(w._peak_hold)))  # (nothing held)
         w.update_spectrum(np.full(2048, -40.0))
         w.set_frequency_range(145e6, 1.0e6)
-        self.assertTrue(np.all(w._peak_hold == -120.0))
+        self.assertTrue(np.all(np.isnan(w._peak_hold)))
 
     def test_peak_checkbox_toggles_trace_and_reset_button(self):
         w = self.widget
@@ -428,14 +428,16 @@ class TestSpectrumBehavior(unittest.TestCase):
         w._peak_check.setChecked(True)
         w.update_spectrum(np.full(2048, -30.0))
         w._peak_reset_btn.click()
-        self.assertTrue(np.all(w._peak_hold == -120.0))
+        self.assertTrue(np.all(np.isnan(w._peak_hold)))  # (nothing held)
 
     def test_nan_bins_do_not_latch_peak_hold(self):
         w = self.widget
+        w.update_spectrum(np.full(2048, -60.0))
         data = np.full(2048, -50.0)
         data[10] = np.nan
         w.update_spectrum(data)
         self.assertFalse(np.any(np.isnan(w._peak_hold)))
+        self.assertEqual(w._peak_hold[10], -60.0)
 
     def test_empty_state_until_first_frame(self):
         w = self.widget

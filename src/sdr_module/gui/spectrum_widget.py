@@ -115,9 +115,6 @@ PASSBAND_ALPHAS = {True: (40, 150), False: (34, 110)}
 #: Narrowest the passband shading gets, in pixels.
 PASSBAND_MIN_PX = 3.0
 
-#: Floor used for "no peak yet" in the peak-hold trace.
-_PEAK_FLOOR_DB = -120.0
-
 #: A jump of the noise floor (the trace's median) at least this big between
 #: two frames is a gain or AGC change: peak hold and the average start over
 #: (peaks held at the old gain would sit far above the new trace).
@@ -864,8 +861,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
         # Spectrum data, and the (center, span) it was received with
         self._spectrum = np.zeros(self._fft_size)
-        self._peak_hold = np.full(self._fft_size, _PEAK_FLOOR_DB)
-        # The lowest level per bin since the last reset (NaN: none yet).
+        # The highest and the lowest level per bin since the last reset
+        # (NaN: none yet; fmax and fmin skip NaN).
+        self._peak_hold = np.full(self._fft_size, np.nan)
         self._min_hold = np.full(self._fft_size, np.nan)
         self._average = np.zeros(self._fft_size)
         self._avg_count = 0
@@ -1169,7 +1167,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
     def reset_peak(self):
         """Reset peak hold (and min hold: they start over together)."""
-        self._peak_hold = np.full(self._fft_size, _PEAK_FLOOR_DB)
+        self._peak_hold = np.full(self._fft_size, np.nan)
         self._min_hold = np.full(self._fft_size, np.nan)
         self._refit_range()
         self._canvas.update()
@@ -1684,7 +1682,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         # The holds drawn count too: a burst caught by Peak hold stays below
         # the top (where its level can be read), Min hold above the floor.
         if self._show_peak:
-            held = self._peak_hold[self._peak_hold > _PEAK_FLOOR_DB]
+            held = self._peak_hold[np.isfinite(self._peak_hold)]
             if held.size:
                 peak = max(peak, float(held.max()))
         if self._show_min:
@@ -2246,8 +2244,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
                 )
                 painter.restore()
 
-        # Peak hold (only bins that have seen data)
-        if self._show_peak and np.any(self._peak_hold > _PEAK_FLOOR_DB):
+        # Peak hold (once there is data; a bin without any is drawn below
+        # the floor)
+        if self._show_peak and np.isfinite(self._peak_hold).any():
             peak = self._trace_xy(self._peak_hold, plot, cols)
             if peak is not None:
                 painter.setPen(pens["peak"])

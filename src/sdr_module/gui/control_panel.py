@@ -461,6 +461,10 @@ class _FrequencySpinBox(QDoubleSpinBox if HAS_PYQT6 else object):
         self._max_hz = MAX_FREQUENCY_HZ
         self._range_text = ""
         self._step_hz = FREQ_STEP_HZ
+        # True while the arrows, Page Up/Down or the wheel step the value
+        # (the window then keeps the mode: only a typed frequency is a far
+        # tune that may pick one from the band plan).
+        self.stepping = False
         self.lineEdit().textChanged.connect(self._update_tone)
 
     def textFromValue(self, value: float) -> str:  # noqa: N802 (Qt API)
@@ -548,13 +552,17 @@ class _FrequencySpinBox(QDoubleSpinBox if HAS_PYQT6 else object):
         """Arrows, Page Up/Down and the wheel: whole tuning steps (like
         Left/Right on the plots), free of the rounding drift a step that
         isn't whole Hz (8.33 kHz) would collect."""
-        if self._edited():
-            super().stepBy(steps)  # interprets the typed text first
-            return
-        current = round(self.value() * self._unit_hz)
-        target = step_frequency(current, self._step_hz, steps)
-        target = min(max(target, self._min_hz), self._max_hz)
-        self.setValue(target / self._unit_hz)
+        self.stepping = True
+        try:
+            if self._edited():
+                super().stepBy(steps)  # interprets the typed text first
+                return
+            current = round(self.value() * self._unit_hz)
+            target = step_frequency(current, self._step_hz, steps)
+            target = min(max(target, self._min_hz), self._max_hz)
+            self.setValue(target / self._unit_hz)
+        finally:
+            self.stepping = False
         if self.style().styleHint(QStyle.StyleHint.SH_SpinBox_SelectOnStep, None, self):
             self.selectAll()
 
@@ -785,6 +793,11 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
         """Get frequency in Hz."""
         return self._frequency_hz
 
+    def is_stepping(self) -> bool:
+        """True while the arrows, Page Up/Down or the wheel step the field
+        (not a frequency typed in)."""
+        return bool(self._freq_input.stepping)
+
 
 # ---------------------------------------------------------------------------
 # Control panel
@@ -882,6 +895,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         # True while Apply Preset applies one (the window doesn't pick a mode
         # from the band plan for that tune: the preset has its own).
         self._applying_preset = False
+        # True while a quick-tune button (+10k...) steps the frequency (a
+        # step, not a far tune: see tuning_by_step).
+        self._quick_tuning = False
         # The tuned frequency the Presets group last matched (show_preset_for)
         # and whether its transmit lines are shown (a TX-capable device).
         self._preset_freq_hz: Optional[float] = None
@@ -1562,7 +1578,18 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._freq_input.set_frequency(current + offset)
         new = self._freq_input.get_frequency()  # clamped to the tuning range
         if new != current:
-            self.frequency_changed.emit(new)
+            self._quick_tuning = True
+            try:
+                self.frequency_changed.emit(new)
+            finally:
+                self._quick_tuning = False
+
+    def tuning_by_step(self) -> bool:
+        """True while the frequency changes by a step: the Frequency field's
+        arrows, Page Up/Down or wheel, or a quick-tune button (not a
+        frequency typed in, nor a preset). A step keeps the mode, as
+        Left/Right on the plots do."""
+        return self._quick_tuning or self._freq_input.is_stepping()
 
     def set_frequency(self, freq_hz: float):
         """Set frequency (no ``frequency_changed`` signal)."""

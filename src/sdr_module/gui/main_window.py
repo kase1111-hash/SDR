@@ -4686,53 +4686,66 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         before = self.__dict__.get("_shown_freq_hz")
         if before is None:
             before = self._current_frequency()
-        if self._tune_to(freq_hz) and not self._control_panel._applying_preset:
-            # (A preset sets its own mode right after.)
+        panel = self._control_panel
+        # Only a frequency typed in is a far tune: a preset sets its own
+        # mode right after, and a step (the field's arrows, a quick-tune
+        # button) keeps the mode, as Left/Right on the plots do.
+        far = not (panel._applying_preset or panel.tuning_by_step())
+        if self._tune_to(freq_hz) and far:
             self._listen_by_band_plan(before, self._current_frequency())
 
     def _listen_by_band_plan(self, before_hz: float, freq_hz: float) -> bool:
         """After a far tune with no mode of its own (a typed frequency, a
-        bookmark or recent frequency without one): in another band whose
-        usual listening differs from the current mode profile, listen the
-        band's way (its mode, filter and FM deviation) and say so. Radio >
-        Choose Mode From Band Plan turns this off. True when it changed."""
+        bookmark or recent frequency without one): outside the band you
+        were in, where the usual listening differs from the current mode
+        profile, listen that way (the mode, filter and FM deviation of the
+        preset channel there, else of the band) and say so. Radio > Choose
+        Mode From Band Plan turns this off. True when it changed."""
         action = self._own("_band_plan_action")
         if action is not None and not action.isChecked():
             return False
-        from ..core.band_plan import band_for
+        from ..core.band_plan import band_for, preset_for, preset_listening
 
         band = band_for(freq_hz)
-        if band is None or not band.mode:
+        # A preset channel is heard the preset's way (7.030 MHz, QRP 40m
+        # CW: in CW, though 40 m is an LSB band; 446.000 MHz, 70cm Calling:
+        # not as the narrower PMR446 band it borders), else as its band is.
+        preset = preset_for(freq_hz)
+        heard = preset_listening(preset) if preset is not None else None
+        if heard is not None and heard[0]:
+            name, where = str(preset.name), "this channel"
+        elif band is not None and band.mode:
+            heard, name, where = band.listening, band.name, "the band"
+        else:
             return False
+        target, target_deviation, target_width = heard
         before = band_for(before_hz)
-        if before is not None and before.name == band.name:
+        if band is not None and before is not None and before.name == band.name:
             return False  # the same band: the mode you chose there stays
         mode, deviation = self._listening_mode()
         broadcast = _BROADCAST_FM_DEVIATION
-        if mode == band.mode:
+        if mode == target:
             if mode != "FM" or (deviation == broadcast) == (
-                band.fm_deviation == broadcast
+                target_deviation == broadcast
             ):
                 return False  # already listening that way
-        elif mode == "USB" and band.mode == "LSB":
+        elif mode == "USB" and target == "LSB":
             # USB stays: the digital modes (FT8...) are USB on every band,
             # 40 m too. (LSB in a USB band does switch: voice above 10 MHz
             # and data are USB.)
             return False
         elif mode == "CW" and self._segment_allows_cw(freq_hz):
             return False  # Morse code in a CW segment stays CW
-        self._set_demod_mode(
-            band.mode, band.fm_deviation or None, band.bandwidth or None
-        )
-        how = self._mode_text(band.mode)
-        if band.mode == "FM":
-            kind = "broadcast" if band.fm_deviation == broadcast else "narrow"
+        self._set_demod_mode(target, target_deviation or None, target_width or None)
+        how = self._mode_text(target)
+        if target == "FM":
+            kind = "broadcast" if target_deviation == broadcast else "narrow"
             how = (
                 f"FM ({kind}, {self._control_panel.get_fm_deviation_text()} deviation)"
             )
         self._show_status_message(
-            f"{band.name}: listening in {how} with a "
-            f"{self._control_panel._bw_combo.currentText()} filter, as the band is "
+            f"{name}: listening in {how} with a "
+            f"{self._control_panel._bw_combo.currentText()} filter, as {where} is "
             "usually heard (Radio > Choose Mode From Band Plan)",
             "info",
             6000,

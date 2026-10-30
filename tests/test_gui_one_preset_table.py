@@ -365,5 +365,66 @@ class TestBandPlanListening(_WindowTestCase):
         self.assertEqual(self.panel.get_demod_mode(), "None (I/Q)")
 
 
+class TestOnlyFarTunesChooseTheMode(_WindowTestCase):
+    """T12 review: a step (the Frequency field's arrows, a quick-tune
+    button) is not a far tune, and a preset channel typed in is heard the
+    preset's way, not its band's."""
+
+    def setUp(self):
+        super().setUp()
+        self.win._set_demod_mode("FM", "75 kHz", "200 kHz")  # broadcast FM
+        self.win.set_frequency(100.1e6)
+        self.panel = self.win._control_panel
+
+    type_frequency = TestBandPlanListening.type_frequency
+    listening = TestBandPlanListening.listening
+
+    def quick_tune(self, text):
+        button = next(b for b in self.panel._quick_tune_buttons if b.text() == text)
+        button.click()
+
+    def test_stepping_the_field_across_a_band_edge_keeps_the_mode(self):
+        # The field's arrows step like Left/Right on the plots: from 107.9
+        # MHz (broadcast FM) into the airband, FM stays.
+        self.win.set_frequency(107.9e6)
+        spin = self.win._frequency_field()
+        spin.setFocus()
+        self.settle()
+        for _ in range(3):
+            QTest.keyClick(spin, Qt.Key.Key_Up)
+        self.assertEqual(self.win._current_frequency(), 108.2e6)
+        self.assertEqual(self.listening(), ("FM", "75 kHz", "200 kHz"))
+        self.assertNotIn("Choose Mode From Band Plan", self.win._message_label.text())
+
+    def test_quick_tune_out_of_the_band_and_back_keeps_your_mode(self):
+        self.type_frequency("147.995")  # 2 m: narrow FM
+        self.win._set_demod_mode("AM")  # picked by hand
+        self.quick_tune("+10k")  # 148.005 MHz: above the 2 m band
+        self.quick_tune("−10k")  # back in 2 m
+        self.assertEqual(self.win._current_frequency(), 147.995e6)
+        self.assertEqual(self.panel.get_demod_mode(), "AM")
+
+    def test_a_typed_cw_calling_frequency_is_heard_in_cw(self):
+        # 7.030 MHz is the QRP 40m CW preset: CW, though 40 m is an LSB band.
+        self.type_frequency("7.03")
+        self.assertEqual(self.win._current_frequency(), 7.03e6)
+        self.assertEqual(self.panel.get_demod_mode(), "CW")
+        text = self.win._message_label.text()
+        self.assertTrue(text.startswith("QRP 40m CW: listening in CW"), text)
+
+    def test_a_typed_preset_channel_gets_the_presets_deviation(self):
+        # 446.000 MHz is 70cm Calling (5 kHz deviation), at the edge of the
+        # narrower PMR446 band (2.5 kHz deviation, 12.5 kHz filter).
+        self.type_frequency("446")
+        self.assertEqual(self.listening(), ("FM", "5 kHz", "25 kHz"))
+        self.assertIn("70cm Calling", self.win._message_label.text())
+
+    def test_a_preset_channel_outside_the_bands_is_heard_its_way(self):
+        # POCSAG (152.240 MHz) lies in none of the band plan's bands.
+        self.type_frequency("152.24")
+        self.assertEqual(self.listening(), ("FM", "5 kHz", "25 kHz"))
+        self.assertIn("POCSAG", self.win._message_label.text())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -86,6 +86,16 @@ logger = logging.getLogger(__name__)
 REMEMBERED_KINDS = ("demo", "rtlsdr", "hackrf")
 #: Why the gain can't be set while a recording plays back.
 PLAYBACK_GAIN = "A recording plays with the gain it was made with."
+#: Why a HackRF's receive amp can't be switched while it transmits.
+AMP_DURING_TX = (
+    "Wait until the transmission ends to switch the RF amp: while "
+    "transmitting, the HackRF uses the amp of Ham ID > TX Power."
+)
+#: Why a HackRF's antenna power can't be switched on while it transmits.
+BIAS_DURING_TX = (
+    "Wait until the transmission ends to switch the bias tee on: the antenna "
+    "port is never powered while transmitting."
+)
 
 _DIRECT_LABELS = {value: label for value, label, _tip in DIRECT_SAMPLING_CHOICES}
 _BRANCH_VALUES = {0: "off", 1: "i", 2: "q"}
@@ -115,10 +125,15 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
         self._shown_for: Optional[Tuple[int, str, str]] = None
         # While configure() fills the controls: nothing is saved.
         self._configuring = False
+        #: A rate asked for before any device was connected (--sample-rate,
+        #: 0 if none): Device > Connect preselects it for every kind.
+        self.requested_rate = 0.0
         #: Device > Sample Rate, also popped up by the status bar's rate.
         self.rate_menu = QMenu("Sample &Rate", window)
         self.rate_menu.setToolTipsVisible(True)
         self.rate_menu.aboutToShow.connect(self._fill_rate_menu)
+        self._rate_group = QActionGroup(self.rate_menu)
+        self._rate_group.setExclusive(True)
         panel = self._panel
         panel.sample_rate_selected.connect(self.choose_rate)
         panel.hackrf_gain_changed.connect(self._on_hackrf_gain_changed)
@@ -158,7 +173,10 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
         key = (id(dev) if dev is not None else 0, kind, locked)
         if key != self._shown_for:
             self._shown_for = key
-            model = gain_model_for(dev)
+            # A recording playing back keeps the gain controls of the device
+            # from before it, locked, so they come back as they were (on
+            # another device's steps, 1.4 dB came back as 0.9 dB).
+            model = self._panel.gain_model() if locked else gain_model_for(dev)
             self._panel.set_gain_model(model, locked)
             self._panel.set_front_end(kind, self._front_end_of(dev, kind))
             if not model.agc and getattr(win, "_agc_enabled", False):
@@ -388,6 +406,11 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
         dev = self._win._device
         if device_kind(dev) != "hackrf":
             return True
+        if self._win._tx_busy():
+            # On the air the HackRF's one amp is the transmitter's (Ham ID >
+            # TX Power, checked against the power limits); the transmitter
+            # puts the receive amp back afterwards.
+            return False
         if not self._call(dev, "set_amp", bool(on)):
             lna, vga, _amp = self._panel.hackrf_gains()
             self._panel.set_hackrf_gains(lna, vga, bool(dev.amp_enabled))
@@ -405,6 +428,12 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
         return True
 
     def _on_amp_changed(self, on: bool) -> None:
+        if device_kind(self._win._device) == "hackrf" and self._win._tx_busy():
+            # (Switching it now would change the transmit power on the air.)
+            lna, vga, _amp = self._panel.hackrf_gains()
+            self._panel.set_hackrf_gains(lna, vga, not on)
+            self._status(AMP_DURING_TX, "warning", 8000)
+            return
         self._set_amp(on)
         self._hackrf_gain_applied()
 
@@ -526,6 +555,12 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
         if dev is None:
             return
         name = _kind_name(self.kind())
+        if on and self._win._tx_busy():
+            # (The driver refuses it: an LNA must not get the transmitter's
+            # power.)
+            self._show_device_front_end()
+            self._status(BIAS_DURING_TX, "warning", 8000)
+            return
         if not self._call(dev, "set_bias_tee", bool(on)):
             self._show_device_front_end()
             self._win._show_status_error(
@@ -569,7 +604,18 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
             )
         if win._tx_busy():
             return "Wait until the transmission ends to change the sample rate."
+        if self._scanning():
+            return (
+                "Stop the scan (Scanner tab) to change the sample rate: a scan "
+                "measures every step at the rate it started with."
+            )
         return ""
+
+    def _scanning(self) -> bool:
+        """Whether the Scanner tab's scan runs (it sweeps at one rate)."""
+        panel = getattr(self._win, "_scanner_panel", None)
+        engine = getattr(panel, "engine", None)
+        return bool(getattr(engine, "active", False))
 
     def sync_rates(self) -> None:
         """The Receiver group's Sample rate and the status bar's rate."""
@@ -637,8 +683,8 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
             note.setEnabled(False)
             return
         current = win._device_sample_rate()
-        group = QActionGroup(menu)
-        group.setExclusive(True)
+        # One group for the menu's life (clear() deleted the old actions).
+        group = self._rate_group
         rates = list(sample_rates_for(device_kind(dev)))
         if not any(abs(r - current) < 1.0 for r in rates):
             rates = sorted(rates + [current])
@@ -679,16 +725,23 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
             prev = getattr(win._playback, "_previous", None)
             current_kind = device_kind(getattr(prev, "device", None))
             current_rate = win._playback.previous_rate()
-        preferred = getattr(win, "_preferred_rate", None)
+        # The demo device's rate (the one it was last given, live or in this
+        # dialog) is the demo's alone; a rate asked for before any device
+        # was connected (--sample-rate) is preselected for every kind; else
+        # each kind gets the rate it had last.
+        preferred = float(getattr(win, "_preferred_rate", None) or 0.0)
+        requested = float(self.requested_rate or 0.0)
         rates: Dict[str, float] = {}
         fronts: Dict[str, FrontEnd] = {}
         for kind in REMEMBERED_KINDS:
             if kind == current_kind and current_rate:
                 rate = current_rate
-            elif preferred:
-                rate = float(preferred)
+            elif kind == "demo" and preferred:
+                rate = preferred
+            elif requested:
+                rate = requested
             else:
-                rate = load_rate(self._settings, kind) or current_rate
+                rate = load_rate(self._settings, kind) or current_rate or preferred
             if rate:
                 rates[kind] = float(rate)
             if kind == current_kind and dev is not None and kind != "playback":

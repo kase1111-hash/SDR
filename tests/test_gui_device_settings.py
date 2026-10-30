@@ -582,6 +582,107 @@ class TestSampleRate(_DeviceCase):
         self.win._start_demo_mode()
         self.assertEqual(self.win._device.sample_rate, 3.2e6)
 
+    def test_the_demos_rate_is_the_demos_alone(self):
+        """(Review) Changing the demo's rate live (or connecting the demo in
+        Device > Connect...) made the dialog preselect that rate for the
+        RTL-SDR and the HackRF too, not the rate each had last."""
+        self.store.values["device/rtlsdr/sample_rate"] = 1.4e6
+        self.store.values["device/hackrf/sample_rate"] = 8e6
+        controls = self.win._device_controls
+        self.assertTrue(controls.choose_rate(3.2e6))
+        expected = {"demo": 3.2e6, "rtlsdr": 1.4e6, "hackrf": 8e6}
+        self.assertEqual(controls.dialog_preferences()[0], expected)
+        self.win._release_device()  # (no device now: the same)
+        self.assertEqual(controls.dialog_preferences()[0], expected)
+        # A type without a rate of its own yet starts at the demo's.
+        del self.store.values["device/hackrf/sample_rate"]
+        self.assertEqual(controls.dialog_preferences()[0]["hackrf"], 3.2e6)
+
+    def test_a_rate_asked_for_without_a_device_is_for_every_type(self):
+        """--sample-rate (before any device): Device > Connect... preselects
+        it whatever the device type, as before."""
+        self.store.values["device/rtlsdr/sample_rate"] = 1.4e6
+        self.win._release_device()
+        self.win._refresh_state_ui()
+        self.assertTrue(self.win.set_sample_rate(2.0e6))
+        rates = self.win._device_controls.dialog_preferences()[0]
+        self.assertEqual(rates, {"demo": 2.0e6, "rtlsdr": 2.0e6, "hackrf": 2.0e6})
+
+    def test_refused_while_a_scan_runs(self):
+        """(Review) A scan measures every step at the rate it started with:
+        a new rate mid-scan put what it found at the wrong frequencies."""
+        scanner = self.win._scanner_panel
+        self.assertTrue(self.win._is_running)
+        self.assertTrue(scanner.start_scan())
+        self.assertTrue(scanner.engine.active)
+        self.assertFalse(self.win._device_controls.choose_rate(1.0e6))
+        self.assertEqual(self.win._device.sample_rate, 2.4e6)
+        self.assertEqual(scanner.engine.rate, 2.4e6)
+        self.assertIn("Stop the scan", self.message())
+        self.assertEqual(self.panel._rate_combo.currentText(), "2.4 MS/s")
+        scanner.stop_scan(stay=False)
+        self.assertTrue(self.win._device_controls.choose_rate(1.0e6))
+
+
+class TestGainThroughPlayback(_DeviceCase):
+    """(Review) A recording played back shows the gain controls of the
+    device from before it, locked: they come back unchanged (an RTL-SDR's
+    1.4 dB came back as 0.9 dB, 44.5 dB as 43.9 dB, through the demo's
+    1 dB steps)."""
+
+    def play(self):
+        import shutil
+        import tempfile
+
+        from tests.test_gui_playback import _fm_tone, _save_sigmf
+
+        folder = tempfile.mkdtemp(prefix="sdr-t11-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.win._recording_folder = folder
+        path = _save_sigmf(os.path.join(folder, "fm.sigmf-data"), _fm_tone(1.0))
+        with mock.patch(
+            "sdr_module.gui.main_window.QFileDialog.getOpenFileName",
+            return_value=(path, ""),
+        ):
+            self.win._open_recording_action.trigger()
+        self.settle()
+        self.assertTrue(self.win._playback.active)
+
+    def test_an_rtl_sdr_gain_comes_back_unchanged(self):
+        from sdr_module.gui.device_settings import format_db
+
+        dev = self.rtl()
+        self.panel.set_agc_enabled(False)
+        for gain in (1.4, 44.5, 29.7):
+            self.win.set_gain(gain)
+            self.assertEqual(dev.state.gain, gain)
+            self.play()
+            self.assertEqual(self.panel._gain_label.text(), format_db(gain))
+            self.assertFalse(self.panel._gain_slider.parentWidget().isEnabled())
+            self.win._playback.close(restore=True)
+            self.settle()
+            self.assertEqual(self.panel.gain_db(), gain)
+            self.assertEqual(self.panel._gain_label.text(), format_db(gain))
+            self.assertEqual(dev.state.gain, gain)
+
+    def test_a_hackrf_keeps_its_stages_locked(self):
+        dev, fake = self.hackrf()
+        self.panel._vga_slider.setValue(15)  # 30 dB
+        self.play()
+        p = self.panel
+        lna_row = p._lna_slider.parentWidget()
+        self.assertTrue(self.visible(lna_row))
+        self.assertFalse(lna_row.isEnabled())
+        self.assertFalse(p._amp_check.isEnabled())
+        self.assertFalse(self.visible(p._gain_slider.parentWidget()))
+        self.win._playback.close(restore=True)
+        self.settle()
+        self.assertTrue(lna_row.isEnabled())
+        self.assertTrue(p._amp_check.isEnabled())
+        self.assertEqual(p.hackrf_gains(), (16, 30, False))
+        self.assertEqual((fake.lna, fake.vga), (16, 30))
+        self.assertFalse(p._agc_check.isEnabled())
+
 
 class TestSampleRateDuringPlayback(_WindowTestCase):
     """While a recording plays, the file sets the rate: refused with the
@@ -962,10 +1063,6 @@ class TestScanForDevices(_DeviceCase):
         self.assertEqual(box.commands_text(), "")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 # --------------------------------------------------------------------------- #
 # Receive gain and the transmit power stay separate (T7's TxPower)
 # --------------------------------------------------------------------------- #
@@ -993,3 +1090,45 @@ class TestReceiveAmpAndTransmit(_TxCase):
         self.assertEqual(receiver.hackrf_gains(), (16, 20, True))
         self.assertEqual((backend.lna, backend.vga), (16, 20))
         self.assertFalse(self.store.values.get("tx/amp", False))
+
+    def test_the_receive_amp_cant_change_on_the_air(self):
+        """(Review) Ticking RF amp while the HackRF transmitted switched its
+        one amp on mid-transmission: 14 dB over Ham ID > TX Power and its
+        power checks, and the Receiver group disagreed with the device
+        afterwards. It waits for the end of the transmission, like the
+        bias tee (never powered while transmitting)."""
+        self.panel.set_callsign("W1AW")
+        dev, backend = self.hackrf()
+        receiver = self.win._control_panel
+        self.panel._amp_check.setChecked(False)  # transmit without the amp
+        during = []
+
+        def on_air(_job):
+            self.assertTrue(self.win._tx_busy())
+            receiver._amp_check.setChecked(True)
+            text = self.win._message_label.text()
+            during.append((backend.amp, receiver._amp_check.isChecked(), text))
+            receiver._bias_check.setChecked(True)
+            text = self.win._message_label.text()
+            during.append((backend.antenna, receiver._bias_check.isChecked(), text))
+
+        self.station.engine.started.connect(on_air)
+        self.assertTrue(self.station.send_station_id())
+        self.wait_done(10)
+        (amp, amp_ticked, amp_text), (antenna, bias_ticked, bias_text) = during
+        self.assertFalse(amp)
+        self.assertFalse(amp_ticked)
+        self.assertIn("Wait until the transmission ends to switch the RF amp", amp_text)
+        self.assertFalse(antenna)
+        self.assertFalse(bias_ticked)
+        self.assertIn("switch the bias tee on", bias_text)
+        # Afterwards the device and the Receiver group agree, and the amp
+        # can be switched again.
+        self.assertFalse(dev.amp_enabled)
+        self.assertEqual(receiver.hackrf_gains(), (16, 20, False))
+        receiver._amp_check.setChecked(True)
+        self.assertTrue(backend.amp and dev.amp_enabled)
+
+
+if __name__ == "__main__":
+    unittest.main()

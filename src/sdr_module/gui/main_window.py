@@ -7060,10 +7060,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         and ``--sample-rate``.
 
         Without a device (or with the demo device) the rate is also used by
-        the demo device from now on and preselected in Device > Connect. It
-        is refused, with the reason in the status bar, while a recording
-        plays back (the file sets the rate), while recording I/Q (one take
-        holds one rate) or while transmitting. Returns True when applied.
+        the demo device from now on; asked for without a device it is also
+        preselected in Device > Connect for every device type. It is
+        refused, with the reason in the status bar, while a recording plays
+        back (the file sets the rate), while recording I/Q (one take holds
+        one rate), while transmitting or while a scan runs. Returns True
+        when applied.
         """
         try:
             rate = float(rate_hz)
@@ -7076,6 +7078,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if blocked:
                 self._show_status_message(blocked, "warning", 8000)
                 return False
+        if self._device is None:
+            self._device_controls.requested_rate = rate
         if self._device is None or _is_demo_device(self._device):
             self._preferred_rate = rate
         self._tx_station.shutdown()  # (a transmission has its own rate)

@@ -106,14 +106,16 @@ class WindowScannerHost(ScannerHost):
         win._scan_checks_tone = False
         # The step is measured around center_hz: with Radio > Keep Tuned
         # Frequency Centered, tuning the VFO would retune the LO onto it,
-        # so FREQ shows the LO instead.
+        # and so would a channel too wide to fit beside the LO (a 2 MHz
+        # I/Q filter), so FREQ shows the LO instead.
         keep_centered = bool(getattr(win, "_keep_centered", lambda: False)())
 
         def tune() -> bool:
             if not win._tune_to(center_hz, recenter=True):
                 return False
             if vfo_hz is not None and abs(vfo_hz - center_hz) >= 0.5:
-                if not keep_centered:
+                offset = vfo_hz - win._lo_frequency()
+                if not keep_centered and win._channel_fits(offset):
                     win._tune_to(vfo_hz)  # inside the span: only the VFO moves
             return True
 

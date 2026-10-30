@@ -384,7 +384,7 @@ class ScanEngine:
         s = self.settings
         readings, noise, threshold = measure_page(
             power,
-            page.lo_hz,
+            self._receiver_lo(page),
             self.rate,
             page.channels,
             s.step_hz,
@@ -424,6 +424,16 @@ class ScanEngine:
             )
         ]
         self._next_candidate()
+
+    def _receiver_lo(self, page: SweepPage) -> float:
+        """The LO a page's blocks were received around: the host's (should
+        the receiver not be exactly where the page was planned, the results
+        still say where the signals are), else the planned one."""
+        try:
+            lo_hz = float(self.host.scan_lo_hz())
+        except (NotImplementedError, TypeError, ValueError):
+            return page.lo_hz
+        return lo_hz if math.isfinite(lo_hz) else page.lo_hz
 
     def _listen(self, samples: np.ndarray, seconds: float) -> None:
         current = self.current

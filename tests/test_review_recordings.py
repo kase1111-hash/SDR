@@ -174,8 +174,26 @@ class TestAutoSaveOnANearlyFullDisk(_ReviewCase):
         self.assertTrue(self.win._buffer_unsaved)
         self.assertEqual(self.win._buffer_sample_count(), count)
         text = self.message()
-        self.assertIn("nearly full", text)
+        # (It fits in the 420 MB, but recording keeps 500 MB free.)
+        self.assertIn("would be nearly full", text)
+        self.assertIn("recording keeps 500 MB free", text)
         self.assertIn("It is kept", text)
+
+    def test_a_take_that_doesnt_fit_at_all_says_so(self):
+        # Not "nearly full" when it doesn't fit at all: there isn't room.
+        self.set_format(".cs16")
+        self.record(3, stop=False)
+        with self.assertLogs("sdr_module.gui.main_window", level="ERROR"):
+            self.stop_for_disk_space(0.5)
+        self.assertEqual(_listing(self.recordings_folder()), {})
+        self.assertTrue(self.win._buffer_unsaved)
+        text = self.message()
+        self.assertIn("there isn't enough space (it needs ", text)
+        self.assertIn("has 0 MB free)", text)
+        self.assertNotIn("nearly full", text)
+        # (Said once: what to do is the auto-save's own advice.)
+        self.assertNotIn("free up some space", text)
+        self.assertIn("It is kept: save it elsewhere", text)
 
     def test_another_drive_with_room_still_gets_a_copy(self):
         self.set_format(".cs16")

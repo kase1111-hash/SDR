@@ -8231,15 +8231,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         where = file_dialogs.display_path(folder)
         need_mb, free_mb = need / 1024**2, free / 1024**2
-        if reserve:
+        if not reserve:
             raise ValueError(
-                f"the drive is nearly full ({free_mb:,.0f} MB free in {where}, "
-                f"and it needs {need_mb:,.0f} MB)"
+                f"there isn't enough space: it needs {need_mb:,.0f} MB, and {where} "
+                f"has {free_mb:,.0f} MB free. Save it to another drive, or free up "
+                "some space."
+            )
+        # (Save automatically says what to do next itself.)
+        if need > free:
+            raise ValueError(
+                f"there isn't enough space (it needs {need_mb:,.0f} MB, and "
+                f"{where} has {free_mb:,.0f} MB free)"
             )
         raise ValueError(
-            f"there isn't enough space: it needs {need_mb:,.0f} MB, and {where} "
-            f"has {free_mb:,.0f} MB free. Save it to another drive, or free up "
-            "some space."
+            f"the drive would be nearly full (it needs {need_mb:,.0f} MB of the "
+            f"{free_mb:,.0f} MB free in {where}, and recording keeps "
+            f"{_MIN_FREE_BYTES // 1024**2} MB free)"
         )
 
     def _import_channels_csv(self) -> None:

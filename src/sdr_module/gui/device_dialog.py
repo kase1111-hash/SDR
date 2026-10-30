@@ -244,7 +244,18 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         self._rate_combo.blockSignals(True)
         self._rate_combo.clear()
         for rate in rates:
-            self._rate_combo.addItem(_format_rate(rate), rate)
+            label = _format_rate(rate)
+            if rate < _ADSB_MIN_RATE:
+                # TOOLS-03: say so before ADS-B silently decodes nothing.
+                label += " (too low for ADS-B)"
+            self._rate_combo.addItem(label, rate)
+            if rate < _ADSB_MIN_RATE:
+                self._rate_combo.setItemData(
+                    self._rate_combo.count() - 1,
+                    "ADS-B (1090 MHz) needs at least 2 MS/s; the other "
+                    "decoders work at any rate",
+                    Qt.ItemDataRole.ToolTipRole,
+                )
         # Keep the previous choice when it is still valid, else the closest.
         best = min(range(len(rates)), key=lambda i: abs(rates[i] - float(current)))
         self._rate_combo.setCurrentIndex(best)
@@ -598,6 +609,9 @@ _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ..
     (152.24e6, "pocsag", -48.0, None),
     (931.9375e6, "flex", -50.0, None),
 )
+
+# The ADS-B decoder's lowest usable rate (its 0.5 us pulses need 2 MS/s).
+_ADSB_MIN_RATE = 2.0e6
 
 # --------------------------------------------------------------------------- #
 # Decodable data: APRS, POCSAG, FLEX and ACARS transmissions

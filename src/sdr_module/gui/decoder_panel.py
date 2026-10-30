@@ -1104,7 +1104,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             age = self._clock() - last if last is not None else 0.0
             parts = [proto, _plural(valid, unit), f"last {_format_age(age)}"]
             if failed:
-                parts.append(f"{failed:,} failed checks")
+                parts.append(f"{failed:,} failed check{'' if failed == 1 else 's'}")
             return "  ·  ".join(parts), ("success" if age < _FRESH_S else None), tip
         if failed:
             return (

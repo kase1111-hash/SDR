@@ -350,6 +350,10 @@ class TestDecoderPanelStatus(unittest.TestCase):
             text, "POCSAG  ·  1 page  ·  last 10 min ago  ·  2 failed checks"
         )
         self.assertIsNone(tone)
+        text, _tone = self.show(self.status(valid=2, failed=1, last_time=self.now))
+        self.assertEqual(
+            text, "POCSAG  ·  2 pages  ·  last just now  ·  1 failed check"
+        )
 
     def test_clear_counts_from_zero_again(self):
         p = self.panel
@@ -458,6 +462,32 @@ class TestDecoderPanelStatus(unittest.TestCase):
         p.set_current_frequency(100e6)
         self.assertIn("Tune to 152–159 MHz or 929–932 MHz to decode.", p._empty.text())
         self.assertEqual(p._empty.action_text(), "Tune to 152.240 MHz")
+
+
+class TestDeviceDialogRates(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_rates_too_low_for_ads_b_say_so(self):
+        # TOOLS-03: 1, 1.4 and 1.8 MS/s were offered with no hint that the
+        # ADS-B decoder then decodes nothing.
+        from PyQt6.QtCore import Qt
+
+        from sdr_module.gui.device_dialog import DeviceDialog
+
+        dialog = DeviceDialog()
+        try:
+            combo = dialog._rate_combo
+            for i in range(combo.count()):
+                rate = combo.itemData(i)
+                low = rate < 2e6
+                self.assertEqual(combo.itemText(i).endswith("(too low for ADS-B)"), low)
+                tip = combo.itemData(i, Qt.ItemDataRole.ToolTipRole) or ""
+                self.assertEqual("needs at least 2 MS/s" in tip, low)
+            self.assertTrue(any(combo.itemData(i) < 2e6 for i in range(combo.count())))
+        finally:
+            dialog.close()
+            dialog.deleteLater()
 
 
 # --------------------------------------------------------------------------- #

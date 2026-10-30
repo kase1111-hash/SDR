@@ -413,6 +413,27 @@ class TestRetuneDropsStaleSamples(_WindowTestCase):
         self.frame()
         self.assertEqual(len(win._waterfall._history), rows + 1)
 
+    def test_a_fine_step_keeps_the_samples(self):
+        # With Keep Tuned Frequency Centered every wheel step moves the LO.
+        # A step within one FFT bin can't put anything in the wrong place
+        # in the plots: what was taken is kept (dropping it froze the plots
+        # and cut a fifth of the audio while the wheel turned, 10 Hz steps).
+        win, dev = self.win, self.dev
+        win._keep_centered_action.setChecked(True)
+        dev.transfer()
+        self.frame()
+        rows = len(win._waterfall._history)
+        dev.transfer()  # taken just before the step
+        self.assertTrue(win._tune_to(win._current_frequency() + 10.0))
+        self.assertEqual(win._lo_frequency(), 100.1e6 + 10.0)
+        self.frame()
+        self.assertEqual(len(win._waterfall._history), rows + 1)
+        # (A step of a bin or more still drops it.)
+        dev.transfer()
+        bin_hz = _Hardware.RATE / win._frame_spectrum.size
+        self.assertTrue(win._tune_to(win._current_frequency() + bin_hz))
+        self.assertIsNone(dev.read_samples(1, timeout=0.0))
+
 
 class TestSecondReceiverPlots(unittest.TestCase):
     """PLOT-3: the Second Receiver window's spectrum menus work there as in

@@ -4400,7 +4400,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 ok = False
             if ok is False:
                 return False
-        moved = abs(lo - self._lo_hz) >= 0.5
+        # What the hardware took before is stale only when the LO moved by
+        # an FFT bin or more: within one (a fine step with Keep Tuned
+        # Frequency Centered) nothing shows anywhere else, and dropping it
+        # would freeze the plots and cut the audio while the wheel turns.
+        bin_hz = self._device_sample_rate() / max(1, self._frame_spectrum.size)
+        moved = abs(lo - self._lo_hz) >= max(0.5, bin_hz)
         self._lo_hz = lo
         self._spectrum.set_center_freq(lo)
         self._waterfall.set_center_freq(lo)

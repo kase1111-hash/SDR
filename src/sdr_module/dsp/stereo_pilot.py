@@ -56,7 +56,6 @@ class StereoPilotDetector:
         self.present = False
         self.ratio_db = 0.0
         self._warm = False
-        self._prev: complex = 0j
 
     def _bins(self, length: int) -> np.ndarray:
         """Windowed DFT rows for the pilot and the references (cached)."""

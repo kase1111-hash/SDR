@@ -195,6 +195,7 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         self._tx_text = ""
         self._tx_tone: Optional[str] = None
         self._sending_text = ""
+        self._sending_id = True  # what is on the air is the station ID
         self._preview_sink: Any = None
         self._preview_buffer: Any = None
         self._form_labels: list = []
@@ -531,8 +532,11 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
     def _refresh_status(self) -> None:
         """Line 1: the callsign and the ID it makes (or the TX state)."""
         cs = self._callsign
-        if self._is_transmitting:
+        if self._is_transmitting and self._sending_id:
             self._set_status(f"Transmitting ID: DE {cs}", "danger")
+        elif self._is_transmitting:
+            # (Another transmission, e.g. Transmit Text: line 2 says what.)
+            self._set_status(f"On the air as {cs}" if cs else "On the air", "danger")
         elif not cs:
             self._set_status("Enter your callsign to enable station ID.", None)
         elif len(cs) < 3:
@@ -548,7 +552,7 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
             seconds = morse_duration(f"DE {cs}", wpm)
             # Non-breaking spaces keep "4.0 s" and "20 WPM" together on wrap.
             self._set_status(
-                f"✓ Callsign OK · DE {cs} = {seconds:.1f} s at " f"{wpm} WPM",
+                f"✓ Callsign OK · DE {cs} = {seconds:.1f}\u00a0s at {wpm}\u00a0WPM",
                 "success",
             )
         self._refresh_morse()
@@ -774,12 +778,16 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
     # Transmission state (driven by the window's transmitter)
     # ------------------------------------------------------------------
 
-    def set_transmitting(self, is_transmitting: bool, text: str = "") -> None:
+    def set_transmitting(
+        self, is_transmitting: bool, text: str = "", is_id: bool = True
+    ) -> None:
         """Show that a transmission is on the air (``text``: what, e.g.
-        "Sending DE W1AW on 146.520 MHz…"): Send ID Now becomes Stop and the
-        progress bar shows. The automatic-ID countdown is the window's to
-        show (:meth:`set_id_countdown`); this never starts one."""
+        "Sending DE W1AW on 146.520 MHz…"; ``is_id``: it is the station ID,
+        not another transmission such as Transmit Text): Send ID Now becomes
+        Stop and the progress bar shows. The automatic-ID countdown is the
+        window's to show (:meth:`set_id_countdown`); this never starts one."""
         self._is_transmitting = bool(is_transmitting)
+        self._sending_id = bool(is_id)
         self._sending_text = text if self._is_transmitting else ""
         self._tx_progress.setVisible(self._is_transmitting)
         if self._is_transmitting:

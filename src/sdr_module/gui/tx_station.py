@@ -77,6 +77,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         # The last outcome, shown on the TX line until something it depends
         # on changes: (inputs it was for, text, tone).
         self._result_line: Optional[Tuple[tuple, str, Optional[str]]] = None
+        # The status bar's "On air: ..." and the air time it is shown for.
+        self._on_air_text = ""
+        self._on_air_total = 0.0
         self.engine.started.connect(self._on_started)
         self.engine.progress.connect(self._on_progress)
         self.engine.finished.connect(self._on_finished)
@@ -210,9 +213,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
                 f"{qrp.watts_text(limit)} power limit (QRP tab). Lower the TX gain "
                 "or raise the limit"
             )
-        from ..core import frequency_manager
-
-        legal = frequency_manager.get_power_limit(freq_hz, mode)
+        # The legal limit the QRP panel shows (with the general amateur limit
+        # where a segment names none).
+        legal = qrp.legal_limit_watts(freq_hz, mode)
         if legal is not None and not qrp.within(watts, legal):
             return (
                 f"the calculated output ({qrp.watts_text(watts)}) is over the "
@@ -439,7 +442,12 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         id_jobs = []
         policy = None if job.is_id else self._auto_id_policy()
         make_id = None if job.is_id or not job.identify else self._id_factory()
-        if problem is None and make_id is not None and policy is not None:
+        if (
+            problem is None
+            and make_id is not None
+            and policy is not None
+            and policy.any()  # (no IDs will be added: none to check)
+        ):
             sample = make_id(job)
             if sample is not None:
                 id_jobs.append(sample)
@@ -461,7 +469,14 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         if problem is not None:
             self._refuse(what, job.center_hz, problem)
             return False
-        if confirm and not self.confirm(job):
+        on_air_s = job.duration_s
+        if id_jobs and policy is not None:
+            # The station IDs Automatic ID adds go on the air too.
+            ids = int(policy.at_start) + int(policy.at_end)
+            if policy.interval_s:
+                ids += int(job.duration_s // float(policy.interval_s))
+            on_air_s += ids * id_jobs[0].duration_s
+        if confirm and not self.confirm(job, on_air_s):
             win._show_status_message(f"{what} not sent: cancelled.", None, 4000)
             return False
         # The HackRF transmits at its center (the LO): put it on the
@@ -505,15 +520,18 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             self._result_line = (self._inputs(), line, tone)
             panel.set_tx_status(line, tone, can)
 
-    def confirm(self, job: TxJob) -> bool:
+    def confirm(self, job: TxJob, on_air_s: Optional[float] = None) -> bool:
         """The first-use question ("Transmit DE W1AW on 146.520 MHz (FM
         tone, 20 WPM, about 1 mW)?"); "Don't ask again" skips it from then
-        on. True to transmit."""
+        on. ``on_air_s``: the whole air time, station IDs included (the
+        job's own by default). True to transmit."""
         settings = self._win._settings
         if not settings.get_bool(KEY_CONFIRM, True):
             return True
         estimate = format_dbm_power(self.power.output_dbm(job.center_hz)).split(" (")[0]
         how = job.summary or job.mode
+        seconds = job.duration_s if on_air_s is None else float(on_air_s)
+        ids = " with your station ID" if seconds > job.duration_s + 0.05 else ""
         box = QMessageBox(self._win)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("Transmit?")
@@ -522,10 +540,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             f"({how}, about {estimate})?"
         )
         box.setInformativeText(
-            "The HackRF will transmit for about "
-            f"{job.duration_s:.1f} s. Make sure an antenna or a dummy load is "
-            "connected and that your license allows this frequency. Stop ends "
-            "it at any time."
+            f"The HackRF will transmit for about {seconds:.1f} s{ids}. Make sure "
+            "an antenna or a dummy load is connected and that your license "
+            "allows this frequency. Stop ends it at any time."
         )
         check = QCheckBox("Don't ask again")
         check.setToolTip("Transmit without asking from now on (the checks still apply)")
@@ -572,15 +589,30 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             self._send_action.setEnabled(False)
         panel = self._panel()
         if panel is not None:
-            panel.set_transmitting(True, f"Sending {job.description} on {where}…")
-        win._show_status_message(
+            panel.set_transmitting(
+                True, f"Sending {job.description} on {where}…", is_id=job.is_id
+            )
+        self._on_air_text = (
             f"On air: {job.description} on {where} ({job.summary or job.mode}). "
-            "Stop ends it.",
-            "danger",
-            int((job.duration_s + 10.0) * 1000),
+            "Stop ends it."
+        )
+        # (The whole transmission: the station IDs added to it included.)
+        self._on_air_total = max(job.duration_s, self.engine.seconds_total())
+        self._show_on_air(0.0)
+
+    def _show_on_air(self, done_s: float) -> None:
+        """Show "On air: ..." until the transmission's end (and a little
+        after, when the outcome replaces it)."""
+        left = max(0.0, self._on_air_total - done_s)
+        self._win._show_status_message(
+            self._on_air_text, "danger", int((left + 10.0) * 1000)
         )
 
     def _on_progress(self, done_s: float, total_s: float) -> None:
+        if self.busy and total_s > self._on_air_total + 0.05:
+            # An interval ID made it longer: keep "On air" up to its end.
+            self._on_air_total = total_s
+            self._show_on_air(done_s)
         panel = self._panel()
         if panel is None:
             return

@@ -166,6 +166,22 @@ class TestCalculatedOutput(_PanelCase):
         self.assertEqual(p.mode(), "SSB")
         self.assertEqual(combo.face_text(), "SSB")
 
+    def test_digital_reads_as_words(self):
+        """Auto's I/Q "Digital" isn't shouted ("for DIGITAL")."""
+        p = self.panel
+        p.set_demod_mode("None (I/Q)")
+        p._amp_calc._driver_check.setChecked(True)
+        p._amp_calc._pa_check.setChecked(True)
+        p._amp_calc._pa_spin.setValue(14)  # 2.5 W: QRP
+        self.assertEqual(
+            p._power_display._detail_label.text(),
+            "Within the 5 W QRP limit for digital modes",
+        )
+        p.set_demod_mode("CW")
+        self.assertEqual(
+            p._power_display._detail_label.text(), "Within the 5 W QRP limit for CW"
+        )
+
 
 class TestAmplifierPresets(_PanelCase):
     def test_qrp_kit_saturates_at_five_watts(self):
@@ -211,6 +227,17 @@ class TestAmplifierPresets(_PanelCase):
         self.panel.set_sdr_output(None)
         self.assertFalse(calc._input_spin.isReadOnly())
         self.assertEqual(calc._input_spin.value(), -3)
+
+    def test_hackrf_estimate_is_used_exactly(self):
+        """The field shows 0.1 dB, but the figures use the HackRF's estimate
+        as the Ham ID tab (and the transmitter's checks) do: 795 nW there is
+        795 nW here, not the 794 nW of the rounded -31.0 dBm."""
+        calc = self.panel._amp_calc
+        self.panel.set_sdr_output(-30.9987)
+        self.assertAlmostEqual(calc._input_spin.value(), -31.0)
+        self.assertEqual(calc._input_watts.text(), "795 nW")
+        self.assertEqual(self.panel._power_display._watts_label.text(), "795 nW")
+        self.assertAlmostEqual(calc.get_output_dbm(), -30.9987)
 
 
 class TestTally(_PanelCase):
@@ -260,6 +287,38 @@ class TestTally(_PanelCase):
         self.assertTrue(p._qso_list.item(0).text().startswith("1,609 km · 5 W"))
         self.assertEqual(p._mpw_group.title(), "Kilometres Per Watt")
 
+    def test_a_metric_locale_starts_in_kilometres_throughout(self):
+        """The group's title says kilometres too (it said "Miles Per Watt"
+        beside "km/W" figures when the locale chose kilometres)."""
+        from unittest import mock
+
+        from sdr_module.ham.gui import qrp_panel
+
+        with mock.patch.object(qrp_panel, "default_distance_unit", lambda: "km"):
+            panel = qrp_panel.QRPPanel()
+        self.addCleanup(panel.deleteLater)
+        self.assertEqual(panel._unit(), "km")
+        self.assertEqual(panel._mpw_group.title(), "Kilometres Per Watt")
+        self.assertTrue(panel._mpw_label.text().endswith("km/W"))
+
+    def test_the_delete_key_deletes_the_selected_qsos(self):
+        """The list's tooltip says "press Delete": the key works, not only
+        the button."""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+
+        p = self.panel
+        self.log(1000, 5)
+        self.log(500, 1)
+        p._qso_list.setFocus()
+        QTest.keyClick(p._qso_list, Qt.Key.Key_Delete)  # nothing selected
+        self.assertEqual(p._qso_list.count(), 2)
+        p._qso_list.item(0).setSelected(True)
+        QTest.keyClick(p._qso_list, Qt.Key.Key_Delete)
+        self.assertEqual(p._qso_list.count(), 1)
+        self.assertTrue(p._undo_btn.isVisibleTo(p))
+        self.assertIn("Deleted 1 QSO", p._mpw_feedback.text())
+
     def test_state_round_trip(self):
         """GAP-07: settings and tally come back."""
         from sdr_module.ham.gui.qrp_panel import QRPPanel
@@ -308,6 +367,21 @@ class TestExchange(_PanelCase):
         self.assertEqual(p.copy_exchange(), "57 CA 5W")
         self.assertEqual(QApplication.clipboard().text(), "57 CA 5W")
         self.assertEqual(copied, ["57 CA 5W"])
+
+    def test_less_than_a_milliwatt_is_not_zero(self):
+        """A HackRF on its own (-31 dBm at TX gain 20) used to give "59 0mW"."""
+        p = self.panel
+        p._mode_combo.setCurrentText("FM")
+        p.set_sdr_output(-30.9987)
+        self.assertEqual(p._exchange_label.text(), "59 795nW")
+        p.set_sdr_output(-20.0)  # 10 uW
+        self.assertEqual(p._exchange_label.text(), "59 10uW")
+        p.set_sdr_output(None)
+        self.assertEqual(p._exchange_label.text(), "59 1mW")
+        controller = p.get_controller()
+        for text, watts in (("599 CA 795NW", 795e-9), ("599 10uW", 10e-6)):
+            parsed = controller.parse_contest_exchange(text)
+            self.assertAlmostEqual(parsed["power_watts"], watts, places=12)
 
 
 class TestQrpInTheWindow(_WindowTestCase):

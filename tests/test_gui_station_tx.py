@@ -451,6 +451,36 @@ class TestTxPower(_TxCase):
         self.assertFalse(spin.isReadOnly())
         self.assertEqual(spin.value(), 0.0)
 
+    def test_the_general_amateur_limit_is_honoured(self):
+        """Where a segment names no limit, the 1500 W general amateur limit
+        the QRP tab shows (red) refuses the transmission too."""
+        self.panel.set_callsign("W1AW")
+        self.hackrf()
+        qrp = self.win._qrp_panel
+        calc = qrp._amp_calc
+        self.panel._tx_gain_spin.setValue(47)
+        self.panel._amp_check.setChecked(True)
+        for check, gain, ceiling in (
+            (calc._driver_check, calc._driver_spin, calc._driver_max_spin),
+            (calc._pa_check, calc._pa_spin, calc._pa_max_spin),
+        ):
+            check.setChecked(True)
+            gain.setValue(40)
+            ceiling.setValue(62)
+        self.assertIn("is over it", qrp._legal_label.text())  # 1585 W
+        text = self.panel.tx_status_text()
+        self.assertTrue(text.startswith("Can't send on 146.520 MHz"), text)
+        self.assertIn("over the 1500 W legal limit here", text)
+        self.assertFalse(self.panel._id_now_btn.isEnabled())
+        self.assertFalse(self.station.send_station_id())
+        self.assertFalse(self.station.busy)
+
+    def test_qrp_shows_the_estimate_the_ham_id_tab_shows(self):
+        self.hackrf()
+        self.assertEqual(self.panel._power_label.text(), "about 795 nW (-31 dBm)")
+        display = self.win._qrp_panel._power_display
+        self.assertEqual(display._watts_label.text(), "795 nW")
+
 
 class TestAutoId(_TxCase):
     def test_a_transmission_gets_its_ids(self):
@@ -503,6 +533,114 @@ class TestAutoId(_TxCase):
         self.station.stop()
         self.wait_done(5)
         self.assertFalse(self.panel._countdown_row.isVisibleTo(self.panel))
+
+    def _spy_status(self):
+        shown = []
+        real = self.win._show_status_message
+
+        def spy(message, tone=None, duration_ms=4000):
+            shown.append((message, tone, duration_ms))
+            real(message, tone, duration_ms)
+
+        self.win._show_status_message = spy
+        return shown
+
+    def test_on_air_stays_up_while_the_ids_go_out(self):
+        """The status bar's "On air" lasts the whole transmission, the IDs
+        Automatic ID adds included (it lasted the job's own air time plus
+        10 s, so the status bar went blank while the IDs went out)."""
+        from sdr_module.gui.transmitter import TxJob
+
+        self.panel.set_callsign("W1AW")
+        self.panel._wpm_spin.setValue(5)  # each ID: about 16.5 s
+        self.hackrf(pace=True)
+        shown = self._spy_status()
+        carrier = np.full(int(2e6), 0.9, np.complex64)  # 1 s
+        job = TxJob(carrier, 2e6, 146.52e6, "FM", 12.5e3, "a test carrier")
+        self.assertTrue(self.win._transmit_job(job))
+        total = self.station.engine.seconds_total()
+        self.assertGreater(total, 30.0)
+        on_air = [ms for text, _tone, ms in shown if text.startswith("On air:")]
+        self.assertEqual(len(on_air), 1)
+        self.assertGreaterEqual(on_air[0], total * 1000)
+        # An interval ID makes the transmission longer: "On air" follows.
+        shown.clear()
+        self.station._on_progress(1.0, total + 20.0)
+        on_air = [ms for text, _tone, ms in shown if text.startswith("On air:")]
+        self.assertEqual(len(on_air), 1)
+        self.assertGreaterEqual(on_air[0], (total + 19.0) * 1000)
+        self.station.stop()
+        self.wait_done(5)
+
+    def test_the_ham_id_tab_says_what_is_on_the_air(self):
+        """Another transmission isn't announced as "Transmitting ID"."""
+        from sdr_module.gui.transmitter import TxJob
+
+        self.panel.set_callsign("W1AW")
+        self.hackrf(pace=True)
+        carrier = np.full(int(2e6), 0.9, np.complex64)
+        job = TxJob(carrier, 2e6, 146.52e6, "FM", 12.5e3, "a test carrier")
+        self.assertTrue(self.win._transmit_job(job))
+        self.assertEqual(self.panel._status_label.text(), "On the air as W1AW")
+        self.assertEqual(
+            self.panel.tx_status_text(), "Sending a test carrier on 146.520 MHz…"
+        )
+        self.station.stop()
+        self.wait_done(5)
+        self.assertTrue(self.station.send_station_id())
+        self.assertEqual(self.panel._status_label.text(), "Transmitting ID: DE W1AW")
+        self.station.stop()
+        self.wait_done(5)
+
+    def test_the_confirmation_counts_the_station_ids(self):
+        """The first-use question gives the whole air time, the IDs at the
+        start and end included, not just the job's."""
+        from sdr_module.gui.transmitter import TxJob
+
+        self.panel.set_callsign("W1AW")
+        self.hackrf()
+        self.store.values["tx/confirm"] = True
+        seen = []
+
+        def answer(box):
+            seen.append(box.informativeText())
+            box.clickedButton = lambda: box.escapeButton()  # Cancel
+            return 0
+
+        self.win._exec_dialog = answer
+        carrier = np.full(int(2e6), 0.9, np.complex64)  # 1 s
+        job = TxJob(carrier, 2e6, 146.52e6, "FM", 12.5e3, "a test carrier")
+        self.assertFalse(self.win._transmit_job(job))
+        id_s = self.station.make_id_job(146.52e6).duration_s
+        self.assertIn(f"about {1.0 + 2 * id_s:.1f} s with your station ID", seen[-1])
+        self.assertTrue(self.station.send_station_id() is False)
+        self.assertIn(f"about {id_s:.1f} s. Make sure", seen[-1])
+
+    def test_an_id_that_wont_be_sent_isnt_checked(self):
+        """With Automatic ID off, the ID's own emission (here an FM tone,
+        not allowed in a CW segment) doesn't refuse a CW transmission."""
+        from sdr_module.core.frequency_manager import LicenseClass
+        from sdr_module.gui.transmitter import TxJob
+
+        self.win._control_panel.set_license_class(LicenseClass.AMATEUR_EXTRA)
+        self.panel.set_callsign("W1AW")
+        self.panel._emission_combo.setCurrentIndex(
+            self.panel._emission_combo.findData("mcw")
+        )
+        self.hackrf(freq=14.05e6)
+        carrier = np.full(20000, 0.9, np.complex64)
+        job = TxJob(carrier, 2e6, 14.05e6, "CW", 150.0, "a test carrier")
+        self.assertFalse(self.win._transmit_job(job))  # its FM ID is refused
+        self.assertIn("FM isn't allowed", self.status()[0])
+        for check in (
+            self.panel._auto_id_check,
+            self.panel._id_start_check,
+            self.panel._id_end_check,
+        ):
+            check.setChecked(False)
+        self.assertTrue(self.win._transmit_job(job), self.status()[0])
+        self.wait_done(10)
+        self.assertTrue(self.station.engine.last_result.ok)
 
 
 class TestMenusAndBadge(_TxCase):

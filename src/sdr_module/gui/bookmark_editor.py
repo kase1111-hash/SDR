@@ -53,15 +53,18 @@ _NO_TONE_TEXT = "None (hear every station)"
 #: CHIRP's Mode for "no particular mode" (a CHIRP channel that keeps the
 #: receiver's mode): it maps to no demodulator here.
 _CHIRP_KEEP_MODE = "Auto"
+#: CHIRP's default cToneFreq: a TSQL channel saved without its tone uses it.
+_CHIRP_DEFAULT_TONE_HZ = 88.5
 
 
 def bookmark_tone_hz(bookmark: Dict[str, Any]) -> float:
     """The CTCSS tone (Hz) a bookmark's tone squelch listens for, 0 for
-    none: CHIRP's TSQL tone (its cToneFreq)."""
+    none: CHIRP's TSQL tone (its cToneFreq, 88.5 Hz when not saved)."""
     if str(bookmark.get("tone_mode") or "") != "TSQL":
         return 0.0
+    raw = bookmark.get("ctone")
     try:
-        tone = float(bookmark.get("ctone"))
+        tone = float(_CHIRP_DEFAULT_TONE_HZ if raw is None else raw)
     except (TypeError, ValueError):
         return 0.0
     return tone if math.isfinite(tone) and tone > 0 else 0.0

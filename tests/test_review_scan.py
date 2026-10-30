@@ -273,5 +273,91 @@ class TestScan03EditKeepsTheChirpMode(_BookmarksCase):
         self.assertNotIn("demod", nfm)
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-02: a CTCSS tone squelch of 88.5 Hz (CHIRP's default) was lost
+# --------------------------------------------------------------------------- #
+_TONE_CSV = (
+    "Location,Name,Frequency,Duplex,Offset,Tone,rToneFreq,cToneFreq,DtcsCode,"
+    "DtcsPolarity,Mode,TStep,Skip,Comment\n"
+    "1,RPT885,145.290000,-,0.600000,TSQL,88.5,88.5,023,NN,FM,5.00,,\n"
+    "2,RPT100,145.310000,-,0.600000,TSQL,88.5,100.0,023,NN,FM,5.00,,\n"
+    "3,ENC885,145.330000,-,0.600000,Tone,88.5,88.5,023,NN,FM,5.00,,\n"
+    "4,DCS023,145.350000,-,0.600000,DTCS,88.5,88.5,023,NN,FM,5.00,,\n"
+)
+
+
+class TestScan02ToneSquelchOf885Hz(_BookmarksCase):
+    def test_an_imported_tsql_channel_keeps_its_885_hz_tone(self):
+        import io
+
+        from sdr_module.core.chirp_csv import read_chirp_csv
+        from sdr_module.gui.bookmark_editor import bookmark_tone_hz
+
+        rpt885, rpt100, enc885, dcs023 = [
+            c.to_bookmark() for c in read_chirp_csv(io.StringIO(_TONE_CSV))
+        ]
+        self.assertEqual(rpt885["ctone"], 88.5)
+        self.assertEqual(bookmark_tone_hz(rpt885), 88.5)
+        self.assertEqual(self.mod.listening(rpt885), ("FM", "5 kHz", "", 88.5))
+        self.assertEqual(self.mod.listening(rpt100), ("FM", "5 kHz", "", 100.0))
+        # The tones a radio uses for the other Tone modes are kept too.
+        self.assertEqual(enc885["rtone"], 88.5)
+        self.assertEqual((dcs023["dtcs"], dcs023["dtcs_polarity"]), (23, "NN"))
+        # A transmit-only tone is no tone squelch.
+        self.assertEqual(self.mod.listening(enc885)[3], 0.0)
+
+    def test_the_apps_own_885_hz_tone_survives_a_round_trip(self):
+        import io
+
+        from sdr_module.core.chirp_csv import export_bookmarks_csv, read_chirp_csv
+
+        panel = self.panel()
+        index = panel.add_bookmark("Club", 145.29e6, "FM", "5 kHz", "12.5 kHz")
+        panel.set_tone(index, 88.5)
+        before = self.mod.listening(panel.bookmark(index))
+        self.assertEqual(before, ("FM", "5 kHz", "12.5 kHz", 88.5))
+        out = io.StringIO()
+        export_bookmarks_csv(out, panel.bookmarks())
+        out.seek(0)
+        (back,) = [c.to_bookmark() for c in read_chirp_csv(out)]
+        self.assertEqual(self.mod.listening(back), before)
+
+    def test_a_tsql_bookmark_saved_without_its_tone_listens_for_885_hz(self):
+        """Bookmarks imported before the fix have no "ctone": CHIRP's
+        default tone is what the radio uses, and what the tooltip says."""
+        from sdr_module.gui.bookmark_editor import BookmarkEditDialog, bookmark_tone_hz
+
+        saved = {
+            "label": "RPT",
+            "freq_hz": 145.29e6,
+            "location": 1,
+            "tone_mode": "TSQL",
+        }
+        self.assertEqual(bookmark_tone_hz(saved), 88.5)
+        self.assertIn("TSQL: 88.5 Hz", self.mod._tooltip(saved))
+        dialog = BookmarkEditDialog(saved, self.mod.tune_mode(saved))
+        self.assertEqual(dialog._tone.currentData(), 88.5)
+        self.assertEqual(dialog.bookmark().get("tone_mode"), "TSQL")
+        dialog.deleteLater()
+
+
+class TestScan02ToneSquelchInTheWindow(_ScanWindowCase):
+    def test_tuning_an_imported_885_hz_channel_sets_its_tone_squelch(self):
+        import io
+
+        from sdr_module.core.chirp_csv import read_chirp_csv
+
+        panel = self.win._bookmarks_panel
+        panel._bookmarks = [
+            c.to_bookmark() for c in read_chirp_csv(io.StringIO(_TONE_CSV))
+        ][:1]
+        panel._refresh_list()
+        self.win._control_panel.set_tone_squelch_hz(0.0)
+        panel._tune_index(0)
+        self.settle()
+        self.assertAlmostEqual(self.win._current_frequency(), 145.29e6)
+        self.assertEqual(self.win._control_panel.tone_squelch_hz(), 88.5)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -164,6 +164,12 @@ _KEEP = "keep"
 _IQ = "I/Q"
 _TAG_RE = re.compile(r"\s*\[sdr\s+([^\]]*)\]\s*$")
 _TAG_FIELDS = (("mode", "demod"), ("dev", "fm_deviation"), ("bw", "bandwidth"))
+#: A channel's tones (CTCSS tones, DCS codes and how they cross): its
+#: bookmark keeps them whenever a Tone mode is set, even at CHIRP's
+#: defaults (a TSQL tone of 88.5 Hz is still a tone squelch).
+_TONE_FIELDS = frozenset(
+    ("rtone", "ctone", "dtcs", "dtcs_polarity", "rx_dtcs", "cross_mode")
+)
 
 
 def _tag_value(value: Any) -> str:
@@ -540,11 +546,13 @@ class Channel:
         }
         comment, listen = split_listening_tag(self.comment)
         defaults = Channel()
+        # The fields left out are CHIRP's defaults, except a Tone mode's tones.
+        kept = _TONE_FIELDS if self.tone_mode else frozenset()
         for f in fields(self):
             if f.name in ("name", "frequency_hz"):
                 continue
             value = comment if f.name == "comment" else getattr(self, f.name)
-            if value != getattr(defaults, f.name):
+            if f.name in kept or value != getattr(defaults, f.name):
                 data[f.name] = value
         demod = listen.get("demod", "")
         # The tag holds while CHIRP's Mode is still what was exported with

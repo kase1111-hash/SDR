@@ -105,6 +105,7 @@ class TestShortcutsMatchTheMainWindow(_WindowTestCase):
             collect_bindings,
             tuning_entries,
             tuning_steps,
+            tuning_words,
         )
 
         bindings = collect_bindings(self.win)
@@ -114,7 +115,9 @@ class TestShortcutsMatchTheMainWindow(_WindowTestCase):
         # they are listed with the window's steps of the moment.
         live = {
             keys: (cat, desc)
-            for cat, keys, desc in tuning_entries(tuning_steps(self.win))
+            for cat, keys, desc in tuning_entries(
+                tuning_steps(self.win), tuning_words(self.win)
+            )
         }
         for category, keys, description in SHORTCUTS:
             if keys == ("Ctrl+R",) and not self.mw.HAS_HAM_RADIO:

@@ -129,6 +129,27 @@ class TestSpectrumSnap(_PlotCase):
         self.assertEqual(w.tuned_frequency(), CENTER)
 
 
+class TestPassbandAtTheVfo(unittest.TestCase):
+    """A sideband narrower than a pixel grows away from the tuned
+    frequency, wherever in the span the VFO is."""
+
+    def test_sub_pixel_sidebands_grow_away_from_the_marker(self):
+        require_pyqt6(self)
+        from PyQt6.QtCore import QRectF
+
+        from sdr_module.gui.spectrum_widget import PASSBAND_MIN_PX, passband_px
+
+        plot = QRectF(0, 0, 1000, 100)
+        span, vfo = 2.4e6, -300e3
+        marker_x = plot.center().x() + vfo * plot.width() / span
+        usb = passband_px((vfo, vfo + 2.8e3), plot, span, anchor_hz=vfo)
+        lsb = passband_px((vfo - 2.8e3, vfo), plot, span, anchor_hz=vfo)
+        self.assertAlmostEqual(usb[0], round(marker_x), delta=1)
+        self.assertGreaterEqual(usb[1] - usb[0], PASSBAND_MIN_PX - 1)
+        self.assertAlmostEqual(lsb[1], round(marker_x), delta=1)
+        self.assertLessEqual(lsb[0], lsb[1] - PASSBAND_MIN_PX + 1)
+
+
 class TestWaterfallSnap(_PlotCase):
     def make(self, rows, step=100e3, mode="wfm"):
         from sdr_module.gui.waterfall_widget import WaterfallWidget

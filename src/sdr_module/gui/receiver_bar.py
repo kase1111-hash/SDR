@@ -20,7 +20,7 @@ import time
 from typing import List, Optional, Tuple
 
 try:
-    from PyQt6.QtCore import QEvent, QObject, QPointF, Qt, pyqtSignal
+    from PyQt6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, pyqtSignal
     from PyQt6.QtGui import QPainter, QPen
     from PyQt6.QtWidgets import QComboBox, QLabel, QToolBar
 
@@ -74,9 +74,13 @@ class FrequencyDigits(QObject if HAS_PYQT6 else object):
 
     # -- geometry -----------------------------------------------------------
     def fit_width(self) -> int:
-        """Give the label the width of the widest frequency text; returns it."""
+        """Give the label the width of the widest frequency text; returns it
+        (0 when the label is gone)."""
         label = self._label
-        label.ensurePolished()
+        try:
+            label.ensurePolished()
+        except RuntimeError:  # deleted before a deferred refit ran
+            return 0
         fm = label.fontMetrics()
         frame = label.sizeHint().width() - fm.horizontalAdvance(label.text())
         width = max(1, frame + fm.horizontalAdvance(WIDEST_FREQUENCY_TEXT))
@@ -143,7 +147,8 @@ class FrequencyDigits(QObject if HAS_PYQT6 else object):
             self._paint_underline()
             return True
         elif kind in (QEvent.Type.StyleChange, QEvent.Type.FontChange):
-            self.fit_width()
+            # The label takes the new font after this filter: measure then.
+            QTimer.singleShot(0, self.fit_width)
         return False
 
     def _set_hover(self, x: Optional[float]) -> None:

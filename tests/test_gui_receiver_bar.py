@@ -208,6 +208,28 @@ class TestTuningStep(_WindowTestCase):
         self.assertEqual(other._step_hz, 200e3)
         self.assertEqual(other._receiver_bar.step_combo.currentText(), "200 kHz")
 
+    def test_f1_lists_the_arrow_keys_with_the_step(self):
+        from sdr_module.gui.help_dialog import HelpDialog
+
+        def rows():
+            dialog = HelpDialog(self.win)
+            self.addCleanup(dialog.deleteLater)
+            return {k: d for c, k, d in dialog.shortcut_entries() if c == "Tuning"}
+
+        listed = rows()
+        self.assertEqual(
+            listed[("Left", "Right")], "Tune down / up by one tuning step (100 kHz)"
+        )
+        self.assertEqual(
+            listed[("Shift+Left", "Shift+Right")],
+            "Tune down / up by ten tuning steps (1 MHz)",
+        )
+        self.assertEqual(listed[("Ctrl+Left", "Ctrl+Right")], "Tune down / up by 1 MHz")
+        self.use("USB")
+        self.assertEqual(
+            rows()[("Left", "Right")], "Tune down / up by one tuning step (100 Hz)"
+        )
+
     def test_arrow_keys_tune_by_the_step(self):
         self.use("FM", "5 kHz")  # 12.5 kHz
         self.win._spectrum.setFocus()
@@ -318,6 +340,19 @@ class TestFreqReadout(_WindowTestCase):
         self.settle()
         self.assertTrue(self.win._frequency_field().hasFocus())
 
+    def test_the_width_follows_a_new_font(self):
+        from PyQt6.QtGui import QFont
+
+        label = self.win._freq_label
+        before = label.width() if label.isVisible() else label.minimumWidth()
+        font = QFont(label.font())
+        font.setPixelSize(max(8, label.fontInfo().pixelSize()) * 2)
+        label.setFont(font)
+        self.settle(3)
+        self.assertGreater(label.minimumWidth(), before)
+        self.assertEqual(label.minimumWidth(), label.maximumWidth())
+        self.assertEqual(label.minimumWidth(), self.win._freq_digits.fit_width())
+
     def test_digit_geometry_matches_the_painted_text(self):
         """The digit boxes are where the label really paints its glyphs."""
         self.win.resize(1366, 768)
@@ -425,13 +460,22 @@ class TestTuningHistory(_WindowTestCase):
         self.win._commit_history_entry()
         recent = self.win._tuning_history.recent()
         self.assertEqual([e.freq_hz for e in recent], [100.6e6, 100.1e6])
-        self.assertTrue(self.win._history_timer.isActive() is False)
+        self.assertFalse(self.win._history_timer.isActive())
 
     def test_back_right_after_a_jump_goes_to_the_frequency_before(self):
         self.win._commit_history_entry()
         self.win.set_frequency(99.5e6)  # not committed yet
         self.win._tune_back()
         self.assertEqual(self.freq(), 100.1e6)
+
+    def test_closing_keeps_the_frequency_just_tuned(self):
+        self.win._commit_history_entry()
+        self.win.set_frequency(99.5e6)  # not yet a moment on it
+        self.assertTrue(self.win._history_timer.isActive())
+        self.win._persist_state = lambda: None
+        self.win.close()
+        saved = json.loads(self.store.values["tuning/recent"])
+        self.assertEqual(saved[0]["freq_hz"], 99.5e6)
 
     def test_recent_frequencies_menu_and_persistence(self):
         self.win._commit_history_entry()

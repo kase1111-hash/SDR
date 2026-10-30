@@ -479,6 +479,37 @@ class TestRefusedTuning(_TuningCase):
         self.win._device = None
 
 
+class TestRefusalsAndTheErrorHistory(_TuningCase):
+    """Tools > Error History is for faults: a frequency out of range is
+    explained in the status bar, not logged; a device that says no is."""
+
+    def test_out_of_range_is_explained_not_logged(self):
+        self.connect(_rtlsdr())
+        with self.assertNoLogs("sdr_module.gui.main_window", level="WARNING"):
+            self.assertFalse(self.win.set_frequency(2.4e9))
+        self.assertIn("RTL-SDR tunes", self.errors())
+
+    def test_a_device_saying_no_is_logged(self):
+        dev = _rtlsdr()
+        self.connect(dev)
+        self.win._keep_centered_action.setChecked(True)
+        with (
+            mock.patch.object(type(dev), "set_frequency", return_value=False),
+            self.assertLogs("sdr_module.gui.main_window", level="WARNING"),
+        ):
+            self.assertFalse(self.win.set_frequency(433.92e6))
+
+    def test_a_damaged_saved_frequency_is_clamped_quietly(self):
+        self.store.values["frequency_hz"] = 1e12
+        other = self.mw.SDRMainWindow()
+        self.addCleanup(other.deleteLater)
+        for timer in (other._display_timer, other._status_timer, other._hotplug_timer):
+            timer.stop()
+        self.assertEqual(other._current_frequency(), 6e9)
+        self.assertEqual(other._lo_frequency(), 6e9)
+        self.assertNotEqual(other._message_label.property("tone"), "danger")
+
+
 class TestTransmitWhereChecked(_TuningCase):
     def test_the_lo_moves_to_the_tuned_frequency_before_transmitting(self):
         dev = _hackrf()
@@ -524,6 +555,13 @@ class TestLockedLo(_TuningCase):
         self.win._unlock_lo()
         self.assertEqual(self.lo(), 100.6e6)  # centered, as the option says
         self.assertEqual(device.frequency, 100.6e6)
+
+    def test_locking_brings_a_vfo_outside_the_span_inside(self):
+        self.win.set_frequency(100.9e6)
+        self.assertEqual(self.lo(), 100.1e6)
+        self.win._lock_lo(100.1e6, 1.0e6, "the recording")  # +/-400 kHz usable
+        self.assertEqual((self.freq(), self.lo()), (100.1e6, 100.1e6))
+        self.win._unlock_lo()
 
 
 class TestNewWindowSettings(unittest.TestCase):

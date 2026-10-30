@@ -1535,6 +1535,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     - Recording controls
     """
 
+    # How F1 names the arrow keys' steps (by modifier prefix): they follow
+    # the tuning step.
+    _TUNE_STEP_WORDS = {"": "one tuning step", "Shift+": "ten tuning steps"}
+
     @property
     def _TUNE_STEPS_HZ(self) -> Dict[Any, float]:  # noqa: N802 - existing name
         """How far Left/Right tune, by modifier: one tuning step, ten with
@@ -2531,7 +2535,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _on_frequency_entry_rejected(self, reason: str) -> None:
         """The Frequency field dropped text it can't tune: say why."""
         self._entry_rejected = self._frequency_field().hasFocus()
-        self._show_status_error(reason)  # "... is out of range: ..."
+        # A typing slip, not a fault: explained, not logged.
+        self._show_status_message(reason, "danger", 6000)
 
     def _focus_plots(self) -> None:
         """Give the keyboard focus to the spectrum (or the waterfall when the
@@ -3374,13 +3379,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._waterfall.set_center_freq(lo)
         return True
 
-    def _tune_to(
-        self, freq_hz: float, recenter: bool = False, force_lo: bool = False
-    ) -> bool:
+    def _tune_to(self, freq_hz: float, recenter: bool = False) -> bool:
         """Tune to ``freq_hz`` by the rules of :meth:`set_frequency`.
 
-        ``recenter`` puts the LO on the tuned frequency whatever the span;
-        ``force_lo`` sends the LO to the device even when it is unchanged.
+        ``recenter`` puts the LO on the tuned frequency whatever the span.
         True when tuned; otherwise the reason is in the status bar and
         everything stays on the frequency tuned.
         """
@@ -3408,14 +3410,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             lo = center
         elif recenter or self._keep_centered() or not self._channel_fits(freq - lo):
             lo = freq
-        if force_lo or abs(lo - self._lo_hz) >= 0.5:
-            if not self._retune_lo(lo):
-                return self._refuse_tuning(
-                    f"{self._device_model_name()} didn't tune to "
-                    f"{format_frequency(lo)}; it stays on "
-                    f"{format_frequency(self._lo_hz)}. Details are in Tools > "
-                    "Error History."
-                )
+        if abs(lo - self._lo_hz) >= 0.5 and not self._retune_lo(lo):
+            return self._refuse_tuning(
+                f"{self._device_model_name()} didn't tune to "
+                f"{format_frequency(lo)}; it stays on "
+                f"{format_frequency(self._lo_hz)}. Details are in Tools > "
+                "Error History.",
+                device_problem=True,
+            )
         self._finish_tune(freq)
         return True
 
@@ -3427,12 +3429,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._on_frequency_changed(self._current_frequency())
         self._note_tuned()
 
-    def _refuse_tuning(self, reason: str) -> bool:
+    def _refuse_tuning(self, reason: str, device_problem: bool = False) -> bool:
         """A frequency can't be tuned: say why, and put the Frequency field
-        (and anything that showed the new frequency) back on the one tuned."""
+        (and anything that showed the new frequency) back on the one tuned.
+
+        Only a device that said no is logged (Tools > Error History); a
+        frequency out of range is just explained.
+        """
         self._control_panel.set_frequency(self._tuned_hz)
         self._on_frequency_changed(self._current_frequency())
-        self._show_status_error(reason)
+        if device_problem:
+            self._show_status_error(reason)
+        else:
+            self._show_status_message(reason, "danger", 6000)
         return False
 
     def _ensure_vfo_fits(self) -> None:
@@ -5760,6 +5769,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             deviation = bandwidth = rec_format = panel = ""
         if not deviation and _FM_BROADCAST_BAND[0] <= freq <= _FM_BROADCAST_BAND[1]:
             deviation = _BROADCAST_FM_DEVIATION  # broadcast FM is wideband
+        if math.isfinite(freq):  # (a damaged setting: the nearest end)
+            freq = min(max(freq, MIN_FREQUENCY_HZ), MAX_FREQUENCY_HZ)
         # The view as it was left: the LO where it was, if the tuned
         # frequency is still inside its span (else centered on it).
         lo = self._settings.get_float("tuning/lo_hz", freq)
@@ -5942,6 +5953,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         if self._recording:
             self._toggle_recording(False)  # armed, or nothing left to lose
+        self._commit_pending_history()  # the last frequency joins Recent
         self._persist_state()
         for timer in (self._display_timer, self._status_timer, self._hotplug_timer):
             timer.stop()

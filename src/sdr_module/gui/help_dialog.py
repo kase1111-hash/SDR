@@ -47,7 +47,7 @@ if HAS_PYQT6:
 SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
     ("Radio", ("Space",), "Start or stop the receiver"),
     ("Radio", ("Ctrl+Shift+R",), "Start or stop recording"),
-    ("Radio", ("Ctrl+L",), "Type a new center frequency"),
+    ("Radio", ("Ctrl+L",), "Type a frequency to tune to"),
     ("Radio", ("Ctrl+B",), "Bookmark the current frequency"),
     (
         "Radio",
@@ -157,16 +157,33 @@ def tuning_steps(window) -> Optional[List[Tuple[str, float]]]:
     return sorted(steps, key=lambda item: item[1]) or None
 
 
-def tuning_entries(steps: Sequence[Tuple[str, float]]) -> List[Entry]:
-    """Shortcut entries for arrow-key tuning steps."""
-    return [
-        (
-            "Tuning",
-            (f"{prefix}Left", f"{prefix}Right"),
-            f"Tune down / up by {_format_step(step)}",
+def tuning_words(window) -> Dict[str, str]:
+    """How ``window._TUNE_STEP_WORDS`` names its arrow-key steps, by
+    modifier prefix (``{"": "one tuning step"}``); empty without one."""
+    words = getattr(window, "_TUNE_STEP_WORDS", None) if window is not None else None
+    return dict(words) if isinstance(words, dict) else {}
+
+
+def tuning_entries(
+    steps: Sequence[Tuple[str, float]], words: Optional[Dict[str, str]] = None
+) -> List[Entry]:
+    """Shortcut entries for arrow-key tuning steps: ``"Tune down / up by
+    10 kHz"``, or with ``words`` for the step, ``"... by one tuning step
+    (10 kHz)"``."""
+    words = words or {}
+    entries: List[Entry] = []
+    for prefix, step in steps:
+        amount = _format_step(step)
+        if words.get(prefix):
+            amount = f"{words[prefix]} ({amount})"
+        entries.append(
+            (
+                "Tuning",
+                (f"{prefix}Left", f"{prefix}Right"),
+                f"Tune down / up by {amount}",
+            )
         )
-        for prefix, step in steps
-    ]
+    return entries
 
 
 def _menu_path(action) -> List[str]:
@@ -236,15 +253,17 @@ def build_entries(
     bindings: Optional[Dict[str, Tuple[str, str]]],
     table: Sequence[Entry] = SHORTCUTS,
     steps: Optional[Sequence[Tuple[str, float]]] = None,
+    words: Optional[Dict[str, str]] = None,
 ) -> List[Entry]:
     """The shortcut entries to show, given the window's live ``bindings``.
 
     ``steps`` (see :func:`tuning_steps`) replaces the table's tuning rows
-    with the window's real arrow-key steps. With no bindings to check
-    against, the whole table is returned.
+    with the window's real arrow-key steps, named with ``words`` (see
+    :func:`tuning_words`). With no bindings to check against, the whole
+    table is returned.
     """
     if steps:
-        generated = tuning_entries(steps)
+        generated = tuning_entries(steps, words)
         merged: List[Entry] = []
         for entry in table:
             if entry[0] != "Tuning":
@@ -387,7 +406,9 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
 
         window = parent.window() if parent is not None else None
         self._entries = build_entries(
-            collect_bindings(window), steps=tuning_steps(window)
+            collect_bindings(window),
+            steps=tuning_steps(window),
+            words=tuning_words(window),
         )
         # (row widget, lowercase search text, category section)
         self._rows: List[Tuple[QWidget, str, QWidget]] = []

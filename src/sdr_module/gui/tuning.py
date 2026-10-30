@@ -163,7 +163,7 @@ _SUFFIXES: Dict[str, float] = {
 }
 #: Unfinished suffixes while typing ("433.92 MH").
 _PARTIAL_SUFFIXES = ("h", "kh", "mh", "gh")
-_SPACES = re.compile(r"[\s   _']+")
+_SPACES = re.compile(r"[\s\u00a0\u2009\u202f_']+")
 _SUFFIX_RE = re.compile(r"([a-df-z]+)$", re.IGNORECASE)
 
 #: The highest frequency any supported receiver tunes (HackRF One).
@@ -238,9 +238,10 @@ def parse_frequency_text(
 
     Accepts a unit suffix in any case, with or without a space (``Hz``,
     ``k``/``kHz``, ``M``/``MHz``, ``G``/``GHz``), e-notation (``7.074e6``)
-    and either decimal separator (``144,39`` in the MHz field). With
-    ``grouped`` (the Hz and kHz units, which show digit grouping) a single
-    separator followed by three digits groups (``7,074`` kHz).
+    and either decimal separator (``144,39`` in the MHz field). In the Hz
+    and kHz units, which show digit grouping (``grouped``), and with a Hz or
+    kHz suffix, a single ``group_separator`` followed by three digits groups
+    digits (``7,074`` kHz is 7074 kHz).
 
     A bare number above the field's range in its unit that is at least
     :data:`HZ_READING_MINIMUM` and in range as Hz is read as Hz:

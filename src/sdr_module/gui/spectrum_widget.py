@@ -409,6 +409,7 @@ def draw_landing_mark(painter: "QPainter", plot: "QRectF", x: float, palette) ->
     """Where a click would tune, when that isn't under the cursor (it snaps
     onto a signal): a thin accent line with a small flag at the top."""
     painter.save()
+    painter.setClipRect(plot)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
     xi = round(x) + 0.5
     painter.setPen(QPen(palette.qcolor(PASSBAND_TOKEN, 170), 1))

@@ -411,6 +411,11 @@ class Channel:
     rpt2call: str = ""
     dv_code: str = ""
 
+    #: Whether ``mode`` is the channel's own (not a field: a row without a
+    #: Mode, from a file that has no such column, gets CHIRP's FM, and as a
+    #: bookmark it keeps the receiver's mode instead).
+    mode_given = True
+
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
         self.frequency_hz = float(self.frequency_hz)
@@ -504,7 +509,7 @@ class Channel:
         get = {str(k).strip().lower(): v for k, v in row.items() if k is not None}.get
 
         location_text = str(get("location", "") or "").strip()
-        return cls(
+        channel = cls(
             name=str(get("name", "") or "").strip(),
             frequency_hz=parse_freq(get("frequency", "")),
             location=_to_int(location_text, 0) if location_text else None,
@@ -527,6 +532,8 @@ class Channel:
             rpt2call=str(get("rpt2call", "") or "").strip(),
             dv_code=str(get("dvcode", "") or "").strip(),
         )
+        channel.mode_given = bool(str(get("mode", "") or "").strip())
+        return channel
 
     # ---- Bookmark bridge -------------------------------------------------
     def to_bookmark(self) -> Dict[str, Any]:
@@ -546,8 +553,11 @@ class Channel:
         }
         comment, listen = split_listening_tag(self.comment)
         defaults = Channel()
-        # The fields left out are CHIRP's defaults, except a Tone mode's tones.
-        kept = _TONE_FIELDS if self.tone_mode else frozenset()
+        # The fields left out are CHIRP's defaults, except a Tone mode's tones
+        # and a Mode the channel gave (FM too: it is listened to in FM then).
+        kept = set(_TONE_FIELDS) if self.tone_mode else set()
+        if self.mode_given:
+            kept.add("mode")
         for f in fields(self):
             if f.name in ("name", "frequency_hz"):
                 continue

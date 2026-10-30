@@ -722,5 +722,44 @@ class TestScan09CliRateTheDeviceRuns(unittest.TestCase):
         self.assertNotIn("can't run", out)
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-10: a minimal CSV's Mode=FM rows imported as "keep the receiver's mode"
+# --------------------------------------------------------------------------- #
+class TestScan10ModeColumnOfAMinimalCsv(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+
+    def bookmarks(self, text):
+        import io
+
+        from sdr_module.core.chirp_csv import read_chirp_csv
+
+        return {c.name: c.to_bookmark() for c in read_chirp_csv(io.StringIO(text))}
+
+    def test_a_mode_column_saying_fm_tunes_fm(self):
+        from sdr_module.gui.bookmarks_panel import _mode, tune_mode
+
+        marks = self.bookmarks(
+            "Name,Frequency,Mode\n"
+            "RPT FM,145.290000,FM\n"
+            "RPT NFM,145.300000,NFM\n"
+            "TWR AM,118.100000,AM\n"
+        )
+        self.assertEqual(marks["RPT FM"]["mode"], "FM")
+        self.assertEqual(_mode(marks["RPT FM"]), "FM")
+        self.assertEqual(tune_mode(marks["RPT FM"]), ("FM", "5 kHz"))
+        self.assertEqual(tune_mode(marks["RPT NFM"]), ("FM", "5 kHz"))
+        self.assertEqual(tune_mode(marks["TWR AM"]), ("AM", ""))
+
+    def test_a_file_that_doesnt_say_still_keeps_the_receivers_mode(self):
+        from sdr_module.gui.bookmarks_panel import tune_mode
+
+        marks = self.bookmarks("Name,Frequency,Mode\nA,146.520000,\n")
+        marks.update(self.bookmarks("Name,Frequency\nB,162.550000\n"))
+        for name in ("A", "B"):
+            self.assertNotIn("mode", marks[name], name)
+            self.assertEqual(tune_mode(marks[name]), ("", ""), name)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

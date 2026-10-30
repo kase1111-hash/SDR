@@ -725,6 +725,25 @@ class TestNoiseReductionOffline(unittest.TestCase):
                 iq = self.make(method).process_clip(np.zeros(0, np.complex64))
                 self.assertTrue(np.iscomplexobj(iq))
 
+    def test_a_stream_too_short_to_learn_from_leaves_no_noise_estimate(self):
+        """Flushing a stream shorter than one hop learned the padding zeros
+        as the noise: the next recording was cleaned less for a second or
+        two (Wiener let twice the noise through). Nothing was heard before
+        the zeros, so there is still no estimate, as in a fresh one."""
+        rng = np.random.default_rng(9)
+        clip = _clip_with_bursts() + 0.05 * rng.standard_normal(8000)
+        for method in self.METHODS:
+            with self.subTest(method=method):
+                fresh = self.make(method)
+                used = self.make(method)
+                used.process(0.05 * rng.standard_normal(200))
+                self.assertEqual(len(used.flush()), used.latency_samples)
+                self.assertIsNone(used.get_noise_spectrum())
+                self.assertFalse(used.noise_estimated)
+                np.testing.assert_allclose(
+                    used.process_clip(clip), fresh.process_clip(clip), atol=1e-12
+                )
+
 
 def _correlation(a: np.ndarray, b: np.ndarray) -> float:
     a = a.astype(float).ravel() - a.mean()

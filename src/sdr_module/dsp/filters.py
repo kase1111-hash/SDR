@@ -2767,12 +2767,19 @@ class NoiseReduction:
             return np.zeros(0, dtype=dtype)
         # The zeros that push the tail out are not quiet to learn from.
         fixed = self._noise_fixed
-        if self._wiener_noise_psd is not None:
+        learned = self._wiener_noise_psd is not None
+        if learned:
             self._noise_fixed = True
         try:
             tail = self._stft_process(np.zeros(self.latency_samples, dtype=dtype))
         finally:
             self._noise_fixed = fixed
+        if not learned:
+            # (A stream shorter than a hop: nothing was heard before the
+            # zeros, so there is still no estimate.)
+            self._wiener_noise_psd = None
+            self._noise_spectrum = None
+            self._reset_noise_tracking()
         self.reset_stream()
         return tail
 

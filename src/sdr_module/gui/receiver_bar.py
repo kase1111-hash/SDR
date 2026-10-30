@@ -338,13 +338,9 @@ class ReceiverBar(QToolBar if HAS_PYQT6 else object):
             source.setCurrentIndex(index)  # the panel's handlers run as usual
 
     def _from_source(self, source: "QComboBox", combo: "QComboBox") -> None:
-        if combo.count() != source.count():
-            self._copy_items(source, combo)
-            return
-        if combo.currentIndex() != source.currentIndex():
-            blocked = combo.blockSignals(True)
-            combo.setCurrentIndex(source.currentIndex())
-            combo.blockSignals(blocked)
+        # Compare the items too: a combo given a new model (setModel) no
+        # longer reports its item changes to the old model's signals.
+        self._copy_items(source, combo)
 
     # -- step -------------------------------------------------------------------
     def _on_step_index_changed(self, index: int) -> None:

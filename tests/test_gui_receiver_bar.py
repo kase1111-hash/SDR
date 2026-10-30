@@ -113,6 +113,23 @@ class TestReceiverBar(_WindowTestCase):
         bar_combo.setCurrentText("3.0 kHz")
         self.assertEqual(panel_combo.currentText(), "3.0 kHz")
 
+    def test_filter_follows_a_bandwidth_combo_given_a_new_model(self):
+        from PyQt6.QtGui import QStandardItem, QStandardItemModel
+
+        panel_combo = self.win._control_panel._bw_combo
+        bar_combo = self.bar().filter_combo
+        # As many items as before, so only their texts tell the change.
+        texts = [f"{w} Hz" for w in range(100, 100 * (panel_combo.count() + 1), 100)]
+        model = QStandardItemModel()
+        for text in texts:
+            model.appendRow(QStandardItem(text))
+        panel_combo.setModel(model)
+        panel_combo.setCurrentIndex(1)
+        self.assertEqual(
+            [bar_combo.itemText(i) for i in range(bar_combo.count())], texts
+        )
+        self.assertEqual(bar_combo.currentText(), "200 Hz")
+
     def test_step_choices(self):
         combo = self.bar().step_combo
         self.assertEqual(
@@ -339,6 +356,19 @@ class TestFreqReadout(_WindowTestCase):
         QTest.mouseClick(label, Qt.MouseButton.LeftButton)
         self.settle()
         self.assertTrue(self.win._frequency_field().hasFocus())
+
+    def test_scrolling_keeps_its_digit_when_the_text_shifts(self):
+        self.win.resize(1366, 768)
+        self.win.show()
+        self.settle(10)
+        label = self.win._freq_label
+        self.win.set_frequency(146.5125e6)
+        self.assertEqual(label.text(), "146.5125 MHz")
+        x0, x1 = self.win._freq_digits.char_spans()[7]  # the 100 Hz digit
+        where = QPointF((x0 + x1) / 2, label.height() / 2)
+        for _ in range(6):  # 146.5125 -> 146.512 (shorter text) -> 146.5119
+            _wheel(label, -1, pos=where)
+        self.assertAlmostEqual(self.freq(), 146.5119e6, places=0)
 
     def test_the_width_follows_a_new_font(self):
         from PyQt6.QtGui import QFont

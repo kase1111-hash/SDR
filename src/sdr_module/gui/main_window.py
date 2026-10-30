@@ -1942,6 +1942,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._tuner_blocks = 0
         self._tuner_signal = False
         self._tuner_centered = False
+        # The receiver refused the tuner's last station (seek stops there).
+        self._tuner_refused = False
         self._pilot: Optional[StereoPilotDetector] = None
         self._squelch_db = -80.0  # the manual squelch threshold (dBFS)
         # What happens after the channel filter: the squelch (hysteresis,
@@ -8132,8 +8134,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # Stored presets (and names) are kept between sessions.
             self._restore_radio_presets()
             tuner.presets_changed.connect(self._save_radio_presets)
-            # Seek steps until a signal opens the squelch.
+            # Seek steps until a signal opens the squelch, over the channels
+            # the receiver can tune.
             tuner.set_signal_probe(self._tuner_probe)
+            tuner.set_tune_check(self._tuner_can_tune)
         self._sync_tuner_device()
         self._pilot = None  # (a fresh detector for the station shown)
 
@@ -8163,8 +8167,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # set_frequency tunes the device (if any) and updates the control
         # panel, toolbar readout and plot axes together. A frequency the
         # device can't tune is refused (the status bar says why) and the
-        # tuner shows the frequency still tuned.
-        if not self.set_frequency(freq_hz):
+        # tuner shows the frequency still tuned (its seek then stops).
+        self._tuner_refused = not self.set_frequency(freq_hz)
+        if self._tuner_refused:
             return
         if band == "FM":
             self._set_demod_mode("FM", _BROADCAST_FM_DEVIATION, _BROADCAST_FM_BANDWIDTH)
@@ -8222,6 +8227,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         pilot is listened for afresh."""
         self._tuner_blocks = 0
         self._tuner_signal = False
+        self._tuner_refused = False  # (set again when the tuner's was refused)
         if self._pilot is not None:
             self._pilot.reset()
         tuner = self._radio_tuner
@@ -8278,11 +8284,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tuner = self._radio_tuner
         if not self._is_running or self._device is None or tuner is None:
             return None
-        if abs(self._current_frequency() - tuner.get_frequency()) > 1.0:
+        # (A refused tune puts the tuner back on the frequency still tuned,
+        # so the two agree: the refusal itself is remembered.)
+        if self._tuner_refused or (
+            abs(self._current_frequency() - tuner.get_frequency()) > 1.0
+        ):
             return "refused"
         if self._tuner_blocks < 3:
             return "wait"
         return "signal" if self._tuner_signal and self._tuner_centered else "quiet"
+
+    def _tuner_can_tune(self, freq_hz: float) -> bool:
+        """For the tuner's seek: whether ``freq_hz`` can be tuned now (inside
+        the device's range and, while a recording plays back, inside its
+        span), by the rules :meth:`_tune_to` refuses with."""
+        low, high = self._tuning_limits()
+        if not low <= freq_hz <= high:
+            return False
+        lock = self._lo_lock
+        if lock is not None:
+            center, span, _why = lock
+            return self._channel_fits(freq_hz - center, rate=span)
+        return True
 
     def _show_decoder_config(self):
         """Bring the Decoder panel to the front."""

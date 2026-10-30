@@ -158,5 +158,198 @@ class TestSstvImageKeptWhenAudioEnds(_HamWindowCase):
         self.assertTrue(self.sstv._progress_bar.isHidden())
 
 
+class _SeekCase(unittest.TestCase):
+    """The tuner alone, its seek driven by hand (a fake receiver)."""
+
+    def setUp(self):
+        from tests.test_gui_chrome import require_pyqt6
+
+        require_pyqt6(self)
+        from sdr_module.ham.gui.radio_tuner import RadioTunerWidget
+
+        self.tuner = RadioTunerWidget(None, 2.4e6)
+        self.emitted = []
+        self.tuner.frequency_changed.connect(lambda f, b: self.emitted.append(f))
+        self.stations = set()
+        self.tuner.set_signal_probe(
+            lambda: (
+                "signal"
+                if round(self.tuner.get_frequency()) in self.stations
+                else "quiet"
+            )
+        )
+        self.tuner.show()
+
+    def tearDown(self):
+        if hasattr(self, "tuner"):
+            self.tuner.close()
+            self.tuner.deleteLater()
+            settle()
+
+    def seek(self, direction: int, polls: int = 400) -> None:
+        tuner = self.tuner
+        (tuner._seek_up if direction > 0 else tuner._seek_down)()
+        for _ in range(polls):
+            if not tuner.is_seeking():
+                return
+            tuner._seek_timer.stop()
+            tuner._seek_poll()
+        self.fail("the seek never ended")
+
+
+class TestSeekWithinReach(_SeekCase):
+    """HAMDSP-4: seek stepped over the whole band. On a HackRF (from 1 MHz)
+    in AM it kept asking for 990 kHz (refused) until it had counted all
+    118 channels, then said no station was anywhere in the band; seek up
+    wrapped to 530 kHz the same way. A recording's span did the same."""
+
+    def am_from(self, freq_hz: float) -> None:
+        self.tuner.set_device_range(1e6, 6e9, "HackRF One")
+        self.tuner._am_btn.click()
+        self.tuner._tuning_dial.tune_to(freq_hz)
+        self.emitted.clear()
+
+    def test_seek_down_wraps_inside_the_device_range(self):
+        self.am_from(1010e3)
+        self.stations = {1260000}
+        self.seek(-1)
+        self.assertTrue(self.emitted)
+        self.assertGreaterEqual(min(self.emitted), 1e6, "below the HackRF's range")
+        self.assertEqual(self.emitted[:2], [1000e3, 1700e3])
+        self.assertAlmostEqual(self.tuner.get_frequency(), 1260e3)
+        self.assertEqual(
+            self.tuner._hint_label.text(), "Found a station on 1260 kHz."
+        )
+
+    def test_seek_up_wraps_inside_the_device_range(self):
+        self.am_from(1260e3)
+        self.stations = {1010000}
+        self.seek(1)
+        self.assertGreaterEqual(min(self.emitted), 1e6)
+        self.assertAlmostEqual(self.tuner.get_frequency(), 1010e3)
+
+    def test_round_the_part_of_the_band_it_can_tune_once(self):
+        self.am_from(1010e3)
+        self.seek(-1)
+        reachable = int(round((1700e3 - 1000e3) / 10e3)) + 1
+        self.assertEqual(len(self.emitted), reachable)
+        self.assertEqual(len(set(self.emitted)), reachable)
+        self.assertEqual(
+            self.tuner._hint_label.text(),
+            "No station strong enough to open the squelch from 1000 kHz to "
+            "1700 kHz, the part of the band the receiver can tune.",
+        )
+
+    def test_the_whole_band_when_it_can_tune_it(self):
+        self.tuner._am_btn.click()
+        self.emitted.clear()
+        self.seek(1)
+        self.assertEqual(len(self.emitted), 118)
+        self.assertEqual(
+            self.tuner._hint_label.text(),
+            "No station strong enough to open the squelch anywhere in the band.",
+        )
+
+    def test_seek_stays_inside_a_recording(self):
+        self.tuner._am_btn.click()
+        self.tuner._tuning_dial.tune_to(960e3)
+        self.emitted.clear()
+        self.tuner.set_tune_check(lambda f: 900e3 <= f <= 1100e3)
+        self.stations = {1100000}
+        self.seek(-1)
+        self.assertTrue(all(900e3 <= f <= 1100e3 for f in self.emitted))
+        self.assertAlmostEqual(self.tuner.get_frequency(), 1100e3)
+
+    def test_nothing_it_can_tune(self):
+        self.tuner.set_tune_check(lambda f: False)
+        self.seek(1)
+        self.assertEqual(self.emitted, [])
+        self.assertIn("can't tune any", self.tuner._hint_label.text())
+
+
+class TestSeekInTheWindow(_HamWindowCase):
+    """HAMDSP-4 through the window: the device's range and a recording's
+    span reach the seek, and a step the receiver refuses stops it."""
+
+    def setUp(self):
+        super().setUp()
+        self.win._show_radio_tuner()
+        self.tuner = self.win._radio_tuner
+        self.tuner._am_btn.click()
+
+    def tearDown(self):
+        tuner = getattr(self, "tuner", None)
+        if tuner is not None:
+            tuner.close()
+        super().tearDown()
+
+    def spy_tuning(self):
+        tunes = []
+        tune = self.win.set_frequency
+
+        def spy(freq):
+            ok = tune(freq)
+            tunes.append((freq, ok))
+            return ok
+
+        self.win.set_frequency = spy
+        return tunes
+
+    def test_seek_on_a_hackrf_finds_the_demo_station(self):
+        from types import SimpleNamespace
+
+        win, tuner = self.win, self.tuner
+        win._device.spec = SimpleNamespace(freq_min=1e6, freq_max=6e9)
+        win._apply_tuning_range()
+        win._sync_tuner_device()
+        tuner._tuning_dial.tune_to(1010e3)
+        tunes = self.spy_tuning()
+        device = win._device
+        block = int(device.sample_rate / 30)
+        tuner._seek_down()
+        for _ in range(300):
+            if not tuner.is_seeking():
+                break
+            tuner._seek_timer.stop()
+            for _ in range(4):
+                win._process_block(device.read_samples(block))
+            tuner._seek_poll()
+        self.assertFalse(tuner.is_seeking())
+        self.assertTrue(all(ok for _f, ok in tunes), "a step was refused")
+        self.assertGreaterEqual(min(f for f, _ok in tunes), 1e6)
+        self.assertAlmostEqual(win._current_frequency(), 1260e3)
+        self.assertEqual(tuner._hint_label.text(), "Found a station on 1260 kHz.")
+
+    def test_seek_inside_a_recording_is_never_refused(self):
+        win, tuner = self.win, self.tuner
+        tuner._tuning_dial.tune_to(1000e3)
+        win._lock_lo(1.0e6, 240e3, "the recording")
+        tunes = self.spy_tuning()
+        tuner.set_signal_probe(lambda: "quiet")
+        tuner._seek_down()
+        for _ in range(300):
+            if not tuner.is_seeking():
+                break
+            tuner._seek_timer.stop()
+            tuner._seek_poll()
+        self.assertFalse(tuner.is_seeking())
+        self.assertTrue(tunes)
+        self.assertTrue(all(ok for _f, ok in tunes), "a step was refused")
+        self.assertIn("the part of the band", tuner._hint_label.text())
+
+    def test_a_refused_step_stops_the_seek(self):
+        win, tuner = self.win, self.tuner
+        tuner._tuning_dial.tune_to(1010e3)
+        win._tx_busy = lambda: True  # every tune is refused now
+        tuner._seek_down()
+        tuner._seek_timer.stop()
+        tuner._seek_poll()
+        self.assertFalse(tuner.is_seeking())
+        self.assertEqual(
+            tuner._hint_label.text(), "Seek stopped: the receiver can't tune 1000 kHz."
+        )
+        self.assertIn("Can't tune while transmitting", win._message_label.text())
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

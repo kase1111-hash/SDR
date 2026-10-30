@@ -947,6 +947,10 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         # Seek: the receiver says whether the tuned channel has a signal
         # (see set_signal_probe); one channel at a time until it does.
         self._probe: Optional[Callable[[], Optional[str]]] = None
+        # Which channels the receiver can tune now (see set_tune_check), and
+        # the channel the seek asked for last.
+        self._tune_check: Optional[Callable[[float], bool]] = None
+        self._seek_target: Optional[float] = None
         self._seek_dir = 0
         self._seek_steps = 0
         self._seek_waited = 0.0
@@ -1410,6 +1414,33 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         self._probe = probe
         self._update_seek_tips()
 
+    def set_tune_check(self, check: Optional[Callable[[float], bool]]) -> None:
+        """Which channels seek may try: ``check(freq_hz)`` is False for a
+        frequency the receiver can't tune now (e.g. outside a recording
+        being played back). Seek goes round the channels it can tune and
+        skips the rest, as it skips those outside the device's range (see
+        :meth:`set_device_range`). None: only the device's range limits it."""
+        self._tune_check = check
+
+    def _seek_reachable(self, freq_hz: float) -> bool:
+        """Whether seek may tune ``freq_hz`` (the device's range, then the
+        receiver's own check)."""
+        if self._device_range is not None:
+            low, high = self._device_range
+            if not low <= freq_hz <= high:
+                return False
+        check = self._tune_check
+        return check is None or bool(check(freq_hz))
+
+    def _seek_channels(self) -> List[float]:
+        """The band's channels that seek may tune, lowest first."""
+        low, high = self._tuning_dial.channel_range()
+        step = band_step(self._band)
+        first, last = int(round(low / step)), int(round(high / step))
+        return [
+            k * step for k in range(first, last + 1) if self._seek_reachable(k * step)
+        ]
+
     def is_seeking(self) -> bool:
         return self._seek_dir != 0
 
@@ -1457,20 +1488,26 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         self._seek_step()
 
     def _seek_step(self) -> None:
-        """One channel on (round the band at its ends), then listen."""
-        low, high = self._tuning_dial.channel_range()
-        step = band_step(self._band)
+        """On to the next channel the receiver can tune (round the band, or
+        the part of it the receiver can tune, at its ends), then listen."""
+        channels = self._seek_channels()
+        if not channels:
+            self.stop_seek(
+                f"Seek stopped: the receiver can't tune any {self._band.value} "
+                "broadcast channel now.",
+                "warning",
+            )
+            return
         here = self._tuning_dial.get_frequency()
-        position = here / step
-        if abs(position - round(position)) < 1e-6:
-            base = round(position)
+        # (From between two channels the first step lands on the next one
+        # that way.)
+        if self._seek_dir > 0:
+            ahead = [c for c in channels if c > here + 0.5]
+            target = ahead[0] if ahead else channels[0]
         else:
-            base = math.floor(position) if self._seek_dir > 0 else math.ceil(position)
-        target = (base + self._seek_dir) * step
-        if target > high + 0.5:
-            target = low
-        elif target < low - 0.5:
-            target = high
+            ahead = [c for c in channels if c < here - 0.5]
+            target = ahead[-1] if ahead else channels[-1]
+        self._seek_target = target
         self._seek_steps += 1
         self._seek_waited = 0.0
         self._seek_stepping = True
@@ -1496,6 +1533,10 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         if state is None:
             self.stop_seek("Seek stopped: the receiver stopped.", "warning")
         elif state == "refused":
+            # (The tuner is back on the frequency still tuned: name the one
+            # the receiver refused.)
+            if self._seek_target is not None:
+                where = format_station(self._seek_target, self._band)
             self.stop_seek(f"Seek stopped: the receiver can't tune {where}.", "warning")
         elif state == "wait":
             self._seek_waited += _SEEK_POLL_MS / 1000.0
@@ -1506,16 +1547,25 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         elif state == "signal":
             self.stop_seek(f"Found a station on {where}.", "success")
         else:
-            low, high = self._tuning_dial.channel_range()
-            channels = int(round((high - low) / band_step(self._band))) + 1
-            if self._seek_steps >= channels:
-                self.stop_seek(
-                    "No station strong enough to open the squelch anywhere in "
-                    "the band.",
-                    "warning",
-                )
+            # Round the band (or the part the receiver can tune) once.
+            channels = self._seek_channels()
+            if self._seek_steps >= len(channels):
+                self.stop_seek(self._nothing_found_text(channels), "warning")
             else:
                 self._seek_step()
+
+    def _nothing_found_text(self, channels: List[float]) -> str:
+        """What a seek that went round ``channels`` without a station says."""
+        low, high = self._tuning_dial.channel_range()
+        whole = int(round((high - low) / band_step(self._band))) + 1
+        if not channels or len(channels) >= whole:
+            return "No station strong enough to open the squelch anywhere in the band."
+        first = format_station(channels[0], self._band)
+        last = format_station(channels[-1], self._band)
+        return (
+            f"No station strong enough to open the squelch from {first} to "
+            f"{last}, the part of the band the receiver can tune."
+        )
 
     def stop_seek(self, message: str = "", tone: Optional[str] = None) -> None:
         """End a seek (saying ``message``)."""

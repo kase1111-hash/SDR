@@ -477,12 +477,13 @@ class _Store:
 def test_dev5_a_remembered_rate_the_kind_doesnt_offer_is_ignored(kind, rate):
     from sdr_module.gui.device_settings import load_rate, save_rate
 
-    store = _Store(**{f"device/{kind}/sample_rate": rate})
+    key = f"device/{kind}/sample_rate"
+    store = _Store(**{key: rate})
     assert load_rate(store, kind) == 0.0
-    save_rate(store, kind, rate)  # (and never saved)
-    assert store.values[f"device/{kind}/sample_rate"] == rate  # unchanged
     save_rate(store, kind, 2.0e6)
     assert load_rate(store, kind) == 2.0e6
+    save_rate(store, kind, rate)  # (never saved: the rate before stays)
+    assert store.values[key] == 2.0e6
 
 
 def test_dev5_the_rate_ranges():

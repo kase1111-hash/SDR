@@ -513,10 +513,11 @@ class TestScan06KeepModeBookmarksInAScan(_BookmarkScanCase):
 
     def test_the_users_own_tone_squelch_decides_speaker_on_or_off(self):
         """Keep the receiver's mode means its tone squelch too: the demo
-        repeater on 145.290 MHz sends 100.0 Hz."""
+        repeater on 145.290 MHz sends 100.0 Hz (and keys up for its first
+        12 s: the cases that hear it come first)."""
         legacy = {"label": "Old 145.29", "freq_hz": 145.29e6}
         for speaker in (True, False):
-            for tone, heard in ((123.0, False), (100.0, True)):
+            for tone, heard in ((100.0, True), (123.0, False)):
                 if speaker:
                     _pretend_audio(self.win)
                 else:

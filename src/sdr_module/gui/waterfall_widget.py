@@ -696,6 +696,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         # Level estimates (dBFS) for Auto levels, the legend and the readouts.
         self._noise_db: Optional[float] = None
         self._peak_db: Optional[float] = None
+        # The noise the SNR readouts use when add_line is given one (else
+        # _noise_db, the rows' median bin).
+        self._snr_noise_db: Optional[float] = None
 
         # Color map
         self._colormap_name = "turbo"
@@ -1036,7 +1039,12 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
     # Public API
     # ------------------------------------------------------------------
 
-    def add_line(self, power_db: np.ndarray, timestamp: Optional[float] = None):
+    def add_line(
+        self,
+        power_db: np.ndarray,
+        timestamp: Optional[float] = None,
+        noise_db: Optional[float] = None,
+    ):
         """
         Add a new spectrum line to the waterfall.
 
@@ -1053,6 +1061,12 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 time: two seconds a second). The time axis, the ages and
                 the measured durations are in that time. Default: now
                 (``time.monotonic()``).
+            noise_db: The noise floor (dBFS per bin) the SNR readouts
+                (hover, measurement) are measured against, e.g. a
+                :class:`~sdr_module.dsp.frame_spectrum.FrameSpectrum`'s
+                ``noise_floor_db`` when the line is its ``max_db``. Default:
+                the rows' median bin (right for a line that is one FFT; a
+                maximum over several FFTs reads it several dB high).
         """
         if self._paused:
             self._skipped += 1
@@ -1100,7 +1114,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             self._row_open = True
             self._write_top_row(codes, scroll=True)
         self._stale = None
-        self._observe_levels(self._history[-1])
+        self._observe_levels(self._history[-1], noise_db)
         if not self._clear_action.isEnabled():
             self._update_clear_action()
         self._canvas.update()
@@ -1600,8 +1614,16 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         delta_db = min(max(delta_db, lo - floor), hi - ceiling)
         self._user_set_levels(floor + delta_db, ceiling + delta_db)
 
-    def _observe_levels(self, row: np.ndarray) -> None:
-        """Track the noise floor (median bin) and the strongest signal."""
+    def _observe_levels(
+        self, row: np.ndarray, noise_db: Optional[float] = None
+    ) -> None:
+        """Track the noise floor (median bin) and the strongest signal, and
+        the noise the SNR readouts use (``noise_db``, when given)."""
+        if noise_db is not None and math.isfinite(noise_db):
+            if self._snr_noise_db is None:
+                self._snr_noise_db = float(noise_db)
+            else:
+                self._snr_noise_db = 0.9 * self._snr_noise_db + 0.1 * float(noise_db)
         values = np.asarray(row, dtype=np.float32)
         finite = values[np.isfinite(values)]
         n = finite.size
@@ -1632,6 +1654,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             or abs(ceiling - cur_ceiling) >= _AUTO_HYSTERESIS_DB
         ):
             self._set_levels(floor, ceiling)
+
+    def _snr_noise(self) -> Optional[float]:
+        """The noise floor (dBFS per bin) SNR readouts are measured against."""
+        return self._noise_db if self._snr_noise_db is None else self._snr_noise_db
 
     def _update_level_description(self) -> None:
         floor, ceiling = self._db_range
@@ -2202,8 +2228,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         ]
         if math.isfinite(stats["peak_db"]):
             peak = f"Peak {stats['peak_db']:.0f} dBFS"
-            if self._noise_db is not None and stats["peak_db"] - self._noise_db >= 1:
-                peak += f" · SNR {stats['peak_db'] - self._noise_db:.0f} dB"
+            noise = self._snr_noise()
+            if noise is not None and stats["peak_db"] - noise >= 1:
+                peak += f" · SNR {stats['peak_db'] - noise:.0f} dB"
             lines.append(peak)
         return lines
 
@@ -2719,8 +2746,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             level = self.level_at(x, y)
             if level is not None:
                 detail = f"{level:.0f} dBFS"
-                if self._noise_db is not None and level - self._noise_db >= 1:
-                    detail += f" · SNR {level - self._noise_db:.0f} dB"
+                noise = self._snr_noise()
+                if noise is not None and level - noise >= 1:
+                    detail += f" · SNR {level - noise:.0f} dB"
             else:
                 detail = "Not received then"
             lines.append(detail)

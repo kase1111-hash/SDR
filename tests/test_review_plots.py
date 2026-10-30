@@ -22,7 +22,7 @@ from tests.test_gui_chrome import (  # noqa: E402
 )
 
 if HAS_PYQT6:
-    from PyQt6.QtCore import QPointF
+    from PyQt6.QtCore import QPointF, QRectF
     from PyQt6.QtWidgets import QApplication
 
     from sdr_module.dsp.frame_spectrum import FrameSpectrumAnalyzer
@@ -674,7 +674,7 @@ class TestPlaybackSpeedTimesRows(_WindowTestCase):
     def burst_rows(self):
         wf = self.win._waterfall
         rows = []
-        for i, (line, (center, rate)) in enumerate(
+        for i, (line, (_center, rate)) in enumerate(
             zip(wf._history, wf._row_axes, strict=True)
         ):
             n = len(line)
@@ -786,6 +786,98 @@ class TestAutoRangeFramesTheHolds(unittest.TestCase):
         self.assertTrue(np.isfinite(low).all())
         floor = sp.db_range()[0]
         self.assertLessEqual(floor, float(np.median(low)))
+
+
+class TestWaterfallSnr(unittest.TestCase):
+    """PLOT-7: the waterfall's SNR readouts (hover, measurement) are
+    measured against the mean noise in a bin, not the median of its
+    max-hold rows (6-8 dB too high, varying with the FFT size, the sample
+    rate and the history)."""
+
+    SIGMA = 1e-3
+
+    def setUp(self):
+        require_pyqt6(self)
+        self.rng = np.random.default_rng(5)
+
+    def noise_frame(self, analyzer, count, carrier_bin=None, rate=2.4e6):
+        x = (self.rng.normal(size=count) + 1j * self.rng.normal(size=count)) * (
+            self.SIGMA
+        )
+        if carrier_bin is not None:
+            t = np.arange(count) / rate
+            f = carrier_bin * rate / analyzer.size
+            x = x + 0.05 * np.exp(2j * np.pi * f * t)
+        return analyzer.process(x.astype(np.complex64))
+
+    def expected_noise_db(self, size):
+        from sdr_module.dsp.frame_spectrum import enbw_bins
+
+        return 10 * np.log10(2 * self.SIGMA**2 * enbw_bins("hann") / size)
+
+    def test_the_frame_noise_floor_is_the_mean_noise_in_a_bin(self):
+        for size, count in ((2048, 80_000), (32768, 65_536), (32768, 32_768)):
+            analyzer = FrameSpectrumAnalyzer(size)
+            values = []
+            for _ in range(4):
+                frame = self.noise_frame(analyzer, count, carrier_bin=100)
+                values.append(frame.noise_floor_db)
+            self.assertEqual(frame.segments, count // size)
+            self.assertAlmostEqual(
+                float(np.mean(values)), self.expected_noise_db(size), delta=0.3
+            )
+
+    def hover_snr(self, wf, freq):
+        lines = []
+
+        def record(painter, text, *args, **kwargs):
+            lines.extend(text)
+            return QRectF()
+
+        plot = wf.plot_rect()
+        wf._hover = QPointF(wf._freq_to_x(freq, plot), plot.top() + 2)
+        with mock.patch.object(wfm, "draw_readout", record):
+            wf._canvas.repaint()
+        wf._hover = None
+        found = [line for line in lines if "SNR" in line]
+        self.assertTrue(found, lines)
+        return float(found[0].split("SNR")[1].split("dB")[0])
+
+    def check(self, rate, size):
+        analyzer = FrameSpectrumAnalyzer(size)
+        wf = wfm.WaterfallWidget(history_size=200)
+        self.addCleanup(wf.deleteLater)
+        wf.set_frequency_range(CENTER, rate)
+        wf.set_fft_size(size)
+        wf.set_history_seconds(0)
+        wf.resize(1000, 360)
+        wf.show()
+        _settle()
+        means = []
+        for _ in range(40):
+            frame = self.noise_frame(analyzer, int(rate / 30), 100, rate)
+            wf.add_line(frame.max_db, noise_db=frame.noise_floor_db)
+            means.append(frame.mean_db)
+        mean_db = np.mean(np.array(means), axis=0)
+        k = size // 2 + 100
+        noise = np.r_[0 : k - 20, k + 20 : size]
+        true_snr = float(mean_db[k]) - 10 * np.log10(
+            np.mean(10 ** (mean_db[noise] / 10))
+        )
+        snr = self.hover_snr(wf, CENTER + 100 * rate / size)
+        self.assertAlmostEqual(snr, true_snr, delta=1.0)
+
+    def test_rtl_rate_2048_points(self):
+        self.check(2.4e6, 2048)
+
+    def test_rtl_rate_1024_points(self):
+        self.check(2.4e6, 1024)
+
+    def test_hackrf_rate(self):
+        self.check(20e6, 2048)
+
+    def test_large_fft(self):
+        self.check(2.4e6, 32768)
 
 
 if __name__ == "__main__":

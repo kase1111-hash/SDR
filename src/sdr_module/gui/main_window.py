@@ -8805,7 +8805,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if frame is None:
             return  # less than one FFT of samples yet (a large FFT size)
         self._spectrum.update_spectrum(frame.mean_db)
-        self._waterfall.add_line(frame.max_db, timestamp=stamp)
+        self._waterfall.add_line(
+            frame.max_db, timestamp=stamp, noise_db=frame.noise_floor_db
+        )
 
     def _plot_time(self, count: int, rate: float) -> float:
         """The time (s) on the waterfall row of a frame of ``count``

@@ -155,6 +155,28 @@ class FrameSpectrum:
     def size(self) -> int:
         return int(self.mean_db.shape[0])
 
+    @property
+    def noise_floor_db(self) -> float:
+        """The noise floor (dBFS): the mean noise power in one bin, for
+        an SNR readout. The median bin of :attr:`mean_db` (so the signals
+        in the frame don't count), corrected for how far the median of a
+        mean of ``segments`` FFTs' noise sits below its mean (1.6 dB for
+        one FFT, almost nothing for dozens). NaN when there is no data.
+
+        (The median of :attr:`max_db`, the strongest of ``segments`` FFTs
+        in each bin, sits 2 to 8 dB above the noise.)"""
+        values = np.asarray(self.mean_db)
+        values = values[:: max(1, len(values) // 2048)]  # (plenty for a median)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            return float("nan")
+        k = max(1, int(self.segments))
+        # The median of a mean of k exponential (noise power) values over
+        # their mean: ln 2 for one, else Choi's approximation of the median
+        # of a gamma(k) distribution.
+        ratio = math.log(2.0) if k == 1 else 1.0 - 1.0 / (3 * k) + 8.0 / (405 * k * k)
+        return float(np.median(values)) - 10.0 * math.log10(ratio)
+
 
 class FrameSpectrumAnalyzer:
     """Spectrum of every sample of each display frame (see the module).

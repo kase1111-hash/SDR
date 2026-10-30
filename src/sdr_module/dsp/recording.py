@@ -467,7 +467,11 @@ class IQRecorder:
         return np.dtype(np.float32)
 
     def _convert_samples(self, samples: np.ndarray) -> np.ndarray:
-        """Convert samples to target format."""
+        """Convert samples to target format.
+
+        Integer formats are rounded to the nearest step: truncating added
+        a DC offset (cu8: -0.5 of a step on I and Q, a spur at the center)
+        and a dead zone around zero (cs8, cs16)."""
         # Ensure complex
         if not np.iscomplexobj(samples):
             samples = samples.astype(np.complex64)
@@ -480,17 +484,17 @@ class IQRecorder:
         # Scale and convert to target format
         if self._sample_format == SampleFormat.UINT8:
             # Scale to 0-255, center at 127.5
-            scaled = np.clip(interleaved * 127.5 + 127.5, 0, 255)
+            scaled = np.clip(np.rint(interleaved * 127.5 + 127.5), 0, 255)
             return scaled.astype(np.uint8)
 
         elif self._sample_format == SampleFormat.INT8:
             # Scale to -128 to 127
-            scaled = np.clip(interleaved * 127, -128, 127)
+            scaled = np.clip(np.rint(interleaved * 127), -128, 127)
             return scaled.astype(np.int8)
 
         elif self._sample_format == SampleFormat.INT16:
             # Scale to -32768 to 32767
-            scaled = np.clip(interleaved * 32767, -32768, 32767)
+            scaled = np.clip(np.rint(interleaved * 32767), -32768, 32767)
             return scaled.astype(np.int16)
 
         elif self._sample_format == SampleFormat.FLOAT32:
@@ -603,8 +607,8 @@ class IQRecorder:
         elif data.dtype in (np.uint8, np.int8):
             self._wav_file.writeframes(data.tobytes())
         else:
-            # Convert float to int16 for WAV
-            int_data = np.clip(data * 32767, -32768, 32767).astype(np.int16)
+            # Convert float to int16 for WAV (rounded, as _convert_samples)
+            int_data = np.clip(np.rint(data * 32767), -32768, 32767).astype(np.int16)
             self._wav_file.writeframes(int_data.tobytes())
 
     def stop(self) -> RecordingMetadata:
@@ -3275,17 +3279,17 @@ class FormatConverter:
         interleaved[0::2] = samples.real
         interleaved[1::2] = samples.imag
 
-        # Convert to target format
+        # Convert to target format (rounded, as IQRecorder does)
         if target_format == SampleFormat.UINT8:
-            scaled = np.clip(interleaved * 127.5 + 127.5, 0, 255)
+            scaled = np.clip(np.rint(interleaved * 127.5 + 127.5), 0, 255)
             return scaled.astype(np.uint8)
 
         elif target_format == SampleFormat.INT8:
-            scaled = np.clip(interleaved * 127, -128, 127)
+            scaled = np.clip(np.rint(interleaved * 127), -128, 127)
             return scaled.astype(np.int8)
 
         elif target_format == SampleFormat.INT16:
-            scaled = np.clip(interleaved * 32767, -32768, 32767)
+            scaled = np.clip(np.rint(interleaved * 32767), -32768, 32767)
             return scaled.astype(np.int16)
 
         elif target_format == SampleFormat.FLOAT32:

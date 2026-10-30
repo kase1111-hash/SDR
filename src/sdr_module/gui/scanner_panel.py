@@ -1315,23 +1315,25 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             return
         self._progress.setValue(int(engine.progress() * 1000))
         current = engine.current
+        held = " (held)" if engine.held else ""
         if engine.state in (DWELL, LISTEN) and current is not None:
             name = f"{current.label} · " if current.label else ""
             listening = mode_text(current.listening[0], current.listening[1])
             freq = _format_freq(current.frequency_hz)
             if engine.state == LISTEN:
-                held = " (held)" if engine.held else ""
                 self._listen_label.setText(
                     f"Listening: {name}{freq}"
                     + (f" · {listening}" if listening else "")
                     + held
                 )
             else:
-                self._listen_label.setText(f"Checking {name}{freq}")
+                self._listen_label.setText(f"Checking {name}{freq}{held}")
             self._listen_label.setToolTip(self._listen_label.text())
-        if engine.state != LISTEN and self._hold_btn.isChecked():
+        # The button says whether the scan is held: Hold also holds it on a
+        # channel being checked, and going on releases it.
+        if self._hold_btn.isChecked() != engine.held:
             self._hold_btn.blockSignals(True)
-            self._hold_btn.setChecked(False)
+            self._hold_btn.setChecked(engine.held)
             self._hold_btn.blockSignals(False)
         self._set_status(self._scanning_text(), None)
         self._update_controls()

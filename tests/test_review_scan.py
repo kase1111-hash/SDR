@@ -13,8 +13,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_chrome import HAS_PYQT6, require_pyqt6  # noqa: E402
 from tests.test_gui_scanner import (  # noqa: E402
+    FRAME_S,
+    FakeWindow,
     _demo,
     _DemoHost,
+    _PanelCase,
     _run,
     _ScanWindowCase,
 )
@@ -524,6 +527,42 @@ class TestScan06KeepModeBookmarksInAScan(_BookmarkScanCase):
                 )
                 self.win._scanner_panel.stop_scan()
                 self.assertEqual(self.win._control_panel.tone_squelch_hz(), tone)
+
+
+# --------------------------------------------------------------------------- #
+# SCAN-07: Hold clicked while the scan was "Checking" a channel
+# --------------------------------------------------------------------------- #
+class TestScan07HoldWhileChecking(_PanelCase):
+    def test_hold_in_dwell_shows_held_and_a_second_click_lets_it_go_on(self):
+        from sdr_module.gui.scan_engine import DWELL, DWELL_S
+
+        host = FakeWindow()  # every channel quiet: the scan only checks them
+        host.bookmarks = [
+            {"index": 0, "label": "Quiet A", "freq_hz": 145.5e6, "demod": "FM"},
+            {"index": 1, "label": "Quiet B", "freq_hz": 145.6e6, "demod": "FM"},
+        ]
+        panel = self.panel(host)
+        panel.set_scan_mode("bookmarks")
+        self.assertTrue(panel.start_scan(), panel._status.text())
+        engine = panel.engine
+        self.assertEqual((engine.state, engine.current.label), (DWELL, "Quiet A"))
+        self.assertFalse(panel._listen_row.isHidden())
+        self.assertIn("Checking Quiet A", panel._listen_label.text())
+        panel._hold_btn.click()
+        self.assertTrue(engine.held)
+        self.assertTrue(panel._hold_btn.isChecked())
+        self.assertIn("(held)", panel._listen_label.text())
+        self.run_scan(panel, seconds=4 * DWELL_S)
+        self.assertEqual((engine.state, engine.current.label), (DWELL, "Quiet A"))
+        self.assertTrue(panel._hold_btn.isChecked())  # (each new state kept it)
+        # Click again: the scan goes on (it has checked Quiet A long enough).
+        panel._hold_btn.click()
+        self.assertFalse(engine.held)
+        self.assertFalse(panel._hold_btn.isChecked())
+        self.run_scan(panel, seconds=2 * FRAME_S)
+        self.assertEqual(engine.current.label, "Quiet B")
+        self.assertIn("Checking Quiet B", panel._listen_label.text())
+        self.assertNotIn("(held)", panel._listen_label.text())
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,152 +1,165 @@
 """
 Specific protocol encoder implementations.
 
-Provides ready-to-use encoders for common protocols.
+Ready-to-use encoders for RTTY, Morse code, ASCII FSK and PSK31. Each turns
+text into complex I/Q at ``config.sample_rate`` with the signal centred on
+``config.carrier_freq`` (an audio offset: 1000 Hz puts it 1 kHz above 0 Hz).
+
+They are built on :mod:`sdr_module.protocols.text_modes`, the same code
+that Transmit Text uses, so the library, the command line and the GUI send
+exactly the same signals:
+
+* RTTY: ITA2 with automatic LTRS/FIGS shifts (US-TTY figures), 45.45 Bd and
+  170 Hz shift unless the config says otherwise, 1.5 stop bits, continuous
+  phase, mark above the carrier;
+* Morse: the full ITU character set and prosigns (``<SK>``), PARIS timing;
+* ASCII: 8N1 FSK of the ASCII bytes;
+* PSK31: the full case-sensitive G3PLX Varicode with cosine-shaped phase
+  reversals.
+
+Characters a protocol can't send are left out and reported:
+:attr:`skipped` after :meth:`encode_text` (character -> times it was
+left out), :meth:`unsupported_chars` before.
 """
+
+from __future__ import annotations
+
+from typing import Dict, Optional
 
 import numpy as np
 
 from .encoder import EncoderConfig, ModulationType, ProtocolEncoder
+from .text_modes import (
+    ASCII_BAUD,
+    ITA2_FIGURES_US,
+    ITA2_LETTERS,
+    MODE_ASCII,
+    MODE_CW,
+    MODE_PSK31,
+    MODE_RTTY,
+    MORSE_CODES,
+    PSK31_BAUD,
+    RTTY_BAUD,
+    RTTY_SHIFT_HZ,
+    VARICODE,
+    TextCheck,
+    TextSettings,
+    TextSignal,
+    check_text,
+)
 
 
-class RTTYEncoder(ProtocolEncoder):
+class _TextEncoder(ProtocolEncoder):
+    """Shared by the text encoders: builds the :class:`TextSignal` and moves
+    it to the carrier; remembers what was left out."""
+
+    MODE = MODE_RTTY
+
+    def __init__(self, config: EncoderConfig):
+        super().__init__(config)
+        #: Characters left out by the last :meth:`encode_text` (char -> count).
+        self.skipped: Dict[str, int] = {}
+        #: What the last :meth:`encode_text` sent (:class:`TextCheck`).
+        self.last_check: Optional[TextCheck] = None
+
+    def _settings(self) -> TextSettings:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+    def unsupported_chars(self, text: str) -> Dict[str, int]:
+        """The characters of ``text`` this protocol can't send (char ->
+        how often it occurs)."""
+        return dict(check_text(text, self.MODE).unsupported)
+
+    def text_signal(self, text: str) -> TextSignal:
+        """``text`` as a :class:`TextSignal` with this encoder's settings."""
+        return TextSignal(text, self._settings())
+
+    def encode_text(self, text: str) -> np.ndarray:
+        """
+        Encode text to complex I/Q centred on the carrier.
+
+        Args:
+            text: Text to encode
+
+        Returns:
+            Complex I/Q samples (complex64); empty when there is nothing
+            this protocol can send. :attr:`skipped` lists what was left out.
+        """
+        signal = self.text_signal(text)
+        self.skipped = dict(signal.check.unsupported)
+        self.last_check = signal.check
+        if signal.empty:
+            return np.zeros(0, dtype=np.complex64)
+        t = signal.times(self._sample_rate)
+        out = signal.analytic(t, self._carrier_freq) * self._config.amplitude
+        return out.astype(np.complex64)
+
+    def encode_bytes(self, data: bytes) -> np.ndarray:
+        """Encode bytes (decoded as ASCII text first; empty if they aren't)."""
+        try:
+            text = data.decode("ascii")
+        except UnicodeDecodeError:
+            return np.array([], dtype=np.complex64)
+        return self.encode_text(text)
+
+
+class RTTYEncoder(_TextEncoder):
     """
     Radio Teletype (RTTY) encoder.
 
-    Uses FSK modulation with Baudot code (5-bit).
-    Standard shift is 170 Hz for amateur radio.
+    FSK with ITA2 (Baudot) 5-bit codes: a start bit, five data bits and 1.5
+    stop bits per character. The standard amateur setting, 45.45 Bd with a
+    170 Hz shift, is used unless the config sets ``baud_rate`` and
+    ``frequency_shift``. Letters and figures shifts are inserted
+    automatically.
     """
 
-    # Baudot code table (letters mode)
-    BAUDOT_LETTERS = {
-        "A": 0b00011,
-        "B": 0b11001,
-        "C": 0b01110,
-        "D": 0b01001,
-        "E": 0b00001,
-        "F": 0b01101,
-        "G": 0b11010,
-        "H": 0b10100,
-        "I": 0b00110,
-        "J": 0b01011,
-        "K": 0b01111,
-        "L": 0b10010,
-        "M": 0b11100,
-        "N": 0b01100,
-        "O": 0b11000,
-        "P": 0b10110,
-        "Q": 0b10111,
-        "R": 0b01010,
-        "S": 0b00101,
-        "T": 0b10000,
-        "U": 0b00111,
-        "V": 0b11110,
-        "W": 0b10011,
-        "X": 0b11101,
-        "Y": 0b10101,
-        "Z": 0b10001,
-        " ": 0b00100,
+    MODE = MODE_RTTY
+
+    #: ITA2 letters case: character -> code (first-sent bit is bit 0).
+    BAUDOT_LETTERS: Dict[str, int] = {
+        c: i
+        for i, c in enumerate(ITA2_LETTERS)
+        if c is not None and (c.isalpha() or c == " ")
     }
+    #: ITA2 figures case (US TTY): character -> code.
+    BAUDOT_FIGURES: Dict[str, int] = {
+        c: i
+        for i, c in enumerate(ITA2_FIGURES_US)
+        if c is not None and c not in "\n\r "
+    }
+    LTRS = 0b11111
+    FIGS = 0b11011
 
     def __init__(self, config: EncoderConfig):
         """Initialize RTTY encoder with 45.45 baud default."""
         if config.baud_rate == 0:
-            config.baud_rate = 45.45  # Standard RTTY baud rate
+            config.baud_rate = RTTY_BAUD  # Standard RTTY baud rate
         if not config.frequency_shift:
-            config.frequency_shift = 170  # Standard shift
+            config.frequency_shift = RTTY_SHIFT_HZ  # Standard shift
         super().__init__(config)
 
-    def encode_text(self, text: str) -> np.ndarray:
-        """
-        Encode text to RTTY FSK signal.
-
-        Args:
-            text: Text to encode (uppercase recommended)
-
-        Returns:
-            Complex I/Q samples
-        """
-        text = text.upper()
-        bits = []
-
-        for char in text:
-            if char in self.BAUDOT_LETTERS:
-                # Start bit (0)
-                bits.append(0)
-
-                # 5 data bits (LSB first)
-                code = self.BAUDOT_LETTERS[char]
-                for i in range(5):
-                    bits.append((code >> i) & 1)
-
-                # Stop bit (1)
-                bits.append(1)
-
-        bit_array = np.array(bits, dtype=np.uint8)
-
-        # Modulate using FSK
+    def _settings(self) -> TextSettings:
         assert self._config.frequency_shift is not None
-        mark_freq = self._carrier_freq + self._config.frequency_shift / 2
-        space_freq = self._carrier_freq - self._config.frequency_shift / 2
-
-        return self.bits_to_fsk(bit_array, mark_freq, space_freq)
-
-    def encode_bytes(self, data: bytes) -> np.ndarray:
-        """Encode bytes (converts to text first)."""
-        try:
-            text = data.decode("ascii")
-            return self.encode_text(text)
-        except UnicodeDecodeError:
-            return np.array([], dtype=np.complex64)
+        return TextSettings.for_mode(
+            MODE_RTTY,
+            baud=self._config.baud_rate,
+            shift_hz=self._config.frequency_shift,
+        )
 
 
-class MorseEncoder(ProtocolEncoder):
+class MorseEncoder(_TextEncoder):
     """
     Morse code encoder using OOK (On-Off Keying).
 
-    Standard timing: Dit = 1 unit, Dah = 3 units.
+    Standard timing (PARIS): dit = 1 unit, dah = 3 units, one unit between
+    the elements of a letter, three between letters, seven between words.
     """
 
-    MORSE_CODE = {
-        "A": ".-",
-        "B": "-...",
-        "C": "-.-.",
-        "D": "-..",
-        "E": ".",
-        "F": "..-.",
-        "G": "--.",
-        "H": "....",
-        "I": "..",
-        "J": ".---",
-        "K": "-.-",
-        "L": ".-..",
-        "M": "--",
-        "N": "-.",
-        "O": "---",
-        "P": ".--.",
-        "Q": "--.-",
-        "R": ".-.",
-        "S": "...",
-        "T": "-",
-        "U": "..-",
-        "V": "...-",
-        "W": ".--",
-        "X": "-..-",
-        "Y": "-.--",
-        "Z": "--..",
-        "0": "-----",
-        "1": ".----",
-        "2": "..---",
-        "3": "...--",
-        "4": "....-",
-        "5": ".....",
-        "6": "-....",
-        "7": "--...",
-        "8": "---..",
-        "9": "----.",
-        " ": " ",
-        "/": "-..-.",
-    }
+    MODE = MODE_CW
+
+    #: Character -> Morse code (letters, digits, punctuation).
+    MORSE_CODE: Dict[str, str] = dict(MORSE_CODES)
 
     def __init__(self, config: EncoderConfig, wpm: int = 20):
         """
@@ -161,78 +174,40 @@ class MorseEncoder(ProtocolEncoder):
         # PARIS standard: 1 word = 50 units
         self._dit_duration = 1.2 / wpm  # seconds
 
-    def encode_text(self, text: str) -> np.ndarray:
-        """
-        Encode text to Morse code.
-
-        Args:
-            text: Text to encode
-
-        Returns:
-            Complex I/Q samples (OOK modulated)
-        """
-        text = text.upper()
-        morse_pattern = []
-
-        for char in text:
-            if char in self.MORSE_CODE:
-                morse_pattern.append(self.MORSE_CODE[char])
-
-        # Convert morse pattern to timing units
-        signal_parts = []
-        t_carrier = (
-            np.arange(int(self._dit_duration * self._sample_rate)) / self._sample_rate
-        )
-        carrier = self._config.amplitude * np.exp(
-            2j * np.pi * self._carrier_freq * t_carrier
-        )
-
-        silence = np.zeros_like(carrier)
-
-        for morse_char in morse_pattern:
-            for symbol in morse_char:
-                if symbol == ".":
-                    # Dit (1 unit)
-                    signal_parts.append(carrier)
-                    signal_parts.append(silence)  # Inter-symbol gap
-                elif symbol == "-":
-                    # Dah (3 units)
-                    signal_parts.append(np.tile(carrier, 3))
-                    signal_parts.append(silence)  # Inter-symbol gap
-                elif symbol == " ":
-                    # Word space (7 units)
-                    signal_parts.append(np.tile(silence, 7))
-
-            # Inter-character gap (3 units total, 1 already added)
-            signal_parts.append(np.tile(silence, 2))
-
-        return np.concatenate(signal_parts).astype(np.complex64)
-
-    def encode_bytes(self, data: bytes) -> np.ndarray:
-        """Encode bytes as Morse (converts to text)."""
-        try:
-            text = data.decode("ascii")
-            return self.encode_text(text)
-        except UnicodeDecodeError:
-            return np.array([], dtype=np.complex64)
+    def _settings(self) -> TextSettings:
+        return TextSettings.for_mode(MODE_CW, wpm=self._wpm)
 
 
-class ASCIIEncoder(ProtocolEncoder):
+class ASCIIEncoder(_TextEncoder):
     """
     Simple ASCII encoder using FSK modulation.
 
-    Each character is 8 bits (standard ASCII) with start/stop bits.
+    Each character is 8 bits (standard ASCII) with start/stop bits (8N1).
     """
+
+    MODE = MODE_ASCII
 
     def __init__(self, config: EncoderConfig):
         """Initialize ASCII encoder."""
         if not config.frequency_shift:
             config.frequency_shift = 1000
+        if not config.baud_rate:
+            config.baud_rate = ASCII_BAUD
         super().__init__(config)
+
+    def _settings(self) -> TextSettings:
+        assert self._config.frequency_shift is not None
+        return TextSettings.for_mode(
+            MODE_ASCII,
+            baud=self._config.baud_rate,
+            shift_hz=self._config.frequency_shift,
+        )
 
     def encode_text(self, text: str) -> np.ndarray:
         """
-        Encode text to FSK signal.
+        Encode text to FSK signal: idle mark, the 8N1 frames of its ASCII
+        bytes, idle mark. Characters outside ASCII are left out and listed
+        in :attr:`skipped`.
 
         Args:
             text: Text to encode
@@ -240,11 +215,11 @@ class ASCIIEncoder(ProtocolEncoder):
         Returns:
             Complex I/Q samples
         """
-        return self.encode_bytes(text.encode("ascii"))
+        return super().encode_text(text)
 
     def encode_bytes(self, data: bytes) -> np.ndarray:
         """
-        Encode bytes to FSK signal with framing.
+        Encode bytes to FSK signal with framing (no idle before or after).
 
         Each byte:
         - 1 start bit (0)
@@ -280,84 +255,24 @@ class ASCIIEncoder(ProtocolEncoder):
         return self.bits_to_fsk(bit_array, mark_freq, space_freq)
 
 
-class PSK31Encoder(ProtocolEncoder):
+class PSK31Encoder(_TextEncoder):
     """
     PSK31 encoder - popular digital mode for amateur radio.
 
-    Uses Binary Phase Shift Keying at 31.25 baud.
+    Binary PSK at 31.25 baud with G3PLX's Varicode (all 128 ASCII
+    characters, case-sensitive); phase reversals are cosine-shaped.
     """
 
-    # Varicode table (variable-length encoding)
-    VARICODE = {
-        " ": "1",
-        "e": "11",
-        "t": "101",
-        "o": "111",
-        "a": "1011",
-        "n": "1101",
-        "i": "1111",
-        "s": "10101",
-        "r": "10111",
-        "h": "11011",
-        "l": "11101",
-        "d": "11111",
-        "c": "101011",
-        # Add more as needed...
-    }
+    MODE = MODE_PSK31
+
+    #: Character -> Varicode (the full table).
+    VARICODE: Dict[str, str] = dict(VARICODE)
 
     def __init__(self, config: EncoderConfig):
         """Initialize PSK31 encoder."""
-        config.baud_rate = 31.25  # Fixed baud rate for PSK31
+        config.baud_rate = PSK31_BAUD  # Fixed baud rate for PSK31
         config.modulation = ModulationType.PSK
         super().__init__(config)
 
-    def encode_text(self, text: str) -> np.ndarray:
-        """
-        Encode text using PSK31 varicode.
-
-        Args:
-            text: Text to encode
-
-        Returns:
-            Complex I/Q samples
-        """
-        text = text.lower()
-        bits_str = ""
-
-        for char in text:
-            if char in self.VARICODE:
-                bits_str += self.VARICODE[char] + "00"  # Double zero separator
-
-        bits = np.array([int(b) for b in bits_str], dtype=np.uint8)
-
-        # PSK modulation
-        samples_per_bit = int(self._sample_rate / self._baud_rate)
-        total_samples = len(bits) * samples_per_bit
-
-        signal = np.zeros(total_samples, dtype=np.complex64)
-        t = np.arange(samples_per_bit) / self._sample_rate
-
-        phase = 0.0
-        for i, bit in enumerate(bits):
-            # PSK31 differential BPSK: phase reversal on 0-bits, no change on 1-bits
-            if bit == 0:
-                phase = (phase + np.pi) % (2 * np.pi)
-
-            carrier_phase = 2 * np.pi * self._carrier_freq * t + phase
-
-            start_idx = i * samples_per_bit
-            end_idx = start_idx + samples_per_bit
-
-            signal[start_idx:end_idx] = self._config.amplitude * np.exp(
-                1j * carrier_phase
-            )
-
-        return signal
-
-    def encode_bytes(self, data: bytes) -> np.ndarray:
-        """Encode bytes (converts to text)."""
-        try:
-            text = data.decode("ascii")
-            return self.encode_text(text)
-        except UnicodeDecodeError:
-            return np.array([], dtype=np.complex64)
+    def _settings(self) -> TextSettings:
+        return TextSettings.for_mode(MODE_PSK31)

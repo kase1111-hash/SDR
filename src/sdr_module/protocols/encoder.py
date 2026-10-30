@@ -108,6 +108,10 @@ class ProtocolEncoder(ABC):
         """
         Modulate bits using FSK.
 
+        The phase runs on from one bit to the next (continuous-phase FSK):
+        restarting it at every bit would put a phase jump, and a burst of
+        splatter, at each change of tone.
+
         Args:
             bits: Bit array
             mark_freq: Frequency for '1' bits
@@ -117,21 +121,14 @@ class ProtocolEncoder(ABC):
             Complex FSK modulated signal
         """
         samples_per_bit = int(self._sample_rate / self._baud_rate)
-        total_samples = len(bits) * samples_per_bit
-
-        signal = np.zeros(total_samples, dtype=np.complex64)
-        t = np.arange(samples_per_bit) / self._sample_rate
-
-        for i, bit in enumerate(bits):
-            freq = mark_freq if bit else space_freq
-            phase = 2 * np.pi * freq * t
-
-            start_idx = i * samples_per_bit
-            end_idx = start_idx + samples_per_bit
-
-            signal[start_idx:end_idx] = self._config.amplitude * np.exp(1j * phase)
-
-        return signal
+        freqs = np.where(np.asarray(bits).ravel() > 0, mark_freq, space_freq)
+        inst = np.repeat(freqs.astype(np.float64), samples_per_bit)
+        if not len(inst):
+            return np.zeros(0, dtype=np.complex64)
+        # The phase at each sample: everything before it (sample 0 at 0 rad).
+        steps = np.concatenate(([0.0], np.cumsum(inst)[:-1]))
+        phase = (2 * np.pi / self._sample_rate) * steps
+        return (self._config.amplitude * np.exp(1j * phase)).astype(np.complex64)
 
     def bits_to_ask(self, bits: np.ndarray) -> np.ndarray:
         """

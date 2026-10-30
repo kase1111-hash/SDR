@@ -930,7 +930,9 @@ def _fm_voice(rng, n: int = 1250, snr_db: float = 60.0):
     audio /= 3.0 * np.std(audio)
     signal = 0.03 * np.exp(2j * np.pi * 2500.0 * np.cumsum(audio) / SMETER_RATE)
     noise_p = float(np.mean(np.abs(signal) ** 2)) / 10 ** (snr_db / 10)
-    noise = np.sqrt(noise_p / 2) * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    noise = np.sqrt(noise_p / 2) * (
+        rng.standard_normal(n) + 1j * rng.standard_normal(n)
+    )
     return (signal + noise).astype(np.complex64), 10 * np.log10(noise_p)
 
 
@@ -1063,7 +1065,6 @@ class TestSignalMeterFilledChannel(_MeterCase):
         self.assertAlmostEqual(widget.get_meter().get_reading().snr_db, 40.0, delta=0.5)
 
 
-
 class TestEncodeFitsTheSampleRate(unittest.TestCase):
     """HAMDSP-11: sdr-scan encode took a carrier (with its shift) beyond the
     sample rate's Nyquist frequency and wrote the aliased signal without a
@@ -1116,7 +1117,9 @@ class TestEncodeFitsTheSampleRate(unittest.TestCase):
         self.assertIn(f"--sample-rate above {2 * 3900 + width:.0f}", printed)
 
     def test_a_signal_wider_than_the_rate_asks_for_a_higher_rate(self):
-        rc, printed, _out = self.encode("ascii", "--sample-rate", "1000", "--carrier", "0")
+        rc, printed, _out = self.encode(
+            "ascii", "--sample-rate", "1000", "--carrier", "0"
+        )
         self.assertEqual(rc, 1)
         self.assertNotIn("--carrier from", printed)
         self.assertIn("--sample-rate above", printed)

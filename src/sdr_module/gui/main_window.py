@@ -19,6 +19,7 @@ and View > Reset Layout restores the defaults.
 
 from __future__ import annotations
 
+import errno
 import importlib
 import importlib.util
 import json
@@ -144,7 +145,13 @@ from .device_controls import (
     ScanResultsDialog,
     confirm_switch_to_demo,
 )
-from .file_jobs import decode_recording, load_recording, run_job, write_recording
+from .file_jobs import (
+    decode_recording,
+    load_recording,
+    run_job,
+    wav_fits,
+    write_recording,
+)
 from .iq_files import (
     OPEN_FILTERS,
     REQUIRED,
@@ -1413,6 +1420,7 @@ _RECORDING_SUFFIX = ".cf32"
 _MIN_FREE_BYTES = 500 * 1024 * 1024
 _FREE_SPACE_CHECK_S = 0.5
 _SAVE_CHUNK = 1 << 20  # samples converted and written per step when saving
+_SAVE_OVERHEAD = 1 << 20  # a saved file's header and metadata, to spare
 _cleaned_folders: set = set()
 
 
@@ -1486,6 +1494,25 @@ def _remove_stale_recordings(folder: str) -> int:
     return removed
 
 
+def _same_file(path: str, other: str) -> bool:
+    """Whether two paths name the same file (one that may not exist yet)."""
+    try:
+        return os.path.samefile(path, other)
+    except OSError:  # (one of them doesn't exist)
+        return os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+            os.path.abspath(other)
+        )
+
+
+def _same_drive(path: str, target: str) -> bool:
+    """Whether the file ``target`` (to be written) is on ``path``'s drive."""
+    folder = os.path.dirname(os.path.abspath(target))
+    try:
+        return os.stat(path).st_dev == os.stat(folder).st_dev
+    except OSError:
+        return False
+
+
 def _close_and_delete(handle: Any, path: str) -> None:
     """Finalizer of a temporary recording: close and delete its file."""
     try:
@@ -1511,6 +1538,10 @@ class _SampleStore:
     read-only view of the file). :meth:`samples` gives them all and
     :meth:`chunks` a piece at a time.
 
+    Every block is written straight to the file (no buffer), so the file
+    holds exactly the samples counted, even after a write fails (a full
+    disk): what is there can still be saved elsewhere.
+
     The temporary file stays open (and locked, on POSIX) until the store is
     discarded, which deletes it; so does the interpreter exiting, and
     :func:`_remove_stale_recordings` removes files a crash left behind.
@@ -1522,9 +1553,15 @@ class _SampleStore:
         self._file: Any = None
         self._finalizer: Any = None
         self._memory: Optional[np.ndarray] = None
-        self._blocks: List[Tuple[int, int]] = []  # (first sample, length)
+        # Where each block starts (the first _nblocks entries): a block a
+        # display frame, so not a Python object each (a day's recording
+        # held a quarter of a GB of them).
+        self._starts = np.zeros(0, dtype=np.int64)
+        self._nblocks = 0
         self._count = 0
         self._map: Optional[np.ndarray] = None
+        # (first sample, UTC start) of each stretch recorded after a gap.
+        self._segments: List[Tuple[int, str]] = []
 
     @classmethod
     def from_samples(cls, samples: np.ndarray) -> "_SampleStore":
@@ -1532,8 +1569,8 @@ class _SampleStore:
         store = cls()
         data = np.asarray(samples)
         store._memory = data
-        store._count = len(data)
-        store._blocks = [(0, len(data))] if len(data) else []
+        if len(data):
+            store._add_block(len(data))
         return store
 
     @property
@@ -1557,9 +1594,53 @@ class _SampleStore:
             return os.path.dirname(self._path)
         return self._folder
 
+    @property
+    def segments(self) -> List[Tuple[int, str]]:
+        """(first sample, UTC start) of each stretch recorded after a gap
+        in time (see :meth:`start_segment`), for SigMF's captures."""
+        return [(first, when) for first, when in self._segments if first < self._count]
+
+    def start_segment(self, start_time: str) -> None:
+        """The samples added from now on were recorded from ``start_time``
+        (UTC, ISO 8601), after a gap in time (a pause, or the receiver
+        stopped): they don't follow on from the ones before."""
+        if not self._count:
+            return  # (the take's own start)
+        if self._segments and self._segments[-1][0] == self._count:
+            self._segments[-1] = (self._count, start_time)
+        else:
+            self._segments.append((self._count, start_time))
+
+    def set_segments(self, segments: Tuple[Tuple[int, str], ...]) -> None:
+        """The stretches after a gap that a converted recording's own
+        metadata names (its SigMF captures after the first)."""
+        self._segments = sorted(
+            (int(first), str(when or "")) for first, when in segments if first > 0
+        )
+
+    def _add_block(self, length: int) -> None:
+        if self._nblocks == len(self._starts):
+            grown = np.zeros(max(64, 2 * len(self._starts)), dtype=np.int64)
+            grown[: self._nblocks] = self._starts[: self._nblocks]
+            self._starts = grown
+        self._starts[self._nblocks] = self._count
+        self._nblocks += 1
+        self._count += length
+
+    def _block(self, index: int) -> Tuple[int, int]:
+        """(first sample, length) of block ``index`` (negative from the end)."""
+        if index < 0:
+            index += self._nblocks
+        if not 0 <= index < self._nblocks:
+            raise IndexError("block index out of range")
+        start = int(self._starts[index])
+        end = int(self._starts[index + 1]) if index + 1 < self._nblocks else self._count
+        return start, end - start
+
     def append(self, block: np.ndarray) -> None:
         """Add a block after the others. The file is created with the first
-        one. Raises OSError when it can't be written (e.g. a full disk)."""
+        one. Raises OSError when it can't be written (e.g. a full disk);
+        the samples written in full before that are kept."""
         data = np.ascontiguousarray(block, dtype=_CF32)
         if len(data) == 0:
             return
@@ -1567,10 +1648,34 @@ class _SampleStore:
             raise ValueError("an imported recording can't be added to")
         if self._file is None:
             self._create_file()
-        self._file.write(data.data)
-        self._blocks.append((self._count, len(data)))
-        self._count += len(data)
         self._map = None
+        self._write(data)
+        self._add_block(len(data))
+
+    def _write(self, data: np.ndarray) -> None:
+        """Write ``data`` at the end of the file, all of it (a short write
+        goes on). When that fails, the samples written in full are kept as
+        a block of their own and a partial one is cut off, so the file holds
+        exactly the samples counted; then the error is raised."""
+        view = memoryview(data.view(np.uint8))
+        done = 0
+        try:
+            while done < len(view):
+                wrote = self._file.write(view[done:])
+                if not wrote:
+                    raise OSError(errno.EIO, "the recording file takes no more data")
+                done += wrote
+        except OSError:
+            whole = done // _CF32.itemsize
+            if whole:
+                self._add_block(whole)
+            end = self._count * _CF32.itemsize
+            try:
+                os.ftruncate(self._file.fileno(), end)
+                self._file.seek(end)
+            except OSError as e:  # pragma: no cover - the disk is in trouble
+                logger.debug(f"Could not trim the recording to {end} bytes: {e}")
+            raise
 
     def _create_file(self) -> None:
         folder = self._folder or _recording_dir()
@@ -1582,7 +1687,7 @@ class _SampleStore:
         path = os.path.join(folder, f"{_RECORDING_PREFIX}{unique}{_RECORDING_SUFFIX}")
         flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
         fd = os.open(path, flags, 0o666)  # the usual permissions, once saved
-        handle = os.fdopen(fd, "wb", buffering=1 << 20)
+        handle = os.fdopen(fd, "wb", buffering=0)  # (see _write)
         if fcntl is not None:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1592,7 +1697,8 @@ class _SampleStore:
         self._finalizer = weakref.finalize(self, _close_and_delete, handle, path)
 
     def finish(self) -> None:
-        """Nothing more will be added for now: write out what is buffered."""
+        """Nothing more will be added for now. (Every block is in the file
+        already: nothing is buffered.)"""
         if self._file is not None:
             self._file.flush()
 
@@ -1615,35 +1721,35 @@ class _SampleStore:
         for start in range(0, len(data), size):
             yield np.asarray(data[start : start + size])
 
-    def save_raw(self, filename: str, move: bool = False) -> None:
-        """Put the samples in ``filename`` as raw complex64 (``.cf32``),
-        the layout they are captured in, so no conversion is needed.
+    @property
+    def temporary(self) -> bool:
+        """Whether the samples are in the store's own temporary file (not
+        moved to a saved one, not in memory)."""
+        return self._finalizer is not None and self._finalizer.alive
 
-        With ``move`` (nothing more will be recorded to this store) the
-        temporary file itself is moved there, instantly on the same drive,
-        and the store reads from ``filename`` from then on. Otherwise, or
-        when it can't be moved (another drive), it is copied.
-        """
-        if self._path is None:
-            raise ValueError("the samples are not in a file")
-        self.finish()
-        if os.path.exists(filename) and os.path.samefile(filename, self._path):
-            return
-        if move and self._finalizer is not None and self._finalizer.alive:
-            self._map = None
-            try:
-                os.replace(self._path, filename)
-            except OSError as e:  # another drive, or open elsewhere (Windows)
-                logger.debug(f"Copying the recording instead of moving it: {e}")
-            else:
-                # The file is the user's now: never delete it.
-                self._finalizer.detach()
-                self._finalizer = None
-                self._file.close()
-                self._file = None
-                self._path = os.path.abspath(filename)
-                return
-        shutil.copyfile(self._path, filename)
+    def move_to(self, filename: str) -> bool:
+        """Move the temporary file (nothing more will be added) to
+        ``filename``: instant on the same drive, needing no space, as the
+        samples are in the layout of a ``.cf32`` file (and SigMF's cf32_le
+        data) already. From then on the store reads from ``filename``,
+        which is the user's and never deleted. False when it can't be moved
+        (no temporary file, another drive, or open elsewhere on Windows):
+        then write a copy."""
+        if self._path is None or not self.temporary:
+            return False
+        self._map = None
+        try:
+            os.replace(self._path, filename)
+        except OSError as e:  # another drive, or open elsewhere (Windows)
+            logger.debug(f"Can't move the recording to {filename}: {e}")
+            return False
+        # The file is the user's now: never delete it.
+        self._finalizer.detach()
+        self._finalizer = None
+        self._file.close()
+        self._file = None
+        self._path = os.path.abspath(filename)
+        return True
 
     def discard(self) -> None:
         """Forget the samples, deleting the temporary file (not a saved one)."""
@@ -1654,24 +1760,27 @@ class _SampleStore:
             self._file.close()
         self._finalizer = self._file = self._path = None
         self._memory = None
-        self._blocks = []
+        self._starts = np.zeros(0, dtype=np.int64)
+        self._nblocks = 0
         self._count = 0
+        self._segments = []
 
     # The list of blocks it replaces -----------------------------------------
 
     def __len__(self) -> int:
-        return len(self._blocks)
+        return self._nblocks
 
     def __bool__(self) -> bool:
-        return bool(self._blocks)
+        return self._nblocks > 0
 
     def __iter__(self):
         data = self.samples()
-        for start, length in self._blocks:
+        for index in range(self._nblocks):
+            start, length = self._block(index)
             yield data[start : start + length]
 
     def __getitem__(self, index: int) -> np.ndarray:
-        start, length = self._blocks[index]
+        start, length = self._block(index)
         return self.samples()[start : start + length]
 
     def __eq__(self, other: object) -> bool:
@@ -1682,6 +1791,16 @@ class _SampleStore:
         return other is self
 
     __hash__ = object.__hash__
+
+
+def _utc_stamp() -> str:
+    """Now in UTC, ISO 8601 to the millisecond (SigMF's ``core:datetime``).
+    (From datetime: tests stand in for this module's ``time`` with a clock
+    that has only what the display loop and a recording's start ask it.)"""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S") + f".{now.microsecond // 1000:03d}Z"
 
 
 def _clock_text(seconds: float) -> str:
@@ -2050,19 +2169,26 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # live samples that haven't been saved yet.
         self._buffer_meta: Tuple[Optional[float], Optional[float]] = (None, None)
         self._buffer_unsaved = False
-        # The buffer holds a converted file (its name) rather than a take,
-        # and the file the last take (I/Q or audio) was saved to.
+        # The buffer holds a converted file (its name and path) rather than
+        # a take, and the file the last take (I/Q or audio) was saved to.
         self._buffer_source = ""
+        self._buffer_source_path = ""
         self._last_saved = ""
         # Record Audio: the take being written (None while not recording).
         self._audio_take: Optional[AudioTake] = None
         # When the take in the buffer started: UTC (ISO, for its metadata)
-        # and local time (for its file name).
+        # and local time (for its file name); a converted file's hardware
+        # and description (SigMF's core:hw and core:description).
         self._take_started = ""
         self._take_stamp = ""
+        self._take_hardware = ""
+        self._take_description = ""
         # A new recording replaces the buffer only once samples arrive, so an
         # armed recording that captures nothing keeps the previous one.
         self._capture_pending = False
+        # Capturing stopped mid-take (paused, or the receiver stopped): the
+        # next samples don't follow on, and start a segment of their own.
+        self._capture_gap = False
         self._retune_warned = False
         # Samples the driver dropped (its queue was full) while a take was
         # captured: (that take's buffer, samples lost), the device (a weak
@@ -6308,6 +6434,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._buffer_meta = (None, None)
         self._buffer_unsaved = False
         self._buffer_source = ""
+        self._buffer_source_path = ""
         self._clear_status_message()  # e.g. "Use File > Save Recording"
         self._update_take_panel()
 
@@ -6350,6 +6477,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._rec_since = None
         if self._recording_capturing():
             self._rec_since = now
+        elif self._recording and not self._capture_pending:
+            self._capture_gap = True  # (see _capture)
 
     def _recording_elapsed(self) -> float:
         """Seconds spent capturing in the current recording."""
@@ -6431,9 +6560,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         return False
 
-    def _stop_recording_with_warning(self, reason: str) -> None:
+    def _stop_recording_with_warning(
+        self, reason: str, elsewhere: bool = False
+    ) -> None:
         """Stop recording because it can't go on (``reason``), keeping what
-        was captured."""
+        was captured (``elsewhere``: its drive is full, so it is saved to
+        another one)."""
         captured = self._recording and not self._capture_pending
         self._auto_save_later = True  # (inside a display frame)
         try:
@@ -6446,7 +6578,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         elif captured and self._samples_buffer:
             kept = (
                 f" The {size:,.0f} MB recorded so far are kept: save them with "
-                "File > Save Recording (Ctrl+S)."
+                "File > Save Recording (Ctrl+S)"
+                + (", on another drive if this one is full." if elsewhere else ".")
             )
         else:
             kept = ""
@@ -6475,19 +6608,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
             return False
         ext = self._panel_recording_extension()
+        note = ""
+        if ext == ".wav" and not wav_fits(self._buffer_sample_count()):
+            ext = ".sigmf-data"
+            note = " as SigMF (it is too long for a WAV file, 4 GiB at most)"
         path = file_dialogs.unique_path(folder, self._suggested_iq_name(ext))
         message = self._message_label.text()
         if not self._write_buffer(path, quiet=True):
             return False
         if announce:
             self._show_status_message(
-                f"Saved the recording to {file_dialogs.display_path(path)}",
+                f"Saved the recording to {file_dialogs.display_path(path)}{note}",
                 "success",
                 8000,
             )
         else:  # (a warning is on show: keep it)
             self._show_status_message(
-                f"{message} It was saved to {file_dialogs.display_path(path)}.",
+                f"{message} It was saved to {file_dialogs.display_path(path)}{note}.",
                 "danger",
                 20000,
             )
@@ -7007,11 +7144,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tuned = (self._lo_frequency(), self._device_sample_rate())
         if self._capture_pending:
             self._capture_pending = False
+            self._capture_gap = False
             self._replace_buffer(_SampleStore(self._capture_folder()))
             self._buffer_meta = tuned
             self._buffer_source = ""
+            self._buffer_source_path = ""
             self._take_started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             self._take_stamp = time.strftime("%Y%m%d_%H%M%S")
+            self._take_hardware = self._take_description = ""
             self._retune_warned = False
             self._sync_recording_armed()
             self._update_take_panel()  # (the status line shows the new take)
@@ -7030,11 +7170,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "warning",
                 10000,
             )
+        if self._capture_gap:
+            # Capturing again after a pause or with the receiver started
+            # again (REC WAITING): these samples were received now, not
+            # straight after the last ones (SigMF: a capture of their own).
+            self._capture_gap = False
+            self._samples_buffer.start_segment(_utc_stamp())
         try:
             self._samples_buffer.append(samples)
         except (OSError, ValueError) as e:
             self._stop_recording_with_warning(
-                f"the recording file can't be written ({e})"
+                f"the recording file can't be written ({e})", elsewhere=True
             )
             return
         self._buffer_unsaved = True
@@ -8383,7 +8529,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._buffer_meta = (options.center_hz or None, options.sample_rate or None)
         self._buffer_unsaved = False  # the file is on disk already
         self._buffer_source = options.name
-        self._take_started = ""
+        self._buffer_source_path = os.path.abspath(options.path)
+        # What its metadata says about it is kept too (an unknown time is
+        # left out, never stamped with the time of saving), and where it
+        # resumed after a gap.
+        self._take_started = options.start_time
+        self._take_hardware = options.hardware
+        self._take_description = options.description
+        store.set_segments(options.segments)
         self._update_take_panel()
         logger.info(
             f"Loaded {loaded.samples} samples from {path} "
@@ -8644,9 +8797,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _suggested_iq_name(self, ext: str) -> str:
         """``iq_100.100MHz_2.4MSps_20261030_142233.sigmf-data`` (the take's
-        center, rate and start), or a converted file's own name."""
+        center, rate and start), or a converted file's own name (with
+        ``_converted`` in the same format: never the file itself)."""
         if self._buffer_source:
-            return split_name(self._buffer_source)[0] + ext
+            stem, source_ext = split_name(self._buffer_source)
+            sigmf = {".sigmf-data", ".sigmf-meta"}  # (one recording)
+            if source_ext.lower() == ext.lower() or {source_ext.lower(), ext} <= sigmf:
+                stem += "_converted"
+            return stem + ext
         center, rate = self._buffer_meta
         parts = ["iq"]
         if center:
@@ -8717,9 +8875,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self, filename: str, selected_filter: str = "", quiet: bool = False
     ) -> bool:
         """Write the recording buffer to ``filename`` (its format from the
-        extension or ``selected_filter``), a chunk at a time in a background
-        thread; a raw or WAV file gets its metadata in a ``.sigmf-meta``
-        beside it. True when saved; failures are reported."""
+        extension or ``selected_filter``); a raw or WAV file gets its
+        metadata in a ``.sigmf-meta`` beside it. A take already in the
+        file's layout is moved there when it can be (see _move_take);
+        otherwise it is written a chunk at a time in a background thread
+        (progress, Cancel), once the drive is known to have room for it.
+        ``quiet`` (Save automatically, which nobody watches): failures go to
+        the status bar, and the drive keeps the room a recording needs. True
+        when saved; failures are reported."""
         from ..dsp.recording import (
             FileFormat,
             SampleFormat,
@@ -8734,28 +8897,30 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         center, rate = self._buffer_meta
         center, rate = float(center or 0.0), float(rate or 0.0)
         name = os.path.basename(filename)
+        # When (and on what) the samples were recorded, and where the take
+        # resumed after a gap: SigMF's captures, so its times are right.
+        details: Dict[str, Any] = {
+            "start_time": self._take_started,
+            "hardware": self._take_hardware,
+            "description": self._take_description,
+            "segments": store.segments,
+        }
 
         error: Optional[BaseException] = None
-        if (
-            fmt is FileFormat.RAW
-            and sample_fmt is SampleFormat.FLOAT32
-            and store.path is not None
-        ):
-            # Already in this layout: move (or copy) the file itself.
-            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-            try:
-                store.save_raw(filename, move=not self._recording)
-            except Exception as e:
-                error = e
-            finally:
-                QApplication.restoreOverrideCursor()
-        else:
-            # The samples so far, mapped here on the GUI thread: the worker
-            # only reads them, while a recording still running may go on
-            # adding to the file. (So is when the take was recorded, for
-            # SigMF's core:datetime.)
-            snapshot = store.samples()[:count]
-            recorded = self._take_started
+        moved = False
+        snapshot: Any = None
+        try:
+            self._check_save_target(filename, fmt)
+            moved = self._move_take(filename, fmt, sample_fmt, rate, center, details)
+            if not moved:
+                self._check_save_room(filename, sample_fmt, count, reserve=quiet)
+                # The samples so far, mapped here on the GUI thread: the
+                # worker only reads them, while a recording still running
+                # may go on adding to the file.
+                snapshot = store.samples()[:count]
+        except (OSError, ValueError) as e:
+            error = e
+        if error is None and not moved:
 
             def chunks():
                 for start in range(0, len(snapshot), _SAVE_CHUNK):
@@ -8774,7 +8939,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     rate,
                     center,
                     report,
-                    start_time=recorded,
+                    **details,
                 ),
             )
             if result.cancelled:
@@ -8791,15 +8956,21 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     header_bytes=(
                         wav_data_offset(filename) if fmt is FileFormat.WAV else 0
                     ),
-                    start_time=self._take_started,
+                    **details,
                 )
             except OSError as e:
                 logger.warning(f"Could not write the metadata of {filename}: {e}")
         if error is not None:
             logger.error(f"Failed to save recording: {error}")
             if quiet:
+                # (Nobody watches an automatic save: shown as long as the
+                # warning it may replace, "Recording stopped: ...".)
+                reason = str(error).rstrip(".")
                 self._show_status_error(
-                    f"Could not save the recording to {name}: {error}", log=False
+                    f"Could not save the recording to {name}: {reason}. It is "
+                    "kept: save it elsewhere with Save... in the Recording group.",
+                    20000,
+                    log=False,
                 )
             else:
                 QMessageBox.warning(
@@ -8817,6 +8988,129 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         self._update_take_panel()
         return True
+
+    def _check_save_target(self, filename: str, fmt: Any) -> None:
+        """Refuse (ValueError) to save over the recording the buffer was
+        converted from, or its metadata: the original would be replaced by
+        a copy, and lost if the save failed. Nor into the take's own
+        temporary file, which is deleted."""
+        from ..dsp.recording import FileFormat, find_sidecar, sidecar_path
+
+        stem = os.path.join(os.path.dirname(filename), split_name(filename)[0])
+        targets = [filename]
+        if fmt is FileFormat.SIGMF:
+            targets.append(stem + ".sigmf-meta")
+        else:
+            targets.append(str(sidecar_path(filename)))
+        store = self._samples_buffer
+        if store.temporary and any(_same_file(t, store.path) for t in targets):
+            raise ValueError(
+                "that is the recording's own temporary file. Choose another name."
+            )
+        source = self._buffer_source_path
+        if not source:
+            return
+        originals = [source]
+        source_stem, source_ext = split_name(source)
+        if source_ext.lower() in (".sigmf-data", ".sigmf-meta"):
+            base = os.path.join(os.path.dirname(source), source_stem)
+            originals += [base + ".sigmf-data", base + ".sigmf-meta"]
+        else:
+            sidecar = find_sidecar(source)
+            if sidecar is not None:
+                originals.append(str(sidecar.path))
+        if any(_same_file(t, o) for t in targets for o in originals):
+            raise ValueError(
+                f"saving there would replace {self._buffer_source}, the "
+                "recording you converted (or its metadata). Choose another name."
+            )
+
+    def _move_take(
+        self,
+        filename: str,
+        fmt: Any,
+        sample_fmt: Any,
+        rate: float,
+        center: float,
+        details: Dict[str, Any],
+    ) -> bool:
+        """Save a take whose temporary file is in the layout ``filename``
+        wants already (raw cf32: ``.cf32``, ``.raw`` and SigMF's data) by
+        moving the file there: instant on the same drive, and needing no
+        space, so it works where a disk-nearly-full stop leaves no room for
+        a copy. True when the samples are there; False when they have to
+        be written (another format or drive, or a recording still adding
+        to them). Raises OSError when SigMF's metadata can't be written."""
+        from ..dsp.recording import FileFormat, SampleFormat, write_sigmf_meta
+
+        store = self._samples_buffer
+        if (
+            sample_fmt is not SampleFormat.FLOAT32
+            or fmt not in (FileFormat.RAW, FileFormat.SIGMF)
+            or store.path is None
+        ):
+            return False
+        sigmf = fmt is FileFormat.SIGMF
+        if not store.temporary:
+            # Moved to a saved file before: saved to that same file again,
+            # only SigMF's metadata is written.
+            if not _same_file(filename, store.path):
+                return False
+            if sigmf:
+                write_sigmf_meta(filename, sample_fmt, rate, center, **details)
+            return True
+        if self._recording or not _same_drive(store.path, filename):
+            return False
+        meta = None
+        if sigmf:  # (first: if it can't be written, nothing has moved)
+            meta = write_sigmf_meta(filename, sample_fmt, rate, center, **details)
+        if store.move_to(filename):
+            return True
+        if meta is not None:  # (written again with the copy)
+            try:
+                os.remove(meta)
+            except OSError:
+                pass
+        return False
+
+    def _check_save_room(
+        self, filename: str, sample_fmt: Any, count: int, reserve: bool = False
+    ) -> None:
+        """Refuse (ValueError) a save that doesn't fit on ``filename``'s
+        drive before writing any of it (it failed at the end, after filling
+        the drive to the last byte). With ``reserve`` (Save automatically)
+        it must also leave the room to spare that a recording needs."""
+        from ..dsp.recording import bytes_per_complex_sample
+
+        folder = os.path.dirname(os.path.abspath(filename))
+        try:
+            free = int(shutil.disk_usage(folder).free)
+            if os.path.isfile(filename):
+                free += os.path.getsize(filename)  # (replaced)
+        except OSError:
+            return  # unknown: a failure is reported (and cleaned up)
+        need = count * bytes_per_complex_sample(sample_fmt) + _SAVE_OVERHEAD
+        if need + (_MIN_FREE_BYTES if reserve else 0) <= free:
+            return
+        where = file_dialogs.display_path(folder)
+        need_mb, free_mb = need / 1024**2, free / 1024**2
+        if not reserve:
+            raise ValueError(
+                f"there isn't enough space: it needs {need_mb:,.0f} MB, and {where} "
+                f"has {free_mb:,.0f} MB free. Save it to another drive, or free up "
+                "some space."
+            )
+        # (Save automatically says what to do next itself.)
+        if need > free:
+            raise ValueError(
+                f"there isn't enough space (it needs {need_mb:,.0f} MB, and "
+                f"{where} has {free_mb:,.0f} MB free)"
+            )
+        raise ValueError(
+            f"the drive would be nearly full (it needs {need_mb:,.0f} MB of the "
+            f"{free_mb:,.0f} MB free in {where}, and recording keeps "
+            f"{_MIN_FREE_BYTES // 1024**2} MB free)"
+        )
 
     def _import_channels_csv(self) -> None:
         """File > Import Bookmarks: a CHIRP CSV's memory channels become

@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, BinaryIO, Dict, Optional, Tuple, Union
+from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -125,6 +125,11 @@ def sigmf_format(datatype: Any) -> Optional[SampleFormat]:
     return _SIGMF_FORMATS.get(str(datatype or "").strip().lower())
 
 
+#: (first sample, UTC start time) of a stretch of a recording made after a
+#: gap in time (a pause): a SigMF capture segment of its own.
+Segment = Tuple[int, str]
+
+
 @dataclass
 class SidecarInfo:
     """What a SigMF metadata file says about the data file it describes."""
@@ -138,6 +143,8 @@ class SidecarInfo:
     start_time: str = ""
     description: str = ""
     hardware: str = ""
+    #: Its captures after the first: where it resumed after a gap.
+    segments: Tuple[Segment, ...] = ()
 
 
 def sidecar_path(data_path: Union[str, Path]) -> Path:
@@ -187,7 +194,22 @@ def _sidecar_info(
         start_time=str(first.get("core:datetime", "") or ""),
         description=str(global_meta.get("core:description", "") or ""),
         hardware=str(global_meta.get("core:hw", "") or ""),
+        segments=_later_captures(captures),
     )
+
+
+def _later_captures(captures: Any) -> Tuple[Segment, ...]:
+    """The SigMF captures after the first, as segments (its sample start
+    and its time, "" if it has none)."""
+    segments = []
+    for capture in captures[1:] if isinstance(captures, list) else ():
+        try:
+            first = int(capture.get("core:sample_start", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue  # (not a capture)
+        if first > 0:
+            segments.append((first, str(capture.get("core:datetime", "") or "")))
+    return tuple(segments)
 
 
 def _dataset_path(meta_path: Path, meta: Dict[str, Any]) -> Optional[Path]:
@@ -197,6 +219,47 @@ def _dataset_path(meta_path: Path, meta: Dict[str, Any]) -> Optional[Path]:
     if not dataset:
         return None
     return meta_path.with_name(Path(str(dataset)).name)
+
+
+def _write_json(path: Path, data: Dict[str, Any]) -> None:
+    """Write ``data`` as JSON to ``path`` through a temporary file beside
+    it, so a write that fails (a full disk) leaves no empty or half-written
+    file behind (and an older one as it was)."""
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(temporary, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _capture_segments(
+    center_frequency: float,
+    start_time: str = "",
+    segments: Sequence[Segment] = (),
+    header_bytes: int = 0,
+) -> List[Dict[str, Any]]:
+    """SigMF ``captures``: the first from sample 0 (when ``start_time``),
+    then one per ``segments`` entry, each with its own start time. An
+    unknown (0) frequency or time is left out rather than written as 0."""
+    center = _positive(center_frequency)
+    starts = sorted({int(first): str(when or "") for first, when in segments}.items())
+    captures: List[Dict[str, Any]] = []
+    for first, when in [(0, start_time)] + [s for s in starts if s[0] > 0]:
+        capture: Dict[str, Any] = {"core:sample_start": first}
+        if center:
+            capture["core:frequency"] = center
+        if when:
+            capture["core:datetime"] = when
+        if first == 0 and header_bytes:
+            capture["core:header_bytes"] = int(header_bytes)
+        captures.append(capture)
+    return captures
 
 
 def find_sidecar(data_path: Union[str, Path]) -> Optional[SidecarInfo]:
@@ -237,11 +300,14 @@ def write_sidecar(
     start_time: str = "",
     description: str = "",
     hardware: str = "",
+    segments: Sequence[Segment] = (),
 ) -> Path:
     """Describe a raw or WAV recording in ``<name>.sigmf-meta`` beside it
     (a SigMF non-conforming dataset: ``core:dataset`` names the file), so
     its sample rate and centre frequency survive. A rate or frequency of 0
-    (unknown) is left out rather than invented. Returns the metadata path.
+    (unknown) is left out rather than invented. ``segments``: where the
+    recording resumed after a gap (see :data:`Segment`). Returns the
+    metadata path.
     """
     path = Path(data_path)
     global_meta: Dict[str, Any] = {
@@ -257,18 +323,10 @@ def write_sidecar(
         global_meta["core:description"] = description
     if hardware:
         global_meta["core:hw"] = hardware
-    capture: Dict[str, Any] = {"core:sample_start": 0}
-    center = _positive(center_frequency)
-    if center:
-        capture["core:frequency"] = center
-    if start_time:
-        capture["core:datetime"] = start_time
-    if header_bytes:
-        capture["core:header_bytes"] = int(header_bytes)
-    meta = {"global": global_meta, "captures": [capture], "annotations": []}
+    captures = _capture_segments(center_frequency, start_time, segments, header_bytes)
+    meta = {"global": global_meta, "captures": captures, "annotations": []}
     meta_path = sidecar_path(path)
-    with open(meta_path, "w", encoding="utf-8") as handle:
-        json.dump(meta, handle, indent=2)
+    _write_json(meta_path, meta)
     return meta_path
 
 
@@ -391,6 +449,8 @@ class IQRecorder:
         self._recording = False
         self._samples_written = 0
         self._start_time: Optional[datetime] = None
+        # Capture segments after the first (see add_capture).
+        self._segments: List[Segment] = []
 
         # Buffer for streaming
         self._buffer = np.array([], dtype=np.complex64)
@@ -429,7 +489,9 @@ class IQRecorder:
 
     @property
     def duration_seconds(self) -> float:
-        """Get recording duration in seconds."""
+        """Get recording duration in seconds (0 while the rate is unknown)."""
+        if not self._sample_rate > 0:
+            return 0.0
         return self._samples_written / self._sample_rate
 
     @property
@@ -467,10 +529,18 @@ class IQRecorder:
         return np.dtype(np.float32)
 
     def _convert_samples(self, samples: np.ndarray) -> np.ndarray:
-        """Convert samples to target format."""
+        """Convert samples to target format.
+
+        Integer formats are rounded to the nearest step: truncating added
+        a DC offset (cu8: -0.5 of a step on I and Q, a spur at the center)
+        and a dead zone around zero (cs8, cs16)."""
         # Ensure complex
         if not np.iscomplexobj(samples):
             samples = samples.astype(np.complex64)
+
+        if self._sample_format == SampleFormat.FLOAT32:
+            # complex64 is interleaved float32 already (no conversion).
+            return np.ascontiguousarray(samples, dtype=np.complex64).view(np.float32)
 
         # Interleave I/Q
         interleaved = np.zeros(len(samples) * 2, dtype=np.float64)
@@ -480,21 +550,18 @@ class IQRecorder:
         # Scale and convert to target format
         if self._sample_format == SampleFormat.UINT8:
             # Scale to 0-255, center at 127.5
-            scaled = np.clip(interleaved * 127.5 + 127.5, 0, 255)
+            scaled = np.clip(np.rint(interleaved * 127.5 + 127.5), 0, 255)
             return scaled.astype(np.uint8)
 
         elif self._sample_format == SampleFormat.INT8:
             # Scale to -128 to 127
-            scaled = np.clip(interleaved * 127, -128, 127)
+            scaled = np.clip(np.rint(interleaved * 127), -128, 127)
             return scaled.astype(np.int8)
 
         elif self._sample_format == SampleFormat.INT16:
             # Scale to -32768 to 32767
-            scaled = np.clip(interleaved * 32767, -32768, 32767)
+            scaled = np.clip(np.rint(interleaved * 32767), -32768, 32767)
             return scaled.astype(np.int16)
-
-        elif self._sample_format == SampleFormat.FLOAT32:
-            return interleaved.astype(np.float32)
 
         elif self._sample_format == SampleFormat.FLOAT64:
             return interleaved.astype(np.float64)
@@ -514,6 +581,14 @@ class IQRecorder:
             else:
                 self._metadata.custom[key] = value
 
+    def add_capture(self, sample_start: int, start_time: str = "") -> None:
+        """The samples from ``sample_start`` on were recorded from
+        ``start_time`` (UTC, ISO 8601), after a gap in time (a pause): a
+        SigMF capture segment of their own, so the times after the gap are
+        right. Call after :meth:`start` (which begins with one segment, from
+        sample 0 at the recording's start time)."""
+        self._segments.append((int(sample_start), str(start_time or "")))
+
     def start(self, filepath: Union[str, Path]) -> None:
         """
         Start recording to file.
@@ -526,6 +601,7 @@ class IQRecorder:
 
         self._filepath = Path(filepath)
         self._samples_written = 0
+        self._segments = []
         self._start_time = _utc_now()
         self._metadata.start_time = self._start_time.isoformat() + "Z"
 
@@ -587,7 +663,9 @@ class IQRecorder:
         if self._file_format == FileFormat.WAV:
             self._write_wav(converted)
         elif self._file is not None:
-            converted.tofile(self._file)
+            # (Through the file, not ndarray.tofile: a full disk then raises
+            # "No space left on device", not "N requested and M written".)
+            self._file.write(np.ascontiguousarray(converted).data)
 
         self._samples_written += len(samples)
         return len(samples)
@@ -603,8 +681,8 @@ class IQRecorder:
         elif data.dtype in (np.uint8, np.int8):
             self._wav_file.writeframes(data.tobytes())
         else:
-            # Convert float to int16 for WAV
-            int_data = np.clip(data * 32767, -32768, 32767).astype(np.int16)
+            # Convert float to int16 for WAV (rounded, as _convert_samples)
+            int_data = np.clip(np.rint(data * 32767), -32768, 32767).astype(np.int16)
             self._wav_file.writeframes(int_data.tobytes())
 
     def stop(self) -> RecordingMetadata:
@@ -616,32 +694,49 @@ class IQRecorder:
         """
         if not self._recording:
             raise RuntimeError("Not recording")
+        # Stopped even when finishing the file fails (a full disk): the
+        # files are closed either way, then the error is raised.
+        self._recording = False
 
         # Update metadata
         self._metadata.num_samples = self._samples_written
         self._metadata.duration_seconds = self.duration_seconds
 
         # Close files
-        if self._wav_file is not None:
-            self._wav_file.close()
-            self._wav_file = None
-
-        if self._file is not None:
-            self._file.close()
-            self._file = None
+        wav_file, self._wav_file = self._wav_file, None
+        raw_file, self._file = self._file, None
+        try:
+            if wav_file is not None:
+                wav_file.close()
+        finally:
+            if raw_file is not None:
+                raw_file.close()
 
         # Write SigMF metadata if using that format
         if self._file_format == FileFormat.SIGMF:
             self._write_sigmf_metadata()
 
-        self._recording = False
         return self._metadata
 
     def _write_sigmf_metadata(self) -> None:
-        """Write SigMF metadata file."""
+        """Write SigMF metadata file (through a temporary file: a failed
+        write leaves no empty or half-written one)."""
         if self._filepath is None:
             return
 
+        # Write metadata file
+        meta_path = self._filepath.with_suffix(".sigmf-meta")
+        _write_json(meta_path, self._sigmf_meta())
+
+        # Rename data file for SigMF
+        data_path = self._filepath.with_suffix(".sigmf-data")
+        if self._filepath.exists() and self._filepath != data_path:
+            self._filepath.rename(data_path)
+
+    def _sigmf_meta(self) -> Dict[str, Any]:
+        """The SigMF metadata. A rate, frequency or time that is unknown (0
+        or empty) is left out rather than written as 0 (as write_sidecar
+        does); each capture segment (see add_capture) has its own time."""
         # SigMF format type string
         format_map = {
             SampleFormat.UINT8: "cu8",
@@ -660,35 +755,49 @@ class IQRecorder:
             "core:recorder": "SDR Module IQRecorder",
         }
 
+        if not _positive(self._sample_rate):
+            del global_meta["core:sample_rate"]
+
         # Add optional fields
         if self._metadata.hardware:
             global_meta["core:hw"] = self._metadata.hardware
 
-        sigmf_meta: Dict[str, Any] = {
+        return {
             "global": global_meta,
-            "captures": [
-                {
-                    "core:sample_start": 0,
-                    "core:frequency": self._center_frequency,
-                    "core:datetime": self._metadata.start_time,
-                }
-            ],
+            "captures": _capture_segments(
+                self._center_frequency, self._metadata.start_time, self._segments
+            ),
             "annotations": [],
         }
-
-        # Write metadata file
-        meta_path = self._filepath.with_suffix(".sigmf-meta")
-        with open(meta_path, "w") as f:
-            json.dump(sigmf_meta, f, indent=2)
-
-        # Rename data file for SigMF
-        data_path = self._filepath.with_suffix(".sigmf-data")
-        if self._filepath.exists() and self._filepath != data_path:
-            self._filepath.rename(data_path)
 
     def get_metadata(self) -> RecordingMetadata:
         """Get current metadata."""
         return self._metadata
+
+
+def write_sigmf_meta(
+    data_path: Union[str, Path],
+    sample_format: SampleFormat,
+    sample_rate: float,
+    center_frequency: float = 0.0,
+    *,
+    start_time: str = "",
+    description: str = "",
+    hardware: str = "",
+    segments: Sequence[Segment] = (),
+) -> Path:
+    """Write the ``.sigmf-meta`` of a SigMF recording whose samples are
+    already in ``data_path`` (``<stem>.sigmf-data``; e.g. a cf32 take moved
+    there instead of copied), as :class:`IQRecorder` writes it. Returns the
+    metadata path."""
+    recorder = IQRecorder(sample_rate, center_frequency, sample_format)
+    recorder.set_metadata(
+        start_time=start_time, description=description, hardware=hardware
+    )
+    recorder._segments = [(int(first), str(when or "")) for first, when in segments]
+    meta_path = Path(data_path).with_suffix(SIDECAR_SUFFIX)
+    _write_json(meta_path, recorder._sigmf_meta())
+    return meta_path
 
 
 class IQPlayer:
@@ -1409,7 +1518,9 @@ class AudioRecorder:
 
     @property
     def duration_seconds(self) -> float:
-        """Get recording duration in seconds."""
+        """Get recording duration in seconds (0 while the rate is unknown)."""
+        if not self._sample_rate > 0:
+            return 0.0
         return self._samples_written / self._sample_rate
 
     @property
@@ -2809,6 +2920,7 @@ class FormatDetector:
             "sigmf_datetime": sidecar.start_time,
             "sigmf_description": sidecar.description,
             "sigmf_hardware": sidecar.hardware,
+            "sigmf_segments": list(sidecar.segments),
         }
 
     def _detect_with_sidecar(
@@ -2906,7 +3018,8 @@ class FormatDetector:
             dataset = _dataset_path(meta_path, sigmf_meta)
             if dataset is not None and dataset.exists():
                 data_path = dataset
-            header = _sidecar_info(meta_path, data_path, sigmf_meta).header_bytes
+            described = _sidecar_info(meta_path, data_path, sigmf_meta)
+            header = described.header_bytes
 
             global_meta = sigmf_meta.get("global", {})
             captures = sigmf_meta.get("captures", [{}])
@@ -2954,6 +3067,7 @@ class FormatDetector:
                     "sigmf_datetime": (
                         captures[0].get("core:datetime", "") if captures else ""
                     ),
+                    "sigmf_segments": list(described.segments),
                     "data_file": str(data_path),
                 },
             )
@@ -3275,17 +3389,17 @@ class FormatConverter:
         interleaved[0::2] = samples.real
         interleaved[1::2] = samples.imag
 
-        # Convert to target format
+        # Convert to target format (rounded, as IQRecorder does)
         if target_format == SampleFormat.UINT8:
-            scaled = np.clip(interleaved * 127.5 + 127.5, 0, 255)
+            scaled = np.clip(np.rint(interleaved * 127.5 + 127.5), 0, 255)
             return scaled.astype(np.uint8)
 
         elif target_format == SampleFormat.INT8:
-            scaled = np.clip(interleaved * 127, -128, 127)
+            scaled = np.clip(np.rint(interleaved * 127), -128, 127)
             return scaled.astype(np.int8)
 
         elif target_format == SampleFormat.INT16:
-            scaled = np.clip(interleaved * 32767, -32768, 32767)
+            scaled = np.clip(np.rint(interleaved * 32767), -32768, 32767)
             return scaled.astype(np.int16)
 
         elif target_format == SampleFormat.FLOAT32:

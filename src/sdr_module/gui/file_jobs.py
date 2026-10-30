@@ -23,11 +23,11 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from ..dsp.recording import FileFormat, IQRecorder, SampleFormat
+from ..dsp.recording import FileFormat, IQRecorder, SampleFormat, Segment
 from .iq_files import IqFileOptions
 
 try:
@@ -42,6 +42,14 @@ logger = logging.getLogger(__name__)
 
 #: Samples read (and converted) per step.
 CHUNK_SAMPLES = 1 << 20
+
+#: Decode Recording feeds the decoder this much of the file at a time, so
+#: each message is placed in the file to within it.
+DECODE_STEP_S = 0.1
+
+#: The most sample data one WAV file holds: its header counts the file's
+#: size in 32 bits (4 GiB), and Python's wave module refuses more.
+WAV_MAX_DATA_BYTES = 0xFFFFFFFF - 36
 
 #: ``report(fraction)`` (0..1): raises :class:`Cancelled` once Cancel was
 #: pressed, so the work stops at its next report.
@@ -118,6 +126,22 @@ def load_recording(
     return result
 
 
+def wav_fits(samples: int, sample_format: SampleFormat = SampleFormat.INT16) -> bool:
+    """Whether ``samples`` I/Q pairs fit in one WAV file (4 GiB at most:
+    7.5 minutes at 2.4 MS/s in 16 bits)."""
+    width = 1 if sample_format in (SampleFormat.UINT8, SampleFormat.INT8) else 2
+    return int(samples) * 2 * width <= WAV_MAX_DATA_BYTES
+
+
+def _wav_limit_text(sample_format: SampleFormat, sample_rate: float) -> str:
+    """How long a recording one WAV file holds at ``sample_rate``."""
+    width = 1 if sample_format in (SampleFormat.UINT8, SampleFormat.INT8) else 2
+    seconds = WAV_MAX_DATA_BYTES // (2 * width) / sample_rate
+    if seconds >= 120:
+        return f"about {seconds / 60:.0f} minutes at this sample rate"
+    return f"about {seconds:.0f} seconds at this sample rate"
+
+
 def write_recording(
     chunks: Iterable[np.ndarray],
     total: int,
@@ -128,11 +152,18 @@ def write_recording(
     center_frequency: float,
     report: Report,
     start_time: str = "",
+    *,
+    hardware: str = "",
+    description: str = "",
+    segments: Sequence[Segment] = (),
 ) -> int:
     """Write ``chunks`` (``total`` samples) to ``filename``; a cancelled or
     failed write leaves no partial file behind. ``start_time`` (UTC, ISO
     8601) is when the samples were recorded, for SigMF's ``core:datetime``
-    (else the time of writing). Returns the samples written."""
+    (left out when unknown); ``hardware`` and ``description`` are SigMF's
+    ``core:hw`` and ``core:description``, and ``segments`` where the
+    recording resumed after a gap (each a capture with its own time).
+    Returns the samples written."""
     if file_format is FileFormat.WAV and not sample_rate > 0:
         # (Its header must hold one: nothing is written.)
         raise ValueError(
@@ -140,31 +171,55 @@ def write_recording(
             "it. Save again and enter it, or choose another format (SigMF can "
             "leave it unknown)."
         )
+    if file_format is FileFormat.WAV and not wav_fits(total, sample_format):
+        # (It would fail after writing 4 GiB: nothing is written.)
+        raise ValueError(
+            "it is too long for a WAV file, which holds 4 GiB at most "
+            f"({_wav_limit_text(sample_format, sample_rate)}). Choose SigMF or "
+            "cs16, which have no such limit."
+        )
     recorder = IQRecorder(
         sample_rate=sample_rate,
         center_frequency=center_frequency,
         sample_format=sample_format,
         file_format=file_format,
     )
+    recorder.set_metadata(hardware=hardware, description=description)
     written = 0
-    started = finished = False
+    opened = complete = False
     try:
         recorder.start(filename)
-        started = True
-        if start_time:
-            recorder.set_metadata(start_time=start_time)
-        report(0.0)
-        for chunk in chunks:
-            recorder.write(chunk)
-            written += len(chunk)
-            report(min(1.0, written / max(1, total)))
-        finished = True
+        opened = True
+        # (start() stamps the time of writing: the samples' own time
+        # replaces it, and an unknown one is left out, never invented.)
+        recorder.set_metadata(start_time=start_time)
+        for first, when in segments:
+            recorder.add_capture(first, when)
+        try:
+            report(0.0)
+            for chunk in chunks:
+                recorder.write(chunk)
+                written += len(chunk)
+                report(min(1.0, written / max(1, total)))
+        except BaseException:
+            _stop_quietly(recorder)  # (the file is removed below)
+            raise
+        # Flushes and closes the file and writes SigMF's metadata: a full
+        # disk can fail here too.
+        recorder.stop()
+        complete = True
     finally:
-        if started:
-            recorder.stop()
-        if not finished:
+        if opened and not complete:
             _remove_partial(filename, file_format)
     return written
+
+
+def _stop_quietly(recorder: IQRecorder) -> None:
+    """Close a write that failed (its own error is the one reported)."""
+    try:
+        recorder.stop()
+    except Exception as e:
+        logger.debug(f"Closing the failed recording write also failed: {e}")
 
 
 def _remove_partial(filename: str, file_format: FileFormat) -> None:
@@ -198,12 +253,17 @@ def decode_recording(
         raise ValueError(status.problem)
     result = DecodeResult()
     rate = float(options.sample_rate)
+    # A message is stamped with the end of the stretch it was found in: a
+    # short one (a whole chunk is 22 s at 48 kS/s).
+    step = max(4096, int(DECODE_STEP_S * rate))
     position = 0
     for chunk in _chunks(options, report):
-        position += len(chunk)
-        messages = decoder.process(chunk)
-        if messages:
-            stamped = [(msg, position / rate) for msg in messages]
+        stamped = []
+        for start in range(0, len(chunk), step):
+            part = chunk[start : start + step]
+            position += len(part)
+            stamped += [(msg, position / rate) for msg in decoder.process(part)]
+        if stamped:
             result.messages.extend(stamped)
             if found is not None:
                 found(stamped)

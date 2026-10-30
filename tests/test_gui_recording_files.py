@@ -939,7 +939,11 @@ class TestInputWhileAJobRuns(_FilesCase):
             return "done"
 
         QTimer.singleShot(50, press)
-        self.assertEqual(run_job(win, "Test", "Working…", work).value, "done")
+        # (The moment before the progress dialog shows is what's tested: with
+        # the computer busy, the dialog could show before the press, and
+        # offscreen its modality doesn't stop a click made by QTest.)
+        result = run_job(win, "Test", "Working…", work, show_after_ms=60_000)
+        self.assertEqual(result.value, "done")
         self.assertFalse(win._recording)
         self.assertTrue(win._is_running)
         # Afterwards the window takes input as before.

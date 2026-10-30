@@ -285,6 +285,17 @@ class TestHackRFGain(_DeviceCase):
         self.assertFalse(self.win._agc_enabled)
         self.assertEqual((fake.lna, fake.vga), (16, 20))  # a manual gain set
 
+    def test_agc_goes_off_whichever_way_a_hackrf_arrives(self):
+        self.panel.set_agc_enabled(True)  # on the demo device
+        dev, fake = open_hackrf(self.patch, rate=10e6)
+        self.win._release_device()
+        self.win._device = dev  # (no _apply_controls_to_device)
+        self.win._refresh_state_ui()
+        self.assertFalse(self.panel.is_agc_enabled())
+        self.assertFalse(self.win._agc_enabled)
+        self.win._refresh_info_panel()
+        self.assertNotIn("Auto", self.win._info_panel.value("gain"))
+
     def test_the_transmit_power_is_left_alone(self):
         station = self.win._tx_station
         before = (station.power.gain_db, station.power.amp)

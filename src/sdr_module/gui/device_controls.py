@@ -158,8 +158,12 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
         key = (id(dev) if dev is not None else 0, kind, locked)
         if key != self._shown_for:
             self._shown_for = key
-            self._panel.set_gain_model(gain_model_for(dev), locked)
+            model = gain_model_for(dev)
+            self._panel.set_gain_model(model, locked)
             self._panel.set_front_end(kind, self._front_end_of(dev, kind))
+            if not model.agc and getattr(win, "_agc_enabled", False):
+                # (The panel unticked Tuner AGC: the window follows.)
+                win._on_agc_changed(False)
         self.sync_rates()
         self.show_auto_gain()
 

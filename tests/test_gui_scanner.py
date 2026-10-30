@@ -1135,7 +1135,8 @@ class TestScannerInTheWindow(_ScanWindowCase):
     def test_ctrl_8_and_the_tab_before_info(self):
         tabs = self.win._right_tabs
         titles = [tabs.tabText(i) for i in range(tabs.count())]
-        self.assertEqual(titles[-2:], ["Scanner", "Info"])
+        # T10's Signal tab sits between the Scanner and Info (contract 4.6).
+        self.assertEqual(titles[-3:], ["Scanner", "Signal", "Info"])
         keys = [key for key, _t, _tip in self.win._panel_specs]
         self.assertEqual(keys.index("scanner"), 7)  # Ctrl+8
         self.assertEqual(

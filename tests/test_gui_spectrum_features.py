@@ -469,6 +469,44 @@ class TestBookmarkLabels(_SpectrumCase):
         self.assertIsNone(sp._bookmark_at(sp.plot_rect().center()))
 
 
+class TestSignalMarkers(_SpectrumCase):
+    def tips(self):
+        """The tip of each marker triangle the spectrum paints."""
+        from PyQt6.QtGui import QPainter
+
+        tips = []
+        real = QPainter.drawPolygon
+
+        def spy(painter, poly, *args):
+            # A marker is (left, right, tip), 8 px wide: see _draw_markers.
+            if poly.size() == 3 and poly.at(1).x() - poly.at(0).x() == 8:
+                tips.append(poly.at(2))
+            return real(painter, poly, *args)
+
+        with mock.patch.object(QPainter, "drawPolygon", spy):
+            self.sp._canvas.grab()
+        return tips
+
+    def test_a_marker_sits_on_its_signal_when_zoomed(self):
+        """Zoomed in, the marker's level is still its own signal's, not
+        the level at the same fraction of the whole band."""
+        sp = self.sp
+        for i in range(3):
+            sp.update_spectrum(_line(seed=i))
+        sp.set_markers([(100.3e6, "1")])
+        for zoom in (0, 1):  # x1, then x2 centered on the signal
+            if zoom:
+                sp.zoom_to(100.3e6, 1)
+            _settle()
+            (tip,) = self.tips()
+            plot = sp.plot_rect()
+            self.assertAlmostEqual(tip.x(), sp._freq_x(100.3e6, plot), delta=1.0)
+            floor, top = sp.db_range()
+            level = min(-40.0, top)
+            signal_y = plot.bottom() - (level - floor) / (top - floor) * plot.height()
+            self.assertLess(abs(tip.y() - (signal_y - 3)), 4.0, (zoom, tip.y()))
+
+
 class TestWindowSpectrumSettings(_WindowTestCase):
     demo = True
 

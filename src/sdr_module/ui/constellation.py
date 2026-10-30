@@ -183,11 +183,14 @@ class ConstellationDisplay:
         if len(samples) > self._max_points:
             samples = samples[: self._max_points]
 
-        # Normalize if enabled
-        if self._normalize:
-            max_mag: float = float(np.max(np.abs(samples)))
-            if max_mag > 1e-10:
-                samples = samples / max_mag
+        # Normalize if enabled: to the overlay's average power (RMS), so
+        # the points land on the ideal ones and the EVM means something
+        # (the peak of a noisy signal is an outlier: dividing by it left
+        # every point short of the ideal ones).
+        if self._normalize and len(samples):
+            rms = float(np.sqrt(np.mean(np.abs(samples) ** 2)))
+            if rms > 1e-10:
+                samples = samples * (self._reference_rms() / rms)
 
         # Add to buffer
         self._buffers.append(samples.copy())
@@ -295,27 +298,26 @@ class ConstellationDisplay:
             iq_imbalance=float(iq_imbalance),
         )
 
-    def _calculate_evm(self, points: np.ndarray) -> float:
-        """Calculate EVM against reference constellation."""
+    def _reference_rms(self) -> float:
+        """RMS magnitude of the overlay's ideal points (1 without one)."""
         if not self._reference:
+            return 1.0
+        ref = np.array([complex(p.i, p.q) for p in self._reference])
+        return float(np.sqrt(np.mean(np.abs(ref) ** 2))) or 1.0
+
+    def _calculate_evm(self, points: np.ndarray) -> float:
+        """Calculate EVM against reference constellation (each point
+        against its nearest ideal point; vectorised)."""
+        if not self._reference or not len(points):
             return 0.0
 
-        # Convert reference to array
         ref_points = np.array([complex(p.i, p.q) for p in self._reference])
-
-        # For each received point, find nearest reference point
-        errors = []
-        for point in points:
-            distances = np.abs(point - ref_points)
-            min_error: float = float(np.min(distances))
-            errors.append(min_error**2)
-
-        # EVM = sqrt(mean error power / mean reference power)
-        mean_error_power = np.mean(errors)
-        mean_ref_power = np.mean(np.abs(ref_points) ** 2)
+        distances = np.abs(np.asarray(points)[:, None] - ref_points[None, :])
+        mean_error_power = float(np.mean(np.min(distances, axis=1) ** 2))
+        mean_ref_power = float(np.mean(np.abs(ref_points) ** 2))
 
         return (
-            np.sqrt(mean_error_power / mean_ref_power)
+            float(np.sqrt(mean_error_power / mean_ref_power))
             if mean_ref_power > 1e-10
             else 0.0
         )

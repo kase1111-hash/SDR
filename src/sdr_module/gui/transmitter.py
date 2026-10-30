@@ -541,8 +541,15 @@ class _Plan:
             return
         word_space = float(getattr(id_job.source, "word_space_s", 0.0) or 0.0)
         gap = int(round(word_space * self.rate))
-        # (Room for the fade before it, even when it is due at once.)
-        latest = max(self._job_read + self._fade, due - gap)
+        # The ID itself (after its key-up) begins by the time it is due, but
+        # never before half an interval of the job has gone out since the
+        # last one (the IDs never starve the job), and with room for the
+        # fade before it.
+        latest = self._job_read + max(
+            self._fade,
+            self._interval - self._since_id - gap,
+            self._min_gap - self._job_since_id,
+        )
         at: Optional[int] = None
         finder = getattr(source, "last_break", None)
         if callable(finder):

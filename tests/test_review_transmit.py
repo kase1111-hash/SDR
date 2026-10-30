@@ -166,6 +166,18 @@ class TestIntervalIdPlacement:
         # The ID begins by the time it is due (not at the next block).
         assert id_starts[0] / RATE <= 10.0 + 1e-6
 
+    def test_half_an_interval_of_the_job_goes_between_ids(self):
+        """However short the interval (a library caller's 0.5 s here, with a
+        4 s ID), at least half of it of the job goes between interval IDs:
+        the IDs never starve the job (the word space doesn't eat it)."""
+        carrier = np.full(int(3 * RATE), 0.9, np.complex64)
+        job = TxJob(carrier, RATE, 146.52e6, "FM", 12.5e3, "a test carrier")
+        plan = _plan(job, AutoIdPolicy(False, False, 0.5), _cw_id_factory())
+        _iq, _ids, runs = _drain(plan, job)
+        assert sum(len(r) for r in runs) == len(carrier)
+        assert min(len(r) for r in runs[:-1]) >= 0.25 * RATE
+        assert plan.ids_sent <= 12
+
     def test_rtty_resumes_in_step_after_the_id(self):
         """RTTY is split after a space, the carrier fades out and in, and
         the text starts again the way it began (idle mark, LTRS): each part

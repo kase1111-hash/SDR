@@ -84,13 +84,19 @@ class Nco:
     def mix(self, samples: np.ndarray) -> np.ndarray:
         """Shift ``samples`` (complex) down by :attr:`frequency_hz`.
 
-        Returns complex64. With a zero shift the input is returned as
-        complex64 unchanged (the phase does not matter then).
+        Returns complex64. With a zero shift the phase stands still: the
+        input comes back turned by the phase reached so far (unchanged, and
+        not copied, while that is zero), so moving the shift to 0 Hz and
+        away again keeps the output continuous, as any other move does.
         """
         x = np.asarray(samples, dtype=np.complex64)
         n = len(x)
-        if n == 0 or self._frequency == 0.0:
+        if n == 0:
             return x
+        if self._frequency == 0.0:
+            if self._cycles == 0.0:
+                return x
+            return x * np.complex64(np.exp(2j * np.pi * self._cycles))
         step = self._step()
         table = self._phasors()
         size = TABLE_SIZE

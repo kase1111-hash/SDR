@@ -84,6 +84,28 @@ class TestNco(unittest.TestCase):
         x = _noise(1000)
         self.assertIs(Nco(RATE, 0.0).mix(x), x)
 
+    def test_moving_to_zero_hertz_and_back_keeps_the_phase(self):
+        """At 0 Hz the phase stands still where it got to: returning the
+        input unturned jumped the phase (a click in SSB/CW audio when
+        fine-tuning across the LO, and on the first step after a recenter)."""
+        ones = np.ones(TABLE_SIZE + 333, dtype=np.complex64)
+        nco = Nco(RATE, 1234.5)
+        parts = [nco.mix(ones)]
+        for freq in (0.0, -10.0, 0.0, 777.0):
+            nco.frequency_hz = freq
+            parts.append(nco.mix(ones))
+        out = np.concatenate(parts)
+        exact = np.concatenate(
+            [
+                np.full(len(ones), f)
+                for f in (1234.5, 0.0, -10.0, 0.0, 777.0)  # Hz, per part
+            ]
+        )
+        phase = -2 * np.pi * np.cumsum(np.concatenate([[0.0], exact[:-1]])) / RATE
+        np.testing.assert_allclose(out, np.exp(1j * phase), atol=2e-4)
+        steps = np.abs(np.angle(out[1:] * np.conj(out[:-1])))
+        self.assertLess(float(np.max(steps)), 2 * np.pi * 1300 / RATE)
+
     def test_rejects_bad_settings(self):
         with self.assertRaises(ValueError):
             Nco(0.0)

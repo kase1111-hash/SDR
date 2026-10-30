@@ -37,6 +37,17 @@ def _flush_deletes() -> None:
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
 
 
+def _analytic(x: np.ndarray) -> np.ndarray:
+    """The analytic signal of a real array (its envelope is the magnitude)."""
+    n = len(x)
+    gain = np.zeros(n)
+    gain[0] = 1.0
+    gain[1 : (n + 1) // 2] = 2.0
+    if n % 2 == 0:
+        gain[n // 2] = 1.0
+    return np.fft.ifft(np.fft.fft(x) * gain)
+
+
 # ---------------------------------------------------------------------------
 # Real drivers on fake USB backends (their own range checks run)
 # ---------------------------------------------------------------------------
@@ -347,6 +358,30 @@ class TestNoClickWhenTheVfoMoves(unittest.TestCase):
         before = float(np.mean(audio[len(audio) // 4 : len(audio) // 2 - 2000]))
         after = float(np.mean(audio[-len(audio) // 4 :]))
         self.assertAlmostEqual(after - before, -0.1, delta=0.03)
+
+    def test_fine_tuning_across_the_lo_does_not_click(self):
+        """USB in 10 Hz steps through offset 0 (the LO itself): the beat
+        note keeps its level at every step. The NCO used to skip mixing at
+        0 Hz and so jumped the phase there: the tone dipped to a fifth."""
+        from sdr_module.gui import main_window as mw
+
+        rate, block = 2.4e6, 80_000
+        offsets = (17.0, 7.0, 0.0, -13.0, -23.0)
+        chain = mw._ReceiverChain(rate, "USB", 3e3, offset_hz=offsets[0])
+        audio, marks, start = [], [], 0
+        for i in range(3 * len(offsets)):
+            if i % 3 == 0:
+                chain.set_offset(offsets[i // 3])
+                marks.append(sum(len(a) for a in audio))
+            t = (start + np.arange(block)) / rate
+            start += block
+            carrier = np.exp(2j * np.pi * 1000.0 * t).astype(np.complex64)
+            audio.append(chain.demodulate(chain.channelize(carrier), 5e3))
+        envelope = np.abs(_analytic(np.concatenate(audio)))
+        for offset, mark in zip(offsets[1:], marks[1:], strict=True):
+            level = float(np.median(envelope[mark - 2000 : mark - 200]))
+            dip = float(envelope[mark : mark + 1200].min())
+            self.assertGreater(dip, 0.8 * level, f"step to {offset:+g} Hz")
 
 
 # ---------------------------------------------------------------------------

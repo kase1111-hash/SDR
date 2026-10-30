@@ -23,8 +23,9 @@ decoded 33 ms at a time gives the same text as the whole recording at once:
   (two clusters, dits and dashes, so the speed is found on its own) and
   turns them into letters, words and lines. The first few elements wait
   until the speed is known, so the first letters decode too. A mark much
-  longer than a dash (a tuning carrier) ends the line; so does a long
-  silence. The speed is ``1.2 / dit`` words per minute (PARIS).
+  longer than a dash (a tuning carrier) ends the line and is left out of
+  the speed; so does a long silence. The speed is ``1.2 / dit`` words per
+  minute (PARIS), 5 to 60 WPM.
 
 NumPy only; no Qt.
 """
@@ -347,7 +348,10 @@ class MorseDecoder:
     #: Marks shorter than this (in dits) are noise, not elements.
     GLITCH = 0.25
     #: A mark longer than this (in dits, and ``CARRIER_MIN_S``) is a
-    #: carrier, not an element: it ends the line.
+    #: carrier, not an element: it ends the line. Until the speed is
+    #: known only a mark longer than that at the slowest speed is surely
+    #: one (a dash at 5 WPM is 0.72 s); the speed is measured from the
+    #: others, leaving out those that are carriers at the speed they give.
     CARRIER_DITS = 6.0
     CARRIER_MIN_S = 0.4
     #: Silence that ends a line: this long (seconds) and ``LINE_GAP_DITS``.
@@ -409,13 +413,37 @@ class MorseDecoder:
         low, high = self.WPM_RANGE
         return min(max(dit, self.rate * 1.2 / high), self.rate * 1.2 / low)
 
+    @property
+    def _longest_element(self) -> float:
+        """Samples in the longest mark that may be an element at all (a
+        carrier at the slowest speed is longer)."""
+        return self.CARRIER_DITS * self.rate * 1.2 / self.WPM_RANGE[0]
+
     def _estimate(self) -> Optional[Tuple[float, bool]]:
         """``(dit in samples, dits and dashes both seen)`` from the recent
-        marks, or None without any."""
+        marks, or None without any. The longest marks are left out while
+        they are carriers (a tuning carrier among the first letters): at
+        the speed the other marks give, when those show dits and dashes,
+        or at the speed of them all."""
         marks = sorted(self._marks)
-        count = len(marks)
-        if not count:
+        if not marks:
             return None
+        estimate = self._clusters(marks)
+        while len(marks) > 1:
+            rest = self._clusters(marks[:-1])
+            if not (
+                self._is_carrier(marks[-1], estimate[0])
+                or (rest[1] and self._is_carrier(marks[-1], rest[0]))
+            ):
+                break
+            marks.pop()
+            estimate = rest
+        return estimate
+
+    def _clusters(self, marks: List[float]) -> Tuple[float, bool]:
+        """``(dit in samples, dits and dashes both seen)`` from ``marks``
+        (sorted, at least one)."""
+        count = len(marks)
         if count >= 2:
             logs = np.log(np.asarray(marks, dtype=np.float64))
             best_split, best_score = 0, -1.0
@@ -471,7 +499,7 @@ class MorseDecoder:
         else:
             self._queue.append(("gap", self._gap))
             self._queue.append(("mark", length))
-            if not self._is_carrier(length):
+            if length <= self._longest_element:
                 self._marks.append(float(length))
             estimate = self._estimate()
             if len(self._marks) >= 2 * self.CALIBRATE_MARKS or (
@@ -482,23 +510,28 @@ class MorseDecoder:
                 self._calibrate()
         self._stage = 0
 
-    def _is_carrier(self, length: int) -> bool:
+    def _is_carrier(self, length: float, dit: Optional[float] = None) -> bool:
+        """Whether a mark is a carrier at the speed of ``dit`` (samples;
+        the measured one by default)."""
         return (
-            length > self.CARRIER_DITS * self._dit
+            length > self.CARRIER_DITS * (self._dit if dit is None else dit)
             and length > self.CARRIER_MIN_S * self.rate
         )
 
     def _mark(self, length: int) -> None:
-        """Classify a mark (the speed is known)."""
-        if self._is_carrier(length):
-            self._end_letter()
-            self._end_line()
-            return
-        if not self._replaying:
+        """Classify a mark (the speed is known). It counts in the speed
+        first, so a speed measured wrong (the first marks were all dits,
+        taken for dashes) is put right by the next dash rather than taking
+        that dash for a carrier."""
+        if not self._replaying and length <= self._longest_element:
             self._marks.append(float(length))
             estimate = self._estimate()
             if estimate is not None:
                 self._dit = estimate[0]
+        if self._is_carrier(length):
+            self._end_letter()
+            self._end_line()
+            return
         self._letter += "." if length < 2.0 * self._dit else "-"
         if len(self._letter) > 9:  # not Morse: give up on this letter
             self._end_letter()

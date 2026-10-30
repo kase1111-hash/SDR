@@ -122,6 +122,61 @@ class TestSpeeds:
         assert lines[0].wpm == pytest.approx(wpm, rel=0.03)
         assert lines[0].protocol is ProtocolType.CW
 
+    @pytest.mark.parametrize("wpm", [5, 6, 7.5, 8, 8.5, 12, 40, 60])
+    def test_slow_and_fast_code_in_blocks(self, wpm):
+        # DEC-03: below about 8.5 WPM the dashes (0.45 s and longer) were
+        # taken for a tuning carrier before the speed was known, so only
+        # the dits were measured, as dashes: "CQ CQ DE W1AW K" at 5 WPM
+        # read "T | T | T ..." at 15 WPM.
+        rate = 2000.0
+        text = "CQ CQ DE W1AW K"
+        key = enc.morse_keying(text, rate, wpm, lead_s=1.0, tail_s=4.0)
+        morse = MorseDecoder(rate)
+        lines = []
+        for i in range(0, len(key), int(rate / 30)):
+            lines += morse.process(key[i : i + int(rate / 30)])
+        lines += morse.flush()
+        assert [m.text for m in lines] == [text]
+        assert morse.wpm == pytest.approx(wpm, rel=0.05)
+
+    @pytest.mark.parametrize("wpm", [8, 20])
+    def test_a_tuning_carrier_before_the_first_letters(self, wpm):
+        # A beacon's carrier of about a second, then its text: the carrier
+        # is not a letter and does not count in the speed.
+        rate = 1000.0
+        key = np.concatenate(
+            [
+                np.zeros(500),
+                np.ones(1100),
+                enc.morse_keying("VVV DE SDR", rate, wpm, lead_s=0.6, tail_s=3.0),
+            ]
+        )
+        morse = MorseDecoder(rate)
+        lines = morse.process(key) + morse.flush()
+        assert [m.text for m in lines] == ["VVV DE SDR"]
+        assert morse.wpm == pytest.approx(wpm, rel=0.05)
+
+    @pytest.mark.parametrize("wpm", [5, 8])
+    def test_slow_code_through_the_live_decoder(self, wpm):
+        # DEC-03 on the whole path: a carrier at the tuned frequency, 30 dB
+        # above the noise in 500 Hz, in 33 ms blocks.
+        rate = 48e3
+        text = "CQ DE W1AW K"
+        x = enc.cw_baseband(text, rate, wpm, amplitude=0.1)
+        x = np.concatenate([x, np.zeros(int(3 * rate), dtype=np.complex64)])
+        rng = np.random.default_rng(3)
+        sigma = 0.1 * np.sqrt(rate / 500.0 / 10**3.0 / 2)
+        x += (sigma * rng.standard_normal(2 * len(x))).view(np.complex128).astype(
+            np.complex64
+        )
+        decoder = create_live_decoder("CW (Morse)", rate)
+        lines = []
+        for i in range(0, len(x), int(rate / 30)):
+            lines += decoder.process(x[i : i + int(rate / 30)])
+        lines += decoder.flush()
+        assert [m.text for m in lines] == [text]
+        assert decoder.status.detail == f"{wpm} WPM"
+
     @pytest.mark.parametrize("wpm", [15, 20, 25])
     @pytest.mark.parametrize("snr_db", [12.0, 8.0])
     def test_with_noise(self, wpm, snr_db):

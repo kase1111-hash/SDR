@@ -1121,5 +1121,85 @@ class TestScan15RecordAudioDuringASweep(_ScanWindowCase):
         self.assertTrue(win._stop_audio_recording())
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-17: at 20 MS/s the FM Broadcast preset listed a stray carrier
+# --------------------------------------------------------------------------- #
+class TestScan17MinimumWidthAtHighRates(unittest.TestCase):
+    """measure_page on a synthetic FM broadcast page (200 kHz steps, the
+    preset's 30 kHz minimum width)."""
+
+    def page(self, rate, signals, seed=7):
+        """``(readings)`` for a page around 99.82 MHz holding ``signals``:
+        ``(offset in bins from 99.82 MHz, level dBFS, width Hz or 0)``."""
+        import numpy as np
+
+        from sdr_module.dsp.sweep import SpectrumAverager, measure_page, plan_sweep
+
+        rng = np.random.default_rng(seed)
+        pages = plan_sweep(88e6, 108e6, 200e3, rate)
+        page = next(p for p in pages if p.first_hz <= 99.82e6 <= p.last_hz)
+        bin_hz = rate / 2048
+        n = 2048 * 32
+        t = np.arange(n) / rate
+        x = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 10 ** (-60 / 20)
+        x = x.astype(np.complex128)
+        centre = round((99.82e6 - page.lo_hz) / bin_hz)
+        for bins, level, width in signals:
+            offset = (centre + bins) * bin_hz
+            if width:  # band-limited noise, `width` wide
+                noise = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+                spectrum = np.fft.fft(noise)
+                freqs = np.fft.fftfreq(n, 1 / rate)
+                spectrum[np.abs(freqs) > width / 2] = 0
+                shaped = np.fft.ifft(spectrum)
+                shaped *= 10 ** (level / 20) / np.sqrt(np.mean(np.abs(shaped) ** 2))
+                x += shaped * np.exp(2j * np.pi * offset * t)
+            else:  # a pure carrier
+                x += 10 ** (level / 20) * np.exp(2j * np.pi * offset * t)
+        averager = SpectrumAverager(32)
+        averager.add(x.astype(np.complex64))
+        readings, _noise, _threshold = measure_page(
+            averager.power_db(),
+            page.lo_hz,
+            rate,
+            page.channels,
+            200e3,
+            min_width_hz=30e3,
+        )
+        return readings
+
+    def test_a_carrier_isnt_a_station_whatever_the_rate(self):
+        for rate in (2.4e6, 10e6, 20e6):
+            for between in (0.0, 0.5):  # on a bin, half-way between two
+                self.assertEqual(
+                    self.page(rate, [(between, -30.0, 0)]), [], (rate, between)
+                )
+
+    def test_stations_still_are(self):
+        for rate in (2.4e6, 10e6, 20e6):
+            readings = self.page(rate, [(0, -40.0, 150e3)])
+            self.assertEqual(len(readings), 1, rate)
+            self.assertAlmostEqual(readings[0].frequency_hz, 99.8e6, delta=100e3)
+        # Narrow, but wider than the minimum.
+        self.assertEqual(len(self.page(2.4e6, [(0, -40.0, 40e3)])), 1)
+
+    def test_without_a_minimum_a_carrier_is_listed(self):
+        import numpy as np
+
+        from sdr_module.dsp.sweep import SpectrumAverager, measure_page
+
+        rate, lo = 20e6, 100e6
+        n = 2048 * 32
+        t = np.arange(n) / rate
+        x = 1e-3 * (np.random.default_rng(1).standard_normal(n) + 0j)
+        x = x + 0.03 * np.exp(2j * np.pi * 1.0e6 * t)
+        averager = SpectrumAverager(32)
+        averager.add(x.astype(np.complex64))
+        readings, _n, _t = measure_page(
+            averager.power_db(), lo, rate, [lo + 1.0e6], 25e3, min_width_hz=0.0
+        )
+        self.assertEqual([round(r.frequency_hz) for r in readings], [101000000])
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

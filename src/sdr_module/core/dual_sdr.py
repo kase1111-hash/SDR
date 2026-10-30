@@ -413,6 +413,12 @@ class DualSDRController:
 
         return success
 
+    def _hackrf_can_transmit(self) -> bool:
+        """Whether the device in the HackRF's place can transmit (one that
+        doesn't say, such as a test double, is taken to)."""
+        can_transmit = getattr(self._hackrf, "can_transmit", None)
+        return not callable(can_transmit) or bool(can_transmit())
+
     def start_full_duplex(
         self,
         rx_callback: Optional[Callable[[np.ndarray], None]] = None,
@@ -434,14 +440,12 @@ class DualSDRController:
             if not self._rtlsdr or not self._hackrf:
                 logger.error("Full-duplex requires both devices")
                 return False
-            can_transmit = getattr(self._hackrf, "can_transmit", None)
-            if tx_generator is not None and callable(can_transmit):
-                if not can_transmit():
-                    logger.error(
-                        "Full-duplex needs a device that can transmit (a "
-                        "HackRF One) in the HackRF's place"
-                    )
-                    return False
+            if tx_generator is not None and not self._hackrf_can_transmit():
+                logger.error(
+                    "Full-duplex needs a device that can transmit (a "
+                    "HackRF One) in the HackRF's place"
+                )
+                return False
 
             if self._state.mode != OperationMode.FULL_DUPLEX:
                 self.set_mode(OperationMode.FULL_DUPLEX)
@@ -511,6 +515,13 @@ class DualSDRController:
         """
         if not self._hackrf:
             logger.error("TX monitor requires HackRF")
+            return False
+        # (Refused before the mode or the receiver's frequency change.)
+        if tx_generator is not None and not self._hackrf_can_transmit():
+            logger.error(
+                "TX monitor needs a device that can transmit (a HackRF One) "
+                "in the HackRF's place"
+            )
             return False
 
         if self._state.mode != OperationMode.TX_MONITOR:

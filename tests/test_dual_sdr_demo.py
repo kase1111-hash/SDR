@@ -154,6 +154,20 @@ class TestControllerOnDemoDevices:
         assert not controller.state.rtlsdr_streaming
         assert not controller.start_tx_monitor(tx, Collector())
 
+    def test_a_refused_tx_monitor_changes_nothing(self):
+        """Refused for want of a transmitter, TX monitor leaves the mode and
+        the receiver's frequency as they were."""
+        controller = DualSDRController()
+        controller.use_devices(demo("A", 100.1e6), demo("B", 146.94e6))
+        tx = lambda: np.zeros(1024, dtype=np.complex64)  # noqa: E731
+        assert not controller.start_tx_monitor(tx, Collector())
+        state = controller.state
+        assert state.mode == OperationMode.DUAL_RX
+        assert state.rtlsdr_frequency == 100.1e6
+        assert controller.rtlsdr.state.frequency == 100.1e6
+        assert controller.rtlsdr.source.frequency == 100.1e6
+        assert not state.rtlsdr_streaming and not state.hackrf_transmitting
+
     def test_devices_cant_change_while_streaming(self):
         controller = DualSDRController()
         controller.use_devices(demo("A"))

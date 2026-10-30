@@ -163,6 +163,11 @@ class LiveDecoder:
         """Follow the VFO: the channel is now ``offset_hz`` from the centre."""
         self._offset = float(offset_hz)
 
+    def channel_changed(self) -> None:
+        """The receiver was retuned (the LO, the VFO or both moved): what
+        the channel carries now is something else, so forget what was
+        measured in it (the counts and the protocol state stay)."""
+
     def process(self, iq: np.ndarray) -> List[DecodedMessage]:
         """Decode a block of raw I/Q (complex, any length); returns the
         messages that completed in it (valid ones and ones that failed
@@ -230,7 +235,9 @@ class ChannelDecoder(LiveDecoder):
     offset and decimated to about ``TARGET_RATE`` (keeping +/- ``PASS_HZ``,
     60 dB down beyond +/- ``STOP_HZ``), then :meth:`_demodulate` turns the
     channel into messages. Also tracks whether a signal is in the channel:
-    its power against the channel's noise floor, every 50 ms.
+    its power against the channel's noise floor, every 50 ms, and how much
+    of that signal went by without a valid message (forgotten when the
+    channel changes or stays quiet for ``_QUIET_S``).
     """
 
     PASS_HZ = 8e3
@@ -244,6 +251,10 @@ class ChannelDecoder(LiveDecoder):
     _FLOOR_S = 20.0
     _WARMUP_S = 2.0
     _HOLD_S = 1.0
+    # Seconds without signal after which the undecoded signal heard
+    # before no longer counts ("Signal present but nothing decodes" is
+    # about what is on the channel now, not a minute ago).
+    _QUIET_S = 30.0
 
     def __init__(
         self,
@@ -276,8 +287,15 @@ class ChannelDecoder(LiveDecoder):
         raise NotImplementedError
 
     def set_offset(self, offset_hz: float) -> None:
+        changed = float(offset_hz) != self._channelizer.offset_hz
         super().set_offset(offset_hz)
         self._channelizer.set_offset(offset_hz)
+        if changed:
+            self.channel_changed()
+
+    def channel_changed(self) -> None:
+        # A new channel has its own floor and signal: measure them afresh.
+        self._reset_presence()
 
     def reset(self) -> None:
         super().reset()
@@ -324,6 +342,8 @@ class ChannelDecoder(LiveDecoder):
             self._undecoded += self._SEGMENT_S
         elif self._since_present is not None:
             self._since_present += self._SEGMENT_S
+            if self._since_present >= self._QUIET_S:
+                self._undecoded = 0.0  # the channel went quiet
 
     def _on_valid(self) -> None:
         self._undecoded = 0.0

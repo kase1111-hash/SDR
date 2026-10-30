@@ -230,6 +230,22 @@ def test_noise_alone_decodes_nothing_and_fails_nothing():
         assert (status.valid, status.failed) == (0, 0), name
 
 
+def test_any_array_layout_and_complex_type():
+    # Regression: a strided view (e.g. one column of a buffer) made the
+    # channelizer's finite check raise ValueError, so every block failed.
+    rate = 240e3
+    x = _scene("AX.25/APRS", rate)
+    buffer = np.zeros((len(x), 2), dtype=np.complex64)
+    buffer[:, 0] = x
+    strided = buffer[:, 0]
+    assert not strided.flags.c_contiguous
+    block = int(rate * GUI_BLOCK_S)
+    expected = CASES["AX.25/APRS"][1]
+    for samples in (strided, x.astype(np.complex128)):
+        decoder = create_live_decoder("AX.25/APRS", rate)
+        assert _rows(_decode(decoder, samples, block)) == expected
+
+
 # --------------------------------------------------------------------------- #
 # Factory, registry and status
 # --------------------------------------------------------------------------- #
@@ -338,6 +354,56 @@ class TestStatus:
         status = decoder.status
         status.valid = 99
         assert decoder.status.valid == 0
+
+    @staticmethod
+    def _undecodable_signal(decoder, rate, seconds, rng):
+        """Noise for the floor, then ``seconds`` of voice-like FM."""
+        n = int(rate * 0.05)
+
+        def noise():
+            return (
+                0.01 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+            ).astype(np.complex64)
+
+        for _ in range(60):  # 3 s of noise: the floor
+            decoder.process(noise())
+        t = np.arange(n) / rate
+        for i in range(int(seconds / 0.05)):
+            phase = 5.0 * np.sin(2 * np.pi * 400 * (t + i * 0.05))
+            decoder.process(np.exp(1j * phase).astype(np.complex64) + noise())
+        return noise
+
+    def test_a_new_channel_forgets_the_signal_heard_on_the_old_one(self):
+        # Regression: after 6 s of something undecodable the status said
+        # "Signal present but nothing decodes" and kept saying it after the
+        # receiver was retuned to a quiet channel.
+        rate = 48e3
+        rng = np.random.default_rng(12)
+        decoder = create_live_decoder("POCSAG", rate)
+        self._undecodable_signal(decoder, rate, 8.0, rng)
+        assert decoder.status.undecoded_signal_s > 6.0
+        decoder.channel_changed()
+        status = decoder.status
+        assert (status.undecoded_signal_s, status.signal_present) == (0.0, False)
+        # Following the VFO to another offset is a new channel too.
+        self._undecodable_signal(decoder, rate, 8.0, rng)
+        decoder.set_offset(0.0)  # unchanged: nothing is forgotten
+        assert decoder.status.undecoded_signal_s > 6.0
+        decoder.set_offset(5e3)
+        assert decoder.status.undecoded_signal_s == 0.0
+
+    def test_undecoded_signal_is_forgotten_once_the_channel_is_quiet(self):
+        rate = 48e3
+        rng = np.random.default_rng(13)
+        decoder = create_live_decoder("POCSAG", rate)
+        noise = self._undecodable_signal(decoder, rate, 8.0, rng)
+        for _ in range(int(20 / 0.05)):  # a short pause keeps it
+            decoder.process(noise())
+        assert decoder.status.undecoded_signal_s > 6.0
+        for _ in range(int(12 / 0.05)):  # 32 s of quiet: gone
+            decoder.process(noise())
+        status = decoder.status
+        assert (status.undecoded_signal_s, status.signal_present) == (0.0, False)
 
 
 # --------------------------------------------------------------------------- #
@@ -482,6 +548,31 @@ class TestPOCSAG:
         _decoder, messages = self._decode(bits)
         assert [(m.content, m.valid) for m in messages] == [("FIXED", True)]
 
+    def test_noise_that_matches_the_sync_word_is_not_a_transmission(self):
+        # Regression: noise matches the sync word (within two bit errors, at
+        # one of three speeds) a few times an hour. The random codewords
+        # after it were taken as a transmission: garbage pages, and the
+        # status line warned that pages "failed their checks" on an idle
+        # channel.
+        rng = np.random.default_rng(11)
+        check = POCSAGDecoder(48000.0)._check_bch
+        junk = []
+        while len(junk) < 16:
+            word = int(rng.integers(0, 1 << 32))
+            if not check(word)[0]:
+                junk.append(word)
+        bits = rng.integers(0, 2, 100).tolist()
+        for word in [POCSAGDecoder.SYNC_WORD ^ (1 << 7)] + junk:
+            bits += [(word >> (31 - i)) & 1 for i in range(32)]
+        # A page right after it still decodes.
+        bits += rng.integers(0, 2, 8).tolist()
+        bits += enc.pocsag_bits([(1234567, 3, "AFTER THE NOISE")])
+        decoder, messages = self._decode(bits)
+        assert [(m.address, m.content, m.valid) for m in messages] == [
+            (1234567, "AFTER THE NOISE", True)
+        ]
+        assert (decoder.frames_seen, decoder.frames_failed) == (1, 0)
+
 
 class TestFLEX:
     def _decode(self, bits, rate=48000.0, invert=False):
@@ -522,15 +613,71 @@ class TestFLEX:
         assert "BCH" in messages[0].error_message
         assert decoder.frames_failed == 1
 
-    def test_other_speeds_are_recognised_but_not_decoded(self):
+    @pytest.mark.parametrize(
+        "code, speed",
+        [
+            # ARIB STD-43A sync codes, as multimon-ng reads them (0xDEA0 was
+            # reported as "3200 bps 4-level", and 0x7B18 / 0xB068 swapped).
+            (0x7B18, "3200 bps 2-level"),
+            (0xB068, "3200 bps 4-level"),
+            (0xDEA0, "6400 bps 4-level"),
+            (0x4C7C, "6400 bps 4-level"),
+        ],
+    )
+    def test_other_speeds_are_recognised_but_not_decoded(self, code, speed):
         bits = enc.flex_frame_bits([(1234567, "AT 1600")])
-        # Make the sync pattern name 3200 bps 4-level (code 0xDEA0).
-        sync = (0xDEA0 << 48) | (0xA6C6AAAA << 16) | (0xDEA0 ^ 0xFFFF)
+        # Make the sync pattern name another speed.
+        sync = (code << 48) | (0xA6C6AAAA << 16) | (code ^ 0xFFFF)
         bits[32:96] = [((sync >> (63 - i)) & 1) ^ 1 for i in range(64)]
         decoder, messages = self._decode(bits)
         assert messages == []
         assert decoder.unsupported_frames == 1
-        assert decoder.last_unsupported == "3200 bps 4-level"
+        assert decoder.last_unsupported == speed
+
+    @staticmethod
+    def _long_address(capcode):
+        """The two address words of a long address (set 1-2)."""
+        first = (capcode - 2068480) % 32768
+        second = 2097151 - (capcode - 2068480) // 32768
+        assert 1 <= first <= 32768 and 2064383 <= second <= 2097150
+        return [first, second]
+
+    def test_long_address_numeric_page(self):
+        # Regression: with a long address the first message word is the
+        # second vector word (multimon-ng, ARIB STD-43A 3.9.1); the digits
+        # were read from the message field only, one word too far.
+        digits = [1, 2, 3, 4, 5, 6, 7, 8, 9, 0]
+        stream = [0, 0] + [(d >> i) & 1 for d in digits for i in range(4)]
+        body = [sum(b << i for i, b in enumerate(stream[k : k + 21])) for k in (0, 21)]
+        values = [enc._flex_checksum(3 << 10)]  # BIW: vectors start at word 3
+        values += self._long_address(2232321)  # words 1-2
+        values += [(3 << 4) | (5 << 7) | (1 << 14)]  # numeric, 2 words, from 5
+        values += body  # word 4 (the second vector word) and word 5
+        _decoder, messages = self._decode(enc.flex_words_bits(values))
+        assert [(m.capcode, m.message_type, m.content, m.valid) for m in messages] == [
+            (2232321, "numeric", "1234567890", True)
+        ]
+
+    def test_long_address_alpha_page(self):
+        text = "LONG ADDRESS PAGE"
+        words = enc._flex_alpha_words(text, 0)
+        values = [enc._flex_checksum(3 << 10)]
+        values += self._long_address(2232321)
+        # Alphanumeric: the header is the second vector word, the
+        # characters follow from word 5.
+        values += [(5 << 4) | (5 << 7) | (len(words) << 14), words[0]] + words[1:]
+        _decoder, messages = self._decode(enc.flex_words_bits(values))
+        assert [(m.capcode, m.content, m.valid) for m in messages] == [
+            (2232321, text, True)
+        ]
+
+    def test_a_long_address_cut_off_by_the_vectors_is_skipped(self):
+        # Its second word would be the first vector word: no page (it was
+        # shown with a negative capcode).
+        values = [enc._flex_checksum(2 << 10), 5, (5 << 4) | (3 << 7) | (2 << 14)]
+        values += enc._flex_alpha_words("X", 0)
+        _decoder, messages = self._decode(enc.flex_words_bits(values))
+        assert messages == []
 
     def test_numeric_page_layout(self):
         # Digits are 4 bits, least significant first, after 2 header bits,

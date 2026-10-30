@@ -331,11 +331,11 @@ class Channelizer:
 
     def process(self, iq: np.ndarray) -> np.ndarray:
         """The channel at 0 Hz, at ``output_rate`` (complex64)."""
-        x = np.asarray(iq)
-        if not np.iscomplexobj(x):
-            x = x.astype(np.complex64)
+        # Contiguous complex64 (a no-op for a device block): any layout or
+        # type works, and the finite check below can view it as floats.
+        x = np.ascontiguousarray(iq, dtype=np.complex64)
         if len(x) and not np.all(np.isfinite(x.view(np.float32))):
-            x = np.nan_to_num(x.astype(np.complex64), nan=0.0, posinf=0.0, neginf=0.0)
+            x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
         y = self._nco.process(x)
         for stage in self._stages:
             y = stage.process(y)

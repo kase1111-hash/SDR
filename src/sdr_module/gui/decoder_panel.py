@@ -186,11 +186,6 @@ _DETAIL_LINES = 3
 _INVALID_ROLE = Qt.ItemDataRole.UserRole.value + 1 if HAS_PYQT6 else 0
 
 
-def html_escape(text: str) -> str:
-    """``text`` escaped for rich text (never markup)."""
-    return html.escape(text)
-
-
 def placeholder_html(text: str) -> str:
     """Rich text for an empty-state message ``"Title\\nHint ..."``.
 
@@ -266,16 +261,14 @@ class ViewPlaceholder(QObject if HAS_PYQT6 else object):
         hint = self.button.sizeHint()
         width = rect.width()
         room = rect.height() - self._ACTION_GAP - hint.height()
-        html = full
-        if self.label.text() != html:
-            self.label.setText(html)
+        if self.label.text() != full:
+            self.label.setText(full)
         title, sep, _hint = self._text.partition("\n")
         if sep and self.label.heightForWidth(width) > room:
-            html = (
+            self.label.setText(
                 '<p style="margin: 0; font-weight: 600; font-style: normal;">'
-                f"{html_escape(title)}</p>"
+                f"{html.escape(title)}</p>"
             )
-            self.label.setText(html)
         text_h = max(0, min(self.label.heightForWidth(width), room))
         total = text_h + self._ACTION_GAP + hint.height()
         top = max(0, (rect.height() - total) // 2)

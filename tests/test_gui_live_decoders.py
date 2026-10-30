@@ -114,6 +114,28 @@ class TestLiveDecoderWiring(_WindowTestCase):
         self.assertTrue(panel.decoder_status_text().startswith("POCSAG  ·  1 page  ·"))
         self.assertEqual(panel._decoded_label.text(), "1")
 
+    def test_retuning_forgets_the_signal_heard_on_the_old_channel(self):
+        # Regression: "Signal present but nothing decodes" stayed on after
+        # retuning to a quiet channel (seen in the window going from a
+        # 146.940 MHz voice channel to 150.000 MHz with POCSAG selected).
+        decoder = self.select("POCSAG")
+        panel = self.win._decoder_panel
+        block = np.zeros(4096, dtype=np.complex64)
+        panel.set_receiving(True)
+        self.win._run_decoder(block)
+        decoder._undecoded = 10.0  # as after 10 s of undecodable signal
+        decoder._since_present = 0.0
+        self.win._run_decoder(block)
+        self.assertTrue(
+            panel.decoder_status_text().startswith("Signal present but nothing decodes")
+        )
+        self.win.set_frequency(self.win._current_frequency() + 1e6)
+        _settle(2)
+        panel.set_receiving(True)
+        self.win._run_decoder(block)
+        self.assertEqual(decoder.status.undecoded_signal_s, 0.0)
+        self.assertNotIn("nothing decodes", panel.decoder_status_text())
+
 
 class TestLiveDecoderRates(_WindowTestCase):
     """With the demo device, whose sample rate can be changed."""

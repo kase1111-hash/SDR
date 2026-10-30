@@ -369,6 +369,11 @@ class POCSAGDecoder(ProtocolDecoder):
     # Sync word bit errors tolerated when searching (and between batches).
     _SYNC_ERRORS = 2
     _NEXT_SYNC_ERRORS = 4
+    # Codewords after the first sync word of a transmission that must pass
+    # the BCH check before it counts as one: noise matches the sync word
+    # (within two bit errors, in one of three speeds) a few times an hour,
+    # and would otherwise turn into garbage pages that failed their checks.
+    _PROBATION_WORDS = 2
     # Longest page assembled (message codewords, about 570 characters)
     # before it is cut.
     _MAX_PAGE_WORDS = 200
@@ -665,15 +670,32 @@ class _POCSAGStream:
         self._invert = 0
         self._count = 0
         self._batch: List[int] = []
+        # After the first sync word of a transmission: how many codewords
+        # still have to pass before it counts (0: it does), the search
+        # register at that sync word and the bits received since then
+        # (searched again if the sync word was noise).
+        self._probation = 0
+        self._sync_reg = 0
+        self._held: List[int] = []
+
+    @staticmethod
+    def _word(bits: Sequence[int]) -> int:
+        word = 0
+        for b in bits:
+            word = (word << 1) | b
+        return word
 
     def feed(self, bits: List[int]) -> List[POCSAGMessage]:
         out: List[POCSAGMessage] = []
         sync = POCSAGDecoder.SYNC_WORD
         sync_inv = sync ^ 0xFFFFFFFF
         state, reg, invert, count = self._state, self._reg, self._invert, self._count
-        batch = self._batch
+        batch, probation, held = self._batch, self._probation, self._held
         decoder = self._decoder
-        for bit in bits:
+        i = 0
+        while i < len(bits):
+            bit = bits[i]
+            i += 1
             if state == self._SEARCH:
                 reg = ((reg << 1) | bit) & 0xFFFFFFFF
                 if (reg ^ sync).bit_count() <= POCSAGDecoder._SYNC_ERRORS:
@@ -682,18 +704,36 @@ class _POCSAGStream:
                     invert = 1
                 else:
                     continue
-                state, batch = self._BATCH, []
-                decoder.frames_seen += 1
-                decoder._baud_rate = self.baud
+                state, batch, held = self._BATCH, [], []
+                probation, self._sync_reg = POCSAGDecoder._PROBATION_WORDS, reg
             elif state == self._BATCH:
                 # Codewords are taken as they complete, so a page is out as
                 # soon as the codeword after it arrives.
                 batch.append(bit ^ invert)
+                if probation:
+                    held.append(bit)
                 if len(batch) % 32 == 0:
-                    word = 0
-                    for b in batch[-32:]:
-                        word = (word << 1) | b
-                    out += self.pages.word(word, len(batch) // 32 - 1)
+                    index = len(batch) // 32 - 1
+                    word = self._word(batch[-32:])
+                    if not probation:
+                        out += self.pages.word(word, index)
+                    elif not decoder._check_bch(word)[0]:
+                        # Noise that looked like a sync word: search on from
+                        # the bit after it.
+                        state, reg, probation = self._SEARCH, self._sync_reg, 0
+                        bits, i = held + list(bits[i:]), 0
+                        held, batch = [], []
+                        continue
+                    else:
+                        probation -= 1
+                        if not probation:
+                            # A transmission: count it, take its codewords.
+                            decoder.frames_seen += 1
+                            decoder._baud_rate = self.baud
+                            for k in range(index + 1):
+                                word = self._word(batch[32 * k : 32 * k + 32])
+                                out += self.pages.word(word, k)
+                            held = []
                 if len(batch) == 512:
                     state, reg, count, batch = self._NEXT_SYNC, 0, 0, []
             else:
@@ -709,7 +749,7 @@ class _POCSAGStream:
                 state = self._SEARCH
                 reg ^= 0xFFFFFFFF if invert else 0
         self._state, self._reg, self._invert, self._count = state, reg, invert, count
-        self._batch = batch
+        self._batch, self._probation, self._held = batch, probation, held
         return out
 
 
@@ -2093,13 +2133,15 @@ class FLEXDecoder(ProtocolDecoder):
     SYNC_1 = 0xA6C6AAAA
     SYNC_2 = 0x5939AAAA
     MARKER = 0xA6C6AAAA
-    # Sync code (first 16 bits of the pattern) -> (bits/s, FSK levels).
+    # Sync code (first 16 bits of the pattern) -> (bits/s, FSK levels), per
+    # ARIB STD-43A (as multimon-ng reads them): A1, A2, A3 (1600 baud),
+    # A4 (3200 baud) and A7 (ReFLEX, as A4).
     SYNC_CODES: Dict[int, Tuple[int, int]] = {
         0x870C: (1600, 2),
-        0xB068: (3200, 2),
-        0x7B18: (1600, 4),
-        0xDEA0: (3200, 4),
-        0x4C7C: (3200, 4),
+        0x7B18: (3200, 2),
+        0xB068: (3200, 4),
+        0xDEA0: (6400, 4),
+        0x4C7C: (6400, 4),
     }
 
     # Frame structure
@@ -2313,6 +2355,8 @@ class FLEXDecoder(ProtocolDecoder):
                 continue
             second = values[i + 1] if i + 1 < first_vector else None
             capcode, long_address = self._capcode(address, second)
+            if long_address and second is None:
+                break  # a long address needs two words; the field ended
             used = [i] + ([i + 1] if long_address else [])
             vector_index = first_vector + (i - first_address)
             i += 2 if long_address else 1
@@ -2341,8 +2385,13 @@ class FLEXDecoder(ProtocolDecoder):
                     [values[w] for w in words], skip_first=fragment == 3
                 )
             elif page_type == "numeric":
-                end = start + ((vector >> 14) & 0x7)
-                words = list(range(start, min(end + 1, 88)))
+                count = ((vector >> 14) & 0x7) + 1  # message words
+                if long_address:
+                    # The first message word is the second vector word.
+                    words = [vector_index + 1] + list(range(start, start + count - 1))
+                else:
+                    words = list(range(start, start + count))
+                words = [w for w in words if w < self.WORDS_PER_PHASE]
                 used += words
                 skip = 10 if (vector >> 4) & 0x7 == 7 else 2
                 content = self._decode_numeric([values[w] for w in words], skip)

@@ -2848,6 +2848,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         except Exception:  # pragma: no cover - defensive (partial windows)
             return 0.0
 
+    def _decoder_retuned(self) -> bool:
+        """Whether the tuned frequency moved (the LO, the VFO or both) since
+        the last block the live decoder got."""
+        try:
+            tuned = self._current_frequency()
+        except Exception:  # pragma: no cover - defensive (partial windows)
+            return False
+        last = getattr(self, "_decoder_tuned_hz", tuned)
+        self._decoder_tuned_hz = tuned
+        return tuned != last
+
     def _rebuild_decoder(self) -> None:
         """Recreate the live decoder for the current device's sample rate."""
         self._on_decoder_protocol_changed(
@@ -2864,6 +2875,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         offset = self._decoder_offset_hz()
         if offset != getattr(decoder, "offset_hz", offset):
             decoder.set_offset(offset)
+        if self._decoder_retuned():
+            # What was measured on the old channel (signal, "nothing
+            # decodes") says nothing about this one.
+            decoder.channel_changed()
         try:
             messages = decoder.process(samples)
         except Exception as exc:  # pragma: no cover - defensive

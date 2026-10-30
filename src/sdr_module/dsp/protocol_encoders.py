@@ -32,6 +32,7 @@ __all__ = [
     "pocsag_baseband",
     "flex_codeword_bits",
     "flex_frame_bits",
+    "flex_words_bits",
     "flex_baseband",
     "ax25_frame",
     "hdlc_bits",
@@ -259,7 +260,19 @@ def flex_frame_bits(
         )
         values[position : position + len(words)] = words
         position += len(words)
+    return flex_words_bits(values, cycle, frame, bit_sync_bits)
 
+
+def flex_words_bits(
+    values: Sequence[int],
+    cycle: int = 0,
+    frame: int = 0,
+    bit_sync_bits: int = 32,
+) -> List[int]:
+    """One FLEX frame (1600 bps, 2-level) whose phase holds the 88 21-bit
+    codeword ``values`` as given (block information word first): the
+    header, then the 11 interleaved blocks."""
+    values = list(values)[:88] + [_FLEX_IDLE] * max(0, 88 - len(values))
     sync = (_FLEX_CODE_1600_2 << 48) | (0xA6C6AAAA << 16) | (_FLEX_CODE_1600_2 ^ 0xFFFF)
     bits = [1 - (i & 1) for i in range(bit_sync_bits)]
     bits += [((sync >> (63 - i)) & 1) ^ 1 for i in range(64)]

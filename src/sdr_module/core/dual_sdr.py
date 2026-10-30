@@ -15,6 +15,12 @@ In the GUI, Device > Second Receiver... gives the same uses with any two
 devices: a second receiver window next to the main one (dual watch), which
 keeps receiving while the main window's HackRF transmits (full duplex) and
 can follow the transmit frequency (TX monitor).
+
+:meth:`DualSDRController.initialize` opens the RTL-SDR and the HackRF it
+finds; :meth:`DualSDRController.use_devices` takes devices that are open
+already instead, e.g. two demo devices wrapped in
+:class:`~sdr_module.devices.polled.PolledDevice` to try dual receive without
+hardware.
 """
 
 import logging
@@ -25,8 +31,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 
-from ..devices.hackrf import HackRFDevice
-from ..devices.rtlsdr import RTLSDRDevice
+from ..devices.base import SDRDevice
 from .config import SDRConfig
 from .device_manager import DeviceManager
 from .sample_buffer import SampleBuffer
@@ -112,8 +117,10 @@ class DualSDRController:
         """
         self._config = config or SDRConfig()
         self._device_manager = DeviceManager()
-        self._rtlsdr: Optional[RTLSDRDevice] = None
-        self._hackrf: Optional[HackRFDevice] = None
+        # The receiver (an RTL-SDR) and the transceiver (a HackRF One), or
+        # the devices given to use_devices().
+        self._rtlsdr: Optional[SDRDevice] = None
+        self._hackrf: Optional[SDRDevice] = None
 
         # Sample buffers
         self._rtlsdr_buffer = SampleBuffer(capacity=2 * 1024 * 1024)
@@ -146,13 +153,13 @@ class DualSDRController:
             )
 
     @property
-    def rtlsdr(self) -> Optional[RTLSDRDevice]:
-        """Get RTL-SDR device."""
+    def rtlsdr(self) -> Optional[SDRDevice]:
+        """Get RTL-SDR device (the receiver)."""
         return self._rtlsdr
 
     @property
-    def hackrf(self) -> Optional[HackRFDevice]:
-        """Get HackRF device."""
+    def hackrf(self) -> Optional[SDRDevice]:
+        """Get HackRF device (the one that can transmit)."""
         return self._hackrf
 
     @property
@@ -213,6 +220,39 @@ class DualSDRController:
             logger.error("No SDR devices available")
 
         return success
+
+    def use_devices(
+        self,
+        rtlsdr: Optional[SDRDevice] = None,
+        hackrf: Optional[SDRDevice] = None,
+    ) -> bool:
+        """Use devices that are open already instead of :meth:`initialize`
+        opening the hardware: another receiver in the RTL-SDR's place, or
+        demo devices (see :class:`~sdr_module.devices.polled.PolledDevice`)
+        to try dual receive without hardware. Full duplex and TX monitor
+        need a ``hackrf`` that can transmit.
+
+        Returns:
+            True when at least one device is in use; False (and nothing
+            changes) while streaming or transmitting.
+        """
+        with self._lock:
+            if (
+                self._state.rtlsdr_streaming
+                or self._state.hackrf_streaming
+                or self._state.hackrf_transmitting
+            ):
+                logger.warning("Stop streaming before changing devices")
+                return False
+            self._rtlsdr = rtlsdr
+            self._hackrf = hackrf
+            self._state.rtlsdr_frequency = (
+                float(rtlsdr.state.frequency) if rtlsdr is not None else 0.0
+            )
+            self._state.hackrf_frequency = (
+                float(hackrf.state.frequency) if hackrf is not None else 0.0
+            )
+        return rtlsdr is not None or hackrf is not None
 
     def shutdown(self) -> None:
         """Shutdown and disconnect all devices."""
@@ -394,6 +434,14 @@ class DualSDRController:
             if not self._rtlsdr or not self._hackrf:
                 logger.error("Full-duplex requires both devices")
                 return False
+            can_transmit = getattr(self._hackrf, "can_transmit", None)
+            if tx_generator is not None and callable(can_transmit):
+                if not can_transmit():
+                    logger.error(
+                        "Full-duplex needs a device that can transmit (a "
+                        "HackRF One) in the HackRF's place"
+                    )
+                    return False
 
             if self._state.mode != OperationMode.FULL_DUPLEX:
                 self.set_mode(OperationMode.FULL_DUPLEX)

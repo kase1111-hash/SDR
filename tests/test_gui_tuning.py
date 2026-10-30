@@ -203,7 +203,7 @@ class TestVfoInsideTheSpan(_TuningCase):
         self.assertEqual(self.lo(), 100.1e6)
         self.assertEqual(self.win._rx_chain.offset_hz, -600e3)
         station_power = float(np.mean(np.abs(np.concatenate(fed)) ** 2)) if fed else 0
-        empty = listen(100.75e6)
+        empty = listen(100.45e6)  # 100.35-100.55 MHz: nothing on the air
         self.assertEqual(self.lo(), 100.1e6)
         empty_power = float(np.mean(np.abs(np.concatenate(fed)) ** 2)) if fed else 0
         self.assertGreater(station, -45.0)  # the station (-34 dBFS peak)

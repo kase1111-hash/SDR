@@ -1014,5 +1014,129 @@ class TestDamagedPlotSettings(unittest.TestCase):
         self.assertEqual(win._spectrum.fft_size(), 2048)
 
 
+class _CountingMetrics:
+    """A QFontMetrics stand-in that counts elidedText calls."""
+
+    def __init__(self, fm):
+        self._fm = fm
+        self.elided = 0
+
+    def elidedText(self, *args):  # noqa: N802 - Qt naming
+        self.elided += 1
+        return self._fm.elidedText(*args)
+
+    def __getattr__(self, name):
+        return getattr(self._fm, name)
+
+
+class TestBookmarkLabelCost(unittest.TestCase):
+    """PLOT-10: a repaint only looks at the bookmarks in view and doesn't
+    measure their names again (each 30 Hz repaint walked every bookmark:
+    44 ms with 2000 in the span, 22 ms with 20000 over 1 GHz), and the
+    labels are placed as before."""
+
+    def setUp(self):
+        require_pyqt6(self)
+        self.sp = swm.SpectrumWidget()
+        self.addCleanup(self.sp.deleteLater)
+        self.sp.set_frequency_range(CENTER, 2.4e6)
+        self.sp.resize(1400, 400)
+        self.sp.show()
+        _settle()
+        self.sp.update_spectrum(np.full(2048, -95.0))
+
+    @staticmethod
+    def bookmarks(count, lo, hi):
+        freqs = np.linspace(lo, hi, count)
+        return [
+            (float(f), f"Channel {i:05d} long name", i) for i, f in enumerate(freqs)
+        ]
+
+    def old_placement(self):
+        """Where the labels went before (the reference algorithm)."""
+        from PyQt6.QtCore import Qt
+
+        sp = self.sp
+        plot = sp.plot_rect()
+        fm = sp._fm
+        height, top, pad = fm.height() + 2, plot.top() + 9, 4
+        tuned = sp.tuned_frequency()
+        candidates = []
+        for freq, name, index in sp._bookmarks:
+            x = sp._freq_x(freq, plot)
+            if x is None:
+                continue
+            text = fm.elidedText(
+                name or swm.tuned_mhz_text(freq),
+                Qt.TextElideMode.ElideMiddle,
+                swm.BOOKMARK_LABEL_MAX_PX,
+            )
+            width = fm.horizontalAdvance(text) + 2 * pad
+            left = min(max(plot.left() + 1, x - width / 2), plot.right() - 1 - width)
+            candidates.append(
+                (abs(freq - tuned), QRectF(left, top, width, height), index)
+            )
+        placed = []
+        for entry in sorted(candidates, key=lambda c: c[0]):
+            box = entry[1]
+            if any(box.adjusted(-3, 0, 3, 0).intersects(o[1]) for o in placed):
+                continue
+            placed.append(entry)
+        return sorted(
+            (round(b.left(), 6), round(b.width(), 6), i) for _d, b, i in placed
+        )
+
+    def placement(self):
+        self.sp._canvas.repaint()
+        return sorted(
+            (round(box.left(), 6), round(box.width(), 6), index)
+            for box, index, _freq, _name in self.sp._bookmark_boxes
+        )
+
+    def test_the_labels_are_placed_as_before(self):
+        sp = self.sp
+        for items in (
+            self.bookmarks(50, CENTER - 1.15e6, CENTER + 1.15e6),
+            self.bookmarks(2000, CENTER - 1.15e6, CENTER + 1.15e6),
+            self.bookmarks(5000, 30e6, 1000e6),
+            [
+                (CENTER + 1e3 * k, "" if k % 3 else f"B{k}", k)
+                for k in range(-900, 900, 7)
+            ],
+        ):
+            sp.set_bookmarks(items)
+            sp.set_tuned_frequency(CENTER + 0.3e6)
+            placed = self.placement()
+            self.assertGreater(len(placed), 0)
+            self.assertEqual(placed, self.old_placement())
+        sp.zoom_to(CENTER + 0.3e6, 3)
+        self.assertEqual(self.placement(), self.old_placement())
+
+    def test_a_repaint_only_looks_at_the_bookmarks_in_view(self):
+        sp = self.sp
+        sp.set_bookmarks(self.bookmarks(20000, 30e6, 1000e6))
+        calls = []
+        original = sp._freq_x
+        sp._freq_x = lambda freq, plot: calls.append(freq) or original(freq, plot)
+        sp._canvas.repaint()
+        in_view = [
+            f for f, _n, _i in sp._bookmarks if CENTER - 1.2e6 <= f <= CENTER + 1.2e6
+        ]
+        self.assertLessEqual(len([c for c in calls if c in set(in_view)]), len(in_view))
+        self.assertLess(len(calls), len(in_view) + 50)  # (the tuned marker...)
+
+    def test_names_are_measured_once(self):
+        sp = self.sp
+        sp.set_bookmarks(self.bookmarks(200, CENTER - 1.15e6, CENTER + 1.15e6))
+        counting = sp._fm = _CountingMetrics(sp._fm)
+        sp._canvas.repaint()
+        self.assertGreater(counting.elided, 0)
+        counting.elided = 0
+        for _ in range(3):
+            sp.update_spectrum(np.full(2048, -95.0))
+            sp._canvas.repaint()
+        self.assertEqual(counting.elided, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

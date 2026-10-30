@@ -26,6 +26,7 @@ frequency axes line up vertically.
 from __future__ import annotations
 
 import math
+from bisect import bisect_left, bisect_right
 from collections import deque
 from typing import (
     TYPE_CHECKING,
@@ -908,8 +909,12 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         # (Tuned frequency, LO, span) the view last followed: it follows
         # again only when one of them changes (see set_tuned_frequency).
         self._follow_key: Optional[Tuple[float, float, float]] = None
-        # Bookmarks labelled along the top: (freq Hz, name, index).
+        # Bookmarks labelled along the top: (freq Hz, name, index), by
+        # frequency (and their frequencies alone, to find those in view),
+        # and each label's elided text and width (measured once).
         self._bookmarks: List[Tuple[float, str, int]] = []
+        self._bookmark_freqs: List[float] = []
+        self._label_cache: Dict[Tuple[str, float], Tuple[str, int]] = {}
         self._show_bookmarks = True
         self._bookmark_boxes: List[Tuple["QRectF", int, float, str]] = []
         # Dragging the dB axis: (start y, range at the start).
@@ -1095,6 +1100,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
     def _on_theme_changed(self, _name: str = "") -> None:
         try:
+            self._label_cache = {}
             self._invalidate_background()
             self._canvas.update()
         except RuntimeError:  # pragma: no cover - widget already deleted
@@ -1422,6 +1428,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         items.sort(key=lambda item: item[0])
         if items != self._bookmarks:
             self._bookmarks = items
+            self._bookmark_freqs = [item[0] for item in items]
+            self._label_cache = {}
             self._canvas.update()
 
     def set_bookmark_labels_visible(self, visible: bool) -> None:
@@ -2402,53 +2410,69 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             painter.setPen(p.qcolor("plot_axis"))
             painter.drawText(QPointF(plot.left() + 4, 2 + fm.ascent()), info)
 
+    def _bookmark_label(self, freq: float, name: str) -> Tuple[str, int]:
+        """A bookmark label's text (its name, or its frequency, elided) and
+        width: measured once, not at every repaint."""
+        key = (name, 0.0 if name else freq)
+        found = self._label_cache.get(key)
+        if found is None:
+            text = self._fm.elidedText(
+                name or tuned_mhz_text(freq),
+                Qt.TextElideMode.ElideMiddle,
+                BOOKMARK_LABEL_MAX_PX,
+            )
+            found = self._label_cache[key] = (text, self._fm.horizontalAdvance(text))
+        return found
+
     def _draw_bookmarks(self, painter: "QPainter", plot: "QRectF", p) -> None:
         """Small labels at the bookmarked frequencies in view, along the top
         of the plot. Labels that would overlap the one before are left out
         (the nearer one to the tuned frequency wins), long names are
         elided."""
         self._bookmark_boxes = []
-        if not self._show_bookmarks or not self._bookmarks:
+        if not self._show_bookmarks or not self._bookmarks or plot.width() <= 0:
             return
         fm = self._fm
         height = fm.height() + 2
         top = plot.top() + 9  # below the tuned-frequency flag
         pad = 4
         tuned = self.tuned_frequency()
+        # Only the bookmarks in view (the list is in frequency order): a
+        # long imported list costs nothing where it isn't shown.
+        half_px = 0.5 * self._view.span / plot.width()
+        first = bisect_left(self._bookmark_freqs, self._view.start - half_px)
+        stop = bisect_right(self._bookmark_freqs, self._view.end + half_px)
         candidates = []
-        for freq, name, index in self._bookmarks:
+        for freq, name, index in self._bookmarks[first:stop]:
             x = self._freq_x(freq, plot)
             if x is None:
                 continue
-            text = fm.elidedText(
-                name or tuned_mhz_text(freq),
-                Qt.TextElideMode.ElideMiddle,
-                BOOKMARK_LABEL_MAX_PX,
-            )
-            width = fm.horizontalAdvance(text) + 2 * pad
+            text, text_width = self._bookmark_label(freq, name)
+            width = text_width + 2 * pad
             left = min(max(plot.left() + 1, x - width / 2), plot.right() - 1 - width)
             candidates.append(
-                (
-                    abs(freq - tuned),
-                    QRectF(left, top, width, height),
-                    x,
-                    text,
-                    index,
-                    freq,
-                    name,
-                )
+                (abs(freq - tuned), left, width, x, text, index, freq, name)
             )
-        # Nearest the tuned frequency first, then skip whatever overlaps.
+        # Nearest the tuned frequency first, then skip whatever comes within
+        # 3 px of a label placed already. The labels share one line, so the
+        # placed ones are kept in order (lefts, rights) and each check looks
+        # at the one placed just left of the candidate's right edge.
+        lefts: List[float] = []
+        rights: List[float] = []
         placed = []
         for entry in sorted(candidates, key=lambda c: c[0]):
-            box = entry[1]
-            if any(box.adjusted(-3, 0, 3, 0).intersects(other[1]) for other in placed):
+            left, width = entry[1], entry[2]
+            k = bisect_left(lefts, left + width + 3)
+            if k > 0 and rights[k - 1] > left - 3:
                 continue
+            lefts.insert(k, left)
+            rights.insert(k, left + width)
             placed.append(entry)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.setFont(self._font)
-        for _dist, box, x, text, index, freq, name in placed:
+        for _dist, left, width, x, text, index, freq, name in placed:
+            box = QRectF(left, top, width, height)
             xi = round(x) + 0.5
             painter.setPen(QPen(p.qcolor("accent", 170), 1))
             painter.drawLine(QPointF(xi, box.bottom()), QPointF(xi, box.bottom() + 4))

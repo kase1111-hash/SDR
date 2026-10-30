@@ -273,6 +273,7 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         self._tx_progress.setTextVisible(True)
         self._tx_progress.setFormat("")
         self._tx_progress.setAccessibleName("Transmission progress")
+        self._tx_progress.setToolTip("Air time sent so far, of the whole transmission")
         self._tx_progress.setVisible(False)
         callsign_form.addRow(self._tx_progress)
 

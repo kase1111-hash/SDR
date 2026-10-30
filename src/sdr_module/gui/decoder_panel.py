@@ -11,6 +11,7 @@ import csv
 import html
 import math
 import os
+import time
 from collections import Counter
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -74,13 +75,14 @@ def _format_mhz(freq_hz: float) -> str:
 PROTOCOL_OFF = "Off"
 
 #: Protocol name -> (what it carries, where to listen). The names are the
-#: ones the main window maps to decoder implementations; keep them in step.
+#: ones the main window maps to decoder implementations (and the keys of
+#: ``sdr_module.dsp.live_decoders.LIVE_DECODERS``); keep them in step.
 PROTOCOL_INFO: Dict[str, Tuple[str, str]] = {
     "POCSAG": (
         "Pager messages (512/1200/2400 baud)",
-        "around 152–159 MHz and 929–932 MHz",
+        "152–159 MHz or 929–932 MHz",
     ),
-    "FLEX": ("Motorola FLEX pager messages", "around 929–932 MHz"),
+    "FLEX": ("Motorola FLEX pager messages (1600 bps)", "929–932 MHz"),
     "AX.25/APRS": (
         "Packet radio and APRS position reports",
         "144.390 MHz (N. America) or 144.800 MHz (Europe)",
@@ -91,11 +93,26 @@ PROTOCOL_INFO: Dict[str, Tuple[str, str]] = {
 }
 
 #: Protocol name -> (frequency in Hz, demod mode, FM deviation, what it is)
-#: offered as a one-click "Tune to ..." in the empty message table. Only
-#: protocols with one well-known channel get one; pagers use many channels
-#: across a band, so their hint names the band instead.
+#: offered as a one-click "Tune to ..." in the empty message table. The
+#: mode is what listening to it sounds best in (the decoder itself picks its
+#: own channel): no audio for ADS-B's pulses, narrowband FM (5 kHz, a 25 kHz
+#: channel) for pagers and packet, AM (10 kHz) for ACARS. Pagers use many
+#: channels across their bands; theirs is a common one (the demo device's).
 PROTOCOL_TUNE: Dict[str, Tuple[float, str, str, str]] = {
-    "ADS-B": (1090e6, "", "", "the ADS-B frequency used worldwide"),
+    "POCSAG": (
+        152.24e6,
+        "FM",
+        "5 kHz",
+        "a common VHF pager channel (pagers use many channels in 152–159 MHz "
+        "and 929–932 MHz)",
+    ),
+    "FLEX": (
+        931.9375e6,
+        "FM",
+        "5 kHz",
+        "a common 900 MHz pager channel (FLEX pagers use 929–932 MHz)",
+    ),
+    "ADS-B": (1090e6, "None (I/Q)", "", "the ADS-B frequency used worldwide"),
     "AX.25/APRS": (
         144.39e6,
         "FM",
@@ -125,6 +142,29 @@ PROTOCOL_UNAVAILABLE: Dict[str, str] = {
 _START_HINT = "press Start (Space)"
 # Shown for a value that isn't there (no message text, no last message).
 _NO_VALUE = "–"
+# Seconds of signal in the decoder's channel without a valid message before
+# the status line says that something is there but does not decode.
+_UNDECODED_SIGNAL_S = 6.0
+# A last message older than this is no longer shown as good news.
+_FRESH_S = 120.0
+
+
+def _plural(count: int, unit: str) -> str:
+    """``3, "page" -> "3 pages"``."""
+    return f"{count:,} {unit}{'' if count == 1 else 's'}"
+
+
+def _format_age(seconds: float) -> str:
+    """``4.2 -> "4 s ago"``, ``130 -> "2 min ago"``."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 2:
+        return "just now"
+    if seconds < 90:
+        return f"{seconds:.0f} s ago"
+    if seconds < 5400:
+        return f"{seconds / 60:.0f} min ago"
+    return f"{seconds / 3600:.0f} h ago"
+
 
 # Table columns.
 COL_TIME, COL_PROTOCOL, COL_ADDRESS, COL_MESSAGE = range(4)
@@ -206,14 +246,30 @@ class ViewPlaceholder(QObject if HAS_PYQT6 else object):
         return False
 
     def _layout(self) -> None:
-        """Center the text (and the action button under it) in the view."""
+        """Center the text (and the action button under it) in the view.
+
+        When the view is too short for the text and the button, only the
+        title is shown with the button, so the button is never cut off.
+        """
         rect = self._viewport.rect()
+        full = placeholder_html(self._text)
         if not self._has_action:
+            if self.label.text() != full:
+                self.label.setText(full)
             self.label.setGeometry(rect)
             return
         hint = self.button.sizeHint()
         width = rect.width()
-        text_h = min(self.label.heightForWidth(width), rect.height())
+        room = rect.height() - self._ACTION_GAP - hint.height()
+        if self.label.text() != full:
+            self.label.setText(full)
+        title, sep, _hint = self._text.partition("\n")
+        if sep and self.label.heightForWidth(width) > room:
+            self.label.setText(
+                '<p style="margin: 0; font-weight: 600; font-style: normal;">'
+                f"{html.escape(title)}</p>"
+            )
+        text_h = max(0, min(self.label.heightForWidth(width), room))
         total = text_h + self._ACTION_GAP + hint.height()
         top = max(0, (rect.height() - total) // 2)
         self.label.setGeometry(0, top, width, text_h)
@@ -496,6 +552,13 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._receiving: Optional[bool] = None
         # The user's Decode choice; the box shows unticked while Off.
         self._decode_wanted = True
+        # The live decoder's health (a LiveDecoderStatus; None: no decoder)
+        # and the clock its last_time is measured with.
+        self._decoder_status: Any = None
+        self._clock = time.monotonic
+        # The decoder's (frames, valid, failed) at the last Clear: the
+        # status line and Stats count from there.
+        self._count_base = (0, 0, 0)
 
         self._setup_ui()
         self._update_state()
@@ -551,6 +614,17 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         proto_row.addWidget(self._enabled_check)
         proto_row.addStretch(0)
         layout.addLayout(proto_row)
+
+        # One line of decoder health: counts, signal, problems.
+        self._status_label = QLabel()
+        set_role(self._status_label, "hint")
+        self._status_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._status_label.setWordWrap(True)
+        self._status_label.setAccessibleName("Decoder status")
+        self._status_label.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
+        layout.addWidget(self._status_label)
 
         # Output tabs, with Clear / Export in the tab bar's corner so the
         # table keeps as much height as possible in the short right column.
@@ -679,6 +753,42 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._last_msg_label = value_label()
         form.addRow("Last message", self._last_msg_label)
 
+        decoder_caption = QLabel("LIVE DECODER")
+        set_role(decoder_caption, "caption")
+        decoder_caption.setContentsMargins(0, 8, 0, 0)
+        decoder_caption.setToolTip(
+            "What the decoder found in the signal since it was started "
+            "(choosing a protocol or changing the sample rate restarts it) "
+            "or since Clear"
+        )
+        form.addRow(decoder_caption)
+        self._frames_label = value_label()
+        frames_caption = QLabel("Frames heard")
+        frames_caption.setToolTip(
+            "Transmissions, packets or blocks the decoder found and tried to "
+            "decode (POCSAG and FLEX: transmissions; APRS: packets; ACARS: "
+            "blocks)"
+        )
+        form.addRow(frames_caption, self._frames_label)
+        self._decoded_label = value_label()
+        decoded_caption = QLabel("Decoded")
+        decoded_caption.setToolTip("Messages that passed every check")
+        form.addRow(decoded_caption, self._decoded_label)
+        self._failed_label = value_label()
+        failed_caption = QLabel("Failed checks")
+        failed_caption.setToolTip(
+            "Frames or messages that failed a CRC, BCH or parity check: a weak "
+            "or mistuned signal, or another station on the channel"
+        )
+        form.addRow(failed_caption, self._failed_label)
+        self._signal_label = value_label()
+        signal_caption = QLabel("Signal in channel")
+        signal_caption.setToolTip(
+            "Whether something stands above the noise in the channel the "
+            "decoder listens to"
+        )
+        form.addRow(signal_caption, self._signal_label)
+
         by_proto = QLabel("BY PROTOCOL")
         set_role(by_proto, "caption")
         by_proto.setContentsMargins(0, 8, 0, 0)
@@ -771,6 +881,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
     def _on_protocol_changed(self, text: str):
         """Handle protocol change."""
+        # The old decoder's status no longer applies; the main window sends
+        # the new one's (or none) while handling the signal.
+        self._decoder_status = None
+        self._count_base = (0, 0, 0)
         self._update_state()
         self.protocol_changed.emit(text)
 
@@ -797,6 +911,50 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         if receiving != self._receiving:
             self._receiving = receiving
             self._update_state()
+
+    def set_decoder_status(self, status: Any) -> None:
+        """Show the live decoder's health: a
+        :class:`~sdr_module.dsp.live_decoders.LiveDecoderStatus` (its
+        counts, signal and any problem), or None when no decoder runs.
+
+        Cheap enough to call for every block: labels change only when
+        their text does.
+        """
+        problem_changed = getattr(status, "problem", None) != getattr(
+            self._decoder_status, "problem", None
+        )
+        self._decoder_status = status
+        if problem_changed:
+            self._update_state()  # the empty-table hint names the problem
+        else:
+            self._update_status_line()
+        self._update_decoder_stats()
+
+    def _decoder_counts(self) -> Tuple[int, int, int]:
+        """The decoder's (frames, valid, failed) since the last Clear."""
+        status = self._decoder_status
+        counts = tuple(
+            int(getattr(status, attr, 0) or 0) for attr in ("frames", "valid", "failed")
+        )
+        if any(now < base for now, base in zip(counts, self._count_base, strict=True)):
+            self._count_base = (0, 0, 0)  # a new decoder counts from zero
+        frames, valid, failed = (
+            now - base for now, base in zip(counts, self._count_base, strict=True)
+        )
+        return frames, valid, failed
+
+    def decoder_status_text(self) -> str:
+        """The status line's text ("" when hidden)."""
+        return self._status_label.text() if not self._status_label.isHidden() else ""
+
+    def add_view(self, widget: Any, title: str, tooltip: str = "") -> int:
+        """Add an output view as a tab before Stats (e.g. an aircraft
+        table); returns its index."""
+        index = max(0, self._tabs.count() - 1)
+        index = self._tabs.insertTab(index, widget, title)
+        if tooltip:
+            self._tabs.setTabToolTip(index, tooltip)
+        return index
 
     def _tuned_for(self, proto: str) -> bool:
         """Whether the tuned frequency is where ``proto`` is heard."""
@@ -838,6 +996,12 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         """Empty-table hint for a selected, decoding protocol."""
         if proto in PROTOCOL_UNAVAILABLE:
             return f"{proto} can't be decoded yet\n{PROTOCOL_UNAVAILABLE[proto]}"
+        problem = getattr(self._decoder_status, "problem", None)
+        if problem:
+            remedy = getattr(self._decoder_status, "remedy", None)
+            return f"{proto} can't decode here\n{problem}." + (
+                f" {remedy}" if remedy else ""
+            )
         if self._tuned_for(proto):
             here = _format_mhz(self._tuned_hz or 0.0)
             if self._receiving:
@@ -893,6 +1057,96 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._empty.set_action(*action)
         self._empty.set_visible(self._table.rowCount() == 0)
         self._update_buttons()
+        self._update_status_line()
+        self._update_decoder_stats()
+
+    def _status_parts(self) -> Tuple[str, Optional[str], str]:
+        """``(text, tone, tooltip)`` of the status line ("" hides it)."""
+        proto = self.protocol()
+        if proto is None or proto in PROTOCOL_UNAVAILABLE:
+            return "", None, ""
+        if not self._enabled_check.isChecked():
+            return "Paused: tick Decode to resume", "muted", ""
+        status = self._decoder_status
+        problem = getattr(status, "problem", None)
+        if problem:
+            return problem, "warning", problem
+        if not self._receiving:
+            return f"Stopped: {_START_HINT} to decode", "muted", ""
+        here = _format_mhz(self._tuned_hz) if self._tuned_hz else ""
+        if status is None:
+            return (f"Listening on {here}" if here else "Listening"), None, ""
+        unit = str(getattr(status, "unit", "message") or "message")
+        frames, valid, failed = self._decoder_counts()
+        tip = (
+            f"Since the decoder started (or Clear): {_plural(frames, 'frame')} "
+            f"heard, {valid:,} decoded, {failed:,} failed their checks."
+        )
+        # Seconds of signal since the last valid message: a channel that
+        # decoded before but carries something else now says so too.
+        undecoded = float(getattr(status, "undecoded_signal_s", 0.0) or 0.0)
+        if undecoded >= _UNDECODED_SIGNAL_S:
+            return (
+                "Signal present but nothing decodes: check the frequency and "
+                "the protocol",
+                "warning",
+                tip,
+            )
+        if valid:
+            last = getattr(status, "last_time", None)
+            age = self._clock() - last if last is not None else 0.0
+            parts = [proto, _plural(valid, unit), f"last {_format_age(age)}"]
+            if failed:
+                parts.append(f"{failed:,} failed check{'' if failed == 1 else 's'}")
+            return "  ·  ".join(parts), ("success" if age < _FRESH_S else None), tip
+        if failed:
+            return (
+                f"{_plural(failed, unit)} failed their checks: the signal may be "
+                "weak, mistuned or another protocol",
+                "warning",
+                tip,
+            )
+        if getattr(status, "signal_present", False):
+            text = f"Signal on {here}: waiting for {proto} {unit}s"
+            return text, "info", tip
+        if here and not self._tuned_for(proto) and proto in PROTOCOL_BANDS:
+            return f"Not tuned to {proto}: listening on {here}", None, tip
+        return (f"Listening on {here}" if here else "Listening"), None, tip
+
+    def _update_status_line(self) -> None:
+        text, tone, tip = self._status_parts()
+        label = self._status_label
+        if label.text() != text:
+            label.setText(text)
+        set_tone(label, tone)  # (a no-op when unchanged)
+        if label.toolTip() != tip:
+            label.setToolTip(tip)
+        if label.isHidden() == bool(text):
+            label.setVisible(bool(text))
+
+    def _update_decoder_stats(self) -> None:
+        """The Stats tab's live decoder counts."""
+        status = self._decoder_status
+        values = {
+            self._frames_label: _NO_VALUE,
+            self._decoded_label: _NO_VALUE,
+            self._failed_label: _NO_VALUE,
+            self._signal_label: _NO_VALUE,
+        }
+        failed = 0
+        if status is not None and not getattr(status, "problem", None):
+            frames, valid, failed = self._decoder_counts()
+            values[self._frames_label] = f"{frames:,}"
+            values[self._decoded_label] = f"{valid:,}"
+            values[self._failed_label] = f"{failed:,}"
+            if getattr(status, "signal_measured", False):
+                values[self._signal_label] = (
+                    "Yes" if getattr(status, "signal_present", False) else "No"
+                )
+        for label, text in values.items():
+            if label.text() != text:
+                label.setText(text)
+        set_tone(self._failed_label, "danger" if failed else None)
 
     def _update_buttons(self) -> None:
         has = bool(self._messages)
@@ -1119,7 +1373,11 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             self._table.scrollTo(rows[0])
 
     def clear(self):
-        """Clear all messages."""
+        """Clear all messages (and count the decoder's from here)."""
+        status = self._decoder_status
+        self._count_base = tuple(
+            int(getattr(status, attr, 0) or 0) for attr in ("frames", "valid", "failed")
+        )
         self._messages.clear()
         self._total = 0
         self._invalid = 0

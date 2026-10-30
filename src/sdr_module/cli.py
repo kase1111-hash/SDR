@@ -151,16 +151,22 @@ def _scan_file(args: argparse.Namespace) -> int:
 
 
 def cmd_decode(args: argparse.Namespace) -> int:
-    """Decode a protocol from a recorded I/Q file."""
-    from .dsp.protocols import (
-        ProtocolType,
-        create_protocol_decoder,
-        demodulate_for_protocol,
+    """Decode a protocol from a recorded I/Q file.
+
+    Uses the same streaming live decoders as the window's Decoder panel:
+    the channel at ``--offset`` from the recording's centre is picked out,
+    demodulated and decoded in one-second blocks. Only messages that pass
+    their checks are counted; ``--show-invalid`` lists the others too.
+    """
+    from .dsp.live_decoders import (
+        create_live_decoder,
+        describe_message,
+        format_rate,
+        live_decoder_class,
     )
     from .dsp.recording import SampleFormat, load_iq_file
 
-    protocol = ProtocolType(args.protocol)
-
+    name = args.protocol.upper()
     input_path = Path(args.input).expanduser()
     if not input_path.exists():
         print(f"Error: file not found: {input_path}")
@@ -181,25 +187,52 @@ def cmd_decode(args: argparse.Namespace) -> int:
         f"({len(samples) / sample_rate:.3f}s at {sample_rate / 1e6:.3f} Msps)"
     )
 
+    decoder_class = live_decoder_class(args.protocol)
+    if decoder_class is None:
+        print(
+            f"Error: decoding {name} from a raw I/Q capture is not supported "
+            "yet (it needs subcarrier recovery)."
+        )
+        return 2
+    if sample_rate < decoder_class.MIN_SAMPLE_RATE:
+        print(
+            f"Error: the sample rate is too low for {decoder_class.name}: it "
+            f"needs at least {format_rate(decoder_class.MIN_SAMPLE_RATE)}, the "
+            f"recording is {format_rate(sample_rate)}."
+        )
+        return 1
     try:
-        decoder = create_protocol_decoder(protocol, sample_rate=sample_rate)
+        decoder = create_live_decoder(args.protocol, sample_rate, args.offset)
     except ValueError as exc:
         print(f"Error: {exc}")
         return 1
+    if decoder.status.problem:
+        print(f"Error: {decoder.status.problem}")
+        return 1
 
-    baseband = demodulate_for_protocol(samples, protocol)
-    if baseband is None:
-        print(
-            f"Error: decoding {protocol.value.upper()} from a raw I/Q capture "
-            "is not supported yet (it needs subcarrier recovery)."
-        )
-        return 2
-    messages = decoder.decode(baseband)
+    messages = []
+    block = max(1, int(sample_rate))
+    for start in range(0, len(samples), block):
+        messages += decoder.process(samples[start : start + block])
+    valid = [m for m in messages if getattr(m, "valid", True)]
+    invalid = [m for m in messages if not getattr(m, "valid", True)]
 
-    print(f"Decoded {len(messages)} {args.protocol.upper()} message(s)")
-    for i, msg in enumerate(messages):
-        print(f"  [{i}] {msg}")
-
+    summary = f"Decoded {len(valid)} {name} message(s)"
+    if invalid:
+        summary += f" ({len(invalid)} failed their checks"
+        summary += ")" if args.show_invalid else "; --show-invalid lists them)"
+    print(summary)
+    for i, msg in enumerate(valid):
+        address, content = describe_message(msg)
+        print(f"  [{i}] {'  '.join(p for p in (address, content) if p)}")
+    if args.show_invalid:
+        for msg in invalid:
+            address, content = describe_message(msg)
+            error = getattr(msg, "error_message", "") or "failed its checks"
+            text = "  ".join(p for p in (address, content) if p)
+            print(
+                f"  [invalid] {text}  ({error})" if text else f"  [invalid] ({error})"
+            )
     return 0
 
 
@@ -537,6 +570,18 @@ def create_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Maximum samples to read (default: all)",
+    )
+    decode_parser.add_argument(
+        "--offset",
+        type=float,
+        default=0.0,
+        help="Where the signal is, in Hz from the centre of the recording "
+        "(default: 0, the centre)",
+    )
+    decode_parser.add_argument(
+        "--show-invalid",
+        action="store_true",
+        help="Also list messages that failed their checks (CRC, BCH, parity)",
     )
     decode_parser.set_defaults(func=cmd_decode)
 

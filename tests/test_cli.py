@@ -121,7 +121,11 @@ def _pocsag_iq_capture(path, fs=38400.0, baud=1200.0, deviation=2400.0):
     bits = [1, 0] * 288 + w2b(POCSAGDecoder.SYNC_WORD)
     words = [POCSAGDecoder.IDLE_WORD] * 16
     words[0] = enc(0, (0x100 << 2) | 0)  # numeric address, function 0
-    words[1] = enc(1, (1 << 16) | (2 << 12) | (3 << 8) | (4 << 4) | 5)  # "12345"
+    # "12345": each digit least significant bit first (ITU-R M.584).
+    digits = 0
+    for digit in (1, 2, 3, 4, 5):
+        digits = (digits << 4) | int(f"{digit:04b}"[::-1], 2)
+    words[1] = enc(1, digits)
     for word in words:
         bits += w2b(word)
     bits += [1, 0] * 32  # trailing data so the final batch completes

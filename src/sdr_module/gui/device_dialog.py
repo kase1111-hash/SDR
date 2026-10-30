@@ -244,7 +244,18 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         self._rate_combo.blockSignals(True)
         self._rate_combo.clear()
         for rate in rates:
-            self._rate_combo.addItem(_format_rate(rate), rate)
+            label = _format_rate(rate)
+            if rate < _ADSB_MIN_RATE:
+                # TOOLS-03: say so before ADS-B silently decodes nothing.
+                label += " (too low for ADS-B)"
+            self._rate_combo.addItem(label, rate)
+            if rate < _ADSB_MIN_RATE:
+                self._rate_combo.setItemData(
+                    self._rate_combo.count() - 1,
+                    "ADS-B (1090 MHz) needs at least 2 MS/s; the other "
+                    "decoders work at any rate",
+                    Qt.ItemDataRole.ToolTipRole,
+                )
         # Keep the previous choice when it is still valid, else the closest.
         best = min(range(len(rates)), key=lambda i: abs(rates[i] - float(current)))
         self._rate_combo.setCurrentIndex(best)
@@ -574,8 +585,8 @@ _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ..
     (124.35e6, "am", -50.0, (8.0, 5.0)),
     (125.0e6, "am", -44.0, None),
     (127.85e6, "am", -48.0, (13.0, 6.0)),
-    # 2 m amateur band
-    (144.39e6, "burst", -50.0, (4.0, 0.4)),
+    # 2 m amateur band (APRS: see _DATA_SCHEDULE)
+    (144.39e6, "aprs", -50.0, None),
     (146.52e6, "nfm", -46.0, (12.0, 6.0)),
     (146.94e6, "nfm", -38.0, (10.0, 7.0)),
     (147.105e6, "nfm", -54.0, (15.0, 5.0)),
@@ -591,7 +602,211 @@ _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ..
     # ISM 915 MHz and ADS-B
     (915.0e6, "burst", -50.0, (1.5, 0.2)),
     (1090.0e6, "modes", -26.0, None),
+    # Decodable data (see _DATA_SCHEDULE; timed by their own schedules, so
+    # no duty cycle here): ACARS, POCSAG and FLEX. Appended, so the signals
+    # above keep their index (their seed).
+    (131.55e6, "acars", -52.0, None),
+    (152.24e6, "pocsag", -48.0, None),
+    (931.9375e6, "flex", -50.0, None),
 )
+
+# The ADS-B decoder's lowest usable rate (its 0.5 us pulses need 2 MS/s).
+_ADSB_MIN_RATE = 2.0e6
+
+# --------------------------------------------------------------------------- #
+# Decodable data: APRS, POCSAG, FLEX and ACARS transmissions
+# --------------------------------------------------------------------------- #
+# Real frames for the Decoder panel: its "Tune to ..." buttons land on these
+# transmitters and decode what they send. Each repeats a schedule of
+# transmissions every period (the carrier is off in between). They are
+# built once per sample rate with the protocol encoders, as FM phase (or,
+# for ACARS, the AM envelope) at about 48 kHz, and stored sparsely, so a
+# read costs nothing extra between transmissions.
+_DATA_KINDS = ("aprs", "pocsag", "flex", "acars")
+_DATA_RAMP_S = 0.002  # carrier rise and fall
+_ACARS_DEMO_FLIGHT = ("N601SD", "SD0601")  # registration, flight ID
+
+# kind -> (period s, ((start s, what is sent), ...)).
+_DATA_SCHEDULE: Dict[str, Tuple[float, Tuple[Tuple[float, Any], ...]]] = {
+    # APRS position reports: (source, destination, info, digipeater path).
+    "aprs": (
+        24.0,
+        (
+            (
+                1.0,
+                (
+                    "N0CALL-9",
+                    "APZ001",
+                    "!4903.50N/07201.75W>Demo mobile on 144.390 MHz",
+                    ("WIDE1-1",),
+                ),
+            ),
+            (
+                9.0,
+                (
+                    "N0CALL-1",
+                    "APZ001",
+                    "!4915.20N/07145.10W#Demo digipeater",
+                    ("WIDE2-1",),
+                ),
+            ),
+            (
+                17.0,
+                (
+                    "N0CALL-7",
+                    "APZ001",
+                    "=4850.00N/07230.00W-Demo home station: SDR Module APRS",
+                    (),
+                ),
+            ),
+        ),
+    ),
+    # POCSAG 1200 pages: (address, function, text); function 0 is numeric.
+    "pocsag": (
+        20.0,
+        (
+            (3.0, ((1234567, 3, "SDR Module demo: POCSAG 1200 page on 152.240 MHz"),)),
+            (
+                13.0,
+                (
+                    (1100004, 0, "555-0123"),
+                    (1234567, 3, "Second demo page: the pager network is up"),
+                ),
+            ),
+        ),
+    ),
+    # FLEX 1600 frames: (frame number, ((capcode, text), ...)).
+    "flex": (
+        22.0,
+        (
+            (
+                5.0,
+                (10, ((1234567, "SDR Module demo: FLEX 1600 page on 931.9375 MHz"),)),
+            ),
+            (16.0, (16, ((1000123, "Second FLEX page: meeting moved to 3 PM"),))),
+        ),
+    ),
+    # ACARS downlinks: (label, message number, text).
+    "acars": (
+        26.0,
+        (
+            (7.0, ("H1", "M01A", "DEMO MESSAGE FROM SDR MODULE - ETA 1435Z")),
+            (20.0, ("5Z", "M02A", "OS DEMO /GATE B12 ARRIVED")),
+        ),
+    ),
+}
+
+
+def _data_transmission(
+    kind: str, sent: Any, loop_rate: float
+) -> Tuple[Optional[np.ndarray], np.ndarray]:
+    """``(FM phase or None, envelope)`` of one transmission at
+    ``loop_rate``; the envelope keys the carrier (and is the AM envelope,
+    with no phase, for ACARS)."""
+    from ..dsp import protocol_encoders as enc
+
+    phase: Optional[np.ndarray] = None
+    if kind == "aprs":
+        source, destination, info, path = sent
+        line = enc.hdlc_bits(enc.ax25_frame(source, destination, info, path))
+        audio = enc.afsk_audio(line, loop_rate)
+        phase = enc.fm_phase(enc.APRS_DEVIATION_HZ * audio, loop_rate)
+        envelope = np.ones(len(phase))
+    elif kind == "pocsag":
+        levels = enc.bit_levels(enc.pocsag_bits(sent), loop_rate, 1200)
+        phase = enc.fm_phase(-enc.POCSAG_DEVIATION_HZ * levels, loop_rate)
+        envelope = np.ones(len(phase))
+    elif kind == "flex":
+        frame, pages = sent
+        bits = enc.flex_frame_bits(pages, 0, frame, bit_sync_bits=96)
+        levels = enc.bit_levels(bits, loop_rate, 1600)
+        phase = enc.fm_phase(enc.FLEX_DEVIATION_HZ * levels, loop_rate)
+        envelope = np.ones(len(phase))
+    else:  # acars
+        label, number, text = sent
+        registration, flight = _ACARS_DEMO_FLIGHT
+        block = enc.acars_block(
+            registration, label, text, message_number=number, flight_id=flight
+        )
+        audio = enc.msk_audio(enc.acars_bits(block), loop_rate)
+        envelope = 1.0 + enc.ACARS_MODULATION_DEPTH * audio
+    ramp = max(1, int(_DATA_RAMP_S * loop_rate))
+    edge = 0.5 - 0.5 * np.cos(np.pi * np.arange(ramp) / ramp)
+    envelope = np.concatenate((envelope, [0.0]))  # ends keyed off
+    envelope[:ramp] *= edge
+    envelope[-ramp - 1 : -1] *= edge[::-1]
+    if phase is not None:
+        phase = np.concatenate((phase, phase[-1:]))
+        phase = phase.astype(np.float32)
+    return phase, envelope.astype(np.float32)
+
+
+def _segment(values: np.ndarray, factor: int, start: int, count: int) -> np.ndarray:
+    """``count`` device-rate samples of a loop-rate array from device sample
+    ``start``, linearly interpolated (past its end, its last value)."""
+    first, skip = divmod(start, factor)
+    num = (skip + count - 1) // factor + 2
+    seg = values[first : first + num]
+    if len(seg) < num:
+        fill = seg[-1] if len(seg) else np.float32(0.0)
+        seg = np.concatenate((seg, np.full(num - len(seg), fill, dtype=np.float32)))
+    if factor == 1:
+        return seg[:count].copy()
+    out = np.repeat(np.diff(seg), factor)[skip : skip + count]
+    out *= _ramp(factor, skip + count)[skip : skip + count]
+    out += np.repeat(seg[:-1], factor)[skip : skip + count]
+    return out
+
+
+class _DataTransmitter:
+    """A transmitter's schedule at one sample rate: each transmission's
+    start (device samples into a period of ``period`` samples), FM phase
+    (None for AM) and envelope at 1/``factor`` of the rate."""
+
+    def __init__(self, period: int, factor: int, items: List[tuple]):
+        self.period = int(period)
+        self.factor = int(factor)
+        self.items = items  # (start, length, phase, envelope)
+
+    def spans(self, pos: int, n: int) -> List[tuple]:
+        """``(a, b, phase or None, envelope)`` of the transmissions on air
+        in the ``n`` samples from stream position ``pos``."""
+        out = []
+        end = pos + n
+        base = (pos // self.period) * self.period
+        while base < end:
+            for start, length, phase, envelope in self.items:
+                a = max(base + start, pos)
+                b = min(base + start + length, end)
+                if b > a:
+                    at = a - (base + start)
+                    out.append(
+                        (
+                            a - pos,
+                            b - pos,
+                            (
+                                None
+                                if phase is None
+                                else _segment(phase, self.factor, at, b - a)
+                            ),
+                            _segment(envelope, self.factor, at, b - a),
+                        )
+                    )
+            base += self.period
+        return out
+
+
+def _data_transmitter(kind: str, rate: float) -> _DataTransmitter:
+    """The ``kind`` transmitter's schedule, built for ``rate``."""
+    period_s, schedule = _DATA_SCHEDULE[kind]
+    factor, loop_rate, _t = _loop_timebase(rate, 1.0)
+    items = []
+    for start_s, sent in schedule:
+        phase, envelope = _data_transmission(kind, sent, loop_rate)
+        start = int(round(start_s * rate))
+        items.append((start, len(envelope) * factor, phase, envelope))
+    return _DataTransmitter(int(round(period_s * rate)), factor, items)
+
 
 # Morse keying for the CW beacon ("VVV DE SDR"): 1 = key down, one dit each.
 _MORSE = {"V": "...-", "D": "-..", "E": ".", "S": "...", "R": ".-."}
@@ -916,6 +1131,8 @@ def _build_loops(kind: str, variant: Any, rate: float):
         return _Loop(keyed, factor)
     if kind == "modes":
         return _other_replies(rate)
+    if kind in _DATA_KINDS:
+        return _data_transmitter(kind, rate)
     return None
 
 
@@ -923,7 +1140,7 @@ def _loops(kind: str, seed: int, rate: float):
     """Cached modulation loop(s) of a demo signal at ``rate``."""
     if kind == "wfm" and seed == _MUSIC_SEED:
         variant: Any = "music"
-    elif kind in ("cw", "modes"):
+    elif kind in ("cw", "modes") or kind in _DATA_KINDS:
         variant = 0
     else:
         variant = seed % 3
@@ -1293,8 +1510,9 @@ class MockDevice:
 
     Generates a band of plausible signals at fixed frequencies (FM broadcast
     stations, airband AM, 2 m and 70 cm FM, NOAA weather, ISM bursts, a CW
-    beacon, Mode S and Mode A/C replies on 1090 MHz and a few weak carriers
-    everywhere else) on top of a realistic noise floor. Signals move across
+    beacon, Mode S and Mode A/C replies on 1090 MHz, decodable APRS, pager
+    and ACARS transmissions, and a few weak carriers everywhere else) on top
+    of a realistic noise floor. Signals move across
     the display as you tune, so click-to-tune and the frequency scanner
     behave as they would with real hardware. Raising the gain lifts signals and noise together and, as on a
     real receiver, too much gain clips the ADC. With automatic gain
@@ -1308,7 +1526,10 @@ class MockDevice:
     airliner's transponder sends real ADS-B frames a few times a second
     (KLM1023, ICAO 4840D6: identification, position, velocity and a squawk
     reply) that the ADS-B decoder decodes, among weaker replies from other
-    aircraft that it drops.
+    aircraft that it drops. The Decoder panel's other protocols have real
+    traffic too (see _DATA_SCHEDULE), every 8 to 13 s: APRS AFSK1200
+    position reports on 144.390 MHz, POCSAG 1200 pages on 152.240 MHz, FLEX
+    1600 pages on 931.9375 MHz and ACARS messages on 131.550 MHz.
 
     The samples form one continuous stream: each read carries on where the
     last one ended, so demodulated audio has no clicks between reads, and
@@ -1545,6 +1766,21 @@ class MockDevice:
             wave = self._carrier(offset, amp, rate, pos, n)
             wave *= envelope
             out += wave
+            return
+        if kind in _DATA_KINDS:
+            # Transmissions on their schedule: only the samples they cover.
+            for a, b, phase, envelope in _loops(kind, seed, rate).spans(pos, n):
+                if phase is None:  # AM
+                    wave = self._carrier(offset, amp, rate, pos + a, b - a)
+                    wave *= envelope
+                    out[a:b] += wave
+                    continue
+                angle = self._phase(offset, rate, pos + a, b - a)
+                angle += phase
+                envelope *= amp
+                part = out[a:b]
+                part.real += np.cos(angle) * envelope
+                part.imag += np.sin(angle) * envelope
             return
         if kind == "modes":
             # Short pulsed replies: only the samples they cover.

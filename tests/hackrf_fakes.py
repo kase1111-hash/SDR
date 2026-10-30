@@ -46,6 +46,7 @@ _ALLOWED = {
     "pyhackrf_set_vga_gain",
     "pyhackrf_set_txvga_gain",
     "pyhackrf_set_amp_enable",
+    "pyhackrf_set_antenna_enable",
     "pyhackrf_is_streaming",
     "set_rx_callback",
     "set_tx_callback",
@@ -77,6 +78,9 @@ class ThreadedFakeHackRF:
         self.bandwidth: Optional[int] = None
         self.txvga: Optional[int] = None
         self.amp: Optional[bool] = None
+        self.antenna: Optional[bool] = None
+        self.lna: Optional[int] = None
+        self.vga: Optional[int] = None
         self._rx_cb = None
         self._tx_cb = None
         self._thread: Optional[threading.Thread] = None
@@ -103,16 +107,19 @@ class ThreadedFakeHackRF:
         self.bandwidth = bw
 
     def pyhackrf_set_lna_gain(self, gain):
-        pass
+        self.lna = gain
 
     def pyhackrf_set_vga_gain(self, gain):
-        pass
+        self.vga = gain
 
     def pyhackrf_set_txvga_gain(self, gain):
         self.txvga = gain
 
     def pyhackrf_set_amp_enable(self, on):
         self.amp = bool(on)
+
+    def pyhackrf_set_antenna_enable(self, on):
+        self.antenna = bool(on)
 
     def set_rx_callback(self, fn):
         self._rx_cb = fn

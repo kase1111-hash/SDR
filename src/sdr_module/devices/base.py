@@ -24,6 +24,8 @@ class DeviceCapability(Enum):
     BIAS_TEE = auto()  # Bias tee for active antennas
     EXT_CLOCK = auto()  # External clock reference
     DIRECT_SAMPLE = auto()  # Direct sampling mode (HF)
+    AGC = auto()  # Automatic gain in the hardware (set_gain_mode(True))
+    FREQ_CORRECTION = auto()  # Crystal error correction (set_freq_correction)
 
 
 @dataclass

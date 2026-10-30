@@ -796,5 +796,75 @@ class TestScan11PlotsGoBackToo(_BookmarkScanCase):
         self.assertEqual(after, before)
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-12: a damaged time in the saved results stopped the app from starting
+# --------------------------------------------------------------------------- #
+class TestScan12DamagedSavedResults(_PanelCase):
+    def test_times_that_cant_be_shown_read_as_never(self):
+        import json
+
+        good = 1.7e9
+        entries = []
+        for key, value in (
+            ("last_seen", 1e20),
+            ("last_seen", float("nan")),
+            ("last_seen", -1e12),
+            ("first_seen", 1e20),
+            ("first_seen", float("inf")),
+        ):
+            entry = {
+                "frequency_hz": 100.1e6 + len(entries) * 1e6,
+                "first_seen": good,
+                "last_seen": good,
+            }
+            entry[key] = value
+            entries.append(entry)
+        entries.append({"frequency_hz": 110e6, "count": float("inf")})
+        self.store.values["scanner/results"] = json.dumps(entries)
+        panel = self.panel()  # (it used to raise here, and so did the window)
+        hits = panel.hits()
+        self.assertEqual(len(hits), 5)  # (a count of infinity isn't a result)
+        for hit in hits:
+            for when in (hit.first_seen, hit.last_seen):
+                self.assertTrue(when in (0.0, good), when)
+        heard = [panel._table.item(r, 4).text() for r in range(panel._table.rowCount())]
+        self.assertEqual(heard.count("—"), 3)
+        for row in range(panel._table.rowCount()):
+            self.assertTrue(panel._table.item(row, 0).toolTip())
+
+
+class TestScan12TheWindowStarts(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_the_window_is_built_with_a_damaged_result_saved(self):
+        import json
+
+        from sdr_module.gui import bookmarks_panel, main_window
+        from tests.test_gui_chrome import _FakeSettings
+
+        store = _FakeSettings()
+        store.values["scanner/results"] = json.dumps(
+            [{"frequency_hz": 100.1e6, "last_seen": 1e20, "first_seen": 1e20}]
+        )
+        patched = [
+            (main_window, "GuiSettings", main_window.GuiSettings),
+            (bookmarks_panel, "GuiSettings", bookmarks_panel.GuiSettings),
+        ]
+        main_window.GuiSettings = lambda: store
+        bookmarks_panel.GuiSettings = lambda: store
+        try:
+            win = main_window.SDRMainWindow(demo_mode=False)
+            for timer in (win._display_timer, win._status_timer, win._hotplug_timer):
+                timer.stop()
+            self.assertEqual(len(win._scanner_panel.hits()), 1)
+            win.close()
+            win.deleteLater()
+            QApplication.processEvents()
+        finally:
+            for module, name, value in patched:
+                setattr(module, name, value)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

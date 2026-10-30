@@ -106,6 +106,9 @@ _SAVED_RESULTS = 500
 _FREQ_RANGE_MHZ = (0.1, 6000.0)
 _STEP_RANGE_KHZ = (1.0, 10000.0)
 _RESUME_RANGE_S = (0.5, 60.0)
+#: Saved result times later than this (the year 3000), or before 1970, or
+#: not numbers at all (damaged settings) read as "never": no clock shows them.
+_LAST_TIMESTAMP = 32503680000.0
 
 _EMPTY_TEXTS = {
     "idle": "No results yet\nChoose a band or range and click Start Scan.",
@@ -178,11 +181,18 @@ class ScanHit:
                 last_seen=float(data.get("last_seen", 0.0)),
                 count=int(data.get("count", 1)),
             )
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             return None
         if not (math.isfinite(hit.frequency_hz) and hit.frequency_hz > 0):
             return None
+        hit.first_seen = _valid_time(hit.first_seen)
+        hit.last_seen = _valid_time(hit.last_seen)
         return hit
+
+
+def _valid_time(timestamp: float) -> float:
+    """A saved time (seconds since 1970), 0 ("never") if no clock shows it."""
+    return timestamp if 0.0 <= timestamp < _LAST_TIMESTAMP else 0.0
 
 
 def mode_text(mode: str, deviation: str = "") -> str:

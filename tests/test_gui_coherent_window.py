@@ -880,6 +880,23 @@ class TestLayoutIsRemembered(_WindowTestCase):
         self.assertIs(self.store.values["layout/spectrum_visible"], True)
 
 
+class TestConnectDialogDemoRow(unittest.TestCase):
+    """mc:MC-U02: the Connect dialog's demo row says what it is."""
+
+    def test_the_demo_row_is_use_demo_device(self):
+        if not HAS_PYQT6:
+            self.skipTest("PyQt6 not available")
+        from sdr_module.gui.device_dialog import DeviceDialog
+
+        dialog = DeviceDialog()
+        self.addCleanup(dialog.deleteLater)
+        table = dialog._device_table
+        row = table.rowCount() - 1
+        self.assertEqual(table.item(row, 1).text(), "Demo Device")
+        for col in range(table.columnCount()):
+            self.assertIn("Device > Use Demo Device", table.item(row, col).toolTip())
+
+
 class TestErrorHistorySummary(_WindowTestCase):
     """mc:MC-U19: "Saved to /a/long/path..." was cut at the dialog edge."""
 

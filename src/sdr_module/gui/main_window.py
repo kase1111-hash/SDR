@@ -379,7 +379,6 @@ _SSB_TRANSITION_HZ = 150.0
 _SSB_WIDTH_RANGE = (300.0, 10e3)
 _CW_WIDTH_RANGE = (50.0, 3e3)
 _NARROW_MODES = ("USB", "LSB", "CW")
-_SIDEBANDS = ("USB", "LSB")
 # DC blocking of the demodulated audio: below the lowest broadcast bass
 # for FM, above the hum of a fading carrier for the other modes.
 _FM_DC_CORNER_HZ = 15.0
@@ -3129,7 +3128,6 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._audio_button.clicked.connect(self._on_audio_button)
         self._volume_slider = QSlider(Qt.Orientation.Horizontal)
         self._volume_slider.setRange(0, 100)
-        self._volume_slider.setSingleStep(_VOLUME_STEP)
         self._volume_slider.setPageStep(_VOLUME_STEP)
         self._volume_slider.setValue(self._saved_volume())
         self._volume_slider.setFixedWidth(96)
@@ -4716,8 +4714,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 band.fm_deviation == broadcast
             ):
                 return False  # already listening that way
-        elif mode in _SIDEBANDS and band.mode in _SIDEBANDS:
-            return False  # SSB: the sideband is yours (FT8 is USB on 40 m too)
+        elif mode == "USB" and band.mode == "LSB":
+            # USB stays: the digital modes (FT8...) are USB on every band,
+            # 40 m too. (LSB in a USB band does switch: voice above 10 MHz
+            # and data are USB.)
+            return False
         elif mode == "CW" and self._segment_allows_cw(freq_hz):
             return False  # Morse code in a CW segment stays CW
         self._set_demod_mode(

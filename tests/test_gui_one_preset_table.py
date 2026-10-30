@@ -350,6 +350,13 @@ class TestBandPlanListening(_WindowTestCase):
         self.type_frequency("7.074")  # FT8: USB, though the band plan says LSB
         self.assertEqual(self.panel.get_demod_mode(), "USB")
 
+    def test_lsb_switches_to_usb_where_the_band_is_usb(self):
+        self.win.set_frequency(7.2e6)
+        self.win._set_demod_mode("LSB")
+        self.type_frequency("14.2")  # 20 m voice and data are USB
+        self.assertEqual(self.panel.get_demod_mode(), "USB")
+        self.assertIn("20m Ham: listening in USB", self.win._message_label.text())
+
     def test_presets_keep_their_own_mode(self):
         self.win.set_frequency(14.2e6)
         self.panel.select_preset("ISM 433 MHz")

@@ -271,6 +271,15 @@ _TIMED_FRAME = 8 * DISPLAY_BLOCK
 # While frames can't keep up, one frame this often reads (and times) a full
 # frame's worth again, to find out when the computer keeps up once more.
 _OVERLOAD_PROBE_S = 1.0
+# After the LO of a hardware receiver moves, what it took on the old
+# frequency is not drawn at the new one: the transfers it queued are
+# dropped (at most this many), and the plots skip the samples of the
+# transfer in flight (an RTL-SDR reads 256k samples at a time, 0.11 s at
+# 2.4 MS/s; a HackRF 128k) and the tuner's settling time (as the Scanner,
+# see scanner_host).
+_RETUNE_MAX_DROPPED = 256
+_RETUNE_STALE_SAMPLES = 256 * 1024
+_RETUNE_SETTLE_S = 0.12
 
 # Tuning (see SDRMainWindow.set_frequency): the tuned channel may sit
 # anywhere in this inner fraction of the span (the receiver's anti-alias
@@ -1979,6 +1988,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # samples carried over between frames belong to.
         self._frame_spectrum = FrameSpectrumAnalyzer()
         self._frame_axis: Optional[Tuple[float, float]] = None
+        # After a hardware retune the plots skip these samples and until
+        # then (they were taken on the old frequency; see _retune_lo).
+        self._plot_skip_samples = 0
+        self._plot_skip_until = 0.0
         # The part of the span both plots show (View > Zoom).
         self._plot_view = PlotView()
         self._agc_enabled = False
@@ -4381,10 +4394,36 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 ok = False
             if ok is False:
                 return False
+        moved = abs(lo - self._lo_hz) >= 0.5
         self._lo_hz = lo
         self._spectrum.set_center_freq(lo)
         self._waterfall.set_center_freq(lo)
+        if moved and isinstance(dev, SDRDevice):
+            self._drop_stale_samples(dev)
         return True
+
+    def _drop_stale_samples(self, dev: SDRDevice) -> None:
+        """A hardware receiver was retuned: what it took before holds the
+        old frequency. Drop the transfers it queued, and have the plots
+        skip the one in flight and the tuner's settling, so no waterfall
+        row or held peak shows the old frequency's signals at the new one.
+        The dropped transfers count as received (see ``_realtime``)."""
+        for _ in range(_RETUNE_MAX_DROPPED):
+            try:
+                block = dev.read_samples(DISPLAY_BLOCK, timeout=0.0)
+            except Exception as e:  # pragma: no cover - driver specific
+                logger.debug(f"Could not drop the queued samples: {e}")
+                break
+            if block is None or len(block) == 0:
+                break
+            self._note_block(len(block))
+        try:
+            streaming = bool(dev.state.is_streaming)
+        except Exception:  # pragma: no cover - defensive
+            streaming = False
+        if streaming:
+            self._plot_skip_samples = _RETUNE_STALE_SAMPLES
+            self._plot_skip_until = time.monotonic() + _RETUNE_SETTLE_S
 
     def _tune_to(self, freq_hz: float, recenter: bool = False) -> bool:
         """Tune to ``freq_hz`` by the rules of :meth:`set_frequency`.
@@ -8747,6 +8786,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _plot_frame(self, samples: np.ndarray) -> None:
         """Hand one frame to the spectrum and the waterfall (see
         :class:`~sdr_module.dsp.frame_spectrum.FrameSpectrumAnalyzer`)."""
+        if self._plot_skip_samples > 0 or time.monotonic() < self._plot_skip_until:
+            # Taken (at least partly) on the frequency before the last
+            # retune: not drawn at this one (see _drop_stale_samples).
+            self._plot_skip_samples = max(0, self._plot_skip_samples - len(samples))
+            return
         axis = (float(self._lo_hz), float(self._device_sample_rate()))
         if axis != self._frame_axis:
             # Samples kept from the last frame belong to another frequency.

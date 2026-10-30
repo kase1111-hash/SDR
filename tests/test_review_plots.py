@@ -15,7 +15,11 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from tests.test_gui_chrome import HAS_PYQT6, require_pyqt6  # noqa: E402
+from tests.test_gui_chrome import (  # noqa: E402
+    HAS_PYQT6,
+    _WindowTestCase,
+    require_pyqt6,
+)
 
 if HAS_PYQT6:
     from PyQt6.QtCore import QPointF
@@ -208,6 +212,206 @@ class TestBinsDrawnAtTheirFrequency(_PlotPair):
         lit = np.flatnonzero(row == row.max())
         middle = CENTER + (lit.mean() - 32768 // 2) * rate / 32768
         self.assertLess(abs(middle - true_f), rate / 32768)
+
+
+class _Hardware:
+    """A hardware-like SDRDevice: transfers of 256k samples (an RTL-SDR's)
+    queued by a driver, each holding one carrier as heard at the LO the
+    transfer was taken at."""
+
+    RATE = 2.4e6
+    CARRIER = 100.3e6
+    TRANSFER = 256 * 1024
+
+    @classmethod
+    def make(cls):
+        import queue
+
+        from sdr_module.devices.base import SDRDevice
+
+        rate, carrier, size = cls.RATE, cls.CARRIER, cls.TRANSFER
+
+        class Device(SDRDevice):
+            def __init__(self):
+                super().__init__()
+                self._state.sample_rate = rate
+                self._state.frequency = 100.1e6
+                self.rng = np.random.default_rng(3)
+                self.clock = 0
+
+            def transfer(self, lo=None):
+                """Queue one transfer taken at ``lo`` (the tuner's LO)."""
+                lo = self._state.frequency if lo is None else lo
+                k = self.clock + np.arange(size)
+                self.clock += size
+                noise = self.rng.standard_normal(size) + 1j * self.rng.standard_normal(
+                    size
+                )
+                x = 1e-3 * noise
+                if abs(carrier - lo) < rate / 2:
+                    x = x + 0.3 * np.exp(2j * np.pi * (carrier - lo) * k / rate)
+                try:
+                    self._sample_queue.put_nowait(x.astype(np.complex64))
+                except queue.Full:
+                    pass
+
+            def set_frequency(self, freq_hz):
+                self._state.frequency = float(freq_hz)
+                return True
+
+            def open(self, index=0):
+                return True
+
+            def close(self):
+                pass
+
+            def set_sample_rate(self, rate_hz):
+                return True
+
+            def set_bandwidth(self, bw_hz):
+                return True
+
+            def set_gain(self, gain_db):
+                return True
+
+            def set_gain_mode(self, auto):
+                return True
+
+            def start_rx(self, callback=None):
+                with self._state_lock:
+                    self._state.is_streaming = True
+                return True
+
+            def stop_rx(self):
+                with self._state_lock:
+                    self._state.is_streaming = False
+                return True
+
+        return Device()
+
+
+class TestRetuneDropsStaleSamples(_WindowTestCase):
+    """PLOT-2: after the LO is retuned on hardware, the transfers it queued
+    and the one in flight hold the old frequency: they are not drawn at
+    the new one (no ghost row, no false peak in the just-reset hold)."""
+
+    demo = True
+
+    def setUp(self):
+        super().setUp()
+        from sdr_module.gui import main_window
+
+        win = self.win
+        win._stop_acquisition()
+        self.dev = _Hardware.make()
+        win._device = self.dev
+        win._demo_mode = False
+        win._tune_to(100.1e6, recenter=True)
+        win._waterfall.set_history_seconds(0)  # Live: one row per frame
+        win._start_acquisition()
+        for timer in (win._display_timer, win._status_timer, win._hotplug_timer):
+            timer.stop()
+        # The tuner's settling time is not what is tested here.
+        patcher = mock.patch.object(main_window, "_RETUNE_SETTLE_S", 0.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.addCleanup(self._release)
+
+    def _release(self):
+        self.win._stop_acquisition()
+        self.win._device = None
+
+    def frame(self):
+        self.win._pacer.reset()
+        self.win._update_display()
+
+    def ghost(self, line, axis):
+        """Level and row median at where the old frequency's carrier would
+        be drawn on ``axis`` (the new LO)."""
+        center, rate = axis
+        n = len(line)
+        ghost_f = 101.5e6 + (_Hardware.CARRIER - 100.1e6)
+        k = int(round((ghost_f - center) / (rate / n) + n / 2))
+        return float(np.max(line[k - 2 : k + 3])), float(np.median(line))
+
+    def test_no_ghost_row_or_peak_after_a_retune(self):
+        win, dev = self.win, self.dev
+        sp, wf = win._spectrum, win._waterfall
+        sp.set_peak_hold(True)
+        for _ in range(4):
+            dev.transfer()
+            self.frame()
+        rows = len(wf._history)
+        self.assertGreater(rows, 0)
+        # Two transfers wait in the queue, one is in flight: all three
+        # were taken at 100.1 MHz.
+        dev.transfer()
+        dev.transfer()
+        self.assertTrue(win._tune_to(101.5e6, recenter=True))
+        self.assertEqual(dev.state.frequency, 101.5e6)
+        dev.transfer(lo=100.1e6)  # the one in flight arrives late
+        for _ in range(3):
+            self.frame()
+            dev.transfer()
+        self.frame()
+        new_rows = [
+            line
+            for line, axis in zip(wf._history, wf._row_axes, strict=True)
+            if axis[0] == 101.5e6
+        ]
+        self.assertGreater(len(new_rows), 0)  # the new frequency is drawn
+        for line in new_rows:
+            level, median = self.ghost(line, (101.5e6, _Hardware.RATE))
+            self.assertLess(level - median, 15.0)
+        hold, median = self.ghost(sp._peak_hold, (sp._center_freq, sp._sample_rate))
+        self.assertLess(hold - float(np.median(sp._spectrum)), 15.0)
+
+    def test_dropped_transfers_count_as_received(self):
+        win, dev = self.win, self.dev
+        dev.transfer()
+        self.frame()
+        before = sum(count for _t, count in win._rx_history)
+        for _ in range(3):
+            dev.transfer()
+        self.assertTrue(win._tune_to(101.5e6, recenter=True))
+        self.assertIsNone(dev.read_samples(1, timeout=0.0))  # dropped
+        after = sum(count for _t, count in win._rx_history)
+        self.assertEqual(after - before, 3 * _Hardware.TRANSFER)
+
+    def test_the_plots_wait_for_the_tuner_to_settle(self):
+        import time
+
+        from sdr_module.gui import main_window
+
+        win, dev = self.win, self.dev
+        dev.transfer()
+        self.frame()
+        rows = len(win._waterfall._history)
+        with (
+            mock.patch.object(main_window, "_RETUNE_STALE_SAMPLES", 0),
+            mock.patch.object(main_window, "_RETUNE_SETTLE_S", 0.15),
+        ):
+            self.assertTrue(win._tune_to(101.5e6, recenter=True))
+        dev.transfer()
+        self.frame()  # within the settling time: not drawn
+        self.assertEqual(len(win._waterfall._history), rows)
+        time.sleep(0.16)
+        dev.transfer()
+        self.frame()
+        self.assertEqual(len(win._waterfall._history), rows + 1)
+        self.assertEqual(win._waterfall._row_axes[-1][0], 101.5e6)
+
+    def test_tuning_within_the_span_keeps_the_samples(self):
+        # Only the VFO moves: the samples are still where they were taken.
+        win, dev = self.win, self.dev
+        dev.transfer()
+        self.frame()
+        dev.transfer()
+        self.assertTrue(win._tune_to(100.2e6))
+        self.assertEqual(win._lo_frequency(), 100.1e6)
+        rows = len(win._waterfall._history)
+        self.frame()
+        self.assertEqual(len(win._waterfall._history), rows + 1)
 
 
 if __name__ == "__main__":

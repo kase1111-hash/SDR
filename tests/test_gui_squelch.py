@@ -218,6 +218,28 @@ class TestSquelchInTheWindow(_SquelchCase):
         self.assertFalse(any(len(a) for a in frames.audio[:30]))
         self.assertTrue(all(len(a) for a in frames.audio[31:60]))
 
+    def test_a_strong_signal_closes_after_the_same_hang(self):
+        # The level averager used to keep a quarter of the previous frame's
+        # power in each frame, so a strong signal's power outweighed the
+        # noise for frames after it ended: the squelch closed 0.57 s after a
+        # -20 dBFS burst (0.6 s after a -10 dBFS one) instead of the 0.3 s
+        # hang, playing that much more noise (e.g. tuning away from a
+        # station).
+        for burst_db in (-60.0, -20.0, -10.0):
+            self.listen()
+            self.panel.set_squelch_db(-70)
+            iq = noise(90 * FRAME, -80.0, seed=6)
+            iq[30 * FRAME : 60 * FRAME] += carrier(30 * FRAME, 1000.0, burst_db)
+            frames = Frames(self, iq).run()
+            self.assertEqual(frames.transitions, 2, burst_db)
+            # The squelch decides at the end of each frame: closing after
+            # frame ``closed`` is that many frames after the burst ended.
+            closed = 60 + frames.states[60:].index(False)
+            delay = (closed + 1 - 60) * FRAME_S
+            self.assertGreaterEqual(delay, 0.3 - 1e-6, burst_db)
+            # (Plus at most the frame holding the channel filter's tail.)
+            self.assertLessEqual(delay, 0.3 + 1.5 * FRAME_S, burst_db)
+
     def test_keyed_cw_is_not_chopped(self):
         # RX-04: the end of each dit was cut off because the frame's level
         # came from its last 0.85 ms.

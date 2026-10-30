@@ -167,10 +167,15 @@ def _robust_noise_db(power_db: np.ndarray) -> float:
 class LevelAverager:
     """Averages block levels (dBFS) over a short time, in power.
 
-    A block of 33 ms is almost all its own level; blocks of a millisecond
-    (the display loop catching up, or a narrow CW filter whose noise is
-    correlated over tens of milliseconds) are averaged over about
+    A block weighs its share of ``time_constant_s``: one at least that long
+    (a 33 ms display frame) is its own level, while blocks of a millisecond
+    (the display loop catching up) are averaged over about
     ``time_constant_s``, so a single noise peak can't open the squelch.
+
+    (An exponential weight, ``1 - exp(-seconds / time constant)``, kept a
+    quarter of the previous frame's power in each 33 ms frame: after a
+    strong signal ended, its power outweighed the noise for several frames
+    and the squelch closed up to 0.3 s after its hang time.)
     """
 
     def __init__(self, time_constant_s: float = 0.025):
@@ -185,8 +190,8 @@ class LevelAverager:
         if self._power is None:
             self._power = power
         else:
-            alpha = 1.0 - math.exp(-max(0.0, seconds) / max(self.time_constant_s, 1e-6))
-            self._power += alpha * (power - self._power)
+            weight = max(0.0, seconds) / max(self.time_constant_s, 1e-6)
+            self._power += min(1.0, weight) * (power - self._power)
         return max(FLOOR_DB, 10.0 * math.log10(max(self._power, 1e-30)))
 
 

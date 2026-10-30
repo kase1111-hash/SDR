@@ -37,6 +37,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import math
 import re
 from dataclasses import dataclass, field, fields
 from decimal import Decimal, InvalidOperation
@@ -164,6 +165,12 @@ _KEEP = "keep"
 _IQ = "I/Q"
 _TAG_RE = re.compile(r"\s*\[sdr\s+([^\]]*)\]\s*$")
 _TAG_FIELDS = (("mode", "demod"), ("dev", "fm_deviation"), ("bw", "bandwidth"))
+#: A channel's tones (CTCSS tones, DCS codes and how they cross): its
+#: bookmark keeps them whenever a Tone mode is set, even at CHIRP's
+#: defaults (a TSQL tone of 88.5 Hz is still a tone squelch).
+_TONE_FIELDS = frozenset(
+    ("rtone", "ctone", "dtcs", "dtcs_polarity", "rx_dtcs", "cross_mode")
+)
 
 
 def _tag_value(value: Any) -> str:
@@ -177,20 +184,23 @@ def listening_tag(bookmark: Mapping[str, Any]) -> str:
     A bookmark with a ``demod`` (a Mode list name) gets its mode, FM
     deviation and width; one saved by this application without a mode
     gets ``mode=keep``; a CHIRP channel that only has CHIRP's own Mode
-    gets no mode in the tag. The group goes in the tag too.
+    gets no mode in the tag (just its filter width, if it has one). The
+    group goes in the tag too.
     """
     parts: List[str] = []
     demod = str(bookmark.get("demod") or "")
+    width = _tag_value(bookmark.get("bandwidth"))
     if demod in APP_DEMODS:
         parts.append(f"mode={_IQ if demod == DEFAULT_DEMOD else demod}")
         deviation = _tag_value(bookmark.get("fm_deviation"))
         if demod == "FM" and deviation:
             parts.append(f"dev={deviation}")
-        width = _tag_value(bookmark.get("bandwidth"))
         if width:
             parts.append(f"bw={width}")
     elif not is_chirp_channel(bookmark):
         parts.append(f"mode={_KEEP}")
+    elif width:
+        parts.append(f"bw={width}")  # listened to in its CHIRP Mode
     group = _tag_value(bookmark.get("group"))
     if group:
         parts.append(f"group={group}")
@@ -280,12 +290,12 @@ def parse_freq(value: Union[str, float, int, None]) -> float:
         Frequency in Hz.
 
     Raises:
-        ValueError: If the text is not a number.
+        ValueError: If the text is not a number (NaN and infinity aren't).
     """
     if value is None:
         return 0.0
     if isinstance(value, (int, float)):
-        return float(Decimal(str(value)) * 1_000_000)
+        return _finite_hz(float(Decimal(str(value)) * 1_000_000), value)
 
     text = str(value).strip().replace(",", "")
     if not text:
@@ -302,9 +312,17 @@ def parse_freq(value: Union[str, float, int, None]) -> float:
     try:
         # Decimal keeps 146.520000 MHz exactly 146520000 Hz instead of
         # 146520000.00000003.
-        return float(Decimal(text) * Decimal(multiplier))
+        hz = float(Decimal(text) * Decimal(multiplier))
     except (InvalidOperation, ArithmeticError) as exc:
         raise ValueError(f"invalid frequency: {value!r}") from exc
+    return _finite_hz(hz, value)
+
+
+def _finite_hz(hz: float, value: Any) -> float:
+    """``hz``, unless it is NaN or infinite ("nan", "inf" in a file)."""
+    if not math.isfinite(hz):
+        raise ValueError(f"invalid frequency: {value!r}")
+    return hz
 
 
 def format_freq(freq_hz: float) -> str:
@@ -325,9 +343,10 @@ def demod_to_chirp_mode(demod: str) -> str:
 def _to_float(value: Any, default: float) -> float:
     try:
         text = str(value).strip()
-        return float(text) if text else default
+        number = float(text) if text else default
     except (TypeError, ValueError):
         return default
+    return number if math.isfinite(number) else default  # ("nan", "inf")
 
 
 def _to_int(value: Any, default: int) -> int:
@@ -335,7 +354,7 @@ def _to_int(value: Any, default: int) -> int:
         text = str(value).strip()
         # int("023") is fine; int("023.0") is not, so go through float.
         return int(float(text)) if text else default
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # (int(inf) overflows)
         return default
 
 
@@ -401,6 +420,11 @@ class Channel:
     rpt1call: str = ""
     rpt2call: str = ""
     dv_code: str = ""
+
+    #: Whether ``mode`` is the channel's own (not a field: a row without a
+    #: Mode, from a file that has no such column, gets CHIRP's FM, and as a
+    #: bookmark it keeps the receiver's mode instead).
+    mode_given = True
 
     def __post_init__(self) -> None:
         self.name = str(self.name).strip()
@@ -495,7 +519,7 @@ class Channel:
         get = {str(k).strip().lower(): v for k, v in row.items() if k is not None}.get
 
         location_text = str(get("location", "") or "").strip()
-        return cls(
+        channel = cls(
             name=str(get("name", "") or "").strip(),
             frequency_hz=parse_freq(get("frequency", "")),
             location=_to_int(location_text, 0) if location_text else None,
@@ -518,6 +542,8 @@ class Channel:
             rpt2call=str(get("rpt2call", "") or "").strip(),
             dv_code=str(get("dvcode", "") or "").strip(),
         )
+        channel.mode_given = bool(str(get("mode", "") or "").strip())
+        return channel
 
     # ---- Bookmark bridge -------------------------------------------------
     def to_bookmark(self) -> Dict[str, Any]:
@@ -537,11 +563,16 @@ class Channel:
         }
         comment, listen = split_listening_tag(self.comment)
         defaults = Channel()
+        # The fields left out are CHIRP's defaults, except a Tone mode's tones
+        # and a Mode the channel gave (FM too: it is listened to in FM then).
+        kept = set(_TONE_FIELDS) if self.tone_mode else set()
+        if self.mode_given:
+            kept.add("mode")
         for f in fields(self):
             if f.name in ("name", "frequency_hz"):
                 continue
             value = comment if f.name == "comment" else getattr(self, f.name)
-            if value != getattr(defaults, f.name):
+            if f.name in kept or value != getattr(defaults, f.name):
                 data[f.name] = value
         demod = listen.get("demod", "")
         # The tag holds while CHIRP's Mode is still what was exported with
@@ -564,6 +595,9 @@ class Channel:
                 data["fm_deviation"] = listen["fm_deviation"]
             if listen.get("bandwidth"):
                 data["bandwidth"] = listen["bandwidth"]
+        elif "demod" not in listen and listen.get("bandwidth"):
+            # Listened to in its CHIRP Mode, with its own filter width.
+            data["bandwidth"] = listen["bandwidth"]
         if listen.get("group"):
             data["group"] = listen["group"]
         return data

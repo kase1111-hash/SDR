@@ -41,6 +41,11 @@ WIDE_SIGNAL_HZ = 60e3  # occupied width (20 dB down) of a wide signal
 #: Bins either side of the LO left out of the search: most receivers show a
 #: DC spike there, which would otherwise be a "signal" on every page.
 DC_GUARD_BINS = 2
+#: How much wider than it is a signal measures (20 dB down, through the Hann
+#: window): about 3 bins; a pure tone measures 3 or 4 bins. A minimum width
+#: is compared with the width less this, so a carrier isn't a station when
+#: the bins are wide (9.8 kHz at 20 MS/s).
+_WINDOW_SPREAD_BINS = 3
 
 
 def power_spectrum_dbfs(samples: np.ndarray, max_segments: int = 4) -> np.ndarray:
@@ -298,7 +303,8 @@ def measure_page(
         threshold_db: Peak level a signal must exceed; None for Auto (the
             noise floor plus ``margin_db``).
         min_width_hz: Signals narrower than this are ignored (a broadcast
-            band scan lists stations, not stray carriers).
+            band scan lists stations, not stray carriers), the window's
+            spread allowed for.
 
     Returns:
         ``(readings, noise_db, threshold_db)``, the readings in frequency
@@ -378,7 +384,7 @@ def measure_page(
         floor = max(peak - 20.0, noise + 6.0)
         wlo, whi = _contiguous(searchable & (power >= floor), k)
         width = (whi - wlo + 1) * bin_hz
-        if width < min_width_hz:
+        if min_width_hz > 0 and width - _WINDOW_SPREAD_BINS * bin_hz < min_width_hz:
             continue
         freq = report_frequency(float(lo_hz) + centre, width, step_hz)
         readings.append(

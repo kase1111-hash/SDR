@@ -81,6 +81,8 @@ DWELL_S = 0.25
 TONE_WAIT_S = 0.9
 #: Why a bookmark scan ended: Skip passed every bookmark by.
 ALL_SKIPPED = "all skipped"
+#: Why a sweep couldn't start, or stopped: no step of the range tuned.
+NO_STEP_TUNED = "The receiver could not tune to any step of this range."
 
 
 class ScanHost:
@@ -119,6 +121,10 @@ class ScanHost:
 
     def scan_set_muted(self, muted: bool) -> None:
         """Mute the speaker while the scan moves between channels."""
+
+    def scan_settled(self) -> None:
+        """The blocks dropped after a retune are over (they may have held
+        the last channel): what is heard is decided afresh from here."""
 
 
 @dataclass
@@ -209,7 +215,6 @@ class ScanEngine:
         self._dwell_s = 0.0
         self._quiet_s = 0.0
         self._opened = False
-        self._tone_hz = 0.0
         self._locked_out: List[Tuple[float, float]] = []  # (freq, width)
         self._skipped_visits: set = set()  # bookmark scan: indices skipped
         self._bookmarks_left = 0  # visits left in this pass
@@ -365,6 +370,10 @@ class ScanEngine:
             self._averager.reset()
             self._measured = 0
         else:
+            # (A host written before this hook may not have it.)
+            settled = getattr(self.host, "scan_settled", None)
+            if settled is not None:
+                settled()
             self._begin_dwell()
 
     def _measure(self, samples: np.ndarray) -> None:
@@ -384,7 +393,7 @@ class ScanEngine:
         s = self.settings
         readings, noise, threshold = measure_page(
             power,
-            page.lo_hz,
+            self._receiver_lo(page),
             self.rate,
             page.channels,
             s.step_hz,
@@ -425,6 +434,16 @@ class ScanEngine:
         ]
         self._next_candidate()
 
+    def _receiver_lo(self, page: SweepPage) -> float:
+        """The LO a page's blocks were received around: the host's (should
+        the receiver not be exactly where the page was planned, the results
+        still say where the signals are), else the planned one."""
+        try:
+            lo_hz = float(self.host.scan_lo_hz())
+        except (NotImplementedError, TypeError, ValueError):
+            return page.lo_hz
+        return lo_hz if math.isfinite(lo_hz) else page.lo_hz
+
     def _listen(self, samples: np.ndarray, seconds: float) -> None:
         current = self.current
         if current is None:
@@ -437,8 +456,11 @@ class ScanEngine:
             if heard:
                 self._begin_listening()
                 return
-            if self._tone_hz and self.host.scan_squelch_open():
-                self._opened = True  # a signal: give its tone time to show
+            if self.host.scan_squelch_open():
+                # A signal the tone squelch holds back (the bookmark's tone,
+                # or the receiver's own for a channel kept in its mode):
+                # give its tone time to show.
+                self._opened = True
             self._dwell_s += seconds
             limit = TONE_WAIT_S if self._opened else DWELL_S
             if self._dwell_s >= limit and not self.held:
@@ -503,7 +525,8 @@ class ScanEngine:
             self.page_index += 1
             if self.page_index >= len(self.pages):
                 if self.settings.mode == "once":
-                    self._finish("complete")
+                    # (Still starting: every step was refused.)
+                    self._finish(NO_STEP_TUNED if self._starting else "complete")
                     return
                 self.pass_number += 1
                 self.page_index = 0
@@ -518,13 +541,12 @@ class ScanEngine:
             # Out of what the receiver tunes (the range is planned inside
             # it, so this is rare): on to the next one.
             self.steps_refused += 1
-        self._finish("The receiver could not tune to any step of this range.")
+        self._finish(NO_STEP_TUNED)
 
     def _next_candidate(self) -> None:
         while self._candidates:
             item = self._candidates.pop(0)
             self.current = item
-            self._tone_hz = 0.0
             if self.host.scan_tune_channel(item.frequency_hz, item.listening, 0.0):
                 self._settle_after_tune(DWELL, self.host.scan_lo_moved())
                 if self.state == SETTLE and not self._skip_frames:
@@ -561,7 +583,6 @@ class ScanEngine:
                 listening,
                 label=str(b.get("label") or ""),
             )
-            self._tone_hz = tone
             self.host.scan_set_muted(True)
             if self.host.scan_tune_channel(freq, listening, tone):
                 self._settle_after_tune(DWELL, self.host.scan_lo_moved())

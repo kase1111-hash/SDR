@@ -27,6 +27,7 @@ import json
 import logging
 import math
 import time
+from bisect import bisect_left, bisect_right, insort
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -106,6 +107,9 @@ _SAVED_RESULTS = 500
 _FREQ_RANGE_MHZ = (0.1, 6000.0)
 _STEP_RANGE_KHZ = (1.0, 10000.0)
 _RESUME_RANGE_S = (0.5, 60.0)
+#: Saved result times later than this (the year 3000), before 1970 or NaN
+#: (damaged settings) read as "never": no clock shows them.
+_LAST_TIMESTAMP = 32503680000.0
 
 _EMPTY_TEXTS = {
     "idle": "No results yet\nChoose a band or range and click Start Scan.",
@@ -178,11 +182,18 @@ class ScanHit:
                 last_seen=float(data.get("last_seen", 0.0)),
                 count=int(data.get("count", 1)),
             )
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError, OverflowError):
             return None
         if not (math.isfinite(hit.frequency_hz) and hit.frequency_hz > 0):
             return None
+        hit.first_seen = _valid_time(hit.first_seen)
+        hit.last_seen = _valid_time(hit.last_seen)
         return hit
+
+
+def _valid_time(timestamp: float) -> float:
+    """A saved time (seconds since 1970), 0 ("never") if no clock shows it."""
+    return timestamp if 0.0 <= timestamp < _LAST_TIMESTAMP else 0.0
 
 
 def mode_text(mode: str, deviation: str = "") -> str:
@@ -212,8 +223,8 @@ class ScannerHost(ScanHost):
 
     def scan_blocker(self) -> Tuple[str, str]:
         """``("", "")`` when a scan can start, else ``(kind, reason)``:
-        kind "device" (none connected), "recording" or "locked" (a
-        recording plays back)."""
+        kind "device" (none connected), "recording", "locked" (a
+        recording plays back) or "transmitting"."""
         return "", ""
 
     def scan_receiving(self) -> bool:
@@ -286,6 +297,13 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._engine = ScanEngine(self._host, self._guess)
         self._connect_engine()
         self._hits: List[ScanHit] = []
+        # The results by frequency, (frequency, index in _hits), the widest
+        # one's width and each one's Frequency cell: a reading finds the
+        # result it repeats, and its row, without visiting them all (in the
+        # display loop, with thousands listed). See _rebuild_table.
+        self._by_freq: List[Tuple[float, int]] = []
+        self._widest_hz = 0.0
+        self._cells: Dict[int, Any] = {}
         self._empty_reason = "idle"
         self._restoring = False
         self._blocker: Tuple[str, str] = ("", "")
@@ -1003,6 +1021,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             True,
         ),
         "locked": ("Scan stopped: a recording is playing.", True),
+        # Answering the channel the scan stopped on: the receiver comes back
+        # on it when the transmission ends.
+        "transmitting": ("Scan stopped: transmitting.", True),
     }
 
     def refresh(self) -> None:
@@ -1315,23 +1336,25 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             return
         self._progress.setValue(int(engine.progress() * 1000))
         current = engine.current
+        held = " (held)" if engine.held else ""
         if engine.state in (DWELL, LISTEN) and current is not None:
             name = f"{current.label} · " if current.label else ""
             listening = mode_text(current.listening[0], current.listening[1])
             freq = _format_freq(current.frequency_hz)
             if engine.state == LISTEN:
-                held = " (held)" if engine.held else ""
                 self._listen_label.setText(
                     f"Listening: {name}{freq}"
                     + (f" · {listening}" if listening else "")
                     + held
                 )
             else:
-                self._listen_label.setText(f"Checking {name}{freq}")
+                self._listen_label.setText(f"Checking {name}{freq}{held}")
             self._listen_label.setToolTip(self._listen_label.text())
-        if engine.state != LISTEN and self._hold_btn.isChecked():
+        # The button says whether the scan is held: Hold also holds it on a
+        # channel being checked, and going on releases it.
+        if self._hold_btn.isChecked() != engine.held:
             self._hold_btn.blockSignals(True)
-            self._hold_btn.setChecked(False)
+            self._hold_btn.setChecked(engine.held)
             self._hold_btn.blockSignals(False)
         self._set_status(self._scanning_text(), None)
         self._update_controls()
@@ -1352,54 +1375,91 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         return f"{pass_text}{where}{count} {noun} {found}"
 
     def _on_found(self, found: Found) -> None:
+        # (In the display loop: the engine's on_state, after the page's
+        # readings, says how many were found and updates the buttons.)
         now = time.time()
+        index = self._repeated_hit(found)
+        if index >= 0:
+            hit = self._hits[index]
+            hit.count += 1
+            hit.last_seen = now
+            if found.peak_db > hit.peak_db:
+                self._index_frequency(index, found.frequency_hz)
+                hit.frequency_hz = found.frequency_hz
+                hit.peak_db = found.peak_db
+                hit.snr_db = found.snr_db
+                hit.width_hz = found.width_hz
+                self._note_width(hit.width_hz)
+            self._render_hit(index)
+            return
+        peak = found.peak_db if math.isfinite(found.peak_db) else -120.0
+        snr = found.snr_db if math.isfinite(found.snr_db) else 0.0
+        demod, deviation, width = found.listening
+        self._hits.append(
+            ScanHit(
+                found.frequency_hz,
+                peak,
+                snr,
+                found.width_hz,
+                demod,
+                deviation,
+                width,
+                found.label,
+                now,
+                now,
+                1,
+            )
+        )
+        index = len(self._hits) - 1
+        insort(self._by_freq, (found.frequency_hz, index))
+        self._note_width(found.width_hz)
+        self._render_hit(index)
+        if self._table.rowCount() == 1:
+            self._update_controls()  # the first: the list's buttons and empty state
+
+    def _repeated_hit(self, found: Found) -> int:
+        """The result ``found`` repeats (the first listed, if several), or
+        -1: in a sweep the same signal (see ``same_signal``); in a bookmark
+        scan the same bookmark (two on one frequency, a repeater's users
+        with different tones, are two results)."""
         bookmarks = self._engine.mode == "bookmarks"
-        step = self._step.value() * 1e3 if not bookmarks else 1.0
-        for index, hit in enumerate(self._hits):
+        freq = found.frequency_hz
+        if bookmarks:
+            step, reach = 1.0, 10.0
+        else:
+            step = self._step.value() * 1e3
+            reach = max(0.75 * step, 0.5 * self._widest_hz)
+        # Only the results within reach of it can be the same.
+        first = bisect_left(self._by_freq, (freq - reach,))
+        last = bisect_right(self._by_freq, (freq + reach, math.inf))
+        best = -1
+        for _freq, index in self._by_freq[first:last]:
+            if best >= 0 and index > best:
+                continue
+            hit = self._hits[index]
             if bookmarks:
-                # One row per bookmark: two on one frequency (a repeater's
-                # users with different tones) are two results.
                 same = (
-                    abs(hit.frequency_hz - found.frequency_hz) < 10.0
+                    abs(hit.frequency_hz - freq) < 10.0
                     and hit.label == found.label
                     and hit.listening == tuple(found.listening)
                 )
             else:
-                same = same_signal(
-                    hit.frequency_hz, hit.width_hz, found.frequency_hz, step
-                )
+                same = same_signal(hit.frequency_hz, hit.width_hz, freq, step)
             if same:
-                hit.count += 1
-                hit.last_seen = now
-                if found.peak_db > hit.peak_db:
-                    hit.frequency_hz = found.frequency_hz
-                    hit.peak_db = found.peak_db
-                    hit.snr_db = found.snr_db
-                    hit.width_hz = found.width_hz
-                self._render_hit(index)
-                break
-        else:
-            peak = found.peak_db if math.isfinite(found.peak_db) else -120.0
-            snr = found.snr_db if math.isfinite(found.snr_db) else 0.0
-            demod, deviation, width = found.listening
-            self._hits.append(
-                ScanHit(
-                    found.frequency_hz,
-                    peak,
-                    snr,
-                    found.width_hz,
-                    demod,
-                    deviation,
-                    width,
-                    found.label,
-                    now,
-                    now,
-                    1,
-                )
-            )
-            self._render_hit(len(self._hits) - 1)
-        self._set_status(self._scanning_text(), None)
-        self._update_controls()
+                best = index
+        return best
+
+    def _index_frequency(self, index: int, freq_hz: float) -> None:
+        """Result ``index`` moves to ``freq_hz`` (a stronger reading)."""
+        old = self._hits[index].frequency_hz
+        at = bisect_left(self._by_freq, (old, index))
+        if at < len(self._by_freq) and self._by_freq[at] == (old, index):
+            del self._by_freq[at]
+        insort(self._by_freq, (freq_hz, index))
+
+    def _note_width(self, width_hz: float) -> None:
+        if math.isfinite(width_hz) and width_hz > self._widest_hz:
+            self._widest_hz = float(width_hz)
 
     def _on_finished(self, reason: str) -> None:
         engine = self._engine
@@ -1474,20 +1534,23 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         return list(self._hits)
 
     def _rebuild_table(self) -> None:
+        """The table (and the index of the results, see ``_by_freq``) anew
+        from ``_hits``."""
         sorting = self._table.isSortingEnabled()
         self._table.setSortingEnabled(False)
+        self._cells = {}  # (the rows' cells go)
         self._table.setRowCount(0)
-        for index in range(len(self._hits)):
+        self._by_freq = sorted((h.frequency_hz, i) for i, h in enumerate(self._hits))
+        self._widest_hz = 0.0
+        for index, hit in enumerate(self._hits):
+            self._note_width(hit.width_hz)
             self._render_hit(index)
         self._table.setSortingEnabled(sorting)
         self._update_controls()
 
     def _row_of(self, index: int) -> int:
-        for row in range(self._table.rowCount()):
-            item = self._table.item(row, COL_FREQ)
-            if item is not None and item.data(_HIT_ROLE) == index:
-                return row
-        return -1
+        cell = self._cells.get(index)
+        return self._table.row(cell) if cell is not None else -1
 
     def _render_hit(self, index: int) -> None:
         hit = self._hits[index]
@@ -1511,6 +1574,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         for col, item in enumerate((freq, level, snr, mode, heard)):
             item.setToolTip(tip)
             self._table.setItem(row, col, item)
+        self._cells[index] = freq
         self._table.setSortingEnabled(sorting)
 
     @staticmethod

@@ -71,13 +71,29 @@ class WindowScannerHost(ScannerHost):
         # Scan steps don't join Tune Back / Recent Frequencies (where the
         # scan ends does, see scan_end).
         win._history_timer.stop()
-        # A new channel: its squelch decides afresh (the last channel's
-        # hang time must not count as this one's signal).
-        win._squelch.reset()
-        win._level_average.reset()
+        self._fresh_channel()
         self.expected_hz = win._current_frequency()
         if self._lo_moved:
             self._drop_stale_transfers()
+
+    def _fresh_channel(self) -> None:
+        """A new channel: its squelch decides afresh. Neither the last
+        channel's hang time nor its samples still in the channel filter
+        count as this one's signal (a station just left, by Skip or for its
+        tone, opened the squelch on a quiet channel after it)."""
+        win = self._win
+        win._squelch.reset()
+        win._level_average.reset()
+        chain = getattr(win, "_rx_chain", None)
+        if chain is not None:
+            chain.reset_channel()
+
+    def scan_settled(self) -> None:
+        # The blocks dropped while settling may hold the last channel (a
+        # hardware receiver's transfer in flight): what they opened, or
+        # the tone they showed, doesn't count.
+        self._fresh_channel()
+        self._win._tone_squelch.reset()
 
     def _drop_stale_transfers(self) -> None:
         """After a retune, the transfers a hardware receiver has queued hold
@@ -106,14 +122,16 @@ class WindowScannerHost(ScannerHost):
         win._scan_checks_tone = False
         # The step is measured around center_hz: with Radio > Keep Tuned
         # Frequency Centered, tuning the VFO would retune the LO onto it,
-        # so FREQ shows the LO instead.
+        # and so would a channel too wide to fit beside the LO (a 2 MHz
+        # I/Q filter), so FREQ shows the LO instead.
         keep_centered = bool(getattr(win, "_keep_centered", lambda: False)())
 
         def tune() -> bool:
             if not win._tune_to(center_hz, recenter=True):
                 return False
             if vfo_hz is not None and abs(vfo_hz - center_hz) >= 0.5:
-                if not keep_centered:
+                offset = vfo_hz - win._lo_frequency()
+                if not keep_centered and win._channel_fits(offset):
                     win._tune_to(vfo_hz)  # inside the span: only the VFO moves
             return True
 
@@ -128,6 +146,12 @@ class WindowScannerHost(ScannerHost):
     ) -> bool:
         win = self._win
         before = win._lo_frequency()
+        if not listening[0] and self._saved is not None:
+            # "The receiver's mode" (an old bookmark, a signal of a range
+            # without a band): the mode, filter and tone squelch the scan
+            # began with, not whatever the channel visited last left.
+            _freq, _lo, mode, deviation, width, tone_hz = self._saved
+            listening = (mode, deviation, width)
         # A bookmark with a tone squelch is judged by its tone, so the
         # window checks it even with the speaker off (see _route_audio).
         win._scan_checks_tone = bool(tone_hz and tone_hz > 0)
@@ -180,7 +204,9 @@ class WindowScannerHost(ScannerHost):
         win = self._win
         if self._squelch_used():
             return bool(win._squelch.is_open) and not win._tone_blocked
-        return self._level_above_threshold()
+        # (The tone squelch still decides with the squelch off: _route_audio
+        # checks the tone of a channel scanned with one.)
+        return self._level_above_threshold() and not win._tone_blocked
 
     def scan_squelch_open(self) -> bool:
         if self._squelch_used():
@@ -207,6 +233,11 @@ class WindowScannerHost(ScannerHost):
             return "recording", (
                 "Stop recording to scan: a scan retunes the receiver, so the "
                 "recording would mix frequencies."
+            )
+        if win._tx_busy():
+            return "transmitting", (
+                "Scanning needs the receiver, which is off while transmitting: "
+                "scan when the transmission ends."
             )
         return "", ""
 
@@ -257,26 +288,43 @@ class WindowScannerHost(ScannerHost):
         win._scan_checks_tone = False
         saved, self._saved = self._saved, None
         self.expected_hz = None
-        if not stay and saved is not None:
-            freq, lo, mode, deviation, width, tone = saved
-
-            def back() -> bool:
-                # The plots where they were too: the LO, then the VFO in it.
-                if abs(lo - freq) >= 0.5 and win._tune_to(lo, recenter=True):
-                    return bool(win._tune_to(freq))
-                return bool(win._tune_to(freq, recenter=True))
-
-            self._quietly(back)
-            if mode:
-                self._quietly(
-                    lambda: (
-                        win._set_demod_mode(mode, deviation or None, width or None),
-                        True,
-                    )[1]
-                )
-                if mode == "FM":
-                    win._control_panel.set_tone_squelch_hz(tone)
+        # (A transmission stays where the scan is: it can't be retuned.)
+        if not stay and saved is not None and not win._tx_busy():
+            self._go_back(*saved)
         win._note_tuned()
+
+    def _go_back(
+        self, freq: float, lo: float, mode: str, deviation: str, width: str, tone: float
+    ) -> None:
+        """To where the scan began, in the mode, filter and tone squelch it
+        began with. A receiver that can't go back (it refused) stays on the
+        scan's channel, in that channel's mode."""
+        win = self._win
+        off_centre = abs(lo - freq) >= 0.5
+
+        def centre() -> bool:
+            # The plots where they were too: the LO first (with the VFO on
+            # it), so the scan's filter, maybe too wide to fit beside it,
+            # doesn't move the LO onto the VFO.
+            if off_centre and win._tune_to(lo, recenter=True):
+                return True
+            return bool(win._tune_to(freq, recenter=True))
+
+        if not self._quietly(centre):
+            return
+        if mode:
+            self._quietly(
+                lambda: (
+                    win._set_demod_mode(mode, deviation or None, width or None),
+                    True,
+                )[1]
+            )
+        # (Whatever the mode: the scan sets it for the FM channels it visits,
+        # and it is kept, and saved, for when FM is next used.)
+        win._control_panel.set_tone_squelch_hz(tone)
+        if off_centre and abs(win._lo_frequency() - lo) < 0.5:
+            # Then the VFO, in the filter it was tuned with: only it moves.
+            self._quietly(lambda: win._tune_to(freq))
 
     # ---- results ---------------------------------------------------------- #
     def scan_listen(self, hit: ScanHit) -> bool:

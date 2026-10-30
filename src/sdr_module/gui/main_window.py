@@ -941,6 +941,12 @@ class _ReceiverChain:
         the filters' state carry on, so the audio doesn't click."""
         self._nco.frequency_hz = offset_hz
 
+    def reset_channel(self) -> None:
+        """Forget the channel filter's history: the next block measures only
+        its own samples (the Scanner's next channel, not the one it left)."""
+        for stage in self._channel:
+            stage.reset()
+
     def _design_demodulator(self) -> None:
         """Design the filters after detection (once per chain)."""
         rate = self.channel_rate
@@ -6694,6 +6700,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 tones.reset()
             snr = None if noise_db is None else level_db - noise_db
             self._check_fm_clipping(chain, seconds, snr)
+        else:
+            # Only FM has a tone squelch: nothing here is held back by one
+            # (Record Audio demodulates every block, so the FM channel tuned
+            # before mustn't leave its verdict for the Scanner and the meter).
+            self._tone_blocked = False
         self._show_detected_tone()
         join = self._audio_join
         nr = self._audio_options.noise_reduction
@@ -6711,7 +6722,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 last[0] is chain and last[1] == deviation and last[2] is nr
             )
             take.stream_key = (chain, deviation, nr)
-            self._record_audio_block(audio, gate.is_open and tone_ok, seconds, joined)
+            # (Silence, as heard, while the Scanner moves between channels.)
+            heard = gate.is_open and tone_ok and not self._scan_muted
+            self._record_audio_block(audio, heard, seconds, joined)
         if speaker:
             if join.playing and new_stream:
                 out = join.join(audio)  # crossfade from the last sample

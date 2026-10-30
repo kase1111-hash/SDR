@@ -101,7 +101,9 @@ class DualSDRConfig:
         )
     )
     # Operation mode
-    mode: str = "dual_rx"  # "dual_rx", "full_duplex", "tx_monitor", "wideband_scan"
+    # "dual_rx", "full_duplex" or "tx_monitor"; "wideband_scan" and "relay"
+    # are accepted in files, but DualSDRController doesn't implement them.
+    mode: str = "dual_rx"
     # Synchronization
     sync_enabled: bool = False
     sync_method: str = "software"  # "software", "external_clock", "gps"
@@ -397,7 +399,9 @@ def create_preset_adsb() -> SDRConfig:
 
 
 def create_preset_wideband_scan() -> SDRConfig:
-    """Preset for wideband spectrum scanning."""
+    """Preset for wideband spectrum scanning (its DSP settings; the
+    controller doesn't implement a wideband scan mode, see
+    ``core.dual_sdr.NOT_IMPLEMENTED_MODES``)."""
     config = SDRConfig()
     config.dual_sdr.mode = "wideband_scan"
     config.dsp.fft_size = 8192

@@ -5,7 +5,22 @@ Provides coordinated control of both devices for:
 - Dual RX monitoring
 - Full-duplex operation (RTL-SDR RX + HackRF TX)
 - TX monitoring
-- Wideband scanning
+
+:class:`OperationMode` also names wideband scanning and relaying, which are
+not implemented: :meth:`DualSDRController.set_mode` refuses them with a
+``NotImplementedError`` that says what to use instead (see
+:data:`NOT_IMPLEMENTED_MODES`).
+
+In the GUI, Device > Second Receiver... gives the same uses with any two
+devices: a second receiver window next to the main one (dual watch), which
+keeps receiving while the main window's HackRF transmits (full duplex) and
+can follow the transmit frequency (TX monitor).
+
+:meth:`DualSDRController.initialize` opens the RTL-SDR and the HackRF it
+finds; :meth:`DualSDRController.use_devices` takes devices that are open
+already instead, e.g. two demo devices wrapped in
+:class:`~sdr_module.devices.polled.PolledDevice` to try dual receive without
+hardware.
 """
 
 import logging
@@ -16,8 +31,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 import numpy as np
 
-from ..devices.hackrf import HackRFDevice
-from ..devices.rtlsdr import RTLSDRDevice
+from ..devices.base import SDRDevice
 from .config import SDRConfig
 from .device_manager import DeviceManager
 from .sample_buffer import SampleBuffer
@@ -26,13 +40,42 @@ logger = logging.getLogger(__name__)
 
 
 class OperationMode(Enum):
-    """Dual-SDR operation modes."""
+    """Dual-SDR operation modes.
+
+    Only :attr:`implemented` modes can be chosen with
+    :meth:`DualSDRController.set_mode`; WIDEBAND_SCAN and RELAY are listed
+    for configuration files and are refused (see
+    :data:`NOT_IMPLEMENTED_MODES`).
+    """
 
     DUAL_RX = "dual_rx"  # Both devices receiving
     FULL_DUPLEX = "full_duplex"  # RTL-SDR RX + HackRF TX
     TX_MONITOR = "tx_monitor"  # Monitor own transmission
-    WIDEBAND_SCAN = "wideband_scan"  # Coordinated scanning
-    RELAY = "relay"  # Receive and retransmit
+    WIDEBAND_SCAN = "wideband_scan"  # Coordinated scanning (not implemented)
+    RELAY = "relay"  # Receive and retransmit (not implemented)
+
+    @property
+    def implemented(self) -> bool:
+        """Whether :class:`DualSDRController` can run in this mode."""
+        return self not in NOT_IMPLEMENTED_MODES
+
+
+#: Modes the controller doesn't implement, and what to use instead (the
+#: text of the ``NotImplementedError`` that ``set_mode`` raises for them).
+NOT_IMPLEMENTED_MODES: Dict[OperationMode, str] = {
+    OperationMode.WIDEBAND_SCAN: (
+        "Wideband scan mode is not implemented by DualSDRController. Scan with "
+        "one device at a time instead: the GUI's Scanner tab (Tools > "
+        "Frequency Scanner), or `sdr-scan scan --device rtlsdr` and "
+        "`sdr-scan scan --device hackrf` for each device's range."
+    ),
+    OperationMode.RELAY: (
+        "Relay mode (receive and retransmit) is not implemented: "
+        "retransmitting what is received needs checks this controller "
+        "doesn't make. To transmit, use the GUI's transmit engine (Radio > "
+        "Send Station ID), which checks the license, mode and power first."
+    ),
+}
 
 
 @dataclass
@@ -74,8 +117,10 @@ class DualSDRController:
         """
         self._config = config or SDRConfig()
         self._device_manager = DeviceManager()
-        self._rtlsdr: Optional[RTLSDRDevice] = None
-        self._hackrf: Optional[HackRFDevice] = None
+        # The receiver (an RTL-SDR) and the transceiver (a HackRF One), or
+        # the devices given to use_devices().
+        self._rtlsdr: Optional[SDRDevice] = None
+        self._hackrf: Optional[SDRDevice] = None
 
         # Sample buffers
         self._rtlsdr_buffer = SampleBuffer(capacity=2 * 1024 * 1024)
@@ -108,13 +153,13 @@ class DualSDRController:
             )
 
     @property
-    def rtlsdr(self) -> Optional[RTLSDRDevice]:
-        """Get RTL-SDR device."""
+    def rtlsdr(self) -> Optional[SDRDevice]:
+        """Get RTL-SDR device (the receiver)."""
         return self._rtlsdr
 
     @property
-    def hackrf(self) -> Optional[HackRFDevice]:
-        """Get HackRF device."""
+    def hackrf(self) -> Optional[SDRDevice]:
+        """Get HackRF device (the one that can transmit)."""
         return self._hackrf
 
     @property
@@ -176,6 +221,39 @@ class DualSDRController:
 
         return success
 
+    def use_devices(
+        self,
+        rtlsdr: Optional[SDRDevice] = None,
+        hackrf: Optional[SDRDevice] = None,
+    ) -> bool:
+        """Use devices that are open already instead of :meth:`initialize`
+        opening the hardware: another receiver in the RTL-SDR's place, or
+        demo devices (see :class:`~sdr_module.devices.polled.PolledDevice`)
+        to try dual receive without hardware. Full duplex and TX monitor
+        need a ``hackrf`` that can transmit.
+
+        Returns:
+            True when at least one device is in use; False (and nothing
+            changes) while streaming or transmitting.
+        """
+        with self._lock:
+            if (
+                self._state.rtlsdr_streaming
+                or self._state.hackrf_streaming
+                or self._state.hackrf_transmitting
+            ):
+                logger.warning("Stop streaming before changing devices")
+                return False
+            self._rtlsdr = rtlsdr
+            self._hackrf = hackrf
+            self._state.rtlsdr_frequency = (
+                float(rtlsdr.state.frequency) if rtlsdr is not None else 0.0
+            )
+            self._state.hackrf_frequency = (
+                float(hackrf.state.frequency) if hackrf is not None else 0.0
+            )
+        return rtlsdr is not None or hackrf is not None
+
     def shutdown(self) -> None:
         """Shutdown and disconnect all devices."""
         logger.info("Shutting down dual-SDR system...")
@@ -188,6 +266,11 @@ class DualSDRController:
 
         logger.info("Dual-SDR system shutdown complete")
 
+    @staticmethod
+    def supported_modes() -> Tuple[OperationMode, ...]:
+        """The operation modes :meth:`set_mode` accepts."""
+        return tuple(mode for mode in OperationMode if mode.implemented)
+
     def set_mode(self, mode: OperationMode) -> bool:
         """
         Set the operation mode.
@@ -196,8 +279,16 @@ class DualSDRController:
             mode: Desired operation mode
 
         Returns:
-            True if mode change successful
+            True if mode change successful (False while streaming, or when
+            the devices the mode needs aren't there)
+
+        Raises:
+            NotImplementedError: for a mode the controller doesn't implement
+                (WIDEBAND_SCAN, RELAY); the message says what to use instead.
         """
+        reason = NOT_IMPLEMENTED_MODES.get(mode)
+        if reason is not None:
+            raise NotImplementedError(reason)
         with self._lock:
             if self._state.rtlsdr_streaming or self._state.hackrf_streaming:
                 logger.warning("Stop streaming before changing mode")
@@ -322,6 +413,12 @@ class DualSDRController:
 
         return success
 
+    def _hackrf_can_transmit(self) -> bool:
+        """Whether the device in the HackRF's place can transmit (one that
+        doesn't say, such as a test double, is taken to)."""
+        can_transmit = getattr(self._hackrf, "can_transmit", None)
+        return not callable(can_transmit) or bool(can_transmit())
+
     def start_full_duplex(
         self,
         rx_callback: Optional[Callable[[np.ndarray], None]] = None,
@@ -342,6 +439,12 @@ class DualSDRController:
         with self._lock:
             if not self._rtlsdr or not self._hackrf:
                 logger.error("Full-duplex requires both devices")
+                return False
+            if tx_generator is not None and not self._hackrf_can_transmit():
+                logger.error(
+                    "Full-duplex needs a device that can transmit (a "
+                    "HackRF One) in the HackRF's place"
+                )
                 return False
 
             if self._state.mode != OperationMode.FULL_DUPLEX:
@@ -412,6 +515,13 @@ class DualSDRController:
         """
         if not self._hackrf:
             logger.error("TX monitor requires HackRF")
+            return False
+        # (Refused before the mode or the receiver's frequency change.)
+        if tx_generator is not None and not self._hackrf_can_transmit():
+            logger.error(
+                "TX monitor needs a device that can transmit (a HackRF One) "
+                "in the HackRF's place"
+            )
             return False
 
         if self._state.mode != OperationMode.TX_MONITOR:

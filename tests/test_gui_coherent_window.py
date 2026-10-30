@@ -929,6 +929,23 @@ class TestChirpDialogsRememberTheirFolder(_WindowTestCase):
         self.assertTrue(os.path.exists(target))
 
 
+class TestWaterfallHintStaysReachable(_WindowTestCase):
+    """ux:UX-U18: at 1366 px the waterfall's "Click to tune · drag to
+    measure · right-click for more" hint was hidden, and with it drag to
+    measure and the context menu."""
+
+    def test_a_question_mark_stands_in_for_the_hint(self):
+        wf = self.win._waterfall
+        hint, more = wf._hint_label, wf._hint_more
+        for width, shown in ((420, False), (4000, True)):
+            wf.resize(width, wf.height())
+            wf._fit_header()
+            self.assertEqual(not hint.isHidden(), shown, width)
+            self.assertEqual(not more.isHidden(), not shown, width)
+        self.assertIn("drag to measure", more.toolTip())
+        self.assertIn("right-click", more.toolTip())
+
+
 class TestErrorHistorySummary(_WindowTestCase):
     """mc:MC-U19: "Saved to /a/long/path..." was cut at the dialog edge."""
 

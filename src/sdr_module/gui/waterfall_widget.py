@@ -802,6 +802,17 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         hint.setMinimumWidth(1)
         controls.addWidget(hint)
         self._hint_label = hint
+        # When the hint doesn't fit (a 1366 px window), a "?" keeps it one
+        # hover away: drag to measure and the right-click menu stay
+        # discoverable (ux:UX-U18).
+        more = QLabel("?")
+        set_role(more, "hint")
+        more.setToolTip(f"{hint.text()}.\n\n{hint.toolTip()}")
+        more.setAccessibleName("How to use the waterfall")
+        more.setCursor(Qt.CursorShape.WhatsThisCursor)
+        more.hide()
+        controls.addWidget(more)
+        self._hint_more = more
 
         controls.addStretch(1)
 
@@ -921,6 +932,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 base += need
         for widget in optional:
             widget.setHidden(not keep[widget])
+        more = getattr(self, "_hint_more", None)
+        if more is not None:
+            more.setHidden(not self._hint_label.isHidden())
 
     def focusInEvent(self, event):  # noqa: N802 - Qt override
         """Show the focus frame: Space and Left/Right now act on this plot."""

@@ -79,6 +79,8 @@ MIN_SEGMENTS = 8
 #: and how long a CTCSS tone gets to be recognised once it has.
 DWELL_S = 0.25
 TONE_WAIT_S = 0.9
+#: Why a bookmark scan ended: Skip passed every bookmark by.
+ALL_SKIPPED = "all skipped"
 
 
 class ScanHost:
@@ -209,6 +211,7 @@ class ScanEngine:
         self._opened = False
         self._tone_hz = 0.0
         self._locked_out: List[Tuple[float, float]] = []  # (freq, width)
+        self._skipped_visits: set = set()  # bookmark scan: indices skipped
         self._bookmarks_left = 0  # visits left in this pass
         self._starting = False
         self._start_failure = ""
@@ -242,6 +245,7 @@ class ScanEngine:
         self.current = None
         self.held = False
         self._locked_out = []
+        self._skipped_visits = set()
         self._candidates = []
         self.last_block_at = time.monotonic()
         if self.rate <= 0:
@@ -293,6 +297,8 @@ class ScanEngine:
             return
         if self.settings.mode == "stop":
             self._locked_out.append((self.current.frequency_hz, self.current.width_hz))
+        elif self.settings.mode == "bookmarks":
+            self._skipped_visits.add(self.bookmark_index)
         self.held = False
         self._safely(self._go_on)
 
@@ -537,6 +543,8 @@ class ScanEngine:
                 self._bookmarks_left = len(bookmarks)
             self._bookmarks_left -= 1
             self.bookmark_index = (self.bookmark_index + 1) % len(bookmarks)
+            if self.bookmark_index in self._skipped_visits:
+                continue  # Skip passed it by for the rest of this scan
             b = bookmarks[self.bookmark_index]
             listening = (
                 str(b.get("demod") or ""),
@@ -563,6 +571,9 @@ class ScanEngine:
                     self.on_state()
                 return
             self.steps_refused += 1
+        if len(self._skipped_visits) >= len(bookmarks):
+            self._finish(ALL_SKIPPED)
+            return
         self._finish("The receiver could not tune to any of the bookmarks.")
 
     def _begin_dwell(self) -> None:

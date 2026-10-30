@@ -267,6 +267,9 @@ class TestEditDialog(_PanelCase):
                 self.assertIsNotNone(label.buddy(), label.text())
                 keys.setdefault(match.group(1).lower(), []).append(label.text())
         self.assertEqual({k: v for k, v in keys.items() if len(v) > 1}, {})
+        # Nor Alt+S / Alt+C: GNOME and KDE label the buttons "&Save" and
+        # "&Cancel" (Comment had Alt+C).
+        self.assertFalse({"s", "c"} & set(keys), keys)
         self.assertNotIn("duplex", dialog.bookmark())
         # A split channel (TX elsewhere) is kept as it is.
         split = BookmarkEditDialog(
@@ -303,6 +306,55 @@ class TestEditDialog(_PanelCase):
         for key in ("tone_mode", "ctone", "group", "skip", "comment"):
             self.assertNotIn(key, edited)
         self.assertEqual(edited["label"], "145.290 MHz")
+        dialog.deleteLater()
+
+    def test_saving_keeps_the_tone_of_a_bookmark_not_listened_to_in_fm(self):
+        """The tone field only applies in FM (it is greyed out otherwise),
+        so Save leaves a CHIRP channel's TSQL tone as it is in the other
+        modes: it used to drop it, also when nothing was changed."""
+        from sdr_module.gui.bookmark_editor import BookmarkEditDialog
+
+        for original in (
+            # A CHIRP channel without a mode here ("Auto": keep the mode).
+            {
+                "label": "R",
+                "freq_hz": 145.29e6,
+                "mode": "Auto",
+                "location": 3,
+                "tone_mode": "TSQL",
+                "ctone": 100.0,
+            },
+            # An AM channel that carries a tone for a radio.
+            {
+                "label": "A",
+                "freq_hz": 127.0e6,
+                "demod": "AM",
+                "mode": "AM",
+                "tone_mode": "TSQL",
+                "ctone": 88.5,
+            },
+        ):
+            dialog = BookmarkEditDialog(original, self.mod.tune_mode(original))
+            self.assertFalse(dialog._tone.isEnabled())
+            edited = dialog.bookmark()
+            self.assertEqual(
+                (edited.get("tone_mode"), edited.get("ctone")),
+                (original["tone_mode"], original["ctone"]),
+                original["label"],
+            )
+            dialog.deleteLater()
+        # In FM the field decides: cleared, the tone goes.
+        fm = {
+            "label": "F",
+            "freq_hz": 145.29e6,
+            "demod": "FM",
+            "fm_deviation": "5 kHz",
+            "tone_mode": "TSQL",
+            "ctone": 100.0,
+        }
+        dialog = BookmarkEditDialog(fm, self.mod.tune_mode(fm))
+        dialog._tone.setCurrentIndex(0)
+        self.assertNotIn("tone_mode", dialog.bookmark())
         dialog.deleteLater()
 
     def test_edit_button_saves_through_the_dialog(self):

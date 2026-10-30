@@ -22,8 +22,6 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
-import numpy as np
-
 from ..dsp import sweep
 
 
@@ -65,23 +63,10 @@ SCAN_PRESETS: Tuple[ScanPreset, ...] = (
 )
 _CUSTOM = "Custom range"
 
-# FFT length for level measurements: the main window's spectrum
-# (DISPLAY_BLOCK), so a threshold read off the spectrum means the same here.
-_FFT_SIZE = sweep.FFT_SIZE
-_FINE_RASTER_HZ = sweep.FINE_RASTER_HZ
-_WIDE_RASTER_HZ = sweep.WIDE_RASTER_HZ
-_WIDE_STEP_HZ = sweep.WIDE_STEP_HZ
-_WIDE_SIGNAL_HZ = sweep.WIDE_SIGNAL_HZ
-
 
 def _format_freq(freq_hz: float) -> str:
     """Always MHz, like the range fields (``1090.000 MHz``, not GHz)."""
     return f"{freq_hz / 1e6:.3f} MHz"
-
-
-def _power_spectrum_dbfs(samples: np.ndarray, max_segments: int = 4) -> np.ndarray:
-    """See :func:`sdr_module.dsp.sweep.power_spectrum_dbfs`."""
-    return sweep.power_spectrum_dbfs(samples, max_segments)
 
 
 def _report_frequency(
@@ -89,16 +74,6 @@ def _report_frequency(
 ) -> float:
     """See :func:`sdr_module.dsp.sweep.report_frequency`."""
     return sweep.report_frequency(freq_hz, width_hz, step_hz)
-
-
-def _tuning_range(device) -> Optional[Tuple[float, float]]:
-    """The device's ``(min, max)`` tuning range in Hz, if it publishes one."""
-    spec = getattr(device, "spec", None)
-    low = getattr(spec, "freq_min", None)
-    high = getattr(spec, "freq_max", None)
-    if isinstance(low, (int, float)) and isinstance(high, (int, float)) and high > low:
-        return float(low), float(high)
-    return None
 
 
 class _NumericItem(QTableWidgetItem if HAS_PYQT6 else object):

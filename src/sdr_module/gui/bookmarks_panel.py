@@ -194,6 +194,27 @@ def listening(bookmark: Dict[str, Any]) -> Tuple[str, str, str, float]:
     return demod, deviation, width, tone
 
 
+def _new_bookmark(
+    label: str,
+    freq_hz: float,
+    mode: str = "",
+    fm_deviation: str = "",
+    bandwidth: str = "",
+) -> Dict[str, Any]:
+    """A new bookmark (see :meth:`BookmarksPanel.add_bookmark`)."""
+    bookmark: Dict[str, Any] = {"label": label, "freq_hz": float(freq_hz)}
+    if mode in _DEMOD_NAMES:
+        bookmark["demod"] = mode
+        if mode == "FM" and fm_deviation:
+            bookmark["fm_deviation"] = str(fm_deviation)
+        chirp = _chirp_mode(mode, str(fm_deviation or ""))
+        if chirp:
+            bookmark["mode"] = chirp  # shown in the list, exported to CHIRP
+        if bandwidth:
+            bookmark["bandwidth"] = str(bandwidth)
+    return bookmark
+
+
 def same_channel(
     bookmark: Dict[str, Any], freq_hz: float, mode: str = "", deviation: str = ""
 ) -> bool:
@@ -537,21 +558,40 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         Returns:
             The new bookmark's index.
         """
-        bookmark: Dict[str, Any] = {"label": label, "freq_hz": float(freq_hz)}
-        if mode in _DEMOD_NAMES:
-            bookmark["demod"] = mode
-            if mode == "FM" and fm_deviation:
-                bookmark["fm_deviation"] = str(fm_deviation)
-            chirp = _chirp_mode(mode, str(fm_deviation or ""))
-            if chirp:
-                bookmark["mode"] = chirp  # shown in the list, exported to CHIRP
-            if bandwidth:
-                bookmark["bandwidth"] = str(bandwidth)
-        self._bookmarks.append(bookmark)
+        self._bookmarks.append(
+            _new_bookmark(label, freq_hz, mode, fm_deviation, bandwidth)
+        )
         self._save()
         index = len(self._bookmarks) - 1
         self._refresh_list(select=index)
         return index
+
+    def add_unique_many(
+        self, entries: List[Tuple[str, float, str, str, str]]
+    ) -> List[Tuple[int, bool]]:
+        """:meth:`add_unique` for many ``(label, freq_hz, mode,
+        fm_deviation, bandwidth)`` at once (the Scanner's Bookmark All):
+        saved, and the list rebuilt, once. An entry already bookmarked (or
+        twice in ``entries``) isn't added again. Returns ``(index, added)``
+        per entry; the last one added (else the first one already there) is
+        selected."""
+        results: List[Tuple[int, bool]] = []
+        for label, freq_hz, mode, fm_deviation, bandwidth in entries:
+            index = self.find_bookmark(freq_hz, mode, fm_deviation)
+            if index >= 0:
+                results.append((index, False))
+                continue
+            self._bookmarks.append(
+                _new_bookmark(label, freq_hz, mode, fm_deviation, bandwidth)
+            )
+            results.append((len(self._bookmarks) - 1, True))
+        added = [index for index, new in results if new]
+        if added:
+            self._save()
+            self._refresh_list(select=added[-1])
+        elif results:
+            self.select_bookmark(results[0][0])
+        return results
 
     def add_unique(
         self,

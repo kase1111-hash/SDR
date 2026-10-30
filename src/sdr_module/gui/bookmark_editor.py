@@ -225,7 +225,9 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         self._comment = QLineEdit(str(b.get("comment", "") or ""))
         self._comment.setPlaceholderText("Optional")
         self._comment.setToolTip("A note for yourself (exported as CHIRP's Comment)")
-        form.addRow("&Comment:", self._comment)
+        # (Not Alt+C or Alt+S: Linux desktops label the buttons "&Save" and
+        # "&Cancel".)
+        form.addRow("C&omment:", self._comment)
         layout.addLayout(form)
 
         self._hint = QLabel()
@@ -317,15 +319,18 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
             b["mode"] = _CHIRP_KEEP_MODE
         else:
             b.pop("mode", None)
-        tone = self._tone.currentData()
-        tone = float(tone) if isinstance(tone, float) and demod == "FM" else 0.0
-        if tone != self._initial_tone:
-            if tone:
-                b["tone_mode"] = "TSQL"
-                b["ctone"] = tone
-            elif str(b.get("tone_mode") or "") == "TSQL":
-                b.pop("tone_mode", None)
-                b.pop("ctone", None)
+        # The tone field applies in FM only (greyed out otherwise): in the
+        # other modes a channel's tone, e.g. a CHIRP memory's, is kept.
+        if demod == "FM":
+            tone = self._tone.currentData()
+            tone = float(tone) if isinstance(tone, float) else 0.0
+            if tone != self._initial_tone:
+                if tone:
+                    b["tone_mode"] = "TSQL"
+                    b["ctone"] = tone
+                elif str(b.get("tone_mode") or "") == "TSQL":
+                    b.pop("tone_mode", None)
+                    b.pop("ctone", None)
         group = self._group.currentText().strip()
         if group:
             b["group"] = group

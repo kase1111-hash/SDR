@@ -1838,8 +1838,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._iq_conditioner = IqConditioner()
         self._clip_s = 0.0
         self._clip_warn_due = 0.0
-        # The Scanner tab mutes the speaker while it moves between channels.
+        # The Scanner tab mutes the speaker while it moves between channels,
+        # and has a bookmark's CTCSS tone checked even with the speaker off.
         self._scan_muted = False
+        self._scan_checks_tone = False
         # Cached analysis window for the spectrum display (built lazily to
         # match the sample-block length).
         self._spectrum_window: Optional[np.ndarray] = None
@@ -5493,10 +5495,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # SSTV is FM; it gets every block (no squelch) so its line timing
         # stays intact, and it listens even with the speaker off.
         sstv = mode == "FM" and self._sstv_listening()
+        # A bookmark scan judges a channel by its CTCSS tone, speaker on or
+        # off (see scanner_host.WindowScannerHost.scan_signal_present).
+        scan_tone = self._scan_checks_tone and mode == "FM" and gate.is_open
         # The block after the speaker stopped is still demodulated: it
         # fades out instead of breaking off.
         fading_out = self._audio_join.playing and not speaker
-        if not (speaker or sstv or fading_out) or not audible:
+        if not (speaker or sstv or fading_out or scan_tone) or not audible:
             if self._demod_running:
                 # Closed for real (not during the hang): start afresh.
                 chain.reset_demodulator()
@@ -5534,7 +5539,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._tone_blocked = False
             if self._tones_checked(deviation):
                 if not tones.process(chain.pre_nr_audio):
-                    self._tone_blocked = speaker
+                    self._tone_blocked = speaker or scan_tone
                     speaker = False
             elif tones.detected_hz is not None:
                 tones.reset()

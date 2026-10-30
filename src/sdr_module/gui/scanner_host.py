@@ -77,12 +77,18 @@ class WindowScannerHost(ScannerHost):
     def scan_tune_lo(self, center_hz: float, vfo_hz: Optional[float] = None) -> bool:
         win = self._win
         before = win._lo_frequency()
+        win._scan_checks_tone = False
+        # The step is measured around center_hz: with Radio > Keep Tuned
+        # Frequency Centered, tuning the VFO would retune the LO onto it,
+        # so FREQ shows the LO instead.
+        keep_centered = bool(getattr(win, "_keep_centered", lambda: False)())
 
         def tune() -> bool:
             if not win._tune_to(center_hz, recenter=True):
                 return False
             if vfo_hz is not None and abs(vfo_hz - center_hz) >= 0.5:
-                win._tune_to(vfo_hz)  # inside the span: only the VFO moves
+                if not keep_centered:
+                    win._tune_to(vfo_hz)  # inside the span: only the VFO moves
             return True
 
         ok = self._quietly(tune)
@@ -96,6 +102,9 @@ class WindowScannerHost(ScannerHost):
     ) -> bool:
         win = self._win
         before = win._lo_frequency()
+        # A bookmark with a tone squelch is judged by its tone, so the
+        # window checks it even with the speaker off (see _route_audio).
+        win._scan_checks_tone = bool(tone_hz and tone_hz > 0)
 
         def tune() -> bool:
             if not win._tune_to(freq_hz):
@@ -219,6 +228,7 @@ class WindowScannerHost(ScannerHost):
         tuning history once the receiver stays on it."""
         win = self._win
         win._scan_muted = False
+        win._scan_checks_tone = False
         saved, self._saved = self._saved, None
         self.expected_hz = None
         if not stay and saved is not None:
@@ -261,12 +271,17 @@ class WindowScannerHost(ScannerHost):
 
     def scan_add_bookmarks(self, hits: List[ScanHit]) -> Tuple[int, List[str]]:
         panel = self._win._bookmarks_panel
+        names = [hit.label or default_bookmark_name(hit.frequency_hz) for hit in hits]
+        # All at once: saved and listed once (Bookmark All of 500 results
+        # took seconds one by one).
+        results = panel.add_unique_many(
+            [
+                (name, hit.frequency_hz, hit.mode, hit.fm_deviation, hit.bandwidth)
+                for name, hit in zip(names, hits, strict=True)
+            ]
+        )
         added, existing = 0, []
-        for hit in hits:
-            name = hit.label or default_bookmark_name(hit.frequency_hz)
-            index, new = panel.add_unique(
-                name, hit.frequency_hz, hit.mode, hit.fm_deviation, hit.bandwidth
-            )
+        for name, (index, new) in zip(names, results, strict=True):
             if new:
                 added += 1
             else:

@@ -286,6 +286,50 @@ class TestScanEngine(unittest.TestCase):
         _run(engine, dev, seconds=0.5)
         self.assertEqual(host.tunes[2], (145.29e6, ("FM", "5 kHz", ""), 100.0))
 
+    def test_skip_passes_a_bookmark_by_for_the_rest_of_the_scan(self):
+        """Skip in a bookmark scan does what its tooltip says (as in Stop on
+        signal): that bookmark isn't stopped on again during this scan. A
+        carrier that never stops used to hold the scan there every pass."""
+        from sdr_module.gui.scan_engine import ALL_SKIPPED, LISTEN, ScanSettings
+
+        bookmarks = [
+            {"label": "A", "freq_hz": 118.1e6, "demod": "AM"},
+            {"label": "B", "freq_hz": 125.0e6, "demod": "AM"},
+        ]
+        dev = _demo(118e6)
+        host = _DemoHost(dev, active=[118.1e6, 125.0e6])
+        engine = self.engine(host)
+        engine.start(
+            ScanSettings("bookmarks", bookmarks=bookmarks, resume_s=0.2),
+            dev.sample_rate,
+            0.0,
+        )
+        _run(engine, dev, until=lambda: engine.state == LISTEN)
+        self.assertEqual(engine.current.label, "A")
+        engine.skip()
+        _run(engine, dev, until=lambda: engine.state == LISTEN)
+        self.assertEqual(engine.current.label, "B")
+        # B goes quiet: the scan goes on, passing A by.
+        host.active = [118.1e6]
+        visited = set()
+        for _ in range(int(2.0 / FRAME_S)):
+            engine.frame(dev.read_samples(int(dev.sample_rate * FRAME_S)))
+            visited.add(engine.current.label)
+        self.assertEqual(visited, {"B"})
+        self.assertGreaterEqual(engine.pass_number, 3)
+        # Skipping the last one ends the scan, saying why.
+        host.active = [125.0e6]
+        _run(engine, dev, until=lambda: engine.state == LISTEN)
+        engine.skip()
+        self.assertFalse(engine.active)
+        self.assertEqual(self.finished, [ALL_SKIPPED])
+        # A new scan visits them all again.
+        engine.start(
+            ScanSettings("bookmarks", bookmarks=bookmarks), dev.sample_rate, 0.0
+        )
+        self.assertEqual(engine.current.label, "A")
+        engine.stop()
+
     def test_a_carrier_without_the_tone_gets_time_then_is_passed_by(self):
         from sdr_module.gui.scan_engine import DWELL, TONE_WAIT_S, ScanSettings
 
@@ -656,6 +700,31 @@ class TestScannerTab(_PanelCase):
         )
         self.assertEqual(panel._table.item(0, 2).text(), "60 dB")
 
+    def test_a_bookmark_scan_lists_each_bookmark_it_heard(self):
+        """Two bookmarks on one frequency (a repeater's users with
+        different tones) are two results: the second used to be counted
+        as the first, under the first one's name."""
+        from sdr_module.gui.scan_engine import Found
+
+        visit = {"freq_hz": 145.29e6, "demod": "FM", "fm_deviation": "5 kHz"}
+        self.host.bookmarks = [
+            dict(visit, index=0, label="Club", bandwidth="", tone_hz=0.0),
+            dict(visit, index=1, label="Club 100", bandwidth="", tone_hz=100.0),
+        ]
+        panel = self.panel()
+        panel.set_scan_mode("bookmarks")
+        self.assertTrue(panel.start_scan())
+        for label in ("Club", "Club 100", "Club"):
+            panel._on_found(
+                Found(145.29e6, -50.0, -90.0, 10e3, ("FM", "5 kHz", ""), label=label)
+            )
+        self.assertEqual(
+            sorted((hit.label, hit.count) for hit in panel.hits()),
+            [("Club", 2), ("Club 100", 1)],
+        )
+        self.assertEqual(panel._table.rowCount(), 2)
+        panel.stop_scan()
+
     def test_empty_states_say_what_happened(self):
         """TOOLS-09: after Clear or an early Stop the table doesn't claim
         that nothing was above the threshold."""
@@ -984,6 +1053,34 @@ class TestScannerTab(_PanelCase):
         self.assertEqual(host.ended, [True])
         self.assertTrue(panel._listen_row.isHidden())
 
+    def test_skipping_every_bookmark_ends_the_scan_and_says_so(self):
+        from sdr_module.gui.scan_engine import LISTEN
+
+        host = FakeWindow()
+        host.scan_signal_present = lambda: True
+        visit = {"demod": "FM", "fm_deviation": "5 kHz", "bandwidth": ""}
+        host.bookmarks = [
+            dict(visit, index=0, label="A", freq_hz=162.4e6, tone_hz=0.0),
+            dict(visit, index=1, label="B", freq_hz=162.55e6, tone_hz=0.0),
+        ]
+        panel = self.panel(host)
+        panel.set_scan_mode("bookmarks")
+        self.assertTrue(panel.start_scan())
+        dev = host.dev
+        for label in ("A", "B"):
+            panel.engine.frame(dev.read_samples(int(dev.sample_rate * FRAME_S)))
+            self.assertEqual(
+                (panel.engine.state, panel.engine.current.label), (LISTEN, label)
+            )
+            panel._skip_btn.click()
+        self.assertFalse(panel.engine.active)
+        self.assertEqual(
+            panel._status.text(),
+            "Scan stopped: every bookmark was skipped. 2 signals heard.",
+        )
+        self.assertEqual(host.ended, [False])  # back where it started
+        self.assertIn("Start Scan", panel._start_btn.text())
+
 
 # --------------------------------------------------------------------------- #
 # The window
@@ -1258,6 +1355,120 @@ class TestScannerInTheWindow(_ScanWindowCase):
         panel.bookmark_all()
         self.assertEqual(win._bookmarks_panel.bookmark_count(), 3)
         self.assertIn("1 already bookmarked", panel._status.text())
+
+    def test_bookmark_all_saves_the_bookmarks_once(self):
+        """Bookmark All saved and rebuilt the bookmark list once per result:
+        with the 500 results kept, the window froze for about 5 s."""
+        from sdr_module.gui.scanner_panel import ScanHit
+
+        win, panel = self.win, self.win._scanner_panel
+        bookmarks = win._bookmarks_panel
+        bookmarks.add_bookmark("Already", 440.0e6, "FM", "5 kHz")
+        hits = [
+            ScanHit(440.0e6 + i * 25e3, -60.0, 20.0, 5e3, "FM", "5 kHz", "25 kHz")
+            for i in range(300)
+        ]
+        hits.append(ScanHit(440.025e6, -61.0, 19.0, 5e3, "FM", "5 kHz", "25 kHz"))
+        panel._hits = hits
+        panel._rebuild_table()
+        saves = []
+        real_save = self.store.set_bookmarks
+        self.store.set_bookmarks = lambda items: (
+            saves.append(len(items)),
+            real_save(items),
+        )
+        with mock.patch.object(
+            bookmarks, "_refresh_list", wraps=bookmarks._refresh_list
+        ) as refresh:
+            panel.bookmark_all()
+        self.assertEqual(saves, [300])  # once, with every new one
+        self.assertEqual(refresh.call_count, 1)
+        self.assertEqual(bookmarks.bookmark_count(), 300)
+        self.assertEqual(
+            panel._status.text(),
+            "Bookmarked 299 of 301 signals (2 already bookmarked).",
+        )
+        added = bookmarks.bookmark(1)
+        self.assertEqual(
+            (added["label"], added["demod"], added["bandwidth"]),
+            ("70cm Ham 440.025", "FM", "25 kHz"),
+        )
+        # One result: the bookmark already there is selected.
+        bookmarks._list.clearSelection()
+        panel._bookmark([hits[0]])
+        self.assertEqual(bookmarks._selected_index(), 0)
+        self.assertEqual(panel._status.text(), "Already bookmarked: Already")
+
+    def test_keep_tuned_frequency_centered_keeps_each_step_where_planned(self):
+        """A sweep measures each step around the LO it planned. With Radio >
+        Keep Tuned Frequency Centered on, putting FREQ on a channel retuned
+        the LO onto it, so 2 m signals were listed up to half a step
+        (6.25 kHz) off: 147.105 MHz as 147.099 MHz."""
+        win, panel = self.win, self.win._scanner_panel
+        win._keep_centered_action.setChecked(True)
+        panel._preset.setCurrentIndex(3)  # 2m Ham, 12.5 kHz channels
+        panel.set_scan_mode("once")
+        los = []
+        retune = win._retune_lo
+
+        def spy(lo_hz):
+            los.append(lo_hz)
+            return retune(lo_hz)
+
+        win._retune_lo = spy
+        self.assertTrue(panel.start_scan())
+        self.frames(10.0, until=lambda: not panel.engine.active)
+        self.assertIn("Scan complete", panel._status.text())
+        planned = [page.lo_hz for page in panel.engine.pages]
+        self.assertEqual(los[: len(planned)], planned)
+        found = [round(hit.frequency_hz) for hit in panel.hits()]
+        self.assertIn(147_105_000, found)
+
+    def test_a_bookmark_scan_checks_the_tone_with_the_speaker_off(self):
+        """A bookmark's CTCSS tone decides whether the scan stops on it,
+        speaker on or off: with the audio off the tone wasn't checked, so
+        the scan stopped on any carrier there."""
+        from sdr_module.gui.scan_engine import LISTEN
+
+        win, panel = self.win, self.win._scanner_panel
+        win._audio_enabled = False
+        bookmarks = win._bookmarks_panel
+        index = bookmarks.add_bookmark("Club, wrong tone", 145.29e6, "FM", "5 kHz")
+        bookmarks.set_tone(index, 123.0)  # the demo repeater sends 100.0 Hz
+        panel.set_scan_mode("bookmarks")
+        self.assertTrue(panel.start_scan())
+        self.assertFalse(self.frames(3.0, until=lambda: panel.engine.state == LISTEN))
+        self.assertEqual(panel.hits(), [])
+        panel.stop_scan()
+        # Its own tone: heard (the repeater keeps sending for a few more s).
+        bookmarks.set_tone(index, 100.0)
+        self.assertTrue(panel.start_scan())
+        self.assertTrue(self.frames(3.0, until=lambda: panel.engine.state == LISTEN))
+        panel.stop_scan()
+        self.assertFalse(win._scan_checks_tone)
+
+    def test_the_tab_leaves_the_menu_bar_mnemonics_alone(self):
+        """Alt+R and Alt+H open the Radio and Help menus: with the tab
+        shown, Resume and Threshold had them too, so every other press
+        moved the focus instead."""
+        import re
+
+        from PyQt6.QtWidgets import QAbstractButton, QLabel
+
+        win, panel = self.win, self.win._scanner_panel
+        menus = set()
+        for action in win.menuBar().actions():
+            match = re.search(r"&([^&])", action.text())
+            if match:
+                menus.add(match.group(1).lower())
+        self.assertTrue({"r", "h", "t", "v", "d", "f"} <= menus)
+        used = []
+        for widget in panel.findChildren((QLabel, QAbstractButton)):
+            match = re.search(r"&([^&])", widget.text())
+            if match:
+                used.append(match.group(1).lower())
+                self.assertNotIn(match.group(1).lower(), menus, widget.text())
+        self.assertGreaterEqual(len(used), 8)
 
     def test_scan_bookmarks_from_here(self):
         win = self.win

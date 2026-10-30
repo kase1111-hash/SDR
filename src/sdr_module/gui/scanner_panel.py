@@ -71,6 +71,7 @@ from ..dsp.sweep import (
 )
 from ..utils.tooltips import get_short_tip
 from .scan_engine import (
+    ALL_SKIPPED,
     DWELL,
     LISTEN,
     MEASURE_S,
@@ -408,9 +409,11 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         )
         self._add_field(grid, 1, 0, "Ste&p:", self._step)
 
+        # (Mnemonics: none of the menu bar's, F D R V T H, which Alt+ opens
+        # while this tab shows.)
         threshold_row = QHBoxLayout()
         threshold_row.setSpacing(4)
-        self._auto = QCheckBox("Auto")
+        self._auto = QCheckBox("A&uto")
         self._auto.setChecked(True)
         self._auto.setToolTip(
             f"Auto threshold: measure the noise floor on each step and list the "
@@ -426,7 +429,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._threshold.setAccessibleName("Threshold")
         self._threshold.setMinimumWidth(72)
         threshold_row.addWidget(self._threshold, 1)
-        label = QLabel("T&hreshold:")
+        label = QLabel("Threshold:")
         label.setBuddy(self._auto)
         grid.addWidget(label, 1, 2)
         grid.addLayout(threshold_row, 1, 3)
@@ -436,7 +439,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             "Stop on signal and Scan bookmarks: go on after the channel has "
             "been quiet (squelch closed) this long"
         )
-        self._resume_label = self._add_field(grid, 2, 0, "&Resume:", self._resume)
+        self._resume_label = self._add_field(grid, 2, 0, "Resu&me:", self._resume)
 
         self._group = QComboBox()
         self._group.setToolTip("Scan bookmarks: all bookmarks, or one group")
@@ -1328,15 +1331,21 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
 
     def _on_found(self, found: Found) -> None:
         now = time.time()
-        step = self._step.value() * 1e3 if self._engine.mode != "bookmarks" else 1.0
+        bookmarks = self._engine.mode == "bookmarks"
+        step = self._step.value() * 1e3 if not bookmarks else 1.0
         for index, hit in enumerate(self._hits):
-            same = (
-                abs(hit.frequency_hz - found.frequency_hz) < 10.0
-                if self._engine.mode == "bookmarks"
-                else same_signal(
+            if bookmarks:
+                # One row per bookmark: two on one frequency (a repeater's
+                # users with different tones) are two results.
+                same = (
+                    abs(hit.frequency_hz - found.frequency_hz) < 10.0
+                    and hit.label == found.label
+                    and hit.listening == tuple(found.listening)
+                )
+            else:
+                same = same_signal(
                     hit.frequency_hz, hit.width_hz, found.frequency_hz, step
                 )
-            )
             if same:
                 hit.count += 1
                 hit.last_seen = now
@@ -1413,6 +1422,12 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             else:
                 verb = "heard" if engine.mode in ("stop", "bookmarks") else "found"
                 self._set_status(f"Scan stopped. {count} {noun} {verb}.", "muted")
+        elif reason == ALL_SKIPPED:
+            self._empty_reason = "stopped"
+            self._set_status(
+                f"Scan stopped: every bookmark was skipped. {count} {noun} heard.",
+                "muted",
+            )
         else:
             message = (
                 reason[len("error: ") :] if reason.startswith("error: ") else reason

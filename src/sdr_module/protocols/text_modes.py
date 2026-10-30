@@ -976,13 +976,15 @@ def cw_bandwidth_hz(wpm: float) -> float:
     keying (runs of dits: "5", "H", "I", "E") where that is wider: from
     about 25 to 45 WPM, where the key edges take a larger part of each dit
     (200 Hz measured at 40 WPM, against 167 Hz). Measured once per speed
-    (a few ms) and kept."""
+    (at most about 10 ms) and kept."""
     settings = TextSettings.for_mode(MODE_CW, wpm=wpm)
     itu = max(150.0, 5.0 * settings.symbol_rate)
-    rate = 4000.0
+    rate = 2000.0  # (the keying sidebands are far below 1% beyond 1 kHz)
+    # Fewer characters at slow speeds: as many dits, measured as well.
+    scale = min(1.0, settings.wpm / 20.0)
     measured = 0.0
-    for pattern in ("5" * 6, "H" * 8, "I" * 12, "E" * 20):
-        signal = TextSignal(pattern, settings)
+    for char, count in (("5", 6), ("H", 8), ("I", 12), ("E", 20)):
+        signal = TextSignal(char * max(2, int(round(count * scale))), settings)
         iq = signal.baseband(signal.times(rate))
         measured = max(measured, _power_bandwidth(iq, rate))
     return float(max(itu, 1.1 * measured))

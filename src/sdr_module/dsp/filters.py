@@ -2483,9 +2483,9 @@ class NoiseReduction:
         bin_hz = self._sample_rate / self._fft_size
         half = max(1, int(round(self._MEDIAN_SPAN_HZ / max(bin_hz, 1e-9))))
         padded = np.pad(self._smoothed, half, mode="edge")
-        local = np.median(
-            np.lib.stride_tricks.sliding_window_view(padded, 2 * half + 1), axis=1
-        )
+        windows = np.lib.stride_tricks.sliding_window_view(padded, 2 * half + 1)
+        # (The window is odd: its median is the middle element.)
+        local = np.partition(windows, half, axis=1)[:, half]
         if self._sub_min is None:
             self._sub_min = local.copy()
         else:

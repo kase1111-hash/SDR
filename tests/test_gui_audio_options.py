@@ -255,3 +255,39 @@ class TestDemoRepeaterTone(_WindowTestCase):
         self.win._reset_demodulator()
         _heard, played = self._listen(100.0)
         self.assertGreater(played, 4.0)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestAudioOptionChangesMidStream(_WindowTestCase):
+    def setUp(self):
+        super().setUp()
+        pretend_audio_output(self.win)
+        self.panel = self.win._control_panel
+        self.win.set_frequency(146.94e6)
+        self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        self.panel.set_squelch_db(-90)
+
+    def test_switching_noise_reduction_does_not_click(self):
+        t = np.arange(30 * FRAME) / RATE
+        iq = fm(0.8 * np.sin(2 * np.pi * 700 * t), 5e3, -50.0) + noise(
+            30 * FRAME, -95.0
+        )
+        first = Frames(self, iq[: 15 * FRAME]).run()
+        self.panel.set_noise_reduction("light")
+        second = Frames(self, iq[15 * FRAME :]).run()
+        before, after = first.played(), second.played()
+        seam = np.abs(np.diff(np.concatenate((before[-3:], after[:400]))))
+        self.assertLess(float(seam.max()), 0.1)  # faded, not a step
+
+    def test_the_lamp_says_when_the_tone_squelch_mutes(self):
+        from sdr_module.gui.level_meter import STATES
+
+        self.panel.set_tone_squelch_hz(123.0)
+        iq = fm(_voice(2.0, tone_hz=100.0), 5e3, -50.0)
+        n = len(iq) - len(iq) % FRAME
+        Frames(self, iq[:n]).run()
+        meter = self.win._level_meter
+        self.assertEqual(meter.state(), "tone")
+        self.assertEqual(STATES["tone"][0], "TONE")
+        self.win._refresh_info_panel()
+        self.assertIn("tone 123.0 Hz", self.win._info_panel.value("squelch"))

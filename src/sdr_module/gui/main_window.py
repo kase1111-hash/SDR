@@ -1698,6 +1698,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._audio_join = AudioJoin(_AUDIO_RATE)
         self._join_chain: Optional["_ReceiverChain"] = None
         self._join_deviation = 0.0
+        self._join_nr: Any = None  # the noise reduction the last block had
+        self._tone_blocked = False  # the tone squelch is muting a signal
         self._demod_running = False
         self._tone_squelch = ToneSquelch(_AUDIO_RATE)
         self._iq_conditioner = IqConditioner()
@@ -3392,17 +3394,21 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         gate = self._squelch
         if mode not in _AUDIBLE_MODES:
             return "Not used (no audio in this mode)", "muted"
+        tone_hz = self._tone_squelch.tone_hz if mode == "FM" else None
+        tone = f", tone {tone_hz:.1f} Hz" if tone_hz else ""
         if not gate.enabled:
-            return "Off (everything plays)", None
+            return f"Off (everything plays){tone}", None
         threshold = gate.last_threshold_db
         if not running or threshold is None:
             if gate.auto:
-                return f"Auto (noise + {gate.margin_db:.0f} dB)", None
-            return f"{gate.manual_db:.0f} dBFS (set by hand)", None
+                return f"Auto (noise + {gate.margin_db:.0f} dB){tone}", None
+            return f"{gate.manual_db:.0f} dBFS (set by hand){tone}", None
         how = "Auto" if gate.auto else "set by hand"
+        if gate.is_open and not self._tone_blocked:
+            return f"{threshold:.0f} dBFS ({how}), open{tone}", "success"
         if gate.is_open:
-            return f"{threshold:.0f} dBFS ({how}), open", "success"
-        return f"{threshold:.0f} dBFS ({how}), closed", None
+            return f"{threshold:.0f} dBFS ({how}), open{tone} (not heard)", None
+        return f"{threshold:.0f} dBFS ({how}), closed{tone}", None
 
     def _level_description(self) -> str:
         level = self._last_peak_db
@@ -4460,6 +4466,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._tone_squelch.reset()
                 self._demod_running = False
                 self._clip_s = 0.0
+            self._tone_blocked = False
             if self._audio_join.playing:
                 self._audio_join.stop()
             self._show_detected_tone()
@@ -4477,8 +4484,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # CTCSS: what tone the station sends, and the tone squelch
             # (broadcast stations send none: not looked for unless asked).
             tones = self._tone_squelch
+            self._tone_blocked = False
             if tones.tone_hz or deviation < _BROADCAST_DEVIATION_HZ:
                 if not tones.process(chain.pre_nr_audio):
+                    self._tone_blocked = speaker
                     speaker = False
             elif tones.detected_hz is not None:
                 tones.reset()
@@ -4486,14 +4495,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._check_fm_clipping(chain, seconds, snr)
         self._show_detected_tone()
         join = self._audio_join
+        nr = self._audio_options.noise_reduction
         if speaker:
             if join.playing and (
-                chain is not self._join_chain or deviation != self._join_deviation
+                chain is not self._join_chain
+                or deviation != self._join_deviation
+                or nr is not self._join_nr
             ):
-                out = join.join(audio)  # a new chain: crossfade, no click
+                # A new chain, deviation or noise reduction: crossfade.
+                out = join.join(audio)
             else:
                 out = join.play(audio)  # fades in after silence
             self._join_chain, self._join_deviation = chain, deviation
+            self._join_nr = nr
             self._audio.write(out)
         elif join.playing:
             self._audio.write(join.fade_out(audio))
@@ -4520,6 +4534,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if not audible:
             return "idle"
         gate = self._squelch
+        if gate.is_open and self._tone_blocked:
+            return "tone"  # a signal, but not the chosen CTCSS tone
         if not gate.enabled:
             return "off"
         return "open" if gate.is_open else "closed"
@@ -4598,6 +4614,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._join_chain = None
         self._demod_running = False
         self._tone_squelch.reset()
+        self._tone_blocked = False
         self._iq_conditioner.reset()
         self._clip_s = 0.0
 

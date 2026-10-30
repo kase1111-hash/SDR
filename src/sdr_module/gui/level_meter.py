@@ -34,6 +34,7 @@ from .themes import get_palette, mono_font, theme_notifier
 STATES = {
     "open": ("OPEN", "the squelch is open: the signal plays"),
     "closed": ("SQL", "squelched: quieter than the threshold, so muted"),
+    "tone": ("TONE", "muted by the tone squelch: not the chosen CTCSS tone"),
     "off": ("OFF", "the squelch is off: everything plays, noise too"),
     "idle": ("I/Q", "no audio in None (I/Q) mode: choose AM, FM, USB, LSB or CW"),
     "none": ("—", "not receiving"),
@@ -235,7 +236,7 @@ class LevelMeter(QWidget if HAS_PYQT6 else object):
                 noise += f" (SNR {snr:.1f} dB)"
             lines.append(noise)
         lamp, meaning = STATES.get(self._state, STATES["none"])
-        if self._state in ("open", "closed") and self._threshold is not None:
+        if self._state in ("open", "closed", "tone") and self._threshold is not None:
             how = "Auto" if self._auto else "set by hand"
             lines.append(f"Squelch: {_format_db(self._threshold)} ({how}), {meaning}")
         else:
@@ -271,7 +272,7 @@ class LevelMeter(QWidget if HAS_PYQT6 else object):
             return "success", "lcd_text", "success_bg", "success"
         if state == "off":
             return "accent", "text", "surface0", "subtext"
-        if state == "closed":
+        if state in ("closed", "tone"):
             return "surface2", "subtext", "surface0", "subtext"
         return "surface1", "subtext", "surface0", "subtext"
 

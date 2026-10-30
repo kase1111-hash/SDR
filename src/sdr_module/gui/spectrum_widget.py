@@ -20,7 +20,8 @@ frequency axes line up vertically.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, List, Optional, Tuple
+from collections import deque
+from typing import TYPE_CHECKING, Deque, List, Optional, Tuple
 
 import numpy as np
 
@@ -87,6 +88,11 @@ PASSBAND_MIN_PX = 3.0
 
 #: Floor used for "no peak yet" in the peak-hold trace.
 _PEAK_FLOOR_DB = -120.0
+
+#: Frames a click looks back over for the signal it snaps to (about half a
+#: second at 30 frames/s): a station's whole width, and a keyed signal
+#: between its dits (see snap_click_frequency's ``recent_db``).
+SNAP_HOLD_FRAMES = 15
 
 # Averaging combo entries: label -> number of frames (0 = off).
 _AVG_CHOICES = (("Off", 0), ("2", 2), ("4", 4), ("8", 8), ("16", 16), ("32", 32))
@@ -590,6 +596,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._tuned_freq: Optional[float] = None
         self._snap_step = 0.0
         self._snap_mode = ""
+        # The last live frames, where a click also looks for its signal.
+        self._recent_frames: Deque[np.ndarray] = deque(maxlen=SNAP_HOLD_FRAMES)
         self._wheel_tuner = WheelTuner()
 
         # Paint caches (rebuilt on resize, theme, range or axis changes)
@@ -768,6 +776,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
         self._spectrum = power_db
         self._has_data = True
+        self._recent_frames.append(power_db)
 
         # Update peak hold (fmax ignores NaN bins instead of latching them)
         self._peak_hold = np.fmax(self._peak_hold, power_db)
@@ -882,9 +891,11 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
     # ------------------------------------------------------------------
 
     def _on_axis_changed(self) -> None:
-        # A peak-hold trace from another frequency or span is misleading.
+        # A peak-hold trace from another frequency or span is misleading
+        # (and so are the recent frames a click snaps on).
         self.reset_peak()
         self.reset_average()
+        self._recent_frames.clear()
         self._invalidate_background()
         self._canvas.update()
 
@@ -916,7 +927,20 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             self._hz_per_px(),
             self._snap_step,
             self._snap_mode,
+            recent_db=self._recent_hold(),
         )
+
+    def _recent_hold(self) -> Optional[np.ndarray]:
+        """The strongest level per bin over the last frames (None until
+        there are two of the current size)."""
+        size = len(self._spectrum)
+        frames = [f for f in self._recent_frames if len(f) == size]
+        if len(frames) < 2:
+            return None
+        hold = np.array(frames[0], dtype=np.float64)
+        for frame in frames[1:]:
+            np.fmax(hold, frame, out=hold)
+        return hold
 
     def _tuned_offset(self) -> float:
         """The tuned frequency's offset from the center (Hz)."""

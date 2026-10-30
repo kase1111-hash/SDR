@@ -388,6 +388,72 @@ class TestSnapClick(unittest.TestCase):
         power[10] = np.nan
         self.assertEqual(self.snap(510e3, power, 100e3), 100.5e6)  # the raster
 
+    def snap_recent(self, click_offset, power, recent, step, mode=""):
+        return snap_click_frequency(
+            self.CENTER + click_offset,
+            power,
+            self.START,
+            RATE,
+            self.HZ_PER_PX,
+            step,
+            mode,
+            recent_db=recent,
+        )
+
+    def test_a_keyed_signal_between_dits_is_found_in_the_recent_frames(self):
+        """The demo's keyed CW beacon: with the key up in the last frame a
+        click landed on the pixel grid, a kHz or two off (silence in CW)."""
+        true = -280_123.0
+        key_up = self.spectrum()
+        key_down = self.spectrum([(true, 0, -45.0)], seed=4)
+        recent = np.fmax(key_up, key_down)
+        landed = self.snap_recent(true + 2.2e3, key_up, recent, 10.0, "cw")
+        self.assertLess(abs(landed - (self.CENTER + true)), 150.0)
+        self.assertNotEqual(self.snap(true + 2.2e3, key_up, 10.0, "cw"), landed)
+
+    def test_the_recent_frames_show_a_stations_whole_width(self):
+        """One frame of a broadcast station shows only where its modulation
+        is at that instant: a click on its side landed 40 kHz off center."""
+        instant = self.spectrum([(552e3, 0, -40.0), (448e3, 0, -60.0)])
+        # Held over frames, the station is a smooth block 180 kHz wide.
+        recent = self.spectrum()
+        freqs = self.START + np.arange(self.N) * RATE / self.N
+        inside = np.abs(freqs - 100.5e6) <= 90e3
+        smooth = -40.0 + 0.5 * np.random.default_rng(8).standard_normal(self.N)
+        recent = np.where(inside, smooth, recent)
+        self.assertNotEqual(self.snap(560e3, instant, 100e3, "wfm"), 100.5e6)
+        landed = self.snap_recent(560e3, instant, recent, 100e3, "wfm")
+        self.assertEqual(landed, 100.5e6)
+
+    def test_a_weak_steady_signal_is_still_found_in_the_last_frame(self):
+        """A max-hold's floor is higher (noise peaks add up): a signal
+        too weak to stand out there is looked for in the frame itself."""
+        rng = np.random.default_rng(7)
+        frames = [10 * np.log10(rng.exponential(1.0, self.N)) - 90.0 for _ in range(15)]
+        recent = np.max(frames, axis=0)
+        last = self.spectrum([(300e3, 0, -78.0)])
+        landed = self.snap_recent(302e3, last, recent, 10.0, "cw")
+        self.assertLess(abs(landed - 100.3e6), 150.0)
+
+    def test_noise_held_over_frames_rarely_counts_as_a_signal(self):
+        rng = np.random.default_rng(12)
+        trials, hops = 300, 0
+        for _ in range(trials):
+            frames = 10 * np.log10(rng.exponential(1.0, (15, self.N))) - 90.0
+            click = self.CENTER + rng.uniform(-1e6, 1e6)
+            landed = snap_click_frequency(
+                click,
+                frames[-1],
+                self.START,
+                RATE,
+                self.HZ_PER_PX,
+                12.5e3,
+                "nfm",
+                recent_db=frames.max(axis=0),
+            )
+            hops += landed != round(click / 12.5e3) * 12.5e3
+        self.assertLess(hops / trials, 0.05)
+
 
 class TestTuningHistory(unittest.TestCase):
     def test_back_and_forward_like_a_browser(self):

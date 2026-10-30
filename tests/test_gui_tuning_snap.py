@@ -120,6 +120,22 @@ class TestSpectrumSnap(_PlotCase):
         landed = self.click(w, 100.512e6)
         self.assertLess(abs(landed - 100.512e6), 3e3)
 
+    def test_a_keyed_carrier_is_found_with_the_key_up(self):
+        """The demo's keyed CW beacon: in a frame with the key up a click
+        landed on the pixel grid (a kHz or two off: silence in CW)."""
+        carrier = CENTER - 280_123.0
+        w = self.make([(carrier - CENTER, 0, -45.0)], step=10.0, mode="cw")
+        for seed in range(6, 10):  # key up for the last few frames
+            w.update_spectrum(_spectrum([], seed=seed))
+        landed = self.click(w, carrier + 2e3)
+        self.assertLess(abs(landed - carrier), 150.0)
+        self.assertEqual(w.landing_frequency(self.x_of(w, carrier + 2e3)), landed)
+        # Another LO: what was seen at the old one no longer counts.
+        w.set_frequency_range(CENTER + 1e3, RATE)
+        w.update_spectrum(_spectrum([], seed=11))
+        w.update_spectrum(_spectrum([], seed=12))
+        self.assertGreater(abs(self.click(w, carrier + 2e3) - carrier), 1e3)
+
     def test_the_marker_follows_the_tuned_frequency(self):
         w = self.make([])
         self.assertEqual(w.tuned_frequency(), CENTER)

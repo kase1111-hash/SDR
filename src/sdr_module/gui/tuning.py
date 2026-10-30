@@ -421,6 +421,42 @@ def _signal_center(power_db: np.ndarray, peak: int, threshold_db: float) -> floa
     return float(first + np.sum(weights * np.arange(len(region))) / np.sum(weights))
 
 
+def _signal_near(
+    click: float,
+    power_db: Optional[np.ndarray],
+    start_hz: float,
+    span_hz: float,
+    hz_per_px: float,
+    search_px: float,
+    min_snr_db: float,
+) -> Optional[Tuple[float, float]]:
+    """``(center Hz, bin width Hz)`` of a signal within ``search_px`` pixels
+    of ``click`` in ``power_db`` (a peak ``min_snr_db`` above its median),
+    or None."""
+    data = None if power_db is None else np.asarray(power_db, dtype=np.float64)
+    if (
+        data is None
+        or data.ndim != 1
+        or len(data) < 8
+        or not span_hz > 0
+        or not np.all(np.isfinite(data))
+    ):
+        return None
+    n = len(data)
+    bin_hz = span_hz / n
+    center_bin = (click - start_hz) / bin_hz
+    half = max(1, int(round(search_px * hz_per_px / bin_hz)))
+    lo = max(0, int(math.floor(center_bin)) - half)
+    hi = min(n, int(math.ceil(center_bin)) + half + 1)
+    if hi <= lo:
+        return None
+    peak = lo + int(np.argmax(data[lo:hi]))
+    if data[peak] - float(np.median(data)) < min_snr_db:
+        return None
+    where = _signal_center(data, peak, float(data[peak]) - 6.0)
+    return start_hz + where * bin_hz, bin_hz
+
+
 def snap_click_frequency(
     click_hz: float,
     power_db: Optional[np.ndarray],
@@ -432,6 +468,7 @@ def snap_click_frequency(
     *,
     search_px: float = SNAP_SEARCH_PX,
     min_snr_db: float = SNAP_MIN_SNR_DB,
+    recent_db: Optional[np.ndarray] = None,
 ) -> float:
     """Where a click at ``click_hz`` tunes.
 
@@ -439,40 +476,33 @@ def snap_click_frequency(
     covering ``start_hz`` to ``start_hz + span_hz``. A signal within
     ``search_px`` pixels of the click (a peak ``min_snr_db`` above the
     median) is tuned at its center: the peak of a narrow carrier, else the
-    centroid of the -6 dB region. That center moves onto the step's raster
-    when the raster point is close (within a quarter step or a bin): a
-    broadcast station lands on its 100 kHz channel, while a 2 m simplex
-    channel (on a 5 kHz raster) is not dragged to the 12.5 kHz one. Clicks
-    away from any signal, and in USB/LSB (where the dial is the signal's
-    edge), go to the step's raster, or to the plot's pixel resolution when
-    a step is finer than a pixel.
+    centroid of the -6 dB region. ``recent_db``, the strongest level per
+    bin over the last moment (same bins), is searched first when given: it
+    shows a station's whole width (one frame shows only where its
+    modulation is at that instant, so a click on the side of a broadcast
+    station landed tens of kHz off its center) and a keyed CW signal
+    between two dits; ``power_db`` is searched when it shows nothing there
+    (a weak signal stands out less above a max-hold's floor). That center
+    moves onto the step's raster when the raster point is close (within a
+    quarter step or a bin): a broadcast station lands on its 100 kHz
+    channel, while a 2 m simplex channel (on a 5 kHz raster) is not dragged
+    to the 12.5 kHz one. Clicks away from any signal, and in USB/LSB (where
+    the dial is the signal's edge), go to the step's raster, or to the
+    plot's pixel resolution when a step is finer than a pixel.
     """
     click = float(click_hz)
     step = float(step_hz) if step_hz and step_hz > 0 else 0.0
     pixel = _pixel_resolution(hz_per_px)
     candidate: Optional[float] = None
     bin_hz = 0.0
-    data = None if power_db is None else np.asarray(power_db, dtype=np.float64)
-    if (
-        data is not None
-        and data.ndim == 1
-        and len(data) >= 8
-        and span_hz > 0
-        and mode_key not in _EDGE_TUNED_MODES
-        and np.all(np.isfinite(data))
-    ):
-        n = len(data)
-        bin_hz = span_hz / n
-        center_bin = (click - start_hz) / bin_hz
-        half = max(1, int(round(search_px * hz_per_px / bin_hz)))
-        lo = max(0, int(math.floor(center_bin)) - half)
-        hi = min(n, int(math.ceil(center_bin)) + half + 1)
-        if hi > lo:
-            peak = lo + int(np.argmax(data[lo:hi]))
-            floor_db = float(np.median(data))
-            if data[peak] - floor_db >= min_snr_db:
-                where = _signal_center(data, peak, float(data[peak]) - 6.0)
-                candidate = start_hz + where * bin_hz
+    if mode_key not in _EDGE_TUNED_MODES:
+        for data in (recent_db, power_db):
+            found = _signal_near(
+                click, data, start_hz, span_hz, hz_per_px, search_px, min_snr_db
+            )
+            if found is not None:
+                candidate, bin_hz = found
+                break
     if candidate is None:
         if step >= pixel:
             return _on_raster(click, step)

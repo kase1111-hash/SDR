@@ -281,6 +281,27 @@ class TestUnknownRate(unittest.TestCase):
         self.assertEqual(IQRecorder(0.0).duration_seconds, 0.0)
         self.assertEqual(AudioRecorder(sample_rate=0).duration_seconds, 0.0)
 
+    def test_an_unknown_frequency_is_left_out_of_sigmf(self):
+        # REC-13 alone: the rate is known, the center frequency isn't (it
+        # was written as 0.0, a recording centered at 0 Hz to other tools).
+        from sdr_module.dsp.recording import (
+            FileFormat,
+            SampleFormat,
+            load_iq_file,
+            save_iq_file,
+        )
+
+        path = os.path.join(self.folder, "take.sigmf-data")
+        save_iq_file(
+            path, np.zeros(64, np.complex64), 1e6, 0.0, file_format=FileFormat.SIGMF
+        )
+        meta = _read_json(os.path.join(self.folder, "take.sigmf-meta"))
+        self.assertEqual(meta["global"]["core:sample_rate"], 1e6)
+        self.assertNotIn("core:frequency", meta["captures"][0])
+        _samples, info = load_iq_file(path)
+        self.assertEqual((info.sample_rate, info.center_frequency), (1e6, 0.0))
+        self.assertEqual(info.sample_format, SampleFormat.FLOAT32)
+
 
 class TestUnknownRateInTheWindow(_ReviewCase):
     def test_a_converted_capture_left_unknown_saves_as_sigmf_and_cs16(self):

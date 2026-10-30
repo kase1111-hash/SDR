@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from contextlib import contextmanager
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -213,10 +214,32 @@ DEFAULT_FM_DEVIATION = "25 kHz"
 SQUELCH_RANGE = (-120, 0)
 
 # Named like File > Save Recording's filters, which preselect the choice.
+# SigMF first: it keeps the frequency and sample rate in a form every SDR
+# program reads.
 RECORDING_FORMATS = (
+    "SigMF, keeps frequency & rate",
     "Complex Float32 I/Q (.cf32)",
+    "Complex Int16 I/Q (.cs16)",
     "WAV, 16-bit I/Q (.wav)",
-    "SigMF (.sigmf-data)",
+    "Raw Float32 I/Q (.raw)",
+)
+#: The file extension of each of RECORDING_FORMATS (the save format).
+RECORDING_FORMAT_EXTENSIONS = (".sigmf-data", ".cf32", ".cs16", ".wav", ".raw")
+# What the Record buttons record: (key, Record list text, tooltip).
+RECORD_KINDS: Tuple[Tuple[str, str, str], ...] = (
+    (
+        "iq",
+        "I/Q samples",
+        "The raw radio samples of the whole span: play, decode or convert "
+        "them later (about 19 MB a second at 2.4 MS/s).",
+    ),
+    (
+        "audio",
+        "Audio (what you hear)",
+        "The demodulated audio as a 48 kHz WAV file that any player plays, "
+        "saved in the recordings folder as it records (Radio > Record Audio, "
+        "Ctrl+Shift+A).",
+    ),
 )
 
 # (license class, combo text, TX privileges summary)
@@ -263,9 +286,17 @@ _APPLY_PRESET_TIP = "Tune to this preset and set its bandwidth and demodulation 
 
 _STATUS_READY = "Ready"
 _STATUS_RECORDING = "● Recording"
+_STATUS_RECORDING_AUDIO = "● Recording audio"
 _STATUS_PAUSED = "❚❚ Paused"
 _STATUS_ARMED = "◌ Armed – waiting for the receiver"
+_STATUS_WAITING = "◌ Waiting – resumes with the receiver"
 _ARMED_TIP = "Samples are captured once the receiver starts (Space)"
+_WAITING_TIP = "The receiver is stopped: recording resumes when it starts again (Space)"
+_AUTO_SAVE_TIP = (
+    "When an I/Q recording stops, save it in the recordings folder with an "
+    "automatic name (iq_<frequency>_<rate>_<date>_<time>) in the format above, "
+    "with no Save step. Audio recordings are always saved there."
+)
 _PAUSE_TEXT = "❚❚ Pause"
 _RESUME_TEXT = "▶ Resume"
 _RECORD_TEXT = "● Record"
@@ -282,6 +313,14 @@ def _parse_hz(text: str) -> float:
     value, _, unit = text.strip().partition(" ")
     scale = {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}.get(unit.strip(), 1.0)
     return float(value) * scale
+
+
+def _elide_middle(text: str, limit: int) -> str:
+    """``text`` shortened to ``limit`` characters with "…" in the middle."""
+    if len(text) <= limit:
+        return text
+    keep = limit - 1
+    return text[: (keep + 1) // 2] + "…" + text[len(text) - keep // 2 :]
 
 
 def _format_mhz(freq_hz: float) -> str:
@@ -732,6 +771,15 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         # Pause (True) / resume (False). The Pause button is only enabled
         # when something is connected to this signal.
         recording_paused = pyqtSignal(bool)
+        # What Record records changed ("iq" or "audio").
+        record_kind_changed = pyqtSignal(str)
+        # The take shown under the Record buttons: Save..., Discard (or
+        # Unload) and Open Folder; the recordings folder and auto-save.
+        take_save_requested = pyqtSignal()
+        take_discard_requested = pyqtSignal()
+        open_folder_requested = pyqtSignal()
+        folder_change_requested = pyqtSignal()
+        auto_save_changed = pyqtSignal(bool)
         license_changed = pyqtSignal(object)  # LicenseClass
         squelch_changed = pyqtSignal(float)  # dB
         agc_changed = pyqtSignal(bool)
@@ -756,8 +804,10 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
         self._form_labels: List[QWidget] = []
         self._wheel_guard = _WheelGuard(self)
-        # A recording is "armed" while it waits for the receiver to start.
+        # A recording is "armed" while it waits for the receiver to start
+        # ("waiting" once it has captured something: it resumes).
         self._armed = False
+        self._waiting = False
         # Bandwidth and FM deviation last used with each filter profile
         # (see filter_profile), and whether a mode change is applying them.
         self._filter_memory: Dict[str, Dict[str, str]] = {}
@@ -1164,11 +1214,53 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     def _build_recording_group(self) -> "QGroupBox":
         group = QGroupBox("Recording")
         form = self._make_form(group)
+        self._recording_form = form
+
+        # What Record records: the I/Q samples or the audio heard.
+        self._kind_combo = self._shrinkable_combo(QComboBox())
+        for key, text, tip in RECORD_KINDS:
+            self._kind_combo.addItem(text, key)
+            self._kind_combo.setItemData(
+                self._kind_combo.count() - 1, tip, Qt.ItemDataRole.ToolTipRole
+            )
+        self._kind_combo.setToolTip(
+            "What the Record buttons record: the I/Q samples (raw radio "
+            "samples of the whole span) or the audio you hear (WAV)."
+        )
+        self._kind_combo.currentIndexChanged.connect(self._on_record_kind_changed)
+        self._add_row(form, "Record:", self._kind_combo)
 
         self._format_combo = self._shrinkable_combo(QComboBox())
-        self._format_combo.addItems(list(RECORDING_FORMATS))
+        for text, ext in zip(
+            RECORDING_FORMATS, RECORDING_FORMAT_EXTENSIONS, strict=True
+        ):
+            self._format_combo.addItem(text, ext)
+        self._format_combo.setItemData(
+            0,
+            "SigMF (.sigmf-data and .sigmf-meta): keeps the frequency, sample "
+            "rate and time, and SDR programs read it.",
+            Qt.ItemDataRole.ToolTipRole,
+        )
         self._format_combo.setToolTip(_FORMAT_TIP)
-        self._add_row(form, "Format:", self._format_combo)
+        self._format_label = self._add_row(form, "Format:", self._format_combo)
+
+        # Where audio recordings (and auto-saved I/Q takes) go.
+        self._folder_btn = QPushButton()
+        self._folder_btn.setAutoDefault(False)
+        self._folder_btn.setAccessibleName("Recordings folder")
+        self._folder_btn.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
+        )
+        self._folder_btn.clicked.connect(
+            lambda _checked=False: self.folder_change_requested.emit()
+        )
+        self._add_row(form, "Folder:", self._folder_btn)
+        self._folder_path = ""
+
+        self._auto_save_check = QCheckBox("Save automatically")
+        self._auto_save_check.setToolTip(_AUTO_SAVE_TIP)
+        self._auto_save_check.toggled.connect(self.auto_save_changed.emit)
+        form.addRow("", self._auto_save_check)
 
         buttons = QHBoxLayout()
         buttons.setSpacing(6)
@@ -1178,7 +1270,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._record_btn.setCheckable(True)
         self._record_btn.setToolTip(
             "Start or stop capturing I/Q samples. Save them afterwards with "
-            "File > Save Recording."
+            "Save... below or File > Save Recording."
         )
         self._record_btn.toggled.connect(self._on_record_toggled)
         buttons.addWidget(self._record_btn, 1)
@@ -1201,6 +1293,42 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._record_time.setToolTip("Elapsed recording time (hh:mm:ss)")
         status.addWidget(self._record_time)
         form.addRow(status)
+
+        # The take after Stop ("Unsaved · 00:00:04 · 73 MB @ 100.100 MHz")
+        # with Save... and Discard, or the file it was saved to.
+        self._take_box = QWidget()
+        take = QVBoxLayout(self._take_box)
+        take.setContentsMargins(0, 0, 0, 0)
+        take.setSpacing(4)
+        self._take_label = QLabel()
+        self._take_label.setWordWrap(True)
+        self._take_label.setAccessibleName("Recording to save")
+        take.addWidget(self._take_label)
+        take_buttons = QHBoxLayout()
+        take_buttons.setSpacing(6)
+        self._take_save_btn = QPushButton("Save...")
+        self._take_save_btn.setAutoDefault(False)
+        self._take_save_btn.clicked.connect(
+            lambda _checked=False: self.take_save_requested.emit()
+        )
+        take_buttons.addWidget(self._take_save_btn, 1)
+        self._take_discard_btn = QPushButton("Discard")
+        self._take_discard_btn.setAutoDefault(False)
+        self._take_discard_btn.clicked.connect(
+            lambda _checked=False: self.take_discard_requested.emit()
+        )
+        take_buttons.addWidget(self._take_discard_btn, 1)
+        self._take_folder_btn = QPushButton("Open Folder")
+        self._take_folder_btn.setAutoDefault(False)
+        self._take_folder_btn.setToolTip("Show the saved file in your file manager")
+        self._take_folder_btn.clicked.connect(
+            lambda _checked=False: self.open_folder_requested.emit()
+        )
+        take_buttons.addWidget(self._take_folder_btn, 1)
+        take.addLayout(take_buttons)
+        form.addRow(self._take_box)
+        self._take_box.setVisible(False)
+        self.set_recordings_folder("")
         return group
 
     # -- License ---------------------------------------------------------
@@ -1671,10 +1799,10 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             set_role(self._record_btn, role or None)
         if not recording:
             self._armed = False
-        self._format_combo.setEnabled(not recording)
-        self._format_combo.setToolTip(
-            "Can't change the format while recording" if recording else _FORMAT_TIP
-        )
+            self._waiting = False
+        # The format only says how the take will be saved: it can change
+        # while recording.
+        self._format_combo.setToolTip(_FORMAT_TIP)
 
         can_pause = recording and self._pause_supported()
         if not recording or not can_pause:
@@ -1698,16 +1826,22 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         recording = self._record_btn.isChecked()
         paused = recording and self._pause_btn.isChecked()
         armed = recording and self._armed and not paused
+        waiting = armed and getattr(self, "_waiting", False)
+        tip = ""
         if paused:
             text, tone = _STATUS_PAUSED, "warning"
+        elif waiting:
+            text, tone, tip = _STATUS_WAITING, "warning", _WAITING_TIP
         elif armed:
-            text, tone = _STATUS_ARMED, "warning"
+            text, tone, tip = _STATUS_ARMED, "warning", _ARMED_TIP
         elif recording:
-            text, tone = _STATUS_RECORDING, "danger"
+            audio = self.record_kind() == "audio"
+            text = _STATUS_RECORDING_AUDIO if audio else _STATUS_RECORDING
+            tone = "danger"
         else:
             text, tone = _STATUS_READY, None
         self._record_status.setText(text)
-        self._record_status.setToolTip(_ARMED_TIP if armed else "")
+        self._record_status.setToolTip(tip)
         set_tone(self._record_status, tone)
         # The timer only runs while samples are captured; idle or armed it is
         # muted (the LCD's default amber read as a warning).
@@ -1738,15 +1872,19 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         secs = seconds % 60
         self._record_time.setText(f"{hours:02d}:{minutes:02d}:{secs:02d}")
 
-    def set_recording_armed(self, armed: bool) -> None:
+    def set_recording_armed(self, armed: bool, waiting: bool = False) -> None:
         """Show whether the current recording is armed: started, but waiting
-        for the receiver to run before any samples are captured.
+        for the receiver to run before any samples are captured. With
+        ``waiting`` it has captured some already and resumes when the
+        receiver starts again.
 
         Only matters while recording; stopping the recording clears it.
         """
         armed = bool(armed)
-        if armed != self._armed:
+        waiting = armed and bool(waiting)
+        if armed != self._armed or waiting != getattr(self, "_waiting", False):
             self._armed = armed
+            self._waiting = waiting
             self._update_record_status()
 
     def is_recording_armed(self) -> bool:
@@ -1767,6 +1905,96 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     def get_recording_format(self) -> str:
         """Return the currently selected recording format label."""
         return self._format_combo.currentText()
+
+    def get_recording_extension(self) -> str:
+        """The file extension of the selected recording format (".cf32")."""
+        return str(self._format_combo.currentData() or "")
+
+    # -- what is recorded, where, and the take -------------------------------
+
+    def record_kind(self) -> str:
+        """What the Record buttons record: ``"iq"`` or ``"audio"``."""
+        return str(self._kind_combo.currentData() or "iq")
+
+    def set_record_kind(self, kind: str) -> None:
+        index = self._kind_combo.findData(kind)
+        if index >= 0:
+            self._kind_combo.setCurrentIndex(index)
+
+    def _on_record_kind_changed(self, _index: int) -> None:
+        kind = self.record_kind()
+        audio = kind == "audio"
+        # Audio is always 48 kHz WAV, saved in the folder as it records.
+        self._recording_form.setRowVisible(self._format_combo, not audio)
+        self._auto_save_check.setVisible(not audio)
+        self._record_btn.setToolTip(
+            "Start or stop recording what you hear (the demodulated audio) to "
+            "a WAV file in the recordings folder."
+            if audio
+            else "Start or stop capturing I/Q samples. Save them afterwards with "
+            "Save... below or File > Save Recording."
+        )
+        self.record_kind_changed.emit(kind)
+
+    def set_recordings_folder(self, path: str) -> None:
+        """Show where audio recordings and auto-saved takes go."""
+        self._folder_path = str(path or "")
+        name = os.path.basename(self._folder_path.rstrip("/\\")) or "Choose..."
+        self._folder_btn.setText(name)
+        self._folder_btn.setToolTip(
+            f"{self._folder_path}\nClick to choose another folder for audio "
+            "recordings and automatically saved I/Q takes."
+            if self._folder_path
+            else "Choose the folder for audio recordings and auto-saved takes."
+        )
+
+    def recordings_folder(self) -> str:
+        return self._folder_path
+
+    def is_auto_save(self) -> bool:
+        return self._auto_save_check.isChecked()
+
+    def set_auto_save(self, on: bool) -> None:
+        self._auto_save_check.setChecked(bool(on))
+
+    def show_take(self, text: str, state: Optional[str], tip: str = "") -> None:
+        """The take under the Record buttons: ``state`` "unsaved" (Save...
+        and Discard), "loaded" (a converted file: Save As... and Unload),
+        "saved" (Open Folder) or None (nothing shown)."""
+        self._take_box.setVisible(state is not None)
+        if state is None:
+            return
+        # A long file name can't wrap: it is shortened in the middle (the
+        # tooltip has all of it), so it never widens the panel.
+        words = [_elide_middle(word, 34) for word in str(text).split(" ")]
+        self._take_label.setText(" ".join(words))
+        self._take_label.setToolTip(tip or text)
+        set_tone(self._take_label, "warning" if state == "unsaved" else None)
+        keep = state in ("unsaved", "loaded")
+        self._take_save_btn.setVisible(keep)
+        self._take_discard_btn.setVisible(keep)
+        self._take_folder_btn.setVisible(state == "saved")
+        if state == "loaded":
+            self._take_save_btn.setText("Save As...")
+            self._take_save_btn.setToolTip(
+                "Write the loaded recording in another format (File > Save "
+                "Recording, Ctrl+S)"
+            )
+            self._take_discard_btn.setText("Unload")
+            self._take_discard_btn.setToolTip(
+                "Forget the loaded recording (the file itself stays on disk)"
+            )
+        else:
+            self._take_save_btn.setText("Save...")
+            self._take_save_btn.setToolTip(
+                "Write the recording to a file (File > Save Recording, Ctrl+S)"
+            )
+            self._take_discard_btn.setText("Discard")
+            self._take_discard_btn.setToolTip("Delete the recording without saving it")
+
+    def take_text(self) -> str:
+        """The take line shown ("" when none is)."""
+        return self._take_label.text() if self._take_box.isVisibleTo(self) else ""
 
     # ------------------------------------------------------------------
     # Presets

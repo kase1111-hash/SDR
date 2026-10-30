@@ -529,6 +529,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
     if HAS_PYQT6:
         protocol_changed = pyqtSignal(str)
+        # Decode File...: run the selected protocol over a recording
+        # (the main window's File > Decode Recording).
+        decode_file_requested = pyqtSignal()
         # freq_hz, label, demod mode and FM deviation ("" = keep the current
         # one): the same shape as BookmarksPanel.tune_requested.
         tune_requested = pyqtSignal(float, str, str, str)
@@ -613,6 +616,18 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._enabled_check.toggled.connect(self._on_decode_toggled)
         proto_row.addWidget(self._enabled_check)
         proto_row.addStretch(0)
+        # Decode a recording instead of the live signal (File > Decode
+        # Recording).
+        self._decode_file_btn = QPushButton("Decode File...")
+        self._decode_file_btn.setAutoDefault(False)
+        self._decode_file_btn.setToolTip(
+            "Decode a recorded I/Q file with a protocol, much faster than real "
+            "time; the messages are listed here (File > Decode Recording)"
+        )
+        self._decode_file_btn.clicked.connect(
+            lambda _checked=False: self.decode_file_requested.emit()
+        )
+        proto_row.addWidget(self._decode_file_btn)
         layout.addLayout(proto_row)
 
         # One line of decoder health: counts, signal, problems.

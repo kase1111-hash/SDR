@@ -82,3 +82,18 @@ def _qt_close_module_windows():
         app.setPalette(palette)
     if theme is not None:
         _restore_theme_name(theme)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _temporary_user_folders(tmp_path_factory):
+    """File dialogs start in Documents/SDR Recordings (created on first
+    use) and Pictures: the tests use temporary ones, not the user's."""
+    try:
+        from sdr_module.gui import file_dialogs
+    except ImportError:
+        yield
+        return
+    for name in ("documents", "pictures"):
+        file_dialogs.LOCATION_OVERRIDES[name] = str(tmp_path_factory.mktemp(name))
+    yield
+    file_dialogs.LOCATION_OVERRIDES.clear()

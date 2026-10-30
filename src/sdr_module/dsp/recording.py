@@ -19,7 +19,7 @@ import os
 import struct
 import wave
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, Optional, Tuple, Union
@@ -72,6 +72,267 @@ class RecordingMetadata:
 
     # Custom fields
     custom: Dict[str, Any] = field(default_factory=dict)
+
+
+def _utc_now() -> datetime:
+    """The time in UTC, without a time zone (as ``datetime.utcnow()`` gave)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+# =============================================================================
+# SigMF-style metadata for files that aren't SigMF (sidecars)
+# =============================================================================
+
+#: SigMF ``core:datatype`` of each sample format (little-endian).
+SIGMF_DATATYPES: Dict[SampleFormat, str] = {
+    SampleFormat.UINT8: "cu8",
+    SampleFormat.INT8: "ci8",
+    SampleFormat.INT16: "ci16_le",
+    SampleFormat.FLOAT32: "cf32_le",
+    SampleFormat.FLOAT64: "cf64_le",
+}
+# (SigMF names 8-bit types without an endianness; some writers add one.)
+_SIGMF_FORMATS: Dict[str, SampleFormat] = {
+    "cu8": SampleFormat.UINT8,
+    "cu8_le": SampleFormat.UINT8,
+    "ci8": SampleFormat.INT8,
+    "ci8_le": SampleFormat.INT8,
+    "ci16_le": SampleFormat.INT16,
+    "cf32_le": SampleFormat.FLOAT32,
+    "cf64_le": SampleFormat.FLOAT64,
+}
+
+#: Sample format of a headerless file, by its extension. ``.bin`` is what
+#: rtl_sdr writes (unsigned 8-bit); hackrf_transfer's cs8 ``.bin`` files and
+#: other ambiguous ones (``.iq``, ``.dat``) need the format named.
+RAW_EXTENSION_FORMATS: Dict[str, SampleFormat] = {
+    ".cu8": SampleFormat.UINT8,
+    ".cs8": SampleFormat.INT8,
+    ".cs16": SampleFormat.INT16,
+    ".cf32": SampleFormat.FLOAT32,
+    ".cf64": SampleFormat.FLOAT64,
+    ".raw": SampleFormat.FLOAT32,
+    ".iq": SampleFormat.FLOAT32,
+    ".bin": SampleFormat.UINT8,
+}
+
+SIDECAR_SUFFIX = ".sigmf-meta"
+
+
+def sigmf_format(datatype: Any) -> Optional[SampleFormat]:
+    """The sample format of a SigMF ``core:datatype`` (None: unsupported,
+    e.g. big-endian or real-valued data)."""
+    return _SIGMF_FORMATS.get(str(datatype or "").strip().lower())
+
+
+@dataclass
+class SidecarInfo:
+    """What a SigMF metadata file says about the data file it describes."""
+
+    path: Path  # the .sigmf-meta file
+    data_path: Path  # the file holding the samples
+    sample_format: Optional[SampleFormat] = None
+    sample_rate: float = 0.0
+    center_frequency: float = 0.0
+    header_bytes: int = 0
+    start_time: str = ""
+    description: str = ""
+    hardware: str = ""
+
+
+def sidecar_path(data_path: Union[str, Path]) -> Path:
+    """Where the metadata of a non-SigMF recording is kept: its whole name
+    plus ``.sigmf-meta`` (``take.cf32`` -> ``take.cf32.sigmf-meta``), so it
+    never collides with a SigMF recording ``take.sigmf-data`` beside it."""
+    path = Path(data_path)
+    return path.with_name(path.name + SIDECAR_SUFFIX)
+
+
+def read_sigmf_meta(meta_path: Union[str, Path]) -> Optional[Dict[str, Any]]:
+    """The JSON of a ``.sigmf-meta`` file (None if it can't be read)."""
+    try:
+        with open(meta_path, "r", encoding="utf-8") as handle:
+            meta = json.load(handle)
+    except (OSError, ValueError) as e:
+        logger.debug(f"Can't read SigMF metadata {meta_path}: {e}")
+        return None
+    return meta if isinstance(meta, dict) else None
+
+
+def _positive(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if number > 0 and np.isfinite(number) else 0.0
+
+
+def _sidecar_info(
+    meta_path: Path, data_path: Path, meta: Dict[str, Any]
+) -> SidecarInfo:
+    global_meta = meta.get("global") or {}
+    captures = meta.get("captures") or [{}]
+    first = captures[0] if captures and isinstance(captures[0], dict) else {}
+    try:
+        header = max(0, int(first.get("core:header_bytes", 0) or 0))
+    except (TypeError, ValueError):
+        header = 0
+    return SidecarInfo(
+        path=meta_path,
+        data_path=data_path,
+        sample_format=sigmf_format(global_meta.get("core:datatype")),
+        sample_rate=_positive(global_meta.get("core:sample_rate")),
+        center_frequency=_positive(first.get("core:frequency")),
+        header_bytes=header,
+        start_time=str(first.get("core:datetime", "") or ""),
+        description=str(global_meta.get("core:description", "") or ""),
+        hardware=str(global_meta.get("core:hw", "") or ""),
+    )
+
+
+def _dataset_path(meta_path: Path, meta: Dict[str, Any]) -> Optional[Path]:
+    """The data file a metadata file names in ``core:dataset`` (a SigMF
+    non-conforming dataset), next to the metadata; None when it names none."""
+    dataset = (meta.get("global") or {}).get("core:dataset")
+    if not dataset:
+        return None
+    return meta_path.with_name(Path(str(dataset)).name)
+
+
+def find_sidecar(data_path: Union[str, Path]) -> Optional[SidecarInfo]:
+    """The SigMF metadata describing a recording that isn't SigMF itself.
+
+    ``<name>.sigmf-meta`` (see :func:`sidecar_path`) unless it names
+    another file, or a same-stem ``<stem>.sigmf-meta`` only when its
+    ``core:dataset`` names this file: a SigMF recording's metadata
+    (``take.sigmf-meta`` for ``take.sigmf-data``) never describes
+    ``take.cs16`` beside it.
+    """
+    path = Path(data_path)
+    if path.suffix.lower() in (".sigmf-data", SIDECAR_SUFFIX, ".sigmf"):
+        return None
+    own = sidecar_path(path)
+    for meta_path in (own, path.with_suffix(SIDECAR_SUFFIX)):
+        if meta_path == path or not meta_path.is_file():
+            continue
+        meta = read_sigmf_meta(meta_path)
+        if meta is None:
+            continue
+        dataset = _dataset_path(meta_path, meta)
+        if dataset is None and meta_path != own:
+            continue
+        if dataset is not None and dataset.name != path.name:
+            continue
+        return _sidecar_info(meta_path, path, meta)
+    return None
+
+
+def write_sidecar(
+    data_path: Union[str, Path],
+    sample_format: SampleFormat,
+    sample_rate: float,
+    center_frequency: float = 0.0,
+    *,
+    header_bytes: int = 0,
+    start_time: str = "",
+    description: str = "",
+    hardware: str = "",
+) -> Path:
+    """Describe a raw or WAV recording in ``<name>.sigmf-meta`` beside it
+    (a SigMF non-conforming dataset: ``core:dataset`` names the file), so
+    its sample rate and centre frequency survive. A rate or frequency of 0
+    (unknown) is left out rather than invented. Returns the metadata path.
+    """
+    path = Path(data_path)
+    global_meta: Dict[str, Any] = {
+        "core:datatype": SIGMF_DATATYPES[sample_format],
+        "core:version": "1.0.0",
+        "core:dataset": path.name,
+        "core:recorder": "SDR Module",
+    }
+    rate = _positive(sample_rate)
+    if rate:
+        global_meta["core:sample_rate"] = rate
+    if description:
+        global_meta["core:description"] = description
+    if hardware:
+        global_meta["core:hw"] = hardware
+    capture: Dict[str, Any] = {"core:sample_start": 0}
+    center = _positive(center_frequency)
+    if center:
+        capture["core:frequency"] = center
+    if start_time:
+        capture["core:datetime"] = start_time
+    if header_bytes:
+        capture["core:header_bytes"] = int(header_bytes)
+    meta = {"global": global_meta, "captures": [capture], "annotations": []}
+    meta_path = sidecar_path(path)
+    with open(meta_path, "w", encoding="utf-8") as handle:
+        json.dump(meta, handle, indent=2)
+    return meta_path
+
+
+def wav_data_offset(path: Union[str, Path]) -> int:
+    """Where a WAV file's samples start (the size of everything before its
+    ``data`` chunk), or 0 if it isn't a WAV file."""
+    try:
+        with open(path, "rb") as handle:
+            if handle.read(4) != b"RIFF":
+                return 0
+            handle.read(4)
+            if handle.read(4) != b"WAVE":
+                return 0
+            while True:
+                header = handle.read(8)
+                if len(header) < 8:
+                    return 0
+                name, size = header[:4], struct.unpack("<I", header[4:])[0]
+                if name == b"data":
+                    return handle.tell()
+                handle.seek(size + (size & 1), os.SEEK_CUR)
+    except OSError:
+        return 0
+
+
+def bytes_per_complex_sample(sample_format: SampleFormat) -> int:
+    """Bytes one I/Q pair takes in ``sample_format`` (cu8: 2, cf32: 8)."""
+    return {
+        SampleFormat.UINT8: 2,
+        SampleFormat.INT8: 2,
+        SampleFormat.INT16: 4,
+        SampleFormat.FLOAT32: 8,
+        SampleFormat.FLOAT64: 16,
+    }[sample_format]
+
+
+def iq_from_bytes(data: bytes, sample_format: SampleFormat) -> np.ndarray:
+    """Interleaved I/Q bytes as complex64, scaled to +/-1 full scale and
+    converted in float32 (no float64 or complex128 temporaries, which took
+    six times the result's memory). A trailing partial sample is ignored."""
+    width = bytes_per_complex_sample(sample_format)
+    count = len(data) // width
+    out = np.empty(count, dtype=np.complex64)
+    if count == 0:
+        return out
+    data = data[: count * width]
+    if sample_format is SampleFormat.FLOAT32:
+        out[:] = np.frombuffer(data, dtype="<c8")
+        return out
+    # Each conversion runs in place in the result (no temporaries).
+    parts = out.view(np.float32)
+    if sample_format is SampleFormat.FLOAT64:
+        parts[:] = np.frombuffer(data, dtype="<f8")
+    elif sample_format is SampleFormat.INT16:
+        parts[:] = np.frombuffer(data, dtype="<i2")
+        np.divide(parts, np.float32(32767.0), out=parts)
+    elif sample_format is SampleFormat.INT8:
+        parts[:] = np.frombuffer(data, dtype=np.int8)
+        np.divide(parts, np.float32(127.0), out=parts)
+    else:  # UINT8: 127.5 is zero
+        parts[:] = np.frombuffer(data, dtype=np.uint8)
+        np.subtract(parts, np.float32(127.5), out=parts)
+        np.divide(parts, np.float32(127.5), out=parts)
+    return out
 
 
 class IQRecorder:
@@ -265,7 +526,7 @@ class IQRecorder:
 
         self._filepath = Path(filepath)
         self._samples_written = 0
-        self._start_time = datetime.utcnow()
+        self._start_time = _utc_now()
         self._metadata.start_time = self._start_time.isoformat() + "Z"
 
         if self._file_format == FileFormat.WAV:
@@ -456,19 +717,27 @@ class IQPlayer:
         filepath: Union[str, Path],
         sample_format: Optional[SampleFormat] = None,
         sample_rate: Optional[float] = None,
+        center_frequency: Optional[float] = None,
     ):
         """
         Initialize I/Q player.
 
         Args:
             filepath: Path to recording file
-            sample_format: Sample format (auto-detect if None)
-            sample_rate: Sample rate (auto-detect if None)
+            sample_format: Sample format (auto-detect if None; a SigMF or
+                WAV file's own format always wins)
+            sample_rate: Sample rate (from the file's metadata if None)
+            center_frequency: Center frequency (from the metadata if None)
         """
         self._filepath = Path(filepath)
         self._sample_format = sample_format
-        self._sample_rate = sample_rate or 0.0
+        self._sample_rate = 0.0
         self._center_frequency = 0.0
+        # Values given by the caller win over the file's metadata.
+        self._given_rate = _positive(sample_rate)
+        self._given_center = (
+            None if center_frequency is None else max(0.0, float(center_frequency))
+        )
 
         # Playback state
         self._file: Optional[BinaryIO] = None
@@ -476,12 +745,18 @@ class IQPlayer:
         self._position = 0
         self._total_samples = 0
         self._eof = False
+        # Bytes before the first sample (a non-SigMF dataset's header).
+        self._header_bytes = 0
+        # The file the samples are read from, and the metadata file used.
+        self._data_path = self._filepath
+        self._meta_path: Optional[Path] = None
 
         # Metadata
         self._metadata: Optional[RecordingMetadata] = None
 
         # Open file
         self._open()
+        self._apply_given_values()
 
     def _open(self) -> None:
         """Open the recording file."""
@@ -496,56 +771,79 @@ class IQPlayer:
         else:
             self._open_raw()
 
+    def _apply_given_values(self) -> None:
+        """The caller's sample rate and centre frequency over the file's."""
+        if self._given_rate:
+            self._sample_rate = self._given_rate
+        if self._given_center is not None:
+            self._center_frequency = self._given_center
+        meta = self._metadata
+        if meta is None:
+            meta = self._metadata = RecordingMetadata(
+                sample_format=self._sample_format or SampleFormat.FLOAT32
+            )
+        meta.sample_rate = self._sample_rate
+        meta.center_frequency = self._center_frequency
+        meta.num_samples = self._total_samples
+        if self._sample_rate > 0:
+            meta.duration_seconds = self._total_samples / self._sample_rate
+
+    def _use_sidecar(self, info: "SidecarInfo") -> None:
+        """Rate, centre frequency, format and header from a metadata file."""
+        self._meta_path = info.path
+        self._sample_rate = info.sample_rate or self._sample_rate
+        self._center_frequency = info.center_frequency
+        self._header_bytes = info.header_bytes
+        self._metadata = RecordingMetadata(
+            sample_rate=self._sample_rate,
+            center_frequency=self._center_frequency,
+            sample_format=self._sample_format or SampleFormat.FLOAT32,
+            start_time=info.start_time,
+            description=info.description,
+            hardware=info.hardware,
+        )
+
+    def _open_data_file(self, path: Path) -> None:
+        """Open the samples' file and count the samples after the header."""
+        self._data_path = path
+        self._file = open(path, "rb")
+        # Size from fstat on the open file (no race with a rename).
+        file_size = os.fstat(self._file.fileno()).st_size
+        self._header_bytes = min(self._header_bytes, file_size)
+        bytes_per_sample = self._get_bytes_per_sample() * 2  # I and Q
+        self._total_samples = (file_size - self._header_bytes) // bytes_per_sample
+        if self._header_bytes:
+            self._file.seek(self._header_bytes)
+
     def _open_sigmf(self) -> None:
-        """Open SigMF recording."""
+        """Open SigMF recording (or a SigMF metadata file naming another
+        file as its dataset, which may have a header to skip)."""
         # Find metadata file
-        meta_path = self._filepath.with_suffix(".sigmf-meta")
+        if self._filepath.suffix.lower() == SIDECAR_SUFFIX:
+            meta_path = self._filepath
+        else:
+            meta_path = self._filepath.with_suffix(SIDECAR_SUFFIX)
         data_path = self._filepath.with_suffix(".sigmf-data")
 
-        if not data_path.exists():
+        meta = read_sigmf_meta(meta_path) if meta_path.exists() else None
+        dataset = _dataset_path(meta_path, meta) if meta is not None else None
+        if dataset is not None and dataset.exists():
+            data_path = dataset
+        elif not data_path.exists():
             data_path = self._filepath
 
-        # Read metadata
-        if meta_path.exists():
-            with open(meta_path, "r") as f:
-                sigmf_meta = json.load(f)
+        if meta is not None:
+            info = _sidecar_info(meta_path, data_path, meta)
+            # A SigMF file says its own format (cf32 when it doesn't).
+            self._sample_format = info.sample_format or SampleFormat.FLOAT32
+            self._use_sidecar(info)
+        elif self._sample_format is None:
+            self._sample_format = SampleFormat.FLOAT32
 
-            global_meta = sigmf_meta.get("global", {})
-            captures = sigmf_meta.get("captures", [{}])
-
-            # Parse datatype
-            datatype = global_meta.get("core:datatype", "cf32_le")
-            format_map = {
-                "cu8": SampleFormat.UINT8,
-                "ci8": SampleFormat.INT8,
-                "ci16_le": SampleFormat.INT16,
-                "cf32_le": SampleFormat.FLOAT32,
-                "cf64_le": SampleFormat.FLOAT64,
-            }
-            self._sample_format = format_map.get(datatype, SampleFormat.FLOAT32)
-
-            self._sample_rate = global_meta.get("core:sample_rate", 0.0)
-            if captures:
-                self._center_frequency = captures[0].get("core:frequency", 0.0)
-
-            self._metadata = RecordingMetadata(
-                sample_rate=self._sample_rate,
-                center_frequency=self._center_frequency,
-                sample_format=self._sample_format,
-                description=global_meta.get("core:description", ""),
-                hardware=global_meta.get("core:hw", ""),
-            )
-
-        # Open data file
-        self._file = open(data_path, "rb")
-
-        # Calculate total samples using fstat on open file to avoid TOCTOU race
-        file_size = os.fstat(self._file.fileno()).st_size
-        bytes_per_sample = self._get_bytes_per_sample() * 2  # I and Q
-        self._total_samples = file_size // bytes_per_sample
+        self._open_data_file(data_path)
 
     def _open_wav(self) -> None:
-        """Open WAV recording."""
+        """Open WAV recording (its centre frequency from a sidecar)."""
         self._wav_file = wave.open(str(self._filepath), "rb")
 
         # Get parameters
@@ -562,42 +860,44 @@ class IQPlayer:
         else:
             self._sample_format = SampleFormat.INT16
 
-        self._metadata = RecordingMetadata(
-            sample_rate=self._sample_rate,
-            sample_format=self._sample_format,
-            num_samples=self._total_samples,
-        )
+        rate = self._sample_rate
+        sidecar = find_sidecar(self._filepath)
+        if sidecar is not None:
+            self._use_sidecar(sidecar)
+            self._header_bytes = 0  # the wave module reads the header
+            if rate > 0:
+                self._sample_rate = rate  # the header's rate is the truth
+        else:
+            self._metadata = RecordingMetadata(
+                sample_rate=self._sample_rate,
+                sample_format=self._sample_format,
+                num_samples=self._total_samples,
+            )
 
     def _open_raw(self) -> None:
-        """Open raw I/Q file."""
-        # Try to detect format from extension
+        """Open raw I/Q file (its metadata from a sidecar, if there is one)."""
         suffix = self._filepath.suffix.lower()
 
-        format_map = {
-            ".cu8": SampleFormat.UINT8,
-            ".cs8": SampleFormat.INT8,
-            ".cs16": SampleFormat.INT16,
-            ".cf32": SampleFormat.FLOAT32,
-            ".cf64": SampleFormat.FLOAT64,
-            ".raw": SampleFormat.FLOAT32,
-            ".iq": SampleFormat.FLOAT32,
-        }
+        sidecar = find_sidecar(self._filepath)
+        if sidecar is not None:
+            if self._sample_format is None:
+                self._sample_format = sidecar.sample_format
+            self._use_sidecar(sidecar)
 
         if self._sample_format is None:
-            self._sample_format = format_map.get(suffix, SampleFormat.FLOAT32)
+            self._sample_format = RAW_EXTENSION_FORMATS.get(
+                suffix, SampleFormat.FLOAT32
+            )
 
-        self._file = open(self._filepath, "rb")
+        self._open_data_file(self._filepath)
 
-        # Calculate total samples using fstat on open file to avoid TOCTOU race
-        file_size = os.fstat(self._file.fileno()).st_size
-        bytes_per_sample = self._get_bytes_per_sample() * 2
-        self._total_samples = file_size // bytes_per_sample
-
-        self._metadata = RecordingMetadata(
-            sample_rate=self._sample_rate,
-            sample_format=self._sample_format,
-            num_samples=self._total_samples,
-        )
+        if self._metadata is None:
+            self._metadata = RecordingMetadata(
+                sample_rate=self._sample_rate,
+                sample_format=self._sample_format,
+                num_samples=self._total_samples,
+            )
+        self._metadata.sample_format = self._sample_format
 
     def _get_bytes_per_sample(self) -> int:
         """Get bytes per sample component."""
@@ -655,6 +955,16 @@ class IQPlayer:
         """Get recording metadata."""
         return self._metadata
 
+    @property
+    def data_path(self) -> Path:
+        """The file the samples are read from."""
+        return self._data_path
+
+    @property
+    def metadata_path(self) -> Optional[Path]:
+        """The SigMF metadata (or sidecar) file read, if any."""
+        return self._meta_path
+
     def read(self, num_samples: int) -> np.ndarray:
         """
         Read samples from recording.
@@ -672,44 +982,19 @@ class IQPlayer:
         return np.array([], dtype=np.complex64)
 
     def _read_raw(self, num_samples: int) -> np.ndarray:
-        """Read from raw file."""
+        """Read from raw file (converted in float32: see iq_from_bytes)."""
         if self._file is None:
             return np.array([], dtype=np.complex64)
-        bytes_per_sample = self._get_bytes_per_sample()
-        bytes_to_read = num_samples * bytes_per_sample * 2
+        width = self._get_bytes_per_sample() * 2
+        count = min(max(0, int(num_samples)), self._total_samples - self._position)
+        data = self._file.read(count * width) if count > 0 else b""
 
-        data = self._file.read(bytes_to_read)
-
-        if len(data) == 0:
+        samples = iq_from_bytes(data, self._sample_format or SampleFormat.FLOAT32)
+        if len(samples) == 0:
             self._eof = True
-            return np.array([], dtype=np.complex64)
-
-        # Convert to numpy
-        dtype = self._get_numpy_dtype()
-        samples = np.frombuffer(data, dtype=dtype)
-
-        # De-interleave I/Q
-        if len(samples) >= 2:
-            n_complex = len(samples) // 2
-            i_samples = samples[0::2].astype(np.float64)
-            q_samples = samples[1::2].astype(np.float64)
-
-            # Normalize based on format
-            if self._sample_format == SampleFormat.UINT8:
-                i_samples = (i_samples - 127.5) / 127.5
-                q_samples = (q_samples - 127.5) / 127.5
-            elif self._sample_format == SampleFormat.INT8:
-                i_samples = i_samples / 127.0
-                q_samples = q_samples / 127.0
-            elif self._sample_format == SampleFormat.INT16:
-                i_samples = i_samples / 32767.0
-                q_samples = q_samples / 32767.0
-
-            complex_samples = i_samples + 1j * q_samples
-            self._position += n_complex
-            return complex_samples.astype(np.complex64)
-
-        return np.array([], dtype=np.complex64)
+            return samples
+        self._position += len(samples)
+        return samples
 
     def _get_numpy_dtype(self) -> np.dtype:
         """Get numpy dtype."""
@@ -735,34 +1020,32 @@ class IQPlayer:
             self._eof = True
             return np.array([], dtype=np.complex64)
 
-        # Convert bytes to samples
+        # Convert bytes to samples (in float32, like _read_raw)
         sample_width = self._wav_file.getsampwidth()
         n_channels = self._wav_file.getnchannels()
 
-        raw: np.ndarray
         samples: np.ndarray
         if sample_width == 1:
-            raw = np.frombuffer(frames, dtype=np.uint8)
-            samples = (raw.astype(np.float64) - 128) / 128.0
-        elif sample_width == 2:
-            raw = np.frombuffer(frames, dtype=np.int16)
-            samples = raw.astype(np.float64) / 32767.0
+            samples = np.frombuffer(frames, dtype=np.uint8).astype(np.float32)
+            np.subtract(samples, np.float32(128.0), out=samples)
+            np.divide(samples, np.float32(128.0), out=samples)
         else:
-            raw = np.frombuffer(frames, dtype=np.int16)
-            samples = raw.astype(np.float64) / 32767.0
+            raw = np.frombuffer(frames[: len(frames) // 2 * 2], dtype="<i2")
+            samples = raw.astype(np.float32)
+            np.divide(samples, np.float32(32767.0), out=samples)
 
         # Handle channels
         if n_channels == 2:
             # Stereo: I on left, Q on right
-            i_samples = samples[0::2]
-            q_samples = samples[1::2]
-            complex_samples = i_samples + 1j * q_samples
+            complex_samples = np.empty(len(samples) // 2, dtype=np.complex64)
+            parts = complex_samples.view(np.float32)
+            parts[:] = samples[: 2 * len(complex_samples)]
         else:
             # Mono: real only
             complex_samples = samples.astype(np.complex64)
 
         self._position += len(complex_samples)
-        return complex_samples.astype(np.complex64)
+        return complex_samples
 
     def seek(self, position: int) -> None:
         """
@@ -771,16 +1054,14 @@ class IQPlayer:
         Args:
             position: Sample position
         """
-        if position < 0:
-            position = 0
-        if position >= self._total_samples:
-            position = self._total_samples - 1
+        # (The end itself is a position too: the next read returns nothing.)
+        position = min(max(0, int(position)), max(0, self._total_samples))
 
         if self._wav_file is not None:
             self._wav_file.setpos(position)
         elif self._file is not None:
             bytes_per_sample = self._get_bytes_per_sample() * 2
-            self._file.seek(position * bytes_per_sample)
+            self._file.seek(self._header_bytes + position * bytes_per_sample)
 
         self._position = position
         self._eof = False
@@ -1220,7 +1501,7 @@ class AudioRecorder:
         self._filepath = Path(filepath)
         self._samples_written = 0
         self._peak_level = 0.0
-        self._start_time = datetime.utcnow()
+        self._start_time = _utc_now()
         self._metadata.start_time = self._start_time.isoformat() + "Z"
 
         # Open WAV file
@@ -2430,7 +2711,7 @@ class FormatDetector:
         ".cf64": (FileFormat.RAW, SampleFormat.FLOAT64),
         ".raw": (FileFormat.RAW, SampleFormat.FLOAT32),
         ".iq": (FileFormat.RAW, SampleFormat.FLOAT32),
-        ".bin": (FileFormat.RAW, SampleFormat.FLOAT32),
+        ".bin": (FileFormat.RAW, SampleFormat.UINT8),  # rtl_sdr's output
         ".sigmf-data": (FileFormat.SIGMF, None),
         ".sigmf-meta": (FileFormat.SIGMF, None),
     }
@@ -2473,15 +2754,25 @@ class FormatDetector:
             suffix, (FileFormat.RAW, SampleFormat.FLOAT32)
         )
 
-        # Detect by magic bytes / content
+        # Detect by magic bytes / content. A file is SigMF by its own name;
+        # another file is described by SigMF metadata only when that
+        # metadata names it (its sidecar, see find_sidecar), never because
+        # a SigMF recording of the same stem lies beside it.
         try:
-            if suffix == ".wav" or self._is_wav_file(filepath):
-                return self._detect_wav(filepath)
-
-            elif suffix in (".sigmf-data", ".sigmf-meta") or self._has_sigmf_meta(
-                filepath
-            ):
+            if suffix in (".sigmf-data", ".sigmf-meta"):
                 return self._detect_sigmf(filepath)
+
+            sidecar = find_sidecar(filepath)
+            if suffix == ".wav" or self._is_wav_file(filepath):
+                info = self._detect_wav(filepath)
+                if sidecar is not None and info.is_valid:
+                    info.center_frequency = sidecar.center_frequency
+                    info.sample_rate = info.sample_rate or sidecar.sample_rate
+                    info.metadata.update(self._sidecar_metadata(sidecar))
+                return info
+
+            elif sidecar is not None:
+                return self._detect_with_sidecar(filepath, sidecar)
 
             else:
                 return self._detect_raw(filepath, sample_format)
@@ -2506,9 +2797,47 @@ class FormatDetector:
             return False
 
     def _has_sigmf_meta(self, filepath: Path) -> bool:
-        """Check if SigMF metadata file exists."""
-        meta_path = filepath.with_suffix(".sigmf-meta")
-        return meta_path.exists()
+        """Check if SigMF metadata describes this file (its own sidecar,
+        or a same-stem metadata file naming it as its dataset)."""
+        return find_sidecar(filepath) is not None
+
+    @staticmethod
+    def _sidecar_metadata(sidecar: "SidecarInfo") -> Dict[str, Any]:
+        return {
+            "detected_from": "sidecar",
+            "metadata_file": str(sidecar.path),
+            "sigmf_datetime": sidecar.start_time,
+            "sigmf_description": sidecar.description,
+            "sigmf_hardware": sidecar.hardware,
+        }
+
+    def _detect_with_sidecar(
+        self, filepath: Path, sidecar: "SidecarInfo"
+    ) -> FormatInfo:
+        """A raw file described by its sidecar (format, rate, centre)."""
+        suffix = filepath.suffix.lower()
+        sample_format = (
+            sidecar.sample_format
+            or self.EXTENSION_MAP.get(suffix, (FileFormat.RAW, SampleFormat.FLOAT32))[1]
+            or SampleFormat.FLOAT32
+        )
+        file_size = filepath.stat().st_size
+        bytes_per_sample = self.BYTES_PER_SAMPLE.get(sample_format, 4) * 2
+        num_samples = max(0, file_size - sidecar.header_bytes) // bytes_per_sample
+        rate = sidecar.sample_rate
+        return FormatInfo(
+            file_format=FileFormat.RAW,
+            sample_format=sample_format,
+            sample_rate=rate,
+            center_frequency=sidecar.center_frequency,
+            num_samples=num_samples,
+            num_channels=2,
+            file_size_bytes=file_size,
+            duration_seconds=num_samples / rate if rate > 0 else 0,
+            bits_per_sample=self.BYTES_PER_SAMPLE.get(sample_format, 4) * 8,
+            is_valid=True,
+            metadata=self._sidecar_metadata(sidecar),
+        )
 
     def _detect_wav(self, filepath: Path) -> FormatInfo:
         """Detect WAV file format."""
@@ -2556,7 +2885,7 @@ class FormatDetector:
     def _detect_sigmf(self, filepath: Path) -> FormatInfo:
         """Detect SigMF file format."""
         # Find metadata file
-        if filepath.suffix == ".sigmf-meta":
+        if filepath.suffix.lower() == ".sigmf-meta":
             meta_path = filepath
             data_path = filepath.with_suffix(".sigmf-data")
         else:
@@ -2568,10 +2897,16 @@ class FormatDetector:
 
         try:
             # Read metadata
-            sigmf_meta = {}
+            sigmf_meta: Dict[str, Any] = {}
             if meta_path.exists():
                 with open(meta_path, "r") as f:
                     sigmf_meta = json.load(f)
+            # A metadata file can name its data file (core:dataset), which
+            # may start with a header (core:header_bytes) to leave out.
+            dataset = _dataset_path(meta_path, sigmf_meta)
+            if dataset is not None and dataset.exists():
+                data_path = dataset
+            header = _sidecar_info(meta_path, data_path, sigmf_meta).header_bytes
 
             global_meta = sigmf_meta.get("global", {})
             captures = sigmf_meta.get("captures", [{}])
@@ -2596,7 +2931,7 @@ class FormatDetector:
             # Calculate samples from file size
             file_size = data_path.stat().st_size if data_path.exists() else 0
             bytes_per_sample = self.BYTES_PER_SAMPLE.get(sample_format, 4) * 2
-            num_samples = file_size // bytes_per_sample
+            num_samples = max(0, file_size - header) // bytes_per_sample
             duration = num_samples / sample_rate if sample_rate > 0 else 0
 
             return FormatInfo(
@@ -2616,6 +2951,10 @@ class FormatDetector:
                     "sigmf_author": global_meta.get("core:author", ""),
                     "sigmf_hardware": global_meta.get("core:hw", ""),
                     "sigmf_datatype": datatype,
+                    "sigmf_datetime": (
+                        captures[0].get("core:datetime", "") if captures else ""
+                    ),
+                    "data_file": str(data_path),
                 },
             )
         except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
@@ -2672,49 +3011,59 @@ class FormatDetector:
 
         # Read sample data
         with open(filepath, "rb") as f:
-            data = f.read(min(file_size, sample_count * 16))
+            data = f.read(min(file_size, max(4096, sample_count * 16)))
+        return guess_sample_format(data)
 
-        # Try different interpretations
-        scores: dict[SampleFormat, float] = {}
 
-        # UINT8: values 0-255, typically centered around 127-128
-        try:
-            samples = np.frombuffer(data, dtype=np.uint8)
-            if len(samples) > 10:
-                mean_val = np.mean(samples)
-                if 100 < mean_val < 156:  # Near center (127.5)
-                    scores[SampleFormat.UINT8] = float(
-                        1.0 - abs(mean_val - 127.5) / 127.5
-                    )
-        except (ValueError, IndexError) as e:
-            logger.debug(f"UINT8 format probe failed for {filepath}: {e}")
+def guess_sample_format(data: bytes) -> SampleFormat:
+    """Most likely sample format of headerless I/Q ``data``.
 
-        # INT16: values typically in reasonable range
-        try:
-            samples = np.frombuffer(data, dtype=np.int16)
-            if len(samples) > 10:
-                max_abs = np.max(np.abs(samples))
-                if max_abs < 32768:
-                    scores[SampleFormat.INT16] = 0.8 if max_abs > 100 else 0.3
-        except (ValueError, IndexError) as e:
-            logger.debug(f"INT16 format probe failed for {filepath}: {e}")
-
-        # FLOAT32: check for valid float values
-        try:
-            samples = np.frombuffer(data, dtype=np.float32)
-            if len(samples) > 10:
-                if not np.any(np.isnan(samples)) and not np.any(np.isinf(samples)):
-                    max_abs = np.max(np.abs(samples))
-                    if max_abs < 10.0:  # Typically normalized
-                        scores[SampleFormat.FLOAT32] = 0.9
-                    elif max_abs < 1000:
-                        scores[SampleFormat.FLOAT32] = 0.5
-        except (ValueError, IndexError) as e:
-            logger.debug(f"FLOAT32 format probe failed for {filepath}: {e}")
-
-        if scores:
-            return max(scores.keys(), key=lambda k: scores[k])
+    Floating-point data reads as finite numbers of a sensible size (integer
+    data read as floats gives NaNs, huge or vanishingly small values). For
+    integers, look at the bytes of each 16-bit pair: unsigned 8-bit (cu8,
+    rtl_sdr) sits around 128 in both; signed 8-bit (cs8, hackrf_transfer)
+    around 0, which as bytes is near 0 or 255, in both; little-endian
+    16-bit (cs16) has spread-out low bytes and high bytes near 0 or 255.
+    Signals so strong that these don't tell go to the reading whose
+    consecutive samples jump least (a wrong 8-bit reading wraps around).
+    """
+    for fmt, dtype in ((SampleFormat.FLOAT32, "<f4"), (SampleFormat.FLOAT64, "<f8")):
+        size = np.dtype(dtype).itemsize
+        values = np.frombuffer(data[: len(data) // size * size], dtype=dtype)
+        if values.size < 16:
+            continue
+        with np.errstate(all="ignore"):
+            if not np.all(np.isfinite(values)):
+                continue
+            magnitude = np.abs(values)
+            if magnitude.max() < 10.0 and np.percentile(magnitude, 90) > 1e-6:
+                return fmt
+    raw = np.frombuffer(data[: len(data) // 4 * 4], dtype=np.uint8)
+    if raw.size < 32:
         return SampleFormat.FLOAT32
+    low, high = raw[0::2], raw[1::2]
+
+    def near_middle(x: np.ndarray) -> float:
+        return float(np.mean(np.abs(x.astype(np.int16) - 128) < 32))
+
+    def near_zero(x: np.ndarray) -> float:
+        return float(np.mean(np.abs(x.view(np.int8).astype(np.int16)) < 32))
+
+    if near_middle(low) > 0.5 and near_middle(high) > 0.5:
+        return SampleFormat.UINT8
+    zero_low, zero_high = near_zero(low), near_zero(high)
+    if zero_high > 0.5 and zero_low < 0.4:
+        return SampleFormat.INT16
+    if zero_low > 0.4 and zero_high > 0.4:
+        return SampleFormat.INT8
+
+    def roughness(fmt: SampleFormat) -> float:
+        samples = iq_from_bytes(bytes(raw), fmt)
+        return float(np.mean(np.abs(np.diff(samples)))) if samples.size > 1 else 0.0
+
+    return min(
+        (SampleFormat.UINT8, SampleFormat.INT8, SampleFormat.INT16), key=roughness
+    )
 
 
 class FormatConverter:
@@ -3073,17 +3422,123 @@ def convert_format(
     )
 
 
-def get_file_info(filepath: Union[str, Path]) -> Dict[str, Any]:
+@dataclass
+class SampleCheck:
+    """What a look at a recording's samples found (:func:`check_iq_samples`)."""
+
+    samples: int = 0  # samples looked at
+    total: int = 0  # samples in the file
+    max_abs: float = 0.0
+    rms: float = 0.0
+    nonfinite: int = 0
+    #: Why the samples don't look right, in plain words ("" when they do).
+    problem: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return not self.problem
+
+
+def check_iq_samples(
+    filepath: Union[str, Path],
+    sample_format: Optional[SampleFormat] = None,
+    max_samples: int = 65536,
+) -> SampleCheck:
+    """Read a few stretches of a recording (its start, middle and end) as
+    ``sample_format`` and say whether they look like I/Q samples: finite
+    numbers within a few times full scale. Data read in the wrong format
+    (an rtl_sdr ``.bin`` read as cf32) gives NaNs or values like 1e31.
+    A file that states its own format (SigMF, WAV, a sidecar) can't be
+    read in another one: its problem says so instead."""
+    pieces = []
+    try:
+        with IQPlayer(filepath, sample_format) as player:
+            total = player.total_samples
+            name = (player.sample_format or SampleFormat.FLOAT32).value
+            stated = player.metadata_path is not None or player._wav_file is not None
+            if total == 0:
+                return SampleCheck(problem="The file holds no I/Q samples.")
+            per = max(1, int(max_samples) // 3)
+            for start in sorted(
+                {0, max(0, total // 2 - per // 2), max(0, total - per)}
+            ):
+                player.seek(start)
+                pieces.append(player.read(per))
+    except Exception as e:
+        return SampleCheck(problem=f"The file can't be read: {e}")
+    samples = np.concatenate(pieces) if pieces else np.zeros(0, np.complex64)
+    with np.errstate(all="ignore"):
+        finite = np.isfinite(samples)
+        good = samples[finite]
+        magnitude = np.abs(good).astype(np.float64)
+        max_abs = float(magnitude.max()) if magnitude.size else 0.0
+        rms = float(np.sqrt(np.mean(magnitude**2))) if magnitude.size else 0.0
+    nonfinite = int(samples.size - good.size)
+    problem = ""
+    beyond = max_abs > 4.0 or not np.isfinite(max_abs)
+    if nonfinite and stated:
+        problem = (
+            "Some samples aren't numbers (NaN or infinity): the file may be "
+            f"damaged, or its metadata gives the wrong sample format ({name})."
+        )
+    elif nonfinite:
+        problem = (
+            f"Some samples aren't numbers (NaN or infinity), so this is "
+            f"probably not {name} data. Choose another sample format."
+        )
+    elif beyond and stated:
+        problem = (
+            f"The samples reach {max_abs:.3g}, far beyond full scale (1.0): "
+            "they were saved with another scale (levels read high), or the "
+            "file is damaged."
+        )
+    elif beyond:
+        problem = (
+            f"The samples reach {max_abs:.3g}, far beyond full scale (1.0), so "
+            f"this is probably not {name} data. Choose another sample format."
+        )
+    return SampleCheck(
+        samples=int(samples.size),
+        total=int(total),
+        max_abs=max_abs,
+        rms=rms,
+        nonfinite=nonfinite,
+        problem=problem,
+    )
+
+
+def get_file_info(
+    filepath: Union[str, Path],
+    sample_format: Optional[SampleFormat] = None,
+    sample_rate: Optional[float] = None,
+    center_frequency: Optional[float] = None,
+) -> Dict[str, Any]:
     """
     Get human-readable file information.
 
     Args:
         filepath: Path to file
+        sample_format: Sample format of a headerless (raw) file, instead of
+            the one its extension suggests (SigMF and WAV say their own)
+        sample_rate: Sample rate to use instead of the file's (Hz)
+        center_frequency: Center frequency to use instead of the file's (Hz)
 
     Returns:
         Dictionary with file information
     """
     info = detect_format(filepath)
+    if info.is_valid:
+        if sample_format is not None and info.file_format is FileFormat.RAW:
+            bits = FormatDetector.BYTES_PER_SAMPLE[sample_format] * 8
+            info.sample_format = sample_format
+            info.bits_per_sample = bits
+            info.num_samples = info.file_size_bytes // (bits // 4)
+        if sample_rate:
+            info.sample_rate = float(sample_rate)
+        if center_frequency is not None:
+            info.center_frequency = max(0.0, float(center_frequency))
+        if info.sample_rate > 0:
+            info.duration_seconds = info.num_samples / info.sample_rate
 
     # Format duration nicely
     if info.duration_seconds > 0:

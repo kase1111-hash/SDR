@@ -1201,8 +1201,9 @@ class TextTxSource:
         """Where a station ID can go: the last sample position (counted
         like :attr:`position`) ahead of what was read and no later than
         ``limit`` at which the text can stop for it and go on after it, the
-        end of a word (:attr:`TextSignal.breaks`); None when there is none
-        (or while an earlier stop is still ahead)."""
+        end of a word (:attr:`TextSignal.breaks`) further on than the last
+        stop (some text always goes between two stops); None when there is
+        none (or while an earlier stop is still ahead)."""
         self._pass_stop()
         breaks = self.signal._breaks
         if self._stop_at is not None or not len(breaks) or not self._pieces:
@@ -1215,6 +1216,9 @@ class TextTxSource:
         at = text_at + offset + self._tail_samples()
         ok = (
             (text_at >= rest.start + rest.done)
+            # (not where the text went on after the last stop: its lead-in
+            # leaves room for the fade, and it would stop there again)
+            & (text_at > rest.start)
             & (text_at < rest.start + rest.length)
             # (room for the carrier to fade out before the stop)
             & (text_at + offset - self._ramp >= self._pos)
@@ -1238,6 +1242,7 @@ class TextTxSource:
             rest is None
             or rest.kind != _Piece.TEXT
             or not rest.start + rest.done <= text_at < rest.start + rest.length
+            or text_at <= rest.start  # (where it went on after the last stop)
         ):
             raise ValueError(f"the text can't stop at sample {at}")
         rate = self.sample_rate

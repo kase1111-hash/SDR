@@ -245,6 +245,89 @@ class TestIntervalIdPlacement:
         assert demod.rtty_decode(runs[0], RATE) == signal.check.sent
 
 
+def _drain_for(plan, job, seconds):
+    """:func:`_drain` for at most ``seconds`` of air time (a plan that never
+    ends would hang it). Returns (the sample where each ID began, the length
+    of each of the job's runs between the IDs, whether the plan ended)."""
+    id_starts, runs, run, handed, last_id = [], [], 0, 0, None
+    while handed < seconds * RATE:
+        before = job.source.position
+        block = plan.read()
+        if block is None:
+            break
+        if plan.last_id_began_at is not None and plan.last_id_began_at != last_id:
+            last_id = plan.last_id_began_at
+            id_starts.append(last_id)
+        if job.source.position != before:  # (the job's own samples)
+            run += len(block)
+        elif run:
+            runs.append(run)
+            run = 0
+        handed += len(block)
+    if run:
+        runs.append(run)
+    return id_starts, runs, plan.exhausted
+
+
+class TestTheTextAlwaysGoesOn:
+    """A text whose only early break is at its start (a long run of letters,
+    a pasted link) got an interval ID straight after the start ID, then the
+    same break was offered again after that ID: RTTY sent IDs back to back
+    and PSK31 (whose lead-in is longer than the fade) sent one ID after
+    another until Stop, the text never going on."""
+
+    def test_an_early_break_doesnt_bring_the_id_forward(self):
+        job, signal = _text_job("CQ " + "RY" * 400 + " K", "RTTY")
+        plan = _plan(job, AutoIdPolicy(True, True, 60.0))
+        id_starts, runs, ended = _drain_for(plan, job, 4 * signal.duration_s)
+        assert ended
+        assert plan.ids_sent == 4  # start, two interval IDs, end (6 before)
+        # At least half an interval of the job between two IDs...
+        assert min(runs[:-1]) >= 30.0 * RATE, np.array(runs) / RATE
+        # ... and never late.
+        assert np.diff(id_starts).max() <= 60.0 * RATE
+
+    def test_a_psk31_text_without_breaks_ends(self):
+        job, signal = _text_job("CQ " + "e" * 1000 + " K", "PSK31", freq=14.0703e6)
+        plan = _plan(job, AutoIdPolicy(True, True, 60.0))
+        id_starts, runs, ended = _drain_for(plan, job, 3 * signal.duration_s)
+        assert ended, f"{plan.ids_sent} IDs and still going"
+        assert plan.ids_sent == 4
+        assert min(runs[:-1]) >= 30.0 * RATE, np.array(runs) / RATE
+        assert np.diff(id_starts).max() <= 60.0 * RATE
+
+    def test_a_text_never_stops_twice_at_one_place(self):
+        """After a stop, the next break offered is further on in the text,
+        not the one it stopped at (its lead-in leaves room for the fade)."""
+        signal = TextSignal("CQ CQ CQ de W1AW pse k", TextSettings.for_mode("PSK31"))
+        source = signal.source(RATE, "direct", amplitude=0.9)
+        at = source.last_break(source.total_samples // 2)
+        added = source.pause_at(at)
+        while source.position < at:
+            assert len(source.read(at - source.position))
+        assert source.last_break(at + added) is None
+        later = source.last_break(source.total_samples)
+        assert later is not None and later > at + added
+
+    def test_a_short_interval_lets_the_text_go_on(self):
+        """A library caller's 2 s interval and a 0.1 s ID (no word space):
+        PSK31's 1.06 s lead-in after each ID is longer than half the
+        interval, and the text stopped at the same break for ever."""
+
+        def short_id(job):
+            tone = np.full(int(0.1 * job.sample_rate), 0.9, np.complex64)
+            return TxJob(
+                tone, job.sample_rate, job.center_hz, "CW", 150.0, "ID", is_id=True
+            )
+
+        text = "CQ CQ CQ de W1AW W1AW W1AW pse k"
+        job, signal = _text_job(text, "PSK31", freq=14.0703e6)
+        plan = _plan(job, AutoIdPolicy(False, False, 2.0), short_id)
+        _ids, _runs, ended = _drain_for(plan, job, 20 * signal.duration_s)
+        assert ended, f"{plan.ids_sent} IDs and still going"
+        assert plan.ids_sent <= len(signal.breaks) + 1
+
+
 def _varicode():
     from sdr_module.protocols.text_modes import VARICODE
 
@@ -310,6 +393,57 @@ class TestIdMemory:
         assert source._table.nbytes < 6e6  # (10 MB as float64)
 
 
+class _Zeros:
+    """A long job's samples (zeros), made as they are read."""
+
+    def __init__(self, count):
+        self.total_samples = int(count)
+        self.position = 0
+
+    def reset(self):
+        self.position = 0
+
+    def read(self, count):
+        n = max(0, min(int(count), self.total_samples - self.position))
+        self.position += n
+        return np.zeros(n, np.complex64)
+
+
+class TestExpectedIds:
+    @pytest.mark.parametrize(
+        "at_start, since, job_s",
+        [
+            (False, 200.0, 500.0),  # the interval runs out during the job
+            (False, 598.0, 7.0),  # ... at once: the ID goes first
+            (False, 100.0, 700.0),
+            (False, None, 700.0),
+            (True, None, 500.0),
+            (True, None, 1300.0),
+        ],
+    )
+    def test_the_count_is_what_the_plan_sends(self, at_start, since, job_s):
+        """TX-1: the first-use question's air time counts the IDs the
+        transmission gets, the one due during a job shorter than the
+        interval included (it was left out)."""
+        import time
+
+        from PyQt6.QtWidgets import QApplication
+
+        from sdr_module.gui.transmitter import Transmitter
+
+        QApplication.instance() or QApplication([])
+        engine = Transmitter()
+        engine._last_id_at = None if since is None else time.monotonic() - since
+        policy = AutoIdPolicy(at_start, True, 600.0)
+        rate = 8000.0
+        job = TxJob(_Zeros(job_s * rate), rate, 146.52e6, "FM", 12.5e3, "a carrier")
+        expected = engine.expected_ids(job, policy)
+        plan = _Plan(job, policy, _cw_id_factory(), since, threading.Event())
+        while plan.read() is not None:
+            pass
+        assert expected == plan.ids_sent
+
+
 # --------------------------------------------------------------------------- #
 # The window (a real SDRMainWindow, the HackRF on a fake backend)
 # --------------------------------------------------------------------------- #
@@ -351,6 +485,20 @@ class TestConfirmationCountsTheIds(_TxCase):
         job = TxJob(carrier, 2e6, 146.52e6, "FM", 12.5e3, "a test carrier")
         text = self._confirmation(job)
         self.assertIn(f"about {7.0 + id_s:.1f} s with your station ID", text)
+
+    def test_an_interval_id_during_the_job_is_counted(self):
+        """The last ID 200 s ago and a 500 s job: the interval runs out
+        300 s in, so the job gets that ID and the one at the end."""
+        import time
+
+        self.panel.set_callsign("W1AW")
+        self.panel._id_start_check.setChecked(False)
+        self.hackrf()
+        self.station.engine._last_id_at = time.monotonic() - 200.0
+        job = TxJob(_Zeros(500 * 2e6), 2e6, 146.52e6, "FM", 12.5e3, "a long carrier")
+        id_s = self.station.make_id_job(146.52e6).duration_s
+        text = self._confirmation(job)
+        self.assertIn(f"about {500.0 + 2 * id_s:.1f} s with your station ID", text)
 
     def test_transmit_text_says_the_id_goes_first(self):
         import time

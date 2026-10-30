@@ -525,9 +525,9 @@ class _Plan:
 
     def _choose_splice(self, source: Any) -> None:
         """Where in the job the next interval ID goes: the last break the
-        source reports that lets the ID begin by the time it is due, else
-        that time (the job fades out and in around it); nothing when the
-        job ends first."""
+        source reports that lets the ID begin by the time it is due (one in
+        the later half of the job until then), else that time (the job
+        fades out and in around it); nothing when the job ends first."""
         self._looked = True
         assert self._interval is not None
         due = self._job_read + max(
@@ -550,6 +550,12 @@ class _Plan:
             self._interval - self._since_id - gap,
             self._min_gap - self._job_since_id,
         )
+        # A break in the first half of the job until then would bring the ID
+        # well forward: a text whose only early break was its first word got
+        # one ID straight after another (PSK31, its lead-in longer than the
+        # fade, stopped at that break for ever). The job is then cut at the
+        # latest point instead, like one without breaks.
+        earliest = self._job_read + max(self._fade, (latest - self._job_read) // 2)
         at: Optional[int] = None
         finder = getattr(source, "last_break", None)
         if callable(finder):
@@ -558,7 +564,7 @@ class _Plan:
             except Exception as e:  # pragma: no cover - defensive
                 logger.warning(f"Could not find a break for the station ID: {e}")
                 found = None
-            if found is not None and self._job_read < int(found) <= latest:
+            if found is not None and earliest <= int(found) <= latest:
                 at = int(found)
         shaped = False
         pauser = getattr(source, "pause_at", None)
@@ -812,17 +818,24 @@ class Transmitter(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         """About how many station IDs :meth:`start` adds to ``job`` with
         ``policy`` now (for the air time the confirmation gives): one
         before it (asked for, or the interval ID due early in it), one per
-        interval while it runs, and one after it."""
+        interval while it runs (the first when the interval since the last
+        ID runs out), and one after it."""
         if job.is_id or not job.identify or policy is None or not policy.any():
             return 0
         first = bool(policy.at_start)
         interval = float(policy.interval_s or 0.0)
+        length = job.duration_s
         during = 0
         if interval > 0:
+            due = interval  # (into the job: the first interval ID)
             if not first:
                 since = max(0.0, self.seconds_since_last_id() or 0.0)
-                first = id_goes_first(interval - since, interval / 2.0, job.duration_s)
-            during = int(job.duration_s // interval)
+                due = interval - since
+                first = id_goes_first(due, interval / 2.0, length)
+            if first:
+                during = int(length // interval)
+            elif due < length:
+                during = 1 + int((length - due) // interval)
         return int(first) + during + int(bool(policy.at_end))
 
     # ------------------------------------------------------------ checks

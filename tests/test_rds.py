@@ -196,6 +196,26 @@ class TestSyncAndCorrection:
         assert decoder.frames_seen - decoder.frames_failed >= 2 * len(_groups()) - 3
         assert decoder.synced
 
+    @pytest.mark.parametrize("lost", [1, 2, 3, 5])
+    def test_lost_blocks_resync_without_garbage(self, lost):
+        # Whole blocks lost (a dropout of a multiple of 22 ms, e.g. samples
+        # skipped while the window was busy): the blocks after it still
+        # check, as other blocks of the group. Offset words A, B, C' and D
+        # are a one- or two-bit burst apart, so they used to be "corrected"
+        # into the blocks expected: the decoder stayed out of step, counted
+        # garbage groups as good and read the PI code as a program type
+        # ("Emergency Test").
+        bits = enc.rds_bits(_groups()) * 4
+        cut = len(bits) // 4 + 2 * 104 + 3 * 26  # before block D of a group
+        stream = bits[:cut] + bits[cut + 26 * lost :]
+        decoder = RDSDecoder(1187.5)
+        updates = decoder.decode_bits(stream, updates_only=True)
+        assert [u.pty for u in updates if u.update == "pty"] == [9]
+        assert [u.ps_name for u in updates if u.update == "ps"] == [NAME]
+        assert decoder.blocks_corrected == 0
+        # Back in step at once: only the groups the dropout cut are lost.
+        assert decoder.frames_seen - decoder.frames_failed >= 4 * len(_groups()) - 2
+
     def test_joining_mid_group_is_no_failure(self):
         # Sync found on blocks C and D: that group's A and B were before
         # the sync, so it is no failed group (it showed "1 failed check" on
@@ -321,6 +341,17 @@ class TestRDSLiveDecoder:
         assert status.detail == NAME and status.signal_present
         assert status.valid == status.frames > 20 and status.failed == 0
         assert status.last_time is not None
+
+    def test_a_cheap_channel_from_20_ms_s(self):
+        # A HackRF at 20 MS/s: the channel is decimated by 80 (16 x 5). It
+        # was 81 (9 x 9), whose first stage cost twice as much: the decoder
+        # took about 20 ms of each 33 ms frame.
+        channelizer = RDSLiveDecoder(20e6, 300e3)._channelizer
+        assert channelizer.output_rate == 250e3
+        assert channelizer._stages[0].factor >= 16
+        # From the usual rates the channel is as it was.
+        assert RDSLiveDecoder(2.4e6).channel_rate == 240e3
+        assert RDSLiveDecoder(2.048e6).channel_rate == 256e3
 
     def test_from_the_receivers_channel(self):
         # The receiver's broadcast FM channel: already at 0 Hz, 480 kS/s.

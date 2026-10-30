@@ -1660,6 +1660,14 @@ class RDSDecoder(ProtocolDecoder):
         for kind in kinds:
             if syndrome == self.OFFSETS[kind]:
                 return (block >> 10) & 0xFFFF, kind, False
+        other = self.SYNDROMES.get(syndrome)
+        if other is not None and all(self._SLOT[other] != self._SLOT[k] for k in kinds):
+            # It checks exactly as another block of the group: a block out
+            # of place (whole blocks were lost), not a damaged one. (Offset
+            # words A, B, C' and D are only a one- or two-bit burst from
+            # their neighbours', so "correcting" it would make, e.g., the
+            # PI code of block A into a block B of garbage.)
+            return None
         for kind in kinds:
             error = self._BURSTS.get(syndrome ^ self.OFFSETS[kind])
             if error is not None and self._burst_length(error) <= self.MAX_BURST:
@@ -1742,7 +1750,18 @@ class RDSDecoder(ProtocolDecoder):
                 self._in_block += 1
                 if self._in_block == self.BLOCK_SIZE:
                     self._in_block = 0
-                    self._synced_block(reg, syn)
+                    if (
+                        kind
+                        and previous
+                        and self._SLOT[kind] != self._expect
+                        and self._SLOT[previous[0]] == (self._SLOT[kind] - 1) % 4
+                    ):
+                        # Two good blocks in a row, in order, but not the
+                        # ones expected here: whole blocks were lost (a
+                        # dropout). Sync on them.
+                        self._acquire(previous, kind, reg)
+                    else:
+                        self._synced_block(reg, syn)
                 elif (
                     kind
                     and previous

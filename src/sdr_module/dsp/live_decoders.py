@@ -22,7 +22,7 @@ ACARS       channel (+/-5 kHz) -> AM envelope -> 1800 Hz complex mix and
 ADS-B       |I/Q| at the full device rate (at least 2 MS/s) -> ADSBDecoder
 CW (Morse)  channel (+/-250 Hz, ~2 kHz) -> envelope -> KeyingDetector (peak
             and noise trackers, hysteresis) -> MorseDecoder (timing, speed)
-RDS         channel (+/-100 kHz, ~240 kHz) -> FM discriminator (multiplex)
+RDS         channel (+/-100 kHz, ~250 kHz) -> FM discriminator (multiplex)
             -> RDSDemodulator (57 kHz locked to 3x the 19 kHz pilot, biphase,
             clock recovery, differential decoding) -> RDSDecoder
 ==========  =============================================================
@@ -627,8 +627,9 @@ class RDSLiveDecoder(LiveDecoder):
     """RDS (station name, RadioText, program type, clock) from the FM
     broadcast station at the tuned frequency.
 
-    The station's channel (+/-100 kHz) is picked out at about 240 kS/s and
-    FM-discriminated; :class:`~sdr_module.dsp.rds.RDSDemodulator` recovers
+    The station's channel (+/-100 kHz) is picked out at about 250 kS/s
+    (240 kS/s from 2.4 MS/s) and FM-discriminated;
+    :class:`~sdr_module.dsp.rds.RDSDemodulator` recovers
     the RDS bits from the multiplex (57 kHz locked to the 19 kHz pilot
     where there is one) and :class:`~sdr_module.dsp.protocols.RDSDecoder`
     finds the groups. With ``channel_ready`` the input already is the
@@ -648,7 +649,10 @@ class RDSLiveDecoder(LiveDecoder):
     unit = "group"
     PASS_HZ = 100e3
     STOP_HZ = 140e3
-    TARGET_RATE = 240e3
+    # 250 kS/s: from 20 MS/s (a HackRF) that is a decimation by 80 = 16 x 5,
+    # whose first stage costs half what 81 = 9 x 9 (246.9 kS/s) costs; from
+    # the other usual rates it gives the same channel as 240 kS/s.
+    TARGET_RATE = 250e3
     MIN_SAMPLE_RATE = 200e3
     #: Updates that are rows of their own (the PI code is in all of them).
     ROW_UPDATES = ("ps", "radio_text", "pty", "ptyn", "clock_time")

@@ -1595,9 +1595,16 @@ class CompactSignalMeter(QWidget if HAS_PYQT6 else object):
 
         layout.addStretch()
 
-    def update_samples(self, samples: np.ndarray) -> None:
-        """Update with samples."""
-        self._meter.update(samples)
+    def get_meter(self) -> SignalMeter:
+        """The signal meter (to calibrate it or set a noise floor)."""
+        return self._meter
+
+    def update_samples(
+        self, samples: np.ndarray, noise_dbfs: Optional[float] = None
+    ) -> None:
+        """Update with samples (and the channel's noise power in dBFS, if
+        known: else the meter estimates it, see :meth:`SignalMeter.update`)."""
+        self._meter.update(samples, noise_dbfs)
 
         # Update bar graph
         bar = self._meter.get_bar_graph(9)

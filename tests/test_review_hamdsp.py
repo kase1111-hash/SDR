@@ -908,5 +908,150 @@ class TestSstvHistoryMemory(unittest.TestCase):
         self.assertLess(held, 2 * 640 * 496 * 3)
 
 
+SMETER_RATE = 12500.0  # an NBFM channel's samples, as a library caller has them
+
+
+def _fm_voice(rng, n: int = 1250, snr_db: float = 60.0):
+    """A voice-like NBFM signal (300-3000 Hz audio, 2.5 kHz deviation) that
+    fills its 12.5 kHz channel, with noise; and the noise power (dBFS)."""
+    freqs = np.fft.rfftfreq(n, 1 / SMETER_RATE)
+    band = ((freqs > 300) & (freqs < 3000)).astype(float)
+    audio = np.fft.irfft(np.fft.rfft(rng.standard_normal(n)) * band, n)
+    audio /= 3.0 * np.std(audio)
+    signal = 0.03 * np.exp(2j * np.pi * 2500.0 * np.cumsum(audio) / SMETER_RATE)
+    noise_p = float(np.mean(np.abs(signal) ** 2)) / 10 ** (snr_db / 10)
+    noise = np.sqrt(noise_p / 2) * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    return (signal + noise).astype(np.complex64), 10 * np.log10(noise_p)
+
+
+class _MeterCase(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+
+        from sdr_module.ham import signal_meter as sm
+
+        self.sm = sm
+        self.now = 1000.0
+        patcher = mock.patch.object(sm.time, "time", lambda: self.now)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.rng = np.random.default_rng(7)
+        self.meter = sm.SignalMeter(SMETER_RATE)
+
+    def run_for(self, seconds: float, snr_db: float = 60.0, **kw):
+        """Blocks of 0.1 s for ``seconds``; the last reading."""
+        reading = None
+        for _ in range(int(round(seconds / 0.1))):
+            self.now += 0.1
+            block, _noise = _fm_voice(self.rng, snr_db=snr_db)
+            reading = self.meter.update(block, **kw)
+        return reading
+
+
+class TestSignalMeterNoiseFloor(_MeterCase):
+    """HAMDSP-10 (a): a floor set with set_noise_floor() was silently
+    replaced 2 s later by the meter's own estimate (-120.5 -> -72.7 dBm,
+    SNR 60 -> 12 dB, RST 59 -> 39); in 6bb37c7 it stayed."""
+
+    def true_floor_dbm(self) -> float:
+        _block, noise_dbfs = _fm_voice(self.rng)
+        return noise_dbfs + self.sm.UNCALIBRATED_DBFS_TO_DBM
+
+    def test_a_floor_set_once_stays_the_reference(self):
+        floor = self.true_floor_dbm()
+        self.meter.set_noise_floor(floor)
+        for _ in range(4):
+            reading = self.run_for(1.0)
+            self.assertAlmostEqual(reading.noise_dbm, floor, delta=0.01)
+            self.assertAlmostEqual(reading.snr_db, 60.0, delta=0.5)
+            self.assertEqual(self.meter.get_rst(), "59")
+
+    def test_a_retune_keeps_it(self):
+        floor = self.true_floor_dbm()
+        self.meter.set_noise_floor(floor)
+        self.run_for(0.5)
+        self.meter.reset_peak()
+        self.assertTrue(self.meter.has_noise_floor)
+        reading = self.run_for(3.0)
+        self.assertAlmostEqual(reading.noise_dbm, floor, delta=0.01)
+
+    def test_noise_given_with_the_updates_comes_first_while_it_comes(self):
+        floor = self.true_floor_dbm()
+        self.meter.set_noise_floor(floor)
+        given = floor + 10.0 - self.sm.UNCALIBRATED_DBFS_TO_DBM  # in dBFS
+        reading = self.run_for(3.0, noise_dbfs=given)
+        self.assertAlmostEqual(
+            reading.noise_dbm, given + self.sm.UNCALIBRATED_DBFS_TO_DBM, delta=0.1
+        )
+        reading = self.run_for(2.5)  # no more given: back to the floor set
+        self.assertAlmostEqual(reading.noise_dbm, floor, delta=0.01)
+
+    def test_clear_noise_floor_goes_back_to_the_estimate(self):
+        self.meter.set_noise_floor(-60.0)  # far too high: SNR near 0
+        self.assertLess(self.run_for(3.0).snr_db, 15.0)
+        self.meter.clear_noise_floor()
+        self.assertAlmostEqual(self.run_for(3.0).snr_db, 60.0, delta=1.5)
+
+    def test_the_floor_is_in_dbm_and_follows_a_calibration(self):
+        """As in 6bb37c7: SNR = level (dBm) - floor (dBm)."""
+        floor = self.true_floor_dbm()
+        self.meter.set_noise_floor(floor)
+        self.meter.set_calibration(6.0)
+        reading = self.run_for(1.0)
+        self.assertAlmostEqual(reading.noise_dbm, floor, delta=0.01)
+        self.assertAlmostEqual(reading.snr_db, 66.0, delta=0.5)
+
+
+class TestSignalMeterFilledChannel(_MeterCase):
+    """HAMDSP-10 (b): with no noise reference the meter took the median
+    spectrum bin as the noise; a signal that fills the samples' band (an
+    NBFM channel) is that median, so 60 dB SNR read 11.6 dB, RST 39."""
+
+    def test_an_fm_channel_reads_its_snr(self):
+        for snr in (60.0, 30.0, 12.0):
+            with self.subTest(snr=snr):
+                self.meter = self.sm.SignalMeter(SMETER_RATE)
+                reading = self.run_for(2.0, snr_db=snr)
+                self.assertAlmostEqual(reading.snr_db, snr, delta=1.5)
+                if snr == 60.0:
+                    self.assertEqual(self.meter.get_rst(), "59")
+
+    def test_noise_alone_is_still_no_signal(self):
+        for _ in range(30):
+            self.now += 0.1
+            hiss = 1e-3 * (
+                self.rng.standard_normal(1250) + 1j * self.rng.standard_normal(1250)
+            )
+            reading = self.meter.update(hiss.astype(np.complex64))
+        self.assertFalse(reading.signal_present)
+        self.assertEqual(reading.readability, 1)
+        self.assertAlmostEqual(reading.noise_dbm, reading.power_dbm, delta=1.0)
+
+    def test_a_narrow_carrier_in_a_wide_span_is_unchanged(self):
+        t = np.arange(4096) / 48000.0
+        for _ in range(12):
+            self.now += 0.1
+            hiss = 1e-3 * (
+                self.rng.standard_normal(4096) + 1j * self.rng.standard_normal(4096)
+            )
+            reading = self.meter.update(
+                (0.05 * np.exp(2j * np.pi * 1000 * t) + hiss).astype(np.complex64)
+            )
+        expected = 10 * np.log10(0.05**2 / 2e-6)  # about 31 dB
+        self.assertAlmostEqual(reading.snr_db, expected, delta=0.7)
+
+    def test_compact_meter_takes_a_noise_reference(self):
+        from tests.test_gui_chrome import require_pyqt6
+
+        require_pyqt6(self)
+        from sdr_module.ham.gui.signal_meter_widget import CompactSignalMeter
+
+        widget = CompactSignalMeter()
+        self.addCleanup(widget.deleteLater)
+        block, noise_dbfs = _fm_voice(self.rng, snr_db=40.0)
+        widget.update_samples(block, noise_dbfs)
+        self.assertAlmostEqual(widget.get_meter().get_reading().snr_db, 40.0, delta=0.5)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

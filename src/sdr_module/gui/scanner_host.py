@@ -43,9 +43,9 @@ class WindowScannerHost(ScannerHost):
 
     def __init__(self, window: Any):
         self._win = window
-        # Where the receiver was before the scan: (frequency, mode,
+        # Where the receiver was before the scan: (frequency, LO, mode,
         # deviation, bandwidth, tone squelch).
-        self._saved: Optional[Tuple[float, str, str, str, float]] = None
+        self._saved: Optional[Tuple[float, float, str, str, str, float]] = None
         self._lo_moved = False
         #: The frequency the scan tuned last (None outside a scan): any
         #: other means the user tuned elsewhere.
@@ -205,6 +205,7 @@ class WindowScannerHost(ScannerHost):
         mode, deviation = win._listening_mode()
         self._saved = (
             win._current_frequency(),
+            win._lo_frequency(),
             mode,
             deviation,
             panel._bw_combo.currentText(),
@@ -221,8 +222,15 @@ class WindowScannerHost(ScannerHost):
         saved, self._saved = self._saved, None
         self.expected_hz = None
         if not stay and saved is not None:
-            freq, mode, deviation, width, tone = saved
-            self._quietly(lambda: win._tune_to(freq))
+            freq, lo, mode, deviation, width, tone = saved
+
+            def back() -> bool:
+                # The plots where they were too: the LO, then the VFO in it.
+                if abs(lo - freq) >= 0.5 and win._tune_to(lo, recenter=True):
+                    return bool(win._tune_to(freq))
+                return bool(win._tune_to(freq, recenter=True))
+
+            self._quietly(back)
             if mode:
                 self._quietly(
                     lambda: (

@@ -63,11 +63,10 @@ except ImportError:
 from ..core.band_plan import band_for, listening_for
 from ..dsp.sweep import (
     AUTO_MARGIN_DB,
-    FFT_SIZE,
     WIDE_SIGNAL_HZ,
-    channel_frequencies,
+    channel_count,
     format_duration,
-    plan_sweep,
+    page_count,
     same_signal,
 )
 from ..utils.tooltips import get_short_tip
@@ -96,6 +95,8 @@ _HIT_ROLE = Qt.ItemDataRole.UserRole + 1 if HAS_PYQT6 else 0
 
 #: A scan whose pass takes longer than this asks before it starts.
 CONFIRM_SECONDS = 120.0
+#: A running scan that gets no blocks for this long stops (and says why).
+NO_BLOCKS_S = 3.0
 #: Display frames per second (the window's display timer).
 _FRAME_S = 1.0 / 30.0
 #: How many results are kept between sessions.
@@ -288,8 +289,6 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._restoring = False
         self._blocker: Tuple[str, str] = ("", "")
         self._stay = False  # end the scan on the channel listened to
-        self._started_at = 0.0
-        self._last_status = ""
         self._setup_ui()
         self._restore_settings()
         self._timer = QTimer(self)
@@ -905,8 +904,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             return 0, 0, 0.0
         step_hz = self._step.value() * 1e3
         rate = self._host.scan_sample_rate()
-        channels = len(channel_frequencies(sweep[0], sweep[1], step_hz))
-        steps = len(plan_sweep(sweep[0], sweep[1], step_hz, rate))
+        channels = channel_count(sweep[0], sweep[1], step_hz)
+        steps = page_count(sweep[0], sweep[1], step_hz, rate)
         return channels, steps, steps * self._page_seconds()
 
     def _auto_level(self) -> Optional[Tuple[float, float]]:
@@ -1013,6 +1012,14 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             elif not self._host.scan_receiving():
                 self.stop_scan(
                     "Scan stopped: the receiver was stopped.", "warning", stay=False
+                )
+            elif time.monotonic() - engine.last_block_at > NO_BLOCKS_S:
+                # Running, but nothing arrives (a device that stalled).
+                self.stop_scan(
+                    "Scan stopped: the receiver returned no samples. Check that "
+                    "it is plugged in and not used by another program.",
+                    "warning",
+                    stay=False,
                 )
         if blocker != self._blocker:
             # (A scan stopped above already said why.)
@@ -1139,6 +1146,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         """Start a scan with the panel's settings (``start_index``: the
         bookmark a bookmark scan starts at). False if it can't."""
         host = self._host
+        if self._engine.active:
+            self.stop_scan(stay=True)  # (it would lose where the last began)
         kind, reason = host.scan_blocker()
         self._blocker = (kind, reason)
         if kind:
@@ -1189,6 +1198,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         error = self._engine.start(settings, rate, host.scan_settle_s())
         if error:
             host.scan_end(stay=False)
+            if error.startswith("error: "):
+                error = f"The scan could not start: {error[len('error: '):]}."
             self._set_status(error, "danger")
             self._update_controls()
             return False
@@ -1197,7 +1208,6 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._rebuild_table()
         self._table.setSortingEnabled(False)
         self._empty_reason = "scanning"
-        self._started_at = time.monotonic()
         self._progress.setValue(0)
         self._timer.start()
         self._on_engine_state()
@@ -1215,6 +1225,14 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         bar = area.verticalScrollBar()
         if bar is not None and bar.maximum() > 0:
             bar.setValue(min(bar.maximum(), self._run_row.y() - 6))
+
+    def scan_bookmarks_from(self, index: int) -> bool:
+        """Scan all the bookmarks, starting at bookmark ``index`` (the
+        Bookmarks tab's Scan Bookmarks from Here)."""
+        self.stop_scan(stay=True)
+        self.set_scan_mode("bookmarks")
+        self._group.setCurrentIndex(0)  # all bookmarks
+        return self.start_scan(start_index=index)
 
     def _confirm_long_scan(self, steps: int, seconds: float) -> bool:
         box = QMessageBox(self)
@@ -1296,8 +1314,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             return f"{pass_text}{count} {noun} {heard}"
         page = engine.current_page()
         where = ""
-        if page is not None and page.channels:
-            where = f"{_format_freq(page.channels[0])} – {_format_freq(page.channels[-1])} · "
+        if page is not None and page.count:
+            where = f"{_format_freq(page.first_hz)} – {_format_freq(page.last_hz)} · "
         found = "found" if engine.mode != "stop" else "heard"
         return f"{pass_text}{where}{count} {noun} {found}"
 
@@ -1391,11 +1409,11 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         else:
             message = (
                 reason[len("error: ") :] if reason.startswith("error: ") else reason
-            )
+            ).rstrip(".")
             self._empty_reason = "stopped"
             self._set_status(
-                f"The scan stopped: {message} {count} {noun} found. Details are in "
-                "Tools > Error History.",
+                f"The scan stopped: {message}. {count} {noun} found. Details are "
+                "in Tools > Error History.",
                 "warning",
             )
             logger.warning("Frequency scan stopped: %s", message)
@@ -1636,5 +1654,4 @@ __all__ = [
     "ScannerPanel",
     "guess_listening",
     "mode_text",
-    "FFT_SIZE",
 ]

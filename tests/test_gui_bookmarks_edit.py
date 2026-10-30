@@ -115,6 +115,31 @@ class TestAddRow(_PanelCase):
             ("FM", "75 kHz", "200 kHz"),
         )
 
+    def test_a_frequency_typed_in_the_same_band_keeps_the_current_mode(self):
+        panel = self.make()
+        panel.set_mode_source(lambda: ("USB", ""))
+        panel.set_current_frequency(144.3e6)  # SSB on 2 m
+        panel._freq_input.setValue(144.25)
+        self.assertEqual(panel._mode_input.currentData(), "USB")
+        panel._freq_input.setValue(125.0)  # airband: its own mode
+        self.assertEqual(panel._mode_input.currentData(), "AM")
+
+    def test_context_menu_rename_and_remove_act_on_the_clicked_bookmark(self):
+        panel = self.make(
+            [{"label": "A", "freq_hz": 100e6}, {"label": "B", "freq_hz": 101e6}]
+        )
+        panel._list.setCurrentItem(panel._list.topLevelItem(0))  # A selected
+        menu = panel._context_menu(1)  # ...but B right-clicked
+        with mock.patch.object(
+            self.mod.QInputDialog, "getText", return_value=("Bee", True)
+        ):
+            next(a for a in menu.actions() if a.text().startswith("Rename")).trigger()
+        self.assertEqual([b["label"] for b in self.store.bookmarks], ["A", "Bee"])
+        panel._confirm_remove = lambda _b: True
+        next(a for a in menu.actions() if a.text().startswith("Remove")).trigger()
+        self.assertEqual([b["label"] for b in self.store.bookmarks], ["A"])
+        menu.deleteLater()
+
     def test_a_mode_picked_by_hand_is_saved(self):
         panel = self.make()
         panel.set_mode_source(lambda: ("FM", "75 kHz"))
@@ -596,6 +621,16 @@ class TestBookmarksInTheWindow(_WindowTestCase):
         self.assertEqual(win._control_panel.tone_squelch_hz(), 0.0)
         self.assertIsNone(win._tone_squelch.tone_hz)
         self.assertEqual(win._control_panel._bw_combo.currentText(), "25 kHz")
+
+    def test_a_waterfall_bookmark_elsewhere_gets_no_tone(self):
+        win = self.win
+        win.set_frequency(145.29e6)
+        win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        win._control_panel.set_tone_squelch_hz(100.0)
+        win._waterfall.bookmark_requested.emit(145.5e6)
+        saved = self.store.bookmarks[-1]
+        self.assertEqual(saved["freq_hz"], 145.5e6)
+        self.assertNotIn("tone_mode", saved)
 
     def test_a_bookmark_without_a_mode_keeps_the_tone_squelch(self):
         win, panel = self.win, self.win._bookmarks_panel

@@ -49,7 +49,7 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
-from ..core.band_plan import default_name, listening_for
+from ..core.band_plan import band_for, default_name, listening_for
 from ..core.chirp_csv import (
     DEFAULT_DEMOD,
     ChirpCsvError,
@@ -1023,22 +1023,29 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             return ""
 
     def _add_listening(self, freq_hz: float) -> Tuple[str, str, str]:
-        """``(demod, fm_deviation, bandwidth)`` the Add row saves: the
-        tuned frequency's (its mode, deviation and filter), else the band's
-        usual ones for a typed-in frequency (airband AM), else the current
-        mode; "" when nothing says (no receiver mode known)."""
+        """``(demod, fm_deviation, bandwidth)`` the Add row saves.
+
+        The current mode: with its deviation and filter for the tuned
+        frequency, or for a frequency typed in the same band. A frequency
+        typed in another band gets that band's usual mode (airband: AM, not
+        the broadcast FM being listened to). "" when nothing says (no
+        receiver mode known).
+        """
         current, deviation = self._current_mode(freq_hz)
         if current:
             return current, deviation, self._current_width()
         band = listening_for(freq_hz)
-        if band is not None:
+        tuned = self._tuned_hz
+        same_band = tuned is not None and band_for(tuned) == band_for(freq_hz)
+        if band is not None and not (same_band and self._mode_source is not None):
             return band
         if self._mode_source is not None:
             try:
                 mode, deviation = self._mode_source()
             except Exception:  # pragma: no cover - defensive
                 return "", "", ""
-            return str(mode or ""), str(deviation or "") if mode == "FM" else "", ""
+            mode, deviation = str(mode or ""), str(deviation or "")
+            return mode, deviation if mode == "FM" else "", ""
         return "", "", ""
 
     def _sync_add_mode(self) -> None:
@@ -1103,8 +1110,10 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             self._tune_index(idx)
 
     def _rename_selected(self):
-        idx = self._selected_index()
-        if idx < 0:
+        self._rename_index(self._selected_index())
+
+    def _rename_index(self, idx: int) -> None:
+        if not 0 <= idx < len(self._bookmarks):
             return
         current = str(self._bookmarks[idx].get("label", ""))
         new_label, ok = QInputDialog.getText(
@@ -1156,7 +1165,7 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         edit = menu.addAction("Edit...")
         edit.triggered.connect(lambda _c=False, i=idx: self.edit_bookmark(i))
         rename = menu.addAction("Rename...\tF2")
-        rename.triggered.connect(lambda _c=False: self._rename_selected())
+        rename.triggered.connect(lambda _c=False, i=idx: self._rename_index(i))
         copy = menu.addAction("Copy Frequency")
         copy.setToolTip(f"Copy {freq} to the clipboard")
         copy.triggered.connect(lambda _c=False, i=idx: self._copy_frequency(i))
@@ -1178,7 +1187,7 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         scan.triggered.connect(lambda _c=False, i=idx: self.scan_requested.emit(i))
         menu.addSeparator()
         remove = menu.addAction("Remove...\tDelete")
-        remove.triggered.connect(lambda _c=False: self._remove_selected())
+        remove.triggered.connect(lambda _c=False, i=idx: self._remove_index(i))
         return menu
 
     def _neighbour(self, idx: int, direction: int) -> int:
@@ -1236,8 +1245,10 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         return removed
 
     def _remove_selected(self):
-        idx = self._selected_index()
-        if idx < 0:
+        self._remove_index(self._selected_index())
+
+    def _remove_index(self, idx: int) -> None:
+        if not 0 <= idx < len(self._bookmarks):
             return
         if not self._confirm_remove(self._bookmarks[idx]):
             return

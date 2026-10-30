@@ -202,7 +202,7 @@ def _scan_live(args: argparse.Namespace) -> int:
                 )
         pages = plan_sweep(start_hz, end_hz, step_hz, rate)
         per_page = _LIVE_SETTLE_S + _LIVE_MEASURE_SAMPLES / rate + 0.02
-        channels = sum(len(p.channels) for p in pages)
+        channels = sum(p.count for p in pages)
         threshold = None if args.threshold is _DEFAULT_THRESHOLD else args.threshold
         print(
             f"Scanning {start_hz / 1e6:.3f} - {end_hz / 1e6:.3f} MHz with {name} "
@@ -225,11 +225,11 @@ def _scan_live(args: argparse.Namespace) -> int:
         print()
         print(f"  {'Frequency':>14}  {'Level':>11}  {'SNR':>7}  Band")
         sweep = 0
-        measured = 0
         while True:
             sweep += 1
             began = time.monotonic()
             new = 0
+            measured = 0  # steps of this sweep that delivered samples
             for page in pages:
                 if device.set_frequency(page.lo_hz) is False:
                     continue

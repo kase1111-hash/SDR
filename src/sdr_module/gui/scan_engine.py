@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -211,6 +212,8 @@ class ScanEngine:
         self._bookmarks_left = 0  # visits left in this pass
         self._starting = False
         self._start_failure = ""
+        #: When the last block arrived (time.monotonic()), for a watchdog.
+        self.last_block_at = 0.0
 
     # ------------------------------------------------------------------ #
     # Control
@@ -240,6 +243,7 @@ class ScanEngine:
         self.held = False
         self._locked_out = []
         self._candidates = []
+        self.last_block_at = time.monotonic()
         if self.rate <= 0:
             return "The receiver's sample rate is unknown."
         if settings.mode == "bookmarks":
@@ -266,6 +270,9 @@ class ScanEngine:
         try:
             self.host.scan_set_muted(True)
             kick_off()
+        except Exception as exc:  # a scan that broke as it began
+            logger.warning("The scan could not start: %s", exc)
+            self._finish(f"error: {exc}")
         finally:
             self._starting = False
         if not self.active:
@@ -287,13 +294,22 @@ class ScanEngine:
         if self.settings.mode == "stop":
             self._locked_out.append((self.current.frequency_hz, self.current.width_hz))
         self.held = False
-        self._go_on()
+        self._safely(self._go_on)
 
     def hold(self, on: bool) -> None:
         """Stay on the channel stopped on (until released, Skip or Stop)."""
         self.held = bool(on) and self.state in (DWELL, LISTEN)
         self._quiet_s = 0.0
         self.on_state()
+
+    def _safely(self, action: Callable[[], None]) -> None:
+        """Run a step of the scan; an error ends the scan, saying why,
+        instead of leaving it half-way."""
+        try:
+            action()
+        except Exception as exc:
+            logger.warning("The scan stopped because of an error: %s", exc)
+            self.stop(f"error: {exc}")
 
     def progress(self) -> float:
         """How far through the current pass (0..1)."""
@@ -316,6 +332,7 @@ class ScanEngine:
         """Take one block the receiver read (after the window processed it)."""
         if not self.active or samples is None or len(samples) == 0:
             return
+        self.last_block_at = time.monotonic()
         seconds = len(samples) / self.rate
         try:
             if self.state == SETTLE:
@@ -487,8 +504,7 @@ class ScanEngine:
             page = self.pages[self.page_index]
             # The tuned frequency shows the channel nearest the LO (the LO
             # sits a few bins off it), not an odd number.
-            middle = min(page.channels, key=lambda c: abs(c - page.lo_hz))
-            if self.host.scan_tune_lo(page.lo_hz, middle):
+            if self.host.scan_tune_lo(page.lo_hz, page.nearest_channel(page.lo_hz)):
                 self.host.scan_set_muted(True)
                 self._settle_after_tune(MEASURE)
                 self.on_state()

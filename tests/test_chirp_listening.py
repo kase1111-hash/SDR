@@ -121,6 +121,30 @@ class TestListeningRoundTrip:
         assert Channel.from_bookmark(ch.to_bookmark()) == ch
         assert listening_tag(ch.to_bookmark()) == ""
 
+    def test_a_mode_changed_in_chirp_wins_over_the_tag(self):
+        _after, text = _round_trip(
+            [
+                {"label": "A", "freq_hz": 118.1e6, "demod": "AM"},
+                {"label": "B", "freq_hz": 100.1e6},
+                {
+                    "label": "C",
+                    "freq_hz": 146.52e6,
+                    "demod": "FM",
+                    "fm_deviation": "12.5 kHz",
+                },
+            ]
+        )
+        rows = text.splitlines()
+        # In CHIRP: A becomes USB, B becomes AM; C is left alone.
+        rows[1] = rows[1].replace(",AM,", ",USB,")
+        rows[2] = rows[2].replace(",FM,", ",AM,")
+        after = import_bookmarks_csv(io.StringIO("\n".join(rows)))
+        assert after[0].get("demod") is None
+        assert after[0]["mode"] == "USB"
+        assert after[1].get("mode") == "AM"
+        assert "location" in after[1]  # a CHIRP channel now
+        assert (after[2]["demod"], after[2]["fm_deviation"]) == ("FM", "12.5 kHz")
+
     def test_tag_parsing_is_forgiving(self):
         assert split_listening_tag("no tag") == ("no tag", {})
         text, found = split_listening_tag("x [sdr mode=usb; dev=5 kHz; bw=2.7 kHz]")

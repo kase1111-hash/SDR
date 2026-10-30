@@ -241,6 +241,29 @@ def test_a_device_that_delivers_nothing_is_reported(monkeypatch, capsys, no_sett
     assert (dev.stopped, manager.closed) == (1, 1)
 
 
+def test_a_device_that_stops_delivering_is_reported(monkeypatch, capsys, no_settle):
+    monkeypatch.setattr(cli, "_LIVE_READ_TIMEOUT_S", 0.01)
+    dev = FakeReceiver()
+    real_read = dev.read_samples
+    sweeps = {"tunes": 0}
+
+    def set_frequency(freq):
+        sweeps["tunes"] += 1
+        if sweeps["tunes"] > 11:  # from the second sweep on: nothing
+            dev.deliver = False
+        return FakeReceiver.set_frequency(dev, freq)
+
+    dev.set_frequency = set_frequency
+    dev.read_samples = real_read
+    _patch_manager(monkeypatch, FakeManager(dev, [_Detected(_Info(), FakeReceiver)]))
+    rc = main(["scan", "--start", "88", "--end", "108", "--step", "100"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Sweep 1 done" in out
+    assert "returned no samples" in out
+    assert dev.stopped == 1
+
+
 def test_bad_range_and_threshold_are_refused(monkeypatch, capsys):
     _patch_manager(monkeypatch, FakeManager())
     assert main(["scan", "--start", "108", "--end", "88", "--single"]) == 1

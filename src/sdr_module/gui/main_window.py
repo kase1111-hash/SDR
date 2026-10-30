@@ -6327,11 +6327,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _scan_bookmarks_from(self, index: int) -> None:
         """Bookmarks > Scan Bookmarks from Here: a bookmark scan from it."""
-        panel = self._scanner_panel
         self._show_panel("scanner")
-        panel.stop_scan(stay=True)
-        panel.set_scan_mode("bookmarks")
-        panel.start_scan(start_index=index)
+        self._scanner_panel.scan_bookmarks_from(index)
 
     def _on_bookmark_tuned(self, bookmark: Dict[str, Any]) -> None:
         """After a bookmark's ``tune_requested``: its own filter width and
@@ -6488,7 +6485,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         label = default_bookmark_name(freq)
         width = self._control_panel._bw_combo.currentText() if mode else ""
         index = panel.add_bookmark(label, freq, mode, deviation, width)
-        tone = self._control_panel.tone_squelch_hz() if mode == "FM" else 0.0
+        # The tone squelch belongs to the channel listened to, not to
+        # another signal right-clicked on the waterfall.
+        tuned = abs(freq - self._current_frequency()) < 0.5
+        tone = self._control_panel.tone_squelch_hz() if mode == "FM" and tuned else 0.0
         if tone:
             panel.set_tone(index, tone)
         self._show_status_message(

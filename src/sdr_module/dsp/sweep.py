@@ -110,11 +110,37 @@ class SpectrumAverager:
 
 @dataclass(frozen=True)
 class SweepPage:
-    """One receiver step of a sweep: where the LO goes and which channel
-    centres (Hz) are measured there."""
+    """One receiver step of a sweep: where the LO goes and which channels
+    are measured there: ``count`` channels from channel ``first_index`` of
+    the range (``start_hz`` every ``step_hz``). The channels are computed
+    when needed, so a sweep of millions of channels costs nothing to plan."""
 
     lo_hz: float
-    channels: Tuple[float, ...]
+    start_hz: float
+    step_hz: float
+    first_index: int
+    count: int
+
+    @property
+    def channels(self) -> np.ndarray:
+        """The channel centres (Hz), as :func:`channel_frequencies` gives
+        them."""
+        index = self.first_index + np.arange(self.count, dtype=np.float64)
+        return np.asarray(self.start_hz + index * self.step_hz, dtype=np.float64)
+
+    @property
+    def first_hz(self) -> float:
+        return self.start_hz + self.first_index * self.step_hz
+
+    @property
+    def last_hz(self) -> float:
+        return self.start_hz + (self.first_index + self.count - 1) * self.step_hz
+
+    def nearest_channel(self, freq_hz: float) -> float:
+        """The page's channel nearest ``freq_hz``."""
+        k = int(round((float(freq_hz) - self.first_hz) / self.step_hz))
+        k = min(max(k, 0), self.count - 1)
+        return self.start_hz + (self.first_index + k) * self.step_hz
 
 
 @dataclass
@@ -131,14 +157,44 @@ class ChannelReading:
         return self.peak_db - self.noise_db
 
 
+def channel_count(start_hz: float, end_hz: float, step_hz: float) -> int:
+    """How many channels a range has (see :func:`channel_frequencies`)."""
+    start, end, step = float(start_hz), float(end_hz), float(step_hz)
+    if not (step > 0 and end >= start) or not math.isfinite(end - start):
+        return 0
+    return int(math.floor((end - start) / step + 0.5)) + 1
+
+
 def channel_frequencies(start_hz: float, end_hz: float, step_hz: float) -> np.ndarray:
     """The channel centres of a range: from ``start_hz`` every ``step_hz``
     up to and including ``end_hz`` (within half a step)."""
-    start, end, step = float(start_hz), float(end_hz), float(step_hz)
-    if step <= 0 or end < start:
-        return np.empty(0, dtype=np.float64)
-    count = int(math.floor((end - start) / step + 0.5)) + 1
-    return start + np.arange(count, dtype=np.float64) * step
+    count = channel_count(start_hz, end_hz, step_hz)
+    return float(start_hz) + np.arange(count, dtype=np.float64) * float(step_hz)
+
+
+def _channels_per_page(step_hz: float, sample_rate: float, usable_fraction: float):
+    """``(channels per page, LO shift)`` for a sweep (see plan_sweep)."""
+    step = float(step_hz)
+    usable = float(usable_fraction) * float(sample_rate)
+    shift = min(0.5 * step, (DC_GUARD_BINS + 2) * float(sample_rate) / FFT_SIZE)
+    per_page = max(1, int(math.floor((usable - step - 2.0 * shift) / step)) + 1)
+    return per_page, shift
+
+
+def page_count(
+    start_hz: float,
+    end_hz: float,
+    step_hz: float,
+    sample_rate: float,
+    usable_fraction: float = USABLE_FRACTION,
+) -> int:
+    """How many receiver steps :func:`plan_sweep` makes (without making
+    them)."""
+    channels = channel_count(start_hz, end_hz, step_hz)
+    if not channels or sample_rate <= 0:
+        return 0
+    per_page, _shift = _channels_per_page(step_hz, sample_rate, usable_fraction)
+    return -(-channels // per_page)
 
 
 def plan_sweep(
@@ -157,20 +213,21 @@ def plan_sweep(
     centre when it lands on one: the bins around the LO are left out of
     the search for peaks (the DC spike, see :data:`DC_GUARD_BINS`).
     """
-    channels = channel_frequencies(start_hz, end_hz, step_hz)
-    if not len(channels) or sample_rate <= 0:
+    total = channel_count(start_hz, end_hz, step_hz)
+    if not total or sample_rate <= 0:
         return []
-    step = float(step_hz)
-    usable = float(usable_fraction) * float(sample_rate)
-    shift = min(0.5 * step, (DC_GUARD_BINS + 2) * float(sample_rate) / FFT_SIZE)
-    per_page = max(1, int(math.floor((usable - step - 2.0 * shift) / step)) + 1)
+    start, step = float(start_hz), float(step_hz)
+    per_page, shift = _channels_per_page(step, sample_rate, usable_fraction)
     pages = []
-    for first in range(0, len(channels), per_page):
-        chunk = channels[first : first + per_page]
-        lo = 0.5 * (float(chunk[0]) + float(chunk[-1]))
-        if float(np.min(np.abs(chunk - lo))) < shift:
-            lo += shift  # beside a channel centre, not on it
-        pages.append(SweepPage(lo, tuple(float(c) for c in chunk)))
+    for first in range(0, total, per_page):
+        count = min(per_page, total - first)
+        lo = start + (first + 0.5 * (count - 1)) * step  # the middle
+        # On a channel centre (an odd count; or one between two, closer
+        # than the shift): beside it, not on it.
+        nearest = 0.0 if count % 2 else 0.5 * step
+        if nearest < shift:
+            lo += shift
+        pages.append(SweepPage(lo, start, step, first, count))
     return pages
 
 
@@ -358,10 +415,12 @@ __all__ = [
     "SpectrumAverager",
     "SweepPage",
     "USABLE_FRACTION",
+    "channel_count",
     "channel_frequencies",
     "format_duration",
     "measure_page",
     "noise_floor_db",
+    "page_count",
     "plan_sweep",
     "power_spectrum_dbfs",
     "report_frequency",

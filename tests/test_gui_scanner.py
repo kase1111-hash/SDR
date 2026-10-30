@@ -349,6 +349,28 @@ class TestScanEngine(unittest.TestCase):
         self.assertFalse(engine.active)
         self.assertEqual(self.finished, ["error: bad"])
 
+    def test_an_error_while_skipping_or_starting_ends_the_scan(self):
+        from sdr_module.gui.scan_engine import LISTEN, ScanSettings
+
+        dev = _demo(146e6)
+        host = _DemoHost(dev, active=[146.52e6])
+        engine = self.engine(host)
+        engine.start(
+            ScanSettings("stop", 146.4e6, 146.6e6, 12.5e3), dev.sample_rate, 0.0
+        )
+        _run(engine, dev, until=lambda: engine.state == LISTEN)
+        host.scan_tune_lo = mock.Mock(side_effect=RuntimeError("tuner gone"))
+        with self.assertLogs("sdr_module.gui.scan_engine", "WARNING"):
+            engine.skip()  # the next page's retune fails
+        self.assertFalse(engine.active)
+        self.assertEqual(self.finished[-1], "error: tuner gone")
+        with self.assertLogs("sdr_module.gui.scan_engine", "WARNING"):
+            error = engine.start(
+                ScanSettings("once", 100e6, 101e6, 200e3), dev.sample_rate, 0.0
+            )
+        self.assertEqual(error, "error: tuner gone")
+        self.assertFalse(engine.active)
+
     def test_hardware_settles_longer(self):
         from sdr_module.gui.scan_engine import MEASURE, SETTLE, ScanSettings
 
@@ -767,6 +789,28 @@ class TestScannerTab(_PanelCase):
         self.assertEqual(self.host.started, 1)
         self.assertEqual(self.host.begun, 1)
 
+    def test_a_scan_that_gets_no_blocks_gives_up(self):
+        from sdr_module.gui import scanner_panel
+
+        panel = self.panel()
+        panel.start_scan()
+        panel.refresh()
+        self.assertTrue(panel.engine.active)  # (just started)
+        panel.engine.last_block_at -= scanner_panel.NO_BLOCKS_S + 1
+        panel.refresh()
+        self.assertFalse(panel.engine.active)
+        self.assertIn("returned no samples", panel._status.text())
+        self.assertEqual(self.host.ended, [False])
+
+    def test_starting_again_keeps_where_the_first_began(self):
+        panel = self.panel()
+        panel.start_scan()
+        panel.start_scan()
+        self.assertEqual(self.host.begun, 2)
+        self.assertEqual(self.host.ended, [True])  # the first one, on the spot
+        panel.stop_scan()
+        self.assertEqual(self.host.ended, [True, False])
+
     def test_the_receiver_stopping_stops_the_scan(self):
         panel = self.panel()
         panel.start_scan()
@@ -989,6 +1033,10 @@ class TestScannerInTheWindow(_ScanWindowCase):
         win, panel = self.win, self.win._scanner_panel
         win._show_panel("scanner")
         win.set_frequency(100.1e6)
+        win.set_frequency(100.5e6)  # the VFO moves within the span
+        lo = win._lo_frequency()
+        self.assertNotAlmostEqual(lo, 100.5e6)
+        win.set_frequency(100.1e6)
         win._set_demod_mode("FM", "75 kHz", "200 kHz")
         panel._preset.setCurrentIndex(1)  # FM broadcast
         panel.set_scan_mode("once")
@@ -1001,8 +1049,9 @@ class TestScannerInTheWindow(_ScanWindowCase):
         self.assertEqual(len(panel.hits()), 18)
         self.assertIn("Scan complete: 18 signals found", panel._status.text())
         self.assertGreater(len(lines), 20)  # the plots kept running
-        # Back where it was, unmuted.
+        # Back where it was (the plots too), unmuted.
         self.assertAlmostEqual(win._current_frequency(), 100.1e6)
+        self.assertAlmostEqual(win._lo_frequency(), lo)
         self.assertEqual(win._listening_mode(), ("FM", "75 kHz"))
         self.assertFalse(win._scan_muted)
         # Scan steps didn't fill Recent Frequencies.
@@ -1204,8 +1253,11 @@ class TestScannerInTheWindow(_ScanWindowCase):
             a for a in menu.actions() if a.text() == "Scan Bookmarks from Here"
         )
         self.assertTrue(action.isEnabled())
-        action.trigger()
         panel = win._scanner_panel
+        panel._group.addItem("Ham", "Ham")
+        panel._group.setCurrentIndex(1)  # a group chosen before...
+        action.trigger()
+        self.assertEqual(panel._group.currentIndex(), 0)  # ...all bookmarks
         self.assertEqual(win._current_panel_key(), "scanner")
         self.assertTrue(panel.engine.active)
         self.assertEqual(panel.scan_mode(), "bookmarks")

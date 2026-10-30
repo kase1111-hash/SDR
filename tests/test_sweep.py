@@ -81,6 +81,38 @@ class TestPlan:
         pages = plan_sweep(100e6, 120e6, 5e6, RATE)
         assert [len(p.channels) for p in pages] == [1, 1, 1, 1, 1]
 
+    def test_page_count_matches_the_plan(self):
+        from sdr_module.dsp.sweep import channel_count, page_count
+
+        for start, end, step in (
+            (88e6, 108e6, 200e3),
+            (144e6, 148e6, 12.5e3),
+            (100e6, 120e6, 5e6),
+            (162.4e6, 162.55e6, 25e3),
+            (100e6, 100e6, 25e3),
+        ):
+            pages = plan_sweep(start, end, step, RATE)
+            assert page_count(start, end, step, RATE) == len(pages)
+            assert channel_count(start, end, step) == sum(p.count for p in pages)
+        assert page_count(108e6, 88e6, 200e3, RATE) == 0
+
+    def test_a_huge_plan_holds_no_channel_lists(self):
+        # 0.1-6000 MHz in 1 kHz steps: six million channels, planned without
+        # listing them (the Scanner tab's hint is recomputed as you type).
+        from sdr_module.dsp.sweep import channel_count
+
+        pages = plan_sweep(0.1e6, 6000e6, 1e3, RATE)
+        assert channel_count(0.1e6, 6000e6, 1e3) == 5_999_901
+        assert len(pages) == 3127
+        page = pages[100]
+        chans = page.channels
+        assert len(chans) == page.count
+        assert chans[0] == page.first_hz
+        assert chans[-1] == page.last_hz
+        nearest = page.nearest_channel(page.lo_hz)
+        assert abs(nearest - page.lo_hz) <= 500.0
+        assert (nearest - page.first_hz) % 1e3 == pytest.approx(0.0, abs=1e-3)
+
     def test_bad_ranges_plan_nothing(self):
         assert plan_sweep(108e6, 88e6, 200e3, RATE) == []
         assert plan_sweep(88e6, 108e6, 0, RATE) == []

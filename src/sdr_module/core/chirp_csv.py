@@ -544,6 +544,15 @@ class Channel:
             if value != getattr(defaults, f.name):
                 data[f.name] = value
         demod = listen.get("demod", "")
+        # The tag holds while CHIRP's Mode is still what was exported with
+        # it; a Mode changed in CHIRP since then wins.
+        exported = (
+            "FM"
+            if demod == _KEEP
+            else chirp_mode_for(demod, listen.get("fm_deviation", ""))
+        )
+        if demod and self.mode.upper() != exported.upper():
+            demod = ""
         if demod == _KEEP:
             # Saved without a mode: it keeps the receiver's mode, as before
             # (its memory slot and CHIRP's default Mode don't change that).

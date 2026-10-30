@@ -98,7 +98,7 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         )
         self._stop_action = win._add_action(
             menu,
-            "Stop &Transmitting",
+            "St&op Transmitting",  # (T is Tuning Step's)
             self.stop,
             tip="End the transmission on the air now",
         )

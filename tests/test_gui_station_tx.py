@@ -298,6 +298,23 @@ class TestSendIdNow(_TxCase):
         self.assertIn("Send your ID again", self.panel.tx_status_text())
         self.assertEqual(self.panel._id_now_btn.text(), "Send ID Now")
 
+    def test_a_double_click_on_send_doesnt_stop_it(self):
+        """Send ID Now becomes Stop under the pointer: the second click of
+        a double-click doesn't end the ID the first one started."""
+        self.panel.set_callsign("W1AW")
+        self.hackrf(pace=True)
+        button = self.panel._id_now_btn
+        button.click()
+        self.assertTrue(self.station.busy)
+        button.click()  # the double-click's second click, now on Stop
+        QApplication.processEvents()
+        self.assertTrue(self.station.busy)
+        self.assertEqual(button.text(), "Stop")
+        self.pump(self.panel._double_click_s() + 0.05)
+        button.click()  # a click of its own stops it
+        self.wait_done(5)
+        self.assertEqual(self.station.engine.last_result.status, "stopped")
+
     def test_the_badge_stops_it(self):
         from PyQt6.QtCore import Qt
         from PyQt6.QtTest import QTest
@@ -652,6 +669,25 @@ class TestMenusAndBadge(_TxCase):
         self.assertIn("Send Station ID", names)
         self.assertIn("Stop Transmitting", names)
         self.assertFalse(self.station._stop_action.isEnabled())
+
+    def test_their_access_keys_are_their_own(self):
+        """Alt+R then a letter reaches each directly (Stop Transmitting's
+        T used to be Tuning Step's too)."""
+        import re
+
+        menu = next(
+            a.menu()
+            for a in self.win.menuBar().actions()
+            if a.menu() is not None and self.station._stop_action in a.menu().actions()
+        )
+        keys = {}
+        for action in menu.actions():
+            match = re.search(r"&(\w)", action.text())
+            if match:
+                keys.setdefault(match.group(1).lower(), []).append(action.text())
+        for action in (self.station._send_action, self.station._stop_action):
+            letter = re.search(r"&(\w)", action.text()).group(1).lower()
+            self.assertEqual(keys[letter], [action.text()])
 
     def test_on_air_badge_fits_a_1024_px_window(self):
         self.win.resize(1024, 640)

@@ -15,6 +15,7 @@ Provides UI controls for:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Optional
 
 import numpy as np
@@ -23,6 +24,7 @@ try:
     from PyQt6.QtCore import Qt, QTimer, pyqtSignal
     from PyQt6.QtGui import QStandardItemModel, QValidator
     from PyQt6.QtWidgets import (
+        QApplication,
         QCheckBox,
         QComboBox,
         QFormLayout,
@@ -196,6 +198,9 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         self._tx_tone: Optional[str] = None
         self._sending_text = ""
         self._sending_id = True  # what is on the air is the station ID
+        # When Send ID Now was last clicked (a double-click's second click,
+        # on Stop by then, is ignored).
+        self._send_clicked_at = float("-inf")
         self._preview_sink: Any = None
         self._preview_buffer: Any = None
         self._form_labels: list = []
@@ -669,11 +674,22 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
 
     def _on_id_now_clicked(self):
         """Send ID Now, or Stop while transmitting."""
+        now = time.monotonic()
         if self._is_transmitting:
-            self.stop_requested.emit()
+            # The second click of a double-click on Send ID Now lands on
+            # Stop: it doesn't end the transmission the first one started.
+            if now - self._send_clicked_at >= self._double_click_s():
+                self.stop_requested.emit()
             return
         if self._callsign:
+            self._send_clicked_at = now
             self.id_requested.emit()
+
+    @staticmethod
+    def _double_click_s() -> float:
+        app = QApplication.instance()
+        ms = app.doubleClickInterval() if isinstance(app, QApplication) else 400
+        return max(0, int(ms)) / 1000.0
 
     def _on_test_clicked(self):
         """Play (or stop) an audible preview of the CW ID."""

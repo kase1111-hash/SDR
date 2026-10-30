@@ -354,6 +354,19 @@ class TestMinHold(_SpectrumCase):
         sp.set_center_freq(101e6)
         self.assertTrue(np.all(np.isnan(sp._min_hold)))
 
+    def test_another_window_starts_the_holds_over(self):
+        # A flat-top window reads the noise per bin 4 dB above Hann: a min
+        # hold (or an average) kept across the change mixes the two.
+        sp = self.sp
+        sp.set_min_hold(True)
+        sp.set_average_frames(8)
+        for level in (-60.0, -80.0):
+            sp.update_spectrum(np.full(N, level))
+        sp._choose_resolution(window="flat-top")
+        self.assertTrue(np.all(np.isnan(sp._min_hold)))
+        self.assertTrue(np.all(sp._peak_hold <= -120.0))
+        self.assertEqual(sp._avg_count, 0)
+
     def test_reset_button_follows_either_hold_and_the_setting_persists(self):
         sp = self.sp
         sp.set_peak_hold(False)

@@ -1195,10 +1195,14 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         return self._fft_size
 
     def set_window_name(self, name: str) -> None:
-        """The FFT window in use (for the menus and the RBW shown)."""
+        """The FFT window in use (for the menus and the RBW shown). Clears
+        the holds and the average, as a new FFT size does: another window
+        reads the noise per bin up to 4 dB differently."""
         name = normalize_window(name)
         if name != self._window_name:
             self._window_name = name
+            self.reset_peak()
+            self.reset_average()
             self._invalidate_background()
             self._canvas.update()
 

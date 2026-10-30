@@ -573,6 +573,28 @@ def cmd_encode(args: argparse.Namespace) -> int:
     else:
         encoder = encoder_class(config)
 
+    # The signal must stay inside +-sample_rate/2, or it aliases (mark and
+    # space swap, a carrier lands on 0 Hz). The output is I/Q: a negative
+    # carrier is fine.
+    width = round(encoder.text_signal("").occupied_bandwidth_hz())
+    half_rate = args.sample_rate / 2.0
+    reach = abs(args.carrier) + width / 2.0
+    if not reach < half_rate:
+        room = half_rate - width / 2.0
+        carriers = (
+            f"a --carrier from {format_number(-room)} to {format_number(room)} Hz, or "
+            if room > 0
+            else ""
+        )
+        print(
+            f"Error: the {name} signal ({format_number(width)} Hz wide) at "
+            f"--carrier {format_number(args.carrier)} Hz reaches "
+            f"{format_number(reach)} Hz, more than --sample-rate "
+            f"{format_number(args.sample_rate)} can hold (±{format_number(half_rate)}"
+            f" Hz): use {carriers}a --sample-rate above {format_number(2 * reach)}."
+        )
+        return 1
+
     text = args.text or sys.stdin.read().strip()
     if not text:
         print("No text provided")

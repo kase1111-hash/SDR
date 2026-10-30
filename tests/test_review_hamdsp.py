@@ -1053,5 +1053,81 @@ class TestSignalMeterFilledChannel(_MeterCase):
         self.assertAlmostEqual(widget.get_meter().get_reading().snr_db, 40.0, delta=0.5)
 
 
+
+class TestEncodeFitsTheSampleRate(unittest.TestCase):
+    """HAMDSP-11: sdr-scan encode took a carrier (with its shift) beyond the
+    sample rate's Nyquist frequency and wrote the aliased signal without a
+    word: ASCII at 8 kHz with --carrier 3900 put the 4400 Hz mark tone at
+    -3600 Hz (mark and space swapped), PSK31 at 1 kHz with --carrier 1000
+    landed on 0 Hz. The output is I/Q, so the limit is +-rate/2."""
+
+    def encode(self, *args: str):
+        import contextlib
+        import io
+
+        from sdr_module.cli import main
+
+        out = Path(self.tmp.name) / "out.cf32"
+        if out.exists():
+            out.unlink()
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            rc = main(["encode", *args, "--text", "CQ", "-o", str(out)])
+        return rc, printed.getvalue(), out
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def test_carriers_past_nyquist_are_refused(self):
+        for args, reach in (
+            (("ascii", "--sample-rate", "8000", "--carrier", "3900"), "Hz reaches"),
+            (("psk31", "--sample-rate", "1000", "--carrier", "1000"), "1030 Hz"),
+            (("morse", "--sample-rate", "8000", "--carrier", "5000"), "Hz reaches"),
+            (("rtty", "--sample-rate", "8000", "--carrier", "-3900"), "Hz reaches"),
+        ):
+            with self.subTest(args=args):
+                rc, printed, out = self.encode(*args)
+                self.assertEqual(rc, 1, printed)
+                self.assertIn("Error:", printed)
+                self.assertIn(reach, printed)
+                self.assertFalse(out.exists(), "nothing is written")
+
+    def test_the_error_says_what_fits(self):
+        rc, printed, _out = self.encode(
+            "ascii", "--sample-rate", "8000", "--carrier", "3900"
+        )
+        from sdr_module.protocols.text_modes import MODE_ASCII, fsk_bandwidth_hz
+
+        width = fsk_bandwidth_hz(MODE_ASCII, 300.0, 1000.0)
+        room = 4000.0 - width / 2.0
+        self.assertIn("(±4000 Hz)", printed)
+        self.assertIn(f"--carrier from {-room:.0f} to {room:.0f} Hz", printed)
+        self.assertIn(f"--sample-rate above {2 * 3900 + width:.0f}", printed)
+
+    def test_a_signal_wider_than_the_rate_asks_for_a_higher_rate(self):
+        rc, printed, _out = self.encode("ascii", "--sample-rate", "1000", "--carrier", "0")
+        self.assertEqual(rc, 1)
+        self.assertNotIn("--carrier from", printed)
+        self.assertIn("--sample-rate above", printed)
+
+    def test_what_fits_is_written_and_lands_where_asked(self):
+        # (protocol options, carrier, how far the strongest tone may be
+        # from it: RTTY idles on the mark, 85 Hz above)
+        for args, carrier, delta in (
+            (("rtty", "--sample-rate", "8000", "--carrier", "1000"), 1000.0, 95.0),
+            (("psk31", "--sample-rate", "1000", "--carrier", "-300"), -300.0, 20.0),
+            (("morse", "--sample-rate", "8000", "--carrier", "3800"), 3800.0, 10.0),
+        ):
+            with self.subTest(args=args):
+                rc, printed, out = self.encode(*args)
+                self.assertEqual(rc, 0, printed)
+                iq = np.fromfile(out, np.complex64)
+                spectrum = np.abs(np.fft.fft(iq)) ** 2
+                freqs = np.fft.fftfreq(len(iq), 1.0 / float(args[2]))
+                peak = float(freqs[int(np.argmax(spectrum))])
+                self.assertAlmostEqual(peak, carrier, delta=delta)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

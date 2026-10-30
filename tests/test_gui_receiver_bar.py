@@ -174,6 +174,8 @@ class TestReceiverBar(_WindowTestCase):
         # while no station names itself.)
         self.assertFalse(self.win._rds_badge_action.isVisible())
         for toolbar in (self.win._toolbar, self.bar()):
+            # (Widgets hidden by design, such as the ON AIR badge while
+            # nothing is transmitted, don't count.)
             widgets = [
                 toolbar.widgetForAction(a)
                 for a in toolbar.actions()

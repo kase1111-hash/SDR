@@ -529,11 +529,16 @@ class QRPController:
         Returns:
             Formatted exchange string
         """
-        # Round power for exchange
-        if power_watts < 1:
-            power_str = f"{int(power_watts * 1000)}mW"
-        else:
+        # Round power for exchange. Below a milliwatt (an SDR on its own)
+        # the power is given in uW or nW, not rounded down to "0mW".
+        if power_watts >= 1:
             power_str = f"{power_watts:.0f}W"
+        elif power_watts >= 1e-3 or power_watts <= 0:
+            power_str = f"{int(power_watts * 1000)}mW"
+        elif power_watts >= 1e-6:
+            power_str = f"{int(power_watts * 1e6)}uW"
+        else:
+            power_str = f"{max(1, int(round(power_watts * 1e9)))}nW"
 
         if state_province:
             return f"{rst} {state_province} {power_str}"
@@ -563,6 +568,10 @@ class QRPController:
                 try:
                     if "MW" in part:
                         result["power_watts"] = float(part.replace("MW", "")) / 1000
+                    elif part.endswith("UW"):
+                        result["power_watts"] = float(part[:-2]) / 1e6
+                    elif part.endswith("NW"):
+                        result["power_watts"] = float(part[:-2]) / 1e9
                     else:
                         result["power_watts"] = float(part.replace("W", ""))
                 except ValueError:

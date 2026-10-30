@@ -583,24 +583,40 @@ class TestRefusalsAndTheErrorHistory(_TuningCase):
 
 class TestTransmitWhereChecked(_TuningCase):
     def test_the_lo_moves_to_the_tuned_frequency_before_transmitting(self):
+        """The HackRF sends at its center (the LO): it is put on the tuned
+        frequency before the driver's own legality check, which checks the
+        emission's bandwidth and mode there (the window's check, made
+        first, is of that same frequency)."""
+        import sdr_module.devices.hackrf as hackrf_mod
+
         dev = _hackrf()
         self.connect(dev)
         self.win.set_frequency(100.9e6)  # 800 kHz up: the VFO only (8 MS/s)
         self.assertEqual(self.lo(), 100.1e6)
-        checked = []
+        self.store.values["tx/confirm"] = False  # (no first-use question)
+        window_checks, driver_checks = [], []
 
-        def fake_allowed(freq, bandwidth):
-            checked.append((freq, dev.state.frequency))
+        def window_allowed(freq, bandwidth=0, mode=""):
+            window_checks.append((freq, mode))
+            return True, None
+
+        def driver_allowed(freq, bandwidth=0, mode=""):
+            driver_checks.append((freq, dev.state.frequency, bandwidth, mode))
             return False, "not here"
 
         with (
-            mock.patch("sdr_module.core.frequency_manager.is_tx_allowed", fake_allowed),
-            mock.patch("sdr_module.gui.main_window.QMessageBox.critical"),
+            mock.patch(
+                "sdr_module.core.frequency_manager.is_tx_allowed", window_allowed
+            ),
+            mock.patch.object(hackrf_mod, "is_tx_allowed", driver_allowed),
         ):
             self.win._transmit_audio(np.zeros(16, dtype=np.complex64), "test")
-        # The HackRF sends at its center: it was moved to the tuned frequency
-        # before the legality check of that frequency.
-        self.assertEqual(checked, [(100.9e6, 100.9e6)])
+            self.assertTrue(self.win._tx_station.engine.wait(5))
+        self.assertTrue(window_checks)
+        self.assertTrue(all(freq == 100.9e6 for freq, _mode in window_checks))
+        self.assertEqual(driver_checks, [(100.9e6, 100.9e6, 12.5e3, "FM")])
+        self.assertEqual(self.lo(), 100.9e6)
+        self.assertIn("test not sent on 100.900 MHz: not here", self.errors())
         self.win._device = None
 
 

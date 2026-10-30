@@ -139,7 +139,9 @@ class TestCallsignPanel(unittest.TestCase):
         from sdr_module.ham.gui.callsign_panel import CallsignPanel
 
         self.panel = CallsignPanel()
-        self.panel.resize(COLUMN_WIDTH, 600)
+        # Tall enough for all of it (in the window it scrolls, at its
+        # height for the column's width).
+        self.panel.resize(COLUMN_WIDTH, 800)
         self.panel.show()
         settle()
 
@@ -212,20 +214,34 @@ class TestCallsignPanel(unittest.TestCase):
         self.assertEqual(self.panel._callsign_input.text(), "K1ABC")
 
     def test_transmitting_state_and_auto_id_gate(self):
+        """While on the air Send becomes Stop; the automatic-ID countdown is
+        the transmitter's to show (set_transmitting never starts one: it
+        used to run its own timer and request IDs nothing would send)."""
         self.type_callsign("w1aw")
-        self.panel.set_transmitting(True)
-        self.assertTrue(self.panel._id_timer.isActive())
-        self.assertTrue(self.panel._countdown_row.isVisible())
+        stops = QSignalSpy(self.panel.stop_requested)
+        requests = QSignalSpy(self.panel.id_requested)
+        self.panel.set_transmitting(True, "Sending DE W1AW on 146.520 MHz…")
         self.assertEqual(self.panel._status_label.property("tone"), "danger")
+        self.assertEqual(self.panel._id_now_btn.text(), "Stop")
+        self.assertTrue(self.panel._id_now_btn.isEnabled())
+        self.assertTrue(self.panel._tx_progress.isVisible())
+        self.assertFalse(self.panel._countdown_row.isVisible())
+        self.assertIn("Sending DE W1AW", self.panel._tx_label.text())
+        self.panel._id_now_btn.click()
+        self.assertEqual((len(stops), len(requests)), (1, 0))
+        self.panel.set_tx_progress(2.0, 4.0)
+        self.assertEqual(self.panel._tx_progress.format(), "2.0 / 4.0 s")
+        self.panel.set_id_countdown(75.0, 600.0)
+        self.assertTrue(self.panel._countdown_row.isVisible())
+        self.assertEqual(self.panel._countdown_label.text(), "Next ID in 01:15")
         self.panel.set_transmitting(False)
-        self.assertFalse(self.panel._id_timer.isActive())
+        self.assertFalse(self.panel._countdown_row.isVisible())
+        self.assertFalse(self.panel._tx_progress.isVisible())
+        self.assertEqual(self.panel._id_now_btn.text(), "Send ID Now")
 
         self.panel._auto_id_check.setChecked(False)
         self.assertFalse(self.panel._interval_spin.isEnabled())
-        self.panel.set_transmitting(True)
-        self.assertFalse(self.panel._id_timer.isActive())
-        self.assertFalse(self.panel._countdown_row.isVisible())
-        self.panel.set_transmitting(False)
+        self.assertIsNone(self.panel.auto_id_settings()["interval_s"])
 
     def test_unimplemented_modes_not_selectable(self):
         model = self.panel._mode_combo.model()
@@ -524,13 +540,27 @@ class TestQRPPanel(unittest.TestCase):
             area.horizontalScrollBarPolicy(), Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
 
+    def _driver_and_pa(self):
+        """The chain these tests use: SDR 0 dBm, a 20 dB driver and a PA
+        (the panel starts with the SDR alone)."""
+        calc = self.panel._amp_calc
+        calc._driver_check.setChecked(True)
+        calc._pa_check.setChecked(True)
+
     def test_initial_power_matches_calculator(self):
+        # The chain starts as the SDR alone (an exciter's milliwatt), not a
+        # watt nobody is transmitting.
         display = self.panel._power_display
+        self.assertEqual(display._watts_label.text(), "1 mW")
+        self.assertEqual(display._dbm_label.text(), "0 dBm")
+        self.assertEqual(display._status_label.text(), "QRPp")
+        self._driver_and_pa()
         self.assertEqual(display._watts_label.text(), "1 W")
         self.assertEqual(display._dbm_label.text(), "+30 dBm")
         self.assertEqual(display._status_label.text(), "QRPp")
 
     def test_mode_changes_status(self):
+        self._driver_and_pa()
         self.panel._amp_calc._pa_spin.setValue(19)  # ~7.9 W
         self.panel._mode_combo.setCurrentText("CW")
         self.assertEqual(self.panel._power_display._status_label.text(), "Low Power")
@@ -543,6 +573,7 @@ class TestQRPPanel(unittest.TestCase):
             [b.text() for b in p._preset_buttons], ["QRPp 1 W", "CW 5 W", "SSB 10 W"]
         )
         spy = QSignalSpy(p.power_limit_changed)
+        self._driver_and_pa()
         p._amp_calc._pa_spin.setValue(20)  # 10 W out
         p._preset_buttons[1].click()  # 5 W limit
         self.assertTrue(p._limit_check.isChecked())
@@ -583,6 +614,7 @@ class TestQRPPanel(unittest.TestCase):
         from sdr_module.ham.gui.qrp_panel import classify_qrp
 
         p = self.panel
+        self._driver_and_pa()
         p._amp_calc._pa_spin.setValue(17)  # +37 dBm = 5.01 W, shown as "5 W"
         self.assertEqual(p._power_display._watts_label.text(), "5 W")
         self.assertEqual(p._power_display._status_label.text(), "QRP")
@@ -599,6 +631,7 @@ class TestQRPPanel(unittest.TestCase):
 
     def test_bypassed_stage_is_muted(self):
         calc = self.panel._amp_calc
+        self._driver_and_pa()
         calc._driver_check.setChecked(False)
         self.assertEqual(calc._driver_out.text(), "(bypassed)")
         self.assertEqual(calc._driver_out.property("tone"), "muted")

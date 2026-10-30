@@ -3,14 +3,19 @@ Callsign identification panel for HAM radio compliance.
 
 Provides UI controls for:
 - Callsign input (uppercased and validated as you type)
-- Automatic ID settings
-- ID mode selection (only CW can be transmitted today)
-- Audible preview of the CW ID and a manual "Send ID Now" trigger
+- What sending the ID would do right now (or why it can't), from the window
+- Audible preview of the CW ID and "Send ID Now" (Stop while on the air),
+  with progress
+- How the ID is sent (CW keyed carrier or FM tone), its speed and tone
+- The HackRF's transmit power (TX gain and the +14 dB amplifier) with an
+  estimate of the output
+- Automatic ID for the app's other transmissions (start, interval, end)
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Optional
 
 import numpy as np
@@ -19,6 +24,7 @@ try:
     from PyQt6.QtCore import Qt, QTimer, pyqtSignal
     from PyQt6.QtGui import QStandardItemModel, QValidator
     from PyQt6.QtWidgets import (
+        QApplication,
         QCheckBox,
         QComboBox,
         QFormLayout,
@@ -28,7 +34,9 @@ try:
         QLineEdit,
         QProgressBar,
         QPushButton,
+        QScrollArea,
         QSizePolicy,
+        QSlider,
         QSpinBox,
         QVBoxLayout,
         QWidget,
@@ -49,6 +57,32 @@ _CW_INDEX = 0
 _INTERVAL_TIP = (
     "Time between automatic IDs. FCC rules require an ID at least every "
     "10 minutes and at the end of a communication."
+)
+# How the ID goes on air: (combo text, saved value, tooltip).
+_EMISSIONS = (
+    (
+        "Auto (by frequency)",
+        "auto",
+        "CW (a keyed carrier) below 30 MHz, where HF stations listen for it; "
+        "an FM tone above, which FM receivers hear",
+    ),
+    (
+        "CW (keyed carrier)",
+        "cw",
+        "The carrier keyed on and off (A1A): heard in CW or SSB, not in FM",
+    ),
+    (
+        "FM tone (MCW)",
+        "mcw",
+        "The Morse as a keyed audio tone on an FM carrier (F2A): heard on FM "
+        "receivers and repeaters",
+    ),
+)
+_TX_GAIN_MAX = 47
+_AUTO_ID_NOTE = (
+    "Automatic ID adds your ID to the app's other transmissions (such as "
+    "Transmit Text) at their start, every interval and at their end. Send "
+    "ID Now sends just the ID."
 )
 
 
@@ -97,6 +131,12 @@ def morse_duration(text: str, wpm: int) -> float:
     return units * 60.0 / (50.0 * max(1, wpm))
 
 
+def _clock(seconds: float) -> str:
+    """``75 -> "01:15"``."""
+    seconds = max(0, int(round(seconds)))
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
 if HAS_PYQT6:
 
     class CallsignValidator(QValidator):
@@ -128,14 +168,19 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
     """
     Callsign identification control panel.
 
-    Allows HAM operators to configure automatic callsign identification
-    to comply with FCC/regulatory requirements.
+    The panel shows and edits; the window decides. It tells the panel what
+    sending would do (:meth:`set_tx_status`), runs the transmission and
+    reports it (:meth:`set_transmitting`, :meth:`set_tx_progress`,
+    :meth:`set_id_countdown`), and shows the transmit power estimate
+    (:meth:`set_power_estimate`).
     """
 
     if HAS_PYQT6:
         callsign_changed = pyqtSignal(str)
-        id_requested = pyqtSignal()  # Manual ID request
+        id_requested = pyqtSignal()  # Send ID Now
+        stop_requested = pyqtSignal()  # Stop (while on the air)
         settings_changed = pyqtSignal(dict)
+        tx_power_changed = pyqtSignal(int, bool)  # TX gain dB, amplifier on
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -145,12 +190,17 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
 
         self._callsign = ""
         self._is_transmitting = False
-        # None = unknown (the main window checks the device when sending).
+        # None = unknown (the window hasn't said): Send stays available and
+        # the window checks when it is pressed.
         self._tx_available: Optional[bool] = None
         self._tx_unavailable_reason = ""
-        self._id_timer = QTimer(self)
-        self._id_timer.timeout.connect(self._update_countdown)
-        self._seconds_until_id = 0
+        self._tx_text = ""
+        self._tx_tone: Optional[str] = None
+        self._sending_text = ""
+        self._sending_id = True  # what is on the air is the station ID
+        # When Send ID Now was last clicked (a double-click's second click,
+        # on Stop by then, is ignored).
+        self._send_clicked_at = float("-inf")
         self._preview_sink: Any = None
         self._preview_buffer: Any = None
         self._form_labels: list = []
@@ -187,13 +237,13 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         self._callsign_input.textChanged.connect(self._on_callsign_changed)
         self._add_row(callsign_form, "Callsign:", self._callsign_input)
 
-        # Validation / activity feedback, directly under the field.
+        # Line 1: the callsign and what the ID is.
         self._status_label = QLabel()
         self._status_label.setWordWrap(True)
         t.set_role(self._status_label, "hint")
         callsign_form.addRow(self._status_label)
 
-        # What will be sent, in Morse, with its duration.
+        # What will be sent, in Morse.
         self._morse_label = QLabel()
         self._morse_label.setWordWrap(True)
         self._morse_label.setTextInteractionFlags(
@@ -202,6 +252,14 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         self._morse_label.setToolTip("The CW identification that will be sent")
         t.set_role(self._morse_label, "lcd-small")
         callsign_form.addRow(self._morse_label)
+
+        # Line 2: what sending would do right now, or why it can't.
+        self._tx_label = QLabel()
+        self._tx_label.setWordWrap(True)
+        self._tx_label.setAccessibleName("Transmit status")
+        t.set_role(self._tx_label, "hint")
+        self._tx_label.setVisible(False)
+        callsign_form.addRow(self._tx_label)
 
         btn_layout = QHBoxLayout()
         btn_layout.setSpacing(8)
@@ -215,7 +273,17 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         btn_layout.addWidget(self._id_now_btn)
         callsign_form.addRow(btn_layout)
 
-        # Auto-ID countdown, shown only while transmitting.
+        # Progress of the transmission on the air.
+        self._tx_progress = QProgressBar()
+        self._tx_progress.setRange(0, 1000)
+        self._tx_progress.setTextVisible(True)
+        self._tx_progress.setFormat("")
+        self._tx_progress.setAccessibleName("Transmission progress")
+        self._tx_progress.setToolTip("Air time sent so far, of the whole transmission")
+        self._tx_progress.setVisible(False)
+        callsign_form.addRow(self._tx_progress)
+
+        # Automatic ID countdown, while a transmission is due one.
         countdown_row = QHBoxLayout()
         countdown_row.setSpacing(8)
         self._countdown_label = QLabel("")
@@ -261,6 +329,17 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         self._mode_combo.currentIndexChanged.connect(self._on_settings_changed)
         self._add_row(form, "Mode:", self._mode_combo)
 
+        self._emission_combo = QComboBox()
+        for index, (text, value, tip) in enumerate(_EMISSIONS):
+            self._emission_combo.addItem(text, value)
+            self._emission_combo.setItemData(index, tip, Qt.ItemDataRole.ToolTipRole)
+        self._emission_combo.setToolTip(
+            "How the Morse goes on air. Auto: CW (a keyed carrier) below 30 "
+            "MHz, an FM tone (MCW) above."
+        )
+        self._emission_combo.currentIndexChanged.connect(self._on_settings_changed)
+        self._add_row(form, "Sent as:", self._emission_combo)
+
         self._wpm_spin = QSpinBox()
         self._wpm_spin.setRange(5, 50)
         self._wpm_spin.setValue(20)
@@ -276,17 +355,79 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         self._tone_spin.setValue(700)
         self._tone_spin.setSuffix(" Hz")
         self._tone_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self._tone_spin.setToolTip("CW audio tone (sidetone) frequency")
+        self._tone_spin.setToolTip(
+            "The audio tone of the FM tone ID (and of the preview). A CW ID "
+            "has no tone of its own: the listener's receiver makes it."
+        )
         self._tone_spin.valueChanged.connect(self._on_settings_changed)
         self._add_row(form, "Tone:", self._tone_spin)
+
+        layout.addWidget(settings_group)
+
+        # --- Transmit power ---------------------------------------------
+        power_group = QGroupBox("TX Power (HackRF)")
+        power_form = self._make_form(power_group)
+
+        gain_row = QHBoxLayout()
+        gain_row.setSpacing(8)
+        self._tx_gain_slider = QSlider(Qt.Orientation.Horizontal)
+        self._tx_gain_slider.setRange(0, _TX_GAIN_MAX)
+        self._tx_gain_slider.setPageStep(5)
+        self._tx_gain_slider.setValue(20)
+        self._tx_gain_slider.setAccessibleName("TX gain")
+        self._tx_gain_slider.setToolTip(
+            "The HackRF's transmit (VGA) gain, 0-47 dB: each dB raises the "
+            "output by 1 dB"
+        )
+        gain_row.addWidget(self._tx_gain_slider, 1)
+        self._tx_gain_spin = QSpinBox()
+        self._tx_gain_spin.setRange(0, _TX_GAIN_MAX)
+        self._tx_gain_spin.setValue(20)
+        self._tx_gain_spin.setSuffix(" dB")
+        self._tx_gain_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self._tx_gain_spin.setToolTip(self._tx_gain_slider.toolTip())
+        gain_row.addWidget(self._tx_gain_spin)
+        self._tx_gain_slider.valueChanged.connect(self._tx_gain_spin.setValue)
+        self._tx_gain_spin.valueChanged.connect(self._tx_gain_slider.setValue)
+        self._tx_gain_spin.valueChanged.connect(self._on_tx_power_changed)
+        gain_field = QWidget()
+        gain_field.setLayout(gain_row)
+        gain_row.setContentsMargins(0, 0, 0, 0)
+        label = self._add_row(power_form, "TX gain:", gain_field)
+        label.setBuddy(self._tx_gain_spin)
+
+        self._amp_check = QCheckBox("+14 dB amplifier")
+        self._amp_check.setToolTip(
+            "The HackRF's front-end amplifier: about 14 dB more output. Leave "
+            "it off unless you need the power."
+        )
+        self._amp_check.toggled.connect(self._on_tx_power_changed)
+        self._add_row(power_form, "RF amp:", self._amp_check)
+
+        self._power_label = QLabel("—")
+        self._power_label.setWordWrap(True)
+        self._power_label.setAccessibleName("Estimated output")
+        t.set_role(self._power_label, "value")
+        self._power_label.setToolTip(
+            "Estimated output at the HackRF's antenna port at the tuned "
+            "frequency. Units differ by a few dB: measure it before adding "
+            "an amplifier."
+        )
+        self._add_row(power_form, "Output:", self._power_label)
+
+        layout.addWidget(power_group)
+
+        # --- Automatic ID ------------------------------------------------
+        auto_group = QGroupBox("Automatic ID")
+        auto_form = self._make_form(auto_group)
 
         self._auto_id_check = QCheckBox("Every interval while transmitting")
         self._auto_id_check.setChecked(True)
         self._auto_id_check.setToolTip(
-            "Automatically send your ID at the interval below during a transmission"
+            "Send your ID at the interval below during a long transmission"
         )
         self._auto_id_check.stateChanged.connect(self._on_settings_changed)
-        self._add_row(form, "Auto-ID:", self._auto_id_check)
+        self._add_row(auto_form, "Auto-ID:", self._auto_id_check)
 
         self._interval_spin = QSpinBox()
         self._interval_spin.setRange(1, 10)
@@ -295,13 +436,13 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         self._interval_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._interval_spin.setToolTip(_INTERVAL_TIP)
         self._interval_spin.valueChanged.connect(self._on_settings_changed)
-        self._add_row(form, "Interval:", self._interval_spin)
+        self._add_row(auto_form, "Interval:", self._interval_spin)
 
         self._id_start_check = QCheckBox("At start of transmission")
         self._id_start_check.setChecked(True)
         self._id_start_check.setToolTip("Send your ID when a transmission begins")
         self._id_start_check.stateChanged.connect(self._on_settings_changed)
-        self._add_row(form, "Also ID:", self._id_start_check)
+        self._add_row(auto_form, "Also ID:", self._id_start_check)
 
         self._id_end_check = QCheckBox("At end of transmission")
         self._id_end_check.setChecked(True)
@@ -309,17 +450,14 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
             "Send your ID when a transmission ends (required by FCC rules)"
         )
         self._id_end_check.stateChanged.connect(self._on_settings_changed)
-        form.addRow("", self._id_end_check)
+        auto_form.addRow("", self._id_end_check)
 
-        note = QLabel(
-            "Sending an ID transmits on the current frequency and needs a "
-            "TX-capable device (HackRF One)."
-        )
-        note.setWordWrap(True)
-        t.set_role(note, "hint")
-        form.addRow(note)
+        self._auto_note = QLabel(_AUTO_ID_NOTE)
+        self._auto_note.setWordWrap(True)
+        t.set_role(self._auto_note, "hint")
+        auto_form.addRow(self._auto_note)
 
-        layout.addWidget(settings_group)
+        layout.addWidget(auto_group)
         layout.addStretch(1)
 
         self._align_form_labels()
@@ -346,10 +484,10 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
     def _align_form_labels(self) -> None:
         """Line the labels up with their fields, in both directions.
 
-        Both forms get the same label column width so the fields start at the
-        same x. Each label is also made as tall as its field: QFormLayout caps
-        a label at 7/4 of its own height, which leaves it a few pixels above
-        the centre of a (taller) spin box.
+        Every form gets the same label column width so the fields start at
+        the same x. Each label is also made as tall as its field: QFormLayout
+        caps a label at 7/4 of its own height, which leaves it a few pixels
+        above the centre of a (taller) spin box.
         """
         if not self._form_labels:
             return
@@ -359,7 +497,8 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         width = max(label.sizeHint().width() for label, _ in self._form_labels)
         for label, field in self._form_labels:
             label.setMinimumWidth(width)
-            label.setMinimumHeight(field.sizeHint().height())
+            if field is not self._power_label:  # (a wrapping value grows)
+                label.setMinimumHeight(field.sizeHint().height())
             label.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
 
     # ------------------------------------------------------------------
@@ -391,11 +530,18 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         valid_chars = all(c.isalnum() or c == "/" for c in callsign)
         return has_letter and has_number and valid_chars
 
+    def is_callsign_valid(self) -> bool:
+        """True when the callsign looks like one (letters and a digit)."""
+        return self._validate_callsign(self._callsign)
+
     def _refresh_status(self) -> None:
-        """Show validation feedback (or the TX state) under the callsign."""
+        """Line 1: the callsign and the ID it makes (or the TX state)."""
         cs = self._callsign
-        if self._is_transmitting:
+        if self._is_transmitting and self._sending_id:
             self._set_status(f"Transmitting ID: DE {cs}", "danger")
+        elif self._is_transmitting:
+            # (Another transmission, e.g. Transmit Text: line 2 says what.)
+            self._set_status(f"On the air as {cs}" if cs else "On the air", "danger")
         elif not cs:
             self._set_status("Enter your callsign to enable station ID.", None)
         elif len(cs) < 3:
@@ -409,10 +555,9 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         else:
             wpm = self._wpm_spin.value()
             seconds = morse_duration(f"DE {cs}", wpm)
-            # Non-breaking spaces keep "5.8 s" and "20 WPM" together on wrap.
+            # Non-breaking spaces keep "4.0 s" and "20 WPM" together on wrap.
             self._set_status(
-                f"✓ Ready to identify as {cs} · {seconds:.1f}\u00a0s at "
-                f"{wpm}\u00a0WPM",
+                f"✓ Callsign OK · DE {cs} = {seconds:.1f}\u00a0s at {wpm}\u00a0WPM",
                 "success",
             )
         self._refresh_morse()
@@ -440,6 +585,16 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         )
         self._morse_label.setVisible(True)
 
+    def _refresh_tx_line(self) -> None:
+        """Line 2: what sending does now (from the window), toned."""
+        if self._is_transmitting and self._sending_text:
+            text, tone = self._sending_text, "danger"
+        else:
+            text, tone = self._tx_text, self._tx_tone
+        self._tx_label.setText(text)
+        _theme().set_tone(self._tx_label, tone)
+        self._tx_label.setVisible(bool(text))
+
     def _update_controls(self) -> None:
         """Enable the action buttons and explain why when they are not."""
         cs = self._callsign
@@ -458,25 +613,28 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
             self._test_btn.setToolTip("Enter your callsign to preview the ID.")
 
         if self._is_transmitting:
-            enabled, tip = False, "An ID is being transmitted."
-        elif not valid:
-            enabled = False
-            tip = (
-                "Enter a valid callsign first (letters and at least one digit, "
-                "e.g. W1AW)."
-            )
-        elif self._tx_available is False:
-            enabled = False
-            tip = self._tx_unavailable_reason or (
-                "Connect a TX-capable device (HackRF One) to send an ID."
-            )
+            self._id_now_btn.setText("Stop")
+            enabled, tip = True, "Stop transmitting now"
         else:
-            enabled = True
-            tip = (
-                f"Transmit “DE {cs}” in CW on the current frequency "
-                "now. Needs a TX-capable device (HackRF One) and a frequency "
-                "your license allows."
-            )
+            self._id_now_btn.setText("Send ID Now")
+            if not valid:
+                enabled = False
+                tip = (
+                    "Enter a valid callsign first (letters and at least one "
+                    "digit, e.g. W1AW)."
+                )
+            elif self._tx_available is False:
+                enabled = False
+                tip = self._tx_unavailable_reason or (
+                    "Connect a TX-capable device (HackRF One) to send an ID."
+                )
+            else:
+                enabled = True
+                tip = (
+                    f"Transmit “DE {cs}” on the tuned frequency now. Needs a "
+                    "TX-capable device (HackRF One) and a frequency your "
+                    "license allows."
+                )
         self._id_now_btn.setEnabled(enabled)
         self._id_now_btn.setToolTip(tip)
 
@@ -505,23 +663,33 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
             # The ready line shows the ID duration, which depends on the speed.
             self._refresh_status()
 
-        if self._is_transmitting:
-            if self._auto_id_check.isChecked() and not self._id_timer.isActive():
-                self._reset_countdown()
-                self._id_timer.start(1000)
-            elif not self._auto_id_check.isChecked():
-                self._id_timer.stop()
-            self._countdown_row.setVisible(self._auto_id_check.isChecked())
+    def _on_tx_power_changed(self, *_args) -> None:
+        self.tx_power_changed.emit(
+            self._tx_gain_spin.value(), self._amp_check.isChecked()
+        )
 
     # ------------------------------------------------------------------
     # Actions
     # ------------------------------------------------------------------
 
     def _on_id_now_clicked(self):
-        """Handle manual ID request."""
+        """Send ID Now, or Stop while transmitting."""
+        now = time.monotonic()
+        if self._is_transmitting:
+            # The second click of a double-click on Send ID Now lands on
+            # Stop: it doesn't end the transmission the first one started.
+            if now - self._send_clicked_at >= self._double_click_s():
+                self.stop_requested.emit()
+            return
         if self._callsign:
+            self._send_clicked_at = now
             self.id_requested.emit()
-            self._reset_countdown()
+
+    @staticmethod
+    def _double_click_s() -> float:
+        app = QApplication.instance()
+        ms = app.doubleClickInterval() if isinstance(app, QApplication) else 400
+        return max(0, int(ms)) / 1000.0
 
     def _on_test_clicked(self):
         """Play (or stop) an audible preview of the CW ID."""
@@ -623,59 +791,129 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         self._test_btn.setText("Preview ID")
 
     # ------------------------------------------------------------------
-    # Transmission state
+    # Transmission state (driven by the window's transmitter)
     # ------------------------------------------------------------------
 
-    def set_transmitting(self, is_transmitting: bool):
-        """Set transmission state."""
+    def set_transmitting(
+        self, is_transmitting: bool, text: str = "", is_id: bool = True
+    ) -> None:
+        """Show that a transmission is on the air (``text``: what, e.g.
+        "Sending DE W1AW on 146.520 MHz…"; ``is_id``: it is the station ID,
+        not another transmission such as Transmit Text): Send ID Now becomes
+        Stop and the progress bar shows. The automatic-ID countdown is the
+        window's to show (:meth:`set_id_countdown`); this never starts one."""
         self._is_transmitting = bool(is_transmitting)
-        auto = self._auto_id_check.isChecked()
-        self._countdown_row.setVisible(self._is_transmitting and auto)
-
+        self._sending_id = bool(is_id)
+        self._sending_text = text if self._is_transmitting else ""
+        self._tx_progress.setVisible(self._is_transmitting)
         if self._is_transmitting:
-            if auto:
-                self._reset_countdown()
-                self._id_timer.start(1000)  # Update every second
+            self._tx_progress.setValue(0)
+            self._tx_progress.setFormat("Starting…")
+            # In a short tab, bring Stop and the progress into view.
+            QTimer.singleShot(0, self._show_stop)
         else:
-            self._id_timer.stop()
-            self._countdown_label.setText("")
+            self.set_id_countdown(None)
         self._refresh_status()
+        self._refresh_tx_line()
         self._update_controls()
+
+    def is_transmitting(self) -> bool:
+        return self._is_transmitting
+
+    def _show_stop(self) -> None:
+        """Scroll the tab (if it scrolls) so Stop and the progress show."""
+        widget = self.parentWidget()
+        while widget is not None and not isinstance(widget, QScrollArea):
+            widget = widget.parentWidget()
+        if widget is not None and self._is_transmitting:
+            widget.ensureWidgetVisible(self._tx_progress, 0, 8)
+
+    def set_tx_progress(self, done_s: float, total_s: float) -> None:
+        """Air time sent so far and in all, while transmitting."""
+        total = max(float(total_s), 1e-6)
+        done = min(max(float(done_s), 0.0), total)
+        self._tx_progress.setValue(int(round(1000 * done / total)))
+        self._tx_progress.setFormat(f"{done:.1f} / {total:.1f} s")
+
+    def set_id_countdown(
+        self, seconds: Optional[float], interval_s: Optional[float] = None
+    ) -> None:
+        """Show "Next ID in mm:ss" (``seconds`` until the next automatic
+        ID of the transmission on the air), or hide it (None)."""
+        if seconds is None:
+            self._countdown_row.setVisible(False)
+            self._countdown_label.setText("")
+            return
+        span = int(
+            round(interval_s if interval_s else self._interval_spin.value() * 60)
+        )
+        self._id_progress.setMaximum(max(1, span))
+        self._id_progress.setValue(int(round(min(max(seconds, 0.0), span))))
+        self._countdown_label.setText(f"Next ID in {_clock(seconds)}")
+        self._countdown_row.setVisible(True)
 
     def set_tx_available(self, available: bool, reason: str = "") -> None:
         """Tell the panel whether the connected device can transmit.
 
-        When ``available`` is False, "Send ID Now" is disabled and its tooltip
-        shows ``reason``.
+        When ``available`` is False, "Send ID Now" is disabled and the
+        reason is shown under the callsign (and as its tooltip).
         """
         self._tx_available = bool(available)
         self._tx_unavailable_reason = reason
+        if available:
+            self._tx_text, self._tx_tone = "", None
+        else:
+            self._tx_text, self._tx_tone = reason, "warning"
+        self._refresh_tx_line()
         self._update_controls()
 
-    def _reset_countdown(self):
-        """Reset the ID countdown."""
-        self._seconds_until_id = self._interval_spin.value() * 60
-        self._id_progress.setMaximum(self._seconds_until_id)
-        self._id_progress.setValue(self._seconds_until_id)
-        self._update_countdown_display()
+    def set_tx_status(
+        self, text: str, tone: Optional[str], can_send: Optional[bool]
+    ) -> None:
+        """Line 2: what Send ID Now would do now ("Will send on 146.520 MHz
+        · FM tone ID · ...") or why it can't ("Can't send: ..."), toned;
+        ``can_send`` False disables Send ID Now with ``text`` as the reason
+        (None: unknown, Send stays available)."""
+        self._tx_available = can_send
+        self._tx_unavailable_reason = text if can_send is False else ""
+        self._tx_text, self._tx_tone = text, tone
+        self._refresh_tx_line()
+        self._update_controls()
 
-    def _update_countdown(self):
-        """Update the countdown timer."""
-        if self._seconds_until_id > 0:
-            self._seconds_until_id -= 1
-            self._id_progress.setValue(self._seconds_until_id)
-            self._update_countdown_display()
+    def tx_status_text(self) -> str:
+        """Line 2 as shown (whether or not the tab is on show)."""
+        return "" if self._tx_label.isHidden() else self._tx_label.text()
 
-            if self._seconds_until_id == 0 and self._auto_id_check.isChecked():
-                # Time for ID
-                self.id_requested.emit()
-                self._reset_countdown()
+    # ------------------------------------------------------------------
+    # Transmit power
+    # ------------------------------------------------------------------
 
-    def _update_countdown_display(self):
-        """Update the countdown label."""
-        minutes = self._seconds_until_id // 60
-        seconds = self._seconds_until_id % 60
-        self._countdown_label.setText(f"Next ID in {minutes:02d}:{seconds:02d}")
+    def tx_power(self) -> tuple:
+        """``(TX gain dB, amplifier on)``."""
+        return self._tx_gain_spin.value(), self._amp_check.isChecked()
+
+    def set_tx_power(self, gain_db: int, amp: bool) -> None:
+        """Show these TX power settings (without emitting)."""
+        for widget in (self._tx_gain_spin, self._tx_gain_slider, self._amp_check):
+            widget.blockSignals(True)
+        try:
+            gain = int(min(max(int(gain_db), 0), _TX_GAIN_MAX))
+            self._tx_gain_spin.setValue(gain)
+            self._tx_gain_slider.setValue(gain)
+            self._amp_check.setChecked(bool(amp))
+        finally:
+            for widget in (self._tx_gain_spin, self._tx_gain_slider, self._amp_check):
+                widget.blockSignals(False)
+
+    def set_power_estimate(
+        self, text: str, tone: Optional[str] = None, tip: str = ""
+    ) -> None:
+        """The estimated output ("about 1 mW (0 dBm) at 146.520 MHz"), red
+        (``tone`` "danger") when it is over a limit; ``tip`` says why."""
+        self._power_label.setText(text or "—")
+        _theme().set_tone(self._power_label, tone)
+        if tip:
+            self._power_label.setToolTip(tip)
 
     # ------------------------------------------------------------------
     # Public API
@@ -689,6 +927,28 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         """Set the callsign."""
         self._callsign_input.setText(callsign)
 
+    def emission_preference(self) -> str:
+        """How the ID is sent: "auto", "cw" or "mcw"."""
+        return str(self._emission_combo.currentData() or "auto")
+
+    def cw_wpm(self) -> int:
+        return self._wpm_spin.value()
+
+    def cw_tone(self) -> int:
+        return self._tone_spin.value()
+
+    def auto_id_settings(self) -> dict:
+        """``{"at_start", "at_end", "interval_s"}`` (interval None: off)."""
+        return {
+            "at_start": self._id_start_check.isChecked(),
+            "at_end": self._id_end_check.isChecked(),
+            "interval_s": (
+                self._interval_spin.value() * 60.0
+                if self._auto_id_check.isChecked()
+                else None
+            ),
+        }
+
     def get_settings(self) -> dict:
         """Get all settings as a dictionary."""
         mode_map = {0: "CW", 1: "VOICE", 2: "PSK31", 3: "RTTY"}
@@ -698,6 +958,7 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
             "id_at_start": self._id_start_check.isChecked(),
             "id_at_end": self._id_end_check.isChecked(),
             "mode": mode_map.get(self._mode_combo.currentIndex(), "CW"),
+            "emission": self.emission_preference(),
             "interval_minutes": self._interval_spin.value(),
             "cw_wpm": self._wpm_spin.value(),
             "cw_tone": self._tone_spin.value(),
@@ -720,6 +981,10 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
             if str(settings["mode"]).upper() != "CW":
                 logger.info(f"ID mode {settings['mode']!r} is not available; using CW")
             self._mode_combo.setCurrentIndex(_CW_INDEX)
+        if "emission" in settings:
+            index = self._emission_combo.findData(str(settings["emission"]).lower())
+            if index >= 0:
+                self._emission_combo.setCurrentIndex(index)
         if "interval_minutes" in settings:
             self._interval_spin.setValue(settings["interval_minutes"])
         if "cw_wpm" in settings:

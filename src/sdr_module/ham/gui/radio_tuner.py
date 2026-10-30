@@ -15,7 +15,7 @@ import logging
 import math
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 try:
     from PyQt6.QtCore import QPointF, QRectF, QSize, Qt, QTimer, pyqtSignal
@@ -35,6 +35,7 @@ try:
         QGridLayout,
         QGroupBox,
         QHBoxLayout,
+        QInputDialog,
         QLabel,
         QMenu,
         QPushButton,
@@ -82,6 +83,12 @@ FM_STEP_HZ = 100e3
 
 # How long a preset button must be held to store the current station.
 _LONG_PRESS_MS = 700
+# Longest preset name (it has to fit a preset button).
+_MAX_NAME = 24
+# Seek: how often the receiver is asked whether the channel has a signal,
+# and how long to wait for an answer before giving up.
+_SEEK_POLL_MS = 30
+_SEEK_PATIENCE_S = 2.0
 
 
 def band_range(band: "RadioBand") -> tuple:
@@ -103,11 +110,28 @@ def band_for_frequency(freq_hz: float) -> Optional["RadioBand"]:
     return None
 
 
+def on_raster(freq_hz: float, band: "RadioBand") -> bool:
+    """Whether ``freq_hz`` is on the band's channel raster (100 kHz FM,
+    10 kHz AM)."""
+    step = band_step(band)
+    channels = float(freq_hz) / step
+    return abs(channels - round(channels)) < 1e-6
+
+
 def format_station(freq_hz: float, band: "RadioBand") -> str:
-    """Display text of a station frequency ("101.1 MHz", "1010 kHz")."""
+    """Display text of a station frequency ("101.1 MHz", "1010 kHz").
+
+    Exact: a frequency between FM channels shows as the receiver shows it
+    ("100.137 MHz", "100.150 MHz"), an AM one to the hertz it needs
+    ("1053 kHz", "1053.5 kHz").
+    """
     if band == RadioBand.FM:
-        return f"{freq_hz / 1e6:.1f} MHz"
-    return f"{freq_hz / 1e3:.0f} kHz"
+        if on_raster(freq_hz, band):
+            return f"{freq_hz / 1e6:.1f} MHz"
+        return format_receiver_frequency(freq_hz)
+    khz = float(freq_hz) / 1e3
+    text = f"{khz:.3f}".rstrip("0").rstrip(".")
+    return f"{text} kHz"
 
 
 def format_receiver_frequency(freq_hz: float) -> str:
@@ -231,9 +255,8 @@ class FrequencyDisplay(QWidget if HAS_PYQT6 else object):
                 " "
             )
             return digits, unit
-        if self._band == RadioBand.FM:
-            return f"{self._frequency_hz / 1e6:.1f}", "MHz"
-        return f"{self._frequency_hz / 1e3:.0f}", "kHz"
+        digits, _, unit = format_station(self._frequency_hz, self._band).partition(" ")
+        return digits, unit
 
     def paintEvent(self, event) -> None:
         """Draw the display."""
@@ -614,8 +637,22 @@ class TuningDial(QWidget if HAS_PYQT6 else object):
         self.update()
 
     def step(self, channels: int) -> None:
-        """Tune up (positive) or down by whole channels."""
-        self._tune_to(self._snap(self._frequency) + channels * self._step)
+        """Tune up (positive) or down by whole channels (from a frequency
+        between channels, the first step lands on the next one that way)."""
+        position = self._frequency / self._step
+        if abs(position - round(position)) < 1e-6:
+            base = round(position)
+        else:
+            base = math.floor(position) if channels > 0 else math.ceil(position)
+        self._tune_to((base + channels) * self._step)
+
+    def tune_to(self, freq: float) -> None:
+        """Tune to ``freq`` (on the channel raster), emitting the change."""
+        self._tune_to(freq)
+
+    def channel_range(self) -> tuple:
+        """(lowest, highest) channel of the band."""
+        return self._snap(self._min_freq), self._snap(self._max_freq)
 
     def _tune_to(self, freq: float) -> None:
         freq = self._snap(freq)
@@ -640,11 +677,14 @@ class PresetButton(QPushButton if HAS_PYQT6 else object):
     Station preset button.
 
     Click to tune. Press and hold, or right-click, to store the current
-    station in it.
+    station in it; right-click also renames or clears it. Always two lines
+    (number and name, then the frequency), so every button is as tall.
     """
 
     if HAS_PYQT6:
         store_requested = pyqtSignal()
+        rename_requested = pyqtSignal()
+        clear_requested = pyqtSignal()
 
     def __init__(self, number: int, parent=None):
         if not HAS_PYQT6:
@@ -653,6 +693,10 @@ class PresetButton(QPushButton if HAS_PYQT6 else object):
         self._number = number
         self._preset: Optional[RadioPreset] = None
         self._long_press_fired = False
+        # Why storing isn't possible now (None: it is), e.g. while the
+        # receiver is outside the broadcast bands.
+        self._store_blocker: Optional[Callable[[], Optional[str]]] = None
+        self._unreachable = ""  # why the device can't tune this preset
 
         self._hold_timer = QTimer(self)
         self._hold_timer.setSingleShot(True)
@@ -661,25 +705,53 @@ class PresetButton(QPushButton if HAS_PYQT6 else object):
 
         self.setCheckable(True)
         self.setAutoDefault(False)
-        self.setMinimumHeight(44)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._fit_two_lines()
         self.set_preset(None)
+
+    def _fit_two_lines(self) -> None:
+        """One height for every preset button: two lines of text."""
+        lines = 2 * self.fontMetrics().lineSpacing()
+        self.setFixedHeight(max(44, lines + 18))
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (event.Type.FontChange, event.Type.StyleChange):
+            self._fit_two_lines()
+
+    def set_store_blocker(self, blocker: Optional[Callable[[], Optional[str]]]) -> None:
+        """``blocker()`` says why storing isn't possible now (None: it is)."""
+        self._store_blocker = blocker
+
+    def set_unreachable(self, reason: str) -> None:
+        """Why the connected device can't tune this preset ("" if it can):
+        the button says "out of range" and the tooltip why (it stays
+        enabled, so a station can still be stored in it, or it renamed)."""
+        self._unreachable = reason
+        self.set_preset(self._preset)
+
+    def unreachable(self) -> str:
+        return self._unreachable
 
     def set_preset(self, preset: Optional[RadioPreset]) -> None:
         """Store a preset for this button (``None`` leaves it empty)."""
         self._preset = preset
         how = "Right-click or press and hold to store the current station here."
         if preset is None:
-            self.setText(f"&{self._number}  Empty")
+            self.setText(f"&{self._number}\nEmpty")
             self.setToolTip(f"Preset {self._number} is empty. {how}")
             return
         freq = format_station(preset.frequency_hz, preset.band)
+        line = f"{freq} (out of range)" if self._unreachable else freq
         if preset.name:
-            self.setText(f"&{self._number}  {preset.name}\n{freq}")
-            self.setToolTip(f"Tune to {preset.name} ({freq}). {how}")
+            self.setText(f"&{self._number}  {preset.name}\n{line}")
+            tip = f"Tune to {preset.name} ({freq}). {how}"
         else:
-            self.setText(f"&{self._number}  {freq}")
-            self.setToolTip(f"Tune to {freq}. {how}")
+            self.setText(f"&{self._number}\n{line}")
+            tip = f"Tune to {freq}. {how} Right-click to name it."
+        if self._unreachable:
+            tip = f"{freq}: {self._unreachable} {how}"
+        self.setToolTip(tip)
 
     def get_preset(self) -> Optional[RadioPreset]:
         """Get stored preset."""
@@ -709,11 +781,21 @@ class PresetButton(QPushButton if HAS_PYQT6 else object):
             self.store_requested.emit()
 
     def contextMenuEvent(self, event) -> None:
-        """Offer to tune to, or store into, this preset."""
+        """Offer to tune to, store into, rename or clear this preset."""
         menu = QMenu(self)
+        menu.setToolTipsVisible(True)
         tune = menu.addAction("&Tune to Preset")
-        tune.setEnabled(self._preset is not None)
+        tune.setEnabled(self._preset is not None and not self._unreachable)
         store = menu.addAction("&Store Current Station Here")
+        blocked = self._store_blocker() if self._store_blocker is not None else None
+        if blocked:
+            store.setEnabled(False)
+            store.setToolTip(blocked)
+        menu.addSeparator()
+        rename = menu.addAction("&Rename...")
+        rename.setEnabled(self._preset is not None)
+        clear = menu.addAction("&Clear")
+        clear.setEnabled(self._preset is not None)
         chosen = menu.exec(event.globalPos())
         # A new menu per right-click: free it rather than keep one per click.
         menu.deleteLater()
@@ -721,6 +803,34 @@ class PresetButton(QPushButton if HAS_PYQT6 else object):
             self.store_requested.emit()
         elif chosen is tune:
             self.click()
+        elif chosen is rename:
+            self.rename_requested.emit()
+        elif chosen is clear:
+            self.clear_requested.emit()
+
+
+class _SeekButton(QPushButton if HAS_PYQT6 else object):
+    """A seek arrow that remembers whether Shift was held when it was
+    pressed (Shift+click steps one channel instead of seeking)."""
+
+    def __init__(self, parent=None):
+        if not HAS_PYQT6:
+            return
+        super().__init__(parent)
+        self.shift = False
+
+    def mousePressEvent(self, event) -> None:
+        self.shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        self.shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        super().keyPressEvent(event)
+
+    def take_shift(self) -> bool:
+        """Whether Shift was held for this click (then forgotten)."""
+        shift, self.shift = self.shift, False
+        return shift
 
 
 class VolumeKnob(QWidget if HAS_PYQT6 else object):
@@ -776,24 +886,26 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
 
     if HAS_PYQT6:
         frequency_changed = pyqtSignal(float, str)  # freq_hz, band
+        presets_changed = pyqtSignal()  # stored, renamed or cleared (save them)
 
-    # Default FM presets (classic rock stations style)
+    # Default presets: just frequencies (common broadcast channels; the demo
+    # device has a station on each). Name them with right-click > Rename.
     DEFAULT_FM_PRESETS = [
-        RadioPreset(101.1e6, RadioBand.FM, "Rock"),
-        RadioPreset(93.3e6, RadioBand.FM, "Classic"),
-        RadioPreset(97.1e6, RadioBand.FM, "Pop"),
-        RadioPreset(104.3e6, RadioBand.FM, "Jazz"),
-        RadioPreset(88.5e6, RadioBand.FM, "NPR"),
-        RadioPreset(99.5e6, RadioBand.FM, "Country"),
+        RadioPreset(101.1e6, RadioBand.FM),
+        RadioPreset(93.3e6, RadioBand.FM),
+        RadioPreset(97.1e6, RadioBand.FM),
+        RadioPreset(104.3e6, RadioBand.FM),
+        RadioPreset(88.5e6, RadioBand.FM),
+        RadioPreset(99.5e6, RadioBand.FM),
     ]
 
     DEFAULT_AM_PRESETS = [
-        RadioPreset(880e3, RadioBand.AM, "News"),
-        RadioPreset(1010e3, RadioBand.AM, "Talk"),
-        RadioPreset(770e3, RadioBand.AM, "Sports"),
-        RadioPreset(1050e3, RadioBand.AM, "Weather"),
-        RadioPreset(660e3, RadioBand.AM, "News2"),
-        RadioPreset(1260e3, RadioBand.AM, "Oldies"),
+        RadioPreset(880e3, RadioBand.AM),
+        RadioPreset(1010e3, RadioBand.AM),
+        RadioPreset(770e3, RadioBand.AM),
+        RadioPreset(1050e3, RadioBand.AM),
+        RadioPreset(660e3, RadioBand.AM),
+        RadioPreset(1260e3, RadioBand.AM),
     ]
 
     _FOOTER_HINT = "Tunes the main receiver. Use the toolbar's Audio button to listen."
@@ -825,12 +937,29 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         self._fm_demod = FMDemodulator(sample_rate)
 
         # Presets per band
-        self._fm_presets = list(self.DEFAULT_FM_PRESETS)
-        self._am_presets = list(self.DEFAULT_AM_PRESETS)
+        self._fm_presets: List[Optional[RadioPreset]] = list(self.DEFAULT_FM_PRESETS)
+        self._am_presets: List[Optional[RadioPreset]] = list(self.DEFAULT_AM_PRESETS)
 
         self._hint_timer = QTimer(self)
         self._hint_timer.setSingleShot(True)
         self._hint_timer.timeout.connect(self._reset_hint)
+
+        # Seek: the receiver says whether the tuned channel has a signal
+        # (see set_signal_probe); one channel at a time until it does.
+        self._probe: Optional[Callable[[], Optional[str]]] = None
+        self._seek_dir = 0
+        self._seek_steps = 0
+        self._seek_waited = 0.0
+        self._seek_stepping = False
+        self._seek_timer = QTimer(self)
+        self._seek_timer.setSingleShot(True)
+        self._seek_timer.setInterval(_SEEK_POLL_MS)
+        self._seek_timer.timeout.connect(self._seek_poll)
+
+        # What the connected device can tune (None: anything) and its name,
+        # for the AM band's reach.
+        self._device_range: Optional[tuple] = None
+        self._device_name = ""
 
         self._setup_ui()
         self._connect_signals()
@@ -886,16 +1015,13 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         # === Tuning dial with step buttons ===
         dial_row = QHBoxLayout()
         dial_row.setSpacing(6)
-        self._seek_down_btn = QPushButton()
-        self._seek_up_btn = QPushButton()
-        self._seek_down_btn.setAccessibleName("Tune down")
-        self._seek_up_btn.setAccessibleName("Tune up")
+        self._seek_down_btn = _SeekButton()
+        self._seek_up_btn = _SeekButton()
+        self._seek_down_btn.setAccessibleName("Seek down")
+        self._seek_up_btn.setAccessibleName("Seek up")
         self._refresh_icons()
         for btn in (self._seek_down_btn, self._seek_up_btn):
             btn.setAutoDefault(False)
-            btn.setAutoRepeat(True)
-            btn.setAutoRepeatDelay(400)
-            btn.setAutoRepeatInterval(90)
             btn.setFixedWidth(34)
             btn.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self._tuning_dial = TuningDial()
@@ -972,6 +1098,9 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
                 lambda _checked=False, idx=i: self._on_preset_clicked(idx)
             )
             btn.store_requested.connect(lambda idx=i: self.store_preset(idx))
+            btn.rename_requested.connect(lambda idx=i: self.rename_preset(idx))
+            btn.clear_requested.connect(lambda idx=i: self.clear_preset(idx))
+            btn.set_store_blocker(self._store_blocker)
 
     # --------------------------------------------------------------- tuning
 
@@ -980,6 +1109,8 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
 
     def _apply_frequency(self, freq_hz: float, emit: bool = True) -> None:
         """Clamp to the band, update every view and optionally emit."""
+        if emit and not self._seek_stepping:
+            self.stop_seek()  # tuning by hand ends a seek
         lo, hi = band_range(self._band)
         self._frequency = max(lo, min(float(freq_hz), hi))
         self._band_frequency[self._band] = self._frequency
@@ -996,20 +1127,39 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         (self._fm_btn if band == RadioBand.FM else self._am_btn).setChecked(True)
         self._tuning_dial.set_range(*band_range(band))
         self._tuning_dial.set_step(band_step(band))
-        step = band_step(band)
-        self._seek_down_btn.setToolTip(
-            f"Tune down one channel ({step / 1e3:.0f} kHz). Hold to keep tuning."
-        )
-        self._seek_up_btn.setToolTip(
-            f"Tune up one channel ({step / 1e3:.0f} kHz). Hold to keep tuning."
-        )
+        if emit:
+            self.stop_seek()
+        self._update_seek_tips()
         self._update_presets(self._current_presets())
-        self._apply_frequency(self._band_frequency[band], emit)
+        self._apply_frequency(self._reachable(band, self._band_frequency[band]), emit)
+        if not self.is_seeking():
+            self._hint_timer.stop()
+            self._reset_hint()  # (the AM band's note, if any)
 
-    def _update_presets(self, presets: List[RadioPreset]) -> None:
+    def _reachable(self, band: RadioBand, freq_hz: float) -> float:
+        """``freq_hz``, or (when the device can't tune it) the first preset
+        of ``band`` it can, else its lowest reachable channel: a HackRF
+        switched to AM lands on 1000 kHz or above instead of being refused."""
+        if self._device_range is None:
+            return freq_hz
+        low, high = self._device_range
+        if low <= freq_hz <= high:
+            return freq_hz
+        presets = self._fm_presets if band == RadioBand.FM else self._am_presets
+        for preset in presets:
+            if preset is not None and low <= preset.frequency_hz <= high:
+                return preset.frequency_hz
+        step = band_step(band)
+        band_low, band_high = band_range(band)
+        channel = math.ceil(max(low, band_low) / step) * step
+        return min(max(channel, band_low), band_high)
+
+    def _update_presets(self, presets: List[Optional[RadioPreset]]) -> None:
         """Update preset buttons for current band."""
         for i, btn in enumerate(self._preset_buttons):
-            btn.set_preset(presets[i] if i < len(presets) else None)
+            preset = presets[i] if i < len(presets) else None
+            btn.set_preset(preset)
+            btn.set_unreachable(self._unreachable_reason(preset))
         self._refresh_markers()
         self._refresh_preset_states()
 
@@ -1035,6 +1185,12 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
                 station = f"Preset {i + 1}" + (
                     f" · {preset.name}" if preset.name else ""
                 )
+        if (
+            not station
+            and not on_raster(self._frequency, self._band)
+            and not getattr(self, "_rds_text", "")
+        ):
+            station = "Between channels"
         self._freq_display.set_station(self._with_rds(station))
 
     def set_rds_text(self, text: str) -> None:
@@ -1061,7 +1217,12 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
     def _on_preset_clicked(self, index: int) -> None:
         """Handle preset button click."""
         presets = self._current_presets()
-        if index < len(presets) and presets[index] is not None:
+        reason = self._preset_buttons[index].unreachable()
+        if index < len(presets) and presets[index] is not None and reason:
+            self._refresh_preset_states()
+            freq = format_station(presets[index].frequency_hz, self._band)
+            self._show_hint(f"{freq}: {reason}", "warning")
+        elif index < len(presets) and presets[index] is not None:
             self._apply_frequency(presets[index].frequency_hz)
         else:
             self._refresh_preset_states()
@@ -1071,21 +1232,116 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
                 "warning",
             )
 
+    def _store_blocker(self) -> Optional[str]:
+        """Why the station can't be stored now (None: it can)."""
+        if self._off_band_hz is not None:
+            return (
+                "Tune to an AM or FM station first: the receiver is on "
+                f"{format_receiver_frequency(self._off_band_hz)}."
+            )
+        return None
+
     def store_preset(self, index: int) -> None:
-        """Store current frequency as preset."""
-        preset = RadioPreset(self._frequency, self._band)
-        if self._band == RadioBand.FM:
-            self._fm_presets[index] = preset
-        else:
-            self._am_presets[index] = preset
-        self._preset_buttons[index].set_preset(preset)
-        self._refresh_markers()
-        self._refresh_preset_states()
+        """Store the station tuned (the receiver's frequency) in preset
+        ``index`` (refused, with a hint, while the receiver is outside the
+        broadcast bands)."""
+        blocked = self._store_blocker()
+        if blocked:
+            self._show_hint(blocked, "warning")
+            return
+        old = self._current_presets()[index]
+        # A station stored over a named one keeps the name only if it is
+        # the same station.
+        name = ""
+        if old is not None and abs(old.frequency_hz - self._frequency) < 1.0:
+            name = old.name
+        preset = RadioPreset(self._frequency, self._band, name)
+        self._set_preset(index, preset)
         self._show_hint(
             f"Stored {format_station(self._frequency, self._band)} in preset "
             f"{index + 1}.",
             "success",
         )
+
+    def _set_preset(self, index: int, preset: Optional[RadioPreset]) -> None:
+        if self._band == RadioBand.FM:
+            self._fm_presets[index] = preset
+        else:
+            self._am_presets[index] = preset
+        button = self._preset_buttons[index]
+        button.set_preset(preset)
+        button.set_unreachable(self._unreachable_reason(preset))
+        self._refresh_markers()
+        self._refresh_preset_states()
+        self.presets_changed.emit()
+
+    def rename_preset(self, index: int, name: Optional[str] = None) -> None:
+        """Name preset ``index`` (asks when ``name`` is None; an empty name
+        removes it)."""
+        preset = self._current_presets()[index]
+        if preset is None:
+            return
+        if name is None:
+            text, ok = QInputDialog.getText(
+                self,
+                "Rename Preset",
+                f"Name for preset {index + 1} "
+                f"({format_station(preset.frequency_hz, preset.band)}):",
+                text=preset.name,
+            )
+            if not ok:
+                return
+            name = text
+        name = " ".join(str(name).split())[:_MAX_NAME]
+        self._set_preset(index, RadioPreset(preset.frequency_hz, preset.band, name))
+        if name:
+            self._show_hint(f"Preset {index + 1} is now {name}.", "success")
+        else:
+            self._show_hint(f"Preset {index + 1} has no name now.", None)
+
+    def clear_preset(self, index: int) -> None:
+        """Empty preset ``index``."""
+        if self._current_presets()[index] is None:
+            return
+        self._set_preset(index, None)
+        self._show_hint(f"Preset {index + 1} cleared.", None)
+
+    def get_presets(self) -> Dict[str, list]:
+        """Both bands' presets, to save: ``{"fm": [[hz, name] or None,
+        ...], "am": [...]}``."""
+
+        def pack(presets: List[Optional[RadioPreset]]) -> list:
+            return [
+                None if p is None else [float(p.frequency_hz), p.name] for p in presets
+            ]
+
+        return {"fm": pack(self._fm_presets), "am": pack(self._am_presets)}
+
+    def set_presets(self, data: Dict[str, Any]) -> None:
+        """Restore :meth:`get_presets` (entries outside their band, or that
+        can't be read, keep the default)."""
+        if not isinstance(data, dict):
+            return
+        for key, band, presets in (
+            ("fm", RadioBand.FM, self._fm_presets),
+            ("am", RadioBand.AM, self._am_presets),
+        ):
+            saved = data.get(key)
+            if not isinstance(saved, list):
+                continue
+            low, high = band_range(band)
+            for i, entry in enumerate(saved[: len(presets)]):
+                if entry is None:
+                    presets[i] = None
+                    continue
+                try:
+                    freq = float(entry[0])
+                    name = " ".join(str(entry[1] or "").split())[:_MAX_NAME]
+                except (TypeError, ValueError, IndexError):
+                    continue
+                if low <= freq <= high and math.isfinite(freq):
+                    presets[i] = RadioPreset(freq, band, name)
+        self._update_presets(self._current_presets())
 
     def _show_hint(self, text: str, tone: Optional[str] = None) -> None:
         """Show feedback in the footer for a few seconds."""
@@ -1102,6 +1358,8 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
                 "switch it to a station."
             )
             tone: Optional[str] = "info"
+        elif self._band == RadioBand.AM and self._am_note():
+            text, tone = self._am_note(), "info"
         else:
             text, tone = self._FOOTER_HINT, None
         self._hint_label.setText(text)
@@ -1142,13 +1400,209 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         self._hint_timer.stop()
         self._reset_hint()
 
+    # ------------------------------------------------------------- seek
+
+    def set_signal_probe(self, probe: Optional[Callable[[], Optional[str]]]) -> None:
+        """How seek knows a station is there: ``probe()`` returns "signal"
+        (the tuned channel opens the squelch), "quiet", "wait" (ask again
+        shortly), "refused" (the receiver didn't tune there) or None (the
+        receiver isn't running). Without a probe the arrows step a channel."""
+        self._probe = probe
+        self._update_seek_tips()
+
+    def is_seeking(self) -> bool:
+        return self._seek_dir != 0
+
+    def _update_seek_tips(self) -> None:
+        step = band_step(self._band) / 1e3
+        if self._probe is None:
+            down = f"Tune down one channel ({step:.0f} kHz)."
+            up = f"Tune up one channel ({step:.0f} kHz)."
+        else:
+            down = (
+                "Seek down: tune down until a station opens the squelch. "
+                f"Shift+click: one channel ({step:.0f} kHz)."
+            )
+            up = (
+                "Seek up: tune up until a station opens the squelch. "
+                f"Shift+click: one channel ({step:.0f} kHz)."
+            )
+        self._seek_down_btn.setToolTip(down)
+        self._seek_up_btn.setToolTip(up)
+
     def _seek_up(self) -> None:
-        """Tune up one channel."""
-        self._tuning_dial.step(1)
+        """Seek up (Shift, or without a receiver to ask: one channel)."""
+        self._seek(1, self._seek_up_btn.take_shift())
 
     def _seek_down(self) -> None:
-        """Tune down one channel."""
-        self._tuning_dial.step(-1)
+        """Seek down (Shift, or without a receiver to ask: one channel)."""
+        self._seek(-1, self._seek_down_btn.take_shift())
+
+    def _seek(self, direction: int, shift: bool = False) -> None:
+        if self.is_seeking():
+            self.stop_seek("Seek stopped.")
+            return
+        if shift or self._probe is None:
+            self._tuning_dial.step(direction)
+            return
+        if self._probe() is None:
+            self._show_hint(
+                "Seek listens for stations: start the receiver first (Start or "
+                "Space). Shift+click steps one channel.",
+                "warning",
+            )
+            return
+        self._seek_dir = direction
+        self._seek_steps = 0
+        self._seek_step()
+
+    def _seek_step(self) -> None:
+        """One channel on (round the band at its ends), then listen."""
+        low, high = self._tuning_dial.channel_range()
+        step = band_step(self._band)
+        here = self._tuning_dial.get_frequency()
+        position = here / step
+        if abs(position - round(position)) < 1e-6:
+            base = round(position)
+        else:
+            base = math.floor(position) if self._seek_dir > 0 else math.ceil(position)
+        target = (base + self._seek_dir) * step
+        if target > high + 0.5:
+            target = low
+        elif target < low - 0.5:
+            target = high
+        self._seek_steps += 1
+        self._seek_waited = 0.0
+        self._seek_stepping = True
+        try:
+            if self._off_band_hz is not None:
+                self._leave_off_band()
+            self._tuning_dial.tune_to(target)
+        finally:
+            self._seek_stepping = False
+        direction = "up" if self._seek_dir > 0 else "down"
+        self._show_hint(
+            f"Seeking {direction}… {format_station(self._frequency, self._band)}",
+            "info",
+        )
+        self._hint_timer.stop()
+        self._seek_timer.start()
+
+    def _seek_poll(self) -> None:
+        if not self.is_seeking():
+            return
+        state = self._probe() if self._probe is not None else None
+        where = format_station(self._frequency, self._band)
+        if state is None:
+            self.stop_seek("Seek stopped: the receiver stopped.", "warning")
+        elif state == "refused":
+            self.stop_seek(f"Seek stopped: the receiver can't tune {where}.", "warning")
+        elif state == "wait":
+            self._seek_waited += _SEEK_POLL_MS / 1000.0
+            if self._seek_waited > _SEEK_PATIENCE_S:
+                self.stop_seek("Seek stopped: no samples from the receiver.", "warning")
+            else:
+                self._seek_timer.start()
+        elif state == "signal":
+            self.stop_seek(f"Found a station on {where}.", "success")
+        else:
+            low, high = self._tuning_dial.channel_range()
+            channels = int(round((high - low) / band_step(self._band))) + 1
+            if self._seek_steps >= channels:
+                self.stop_seek(
+                    "No station strong enough to open the squelch anywhere in "
+                    "the band.",
+                    "warning",
+                )
+            else:
+                self._seek_step()
+
+    def stop_seek(self, message: str = "", tone: Optional[str] = None) -> None:
+        """End a seek (saying ``message``)."""
+        if not self.is_seeking():
+            return
+        self._seek_dir = 0
+        self._seek_timer.stop()
+        if message:
+            self._show_hint(message, tone)
+        else:
+            self._hint_timer.stop()
+            self._reset_hint()
+
+    def hideEvent(self, event) -> None:
+        self.stop_seek()
+        super().hideEvent(event)
+
+    # ------------------------------------------------------------- device
+
+    def set_device_range(
+        self, low_hz: Optional[float], high_hz: Optional[float], name: str = ""
+    ) -> None:
+        """What the connected device can tune (None: anything, e.g. the
+        demo device) and its name: presets it can't reach are disabled and
+        the AM band is explained (or disabled) when it can't tune it."""
+        if low_hz is None or high_hz is None:
+            device_range = None
+        else:
+            device_range = (float(low_hz), float(high_hz))
+        name = name or "The receiver"
+        if (device_range, name) == (self._device_range, self._device_name):
+            return  # (unchanged: keep the footer's feedback)
+        self._device_range = device_range
+        self._device_name = name
+        am_low, am_high = AM_RANGE
+        reachable = self._device_range is None or (
+            self._device_range[0] <= am_high and self._device_range[1] >= am_low
+        )
+        tip = f"AM (medium wave) broadcast band, 530-1700 kHz. {_tip('am')}".strip()
+        note = self._am_note()
+        if note:
+            tip = f"{tip}\n\n{note}"
+        self._am_btn.setToolTip(tip)
+        self._am_btn.setEnabled(reachable)
+        if not reachable and self._band == RadioBand.AM and self._off_band_hz is None:
+            self._switch_band(RadioBand.FM, emit=False)
+        self._update_presets(self._current_presets())
+        self._hint_timer.stop()
+        self._reset_hint()
+
+    def _am_note(self) -> str:
+        """What limits the AM band on the connected device ("" if nothing)."""
+        if self._device_range is None:
+            return ""
+        low, high = self._device_range
+        am_low, am_high = AM_RANGE
+        name = self._device_name
+        span = f"{low / 1e6:g}–{high / 1e6:g} MHz"
+        if low > am_high or high < am_low:
+            return (
+                f"{name} tunes {span}: the AM broadcast band (530–1700 kHz) is "
+                "out of its reach."
+            )
+        if low > am_low:
+            return (
+                f"{name} tunes from {low / 1e3:.0f} kHz: AM stations below that "
+                "are out of its reach."
+            )
+        if name == "RTL-SDR":
+            return (
+                "An RTL-SDR receives the AM band by direct sampling, which only "
+                "some dongles support (such as the RTL-SDR Blog V3 and V4); "
+                "others need an upconverter."
+            )
+        return ""
+
+    def _unreachable_reason(self, preset: Optional[RadioPreset]) -> str:
+        """Why the device can't tune ``preset`` ("" if it can)."""
+        if preset is None or self._device_range is None:
+            return ""
+        low, high = self._device_range
+        if low <= preset.frequency_hz <= high:
+            return ""
+        return (
+            f"{self._device_name} can't tune it (it tunes "
+            f"{low / 1e6:g}–{high / 1e6:g} MHz)."
+        )
 
     def set_stereo(self, stereo: bool) -> None:
         """Set stereo indicator state."""

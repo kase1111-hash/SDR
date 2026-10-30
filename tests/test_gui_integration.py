@@ -275,20 +275,39 @@ class TestHamId(_WindowTestCase):
             self.skipTest("ham radio panels not installed")
 
     def test_send_id_needs_a_hackrf(self):
+        """Send ID Now is available only where it can work, and the panel's
+        TX line says why not (the device, then the license at the tuned
+        frequency)."""
+        from sdr_module.core.frequency_manager import LicenseClass
         from sdr_module.devices.hackrf import HackRFDevice
 
         panel = self.win._callsign_panel
         self.assertIs(panel._tx_available, False)
         self.assertEqual(
-            panel._tx_unavailable_reason, "Connect a HackRF One to transmit an ID."
+            panel._tx_unavailable_reason,
+            "Can't send: no device is connected. Connect a HackRF One "
+            "(Device > Connect...).",
         )
         self.win._start_demo_mode()
         self.assertIs(panel._tx_available, False)
+        self.assertIn("the demo device can't transmit", panel._tx_unavailable_reason)
         self.win._release_device()
 
+        self.win.set_frequency(146.52e6)
         self.win._device = HackRFDevice()  # not opened; no hardware touched
+        self.win._control_panel.set_license_class(LicenseClass.TECHNICIAN)
         self.win._refresh_state_ui()
         self.assertIs(panel._tx_available, True)
+        self.assertTrue(
+            panel.tx_status_text().startswith(
+                "With a callsign, Send ID Now sends on 146.520 MHz"
+            )
+        )
+        panel.set_callsign("W1AW")
+        self.assertTrue(panel.tx_status_text().startswith("Will send on 146.520 MHz"))
+        self.win._control_panel.set_license_class(LicenseClass.NONE)
+        self.assertIs(panel._tx_available, False)
+        self.assertIn("your license (None) allows CB/MURS/FRS", panel.tx_status_text())
         self.win._device = None
         self.win._refresh_state_ui()
         self.assertIs(panel._tx_available, False)

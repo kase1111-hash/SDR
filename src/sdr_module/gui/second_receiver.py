@@ -2245,20 +2245,12 @@ if HAS_PYQT6:
         def _apply_hackrf_gain(self, dev: Any) -> None:
             """Set a HackRF One's LNA, VGA and RF amp as shown."""
             lna, vga, amp = self._hackrf_gains()
-            ok = True
-            for name, value in (
-                ("set_lna_gain", lna),
-                ("set_vga_gain", vga),
-                ("set_amp", amp),
-            ):
-                method = getattr(dev, name, None)
-                try:
-                    done = callable(method) and method(value) is not False
-                except Exception as e:
-                    logger.warning(f"Second receiver {name}({value}): {e}")
-                    done = False
-                ok = ok and done
-            if not ok:
+            results = [  # (all three tried, whatever each says)
+                _device_call(dev, "set_lna_gain", lna),
+                _device_call(dev, "set_vga_gain", vga),
+                _device_call(dev, "set_amp", amp),
+            ]
+            if not all(results):
                 self._show_message(
                     f"{self._device_name()} didn't take LNA {lna} dB, VGA {vga} dB "
                     f"and the RF amp {'on' if amp else 'off'} (Tools > Error "
@@ -2321,7 +2313,9 @@ if HAS_PYQT6:
                 getattr(dev, "direct_sampling_branch", None)
             )
             if value is not None:
-                self._direct_combo.setCurrentIndex(self._direct_combo.findData(value))
+                self._direct_combo.setCurrentIndex(
+                    max(0, self._direct_combo.findData(value))
+                )
             ppm = getattr(dev, "freq_correction", None)
             if isinstance(ppm, int):
                 self._ppm_spin.blockSignals(True)

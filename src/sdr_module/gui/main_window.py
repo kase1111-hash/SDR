@@ -1996,9 +1996,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._capture_pending = False
         self._retune_warned = False
         # Samples the driver dropped (its queue was full) while a take was
-        # captured: (that take's buffer, samples lost), the device, its drop
-        # count and whether a take captured at the last hardware frame, and
-        # what was lost this frame (added to the take once it has a buffer).
+        # captured: (that take's buffer, samples lost), the device (a weak
+        # reference: one let go is freed, with its queue), its drop count
+        # and whether a take captured at the last hardware frame, and what
+        # was lost this frame (added to the take once it has a buffer).
         self._take_lost: Tuple[Any, int] = (None, 0)
         self._drop_mark: Optional[Tuple[Any, int, bool]] = None
         self._lost_unreported = 0
@@ -6256,8 +6257,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             dropped = int(dev.dropped_samples)
         except (AttributeError, TypeError, ValueError):
             return False
-        mark, self._drop_mark = self._drop_mark, (dev, dropped, capturing)
-        if not capturing or mark is None or mark[0] is not dev or dropped <= mark[1]:
+        mark = self._drop_mark
+        self._drop_mark = (weakref.ref(dev), dropped, capturing)
+        if not capturing or mark is None or mark[0]() is not dev or dropped <= mark[1]:
             return False
         if not mark[2]:
             return True

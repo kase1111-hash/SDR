@@ -308,6 +308,26 @@ class TestRecordingGapsAreReported(_HardwareCase):
         return False
 
 
+class TestDisconnectFreesTheDevice(_HardwareCase):
+    def test_a_disconnected_device_and_its_queue_are_let_go(self):
+        """Watching the driver's drop count must not keep a device the
+        window let go (with up to 100 queued transfers: 105 MB for a
+        HackRF, 420 MB for an RTL-SDR's complex128 reads)."""
+        import gc
+        import weakref
+
+        self.win._toggle_recording(True)
+        self.run_frames(3)
+        self.win._toggle_recording(False)
+        self.dev.deliver(100)  # (full when the window lets it go)
+        gone = weakref.ref(self.dev)
+        self.win._is_running = False
+        self.win._disconnect_device()
+        self.dev = None
+        gc.collect()
+        self.assertIsNone(gone())
+
+
 class TestDriversCountDrops(unittest.TestCase):
     def test_base_class_reports_no_drops(self):
         from sdr_module.devices.base import SDRDevice

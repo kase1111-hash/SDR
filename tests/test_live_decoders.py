@@ -598,6 +598,38 @@ class TestPOCSAG:
         assert "BCH" in messages[0].error_message
         assert decoder.frames_failed == 1
 
+    LONG_TEXT = (
+        "This is a long page that continues into the next batch so that a "
+        "lost sync word cuts it short in the middle, ok"
+    )
+
+    @pytest.mark.parametrize("errors", [4, 5])
+    def test_a_page_cut_by_a_lost_batch_is_not_valid(self, errors):
+        # DEC-05: the second batch's sync word after a short fade (more
+        # than 4 bit errors) ended the transmission, and the open page came
+        # out valid as "Th" instead of its 111 characters.
+        bits = enc.pocsag_bits([(1234567, 3, self.LONG_TEXT)])  # frame 7
+        sync = POCSAGDecoder.PREAMBLE_BITS + 32 * 17  # the 2nd sync word
+        for k in range(errors):
+            bits[sync + 3 + 6 * k] ^= 1
+        decoder, messages = self._decode(bits)
+        page = messages[0]
+        if errors == 4:  # still found: the whole page
+            assert (page.content, page.valid) == (self.LONG_TEXT, True)
+            return
+        assert page.content == "Th"
+        assert not page.valid
+        assert page.error_message == "cut short: the next batch was lost"
+        assert decoder.frames_failed >= 1
+
+    def test_a_page_cut_at_its_longest_is_not_valid(self):
+        text = ("0123456789abcdefghij" * 40)[:780]  # 273 message codewords
+        decoder, messages = self._decode(enc.pocsag_bits([(8, 3, text)]))
+        page = messages[0]
+        assert text.startswith(page.content) and len(page.content) < len(text)
+        assert not page.valid
+        assert page.error_message == "cut short after 200 codewords"
+
     def test_one_or_two_bit_errors_are_corrected(self):
         bits = enc.pocsag_bits([(1234567, 3, "FIXED")])
         start = 576 + 32 + 15 * 32

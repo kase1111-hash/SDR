@@ -484,13 +484,15 @@ class POCSAGDecoder(ProtocolDecoder):
         message_bits: List[int],
         errors: int = 0,
         baud: Optional[int] = None,
+        cut: str = "",
     ) -> POCSAGMessage:
         """Assemble a POCSAGMessage, decoding the payload per the function code.
 
         Function 0 selects a numeric page (4-bit BCD-style symbols); the other
         function codes select an alphanumeric page (7-bit characters). A page
         without message codewords is a tone-only page. ``errors`` counts
-        codewords that could not be corrected: such a page is invalid.
+        codewords that could not be corrected: such a page is invalid. So is
+        a page that was ``cut`` (why: it ended before its end mark).
         """
         if not message_bits:
             content = ""
@@ -506,11 +508,13 @@ class POCSAGDecoder(ProtocolDecoder):
             error = (
                 f"{errors} codeword{'s' if errors != 1 else ''} failed the " "BCH check"
             )
+        if cut:
+            error = f"{error}; {cut}" if error else cut
         return POCSAGMessage(
             protocol=ProtocolType.POCSAG,
             timestamp=self._timestamp,
             raw_bits=bytes(batch),
-            valid=not errors,
+            valid=not (errors or cut),
             error_message=error,
             address=address,
             function=function,
@@ -620,7 +624,9 @@ class _POCSAGPages:
             page["bits"].extend((fixed >> (30 - i)) & 1 for i in range(20))
             page["words"].append(fixed)
             if len(page["words"]) > POCSAGDecoder._MAX_PAGE_WORDS:
-                return self.flush()
+                return self.flush(
+                    f"cut short after {POCSAGDecoder._MAX_PAGE_WORDS} codewords"
+                )
             return []
         # Address codeword: the 18-bit address field (bits 30..13) and the
         # 2-bit function code (bits 12..11). The full 21-bit receiver
@@ -637,8 +643,13 @@ class _POCSAGPages:
         }
         return out
 
-    def flush(self) -> List[POCSAGMessage]:
-        """The open page, if any (the transmission or the page ended)."""
+    def flush(self, cut: str = "") -> List[POCSAGMessage]:
+        """The open page, if any (the transmission or the page ended).
+
+        ``cut`` says why a page ended before its end mark (every page ends
+        at an idle or an address codeword): it may be missing the rest of
+        its text, so it is returned invalid with that reason.
+        """
         page, self._page = self._page, None
         if page is None:
             return []
@@ -650,6 +661,7 @@ class _POCSAGPages:
             page["bits"],
             page["errors"],
             self.baud,
+            cut=cut,
         )
         if not msg.valid:
             self._decoder.frames_failed += 1
@@ -751,8 +763,9 @@ class _POCSAGStream:
                 if (reg ^ sync).bit_count() <= POCSAGDecoder._NEXT_SYNC_ERRORS:
                     state, batch = self._BATCH, []
                     continue
-                # No batch follows: the transmission is over.
-                out += self.pages.flush()
+                # No batch follows: the transmission is over. A page still
+                # open had no end mark: the rest of it was in a lost batch.
+                out += self.pages.flush("cut short: the next batch was lost")
                 state = self._SEARCH
                 reg ^= 0xFFFFFFFF if invert else 0
         self._state, self._reg, self._invert, self._count = state, reg, invert, count

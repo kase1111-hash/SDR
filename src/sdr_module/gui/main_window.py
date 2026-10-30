@@ -1434,7 +1434,11 @@ class _SampleStore:
         self._file: Any = None
         self._finalizer: Any = None
         self._memory: Optional[np.ndarray] = None
-        self._blocks: List[Tuple[int, int]] = []  # (first sample, length)
+        # Where each block starts (the first _nblocks entries): a block a
+        # display frame, so not a Python object each (a day's recording
+        # held a quarter of a GB of them).
+        self._starts = np.zeros(0, dtype=np.int64)
+        self._nblocks = 0
         self._count = 0
         self._map: Optional[np.ndarray] = None
 
@@ -1444,8 +1448,8 @@ class _SampleStore:
         store = cls()
         data = np.asarray(samples)
         store._memory = data
-        store._count = len(data)
-        store._blocks = [(0, len(data))] if len(data) else []
+        if len(data):
+            store._add_block(len(data))
         return store
 
     @property
@@ -1469,6 +1473,25 @@ class _SampleStore:
             return os.path.dirname(self._path)
         return self._folder
 
+    def _add_block(self, length: int) -> None:
+        if self._nblocks == len(self._starts):
+            grown = np.zeros(max(64, 2 * len(self._starts)), dtype=np.int64)
+            grown[: self._nblocks] = self._starts[: self._nblocks]
+            self._starts = grown
+        self._starts[self._nblocks] = self._count
+        self._nblocks += 1
+        self._count += length
+
+    def _block(self, index: int) -> Tuple[int, int]:
+        """(first sample, length) of block ``index`` (negative from the end)."""
+        if index < 0:
+            index += self._nblocks
+        if not 0 <= index < self._nblocks:
+            raise IndexError("block index out of range")
+        start = int(self._starts[index])
+        end = int(self._starts[index + 1]) if index + 1 < self._nblocks else self._count
+        return start, end - start
+
     def append(self, block: np.ndarray) -> None:
         """Add a block after the others. The file is created with the first
         one. Raises OSError when it can't be written (e.g. a full disk)."""
@@ -1480,8 +1503,7 @@ class _SampleStore:
         if self._file is None:
             self._create_file()
         self._file.write(data.data)
-        self._blocks.append((self._count, len(data)))
-        self._count += len(data)
+        self._add_block(len(data))
         self._map = None
 
     def _create_file(self) -> None:
@@ -1566,24 +1588,26 @@ class _SampleStore:
             self._file.close()
         self._finalizer = self._file = self._path = None
         self._memory = None
-        self._blocks = []
+        self._starts = np.zeros(0, dtype=np.int64)
+        self._nblocks = 0
         self._count = 0
 
     # The list of blocks it replaces -----------------------------------------
 
     def __len__(self) -> int:
-        return len(self._blocks)
+        return self._nblocks
 
     def __bool__(self) -> bool:
-        return bool(self._blocks)
+        return self._nblocks > 0
 
     def __iter__(self):
         data = self.samples()
-        for start, length in self._blocks:
+        for index in range(self._nblocks):
+            start, length = self._block(index)
             yield data[start : start + length]
 
     def __getitem__(self, index: int) -> np.ndarray:
-        start, length = self._blocks[index]
+        start, length = self._block(index)
         return self.samples()[start : start + length]
 
     def __eq__(self, other: object) -> bool:

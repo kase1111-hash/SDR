@@ -6,6 +6,7 @@
 * REC-04: a save that failed (a full disk) left a truncated data file and an
   empty ``.sigmf-meta`` behind.
 * REC-12: cu8/cs8/cs16 saves truncated instead of rounding (a DC offset).
+* REC-14: the recording buffer kept a Python tuple per display frame.
 """
 
 import contextlib
@@ -14,6 +15,7 @@ import os
 import shutil
 import signal
 import tempfile
+import tracemalloc
 import unittest
 from collections import namedtuple
 from unittest import mock
@@ -289,3 +291,58 @@ class TestRounding(unittest.TestCase):
             np.array([0.006 - 0.006j], np.complex64), SampleFormat.INT8
         )
         self.assertEqual(converted.tolist(), [1, -1])  # (was [0, 0])
+
+
+# ---------------------------------------------------------------------------
+# REC-14: the recording buffer's block list
+# ---------------------------------------------------------------------------
+
+
+class TestBlockList(unittest.TestCase):
+    def setUp(self):
+        from tests.test_gui_chrome import require_pyqt6
+
+        require_pyqt6(self)
+        from sdr_module.gui import main_window
+
+        self.mw = main_window
+        self.folder = tempfile.mkdtemp(prefix="sdr-review-rec-")
+        self.addCleanup(shutil.rmtree, self.folder, True)
+
+    def test_blocks_cost_bytes_not_python_objects(self):
+        store = self.mw._SampleStore(self.folder)
+        self.addCleanup(store.discard)
+        block = np.ones(1, np.complex64)
+        store.append(block)
+        frames = 30_000  # (over 15 minutes of display frames)
+        tracemalloc.start()
+        try:
+            before = tracemalloc.get_traced_memory()[0]
+            for _ in range(frames):
+                store.append(block)
+            grown = tracemalloc.get_traced_memory()[0] - before
+        finally:
+            tracemalloc.stop()
+        # A tuple per block took about 128 bytes each (3.8 MB here).
+        self.assertLess(grown / frames, 24)
+        self.assertEqual(len(store), frames + 1)
+
+    def test_the_list_of_blocks_api(self):
+        store = self.mw._SampleStore(self.folder)
+        self.addCleanup(store.discard)
+        self.assertFalse(store)
+        blocks = [np.arange(n, dtype=np.complex64) + 1j * n for n in (3, 1, 4, 1, 5)]
+        for block in blocks:
+            store.append(block)
+        self.assertTrue(store)
+        self.assertEqual(len(store), 5)
+        self.assertEqual(store, blocks)
+        np.testing.assert_array_equal(store[2], blocks[2])
+        np.testing.assert_array_equal(store[-1], blocks[-1])
+        with self.assertRaises(IndexError):
+            store[5]
+        memory = self.mw._SampleStore.from_samples(blocks[2])
+        self.assertEqual(len(memory), 1)
+        np.testing.assert_array_equal(memory[0], blocks[2])
+        store.discard()
+        self.assertEqual((len(store), store.sample_count), (0, 0))

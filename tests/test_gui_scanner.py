@@ -888,10 +888,20 @@ class TestScannerTab(_PanelCase):
         panel = self.panel()
         panel.start_scan()
         panel.start_scan()
-        self.assertEqual(self.host.begun, 2)
-        self.assertEqual(self.host.ended, [True])  # the first one, on the spot
+        # The new scan takes over on the spot: where the first began is
+        # kept (it used to be replaced by the first scan's last step).
+        self.assertEqual(self.host.begun, 1)
+        self.assertEqual(self.host.ended, [])
+        self.assertTrue(panel.engine.active)
         panel.stop_scan()
-        self.assertEqual(self.host.ended, [True, False])
+        self.assertEqual(self.host.ended, [False])
+        # A replacement that can't start goes back there at once.
+        panel.start_scan()
+        self.host.blocker = ("recording", "Stop recording to scan.")
+        self.assertFalse(panel.start_scan())
+        self.assertEqual(self.host.begun, 2)
+        self.assertEqual(self.host.ended, [False, False])
+        self.assertFalse(panel.engine.active)
 
     def test_the_receiver_stopping_stops_the_scan(self):
         panel = self.panel()
@@ -1583,6 +1593,31 @@ class TestScannerInTheWindow(_ScanWindowCase):
 
         self.assertTrue(self.frames(2.0, until=lambda: panel.engine.state == LISTEN))
         panel.stop_scan()
+
+    def test_scan_from_here_during_a_sweep_keeps_where_you_were(self):
+        """Scan Bookmarks from Here while a sweep runs replaces the sweep;
+        stopped, the receiver goes back to where it was before the sweep
+        (it went back to the sweep's last step instead, e.g. 96.000 MHz)."""
+        win, panel = self.win, self.win._scanner_panel
+        win.set_frequency(100.1e6)
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        lo = win._lo_frequency()
+        win._bookmarks_panel.add_bookmark("Quiet", 145.5e6, "FM", "5 kHz")
+        panel._preset.setCurrentIndex(1)
+        panel.set_scan_mode("continuous")
+        self.assertTrue(panel.start_scan())
+        self.frames(0.3)
+        self.assertNotAlmostEqual(win._current_frequency(), 100.1e6)
+        win._scan_bookmarks_from(0)
+        self.assertEqual(panel.scan_mode(), "bookmarks")
+        self.assertTrue(panel.engine.active)
+        self.assertAlmostEqual(win._current_frequency(), 145.5e6)
+        self.frames(0.2)
+        panel.stop_scan()  # checking the quiet bookmark: back where you were
+        self.assertAlmostEqual(win._current_frequency(), 100.1e6)
+        self.assertAlmostEqual(win._lo_frequency(), lo)
+        self.assertEqual(win._listening_mode(), ("FM", "75 kHz"))
+        self.assertFalse(win._scan_muted)
 
     def test_no_device_offers_the_demo(self):
         win, panel = self.win, self.win._scanner_panel

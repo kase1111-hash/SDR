@@ -290,6 +290,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._restoring = False
         self._blocker: Tuple[str, str] = ("", "")
         self._stay = False  # end the scan on the channel listened to
+        self._restarting = False  # a new scan replaces the one running
         self._setup_ui()
         self._restore_settings()
         self._timer = QTimer(self)
@@ -1154,10 +1155,29 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
 
     def start_scan(self, start_index: int = 0) -> bool:
         """Start a scan with the panel's settings (``start_index``: the
-        bookmark a bookmark scan starts at). False if it can't."""
+        bookmark a bookmark scan starts at). False if it can't.
+
+        A scan running (Scan Bookmarks from Here during a sweep) is
+        replaced: the receiver stays where it is meanwhile, and goes back
+        to where the first scan began when the new one ends, or can't
+        start."""
+        restart = self._engine.active
+        if restart:
+            self._restarting = True
+            try:
+                self.stop_scan(stay=True)
+            finally:
+                self._restarting = False
+        if self._launch(start_index, begin=not restart):
+            return True
+        if restart:
+            self._host.scan_end(stay=False)  # back where the first began
+        return False
+
+    def _launch(self, start_index: int, begin: bool) -> bool:
+        """:meth:`start_scan`'s work; ``begin``: the host remembers where
+        the receiver is now (else where the scan replaced began)."""
         host = self._host
-        if self._engine.active:
-            self.stop_scan(stay=True)  # (it would lose where the last began)
         kind, reason = host.scan_blocker()
         self._blocker = (kind, reason)
         if kind:
@@ -1202,12 +1222,14 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 "The receiver didn't start, so the scan can't run.", "danger"
             )
             return False
-        host.scan_begin()
+        if begin:
+            host.scan_begin()
         self._stay = False
         rate = host.scan_sample_rate()
         error = self._engine.start(settings, rate, host.scan_settle_s())
         if error:
-            host.scan_end(stay=False)
+            if begin:
+                host.scan_end(stay=False)
             if error.startswith("error: "):
                 error = f"The scan could not start: {error[len('error: '):]}."
             self._set_status(error, "danger")
@@ -1238,8 +1260,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
 
     def scan_bookmarks_from(self, index: int) -> bool:
         """Scan all the bookmarks, starting at bookmark ``index`` (the
-        Bookmarks tab's Scan Bookmarks from Here)."""
-        self.stop_scan(stay=True)
+        Bookmarks tab's Scan Bookmarks from Here; it replaces a scan
+        running, see :meth:`start_scan`)."""
         self.set_scan_mode("bookmarks")
         self._group.setCurrentIndex(0)  # all bookmarks
         return self.start_scan(start_index=index)
@@ -1382,7 +1404,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
     def _on_finished(self, reason: str) -> None:
         engine = self._engine
         host = self._host
-        host.scan_end(stay=self._stay)
+        if not self._restarting:  # (a new scan takes over where it is)
+            host.scan_end(stay=self._stay)
         self._stay = False
         self._listen_row.setVisible(False)
         self._hold_btn.blockSignals(True)

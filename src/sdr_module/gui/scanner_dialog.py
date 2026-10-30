@@ -63,7 +63,7 @@ SCAN_PRESETS: Tuple[ScanPreset, ...] = (
     ),
     ScanPreset("ISM 915 (902–928 MHz)", 902.0, 928.0, 100.0, "None (I/Q)", "", "2 MHz"),
 )
-_CUSTOM = "Custom"
+_CUSTOM = "Custom range"
 
 # FFT length for level measurements: the main window's spectrum
 # (DISPLAY_BLOCK), so a threshold read off the spectrum means the same here.

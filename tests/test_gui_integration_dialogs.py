@@ -218,7 +218,7 @@ class TestScannerKeyboard(_DialogCase):
         stops = _tab_stops(panel, panel._table, 5)
         self.assertEqual(
             _button_texts(stops[1:5]),
-            ["Listen", "Bookmark", "Bookmark All", "Results"],
+            ["Listen", "Bookmark", "Bookmark All", "⋯"],
         )
 
     def test_no_mnemonic_is_used_twice(self):

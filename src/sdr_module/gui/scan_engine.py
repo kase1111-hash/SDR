@@ -84,9 +84,9 @@ class ScanHost:
     """What the engine needs from the window (the main window implements it;
     tests fake it). All tuning goes through here."""
 
-    def scan_tune_lo(self, center_hz: float) -> bool:
+    def scan_tune_lo(self, center_hz: float, vfo_hz: Optional[float] = None) -> bool:
         """Retune the receiver to ``center_hz``, the tuned frequency in the
-        middle. False if it can't."""
+        middle (or at ``vfo_hz``, a channel near it). False if it can't."""
         raise NotImplementedError
 
     def scan_tune_channel(
@@ -484,7 +484,11 @@ class ScanEngine:
                     return
                 self.pass_number += 1
                 self.page_index = 0
-            if self.host.scan_tune_lo(self.pages[self.page_index].lo_hz):
+            page = self.pages[self.page_index]
+            # The tuned frequency shows the channel nearest the LO (the LO
+            # sits a few bins off it), not an odd number.
+            middle = min(page.channels, key=lambda c: abs(c - page.lo_hz))
+            if self.host.scan_tune_lo(page.lo_hz, middle):
                 self.host.scan_set_muted(True)
                 self._settle_after_tune(MEASURE)
                 self.on_state()

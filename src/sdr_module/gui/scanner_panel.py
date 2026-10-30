@@ -48,6 +48,7 @@ try:
         QMessageBox,
         QProgressBar,
         QPushButton,
+        QScrollArea,
         QSizePolicy,
         QTableWidget,
         QTableWidgetItem,
@@ -327,22 +328,22 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(6)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(3, 1)
-
+        # Band and mode side by side (their tooltips and accessible names
+        # say what they are), then the range, step and threshold: compact
+        # enough for the 380 px column of a 1024x640 window.
+        top = QHBoxLayout()
+        top.setSpacing(6)
         self._preset = QComboBox()
         self._preset.addItem(_CUSTOM)
         for preset in SCAN_PRESETS:
             self._preset.addItem(preset.label)
         self._preset.setToolTip(
-            "Fill in the range and step for a common band; signals found there "
-            "are listened to in the band's mode (airband: AM)"
+            "Band: fills in the range and step for a common band; signals found "
+            "there are listened to in the band's mode (airband: AM)"
         )
+        self._preset.setAccessibleName("Band")
         self._preset.currentIndexChanged.connect(self._on_preset_changed)
-        self._add_field(grid, 0, 0, "Ba&nd:", self._preset, span=3)
+        top.addWidget(self._preset, 3)
 
         self._mode = QComboBox()
         for key, text in SCAN_MODES:
@@ -370,16 +371,32 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             "(bookmarks marked Skip are passed by)",
             Qt.ItemDataRole.ToolTipRole,
         )
-        self._mode.setToolTip("What the scan does")
+        self._mode.setToolTip(
+            "What the scan does: sweep the range once or again and again, stop "
+            "on each signal to listen, or scan your bookmarks"
+        )
+        self._mode.setAccessibleName("Scan mode")
         self._mode.currentIndexChanged.connect(self._on_mode_changed)
-        self._add_field(grid, 1, 0, "&Mode:", self._mode, span=3)
+        top.addWidget(self._mode, 2)
+        for combo in (self._preset, self._mode):
+            combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            combo.setMinimumContentsLength(8)
+        layout.addLayout(top)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
 
         self._start = self._spin(*_FREQ_RANGE_MHZ, 3, 88.0, " MHz")
         self._start.setToolTip("First frequency to scan")
-        self._add_field(grid, 2, 0, "&Start:", self._start)
+        self._add_field(grid, 0, 0, "&Start:", self._start)
         self._end = self._spin(*_FREQ_RANGE_MHZ, 3, 108.0, " MHz")
         self._end.setToolTip("Last frequency to scan")
-        self._add_field(grid, 2, 2, "&End:", self._end)
+        self._add_field(grid, 0, 2, "&End:", self._end)
 
         self._step = self._spin(*_STEP_RANGE_KHZ, 1, 200.0, " kHz")
         self._step.setToolTip(
@@ -387,40 +404,45 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             "half a step either side.\nUse the band's channel spacing: 200 kHz "
             "for FM broadcast, 12.5-25 kHz for voice."
         )
-        self._add_field(grid, 3, 0, "Ste&p:", self._step)
+        self._add_field(grid, 1, 0, "Ste&p:", self._step)
 
         threshold_row = QHBoxLayout()
         threshold_row.setSpacing(4)
         self._auto = QCheckBox("Auto")
         self._auto.setChecked(True)
         self._auto.setToolTip(
-            f"Measure the noise floor on each step and list the signals "
-            f"{AUTO_MARGIN_DB:.0f} dB above it (recommended)"
+            f"Auto threshold: measure the noise floor on each step and list the "
+            f"signals {AUTO_MARGIN_DB:.0f} dB above it (recommended)"
         )
         threshold_row.addWidget(self._auto)
         self._threshold = self._spin(-140.0, 0.0, 0, -76.0, " dBFS")
         self._threshold.setToolTip(
             "Only signals whose peak is above this level are listed: set it "
             "10-20 dB above the noise floor shown on the spectrum (untick "
-            "Auto to set it)"
+            "Auto to set it; with Auto it shows the level in use)"
         )
         self._threshold.setAccessibleName("Threshold")
+        self._threshold.setMinimumWidth(72)
         threshold_row.addWidget(self._threshold, 1)
         label = QLabel("T&hreshold:")
         label.setBuddy(self._auto)
-        grid.addWidget(label, 3, 2)
-        grid.addLayout(threshold_row, 3, 3)
+        grid.addWidget(label, 1, 2)
+        grid.addLayout(threshold_row, 1, 3)
 
         self._resume = self._spin(*_RESUME_RANGE_S, 1, 3.0, " s")
         self._resume.setToolTip(
             "Stop on signal and Scan bookmarks: go on after the channel has "
             "been quiet (squelch closed) this long"
         )
-        self._resume_label = self._add_field(grid, 4, 0, "&Resume after:", self._resume)
+        self._resume_label = self._add_field(grid, 2, 0, "&Resume:", self._resume)
 
         self._group = QComboBox()
         self._group.setToolTip("Scan bookmarks: all bookmarks, or one group")
-        self._group_label = self._add_field(grid, 4, 2, "&Group:", self._group)
+        self._group.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._group.setMinimumContentsLength(6)
+        self._group_label = self._add_field(grid, 2, 2, "&Group:", self._group)
         layout.addLayout(grid)
 
         self._hint = QLabel()
@@ -437,7 +459,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
 
         # Start/Stop (or, with no device, Use Demo Device / Connect...),
         # with the status beside it.
-        run_row = QHBoxLayout()
+        self._run_row = QWidget()
+        run_row = QHBoxLayout(self._run_row)
+        run_row.setContentsMargins(0, 0, 0, 0)
         run_row.setSpacing(6)
         self._start_btn = QPushButton()
         widths = []
@@ -467,7 +491,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
         run_row.addWidget(self._status, 1)
-        layout.addLayout(run_row)
+        layout.addWidget(self._run_row)
 
         self._progress = QProgressBar()
         self._progress.setRange(0, 1000)
@@ -513,9 +537,12 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             ["Frequency", "Level", "SNR", "Mode", "Heard"]
         )
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(COL_MODE, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(COL_HEARD, QHeaderView.ResizeMode.ResizeToContents)
+        # One line per result; the small columns as wide as their widest
+        # text (_size_columns), the frequency takes what is left.
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(COL_FREQ, QHeaderView.ResizeMode.Stretch)
+        header.setMinimumSectionSize(30)
+        self._table.setWordWrap(False)
         header.setSortIndicator(COL_FREQ, Qt.SortOrder.AscendingOrder)
         header_tips = (
             "Signal center frequency, to the nearest kHz (a broadcast FM "
@@ -553,12 +580,13 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
         self._table.installEventFilter(self)
+        self._size_columns()
         layout.addWidget(self._table, 1)
         # Empty states: a bold title over what to do next.
         self._empty = ViewPlaceholder(self._table)
 
         buttons = QHBoxLayout()
-        buttons.setSpacing(6)
+        buttons.setSpacing(4)
         self._listen_btn = QPushButton("&Listen")
         self._listen_btn.clicked.connect(lambda _c=False: self.listen_selected())
         buttons.addWidget(self._listen_btn)
@@ -580,8 +608,11 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._clear_action = self._results_menu.addAction("Clear Results")
         self._clear_action.setToolTip("Empty the results list")
         self._clear_action.triggered.connect(lambda _c=False: self.clear_results())
-        self._results_btn = QPushButton("Results")
+        # (Like the waterfall's options button: compact, a menu.)
+        self._results_btn = QPushButton("⋯")
+        set_role(self._results_btn, "compact")
         self._results_btn.setMenu(self._results_menu)
+        self._results_btn.setAccessibleName("Results options")
         self._results_btn.setToolTip("Export the results as CSV, or clear them")
         buttons.addWidget(self._results_btn)
         for btn in (
@@ -592,6 +623,30 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         ):
             btn.setAutoDefault(False)
         layout.addLayout(buttons)
+
+    def _size_columns(self) -> None:
+        """Level, SNR, Mode and Heard as wide as their widest text."""
+        cells = self._table.fontMetrics()
+        header = self._table.horizontalHeader()
+        titles = header.fontMetrics()
+        widest = {
+            COL_LEVEL: ("Level", ("-120 dBFS",)),
+            COL_SNR: ("SNR", ("120 dB",)),
+            COL_MODE: ("Mode", ("WFM", "USB", "I/Q")),
+            COL_HEARD: ("Heard", ("00:00:00",)),
+        }
+        for col, (title, texts) in widest.items():
+            width = max(
+                titles.horizontalAdvance(title) + 20,
+                max(cells.horizontalAdvance(t) for t in texts) + 14,
+            )
+            header.resizeSection(col, width)
+
+    def changeEvent(self, event):  # noqa: N802 (Qt API)
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            if getattr(self, "_table", None) is not None:
+                self._size_columns()
 
     @staticmethod
     def _add_field(grid, row, col, text, field, span=1) -> "QLabel":
@@ -611,6 +666,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         spin.setSuffix(suffix)
         spin.setAlignment(Qt.AlignmentFlag.AlignRight)
         spin.setKeyboardTracking(False)
+        # (Its size hint fits "6000.000 MHz"; the column fits "108.000 MHz".)
+        spin.setMinimumWidth(84)
         return spin
 
     def _set_status(self, text: str, tone: Optional[str] = None) -> None:
@@ -852,15 +909,27 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         steps = len(plan_sweep(sweep[0], sweep[1], step_hz, rate))
         return channels, steps, steps * self._page_seconds()
 
-    def _auto_text(self) -> str:
+    def _auto_level(self) -> Optional[Tuple[float, float]]:
+        """``(noise floor, threshold)`` Auto uses now, in dBFS, if known:
+        the scan's last step, else the spectrum's noise floor."""
         noise = self._engine.noise_db if self._engine.active else None
         if noise is None or not math.isfinite(noise):
             noise = self._host.scan_noise_floor_db()
         if noise is None or not math.isfinite(noise):
-            return f"Auto lists signals {AUTO_MARGIN_DB:.0f} dB above the noise floor."
+            return None
+        return noise, noise + AUTO_MARGIN_DB
+
+    def _auto_text(self) -> str:
+        level = self._auto_level()
+        if level is None:
+            return f"Auto: {AUTO_MARGIN_DB:.0f} dB over the noise floor."
+        # The threshold field shows the level in use.
+        self._threshold.blockSignals(True)
+        self._threshold.setValue(round(level[1]))
+        self._threshold.blockSignals(False)
         return (
-            f"Auto lists signals {AUTO_MARGIN_DB:.0f} dB above the noise floor "
-            f"(now {noise:.0f} dBFS: above {noise + AUTO_MARGIN_DB:.0f} dBFS)."
+            f"Auto: {AUTO_MARGIN_DB:.0f} dB over the noise floor "
+            f"({level[0]:.0f} dBFS)."
         )
 
     def _update_steps_hint(self) -> None:
@@ -898,9 +967,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         channels, steps, seconds = self.estimate()
         noun = "channel" if channels == 1 else "channels"
         snoun = "receiver step" if steps == 1 else "receiver steps"
-        per = "per pass" if mode != "once" else ""
-        text = f"{channels:,} {noun} in {steps:,} {snoun}, {format_duration(seconds)}"
-        text += f" {per}." if per else "."
+        per = " a pass" if mode != "once" else ""
+        text = (
+            f"{channels:,} {noun}, {steps:,} {snoun}: {format_duration(seconds)}{per}."
+        )
         if self._auto.isChecked():
             text += " " + self._auto_text()
         else:
@@ -945,11 +1015,11 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                     "Scan stopped: the receiver was stopped.", "warning", stay=False
                 )
         if blocker != self._blocker:
-            shown = self._status.text()
-            if not kind and shown == self._blocker[1]:
-                self._set_status("")  # (no longer true)
+            # (A scan stopped above already said why.)
+            if not kind and self._status.text() == self._blocker[1]:
+                self._set_status("")  # no longer true
             self._blocker = blocker
-            if kind and not engine.active and (not shown or shown == reason):
+            if kind and not engine.active:
                 self._set_status(reason, "warning")
         if not engine.active and self._auto.isChecked():
             self._update_steps_hint()
@@ -1131,7 +1201,20 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._progress.setValue(0)
         self._timer.start()
         self._on_engine_state()
+        self._reveal_results()
         return True
+
+    def _reveal_results(self) -> None:
+        """In a short tab (1366x768), scroll so the status, the progress and
+        the results are in view rather than the settings."""
+        area = self.parentWidget()
+        while area is not None and not isinstance(area, QScrollArea):
+            area = area.parentWidget()
+        if area is None:
+            return
+        bar = area.verticalScrollBar()
+        if bar is not None and bar.maximum() > 0:
+            bar.setValue(min(bar.maximum(), self._run_row.y() - 6))
 
     def _confirm_long_scan(self, steps: int, seconds: float) -> bool:
         box = QMessageBox(self)
@@ -1353,8 +1436,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             self._table.insertRow(row)
         freq = _NumericItem(_format_freq(hit.frequency_hz), hit.frequency_hz)
         freq.setData(_HIT_ROLE, index)
-        level = _NumericItem(f"{hit.peak_db:.1f} dBFS", hit.peak_db)
-        snr = _NumericItem(f"{hit.snr_db:.1f} dB", hit.snr_db)
+        # Whole dB in the narrow column (the tooltip has tenths).
+        level = _NumericItem(f"{hit.peak_db:.0f} dBFS", hit.peak_db)
+        snr = _NumericItem(f"{hit.snr_db:.0f} dB", hit.snr_db)
         mode = QTableWidgetItem(mode_text(hit.mode, hit.fm_deviation) or "—")
         heard_at = datetime.fromtimestamp(hit.last_seen) if hit.last_seen else None
         heard = _NumericItem(

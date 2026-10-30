@@ -191,7 +191,7 @@ def _scanner_panel(device_range=None, blocker=("", ""), receiving=True):
         started = 0
         state = {"receiving": receiving, "blocker": blocker}
 
-        def scan_tune_lo(self, center_hz):
+        def scan_tune_lo(self, center_hz, vfo_hz=None):
             dev.set_frequency(center_hz)
             return True
 
@@ -303,7 +303,7 @@ class TestScanner(unittest.TestCase):
         self.assertFalse(panel._listen_btn.isEnabled())
         panel._on_found(Found(101.1e6, -40.0, -90.0, 150e3, ("FM", "75 kHz", "")))
         self.assertFalse(panel._empty.is_visible())
-        self.assertEqual(panel._table.item(0, 2).text(), "50.0 dB")
+        self.assertEqual(panel._table.item(0, 2).text(), "50 dB")
         panel._table.selectRow(0)
         self.assertTrue(panel._listen_btn.isEnabled())
         panel.listen_selected()

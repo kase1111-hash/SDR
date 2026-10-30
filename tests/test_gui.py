@@ -614,7 +614,7 @@ class TestScannerNoDeviceHonesty(unittest.TestCase):
             def scan_blocker(self):
                 return blocker
 
-            def scan_tune_lo(self, center_hz):
+            def scan_tune_lo(self, center_hz, vfo_hz=None):
                 return True
 
             def scan_lo_hz(self):

@@ -273,26 +273,40 @@ def measure_page(
     stops = np.clip(
         center + np.floor((rel + half) / bin_hz + 1e-9).astype(int), 0, n - 1
     )
+    # A slice narrower than a bin is the bin its start falls in.
+    stops = np.maximum(stops, starts)
     masked = np.where(peaks_allowed, power, -np.inf)
 
+    # Only the slices holding a bin above the threshold can report a signal
+    # (on a page of noise, none): find those without visiting every slice
+    # (16,000 of them at 20 MS/s in 1 kHz steps). The slices are in
+    # frequency order, so those holding bin b are a contiguous run.
+    hot = np.flatnonzero(masked > threshold)
     candidates: List[int] = []
-    for first, last in zip(starts.tolist(), stops.tolist(), strict=True):
-        if last < first:
-            first = last = int(min(max(first, 0), n - 1))
-        segment = masked[first : last + 1]
-        if not len(segment) or not np.isfinite(segment).any():
-            continue
-        k = first + int(np.argmax(segment))
-        peak = power[k]
-        if not peak > threshold:
-            continue
-        # The skirt of a stronger signal in the next channel peaks at the
-        # slice's edge, still rising: not a signal of this channel.
-        if k == first and k > 0 and power[k - 1] > peak:
-            continue
-        if k == last and k < n - 1 and power[k + 1] > peak:
-            continue
-        candidates.append(k)
+    if hot.size:
+        first_slice = np.searchsorted(stops, hot, side="left")
+        last_slice = np.searchsorted(starts, hot, side="right") - 1
+        runs = [
+            np.arange(a, b + 1)
+            for a, b in zip(first_slice.tolist(), last_slice.tolist(), strict=True)
+            if b >= a
+        ]
+        touched = np.unique(np.concatenate(runs)) if runs else np.empty(0, int)
+        # Narrow steps put many slices in one bin: each bin range once.
+        ranges = np.unique(np.stack([starts[touched], stops[touched]], axis=1), axis=0)
+        for first, last in ranges.tolist():
+            segment = masked[first : last + 1]
+            k = first + int(np.argmax(segment))
+            peak = power[k]
+            if not peak > threshold:
+                continue
+            # The skirt of a stronger signal in the next channel peaks at
+            # the slice's edge, still rising: not a signal of this channel.
+            if k == first and k > 0 and power[k - 1] > peak:
+                continue
+            if k == last and k < n - 1 and power[k + 1] > peak:
+                continue
+            candidates.append(k)
 
     readings: List[Tuple[int, ChannelReading, Tuple[int, int]]] = []
     offsets = (np.arange(n) - center) * bin_hz

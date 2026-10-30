@@ -216,6 +216,43 @@ class TestEditDialog(_PanelCase):
         dialog.deleteLater()
         chirp.deleteLater()
 
+    def test_repeater_shift(self):
+        from sdr_module.gui.bookmark_editor import BookmarkEditDialog
+
+        dialog = BookmarkEditDialog(
+            {"label": "R", "freq_hz": 146.94e6, "duplex": "-", "offset_hz": 600e3},
+            ("FM", "5 kHz"),
+        )
+        self.assertEqual(dialog._duplex.currentData(), "-")
+        self.assertAlmostEqual(dialog._offset.value(), 0.6)
+        self.assertTrue(dialog._offset.isEnabled())
+        dialog._duplex.setCurrentIndex(dialog._duplex.findData("+"))
+        dialog._offset.setValue(0.5)
+        edited = dialog.bookmark()
+        self.assertEqual((edited["duplex"], edited["offset_hz"]), ("+", 500e3))
+        dialog._duplex.setCurrentIndex(0)
+        self.assertFalse(dialog._offset.isEnabled())
+        # Every label's mnemonic works and none is used twice.
+        from PyQt6.QtWidgets import QLabel
+
+        keys = {}
+        for label in dialog.findChildren(QLabel):
+            match = re.search(r"&([^&])", label.text())
+            if match:
+                self.assertIsNotNone(label.buddy(), label.text())
+                keys.setdefault(match.group(1).lower(), []).append(label.text())
+        self.assertEqual({k: v for k, v in keys.items() if len(v) > 1}, {})
+        self.assertNotIn("duplex", dialog.bookmark())
+        # A split channel (TX elsewhere) is kept as it is.
+        split = BookmarkEditDialog(
+            {"label": "S", "freq_hz": 145.1e6, "duplex": "split", "offset_hz": 146.7e6},
+            ("FM", "5 kHz"),
+        )
+        self.assertEqual(split.bookmark()["duplex"], "split")
+        self.assertEqual(split.bookmark()["offset_hz"], 146.7e6)
+        dialog.deleteLater()
+        split.deleteLater()
+
     def test_clearing_the_tone_and_other_fields(self):
         from sdr_module.gui.bookmark_editor import BookmarkEditDialog
 
@@ -332,6 +369,8 @@ class TestListTools(_PanelCase):
                 "Edit...",
                 "Rename...\tF2",
                 "Copy Frequency",
+                "Move Up",
+                "Move Down",
                 "Scan Bookmarks from Here",
                 "Remove...\tDelete",
             ],
@@ -348,6 +387,26 @@ class TestListTools(_PanelCase):
         scan.trigger()
         self.assertEqual(scans, [1])
         menu.deleteLater()
+
+    def test_move_up_and_down_within_the_group(self):
+        panel = self.make(self.SAMPLE)
+        menu = panel._context_menu(0)  # Tower: first of Airport
+        up = next(a for a in menu.actions() if a.text() == "Move Up")
+        self.assertFalse(up.isEnabled())
+        menu.deleteLater()
+        self.assertTrue(panel.move_bookmark(0, 1))  # past Calling, to Ground
+        self.assertEqual(
+            [b["label"] for b in self.store.bookmarks],
+            ["Ground", "Calling", "Tower", "Wx"],
+        )
+        self.assertEqual(panel._selected_index(), 2)
+        self.assertEqual(
+            self.rows(panel),
+            [(0, "Airport"), (1, "Ground"), (1, "Tower"), (0, "Calling"), (0, "Wx")],
+        )
+        self.assertFalse(panel.move_bookmark(3, 1))  # last of the list
+        self.assertTrue(panel.move_bookmark(3, -1))
+        self.assertEqual(self.store.bookmarks[1]["label"], "Wx")
 
     def test_scan_from_here_needs_the_scanner(self):
         panel = self.make(self.SAMPLE)
@@ -379,6 +438,20 @@ class TestListTools(_PanelCase):
         self.assertEqual(
             self.mod.listening(order[1][1]), ("FM", "5 kHz", "12.5 kHz", 100.0)
         )
+
+    def test_skipped_bookmarks_say_so_in_the_list(self):
+        panel = self.make(
+            [
+                {"label": "A", "freq_hz": 118.1e6, "demod": "AM", "skip": "S"},
+                {"label": "B", "freq_hz": 125.0e6, "skip": "S"},
+            ]
+        )
+        self.assertEqual(
+            panel._list.topLevelItem(0).text(self.mod.COL_MODE), "AM · Skip"
+        )
+        self.assertEqual(panel._list.topLevelItem(1).text(self.mod.COL_MODE), "Skip")
+        panel._filter.setText("skip")
+        self.assertEqual(len(self.rows(panel)), 2)
 
     def test_list_shows_filter_tone_group_and_skip_in_the_tooltip(self):
         panel = self.make(

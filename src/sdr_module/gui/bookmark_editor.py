@@ -20,6 +20,7 @@ try:
         QDialog,
         QDialogButtonBox,
         QFormLayout,
+        QHBoxLayout,
         QLabel,
         QLineEdit,
         QVBoxLayout,
@@ -46,6 +47,8 @@ if HAS_PYQT6:
 #: The Mode list's entry that leaves the receiver's mode as it is.
 KEEP_MODE_TEXT = "Keep the receiver's mode"
 _DEFAULT_WIDTH_TEXT = "The mode's usual width"
+#: Repeater shift choices: (CHIRP Duplex, text).
+_DUPLEX_CHOICES = (("", "None (simplex)"), ("+", "+ (above)"), ("-", "− (below)"))
 _NO_TONE_TEXT = "None (hear every station)"
 #: CHIRP's Mode for "no particular mode" (a CHIRP channel that keeps the
 #: receiver's mode): it maps to no demodulator here.
@@ -181,6 +184,44 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         )
         form.addRow("", self._skip)
 
+        # Repeater shift: where a radio loaded with this memory transmits
+        # (CHIRP's Duplex and Offset; this receiver only listens).
+        shift_row = QHBoxLayout()
+        shift_row.setSpacing(6)
+        self._duplex = QComboBox()
+        for value, text in _DUPLEX_CHOICES:
+            self._duplex.addItem(text, value)
+        duplex = str(b.get("duplex", "") or "")
+        if self._duplex.findData(duplex) < 0:
+            self._duplex.addItem(duplex, duplex)  # e.g. split: kept as it is
+        self._duplex.setCurrentIndex(max(self._duplex.findData(duplex), 0))
+        self._duplex.setToolTip(
+            "Repeater shift, for a radio this memory is exported to: it "
+            "transmits this far above or below the frequency (CHIRP's Duplex)"
+        )
+        shift_row.addWidget(self._duplex, 1)
+        self._offset = _MhzSpinBox()
+        self._offset.setRange(0.0, 1000.0)
+        self._offset.setDecimals(6)
+        self._offset.setSuffix(" MHz")
+        self._offset.setAlignment(Qt.AlignmentFlag.AlignRight)
+        try:
+            self._offset.setValue(abs(float(b.get("offset_hz", 0.0) or 0.0)) / 1e6)
+        except (TypeError, ValueError):
+            pass
+        self._offset.setToolTip(
+            "Repeater shift (CHIRP's Offset), e.g. 0.600 MHz on 2 m"
+        )
+        self._offset.setAccessibleName("Repeater shift")
+        shift_row.addWidget(self._offset, 1)
+        self._duplex.currentIndexChanged.connect(
+            lambda _i: self._offset.setEnabled(self._duplex.currentData() in ("+", "-"))
+        )
+        self._offset.setEnabled(duplex in ("+", "-"))
+        shift_label = QLabel("Repeater s&hift:")
+        shift_label.setBuddy(self._duplex)
+        form.addRow(shift_label, shift_row)
+
         self._comment = QLineEdit(str(b.get("comment", "") or ""))
         self._comment.setPlaceholderText("Optional")
         self._comment.setToolTip("A note for yourself (exported as CHIRP's Comment)")
@@ -294,6 +335,14 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
             b["skip"] = "S"
         elif str(b.get("skip", "") or "") == "S":
             b.pop("skip", None)
+        duplex = self._duplex.currentData()
+        duplex = duplex if isinstance(duplex, str) else ""
+        if duplex in ("+", "-"):
+            b["duplex"] = duplex
+            b["offset_hz"] = float(round(self._offset.value() * 1e6))
+        elif not duplex:
+            b.pop("duplex", None)
+            b.pop("offset_hz", None)
         comment = self._comment.text().strip()
         if comment:
             b["comment"] = comment

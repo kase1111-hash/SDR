@@ -70,11 +70,12 @@ class _DemoHost:
         self.moved = True
         self.refuse_above = None
 
-    def scan_tune_lo(self, center):
+    def scan_tune_lo(self, center, vfo=None):
         if self.refuse_above is not None and center > self.refuse_above:
             return False
         self.dev.set_frequency(center)
-        self.lo = self.vfo = center
+        self.lo = center
+        self.vfo = center if vfo is None else vfo
         self.moved = True
         return True
 
@@ -407,7 +408,7 @@ class FakeWindow:
         self.muted = False
 
     # ScanHost
-    def scan_tune_lo(self, center):
+    def scan_tune_lo(self, center, vfo=None):
         self.dev.set_frequency(center)
         self.lo = center
         return True
@@ -564,8 +565,9 @@ class TestScannerTab(_PanelCase):
         panel = self.panel()
         self.assertTrue(panel._auto.isChecked())
         self.assertFalse(panel._threshold.isEnabled())
-        self.assertIn("now -88 dBFS: above -76 dBFS", panel._hint.text())
-        self.assertIn("101 channels in 12 receiver steps", panel._hint.text())
+        self.assertIn("Auto: 12 dB over the noise floor (-88 dBFS)", panel._hint.text())
+        self.assertIn("101 channels, 12 receiver steps", panel._hint.text())
+        self.assertEqual(panel._threshold.value(), -76)  # the level in use
         panel._auto.setChecked(False)
         self.assertTrue(panel._threshold.isEnabled())
         panel._threshold.setValue(-60)
@@ -617,7 +619,7 @@ class TestScannerTab(_PanelCase):
         self.assertEqual(
             (hit.peak_db, hit.frequency_hz, hit.count), (-30.0, 100.31e6, 2)
         )
-        self.assertEqual(panel._table.item(0, 2).text(), "60.0 dB")
+        self.assertEqual(panel._table.item(0, 2).text(), "60 dB")
 
     def test_empty_states_say_what_happened(self):
         """TOOLS-09: after Clear or an early Stop the table doesn't claim
@@ -1007,6 +1009,70 @@ class TestScannerInTheWindow(_ScanWindowCase):
         win._commit_pending_history()
         recent = [round(e.freq_hz) for e in win._tuning_history.recent()]
         self.assertLessEqual(len(recent), 2)
+
+    def test_the_tuned_frequency_is_a_channel_while_sweeping(self):
+        win, panel = self.win, self.win._scanner_panel
+        panel._preset.setCurrentIndex(1)  # FM broadcast, 200 kHz channels
+        panel.set_scan_mode("continuous")
+        panel.start_scan()
+        seen = set()
+        for _ in range(12):
+            self.frames(FRAME_S)
+            seen.add(round(win._current_frequency()))
+            # (The LO sits a few bins off the channel: its DC spike.)
+            self.assertNotEqual(win._lo_frequency(), win._current_frequency())
+        self.assertGreater(len(seen), 3)
+        for freq in seen:
+            self.assertEqual((freq - 88_000_000) % 200_000, 0, freq)
+        panel.stop_scan()
+
+    def test_losing_the_device_says_so(self):
+        win, panel = self.win, self.win._scanner_panel
+        panel._preset.setCurrentIndex(1)
+        panel.start_scan()
+        panel.stop_scan()
+        self.assertIn("Scan stopped", panel._status.text())
+        win._release_device()
+        panel.refresh()
+        self.assertIn("No receiver", panel._status.text())
+        self.assertFalse(panel._demo_btn.isHidden())
+        # And a scan running when it goes: stopped, saying why.
+        win._start_demo_mode()
+        panel.refresh()
+        self.assertTrue(panel.start_scan())
+        win._release_device()
+        panel.refresh()
+        self.assertFalse(panel.engine.active)
+        self.assertIn("the device was disconnected", panel._status.text())
+
+    def test_a_new_sample_rate_or_a_playback_stops_the_scan(self):
+        win, panel = self.win, self.win._scanner_panel
+        panel._preset.setCurrentIndex(1)
+        panel.set_scan_mode("continuous")
+        panel.start_scan()
+        self.frames(0.2)
+        win.set_sample_rate(2.048e6)
+        self.frames(0.1)
+        self.assertFalse(panel.engine.active)
+        self.assertIn("sample rate changed", panel._status.text())
+        panel.start_scan()
+        self.frames(0.1)
+        win._lo_lock = (win._lo_frequency(), 2.048e6, "the recording")
+        self.frames(0.1)
+        self.assertFalse(panel.engine.active)
+        self.assertIn("a recording is playing", panel._status.text())
+        win._lo_lock = None
+        panel.refresh()
+
+    def test_listen_starts_a_stopped_receiver(self):
+        from sdr_module.gui.scanner_panel import ScanHit
+
+        win = self.win
+        win._stop_acquisition()
+        hit = ScanHit(125.0e6, -44.0, 44.0, 8e3, "AM", "", "10 kHz")
+        self.assertTrue(win._scanner_host.scan_listen(hit))
+        self.assertTrue(win._is_running)
+        self.assertEqual(win._control_panel.get_demod_mode(), "AM")
 
     def test_an_airband_hit_is_heard_in_am(self):
         """TOOLS-07: Listen on a hit of the Airband preset tunes AM 10 kHz

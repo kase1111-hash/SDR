@@ -6295,6 +6295,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if panel is None or not panel.engine.active:
             return
         host = self._scanner_host
+        if self._device_sample_rate() != panel.engine.rate:
+            # Its steps and measurements were planned for the old rate.
+            panel.stop_scan(
+                "Scan stopped: the sample rate changed. Start it again.",
+                "warning",
+                stay=True,
+            )
+            return
+        if getattr(self, "_lo_lock", None) is not None:
+            panel.stop_scan(
+                "Scan stopped: a recording is playing.", "warning", stay=True
+            )
+            return
         tuned = self._current_frequency()
         if host.expected_hz is not None and abs(tuned - host.expected_hz) > 1.0:
             panel.stop_scan(

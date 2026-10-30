@@ -74,10 +74,18 @@ class WindowScannerHost(ScannerHost):
         win._level_average.reset()
         self.expected_hz = win._current_frequency()
 
-    def scan_tune_lo(self, center_hz: float) -> bool:
+    def scan_tune_lo(self, center_hz: float, vfo_hz: Optional[float] = None) -> bool:
         win = self._win
         before = win._lo_frequency()
-        ok = self._quietly(lambda: win._tune_to(center_hz, recenter=True))
+
+        def tune() -> bool:
+            if not win._tune_to(center_hz, recenter=True):
+                return False
+            if vfo_hz is not None and abs(vfo_hz - center_hz) >= 0.5:
+                win._tune_to(vfo_hz)  # inside the span: only the VFO moves
+            return True
+
+        ok = self._quietly(tune)
         self._lo_moved = abs(win._lo_frequency() - before) >= 0.5
         if ok:
             self._after_tune()
@@ -228,6 +236,8 @@ class WindowScannerHost(ScannerHost):
 
     # ---- results ---------------------------------------------------------- #
     def scan_listen(self, hit: ScanHit) -> bool:
+        """Tune to a result in its mode, filter and (no) tone squelch, and
+        start the receiver if it is stopped, so it is heard."""
         win = self._win
         label = hit.label or default_bookmark_name(hit.frequency_hz)
         win._on_bookmark_tune(hit.frequency_hz, label, hit.mode, hit.fm_deviation)
@@ -237,6 +247,8 @@ class WindowScannerHost(ScannerHost):
             win._set_demod_mode(hit.mode, hit.fm_deviation or None, hit.bandwidth)
         if hit.mode == "FM":
             win._control_panel.set_tone_squelch_hz(0.0)
+        if win._device is not None and not win._is_running:
+            win._start_acquisition()
         return True
 
     def scan_add_bookmarks(self, hits: List[ScanHit]) -> Tuple[int, List[str]]:

@@ -224,12 +224,16 @@ def _offset_text(bookmark: Dict[str, Any]) -> str:
 
 
 def _details(bookmark: Dict[str, Any]) -> str:
-    """Compact mode / tone / shift summary for the Mode column."""
+    """Compact mode / tone / shift summary for the Mode column (and
+    "· Skip" for a bookmark the bookmark scan passes by)."""
     parts = [p for p in (_mode(bookmark), str(bookmark.get("tone_mode") or "")) if p]
     shift = _offset_text(bookmark)
     if shift:
         parts.append(shift)
-    return " ".join(parts)
+    text = " ".join(parts)
+    if str(bookmark.get("skip") or "") == "S":
+        text = f"{text} · Skip" if text else "Skip"
+    return text
 
 
 def _tooltip(bookmark: Dict[str, Any]) -> str:
@@ -1156,6 +1160,14 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         copy = menu.addAction("Copy Frequency")
         copy.setToolTip(f"Copy {freq} to the clipboard")
         copy.triggered.connect(lambda _c=False, i=idx: self._copy_frequency(i))
+        up = menu.addAction("Move Up")
+        up.setToolTip("Earlier in the list (and in an exported CHIRP file)")
+        up.setEnabled(self._neighbour(idx, -1) >= 0)
+        up.triggered.connect(lambda _c=False, i=idx: self.move_bookmark(i, -1))
+        down = menu.addAction("Move Down")
+        down.setToolTip("Later in the list (and in an exported CHIRP file)")
+        down.setEnabled(self._neighbour(idx, 1) >= 0)
+        down.triggered.connect(lambda _c=False, i=idx: self.move_bookmark(i, 1))
         menu.addSeparator()
         scan = menu.addAction("Scan Bookmarks from Here")
         scan.setToolTip(
@@ -1168,6 +1180,31 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         remove = menu.addAction("Remove...\tDelete")
         remove.triggered.connect(lambda _c=False: self._remove_selected())
         return menu
+
+    def _neighbour(self, idx: int, direction: int) -> int:
+        """The bookmark shown just before (-1) or after (+1) bookmark
+        ``idx`` in its group, or -1."""
+        if not 0 <= idx < len(self._bookmarks):
+            return -1
+        group = str(self._bookmarks[idx].get("group", "") or "")
+        j = idx + direction
+        while 0 <= j < len(self._bookmarks):
+            if str(self._bookmarks[j].get("group", "") or "") == group:
+                return j
+            j += direction
+        return -1
+
+    def move_bookmark(self, idx: int, direction: int) -> bool:
+        """Swap bookmark ``idx`` with its neighbour in its group (the order
+        of the list and of an exported CHIRP file); True when moved."""
+        other = self._neighbour(idx, direction)
+        if other < 0:
+            return False
+        items = self._bookmarks
+        items[idx], items[other] = items[other], items[idx]
+        self._save()
+        self._refresh_list(select=other)
+        return True
 
     def _copy_frequency(self, idx: int) -> None:
         if not 0 <= idx < len(self._bookmarks):

@@ -3854,6 +3854,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         panel = self._control_panel
         if panel._record_btn.isChecked() != on:
             panel.set_recording_state(on)
+        if on:  # (and its own Pause: each recording has one)
+            take = self._audio_take
+            panel.set_recording_paused(
+                take.paused if audio and take is not None else self._recording_paused
+            )
         if audio and self._audio_take is not None:
             panel.update_record_time(int(self._audio_take.seconds))
         self._sync_recording_armed()

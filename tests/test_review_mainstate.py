@@ -12,6 +12,8 @@ regression tests for the confirmed findings.
   tuned inside its span.
 * MS-5: no Open Recording while transmitting; Disconnect ends a
   transmission before it closes the HackRF.
+* MS-6: the Recording group's Pause shows the pause of the recording its
+  Record choice shows.
 
 Run offscreen: ``QT_QPA_PLATFORM=offscreen python -m pytest
 tests/test_review_mainstate.py``
@@ -53,6 +55,7 @@ class _MainStateCase(_WindowTestCase):
         self.folder = tempfile.mkdtemp(prefix="sdr-mainstate-")
         self.addCleanup(shutil.rmtree, self.folder, True)
         self.win._recording_folder = self.folder
+        self.store.set("recording/folder", self.folder)  # (audio recordings)
         self.messages = []
         show = self.win._show_status_message
 
@@ -390,6 +393,86 @@ class TestPlaybackAndTransmitting(_TxCase):
         self.assertEqual(on_air_when_closed, [False])
         self.assertIsNone(self.win._device)
         self.assertEqual(self.station.engine.last_result.status, "stopped")
+
+
+# ---------------------------------------------------------------------------
+# MS-6: the Recording group's Pause and its Record choice
+# ---------------------------------------------------------------------------
+
+
+class TestPauseFollowsTheRecordChoice(_MainStateCase):
+    """Pause a recording in the Recording group, then switch its Record
+    choice to the other kind and back: the group said "● Recording" with
+    "❚❚ Pause" while nothing was captured, and the next press of Pause only
+    paused it (again)."""
+
+    PAUSED = ("❚❚ Paused", "▶ Resume", True)
+
+    def group(self):
+        panel = self.win._control_panel
+        return (
+            panel._record_status.text(),
+            panel._pause_btn.text(),
+            panel._pause_btn.isChecked(),
+        )
+
+    def test_a_paused_iq_recording_still_shows_paused(self):
+        win, panel = self.win, self.win._control_panel
+        panel.set_record_kind("iq")
+        panel._record_btn.click()
+        self.frames(0.2)
+        self.assertTrue(win._recording)
+        panel._pause_btn.click()
+        self.assertTrue(win._recording_paused)
+        self.assertEqual(self.group(), self.PAUSED)
+        panel.set_record_kind("audio")
+        self.assertEqual(self.group()[0], "Ready")  # (no audio recording)
+        panel.set_record_kind("iq")
+        self.assertEqual(self.group(), self.PAUSED)
+        self.assertTrue(panel.is_recording_paused())
+        # One press resumes it.
+        captured = win._buffer_sample_count()
+        panel._pause_btn.click()
+        self.assertFalse(win._recording_paused)
+        self.assertEqual(self.group(), ("● Recording", "❚❚ Pause", False))
+        self.frames(0.2)
+        self.assertGreater(win._buffer_sample_count(), captured)
+        win._toggle_recording(False)
+
+    def test_a_paused_audio_recording_still_shows_paused(self):
+        win, panel = self.win, self.win._control_panel
+        panel.set_record_kind("audio")
+        panel._record_btn.click()
+        take = win._audio_take
+        self.assertIsNotNone(take)
+        panel._pause_btn.click()
+        self.assertTrue(take.paused)
+        panel.set_record_kind("iq")
+        panel.set_record_kind("audio")
+        self.assertEqual(self.group(), self.PAUSED)
+        panel._pause_btn.click()
+        self.assertFalse(take.paused)
+        self.assertEqual(self.group(), ("● Recording audio", "❚❚ Pause", False))
+        win._stop_audio_recording(quiet=True)
+
+    def test_each_recording_shows_its_own_pause(self):
+        """Both recording: the I/Q one paused, the audio one not."""
+        win, panel = self.win, self.win._control_panel
+        panel.set_record_kind("iq")
+        panel._record_btn.click()
+        panel._pause_btn.click()
+        panel.set_record_kind("audio")
+        panel._record_btn.click()
+        self.assertIsNotNone(win._audio_take)
+        self.assertEqual(self.group(), ("● Recording audio", "❚❚ Pause", False))
+        panel.set_record_kind("iq")
+        self.assertEqual(self.group(), self.PAUSED)
+        panel.set_record_kind("audio")
+        self.assertEqual(self.group(), ("● Recording audio", "❚❚ Pause", False))
+        self.assertTrue(win._recording_paused)
+        self.assertFalse(win._audio_take.paused)
+        win._stop_audio_recording(quiet=True)
+        win._toggle_recording(False)
 
 
 if __name__ == "__main__":  # pragma: no cover

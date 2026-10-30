@@ -2301,6 +2301,17 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         """Whether the current recording is paused."""
         return self._record_btn.isChecked() and self._pause_btn.isChecked()
 
+    def set_recording_paused(self, paused: bool) -> None:
+        """Show whether the recording shown is paused, without emitting
+        :attr:`recording_paused` (the I/Q and the audio recording each have
+        their own pause: the window shows the one the Record choice shows)."""
+        paused = bool(paused) and self._record_btn.isChecked()
+        self._pause_btn.blockSignals(True)
+        self._pause_btn.setChecked(paused)
+        self._pause_btn.blockSignals(False)
+        self._pause_btn.setText(_RESUME_TEXT if paused else _PAUSE_TEXT)
+        self._update_record_status()
+
     def update_record_time(self, seconds: int):
         """Update recording time display."""
         seconds = max(0, int(seconds))

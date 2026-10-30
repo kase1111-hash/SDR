@@ -90,10 +90,26 @@ except ImportError:
 from .. import __version__
 from ..devices.base import SDRDevice
 from ..utils.tooltips import get_short_tip
+from .audio_chain import (
+    AGC_SPEEDS,
+    AM_CARRIER_TIME_S,
+    AudioAgc,
+    AudioJoin,
+    AudioOptions,
+    DcBlocker,
+    IqConditioner,
+    LevelAverager,
+    NoiseFloorTracker,
+    SquelchGate,
+    ToneSquelch,
+    channel_power_db,
+    make_noise_reduction,
+)
 from .audio_sink import AudioSink
 from .bookmarks_panel import BookmarksPanel
-from .control_panel import ControlPanel
+from .control_panel import ControlPanel, bandwidth_options, closest_bandwidth
 from .decoder_panel import DecoderPanel
+from .level_meter import LevelMeter
 from .settings_store import DEFAULT_FREQUENCY_HZ, GuiSettings
 from .spectrum_widget import SpectrumWidget
 from .themes import (
@@ -126,7 +142,7 @@ BAND_PRESETS: List[BandPreset] = [
     BandPreset("&NOAA Weather", 162.55e6, "FM", "5 kHz", "25 kHz"),
     BandPreset("&2m Ham", 146.52e6, "FM", "5 kHz", "25 kHz"),
     BandPreset("&70cm Ham", 446.0e6, "FM", "5 kHz", "25 kHz"),
-    BandPreset("&Airband AM", 125.0e6, "AM", None, "25 kHz"),
+    BandPreset("&Airband AM", 125.0e6, "AM", None, "10 kHz"),
     BandPreset("A&DS-B", 1090e6, "None (I/Q)", None, "2.4 MHz"),
     BandPreset("ISM &433", 433.92e6, "None (I/Q)", None, "500 kHz"),
     BandPreset("ISM &915", 915e6, "None (I/Q)", None, "2 MHz"),
@@ -243,11 +259,45 @@ def _parse_hz(text: str) -> Optional[float]:
 # Receiver DSP: channel filter and demodulators
 # ---------------------------------------------------------------------------
 
-# Audio passband of the SSB demodulator and the CW filter and beat note.
+# SSB and CW filters. Their width is the Bandwidth control in those modes
+# (its choices depend on the mode, see control_panel.MODE_BANDWIDTHS). The
+# SSB passband starts _SSB_LOW_HZ from the carrier and is the Bandwidth
+# wide; its lower edge falls off over _SSB_TRANSITION_HZ, so 50 Hz from the
+# carrier and below (a carrier, or the hardware's DC spike, at the tuned
+# frequency) is 60 dB down and never reaches the audio. CW keeps +/- half
+# the Bandwidth around the carrier and adds a beat note (the CW pitch).
 _SSB_LOW_HZ = 200.0
-_SSB_HIGH_HZ = 2800.0
-_CW_HALF_WIDTH_HZ = 250.0
-_CW_PITCH_HZ = 700.0
+_SSB_TRANSITION_HZ = 150.0
+_SSB_WIDTH_RANGE = (300.0, 10e3)
+_CW_WIDTH_RANGE = (50.0, 3e3)
+_CW_PITCH_HZ = 700.0  # default beat note
+_NARROW_MODES = ("USB", "LSB", "CW")
+# DC blocking of the demodulated audio: below the lowest broadcast bass
+# for FM, above the hum of a fading carrier for the other modes.
+_FM_DC_CORNER_HZ = 15.0
+_FM_BROADCAST_DC_CORNER_HZ = 2.0
+_AUDIO_DC_CORNER_HZ = 30.0
+# AM with the AGC off: a fixed gain, so the loudness follows the signal.
+_AM_FIXED_GAIN = 30.0
+_AM_CARRIER_TIME_S = AM_CARRIER_TIME_S  # release, by AGC speed
+_AM_ATTACK_S = 0.01
+# The audio filters' start-up (their history fills): the DC blocker waits
+# it out, so the noise in it doesn't linger (and a stream cut into blocks
+# still gives exactly the audio of one long block).
+_AUDIO_STARTUP_S = 0.012
+# Options for chains nobody handed any (tests, one-off demodulation).
+_DEFAULT_AUDIO_OPTIONS = AudioOptions()
+# Squelch hang time: how long the level must stay below the threshold
+# (minus the hysteresis) before the squelch closes; longer in CW, whose
+# gaps between characters must not chop it.
+_SQUELCH_HANG_S = 0.3
+_CW_SQUELCH_HANG_S = 0.5
+# FM audio clipping warning: more than this fraction of the samples beyond
+# full scale for this long (the deviation is set too small), at most this
+# often.
+_CLIP_FRACTION = 0.05
+_CLIP_WARN_AFTER_S = 0.5
+_CLIP_WARN_EVERY_S = 30.0
 # Highest audio frequency kept after AM/FM detection (broadcast FM is 15 kHz),
 # and where the audio low-pass stops: below broadcast FM's 19 kHz stereo
 # pilot tone, which would otherwise come through as a faint whistle.
@@ -515,17 +565,42 @@ class _Resampler:
         return out.astype(np.float32, copy=False)
 
 
+def _filter_width(mode: str, bandwidth: float, rate: float) -> float:
+    """The Bandwidth control, limited to what ``mode`` can use: the SSB or
+    CW filter width in those modes, else the channel width."""
+    if mode in ("USB", "LSB"):
+        low, high = _SSB_WIDTH_RANGE
+        return min(max(float(bandwidth), low), high)
+    if mode == "CW":
+        low, high = _CW_WIDTH_RANGE
+        return min(max(float(bandwidth), low), high)
+    return min(max(float(bandwidth), 1e3), float(rate))
+
+
 def _channel_edges(mode: str, bandwidth: float, rate: float) -> Tuple[float, float]:
     """Offsets from the tuned frequency (Hz) of what ``mode`` demodulates
-    (and LEVEL, the squelch and the S-meter measure)."""
+    (and LEVEL, the squelch and the S-meter measure). In USB, LSB and CW
+    ``bandwidth`` is the filter width: USB keeps 200 Hz to 200 Hz plus the
+    width above the carrier, LSB the same below, CW +/- half the width."""
+    width = _filter_width(mode, bandwidth, rate)
     if mode == "USB":
-        return 0.0, _SSB_HIGH_HZ
+        return _SSB_LOW_HZ, _SSB_LOW_HZ + width
     if mode == "LSB":
-        return -_SSB_HIGH_HZ, 0.0
-    if mode == "CW":
-        return -_CW_HALF_WIDTH_HZ, _CW_HALF_WIDTH_HZ
-    half = min(max(float(bandwidth), 1e3), float(rate)) / 2.0
+        return -(_SSB_LOW_HZ + width), -_SSB_LOW_HZ
+    half = width / 2.0
     return -half, half
+
+
+def _noise_bandwidth(taps: Optional[np.ndarray], rate: float) -> float:
+    """Equivalent noise bandwidth (Hz) of an FIR with unity gain in its
+    passband, running at ``rate``."""
+    if taps is None or len(taps) == 0:
+        return float(rate)
+    taps = np.asarray(taps)
+    gain = abs(complex(np.sum(taps)))
+    if gain <= 0.0:
+        return float(rate)
+    return float(rate * np.sum(np.abs(taps) ** 2) / gain**2)
 
 
 class _ReceiverChain:
@@ -544,15 +619,33 @@ class _ReceiverChain:
 
     AM and FM audio is low-passed to at most 15 kHz, 60 dB down by 18.5 kHz
     (below broadcast FM's 19 kHz stereo pilot); FM with a broadcast
-    deviation (50 kHz or more) is also de-emphasized (75 us). USB/LSB keep
-    200-2800 Hz on their side of the carrier; CW keeps +/-250 Hz around it
-    and adds a 700 Hz beat note (BFO).
+    deviation (50 kHz or more) is also de-emphasized (75 us).
+
+    In USB, LSB and CW the Bandwidth is the filter width, and the channel
+    filter ends in that filter: USB/LSB keep 200 Hz to 200 Hz plus the width
+    on their side of the carrier, CW +/- half the width around it (and the
+    demodulator adds the CW pitch as a beat note). So the channel the
+    S-meter, LEVEL and the squelch measure is exactly what is heard.
+
+    All audio is DC-blocked (a mistuned FM station otherwise comes out
+    offset and clips), and ``options`` (an :class:`~.audio_chain.
+    AudioOptions`, shared with the window) sets the CW pitch, the AGC speed
+    of AM, SSB and CW, and the noise reduction, all without rebuilding the
+    chain.
     """
+
+    options: Optional[AudioOptions] = None
+
+    @staticmethod
+    def clamp_bandwidth(mode: str, bandwidth: float, rate: float) -> float:
+        """The width a chain for ``mode`` uses for a Bandwidth of
+        ``bandwidth`` (what ``chain.bandwidth`` will be)."""
+        return _filter_width(mode, bandwidth, rate)
 
     def __init__(self, rate: float, mode: str, bandwidth: float):
         self.rate = float(rate)
         self.mode = mode
-        self.bandwidth = min(max(float(bandwidth), 1e3), self.rate)
+        self.bandwidth = self.clamp_bandwidth(mode, bandwidth, self.rate)
         self.audio_rate = _AUDIO_RATE
         total = _smooth_factor(self.rate / _AUDIO_RATE)
         self.intermediate_rate = self.rate / total
@@ -570,6 +663,10 @@ class _ReceiverChain:
             if self.rate / first < need:
                 first = 1
         self.channel_rate = self.rate / first
+        # USB/LSB: complex band-pass for one sideband; CW: narrow low-pass.
+        # The last stage of the channel filter (see _channel_stages).
+        self._sideband_taps: Optional[np.ndarray] = None
+        self._noise_bw = self.rate
         self._channel = self._channel_stages(first, half, mode)
         self._audio_factor = total // first
         self._audio_cutoff = min(half, _MAX_AUDIO_HZ, 0.45 * self.intermediate_rate)
@@ -579,13 +676,32 @@ class _ReceiverChain:
         # squelched frames reset the demodulator every frame, and rebuilding
         # the resampler table and filter designs each time cost ~0.6 ms.
         self._audio_cache: Dict[bool, List[_FirDecimator]] = {}
-        self._sideband: Optional[_FirDecimator] = None
-        if self._sideband_taps is not None:
-            self._sideband = _FirDecimator(self._sideband_taps)
+        self._sideband: Optional[_FirDecimator] = None  # (now in the channel)
         self._resampler: Optional[_Resampler] = None
         if abs(self.intermediate_rate - self.audio_rate) > 1e-6 * self.audio_rate:
             self._resampler = _Resampler(self.intermediate_rate, self.audio_rate)
+        corner = _FM_DC_CORNER_HZ if mode == "FM" else _AUDIO_DC_CORNER_HZ
+        self._dc_blocker = self._make_dc_blocker(corner)
+        self._audio_agc = AudioAgc(self.audio_rate)
+        # What the last demodulate() call saw: the fraction of FM audio
+        # beyond full scale (clipped: the deviation is set too small), and
+        # the audio before noise reduction (for the SSTV decoder).
+        self.last_clip_fraction = 0.0
+        self.pre_nr_audio = np.empty(0, dtype=np.float32)
         self.reset_demodulator()
+
+    def _options(self) -> AudioOptions:
+        options = self.options
+        return options if options is not None else _DEFAULT_AUDIO_OPTIONS
+
+    def _make_dc_blocker(self, corner_hz: float) -> DcBlocker:
+        startup = int(round(_AUDIO_STARTUP_S * self.audio_rate))
+        return DcBlocker(corner_hz, self.audio_rate, startup)
+
+    def noise_bandwidth(self) -> float:
+        """Equivalent noise bandwidth (Hz) of the channel: an empty channel
+        measures the noise density times this."""
+        return self._noise_bw
 
     def _channel_stages(
         self, factor: int, half: float, mode: str
@@ -597,14 +713,19 @@ class _ReceiverChain:
         a strong station next door doesn't leak into the S-meter or the
         demodulator. It runs after a coarse decimation stage where possible,
         which keeps it short.
+
+        In USB, LSB and CW the decimation only needs to keep +/- a quarter
+        of the channel rate (a lighter filter), and the SSB or CW filter at
+        the channel rate ends the chain: the channel is the passband.
         """
         rate = self.rate
-        if factor == 1 and half >= 0.45 * rate:
+        narrow = mode in _NARROW_MODES
+        if factor == 1 and half >= 0.45 * rate and not narrow:
             return []  # the channel is the whole span: nothing to remove
-        # Narrow modes cut their sideband later, so this passband only needs
-        # to clear that (a lighter filter than the full channel).
-        edge = 0.25 if mode in ("USB", "LSB", "CW") else 0.45
-        pass_hz = min(half, edge * self.channel_rate)
+        if narrow:
+            pass_hz = 0.25 * self.channel_rate
+        else:
+            pass_hz = min(half, 0.45 * self.channel_rate)
         stop_hz = min(pass_hz * 1.25, max(self.channel_rate - pass_hz, pass_hz * 1.05))
         if factor == 1:
             stop_hz = min(stop_hz, rate / 2.0)
@@ -621,10 +742,41 @@ class _ReceiverChain:
             taps = _lowpass_taps(stop_hz, rate / coarse - pass_hz, rate)
             stages.append(_FirDecimator(taps, coarse))
         fine_rate = rate / coarse
-        stages.append(
-            _FirDecimator(_lowpass_taps(pass_hz, stop_hz, fine_rate), factor // coarse)
-        )
+        fine = _lowpass_taps(pass_hz, stop_hz, fine_rate)
+        stages.append(_FirDecimator(fine, factor // coarse))
+        self._noise_bw = _noise_bandwidth(fine, fine_rate)
+        if narrow:
+            prototype, self._sideband_taps = self._narrow_taps()
+            stages.append(_FirDecimator(self._sideband_taps))
+            self._noise_bw = _noise_bandwidth(prototype, self.channel_rate)
         return stages
+
+    def _narrow_taps(self) -> Tuple[np.ndarray, np.ndarray]:
+        """``(low-pass prototype, filter)`` of the SSB or CW filter at the
+        channel rate: the prototype shifted to the sideband for USB/LSB (a
+        complex band-pass), the prototype itself for CW."""
+        rate = self.channel_rate
+        width = self.bandwidth
+        if self.mode == "CW":
+            # Centred on the edge, so the filter is ``width`` wide at -6 dB
+            # (and in noise bandwidth); half the width at most, so narrow
+            # filters still pass something flat.
+            half = width / 2.0
+            transition = min(max(0.5 * width, 60.0), 250.0)
+            taps = _lowpass_taps(
+                max(half - transition / 2.0, 1.0), half + transition / 2.0, rate
+            )
+            assert taps is not None  # a CW filter is far below Nyquist
+            return taps, taps
+        half = width / 2.0
+        taps = _lowpass_taps(half, half + _SSB_TRANSITION_HZ, rate)
+        assert taps is not None  # an SSB filter is far below Nyquist
+        center = _SSB_LOW_HZ + half
+        if self.mode == "LSB":
+            center = -center
+        t = np.arange(len(taps)) - (len(taps) - 1) / 2.0
+        shift = np.exp(2j * np.pi * center * t / rate)
+        return taps, (taps * shift).astype(np.complex64)
 
     def band_edges(self) -> Tuple[float, float]:
         """Offsets from the tuned frequency (Hz) of what is demodulated."""
@@ -640,25 +792,11 @@ class _ReceiverChain:
         self._audio_coarse_factor = 1
         self._audio_taps: Optional[np.ndarray] = None
         self._audio_rate_in = rate  # the rate the audio low-pass runs at
-        # USB/LSB: complex band-pass for one sideband; CW: narrow low-pass.
-        self._sideband_taps: Optional[np.ndarray] = None
+        # (USB/LSB/CW: the sideband or CW filter ends the channel filter.)
         if self.mode in ("AM", "FM") and (
             self._audio_factor > 1 or self._audio_cutoff < 0.45 * rate
         ):
             self._design_audio_filters()
-        elif self.mode in ("USB", "LSB"):
-            width = (_SSB_HIGH_HZ - _SSB_LOW_HZ) / 2.0
-            center = (_SSB_HIGH_HZ + _SSB_LOW_HZ) / 2.0
-            if self.mode == "LSB":
-                center = -center
-            taps = _lowpass_taps(width, width + 300.0, rate)
-            t = np.arange(len(taps)) - (len(taps) - 1) / 2.0
-            shift = np.exp(2j * np.pi * center * t / rate)
-            self._sideband_taps = (taps * shift).astype(np.complex64)
-        elif self.mode == "CW":
-            self._sideband_taps = _lowpass_taps(
-                _CW_HALF_WIDTH_HZ, _CW_HALF_WIDTH_HZ + 250.0, rate
-            )
 
     def _design_audio_filters(self) -> None:
         """AM/FM audio: low-pass to ``_audio_cutoff`` (stopping below the
@@ -722,13 +860,18 @@ class _ReceiverChain:
     def reset_demodulator(self) -> None:
         """Forget the audio state (after a gap); the channel filter keeps its."""
         self._prev: Optional[complex] = None
-        self._level = 0.0  # AGC / AM carrier level
+        self._level = 0.0  # AM carrier level
         self._bfo_phase = 0.0
         self._audio = self._audio_stages()
         if self._sideband is not None:
             self._sideband.reset()
         if self._resampler is not None:
             self._resampler.reset()
+        self._dc_blocker.reset()
+        self._audio_agc.reset()
+        noise_reduction = self._options().noise_reduction
+        if noise_reduction is not None:
+            noise_reduction.reset_stream()
 
     def channelize(self, samples: np.ndarray) -> np.ndarray:
         """The tuned channel of an I/Q block, at ``channel_rate``."""
@@ -746,6 +889,11 @@ class _ReceiverChain:
             if broadcast != self._deemphasis:
                 self._deemphasis = broadcast
                 self._audio = self._audio_stages()
+                # Broadcast keeps its deepest bass (a 2 Hz corner still
+                # removes a tuning offset within a few tenths of a second).
+                self._dc_blocker = self._make_dc_blocker(
+                    _FM_BROADCAST_DC_CORNER_HZ if broadcast else _FM_DC_CORNER_HZ
+                )
             # Discriminator; the previous block's last sample keeps the phase
             # difference continuous. Scaled so +/- the deviation is full scale.
             if self._prev is not None:
@@ -756,21 +904,27 @@ class _ReceiverChain:
             detected = np.angle(channel * np.conj(prior)).astype(np.float32)
             gain = self.channel_rate / (2.0 * np.pi * max(float(fm_deviation), 1.0))
             audio = self._to_audio_rate(detected * np.float32(gain))
-            return np.clip(audio, -1.0, 1.0).astype(np.float32)
+            # A tuning error is a constant frequency offset: DC, removed.
+            audio = self._dc_blocker.process(audio)
+            if audio.size:
+                over = np.count_nonzero(np.abs(audio) > 1.0)
+                self.last_clip_fraction = float(over) / audio.size
+            audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
+            self.pre_nr_audio = audio
+            return self._reduce_noise(audio)
+        options = self._options()
         if self.mode == "AM":
-            # Envelope relative to the carrier: loudness follows the
-            # modulation depth, not the signal strength.
-            envelope = np.abs(channel).astype(np.float32)
-            carrier = float(np.mean(envelope))
-            self._level = (
-                carrier if self._level <= 0 else (0.8 * self._level + 0.2 * carrier)
-            )
-            audio = (envelope - self._level) / max(self._level, 1e-9)
-            return np.clip(self._to_audio_rate(audio), -1.0, 1.0).astype(np.float32)
-        # USB / LSB / CW: keep the sideband (or the CW filter), then real part.
-        narrow = self._sideband.process(channel) if self._sideband else channel
+            audio = self._am_detect(channel, options.agc_speed)
+            audio = self._dc_blocker.process(self._to_audio_rate(audio))
+            audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
+            self.pre_nr_audio = audio
+            return self._reduce_noise(audio)
+        # USB / LSB / CW: the channel is already the sideband (or the CW
+        # filter's passband); CW adds the beat note. Then the real part.
+        narrow = channel
         if self.mode == "CW":
-            step = 2.0 * np.pi * _CW_PITCH_HZ / self.channel_rate
+            pitch = min(max(float(options.cw_pitch_hz), 200.0), 2000.0)
+            step = 2.0 * np.pi * pitch / self.channel_rate
             phase = self._bfo_phase + step * np.arange(len(narrow))
             self._bfo_phase = float(
                 (self._bfo_phase + step * len(narrow)) % (2 * np.pi)
@@ -779,7 +933,48 @@ class _ReceiverChain:
         audio = np.real(narrow).astype(np.float32)
         if self._resampler is not None:
             audio = self._resampler.process(audio)
+        audio = self._dc_blocker.process(audio)
+        self.pre_nr_audio = audio
+        nr = options.noise_reduction
+        if nr is not None:
+            audio = np.asarray(nr.process(audio), dtype=np.float32)
         return self._agc(audio)
+
+    def _am_detect(self, channel: np.ndarray, speed: str) -> np.ndarray:
+        """AM envelope relative to the carrier (at the channel rate).
+
+        The carrier level is tracked with the AGC speed's time constant and
+        interpolated across the block (no steps between blocks), and the
+        envelope is divided by it: the loudness follows the modulation
+        depth, not the signal strength. With the AGC off it isn't divided,
+        so the loudness follows the signal."""
+        envelope = np.abs(channel).astype(np.float32)
+        carrier = float(np.mean(envelope))
+        seconds = len(channel) / max(self.channel_rate, 1.0)
+        if carrier > self._level:
+            tau = _AM_ATTACK_S  # a rising carrier is followed at once
+        else:
+            tau = _AM_CARRIER_TIME_S.get(speed, _AM_CARRIER_TIME_S["medium"])
+        if self._level <= 0.0:
+            start = end = carrier
+        else:
+            start = self._level
+            end = start + (1.0 - np.exp(-seconds / tau)) * (carrier - start)
+        self._level = float(end)
+        if len(channel) > 1 and start != end:
+            level = np.linspace(start, end, len(channel), dtype=np.float32)
+        else:
+            level = np.float32(end)
+        if speed not in AGC_SPEEDS:  # AGC off
+            return (envelope - level) * np.float32(_AM_FIXED_GAIN)
+        return (envelope - level) / np.maximum(level, np.float32(1e-9))
+
+    def _reduce_noise(self, audio: np.ndarray) -> np.ndarray:
+        nr = self._options().noise_reduction
+        if nr is None:
+            return audio
+        out = np.asarray(nr.process(audio), dtype=np.float32)
+        return np.clip(out, -1.0, 1.0)
 
     def _to_audio_rate(self, audio: np.ndarray) -> np.ndarray:
         """Audio filter, decimation and resampling to exactly 48 kHz."""
@@ -790,14 +985,12 @@ class _ReceiverChain:
         return audio
 
     def _agc(self, audio: np.ndarray) -> np.ndarray:
-        """Bring SSB/CW to a steady level: fast attack, ~1 s release."""
-        peak = float(np.max(np.abs(audio))) if len(audio) else 0.0
-        release = float(np.exp(-len(audio) / max(self.audio_rate, 1.0)))
-        self._level = max(peak, self._level * release)
-        # The floor (-80 dBFS) keeps an empty channel from being turned up
-        # into full-scale hiss.
-        out = audio * (0.5 / max(self._level, 1e-4))
-        return np.clip(out, -1.0, 1.0).astype(np.float32)
+        """Bring SSB/CW to a steady level: instant attack, a release that
+        follows the AGC speed (see :class:`~.audio_chain.AudioAgc`; its
+        floor, -80 dBFS, keeps an empty channel from being turned up into
+        full-scale hiss)."""
+        self._audio_agc.speed = self._options().agc_speed
+        return self._audio_agc.process(audio)
 
 
 class _Pacer:
@@ -1285,15 +1478,21 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
                     "bandwidth",
                     "Bandwidth",
                     "Width of the tuned channel that is demodulated and measured "
-                    "(Receiver > Bandwidth).",
+                    "(Receiver > Bandwidth); in USB, LSB and CW the filter "
+                    "width, with the audio passband it gives.",
                 ),
                 ("gain", "Gain", get_short_tip("gain")),
-                ("squelch", "Squelch", "Audio is muted below this level."),
+                (
+                    "squelch",
+                    "Squelch",
+                    "Audio is muted while the channel is below this level "
+                    "(Demodulation > Squelch, or drag it on the level meter).",
+                ),
                 (
                     "level",
                     "Channel level",
-                    "Strongest signal inside the tuned channel (Bandwidth), in "
-                    "dBFS (0 dBFS = full scale).",
+                    "Power of the tuned channel (what is demodulated), in dBFS "
+                    "(0 dBFS = full scale), and how far it is above the noise.",
                 ),
             ),
         ),
@@ -1486,7 +1685,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._retune_warned = False
         self._demo_mode = False  # set by _start_demo_mode()
         self._radio_tuner = None  # Pop-out radio tuner window
-        self._squelch_db = -80.0  # applied to spectrum gating
+        self._squelch_db = -80.0  # the manual squelch threshold (dBFS)
+        # What happens after the channel filter: the squelch (hysteresis,
+        # hang time, Auto), the channel's noise floor, the audio options
+        # the receiver chain reads, the fades that keep the speaker free
+        # of clicks, the CTCSS tone squelch and the I/Q clean-up.
+        self._squelch = SquelchGate(self._squelch_db)
+        self._level_average = LevelAverager()
+        self._noise_floor = NoiseFloorTracker()
+        self._audio_options = AudioOptions()
+        self._audio_join = AudioJoin(_AUDIO_RATE)
+        self._join_chain: Optional["_ReceiverChain"] = None
+        self._join_deviation = 0.0
+        self._demod_running = False
+        self._tone_squelch = ToneSquelch(_AUDIO_RATE)
+        self._iq_conditioner = IqConditioner()
+        self._clip_s = 0.0
+        self._clip_warn_due = 0.0
         # Cached analysis window for the spectrum display (built lazily to
         # match the sample-block length).
         self._spectrum_window: Optional[np.ndarray] = None
@@ -2135,25 +2350,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         toolbar.addSeparator()
 
-        # Signal level readout
+        # Signal level meter: the tuned channel's level with the squelch
+        # threshold (drag it to set the squelch) and whether it is open.
         level_caption = QLabel("LEVEL")
         set_role(level_caption, "caption")
         toolbar.addWidget(level_caption)
-        self._level_label = QLabel(f"{_NO_VALUE} dBFS")
-        set_role(self._level_label, "lcd-small")
-        self._level_label.setAlignment(
-            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-        )
-        self._level_label.setMinimumWidth(
-            self._level_label.fontMetrics().horizontalAdvance("-120.0 dBFS") + 20
-        )
-        self._level_label.setToolTip(
-            "Strongest signal inside the tuned channel (Bandwidth), in dBFS "
-            "(0 dBFS = full scale). Green while it is above the squelch "
-            "threshold."
-        )
-        self._level_label.setAccessibleName("Signal level")
-        toolbar.addWidget(self._level_label)
+        self._level_meter = LevelMeter()
+        self._level_meter.threshold_changed.connect(self._on_meter_threshold)
+        # The readout's old name: text() / setText() work on the meter.
+        self._level_label = self._level_meter
+        toolbar.addWidget(self._level_meter)
 
     def _setup_statusbar(self):
         """Setup status bar."""
@@ -2245,10 +2451,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._bookmarks_panel.set_mode_source(self._listening_mode)
         # The license class decides where transmitting is allowed; remember it.
         self._control_panel.license_changed.connect(self._on_license_changed)
-        # Remembered between sessions, like the mode they belong to.
+        # Remembered between sessions, like the mode they belong to (the
+        # value, "75 kHz", not the item text "75 kHz (broadcast)").
         self._control_panel._fm_dev_combo.currentTextChanged.connect(
-            lambda text: self._save_setting("fm_deviation", text)
+            lambda _text: self._save_setting(
+                "fm_deviation", self._control_panel.get_fm_deviation_text()
+            )
         )
+        self._connect_audio_controls()
         self._control_panel._format_combo.currentTextChanged.connect(
             lambda text: self._save_setting("recording_format", text)
         )
@@ -2554,14 +2764,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             ),
         )
         p.set_value("demod", self._control_panel._demod_combo.currentText())
-        p.set_value("bandwidth", self._control_panel._bw_combo.currentText())
+        p.set_value("bandwidth", self._bandwidth_description())
         if self._agc_enabled:
             p.set_value("gain", "Automatic (AGC)")
         else:
             p.set_value("gain", f"{self._control_panel._gain_slider.value()} dB")
-        p.set_value("squelch", f"{self._squelch_db:.0f} dBFS")
+        p.set_value("squelch", *self._squelch_description(running))
         if running and self._last_peak_db is not None:
-            p.set_value("level", f"{self._last_peak_db:.1f} dBFS")
+            p.set_value("level", self._level_description())
         else:
             p.set_value("level", _NO_VALUE)
 
@@ -3040,9 +3250,166 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._settings.set(key, value)
 
     def _on_squelch_changed(self, db: float):
-        """Handle squelch threshold change."""
+        """A squelch threshold set by hand (the slider, or dragged on the
+        level meter)."""
         self._squelch_db = float(db)
-        self._settings.set("squelch_db", self._squelch_db)
+        self._squelch.manual_db = self._squelch_db
+        self._save_setting("squelch_db", self._squelch_db)
+
+    def _on_meter_threshold(self, db: float) -> None:
+        """The threshold was dragged on the toolbar meter: the squelch is on
+        and set by hand there (the slider follows)."""
+        panel = self._control_panel
+        if not panel.is_squelch_enabled():
+            panel.set_squelch_enabled(True)
+        panel.set_squelch_db(db)
+
+    def _on_squelch_enabled(self, enabled: bool) -> None:
+        self._squelch.enabled = bool(enabled)
+        self._save_setting("squelch/enabled", bool(enabled))
+        if self._info_panel.isVisible():
+            self._refresh_info_panel()
+
+    def _on_squelch_auto(self, auto: bool) -> None:
+        self._squelch.auto = bool(auto)
+        self._save_setting("squelch/auto", bool(auto))
+
+    def _connect_audio_controls(self) -> None:
+        """The Demodulation, Audio and I/Q controls of the control panel."""
+        panel = self._control_panel
+        panel.squelch_enabled_changed.connect(self._on_squelch_enabled)
+        panel.squelch_auto_changed.connect(self._on_squelch_auto)
+        panel.filter_memory_changed.connect(self._save_filter_memory)
+        panel.cw_pitch_changed.connect(self._on_cw_pitch_changed)
+        panel.noise_reduction_changed.connect(self._on_noise_reduction_changed)
+        panel.audio_agc_changed.connect(self._on_audio_agc_changed)
+        panel.tone_squelch_changed.connect(self._on_tone_squelch_changed)
+        panel.iq_options_changed.connect(self._on_iq_options_changed)
+
+    def _save_filter_memory(self) -> None:
+        try:
+            text = json.dumps(self._control_panel.filter_memory())
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return
+        self._save_setting("audio/mode_filters", text)
+
+    def _on_cw_pitch_changed(self, hz: int) -> None:
+        self._audio_options.cw_pitch_hz = float(hz)
+        self._save_setting("audio/cw_pitch", int(hz))
+        if self._info_panel.isVisible():
+            self._refresh_info_panel()
+
+    def _on_noise_reduction_changed(self, level: str) -> None:
+        self._audio_options.noise_reduction = make_noise_reduction(level, _AUDIO_RATE)
+        self._save_setting("audio/noise_reduction", level)
+
+    def _on_audio_agc_changed(self, speed: str) -> None:
+        self._audio_options.agc_speed = speed
+        self._save_setting("audio/agc_speed", speed)
+
+    def _on_tone_squelch_changed(self, hz: float) -> None:
+        self._tone_squelch.tone_hz = float(hz) if hz else None
+        self._save_setting("audio/tone_squelch", float(hz))
+
+    def _on_iq_options_changed(self, remove_dc: bool, balance_iq: bool) -> None:
+        conditioner = self._iq_conditioner
+        conditioner.remove_dc = bool(remove_dc)
+        conditioner.balance_iq = bool(balance_iq)
+        conditioner.reset()
+        self._save_setting("audio/remove_dc", bool(remove_dc))
+        self._save_setting("audio/balance_iq", bool(balance_iq))
+
+    def _restore_audio_settings(self) -> None:
+        """Squelch, per-mode filters and the Audio / I/Q options."""
+        panel = self._control_panel
+        settings = self._settings
+        raw = settings.get_str("audio/mode_filters", "")
+        if raw:
+            try:
+                memory = json.loads(raw)
+            except ValueError:
+                logger.debug("Ignoring unreadable saved mode filters: %r", raw)
+            else:
+                if isinstance(memory, dict):
+                    panel.set_filter_memory(memory)
+        panel.set_squelch_auto(settings.get_bool("squelch/auto", True))
+        panel.set_squelch_enabled(settings.get_bool("squelch/enabled", True))
+        panel.set_cw_pitch(settings.get_int("audio/cw_pitch", 700))
+        panel.set_noise_reduction(settings.get_str("audio/noise_reduction", "off"))
+        panel.set_audio_agc_speed(settings.get_str("audio/agc_speed", "medium"))
+        panel.set_tone_squelch_hz(settings.get_float("audio/tone_squelch", 0.0))
+        panel.set_iq_options(
+            settings.get_bool("audio/remove_dc", False),
+            settings.get_bool("audio/balance_iq", False),
+        )
+        # (The panel's signals applied these; make sure even unchanged
+        # defaults are in effect.)
+        self._squelch.enabled = panel.is_squelch_enabled()
+        self._squelch.auto = panel.is_squelch_auto()
+        self._squelch.manual_db = self._squelch_db
+        self._audio_options.cw_pitch_hz = float(panel.cw_pitch())
+        self._audio_options.agc_speed = panel.audio_agc_speed()
+        self._audio_options.noise_reduction = make_noise_reduction(
+            panel.noise_reduction(), _AUDIO_RATE
+        )
+        hz = panel.tone_squelch_hz()
+        self._tone_squelch.tone_hz = hz if hz else None
+        remove_dc, balance_iq = panel.iq_options()
+        self._iq_conditioner.remove_dc = remove_dc
+        self._iq_conditioner.balance_iq = balance_iq
+
+    def _persist_audio_settings(self) -> None:
+        panel = self._control_panel
+        settings = self._settings
+        settings.set("squelch/enabled", panel.is_squelch_enabled())
+        settings.set("squelch/auto", panel.is_squelch_auto())
+        settings.set("audio/mode_filters", json.dumps(panel.filter_memory()))
+        settings.set("audio/cw_pitch", panel.cw_pitch())
+        settings.set("audio/noise_reduction", panel.noise_reduction())
+        settings.set("audio/agc_speed", panel.audio_agc_speed())
+        settings.set("audio/tone_squelch", panel.tone_squelch_hz())
+        remove_dc, balance_iq = panel.iq_options()
+        settings.set("audio/remove_dc", remove_dc)
+        settings.set("audio/balance_iq", balance_iq)
+
+    def _bandwidth_description(self) -> str:
+        """The Info tab's Bandwidth: the width and, in SSB and CW, the
+        passband it gives (``"2.7 kHz (USB, 200-2900 Hz)"``)."""
+        panel = self._control_panel
+        mode = panel.get_demod_mode()
+        width = panel._bw_combo.currentText()
+        if mode in ("USB", "LSB"):
+            low, high = sorted(abs(e) for e in self._passband_edges())
+            return f"{width} ({mode}, {low:.0f}-{high:.0f} Hz)"
+        if mode == "CW":
+            return f"{width} (CW, {panel.cw_pitch()} Hz tone)"
+        return width
+
+    def _squelch_description(self, running: bool) -> Tuple[str, Optional[str]]:
+        """The Info tab's Squelch: on or off, the threshold, open or not."""
+        mode = self._control_panel.get_demod_mode()
+        gate = self._squelch
+        if mode not in _AUDIBLE_MODES:
+            return "Not used (no audio in this mode)", "muted"
+        if not gate.enabled:
+            return "Off (everything plays)", None
+        threshold = gate.last_threshold_db
+        if not running or threshold is None:
+            if gate.auto:
+                return f"Auto (noise + {gate.margin_db:.0f} dB)", None
+            return f"{gate.manual_db:.0f} dBFS (set by hand)", None
+        how = "Auto" if gate.auto else "set by hand"
+        if gate.is_open:
+            return f"{threshold:.0f} dBFS ({how}), open", "success"
+        return f"{threshold:.0f} dBFS ({how}), closed", None
+
+    def _level_description(self) -> str:
+        level = self._last_peak_db
+        text = f"{level:.1f} dBFS"
+        noise = self._level_meter.noise_floor()
+        if level is not None and noise is not None:
+            text += f" (SNR {level - noise:.0f} dB)"
+        return text
 
     def _on_agc_changed(self, enabled: bool):
         """Handle AGC toggle."""
@@ -3057,12 +3424,41 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 logger.debug(f"Device AGC set failed: {e}")
 
     def _on_demod_changed(self, mode: str):
-        """Handle demodulator selection change."""
+        """Handle demodulator selection change. The control panel has
+        already applied the mode's Bandwidth choices and the width (and FM
+        deviation) last used with it; say what they are."""
         self._save_setting("demod_mode", mode)
         self._refresh_audio_output(announce=not self._restoring)
         self._update_passband()
+        if not self._restoring and mode in _AUDIBLE_MODES:
+            self._show_status_message(f"{mode}: {self._filter_summary()}", None, 3000)
         if mode != "FM" and self._sstv_listening():
             self._hint_sstv_needs_fm()
+        if self._info_panel.isVisible():
+            self._refresh_info_panel()
+
+    def _filter_summary(self) -> str:
+        """What the current mode listens with, e.g. ``"2.7 kHz filter,
+        200-2900 Hz"`` or ``"200 kHz, 75 kHz deviation (broadcast)"``."""
+        panel = self._control_panel
+        mode = panel.get_demod_mode()
+        width = panel._bw_combo.currentText()
+        if mode in ("USB", "LSB"):
+            low, high = sorted(abs(e) for e in self._passband_edges())
+            return f"{width} filter, {low:.0f}-{high:.0f} Hz"
+        if mode == "CW":
+            return f"{width} filter, {panel.cw_pitch()} Hz tone"
+        if mode == "FM":
+            return f"{width}, {panel._fm_dev_combo.current_label()} deviation"
+        return width
+
+    def _passband_edges(self) -> Tuple[float, float]:
+        """The demodulated channel's edges (Hz from the tuned frequency)."""
+        return _channel_edges(
+            self._control_panel._demod_combo.currentText(),
+            self._channel_bandwidth(),
+            self._device_sample_rate(),
+        )
 
     def _set_demod_mode(
         self,
@@ -3071,19 +3467,30 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         bandwidth: Optional[str] = None,
     ) -> None:
         """Select a demodulation mode (and, for FM, a deviation; and a
-        channel bandwidth) in the control panel; its signals apply them."""
+        channel bandwidth) in the control panel; its signals apply them.
+
+        The mode goes first: it sets the Bandwidth choices (and the width
+        and deviation last used with it), which ``fm_deviation`` and
+        ``bandwidth`` then override. A width the mode doesn't offer picks
+        the narrowest of its choices that holds it (else the widest)."""
         panel = self._control_panel
-        if bandwidth:
-            index = panel._bw_combo.findText(bandwidth)
-            if index >= 0:
-                panel._bw_combo.setCurrentIndex(index)
+        index = panel._demod_combo.findText(mode)
+        if index >= 0:
+            panel._demod_combo.setCurrentIndex(index)
         if mode == "FM" and fm_deviation:
             index = panel._fm_dev_combo.findText(fm_deviation)
             if index >= 0:
                 panel._fm_dev_combo.setCurrentIndex(index)
-        index = panel._demod_combo.findText(mode)
-        if index >= 0:
-            panel._demod_combo.setCurrentIndex(index)
+        if bandwidth:
+            combo = panel._bw_combo
+            index = combo.findText(bandwidth)
+            if index < 0:
+                width = _parse_hz(bandwidth)
+                if width:
+                    nearest = closest_bandwidth(panel.bandwidth_choices(), width)
+                    index = combo.findText(nearest)
+            if index >= 0:
+                combo.setCurrentIndex(index)
 
     def _on_license_changed(self, license_class: Any) -> None:
         """Remember the license class (it gates where TX is allowed)."""
@@ -3157,12 +3564,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _bandwidth_for_mode(self, mode: str, deviation: str = "") -> Optional[str]:
         """The Bandwidth option to listen to ``mode`` with (None: keep).
 
-        FM: the narrowest option at least 80% of Carson's bandwidth, twice
-        the deviation plus the highest audio frequency (15 kHz for
-        broadcast, 3 kHz for voice): 200 kHz for broadcast FM, 50 kHz at 25
-        kHz deviation, 25 kHz at 12.5 or 5 kHz (2 m, APRS, NOAA) and 10 kHz
-        at 2.5 kHz. AM: 10 kHz (airband and broadcast AM). USB/LSB/CW: the
-        narrowest option (the demodulator cuts the sideband itself).
+        FM: the narrowest of FM's options at least 80% of Carson's
+        bandwidth, twice the deviation plus the highest audio frequency (15
+        kHz for broadcast, 3 kHz for voice): 200 kHz for broadcast FM, 50
+        kHz at 25 kHz deviation, 25 kHz at 12.5 or 5 kHz (2 m, APRS, NOAA)
+        and 12.5 kHz at 2.5 kHz. AM: 10 kHz (airband and broadcast AM).
+        USB/LSB/CW: None, so the mode keeps its own filter (the width last
+        used with it, or its default).
         """
         if mode == "FM":
             hz = _parse_hz(deviation) if deviation else None
@@ -3172,20 +3580,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             need = 0.8 * 2.0 * (hz + audio)
         elif mode == "AM":
             need = 10e3
-        elif mode in ("USB", "LSB", "CW"):
-            need = _SSB_HIGH_HZ
         else:
             return None
-        combo = self._control_panel._bw_combo
-        options = []
-        for i in range(combo.count()):
-            width = _parse_hz(combo.itemText(i))
-            if width:
-                options.append((width, combo.itemText(i)))
-        if not options:
-            return None
-        fitting = [option for option in options if option[0] >= need]
-        return min(fitting)[1] if fitting else max(options)[1]
+        return closest_bandwidth(bandwidth_options(mode), need) or None
 
     @staticmethod
     def _mode_text(mode: str) -> str:
@@ -3798,6 +4195,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _process_block(self, samples: np.ndarray) -> None:
         """Plots, level, audio, recording, S-meter and decoder for one frame."""
+        # Remove DC spike / Balance I/Q (Receiver group), when switched on.
+        samples = self._iq_conditioner.process(samples, self._device_sample_rate())
         # The plots show the newest DISPLAY_BLOCK samples (a fixed FFT size, so
         # the RBW shown in the Info tab holds); everything else gets the block.
         display = samples[-DISPLAY_BLOCK:] if len(samples) > DISPLAY_BLOCK else samples
@@ -3811,14 +4210,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Update waterfall
         self._waterfall.add_line(power)
 
-        # Level of the tuned channel (green while above the squelch
-        # threshold): a strong station elsewhere in the span no longer
-        # holds the squelch open.
+        # Level of the tuned channel: a strong station elsewhere in the span
+        # no longer holds the squelch open. (The meter and the squelch use
+        # the power of the whole block's channel, see _route_audio; the
+        # spectrum gives the noise floor for Auto squelch and the SNR.)
         chain = self._receiver_chain()
         level = self._channel_level(power, chain)
         self._last_peak_db = level
-        self._level_label.setText(f"{level:.1f} dBFS")
-        set_tone(self._level_label, "success" if level >= self._squelch_db else None)
+        self._track_noise_floor(power, len(samples))
 
         # The tuned channel, filtered out of the block: the S-meter measures
         # it and the demodulator listens to it.
@@ -3888,7 +4287,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if (
             chain is None
             or (chain.rate, chain.mode) != (rate, mode)
-            or (chain.bandwidth != min(max(bandwidth, 1e3), rate))
+            or chain.bandwidth != _ReceiverChain.clamp_bandwidth(mode, bandwidth, rate)
         ):
             chain = self._rx_chain = _ReceiverChain(rate, mode, bandwidth)
         return chain
@@ -3997,15 +4396,41 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
 
     def _route_audio(self, channel: np.ndarray, level_db: float) -> None:
-        """Demodulate the tuned channel once and hand the audio to its
-        consumers."""
+        """Measure the tuned channel, run the squelch, demodulate once and
+        hand the audio to its consumers (the speaker, the SSTV decoder).
+
+        The level is the power of the whole block's channel (in USB, LSB
+        and CW exactly the passband heard): the toolbar meter, the Info tab
+        and the squelch all use it. ``level_db`` (the strongest spectrum
+        bin of the newest samples) only stands in for an empty block.
+
+        The squelch opens at its threshold and closes only after the level
+        has stayed 3 dB below it for the hang time (0.3 s, 0.5 s in CW); the
+        demodulator is reset only once it has closed. Audio fades in when
+        the squelch opens, fades out when it closes and crossfades when a
+        new receiver chain takes over, so none of these click.
+        """
         chain = self._receiver_chain()
+        chain.options = self._audio_options
         mode = chain.mode
-        speaker = (
-            self._audio_enabled
-            and mode in _AUDIBLE_MODES
-            and level_db >= self._squelch_db
-        )
+        audible = mode in _AUDIBLE_MODES
+        seconds = len(channel) / max(chain.channel_rate, 1.0)
+        gate_level = level_db
+        if len(channel):
+            level_db = channel_power_db(channel)
+            # The squelch decides on at least ~25 ms of signal, however
+            # short the block (LEVEL shows the block's own level).
+            gate_level = self._level_average.update(level_db, seconds)
+        self._last_peak_db = level_db
+        noise_db = self._channel_noise_db(chain)
+        gate = self._squelch
+        gate.hang_s = _CW_SQUELCH_HANG_S if mode == "CW" else _SQUELCH_HANG_S
+        if audible:
+            gate.update(gate_level, noise_db, seconds)
+            if gate.auto and noise_db is not None:
+                self._control_panel.show_auto_threshold(gate.last_threshold_db)
+        self._update_level_meter(level_db, noise_db, audible)
+        speaker = self._audio_enabled and audible and gate.is_open
         if speaker and not self._realtime():
             # A few ms of signal per display frame would play as a buzz.
             speaker = False
@@ -4022,24 +4447,116 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # SSTV is FM; it gets every block (no squelch) so its line timing
         # stays intact, and it listens even with the speaker off.
         sstv = mode == "FM" and self._sstv_listening()
-        if not (speaker or sstv):
-            chain.reset_demodulator()
+        # The block after the speaker stopped is still demodulated: it
+        # fades out instead of breaking off.
+        fading_out = self._audio_join.playing and not speaker
+        if not (speaker or sstv or fading_out) or not audible:
+            if self._demod_running:
+                # Closed for real (not during the hang): start afresh.
+                chain.reset_demodulator()
+                self._tone_squelch.reset()
+                self._demod_running = False
+            if self._audio_join.playing:
+                self._audio_join.stop()
+            self._show_detected_tone()
             return
-        if mode not in _AUDIBLE_MODES:
-            return
+        deviation = self._control_panel.get_fm_deviation()
         try:
-            audio = chain.demodulate(channel, self._control_panel.get_fm_deviation())
+            audio = chain.demodulate(channel, deviation)
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug(f"Audio demod failed: {exc}")
             chain.reset_demodulator()
+            self._demod_running = False
             return
+        self._demod_running = True
+        if mode == "FM":
+            # CTCSS: what tone the station sends, and the tone squelch
+            # (broadcast stations send none: not looked for unless asked).
+            tones = self._tone_squelch
+            if tones.tone_hz or deviation < _BROADCAST_DEVIATION_HZ:
+                if not tones.process(chain.pre_nr_audio):
+                    speaker = False
+            elif tones.detected_hz is not None:
+                tones.reset()
+            self._check_fm_clipping(chain, seconds)
+        self._show_detected_tone()
+        join = self._audio_join
         if speaker:
-            self._audio.write(audio)
+            if join.playing and (
+                chain is not self._join_chain or deviation != self._join_deviation
+            ):
+                out = join.join(audio)  # a new chain: crossfade, no click
+            else:
+                out = join.play(audio)  # fades in after silence
+            self._join_chain, self._join_deviation = chain, deviation
+            self._audio.write(out)
+        elif join.playing:
+            self._audio.write(join.fade_out(audio))
         if sstv:
             try:
-                self._sstv_panel.process_audio(audio, sample_rate=chain.audio_rate)
+                self._sstv_panel.process_audio(
+                    chain.pre_nr_audio, sample_rate=chain.audio_rate
+                )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("SSTV decoder failed: %s", exc)
+
+    def _track_noise_floor(self, power: np.ndarray, count: int) -> None:
+        """The spectrum's noise floor (for Auto squelch and the SNR)."""
+        rate = self._device_sample_rate()
+        self._noise_floor.update(power, count / max(rate, 1.0))
+
+    def _channel_noise_db(self, chain: "_ReceiverChain") -> Optional[float]:
+        """Noise power (dBFS) of the tuned channel: what an empty channel
+        of this width reads. None until a spectrum arrived."""
+        return self._noise_floor.channel_noise_db(chain.noise_bandwidth(), chain.rate)
+
+    def _squelch_state(self, audible: bool) -> str:
+        """The meter lamp's state (see level_meter.STATES)."""
+        if not audible:
+            return "idle"
+        gate = self._squelch
+        if not gate.enabled:
+            return "off"
+        return "open" if gate.is_open else "closed"
+
+    def _update_level_meter(
+        self, level_db: float, noise_db: Optional[float], audible: bool
+    ) -> None:
+        gate = self._squelch
+        threshold = gate.threshold_db(noise_db)
+        self._level_meter.set_reading(
+            level_db,
+            noise_db,
+            threshold,
+            self._squelch_state(audible),
+            gate.auto and noise_db is not None,
+        )
+
+    def _show_detected_tone(self) -> None:
+        if self._tone_squelch is not None:
+            self._control_panel.set_detected_tone(self._tone_squelch.detected_hz)
+
+    def _check_fm_clipping(self, chain: "_ReceiverChain", seconds: float) -> None:
+        """Warn (now and then) while FM audio clips: the station deviates
+        more than the FM deviation setting, which distorts it."""
+        if chain.last_clip_fraction > _CLIP_FRACTION:
+            self._clip_s += seconds
+        else:
+            self._clip_s = max(0.0, self._clip_s - seconds)
+            return
+        now = time.monotonic()
+        if self._clip_s < _CLIP_WARN_AFTER_S or now < self._clip_warn_due:
+            return
+        self._clip_warn_due = now + _CLIP_WARN_EVERY_S
+        self._clip_s = 0.0
+        current = self._control_panel.get_fm_deviation_text()
+        self._show_status_message(
+            f"FM audio is clipping: this station deviates more than "
+            f"{current}. Choose a larger FM deviation in Demodulation, such as "
+            "75 kHz (broadcast) for an FM radio station.",
+            "warning",
+            8000,
+        )
 
     def _realtime_hint(self) -> str:
         if self._demo_mode:
@@ -4063,6 +4580,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _reset_demodulator(self) -> None:
         """Forget the channel filter and demodulator state (after a gap)."""
         self._rx_chain = None
+        # The next samples don't follow on: the squelch starts closed, the
+        # audio fades in again and the I/Q corrections are measured anew.
+        self._squelch.reset()
+        self._level_average.reset()
+        self._audio_join.stop()
+        self._join_chain = None
+        self._demod_running = False
+        self._tone_squelch.reset()
+        self._iq_conditioner.reset()
+        self._clip_s = 0.0
 
     def _demodulate(
         self, samples: np.ndarray, mode: str
@@ -4976,11 +5503,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # set_frequency also updates the toolbar readout and plot axes.
         self.set_frequency(freq)
         self._control_panel.set_gain(gain)
-        self._control_panel.set_squelch_db(squelch)
         self._control_panel.set_agc_enabled(agc)
+        if bandwidth not in bandwidth_options(demod):
+            bandwidth = ""  # saved by a version whose choices differed
         self._restoring = True
         try:
-            # Bandwidth and deviation first: they belong to the mode.
+            # The manual squelch threshold, then Auto and on/off; the widths
+            # last used with each mode before the mode itself.
+            self._control_panel.set_squelch_db(squelch)
+            self._restore_audio_settings()
+            # The mode (its choices), then its saved deviation and width.
             self._set_demod_mode(demod, deviation or None, bandwidth or None)
             combo = self._control_panel._format_combo
             if rec_format and combo.findText(rec_format) >= 0:
@@ -5083,10 +5615,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._settings.set("theme", self._theme)
             panel = self._control_panel
             self._settings.set("demod_mode", panel._demod_combo.currentText())
-            self._settings.set("fm_deviation", panel._fm_dev_combo.currentText())
+            self._settings.set("fm_deviation", panel.get_fm_deviation_text())
             self._settings.set("bandwidth", panel._bw_combo.currentText())
             self._settings.set("recording_format", panel._format_combo.currentText())
             self._settings.set("audio_volume", self._volume_slider.value())
+            self._persist_audio_settings()
             current = self._current_panel_key()
             if current:
                 self._settings.set("panel", current)

@@ -140,6 +140,7 @@ class TestLayout(_PanelTestCase):
                 "Frequency",
                 "Presets",
                 "Demodulation",
+                "Audio",  # noise reduction, audio AGC, tone squelch
                 "Receiver",
                 "Recording",
                 "License Profile",
@@ -364,7 +365,8 @@ class TestPresets(_PanelTestCase):
 
     def test_apply_picks_the_narrowest_bandwidth_that_fits(self):
         cases = {
-            ("QRP", "QRP 20m SSB"): ("10 kHz", "USB"),  # was 25 kHz
+            # SSB picks from the SSB filter widths (the preset is 2.7 kHz).
+            ("QRP", "QRP 20m SSB"): ("2.7 kHz", "USB"),  # was 10, then 25 kHz
             ("ISM", "ISM 915 MHz"): ("2 MHz", "None (I/Q)"),  # was unchanged
             ("Amateur", "2m Calling"): ("25 kHz", "FM"),
             ("Broadcast", "FM Broadcast"): ("200 kHz", "FM"),

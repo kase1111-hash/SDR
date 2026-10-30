@@ -444,6 +444,42 @@ class TestSaving(_FilesCase):
         )
 
 
+class TestUnreadableFiles(_FilesCase):
+    def _sigmf(self, name, datatype, data=True):
+        meta = {
+            "global": {"core:datatype": datatype, "core:sample_rate": 1e6},
+            "captures": [{"core:sample_start": 0, "core:frequency": 1e8}],
+            "annotations": [],
+        }
+        with open(self.path(name + ".sigmf-meta"), "w") as handle:
+            json.dump(meta, handle)
+        if data:
+            np.zeros(64, np.complex64).tofile(self.path(name + ".sigmf-data"))
+        return self.path(name + ".sigmf-meta")
+
+    def test_big_endian_and_missing_data_are_refused_clearly(self):
+        for path, why in (
+            (self._sigmf("be", "cf32_be"), "sample type cf32_be isn't one"),
+            (self._sigmf("gone", "cf32_le", data=False), "gone.sigmf-data isn't"),
+        ):
+            with (
+                self.open_dialog(path),
+                mock.patch.object(QMessageBox, "warning") as warn,
+            ):
+                self.assertFalse(self.win._open_recording())
+            self.assertIn(why, warn.call_args[0][2])
+            self.assertFalse(self.win._playback.active)
+
+    def test_an_audio_wav_is_not_taken_for_iq(self):
+        from sdr_module.dsp.recording import save_audio_file
+
+        path = self.path("145.800MHz_FM_20261030_120000.wav")
+        save_audio_file(path, np.zeros(4800, np.float32), 48000)
+        with self.open_dialog(path), mock.patch.object(QMessageBox, "warning") as warn:
+            self.assertFalse(self.win._open_recording())
+        self.assertIn("it is audio, not I/Q", warn.call_args[0][2])
+
+
 class TestRecordingInfo(_FilesCase):
     def test_info_of_a_sigmf_file(self):
         from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file

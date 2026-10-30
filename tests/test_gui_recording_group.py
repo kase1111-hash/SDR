@@ -134,6 +134,30 @@ class TestAutoSave(_GroupCase):
         win.close()
         self.assertEqual(len([n for n in os.listdir(self.rec) if "sigmf" in n]), 2)
 
+    def test_disk_full_stop_saves_after_the_frame_and_keeps_the_warning(self):
+        from collections import namedtuple
+
+        self.panel.set_auto_save(True)
+        self.panel._format_combo.setCurrentIndex(2)  # cs16: a real write
+        win = self.win
+        win._record_button.click()
+        win._update_display()
+        win._next_space_check = 0.0
+        usage = namedtuple("Usage", "total used free")(10**12, 0, 420 * 1024**2)
+        with mock.patch.object(self.mw.shutil, "disk_usage", return_value=usage):
+            win._update_display()
+        self.assertFalse(win._recording)
+        # Not inside the frame (no nested event loop in the display loop)...
+        self.assertFalse(os.path.isdir(self.rec) and os.listdir(self.rec))
+        self.settle()
+        # ...but right after it.
+        names = sorted(os.listdir(self.rec))
+        self.assertEqual(len([n for n in names if n.endswith(".cs16")]), 1, names)
+        text = win._message_label.text()
+        self.assertIn("Recording stopped: only 420 MB", text)
+        self.assertIn("It was saved to", text)
+        self.assertEqual(win._message_label.property("tone"), "danger")
+
     def test_folder_button(self):
         other = os.path.join(self.folder, "other")
         os.makedirs(other)

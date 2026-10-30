@@ -33,6 +33,7 @@ from ..dsp.recording import (
     detect_format,
     get_file_info,
     guess_sample_format,
+    sigmf_format,
 )
 from .file_dialogs import display_path
 
@@ -361,6 +362,23 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
     if not info.is_valid:
         raise ValueError(info.error_message or "the file can't be read")
     meta = info.metadata or {}
+    data_file = str(meta.get("data_file", "") or "")
+    if info.file_format is FileFormat.SIGMF and (
+        not data_file or data_file.lower().endswith(".sigmf-meta")
+    ):
+        stem = split_name(path)[0]
+        raise ValueError(f"its samples are missing: {stem}.sigmf-data isn't next to it")
+    if info.file_format is FileFormat.WAV and meta.get("wav_channels") == 1:
+        raise ValueError(
+            "it has one channel: it is audio, not I/Q (an I/Q WAV file has two, "
+            "I and Q)"
+        )
+    datatype = str(meta.get("sigmf_datatype", "") or "")
+    if datatype and sigmf_format(datatype) is None:
+        raise ValueError(
+            f"its sample type {datatype} isn't one this app reads (complex "
+            "cu8, ci8, ci16_le, cf32_le or cf64_le)"
+        )
     source = ""
     if info.file_format is FileFormat.SIGMF:
         source = "SigMF metadata"

@@ -52,6 +52,10 @@ LAST_FOLDER_KEY = "recording/last_folder/"
 #: Settings key of the folder automatic recordings go to.
 RECORDINGS_FOLDER_KEY = "recording/folder"
 
+#: Stand-ins for the user's folders ("documents", "pictures"), e.g. a
+#: temporary folder while the tests run.
+LOCATION_OVERRIDES: Dict[str, str] = {}
+
 #: Where each kind of file starts until a folder has been used for it:
 #: "recordings" (Documents/SDR Recordings), "pictures" or "documents".
 KIND_DEFAULTS: Dict[str, str] = {
@@ -77,6 +81,8 @@ def _standard_location(location: Any) -> str:
 
 def documents_folder() -> str:
     """The user's Documents folder (their home folder if there is none)."""
+    if LOCATION_OVERRIDES.get("documents"):
+        return LOCATION_OVERRIDES["documents"]
     if not HAS_PYQT6:  # pragma: no cover
         return os.path.expanduser("~")
     return _standard_location(QStandardPaths.StandardLocation.DocumentsLocation)
@@ -84,6 +90,8 @@ def documents_folder() -> str:
 
 def pictures_folder() -> str:
     """The user's Pictures folder (their home folder if there is none)."""
+    if LOCATION_OVERRIDES.get("pictures"):
+        return LOCATION_OVERRIDES["pictures"]
     if not HAS_PYQT6:  # pragma: no cover
         return os.path.expanduser("~")
     return _standard_location(QStandardPaths.StandardLocation.PicturesLocation)

@@ -1338,8 +1338,9 @@ class _SampleStore:
 
     A live recording streams to a temporary complex64 file (``.cf32``) as
     it is captured, so recording takes disk space rather than memory (19 MB
-    a second at 2.4 MS/s, 160 MB at 20 MS/s). An imported file is held in
-    memory as it was loaded. Either way the samples read back as the list
+    a second at 2.4 MS/s, 160 MB at 20 MS/s); so does a file loaded by File >
+    Convert Recording, a chunk at a time (:meth:`from_samples` holds samples
+    in memory, for small ones). Either way the samples read back as the list
     of blocks they arrived in, like the list this replaces: ``len()`` is
     the number of blocks, and iterating or indexing gives each block (a
     read-only view of the file). :meth:`samples` gives them all and
@@ -1362,7 +1363,7 @@ class _SampleStore:
 
     @classmethod
     def from_samples(cls, samples: np.ndarray) -> "_SampleStore":
-        """A store holding ``samples`` in memory (an imported file)."""
+        """A store holding ``samples`` in memory."""
         store = cls()
         data = np.asarray(samples)
         store._memory = data
@@ -2216,7 +2217,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             file_menu,
             "C&lose Recording",
             lambda: self._playback.close(restore=True),
-            tip="Stop playing the recording and go back to the device used " "before",
+            tip="Stop playing the recording and go back to the device used before",
         )
         self._close_recording_action.setEnabled(False)
         self._add_action(
@@ -4944,7 +4945,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             logger.warning(f"Could not write the end of the recording: {e}")
         count = self._buffer_sample_count()
         if captured and count and self._control_panel.is_auto_save():
-            self._auto_save_take()
+            if getattr(self, "_auto_save_later", False):
+                # Stopped from inside a display frame (the disk filled up):
+                # saved right after it, not in a nested event loop here.
+                store = self._samples_buffer
+                QTimer.singleShot(
+                    0, lambda: self._auto_save_take(announce=False, store=store)
+                )
+            else:
+                self._auto_save_take()
         elif captured and count:
             self._show_status_message(
                 f"Recorded {count:,} samples. Use File > Save Recording (Ctrl+S) "
@@ -5164,23 +5173,37 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Stop recording because it can't go on (``reason``), keeping what
         was captured."""
         captured = self._recording and not self._capture_pending
-        self._toggle_recording(False)
+        self._auto_save_later = True  # (inside a display frame)
+        try:
+            self._toggle_recording(False)
+        finally:
+            self._auto_save_later = False
         size = self._samples_buffer.nbytes / 1024**2
-        kept = (
-            f" The {size:,.0f} MB recorded so far are kept: save them with File "
-            "> Save Recording (Ctrl+S)."
-            if captured and self._samples_buffer
-            else ""
-        )
+        if captured and self._samples_buffer and self._control_panel.is_auto_save():
+            kept = f" The {size:,.0f} MB recorded so far are kept."
+        elif captured and self._samples_buffer:
+            kept = (
+                f" The {size:,.0f} MB recorded so far are kept: save them with "
+                "File > Save Recording (Ctrl+S)."
+            )
+        else:
+            kept = ""
         message = f"Recording stopped: {reason}.{kept}"
         logger.warning(message)
         self._show_status_error(message, 20000, log=False)  # (logged once)
 
     # -- the take, the recordings folder and auto-save ---------------------
 
-    def _auto_save_take(self) -> bool:
+    def _auto_save_take(
+        self, announce: bool = True, store: Optional["_SampleStore"] = None
+    ) -> bool:
         """Save automatically is on: the take just stopped goes to the
-        recordings folder with an automatic name, in the panel's format."""
+        recordings folder with an automatic name, in the panel's format.
+        With ``store``, only if that is still the recording buffer."""
+        if store is not None and store is not self._samples_buffer:
+            return False
+        if not (self._samples_buffer and self._buffer_unsaved):
+            return False
         folder = file_dialogs.recordings_folder(self._settings)
         if not file_dialogs.ensure_folder(folder):
             self._show_status_error(
@@ -5191,13 +5214,21 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         ext = self._panel_recording_extension()
         path = file_dialogs.unique_path(folder, self._suggested_iq_name(ext))
+        message = self._message_label.text()
         if not self._write_buffer(path, quiet=True):
             return False
-        self._show_status_message(
-            f"Saved the recording to {file_dialogs.display_path(path)}",
-            "success",
-            8000,
-        )
+        if announce:
+            self._show_status_message(
+                f"Saved the recording to {file_dialogs.display_path(path)}",
+                "success",
+                8000,
+            )
+        else:  # (a warning is on show: keep it)
+            self._show_status_message(
+                f"{message} It was saved to {file_dialogs.display_path(path)}.",
+                "danger",
+                20000,
+            )
         return True
 
     def _take_summary(self) -> Tuple[str, Optional[str], str]:
@@ -6285,10 +6316,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """
         from .device_dialog import DeviceDialog
 
-        # Choosing a device ends a playback: back to the device from before
-        # (it may be the one chosen again, which must be free to open).
-        self._playback.close(restore=True, resume=False)
         was_running = self._is_running and self._device is not None
+        # Choosing a device ends a playback: back to the device from before
+        # (it may be the one chosen again, which must be free to open); the
+        # new one receives if the file was playing.
+        self._playback.close(restore=True, resume=False)
         released: List[str] = []
         dialog = DeviceDialog(self)
         self._preselect_rate(dialog)

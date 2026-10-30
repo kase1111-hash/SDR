@@ -177,14 +177,17 @@ class FilePlaybackDevice:
         if n <= 0 or self._total <= 0:
             return np.zeros(0, dtype=np.complex64)
         try:
-            out = self._player.read(n)
-            while len(out) < n and self.loop:
+            pieces = [self._player.read(n)]
+            got = len(pieces[0])
+            while got < n and self.loop:
                 self._player.seek(0)
-                more = self._player.read(n - len(out))
+                more = self._player.read(n - got)
                 if not len(more):
                     break
                 self.loops += 1
-                out = np.concatenate((out, more))
+                pieces.append(more)
+                got += len(more)
+            out = pieces[0] if len(pieces) == 1 else np.concatenate(pieces)
         except (OSError, ValueError) as e:
             self.error = f"the recording can't be read any more ({e})"
             logger.warning(f"Playback of {self.options.path} stopped: {e}")
@@ -643,7 +646,6 @@ if HAS_PYQT6:
             self._previous = None
             if win._device is device:
                 win._device = None
-            win._lo_lock = None
             win._demo_mode = False
             if prev is not None:
                 if restore and prev.device is not None:
@@ -663,6 +665,7 @@ if HAS_PYQT6:
                 if not win._retune_lo(prev.lo_hz):
                     win._lo_hz = float(prev.lo_hz)
                 win._finish_tune(prev.tuned_hz)
+            win._unlock_lo()  # the LO follows tuning again
             win._reset_demodulator()
             self._bar.setVisible(False)
             self._set_gain_controls(True)

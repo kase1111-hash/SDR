@@ -45,7 +45,7 @@ if HAS_PYQT6:
 # Categories use the main window's menu names, so the static fallback groups
 # entries the same way as the live list (which groups by the real menus).
 SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
-    ("Radio", ("Space",), "Start or stop the receiver"),
+    ("Radio", ("Space",), "Start or stop the receiver (play or pause a recording)"),
     ("Radio", ("Ctrl+Shift+R",), "Start or stop recording I/Q samples"),
     ("Radio", ("Ctrl+Shift+A",), "Start or stop recording the audio you hear"),
     ("Radio", ("Ctrl+L",), "Type a frequency to tune to"),

@@ -208,6 +208,33 @@ class TestOpenRecording(_PlaybackCase):
         self.assertEqual(len(lines), 12)
         self.assertGreater(win._last_peak_db, -40.0)
 
+    def test_squelch_s_meter_and_sstv_work_on_played_samples(self):
+        quiet = np.zeros(int(0.5 * RATE), np.complex64)
+        self.play(self.make_file(np.concatenate([quiet, _fm_tone(1.0)])))
+        win = self.win
+        win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        panel = win._control_panel
+        panel.set_squelch_auto(False)
+        panel.set_squelch_enabled(True)
+        panel.set_squelch_db(-40.0)
+        metered, sstv = [], []
+        win._signal_meter_panel.update_samples = lambda ch, noise: metered.append(
+            len(ch)
+        )
+        win._sstv_listening = lambda: True
+        win._sstv_panel.process_audio = lambda audio, sample_rate: sstv.append(
+            len(audio)
+        )
+        dev = win._device
+        for _ in range(4):  # the quiet half second
+            win._process_block(dev.read_samples(int(0.1 * RATE)))
+        self.assertFalse(win._squelch.is_open)
+        for _ in range(5):  # the FM tone
+            win._process_block(dev.read_samples(int(0.1 * RATE)))
+        self.assertTrue(win._squelch.is_open)
+        self.assertEqual(len(metered), 9)
+        self.assertGreater(sum(sstv), 0.8 * 48000)
+
     def test_the_display_loop_reads_in_real_time(self):
         self.play()
         win = self.win

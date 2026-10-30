@@ -5189,7 +5189,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             logger.warning("Ignoring unreadable saved QRP settings")
             return
         if isinstance(saved, dict):
-            self._qrp_panel.set_state(saved)
+            # (A value of another shape must not stop the app from starting.)
+            try:
+                self._qrp_panel.set_state(saved)
+            except Exception as e:
+                logger.warning(f"Ignoring the saved QRP settings that failed: {e}")
 
     def _start_or_stop_audio(self, mode: str) -> bool:
         """Open the speaker for audible modes, close it otherwise.

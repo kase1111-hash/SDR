@@ -536,5 +536,85 @@ class TestQrpSidebandInTheWindow(_HamWindowCase):
         )
 
 
+# Saved ham/qrp values of the wrong shape (a hand edit, another version).
+CORRUPT_QRP = (
+    '{"qsos": 5}',
+    '{"qsos": true}',
+    '{"qsos": 2.5}',
+    '{"qsos": [5, "x", null, [1, 2], {"km": Infinity, "watts": 1}, '
+    '{"km": 10, "watts": 1}]}',
+    '{"chain": {"stages": [[true, 1e12, 10, 0.5]]}}',
+    '{"chain": {"stages": [[true, 10, 3000000000, 0.5]]}}',
+    '{"chain": {"sdr_dbm": NaN, "stages": [[true, Infinity, -1e30, NaN]]}}',
+)
+
+
+class TestCorruptQrpSettings(unittest.TestCase):
+    """HAMDSP-6: some wrongly typed ham/qrp values raised TypeError or
+    OverflowError out of SDRMainWindow.__init__: the app would not start
+    again until the value was deleted by hand."""
+
+    def setUp(self):
+        from tests.test_gui_chrome import require_pyqt6
+
+        require_pyqt6(self)
+
+    def build(self, raw: str):
+        from sdr_module.gui import bookmarks_panel, main_window
+        from tests.test_gui_chrome import _FakeSettings
+
+        if not main_window.HAS_HAM_RADIO:
+            self.skipTest("ham radio panels not installed")
+        store = _FakeSettings()
+        store.values["ham/qrp"] = raw
+        saved = (main_window.GuiSettings, bookmarks_panel.GuiSettings)
+        main_window.GuiSettings = lambda: store
+        bookmarks_panel.GuiSettings = lambda: store
+        try:
+            win = main_window.SDRMainWindow(demo_mode=False)
+        finally:
+            main_window.GuiSettings, bookmarks_panel.GuiSettings = saved
+        for timer in (win._display_timer, win._status_timer, win._hotplug_timer):
+            timer.stop()
+        win._confirm_discard_recording = lambda *_args: True
+        self.addCleanup(win.deleteLater)
+        self.addCleanup(win.close)
+        return win
+
+    def test_the_window_starts_with_each_corrupt_value(self):
+        for raw in CORRUPT_QRP:
+            with self.subTest(raw=raw):
+                win = self.build(raw)
+                qrp = win._qrp_panel
+                for stage in qrp._amp_calc._stages:
+                    self.assertGreaterEqual(stage.gain.value(), stage.gain.minimum())
+                    self.assertLessEqual(stage.gain.value(), stage.gain.maximum())
+                    self.assertTrue(0.05 <= stage.efficiency <= 1.0)
+                self.assertTrue(np.isfinite(qrp._amp_calc.get_output_dbm()))
+
+    def test_good_entries_survive_among_bad_ones(self):
+        win = self.build(CORRUPT_QRP[3])
+        self.assertEqual(
+            [(q["km"], q["watts"]) for q in win._qrp_panel._qsos], [(10.0, 1.0)]
+        )
+
+    def test_a_huge_gain_is_clamped_not_dropped(self):
+        win = self.build(CORRUPT_QRP[4])
+        stage = win._qrp_panel._amp_calc._stages[0]
+        self.assertTrue(stage.check.isChecked())
+        self.assertEqual(stage.gain.value(), stage.gain.maximum())
+        self.assertEqual(stage.max_out.value(), 10)
+
+    def test_anything_else_a_restore_raises_is_logged_not_fatal(self):
+        from unittest import mock
+
+        from sdr_module.ham.gui.qrp_panel import QRPPanel
+
+        with mock.patch.object(QRPPanel, "set_state", side_effect=RuntimeError("x")):
+            with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+                self.build('{"mode": "CW"}')
+        self.assertTrue(any("QRP settings" in line for line in logs.output))
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

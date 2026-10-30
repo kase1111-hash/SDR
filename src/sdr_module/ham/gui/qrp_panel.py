@@ -112,6 +112,25 @@ def _trim(number: str) -> str:
     return number
 
 
+def _finite(value: Any) -> float:
+    """A saved number (ValueError for NaN or infinity, TypeError for what
+    isn't a number)."""
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"not a finite number: {value!r}")
+    return number
+
+
+def _spin_value(value: Any, spin: Any) -> int:
+    """A saved number as a whole value inside ``spin``'s range (a QSpinBox
+    raises OverflowError beyond 32 bits). ValueError for NaN, TypeError for
+    what isn't a number."""
+    number = float(value)
+    if math.isnan(number):
+        raise ValueError("not a number")
+    return int(min(max(number, spin.minimum()), spin.maximum()))
+
+
 # (smallest value in watts, watts per unit, unit). The thresholds sit just
 # under 1 so a value that would round to "1000" of a unit uses the next unit
 # up: 0.9996 W reads "1 W", not "1000 mW".
@@ -797,11 +816,12 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
         }
 
     def set_state(self, state: Dict[str, Any]) -> None:
-        """Restore :meth:`state` (unknown or broken entries are skipped)."""
+        """Restore :meth:`state` (unknown or broken entries are skipped,
+        numbers out of a control's range are clamped to it)."""
         self._applying = True
         try:
             try:
-                self._user_sdr_dbm = float(state.get("sdr_dbm", 0.0))
+                self._user_sdr_dbm = _finite(state.get("sdr_dbm", 0.0))
             except (TypeError, ValueError):
                 self._user_sdr_dbm = 0.0
             if not self._sdr_locked:
@@ -811,12 +831,15 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
                 for widget, saved in zip(self._stages, stages, strict=False):
                     try:
                         on, gain, max_out, eff = saved
-                        widget.check.setChecked(bool(on))
-                        widget.gain.setValue(int(gain))
-                        widget.max_out.setValue(int(max_out))
-                        widget.efficiency = min(max(float(eff), 0.05), 1.0)
+                        gain_db = _spin_value(gain, widget.gain)
+                        max_dbm = _spin_value(max_out, widget.max_out)
+                        efficiency = min(max(_finite(eff), 0.05), 1.0)
                     except (TypeError, ValueError):
                         continue
+                    widget.check.setChecked(bool(on))
+                    widget.gain.setValue(gain_db)
+                    widget.max_out.setValue(max_dbm)
+                    widget.efficiency = efficiency
             preset = str(state.get("preset", ""))
             index = self._preset_combo.findText(preset)
             if index >= 0:
@@ -1665,11 +1688,16 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
             if index >= 0 and index != self._unit_combo.currentIndex():
                 self._unit_combo.setCurrentIndex(index)
             qsos = []
-            for qso in state.get("qsos") or []:
+            saved_qsos = state.get("qsos")
+            if not isinstance(saved_qsos, list):
+                saved_qsos = []
+            for qso in saved_qsos:
+                if not isinstance(qso, dict):
+                    continue
                 try:
                     entry = {
-                        "km": float(qso["km"]),
-                        "watts": float(qso["watts"]),
+                        "km": _finite(qso["km"]),
+                        "watts": _finite(qso["watts"]),
                         "when": str(qso.get("when", "")),
                     }
                 except (TypeError, ValueError, KeyError):

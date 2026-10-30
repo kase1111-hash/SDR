@@ -897,6 +897,38 @@ class TestConnectDialogDemoRow(unittest.TestCase):
             self.assertIn("Device > Use Demo Device", table.item(row, col).toolTip())
 
 
+class TestChirpDialogsRememberTheirFolder(_WindowTestCase):
+    """mc:MC-U07: Import/Export Bookmarks (CHIRP CSV) opened in the folder
+    the app was started from and forgot the last one."""
+
+    def test_export_starts_in_documents_then_where_it_last_saved(self):
+        import shutil
+        import tempfile
+
+        from sdr_module.gui import file_dialogs
+
+        panel = self.win._bookmarks_panel
+        panel.add_bookmark("Tower", 118.3e6, "AM", "", "")
+        folder = tempfile.mkdtemp(prefix="sdr-chirp-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        default = file_dialogs.start_folder(self.store, "channels")
+        target = os.path.join(folder, "radio.csv")
+        with (
+            mock.patch(
+                "sdr_module.gui.file_dialogs.QFileDialog.getSaveFileName",
+                return_value=(target, ""),
+            ) as ask,
+            mock.patch("sdr_module.gui.bookmarks_panel.QMessageBox.information"),
+        ):
+            self.assertEqual(panel.export_csv(), 1)
+            first = ask.call_args[0][2]
+            panel.export_csv()
+            second = ask.call_args[0][2]
+        self.assertEqual(first, os.path.join(default, "bookmarks.csv"))
+        self.assertEqual(second, os.path.join(folder, "bookmarks.csv"))
+        self.assertTrue(os.path.exists(target))
+
+
 class TestErrorHistorySummary(_WindowTestCase):
     """mc:MC-U19: "Saved to /a/long/path..." was cut at the dialog edge."""
 

@@ -30,7 +30,6 @@ try:
         QAbstractItemView,
         QComboBox,
         QDoubleSpinBox,
-        QFileDialog,
         QHBoxLayout,
         QHeaderView,
         QInputDialog,
@@ -60,6 +59,7 @@ from ..core.chirp_csv import (
     read_chirp_csv,
     write_chirp_csv,
 )
+from . import file_dialogs
 from .bookmark_editor import bookmark_tone_hz
 from .bookmark_editor import edit_bookmark as _edit_dialog
 from .control_panel import DEMOD_MODES, MAX_FREQUENCY_HZ, MIN_FREQUENCY_HZ
@@ -708,8 +708,14 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             Number of channels imported (0 if cancelled or on error).
         """
         if not path:
-            path, _ = QFileDialog.getOpenFileName(
-                self, "Import Bookmarks (CHIRP CSV)", "", CSV_FILTER
+            # (In the folder last used for CHIRP files, else Documents: not
+            # the folder the app was started from. mc:MC-U07)
+            path, _ = file_dialogs.open_file(
+                self,
+                self._settings,
+                "channels",
+                "Import Bookmarks (CHIRP CSV)",
+                CSV_FILTER,
             )
         if not path:
             return 0
@@ -816,8 +822,13 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             return 0
 
         if not path:
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Export Bookmarks (CHIRP CSV)", "bookmarks.csv", CSV_FILTER
+            path, _ = file_dialogs.save_file(
+                self,
+                self._settings,
+                "channels",
+                "Export Bookmarks (CHIRP CSV)",
+                "bookmarks.csv",
+                CSV_FILTER,
             )
         if not path:
             return 0
@@ -844,8 +855,10 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         from ..core.frequency_manager import RX_PRESETS
 
         if not path:
-            path, _ = QFileDialog.getSaveFileName(
+            path, _ = file_dialogs.save_file(
                 self,
+                self._settings,
+                "channels",
                 "Export Built-in Presets (CHIRP CSV)",
                 "sdr-module-presets.csv",
                 CSV_FILTER,

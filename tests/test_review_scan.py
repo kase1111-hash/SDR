@@ -761,5 +761,40 @@ class TestScan10ModeColumnOfAMinimalCsv(unittest.TestCase):
             self.assertEqual(tune_mode(marks[name]), ("", ""), name)
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-11: the frequency was restored before the mode when a scan ended
+# --------------------------------------------------------------------------- #
+class TestScan11PlotsGoBackToo(_BookmarkScanCase):
+    def test_after_a_wide_bookmark_the_lo_and_the_vfo_go_back(self):
+        from sdr_module.gui.scan_engine import DWELL
+
+        win, panel = self.win, self.win._scanner_panel
+        win.set_frequency(146.0e6)
+        win._set_demod_mode("FM", "5 kHz", "12.5 kHz")
+        win.set_frequency(146.9e6)  # the VFO moves within the span
+        before = (win._lo_frequency(), win._current_frequency(), self.listening_now())
+        self.assertAlmostEqual(before[0], 146.0e6)
+        wide = {
+            "label": "Quiet WFM",
+            "freq_hz": 87.7e6,
+            "demod": "FM",
+            "fm_deviation": "75 kHz",
+            "bandwidth": "200 kHz",
+        }
+        engine = panel.engine
+        self.assertTrue(
+            self.scan(
+                [wide],
+                seconds=2.0,
+                until=lambda: engine.state == DWELL
+                and engine.current.label == wide["label"],
+            )
+        )
+        self.assertEqual(win._control_panel._bw_combo.currentText(), "200 kHz")
+        panel.stop_scan()  # (not listening to anything: it goes back)
+        after = (win._lo_frequency(), win._current_frequency(), self.listening_now())
+        self.assertEqual(after, before)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

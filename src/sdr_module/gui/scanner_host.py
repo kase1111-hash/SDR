@@ -284,14 +284,17 @@ class WindowScannerHost(ScannerHost):
         began with. A receiver that can't go back (it refused) stays on the
         scan's channel, in that channel's mode."""
         win = self._win
+        off_centre = abs(lo - freq) >= 0.5
 
-        def back() -> bool:
-            # The plots where they were too: the LO, then the VFO in it.
-            if abs(lo - freq) >= 0.5 and win._tune_to(lo, recenter=True):
-                return bool(win._tune_to(freq))
+        def centre() -> bool:
+            # The plots where they were too: the LO first (with the VFO on
+            # it), so the scan's filter, maybe too wide to fit beside it,
+            # doesn't move the LO onto the VFO.
+            if off_centre and win._tune_to(lo, recenter=True):
+                return True
             return bool(win._tune_to(freq, recenter=True))
 
-        if not self._quietly(back):
+        if not self._quietly(centre):
             return
         if mode:
             self._quietly(
@@ -303,6 +306,9 @@ class WindowScannerHost(ScannerHost):
         # (Whatever the mode: the scan sets it for the FM channels it visits,
         # and it is kept, and saved, for when FM is next used.)
         win._control_panel.set_tone_squelch_hz(tone)
+        if off_centre and abs(win._lo_frequency() - lo) < 0.5:
+            # Then the VFO, in the filter it was tuned with: only it moves.
+            self._quietly(lambda: win._tune_to(freq))
 
     # ---- results ---------------------------------------------------------- #
     def scan_listen(self, hit: ScanHit) -> bool:

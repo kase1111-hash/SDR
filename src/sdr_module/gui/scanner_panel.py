@@ -1030,7 +1030,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             if not kind and self._status.text() == self._blocker[1]:
                 self._set_status("")  # no longer true
             self._blocker = blocker
-            if kind and not engine.active:
+            # (A scan the window just stopped for it has said why: keep
+            # that; the disabled Start button gives the reason.)
+            shown = self._status.text()
+            if kind and not engine.active and not shown.startswith("Scan stopped:"):
                 self._set_status(reason, "warning")
         if not engine.active and self._auto.isChecked():
             self._update_steps_hint()

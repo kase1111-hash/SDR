@@ -1208,6 +1208,9 @@ class TestScannerInTheWindow(_ScanWindowCase):
         self.frames(0.5)
         self.assertFalse(panel.engine.active)
         self.assertIn("recording", panel._status.text())
+        panel.refresh()  # (the tab's timer) keeps saying why it stopped
+        self.assertIn("Scan stopped", panel._status.text())
+        self.assertIn("Stop recording to scan", panel._start_btn.toolTip())
         self.assertAlmostEqual(win._lo_frequency(), lo)  # no more retunes
         self.assertGreater(win._buffer_sample_count(), before)
         # One centre frequency for the whole take, never retuned during it.

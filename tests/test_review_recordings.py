@@ -1,10 +1,21 @@
 """Regression tests for the recordings code review (findings REC-xx).
 
+* REC-03: with Save automatically on, a recording stopped because the disk
+  was nearly full was copied in full onto that same drive: it filled the
+  drive to the last byte, failed, and left broken files. Now the take is
+  moved (instantly, needing no space) when it can be, and a copy that
+  would leave the drive nearly full is refused; a save that doesn't fit is
+  refused before anything is written.
 * REC-01 / REC-13: a take whose sample rate (or frequency) is unknown
   couldn't be saved as SigMF, cs16, cu8 or cs8 ("float division by zero"),
   and SigMF wrote an unknown frequency as 0 Hz.
 * REC-04: a save that failed (a full disk) left a truncated data file and an
   empty ``.sigmf-meta`` behind.
+* REC-05: after the temp drive filled up while recording, the take could
+  not be saved anywhere (the unwritable buffered tail failed every save).
+* REC-06: a take over 4 GiB failed as WAV only after writing 4 GiB.
+* REC-07: ``.cf32``/``.raw`` saves copied the take on the GUI thread (no
+  progress or Cancel) and left a partial file when the copy failed.
 * REC-12: cu8/cs8/cs16 saves truncated instead of rounding (a DC offset).
 * REC-14: the recording buffer kept a Python tuple per display frame.
 """
@@ -15,6 +26,7 @@ import os
 import shutil
 import signal
 import tempfile
+import threading
 import tracemalloc
 import unittest
 from collections import namedtuple
@@ -109,6 +121,119 @@ class _ReviewCase(_FilesCase):
 
     def warnings(self):
         return mock.patch.object(QMessageBox, "warning")
+
+
+# ---------------------------------------------------------------------------
+# REC-03: Save automatically after a disk-nearly-full stop
+# ---------------------------------------------------------------------------
+
+
+class TestAutoSaveOnANearlyFullDisk(_ReviewCase):
+    def setUp(self):
+        super().setUp()
+        self.win._control_panel.set_auto_save(True)
+
+    def test_the_take_is_moved_not_copied_onto_the_full_drive(self):
+        self.assertEqual(self.win._panel_recording_extension(), ".sigmf-data")
+        self.record(3, stop=False)
+        store = self.win._samples_buffer
+        temp, count = store.path, store.sample_count
+        with mock.patch.object(
+            self.mw, "write_recording", side_effect=self.mw.write_recording
+        ) as write:
+            self.stop_for_disk_space(420)
+        write.assert_not_called()  # no second copy on the nearly full drive
+        self.assertFalse(os.path.exists(temp))  # moved
+        names = sorted(_listing(self.recordings_folder()))
+        self.assertEqual(len(names), 2, names)
+        data = [n for n in names if n.endswith(".sigmf-data")][0]
+        meta = _read_json(os.path.join(self.recordings_folder(), names[1]))
+        self.assertEqual(meta["global"]["core:sample_rate"], 2.4e6)
+        self.assertEqual(meta["captures"][0]["core:frequency"], 100.1e6)
+        self.assertEqual(
+            os.path.getsize(os.path.join(self.recordings_folder(), data)), count * 8
+        )
+        self.assertFalse(self.win._buffer_unsaved)
+        self.assertIn("It was saved to", self.message())
+
+    def test_a_copy_that_would_fill_the_drive_is_refused_and_the_take_kept(self):
+        self.set_format(".cs16")  # not the take's own layout: a full copy
+        self.record(3, stop=False)
+        count = self.win._buffer_sample_count()
+        with self.assertLogs("sdr_module.gui.main_window", level="ERROR"):
+            self.stop_for_disk_space(420)
+        self.assertEqual(_listing(self.recordings_folder()), {})  # nothing written
+        self.assertTrue(self.win._buffer_unsaved)
+        self.assertEqual(self.win._buffer_sample_count(), count)
+        text = self.message()
+        self.assertIn("nearly full", text)
+        self.assertIn("It is kept", text)
+
+    def test_another_drive_with_room_still_gets_a_copy(self):
+        self.set_format(".cs16")
+        self.record(3, stop=False)
+        free = {self.win._samples_buffer.folder: 420}
+
+        def usage(folder):
+            return Usage(10**12, 0, free.get(folder, 10**6) * 1024**2)
+
+        self.win._next_space_check = 0.0
+        with mock.patch.object(self.mw.shutil, "disk_usage", side_effect=usage):
+            self.win._update_display()
+            self.settle(5)
+        names = _listing(self.recordings_folder())
+        self.assertEqual(len([n for n in names if n.endswith(".cs16")]), 1, names)
+        self.assertFalse(self.win._buffer_unsaved)
+
+
+class TestSaveRoom(_ReviewCase):
+    def test_a_save_that_doesnt_fit_is_refused_before_writing(self):
+        self.record(3)
+        target = self.path("take.cs16")
+        with self.save_dialog(target), self.free(0.5), self.warnings() as warn:
+            self.assertFalse(self.win._save_recording())
+        self.assertIn("isn't enough space", warn.call_args[0][2])
+        self.assertFalse(os.path.exists(target))
+        self.assertTrue(self.win._buffer_unsaved)
+
+    def test_a_stopped_take_saved_as_sigmf_is_moved_instantly(self):
+        self.record(3)
+        temp, count = self.win._samples_buffer.path, self.win._buffer_sample_count()
+        target = self.path("take.sigmf-data")
+        with (
+            self.save_dialog(target),
+            mock.patch.object(self.mw, "run_job") as job,
+            self.free(0.5),  # (no room needed)
+        ):
+            self.assertTrue(self.win._save_recording())
+        job.assert_not_called()
+        self.assertFalse(os.path.exists(temp))
+        self.assertEqual(os.path.getsize(target), count * 8)
+        meta = _read_json(self.path("take.sigmf-meta"))
+        self.assertEqual(meta["global"]["core:datatype"], "cf32_le")
+        # The saved file is the user's: discarding the take keeps it.
+        self.win._discard_recording()
+        self.assertTrue(os.path.exists(target))
+
+    def test_never_into_the_take_s_own_temporary_file(self):
+        self.record(3)
+        temp = self.win._samples_buffer.path
+        size = os.path.getsize(temp)
+        with self.save_dialog(temp), self.warnings() as warn:
+            self.assertFalse(self.win._save_recording())
+        self.assertIn("temporary file", warn.call_args[0][2])
+        self.assertEqual(os.path.getsize(temp), size)
+        self.assertTrue(self.win._samples_buffer.temporary)
+
+    def test_saved_again_to_the_same_file_keeps_the_samples(self):
+        self.record(3)
+        whole = np.array(self.win._samples_buffer.samples())
+        target = self.path("take.sigmf-data")
+        for _ in range(2):
+            with self.save_dialog(target):
+                self.assertTrue(self.win._save_recording())
+        np.testing.assert_array_equal(np.fromfile(target, np.complex64), whole)
+        self.assertTrue(os.path.exists(self.path("take.sigmf-meta")))
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +366,153 @@ class TestFailedSavesLeaveNothing(unittest.TestCase):
         self.assertEqual(
             sorted(_listing(self.folder)), ["take.sigmf-data", "take.sigmf-meta"]
         )
+
+
+# ---------------------------------------------------------------------------
+# REC-05: the temp drive fills up while recording
+# ---------------------------------------------------------------------------
+
+
+class TestTempDriveFillsWhileRecording(_ReviewCase):
+    def setUp(self):
+        super().setUp()
+        if not _can_limit_file_size():
+            self.skipTest("needs RLIMIT_FSIZE (POSIX)")
+
+    def test_what_was_recorded_can_be_saved_elsewhere(self):
+        from sdr_module.dsp.recording import load_iq_file
+
+        win = self.win
+        win._record_button.click()
+        win._update_display()
+        block = win._buffer_sample_count() * 8
+        limit = int(2.5 * block) + 12  # (not a whole number of samples)
+        with file_size_limit(limit):
+            for _ in range(5):
+                win._update_display()
+            self.assertFalse(win._recording)  # stopped: the file can't grow
+            store = win._samples_buffer
+            count = store.sample_count
+            # Every sample counted is on disk (none stuck in a buffer).
+            self.assertEqual(os.path.getsize(store.path), count * 8)
+            self.assertEqual(count, limit // 8)
+            self.assertIn("on another drive if this one is full", self.message())
+            # Saved (to another drive, in a format that fits there).
+            target = self.path("elsewhere.cu8")
+            with self.save_dialog(target), self.warnings() as warn:
+                self.assertTrue(win._save_recording())
+            warn.assert_not_called()
+        samples, meta = load_iq_file(target)
+        self.assertEqual(len(samples), count)
+        self.assertEqual(meta.sample_rate, 2.4e6)
+
+    def test_a_failing_save_is_reported_not_raised(self):
+        self.record(3)
+        with (
+            mock.patch.object(
+                self.mw._SampleStore, "samples", side_effect=OSError(28, "No space")
+            ),
+            self.save_dialog(self.path("take.cs16")),
+            self.warnings() as warn,
+        ):
+            self.assertFalse(self.win._save_recording())
+        self.assertIn("No space", warn.call_args[0][2])
+
+
+# ---------------------------------------------------------------------------
+# REC-06: WAV files hold 4 GiB at most
+# ---------------------------------------------------------------------------
+
+
+class TestWavSizeLimit(_ReviewCase):
+    def test_too_long_for_wav_is_refused_before_writing(self):
+        from sdr_module.dsp.recording import FileFormat, SampleFormat
+        from sdr_module.gui.file_jobs import write_recording
+
+        path = self.path("long.wav")
+        total = (1 << 30) + 1  # (4 GiB and a bit as 16-bit I/Q)
+        with self.assertRaises(ValueError) as caught:
+            write_recording(
+                iter([]),
+                total,
+                path,
+                FileFormat.WAV,
+                SampleFormat.INT16,
+                2.4e6,
+                100e6,
+                lambda _f: None,
+            )
+        self.assertIn("4 GiB", str(caught.exception))
+        self.assertIn("about 7 minutes", str(caught.exception))
+        self.assertFalse(os.path.exists(path))
+
+    def test_save_refuses_and_auto_save_falls_back_to_sigmf(self):
+        from sdr_module.gui import file_jobs
+
+        self.record(3)
+        count = self.win._buffer_sample_count()
+        small = count * 4 - 1  # (this take is "over 4 GiB")
+        with mock.patch.object(file_jobs, "WAV_MAX_DATA_BYTES", small, create=True):
+            target = self.path("take.wav")
+            with self.save_dialog(target), self.warnings() as warn:
+                self.assertFalse(self.win._save_recording())
+            self.assertIn("too long for a WAV file", warn.call_args[0][2])
+            self.assertFalse(os.path.exists(target))
+            self.set_format(".wav")
+            self.win._control_panel.set_auto_save(True)
+            self.assertTrue(self.win._auto_save_take())
+        names = _listing(self.recordings_folder())
+        self.assertEqual(
+            sorted(os.path.splitext(n)[1] for n in names),
+            [".sigmf-data", ".sigmf-meta"],
+        )
+        self.assertIn("as SigMF", self.message())
+
+
+# ---------------------------------------------------------------------------
+# REC-07: copies run in the background and leave nothing when they fail
+# ---------------------------------------------------------------------------
+
+
+class TestCopiesRunInTheBackground(_ReviewCase):
+    def test_saving_cf32_while_recording_copies_in_a_worker(self):
+        from sdr_module.dsp.recording import IQRecorder
+
+        self.record(3, stop=False)
+        whole = np.array(self.win._samples_buffer.samples())
+        threads = []
+        real_write = IQRecorder.write
+
+        def spy(recorder, samples):
+            threads.append(threading.current_thread())
+            return real_write(recorder, samples)
+
+        target = self.path("running.cf32")
+        with self.save_dialog(target), mock.patch.object(IQRecorder, "write", spy):
+            self.assertTrue(self.win._save_recording())
+        self.assertTrue(threads)
+        self.assertNotIn(threading.main_thread(), threads)
+        np.testing.assert_array_equal(np.fromfile(target, np.complex64), whole)
+        self.assertTrue(self.win._recording)  # still going
+        self.win._record_button.click()
+
+    def test_a_failed_copy_leaves_no_partial_file(self):
+        if not _can_limit_file_size():
+            self.skipTest("needs RLIMIT_FSIZE (POSIX)")
+        self.record(3, stop=False)  # (running: copied, not moved)
+        self.win._samples_buffer.finish()  # (the take itself is all on disk)
+        target = self.path("partial.cf32")
+        with (
+            self.save_dialog(target),
+            self.warnings() as warn,
+            file_size_limit(100_000),
+            self.assertLogs("sdr_module.gui.main_window", level="ERROR"),
+        ):
+            self.assertFalse(self.win._save_recording())
+        self.assertIn("Could not save recording", warn.call_args[0][2])
+        self.assertFalse(os.path.exists(target))
+        self.assertFalse(os.path.exists(target + ".sigmf-meta"))
+        self.win._record_button.click()
 
 
 # ---------------------------------------------------------------------------

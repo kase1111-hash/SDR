@@ -518,6 +518,10 @@ class IQRecorder:
         if not np.iscomplexobj(samples):
             samples = samples.astype(np.complex64)
 
+        if self._sample_format == SampleFormat.FLOAT32:
+            # complex64 is interleaved float32 already (no conversion).
+            return np.ascontiguousarray(samples, dtype=np.complex64).view(np.float32)
+
         # Interleave I/Q
         interleaved = np.zeros(len(samples) * 2, dtype=np.float64)
         interleaved[0::2] = samples.real
@@ -538,9 +542,6 @@ class IQRecorder:
             # Scale to -32768 to 32767
             scaled = np.clip(np.rint(interleaved * 32767), -32768, 32767)
             return scaled.astype(np.int16)
-
-        elif self._sample_format == SampleFormat.FLOAT32:
-            return interleaved.astype(np.float32)
 
         elif self._sample_format == SampleFormat.FLOAT64:
             return interleaved.astype(np.float64)
@@ -741,6 +742,29 @@ class IQRecorder:
     def get_metadata(self) -> RecordingMetadata:
         """Get current metadata."""
         return self._metadata
+
+
+def write_sigmf_meta(
+    data_path: Union[str, Path],
+    sample_format: SampleFormat,
+    sample_rate: float,
+    center_frequency: float = 0.0,
+    *,
+    start_time: str = "",
+    description: str = "",
+    hardware: str = "",
+) -> Path:
+    """Write the ``.sigmf-meta`` of a SigMF recording whose samples are
+    already in ``data_path`` (``<stem>.sigmf-data``; e.g. a cf32 take moved
+    there instead of copied), as :class:`IQRecorder` writes it. Returns the
+    metadata path."""
+    recorder = IQRecorder(sample_rate, center_frequency, sample_format)
+    recorder.set_metadata(
+        start_time=start_time, description=description, hardware=hardware
+    )
+    meta_path = Path(data_path).with_suffix(SIDECAR_SUFFIX)
+    _write_json(meta_path, recorder._sigmf_meta())
+    return meta_path
 
 
 class IQPlayer:

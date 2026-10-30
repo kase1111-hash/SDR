@@ -43,6 +43,10 @@ logger = logging.getLogger(__name__)
 #: Samples read (and converted) per step.
 CHUNK_SAMPLES = 1 << 20
 
+#: The most sample data one WAV file holds: its header counts the file's
+#: size in 32 bits (4 GiB), and Python's wave module refuses more.
+WAV_MAX_DATA_BYTES = 0xFFFFFFFF - 36
+
 #: ``report(fraction)`` (0..1): raises :class:`Cancelled` once Cancel was
 #: pressed, so the work stops at its next report.
 Report = Callable[[float], None]
@@ -118,6 +122,22 @@ def load_recording(
     return result
 
 
+def wav_fits(samples: int, sample_format: SampleFormat = SampleFormat.INT16) -> bool:
+    """Whether ``samples`` I/Q pairs fit in one WAV file (4 GiB at most:
+    7.5 minutes at 2.4 MS/s in 16 bits)."""
+    width = 1 if sample_format in (SampleFormat.UINT8, SampleFormat.INT8) else 2
+    return int(samples) * 2 * width <= WAV_MAX_DATA_BYTES
+
+
+def _wav_limit_text(sample_format: SampleFormat, sample_rate: float) -> str:
+    """How long a recording one WAV file holds at ``sample_rate``."""
+    width = 1 if sample_format in (SampleFormat.UINT8, SampleFormat.INT8) else 2
+    seconds = WAV_MAX_DATA_BYTES // (2 * width) / sample_rate
+    if seconds >= 120:
+        return f"about {seconds / 60:.0f} minutes at this sample rate"
+    return f"about {seconds:.0f} seconds at this sample rate"
+
+
 def write_recording(
     chunks: Iterable[np.ndarray],
     total: int,
@@ -139,6 +159,13 @@ def write_recording(
             "a WAV file needs the sample rate, and this recording doesn't say "
             "it. Save again and enter it, or choose another format (SigMF can "
             "leave it unknown)."
+        )
+    if file_format is FileFormat.WAV and not wav_fits(total, sample_format):
+        # (It would fail after writing 4 GiB: nothing is written.)
+        raise ValueError(
+            "it is too long for a WAV file, which holds 4 GiB at most "
+            f"({_wav_limit_text(sample_format, sample_rate)}). Choose SigMF or "
+            "cs16, which have no such limit."
         )
     recorder = IQRecorder(
         sample_rate=sample_rate,

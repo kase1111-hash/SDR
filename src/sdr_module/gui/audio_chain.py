@@ -459,6 +459,8 @@ class AudioJoin:
       receiver chain after a Bandwidth, Mode or deviation change starts
       from empty filters): it starts from the last sample played and
       crossfades into the new audio.
+    * :meth:`release` when the audio stops with no block to fade out: a
+      short decay from the last sample played.
     """
 
     def __init__(self, rate: float):
@@ -510,6 +512,16 @@ class AudioJoin:
             out = np.zeros(0, dtype=np.float32)
         self.playing = False
         self.last = 0.0
+        return out
+
+    def release(self) -> np.ndarray:
+        """``FADE_S`` decaying from the last sample played to silence, for
+        when the audio stops with nothing to fade out (another mode, the
+        receiver stopped); empty when nothing was playing."""
+        if not self.playing:
+            return np.zeros(0, dtype=np.float32)
+        out = (np.float32(self.last) * (1.0 - self._ramp)).astype(np.float32)
+        self.stop()
         return out
 
     def stop(self) -> None:

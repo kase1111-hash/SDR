@@ -291,3 +291,40 @@ class TestAudioOptionChangesMidStream(_WindowTestCase):
         self.assertEqual(STATES["tone"][0], "TONE")
         self.win._refresh_info_panel()
         self.assertIn("tone 123.0 Hz", self.win._info_panel.value("squelch"))
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestStoppingDoesNotClick(_WindowTestCase):
+    def setUp(self):
+        super().setUp()
+        pretend_audio_output(self.win)
+        self.win.set_frequency(146.94e6)
+        self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        self.win._control_panel.set_squelch_db(-90)
+        t = np.arange(10 * FRAME) / RATE
+        self.iq = fm(0.8 * np.sin(2 * np.pi * 700 * t), 5e3, -50.0)
+
+    def _tail_after(self, action):
+        frames = Frames(self, self.iq).run()
+        last = float(frames.played()[-1])
+        written = []
+        self.win._audio.write = written.append
+        action()
+        tail = np.concatenate(written) if written else np.zeros(0)
+        return last, tail
+
+    def test_switching_to_iq_mode_decays_to_silence(self):
+        def to_iq():
+            self.win._set_demod_mode("None (I/Q)")
+            self.win._process_block(self.iq[:FRAME])
+
+        last, tail = self._tail_after(to_iq)
+        self.assertGreater(len(tail), 0)
+        self.assertAlmostEqual(float(tail[0]), last, delta=0.05)
+        self.assertLess(abs(float(tail[-1])), 0.01)
+
+    def test_stopping_the_receiver_decays_to_silence(self):
+        last, tail = self._tail_after(self.win._reset_demodulator)
+        self.assertGreater(len(tail), 0)
+        self.assertAlmostEqual(float(tail[0]), last, delta=0.05)
+        self.assertLess(abs(float(tail[-1])), 0.01)

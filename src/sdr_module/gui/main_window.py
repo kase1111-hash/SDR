@@ -4468,7 +4468,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._clip_s = 0.0
             self._tone_blocked = False
             if self._audio_join.playing:
-                self._audio_join.stop()
+                # (Another mode with no audio: no block to fade out.)
+                self._audio.write(self._audio_join.release())
             self._show_detected_tone()
             return
         deviation = self._control_panel.get_fm_deviation()
@@ -4478,6 +4479,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             logger.debug(f"Audio demod failed: {exc}")
             chain.reset_demodulator()
             self._demod_running = False
+            if self._audio_join.playing:
+                self._audio.write(self._audio_join.release())
             return
         self._demod_running = True
         if mode == "FM":
@@ -4496,21 +4499,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._show_detected_tone()
         join = self._audio_join
         nr = self._audio_options.noise_reduction
+        # A new chain, deviation or noise reduction: the audio doesn't
+        # continue the last block played.
+        new_stream = (
+            chain is not self._join_chain
+            or deviation != self._join_deviation
+            or nr is not self._join_nr
+        )
         if speaker:
-            if join.playing and (
-                chain is not self._join_chain
-                or deviation != self._join_deviation
-                or nr is not self._join_nr
-            ):
-                # A new chain, deviation or noise reduction: crossfade.
-                out = join.join(audio)
+            if join.playing and new_stream:
+                out = join.join(audio)  # crossfade from the last sample
             else:
                 out = join.play(audio)  # fades in after silence
             self._join_chain, self._join_deviation = chain, deviation
             self._join_nr = nr
             self._audio.write(out)
         elif join.playing:
-            self._audio.write(join.fade_out(audio))
+            # Stopping: fade this block out, or (if it doesn't continue the
+            # last one) decay from the last sample played.
+            self._audio.write(join.release() if new_stream else join.fade_out(audio))
         if sstv:
             try:
                 self._sstv_panel.process_audio(
@@ -4607,10 +4614,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Forget the channel filter and demodulator state (after a gap)."""
         self._rx_chain = None
         # The next samples don't follow on: the squelch starts closed, the
-        # audio fades in again and the I/Q corrections are measured anew.
+        # audio decays to silence (and fades in again) and the I/Q
+        # corrections are measured anew.
         self._squelch.reset()
         self._level_average.reset()
-        self._audio_join.stop()
+        if self._audio_join.playing:
+            self._audio.write(self._audio_join.release())
         self._join_chain = None
         self._demod_running = False
         self._tone_squelch.reset()

@@ -354,6 +354,23 @@ class TestOpenRecording(_PlaybackCase):
         self.assertTrue(win._is_running)
         self.assertEqual(dev.position, 0)
 
+    def test_a_file_that_cant_be_read_stops_with_one_error_history_entry(self):
+        # (As for a recording that stops by itself, mc:MC-17: the device
+        # logged it and the status bar logged it again.)
+        self.play()
+        win = self.win
+
+        def gone(_n):
+            raise OSError("the disk went away")
+
+        win._device._player.read = gone
+        with self.assertLogs("sdr_module", level="WARNING") as logs:
+            win._update_display()
+            win._playback._tick()
+        self.assertFalse(win._is_running)
+        self.assertIn("Playback stopped", self.message())
+        self.assertEqual(len(logs.records), 1, [r.getMessage() for r in logs.records])
+
     def test_loop_and_seek_from_the_strip(self):
         self.play()
         win = self.win

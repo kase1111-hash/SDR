@@ -747,7 +747,8 @@ if HAS_PYQT6:
             win = self._win
             if device.error:
                 win._stop_acquisition()
-                win._show_status_error(f"Playback stopped: {device.error}.")
+                # (Logged by the device: one Error History entry.)
+                win._show_status_error(f"Playback stopped: {device.error}.", log=False)
                 device.error = None
             elif device.finished and win._is_running:
                 win._stop_acquisition()

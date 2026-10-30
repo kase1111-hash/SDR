@@ -155,6 +155,18 @@ class TestWindow(_TextCase):
         again.set_mode("CW")
         self.assertEqual(again._wpm_spin.value(), 28)
 
+    def test_unreadable_settings_are_ignored(self):
+        from sdr_module.gui.transmit_text import TransmitTextDialog
+
+        self.store.values["tx/text"] = "{not json"
+        fresh = TransmitTextDialog(self.win)
+        self.addCleanup(fresh.deleteLater)
+        self.assertEqual((fresh.mode(), fresh.text()), ("RTTY", ""))
+        self.store.values["tx/text"] = '{"mode": "CW", "modes": {"CW": {"wpm": "x"}}}'
+        fresh = TransmitTextDialog(self.win)
+        self.addCleanup(fresh.deleteLater)
+        self.assertEqual((fresh.mode(), fresh.settings().wpm), ("CW", 20.0))
+
     def test_text_is_limited(self):
         from sdr_module.protocols.text_modes import MAX_TEXT_CHARS
 
@@ -192,6 +204,25 @@ class TestWindow(_TextCase):
             if match and widget.isVisibleTo(self.dlg):
                 keys.append(match.group(1).lower())
         self.assertEqual(len(keys), len(set(keys)), keys)
+
+    def test_every_control_says_what_it_does(self):
+        from PyQt6.QtWidgets import (
+            QAbstractButton,
+            QAbstractSpinBox,
+            QComboBox,
+            QPlainTextEdit,
+            QProgressBar,
+        )
+
+        kinds = (QAbstractButton, QAbstractSpinBox, QComboBox, QPlainTextEdit)
+        for widget in self.dlg.findChildren(kinds + (QProgressBar,)):
+            if widget.parent() is not None and widget.parent().inherits("QComboBox"):
+                continue
+            self.assertTrue(
+                widget.toolTip() or widget.accessibleName(),
+                widget.objectName()
+                or type(widget).__name__ + " " + str(getattr(widget, "text", str)()),
+            )
 
     def test_speed_access_key_goes_to_the_control_shown(self):
         self.dlg.set_mode("CW")
@@ -374,6 +405,19 @@ class TestTransmit(_TextCase):
         text, tone = self.line()
         self.assertTrue(text.startswith("Stopped RTTY “THE QUICK BROWN FOX"), text)
         self.assertEqual(tone, "warning")
+
+    def test_closing_the_window_keeps_sending_and_says_so(self):
+        dev, backend = self._send("THE QUICK BROWN FOX " * 3, "RTTY", pace=True)
+        self.assertTrue(self.station.busy)
+        self.dlg.close()
+        self.assertTrue(self.station.busy)  # (Stop ends it, not Close)
+        text, tone = self.status()
+        self.assertTrue(text.startswith("Still transmitting RTTY “THE QUICK"), text)
+        self.assertEqual(tone, "danger")
+        self.win._show_transmit_text()  # back: Stop and the progress
+        self.assertEqual(self.dlg._transmit_button.text(), "Stop")
+        self.station.stop()
+        self.wait_done(10)
 
     def test_each_send_is_a_new_job(self):
         dev, backend = self._send("AB", "RTTY")
@@ -654,6 +698,26 @@ class TestSave(_TextCase):
             self.assertEqual(analyse(iq, 48000.0)["text"], "VVV")
             info = find_sidecar(path)
             self.assertEqual((info.sample_rate, info.center_frequency), (48000.0, freq))
+
+    def test_a_failed_save_says_why(self):
+        missing = os.path.join(self._missing_folder(), "nowhere", "x.wav")
+        self.patch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            staticmethod(lambda *a: (missing, "WAV audio (*.wav)")),
+        )
+        self.dlg.set_text("TEST")
+        self.dlg._save_button.click()
+        text, tone = self.line()
+        self.assertTrue(text.startswith("Couldn't save x.wav: "), text)
+        self.assertEqual(tone, "danger")
+        self.assertEqual(self.status()[1], "danger")
+        self.assertFalse(os.path.exists(missing))
+
+    def _missing_folder(self):
+        import tempfile
+
+        return tempfile.mkdtemp(prefix="t14_missing_")
 
     def test_cancelled_dialog_saves_nothing(self):
         self.patch.setattr(

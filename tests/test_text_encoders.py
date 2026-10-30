@@ -197,6 +197,28 @@ class TestMorse:
         assert enc.skipped == {"%": 1, "#": 1}
 
 
+class TestConfigsOutOfRange:
+    """A configuration the encoders can't honour is refused, never quietly
+    changed (2000 Hz of shift used to go out as 1000 Hz)."""
+
+    def test_rtty_and_ascii_baud_and_shift(self):
+        with pytest.raises(ValueError, match="shift"):
+            _rtty(shift=2000.0)
+        with pytest.raises(ValueError, match="baud"):
+            _rtty(baud=5000.0)
+        with pytest.raises(ValueError, match="baud"):
+            ASCIIEncoder(EncoderConfig(FS, 1500, 9600, ModulationType.FSK))
+        # In range: kept exactly.
+        enc = _rtty(carrier=3000.0, baud=50.0, shift=850.0)
+        iq = enc.encode_text("RYRY")
+        low, high = demod.tone_frequencies(iq, FS)
+        assert high - low == pytest.approx(850.0, abs=3)
+
+    def test_morse_speed(self):
+        with pytest.raises(ValueError, match="WPM"):
+            MorseEncoder(EncoderConfig(FS, 700, 0, ModulationType.OOK), wpm=100)
+
+
 class TestBitsToFsk:
     def test_phase_continuous_across_bits(self):
         enc = ASCIIEncoder(EncoderConfig(FS, 1500, 300, ModulationType.FSK))

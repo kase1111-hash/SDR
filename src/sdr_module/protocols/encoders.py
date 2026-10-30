@@ -31,6 +31,7 @@ import numpy as np
 from .encoder import EncoderConfig, ModulationType, ProtocolEncoder
 from .text_modes import (
     ASCII_BAUD,
+    BAUD_RANGE,
     ITA2_FIGURES_US,
     ITA2_LETTERS,
     MODE_ASCII,
@@ -41,12 +42,25 @@ from .text_modes import (
     PSK31_BAUD,
     RTTY_BAUD,
     RTTY_SHIFT_HZ,
+    SHIFT_RANGE,
     VARICODE,
+    WPM_RANGE,
     TextCheck,
     TextSettings,
     TextSignal,
     check_text,
+    format_number,
 )
+
+
+def _check_range(value: float, bounds: tuple, what: str, unit: str) -> None:
+    """A value the encoders can't send is refused, never quietly changed."""
+    low, high = bounds
+    if not low <= float(value) <= high:
+        raise ValueError(
+            f"{what} must be {format_number(low)} to {format_number(high)} {unit}, "
+            f"not {format_number(value)}"
+        )
 
 
 class _TextEncoder(ProtocolEncoder):
@@ -137,6 +151,8 @@ class RTTYEncoder(_TextEncoder):
             config.baud_rate = RTTY_BAUD  # Standard RTTY baud rate
         if not config.frequency_shift:
             config.frequency_shift = RTTY_SHIFT_HZ  # Standard shift
+        _check_range(config.baud_rate, BAUD_RANGE, "The RTTY baud rate", "Bd")
+        _check_range(config.frequency_shift, SHIFT_RANGE, "The RTTY shift", "Hz")
         super().__init__(config)
 
     def _settings(self) -> TextSettings:
@@ -169,6 +185,7 @@ class MorseEncoder(_TextEncoder):
             config: Encoder configuration
             wpm: Words per minute (default 20)
         """
+        _check_range(wpm, WPM_RANGE, "The Morse speed", "WPM")
         super().__init__(config)
         self._wpm = wpm
         # PARIS standard: 1 word = 50 units
@@ -193,6 +210,8 @@ class ASCIIEncoder(_TextEncoder):
             config.frequency_shift = 1000
         if not config.baud_rate:
             config.baud_rate = ASCII_BAUD
+        _check_range(config.baud_rate, BAUD_RANGE, "The ASCII baud rate", "Bd")
+        _check_range(config.frequency_shift, SHIFT_RANGE, "The ASCII shift", "Hz")
         super().__init__(config)
 
     def _settings(self) -> TextSettings:

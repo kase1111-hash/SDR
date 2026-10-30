@@ -465,6 +465,10 @@ if HAS_PYQT6:
                 "Type what to send, or insert a macro below…"
             )
             self._text_edit.setAccessibleName("Text to send")
+            self._text_edit.setToolTip(
+                f"What to send, up to {MAX_TEXT_CHARS:,} characters. CW and RTTY "
+                "send capitals; characters a mode can't send are listed below"
+            )
             self._text_edit.setTabChangesFocus(True)
             self._text_edit.setMinimumHeight(90)
             self._text_edit.textChanged.connect(self._on_text_changed)
@@ -541,6 +545,7 @@ if HAS_PYQT6:
             self._progress.setRange(0, 1000)
             self._progress.setTextVisible(True)
             self._progress.setAccessibleName("Progress")
+            self._progress.setToolTip("How far the preview or the transmission is")
             self._progress.setVisible(False)
             layout.addWidget(self._progress)
 

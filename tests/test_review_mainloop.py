@@ -708,5 +708,95 @@ class TestAudioSinkFeedsBetweenWrites(unittest.TestCase):
         self.assertTrue(timer is None or not timer.isActive())
 
 
+# ---------------------------------------------------------------------------
+# mainloop-rds-badge-survives-device-change
+# ---------------------------------------------------------------------------
+
+
+class TestRdsBadgeFollowsTheSource(_WindowTestCase):
+    demo = True
+
+    def tearDown(self):
+        if HAS_PYQT6:
+            self.win._is_running = False
+            self.win._device = None
+        super().tearDown()
+
+    def _hear_station(self, frames=150):
+        """The demo's station on 100.1 MHz until its name is known."""
+        self.win._rds_auto_action.setChecked(True)
+        self.win.set_frequency(100.1e6)
+        self.win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        for _ in range(frames):  # (~5 s of the demo station)
+            self.win._process_block(self.win._device.read_samples(80000))
+            if self.win._rds_badge.text():
+                break
+        self.assertTrue(self.win._rds_badge.text())
+
+    def _connect_noise_receiver(self):
+        """Device > Connect... picks a receiver on the same frequency and
+        sample rate that hears only noise."""
+        from sdr_module.gui import device_dialog
+
+        dev = _queued_hardware(self.win._device_sample_rate())
+        dev.set_frequency(self.win._lo_frequency())
+
+        class Dialog:
+            def __init__(self, parent=None):
+                pass
+
+            def exec(self):
+                return 1
+
+            def deleteLater(self):
+                pass
+
+            def get_selected_device(self):
+                return dev
+
+        with mock.patch.object(device_dialog, "DeviceDialog", Dialog):
+            self.win._show_device_dialog()
+        self.assertIs(self.win._device, dev)
+        self.assertAlmostEqual(self.win._current_frequency(), 100.1e6)
+        return dev
+
+    def _hear_noise(self, frames=10):
+        rng = np.random.default_rng(4)
+        for _ in range(frames):
+            noise = 0.01 * (
+                rng.standard_normal(80000) + 1j * rng.standard_normal(80000)
+            )
+            self.win._process_block(noise.astype(np.complex64))
+
+    def test_a_new_receiver_on_the_same_frequency_forgets_the_station(self):
+        self._hear_station()
+        self._connect_noise_receiver()
+        self.assertEqual(self.win._rds_badge.text(), "")
+        self.assertFalse(self.win._rds_badge_action.isVisible())
+        self.assertIsNone(self.win._rds_listener.station())
+        # Its noise doesn't bring the old station's name back.
+        self._hear_noise()
+        self.assertEqual(self.win._rds_badge.text(), "")
+
+    def test_stop_and_start_keep_the_station(self):
+        self._hear_station()
+        name = self.win._rds_badge.text()
+        self.win._stop_acquisition()
+        self.win._start_acquisition()
+        self.assertEqual(self.win._rds_badge.text(), name)
+
+    def test_the_decoder_tabs_rds_forgets_the_station_too(self):
+        self.win._rds_auto_action.setChecked(True)
+        self.win._decoder_panel._proto_combo.setCurrentText("RDS")
+        self.settle(1)
+        self._hear_station(frames=300)
+        decoder = self.win._decoder
+        self.assertTrue(getattr(decoder.station, "ps_name", ""))
+        self._connect_noise_receiver()
+        self.assertEqual(self.win._rds_badge.text(), "")
+        self._hear_noise()
+        self.assertEqual(self.win._rds_badge.text(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

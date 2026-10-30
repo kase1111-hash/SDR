@@ -3548,10 +3548,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder_panel.set_demod_mode(self._control_panel.get_demod_mode())
         self._update_decoder_chip()
         listener = self._own("_rds_listener")
-        if not has_device and listener is not None:
-            # No receiver: no station to name.
+        source = self._device
+        if listener is not None and (
+            not has_device or source is not self._own("_decoded_source")
+        ):
+            # No receiver, or another one (a device, the demo, a recording,
+            # maybe on the same frequency): no station to name yet, and
+            # the live decoder's channel carries something else now.
             listener.reset()
             self._show_rds_station(None)
+            decoder = self._own("_decoder")
+            if has_device and decoder is not None:
+                decoder.channel_changed()
+        self._decoded_source = source
         if HAS_HAM_RADIO:
             self._sync_signal_meter(running, has_device)
 

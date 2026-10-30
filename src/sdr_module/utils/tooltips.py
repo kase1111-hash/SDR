@@ -52,8 +52,10 @@ that is the Bandwidth setting.""",
         short="Amplification applied to received signals (in dB).",
         detailed="""Gain amplifies weak signals but also amplifies noise. Too little
 gain = weak signals buried in noise. Too much gain = distortion and
-intermodulation from strong signals. Start with AGC or ~30dB, then
-adjust based on signal quality. RTL-SDR: 0-49.6dB, HackRF: 0-62dB.""",
+intermodulation from strong signals. Start with Tuner AGC or ~30dB,
+then adjust based on signal quality. RTL-SDR: 0-49.6dB in its tuner's
+steps. HackRF One: LNA 0-40dB and VGA 0-62dB (up to 102dB), plus a
++14dB RF amp; it has no AGC.""",
         warning="Excessive gain causes signal clipping and spurious signals.",
     ),
     "bandwidth": Tooltip(

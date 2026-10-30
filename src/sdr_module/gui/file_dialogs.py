@@ -240,15 +240,22 @@ def save_file(
 
 
 def choose_folder(
-    parent: Any, settings: Any, kind: str, caption: str, current: str = ""
+    parent: Any,
+    settings: Any,
+    kind: str,
+    caption: str,
+    current: str = "",
+    remember: bool = True,
 ) -> str:
     """``QFileDialog.getExistingDirectory`` starting at ``current`` (or
-    ``kind``'s folder); remembers the choice for ``kind``. "" if cancelled."""
+    ``kind``'s folder); remembers the choice for ``kind`` (unless
+    ``remember`` is False, e.g. in a dialog that can still be cancelled).
+    "" if cancelled."""
     start = current if current and os.path.isdir(current) else ""
     folder = QFileDialog.getExistingDirectory(
         parent, caption, start or start_folder(settings, kind, create=True)
     )
-    if folder:
+    if folder and remember:
         remember_folder(settings, kind, folder)
     return folder
 

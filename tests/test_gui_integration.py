@@ -664,19 +664,16 @@ class TestHotplug(_WindowTestCase):
     def test_scan_menu_lists_names_and_missing_drivers(self):
         from sdr_module.gui import main_window
 
+        # (T11, mc:MC-U12) The box is a dialog with Use Demo Device and
+        # Connect... buttons and the commands in a selectable block, run
+        # through _exec_dialog like the window's other dialogs.
         shown = []
-        with (
-            mock.patch.object(main_window, "_driver_importable", return_value=False),
-            mock.patch.object(
-                main_window.QMessageBox,
-                "information",
-                side_effect=lambda *a: shown.append(a),
-            ),
-        ):
+        self.win._exec_dialog = lambda box: shown.append(box) or 0
+        with mock.patch.object(main_window, "_driver_importable", return_value=False):
             self.win._refresh_devices()
-        self.assertEqual(shown[0][1], "No Devices Found")
-        self.assertIn('sdr-module[rtlsdr]"', shown[0][2])
-        self.assertIn('sdr-module[hackrf]"', shown[0][2])
+        self.assertEqual(shown[0].windowTitle(), "No Devices Found")
+        self.assertIn('sdr-module[rtlsdr]"', shown[0].commands_text())
+        self.assertIn('sdr-module[hackrf]"', shown[0].commands_text())
 
 
 class TestScanner(_WindowTestCase):

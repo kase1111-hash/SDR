@@ -131,6 +131,11 @@ from .control_panel import (
     closest_bandwidth,
 )
 from .decoder_panel import DecoderPanel
+from .device_controls import (
+    DeviceControls,
+    ScanResultsDialog,
+    confirm_switch_to_demo,
+)
 from .file_jobs import decode_recording, load_recording, run_job, write_recording
 from .iq_files import (
     OPEN_FILTERS,
@@ -146,6 +151,12 @@ from .iq_files import (
 )
 from .level_meter import LevelMeter
 from .playback import PlaybackBar, PlaybackController
+from .preferences_dialog import (
+    KEY_AUDIO_OUTPUT,
+    KEY_AUDIO_OUTPUT_NAME,
+    PreferencesDialog,
+    preferred_capture_folder,
+)
 from .rds_station import RdsListener, badge_text, badge_tooltip, tuner_text
 from .receiver_bar import FrequencyDigits, ReceiverBar
 from .scanner_host import WindowScannerHost
@@ -1679,6 +1690,12 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
                 ),
                 ("gain", "Gain", get_short_tip("gain")),
                 (
+                    "frontend",
+                    "Front end",
+                    "The device's frequency correction (ppm), direct sampling "
+                    "(HF) and bias tee: Receiver group.",
+                ),
+                (
                     "squelch",
                     "Squelch",
                     "Audio is muted while the channel is below this level "
@@ -2022,11 +2039,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._audio_enabled = self._settings.get_bool("audio_enabled", True)
         self._audio_problem: Optional[str] = None
         self._audio.set_volume(self._saved_volume() / 100.0)
+        # The output chosen in Tools > Preferences (the default if none).
+        self._audio.set_output_device(
+            self._settings.get_str(KEY_AUDIO_OUTPUT, ""),
+            self._settings.get_str(KEY_AUDIO_OUTPUT_NAME, ""),
+        )
 
         self._setup_ui()
         # Transmitting (Send ID Now, Transmit Text): the transmit engine,
         # the ON AIR badge and the Ham ID panel's TX side (T7).
         self._tx_station = StationTx(self)
+        # The Receiver group's device settings: gain, sample rate, front end
+        # (T11).
+        self._device_controls = DeviceControls(self)
         self._setup_menus()
         self._setup_toolbar()
         self._setup_receiver_bar()
@@ -2391,12 +2416,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             tip="Stop receiving and close the current device",
         )
         device_menu.addSeparator()
+        # The sample rate (span), changed live; the status bar's rate pops
+        # up the same menu.
+        device_menu.addMenu(self._device_controls.rate_menu)
+        device_menu.addSeparator()
         self._demo_action = self._add_action(
             device_menu,
             "Use De&mo Device",
-            self._start_demo_mode,
-            tip="Explore the app with simulated signals (no hardware needed)",
+            tip="Explore the app with simulated signals (no hardware needed); "
+            "it replaces a connected device",
+            checkable=True,
         )
+        self._demo_action.triggered.connect(lambda _c=False: self._use_demo_device())
         self._add_action(
             device_menu,
             "&Scan for Devices",
@@ -2655,6 +2686,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "Ctrl+E",
             "Show recent warnings and errors",
         )
+        preferences = self._add_action(
+            tools_menu,
+            "&Preferences...",
+            self._show_preferences,
+            "Ctrl+,",
+            "Audio output device, default folders, the recording temp folder "
+            "and the transmit confirmation",
+        )
+        preferences.setMenuRole(QAction.MenuRole.PreferencesRole)
 
         # ---- Help ----
         help_menu = menubar.addMenu("&Help")
@@ -2824,6 +2864,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         self._rate_label = QLabel("")
         self._rate_label.setToolTip(get_short_tip("sample_rate"))
+        # A click opens the sample rate menu (Device > Sample Rate).
+        self._rate_label.setAccessibleName("Sample rate")
+        self._rate_label.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._rate_label.installEventFilter(self)
         statusbar.addWidget(self._rate_label)
 
         # Transient messages (neutral, success or error), auto-clearing. A
@@ -2969,6 +3013,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             and event.button() == Qt.MouseButton.LeftButton
         ):
             self._focus_frequency_entry()
+            return True
+        if (
+            obj is getattr(self, "_rate_label", None)
+            and event.type() == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            self._device_controls.popup_rate_menu(self._rate_label)
             return True
         return super().eventFilter(obj, event)
 
@@ -3239,9 +3290,21 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         rate = self._device_sample_rate()
         self._rate_label.setText(format_rate(rate) if has_device else "")
 
-        # Menus
+        # Menus. Use Demo Device stays available while a real device (or a
+        # recording) is in use, and is ticked (and off) while the demo is.
         self._disconnect_action.setEnabled(has_device)
-        self._demo_action.setEnabled(not has_device)
+        demo_in_use = bool(self._demo_mode and has_device)
+        self._demo_action.setChecked(demo_in_use)
+        self._demo_action.setEnabled(not demo_in_use)
+        self._demo_action.setStatusTip(
+            "The demo device is in use"
+            if demo_in_use
+            else "Explore the app with simulated signals (no hardware needed); it "
+            "replaces a connected device"
+        )
+        # The Receiver group's gain, sample rate and front end follow the
+        # device (T11).
+        self._device_controls.sync()
 
         # Level readout is only meaningful while samples flow
         if not running:
@@ -3348,10 +3411,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         p.set_value("demod", self._control_panel._demod_combo.currentText())
         p.set_value("bandwidth", self._bandwidth_description())
-        if self._agc_enabled:
-            p.set_value("gain", "Automatic (AGC)")
-        else:
-            p.set_value("gain", f"{self._control_panel._gain_slider.value()} dB")
+        p.set_value("gain", self._device_controls.gain_text())
+        p.set_value("frontend", self._device_controls.front_end_text())
         p.set_value("squelch", *self._squelch_description(running))
         if running and self._last_peak_db is not None:
             p.set_value("level", self._level_description())
@@ -4514,6 +4575,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._show_status_error(f"Could not set the gain: {e}")
         if HAS_HAM_RADIO:
             self._signal_meter_panel.set_gain(self._signal_meter_gain())
+        self._device_controls.gain_applied()  # remembered for the device type
         logger.debug(f"Gain changed to {gain_db:.1f} dB")
 
     def _apply_controls_to_device(self) -> str:
@@ -4526,13 +4588,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Returns a note for the user when the tuned frequency had to change
         (the device can't tune it), else "".
         """
+        # The device's own gain controls, Tuner AGC where it has it and its
+        # front end (ppm, direct sampling, bias tee) as that kind of device
+        # last had them, set before tuning (direct sampling depends on where).
+        device_note = self._device_controls.configure()
         note = self._sync_device_tuning()
         agc = self._control_panel.is_agc_enabled()
         self._on_agc_changed(agc)
         if not agc:
-            self._on_gain_changed(float(self._control_panel._gain_slider.value()))
+            self._device_controls.apply_manual_gain()
         self._apply_baseband_filter()
-        return note
+        return " ".join(text for text in (note, device_note) if text)
 
     def _on_bandwidth_changed(self, bw_hz: float):
         """The channel width: it sets the demodulator's channel filter and
@@ -4776,13 +4842,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._settings.set("agc_enabled", self._agc_enabled)
         if HAS_HAM_RADIO:
             self._signal_meter_panel.set_gain(self._signal_meter_gain())
+        accepted = True
         if self._device and hasattr(self._device, "set_gain_mode"):
             try:
                 # set_gain_mode(auto: bool). Passing the strings "auto"/"manual"
                 # made "manual" truthy, so unticking AGC left AGC on.
-                self._device.set_gain_mode(self._agc_enabled)
+                accepted = self._device.set_gain_mode(self._agc_enabled) is not False
             except Exception as e:
-                logger.debug(f"Device AGC set failed: {e}")
+                logger.warning(f"Could not switch the device's automatic gain: {e}")
+                accepted = False
+        # A refusal (a HackRF has no AGC) is reported and AGC goes back off;
+        # the readout shows what an automatic gain chose.
+        self._device_controls.agc_changed(self._agc_enabled, accepted)
 
     def _on_demod_changed(self, mode: str):
         """Handle demodulator selection change. The control panel has
@@ -5294,10 +5365,37 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             old.discard()
 
     def _capture_folder(self) -> str:
-        """The folder recordings are captured into."""
+        """The folder recordings are captured into: the one chosen in Tools
+        > Preferences, else the user cache folder."""
         if self._recording_folder is None:
-            self._recording_folder = _recording_dir()
+            self._recording_folder = (
+                preferred_capture_folder(self._settings) or _recording_dir()
+            )
         return self._recording_folder
+
+    def _show_preferences(self) -> None:
+        """Tools > Preferences (Ctrl+,): audio output, default folders, the
+        recording temp folder and the transmit confirmation."""
+        rate = self._device_sample_rate() if self._device else _DEFAULT_SAMPLE_RATE
+        dialog = PreferencesDialog(
+            self._settings, self, capture_default=_recording_dir(), sample_rate=rate
+        )
+        if not self._exec_dialog(dialog):
+            return
+        before = self._audio.output_id
+        prefs = dialog.apply()
+        self._audio.set_output_device(prefs.audio_output, prefs.audio_output_name)
+        self._control_panel.set_recordings_folder(prefs.recordings_folder)
+        # The next recording starts in the temp folder chosen (one running
+        # goes on where it is).
+        self._recording_folder = None
+        self._sync_audio_ui()
+        if prefs.audio_output != before:
+            self._show_status_message(
+                f"Audio plays through {self._audio.output_name()}.", None, 5000
+            )
+        else:
+            self._show_status_message("Preferences saved.", None, 3000)
 
     def _confirm_discard_recording(self, doing: str) -> bool:
         """Before ``doing`` (e.g. "closing") drops the unsaved recording,
@@ -6253,7 +6351,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         gain the tuner picks isn't known)."""
         if self._agc_enabled:
             return None
-        return float(self._control_panel._gain_slider.value())
+        return float(self._control_panel.gain_db())
 
     def _smeter_device_type(self) -> str:
         """Key the S-meter calibration is stored under: one per device type."""
@@ -6548,18 +6646,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return (
                 "The demo device can't keep up in real time right now, so "
                 "its audio is paused. It resumes by itself when the computer "
-                "catches up (a lower sample rate in Device > Connect... helps)."
+                "catches up (a lower sample rate in Receiver > Sample rate "
+                "helps)."
             )
         if self._pacer.overloaded:
             return (
                 "This computer can't process "
                 f"{format_rate(self._device_sample_rate())} in real time right "
                 "now, so audio is paused until it catches up. A lower sample "
-                "rate in Device > Connect... helps."
+                "rate (Receiver > Sample rate) helps."
             )
         return (
             "The device isn't delivering samples in real time, so audio is "
-            "paused. Try a lower sample rate in Device > Connect..."
+            "paused. Try a lower sample rate (Receiver > Sample rate)."
         )
 
     def _reset_demodulator(self) -> None:
@@ -6613,6 +6712,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._update_recording_status()
         if self._audio_take is not None:
             self._update_audio_recording_status()
+        if self._agc_enabled:
+            self._device_controls.show_auto_gain()  # "Auto (25.9 dB)"
         if self._info_panel.isVisible():
             self._refresh_info_panel()
         # (T6) Messages counted while the window was minimized are seen once
@@ -6706,6 +6807,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._device is not None and device is not self._device:
             self._release_device()
         self._device = device
+        # The front end chosen in the dialog is what the device type uses
+        # from now on (applied again, with the gain, below).
+        choice = getattr(dialog, "front_end_choice", None)
+        if callable(choice):
+            self._device_controls.remember_dialog_choice(*choice())
         # The dialog's Demo row opens the same simulated device as Device >
         # Use Demo Device: it is paced in real time, and named, the same way.
         self._demo_mode = _is_demo_device(device)
@@ -6737,7 +6843,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return True
 
     def _preselect_rate(self, dialog: Any) -> None:
-        """Preselect the current device's (or the --sample-rate) rate."""
+        """Preselect the current device's (or the --sample-rate) rate; each
+        device type gets its own (the one it had last), and its front end."""
+        set_preferences = getattr(dialog, "set_preferences", None)
+        if callable(set_preferences):
+            set_preferences(*self._device_controls.dialog_preferences())
+            return
         combo = getattr(dialog, "_rate_combo", None)
         wanted: Optional[float]
         if self._playback.active:
@@ -6809,9 +6920,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return self._hardware_classes
 
     def _missing_drivers(self) -> List[Tuple[str, str]]:
-        """(label, pip extra) of the hardware drivers that aren't installed."""
+        """(label, install command) of the hardware drivers that aren't
+        installed: the same commands as Device > Connect... and the welcome
+        screen show."""
+        from .device_dialog import install_command
+
         return [
-            (label, module)
+            (label, install_command(module))
             for label, package, name, module, _cls in _HARDWARE_DRIVERS
             if not _driver_importable(package, name)
         ]
@@ -6840,32 +6955,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return found
 
     def _refresh_devices(self):
-        """Device > Scan for Devices: list the SDR hardware plugged in."""
+        """Device > Scan for Devices: list the SDR hardware plugged in, with
+        Connect... (and, when nothing was found, Use Demo Device and the
+        commands that install a missing driver, selectable)."""
         logger.info("Scanning for devices...")
         self._hardware_classes = None  # pick up a driver installed meanwhile
         devices = self._scan_hardware()
         self._known_devices = dict(devices)
-        if devices:
-            names = "\n".join(f"  •  {name}" for _key, name in devices)
-            QMessageBox.information(
-                self,
-                "Devices Found",
-                f"Detected {len(devices)} device(s):\n\n{names}\n\n"
-                "Use Device > Connect... to open one.",
-            )
-            return
-        text = (
-            "No SDR devices were detected.\n\n"
-            "Plug in an RTL-SDR or HackRF One and scan again, or use "
-            "Device > Use Demo Device to try the app without hardware."
-        )
-        missing = self._missing_drivers()
-        if missing:
-            text += "\n\nNot installed:\n" + "\n".join(
-                f'  •  {label} support: python -m pip install "sdr-module[{extra}]"'
-                for label, extra in missing
-            )
-        QMessageBox.information(self, "No Devices Found", text)
+        missing = [] if devices else self._missing_drivers()
+        box = ScanResultsDialog([name for _key, name in devices], missing, self)
+        self._exec_dialog(box)
+        if box.choice == "connect":
+            self._show_device_dialog()
+        elif box.choice == "demo":
+            self._use_demo_device()
 
     def _poll_hotplug(self) -> None:
         """Poll for device hot-plug changes and notify on new devices."""
@@ -6892,18 +6995,37 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 8000,
             )
 
-    def _start_demo_mode(self):
-        """Start demo mode with simulated signals."""
+    def _use_demo_device(self) -> None:
+        """Device > Use Demo Device: switch to the demo device (also from a
+        connected SDR, asking first if a recording runs)."""
+        if not (self._demo_mode and self._device is not None):
+            self._start_demo_mode()
+        self._refresh_state_ui()  # the menu item ticked (or not, if cancelled)
+
+    def _start_demo_mode(self) -> bool:
+        """Start demo mode with simulated signals. A connected SDR is
+        released first; if a recording runs on it, the user is asked (the
+        recording would go on with simulated samples). False if cancelled."""
         from .device_dialog import MockDevice
 
+        if (
+            self._device is not None
+            and not self._demo_mode
+            and not self._playback.active
+            and not confirm_switch_to_demo(self)
+        ):
+            return False
         if self._playback.active:
             self._playback.close(restore=True, resume=False, quiet=True)
         if self._device is not None and not self._demo_mode:
             self._release_device()
         if self._device is None:
             self._device = MockDevice()
-            if self._preferred_rate:
-                self._device.set_sample_rate(self._preferred_rate)
+            # The rate asked for without a device (--sample-rate), else the
+            # one the demo device had last time.
+            rate = self._preferred_rate or self._device_controls.remembered_rate("demo")
+            if rate:
+                self._device.set_sample_rate(rate)
         self._demo_mode = True
         # The demo is about seeing (and demodulating) stations: leave the
         # "no audio" mode for FM.
@@ -6928,25 +7050,40 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             8000,
         )
         logger.info("Demo mode started")
+        return True
 
-    def set_sample_rate(self, rate_hz: float) -> None:
-        """Set the sample rate of the current device.
+    def set_sample_rate(self, rate_hz: float) -> bool:
+        """Set the sample rate of the current device, live (no reconnecting:
+        the decoders, the receiver chain and the plots follow). Receiver >
+        Sample rate, Device > Sample Rate and the status bar's rate use it,
+        and ``--sample-rate``.
 
-        The rate is also used by the demo device from now on and preselected
-        in Device > Connect (it is how ``--sample-rate`` is applied).
+        Without a device (or with the demo device) the rate is also used by
+        the demo device from now on and preselected in Device > Connect. It
+        is refused, with the reason in the status bar, while a recording
+        plays back (the file sets the rate), while recording I/Q (one take
+        holds one rate) or while transmitting. Returns True when applied.
         """
         try:
             rate = float(rate_hz)
         except (TypeError, ValueError):
-            return
-        if not rate > 0:
-            return
-        self._preferred_rate = rate
+            return False
+        if not (math.isfinite(rate) and rate > 0):
+            return False
+        if self._device is not None:
+            blocked = self._device_controls.rate_blocked()
+            if blocked:
+                self._show_status_message(blocked, "warning", 8000)
+                return False
+        if self._device is None or _is_demo_device(self._device):
+            self._preferred_rate = rate
         self._tx_station.shutdown()  # (a transmission has its own rate)
+        applied = True
         if self._device is not None:
             try:
-                self._device.set_sample_rate(rate)
+                applied = self._device.set_sample_rate(rate) is not False
             except Exception as e:
+                applied = False
                 self._show_status_error(f"Could not set the sample rate: {e}")
             self._apply_baseband_filter()
         self._reset_demodulator()
@@ -6957,6 +7094,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._refresh_state_ui()
         # A smaller span may no longer hold the tuned channel.
         self._ensure_vfo_fits()
+        if self._device is not None and applied:
+            # Remembered for the device type; the status bar says what it is.
+            self._device_controls.rate_applied(self._device_sample_rate())
+        return applied
 
     # ------------------------------------------------------------------
     # Files
@@ -8105,6 +8246,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._audio_enabled:
             if self._is_running and not self._realtime():
                 return "On (the signal isn't real time)", "warning"
+            if self._control_panel.get_demod_mode() not in _AUDIBLE_MODES:
+                return "On (no audio in I/Q mode)", "muted"
             return "On", None
         problem = self._audio_problem
         if problem is not None:
@@ -8155,6 +8298,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             tip = "Audio is off. Click to play the tuned signal through your speakers."
             if self._audio_problem is not None:
                 tip += f" ({self._audio_problem}.)"
+        if available:
+            # Which sound card plays it (Tools > Preferences chooses).
+            tip += f"\nOutput: {self._audio.output_name()}"
         button.setToolTip(tip)
         if self._info_panel.isVisible():
             self._refresh_info_panel()
@@ -8364,7 +8510,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Save settings on exit."""
         try:
             freq = self._current_frequency()
-            gain = float(self._control_panel._gain_slider.value())
+            gain = float(self._control_panel.gain_db())
             self._settings.set("frequency_hz", freq)
             self._settings.set("tuning/lo_hz", self._lo_frequency())
             self._settings.set("gain_db", gain)

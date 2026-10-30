@@ -67,6 +67,7 @@ SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
     ("Tools", ("Ctrl+F",), "Open the frequency scanner"),
     ("Tools", ("Ctrl+R",), "Open the AM/FM radio tuner"),
     ("Tools", ("Ctrl+E",), "Show the error history"),
+    ("Tools", ("Ctrl+,",), "Open the preferences (audio output, folders)"),
     ("View", ("F6",), "Put the keyboard focus on the spectrum"),
     ("View", ("Esc",), "Return the keyboard focus to the spectrum"),
     ("View", ("Ctrl+T",), "Switch between the light and dark themes"),

@@ -351,5 +351,103 @@ class TestSeekInTheWindow(_HamWindowCase):
         self.assertIn("Can't tune while transmitting", win._message_label.text())
 
 
+class _QrpCase(unittest.TestCase):
+    def setUp(self):
+        from tests.test_gui_chrome import require_pyqt6
+
+        require_pyqt6(self)
+        from sdr_module.core import frequency_manager
+        from sdr_module.ham.gui.qrp_panel import QRPPanel
+
+        self.fm = frequency_manager.get_frequency_manager()
+        saved = self.fm.get_license_class()
+        self.addCleanup(lambda: self.fm.set_license_class(saved))
+        self.panel = QRPPanel()
+        self.panel.show()
+        settle()
+
+    def tearDown(self):
+        if hasattr(self, "panel"):
+            self.panel.close()
+            self.panel.deleteLater()
+            settle()
+
+    def license(self, name: str) -> None:
+        from sdr_module.core.frequency_manager import LicenseClass
+
+        self.fm.set_license_class(LicenseClass(name))
+        self.panel.refresh_license()
+
+
+# The five US 60 m channels (USB phone, CW and data only).
+CHANNELS_60M = (5.3305e6, 5.3465e6, 5.357e6, 5.3715e6, 5.4035e6)
+
+
+class TestQrpSidebandOn60m(_QrpCase):
+    """HAMDSP-5: in Auto the card checked USB as "SSB", which the 60 m
+    channels don't list (USB only): "Not permitted ... in SSB" in red, and
+    the channel's 100 W limit never showed."""
+
+    def test_usb_is_permitted_on_every_60m_channel(self):
+        p = self.panel
+        self.license("general")
+        for freq in CHANNELS_60M:
+            p.set_station(freq, "USB")
+            self.assertEqual(p.mode(), "SSB", "the class is still judged as phone")
+            self.assertEqual(
+                p._legal_label.text(),
+                f"At {freq / 1e6:.3f} MHz (General, SSB): legal limit 100 W PEP.",
+            )
+            self.assertEqual(p._legal_label.property("tone"), "success")
+            self.assertEqual(p._legal_limit, 100.0)
+
+    def test_lsb_is_still_refused_there(self):
+        p = self.panel
+        self.license("general")
+        p.set_station(5.3305e6, "LSB")
+        self.assertTrue(p._legal_label.text().startswith("Not permitted"))
+        self.assertIn("LSB isn't allowed", p._legal_label.text())
+        self.assertEqual(p._legal_label.property("tone"), "danger")
+
+    def test_a_manual_ssb_choice_counts_either_sideband(self):
+        p = self.panel
+        self.license("general")
+        p._mode_combo.setCurrentText("SSB")
+        p.set_station(5.3305e6, "AM")  # (receiving in AM, sending SSB)
+        self.assertIn("legal limit 100 W PEP", p._legal_label.text())
+        self.assertEqual(p._legal_label.property("tone"), "success")
+        p.set_station(14.25e6, "AM")  # 20 m General phone: both sidebands
+        self.assertIn("legal limit", p._legal_label.text())
+        self.assertEqual(p._legal_label.property("tone"), "success")
+
+    def test_ssb_elsewhere_is_unchanged(self):
+        p = self.panel
+        self.license("technician")
+        p.set_station(28.4e6, "USB")
+        self.assertEqual(
+            p._legal_label.text(),
+            "At 28.400 MHz (Technician, SSB): legal limit 200 W PEP.",
+        )
+
+
+class TestQrpSidebandInTheWindow(_HamWindowCase):
+    def test_qrp_card_on_60m_in_usb(self):
+        from sdr_module.core import frequency_manager
+        from sdr_module.core.frequency_manager import LicenseClass
+
+        fm = frequency_manager.get_frequency_manager()
+        saved = fm.get_license_class()
+        self.addCleanup(lambda: fm.set_license_class(saved))
+        fm.set_license_class(LicenseClass.GENERAL)
+        qrp = self.win._qrp_panel
+        qrp.refresh_license()
+        self.assertTrue(self.win.set_frequency(5.3305e6))
+        self.win._set_demod_mode("USB")
+        self.assertEqual(
+            qrp._legal_label.text(),
+            "At 5.330 MHz (General, SSB): legal limit 100 W PEP.",
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

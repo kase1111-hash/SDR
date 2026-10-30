@@ -1239,6 +1239,17 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         """The mode the QRP class is judged in (Digital: the CW/data 5 W)."""
         return self.mode()
 
+    def _tx_modes(self) -> Tuple[str, ...]:
+        """What the frequency manager calls the mode in effect, for the
+        legality check and the legal limit. SSB is checked as the sideband
+        actually used (the 60 m channels allow USB only); a manual SSB
+        choice while receiving in another mode tries USB, then LSB."""
+        mode = self.mode()
+        if mode != "SSB":
+            return (_QRP_TO_TX_MODE.get(mode, mode),)
+        demod = (self._demod or "").upper()
+        return (demod,) if demod in ("USB", "LSB") else ("USB", "LSB")
+
     def set_demod_mode(self, mode: str) -> None:
         """Demodulation > Mode changed (Auto follows it)."""
         self._demod = str(mode or "")
@@ -1289,12 +1300,16 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         from ...gui.transmitter import describe_refusal, license_name, quiet_checks
 
         freq = self._freq_hz
-        tx_mode = _QRP_TO_TX_MODE.get(self.mode(), self.mode())
         where = f"{freq / 1e6:.3f} MHz"
         lic = license_name()
         head = f"At {where} ({lic}, {self.mode()})"
+        # The first mode name permitted here (or, if none is, the first).
         with quiet_checks():
-            allowed, reason = frequency_manager.is_tx_allowed(freq, 0.0, tx_mode)
+            checks = [
+                (m, *frequency_manager.is_tx_allowed(freq, 0.0, m))
+                for m in self._tx_modes()
+            ]
+        tx_mode, allowed, reason = next((c for c in checks if c[1]), checks[0])
         if not allowed:
             why = describe_refusal(reason, freq, tx_mode)
             text = f"Not permitted at {where} in {self.mode()}: {why}."

@@ -105,6 +105,25 @@ class TestCWDemodulatorStreams:
         assert MORSE_CODE["...---..."] == "SOS"
         assert MORSE_CODE[".-"] == "A"
 
+    @pytest.mark.parametrize("text", ["HI", "EEE", "TOM", "PARIS"])
+    def test_a_short_complete_capture(self, text):
+        # DEC-11: decode_morse waited for 6 marks of both kinds (or 12, or a
+        # 1.5 s pause) before decoding anything, so one complete capture of
+        # "HI", "EEE" or "TOM" with half a second of silence after it gave
+        # "" (the old decoder gave "H", "EE" and "TO").
+        rate = 8000.0
+        key = enc.morse_keying(text, rate, 20, edge_s=0.0, lead_s=0.5, tail_s=0.5)
+        demod = CWDemodulator(rate)
+        assert demod.decode_morse(demod.detect_keying(key)) == text
+        # A capture that stops right after its last letter: flush() ends it.
+        key = enc.morse_keying(text, rate, 20, edge_s=0.0, lead_s=0.5, tail_s=0.05)
+        demod = CWDemodulator(rate)
+        returned = demod.decode_morse(demod.detect_keying(key))
+        returned += demod.flush()
+        assert returned.strip() == text
+        assert demod.decoded_text == returned
+        assert demod.flush() == ""
+
 
 # --------------------------------------------------------------------------- #
 # MorseDecoder and KeyingDetector
@@ -166,8 +185,10 @@ class TestSpeeds:
         x = np.concatenate([x, np.zeros(int(3 * rate), dtype=np.complex64)])
         rng = np.random.default_rng(3)
         sigma = 0.1 * np.sqrt(rate / 500.0 / 10**3.0 / 2)
-        x += (sigma * rng.standard_normal(2 * len(x))).view(np.complex128).astype(
-            np.complex64
+        x += (
+            (sigma * rng.standard_normal(2 * len(x)))
+            .view(np.complex128)
+            .astype(np.complex64)
         )
         decoder = create_live_decoder("CW (Morse)", rate)
         lines = []
@@ -220,6 +241,73 @@ class TestSpeeds:
             # As the CW channel leaves it, band-limited.
             text, morse = _decode(_noisy(np.zeros(120_000), 0.0, seed), rate)
             assert text == [] and morse.characters == 0, seed
+
+    @staticmethod
+    def _shaped_noise(seconds, level, seed, rate=2000.0):
+        """Noise as the CW channel leaves it (band-limited to +/-250 Hz),
+        its amplitude shaped by ``level`` (an array over time)."""
+        rng = np.random.default_rng(seed)
+        n = int(seconds * rate)
+        white = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) * level
+        spectrum = np.fft.fft(white)
+        spectrum[np.abs(np.fft.fftfreq(n, 1.0 / rate)) > 250.0] = 0.0
+        return np.fft.ifft(spectrum).astype(np.complex64)
+
+    @staticmethod
+    def _crashes(seconds, seed, rate=2000.0):
+        """Static crashes: 12 dB bursts of 20-120 ms about once a second."""
+        rng = np.random.default_rng(seed)
+        level = np.ones(int(seconds * rate))
+        t = rng.uniform(0.5, 1.5)
+        while t < seconds:
+            length = rng.uniform(0.02, 0.12)
+            level[int(t * rate) : int((t + length) * rate)] = 10 ** (12 / 20)
+            t += length + rng.uniform(0.5, 1.5)
+        return level
+
+    def test_static_crashes_decode_next_to_nothing(self):
+        # DEC-10: each crash of static keyed one mark, a gap of 1.5 s then
+        # took whatever was queued for a transmission, and every crash
+        # after that was an E or a T: about one character a second. Now a
+        # lone E or T is not shown; a crash that keys twice can still make
+        # an I or an N now and then.
+        rate = 2000.0
+        for seed in (1, 2, 3):
+            x = self._shaped_noise(90.0, self._crashes(90.0, seed), seed)
+            _text, morse = _decode(x, rate, block=66)
+            assert morse.characters <= 5, seed
+
+    def test_a_slow_swing_of_the_noise_decodes_nothing(self):
+        # DEC-10: band noise rising and falling 4 dB over 6 s (fading, a
+        # pumping AGC) outran the floor and keyed: 70 characters in 5 min.
+        rate = 2000.0
+        t = np.arange(int(180 * rate)) / rate
+        level = 10 ** (4.0 * np.sin(2 * np.pi * t / 6.0) / 20)
+        for seed in (1, 2):
+            text, morse = _decode(self._shaped_noise(180.0, level, seed), rate, 66)
+            assert text == [] and morse.characters == 0, seed
+
+    def test_crashes_after_a_transmission_add_nothing(self):
+        rate = 2000.0
+        x = enc.cw_baseband(MESSAGE, rate, 20, offset_hz=30.0)
+        after = self._crashes(40.0, 3)
+        level = np.concatenate([np.ones(len(x)), after])
+        noise = self._shaped_noise(len(level) / rate, level, 3)
+        signal = np.concatenate([x, np.zeros(len(after), dtype=np.complex64)])
+        text, morse = _decode(np.sqrt(10**1.2) * signal + noise, rate, block=66)
+        assert text == [MESSAGE]
+        assert morse.characters == len(MESSAGE.replace(" ", ""))
+
+    def test_a_blip_before_a_long_pause_is_not_a_letter(self):
+        # One or two marks and then silence: noise, not a transmission.
+        rate = 1000.0
+        for marks in ([60], [60, 180]):
+            key = np.zeros(500)
+            for length in marks:
+                key = np.concatenate([key, np.ones(length), np.zeros(60)])
+            morse = MorseDecoder(rate)
+            lines = morse.process(np.concatenate([key, np.zeros(3000)]))
+            assert lines + morse.flush() == [] and morse.characters == 0, marks
 
     def test_silence_decodes_nothing(self):
         text, morse = _decode(np.zeros(20_000, dtype=np.complex64), 2000.0)

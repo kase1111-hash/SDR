@@ -12,20 +12,25 @@ decoded 33 ms at a time gives the same text as the whole recording at once:
   blocks: the signal's peak (it follows a rising envelope at once and
   decays over seconds) and the noise floor (it follows a falling envelope
   at once and rises over seconds, far more slowly while a strong signal
-  keys, so a long carrier is not taken for noise). The key goes down when the
-  envelope is 60% of the way from the floor to the peak and comes up below
-  40% (hysteresis), and only while the peak stands clear of the floor, so
-  noise alone does not key. A change must hold for a few milliseconds
-  (both edges are delayed alike, so the timing is kept). Decisions are made
-  at about 1 kHz whatever the input rate; the smoothing is vectorised.
+  keys, so a long carrier is not taken for noise, and faster while nothing
+  keys, so a slow swing of the noise level does not open the gate). The
+  key goes down when the envelope is 60% of the way from the floor to the
+  peak and comes up below 40% (hysteresis), and only while the peak stands
+  clear of the floor, so noise alone does not key. A change must hold for
+  a few milliseconds (both edges are delayed alike, so the timing is
+  kept). Decisions are made at about 1 kHz whatever the input rate; the
+  smoothing is vectorised.
 - :class:`MorseDecoder` times the marks and gaps (the run in progress is
   carried over block boundaries), learns the dit length from the marks
   (two clusters, dits and dashes, so the speed is found on its own) and
   turns them into letters, words and lines. The first few elements wait
-  until the speed is known, so the first letters decode too. A mark much
-  longer than a dash (a tuning carrier) ends the line and is left out of
-  the speed; so does a long silence. The speed is ``1.2 / dit`` words per
-  minute (PARIS), 5 to 60 WPM.
+  until the speed is known, so the first letters decode too; a pause of a
+  word or more ends a transmission even if it was too short for that. A
+  mark much longer than a dash (a tuning carrier) ends the line and is
+  left out of the speed; so does a long silence. A lone dit or dash (an E
+  or a T as a word of its own: what a crash of static gives) is not
+  shown, nor is a blip of fewer than three marks. The speed is
+  ``1.2 / dit`` words per minute (PARIS), 5 to 60 WPM.
 
 NumPy only; no Qt.
 """
@@ -149,6 +154,12 @@ class KeyingDetector:
     PEAK_DECAY_S = 2.0
     FLOOR_FALL_S = 0.05
     FLOOR_RISE_S = 3.0
+    #: While the gate is closed (nothing keys) the floor follows a rising
+    #: noise level faster, so a slow swing of the band noise (fading, a
+    #: receiver's AGC) does not open it; a signal still opens it at once
+    #: (the peak follows within milliseconds), and from then on the floor
+    #: rises at the usual pace.
+    FLOOR_RISE_CLOSED_S = 1.0
     #: While the key is down on a strong signal (peak at least ``STRONG``
     #: times the floor) the floor rises much more slowly, so a long carrier
     #: (a beacon's tuning dash) is not taken for the noise.
@@ -190,6 +201,7 @@ class KeyingDetector:
         self._a_peak_down = _alpha(work, self.PEAK_DECAY_S)
         self._a_floor_down = _alpha(work, self.FLOOR_FALL_S)
         self._a_floor_up = _alpha(work, self.FLOOR_RISE_S)
+        self._a_floor_up_closed = _alpha(work, self.FLOOR_RISE_CLOSED_S)
         self._a_floor_up_keyed = _alpha(work, self.FLOOR_RISE_KEYED_S)
         self._debounce = max(1, int(round(self.DEBOUNCE_S * work)))
         self._warmup = int(round(self.WARMUP_S * work))
@@ -278,6 +290,7 @@ class KeyingDetector:
         a_pu, a_pd = self._a_peak_up, self._a_peak_down
         a_fd, a_fu = self._a_floor_down, self._a_floor_up
         a_fk = self._a_floor_up_keyed
+        a_fc = self._a_floor_up_closed
         strong_ratio = self.STRONG
         gate_high, gate_low = self.GATE, self.GATE_LOW
         press, release = self.PRESS, self.RELEASE
@@ -301,9 +314,10 @@ class KeyingDetector:
             else:
                 if v < floor:
                     floor += a_fd * (v - floor)
+                elif key and peak > strong_ratio * floor:
+                    floor += a_fk * (v - floor)
                 else:
-                    strong = key and peak > strong_ratio * floor
-                    floor += (a_fk if strong else a_fu) * (v - floor)
+                    floor += (a_fu if gate_open else a_fc) * (v - floor)
                 if peak < min_level:
                     gate_open = False
                 elif gate_open:
@@ -360,9 +374,14 @@ class MorseDecoder:
     #: Marks remembered for the speed estimate; how many it takes first.
     MARKS_KEPT = 16
     CALIBRATE_MARKS = 6
-    #: A gap this long (seconds) ends a transmission: what was heard so far
-    #: is decoded even if it had too few marks for a confident speed.
+    #: A gap this long (seconds), or ``END_GAP_DITS`` at the speed the
+    #: marks heard so far suggest, ends a transmission: what was heard is
+    #: decoded even if it had too few marks for a confident speed, when it
+    #: had at least ``CALIBRATE_GAP_MARKS`` marks (fewer are a blip of
+    #: noise and are dropped, after ``CALIBRATE_GAP_S``).
     CALIBRATE_GAP_S = 1.5
+    END_GAP_DITS = 7.0
+    CALIBRATE_GAP_MARKS = 3
     WPM_RANGE = (5.0, 60.0)
 
     def __init__(self, rate: float, wpm: float = 20.0, line_chars: int = 60):
@@ -386,6 +405,8 @@ class MorseDecoder:
         self._queue: List[Tuple[str, int]] = []  # events waiting for a speed
         self._replaying = False
         self._letter = ""
+        self._word_letters = 0  # letters of the word in progress
+        self._held = ""  # its first letter, while it is a lone E or T
         self._pending_space = False
         self.line = ""
         self.text = ""
@@ -499,15 +520,19 @@ class MorseDecoder:
         else:
             self._queue.append(("gap", self._gap))
             self._queue.append(("mark", length))
-            if length <= self._longest_element:
+            if length > self._longest_element:
+                # A carrier, longer than an element at any speed: what was
+                # heard before it is a transmission of its own.
+                self._end_transmission()
+            else:
                 self._marks.append(float(length))
-            estimate = self._estimate()
-            if len(self._marks) >= 2 * self.CALIBRATE_MARKS or (
-                len(self._marks) >= self.CALIBRATE_MARKS
-                and estimate is not None
-                and estimate[1]
-            ):
-                self._calibrate()
+                estimate = self._estimate()
+                if len(self._marks) >= 2 * self.CALIBRATE_MARKS or (
+                    len(self._marks) >= self.CALIBRATE_MARKS
+                    and estimate is not None
+                    and estimate[1]
+                ):
+                    self._calibrate()
         self._stage = 0
 
     def _is_carrier(self, length: float, dit: Optional[float] = None) -> bool:
@@ -542,10 +567,11 @@ class MorseDecoder:
         line). Calling it again with a longer length does the rest, so it
         makes no difference where the blocks end."""
         if not self._calibrated:
-            if not (self._queue and length >= self.CALIBRATE_GAP_S * self.rate):
+            if not (self._queue and self._transmission_over(length)):
                 return
             # The end of a transmission: decode what it had.
-            self._calibrate()
+            if not self._end_transmission():
+                return
         dit = self._dit
         if self._stage < 1 and length >= self.LETTER_GAP * dit:
             self._stage = 1
@@ -561,6 +587,27 @@ class MorseDecoder:
             self._stage = 3
             self._end_line()
 
+    def _transmission_over(self, gap: int) -> bool:
+        """Whether a gap of ``gap`` samples ends the queued transmission
+        (the speed is not known yet)."""
+        if gap >= self.CALIBRATE_GAP_S * self.rate:
+            return True
+        if len(self._marks) < self.CALIBRATE_GAP_MARKS:
+            return False
+        estimate = self._estimate()
+        return estimate is not None and gap >= self.END_GAP_DITS * estimate[0]
+
+    def _end_transmission(self) -> bool:
+        """The queued transmission ended before the speed was known: decode
+        it if it had enough marks to be one, else drop it (a blip of
+        noise). Whether it was decoded."""
+        if len(self._marks) >= self.CALIBRATE_GAP_MARKS:
+            self._calibrate()
+            return True
+        self._queue = []
+        self._marks.clear()
+        return False
+
     # -- text ----------------------------------------------------------------
 
     def _emit(self, chars: str) -> None:
@@ -575,14 +622,30 @@ class MorseDecoder:
         if not self._letter:
             return
         char = MORSE_CODE.get(self._letter, UNKNOWN_CHAR)
+        lone = len(self._letter) == 1 and not self._word_letters
         self._letter = ""
+        self._word_letters += 1
+        if lone:
+            # A dit or a dash starting a word (E or T) shows once the word
+            # goes on: alone, it is most likely a crash of static.
+            self._held = char
+            return
+        if self._held:
+            self._show(self._held)
+            self._held = ""
+        self._show(char)
+
+    def _show(self, char: str) -> None:
         self.characters += 1
         self._emit(char)
 
     def _space(self) -> None:
         """A word gap: the next character starts a new word (the space is
-        added with it, so :attr:`text` only ever grows)."""
+        added with it, so :attr:`text` only ever grows). A word that was a
+        lone E or T is dropped."""
         self._end_letter()
+        self._held = ""
+        self._word_letters = 0
         if self.line and not self._pending_space:
             if len(self.line) >= self.line_chars:
                 self._end_line()
@@ -591,6 +654,8 @@ class MorseDecoder:
 
     def _end_line(self) -> None:
         self._end_letter()
+        self._held = ""
+        self._word_letters = 0
         self._pending_space = False
         line = self.line.strip()
         self.line = ""
@@ -620,7 +685,7 @@ class MorseDecoder:
         if self._key:
             self._mark_ended(self._run)
         if not self._calibrated and self._queue:
-            self._calibrate()
+            self._end_transmission()
         self._end_line()
         messages, self._messages = self._messages, []
         return messages

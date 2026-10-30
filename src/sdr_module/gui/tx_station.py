@@ -253,12 +253,15 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             return f"Can't send on {where}: {problem}.", "danger", False
         estimate = format_dbm_power(self.power.output_dbm(freq))
         how = "FM tone ID" if mode == "FM" else "CW ID"
-        return (
-            f"Will send on {where} · {how} · TX gain {self.power.gain_db} dB "
-            f"(about {estimate.split(' (')[0]})",
-            "info",
-            True,
+        what = (
+            f"{where} · {how} · TX gain {self.power.gain_db} dB "
+            f"(about {estimate.split(' (')[0]})"
         )
+        panel = self._panel()
+        if panel is not None and not panel.is_callsign_valid():
+            # (The callsign line says what is missing; Send waits for it.)
+            return f"With a callsign, Send ID Now sends on {what}", None, True
+        return f"Will send on {what}", "info", True
 
     def refresh(self) -> None:
         """Bring the Ham ID panel's TX line, Send button and power estimate
@@ -436,6 +439,17 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             sample = make_id(job)
             if sample is not None:
                 id_jobs.append(sample)
+        if (
+            problem is None
+            and not job.is_id
+            and job.identify
+            and make_id is None
+            and _in_amateur_band(job.center_hz)
+        ):
+            problem = (
+                "an amateur transmission must be identified: enter your callsign "
+                "in Ham Radio > Ham ID first"
+            )
         if problem is None:
             problem = self.engine.check(job, self._device(), id_jobs)
         if problem is None:
@@ -609,6 +623,13 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         self._resume_rx = False
         self._result_line = (self._inputs(), line, tone)
         self.refresh()
+
+
+def _in_amateur_band(freq_hz: float) -> bool:
+    """Whether ``freq_hz`` is in an amateur band (for any license class)."""
+    from ..core.frequency_manager import AMATEUR_BAND_PRIVILEGES
+
+    return any(b.start_hz <= freq_hz <= b.end_hz for b in AMATEUR_BAND_PRIVILEGES)
 
 
 __all__ = ["ID_DEVIATION_HZ", "ID_SAMPLE_RATE", "StationTx"]

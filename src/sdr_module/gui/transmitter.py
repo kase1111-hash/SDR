@@ -413,6 +413,13 @@ class _Plan:
         if identify and policy is not None and policy.at_end:
             self._add_id(front=False)
         self.total = sum(int(seg.source.total_samples) for seg in self._segments)
+        # What is checked before sending: the job and its IDs (with only
+        # interval IDs, one made now stands for them: its mode and width).
+        self.check_jobs: List[TxJob] = list(self.id_jobs)
+        if identify and self._interval is not None and not self.check_jobs:
+            sample = self._make_id(job) if self._make_id is not None else None
+            if sample is not None:
+                self.check_jobs.append(sample)
 
     def _add_id(self, front: bool) -> bool:
         if self._make_id is None:
@@ -434,12 +441,12 @@ class _Plan:
 
     @property
     def modes(self) -> Tuple[str, ...]:
-        modes = [self.job.mode] + [j.mode for j in self.id_jobs]
+        modes = [self.job.mode] + [j.mode for j in self.check_jobs]
         return tuple(dict.fromkeys(m for m in modes if m))
 
     @property
     def bandwidth_hz(self) -> float:
-        return max([self.job.bandwidth_hz] + [j.bandwidth_hz for j in self.id_jobs])
+        return max([self.job.bandwidth_hz] + [j.bandwidth_hz for j in self.check_jobs])
 
     def next_id_in_s(self) -> Optional[float]:
         """Air time until the next interval ID, or None (no interval IDs)."""
@@ -537,6 +544,15 @@ def can_transmit(device: Any) -> bool:
 
 def _state(device: Any) -> Any:
     return getattr(device, "state", None)
+
+
+def _tx_filter(device: Any, occupied_hz: float, rate: float) -> float:
+    """The narrowest baseband filter the device has that passes the job:
+    its occupied bandwidth and 3/4 of its sample rate (the images of the
+    DAC stay out)."""
+    wanted = max(float(occupied_hz), 0.75 * float(rate))
+    choices = sorted(getattr(device, "SUPPORTED_BANDWIDTHS", None) or [wanted])
+    return next((bw for bw in choices if bw >= wanted), choices[-1])
 
 
 class Transmitter(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
@@ -665,7 +681,7 @@ class Transmitter(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         cancel = threading.Event()
         since = self.seconds_since_last_id()
         plan = _Plan(job, policy, make_id, since, cancel)
-        problem = self.check(job, device, plan.id_jobs)
+        problem = self.check(job, device, plan.check_jobs)
         if problem is None and getattr(_state(device), "is_streaming", False):
             problem = "the receiver is still running"
         if problem is None and getattr(_state(device), "is_transmitting", False):
@@ -751,10 +767,9 @@ class Transmitter(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
                     raise RuntimeError(
                         f"it runs at {now / 1e6:g} MS/s, not {rate / 1e6:g}"
                     )
-            # The narrowest baseband filter that passes the job (the driver
-            # rounds up to what the hardware has, 1.75 MHz at least).
-            width = max(float(job.bandwidth_hz), 0.75 * rate)
-            device.set_bandwidth(width)
+            # The narrowest baseband filter that passes the job (1.75 MHz,
+            # the HackRF's narrowest, for anything up to 2.3 MS/s).
+            device.set_bandwidth(_tx_filter(device, job.bandwidth_hz, rate))
             if abs(saved["frequency"] - float(job.center_hz)) > 0.5:
                 if device.set_frequency(float(job.center_hz)) is False:
                     raise RuntimeError(f"it didn't tune to {format_mhz(job.center_hz)}")

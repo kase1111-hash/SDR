@@ -725,10 +725,13 @@ class PresetButton(QPushButton if HAS_PYQT6 else object):
 
     def set_unreachable(self, reason: str) -> None:
         """Why the connected device can't tune this preset ("" if it can):
-        the button is disabled and the tooltip says why."""
+        the button says "out of range" and the tooltip why (it stays
+        enabled, so a station can still be stored in it, or it renamed)."""
         self._unreachable = reason
-        self.setEnabled(not reason)
         self.set_preset(self._preset)
+
+    def unreachable(self) -> str:
+        return self._unreachable
 
     def set_preset(self, preset: Optional[RadioPreset]) -> None:
         """Store a preset for this button (``None`` leaves it empty)."""
@@ -739,14 +742,15 @@ class PresetButton(QPushButton if HAS_PYQT6 else object):
             self.setToolTip(f"Preset {self._number} is empty. {how}")
             return
         freq = format_station(preset.frequency_hz, preset.band)
+        line = f"{freq} (out of range)" if self._unreachable else freq
         if preset.name:
-            self.setText(f"&{self._number}  {preset.name}\n{freq}")
+            self.setText(f"&{self._number}  {preset.name}\n{line}")
             tip = f"Tune to {preset.name} ({freq}). {how}"
         else:
-            self.setText(f"&{self._number}\n{freq}")
+            self.setText(f"&{self._number}\n{line}")
             tip = f"Tune to {freq}. {how} Right-click to name it."
         if self._unreachable:
-            tip = f"{freq}: {self._unreachable}"
+            tip = f"{freq}: {self._unreachable} {how}"
         self.setToolTip(tip)
 
     def get_preset(self) -> Optional[RadioPreset]:
@@ -1192,7 +1196,12 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
     def _on_preset_clicked(self, index: int) -> None:
         """Handle preset button click."""
         presets = self._current_presets()
-        if index < len(presets) and presets[index] is not None:
+        reason = self._preset_buttons[index].unreachable()
+        if index < len(presets) and presets[index] is not None and reason:
+            self._refresh_preset_states()
+            freq = format_station(presets[index].frequency_hz, self._band)
+            self._show_hint(f"{freq}: {reason}", "warning")
+        elif index < len(presets) and presets[index] is not None:
             self._apply_frequency(presets[index].frequency_hz)
         else:
             self._refresh_preset_states()
@@ -1512,10 +1521,14 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         demo device) and its name: presets it can't reach are disabled and
         the AM band is explained (or disabled) when it can't tune it."""
         if low_hz is None or high_hz is None:
-            self._device_range = None
+            device_range = None
         else:
-            self._device_range = (float(low_hz), float(high_hz))
-        self._device_name = name or "The receiver"
+            device_range = (float(low_hz), float(high_hz))
+        name = name or "The receiver"
+        if (device_range, name) == (self._device_range, self._device_name):
+            return  # (unchanged: keep the footer's feedback)
+        self._device_range = device_range
+        self._device_name = name
         am_low, am_high = AM_RANGE
         reachable = self._device_range is None or (
             self._device_range[0] <= am_high and self._device_range[1] >= am_low

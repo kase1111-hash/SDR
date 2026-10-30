@@ -157,6 +157,33 @@ class TestTxLine(_TxCase):
         self.assertEqual(self.boxes, [])
         self.assertFalse(self.station.busy)
 
+    def test_without_a_callsign_the_line_says_what_it_would_do(self):
+        self.hackrf()
+        self.assertTrue(
+            self.panel.tx_status_text().startswith(
+                "With a callsign, Send ID Now sends on 146.520 MHz · FM tone ID"
+            )
+        )
+        self.assertFalse(self.panel._id_now_btn.isEnabled())
+        self.assertFalse(self.station.send_station_id())
+        self.assertEqual(
+            self.status(),
+            (
+                "ID not sent: enter your callsign in Ham Radio > Ham ID first.",
+                "warning",
+            ),
+        )
+
+    def test_an_unidentified_amateur_transmission_is_refused(self):
+        """Without a callsign the IDs it needs can't be sent."""
+        from sdr_module.gui.transmitter import TxJob
+
+        self.hackrf()
+        carrier = np.full(1000, 0.5, np.complex64)
+        job = TxJob(carrier, 2e6, 146.52e6, "FM", 12.5e3, "a test carrier")
+        self.assertFalse(self.win._transmit_job(job))
+        self.assertIn("an amateur transmission must be identified", self.status()[0])
+
     def test_license_is_checked_at_the_tuned_frequency(self):
         from sdr_module.core.frequency_manager import LicenseClass
 

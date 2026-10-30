@@ -298,6 +298,12 @@ class TestHamId(_WindowTestCase):
         self.win._control_panel.set_license_class(LicenseClass.TECHNICIAN)
         self.win._refresh_state_ui()
         self.assertIs(panel._tx_available, True)
+        self.assertTrue(
+            panel.tx_status_text().startswith(
+                "With a callsign, Send ID Now sends on 146.520 MHz"
+            )
+        )
+        panel.set_callsign("W1AW")
         self.assertTrue(panel.tx_status_text().startswith("Will send on 146.520 MHz"))
         self.win._control_panel.set_license_class(LicenseClass.NONE)
         self.assertIs(panel._tx_available, False)

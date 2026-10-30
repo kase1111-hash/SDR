@@ -159,6 +159,9 @@ class TestCalculatedOutput(_PanelCase):
         self.assertEqual(p._power_display._status_label.text(), "QRP")
         p.set_demod_mode("CW")
         self.assertEqual(p._power_display._status_label.text(), "Low Power")
+        p.set_demod_mode("None (I/Q)")  # digital: the 5 W limit, like CW
+        self.assertEqual(p._power_display._status_label.text(), "Low Power")
+        self.assertIn("5 W QRP limit", p._power_display._detail_label.text())
         combo.setCurrentText("SSB")  # a manual choice overrides
         self.assertEqual(p.mode(), "SSB")
         self.assertEqual(combo.face_text(), "SSB")

@@ -238,7 +238,7 @@ class TestAmBandPerDevice(_TunerCase):
         self.assertEqual(t.get_frequency(), 1010e3)
         self.assertEqual(self.emitted[-1], (1010e3, "AM"))
         reachable = {
-            b.get_preset().frequency_hz: b.isEnabled() for b in t._preset_buttons
+            b.get_preset().frequency_hz: not b.unreachable() for b in t._preset_buttons
         }
         self.assertEqual(
             reachable,
@@ -251,9 +251,20 @@ class TestAmBandPerDevice(_TunerCase):
                 1260e3: True,
             },
         )
-        self.assertIn("HackRF One can't tune it", t._preset_buttons[0].toolTip())
         self.assertIn("HackRF One tunes from 1000 kHz", t._hint_label.text())
         self.assertIn("HackRF One tunes from 1000 kHz", t._am_btn.toolTip())
+        first = t._preset_buttons[0]
+        self.assertEqual(first.text(), "&1\n880 kHz (out of range)")
+        self.assertIn("HackRF One can't tune it", first.toolTip())
+        # A click explains instead of tuning; the slot can still be reused.
+        self.emitted.clear()
+        self.assertTrue(first.isEnabled())
+        first.click()
+        self.assertEqual(self.emitted, [])
+        self.assertFalse(first.isChecked())
+        self.assertIn("880 kHz: HackRF One can't tune it", t._hint_label.text())
+        t.store_preset(0)  # (the tuner is on 1010 kHz)
+        self.assertEqual(first.text(), "&1\n1010 kHz")
 
     def test_a_device_without_mw_disables_am_and_says_why(self):
         t = self.tuner
@@ -271,7 +282,7 @@ class TestAmBandPerDevice(_TunerCase):
         self.assertIn("direct sampling", t._hint_label.text())
         t.set_device_range(None, None, "Demo Device")
         self.assertNotIn("direct sampling", t._am_btn.toolTip())
-        self.assertTrue(all(b.isEnabled() for b in t._preset_buttons))
+        self.assertFalse(any(b.unreachable() for b in t._preset_buttons))
 
 
 class TestSeekWithoutReceiver(_TunerCase):

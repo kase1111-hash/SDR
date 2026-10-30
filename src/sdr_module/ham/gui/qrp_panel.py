@@ -54,7 +54,17 @@ from ..qrp import (
 )
 
 # Modes held to the stricter CW/digital QRP limit (matches QRPController).
-_CW_DIGITAL_MODES = ("CW", "RTTY", "PSK", "FT8", "FT4", "JT65", "WSPR", "DATA")
+_CW_DIGITAL_MODES = (
+    "CW",
+    "RTTY",
+    "PSK",
+    "FT8",
+    "FT4",
+    "JT65",
+    "WSPR",
+    "DATA",
+    "DIGITAL",
+)
 # Power within this many dB of a limit counts as "at" the limit. Whole-dB
 # steps land just beside round watt values (+37 dBm is 5.01 W), which would
 # otherwise show "5.0 W" next to "Above the 5 W QRP limit".
@@ -154,7 +164,7 @@ def format_dbm(dbm: float) -> str:
 
 def qrp_limit_for_mode(mode: str) -> float:
     """QRP ceiling in watts for ``mode`` (5 W CW/digital, 10 W phone)."""
-    if mode.upper() in _CW_DIGITAL_MODES or mode == "Digital":
+    if mode.upper() in _CW_DIGITAL_MODES:
         return QRP_LIMITS.qrp_cw_watts
     return QRP_LIMITS.qrp_ssb_watts
 
@@ -1177,8 +1187,8 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         return _DEMOD_TO_QRP.get(demod, "FM")
 
     def _class_mode(self) -> str:
-        mode = self.mode()
-        return "DATA" if mode == "Digital" else mode
+        """The mode the QRP class is judged in (Digital: the CW/data 5 W)."""
+        return self.mode()
 
     def set_demod_mode(self, mode: str) -> None:
         """Demodulation > Mode changed (Auto follows it)."""

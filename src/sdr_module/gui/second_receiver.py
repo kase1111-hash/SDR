@@ -1539,11 +1539,40 @@ if HAS_PYQT6:
                 self._save(f"{KEY}sample_rate/{kind}", rate)
                 self._refresh_state()
                 return
+            dev = self._device
+            # Hardware takes the new rate between two streams, and what it
+            # queued at the old rate is dropped (it would be taken for the
+            # new rate: a wrong waterfall line, a blip of audio at the wrong
+            # pitch), as in the main window.
+            pause = isinstance(dev, SDRDevice) and self._running
+            if pause:
+                try:
+                    dev.stop_rx()
+                except Exception as e:  # pragma: no cover - driver-dependent
+                    logger.debug(f"Second receiver: stop_rx for the rate: {e}")
             try:
-                ok = self._device.set_sample_rate(rate)
+                ok = dev.set_sample_rate(rate)
             except Exception as e:
                 logger.warning(f"Second receiver: sample rate {rate}: {e}")
                 ok = False
+            self._apply_baseband_filter()  # (for the rate it runs at)
+            if pause:
+                dev.discard_queued_samples()
+                try:
+                    started = dev.start_rx() is not False
+                except Exception as e:
+                    logger.error(f"Second receiver: could not restart receiving: {e}")
+                    started = False
+                if not started:
+                    name = self._device_name()
+                    self.stop(quiet=True)
+                    self._show_message(
+                        f"{name} didn't restart receiving after the sample rate "
+                        "change (details in Tools > Error History): press Start.",
+                        "danger",
+                        10000,
+                    )
+                    return
             if ok is False:
                 # (Not remembered: it would be asked for at every open.)
                 self._fill_rates()
@@ -1556,7 +1585,6 @@ if HAS_PYQT6:
             # A new span: the filters, the noise floor and the pacing start
             # afresh (the audio fading out first); a narrower span may no
             # longer hold the channel.
-            self._apply_baseband_filter()
             if self._audio_open:
                 self._audio.write(self._dsp.release())
             self._dsp.reset()

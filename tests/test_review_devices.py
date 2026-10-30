@@ -34,7 +34,11 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import sdr_module.devices.hackrf as hackrf_mod  # noqa: E402
-from tests.hackrf_fakes import ThreadedFakeHackRF, install_fake_backend  # noqa: E402
+from tests.hackrf_fakes import (  # noqa: E402
+    BUFFER_LENGTH,
+    ThreadedFakeHackRF,
+    install_fake_backend,
+)
 from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
 from tests.test_gui_device_settings import FakeRtlSdr, _DeviceCase  # noqa: E402
 from tests.test_gui_second_receiver import _SecondCase  # noqa: E402
@@ -764,6 +768,79 @@ class TestDev6SecondReceiverRtlFrontEnd(_SecondDriverCase):
         self.choose("hackrf")
         self.assertFalse(self.shown(rx._direct_combo))
         self.assertFalse(self.shown(rx._ppm_spin))
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestDev7SecondReceiverLiveRate(_SecondDriverCase):
+    """The stream pauses for the new rate, and what the device queued at
+    the old rate is dropped (as in the main window)."""
+
+    OLD = 77  # (the I/Q bytes of a transfer taken at the old rate)
+
+    def choose_rate(self, rate):
+        combo = self.rx._rate_combo
+        index = combo.findData(rate)
+        self.assertGreaterEqual(index, 0)
+        combo.setCurrentIndex(index)
+        combo.activated.emit(index)
+
+    def queue_old_rate_transfers(self, fake, count=3):
+        marker = np.full(BUFFER_LENGTH, self.OLD, dtype=np.int8)
+        for _ in range(count):  # (as libhackrf's USB thread hands them over)
+            fake._rx_cb(fake, marker, BUFFER_LENGTH, BUFFER_LENGTH)
+
+    def test_transfers_queued_at_the_old_rate_are_dropped(self):
+        fake = self.use_hackrf()
+        rx = self.rx
+        dev = self.start_on("hackrf")
+        self.assertEqual(rx._rate(), 2.4e6)
+        self.queue_old_rate_transfers(fake)
+        self.assertEqual(dev._sample_queue.qsize(), 3)
+        calls = []
+        for name in (
+            "stop_rx",
+            "set_sample_rate",
+            "discard_queued_samples",
+            "start_rx",
+        ):
+            real = getattr(dev, name)
+
+            def spy(*args, _real=real, _name=name):
+                calls.append(_name)
+                return _real(*args)
+
+            setattr(dev, name, spy)
+        processed = []
+        real_process = rx._process
+
+        def process(samples):
+            old = np.allclose(samples[:4], (self.OLD + 1j * self.OLD) / 128.0)
+            processed.append(("old" if old else "new", rx._rate()))
+            return real_process(samples)
+
+        rx._process = process
+        self.choose_rate(8e6)
+        self.assertEqual(
+            calls, ["stop_rx", "set_sample_rate", "discard_queued_samples", "start_rx"]
+        )
+        self.assertEqual(dev._sample_queue.qsize(), 0)
+        self.assertTrue(rx.running and dev.state.is_streaming)
+        self.assertEqual(rx._rate(), 8e6)
+        self.assertEqual(fake.bandwidth, 6_000_000)  # (0.75 x the new rate)
+        fresh = np.zeros(BUFFER_LENGTH, dtype=np.int8)
+        fake._rx_cb(fake, fresh, BUFFER_LENGTH, BUFFER_LENGTH)
+        rx._frame()
+        self.assertEqual(processed, [("new", 8e6)])
+
+    def test_a_stream_that_wont_restart_stops_with_the_reason(self):
+        self.use_hackrf()
+        rx = self.rx
+        dev = self.start_on("hackrf")
+        dev.start_rx = lambda callback=None: False
+        self.choose_rate(2.0e6)
+        self.assertFalse(rx.running)
+        self.assertIsNone(rx.device)
+        self.assertIn("didn't restart receiving", rx.message())
 
 
 if __name__ == "__main__":

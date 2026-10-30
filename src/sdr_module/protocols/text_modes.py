@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import math
 import os
 import wave
 from dataclasses import dataclass, field, replace
@@ -175,10 +176,15 @@ class TextSettings:
         return replace(base, **values).clamped()
 
     def clamped(self) -> "TextSettings":
-        """These settings with every value in its range."""
+        """These settings with every value in its range (a value that is not
+        a number takes the bottom of its range). Both FSK tones stay in
+        :data:`AUDIO_RANGE` (see :func:`audio_bounds`)."""
 
         def clamp(value: float, bounds: Tuple[float, float]) -> float:
-            return float(min(max(float(value), bounds[0]), bounds[1]))
+            value = float(value)
+            if math.isnan(value):
+                return float(bounds[0])
+            return float(min(max(value, bounds[0]), bounds[1]))
 
         mode = normalize_mode(self.mode)
         baud = PSK31_BAUD if mode == MODE_PSK31 else clamp(self.baud, BAUD_RANGE)
@@ -188,9 +194,13 @@ class TextSettings:
             clamp(self.wpm, WPM_RANGE),
             baud,
             shift,
-            clamp(self.audio_hz, AUDIO_RANGE),
+            clamp(self.audio_hz, audio_bounds(mode, shift)),
             "ita2" if str(self.figures).lower() == "ita2" else "us",
         )
+
+    def audio_bounds(self) -> Tuple[float, float]:
+        """The range ``audio_hz`` may take with these settings."""
+        return audio_bounds(self.mode, self.shift_hz)
 
     @property
     def symbol_rate(self) -> float:
@@ -237,6 +247,20 @@ def normalize_mode(mode: str) -> str:
 def format_number(value: float) -> str:
     """``45.45 -> "45.45"``, ``300.0 -> "300"``."""
     return f"{float(value):.2f}".rstrip("0").rstrip(".")
+
+
+def audio_bounds(mode: str, shift_hz: float = 0.0) -> Tuple[float, float]:
+    """The range of the audio tone (CW, PSK31), or of the centre between
+    the two FSK tones (RTTY, ASCII), that keeps every tone in
+    :data:`AUDIO_RANGE`: the centre stays at least half the shift from
+    either end (a 100 Hz centre with a 1000 Hz shift would put space at
+    -400 Hz, which plays as 400 Hz)."""
+    low, high = AUDIO_RANGE
+    if normalize_mode(mode) in (MODE_RTTY, MODE_ASCII):
+        half = min(max(0.0, float(shift_hz)), SHIFT_RANGE[1]) / 2.0
+        # (Whole hertz, as the Transmit Text window sets them.)
+        return (float(math.ceil(low + half)), float(math.floor(high - half)))
+    return (low, high)
 
 
 # --------------------------------------------------------------------------- #
@@ -826,8 +850,9 @@ class TextSignal:
     ) -> float:
         """What the emission occupies (for the legality check, which tests
         both its edges), never less than its 99% power bandwidth whatever
-        the text: CW about five times the keying rate (at least 150 Hz); FSK
-        from the 99% bandwidth of alternating keying, the widest a text makes
+        the text: CW at least five times the keying rate (and 150 Hz), wider
+        where runs of dits need it (:func:`cw_bandwidth_hz`); FSK from the
+        99% bandwidth of alternating keying, the widest a text makes
         (:func:`fsk_bandwidth_hz`: 330 Hz for standard RTTY); PSK31 60 Hz
         (it measures about 45 Hz); on FM, Carson's rule over the highest
         audio frequency."""
@@ -840,7 +865,7 @@ class TextSignal:
                 top += PSK31_BAUD
             return 2.0 * (abs(float(deviation_hz)) + top)
         if s.mode == MODE_CW:
-            return max(150.0, 5.0 * s.wpm / 1.2)
+            return cw_bandwidth_hz(s.wpm)
         if s.mode == MODE_PSK31:
             return 60.0
         return fsk_bandwidth_hz(s.mode, s.baud, s.shift_hz)
@@ -940,6 +965,27 @@ def fsk_bandwidth_hz(mode: str, baud: float, shift_hz: float) -> float:
     measured = _power_bandwidth(signal.baseband(t), rate)
     itu = settings.baud + 1.2 * settings.shift_hz
     return float(1.1 * max(itu, measured))
+
+
+@functools.lru_cache(maxsize=64)
+def cw_bandwidth_hz(wpm: float) -> float:
+    """Occupied bandwidth (Hz) of Morse code at ``wpm``, whatever the text:
+    the ITU's necessary bandwidth on fading paths (five times the keying
+    rate, at least 150 Hz for the 5 ms key edges; what the station ID
+    declares), or 10% more than the 99% power bandwidth of the densest
+    keying (runs of dits: "5", "H", "I", "E") where that is wider: from
+    about 25 to 45 WPM, where the key edges take a larger part of each dit
+    (200 Hz measured at 40 WPM, against 167 Hz). Measured once per speed
+    (a few ms) and kept."""
+    settings = TextSettings.for_mode(MODE_CW, wpm=wpm)
+    itu = max(150.0, 5.0 * settings.symbol_rate)
+    rate = 4000.0
+    measured = 0.0
+    for pattern in ("5" * 6, "H" * 8, "I" * 12, "E" * 20):
+        signal = TextSignal(pattern, settings)
+        iq = signal.baseband(signal.times(rate))
+        measured = max(measured, _power_bandwidth(iq, rate))
+    return float(max(itu, 1.1 * measured))
 
 
 # --------------------------------------------------------------------------- #
@@ -1195,9 +1241,11 @@ __all__ = [
     "TextTxSource",
     "VARICODE",
     "ascii_bytes",
+    "audio_bounds",
     "build_text_signal",
     "char_name",
     "check_text",
+    "cw_bandwidth_hz",
     "format_number",
     "ita2_codes",
     "morse_elements",

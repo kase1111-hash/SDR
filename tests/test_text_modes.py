@@ -70,8 +70,29 @@ class TestSettings:
 
     def test_values_are_kept_in_range(self):
         s = TextSettings(MODE_RTTY, wpm=1, baud=1e6, shift_hz=5, audio_hz=1e5).clamped()
-        assert (s.wpm, s.baud, s.shift_hz, s.audio_hz) == (5.0, 1200.0, 20.0, 3500.0)
+        # (The center stops half the shift below 3500 Hz: mark is at 3500.)
+        assert (s.wpm, s.baud, s.shift_hz, s.audio_hz) == (5.0, 1200.0, 20.0, 3490.0)
         assert TextSettings(MODE_PSK31, baud=100).clamped().baud == 31.25
+        nan = TextSettings(MODE_CW, wpm=float("nan"), audio_hz=float("nan")).clamped()
+        assert (nan.wpm, nan.audio_hz) == (5.0, 100.0)  # (not NaN)
+
+    def test_fsk_tones_stay_in_the_audio_range(self):
+        """The center was only kept in 100-3500 Hz, so a low center with a
+        wide shift put space below 0 Hz (100 Hz with a 1000 Hz shift: space
+        at -400 Hz, which plays as 400 Hz, half the shift a receiver
+        expects)."""
+        low = TextSettings.for_mode(MODE_ASCII, shift_hz=1000.0, audio_hz=100.0)
+        assert low.tones() == (100.0, 1100.0)
+        high = TextSettings.for_mode(MODE_RTTY, shift_hz=850.0, audio_hz=3500.0)
+        assert high.tones() == (2650.0, 3500.0)
+        assert tm.audio_bounds(MODE_RTTY, 425.0) == (313.0, 3287.0)
+        assert low.audio_bounds() == (600.0, 3000.0)
+        assert tm.audio_bounds(MODE_CW) == tm.AUDIO_RANGE
+        assert tm.audio_bounds(MODE_PSK31) == tm.AUDIO_RANGE
+        # What a receiver plays has the two tones the settings give.
+        sig = _signal("UUUU", MODE_ASCII, baud=110.0, shift_hz=1000.0, audio_hz=100.0)
+        tones = demod.tone_frequencies(sig.audio(sig.times(RATE)), RATE)
+        assert tones == pytest.approx([100.0, 1100.0], abs=5.0)
 
     def test_describe(self):
         assert (
@@ -433,6 +454,24 @@ class TestBandwidth:
                         iq = sig.baseband(sig.times(rate))
                         measured = demod.occupied_bandwidth(iq, rate)
                         assert measured <= declared, (mode, baud, shift, text[:8])
+
+    def test_cw_bound_holds_for_runs_of_dits(self):
+        """Five times the keying rate is too little from about 25 to 45 WPM,
+        where the key edges take a larger part of each dit: runs of dits
+        measured 200 Hz at 40 WPM against 167 Hz declared."""
+        texts = ("E" * 30, "5" * 10, "H" * 12, "I" * 16, "S" * 16, "5NN " * 6)
+        for wpm in (5.0, 20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 60.0):
+            for text in texts:
+                sig = _signal(text, MODE_CW, wpm=wpm)
+                rate = 8000.0
+                iq = sig.baseband(sig.times(rate))
+                measured = demod.occupied_bandwidth(iq, rate)
+                assert measured <= sig.occupied_bandwidth_hz(), (wpm, text[:4])
+        # Where five times the keying rate is enough, that is declared (as
+        # for the station ID).
+        assert tm.cw_bandwidth_hz(20.0) == 150.0
+        assert tm.cw_bandwidth_hz(60.0) == 250.0
+        assert tm.cw_bandwidth_hz(40.0) > 200.0
 
     def test_cw_and_psk31_bounds(self):
         for wpm in (5.0, 20.0, 40.0, 60.0):

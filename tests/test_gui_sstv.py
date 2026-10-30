@@ -224,6 +224,77 @@ class TestPartialImages(_PanelCase):
         self.assertIn("audio stopped", self.panel._status_label.text())
 
 
+class TestImageEndsCleanly(_PanelCase):
+    """An image that ends (discarded, faded early, no syncs found) leaves the
+    panel listening. A pending throttled redraw used to bring it back as
+    "Receiving Robot 36: line N of 240…" with its progress bar, although
+    the decoder had stopped."""
+
+    def assert_listening_again(self, status: str):
+        panel = self.panel
+        panel._update_status()  # the next 100 ms tick
+        self.assertFalse(panel._decoder.is_receiving())
+        self.assertTrue(panel.is_receiving(), "still listening")
+        self.assertEqual(panel._status_label.text(), status)
+        self.assertTrue(panel._progress_bar.isHidden())
+        self.assertFalse(panel._image_display.has_image())
+        self.assertEqual(panel._mode_label.text(), "—")
+        self.assertEqual(panel._clear_btn.text(), "Clear")
+
+    def test_discarded_image_stays_discarded(self):
+        """hm:HAM-10: Discard Image came undone on the next timer tick."""
+        audio = encode_sstv(sstv_test_card(320, 240), "Robot 36", FS)
+        self.panel._start_btn.click()
+        self.feed(audio[: len(audio) // 2])
+        self.panel._display_dirty = True  # a redraw is pending (throttled)
+        self.panel._clear_btn.click()  # Discard Image
+        self.assert_listening_again("Image discarded. Listening for the next one…")
+
+    def test_a_fragment_that_fades_is_dropped_from_view(self):
+        spec = find_mode("Robot 36")
+        audio = encode_sstv(sstv_test_card(320, 240), spec, FS, lines=1)
+        rng = np.random.default_rng(1)
+        hiss = (0.3 * rng.standard_normal(int(8 * FS))).astype(np.float32)
+        self.panel._start_btn.click()
+        self.feed(np.concatenate([audio[: int(0.91 * FS)], hiss]))
+        self.assert_listening_again(
+            "The signal faded before the image got going. Listening for the "
+            "next one…"
+        )
+        self.assertEqual(self.history_texts(), [])
+
+    def test_a_vis_with_no_picture_after_it(self):
+        """No line came through at all: the decoder did not tell the panel,
+        which stayed on "Receiving Robot 36…"."""
+        spec = find_mode("Robot 36")
+        audio = encode_sstv(sstv_test_card(320, 240), spec, FS, lines=1)
+        self.panel._start_btn.click()
+        self.feed(
+            np.concatenate([audio[: int(0.91 * FS)], np.zeros(int(6 * FS), np.float32)])
+        )
+        self.assert_listening_again(
+            "The signal faded before the image got going. Listening for the "
+            "next one…"
+        )
+
+    def test_start_now_without_syncs_gives_up(self):
+        """hm:GAP-11: Start Now in a fixed mode with no SSTV on the channel
+        waited for a line sync until Stop was pressed."""
+        rng = np.random.default_rng(1)
+        hiss = (0.3 * rng.standard_normal(int(14 * FS))).astype(np.float32)
+        self.panel.set_mode_choice("Martin 1")
+        self.panel._start_btn.click()
+        self.feed(hiss[: int(2 * FS)])
+        self.panel._start_now_btn.click()
+        self.assertTrue(self.panel._decoder.is_receiving())
+        self.feed(hiss[int(2 * FS) :])
+        self.assert_listening_again(
+            "No Martin 1 line syncs were heard, so nothing was decoded. Check "
+            "the Mode, or wait for the next image's start tone."
+        )
+        self.assertEqual(self.panel._status_label.property("tone"), "warning")
+
+
 class TestHistoryAcrossRestarts(_PanelCase):
     def write_image(self, name, height=256):
         from sdr_module.ham.gui.sstv_panel import save_rgb_image
@@ -298,6 +369,98 @@ class TestHistoryAcrossRestarts(_PanelCase):
         entry = parse_image_filename(Path("sstv_20261030_123456.png"))
         self.assertEqual(entry["mode"], "SSTV")  # saved by hand
         self.assertIsNone(parse_image_filename(Path("holiday.png")))
+
+    def test_second_partial_in_the_same_second_parses(self):
+        """The auto-save's "_2" suffix after a partial image's line count hid
+        the mode and line count ("Robot 36 partial 180of240 2")."""
+        from sdr_module.ham.gui.sstv_panel import parse_image_filename
+
+        entry = parse_image_filename(
+            Path("sstv_20261030_123456_Robot_36_partial_180of240_2.png")
+        )
+        self.assertEqual(
+            (entry["mode"], entry["partial_lines"], entry["height"]),
+            ("Robot 36", 180, 240),
+        )
+        entry = parse_image_filename(Path("sstv_20261030_123456_PD_120.png"))
+        self.assertEqual((entry["mode"], entry["partial_lines"]), ("PD 120", None))
+
+    def receive_image(self):
+        audio = encode_sstv(sstv_test_card(320, 240), "Robot 36", FS)
+        self.panel._start_btn.click()
+        self.feed(np.concatenate([audio, np.zeros(int(0.5 * FS), np.float32)]))
+        self.panel._start_btn.click()
+        self.assertEqual(len(self.history_texts()), 1)
+
+    def save_as(self, choose_folder=None):
+        """Press Save Image...; the dialog returns its suggestion (or the
+        same name in ``choose_folder``). Returns the suggested path."""
+        from unittest import mock
+
+        from PyQt6.QtWidgets import QFileDialog
+
+        offered = []
+
+        def dialog(parent, title, default, filters):
+            offered.append(Path(default))
+            folder = Path(choose_folder) if choose_folder else Path(default).parent
+            return str(folder / Path(default).name), "PNG Image (*.png)"
+
+        with mock.patch.object(QFileDialog, "getSaveFileName", dialog):
+            self.panel._save_btn.click()
+        return offered[0]
+
+    def listed_after_restart(self):
+        from sdr_module.ham.gui.sstv_panel import SSTVPanel
+
+        again = SSTVPanel()
+        try:
+            again.set_save_directory(self.tmp.name)
+            again.show()
+            settle()
+            lst = again._history_list
+            return [lst.item(i).text() for i in range(lst.count())]
+        finally:
+            again.deleteLater()
+
+    def test_save_image_offers_a_copy_elsewhere_once_auto_saved(self):
+        """hm:GAP-09: Save Image... suggested sstv_<time>.png beside the
+        auto-saved file, so after a restart the image was listed twice (once
+        as "SSTV")."""
+        self.receive_image()
+        elsewhere = tempfile.TemporaryDirectory()
+        self.addCleanup(elsewhere.cleanup)
+        offered = self.save_as(choose_folder=elsewhere.name)
+        self.assertNotEqual(offered.parent, Path(self.tmp.name))
+        self.assertRegex(offered.name, r"^sstv_\d{8}_\d{6}_Robot_36\.png$")
+        self.assertEqual(len(self.listed_after_restart()), 1)
+
+    def test_save_image_without_auto_save_is_listed_with_its_mode(self):
+        self.panel._auto_save_check.setChecked(False)
+        self.receive_image()
+        offered = self.save_as()
+        self.assertEqual(offered.parent, Path(self.tmp.name))
+        self.assertTrue(offered.exists())
+        listed = self.listed_after_restart()
+        self.assertEqual(len(listed), 1)
+        self.assertRegex(listed[0], r"· Robot 36$")
+
+    def test_history_menu_is_freed_after_use(self):
+        from unittest import mock
+
+        from PyQt6.QtCore import QCoreApplication, QEvent
+        from PyQt6.QtWidgets import QMenu
+
+        self.write_image("sstv_20261029_101530_Martin_1.png")
+        self.panel.load_history()
+        lst = self.panel._history_list
+        pos = lst.visualItemRect(lst.item(0)).center()
+        before = len(self.panel.findChildren(QMenu))
+        with mock.patch.object(QMenu, "exec", lambda *args, **kwargs: None):
+            for _ in range(3):
+                self.panel._on_history_menu(pos)
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        self.assertEqual(len(self.panel.findChildren(QMenu)), before)
 
     def test_history_label_format(self):
         from sdr_module.ham.gui.sstv_panel import history_label

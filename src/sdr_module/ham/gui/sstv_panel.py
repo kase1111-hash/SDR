@@ -112,9 +112,11 @@ MODE_ORDER = (
     "PD 290",
     "Wraase SC2-180",
 )
-# sstv_20261030_123456_Martin_1.png / ..._Martin_1_partial_180of256.png
+# sstv_20261030_123456_Martin_1.png / ..._Martin_1_partial_180of256.png, and
+# a "_2" suffix for a second image saved in the same second.
 _FILE_RE = re.compile(
-    r"^sstv_(\d{8}_\d{6})(?:_(.+?))?(?:_partial_(\d+)of(\d+))?$", re.IGNORECASE
+    r"^sstv_(\d{8}_\d{6})(?:_(.+?))?(?:_partial_(\d+)of(\d+)(?:_\d+)?)?$",
+    re.IGNORECASE,
 )
 
 
@@ -1017,6 +1019,7 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         if not path:
             open_action.setToolTip("This image is not saved: use Save Image...")
         chosen = menu.exec(self._history_list.viewport().mapToGlobal(pos))
+        menu.deleteLater()
         if chosen is open_action and path:
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
         elif chosen is folder_action and path:
@@ -1216,14 +1219,19 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
             return
 
         info = self._viewer.get_image_info() or {}
-        stamp = info.get("timestamp") or time.strftime("%Y%m%d_%H%M%S")
         folder = self.save_directory()
-        if not folder.is_dir():
+        saved = info.get("filename")
+        if not folder.is_dir() or (
+            saved and Path(saved).parent.resolve() == folder.resolve()
+        ):
+            # Already in the image folder (auto-saved): suggest a copy
+            # elsewhere, so Received Images doesn't list it twice later.
             pictures = QStandardPaths.writableLocation(
                 QStandardPaths.StandardLocation.PicturesLocation
             )
             folder = Path(pictures) if pictures else Path.home()
-        default_path = str(folder / f"sstv_{stamp}.png")
+        # The auto-save's name: read back with its mode after a restart.
+        default_path = str(folder / self._image_file_name(info))
 
         filepath, selected = QFileDialog.getSaveFileName(
             self,
@@ -1272,6 +1280,15 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         """Drop the image being received and keep listening."""
         if self._decoder is not None:
             self._decoder.stop()
+        self._show_listening_viewer()
+        self._set_status("Image discarded. Listening for the next one…", None)
+        self._refresh_history_ui()
+        self._update_action_buttons()
+
+    def _show_listening_viewer(self) -> None:
+        """Empty the viewer of an image that ended without being kept (and
+        drop its pending redraw): back to "Listening…"."""
+        self._display_dirty = False
         self._image_display.clear()
         self._showing_complete = False
         self._progress_bar.setValue(0)
@@ -1281,9 +1298,6 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         self._image_display.set_placeholder(
             "Listening…", "Waiting for an SSTV start tone (VIS header) on the FM audio."
         )
-        self._set_status("Image discarded. Listening for the next one…", None)
-        self._refresh_history_ui()
-        self._update_action_buttons()
 
     def _on_prev_clicked(self) -> None:
         """Show previous image."""
@@ -1384,9 +1398,13 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
 
     def _refresh_partial_display(self) -> None:
         decoder = self._decoder
+        self._display_dirty = False
         if decoder is None or decoder.state.image_data is None:
             return
-        self._display_dirty = False
+        if not decoder.is_receiving():
+            # The image ended (complete, kept as partial, discarded or lost)
+            # after this redraw was put off: nothing is coming in any more.
+            return
         self._last_display_update = time.monotonic()
         mode = decoder.state.mode
         total = mode.height if mode else 1
@@ -1456,11 +1474,21 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         started)."""
         reason = self._decoder.lost_reason if self._decoder else ""
         cut_short = reason == "a new image started"
+        mode = self._decoder.get_mode() if self._decoder else None
         note = self._keep_partial(image, lines)
+        if note is None and not cut_short:
+            self._show_listening_viewer()
         if cut_short:
             text = "A new image started before the last one ended."
             text += f" {note}" if note else ""
             self._set_status(text, "warning")
+        elif reason == "no line syncs were heard":
+            name = mode.name if mode else "SSTV"
+            self._set_status(
+                f"No {name} line syncs were heard, so nothing was decoded. "
+                "Check the Mode, or wait for the next image's start tone.",
+                "warning",
+            )
         elif note is None:
             self._set_status(
                 "The signal faded before the image got going. Listening for the "
@@ -1508,19 +1536,27 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         self._update_action_buttons()
         return note
 
-    def _auto_save(self, index: int, image: np.ndarray) -> Optional[Path]:
-        """Save a received image into the save folder; return its path."""
-        info = self._viewer.images[index] if index < len(self._viewer.images) else {}
+    @staticmethod
+    def _image_file_name(info: Dict[str, Any], copy: int = 1) -> str:
+        """``sstv_<stamp>_<Mode>[_partial_<rows>of<height>][_<copy>].png``:
+        the name Received Images reads the time and mode back from."""
         mode_name = str(info.get("mode", "sstv")).replace(" ", "_")
         stamp = info.get("timestamp") or time.strftime("%Y%m%d_%H%M%S")
         suffix = ""
         if info.get("partial_lines"):
             suffix = f"_partial_{info['partial_lines']}of{info.get('height', 0)}"
+        if copy > 1:
+            suffix += f"_{copy}"
+        return f"sstv_{stamp}_{mode_name}{suffix}.png"
+
+    def _auto_save(self, index: int, image: np.ndarray) -> Optional[Path]:
+        """Save a received image into the save folder; return its path."""
+        info = self._viewer.images[index] if index < len(self._viewer.images) else {}
         folder = self.save_directory()
-        path = folder / f"sstv_{stamp}_{mode_name}{suffix}.png"
+        path = folder / self._image_file_name(info)
         n = 2
         while path.exists():  # two images in the same second
-            path = folder / f"sstv_{stamp}_{mode_name}{suffix}_{n}.png"
+            path = folder / self._image_file_name(info, n)
             n += 1
         try:
             folder.mkdir(parents=True, exist_ok=True)

@@ -782,6 +782,7 @@ class _Reception:
     next_k: int = 0
     first_end: Optional[float] = None  # predicted end of sync 0 (VIS start)
     acquire_from: Optional[int] = None  # start now: search from here
+    acquire_started: int = 0  # start now: track index when the search began
     misses: int = 0
     rows: int = 0
     last_good_rows: int = 0
@@ -889,8 +890,10 @@ class SSTVDecoder:
         self._on_mode_detected = callback
 
     def set_on_image_lost(self, callback: Callable[[np.ndarray, int], None]) -> None:
-        """Set callback for an image that ended early: the signal faded, or a
-        new VIS started another image. Gets ``(image, lines received)``."""
+        """Set callback for an image that ended early: the signal faded, a
+        new VIS started another image, or Start now found no line syncs
+        (see :attr:`lost_reason`). Gets ``(image, lines received)``; the
+        line count can be 0."""
         self._on_image_lost = callback
 
     def set_forced_mode(self, mode: Optional[SSTVModeSpec]) -> None:
@@ -924,7 +927,8 @@ class SSTVDecoder:
 
         ``mode`` defaults to the forced mode, then to the mode the recent
         sync pulses fit. Returns False (and does nothing) when no mode is
-        known.
+        known. When no line sync turns up for as long as a fading image is
+        kept, the image ends (reason "no line syncs were heard").
         """
         spec = mode or self._forced_mode
         if spec is None:
@@ -1332,6 +1336,7 @@ class SSTVDecoder:
                 self._freq.start,
                 self._freq.end - int((spec.scan_time_ms + 100.0) * self._spm),
             )
+            rx.acquire_started = self._freq.end
         self._rx = rx
         self.state = SSTVState(
             mode=spec,
@@ -1400,12 +1405,14 @@ class SSTVDecoder:
             if rx.next_k >= rx.spec.sync_periods:
                 self._finish_image()
                 return
-            lost_after = max(
-                _LOST_LINES, int(math.ceil(_LOST_S * 1000.0 / rx.spec.scan_time_ms))
-            )
-            if rx.misses >= lost_after:
+            if rx.misses >= self._lost_after(rx.spec):
                 self._lose_image("the signal faded")
                 return
+
+    @staticmethod
+    def _lost_after(spec: SSTVModeSpec) -> int:
+        """Line periods without a sync before an image counts as lost."""
+        return max(_LOST_LINES, int(math.ceil(_LOST_S * 1000.0 / spec.scan_time_ms)))
 
     def _try_relock(self, rx: _Reception, k: int, found: float) -> None:
         """After a jump in the audio (lost samples), strong syncs keep
@@ -1437,8 +1444,12 @@ class SSTVDecoder:
             return False
         found, score = self._find_sync_end(lo, hi, rx)
         if found is None or score < _RELOCK_THRESHOLD:
-            # Nothing sync-like yet: slide on by half a period.
+            # Nothing sync-like yet: slide on by half a period, and give up
+            # after as many line periods as a fading image is kept for.
             rx.acquire_from = int(lo - before - 2 * spm + 0.5 * rx.period)
+            searched = self._freq.end - rx.acquire_started
+            if searched > self._lost_after(rx.spec) * rx.period:
+                self._lose_image("no line syncs were heard")
             return False
         rx.acquire_from = None
         rx.first_end = found
@@ -1625,7 +1636,8 @@ class SSTVDecoder:
         image = self.state.image_data
         if image is not None:
             image[rows:] = 0  # lines decoded after the signal faded are noise
-        if self._on_image_lost and image is not None and rows > 0:
+        # Also with no lines: the caller still shows "receiving".
+        if self._on_image_lost and image is not None:
             self._on_image_lost(image.copy(), rows)
 
     def _end_reception(self) -> None:

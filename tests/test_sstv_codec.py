@@ -443,6 +443,23 @@ class TestWithoutVis:
         assert not decoder.start_now()
         assert not decoder.is_receiving()
 
+    def test_start_now_gives_up_without_line_syncs(self):
+        """Start now in a fixed mode on a channel with no SSTV waited for a
+        line sync for ever (until Stop)."""
+        spec = find_mode("Martin 1")
+        rng = np.random.default_rng(1)
+        hiss = (0.3 * rng.standard_normal(int(14 * FS))).astype(np.float32)
+        decoder = SSTVDecoder(FS)
+        events = Events(decoder)
+        feed(decoder, hiss[: int(2 * FS)])
+        assert decoder.start_now(spec)
+        assert decoder.is_receiving()
+        feed(decoder, hiss[int(2 * FS) :])
+        assert not decoder.is_receiving()
+        assert decoder.lost_reason == "no line syncs were heard"
+        assert [rows for _image, rows in events.lost] == [0]
+        assert events.modes == ["Martin 1"]
+
     def test_forced_mode_starts_on_line_syncs(self):
         spec = find_mode("Scottie 2")
         card = card_for("Scottie 2")
@@ -505,6 +522,20 @@ class TestLosingTheSignal:
         assert decoder.stop() >= 48
         assert not decoder.is_receiving()
         assert decoder.get_image() is not None
+
+    def test_a_vis_with_no_picture_after_it_is_reported(self):
+        """An image that ends before a single good line still reaches the
+        on_image_lost callback (with 0 lines): the panel stayed on
+        "Receiving Robot 36…" with its progress bar."""
+        spec = find_mode("Robot 36")
+        vis = encode_sstv(card_for("Robot 36"), spec, FS, lines=1)[: int(0.91 * FS)]
+        decoder = SSTVDecoder(FS)
+        events = Events(decoder)
+        feed(decoder, np.concatenate([vis, np.zeros(int(6 * FS), np.float32)]))
+        assert events.modes == ["Robot 36"]
+        assert not decoder.is_receiving()
+        assert decoder.lost_reason == "the signal faded"
+        assert [rows for _image, rows in events.lost] == [0]
 
 
 class TestBoundedMemory:

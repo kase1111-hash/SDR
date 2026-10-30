@@ -189,6 +189,36 @@ class TestIntervalIdPlacement:
         parts = [demod.psk31_decode(run, RATE, table) for run in runs]
         assert "".join(parts) == signal.check.sent, parts
 
+    def test_ascii_and_fm_audio_resume_in_step(self):
+        """The same for ASCII on the carrier, and for PSK31 sent as audio on
+        an FM carrier (the carrier fades, comes back, and the audio goes on
+        in step), with FM tone IDs."""
+        text = "the quick brown fox jumps over the lazy dog 0123456789 " * 2
+        job, signal = _text_job(text.strip(), "ASCII")
+        _iq, _ids, runs = _drain(_plan(job, AutoIdPolicy(False, True, 3.0)), job)
+        assert len(runs) >= 2
+        parts = [demod.ascii_decode(run, RATE).decode() for run in runs]
+        assert "".join(parts) == signal.check.sent, parts
+
+        text = "Hello de W1AW, the quick brown fox jumps over the lazy dog 73"
+        job, signal = _text_job(text, "PSK31", freq=146.52e6, emission="fm")
+        mcw = _cw_id_factory(emission="mcw")
+        iq, _ids, runs = _drain(_plan(job, AutoIdPolicy(False, True, 8.0), mcw), job)
+        assert len(runs) >= 2
+        assert np.max(np.abs(np.diff(np.abs(iq)))) < 0.05
+        table = {code: char for char, code in _varicode().items()}
+        audio_hz = signal.settings.audio_hz
+        parts = [
+            demod.psk31_decode(
+                demod.analytic(demod.instantaneous_frequency(run, RATE)),
+                RATE,
+                table,
+                center_hz=audio_hz,
+            )
+            for run in runs
+        ]
+        assert "".join(parts) == signal.check.sent, parts
+
     def test_a_carried_over_id_goes_before_the_text(self):
         """The last ID went out 9 min 58 s ago and "At start" is off: the ID
         due 2 s into a 7 s text goes before it instead of into it."""

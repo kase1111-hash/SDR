@@ -110,13 +110,15 @@ FILE_RATE = 48000
 AUDIO_LEVEL = 0.5
 
 # "Sent as" per mode: (text, value, tooltip). "auto" (CW only) picks CW
-# below 30 MHz and an FM tone above, as the station ID does.
+# below 30 MHz and in the CW-only segments, an FM tone elsewhere above, as
+# Send ID Now does.
 _CW_EMISSIONS = (
     (
         "Auto (by frequency)",
         "auto",
-        "A keyed carrier (CW) below 30 MHz, where CW is heard in CW or SSB; "
-        "an FM tone (MCW) above, which FM receivers hear",
+        "A keyed carrier (CW) below 30 MHz and in the CW-only parts of 6 m "
+        "and 2 m, where CW is heard in CW or SSB; an FM tone (MCW) elsewhere "
+        "above, which FM receivers hear",
     ),
     (
         "CW (keyed carrier)",
@@ -218,8 +220,9 @@ def _in_amateur_band(freq_hz: float) -> bool:
 
 
 def resolve_emission(mode: str, choice: str, freq_hz: float) -> str:
-    """``"direct"`` or ``"fm"``: "auto" (CW) by frequency, as the station
-    ID does (a keyed carrier below 30 MHz, an FM tone above)."""
+    """``"direct"`` or ``"fm"``: "auto" (CW) by frequency, as Send ID Now
+    does (a keyed carrier below 30 MHz and in the CW-only segments, an FM
+    tone elsewhere above)."""
     if choice in (EMISSION_DIRECT, EMISSION_FM):
         return choice
     if mode != MODE_CW:

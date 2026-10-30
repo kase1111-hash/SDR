@@ -125,7 +125,9 @@ class TestShortcutsMatchTheMainWindow(_WindowTestCase):
             )
         }
         for category, keys, description in SHORTCUTS:
-            if keys == ("Ctrl+R",) and not self.mw.HAS_HAM_RADIO:
+            # (The radio tuner and Transmit Text come with the ham panels.)
+            ham = (("Ctrl+R",), ("Ctrl+Shift+T",))
+            if keys in ham and not self.mw.HAS_HAM_RADIO:
                 continue
             self.assertIn(keys, listed, f"{keys} is not bound by the window")
             if category == "Tuning":

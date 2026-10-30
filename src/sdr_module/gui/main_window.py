@@ -1906,6 +1906,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._retune_warned = False
         self._demo_mode = False  # set by _start_demo_mode()
         self._radio_tuner = None  # Pop-out radio tuner window
+        self._transmit_text = None  # Tools > Transmit Text window (T14)
         # The tuner's seek and STEREO lamp (T7): blocks processed since the
         # last retune, whether the last one opened the squelch, and the
         # 19 kHz pilot detector (built while the tuner is open).
@@ -2646,6 +2647,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._tune_iss_from_menu,
                 tip="Tune to the ISS SSTV downlink (FM, 5 kHz deviation), start "
                 "receiving and listen for images in the SSTV panel",
+            )
+            self._add_action(
+                tools_menu,
+                "Transmit Te&xt...",
+                self._show_transmit_text,
+                "Ctrl+Shift+T",
+                "Send text in Morse code (CW), RTTY, PSK31 or ASCII FSK: preview "
+                "it, save it as audio or I/Q, or transmit it on a HackRF One",
             )
         tools_menu.addSeparator()
         self._add_action(
@@ -7779,6 +7788,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._radio_tuner.raise_()
         self._radio_tuner.activateWindow()
 
+    def _show_transmit_text(self) -> None:
+        """Tools > Transmit Text (Ctrl+Shift+T): the text transmit window
+        (CW, RTTY, PSK31, ASCII FSK; gui/transmit_text.py)."""
+        if self._transmit_text is None:
+            from .transmit_text import TransmitTextDialog
+
+            self._transmit_text = TransmitTextDialog(self)
+        self._transmit_text.show()
+        self._transmit_text.raise_()
+        self._transmit_text.activateWindow()
+        self._transmit_text.focus_text()
+
     def _on_radio_frequency_changed(self, freq_hz: float, band: str):
         """Tune the receiver to the radio tuner's station, in its mode."""
         # set_frequency tunes the device (if any) and updates the control
@@ -8445,6 +8466,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # A recording playing back: the tuning from before it is saved.
         self._playback.shutdown()
         self._commit_pending_history()  # the last frequency joins Recent
+        if self._transmit_text is not None:
+            self._transmit_text.shutdown()  # (its preview; the draft is kept)
         self._persist_state()
         for timer in (self._display_timer, self._status_timer, self._hotplug_timer):
             timer.stop()

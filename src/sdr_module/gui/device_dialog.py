@@ -833,6 +833,27 @@ _SSTV_CACHE: Dict[float, Tuple[Any, int]] = {}
 _DEMO_SIGNALS = _DEMO_SIGNALS + ((_SSTV_HZ, "sstv", _SSTV_LEVEL_DB, None),)
 # --- end SSTV demo ----------------------------------------------------------- #
 
+# --- T7: AM broadcast stations on the radio tuner's AM presets ------------- #
+# Medium-wave stations on the six AM presets of Tools > AM/FM Radio Tuner
+# (660-1260 kHz), so the AM band (and the tuner's seek) has something to
+# find in demo mode. Each plays the demo tune ("amb": the music as 80 % AM,
+# each station from another point of the loop). Appended, so the signals
+# above keep their seeds.
+_AM_BROADCAST = (
+    (660e3, -40.0),
+    (770e3, -46.0),
+    (880e3, -32.0),
+    (1010e3, -36.0),
+    (1050e3, -50.0),
+    (1260e3, -42.0),
+)
+_AM_BROADCAST_DEPTH = 0.8  # modulation depth of the music peaks
+_AM_MUSIC: Dict[Tuple[float, int], np.ndarray] = {}  # mono tune per loop
+_DEMO_SIGNALS = _DEMO_SIGNALS + tuple(
+    (freq, "amb", level, None) for freq, level in _AM_BROADCAST
+)
+# --- end T7 ------------------------------------------------------------------ #
+
 # Morse keying for the CW beacon ("VVV DE SDR"): 1 = key down, one dit each.
 _MORSE = {"V": "...-", "D": "-..", "E": ".", "S": "...", "R": ".-."}
 
@@ -1136,6 +1157,20 @@ def _build_loops(kind: str, variant: Any, rate: float):
         deviation += 1.2e3 * _swept_tone(1650.0, -250.0, t, twist)
         deviation += _DEMO_CTCSS_DEVIATION_HZ * _tone(_DEMO_CTCSS_HZ, t)
         return _Loop(_fm_phase(deviation, loop_rate), factor)
+    if kind == "amb":
+        # (T7) AM broadcast: the demo tune (mono, as heard) as the envelope,
+        # each station starting at another point of the loop.
+        factor, loop_rate, t = _loop_timebase(
+            rate, _MUSIC_STEP_S * 8 * len(_MUSIC_BARS)
+        )
+        key = (loop_rate, len(t))
+        mono = _AM_MUSIC.get(key)
+        if mono is None:
+            left, right = _music_channels(loop_rate, len(t))
+            mono = _AM_MUSIC[key] = (left + right) / 2.0
+        mono = np.roll(mono, int(variant) * len(mono) // 3)
+        peak = float(np.max(np.abs(mono))) or 1.0
+        return _Loop(1.0 + _AM_BROADCAST_DEPTH * mono / peak, factor)
     if kind == "am":
         factor, loop_rate, t = _loop_timebase(rate, _TONE_LOOP_S)
         envelope = 1.0 + 0.35 * _swept_tone(600.0, 150.0, t, variant * 2.1)
@@ -1582,7 +1617,10 @@ class MockDevice:
     of a realistic noise floor. Signals move across
     the display as you tune, so click-to-tune and the frequency scanner
     behave as they would with real hardware. A 2 m repeater on 145.290 MHz
-    sends a 100.0 Hz CTCSS tone (Audio > Tone squelch shows it). Raising the gain lifts signals and noise together and, as on a
+    sends a 100.0 Hz CTCSS tone (Audio > Tone squelch shows it). The AM
+    band has a broadcast station on each of the radio tuner's six AM presets
+    (660, 770, 880, 1010, 1050 and 1260 kHz) playing the demo tune.
+    Raising the gain lifts signals and noise together and, as on a
     real receiver, too much gain clips the ADC. With automatic gain
     (``set_gain_mode(True)``) the device picks the gain itself, keeping the
     signals in the passband clear of clipping.
@@ -1835,7 +1873,7 @@ class MockDevice:
         if kind == "cw_steady":
             out += self._carrier(offset, amp, rate, pos, n)
             return
-        if kind in ("am", "cw"):
+        if kind in ("am", "cw", "amb"):
             envelope = _loops(kind, seed, rate).read(pos, n)
             wave = self._carrier(offset, amp, rate, pos, n)
             wave *= envelope

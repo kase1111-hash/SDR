@@ -171,10 +171,12 @@ class TestReceiverBar(_WindowTestCase):
         self.win.show()
         self.settle(10)
         for toolbar in (self.win._toolbar, self.bar()):
+            # (Widgets hidden by design, such as the ON AIR badge while
+            # nothing is transmitted, don't count.)
             widgets = [
                 toolbar.widgetForAction(a)
                 for a in toolbar.actions()
-                if toolbar.widgetForAction(a) is not None
+                if toolbar.widgetForAction(a) is not None and a.isVisible()
             ]
             self.assertTrue(widgets)
             for widget in widgets:

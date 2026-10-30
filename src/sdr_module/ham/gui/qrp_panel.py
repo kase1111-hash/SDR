@@ -2,20 +2,23 @@
 QRP (Low Power) Operations Panel.
 
 Provides controls for QRP operation:
-- Power display in watts/mW/dBm
-- TX power limiter
-- Amplifier chain calculator
-- QRP compliance indicator
-- Miles-per-watt tracker
+- The calculated station output in watts/mW/dBm, its QRP class, and the
+  legal power limit and transmit privilege at the tuned frequency
+- Amplifier chain calculator with presets, saturation and DC input
+- A power limit (the transmitter refuses to go over it)
+- Miles-per-watt tally (miles or kilometres) with the QSOs logged
+- Contest exchange ("599 CA 5W") to copy
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
-    from PyQt6.QtCore import Qt, pyqtSignal
+    from PyQt6.QtCore import Qt, QTimer, pyqtSignal
+    from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWidgets import (
         QCheckBox,
         QComboBox,
@@ -26,6 +29,9 @@ try:
         QGroupBox,
         QHBoxLayout,
         QLabel,
+        QLineEdit,
+        QListWidget,
+        QListWidgetItem,
         QPushButton,
         QScrollArea,
         QSizePolicy,
@@ -38,21 +44,44 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
-from ..qrp import QRP_LIMITS, QRPController, dbm_to_watts
+from ..qrp import (
+    QRP_LIMITS,
+    AmplifierStage,
+    QRPController,
+    dbm_to_watts,
+    get_qro_amplifier_chain,
+    get_qrp_amplifier_chain,
+)
 
 # Modes held to the stricter CW/digital QRP limit (matches QRPController).
-_CW_DIGITAL_MODES = ("CW", "RTTY", "PSK", "FT8", "FT4", "JT65", "WSPR")
+_CW_DIGITAL_MODES = ("CW", "RTTY", "PSK", "FT8", "FT4", "JT65", "WSPR", "DATA")
 # Power within this many dB of a limit counts as "at" the limit. Whole-dB
 # steps land just beside round watt values (+37 dBm is 5.01 W), which would
 # otherwise show "5.0 W" next to "Above the 5 W QRP limit".
 _LIMIT_TOLERANCE_DB = 0.05
-
+# The US amateur limit where a segment names none (97.313(b)).
+_AMATEUR_LIMIT_W = 1500.0
+_KM_PER_MILE = 1.609344
 
 _LIMIT_TIP = "Maximum transmit power you intend to use"
 _LIMIT_OFF_TIP = (
-    "Turn on \u201cWarn when output exceeds the limit\u201d (or pick a preset) "
+    "Turn on “Warn when output exceeds the limit” (or pick a preset) "
     "to set a maximum power."
 )
+_AUTO_MODE = "Auto (follow demodulation)"
+# Demodulation mode -> QRP mode, for Auto.
+_DEMOD_TO_QRP = {"CW": "CW", "USB": "SSB", "LSB": "SSB", "AM": "AM", "FM": "FM"}
+# QRP mode -> what the frequency manager calls it.
+_QRP_TO_TX_MODE = {
+    "CW": "CW",
+    "SSB": "SSB",
+    "FM": "FM",
+    "AM": "AM",
+    "FT8": "DATA",
+    "RTTY": "DATA",
+    "Digital": "DATA",
+}
+_MAX_QSOS = 200  # kept in the tally (the list shows the newest first)
 
 
 def _theme() -> Any:
@@ -84,6 +113,14 @@ _POWER_UNITS = (
 )
 
 
+def _unit_for(watts: float) -> Tuple[float, str]:
+    scale, unit = 1e-12, "pW"
+    for threshold, unit_scale, unit_name in _POWER_UNITS:
+        if watts >= threshold:
+            return unit_scale, unit_name
+    return scale, unit
+
+
 def format_watts(watts: float) -> str:
     """Power in the panel's one watt format.
 
@@ -93,14 +130,17 @@ def format_watts(watts: float) -> str:
     watts = float(watts)
     if watts <= 0.0 or not math.isfinite(watts):
         return "0 W"
-    scale, unit = 1e-12, "pW"
-    for threshold, unit_scale, unit_name in _POWER_UNITS:
-        if watts >= threshold:
-            scale, unit = unit_scale, unit_name
-            break
+    scale, unit = _unit_for(watts)
     value = watts / scale
     number = f"{value:.0f}" if value >= 99.95 else _trim(f"{value:.1f}")
     return f"{number} {unit}"
+
+
+def _format_watts_decimals(watts: float, decimals: int) -> Tuple[str, float]:
+    """``(text, value shown in watts)`` with ``decimals`` decimals."""
+    scale, unit = _unit_for(watts)
+    number = _trim(f"{watts / scale:.{decimals}f}")
+    return f"{number} {unit}", float(number) * scale
 
 
 def format_dbm(dbm: float) -> str:
@@ -114,7 +154,7 @@ def format_dbm(dbm: float) -> str:
 
 def qrp_limit_for_mode(mode: str) -> float:
     """QRP ceiling in watts for ``mode`` (5 W CW/digital, 10 W phone)."""
-    if mode.upper() in _CW_DIGITAL_MODES:
+    if mode.upper() in _CW_DIGITAL_MODES or mode == "Digital":
         return QRP_LIMITS.qrp_cw_watts
     return QRP_LIMITS.qrp_ssb_watts
 
@@ -122,6 +162,42 @@ def qrp_limit_for_mode(mode: str) -> float:
 def within_limit(watts: float, limit: float) -> bool:
     """True when ``watts`` is at or below ``limit`` (to within 0.05 dB)."""
     return watts <= limit * 10.0 ** (_LIMIT_TOLERANCE_DB / 10.0)
+
+
+def _near_limit(watts: float, limit: float) -> bool:
+    """Within the tolerance of ``limit``, on either side."""
+    if watts <= 0 or limit <= 0:
+        return False
+    return abs(10.0 * math.log10(watts / limit)) <= _LIMIT_TOLERANCE_DB
+
+
+def format_class_watts(watts: float, mode: str = "CW") -> str:
+    """The power as the class badge sees it, so number and badge agree.
+
+    A power within 0.05 dB of a class limit reads as the limit ("5 W" for
+    +37 dBm, which counts as QRP); otherwise as many decimals as it takes
+    for the number to sit on the same side of every class limit as the
+    power itself ("1.02 W" for +30.1 dBm: above the 1 W QRPp limit, so
+    QRP, not "1 W").
+    """
+    watts = float(watts)
+    if watts <= 0.0 or not math.isfinite(watts):
+        return "0 W"
+    limits = sorted(
+        {QRP_LIMITS.qrpp_watts, qrp_limit_for_mode(mode), QRP_LIMITS.low_power_watts}
+    )
+    for limit in limits:
+        if _near_limit(watts, limit):
+            return format_watts(limit)
+    text = format_watts(watts)
+    shown = _format_watts_decimals(watts, 0 if text.split()[0].isdigit() else 1)[1]
+    if all((shown <= lim) == (watts <= lim) for lim in limits):
+        return text
+    for decimals in (1, 2, 3):
+        text, shown = _format_watts_decimals(watts, decimals)
+        if all((shown <= lim) == (watts <= lim) for lim in limits):
+            return text
+    return text
 
 
 def classify_qrp(watts: float, mode: str = "CW") -> Tuple[str, str, str]:
@@ -151,6 +227,21 @@ def classify_qrp(watts: float, mode: str = "CW") -> Tuple[str, str, str]:
         "danger",
         f"Above {format_watts(QRP_LIMITS.low_power_watts)}: high power (QRO)",
     )
+
+
+def default_distance_unit() -> str:
+    """ "mi" or "km" for the system locale (miles, the unit of the
+    miles-per-watt awards, when the locale doesn't say)."""
+    try:
+        from PyQt6.QtCore import QLocale
+
+        locale = QLocale.system()
+        if locale.name() in ("C", "POSIX"):
+            return "mi"
+        metric = locale.measurementSystem() == QLocale.MeasurementSystem.MetricSystem
+        return "km" if metric else "mi"
+    except Exception:  # pragma: no cover - Qt missing
+        return "mi"
 
 
 class _WattSpinBox(QDoubleSpinBox if HAS_PYQT6 else object):
@@ -224,8 +315,8 @@ class PowerDisplayWidget(QWidget if HAS_PYQT6 else object):
         self._watts_label = QLabel("0 mW")
         t.set_role(self._watts_label, "display")
         self._watts_label.setToolTip(
-            "Transmit power at the antenna, as worked out by the Amplifier "
-            "Chain below"
+            "Station output worked out by the Amplifier Chain below: a "
+            "calculation, not a measurement of what is transmitted"
         )
         layout.addWidget(self._watts_label, 0, 0)
 
@@ -243,7 +334,7 @@ class PowerDisplayWidget(QWidget if HAS_PYQT6 else object):
         # dBm display
         self._dbm_label = QLabel("0 dBm")
         t.set_role(self._dbm_label, "muted")
-        self._dbm_label.setToolTip("Transmit power in dBm (0 dBm = 1 mW)")
+        self._dbm_label.setToolTip("Calculated output in dBm (0 dBm = 1 mW)")
         layout.addWidget(self._dbm_label, 1, 0, 1, 2)
 
         # Why the badge says what it says.
@@ -255,12 +346,20 @@ class PowerDisplayWidget(QWidget if HAS_PYQT6 else object):
 
         self.set_power(0.0)
 
-    def set_power(self, dbm: float, mode: str = "CW") -> None:
-        """Update power display."""
+    def set_power(
+        self, dbm: float, mode: str = "CW", legal_limit_w: Optional[float] = None
+    ) -> None:
+        """Show ``dbm`` for ``mode``; above ``legal_limit_w`` the badge is red."""
         watts = dbm_to_watts(dbm)
         label, tone, detail = classify_qrp(watts, mode)
+        if legal_limit_w is not None and not within_limit(watts, legal_limit_w):
+            tone = "danger"
+            detail = (
+                f"Above the {format_watts(legal_limit_w)} legal limit at this "
+                f"frequency. {detail}."
+            )
 
-        self._watts_label.setText(format_watts(watts))
+        self._watts_label.setText(format_class_watts(watts, mode))
         self._dbm_label.setText(format_dbm(dbm))
         self._status_label.setText(label)
         self._detail_label.setText(detail)
@@ -271,117 +370,211 @@ class PowerDisplayWidget(QWidget if HAS_PYQT6 else object):
         t.set_tone(self._watts_label, tone)
 
 
+# Amplifier chain presets: (name, stages or None for the SDR alone).
+def _chain_presets() -> List[Tuple[str, Optional[List[AmplifierStage]]]]:
+    return [
+        ("SDR only", None),
+        ("HackRF → 5 W QRP kit", get_qrp_amplifier_chain()),
+        ("HackRF → 100 W linear", get_qro_amplifier_chain()),
+    ]
+
+
+_CUSTOM = "Custom"
+# Stage settings when nothing else is chosen: (gain dB, max out dBm, efficiency).
+_DEFAULT_DRIVER = (20, 30, 0.5)
+_DEFAULT_PA = (10, 50, 0.5)
+
+
+class _Stage:
+    """One amplifier stage's widgets and figures."""
+
+    def __init__(
+        self, name: str, check: Any, gain: Any, max_out: Any, out: Any, note: Any
+    ):
+        self.name = name
+        self.check = check
+        self.gain = gain
+        self.max_out = max_out
+        self.out = out
+        self.note = note
+        self.efficiency = 0.5
+
+
 class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
-    """Amplifier chain power calculator."""
+    """Amplifier chain power calculator: SDR output, a driver and a PA,
+    each with a gain and the most it can put out (it saturates there), the
+    output and the DC input the stages draw."""
 
     if HAS_PYQT6:
         power_changed = pyqtSignal(float)  # Output power in dBm
+        chain_changed = pyqtSignal()  # any setting (to save it)
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
             raise ImportError("PyQt6 is required")
         super().__init__(parent)
 
+        self._presets = _chain_presets()
+        self._applying = False
+        self._user_sdr_dbm = 0.0
+        self._sdr_locked = False
+        self._sdr_source_tip = ""
         self._setup_ui()
-        self._calculate()
+        self.apply_preset(self._presets[0][0])
 
     def _setup_ui(self):
+        t = _theme()
         layout = QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setHorizontalSpacing(8)
         layout.setVerticalSpacing(8)
         layout.setColumnStretch(1, 1)
 
+        preset_label = QLabel("Preset:")
+        layout.addWidget(preset_label, 0, 0)
+        self._preset_combo = QComboBox()
+        for name, stages in self._presets:
+            self._preset_combo.addItem(name)
+            index = self._preset_combo.count() - 1
+            self._preset_combo.setItemData(
+                index, self._preset_tip(name, stages), Qt.ItemDataRole.ToolTipRole
+            )
+        self._preset_combo.addItem(_CUSTOM)
+        self._preset_combo.setItemData(
+            self._preset_combo.count() - 1,
+            "Your own stages (chosen by itself when you change one)",
+            Qt.ItemDataRole.ToolTipRole,
+        )
+        self._preset_combo.setToolTip(
+            "Common station setups; the stages below show what they hold"
+        )
+        self._preset_combo.currentTextChanged.connect(self._on_preset_chosen)
+        preset_label.setBuddy(self._preset_combo)
+        layout.addWidget(self._preset_combo, 0, 1, 1, 2)
+
         # Input power (SDR output)
         sdr_label = QLabel("SDR output:")
-        self._label_column = [sdr_label]
-        layout.addWidget(sdr_label, 0, 0)
-        self._input_spin = QSpinBox()
-        self._input_spin.setRange(-20, 20)
+        self._label_column = [preset_label, sdr_label]
+        layout.addWidget(sdr_label, 1, 0)
+        self._input_spin = QDoubleSpinBox()
+        self._input_spin.setRange(-60.0, 20.0)
+        self._input_spin.setDecimals(1)
+        self._input_spin.setSingleStep(1.0)
         self._input_spin.setValue(0)
         self._input_spin.setSuffix(" dBm")
         self._input_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self._input_spin.setToolTip(
-            "RF output of the SDR (exciter). A HackRF One gives roughly "
-            "0 to +15 dBm depending on frequency."
+        self._sdr_tip = (
+            "RF output of the SDR (exciter). A HackRF One gives up to about "
+            "+15 dBm depending on frequency, TX gain and its amplifier."
         )
-        self._input_spin.valueChanged.connect(self._calculate)
+        self._input_spin.setToolTip(self._sdr_tip)
+        self._input_spin.valueChanged.connect(self._on_sdr_edited)
         sdr_label.setBuddy(self._input_spin)
-        layout.addWidget(self._input_spin, 0, 1)
+        layout.addWidget(self._input_spin, 1, 1)
         self._input_watts = _readout("1 mW")
-        layout.addWidget(self._input_watts, 0, 2)
+        layout.addWidget(self._input_watts, 1, 2)
 
-        # Driver stage
-        self._driver_check = QCheckBox("Driver:")
-        self._driver_check.setChecked(True)
-        self._driver_check.setToolTip("Include a driver amplifier stage")
-        self._driver_check.stateChanged.connect(self._calculate)
-        layout.addWidget(self._driver_check, 1, 0)
+        self._stages: List[_Stage] = []
+        row = 2
+        for name, accessible, (gain, max_out, _eff) in (
+            ("Driver", "Driver gain", _DEFAULT_DRIVER),
+            ("PA", "PA gain", _DEFAULT_PA),
+        ):
+            check = QCheckBox(f"{name}:")
+            check.setToolTip(
+                "Include a driver amplifier stage"
+                if name == "Driver"
+                else "Include the final power amplifier (PA)"
+            )
+            check.stateChanged.connect(self._on_stage_edited)
+            layout.addWidget(check, row, 0)
+            gain_spin = QSpinBox()
+            gain_spin.setRange(0, 40)
+            gain_spin.setValue(gain)
+            gain_spin.setSuffix(" dB")
+            gain_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+            gain_spin.setToolTip(f"Gain of the {name.lower()} stage")
+            # Labelled by a checkbox, which cannot be a buddy: name it directly.
+            gain_spin.setAccessibleName(accessible)
+            gain_spin.valueChanged.connect(self._on_stage_edited)
+            layout.addWidget(gain_spin, row, 1)
+            out = _readout("")
+            layout.addWidget(out, row, 2)
 
-        self._driver_spin = QSpinBox()
-        self._driver_spin.setRange(0, 30)
-        self._driver_spin.setValue(20)
-        self._driver_spin.setSuffix(" dB")
-        self._driver_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self._driver_spin.setToolTip("Gain of the driver stage")
-        # Labelled by a checkbox, which cannot be a buddy: name it directly.
-        self._driver_spin.setAccessibleName("Driver gain")
-        self._driver_spin.valueChanged.connect(self._calculate)
-        layout.addWidget(self._driver_spin, 1, 1)
+            max_label = QLabel("max out:")
+            max_label.setIndent(18)
+            t.set_role(max_label, "muted")
+            layout.addWidget(max_label, row + 1, 0)
+            max_spin = QSpinBox()
+            max_spin.setRange(0, 62)
+            max_spin.setValue(max_out)
+            max_spin.setSuffix(" dBm")
+            max_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+            max_spin.setToolTip(
+                f"The most the {name.lower()} can put out (its saturated "
+                "power): more drive doesn't raise its output beyond this"
+            )
+            max_spin.setAccessibleName(f"{name} maximum output")
+            max_spin.valueChanged.connect(self._on_stage_edited)
+            max_label.setBuddy(max_spin)
+            layout.addWidget(max_spin, row + 1, 1)
+            note = _readout("")
+            layout.addWidget(note, row + 1, 2)
+            self._label_column += [check, max_label]
+            self._stages.append(_Stage(name, check, gain_spin, max_spin, out, note))
+            row += 2
 
-        self._driver_out = _readout("100 mW")
-        layout.addWidget(self._driver_out, 1, 2)
+        driver, pa = self._stages
+        self._driver_check, self._driver_spin, self._driver_out = (
+            driver.check,
+            driver.gain,
+            driver.out,
+        )
+        self._pa_check, self._pa_spin, self._pa_out = pa.check, pa.gain, pa.out
+        self._driver_max_spin, self._pa_max_spin = driver.max_out, pa.max_out
 
-        # PA stage
-        self._pa_check = QCheckBox("PA:")
-        self._pa_check.setChecked(True)
-        self._pa_check.setToolTip("Include the final power amplifier (PA)")
-        self._pa_check.stateChanged.connect(self._calculate)
-        layout.addWidget(self._pa_check, 2, 0)
-
-        self._pa_spin = QSpinBox()
-        self._pa_spin.setRange(0, 30)
-        self._pa_spin.setValue(10)
-        self._pa_spin.setSuffix(" dB")
-        self._pa_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self._pa_spin.setToolTip("Gain of the power amplifier stage")
-        self._pa_spin.setAccessibleName("PA gain")
-        self._pa_spin.valueChanged.connect(self._calculate)
-        layout.addWidget(self._pa_spin, 2, 1)
-
-        self._pa_out = _readout("1 W")
-        layout.addWidget(self._pa_out, 2, 2)
-
-        # Result column must fit "(bypassed)" and "79.4 mW" without jitter.
-        for label in (self._input_watts, self._driver_out, self._pa_out):
+        # Result column must fit "(bypassed)", "saturated" and "79.4 mW".
+        for label in (
+            [self._input_watts]
+            + [s.out for s in self._stages]
+            + [s.note for s in self._stages]
+        ):
             label.ensurePolished()
             label.setMinimumWidth(label.fontMetrics().horizontalAdvance("(bypassed)"))
 
         # A little air between the stages and the totals.
-        layout.setRowMinimumHeight(3, 2)
+        layout.setRowMinimumHeight(row, 2)
+        row += 1
 
         # Output
         output_caption = QLabel("Output:")
-        layout.addWidget(output_caption, 4, 0)
-        self._output_label = _readout("1 W (+30 dBm)", "value")
-        self._output_label.setToolTip("Power at the antenna connector")
-        layout.addWidget(self._output_label, 4, 1, 1, 2)
+        layout.addWidget(output_caption, row, 0)
+        self._output_label = _readout("1 mW (0 dBm)", "value")
+        self._output_label.setToolTip("Power at the antenna connector (calculated)")
+        layout.addWidget(self._output_label, row, 1, 1, 2)
+        row += 1
 
         # DC Power estimate
         dc_caption = QLabel("Est. DC input:")
         dc_caption.setToolTip(
-            "Rough supply power needed, assuming each stage is 50 % efficient"
+            "Rough supply power the amplifier stages need, from their "
+            "efficiency (50 % unless the preset says otherwise)"
         )
-        layout.addWidget(dc_caption, 5, 0)
-        self._label_column += [
-            self._driver_check,
-            self._pa_check,
-            output_caption,
-            dc_caption,
-        ]
-        self._dc_label = _readout("2.2 W")
+        layout.addWidget(dc_caption, row, 0)
+        self._label_column += [output_caption, dc_caption]
+        self._dc_label = _readout("0 W")
         self._dc_label.setToolTip(dc_caption.toolTip())
-        layout.addWidget(self._dc_label, 5, 1, 1, 2)
+        layout.addWidget(self._dc_label, row, 1, 1, 2)
+
+    @staticmethod
+    def _preset_tip(name: str, stages: Optional[List[AmplifierStage]]) -> str:
+        if not stages:
+            return "The SDR's own output, no amplifier"
+        parts = [
+            f"{s.name}: {s.gain_db:g} dB, up to {format_watts(dbm_to_watts(s.max_output_dbm))}"
+            for s in stages
+        ]
+        return f"{name}: " + "; ".join(parts)
 
     def label_column_width(self) -> int:
         """Width the left (label / stage) column needs."""
@@ -395,63 +588,198 @@ class AmplifierCalculator(QWidget if HAS_PYQT6 else object):
         if isinstance(layout, QGridLayout):
             layout.setColumnMinimumWidth(0, width)
 
-    def _calculate(self):
-        """Recalculate power chain."""
+    # ------------------------------------------------------------ presets
+
+    def preset(self) -> str:
+        return self._preset_combo.currentText()
+
+    def apply_preset(self, name: str) -> None:
+        """Set the stages to a preset ("SDR only", ... or "Custom": keep)."""
+        stages = next((s for n, s in self._presets if n == name), "custom")
+        self._applying = True
+        try:
+            index = self._preset_combo.findText(name)
+            if index >= 0:
+                self._preset_combo.setCurrentIndex(index)
+            if stages != "custom":
+                for widget, stage in zip(
+                    self._stages, (stages or [None, None]), strict=False
+                ):
+                    if stage is None:
+                        widget.check.setChecked(False)
+                        continue
+                    widget.check.setChecked(True)
+                    widget.gain.setValue(int(round(stage.gain_db)))
+                    widget.max_out.setValue(int(round(stage.max_output_dbm)))
+                    widget.efficiency = float(stage.efficiency)
+        finally:
+            self._applying = False
+        self._calculate()
+
+    def _on_preset_chosen(self, name: str) -> None:
+        if not self._applying:
+            self.apply_preset(name)
+
+    def _on_stage_edited(self, *_args) -> None:
+        if self._applying:
+            return
+        if self.preset() != _CUSTOM:
+            self._applying = True
+            self._preset_combo.setCurrentIndex(self._preset_combo.findText(_CUSTOM))
+            self._applying = False
+        self._calculate()
+
+    def _on_sdr_edited(self, value: float) -> None:
+        if not self._sdr_locked and not self._applying:
+            self._user_sdr_dbm = float(value)
+        if not self._applying:
+            self._calculate()
+
+    # ------------------------------------------------------------ SDR input
+
+    def set_sdr_output(self, dbm: Optional[float], tip: str = "") -> None:
+        """The SDR output from a connected HackRF's TX power (read-only),
+        or None to let the user set it again."""
+        if dbm is None and not self._sdr_locked:
+            return  # (already the user's own figure)
+        if (
+            dbm is not None
+            and self._sdr_locked
+            and abs(float(dbm) - self._input_spin.value()) < 0.05
+            and tip == self._sdr_source_tip
+        ):
+            return  # unchanged
+        self._sdr_source_tip = tip
+        self._applying = True
+        try:
+            if dbm is None:
+                self._sdr_locked = False
+                self._input_spin.setReadOnly(False)
+                self._input_spin.setButtonSymbols(
+                    QDoubleSpinBox.ButtonSymbols.UpDownArrows
+                )
+                self._input_spin.setValue(self._user_sdr_dbm)
+                self._input_spin.setToolTip(self._sdr_tip)
+            else:
+                self._sdr_locked = True
+                self._input_spin.setReadOnly(True)
+                self._input_spin.setButtonSymbols(
+                    QDoubleSpinBox.ButtonSymbols.NoButtons
+                )
+                self._input_spin.setValue(max(-60.0, min(20.0, float(dbm))))
+                self._input_spin.setToolTip(
+                    (tip or "From the connected HackRF's TX power")
+                    + ". Change it in Ham Radio > Ham ID > TX Power."
+                )
+        finally:
+            self._applying = False
+        self._calculate(save=False)
+
+    def sdr_locked(self) -> bool:
+        return self._sdr_locked
+
+    # ------------------------------------------------------------ figures
+
+    def chain_output(
+        self, input_dbm: Optional[float] = None
+    ) -> Tuple[float, float, List[Tuple[float, bool]]]:
+        """``(output dBm, DC input W, [(stage out dBm, saturated)])`` for an
+        SDR output of ``input_dbm`` (the field's value by default)."""
+        current = float(self._input_spin.value() if input_dbm is None else input_dbm)
+        dc = 0.0
+        stages = []
+        for stage in self._stages:
+            if not stage.check.isChecked():
+                stages.append((current, False))
+                continue
+            wanted = current + stage.gain.value()
+            ceiling = float(stage.max_out.value())
+            saturated = wanted > ceiling + _LIMIT_TOLERANCE_DB
+            current = min(wanted, ceiling)
+            dc += dbm_to_watts(current) / max(stage.efficiency, 0.05)
+            stages.append((current, saturated))
+        return current, dc, stages
+
+    def _calculate(self, save: bool = True):
+        """Recalculate power chain (``save``: tell the panel to save it)."""
         t = _theme()
-        input_dbm = self._input_spin.value()
+        input_dbm = float(self._input_spin.value())
         self._input_watts.setText(format_watts(dbm_to_watts(input_dbm)))
+        output_dbm, dc_power, figures = self.chain_output(input_dbm)
+        for stage, (out_dbm, saturated) in zip(self._stages, figures, strict=True):
+            on = stage.check.isChecked()
+            stage.gain.setEnabled(on)
+            stage.max_out.setEnabled(on)
+            if on:
+                stage.out.setText(format_watts(dbm_to_watts(out_dbm)))
+                t.set_tone(stage.out, None)
+                stage.note.setText("saturated" if saturated else "")
+                t.set_tone(stage.note, "warning" if saturated else None)
+                stage.note.setToolTip(
+                    f"Driven past its {format_watts(dbm_to_watts(stage.max_out.value()))} "
+                    "maximum: it can't put out more"
+                    if saturated
+                    else ""
+                )
+            else:
+                stage.out.setText("(bypassed)")
+                t.set_tone(stage.out, "muted")
+                stage.note.setText("")
+                stage.note.setToolTip("")
 
-        current_dbm = input_dbm
-        dc_power = 0.0
-
-        # Driver stage
-        if self._driver_check.isChecked():
-            gain = self._driver_spin.value()
-            current_dbm += gain
-            watts = dbm_to_watts(current_dbm)
-            dc_power += watts / 0.5  # 50% efficiency
-            self._driver_out.setText(format_watts(watts))
-            t.set_tone(self._driver_out, None)
-            self._driver_spin.setEnabled(True)
-        else:
-            self._driver_out.setText("(bypassed)")
-            t.set_tone(self._driver_out, "muted")
-            self._driver_spin.setEnabled(False)
-
-        # PA stage
-        if self._pa_check.isChecked():
-            gain = self._pa_spin.value()
-            current_dbm += gain
-            watts = dbm_to_watts(current_dbm)
-            dc_power += watts / 0.5  # 50% efficiency
-            self._pa_out.setText(format_watts(watts))
-            t.set_tone(self._pa_out, None)
-            self._pa_spin.setEnabled(True)
-        else:
-            self._pa_out.setText("(bypassed)")
-            t.set_tone(self._pa_out, "muted")
-            self._pa_spin.setEnabled(False)
-
-        # Output
-        output_watts = dbm_to_watts(current_dbm)
         self._output_label.setText(
-            f"{format_watts(output_watts)} ({format_dbm(current_dbm)})"
+            f"{format_watts(dbm_to_watts(output_dbm))} ({format_dbm(output_dbm)})"
         )
-
-        # DC power
         self._dc_label.setText(format_watts(dc_power))
-
-        # Emit signal
-        self.power_changed.emit(current_dbm)
+        self.power_changed.emit(output_dbm)
+        if save and not self._applying:
+            self.chain_changed.emit()
 
     def get_output_dbm(self) -> float:
         """Get calculated output power in dBm."""
-        result = self._input_spin.value()
-        if self._driver_check.isChecked():
-            result += self._driver_spin.value()
-        if self._pa_check.isChecked():
-            result += self._pa_spin.value()
-        return result
+        return self.chain_output()[0]
+
+    # ------------------------------------------------------------ state
+
+    def state(self) -> Dict[str, Any]:
+        """The chain's settings (to save)."""
+        return {
+            "preset": self.preset(),
+            "sdr_dbm": self._user_sdr_dbm,
+            "stages": [
+                [s.check.isChecked(), s.gain.value(), s.max_out.value(), s.efficiency]
+                for s in self._stages
+            ],
+        }
+
+    def set_state(self, state: Dict[str, Any]) -> None:
+        """Restore :meth:`state` (unknown or broken entries are skipped)."""
+        self._applying = True
+        try:
+            try:
+                self._user_sdr_dbm = float(state.get("sdr_dbm", 0.0))
+            except (TypeError, ValueError):
+                self._user_sdr_dbm = 0.0
+            if not self._sdr_locked:
+                self._input_spin.setValue(self._user_sdr_dbm)
+            stages = state.get("stages")
+            if isinstance(stages, list):
+                for widget, saved in zip(self._stages, stages, strict=False):
+                    try:
+                        on, gain, max_out, eff = saved
+                        widget.check.setChecked(bool(on))
+                        widget.gain.setValue(int(gain))
+                        widget.max_out.setValue(int(max_out))
+                        widget.efficiency = min(max(float(eff), 0.05), 1.0)
+                    except (TypeError, ValueError):
+                        continue
+            preset = str(state.get("preset", ""))
+            index = self._preset_combo.findText(preset)
+            if index >= 0:
+                self._preset_combo.setCurrentIndex(index)
+        finally:
+            self._applying = False
+        self._calculate()
 
 
 class QRPPanel(QWidget if HAS_PYQT6 else object):
@@ -459,15 +787,18 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
     Complete QRP operations panel.
 
     Provides:
-    - Power display in multiple formats
-    - TX power limiter
-    - Amplifier calculator
-    - QRP compliance status
-    - Miles-per-watt tracker
+    - Calculated output in multiple formats, its QRP class and the legal
+      limit at the tuned frequency
+    - Amplifier calculator with presets
+    - TX power limit (the transmitter refuses to go over it)
+    - Miles-per-watt tally with the QSOs logged
+    - Contest exchange
     """
 
     if HAS_PYQT6:
         power_limit_changed = pyqtSignal(float)  # New limit in watts
+        state_changed = pyqtSignal(dict)  # settings and tally (to save)
+        exchange_copied = pyqtSignal(str)
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -476,6 +807,13 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
 
         self._qrp = QRPController()
         self._current_dbm = 0.0
+        self._restoring = False
+        self._freq_hz: Optional[float] = None
+        self._demod = "FM"
+        self._legal_limit: Optional[float] = None
+        self._qsos: List[Dict[str, Any]] = []
+        self._undo_qsos: Optional[List[Dict[str, Any]]] = None
+        self._rst_source: Optional[Callable[[], Optional[str]]] = None
         self._setup_ui()
 
     def _setup_ui(self):
@@ -499,13 +837,25 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(10)
 
-        # --- TX power -----------------------------------------------------
-        power_group = QGroupBox("TX Power")
+        # --- Calculated output -------------------------------------------
+        power_group = QGroupBox("Calculated Output")
+        power_group.setToolTip(
+            "What the station would put out, worked out from the Amplifier "
+            "Chain below: a calculation, not a measurement"
+        )
         power_layout = QVBoxLayout(power_group)
         power_layout.setSpacing(8)
 
         self._power_display = PowerDisplayWidget()
         power_layout.addWidget(self._power_display)
+
+        # The license's privilege and power limit at the tuned frequency.
+        self._legal_label = QLabel("")
+        self._legal_label.setWordWrap(True)
+        self._legal_label.setAccessibleName("Legal limit here")
+        t.set_role(self._legal_label, "hint")
+        self._legal_label.setVisible(False)
+        power_layout.addWidget(self._legal_label)
 
         self._limit_status = QLabel("")
         self._limit_status.setWordWrap(True)
@@ -515,8 +865,19 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
 
         mode_form = _make_form()
         self._forms = [mode_form]
-        self._mode_combo = QComboBox()
+        # Shows "Auto · SSB" closed and the full items open, like the
+        # S-meter's report format.
+        from .signal_meter_widget import _ReportModeCombo
+
+        self._mode_combo = _ReportModeCombo()
+        self._mode_combo.addItem(_AUTO_MODE)
         self._mode_combo.addItems(["CW", "SSB", "FM", "FT8", "RTTY", "AM"])
+        self._mode_combo.setItemData(
+            0,
+            "Follow Demodulation > Mode: CW is CW, USB/LSB SSB, AM and FM as "
+            "they are, I/Q digital",
+            Qt.ItemDataRole.ToolTipRole,
+        )
         self._mode_combo.setToolTip(
             "Operating mode. QRP means 5 W or less for CW and digital modes, "
             "10 W or less for phone (SSB, FM, AM)."
@@ -536,6 +897,7 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
 
         self._amp_calc = AmplifierCalculator()
         self._amp_calc.power_changed.connect(self._on_calc_power_changed)
+        self._amp_calc.chain_changed.connect(self._emit_state)
         amp_layout.addWidget(self._amp_calc)
 
         layout.addWidget(amp_group)
@@ -547,7 +909,8 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
 
         self._limit_check = QCheckBox("Warn when output exceeds the limit")
         self._limit_check.setToolTip(
-            "Flag the TX power above when it is higher than the maximum below"
+            "Flag the calculated output when it is higher than the maximum "
+            "below; the HackRF then refuses to transmit"
         )
         self._limit_check.stateChanged.connect(self._on_limit_toggled)
         limit_layout.addWidget(self._limit_check)
@@ -592,15 +955,30 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
 
         # --- Miles per watt -----------------------------------------------
         mpw_group = QGroupBox("Miles Per Watt")
+        self._mpw_group = mpw_group
         mpw_layout = QVBoxLayout(mpw_group)
         mpw_layout.setSpacing(8)
         mpw_form = _make_form()
         self._forms.append(mpw_form)
 
+        self._unit_combo = QComboBox()
+        self._unit_combo.addItem("Miles", "mi")
+        self._unit_combo.addItem("Kilometres", "km")
+        self._unit_combo.setToolTip(
+            "Distances in miles (miles per watt, as the QRP awards count) or "
+            "kilometres (km per watt)"
+        )
+        index = self._unit_combo.findData(default_distance_unit())
+        self._unit_combo.setCurrentIndex(max(index, 0))
+        self._unit_combo.currentIndexChanged.connect(self._on_unit_changed)
+        self._unit_label = QLabel("Units:")
+        self._unit_label.setBuddy(self._unit_combo)
+        mpw_form.addRow(self._unit_label, self._unit_combo)
+
         self._distance_spin = QSpinBox()
-        self._distance_spin.setRange(1, 20000)
+        self._distance_spin.setRange(1, 40000)
         self._distance_spin.setValue(500)
-        self._distance_spin.setSuffix(" mi")
+        self._distance_spin.setSuffix(f" {self._unit()}")
         self._distance_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
         self._distance_spin.setToolTip("Distance to the station you worked")
         self._distance_spin.valueChanged.connect(self._update_mpw_display)
@@ -627,7 +1005,7 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         self._mpw_label.setToolTip("Distance divided by power for this contact")
         qso_row.addWidget(self._mpw_label, 1)
         self._log_qso_btn = QPushButton("Log QSO")
-        self._log_qso_btn.setToolTip("Add this contact to the miles-per-watt tally")
+        self._log_qso_btn.setToolTip("Add this contact to the tally")
         self._log_qso_btn.clicked.connect(self._on_log_qso)
         qso_row.addWidget(self._log_qso_btn)
         self._this_qso_label = QLabel("This QSO:")
@@ -655,6 +1033,38 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         stats_row.setContentsMargins(0, 0, 0, 0)
         mpw_layout.addWidget(self._stats_row)
 
+        # The QSOs logged, newest first, with Delete / Reset / Undo.
+        self._qso_list = QListWidget()
+        self._qso_list.setAccessibleName("Logged QSOs")
+        self._qso_list.setToolTip(
+            "Contacts in the tally, newest first. Select one and press Delete "
+            "to take it out."
+        )
+        self._qso_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
+        self._qso_list.itemSelectionChanged.connect(self._update_qso_buttons)
+        self._qso_list.setMaximumHeight(110)
+        mpw_layout.addWidget(self._qso_list)
+
+        list_buttons = QHBoxLayout()
+        list_buttons.setSpacing(6)
+        self._delete_qso_btn = QPushButton("Delete")
+        self._delete_qso_btn.setToolTip("Take the selected QSOs out of the tally")
+        self._delete_qso_btn.clicked.connect(self._delete_selected_qsos)
+        list_buttons.addWidget(self._delete_qso_btn)
+        self._reset_btn = QPushButton("Reset Tally")
+        self._reset_btn.setToolTip("Start the tally again (Undo brings it back)")
+        self._reset_btn.clicked.connect(self._reset_tally)
+        list_buttons.addWidget(self._reset_btn)
+        self._undo_btn = QPushButton("Undo")
+        self._undo_btn.setToolTip("Bring back what the last Delete or Reset removed")
+        self._undo_btn.clicked.connect(self._undo_qso_change)
+        list_buttons.addWidget(self._undo_btn)
+        list_buttons.addStretch(1)
+        self._qso_buttons = QWidget()
+        self._qso_buttons.setLayout(list_buttons)
+        list_buttons.setContentsMargins(0, 0, 0, 0)
+        mpw_layout.addWidget(self._qso_buttons)
+
         self._mpw_feedback = QLabel(
             "No QSOs logged yet. Enter a contact's distance and power, then "
             "press Log QSO."
@@ -665,14 +1075,56 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
 
         layout.addWidget(mpw_group)
 
+        # --- Contest exchange ---------------------------------------------
+        exchange_group = QGroupBox("Contest Exchange")
+        exchange_group.setToolTip(
+            "The QRP contest exchange: the report you give, your location and "
+            "your power"
+        )
+        exchange_form = _make_form(exchange_group)
+        self._forms.append(exchange_form)
+        self._state_edit = QLineEdit()
+        self._state_edit.setPlaceholderText("e.g. CA")
+        self._state_edit.setMaxLength(6)
+        self._state_edit.setToolTip(
+            "Your state, province or other location for the exchange (optional)"
+        )
+        self._state_edit.textChanged.connect(self._on_state_edited)
+        self._state_label = QLabel("Location:")
+        self._state_label.setBuddy(self._state_edit)
+        exchange_form.addRow(self._state_label, self._state_edit)
+
+        exchange_row = QHBoxLayout()
+        exchange_row.setSpacing(8)
+        self._exchange_label = QLabel("599 1mW")
+        t.set_role(self._exchange_label, "lcd-small")
+        self._exchange_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        exchange_row.addWidget(self._exchange_label, 1)
+        self._copy_exchange_btn = QPushButton("Copy")
+        self._copy_exchange_btn.setToolTip("Copy the exchange to the clipboard")
+        self._copy_exchange_btn.clicked.connect(self.copy_exchange)
+        exchange_row.addWidget(self._copy_exchange_btn)
+        self._exchange_caption = QLabel("Exchange:")
+        exchange_form.addRow(self._exchange_caption, exchange_row)
+        layout.addWidget(exchange_group)
+
         # Stretch at bottom
         layout.addStretch()
 
         self._align_form_labels()
 
+        # The exchange follows the S-meter's report while the panel shows.
+        self._exchange_timer = QTimer(self)
+        self._exchange_timer.setInterval(1000)
+        self._exchange_timer.timeout.connect(self._update_exchange)
+
         # Initial state: the calculator computed its output before we were
         # connected to it, so show that result now.
+        self._update_mode_face()
         self._update_mpw_display()
+        self._update_qso_list()
         self._refresh_power(self._amp_calc.get_output_dbm())
 
     def _align_form_labels(self) -> None:
@@ -681,9 +1133,12 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         labels = [
             self._mode_label,
             self._max_power_label,
+            self._unit_label,
             self._distance_label,
             self._mpw_power_label,
             self._this_qso_label,
+            self._state_label,
+            self._exchange_caption,
         ]
         for label in labels:
             label.ensurePolished()
@@ -697,16 +1152,124 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         for form in self._forms:
             _match_label_heights(form)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._update_exchange()
+        self._exchange_timer.start()
+
+    def hideEvent(self, event) -> None:
+        self._exchange_timer.stop()
+        super().hideEvent(event)
+
+    # ------------------------------------------------------------------
+    # Mode
+    # ------------------------------------------------------------------
+
+    def mode(self) -> str:
+        """The QRP mode in effect ("CW", "SSB", "FM", "AM", "FT8", "RTTY" or
+        "Digital"), Auto resolved from the demodulation mode."""
+        text = self._mode_combo.currentText()
+        if text != _AUTO_MODE:
+            return text
+        demod = (self._demod or "").upper()
+        if demod.startswith("NONE") or demod == "I/Q":
+            return "Digital"
+        return _DEMOD_TO_QRP.get(demod, "FM")
+
+    def _class_mode(self) -> str:
+        mode = self.mode()
+        return "DATA" if mode == "Digital" else mode
+
+    def set_demod_mode(self, mode: str) -> None:
+        """Demodulation > Mode changed (Auto follows it)."""
+        self._demod = str(mode or "")
+        self._update_mode_face()
+        self._refresh_power(self._current_dbm)
+
+    def _update_mode_face(self) -> None:
+        if self._mode_combo.currentText() == _AUTO_MODE:
+            self._mode_combo.set_face_text(f"Auto · {self.mode()}")
+            self._mode_combo.setToolTip(
+                f"Auto: {self.mode()} (from Demodulation > Mode). QRP means 5 W "
+                "or less for CW and digital modes, 10 W or less for phone."
+            )
+        else:
+            self._mode_combo.set_face_text(None)
+            self._mode_combo.setToolTip(
+                "Operating mode. QRP means 5 W or less for CW and digital "
+                "modes, 10 W or less for phone (SSB, FM, AM)."
+            )
+
     # ------------------------------------------------------------------
     # Power / limit
     # ------------------------------------------------------------------
 
+    def set_station(
+        self, freq_hz: Optional[float], demod_mode: Optional[str] = None
+    ) -> None:
+        """The tuned frequency (and demodulation mode): the legal limit and
+        privilege line follows them (and the license class)."""
+        self._freq_hz = None if freq_hz is None else float(freq_hz)
+        if demod_mode is not None:
+            self._demod = str(demod_mode)
+            self._update_mode_face()
+        self._refresh_power(self._current_dbm)
+
+    def refresh_license(self) -> None:
+        """The license class changed."""
+        self._refresh_power(self._current_dbm)
+
+    def _update_legal(self) -> None:
+        """The license's privilege and power limit at the tuned frequency."""
+        t = _theme()
+        self._legal_limit = None
+        if self._freq_hz is None:
+            self._legal_label.setVisible(False)
+            return
+        from ...core import frequency_manager
+        from ...gui.transmitter import describe_refusal, license_name, quiet_checks
+
+        freq = self._freq_hz
+        tx_mode = _QRP_TO_TX_MODE.get(self.mode(), self.mode())
+        where = f"{freq / 1e6:.3f} MHz"
+        lic = license_name()
+        head = f"At {where} ({lic}, {self.mode()})"
+        with quiet_checks():
+            allowed, reason = frequency_manager.is_tx_allowed(freq, 0.0, tx_mode)
+        if not allowed:
+            why = describe_refusal(reason, freq, tx_mode)
+            text = f"Not permitted at {where} in {self.mode()}: {why}."
+            tone: Optional[str] = "danger"
+        else:
+            limit = frequency_manager.get_power_limit(freq, tx_mode)
+            if limit is None:
+                limit = _AMATEUR_LIMIT_W
+                general = " (the general amateur limit)"
+            else:
+                general = ""
+            self._legal_limit = float(limit)
+            watts = dbm_to_watts(self._current_dbm)
+            if within_limit(watts, limit):
+                text = f"{head}: legal limit {format_watts(limit)} PEP{general}."
+                tone = "success"
+            else:
+                text = (
+                    f"{head}: legal limit {format_watts(limit)} PEP{general}: "
+                    f"the calculated {format_watts(watts)} is over it."
+                )
+                tone = "danger"
+        self._legal_label.setText(text)
+        t.set_tone(self._legal_label, tone)
+        self._legal_label.setVisible(True)
+
     def _refresh_power(self, dbm: float) -> None:
-        """Show ``dbm`` in the TX power card and check it against the limit."""
+        """Show ``dbm`` in the calculated output card and check it against
+        the limits."""
         self._current_dbm = float(dbm)
-        mode = self._mode_combo.currentText()
-        self._power_display.set_power(dbm, mode)
+        self._update_legal()
+        self._power_display.set_power(dbm, self._class_mode(), self._legal_limit)
         self._update_limit_status()
+        self._update_exchange()
 
     def _update_limit_status(self) -> None:
         t = _theme()
@@ -722,8 +1285,8 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
             over_db = 10.0 * math.log10(max(watts, 1e-12) / max(limit, 1e-12))
             # A non-breaking space keeps "3.0 dB" together when wrapping.
             text = (
-                f"\u26a0 Exceeds your {format_watts(limit)} limit "
-                f"by {over_db:.1f}\u00a0dB"
+                f"⚠ Exceeds your {format_watts(limit)} limit "
+                f"by {over_db:.1f} dB: the HackRF won't transmit"
             )
             tone = "danger"
         self._limit_status.setText(text)
@@ -732,7 +1295,9 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
 
     def _on_mode_changed(self, mode: str):
         """Handle mode change."""
+        self._update_mode_face()
         self._refresh_power(self._current_dbm)
+        self._emit_state()
 
     def _on_limit_toggled(self, state: int):
         """Handle limit checkbox toggle."""
@@ -746,6 +1311,7 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         else:
             self._qrp.disable_power_limit()
         self._update_limit_status()
+        self._emit_state()
 
     def _on_limit_changed(self, value: float):
         """Handle limit value change."""
@@ -753,6 +1319,7 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
             self._qrp.set_power_limit(value)
             self.power_limit_changed.emit(value)
         self._update_limit_status()
+        self._emit_state()
 
     def _set_quick_limit(self, watts: float):
         """Set a quick power limit."""
@@ -760,6 +1327,7 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         self._limit_check.setChecked(True)
         self._qrp.set_power_limit(watts)
         self._update_limit_status()
+        self._emit_state()
 
     def _on_calc_power_changed(self, dbm: float):
         """Handle calculator power change."""
@@ -769,35 +1337,282 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
     # Miles per watt
     # ------------------------------------------------------------------
 
+    def _unit(self) -> str:
+        return str(self._unit_combo.currentData() or "mi")
+
+    def _per_watt_name(self) -> str:
+        return "MPW" if self._unit() == "mi" else "km/W"
+
+    def _distance_in_unit(self, km: float) -> float:
+        return km if self._unit() == "km" else km / _KM_PER_MILE
+
+    def _on_unit_changed(self, _index: int) -> None:
+        """Show distances in the other unit (the value typed converts)."""
+        unit = self._unit()
+        value = self._distance_spin.value()
+        converted = value * _KM_PER_MILE if unit == "km" else value / _KM_PER_MILE
+        self._distance_spin.blockSignals(True)
+        self._distance_spin.setValue(max(1, int(round(converted))))
+        self._distance_spin.setSuffix(f" {unit}")
+        self._distance_spin.blockSignals(False)
+        self._mpw_group.setTitle(
+            "Miles Per Watt" if unit == "mi" else "Kilometres Per Watt"
+        )
+        self._update_mpw_display()
+        self._update_qso_list()
+        self._emit_state()
+
+    def _distance_km(self) -> float:
+        value = float(self._distance_spin.value())
+        return value if self._unit() == "km" else value * _KM_PER_MILE
+
     def _on_log_qso(self):
         """Log a QSO for MPW tracking."""
         distance = self._distance_spin.value()
         power = self._mpw_power_spin.value()
-
-        previous_best = self._qrp.get_statistics()["best_mpw"]
-        mpw = self._qrp.log_qso(distance, power)
+        km = self._distance_km()
+        previous_best = self._best_per_watt()
+        entry = {
+            "km": round(km, 3),
+            "watts": float(power),
+            "when": time.strftime("%Y-%m-%d %H:%M"),
+        }
+        self._qsos.append(entry)
+        del self._qsos[:-_MAX_QSOS]
+        self._undo_qsos = None
+        self._sync_controller()
+        per_watt = self._distance_in_unit(km) / power if power > 0 else 0.0
         self._update_mpw_display()
+        self._update_qso_list()
 
-        summary = f"Logged {distance} mi on {format_watts(power)} = {mpw:,.0f} MPW."
-        if mpw > previous_best:
+        summary = (
+            f"Logged {distance} {self._unit()} on {format_watts(power)} = "
+            f"{per_watt:,.0f} {self._per_watt_name()}."
+        )
+        if per_watt > previous_best:
             self._mpw_feedback.setText(f"{summary} New best!")
             _theme().set_tone(self._mpw_feedback, "success")
         else:
             self._mpw_feedback.setText(summary)
             _theme().set_tone(self._mpw_feedback, None)
+        self._emit_state()
+
+    def _best_per_watt(self) -> float:
+        best = 0.0
+        for qso in self._qsos:
+            if qso["watts"] > 0:
+                best = max(best, self._distance_in_unit(qso["km"]) / qso["watts"])
+        return best
+
+    def _sync_controller(self) -> None:
+        """The QRP controller's statistics, from the QSO list (always miles)."""
+        qrp = self._qrp
+        qrp._total_qsos = len(self._qsos)
+        qrp._total_miles = sum(q["km"] / _KM_PER_MILE for q in self._qsos)
+        qrp._best_mpw = max(
+            (
+                (q["km"] / _KM_PER_MILE) / q["watts"]
+                for q in self._qsos
+                if q["watts"] > 0
+            ),
+            default=0.0,
+        )
 
     def _update_mpw_display(self):
         """Update miles-per-watt display."""
         distance = self._distance_spin.value()
         power = self._mpw_power_spin.value()
-        current_mpw = distance / power if power > 0 else 0
+        current = distance / power if power > 0 else 0
+        name = self._per_watt_name()
 
-        self._mpw_label.setText(f"{current_mpw:,.0f} MPW")
+        self._mpw_label.setText(f"{current:,.0f} {name}")
+        self._best_mpw_label.setText(f"{self._best_per_watt():,.0f} {name}")
+        self._qso_count_label.setText(str(len(self._qsos)))
+        self._stats_row.setVisible(bool(self._qsos))
 
-        stats = self._qrp.get_statistics()
-        self._best_mpw_label.setText(f"{stats['best_mpw']:,.0f} MPW")
-        self._qso_count_label.setText(str(stats["total_qsos"]))
-        self._stats_row.setVisible(stats["total_qsos"] > 0)
+    def _update_qso_list(self) -> None:
+        self._qso_list.clear()
+        unit, name = self._unit(), self._per_watt_name()
+        for index in range(len(self._qsos) - 1, -1, -1):
+            qso = self._qsos[index]
+            distance = self._distance_in_unit(qso["km"])
+            per_watt = distance / qso["watts"] if qso["watts"] > 0 else 0.0
+            text = (
+                f"{distance:,.0f} {unit} · {format_watts(qso['watts'])} · "
+                f"{per_watt:,.0f} {name}"
+            )
+            if qso.get("when"):
+                text += f" · {qso['when']}"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, index)
+            self._qso_list.addItem(item)
+        self._qso_list.setVisible(bool(self._qsos))
+        self._update_qso_buttons()
+
+    def _update_qso_buttons(self) -> None:
+        has = bool(self._qsos)
+        self._delete_qso_btn.setEnabled(bool(self._qso_list.selectedItems()))
+        self._reset_btn.setEnabled(has)
+        self._undo_btn.setVisible(self._undo_qsos is not None)
+        self._qso_buttons.setVisible(has or self._undo_qsos is not None)
+
+    def _delete_selected_qsos(self) -> None:
+        indexes = sorted(
+            {
+                int(item.data(Qt.ItemDataRole.UserRole))
+                for item in self._qso_list.selectedItems()
+            }
+        )
+        if not indexes:
+            return
+        self._undo_qsos = list(self._qsos)
+        for index in reversed(indexes):
+            del self._qsos[index]
+        self._after_tally_edit(
+            f"Deleted {len(indexes)} QSO{'s' if len(indexes) != 1 else ''}. "
+            "Undo brings it back."
+        )
+
+    def _reset_tally(self) -> None:
+        if not self._qsos:
+            return
+        count = len(self._qsos)
+        self._undo_qsos = list(self._qsos)
+        self._qsos = []
+        self._after_tally_edit(
+            f"Tally reset ({count} QSO{'s' if count != 1 else ''}). Undo brings "
+            "it back."
+        )
+
+    def _undo_qso_change(self) -> None:
+        if self._undo_qsos is None:
+            return
+        self._qsos = self._undo_qsos
+        self._undo_qsos = None
+        self._after_tally_edit("Restored.")
+
+    def _after_tally_edit(self, message: str) -> None:
+        self._sync_controller()
+        self._update_mpw_display()
+        self._update_qso_list()
+        self._mpw_feedback.setText(message)
+        _theme().set_tone(self._mpw_feedback, None)
+        self._emit_state()
+
+    # ------------------------------------------------------------------
+    # Contest exchange
+    # ------------------------------------------------------------------
+
+    def set_rst_source(self, source: Optional[Callable[[], Optional[str]]]) -> None:
+        """Where the report comes from (the S-meter: the RST of the signal
+        received, or None without one; the contest's 599/59 then)."""
+        self._rst_source = source
+        self._update_exchange()
+
+    def exchange_text(self) -> str:
+        """The exchange: report, location (if set) and the calculated power,
+        e.g. "599 CA 5W" or "59 250mW"."""
+        rst = None
+        if self._rst_source is not None:
+            try:
+                rst = self._rst_source()
+            except Exception:  # pragma: no cover - defensive
+                rst = None
+        if not rst:
+            rst = "599" if self.mode() in ("CW", "FT8", "RTTY", "Digital") else "59"
+        watts = dbm_to_watts(self._current_dbm)
+        state = self._state_edit.text().strip().upper()
+        return self._qrp.format_contest_exchange(rst, watts, state)
+
+    def _update_exchange(self) -> None:
+        if not hasattr(self, "_exchange_label"):
+            return
+        text = self.exchange_text()
+        self._exchange_label.setText(text)
+        self._exchange_label.setToolTip(
+            f"{text}: the report you give (the S-meter's when a signal is "
+            "received, else the contest's usual one), your location and your "
+            "calculated power"
+        )
+
+    def _on_state_edited(self, _text: str) -> None:
+        self._update_exchange()
+        self._emit_state()
+
+    def copy_exchange(self) -> str:
+        """Copy the exchange to the clipboard (and return it)."""
+        text = self.exchange_text()
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(text)
+        self._copy_exchange_btn.setToolTip(f"Copied: {text}")
+        self.exchange_copied.emit(text)
+        return text
+
+    # ------------------------------------------------------------------
+    # State (saved between sessions)
+    # ------------------------------------------------------------------
+
+    def get_state(self) -> Dict[str, Any]:
+        """Settings and the QSO tally, to save."""
+        mode = self._mode_combo.currentText()
+        return {
+            "chain": self._amp_calc.state(),
+            "mode": "auto" if mode == _AUTO_MODE else mode,
+            "limit_on": self._limit_check.isChecked(),
+            "limit_w": self._limit_spin.value(),
+            "units": self._unit(),
+            "qsos": list(self._qsos),
+            "location": self._state_edit.text().strip(),
+        }
+
+    def set_state(self, state: Dict[str, Any]) -> None:
+        """Restore :meth:`get_state` (what can't be read is skipped)."""
+        if not isinstance(state, dict):
+            return
+        self._restoring = True
+        try:
+            chain = state.get("chain")
+            if isinstance(chain, dict):
+                self._amp_calc.set_state(chain)
+            mode = str(state.get("mode", "auto"))
+            index = self._mode_combo.findText(_AUTO_MODE if mode == "auto" else mode)
+            if index >= 0:
+                self._mode_combo.setCurrentIndex(index)
+            try:
+                self._limit_spin.setValue(float(state.get("limit_w", 5.0)))
+            except (TypeError, ValueError):
+                pass
+            self._limit_check.setChecked(bool(state.get("limit_on", False)))
+            units = state.get("units")
+            index = self._unit_combo.findData(units)
+            if index >= 0 and index != self._unit_combo.currentIndex():
+                self._unit_combo.setCurrentIndex(index)
+            qsos = []
+            for qso in state.get("qsos") or []:
+                try:
+                    entry = {
+                        "km": float(qso["km"]),
+                        "watts": float(qso["watts"]),
+                        "when": str(qso.get("when", "")),
+                    }
+                except (TypeError, ValueError, KeyError):
+                    continue
+                if entry["km"] > 0 and entry["watts"] > 0:
+                    qsos.append(entry)
+            self._qsos = qsos[-_MAX_QSOS:]
+            self._undo_qsos = None
+            self._state_edit.setText(str(state.get("location", ""))[:6])
+            self._sync_controller()
+            self._update_mpw_display()
+            self._update_qso_list()
+            self._refresh_power(self._amp_calc.get_output_dbm())
+        finally:
+            self._restoring = False
+
+    def _emit_state(self, *_args) -> None:
+        if not self._restoring:
+            self.state_changed.emit(self.get_state())
 
     # ------------------------------------------------------------------
     # Public API
@@ -811,12 +1626,37 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
         """Set current power for display."""
         self._refresh_power(dbm)
 
+    def set_sdr_output(self, dbm: Optional[float], tip: str = "") -> None:
+        """A connected HackRF's estimated output as the chain's SDR output
+        (read-only), or None for the user's own figure."""
+        self._amp_calc.set_sdr_output(dbm, tip)
+
+    def calculated_output_watts(self, sdr_dbm: Optional[float] = None) -> float:
+        """The station's output through the amplifier chain, for an SDR
+        output of ``sdr_dbm`` (the chain's own figure by default)."""
+        return dbm_to_watts(self._amp_calc.chain_output(sdr_dbm)[0])
+
+    def power_limit_watts(self) -> Optional[float]:
+        """The power limit when it is on (None: off)."""
+        return self._qrp.get_power_limit() if self._limit_check.isChecked() else None
+
+    @staticmethod
+    def within(watts: float, limit: float) -> bool:
+        """``watts`` at or below ``limit`` (to within 0.05 dB)."""
+        return within_limit(watts, limit)
+
+    @staticmethod
+    def watts_text(watts: float) -> str:
+        return format_watts(watts)
+
 
 __all__ = [
     "PowerDisplayWidget",
     "AmplifierCalculator",
     "QRPPanel",
     "classify_qrp",
+    "default_distance_unit",
+    "format_class_watts",
     "format_dbm",
     "format_watts",
     "qrp_limit_for_mode",

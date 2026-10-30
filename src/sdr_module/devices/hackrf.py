@@ -27,7 +27,7 @@ Threading model:
 import logging
 import queue
 import threading
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -99,6 +99,8 @@ class HackRFDevice(SDRDevice):
     LNA_GAIN_VALUES = list(range(0, 41, 8))  # 0, 8, 16, 24, 32, 40 dB
     VGA_GAIN_VALUES = list(range(0, 63, 2))  # 0-62 dB in 2 dB steps
     TX_VGA_GAIN_VALUES = list(range(0, 48, 1))  # 0-47 dB
+    # The front-end amplifier's gain (RX and TX), nominal.
+    AMP_GAIN_DB = 14.0
 
     # Supported baseband filter bandwidths (Hz).
     SUPPORTED_BANDWIDTHS = [
@@ -133,6 +135,13 @@ class HackRFDevice(SDRDevice):
         self._tx_leftover: np.ndarray = np.empty(0, dtype=np.int8)
         self._tx_done = threading.Event()
         self._rx_error: Optional[str] = None
+        # The emission being transmitted: its occupied bandwidth (None: not
+        # given, so the baseband filter's width is checked) and mode(s).
+        # The legality checks during a transmission use these.
+        self._tx_bandwidth: Optional[float] = None
+        self._tx_modes: Tuple[str, ...] = ()
+        # Why the last transmission was refused or failed (None: it wasn't).
+        self._last_tx_error: Optional[str] = None
 
     # ------------------------------------------------------------------ #
     # Enumeration
@@ -280,7 +289,7 @@ class HackRFDevice(SDRDevice):
 
         # SAFETY: while transmitting, a retune must not cross into a locked band.
         if self._state.is_transmitting:
-            allowed, reason = is_tx_allowed(freq_hz, self._state.bandwidth)
+            allowed, reason = self._check_tx(freq_hz)
             if not allowed:
                 logger.error(f"TX frequency change BLOCKED: {reason}")
                 return False
@@ -319,9 +328,11 @@ class HackRFDevice(SDRDevice):
 
         bw_hz = min(self.SUPPORTED_BANDWIDTHS, key=lambda x: abs(x - bw_hz))
 
-        # SAFETY: while transmitting, a wider filter must not straddle a lock.
+        # SAFETY: while transmitting, a wider filter must not straddle a lock
+        # (when the emission's own bandwidth is unknown, the filter is the
+        # widest it can be).
         if self._state.is_transmitting:
-            allowed, reason = is_tx_allowed(self._state.frequency, bw_hz)
+            allowed, reason = self._check_tx(self._state.frequency, bw_hz)
             if not allowed:
                 logger.error(f"TX bandwidth change BLOCKED: {reason}")
                 return False
@@ -417,9 +428,7 @@ class HackRFDevice(SDRDevice):
         # SAFETY: the +14 dB amp raises TX ERP. Refuse to enable it mid-transmit
         # unless the current frequency/bandwidth is transmit-legal.
         if enabled and self._state.is_transmitting:
-            allowed, reason = is_tx_allowed(
-                self._state.frequency, self._state.bandwidth
-            )
+            allowed, reason = self._check_tx(self._state.frequency)
             if not allowed:
                 logger.error(f"TX amplifier enable BLOCKED: {reason}")
                 return False
@@ -536,6 +545,52 @@ class HackRFDevice(SDRDevice):
             logger.error(f"Failed to set TX gain: {e}")
             return False
 
+    @property
+    def tx_gain(self) -> int:
+        """The transmit VGA gain last set (0-47 dB)."""
+        return int(self._tx_vga_gain)
+
+    @property
+    def amp_enabled(self) -> bool:
+        """Whether the +14 dB front-end amplifier is on."""
+        return bool(self._amp_enabled)
+
+    @property
+    def last_tx_error(self) -> Optional[str]:
+        """Why the last transmission was refused or failed (None if it
+        wasn't), e.g. the frequency manager's ``"LICENSE: ..."`` reason."""
+        return self._last_tx_error
+
+    @staticmethod
+    def _mode_list(mode: Union[str, Sequence[str], None]) -> Tuple[str, ...]:
+        """The emission's mode(s) as a tuple (``""`` for "not given")."""
+        if mode is None:
+            return ("",)
+        if isinstance(mode, str):
+            return (mode,)
+        modes = tuple(str(m) for m in mode)
+        return modes or ("",)
+
+    def _check_tx(
+        self, freq_hz: float, filter_hz: Optional[float] = None
+    ) -> Tuple[bool, Optional[str]]:
+        """Whether sending the current emission at ``freq_hz`` is allowed.
+
+        With the emission's occupied bandwidth and mode(s) given to
+        :meth:`start_tx` / :meth:`write_samples`, those are checked (each
+        mode must be allowed). Otherwise (a caller that didn't say) the
+        baseband filter's width, ``filter_hz`` or the current one, stands in
+        as the widest the signal can be, as before.
+        """
+        if self._tx_bandwidth is None:
+            width = self._state.bandwidth if filter_hz is None else filter_hz
+            return is_tx_allowed(freq_hz, width)
+        for mode in self._tx_modes or ("",):
+            allowed, reason = is_tx_allowed(freq_hz, self._tx_bandwidth, mode)
+            if not allowed:
+                return False, reason
+        return True, None
+
     @staticmethod
     def _to_int8_iq(samples: np.ndarray) -> np.ndarray:
         """Convert complex samples to clipped, interleaved int8 I/Q bytes."""
@@ -548,7 +603,10 @@ class HackRFDevice(SDRDevice):
         return iq
 
     def start_tx(
-        self, callback: Optional[Callable[[], Optional[np.ndarray]]] = None
+        self,
+        callback: Optional[Callable[[], Optional[np.ndarray]]] = None,
+        bandwidth_hz: Optional[float] = None,
+        mode: Union[str, Sequence[str], None] = "",
     ) -> bool:
         """
         Start transmitting.
@@ -558,12 +616,25 @@ class HackRFDevice(SDRDevice):
         empty array / None to end the transmission. ``callback`` is required;
         ``start_tx(None)`` is refused so the transmitter never radiates the
         contents of an uninitialised buffer.
+
+        ``bandwidth_hz`` and ``mode`` describe the emission: its occupied
+        bandwidth (e.g. 6.4 kHz for an FM tone ID, 150 Hz for CW) and its
+        mode ("CW", "FM", "SSB", ...; a sequence when the transmission mixes
+        modes, e.g. an FM message with a CW ID: each must be allowed). The
+        legality check (lockouts and license privileges) uses them, here and
+        whenever the frequency, filter or amplifier changes while
+        transmitting. Without ``bandwidth_hz`` the baseband filter's width is
+        checked instead (the widest the signal can be), which refuses
+        anything near a band edge. Why a start was refused is in
+        :attr:`last_tx_error`.
         """
         if not self._is_open or self._device is None:
+            self._last_tx_error = "The HackRF is not open"
             return False
 
         if callback is None:
             logger.error("start_tx requires a sample-producing callback")
+            self._last_tx_error = "No samples to transmit"
             return False
 
         with self._state_lock:
@@ -572,15 +643,25 @@ class HackRFDevice(SDRDevice):
                 return True
             if self._state.is_streaming:
                 logger.error("Cannot TX while RX is active (half-duplex)")
+                self._last_tx_error = (
+                    "The HackRF is receiving; it can't transmit at the same time"
+                )
                 return False
             freq = self._state.frequency
-            bw = self._state.bandwidth
 
-        # SAFETY: validate the TX frequency/bandwidth against the lockout bands.
-        allowed, reason = is_tx_allowed(freq, bw)
+        # SAFETY: validate the emission against the lockout bands and the
+        # license (its own bandwidth and mode, when given).
+        self._tx_bandwidth = (
+            None if bandwidth_hz is None else max(0.0, float(bandwidth_hz))
+        )
+        self._tx_modes = self._mode_list(mode)
+        allowed, reason = self._check_tx(freq)
         if not allowed:
             logger.error(f"TX BLOCKED: {reason}")
+            self._last_tx_error = reason or "Transmitting is not allowed here"
+            self._tx_bandwidth, self._tx_modes = None, ()
             return False
+        self._last_tx_error = None
 
         self._tx_callback = callback
         self._tx_leftover = np.empty(0, dtype=np.int8)
@@ -613,6 +694,7 @@ class HackRFDevice(SDRDevice):
                 return 0
             except Exception as e:
                 logger.error(f"HackRF TX callback error: {e}")
+                self._last_tx_error = f"Transmit error: {e}"
                 valid_length.value = 0
                 self._tx_done.set()
                 return -1
@@ -622,12 +704,20 @@ class HackRFDevice(SDRDevice):
             self._device.pyhackrf_start_tx()
         except Exception as e:
             logger.error(f"Failed to start TX: {e}")
+            self._last_tx_error = f"The HackRF didn't start transmitting: {e}"
+            self._tx_bandwidth, self._tx_modes = None, ()
             return False
 
         with self._state_lock:
             self._state.is_transmitting = True
         logger.info("Started HackRF TX streaming")
         return True
+
+    def wait_tx_done(self, timeout: Optional[float] = None) -> bool:
+        """Wait until the transmission has handed its last samples to the
+        hardware (the callback returned no more) or was stopped. True when
+        that happened within ``timeout`` seconds."""
+        return self._tx_done.wait(timeout=timeout)
 
     def stop_tx(self) -> bool:
         """Stop transmitting samples."""
@@ -643,19 +733,35 @@ class HackRFDevice(SDRDevice):
                 self._device.pyhackrf_stop_tx()
         except Exception as e:
             logger.warning(f"Error stopping TX: {e}")
+        self._tx_bandwidth, self._tx_modes = None, ()
 
         logger.info("Stopped HackRF TX streaming")
         return True
 
-    def write_samples(self, samples: np.ndarray, timeout: float = 10.0) -> bool:
+    def write_samples(
+        self,
+        samples: np.ndarray,
+        timeout: float = 10.0,
+        bandwidth_hz: Optional[float] = None,
+        mode: Union[str, Sequence[str], None] = "",
+    ) -> bool:
         """
         Transmit a fixed block of complex samples once, blocking until done.
 
         Returns True only after the samples have been handed to libhackrf and
         transmission has stopped. Returns False if TX is not currently allowed
-        (device closed, RX active, or a frequency/bandwidth lockout).
+        (device closed, RX active, or a frequency/bandwidth lockout; the
+        reason is in :attr:`last_tx_error`).
+
+        ``bandwidth_hz`` and ``mode`` describe the emission, as for
+        :meth:`start_tx`. ``timeout`` is the extra time allowed beyond the
+        samples' own air time at the current sample rate, so a long block is
+        never cut short. (The GUI streams through
+        :class:`sdr_module.gui.transmitter.Transmitter` instead, which does
+        not block.)
         """
         if not self._is_open or self._device is None:
+            self._last_tx_error = "The HackRF is not open"
             return False
 
         samples = np.asarray(samples)
@@ -665,17 +771,15 @@ class HackRFDevice(SDRDevice):
         with self._state_lock:
             if self._state.is_streaming:
                 logger.error("Cannot TX while RX is active (half-duplex)")
+                self._last_tx_error = (
+                    "The HackRF is receiving; it can't transmit at the same time"
+                )
                 return False
             if self._state.is_transmitting:
                 logger.error("Already transmitting")
+                self._last_tx_error = "The HackRF is already transmitting"
                 return False
-            freq = self._state.frequency
-            bw = self._state.bandwidth
-
-        allowed, reason = is_tx_allowed(freq, bw)
-        if not allowed:
-            logger.error(f"TX BLOCKED: {reason}")
-            return False
+            rate = self._state.sample_rate
 
         sent = threading.Event()
         state = {"done": False}
@@ -687,13 +791,17 @@ class HackRFDevice(SDRDevice):
             state["done"] = True
             return samples
 
-        if not self.start_tx(one_shot):
+        if not self.start_tx(one_shot, bandwidth_hz=bandwidth_hz, mode=mode):
             return False
 
-        # Wait for the source to be fully consumed, then for the transfer to end.
-        sent.wait(timeout=timeout)
-        finished = self._tx_done.wait(timeout=timeout)
+        # Wait for the source to be fully consumed, then for the transfer to
+        # end: the samples' air time plus the margin.
+        air_time = samples.size / rate if rate and rate > 0 else 0.0
+        limit = air_time + max(0.0, float(timeout))
+        sent.wait(timeout=limit)
+        finished = self._tx_done.wait(timeout=limit)
         self.stop_tx()
         if not finished:
             logger.warning("write_samples timed out waiting for TX to drain")
+            self._last_tx_error = "The HackRF stopped taking samples (timed out)"
         return finished

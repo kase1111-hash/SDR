@@ -100,6 +100,7 @@ except ImportError:
 from .. import __version__
 from ..devices.base import SDRDevice
 from ..dsp.nco import Nco
+from ..dsp.stereo_pilot import StereoPilotDetector
 from ..utils.tooltips import get_short_tip
 from .audio_chain import (
     AGC_SPEEDS,
@@ -140,6 +141,7 @@ from .themes import (
     set_tone,
     theme_notifier,
 )
+from .transmitter import ArraySource, TxJob
 from .tuning import (
     STEP_CHOICES_HZ,
     STEP_MODE_NAMES,
@@ -153,6 +155,7 @@ from .tuning import (
     step_index,
     step_mode_key,
 )
+from .tx_station import StationTx
 from .waterfall_widget import WaterfallWidget
 
 
@@ -251,7 +254,7 @@ _HARDWARE_DRIVERS = (
 try:
     from ..ham.gui.callsign_panel import CallsignPanel
     from ..ham.gui.qrp_panel import QRPPanel
-    from ..ham.gui.radio_tuner import RadioTunerWidget
+    from ..ham.gui.radio_tuner import RadioTunerWidget, band_step
     from ..ham.gui.signal_meter_widget import SignalMeterPanel
     from ..ham.gui.sstv_panel import ISS_FREQUENCY_HZ, SSTVPanel
 
@@ -647,6 +650,27 @@ def _noise_bandwidth(taps: Optional[np.ndarray], rate: float) -> float:
     if gain <= 0.0:
         return float(rate)
     return float(rate * np.sum(np.abs(taps) ** 2) / gain**2)
+
+
+def _channel_centroid_hz(power_db: np.ndarray, chain: Any) -> Optional[float]:
+    """Where the tuned channel's power is centered, in Hz from the tuned
+    frequency (from the spectrum, linear power weights), or None for an
+    empty spectrum."""
+    n = len(power_db)
+    if n == 0:
+        return None
+    bin_hz = chain.rate / n
+    low, high = chain.band_edges()
+    offset = float(getattr(chain, "offset_hz", 0.0))
+    center = n // 2  # fftshift puts the LO (0 Hz) here
+    first = max(0, center + int(np.floor((offset + low) / bin_hz + 0.5)))
+    last = min(n - 1, center + int(np.ceil((offset + high) / bin_hz - 0.5)))
+    if last <= first:
+        return 0.0
+    weights = np.power(10.0, power_db[first : last + 1].astype(np.float64) / 10.0)
+    freqs = (np.arange(first, last + 1) - center) * bin_hz - offset
+    total = float(np.sum(weights))
+    return float(np.dot(weights, freqs) / total) if total > 0 else 0.0
 
 
 def _noise_per_bin(power_db: np.ndarray) -> float:
@@ -1815,6 +1839,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._retune_warned = False
         self._demo_mode = False  # set by _start_demo_mode()
         self._radio_tuner = None  # Pop-out radio tuner window
+        # The tuner's seek and STEREO lamp (T7): blocks processed since the
+        # last retune, whether the last one opened the squelch, and the
+        # 19 kHz pilot detector (built while the tuner is open).
+        self._tuner_blocks = 0
+        self._tuner_signal = False
+        self._tuner_centered = False
+        self._pilot: Optional[StereoPilotDetector] = None
         self._squelch_db = -80.0  # the manual squelch threshold (dBFS)
         # What happens after the channel filter: the squelch (hysteresis,
         # hang time, Auto), the channel's noise floor, the audio options
@@ -1916,6 +1947,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._audio.set_volume(self._saved_volume() / 100.0)
 
         self._setup_ui()
+        # Transmitting (Send ID Now, Transmit Text): the transmit engine,
+        # the ON AIR badge and the Ham ID panel's TX side (T7).
+        self._tx_station = StationTx(self)
         self._setup_menus()
         self._setup_toolbar()
         self._setup_receiver_bar()
@@ -2349,6 +2383,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             checkable=True,
             checked=self._settings.get_bool("tuning/keep_centered", False),
         )
+        radio_menu.addSeparator()
+        self._tx_station.add_menu_actions(radio_menu)  # Send Station ID, Stop TX
         self._rebuild_recent_menu()
         self._update_history_actions()
 
@@ -2586,6 +2622,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._level_label = self._level_meter
         toolbar.addWidget(self._level_meter)
 
+        # ON AIR (red) while transmitting; a click stops it.
+        self._tx_station.add_toolbar_badge(toolbar)
+
     def _setup_receiver_bar(self) -> None:
         """Second toolbar row: MODE and FILTER (mirroring the control panel's
         Mode and Bandwidth) and the tuning STEP."""
@@ -2718,6 +2757,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._callsign_panel.id_requested.connect(self._on_callsign_id_requested)
             self._callsign_panel.callsign_changed.connect(self._save_ham_id_settings)
             self._callsign_panel.settings_changed.connect(self._save_ham_id_settings)
+            self._tx_station.connect_panel()
+            self._connect_qrp()
             self._sstv_panel.start_requested.connect(self._on_sstv_start_requested)
             self._connect_sstv_and_smeter()
         # Click-to-tune from spectrum and waterfall. set_frequency keeps the
@@ -3022,11 +3063,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._waterfall.set_frequency_range(center, rate)
         self._update_passband()
 
-        # Only a HackRF One can send the Ham ID.
-        if HAS_HAM_RADIO:
-            self._callsign_panel.set_tx_available(
-                self._device_can_transmit(), _TX_UNAVAILABLE
-            )
+        # Only a HackRF One can send the Ham ID: what Send ID Now would do
+        # (or why it can't), and the QRP calculator's SDR output.
+        self._tx_station.refresh()
+        # An open radio tuner: what the device can tune; no STEREO when idle.
+        self._sync_tuner_device()
 
         # A live decoder is built for one sample rate; rebuild it when the
         # device (and so the rate) changes, also after a build that failed
@@ -3503,6 +3544,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if tuner is not None and tuner.isVisible():
             tuner.set_frequency(freq_hz)  # does not emit frequency_changed
         self._reset_signal_meter_peak()
+        # Ham ID: where Send ID Now would transmit, and whether it may; QRP:
+        # the legal limit here.
+        if HAS_HAM_RADIO:
+            self._qrp_panel.set_station(freq_hz)
+        self._tx_station.refresh()
+        self._tuner_retuned()
 
         logger.debug(f"Frequency changed to {freq_hz/1e6:.3f} MHz")
 
@@ -3643,6 +3690,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         if not math.isfinite(freq):
             return False
+        if self._tx_busy():
+            # The HackRF sends where it is: it can't move mid-transmission.
+            return self._refuse_tuning(
+                "Can't tune while transmitting: press Stop (or wait for the "
+                "transmission to end) first."
+            )
         low, high = self._tuning_limits()
         if not low <= freq <= high:
             return self._refuse_tuning(
@@ -4254,6 +4307,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._hint_sstv_needs_fm()
         if HAS_HAM_RADIO:
             self._signal_meter_panel.set_demod_mode(mode)
+            self._qrp_panel.set_demod_mode(mode)  # QRP's Auto mode follows
             self._reset_signal_meter_peak()
             self._sstv_panel.show_fm_needed(
                 self._mode_text(mode)
@@ -4323,6 +4377,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         value = getattr(license_class, "value", None)
         if isinstance(value, str):
             self._settings.set("license_class", value)
+        if HAS_HAM_RADIO:
+            self._qrp_panel.refresh_license()  # the legal limit here
+        self._tx_station.refresh()  # what Send ID Now may do now
 
     def _save_ham_id_settings(self, *_args) -> None:
         """Persist the Ham ID panel (callsign, CW speed/tone, auto-ID)."""
@@ -4351,6 +4408,56 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._callsign_panel.set_settings(saved)
             except Exception as e:  # pragma: no cover - defensive
                 logger.debug(f"Could not restore the Ham ID settings: {e}")
+
+    # -- QRP panel (T7) ----------------------------------------------------------
+
+    def _connect_qrp(self) -> None:
+        """The QRP panel follows the tuned frequency, the mode and the
+        license; its settings and tally are saved (ham/qrp); its limit and
+        chain gate transmitting; its exchange takes the S-meter's report."""
+        qrp = self._qrp_panel
+        qrp.state_changed.connect(self._save_qrp_settings)
+        qrp.state_changed.connect(lambda _state: self._tx_station.refresh())
+        qrp.exchange_copied.connect(
+            lambda text: self._show_status_message(f"Copied: {text}", "success", 3000)
+        )
+        qrp.set_rst_source(self._smeter_rst)
+        qrp.set_station(self._current_frequency(), self._control_panel.get_demod_mode())
+
+    def _smeter_rst(self) -> Optional[str]:
+        """The S-meter's RST for the signal received (None without one)."""
+        panel = self._signal_meter_panel
+        reading = getattr(panel, "_last_reading", None)
+        if not getattr(panel, "_showing_data", False) or reading is None:
+            return None
+        if not getattr(reading, "signal_present", False):
+            return None
+        try:
+            return str(panel.get_meter().get_rst())
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    def _save_qrp_settings(self, *_args) -> None:
+        if self._restoring or not HAS_HAM_RADIO:
+            return
+        try:
+            self._settings.set("ham/qrp", json.dumps(self._qrp_panel.get_state()))
+        except (TypeError, ValueError) as e:  # pragma: no cover - defensive
+            logger.debug(f"Could not save the QRP settings: {e}")
+
+    def _restore_qrp_settings(self) -> None:
+        if not HAS_HAM_RADIO:
+            return
+        raw = self._settings.get_str("ham/qrp", "")
+        if not raw:
+            return
+        try:
+            saved = json.loads(raw)
+        except ValueError:
+            logger.warning("Ignoring unreadable saved QRP settings")
+            return
+        if isinstance(saved, dict):
+            self._qrp_panel.set_state(saved)
 
     def _start_or_stop_audio(self, mode: str) -> bool:
         """Open the speaker for audible modes, close it otherwise.
@@ -4477,6 +4584,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Start signal acquisition."""
         if self._is_running:
             return
+        if self._tx_busy():
+            self._show_status_message(
+                "Can't receive while transmitting (the HackRF is half duplex): "
+                "receiving resumes when the transmission ends.",
+                "warning",
+            )
+            return
         if not self._device:
             choice = self._prompt_no_device()
             if choice == "demo":
@@ -4509,8 +4623,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._reset_demodulator()  # the next samples don't follow on
         self._rx_history.clear()
 
-        # Update callsign panel
-        if HAS_HAM_RADIO:
+        # (A transmission in progress keeps the Ham ID panel's TX state.)
+        if HAS_HAM_RADIO and not self._tx_busy():
             self._callsign_panel.set_transmitting(False)
 
         if self._device:
@@ -4523,150 +4637,46 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         logger.info("Acquisition stopped")
 
     def _on_callsign_id_requested(self):
-        """Handle callsign ID request from the callsign panel."""
-        callsign = self._callsign_panel.get_callsign()
-        if not callsign:
-            QMessageBox.warning(
-                self, "No Callsign", "Please enter your callsign in the Ham ID panel."
-            )
-            self._show_panel("ham_id")
-            return
+        """Ham ID > Send ID Now (or Radio > Send Station ID): the station ID
+        on the tuned frequency, through the transmit engine (checked, asked
+        the first time, sent without blocking the window)."""
+        self._tx_station.send_station_id()
 
-        logger.info(f"Callsign ID requested: {callsign}")
+    def _tx_busy(self) -> bool:
+        """True while a transmission is on the air (or being set up)."""
+        station = getattr(self, "_tx_station", None)
+        return bool(station is not None and station.busy)
 
-        try:
-            from ..ham.callsign import generate_tx_id
+    def _transmit_job(self, job: "TxJob", confirm: bool = True) -> bool:
+        """Transmit ``job`` (see :class:`~.transmitter.TxJob`) on the HackRF:
+        checked (license, mode, bandwidth, power), asked the first time,
+        with the Ham ID panel's automatic IDs, without blocking the window.
+        False (the status bar says why) when it isn't sent. Transmit Text
+        and any other transmission come through here."""
+        return self._tx_station.transmit(job, confirm=confirm)
 
-            settings = self._callsign_panel.get_settings()
-
-            # Only CW ID is implemented for transmission. Refuse the other
-            # modes rather than silently transmitting Morse under their label.
-            mode = settings.get("mode", "CW")
-            if mode != "CW":
-                QMessageBox.information(
-                    self,
-                    "Mode Not Available",
-                    f"{mode} identification is not implemented for transmission "
-                    "yet; only CW (Morse) ID can be sent. Select CW (Morse) in "
-                    "the Ham ID panel.",
-                )
-                return
-
-            self._show_status_message(f"Preparing CW ID: DE {callsign}", "info")
-
-            # Generate FM-modulated I/Q samples ready for transmission
-            iq_samples = generate_tx_id(
-                callsign,
-                wpm=settings.get("cw_wpm", 20),
-                tone_frequency=settings.get("cw_tone", 700),
-                rf_sample_rate=2e6,
-                fm_deviation=2500.0,  # Narrowband FM for CW
-            )
-            logger.info(f"Generated TX ID: {len(iq_samples)} I/Q samples")
-
-            # Attempt transmission
-            self._transmit_audio(iq_samples, callsign)
-
-        except Exception as e:
-            logger.error(f"Error generating callsign ID: {e}")
-            QMessageBox.warning(
-                self, "ID Error", f"Failed to generate callsign ID: {e}"
-            )
-
-    def _transmit_audio(self, iq_samples: np.ndarray, description: str = "audio"):
-        """
-        Transmit I/Q samples via HackRF.
-
-        Args:
-            iq_samples: Complex I/Q samples to transmit
-            description: Description for logging/status
-        """
-        from ..core.frequency_manager import is_tx_allowed
-        from ..devices.hackrf import HackRFDevice
-
-        # Check if we have a TX-capable device
-        if self._device is None:
-            QMessageBox.warning(
-                self,
-                "No Device",
-                "No SDR device connected. Connect a HackRF for transmission.",
-            )
-            return
-
-        # Verify it's a HackRF (TX-capable)
-        if not isinstance(self._device, HackRFDevice):
-            QMessageBox.warning(
-                self,
-                "TX Not Supported",
-                "Connected device does not support transmission.\n"
-                "HackRF One is required for TX operations.",
-            )
-            return
-
-        # The HackRF transmits at its center frequency (the LO): center it on
-        # the tuned frequency first, so it sends where it is checked below.
-        if abs(self._vfo_offset_hz()) >= 0.5 and not self._tune_to(
-            self._current_frequency(), recenter=True
-        ):
-            return
-
-        # Get current frequency for TX validation
-        current_freq = self._current_frequency()
-        bandwidth = 10e3  # Approximate CW bandwidth
-
-        # Validate TX is allowed at this frequency
-        allowed, reason = is_tx_allowed(current_freq, bandwidth)
-        if not allowed:
-            QMessageBox.critical(
-                self,
-                "TX Blocked",
-                f"Transmission blocked at {current_freq/1e6:.3f} MHz:\n{reason}",
-            )
-            return
-
-        # Stop RX if running (HackRF is half-duplex)
-        was_running = self._is_running
-        if was_running:
-            self._stop_acquisition()
-
-        try:
-            # Update status
-            self._show_status_message(f"Transmitting: {description}", "warning")
-            if HAS_HAM_RADIO:
-                self._callsign_panel.set_transmitting(True)
-
-            # Configure TX gain
-            self._device.set_tx_gain(20)  # Moderate TX power
-
-            # Transmit the samples
-            logger.info(
-                f"Starting TX: {len(iq_samples)} samples at {current_freq/1e6:.3f} MHz"
-            )
-
-            # Use write_samples for one-shot transmission
-            success = self._device.write_samples(iq_samples)
-
-            if success:
-                logger.info(f"TX complete: {description}")
-                self._show_status_message(
-                    f"Transmission complete: {description}", "success"
-                )
-            else:
-                logger.error("TX failed")
-                QMessageBox.warning(
-                    self, "TX Failed", "Failed to transmit. Check device connection."
-                )
-
-        except Exception as e:
-            logger.error(f"TX error: {e}")
-            QMessageBox.warning(self, "TX Error", f"Transmission error: {e}")
-        finally:
-            if HAS_HAM_RADIO:
-                self._callsign_panel.set_transmitting(False)
-
-            # Restart RX if it was running
-            if was_running:
-                self._start_acquisition()
+    def _transmit_audio(
+        self,
+        iq_samples: np.ndarray,
+        description: str = "audio",
+        sample_rate: float = 2e6,
+        mode: str = "FM",
+        bandwidth_hz: float = 12.5e3,
+    ) -> bool:
+        """Transmit ready-made I/Q samples on the tuned frequency (kept for
+        callers of the old blocking API; the samples are taken to be
+        ``mode`` at ``sample_rate``, ``bandwidth_hz`` wide). Prefer
+        :meth:`_transmit_job`."""
+        job = TxJob(
+            ArraySource(iq_samples),
+            sample_rate,
+            self._current_frequency(),
+            mode,
+            bandwidth_hz,
+            description,
+            identify=False,
+        )
+        return self._transmit_job(job)
 
     # ------------------------------------------------------------------
     # Recording
@@ -5063,6 +5073,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Audio: the speaker (while the signal is above squelch) and the SSTV
         # decoder (whenever it listens, speaker on or off).
         self._route_audio(channel, level)
+        # The AM/FM radio tuner's seek and STEREO lamp (only while it is open).
+        self._tuner_block(channel, chain, power)
 
         # Record if active (and not paused). The REC badge and the Recording
         # panel's timer are refreshed by the status timer.
@@ -5801,6 +5813,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _release_device(self) -> None:
         """Stop and close the current device (if any)."""
+        # A transmission ends first (and puts the HackRF back as it was).
+        self._tx_station.shutdown()
         if self._is_running:
             self._stop_acquisition()
         if self._device is not None:
@@ -5972,6 +5986,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if not rate > 0:
             return
         self._preferred_rate = rate
+        self._tx_station.shutdown()  # (a transmission has its own rate)
         if self._device is not None:
             try:
                 self._device.set_sample_rate(rate)
@@ -6248,11 +6263,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _show_radio_tuner(self):
         """Show the AM/FM radio tuner pop-out window."""
         if self._radio_tuner is None:
-            self._radio_tuner = RadioTunerWidget(self, self._device_sample_rate())
+            tuner = RadioTunerWidget(self, self._device_sample_rate())
+            self._radio_tuner = tuner
             # Connect frequency change to main tuner
-            self._radio_tuner.frequency_changed.connect(
-                self._on_radio_frequency_changed
-            )
+            tuner.frequency_changed.connect(self._on_radio_frequency_changed)
+            # Stored presets (and names) are kept between sessions.
+            self._restore_radio_presets()
+            tuner.presets_changed.connect(self._save_radio_presets)
+            # Seek steps until a signal opens the squelch.
+            tuner.set_signal_probe(self._tuner_probe)
+        self._sync_tuner_device()
+        self._pilot = None  # (a fresh detector for the station shown)
 
         # Open on the station being received (or, outside the broadcast
         # bands, showing that the receiver is elsewhere).
@@ -6274,10 +6295,119 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._set_demod_mode("FM", _BROADCAST_FM_DEVIATION, _BROADCAST_FM_BANDWIDTH)
         elif band == "AM":
             self._set_demod_mode("AM", bandwidth=_BROADCAST_AM_BANDWIDTH)
-        self._show_status_message(
-            f"Tuned to {format_frequency(freq_hz)} ({band})", "info", 2500
-        )
+        tuner = self._radio_tuner
+        if tuner is None or not tuner.is_seeking():  # (seek says it itself)
+            self._show_status_message(
+                f"Tuned to {format_frequency(freq_hz)} ({band})", "info", 2500
+            )
         logger.info(f"Tuned to {freq_hz/1e6:.3f} MHz ({band})")
+
+    # -- AM/FM radio tuner: presets, seek, STEREO, device range (T7) -----------
+
+    def _save_radio_presets(self) -> None:
+        tuner = self._radio_tuner
+        if tuner is None:
+            return
+        try:
+            self._settings.set("ham/radio_presets", json.dumps(tuner.get_presets()))
+        except (TypeError, ValueError) as e:  # pragma: no cover - defensive
+            logger.debug(f"Could not save the radio presets: {e}")
+
+    def _restore_radio_presets(self) -> None:
+        raw = self._settings.get_str("ham/radio_presets", "")
+        if not raw or self._radio_tuner is None:
+            return
+        try:
+            saved = json.loads(raw)
+        except ValueError:
+            logger.warning("Ignoring unreadable saved radio presets")
+            return
+        if isinstance(saved, dict):
+            self._radio_tuner.set_presets(saved)
+
+    def _sync_tuner_device(self) -> None:
+        """Tell an open tuner what the device can tune (it explains the AM
+        band when the device can't reach it) and whether it is receiving."""
+        tuner = self._radio_tuner
+        if tuner is None:
+            return
+        has_range = self._device_tuning_range() is not None
+        low, high = self._tuning_limits()
+        name = self._device_model_name() if self._device is not None else ""
+        tuner.set_device_range(
+            low if has_range else None, high if has_range else None, name
+        )
+        if not (self._is_running and self._device is not None):
+            tuner.set_stereo(False)
+            if self._pilot is not None:
+                self._pilot.reset()
+
+    def _tuner_retuned(self) -> None:
+        """A retune: the seek waits for blocks of the new channel, and the
+        pilot is listened for afresh."""
+        self._tuner_blocks = 0
+        self._tuner_signal = False
+        if self._pilot is not None:
+            self._pilot.reset()
+        tuner = self._radio_tuner
+        if tuner is not None and tuner.isVisible():
+            tuner.set_stereo(False)
+
+    def _tuner_block(
+        self,
+        channel: np.ndarray,
+        chain: "_ReceiverChain",
+        power: Optional[np.ndarray] = None,
+    ) -> None:
+        """Per block while the tuner is open: whether the tuned channel opens
+        the squelch with a station centered on it (for seek), and the 19 kHz
+        stereo pilot (broadcast FM)."""
+        tuner = self._radio_tuner
+        if tuner is None or not tuner.isVisible():
+            return
+        self._tuner_blocks += 1
+        gate = self._squelch
+        noise = self._channel_noise_db(chain)
+        if gate.enabled or noise is None:
+            threshold = gate.threshold_db(noise)
+        else:  # squelch off: seek still needs a threshold (Auto's)
+            threshold = noise + gate.margin_db
+        level = self._last_peak_db
+        self._tuner_signal = level is not None and level >= threshold
+        # A station half in the channel (a 200 kHz FM filter tuned 100 kHz
+        # beside one) opens the squelch too: seek stops only where the
+        # channel's power is centered, within half a channel step.
+        centroid = None if power is None else _channel_centroid_hz(power, chain)
+        step = band_step(tuner.get_band())
+        self._tuner_centered = centroid is None or abs(centroid) <= 0.5 * step
+        stereo = False
+        broadcast = (
+            chain.mode == "FM"
+            and self._control_panel.get_fm_deviation() >= _BROADCAST_DEVIATION_HZ
+            and not tuner.is_off_band()
+        )
+        if broadcast and len(channel):
+            pilot = self._pilot
+            if pilot is None or pilot.rate != chain.channel_rate:
+                pilot = self._pilot = StereoPilotDetector(chain.channel_rate)
+            stereo = pilot.process(channel)
+        elif self._pilot is not None:
+            self._pilot.reset()
+        tuner.set_stereo(stereo)
+
+    def _tuner_probe(self) -> Optional[str]:
+        """For the tuner's seek: "signal" (the tuned channel opens the
+        squelch), "quiet", "wait" (too few blocks of it yet), "refused"
+        (the receiver didn't tune where the tuner is) or None (not
+        receiving: seek can't tell)."""
+        tuner = self._radio_tuner
+        if not self._is_running or self._device is None or tuner is None:
+            return None
+        if abs(self._current_frequency() - tuner.get_frequency()) > 1.0:
+            return "refused"
+        if self._tuner_blocks < 3:
+            return "wait"
+        return "signal" if self._tuner_signal and self._tuner_centered else "quiet"
 
     def _show_decoder_config(self):
         """Bring the Decoder panel to the front."""
@@ -6617,6 +6747,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._show_panel(panel)
             self._restore_license_class()
             self._restore_ham_id_settings()
+            self._restore_qrp_settings()
             self._restore_waterfall_settings()
             self._load_step_for_mode()  # the restored mode's tuning step
             self._restore_sstv_and_smeter()
@@ -6723,6 +6854,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if current:
                 self._settings.set("panel", current)
             self._save_ham_id_settings()
+            self._save_qrp_settings()
+            self._save_radio_presets()
             self._save_waterfall_settings()
             self._settings.save_geometry("main", self.saveGeometry())
             if self._spectrum.isVisible() and self._waterfall.isVisible():

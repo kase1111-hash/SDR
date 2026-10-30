@@ -6356,7 +6356,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # (Muted while the Scanner moves between channels.)
         speaker = speaker and not self._scan_muted
         # (And while the second receiver's Listen plays only that one.)
-        speaker = speaker and not self._second_rx.mutes_main()
+        second = getattr(self, "_second_rx", None)
+        speaker = speaker and not (second is not None and second.mutes_main())
         if speaker and not self._realtime():
             # A few ms of signal per display frame would play as a buzz.
             speaker = False

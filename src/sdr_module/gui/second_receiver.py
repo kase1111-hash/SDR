@@ -36,6 +36,7 @@ geometry and splitters).
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import shutil
@@ -154,10 +155,19 @@ KEY = "device/second_receiver/"
 GEOMETRY_KEY = "layout/second_receiver/geometry"
 SPLITTER_KEY = "layout/second_receiver/splitter"
 PLOTS_KEY = "layout/second_receiver/plots"
+#: The waterfall's colors, history and levels (JSON, as the widget gives it).
+WATERFALL_KEY = "layout/second_receiver/waterfall"
 
-#: The rate the second receiver runs its device at (every device offers it:
-#: RTL-SDR 0.9-2.56 MS/s, HackRF 2-20 MS/s, the demo device 1-3.2 MS/s).
+#: The sample rate a device starts at (every device offers it: RTL-SDR
+#: 0.9-2.56 MS/s, HackRF 2-20 MS/s, the demo device 1-3.2 MS/s).
 SAMPLE_RATE = 2.4e6
+#: The sample rates offered for each kind of device (Device > Connect...
+#: offers the same; the demo device's span is limited like an RTL-SDR's).
+SAMPLE_RATES: Dict[str, Tuple[float, ...]] = {
+    "demo": (1.0e6, 1.4e6, 1.8e6, 2.0e6, 2.4e6, 2.56e6, 3.2e6),
+    "rtlsdr": (1.0e6, 1.4e6, 1.8e6, 2.0e6, 2.4e6, 2.56e6),
+    "hackrf": (2.0e6, 2.4e6, 4e6, 8e6, 10e6, 20e6),
+}
 #: Gain range of the RF gain slider (dB), and its default (the demo
 #: device's reference gain).
 GAIN_RANGE = (0, 50)
@@ -223,6 +233,15 @@ _TX_WARNING = (
     "40-60 dB of attenuation in front of it: a strong signal close by "
     "overloads a receiver and can damage it."
 )
+
+
+def _number(value: Any) -> float:
+    """``float(value)``, or 0 when it isn't a finite number."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
 
 
 def _model_name(kind: str) -> str:
@@ -310,6 +329,7 @@ def list_sources(win: Any) -> List[Source]:
     except Exception as e:  # pragma: no cover - defensive
         logger.debug(f"Could not list the hardware drivers: {e}")
         classes = []
+    seen: Dict[str, int] = {}
     for device_class in classes:
         kind = device_kind(device_class)
         if kind not in ("rtlsdr", "hackrf"):
@@ -327,9 +347,14 @@ def list_sources(win: Any) -> List[Source]:
             serial = str(getattr(info, "serial", "") or "")
             name = str(getattr(info, "name", "") or f"{_model_name(kind)} #{index}")
             busy = "the main window" if (kind, index) in held else ""
+            # Cheap dongles often share one serial: keep them apart.
+            key = f"{kind}:{serial or index}"
+            seen[key] = seen.get(key, 0) + 1
+            if seen[key] > 1:
+                key = f"{key}#{seen[key]}"
             sources.append(
                 Source(
-                    f"{kind}:{serial or index}",
+                    key,
                     name,
                     kind,
                     index,
@@ -517,21 +542,14 @@ class ReceiverDsp:
 
 
 def _show_note(label: Any, text: str, tone: Optional[str]) -> None:
-    """Show ``text`` in ``label``: a plain hint, or a callout box in
-    ``tone``. Restyled (and its size hint renewed, for the callout's
-    padding) only when something changed: it is refreshed five times a
-    second."""
-    role = "callout" if tone else "hint"
-    changed = label.text() != text
-    if changed:
+    """Show ``text`` in the hint ``label``, colored by ``tone`` (None:
+    plain). Only the tone changes, never the role: a role switched on a
+    shown label doesn't get its padding. (Refreshed five times a second:
+    nothing is touched unless it changed.)"""
+    if label.text() != text:
         label.setText(text)
-    if (label.property("role") or "") != role or (label.property("tone") or "") != (
-        tone or ""
-    ):
-        set_role(label, role, tone)
-        changed = True
-    if changed:
         label.updateGeometry()
+    set_tone(label, tone)
 
 
 if HAS_PYQT6:
@@ -563,7 +581,10 @@ if HAS_PYQT6:
         _STATUS_MS = 200
 
         def __init__(self, main_window: Any):
-            super().__init__(main_window)
+            # A window of its own (no Qt parent): a peer of the main window
+            # that can go behind it and has its own taskbar entry. The
+            # host closes it with the main window.
+            super().__init__(None)
             self._win = main_window
             self._settings = main_window._settings
             self.setObjectName("secondReceiverWindow")
@@ -597,6 +618,7 @@ if HAS_PYQT6:
             self._follow_tx = False
             self._restoring = False
             self._shut_down = False
+            self._main_gone = False  # (the main window was deleted)
             self._setup_ui()
             self._setup_actions()
             self._restore()
@@ -691,6 +713,9 @@ if HAS_PYQT6:
             self._plots.setStretchFactor(0, 2)
             self._plots.setStretchFactor(1, 3)
             self._waterfall.bookmark_requested.connect(self.bookmark_frequency)
+            self._waterfall.display_settings_changed.connect(
+                self._save_waterfall_settings
+            )
             self._splitter.addWidget(self._plots)
 
             controls = QWidget()
@@ -791,6 +816,17 @@ if HAS_PYQT6:
             label = QLabel("Device:")
             label.setBuddy(self._source_combo)
             form.addRow(label, self._source_combo)
+
+            self._rate_combo = self._combo(8)
+            self._rate_combo.setAccessibleName("Second receiver's sample rate")
+            self._rate_combo.setToolTip(
+                "How much spectrum this receiver sees at once (the span of its "
+                "spectrum and waterfall). Higher rates cost more processing."
+            )
+            self._rate_combo.activated.connect(self._on_rate_activated)
+            label = QLabel("Sample rate:")
+            label.setBuddy(self._rate_combo)
+            form.addRow(label, self._rate_combo)
 
             gain_row = QWidget()
             row = QHBoxLayout(gain_row)
@@ -1009,8 +1045,7 @@ if HAS_PYQT6:
             )
             layout = QVBoxLayout(group)
             layout.setSpacing(6)
-            self._tx_label = QLabel()
-            self._tx_label.setWordWrap(True)
+            self._tx_label = self._hint()
             self._tx_label.setTextFormat(Qt.TextFormat.PlainText)
             layout.addWidget(self._tx_label)
             row = QHBoxLayout()
@@ -1101,12 +1136,37 @@ if HAS_PYQT6:
             station = getattr(self._win, "_tx_station", None)
             engine = getattr(station, "engine", None)
             if engine is not None:
+                # (Bound methods: disconnected when this window is deleted.)
                 engine.started.connect(self._on_tx_started)
-                engine.finished.connect(lambda _result: self._update_tx_group())
+                engine.finished.connect(self._on_tx_finished)
             panel = getattr(self._win, "_bookmarks_panel", None)
             if panel is not None:
                 panel.bookmarks_changed.connect(self._refresh_bookmarks)
             self._refresh_bookmarks()
+            # Never outlive the main window running (the host closes this
+            # window first; this covers a main window deleted without it).
+            destroyed = getattr(self._win, "destroyed", None)
+            if destroyed is not None:
+                destroyed.connect(self._on_main_window_destroyed)
+
+        def _on_main_window_destroyed(self, *_args: Any) -> None:
+            """The main window is gone: stop, finishing a recording and
+            closing the device, without touching anything of the main
+            window's."""
+            self._main_gone = True
+            self._frame_timer.stop()
+            self._status_timer.stop()
+            self._running = False
+            if self._recorder is not None:
+                try:
+                    self._recorder.stop()
+                except Exception as e:  # pragma: no cover - disk trouble
+                    logger.warning(f"Could not finish {self._record_path}: {e}")
+                self._recorder = None
+            self._close_device()
+            self._audio.stop()
+            self._audio_open = False
+            self._shut_down = True
 
         def _main_audio_on(self) -> bool:
             """The main window's Audio switch (the app's master mute)."""
@@ -1158,7 +1218,18 @@ if HAS_PYQT6:
                     continue
                 if rate > 0:
                     return rate
-            return SAMPLE_RATE
+            return self._chosen_rate()
+
+        def _chosen_rate(self) -> float:
+            """The Sample rate choice (what the device is opened at)."""
+            rate = (
+                self._rate_combo.currentData() if hasattr(self, "_rate_combo") else None
+            )
+            try:
+                value = float(rate)
+            except (TypeError, ValueError):
+                return SAMPLE_RATE
+            return value if value > 0 else SAMPLE_RATE
 
         def _bandwidth_hz(self) -> float:
             return _parse_hz(self._filter_combo.currentText()) or 25e3
@@ -1210,7 +1281,78 @@ if HAS_PYQT6:
                 index = 0
             combo.setCurrentIndex(index)
             combo.blockSignals(False)
+            self._fill_rates()
             self._update_device_note()
+
+        def _rate_kind(self) -> str:
+            """The kind of device the Sample rate list is for: the one open,
+            else the one chosen."""
+            if self._source is not None:
+                return self._source.kind
+            source = self._selected_source()
+            return source.kind if source is not None else "demo"
+
+        def _fill_rates(self) -> None:
+            """The rates the device offers, the one last used with that kind
+            of device chosen (remembered per kind)."""
+            kind = self._rate_kind()
+            rates = SAMPLE_RATES.get(kind, SAMPLE_RATES["demo"])
+            wanted = (
+                self._rate()
+                if self._device is not None
+                else self._settings.get_float(f"{KEY}sample_rate/{kind}", SAMPLE_RATE)
+            )
+            if not (math.isfinite(wanted) and wanted > 0):
+                wanted = SAMPLE_RATE
+            combo = self._rate_combo
+            combo.blockSignals(True)
+            combo.clear()
+            for rate in rates:
+                combo.addItem(format_rate(rate), rate)
+            best = min(range(len(rates)), key=lambda i: abs(rates[i] - wanted))
+            combo.setCurrentIndex(best)
+            combo.blockSignals(False)
+
+        def _on_rate_activated(self, _index: int) -> None:
+            rate = self._chosen_rate()
+            kind = self._rate_kind()
+            if self._recorder is not None:
+                self._fill_rates()  # (back to the rate in use)
+                self._show_message(
+                    "Stop recording to change the sample rate: one file has one "
+                    "rate.",
+                    "warning",
+                )
+                return
+            self._save(f"{KEY}sample_rate/{kind}", rate)
+            if self._device is None or abs(rate - self._rate()) < 1.0:
+                self._refresh_state()
+                return
+            try:
+                ok = self._device.set_sample_rate(rate)
+            except Exception as e:
+                logger.warning(f"Second receiver: sample rate {rate}: {e}")
+                ok = False
+            if ok is False:
+                self._fill_rates()
+                self._show_message(
+                    f"{self._device_name()} didn't take {format_rate(rate)}.",
+                    "danger",
+                )
+                return
+            # A new span: the filters, the noise floor and the pacing start
+            # afresh; a narrower span may no longer hold the channel.
+            self._dsp.reset()
+            self._pacer.reset()
+            self._rx_history.clear()
+            self._refresh_state()
+            self._ensure_vfo_fits()
+            self._show_message(
+                f"{format_rate(rate)}: {format_mhz_range(self._lo_hz - rate / 2, self._lo_hz + rate / 2)} "
+                "in view.",
+                None,
+                3000,
+            )
 
         def _source_index(self, key: str) -> int:
             for index, source in enumerate(self._sources):
@@ -1259,9 +1401,14 @@ if HAS_PYQT6:
             if self._source is not None and source.key == self._source.key:
                 return
             if self._running:
-                # Switch over: the new device receives at once.
+                # Switch over: the new device receives at once, at a rate it
+                # offers (the one last used with that kind of device).
                 self.stop(quiet=True)
+                self._fill_rates()
                 self.start()
+            else:
+                self._fill_rates()  # (its rates; it opens on Start)
+                self._refresh_state()
 
         def _open(self, source: Source) -> Optional[str]:
             """Open ``source`` as this receiver's device; why not, if it
@@ -1288,11 +1435,10 @@ if HAS_PYQT6:
                         "in and not in use by another program (details in "
                         "Tools > Error History)"
                     )
-            for name, value in (("set_sample_rate", SAMPLE_RATE),):
-                try:
-                    getattr(device, name)(value)
-                except Exception as e:  # pragma: no cover - defensive
-                    logger.debug(f"{source.name}: {name} failed: {e}")
+            try:
+                device.set_sample_rate(self._chosen_rate())
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(f"{source.name}: could not set the sample rate: {e}")
             self._device = device
             self._source = source
             self._apply_gain()
@@ -1393,6 +1539,7 @@ if HAS_PYQT6:
                 self._audio.write(self._dsp.release())
             name = self._device_name()
             self._close_device()
+            self._apply_tuning_range()  # (no device: any frequency)
             self._dsp.reset()
             self._sync_audio_output()
             self._level_meter.clear()
@@ -1530,8 +1677,21 @@ if HAS_PYQT6:
             if not low <= lo <= high or not self._channel_fits(wanted - lo):
                 lo = wanted
             if not self._retune_lo(lo):
-                note = f"{self._device_name()} didn't tune to {format_frequency(lo)}."
-                self._lo_hz = lo
+                # The device says where it is: show that.
+                actual = _number(
+                    getattr(getattr(self._device, "state", None), "frequency", 0.0)
+                )
+                actual = actual or _number(getattr(self._device, "frequency", 0.0))
+                if not low <= actual <= high:
+                    actual = lo
+                note = (
+                    f"{self._device_name()} didn't tune to {format_frequency(lo)}; "
+                    f"it is on {format_frequency(actual)}."
+                )
+                self._lo_hz = wanted = actual
+                rate = self._rate()
+                self._spectrum.set_frequency_range(actual, rate)
+                self._waterfall.set_frequency_range(actual, rate)
             self._tuned_hz = wanted
             self._on_tuned()
             return note
@@ -1666,6 +1826,8 @@ if HAS_PYQT6:
         def _load_step(self) -> None:
             key = self._step_key()
             step = self._settings.get_float(f"{KEY}step/{key}", default_step_hz(key))
+            if not (math.isfinite(step) and step > 0):  # (a damaged setting)
+                step = default_step_hz(key)
             self._set_step(step, save=False)
 
         def _set_step(self, step_hz: float, save: bool = True) -> None:
@@ -1767,6 +1929,8 @@ if HAS_PYQT6:
                 self._save(KEY + "squelch_db", float(value))
 
         def _set_threshold(self, db: float) -> None:
+            if not math.isfinite(db):  # (a damaged setting)
+                db = -80.0
             value = int(round(min(max(db, SQUELCH_RANGE[0]), SQUELCH_RANGE[1])))
             self._squelch_slider.setValue(value)
             self._dsp.squelch.manual_db = float(value)
@@ -1947,6 +2111,8 @@ if HAS_PYQT6:
 
         def _show_auto_threshold(self, db: float) -> None:
             """The slider shows the Auto threshold (without taking it)."""
+            if not math.isfinite(db):
+                return
             value = int(round(min(max(db, SQUELCH_RANGE[0]), SQUELCH_RANGE[1])))
             slider = self._squelch_slider
             if slider.value() != value:
@@ -2105,15 +2271,22 @@ if HAS_PYQT6:
                 return
             seconds = recorder.duration_seconds
             size = recorder.file_size_bytes
+            where = file_dialogs.display_path(path)
             try:
                 recorder.stop()
             except Exception as e:  # pragma: no cover - disk trouble
                 logger.warning(f"Could not finish the recording {path}: {e}")
-            where = file_dialogs.display_path(path)
-            text = (
-                f"Saved {where} ({_clock_text(seconds)}, {size / 1024 ** 2:,.0f} MB). "
-                "File > Open Recording in the main window plays it."
-            )
+                problem = problem or f"its metadata couldn't be written ({e})"
+                text = (
+                    f"{where} holds {_clock_text(seconds)} of samples, but "
+                    "without its frequency and rate."
+                )
+            else:
+                text = (
+                    f"Saved {where} ({_clock_text(seconds)}, "
+                    f"{size / 1024 ** 2:,.0f} MB). File > Open Recording in "
+                    "the main window plays it."
+                )
             if problem:
                 text = f"Recording stopped: {problem}. {text}"
                 logger.warning(text)
@@ -2166,7 +2339,12 @@ if HAS_PYQT6:
             combo.blockSignals(True)
             combo.clear()
             combo.addItem(
-                "Tune to a bookmark…" if bookmarks else "No bookmarks yet", None
+                (
+                    "Tune to a bookmark…"
+                    if bookmarks
+                    else "No bookmarks yet (Ctrl+B adds one)"
+                ),
+                None,
             )
             for index, bookmark in enumerate(bookmarks):
                 try:
@@ -2203,15 +2381,13 @@ if HAS_PYQT6:
                 return False
             demod, deviation, width, _tone = bookmark_listening(bookmark)
             if demod:
-                self._restoring_mode_defaults(demod, deviation, width)
+                self._listen_like_bookmark(demod, deviation, width)
             label = str(bookmark.get("label") or "") or format_frequency(freq)
             mode = "I/Q" if self.mode().startswith("None") else self.mode()
             self._show_message(f"Tuned to {label} ({mode})", "info", 3000)
             return True
 
-        def _restoring_mode_defaults(
-            self, demod: str, deviation: str, width: str
-        ) -> None:
+        def _listen_like_bookmark(self, demod: str, deviation: str, width: str) -> None:
             """A bookmark's mode: its own deviation and width override the
             mode's defaults."""
             self.set_mode(demod, deviation, width)
@@ -2332,7 +2508,13 @@ if HAS_PYQT6:
             if not self._restoring:
                 self._save(KEY + "follow_tx", bool(on))
 
+        def _on_tx_finished(self, _result: Any) -> None:
+            if not self._main_gone:
+                self._update_tx_group()
+
         def _on_tx_started(self, _job: Any) -> None:
+            if self._main_gone:
+                return
             if self._follow_tx and not self._shut_down:
                 self.monitor_tx()
             self._update_tx_group()
@@ -2431,6 +2613,8 @@ if HAS_PYQT6:
             self._update_audio_note()
 
         def _update_status(self) -> None:
+            if self._main_gone:
+                return
             if self._recorder is not None:
                 self._update_rec_label()
             self._update_tx_group()
@@ -2568,11 +2752,35 @@ if HAS_PYQT6:
                 index = self._source_index(saved)
                 if index >= 0 and not self._sources[index].busy:
                     self._source_combo.setCurrentIndex(index)
+                self._fill_rates()  # (the chosen device's rates)
             finally:
                 self._restoring = False
             self._on_tuned()
             self._apply_dsp_settings()
+            self._restore_waterfall_settings()
             self._restore_geometry()
+
+        def _save_waterfall_settings(self) -> None:
+            if self._restoring:
+                return
+            try:
+                self._save(
+                    WATERFALL_KEY, json.dumps(self._waterfall.display_settings())
+                )
+            except (TypeError, ValueError) as e:  # pragma: no cover - defensive
+                logger.debug(f"Could not save the waterfall settings: {e}")
+
+        def _restore_waterfall_settings(self) -> None:
+            raw = self._settings.get_str(WATERFALL_KEY, "")
+            if not raw:
+                return
+            try:
+                saved = json.loads(raw)
+            except ValueError:
+                logger.debug(f"Ignoring unreadable waterfall settings: {raw!r}")
+                return
+            if isinstance(saved, dict):
+                self._waterfall.apply_display_settings(saved)
 
         def _restore_geometry(self) -> None:
             restored = False
@@ -2604,17 +2812,17 @@ if HAS_PYQT6:
                 if ok and min(splitter.sizes() or [0]) < 40:
                     ok = False
                 if not ok and splitter is self._splitter:
-                    width = max(self.width(), 760)
+                    width = max(self.width(), self.minimumWidth())
                     splitter.setSizes([width - 340, 340])
 
         def _apply_default_geometry(self) -> None:
-            """1100x700, smaller on a small screen, beside the main window."""
+            """1100x700 (smaller on a small screen), centred on the screen."""
             screen = self.screen() or QGuiApplication.primaryScreen()
             available = screen.availableGeometry() if screen is not None else None
             width, height = 1100, 700
             if available is not None:
-                width = min(width, max(760, available.width() - 40))
-                height = min(height, max(520, available.height() - 60))
+                width = min(width, max(self.minimumWidth(), available.width() - 40))
+                height = min(height, max(self.minimumHeight(), available.height() - 60))
             self.resize(width, height)
             if available is not None:
                 self.move(
@@ -2651,7 +2859,7 @@ if HAS_PYQT6:
         def shutdown(self) -> None:
             """Stop (ending a recording, closing the device), save, and
             stop the timers: the window is closing, or the app is."""
-            if self._shut_down:
+            if self._shut_down or self._main_gone:
                 return
             self.stop(quiet=True)
             self.persist()
@@ -2668,6 +2876,9 @@ if HAS_PYQT6:
             event.accept()
 
         def showEvent(self, event):  # noqa: N802 - Qt naming
+            if self._main_gone:  # (an orphan: nothing to show it with)
+                super().showEvent(event)
+                return
             if self._shut_down:
                 # Opened again: back in service.
                 self._shut_down = False
@@ -2713,6 +2924,8 @@ if HAS_PYQT6:
             receiver.show()
             receiver.raise_()
             receiver.activateWindow()
+            # Space and the arrow keys work at once (as in the main window).
+            receiver._focus_plots()
             self._on_listen_changed(receiver.listen())
             return receiver
 
@@ -2766,11 +2979,13 @@ if HAS_PYQT6:
                 show(text, "info", 5000)
 
         def shutdown(self) -> None:
-            """The main window is closing: stop and save the second one."""
-            receiver = self._receiver
+            """The main window is closing: stop, save and close the second
+            receiver (a window of its own: it would stay open otherwise)."""
+            receiver, self._receiver = self._receiver, None
             if receiver is not None:
                 receiver.shutdown()
                 receiver.close()
+                receiver.deleteLater()
 
 
 __all__ = [

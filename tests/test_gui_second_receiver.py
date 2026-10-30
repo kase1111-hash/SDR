@@ -263,13 +263,24 @@ class _SecondCase(_WindowTestCase):
         self.host = self.win._second_rx
         self.rx = self.host.show()
         self.rx._status_timer.stop()
-        self.addCleanup(self._close_rx)
+        self.extra_windows = []
         self.settle()
 
-    def _close_rx(self):
-        rx = self.host.receiver
+    def tearDown(self):
+        # Before the main window goes: a receiver window outliving it would
+        # keep its timers running.
+        for window in self.extra_windows:
+            window.shutdown()
+            window.deleteLater()
+        rx = self.host.receiver if HAS_PYQT6 else None
         if rx is not None:
             rx.shutdown()
+        super().tearDown()
+
+    def extra(self, window):
+        """A further receiver window, shut down before the main window."""
+        self.extra_windows.append(window)
+        return window
 
     def frames(self, count=8, rx=None):
         rx = rx or self.rx
@@ -303,6 +314,10 @@ class TestOpening(_SecondCase):
             if a.text().replace("&", "") == "Device"
         )
         self.assertIn(action, device_menu.actions())
+        # A window of its own (it can go behind the main window), not a
+        # dialog stuck on top of it.
+        self.assertIsNone(self.rx.parent())
+        self.assertTrue(self.rx.isWindow())
         self.rx.close()
         self.settle()
         self.assertFalse(self.rx.isVisible())
@@ -310,6 +325,8 @@ class TestOpening(_SecondCase):
         self.settle()
         self.assertTrue(self.host.receiver.isVisible())
         self.assertIs(self.host.receiver, self.rx)  # (one window, reused)
+        # The plots have the focus, so Space and the arrows work at once.
+        self.assertTrue(self.rx._plots_focused())
 
     def test_starts_on_a_demo_device_of_its_own(self):
         rx = self.rx
@@ -476,6 +493,65 @@ class TestDevices(_SecondCase):
         self.assertTrue(device.closed)
         self.assertIn("stopped streaming: USB error", rx.message())
 
+    def test_the_frequency_field_takes_the_devices_range_while_it_runs(self):
+        rx = self.rx
+        rx._refresh_sources()
+        rx._source_combo.setCurrentIndex(2)  # RTL-SDR #1 (24-1766 MHz)
+        rx.start()
+        low, high = rx._freq_input.tuning_range()
+        self.assertEqual(
+            (low, high), (rx.device.spec.freq_min, rx.device.spec.freq_max)
+        )
+        self.assertFalse(rx.tune(2.4e9))
+        self.assertIn("RTL-SDR tunes", rx.message())
+        rx.stop()
+        self.assertEqual(rx._freq_input.tuning_range(), (1e3, 6e9))
+        self.assertTrue(rx.tune(2.4e9))  # (stopped: no device to refuse it)
+        # Started again, the RTL-SDR brings it into its range and says so.
+        rx.start()
+        self.assertEqual(rx.tuned_frequency(), rx.device.spec.freq_max)
+        self.assertIn("out of range", rx.message())
+
+    def test_a_device_that_wont_tune_shows_where_it_is(self):
+        rx = self.rx
+        rx.tune(433.92e6, recenter=True)
+        rx._refresh_sources()
+        rx._source_combo.setCurrentIndex(2)
+        original = FakeRtl.set_frequency
+        FakeRtl.set_frequency = lambda self, freq: False
+        self.addCleanup(lambda: setattr(FakeRtl, "set_frequency", original))
+        rx.start()
+        self.assertEqual(rx.lo_frequency(), 100e6)  # (where FakeRtl opens)
+        self.assertEqual(rx.tuned_frequency(), 100e6)
+        self.assertEqual(rx._spectrum._center_freq, 100e6)
+        self.assertIn("didn't tune to 433.920 MHz; it is on 100.000 MHz", rx.message())
+
+    def test_dongles_sharing_a_serial_are_told_apart(self):
+        """Cheap RTL-SDRs often all say serial 00000001."""
+        from sdr_module.gui.second_receiver import list_sources
+
+        original = FakeRtl.list_devices
+
+        def same_serial():
+            infos = original()
+            for info in infos:
+                info.serial = "00000001"
+            return infos
+
+        FakeRtl.list_devices = staticmethod(same_serial)
+        self.addCleanup(
+            lambda: setattr(FakeRtl, "list_devices", staticmethod(original))
+        )
+        keys = [s.key for s in list_sources(self.win)]
+        self.assertEqual(keys, ["demo", "rtlsdr:00000001", "rtlsdr:00000001#2"])
+        rx = self.rx
+        rx._refresh_sources()
+        rx._source_combo.setCurrentIndex(2)
+        rx._on_source_activated(2)
+        self.assertEqual(rx._selected_source().name, "RTL-SDR #1")
+        self.assertTrue(rx.start())
+        self.assertTrue(rx.holds("rtlsdr", 1))
+
     def test_no_hardware_says_so(self):
         self.win._hardware_classes = []
         self.rx._refresh_sources()
@@ -591,6 +667,98 @@ class TestTuning(_SecondCase):
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestSampleRate(_SecondCase):
+    def rates(self):
+        combo = self.rx._rate_combo
+        return [combo.itemData(i) for i in range(combo.count())]
+
+    def choose(self, rate):
+        combo = self.rx._rate_combo
+        index = combo.findData(rate)
+        self.assertGreaterEqual(index, 0)
+        combo.setCurrentIndex(index)
+        combo.activated.emit(index)
+
+    def test_the_list_follows_the_device(self):
+        from sdr_module.gui.second_receiver import SAMPLE_RATES
+
+        self.assertEqual(self.rates(), list(SAMPLE_RATES["demo"]))
+        self.assertEqual(self.rx._rate_combo.currentData(), 2.4e6)
+        self.win._hardware_classes = [FakeRtl]
+        self.rx._refresh_sources()
+        self.rx._source_combo.setCurrentIndex(2)
+        self.rx._on_source_activated(2)
+        self.assertEqual(self.rates(), list(SAMPLE_RATES["rtlsdr"]))
+
+    def test_changing_it_while_running(self):
+        rx = self.rx
+        rx.start()
+        rx.tune(100.0e6, recenter=True)
+        self.assertTrue(rx.tune(100.9e6))  # 900 kHz off the LO: fits 2.4 MS/s
+        self.assertEqual(rx.lo_frequency(), 100.0e6)
+        self.choose(1.0e6)
+        self.assertEqual(rx.device.sample_rate, 1.0e6)
+        self.assertEqual(rx._spectrum._sample_rate, 1.0e6)
+        self.assertEqual(rx._rate_label.text(), "1 MS/s")
+        # The channel no longer fits the narrower span: recentered on it.
+        self.assertEqual(rx.lo_frequency(), 100.9e6)
+        self.assertEqual(rx.tuned_frequency(), 100.9e6)
+        self.feed(3)
+        self.assertEqual(rx._dsp.chain().rate, 1.0e6)
+        self.assertEqual(
+            self.store.values["device/second_receiver/sample_rate/demo"], 1.0e6
+        )
+
+    def test_switching_devices_uses_the_new_devices_rates(self):
+        rx = self.rx
+        self.win._hardware_classes = [FakeRtl]
+        rx._refresh_sources()
+        self.choose(3.2e6)  # (demo only: an RTL-SDR stops at 2.56 MS/s)
+        rx.start()
+        self.assertEqual(rx.device.sample_rate, 3.2e6)
+        rx._source_combo.setCurrentIndex(2)
+        rx._on_source_activated(2)
+        self.assertEqual(rx.source.kind, "rtlsdr")
+        self.assertEqual(rx.device.state.sample_rate, 2.4e6)
+        self.assertEqual(rx._rate_combo.currentData(), 2.4e6)
+
+    def test_the_saved_device_comes_back_with_its_rates(self):
+        from sdr_module.gui.second_receiver import SAMPLE_RATES, SecondReceiverWindow
+
+        self.win._hardware_classes = [FakeRtl]
+        self.rx.shutdown()
+        self.store.values["device/second_receiver/device"] = "rtlsdr:00000002"
+        self.store.values["device/second_receiver/sample_rate/rtlsdr"] = 1.8e6
+        again = self.extra(SecondReceiverWindow(self.win))
+        self.assertEqual(again._selected_source().name, "RTL-SDR #1")
+        rates = [
+            again._rate_combo.itemData(i) for i in range(again._rate_combo.count())
+        ]
+        self.assertEqual(rates, list(SAMPLE_RATES["rtlsdr"]))
+        self.assertEqual(again._rate_combo.currentData(), 1.8e6)
+
+    def test_refused_while_recording(self):
+        rx = self.rx
+        folder = tempfile.mkdtemp(prefix="rx2-rate-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(folder, True))
+        self.store.values["recording/folder"] = folder
+        rx.start()
+        rx._set_recording(True)
+        self.choose(1.0e6)
+        self.assertEqual(rx.device.sample_rate, 2.4e6)
+        self.assertEqual(rx._rate_combo.currentData(), 2.4e6)
+        self.assertIn("Stop recording to change the sample rate", rx.message())
+        rx._set_recording(False)
+
+    def test_the_device_opens_at_the_chosen_rate(self):
+        rx = self.rx
+        self.choose(3.2e6)
+        rx.start()
+        self.assertEqual(rx.device.sample_rate, 3.2e6)
+        self.assertEqual(rx._spectrum._sample_rate, 3.2e6)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestSquelch(_SecondCase):
     def test_auto_by_default_and_a_dragged_threshold_turns_it_off(self):
         rx = self.rx
@@ -680,6 +848,8 @@ class TestListen(_SecondCase):
         self.assertEqual(len(self.main_sink.samples()), 0)
         self.assertGreater(len(self.second_sink.samples()), 4800)
         self.assertIn("main window is muted", self.rx._audio_note.text())
+        self.assertEqual(self.rx._audio_note.property("role"), "hint")
+        self.assertEqual(self.rx._audio_note.property("tone"), "info")
         self.rx.close()
         self.settle()
         self.assertFalse(self.host.mutes_main())
@@ -712,6 +882,15 @@ class TestBookmarks(_SecondCase):
         self.panel = self.win._bookmarks_panel
         self.panel.add_bookmark("Airport tower", 118.3e6, "AM", "", "8 kHz")
         self.panel.add_bookmark("NOAA 1", 162.55e6, "FM", "5 kHz", "")
+
+    def test_no_bookmarks_says_how_to_add_one(self):
+        for index in reversed(range(self.panel.bookmark_count())):
+            self.panel._bookmarks.pop(index)
+        self.panel.bookmarks_changed.emit()
+        combo = self.rx._bookmark_combo
+        self.assertEqual(combo.count(), 1)
+        self.assertFalse(combo.isEnabled())
+        self.assertIn("Ctrl+B", combo.itemText(0))
 
     def test_the_list_follows_the_main_windows_bookmarks(self):
         combo = self.rx._bookmark_combo
@@ -890,6 +1069,10 @@ class TestPersistence(_SecondCase):
         rx._squelch_slider.setValue(-70)
         rx._gain_slider.setValue(33)
         rx._follow_check.setChecked(True)
+        rx._waterfall._on_colormap_changed("viridis")  # (the ⋯ menu's Colors)
+        rx._waterfall._history_combo.setCurrentIndex(
+            rx._waterfall._history_combo.findData(60.0)
+        )
         rx.resize(rx.minimumWidth() + 40, 640)
         rx.close()
         self.settle()
@@ -902,8 +1085,9 @@ class TestPersistence(_SecondCase):
         self.assertTrue(values["layout/second_receiver/geometry"])
         self.assertTrue(values["layout/second_receiver/splitter"])
 
-        again = SecondReceiverWindow(self.win)
-        self.addCleanup(again.shutdown)
+        again = self.extra(SecondReceiverWindow(self.win))
+        self.assertEqual(again._waterfall.colormap_name(), "viridis")
+        self.assertEqual(again._waterfall.history_seconds(), 60.0)
         self.assertEqual(again.tuned_frequency(), 433.92e6)
         self.assertEqual(again.mode(), "AM")
         self.assertEqual(again._filter_combo.currentText(), "12 kHz")
@@ -924,14 +1108,18 @@ class TestPersistence(_SecondCase):
                 "device/second_receiver/frequency_hz": float("nan"),
                 "device/second_receiver/mode": "QAM",
                 "device/second_receiver/listen": "loud",
+                "device/second_receiver/squelch_db": float("nan"),
+                "device/second_receiver/step/nfm": float("inf"),
                 "layout/second_receiver/geometry": "not base64!",
             }
         )
-        again = SecondReceiverWindow(self.win)
-        self.addCleanup(again.shutdown)
+        again = self.extra(SecondReceiverWindow(self.win))
         self.assertEqual(again.tuned_frequency(), 145.8e6)
         self.assertEqual(again.mode(), "FM")
         self.assertEqual(again.listen(), "both")
+        self.assertEqual(again._dsp.squelch.manual_db, -80.0)
+        self.assertEqual(again._step_hz, 12.5e3)
+        self.assertGreaterEqual(again.width(), again.minimumWidth())
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
@@ -985,6 +1173,31 @@ class TestLayout(_SecondCase):
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestShutdown(_SecondCase):
+    def test_a_receiver_never_outlives_the_main_window_running(self):
+        """A window the host doesn't know (the main window deleted without
+        closing it) stops, finishing its recording and closing its device."""
+        from sdr_module.gui.second_receiver import SecondReceiverWindow
+
+        folder = tempfile.mkdtemp(prefix="rx2-orphan-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(folder, True))
+        self.store.values["recording/folder"] = folder
+        orphan = SecondReceiverWindow(self.win)
+        self.assertTrue(orphan.start())
+        orphan._set_recording(True)
+        orphan._process(orphan.device.read_samples(BLOCK))
+        device = orphan.device
+        self.win.destroyed.emit()  # (as when the C++ window is deleted)
+        self.assertFalse(orphan._frame_timer.isActive())
+        self.assertFalse(orphan._status_timer.isActive())
+        self.assertFalse(orphan.running)
+        self.assertFalse(device.is_streaming)
+        self.assertTrue(
+            any(name.endswith(".sigmf-meta") for name in os.listdir(folder))
+        )
+        orphan._update_status()  # (inert: nothing of the main window's)
+        orphan.shutdown()
+        orphan.deleteLater()
+
     def test_closing_the_window_releases_everything(self):
         rx = self.rx
         rx.set_listen("second")
@@ -1076,7 +1289,11 @@ class TestTxMonitorOnAir(_TxCase):
         super().setUp()
         self.rx = self.win._second_rx.show()
         self.rx._status_timer.stop()
-        self.addCleanup(self.rx.shutdown)
+
+    def tearDown(self):
+        if hasattr(self, "rx"):
+            self.rx.shutdown()
+        super().tearDown()
 
     def test_follow_tunes_to_the_transmission_and_keeps_receiving(self):
         rx = self.rx
@@ -1095,6 +1312,9 @@ class TestTxMonitorOnAir(_TxCase):
         self.assertEqual(rx._filter_combo.currentText(), "12.5 kHz")
         rx._update_tx_group()
         self.assertIn("On air: DE W1AW on 146.520 MHz (FM)", rx._tx_label.text())
+        # (A hint colored by its tone: its role never changes.)
+        self.assertEqual(rx._tx_label.property("role"), "hint")
+        self.assertEqual(rx._tx_label.property("tone"), "danger")
         # Full duplex: the main receiver is held off, this one receives.
         self.assertFalse(self.win._is_running)
         for _ in range(3):

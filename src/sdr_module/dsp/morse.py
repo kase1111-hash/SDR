@@ -28,9 +28,12 @@ decoded 33 ms at a time gives the same text as the whole recording at once:
   word or more ends a transmission even if it was too short for that. A
   mark much longer than a dash (a tuning carrier) ends the line and is
   left out of the speed; so does a long silence. A lone dit or dash (an E
-  or a T as a word of its own: what a crash of static gives) is not
-  shown, nor is a blip of fewer than three marks. The speed is
-  ``1.2 / dit`` words per minute (PARIS), 5 to 60 WPM.
+  or a T as a word of its own: what a crash of static gives) is not shown
+  next to words of several letters, nor in a line of nothing else; in
+  code spaced letter by letter (Farnsworth practice, a loose hand: a word
+  per letter) it shows once the code is heard to go so. A blip of fewer
+  than three marks is not shown either. The speed is ``1.2 / dit`` words
+  per minute (PARIS), 5 to 60 WPM.
 
 NumPy only; no Qt.
 """
@@ -137,6 +140,12 @@ class MorseMessage(DecodedMessage):
 def _alpha(rate: float, tau_s: float) -> float:
     """One-pole smoothing coefficient for a time constant at ``rate``."""
     return 1.0 - math.exp(-1.0 / max(rate * tau_s, 1e-9))
+
+
+def _lone_e_or_t(codes: List[str]) -> bool:
+    """Whether the letters of a word (codes such as ``".-"``) are a lone E
+    or T: what a crash of static keys."""
+    return len(codes) == 1 and len(codes[0]) == 1
 
 
 class KeyingDetector:
@@ -387,6 +396,17 @@ class MorseDecoder:
     #: gap between them is shorter than this many times their length (the
     #: elements of a letter are a dit apart), else dits.
     DASH_GAP = 0.6
+    #: A word that is a lone E or T (what a crash of static keys) waits.
+    #: Next to a word of several letters it is static: dropped.
+    #: Next to a word of one letter, up to this many in a row show while
+    #: the code reads letter by letter (Farnsworth practice, a loose hand):
+    #: two of the last ``SPACED_WORDS`` other words were one letter, one of
+    #: them of three or more elements (static keys dits, dashes and now and
+    #: then an I, A, N or M; a "K" ends many messages).
+    HELD_WORDS = 4
+    SPACED_WORDS = 4
+    #: A lone dit shorter than this (in dits) is a blip of noise, not an E.
+    SOLID_DIT = 0.6
 
     def __init__(self, rate: float, wpm: float = 20.0, line_chars: int = 60):
         rate = float(rate)
@@ -409,8 +429,15 @@ class MorseDecoder:
         self._queue: List[Tuple[str, int]] = []  # events waiting for a speed
         self._replaying = False
         self._letter = ""
-        self._word_letters = 0  # letters of the word in progress
-        self._held = ""  # its first letter, while it is a lone E or T
+        self._mark_dits = 1.0  # the last mark (dits)
+        self._word = ""  # letters of the word in progress not shown yet
+        self._codes: List[str] = []  # their codes
+        self._word_dits = 1.0  # its last dit or dash (dits)
+        self._word_shown = False  # its letters show as they come
+        self._held: List[str] = []  # lone Es and Ts waiting (HELD_WORDS)
+        self._after_one = False  # the line's last word was one letter
+        # The last SPACED_WORDS other words: (one letter, of 3+ elements).
+        self._recent: Deque[Tuple[bool, bool]] = deque(maxlen=self.SPACED_WORDS)
         self._pending_space = False
         self.line = ""
         self.text = ""
@@ -575,6 +602,7 @@ class MorseDecoder:
             self._end_letter()
             self._end_line()
             return
+        self._mark_dits = length / self._dit
         self._letter += "." if length < 2.0 * self._dit else "-"
         if len(self._letter) > 9:  # not Morse: give up on this letter
             self._end_letter()
@@ -639,19 +667,71 @@ class MorseDecoder:
     def _end_letter(self) -> None:
         if not self._letter:
             return
-        char = MORSE_CODE.get(self._letter, UNKNOWN_CHAR)
-        lone = len(self._letter) == 1 and not self._word_letters
-        self._letter = ""
-        self._word_letters += 1
-        if lone:
-            # A dit or a dash starting a word (E or T) shows once the word
-            # goes on: alone, it is most likely a crash of static.
-            self._held = char
+        code, self._letter = self._letter, ""
+        char = MORSE_CODE.get(code, UNKNOWN_CHAR)
+        self._codes.append(code)
+        if self._word_shown:
+            self._show(char)
             return
-        if self._held:
-            self._show(self._held)
-            self._held = ""
-        self._show(char)
+        self._word += char
+        if len(code) == 1:
+            self._word_dits = self._mark_dits
+        if _lone_e_or_t(self._codes) or (len(self._codes) == 1 and self._held):
+            # It waits: maybe static (see HELD_WORDS), or a word of one
+            # letter that decides about the words that waited before it.
+            return
+        # A word of several letters: the words that waited were static.
+        self._held = []
+        self._show_word()
+
+    def _show_word(self) -> None:
+        """Show the word in progress so far; its next letters show as they
+        come."""
+        if self.line:
+            self._pending_space = True
+        for char in self._word:
+            self._show(char)
+        self._word = ""
+        self._word_shown = True
+
+    def _end_word(self) -> None:
+        """The word in progress ended (a word gap, or the end of the line)."""
+        self._end_letter()
+        codes, self._codes = self._codes, []
+        if not codes:
+            return
+        if not self._word_shown and _lone_e_or_t(codes):
+            # It waits (a lone dit much shorter than a dit is a blip).
+            if not (self._word == "E" and self._word_dits < self.SOLID_DIT):
+                self._held.append(self._word)
+            self._word = ""
+            return
+        one = len(codes) == 1
+        self._recent.append((one, one and len(codes[0]) >= 3))
+        if not self._word_shown:
+            # A word of one letter after words that waited: they show
+            # with it if the code reads letter by letter.
+            self._show_held(self._letter_by_letter())
+            self._show_word()
+        self._word_shown = False
+        self._after_one = one
+
+    def _letter_by_letter(self) -> bool:
+        """Whether the code reads letter by letter (see HELD_WORDS)."""
+        ones = [longer for one, longer in self._recent if one]
+        return len(ones) >= 2 and any(ones)
+
+    def _show_held(self, show: bool) -> None:
+        """Show the words that waited (``show``: up to ``HELD_WORDS`` of
+        them), or drop them."""
+        held, self._held = self._held, []
+        if not show or len(held) > self.HELD_WORDS:
+            return
+        for word in held:
+            if self.line:
+                self._pending_space = True
+            for letter in word:
+                self._show(letter)
 
     def _show(self, char: str) -> None:
         self.characters += 1
@@ -659,11 +739,8 @@ class MorseDecoder:
 
     def _space(self) -> None:
         """A word gap: the next character starts a new word (the space is
-        added with it, so :attr:`text` only ever grows). A word that was a
-        lone E or T is dropped."""
-        self._end_letter()
-        self._held = ""
-        self._word_letters = 0
+        added with it, so :attr:`text` only ever grows)."""
+        self._end_word()
         if self.line and not self._pending_space:
             if len(self.line) >= self.line_chars:
                 self._end_line()
@@ -671,9 +748,14 @@ class MorseDecoder:
                 self._pending_space = True
 
     def _end_line(self) -> None:
-        self._end_letter()
-        self._held = ""
-        self._word_letters = 0
+        self._end_word()
+        # Words that waited after a word of one letter show if the code
+        # reads letter by letter; else (a line of nothing else, too) they
+        # are what crashes of static key.
+        self._show_held(
+            self._after_one and bool(self.line) and self._letter_by_letter()
+        )
+        self._after_one = False
         self._pending_space = False
         line = self.line.strip()
         self.line = ""

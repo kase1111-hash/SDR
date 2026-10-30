@@ -299,8 +299,8 @@ class TestSpeeds:
         # DEC-10: each crash of static keyed one mark, a gap of 1.5 s then
         # took whatever was queued for a transmission, and every crash
         # after that was an E or a T: about one character a second. Now a
-        # lone E or T is not shown; a crash that keys twice can still make
-        # an I or an N now and then.
+        # lone E or T is not shown (but in code spaced letter by letter); a
+        # crash that keys twice can still make an I or an N now and then.
         rate = 2000.0
         for seed in (1, 2, 3):
             x = self._shaped_noise(90.0, self._crashes(90.0, seed), seed)
@@ -327,6 +327,23 @@ class TestSpeeds:
         text, morse = _decode(np.sqrt(10**1.2) * signal + noise, rate, block=66)
         assert text == [MESSAGE]
         assert morse.characters == len(MESSAGE.replace(" ", ""))
+
+    @pytest.mark.parametrize("seed", [2, 3, 4, 5, 6, 7, 8, 9])
+    def test_crashes_just_before_and_after_a_message_add_nothing(self, seed):
+        # Crashes of static less than a line's pause from the words key
+        # lone Es and Ts next to them, in the message's line: next to
+        # words of several letters they are static, not letters.
+        rate = 2000.0
+        x = enc.cw_baseband(MESSAGE, rate, 20, offset_hz=30.0)
+        lead, tail = int(2.0 * rate), int(3.0 * rate)
+        signal = np.concatenate(
+            [np.zeros(lead, np.complex64), x, np.zeros(tail, np.complex64)]
+        )
+        level = self._crashes(len(signal) / rate, seed)[: len(signal)]
+        level[lead - int(0.4 * rate) : lead + len(x)] = 1.0  # none in the text
+        noise = self._shaped_noise(len(signal) / rate, level, seed)
+        text, morse = _decode(np.sqrt(10**1.2) * signal + noise, rate, block=66)
+        assert text == [MESSAGE], seed
 
     def test_a_blip_before_a_long_pause_is_not_a_letter(self):
         # One or two marks and then silence: noise, not a transmission.
@@ -419,6 +436,61 @@ class TestTextLayout:
         morse = MorseDecoder(self.RATE)
         morse.process(keying[:-20])
         assert [m.text for m in morse.flush()] == ["TEST"]
+
+    def spaced(self, text, wpm, letter_gap, word_gap, tail_s=3.0):
+        """Keying of ``text`` at ``wpm`` with its letters ``letter_gap``
+        dits apart and its words ``word_gap`` dits (wider than the usual 3
+        and 7: Farnsworth code practice, or a loose hand)."""
+        codes = {char: code for code, char in MORSE_CODE.items() if len(char) == 1}
+        dit = 1.2 / wpm * self.RATE
+        out = [np.zeros(int(0.5 * self.RATE))]
+        for w, word in enumerate(text.split()):
+            if w:
+                out.append(np.zeros(int(word_gap * dit)))
+            for c, char in enumerate(word):
+                if c:
+                    out.append(np.zeros(int(letter_gap * dit)))
+                for e, element in enumerate(codes[char]):
+                    if e:
+                        out.append(np.zeros(int(dit)))
+                    out.append(np.ones(int((1 if element == "." else 3) * dit)))
+        out.append(np.zeros(int(tail_s * self.RATE)))
+        return np.concatenate(out)
+
+    @pytest.mark.parametrize(
+        "letter_gap, word_gap",
+        [(5.5, 11.0), (9.3, 21.7)],  # a loose hand; 18 WPM letters at 10 WPM
+    )
+    def test_letters_spaced_wider_keep_their_es_and_ts(self, letter_gap, word_gap):
+        # Letters spaced as wide as words are each a word to the decoder,
+        # and every word that was a lone E or T was dropped as a crash of
+        # static: "THE CAT SAT" read "H C A S A". Once the code reads
+        # letter by letter they show (as do the Es and Ts that end it).
+        morse = MorseDecoder(self.RATE)
+        key = self.spaced("CQ THE CAT SAT MEET THE TEAM", 18, letter_gap, word_gap)
+        lines = morse.process(key) + morse.flush()
+        assert [m.text for m in lines] == [
+            "C Q T H E C A T S A T M E E T T H E T E A M"
+        ]
+        key = self.spaced("CQ DE MEET", 18, letter_gap, word_gap)
+        assert [m.text for m in morse.process(key) + morse.flush()] == [
+            "C Q D E M E E T"
+        ]
+
+    def test_a_blip_after_letters_is_not_an_e(self):
+        # Noise keys short blips once a signal stops: a third of a dit
+        # alone, even after letters spaced one by one, is not an E.
+        dit = 1.2 / 18 * self.RATE
+        keying = np.concatenate(
+            [
+                self.spaced("CQ DE", 18, 9.3, 21.7, tail_s=0.0),
+                np.zeros(int(12 * dit)),
+                np.ones(int(dit / 3)),
+                np.zeros(int(3.0 * self.RATE)),
+            ]
+        )
+        lines, morse = self.lines(keying)
+        assert lines + [m.text for m in morse.flush()] == ["C Q D E"]
 
     def test_unknown_codes_show_a_star(self):
         morse = MorseDecoder(self.RATE)

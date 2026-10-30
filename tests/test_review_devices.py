@@ -697,5 +697,74 @@ class TestDev4SecondReceiverGain(_SecondDriverCase):
         self.assertEqual(rx._gain_label.text(), "30 dB")
 
 
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestDev6SecondReceiverRtlFrontEnd(_SecondDriverCase):
+    def test_hf_follows_the_direct_sampling_the_rtl_sdr_uses(self):
+        """An RTL-SDR Blog V4 (direct sampling "Off" for the type in the
+        main window) hears HF through its upconverter here too."""
+        self.store.values["device/rtlsdr/direct_sampling"] = "off"
+        self.use_rtl()
+        rx = self.rx
+        self.choose("rtlsdr")
+        self.assertTrue(self.shown(rx._direct_combo))
+        self.assertTrue(self.shown(rx._ppm_spin))
+        self.assertEqual(rx._direct_combo.currentData(), "off")
+        dev = self.start_on("rtlsdr")
+        self.assertTrue(rx.tune(7.1e6, recenter=True))
+        self.assertEqual(dev.direct_sampling_branch, 0)
+        self.assertEqual(dev._device.direct, 0)
+        self.assertFalse(dev.direct_sampling)
+
+    def test_its_own_direct_sampling_and_correction_live_and_remembered(self):
+        from sdr_module.gui.second_receiver import SecondReceiverWindow
+
+        self.use_rtl()
+        rx = self.rx
+        dev = self.start_on("rtlsdr")
+        self.assertEqual(rx._direct_combo.currentData(), "q")  # (the default)
+        self.assertTrue(rx.tune(7.1e6, recenter=True))
+        self.assertEqual(dev._device.direct, 2)
+        index = rx._direct_combo.findData("i")
+        rx._direct_combo.setCurrentIndex(index)
+        rx._direct_combo.activated.emit(index)
+        self.assertEqual(dev._device.direct, 1)  # at once, at HF
+        rx._ppm_spin.setValue(12)
+        self.assertEqual((dev.freq_correction, dev._device.corr), (12, 12))
+        values = self.store.values
+        self.assertEqual(values["device/second_receiver/rtlsdr_direct_sampling"], "i")
+        self.assertEqual(values["device/second_receiver/rtlsdr_ppm"], 12)
+        # The main window's own front end for the type is left alone.
+        self.assertNotIn("device/rtlsdr/direct_sampling", values)
+        self.assertNotIn("device/rtlsdr/ppm", values)
+        rx.shutdown()
+        again = self.extra(SecondReceiverWindow(self.win))
+        self.assertTrue(again.start(), again.message())
+        dev = again.device
+        self.assertEqual(dev.direct_sampling_branch, 1)
+        self.assertEqual((dev.freq_correction, dev._device.corr), (12, 12))
+        self.assertEqual(dev._device.direct, 1)  # (still at 7.1 MHz)
+        again.stop()
+
+    def test_a_refused_correction_goes_back_and_says_so(self):
+        self.use_rtl()
+        rx = self.rx
+        dev = self.start_on("rtlsdr")
+        FakeRtlSdr.fail = {"set_freq_correction"}
+        rx._ppm_spin.setValue(30)
+        self.assertEqual(rx._ppm_spin.value(), 0)
+        self.assertEqual(dev.freq_correction, 0)
+        self.assertIn("didn't take the +30 ppm correction", rx.message())
+
+    def test_only_an_rtl_sdr_has_them(self):
+        self.use_hackrf()
+        rx = self.rx
+        self.choose("demo")
+        self.assertFalse(self.shown(rx._direct_combo))
+        self.assertFalse(self.shown(rx._ppm_spin))
+        self.choose("hackrf")
+        self.assertFalse(self.shown(rx._direct_combo))
+        self.assertFalse(self.shown(rx._ppm_spin))
+
+
 if __name__ == "__main__":
     unittest.main()

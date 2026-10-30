@@ -696,6 +696,34 @@ class TestTuning(_SecondCase):
         self.assertEqual(rx._deviation_value(), "75 kHz")
         self.assertEqual(rx._filter_combo.currentText(), "200 kHz")
 
+    def test_the_fm_deviation_is_never_shown_cut_off(self):
+        """The label of 2.5 kHz ("2.5 kHz (narrow, 12.5 kHz channels)",
+        what Monitor TX picks for an FM tone ID) is wider than the box in
+        the controls column: the box shows the value instead of a label
+        cut off mid-word; a label that fits shows whole (the list always
+        does)."""
+        rx = self.rx
+        combo = rx._deviation_combo
+        metrics = combo.fontMetrics()
+        rx.set_mode("FM", "2.5 kHz", "12.5 kHz")
+        self.assertEqual(combo.currentText(), "2.5 kHz (narrow, 12.5 kHz channels)")
+        self.assertGreater(
+            metrics.horizontalAdvance(combo.currentText()), combo.text_room()
+        )
+        self.assertEqual(combo.shown_text(), "2.5 kHz")
+        rx.set_mode("FM", "5 kHz", "25 kHz")
+        self.assertEqual(combo.shown_text(), "5 kHz (narrow voice)")
+        combo.grab()  # (paints)
+        # Without a shorter form, a text too wide ends in "…".
+        rx._listen_combo.setItemText(0, "Main window " * 6)
+        rx.set_listen("main")
+        shown = rx._listen_combo.shown_text()
+        self.assertTrue(shown.endswith("…"), shown)
+        self.assertLessEqual(
+            rx._listen_combo.fontMetrics().horizontalAdvance(shown),
+            rx._listen_combo.text_room(),
+        )
+
     def test_step_follows_the_mode_and_is_remembered(self):
         rx = self.rx
         rx._mode_combo.setCurrentText("AM")

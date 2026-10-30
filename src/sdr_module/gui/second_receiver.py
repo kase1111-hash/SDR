@@ -50,7 +50,7 @@ import numpy as np
 
 try:
     from PyQt6.QtCore import QByteArray, QObject, Qt, QTimer, pyqtSignal
-    from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence
+    from PyQt6.QtGui import QAction, QGuiApplication, QKeySequence, QPalette
     from PyQt6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -67,6 +67,9 @@ try:
         QSlider,
         QSplitter,
         QStatusBar,
+        QStyle,
+        QStyleOptionComboBox,
+        QStylePainter,
         QToolBar,
         QVBoxLayout,
         QWidget,
@@ -556,6 +559,63 @@ def _show_note(label: Any, text: str, tone: Optional[str]) -> None:
 
 if HAS_PYQT6:
 
+    #: Item data role holding a shorter form of an item's text ("2.5 kHz"
+    #: for "2.5 kHz (narrow, 12.5 kHz channels)"), shown by a
+    #: :class:`_FittingComboBox` too narrow for the whole text.
+    _SHORT_TEXT_ROLE = Qt.ItemDataRole.UserRole + 1
+
+    class _FittingComboBox(QComboBox):
+        """A combo box that never shows its text cut off mid-word: too
+        narrow for the whole text (the controls column is), it shows the
+        item's shorter form (:data:`_SHORT_TEXT_ROLE`), else the text
+        ending in "…". The list shows every text whole."""
+
+        def text_room(self) -> int:
+            """The width (px) the shown text has in the box."""
+            option = QStyleOptionComboBox()
+            self.initStyleOption(option)
+            return self._room(option)
+
+        def _room(self, option: "QStyleOptionComboBox") -> int:
+            field = self.style().subControlRect(
+                QStyle.ComplexControl.CC_ComboBox,
+                option,
+                QStyle.SubControl.SC_ComboBoxEditField,
+                self,
+            )
+            width = field.width()
+            if not option.currentIcon.isNull():
+                width -= option.iconSize.width() + 4
+            return max(0, width)
+
+        def shown_text(self) -> str:
+            """The text the box shows for the current item."""
+            option = QStyleOptionComboBox()
+            self.initStyleOption(option)
+            return self._fitted(option)
+
+        def _fitted(self, option: "QStyleOptionComboBox") -> str:
+            text = option.currentText
+            room = self._room(option)
+            metrics = self.fontMetrics()
+            if metrics.horizontalAdvance(text) <= room:
+                return text
+            short = self.currentData(_SHORT_TEXT_ROLE)
+            if isinstance(short, str) and short:
+                if metrics.horizontalAdvance(short) <= room:
+                    return short
+            return metrics.elidedText(text, Qt.TextElideMode.ElideRight, room)
+
+        def paintEvent(self, _event):  # noqa: N802 - Qt naming
+            # As QComboBox paints itself, with the text fitted to the box.
+            painter = QStylePainter(self)
+            painter.setPen(self.palette().color(QPalette.ColorRole.Text))
+            option = QStyleOptionComboBox()
+            self.initStyleOption(option)
+            painter.drawComplexControl(QStyle.ComplexControl.CC_ComboBox, option)
+            option.currentText = self._fitted(option)
+            painter.drawControl(QStyle.ControlElement.CE_ComboBoxLabel, option)
+
     class _SourceCombo(QComboBox):
         """The Device list; refreshed every time it opens (a device plugged
         in, or the main window's device changed, shows at once)."""
@@ -770,8 +830,8 @@ if HAS_PYQT6:
             return form
 
         @staticmethod
-        def _combo(min_chars: int = 8) -> "QComboBox":
-            combo = QComboBox()
+        def _combo(min_chars: int = 8) -> "_FittingComboBox":
+            combo = _FittingComboBox()
             combo.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
             )
@@ -901,11 +961,13 @@ if HAS_PYQT6:
             self._deviation_combo = self._combo(6)
             for value, text, tip in FM_DEVIATIONS:
                 self._deviation_combo.addItem(text, value)
+                index = self._deviation_combo.count() - 1
                 self._deviation_combo.setItemData(
-                    self._deviation_combo.count() - 1,
-                    tip,
-                    Qt.ItemDataRole.ToolTipRole,
+                    index, tip, Qt.ItemDataRole.ToolTipRole
                 )
+                # (Shown when "2.5 kHz (narrow, 12.5 kHz channels)" is
+                # too wide for the box.)
+                self._deviation_combo.setItemData(index, value, _SHORT_TEXT_ROLE)
             self._deviation_combo.setToolTip("The FM deviation the station uses")
             self._deviation_combo.setAccessibleName("Second receiver's FM deviation")
             self._deviation_combo.currentIndexChanged.connect(

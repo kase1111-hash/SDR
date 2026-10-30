@@ -257,6 +257,26 @@ class TestParseAprsInfo:
         assert parse_aprs_info("")["data_type"] == "unknown"
         assert parse_aprs_info("{{weird")["data_type"] == "unknown"
 
+    def test_a_course_and_speed_that_are_not_base_91_are_left_out(self):
+        # DEC-08: a speed byte of 0xFF (it arrives as U+FFFD) was read as
+        # 1.08 ** 65500 and raised OverflowError: the row never showed and
+        # sdr-scan decode stopped listing at it.
+        for bad in ("\ufffd", "\x7f", " "):
+            fields = parse_aprs_info(f"!/5L!!<*e7>!{bad}A comment")
+            assert fields["latitude"] == pytest.approx(49.5, abs=1e-4)
+            assert (fields["course"], fields["speed"]) == (0.0, 0.0)
+        frame = AX25Frame(
+            protocol=ProtocolType.AX25,
+            timestamp=0.0,
+            raw_bits=b"",
+            valid=True,
+            source="N0CALL-1",
+            destination="APRS",
+            info="!/5L!!<*e7>!\ufffdA bad speed byte",
+        )
+        assert describe_message(frame)[1].startswith("49.5000, -72.7500")
+        assert "APRS: Position" in " ".join(message_details(frame))
+
 
 class TestOtherDetails:
     def test_rds(self):

@@ -970,7 +970,10 @@ def _aprs_fields(msg: Any) -> Optional[Dict[str, Any]]:
     info = _text(msg, "info")
     if not info or not getattr(msg, "valid", True):
         return None
-    fields = parse_aprs_info(info)
+    try:
+        fields = parse_aprs_info(info)
+    except Exception:  # a malformed report is shown as sent
+        return None
     kind = str(fields["data_type"])
     if kind == "unknown" or (kind.startswith("position") and not fields["symbol"]):
         return None  # not APRS, or a position that doesn't read: as sent

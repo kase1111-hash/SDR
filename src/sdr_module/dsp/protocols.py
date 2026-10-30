@@ -915,9 +915,13 @@ def _aprs_position(body: str, out: Dict[str, Any]) -> str:
         out["longitude"] = -180.0 + _aprs_base91(body[5:9]) / 190463.0
         out["symbol"] = body[0] + body[9]
         cs, kind = body[10:12], body[12]
+        # Course and speed when the three bytes are base-91 (a byte that
+        # isn't, e.g. one received as U+FFFD, would read as a speed of
+        # 1.08 ** 65500) and the type byte doesn't say they are altitude.
         if (
-            cs[0] != " "
-            and 0 <= ord(cs[0]) - 33 <= 89
+            0 <= ord(cs[0]) - 33 <= 89
+            and 0 <= ord(cs[1]) - 33 <= 91
+            and 0 <= ord(kind) - 33 <= 91
             and (ord(kind) - 33) & 0x18 != 0x10
         ):
             out["course"] = float((ord(cs[0]) - 33) * 4)

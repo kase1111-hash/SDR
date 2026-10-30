@@ -359,5 +359,172 @@ class TestScan02ToneSquelchInTheWindow(_ScanWindowCase):
         self.assertEqual(self.win._control_panel.tone_squelch_hz(), 88.5)
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-04 / 05 / 06: how a bookmark scan listens, and what it leaves behind
+# --------------------------------------------------------------------------- #
+def _pretend_audio(win):
+    win._audio_output_problem = lambda: None
+    win._audio.start = lambda *_a, **_k: True
+    win._audio.write = lambda *_a, **_k: None
+    win._audio_enabled = True
+
+
+class _BookmarkScanCase(_ScanWindowCase):
+    def scan(self, bookmarks, seconds=3.0, until=None):
+        """Start a bookmark scan of ``bookmarks``; run until ``until()``
+        (default: it stops on a channel) or ``seconds``."""
+        from sdr_module.gui.scan_engine import LISTEN
+
+        marks = self.win._bookmarks_panel
+        marks._bookmarks = [dict(b) for b in bookmarks]
+        marks._save()
+        marks._refresh_list()
+        panel = self.win._scanner_panel
+        panel.set_scan_mode("bookmarks")
+        panel._refresh_groups()
+        self.assertTrue(panel.start_scan(), panel._status.text())
+        engine = panel.engine
+        return self.frames(seconds, until=until or (lambda: engine.state == LISTEN))
+
+    def listening_now(self):
+        cp = self.win._control_panel
+        return (
+            self.win._listening_mode(),
+            cp._bw_combo.currentText(),
+            cp.tone_squelch_hz(),
+        )
+
+
+_CLUB = {"label": "Club", "freq_hz": 145.29e6, "demod": "FM", "fm_deviation": "5 kHz"}
+_QUIET_TONE = {
+    "label": "Quiet FM tone 100",
+    "freq_hz": 145.5e6,
+    "demod": "FM",
+    "fm_deviation": "5 kHz",
+    "mode": "FM",
+    "tone_mode": "TSQL",
+    "ctone": 100.0,
+}
+_QUIET_AM = {
+    "label": "Quiet AM",
+    "freq_hz": 133.0e6,
+    "demod": "AM",
+    "mode": "AM",
+    "bandwidth": "6 kHz",
+}
+#: An old bookmark without a mode: tuning it keeps the receiver's mode.
+_LEGACY = {"label": "Old 146.94", "freq_hz": 146.94e6}
+
+
+class TestScan04ToneWithTheSquelchOff(_BookmarkScanCase):
+    def test_a_wrong_tone_is_passed_by_with_the_squelch_off(self):
+        """The demo repeater on 145.290 MHz sends 100.0 Hz: a bookmark with
+        123.0 Hz must not stop the scan, squelch on or off."""
+        self.win._control_panel.set_squelch_enabled(False)
+        self.settle()
+        self.assertFalse(self.win._squelch.enabled)
+        wrong = dict(_CLUB, label="Club, wrong tone", tone_mode="TSQL", ctone=123.0)
+        self.assertFalse(self.scan([wrong]))
+        self.assertEqual(self.win._scanner_panel.hits(), [])
+        self.win._scanner_panel.stop_scan()
+
+    def test_the_right_tone_is_heard_with_the_squelch_off(self):
+        self.win._control_panel.set_squelch_enabled(False)
+        self.settle()
+        right = dict(_CLUB, tone_mode="TSQL", ctone=100.0)
+        self.assertTrue(self.scan([right]))
+        self.assertEqual([h.label for h in self.win._scanner_panel.hits()], ["Club"])
+        self.win._scanner_panel.stop_scan()
+
+
+class TestScan05ToneSquelchRestored(_BookmarkScanCase):
+    def test_a_scan_from_am_leaves_no_tone_squelch_behind(self):
+        win, cp = self.win, self.win._control_panel
+        win.set_frequency(125.0e6)
+        win._set_demod_mode("AM", None, "10 kHz")
+        cp.set_tone_squelch_hz(0.0)
+        self.scan([_QUIET_TONE], seconds=0.5)
+        self.assertEqual(cp.tone_squelch_hz(), 100.0)  # (the scan's)
+        win._scanner_panel.stop_scan()
+        self.settle()
+        self.assertEqual(win._listening_mode(), ("AM", ""))
+        self.assertEqual(cp.tone_squelch_hz(), 0.0)
+        self.assertIsNone(win._tone_squelch.tone_hz)
+        win._persist_audio_settings()
+        self.assertEqual(self.store.values.get("audio/tone_squelch"), 0.0)
+
+    def test_a_scan_from_am_gives_back_the_users_own_tone(self):
+        win, cp = self.win, self.win._control_panel
+        win._set_demod_mode("FM", "5 kHz", "12.5 kHz")
+        cp.set_tone_squelch_hz(100.0)
+        win.set_frequency(125.0e6)
+        win._set_demod_mode("AM", None, "10 kHz")
+        quiet = dict(_QUIET_TONE, label="Quiet FM", tone_mode="", ctone=88.5)
+        self.scan([quiet], seconds=0.5)
+        self.assertEqual(cp.tone_squelch_hz(), 0.0)  # (the scan's)
+        win._scanner_panel.stop_scan()
+        self.settle()
+        self.assertEqual(win._listening_mode(), ("AM", ""))
+        self.assertEqual(cp.tone_squelch_hz(), 100.0)
+
+
+class TestScan06KeepModeBookmarksInAScan(_BookmarkScanCase):
+    def setUp(self):
+        super().setUp()
+        self.win.set_frequency(146.94e6)
+        self.win._set_demod_mode("FM", "5 kHz", "25 kHz")  # no tone squelch
+        self.win._control_panel.set_tone_squelch_hz(0.0)
+        self.user = self.listening_now()
+        self.seen = []
+        engine = self.win._scanner_panel.engine
+
+        def on_legacy():
+            current = engine.current
+            if current is not None and current.label == _LEGACY["label"]:
+                self.seen.append(self.listening_now())
+            return engine.state == "listen" and current.label == _LEGACY["label"]
+
+        self.on_legacy = on_legacy
+
+    def check_heard_as_the_user_listens(self, before):
+        self.assertTrue(self.scan([before, _LEGACY], seconds=4.0, until=self.on_legacy))
+        self.assertTrue(self.seen)
+        self.assertEqual(set(self.seen), {self.user})
+        self.assertEqual(
+            [h.label for h in self.win._scanner_panel.hits()], [_LEGACY["label"]]
+        )
+        self.win._scanner_panel.stop_scan()
+
+    def test_after_a_bookmark_with_a_tone_speaker_on(self):
+        _pretend_audio(self.win)
+        self.check_heard_as_the_user_listens(_QUIET_TONE)
+
+    def test_after_a_bookmark_with_a_tone_speaker_off(self):
+        self.win._audio_enabled = False
+        self.check_heard_as_the_user_listens(_QUIET_TONE)
+
+    def test_after_an_am_bookmark(self):
+        _pretend_audio(self.win)
+        self.check_heard_as_the_user_listens(_QUIET_AM)
+
+    def test_the_users_own_tone_squelch_decides_speaker_on_or_off(self):
+        """Keep the receiver's mode means its tone squelch too: the demo
+        repeater on 145.290 MHz sends 100.0 Hz."""
+        legacy = {"label": "Old 145.29", "freq_hz": 145.29e6}
+        for speaker in (True, False):
+            for tone, heard in ((123.0, False), (100.0, True)):
+                if speaker:
+                    _pretend_audio(self.win)
+                else:
+                    self.win._audio_enabled = False
+                self.win.set_frequency(145.29e6)
+                self.win._control_panel.set_tone_squelch_hz(tone)
+                self.assertEqual(
+                    self.scan([_QUIET_AM, legacy], seconds=3.0), heard, (speaker, tone)
+                )
+                self.win._scanner_panel.stop_scan()
+                self.assertEqual(self.win._control_panel.tone_squelch_hz(), tone)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

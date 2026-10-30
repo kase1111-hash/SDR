@@ -209,7 +209,6 @@ class ScanEngine:
         self._dwell_s = 0.0
         self._quiet_s = 0.0
         self._opened = False
-        self._tone_hz = 0.0
         self._locked_out: List[Tuple[float, float]] = []  # (freq, width)
         self._skipped_visits: set = set()  # bookmark scan: indices skipped
         self._bookmarks_left = 0  # visits left in this pass
@@ -447,8 +446,11 @@ class ScanEngine:
             if heard:
                 self._begin_listening()
                 return
-            if self._tone_hz and self.host.scan_squelch_open():
-                self._opened = True  # a signal: give its tone time to show
+            if self.host.scan_squelch_open():
+                # A signal the tone squelch holds back (the bookmark's tone,
+                # or the receiver's own for a channel kept in its mode):
+                # give its tone time to show.
+                self._opened = True
             self._dwell_s += seconds
             limit = TONE_WAIT_S if self._opened else DWELL_S
             if self._dwell_s >= limit and not self.held:
@@ -534,7 +536,6 @@ class ScanEngine:
         while self._candidates:
             item = self._candidates.pop(0)
             self.current = item
-            self._tone_hz = 0.0
             if self.host.scan_tune_channel(item.frequency_hz, item.listening, 0.0):
                 self._settle_after_tune(DWELL, self.host.scan_lo_moved())
                 if self.state == SETTLE and not self._skip_frames:
@@ -571,7 +572,6 @@ class ScanEngine:
                 listening,
                 label=str(b.get("label") or ""),
             )
-            self._tone_hz = tone
             self.host.scan_set_muted(True)
             if self.host.scan_tune_channel(freq, listening, tone):
                 self._settle_after_tune(DWELL, self.host.scan_lo_moved())

@@ -130,6 +130,12 @@ class WindowScannerHost(ScannerHost):
     ) -> bool:
         win = self._win
         before = win._lo_frequency()
+        if not listening[0] and self._saved is not None:
+            # "The receiver's mode" (an old bookmark, a signal of a range
+            # without a band): the mode, filter and tone squelch the scan
+            # began with, not whatever the channel visited last left.
+            _freq, _lo, mode, deviation, width, tone_hz = self._saved
+            listening = (mode, deviation, width)
         # A bookmark with a tone squelch is judged by its tone, so the
         # window checks it even with the speaker off (see _route_audio).
         win._scan_checks_tone = bool(tone_hz and tone_hz > 0)
@@ -182,7 +188,9 @@ class WindowScannerHost(ScannerHost):
         win = self._win
         if self._squelch_used():
             return bool(win._squelch.is_open) and not win._tone_blocked
-        return self._level_above_threshold()
+        # (The tone squelch still decides with the squelch off: _route_audio
+        # checks the tone of a channel scanned with one.)
+        return self._level_above_threshold() and not win._tone_blocked
 
     def scan_squelch_open(self) -> bool:
         if self._squelch_used():
@@ -276,8 +284,9 @@ class WindowScannerHost(ScannerHost):
                         True,
                     )[1]
                 )
-                if mode == "FM":
-                    win._control_panel.set_tone_squelch_hz(tone)
+            # (Whatever the mode: the scan sets it for the FM channels it
+            # visits, and it is kept, and saved, for when FM is next used.)
+            win._control_panel.set_tone_squelch_hz(tone)
         win._note_tuned()
 
     # ---- results ---------------------------------------------------------- #

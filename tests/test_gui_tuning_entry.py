@@ -104,6 +104,25 @@ class TestTypedFrequencies(_EntryCase):
         self.assertEqual(self.freq(), 100.1e6)
         self.assertIn("Can't read “7.074e” as a frequency", self.error())
 
+    def test_slips_never_tune_another_frequency(self):
+        """Slips used to tune something else: "12..5" tuned 125 MHz,
+        "145.800.0" 1.458 MHz and "-5" 5 MHz."""
+        for text in ("12..5", "145.800.0", "1.2.3"):
+            self.type_frequency(text)
+            self.assertEqual(self.freq(), 100.1e6, text)
+            self.assertIn(f"Can't read “{text}” as a frequency", self.error())
+            QTest.keyClick(QApplication.focusWidget(), Qt.Key.Key_Escape)
+        self.win._focus_frequency_entry()
+        self.settle()
+        field = QApplication.focusWidget()
+        QTest.keyClicks(field, "-5")
+        self.assertEqual(field.text(), "-5")  # the minus is kept ...
+        self.assertEqual(field.property("tone"), "danger")
+        QTest.keyClick(field, Qt.Key.Key_Return)
+        self.settle()
+        self.assertEqual(self.freq(), 100.1e6)  # ... and nothing is tuned
+        self.assertEqual(self.error(), "A frequency can't be negative.")
+
     def test_leaving_the_field_with_bad_text_says_so(self):
         self.win._focus_frequency_entry()
         self.settle()

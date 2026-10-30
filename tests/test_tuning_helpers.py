@@ -196,8 +196,37 @@ class TestParseFrequencyText(unittest.TestCase):
         for text in ("-5", "+5", "abc", "12x", "1e6k", "1.2.3,4,5"):
             state = self.parse(text).state
             self.assertIn(state, (INVALID, INTERMEDIATE), text)
-        for text in ("-5", "abc", "12x"):
+        for text in ("+5", "--5", "-abc", "abc", "12x"):
             self.assertEqual(self.parse(text).state, INVALID, text)
+
+    def test_a_negative_number_is_kept_and_refused(self):
+        """Dropping the minus (Invalid) left "5": Enter tuned 5 MHz."""
+        result = self.parse("-5")
+        self.assertEqual(result.state, INTERMEDIATE)
+        self.assertEqual(result.hz, -5e6)  # a number: the field turns red
+        self.assertEqual(result.problem, "A frequency can't be negative.")
+        self.assertEqual(self.parse("-").state, INTERMEDIATE)
+
+    def test_separators_that_dont_group_thousands_are_not_a_number(self):
+        """A slip ("12..5") was read as grouping and tuned 125 MHz;
+        "145.800.0" (on the way to 145.800.000) tuned 1.458 MHz."""
+        for text in ("12..5", "1.2.3", "145.800.0", "..5", "5..", "1,2,3"):
+            result = self.parse(text)
+            self.assertEqual(result.state, INTERMEDIATE, text)
+            self.assertIsNone(result.hz, text)
+            self.assertIn("Can't read", result.problem)
+        for text in ("12,34.5", "1.,5", "1,2.3,4"):
+            self.assertEqual(self.parse(text).state, INTERMEDIATE, text)
+        # Well-formed grouping still reads.
+        self.assertHz("145.800.000", 145.8e6)
+        self.assertHz("1,234.5", 1234.5e6)
+        self.assertHz("1.234,5", 1234.5e6)
+
+    def test_the_smaller_unit_hint_needs_whole_hertz(self):
+        self.assertIn("For 7000 kHz, type 7000k.", self.parse("7000").problem)
+        problem = self.parse("6000.000001").problem  # 1 Hz above 6 GHz
+        self.assertIn("6000.000001 MHz is out of range", problem)
+        self.assertNotIn("For ", problem)
 
     def test_range_text(self):
         self.assertEqual(format_mhz_range(500e3, 1.766e9), "0.5–1766 MHz")

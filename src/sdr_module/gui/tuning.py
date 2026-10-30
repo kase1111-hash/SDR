@@ -201,23 +201,34 @@ def format_mhz_range(low_hz: float, high_hz: float) -> str:
     return f"{low_hz / 1e6:g}–{high_hz / 1e6:g} MHz"
 
 
+def _groups_thousands(digits: str, sep: str) -> bool:
+    """Whether ``digits`` groups thousands with ``sep`` ("145.800.000"):
+    groups of three after the first, none empty or short, as a slip of the
+    finger would leave ("12..5", "145.800.0")."""
+    pattern = r"[0-9]{1,3}(?:" + re.escape(sep) + r"[0-9]{3})+"
+    return re.fullmatch(pattern, digits) is not None
+
+
 def _normalize_number(
     mantissa: str, grouped: bool, group_separator: str
 ) -> Optional[str]:
-    """``mantissa`` (digits, '.' and ',') as a Python float string, or None."""
+    """``mantissa`` (digits, '.' and ',') as a Python float string, or None
+    when its separators don't make a number ("12..5", "1.2.3")."""
     dots, commas = mantissa.count("."), mantissa.count(",")
     if dots and commas:
         # Both: the last one is the decimal separator, the other groups.
         last = "." if mantissa.rfind(".") > mantissa.rfind(",") else ","
         other = "," if last == "." else "."
-        if mantissa.count(last) > 1:
+        whole, _, frac = mantissa.rpartition(last)
+        if not _groups_thousands(whole, other):
             return None
-        return mantissa.replace(other, "").replace(last, ".")
+        return whole.replace(other, "") + "." + frac
     sep = "." if dots else ("," if commas else "")
     if not sep:
         return mantissa
     if mantissa.count(sep) > 1:
-        return mantissa.replace(sep, "")  # "145,800,000": grouping
+        # "145,800,000": grouping.
+        return mantissa.replace(sep, "") if _groups_thousands(mantissa, sep) else None
     whole, _, frac = mantissa.partition(sep)
     if grouped and sep == group_separator and whole and len(frac) == 3:
         return whole + frac  # "7,074" in the kHz field: grouping
@@ -254,8 +265,25 @@ def parse_frequency_text(
     compact = _SPACES.sub("", raw)
     if not compact:
         return ParsedFrequency(INTERMEDIATE)
+    if compact[0] == "-" and compact[1:2] not in ("+", "-"):
+        # Kept (not dropped, which would quietly tune the positive number)
+        # and refused with the reason.
+        rest = parse_frequency_text(
+            compact[1:],
+            unit_hz,
+            minimum_hz,
+            maximum_hz,
+            grouped=grouped,
+            group_separator=group_separator,
+        )
+        if rest.state == INVALID:
+            return rest
+        hz = None if rest.hz is None else -rest.hz
+        return ParsedFrequency(
+            INTERMEDIATE, hz, problem="A frequency can't be negative."
+        )
     if compact[0] in "+-":
-        return ParsedFrequency(INVALID, problem="A frequency can't be negative.")
+        return ParsedFrequency(INVALID, problem=_unreadable(raw))
     suffix = ""
     match = _SUFFIX_RE.search(compact)
     if match:
@@ -340,10 +368,16 @@ def _out_of_range(
     message = f"{shown} is out of range: {limits}."
     if not suffix and hz > ANY_RECEIVER_MAX_HZ:
         # Beyond every receiver, so probably meant in a smaller unit ("7000"
-        # for 7000 kHz): say how to type that.
+        # for 7000 kHz): say how to type that. Not for a reading with a
+        # fraction of a hertz ("6000.000001" is 1 Hz above 6 GHz, not kHz).
         value = hz / scale
         for smaller, unit, typed in ((1e3, "kHz", "k"), (1.0, "Hz", " Hz")):
-            if smaller < scale and minimum_hz <= value * smaller <= maximum_hz:
+            reading = value * smaller
+            if (
+                smaller < scale
+                and minimum_hz <= reading <= maximum_hz
+                and abs(reading - round(reading)) < 1e-6
+            ):
                 message += f" For {text} {unit}, type {text}{typed}."
                 break
     return message

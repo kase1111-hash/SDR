@@ -2001,16 +2001,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # live samples that haven't been saved yet.
         self._buffer_meta: Tuple[Optional[float], Optional[float]] = (None, None)
         self._buffer_unsaved = False
-        # The buffer holds a converted file (its name) rather than a take,
-        # and the file the last take (I/Q or audio) was saved to.
+        # The buffer holds a converted file (its name and path) rather than
+        # a take, and the file the last take (I/Q or audio) was saved to.
         self._buffer_source = ""
+        self._buffer_source_path = ""
         self._last_saved = ""
         # Record Audio: the take being written (None while not recording).
         self._audio_take: Optional[AudioTake] = None
         # When the take in the buffer started: UTC (ISO, for its metadata)
-        # and local time (for its file name).
+        # and local time (for its file name); a converted file's hardware
+        # and description (SigMF's core:hw and core:description).
         self._take_started = ""
         self._take_stamp = ""
+        self._take_hardware = ""
+        self._take_description = ""
         # A new recording replaces the buffer only once samples arrive, so an
         # armed recording that captures nothing keeps the previous one.
         self._capture_pending = False
@@ -5708,6 +5712,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._buffer_meta = (None, None)
         self._buffer_unsaved = False
         self._buffer_source = ""
+        self._buffer_source_path = ""
         self._clear_status_message()  # e.g. "Use File > Save Recording"
         self._update_take_panel()
 
@@ -6337,8 +6342,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._replace_buffer(_SampleStore(self._capture_folder()))
             self._buffer_meta = tuned
             self._buffer_source = ""
+            self._buffer_source_path = ""
             self._take_started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             self._take_stamp = time.strftime("%Y%m%d_%H%M%S")
+            self._take_hardware = self._take_description = ""
             self._retune_warned = False
             self._sync_recording_armed()
             self._update_take_panel()  # (the status line shows the new take)
@@ -7625,7 +7632,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._buffer_meta = (options.center_hz or None, options.sample_rate or None)
         self._buffer_unsaved = False  # the file is on disk already
         self._buffer_source = options.name
-        self._take_started = ""
+        self._buffer_source_path = os.path.abspath(options.path)
+        # What its metadata says about it is kept too (an unknown time is
+        # left out, never stamped with the time of saving).
+        self._take_started = options.start_time
+        self._take_hardware = options.hardware
+        self._take_description = options.description
         self._update_take_panel()
         logger.info(
             f"Loaded {loaded.samples} samples from {path} "
@@ -7886,9 +7898,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _suggested_iq_name(self, ext: str) -> str:
         """``iq_100.100MHz_2.4MSps_20261030_142233.sigmf-data`` (the take's
-        center, rate and start), or a converted file's own name."""
+        center, rate and start), or a converted file's own name (with
+        ``_converted`` in the same format: never the file itself)."""
         if self._buffer_source:
-            return split_name(self._buffer_source)[0] + ext
+            stem, source_ext = split_name(self._buffer_source)
+            sigmf = {".sigmf-data", ".sigmf-meta"}  # (one recording)
+            if source_ext.lower() == ext.lower() or {source_ext.lower(), ext} <= sigmf:
+                stem += "_converted"
+            return stem + ext
         center, rate = self._buffer_meta
         parts = ["iq"]
         if center:
@@ -7981,8 +7998,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         center, rate = self._buffer_meta
         center, rate = float(center or 0.0), float(rate or 0.0)
         name = os.path.basename(filename)
-        # When the samples were recorded (SigMF's core:datetime).
-        details: Dict[str, Any] = {"start_time": self._take_started}
+        # When (and on what) the samples were recorded.
+        details: Dict[str, Any] = {
+            "start_time": self._take_started,
+            "hardware": self._take_hardware,
+            "description": self._take_description,
+        }
 
         error: Optional[BaseException] = None
         moved = False
@@ -8065,9 +8086,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return True
 
     def _check_save_target(self, filename: str, fmt: Any) -> None:
-        """Refuse (ValueError) to save into the take's own temporary file,
-        which is deleted."""
-        from ..dsp.recording import FileFormat, sidecar_path
+        """Refuse (ValueError) to save over the recording the buffer was
+        converted from, or its metadata: the original would be replaced by
+        a copy, and lost if the save failed. Nor into the take's own
+        temporary file, which is deleted."""
+        from ..dsp.recording import FileFormat, find_sidecar, sidecar_path
 
         stem = os.path.join(os.path.dirname(filename), split_name(filename)[0])
         targets = [filename]
@@ -8079,6 +8102,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if store.temporary and any(_same_file(t, store.path) for t in targets):
             raise ValueError(
                 "that is the recording's own temporary file. Choose another name."
+            )
+        source = self._buffer_source_path
+        if not source:
+            return
+        originals = [source]
+        source_stem, source_ext = split_name(source)
+        if source_ext.lower() in (".sigmf-data", ".sigmf-meta"):
+            base = os.path.join(os.path.dirname(source), source_stem)
+            originals += [base + ".sigmf-data", base + ".sigmf-meta"]
+        else:
+            sidecar = find_sidecar(source)
+            if sidecar is not None:
+                originals.append(str(sidecar.path))
+        if any(_same_file(t, o) for t in targets for o in originals):
+            raise ValueError(
+                f"saving there would replace {self._buffer_source}, the "
+                "recording you converted (or its metadata). Choose another name."
             )
 
     def _move_take(

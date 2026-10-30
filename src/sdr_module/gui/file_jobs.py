@@ -148,11 +148,15 @@ def write_recording(
     center_frequency: float,
     report: Report,
     start_time: str = "",
+    *,
+    hardware: str = "",
+    description: str = "",
 ) -> int:
     """Write ``chunks`` (``total`` samples) to ``filename``; a cancelled or
     failed write leaves no partial file behind. ``start_time`` (UTC, ISO
     8601) is when the samples were recorded, for SigMF's ``core:datetime``
-    (else the time of writing). Returns the samples written."""
+    (left out when unknown); ``hardware`` and ``description`` are SigMF's
+    ``core:hw`` and ``core:description``. Returns the samples written."""
     if file_format is FileFormat.WAV and not sample_rate > 0:
         # (Its header must hold one: nothing is written.)
         raise ValueError(
@@ -173,13 +177,15 @@ def write_recording(
         sample_format=sample_format,
         file_format=file_format,
     )
+    recorder.set_metadata(hardware=hardware, description=description)
     written = 0
     opened = complete = False
     try:
         recorder.start(filename)
         opened = True
-        if start_time:
-            recorder.set_metadata(start_time=start_time)
+        # (start() stamps the time of writing: the samples' own time
+        # replaces it, and an unknown one is left out, never invented.)
+        recorder.set_metadata(start_time=start_time)
         try:
             report(0.0)
             for chunk in chunks:

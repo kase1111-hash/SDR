@@ -16,6 +16,9 @@
 * REC-06: a take over 4 GiB failed as WAV only after writing 4 GiB.
 * REC-07: ``.cf32``/``.raw`` saves copied the take on the GUI thread (no
   progress or Cancel) and left a partial file when the copy failed.
+* REC-08 / REC-09: Convert then Save as SigMF stamped the time of saving as
+  the recording's time and dropped its hardware and description; Save As
+  suggested (and wrote over) the converted file itself.
 * REC-12: cu8/cs8/cs16 saves truncated instead of rounding (a DC offset).
 * REC-14: the recording buffer kept a Python tuple per display frame.
 """
@@ -513,6 +516,125 @@ class TestCopiesRunInTheBackground(_ReviewCase):
         self.assertFalse(os.path.exists(target))
         self.assertFalse(os.path.exists(target + ".sigmf-meta"))
         self.win._record_button.click()
+
+
+# ---------------------------------------------------------------------------
+# REC-08 / REC-09: converting keeps the metadata and the original
+# ---------------------------------------------------------------------------
+
+
+class TestConvertKeepsTheRecording(_ReviewCase):
+    META = {
+        "global": {
+            "core:datatype": "cf32_le",
+            "core:sample_rate": 250000.0,
+            "core:version": "1.0.0",
+            "core:hw": "RTL-SDR v3 + QFH",
+            "core:description": "NOAA-19 pass",
+        },
+        "captures": [
+            {
+                "core:sample_start": 0,
+                "core:frequency": 137.1e6,
+                "core:datetime": "2020-01-02T03:04:05Z",
+            }
+        ],
+        "annotations": [],
+    }
+
+    def _source(self, name="pass"):
+        x = (0.3 * np.exp(2j * np.pi * 0.01 * np.arange(50000))).astype(np.complex64)
+        x.tofile(self.path(name + ".sigmf-data"))
+        with open(self.path(name + ".sigmf-meta"), "w") as handle:
+            json.dump(self.META, handle)
+        return self.path(name + ".sigmf-data"), x
+
+    def _convert(self, path):
+        self.answer("Close")
+        with self.open_dialog(path):
+            self.assertTrue(self.win._convert_recording())
+
+    def test_time_hardware_and_description_are_kept(self):
+        path, _x = self._source()
+        self._convert(path)
+        os.makedirs(self.path("out"))
+        with self.save_dialog(self.path("out/copy.sigmf-data")):
+            self.assertTrue(self.win._save_recording())
+        meta = _read_json(self.path("out/copy.sigmf-meta"))
+        self.assertEqual(meta["captures"][0]["core:datetime"], "2020-01-02T03:04:05Z")
+        self.assertEqual(meta["global"]["core:hw"], "RTL-SDR v3 + QFH")
+        self.assertEqual(meta["global"]["core:description"], "NOAA-19 pass")
+        with self.save_dialog(self.path("out/copy.cs16")):
+            self.assertTrue(self.win._save_recording())
+        sidecar = _read_json(self.path("out/copy.cs16.sigmf-meta"))
+        self.assertEqual(
+            sidecar["captures"][0]["core:datetime"], "2020-01-02T03:04:05Z"
+        )
+        self.assertEqual(sidecar["global"]["core:hw"], "RTL-SDR v3 + QFH")
+
+    def test_an_unknown_time_is_left_out_not_stamped_now(self):
+        from sdr_module.gui import iq_files
+
+        path = self.path("capture.cs16")
+        np.zeros(2000, np.int16).tofile(path)
+
+        def fake_exec(dialog):
+            if isinstance(dialog, iq_files.ImportOptionsDialog):
+                dialog._rate_edit.setText("1M")
+                dialog._center_edit.setText("433.92")
+                dialog._on_accept()
+                return dialog.result()
+            if isinstance(dialog, QMessageBox):
+                dialog.buttons()[-1].click()
+            return 0
+
+        self.win._exec_dialog = fake_exec
+        with self.open_dialog(path):
+            self.assertTrue(self.win._convert_recording())
+        with self.save_dialog(self.path("capture.sigmf-data")):
+            self.assertTrue(self.win._save_recording())
+        meta = _read_json(self.path("capture.sigmf-meta"))
+        self.assertNotIn("core:datetime", meta["captures"][0])
+
+    def test_save_as_never_suggests_or_overwrites_the_source(self):
+        path, x = self._source()
+        self._convert(path)
+        self.assertEqual(
+            self.win._suggested_iq_name(".sigmf-data"), "pass_converted.sigmf-data"
+        )
+        self.assertEqual(self.win._suggested_iq_name(".cs16"), "pass.cs16")
+        # (Opened by its metadata file: still the same recording.)
+        self.win._buffer_source = "pass.sigmf-meta"
+        self.assertEqual(
+            self.win._suggested_iq_name(".sigmf-data"), "pass_converted.sigmf-data"
+        )
+        self.win._buffer_source = "pass.sigmf-data"
+        before = {
+            name: os.path.getmtime(self.path(name)) for name in os.listdir(self.folder)
+        }
+        for target in ("pass.sigmf-data", "pass.sigmf-meta"):
+            with self.save_dialog(self.path(target)), self.warnings() as warn:
+                self.assertFalse(self.win._save_recording(), target)
+            self.assertIn("the recording you converted", warn.call_args[0][2])
+        after = {
+            name: os.path.getmtime(self.path(name)) for name in os.listdir(self.folder)
+        }
+        self.assertEqual(after, before)
+        self.assertEqual(_read_json(self.path("pass.sigmf-meta")), self.META)
+        np.testing.assert_array_equal(np.fromfile(path, np.complex64), x)
+
+    def test_a_sidecar_source_is_protected_too(self):
+        from sdr_module.dsp.recording import SampleFormat, write_sidecar
+
+        x = (0.2 * np.ones(4000)).astype(np.complex64)
+        path = self.path("cap.cf32")
+        x.tofile(path)
+        write_sidecar(path, SampleFormat.FLOAT32, 1e6, 433.92e6)
+        self._convert(path)
+        with self.save_dialog(path), self.warnings() as warn:
+            self.assertFalse(self.win._save_recording())
+        self.assertIn("the recording you converted", warn.call_args[0][2])
+        np.testing.assert_array_equal(np.fromfile(path, np.complex64), x)
 
 
 # ---------------------------------------------------------------------------

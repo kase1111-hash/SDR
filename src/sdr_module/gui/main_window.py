@@ -6477,8 +6477,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _on_sstv_tune_iss(self) -> None:
         """Tune to ISS: 145.800 MHz, FM with narrowband deviation, then start
-        the receiver and the SSTV decoder."""
-        self.set_frequency(ISS_FREQUENCY_HZ)
+        the receiver and the SSTV decoder. When the tune is refused (outside
+        a recording being played, transmitting, out of the device's range)
+        nothing else changes and the status bar keeps the reason."""
+        if not self.set_frequency(ISS_FREQUENCY_HZ):
+            return
         self._set_demod_mode("FM", "5 kHz", self._bandwidth_for_mode("FM", "5 kHz"))
         if self._device is not None and not self._is_running:
             self._start_acquisition()

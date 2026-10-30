@@ -67,8 +67,9 @@ import logging
 import math
 import os
 import wave
+from collections import deque
 from dataclasses import dataclass, field, replace
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -515,6 +516,20 @@ def varicode_bits(text: str) -> Tuple[List[int], TextCheck]:
     return bits, check
 
 
+def _varicode_word_ends(text: str) -> List[int]:
+    """The bits of :func:`varicode_bits` sent by the end of each space, tab
+    or new line (its two zeros included): where a word ends."""
+    ends: List[int] = []
+    count = 0
+    for char in _normalize(text):
+        chars = "\r\n" if char == "\n" else char
+        if all(c in VARICODE for c in chars):
+            count += sum(len(VARICODE[c]) + 2 for c in chars)
+            if char in (" ", "\t", "\n"):
+                ends.append(count)
+    return ends
+
+
 def ascii_bytes(text: str) -> Tuple[bytes, TextCheck]:
     """The ASCII bytes of ``text`` (sent as they are; a new line is LF) and
     what was sent."""
@@ -765,20 +780,30 @@ class TextSignal:
         self._keyed: Optional[_Keyed] = None
         self._fsk: Optional[_Fsk] = None
         self._psk: Optional[_Psk] = None
+        # Where the text may stop for a station ID (seconds): the ends of
+        # its words (see :attr:`breaks`).
+        breaks: List[float] = []
         if mode == MODE_CW:
             words, self.check = morse_elements(self.text)
-            self._keyed, self.duration_s = self._build_cw(words)
+            self._keyed, self.duration_s = self._build_cw(words, breaks)
         elif mode == MODE_PSK31:
             bits, self.check = varicode_bits(self.text)
             bits = [0] * _PSK_PREAMBLE_BITS + bits + [1] * _PSK_POSTAMBLE_BITS
             self._psk = _Psk(bits, PSK31_BAUD)
             self.duration_s = self._psk.duration
+            # After the two zeros that end a space or a new line (the RISE
+            # symbol and the preamble go first).
+            breaks += [
+                (1 + _PSK_PREAMBLE_BITS + count) * self._psk.symbol
+                for count in _varicode_word_ends(self.text)
+            ]
         else:
             if mode == MODE_RTTY:
                 codes, self.check = ita2_codes(self.text, self.settings.figures)
                 frames = [_LTRS] * _RTTY_PREAMBLE + codes
                 if codes and codes[0] == _LTRS:
                     frames = frames[1:]  # (two LTRS in all)
+                frame_bits, word_ends = 7.5, (_SPACE, _LF)
                 segments, self.duration_s = _uart_segments(
                     frames,
                     5,
@@ -790,8 +815,10 @@ class TextSignal:
                 )
             else:
                 data, self.check = ascii_bytes(self.text)
+                frames = list(data)
+                frame_bits, word_ends = 10.0, (0x20, 0x0A)
                 segments, self.duration_s = _uart_segments(
-                    list(data),
+                    frames,
                     8,
                     1.0,
                     self.settings.baud,
@@ -800,8 +827,18 @@ class TextSignal:
                     _ASCII_TAIL_S,
                 )
             self._fsk = _Fsk(segments, self.duration_s)
+            # At the end of the stop bit of a space or a line feed.
+            frame_s = frame_bits / self.settings.baud
+            breaks += [
+                _FSK_LEAD_S + (i + 1) * frame_s
+                for i, code in enumerate(frames)
+                if code in word_ends
+            ]
+        self._breaks = np.asarray(breaks, np.float64)
 
-    def _build_cw(self, words: List[List[str]]) -> Tuple[_Keyed, float]:
+    def _build_cw(
+        self, words: List[List[str]], breaks: List[float]
+    ) -> Tuple[_Keyed, float]:
         dit = 1.2 / self.settings.wpm
         lead = _CW_GAP_DITS * dit
         starts: List[float] = []
@@ -809,6 +846,8 @@ class TextSignal:
         units = 0
         for w, word in enumerate(words):
             if w:
+                # The middle of the word space: key up on both sides.
+                breaks.append(lead + (units + 3.5) * dit)
                 units += 7
             for c, code in enumerate(word):
                 if c:
@@ -872,6 +911,45 @@ class TextSignal:
 
     def describe(self) -> str:
         return self.settings.describe()
+
+    @property
+    def breaks(self) -> np.ndarray:
+        """Where the text can stop for a station ID and go on after it
+        (seconds from the start, in order): the ends of its words. CW: the
+        middle of each word space (key up on both sides); RTTY and ASCII:
+        the end of the stop bit of a space or a line feed; PSK31: after the
+        two zeros that end a space or a new line."""
+        return self._breaks.copy()
+
+    # ------------------------------------------------- stopping for an ID
+
+    @property
+    def pause_tail_s(self) -> float:
+        """How the text ends at a break before a station ID (seconds):
+        PSK31 idles on for one more phase reversal (a zero bit: nothing is
+        printed), so a receiver reads the last one of the text, then half a
+        reversal, whose cosine takes the carrier smoothly to zero; the
+        others stop at the break."""
+        return 1.5 / PSK31_BAUD if self.mode == MODE_PSK31 else 0.0
+
+    @property
+    def resume_lead_in_s(self) -> float:
+        """The lead-in sent after a station ID, before the text goes on
+        (seconds), so that a receiver falls back in step: what the text
+        itself begins with (RTTY: idle mark and two LTRS; ASCII: idle mark;
+        PSK31: the phase reversals); none for CW (the word space does)."""
+        if self.mode == MODE_CW:
+            return 0.0
+        if self.mode == MODE_PSK31:
+            return (1 + _PSK_PREAMBLE_BITS) / PSK31_BAUD
+        if self.mode == MODE_RTTY:
+            return _FSK_LEAD_S + _RTTY_PREAMBLE * 7.5 / self.settings.baud
+        return _FSK_LEAD_S
+
+    def lead_in(self) -> "TextSignal":
+        """The lead-in on its own (see :attr:`resume_lead_in_s`): the
+        signal of no text, read up to :attr:`resume_lead_in_s`."""
+        return TextSignal("", self.settings)
 
     # ------------------------------------------------------------ synthesis
 
@@ -995,6 +1073,40 @@ def cw_bandwidth_hz(wpm: float) -> float:
 # --------------------------------------------------------------------------- #
 
 
+def _ramp_up(k: np.ndarray, length: int) -> np.ndarray:
+    """Raised-cosine rise over ``length`` samples, at sample(s) ``k``
+    (1 from ``length`` on)."""
+    x = np.clip((np.asarray(k, np.float64) + 0.5) / max(1, int(length)), 0.0, 1.0)
+    return 0.5 - 0.5 * np.cos(np.pi * x)
+
+
+class _Piece:
+    """A stretch of what a :class:`TextTxSource` sends: the text from one of
+    its samples on, or, around a stop for a station ID, the text's ending,
+    the stop itself, the unmodulated FM carrier and the lead-in after it."""
+
+    TEXT, TAIL, STOP, LEAD, LEAD_IN = range(5)
+
+    __slots__ = ("kind", "length", "done", "start", "t", "value", "align")
+
+    def __init__(
+        self,
+        kind: int,
+        length: int,
+        start: int = 0,
+        t: float = 0.0,
+        value: complex = 0j,
+        align: complex = 1 + 0j,
+    ):
+        self.kind = kind
+        self.length = max(0, int(length))
+        self.done = 0
+        self.start = int(start)  # TEXT: its first sample of the text
+        self.t = float(t)  # the text's time at the stop (s)
+        self.value = value  # the text's baseband there
+        self.align = align  # phase (and sign) joining the lead-in to it
+
+
 class TextTxSource:
     """A :class:`TextSignal` streamed as complex64 I/Q at ``rate``, a block
     at a time (``read(n)``; empty at the end), the way the transmit engine
@@ -1003,7 +1115,18 @@ class TextTxSource:
     ``emission`` "direct": the emission on the carrier (0 Hz is the transmit
     frequency). "fm": the signal's audio on an FM carrier, ``deviation_hz``
     peak, with :data:`FM_LEAD_S` / :data:`FM_TAIL_S` of unmodulated carrier
-    around it. ``amplitude``: the digital level (headroom below full scale).
+    around it; the carrier rises and falls over 5 ms (raised cosine), so it
+    never switches on or off in one sample. ``amplitude``: the digital
+    level (headroom below full scale).
+
+    A station ID can go into a long text without cutting a word: the
+    transmit engine asks :meth:`last_break` where the text can stop (the
+    end of a word, :attr:`TextSignal.breaks`) and :meth:`pause_at` stops it
+    there. The text then ends the way a transmission ends (the carrier
+    fades out; PSK31 runs half a phase reversal to zero) and, after the ID,
+    begins again the way it began (an FM carrier first; the mode's own
+    lead-in, :attr:`TextSignal.resume_lead_in_s`), so receivers fall back in
+    step. What that adds counts in :attr:`total_samples`.
     """
 
     def __init__(
@@ -1027,9 +1150,11 @@ class TextTxSource:
         else:
             self._lead = 0.0
             seconds = signal.duration_s
-        self.total_samples = int(round(seconds * self.sample_rate))
-        self._pos = 0
-        self._phase = 0.0
+        # The text's own samples (stops for station IDs add to them).
+        self._text_total = int(round(seconds * self.sample_rate))
+        self._ramp = max(1, int(round(_RISE_S * self.sample_rate)))
+        self._lead_in_signal: Optional[TextSignal] = None
+        self.reset()
 
     @property
     def duration_s(self) -> float:
@@ -1049,25 +1174,191 @@ class TextTxSource:
         return self.signal.occupied_bandwidth_hz(self.emission, self.deviation_hz)
 
     def reset(self) -> None:
+        """Start again from the beginning (without the stops)."""
         self._pos = 0
         self._phase = 0.0
+        self.total_samples = self._text_total
+        self._pieces: Deque[_Piece] = deque([_Piece(_Piece.TEXT, self._text_total)])
+        self._stop_at: Optional[int] = None
+
+    # ------------------------------------------------- stops for an ID
+
+    def _tail_samples(self) -> int:
+        return int(round(self.signal.pause_tail_s * self.sample_rate))
+
+    def _pass_stop(self) -> None:
+        """Forget a stop that has been reached (its ID was sent)."""
+        if (
+            self._stop_at is not None
+            and self._pos >= self._stop_at
+            and self._pieces
+            and self._pieces[0].kind == _Piece.STOP
+        ):
+            self._pieces.popleft()
+            self._stop_at = None
+
+    def last_break(self, limit: int) -> Optional[int]:
+        """Where a station ID can go: the last sample position (counted
+        like :attr:`position`) ahead of what was read and no later than
+        ``limit`` at which the text can stop for it and go on after it, the
+        end of a word (:attr:`TextSignal.breaks`); None when there is none
+        (or while an earlier stop is still ahead)."""
+        self._pass_stop()
+        breaks = self.signal._breaks
+        if self._stop_at is not None or not len(breaks) or not self._pieces:
+            return None
+        rest = self._pieces[-1]  # (the text still to send)
+        if rest.kind != _Piece.TEXT:
+            return None
+        text_at = np.round((breaks + self._lead) * self.sample_rate).astype(np.int64)
+        offset = self.total_samples - self._text_total
+        at = text_at + offset + self._tail_samples()
+        ok = (
+            (text_at >= rest.start + rest.done)
+            & (text_at < rest.start + rest.length)
+            # (room for the carrier to fade out before the stop)
+            & (text_at + offset - self._ramp >= self._pos)
+            & (at <= int(limit))
+        )
+        return int(at[ok][-1]) if ok.any() else None
+
+    def pause_at(self, at: int) -> int:
+        """Stop at sample ``at`` (a place :meth:`last_break` gave) for a
+        station ID: :meth:`read` returns nothing past it until it is read
+        again, and the text goes on after it the way it began. Returns the
+        samples this adds (:attr:`total_samples` grows by as many)."""
+        self._pass_stop()
+        if self._stop_at is not None:
+            raise ValueError("the text already stops for a station ID")
+        tail = self._tail_samples()
+        offset = self.total_samples - self._text_total
+        text_at = int(at) - tail - offset
+        rest = self._pieces[-1] if self._pieces else None
+        if (
+            rest is None
+            or rest.kind != _Piece.TEXT
+            or not rest.start + rest.done <= text_at < rest.start + rest.length
+        ):
+            raise ValueError(f"the text can't stop at sample {at}")
+        rate = self.sample_rate
+        t = text_at / rate - self._lead  # (the text's time where it goes on)
+        value = complex(self.signal.baseband(np.array([t]))[0])
+        lead_in_s = self.signal.resume_lead_in_s
+        align = 1 + 0j
+        if lead_in_s > 0:
+            if self._lead_in_signal is None:
+                self._lead_in_signal = self.signal.lead_in()
+            end = complex(self._lead_in_signal.baseband(np.array([lead_in_s]))[0])
+            ratio = value / end if abs(end) > 1e-9 else 1 + 0j
+            align = ratio / abs(ratio) if abs(ratio) > 1e-9 else 1 + 0j
+        lead = int(round(FM_LEAD_S * rate)) if self.emission == EMISSION_FM else 0
+        lead_in = int(round(lead_in_s * rate))
+        # The text up to the stop, then the rest of it after the lead-in.
+        after = _Piece(_Piece.TEXT, rest.start + rest.length - text_at, text_at)
+        rest.length = text_at - rest.start
+        new = [
+            _Piece(_Piece.TAIL, tail, t=t, value=value),
+            _Piece(_Piece.STOP, 0),
+            _Piece(_Piece.LEAD, lead),
+            _Piece(_Piece.LEAD_IN, lead_in, t=t, align=align),
+            after,
+        ]
+        self._pieces.extend(p for p in new if p.length or p.kind == _Piece.STOP)
+        self._stop_at = int(at)
+        added = tail + lead + lead_in
+        self.total_samples += added
+        return added
+
+    # ------------------------------------------------------------ reading
+
+    def _values(self, piece: _Piece, k: int, n: int) -> np.ndarray:
+        """``n`` samples of ``piece`` from its sample ``k``: the complex
+        baseband (direct) or the audio (FM)."""
+        rate = self.sample_rate
+        if piece.kind == _Piece.TEXT:
+            t = (piece.start + k + np.arange(n, dtype=np.float64)) / rate
+            t -= self._lead
+            if self.emission == EMISSION_DIRECT:
+                return self.signal.baseband(t)
+            return self.signal.audio(t)
+        if piece.kind == _Piece.LEAD:
+            return np.zeros(n)
+        tau = (k + np.arange(n, dtype=np.float64)) / rate
+        if piece.kind == _Piece.TAIL:  # (PSK31: reversals, to zero)
+            tau = np.minimum(tau, self.signal.pause_tail_s)
+            base = piece.value * np.cos(np.pi * PSK31_BAUD * tau)
+            t = piece.t + tau
+        else:  # the lead-in, in the text's time so it joins it at piece.t
+            assert self._lead_in_signal is not None
+            base = piece.align * self._lead_in_signal.baseband(tau)
+            t = piece.t - self.signal.resume_lead_in_s + tau
+        if self.emission == EMISSION_DIRECT:
+            return base
+        f = self.signal.settings.audio_hz
+        return np.imag(base * np.exp(2j * np.pi * f * t))
+
+    def _gain(self, start: int, n: int) -> Optional[np.ndarray]:
+        """The carrier's level ramps over output samples ``start``.. (None:
+        full level): it fades out before a stop and, on an FM carrier,
+        rises at the start and falls at the end."""
+        ramp = self._ramp
+        gain: Optional[np.ndarray] = None
+        pos = start + np.arange(n)
+        if self.emission == EMISSION_FM and (
+            start < ramp or start + n > self.total_samples - ramp
+        ):
+            gain = _ramp_up(pos, ramp) * _ramp_up(self.total_samples - 1 - pos, ramp)
+        if self._stop_at is not None and start + n > self._stop_at - ramp:
+            fade = _ramp_up(self._stop_at - 1 - pos, ramp)
+            gain = fade if gain is None else gain * fade
+        return gain
 
     def read(self, count: int) -> np.ndarray:
-        """The next ``count`` samples (fewer at the end; empty when done)."""
+        """The next ``count`` samples (fewer at the end or at a stop for a
+        station ID; empty when done)."""
         count = max(0, min(int(count), self.total_samples - self._pos))
         if count == 0:
             return np.zeros(0, dtype=np.complex64)
-        t = (self._pos + np.arange(count, dtype=np.float64)) / self.sample_rate
-        t -= self._lead
-        self._pos += count
+        start = self._pos
+        parts: List[np.ndarray] = []
+        rises: List[Tuple[int, int, int]] = []  # (where, lead sample, count)
+        while count > 0 and self._pieces:
+            piece = self._pieces[0]
+            if piece.kind == _Piece.STOP:
+                if parts:
+                    break  # (the station ID goes here)
+                self._pieces.popleft()
+                self._stop_at = None
+                continue
+            n = min(count, piece.length - piece.done)
+            if n > 0:
+                if piece.kind == _Piece.LEAD and piece.done < self._ramp:
+                    rises.append((self._pos - start, piece.done, n))
+                parts.append(self._values(piece, piece.done, n))
+                piece.done += n
+                count -= n
+                self._pos += n
+            if piece.done >= piece.length:
+                self._pieces.popleft()
+        if not parts:
+            return np.zeros(0, dtype=np.complex64)
+        x = np.concatenate(parts) if len(parts) > 1 else parts[0]
         if self.emission == EMISSION_DIRECT:
-            out = self.signal.baseband(t) * self.amplitude
-            return out.astype(np.complex64)
-        audio = self.signal.audio(t)
-        step = 2.0 * np.pi * self.deviation_hz / self.sample_rate
-        phase = self._phase + np.cumsum(audio) * step
-        self._phase = float(phase[-1] % (2.0 * np.pi))
-        return (np.exp(1j * phase) * self.amplitude).astype(np.complex64)
+            out = x * self.amplitude
+        else:
+            step = 2.0 * np.pi * self.deviation_hz / self.sample_rate
+            phase = self._phase + np.cumsum(x) * step
+            self._phase = float(phase[-1] % (2.0 * np.pi))
+            out = np.exp(1j * phase) * self.amplitude
+        gain = self._gain(start, len(out))
+        for where, k, n in rises:  # (the FM carrier back after a stop)
+            rise = _ramp_up(k + np.arange(n), self._ramp)
+            if gain is None:
+                gain = np.ones(len(out))
+            gain[where : where + n] *= rise
+        if gain is not None:
+            out = out * gain
+        return out.astype(np.complex64)
 
 
 #: ``report(fraction)``, 0..1; may raise to cancel (see gui/file_jobs.py).

@@ -85,6 +85,10 @@ _BLOCK = 65536
 _IN_FLIGHT_SAMPLES = 4 * 131072
 # A device that takes no samples for this long has stalled.
 _STALL_S = 3.0
+# A station ID put into a job: a job that can't stop at a break of its own
+# fades out and back in over this long (raised cosine), so the carrier
+# never steps (key clicks).
+_SPLICE_FADE_S = 0.005
 # How often the GUI looks at the worker.
 _POLL_MS = 100
 
@@ -352,20 +356,68 @@ class TxResult:
 IdFactory = Callable[[TxJob], Optional[TxJob]]
 
 
+class _Silence:
+    """Key up (no carrier) for ``total_samples`` samples: the word space
+    around a station ID put into a job."""
+
+    def __init__(self, count: int):
+        self.total_samples = max(0, int(count))
+        self._pos = 0
+
+    @property
+    def position(self) -> int:
+        return self._pos
+
+    def reset(self) -> None:
+        self._pos = 0
+
+    def read(self, count: int) -> np.ndarray:
+        n = max(0, min(int(count), self.total_samples - self._pos))
+        self._pos += n
+        return np.zeros(n, dtype=np.complex64)
+
+
+def _rise(k: np.ndarray, length: int) -> np.ndarray:
+    """Raised-cosine rise over ``length`` samples at sample(s) ``k``."""
+    x = np.clip((np.asarray(k, np.float64) + 0.5) / max(1, int(length)), 0.0, 1.0)
+    return 0.5 - 0.5 * np.cos(np.pi * x)
+
+
+def id_goes_first(due: float, min_gap: float, job_length: float) -> bool:
+    """Whether the interval ID that falls ``due`` into a job (``due`` and
+    ``min_gap`` in the units of ``job_length``) goes before it instead: it
+    would come before the job ends, and before half an interval of it
+    (e.g. the last ID was 9 min 58 s ago and "At start" is off)."""
+    return due < job_length and due < min_gap
+
+
 class _Segment:
-    """One part of a transmission: the job, or a station ID."""
+    """One part of a transmission: the job, a station ID, or the key-up
+    around an ID put into the job."""
 
-    __slots__ = ("source", "is_id", "begun")
+    JOB, ID, GAP = "job", "id", "gap"
 
-    def __init__(self, source: Any, is_id: bool):
+    __slots__ = ("source", "is_id", "begun", "kind")
+
+    def __init__(self, source: Any, is_id: bool, kind: Optional[str] = None):
         self.source = source
         self.is_id = bool(is_id)
         self.begun = False
+        self.kind = kind or (self.ID if is_id else self.JOB)
 
 
 class _Plan:
     """What a transmission sends, in order: the job, with station IDs
     before, during (every interval) and after it as the policy asks.
+
+    An interval ID never cuts the job at a random place: it goes in at the
+    last break before it is due that the job's source reports (the end of
+    a word, see :meth:`~sdr_module.protocols.text_modes.TextTxSource.last_break`;
+    the source then stops and starts again cleanly), else at the moment it
+    is due, the job's carrier fading out and back in around it. A word
+    space of key-up sets it apart on each side. When the interval would run
+    out early in the job (a short job soon after the last transmission's
+    ID), the ID goes before the job instead.
 
     :meth:`read` is called by the driver from libhackrf's USB thread; the
     GUI only reads the counters.
@@ -406,8 +458,27 @@ class _Plan:
         # the job); at least half an interval of the job goes between them.
         self._job_since_id = self._since_id
         self._min_gap = (self._interval or 0) // 2
+        # The job's samples read so far, and where in them the next
+        # interval ID goes (None: not chosen yet, or none falls in the job):
+        # that ID, the key-up around it, and whether the job's source stops
+        # there itself (else the plan fades the job out and back in).
+        self._job_read = 0
+        self._looked = False
+        self._splice_at: Optional[int] = None
+        self._splice_id: Optional[TxJob] = None
+        self._splice_gap = 0
+        self._splice_shaped = False
+        self._resumed_at: Optional[int] = None
+        self._fade = max(1, int(round(_SPLICE_FADE_S * self.rate)))
+        # The IDs made up front (before and after the job): what is checked.
         self.id_jobs: List[TxJob] = []
-        if identify and policy is not None and policy.at_start:
+        first = bool(identify and policy is not None and policy.at_start)
+        if identify and not first and self._interval is not None:
+            # An interval ID due early in the job goes before it.
+            first = id_goes_first(
+                self._interval - self._since_id, self._min_gap, job.total_samples
+            )
+        if first:
             self._add_id(front=False)
         self._segments.append(_Segment(job.source, job.is_id))
         if identify and policy is not None and policy.at_end:
@@ -421,14 +492,17 @@ class _Plan:
             if sample is not None:
                 self.check_jobs.append(sample)
 
-    def _add_id(self, front: bool) -> bool:
+    def _new_id(self) -> Optional[TxJob]:
         if self._make_id is None:
-            return False
+            return None
         try:
-            id_job = self._make_id(self.job)
+            return self._make_id(self.job)
         except Exception as e:  # pragma: no cover - defensive
             logger.error(f"Could not make the station ID: {e}")
-            id_job = None
+            return None
+
+    def _add_id(self, front: bool) -> bool:
+        id_job = self._new_id()
         if id_job is None:
             return False
         self.id_jobs.append(id_job)
@@ -438,6 +512,94 @@ class _Plan:
         else:
             self._segments.append(segment)
         return True
+
+    def _choose_splice(self, source: Any) -> None:
+        """Where in the job the next interval ID goes: the last break the
+        source reports that lets the ID begin by the time it is due, else
+        that time (the job fades out and in around it); nothing when the
+        job ends first."""
+        self._looked = True
+        assert self._interval is not None
+        due = self._job_read + max(
+            0, self._interval - self._since_id, self._min_gap - self._job_since_id
+        )
+        if due >= int(source.total_samples):
+            return  # (the job ends first)
+        id_job = self._new_id()
+        if id_job is None:
+            self._interval = None  # (no ID to send: no interval IDs)
+            return
+        word_space = float(getattr(id_job.source, "word_space_s", 0.0) or 0.0)
+        gap = int(round(word_space * self.rate))
+        # (Room for the fade before it, even when it is due at once.)
+        latest = max(self._job_read + self._fade, due - gap)
+        at: Optional[int] = None
+        finder = getattr(source, "last_break", None)
+        if callable(finder):
+            try:
+                found = finder(latest)
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(f"Could not find a break for the station ID: {e}")
+                found = None
+            if found is not None and self._job_read < int(found) <= latest:
+                at = int(found)
+        shaped = False
+        pauser = getattr(source, "pause_at", None)
+        if at is not None and callable(pauser):
+            before = int(source.total_samples)
+            try:
+                pauser(at)
+                shaped = True
+            except Exception as e:  # pragma: no cover - defensive
+                logger.warning(f"The job couldn't stop for the station ID: {e}")
+            self.total += int(source.total_samples) - before
+        self._splice_at = at if at is not None else latest
+        self._splice_id, self._splice_gap = id_job, gap
+        self._splice_shaped = shaped
+
+    def _splice(self) -> None:
+        """Put the interval ID chosen by :meth:`_choose_splice` in front of
+        the rest of the job, with a word space of key-up on each side."""
+        id_job, gap = self._splice_id, self._splice_gap
+        self._splice_at = self._splice_id = None
+        self._looked = False
+        if id_job is None:  # pragma: no cover - defensive
+            return
+        parts = [_Segment(id_job.source, True)]
+        if gap:
+            parts = [
+                _Segment(_Silence(gap), False, _Segment.GAP),
+                parts[0],
+                _Segment(_Silence(gap), False, _Segment.GAP),
+            ]
+        for part in reversed(parts):
+            self._segments.appendleft(part)
+        self.total += sum(int(part.source.total_samples) for part in parts)
+        if not self._splice_shaped:
+            self._resumed_at = self._job_read  # (fade the job back in)
+
+    def _shape(self, block: np.ndarray) -> np.ndarray:
+        """The job's ``block`` (from job sample :attr:`_job_read`) faded out
+        before an interval ID and back in after it, where its source doesn't
+        stop cleanly itself."""
+        start, n, fade = self._job_read, len(block), self._fade
+        gain: Optional[np.ndarray] = None
+        where = start + np.arange(n)
+        if (
+            self._splice_at is not None
+            and not self._splice_shaped
+            and start + n > self._splice_at - fade
+        ):
+            gain = _rise(self._splice_at - 1 - where, fade)
+        if self._resumed_at is not None:
+            if start < self._resumed_at + fade:
+                rise = _rise(where - self._resumed_at, fade)
+                gain = rise if gain is None else gain * rise
+            if start + n >= self._resumed_at + fade:
+                self._resumed_at = None
+        if gain is None:
+            return block
+        return (np.asarray(block) * gain).astype(np.complex64)
 
     @property
     def modes(self) -> Tuple[str, ...]:
@@ -452,6 +614,9 @@ class _Plan:
         """Air time until the next interval ID, or None (no interval IDs)."""
         if self._interval is None or self.exhausted:
             return None
+        at = self._splice_at  # (once: the transmit thread may change it)
+        if at is not None:  # (its place in the job is chosen)
+            return (max(0, at - self._job_read) + self._splice_gap) / self.rate
         due = max(self._interval - self._since_id, self._min_gap - self._job_since_id)
         return max(0, due) / self.rate
 
@@ -462,27 +627,35 @@ class _Plan:
         try:
             while self._segments:
                 segment = self._segments[0]
-                if (
-                    not segment.is_id
-                    and self._interval is not None
-                    and self._since_id >= self._interval
-                    and self._job_since_id >= self._min_gap
-                    and self._add_id(front=True)
-                ):
-                    self.total += int(self._segments[0].source.total_samples)
-                    continue
+                is_job = segment.kind == _Segment.JOB
+                if is_job and self._interval is not None:
+                    if not self._looked:
+                        self._choose_splice(segment.source)
+                    if (
+                        self._splice_at is not None
+                        and self._job_read >= self._splice_at
+                    ):
+                        self._splice()
+                        continue
                 if segment.is_id and not segment.begun:
                     self._since_id = 0  # an ID begins
                     self._job_since_id = 0
                     self.ids_begun += 1
                     self.last_id_began_at = self.handed
                 segment.begun = True
-                block = segment.source.read(_BLOCK)
+                count = _BLOCK
+                if is_job and self._splice_at is not None:
+                    # Up to the ID's place, the last block whole (its fade).
+                    left = self._splice_at - self._job_read
+                    count = left if left <= _BLOCK + self._fade else _BLOCK
+                block = segment.source.read(count)
                 if len(block):
+                    if is_job:
+                        block = self._shape(block)
+                        self._job_read += len(block)
+                        self._job_since_id += len(block)
                     self.handed += len(block)
                     self._since_id += len(block)
-                    if not segment.is_id:
-                        self._job_since_id += len(block)
                     return block
                 self._segments.popleft()
                 if segment.is_id:
@@ -617,6 +790,23 @@ class Transmitter(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         if self._last_id_at is None:
             return None
         return time.monotonic() - self._last_id_at
+
+    def expected_ids(self, job: TxJob, policy: Optional[AutoIdPolicy]) -> int:
+        """About how many station IDs :meth:`start` adds to ``job`` with
+        ``policy`` now (for the air time the confirmation gives): one
+        before it (asked for, or the interval ID due early in it), one per
+        interval while it runs, and one after it."""
+        if job.is_id or not job.identify or policy is None or not policy.any():
+            return 0
+        first = bool(policy.at_start)
+        interval = float(policy.interval_s or 0.0)
+        during = 0
+        if interval > 0:
+            if not first:
+                since = max(0.0, self.seconds_since_last_id() or 0.0)
+                first = id_goes_first(interval - since, interval / 2.0, job.duration_s)
+            during = int(job.duration_s // interval)
+        return int(first) + during + int(bool(policy.at_end))
 
     # ------------------------------------------------------------ checks
 

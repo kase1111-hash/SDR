@@ -240,13 +240,18 @@ class TestTransmitter:
         result, events, _elapsed = _run(engine, _id_job(146.52e6), dev)
         assert result.status == "sent", result.message
         assert fake.start_rate() == 2e6
-        on_air = analyse_mcw(fake.tx_iq(_DEC), _DEC_RATE)
+        iq = fake.tx_iq(_DEC)
+        on_air = analyse_mcw(iq, _DEC_RATE)
         assert on_air["text"] == "DE W1AW"
         assert 1.2 * _W1AW_UNITS / on_air["keyed_s"] == pytest.approx(20, abs=0.5)
         assert on_air["keyed_s"] == pytest.approx(4.02, rel=0.02)
         assert on_air["tone_hz"] == pytest.approx(700, abs=5)
         assert on_air["peak_dev_hz"] == pytest.approx(2500, rel=0.05)
-        assert on_air["envelope_min"] > 0.8  # MCW: the carrier stays on
+        # MCW: the carrier stays on, rising and falling over 5 ms at the
+        # ends (never on or off in one sample).
+        ramp = int(0.006 * _DEC_RATE)
+        assert np.abs(iq[ramp:-ramp]).min() > 0.8
+        assert np.abs(iq[0]) < 0.1 and np.abs(iq[-1]) < 0.1
         # Back as the receiver had it.
         assert dev.state.sample_rate == rx_rate
         assert dev.state.bandwidth == rx_filter
@@ -415,12 +420,6 @@ class TestRefusals:
         assert describe_refusal(None, 1e6) == "transmitting isn't allowed here"
 
 
-def _blocks_after(seconds, rate=2e6):
-    """Samples handed over when ``seconds`` had gone out, in whole blocks."""
-    block = tx_mod._BLOCK
-    return -(-int(seconds * rate) // block) * block
-
-
 class TestAutoId:
     def _carrier_job(self, seconds, rate=2e6, freq=146.52e6):
         samples = np.full(int(seconds * rate), 0.9, np.complex64)
@@ -454,17 +453,22 @@ class TestAutoId:
         dev.set_frequency(146.52e6)
         engine = Transmitter()
         policy = AutoIdPolicy(at_start=False, at_end=False, interval_s=2.0)
-        job = self._carrier_job(3.0)
+        job = self._carrier_job(2.5)
         result, _e, _t = _run(engine, job, dev, policy=policy, make_id=self._make_id)
         assert result.ok and result.ids_sent == 1
         id_len = _id_job(146.52e6).total_samples
+        gap = int(round(7 * 1.2 / 20 * 2e6))  # a word space at the ID's speed
         total = fake.tx_count()
-        assert total == id_len + job.total_samples
-        # The ID began once 2 s (rounded up to whole blocks) had gone out.
-        start = total - id_len - (job.total_samples - _blocks_after(2.0))
-        assert 2.0 <= start / 2e6 < 2.1
-        iq = fake.tx_iq(_DEC)[start // _DEC : (start + id_len) // _DEC]
-        assert analyse_mcw(iq, _DEC_RATE)["text"] == "DE W1AW"
+        assert total == id_len + job.total_samples + 2 * gap
+        # The ID began when it was due (2 s on the air, not at the next
+        # block), a word space of key-up after the carrier faded out.
+        start, end = int(2.0 * 2e6) // _DEC, (int(2.0 * 2e6) + id_len) // _DEC
+        iq = fake.tx_iq(_DEC)
+        assert analyse_mcw(iq[start:end], _DEC_RATE)["text"] == "DE W1AW"
+        assert not np.any(iq[start - gap // _DEC : start])  # key up
+        assert not np.any(iq[end + 1 : end + gap // _DEC])
+        steps = np.abs(np.diff(np.abs(iq)))
+        assert steps.max() < 0.02  # (no one-sample carrier steps)
         # The next transmission's interval runs from that ID.
         assert engine.seconds_since_last_id() < 5
 

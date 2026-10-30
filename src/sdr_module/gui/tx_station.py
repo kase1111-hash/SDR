@@ -471,10 +471,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             return False
         on_air_s = job.duration_s
         if id_jobs and policy is not None:
-            # The station IDs Automatic ID adds go on the air too.
-            ids = int(policy.at_start) + int(policy.at_end)
-            if policy.interval_s:
-                ids += int(job.duration_s // float(policy.interval_s))
+            # The station IDs Automatic ID adds go on the air too (an
+            # interval ID due early in the job goes before it).
+            ids = self.engine.expected_ids(job, policy)
             on_air_s += ids * id_jobs[0].duration_s
         if confirm and not self.confirm(job, on_air_s):
             win._show_status_message(f"{what} not sent: cancelled.", None, 4000)

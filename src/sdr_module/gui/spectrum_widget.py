@@ -26,6 +26,7 @@ frequency axes line up vertically.
 from __future__ import annotations
 
 import math
+from bisect import bisect_left, bisect_right
 from collections import deque
 from typing import (
     TYPE_CHECKING,
@@ -114,9 +115,6 @@ PASSBAND_ALPHAS = {True: (40, 150), False: (34, 110)}
 
 #: Narrowest the passband shading gets, in pixels.
 PASSBAND_MIN_PX = 3.0
-
-#: Floor used for "no peak yet" in the peak-hold trace.
-_PEAK_FLOOR_DB = -120.0
 
 #: A jump of the noise floor (the trace's median) at least this big between
 #: two frames is a gain or AGC change: peak hold and the average start over
@@ -648,12 +646,23 @@ def columns_max(data: np.ndarray, cols: int, axis: int = -1) -> np.ndarray:
     return out
 
 
+def bins_start(center_hz: float, span_hz: float, n: int) -> float:
+    """Lower edge (Hz) of the first of the ``n`` FFT bins of a line received
+    over ``span_hz`` around ``center_hz``. In ``fftshift`` order bin ``k``
+    is centered at ``center - span/2 + k * span/n`` (the center frequency
+    is bin ``n // 2``), so the bins start half a bin below
+    ``center - span/2``."""
+    return center_hz - span_hz / 2 - (span_hz / n / 2 if n > 0 else 0.0)
+
+
 def visible_bins(
     n: int, data_start: float, data_span: float, view_start: float, view_span: float
 ) -> Optional[Tuple[int, int]]:
     """``(first, stop)``: the bins of an ``n``-bin line covering
     ``data_start`` .. ``data_start + data_span`` that overlap the view
-    ``view_start`` .. ``view_start + view_span`` (None: none do)."""
+    ``view_start`` .. ``view_start + view_span`` (None: none do).
+    ``data_start`` is the lower edge of the first bin (for an FFT line,
+    :func:`bins_start`)."""
     if n <= 0 or data_span <= 0 or view_span <= 0:
         return None
     bin_hz = data_span / n
@@ -853,8 +862,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
         # Spectrum data, and the (center, span) it was received with
         self._spectrum = np.zeros(self._fft_size)
-        self._peak_hold = np.full(self._fft_size, _PEAK_FLOOR_DB)
-        # The lowest level per bin since the last reset (NaN: none yet).
+        # The highest and the lowest level per bin since the last reset
+        # (NaN: none yet; fmax and fmin skip NaN).
+        self._peak_hold = np.full(self._fft_size, np.nan)
         self._min_hold = np.full(self._fft_size, np.nan)
         self._average = np.zeros(self._fft_size)
         self._avg_count = 0
@@ -899,8 +909,12 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         # (Tuned frequency, LO, span) the view last followed: it follows
         # again only when one of them changes (see set_tuned_frequency).
         self._follow_key: Optional[Tuple[float, float, float]] = None
-        # Bookmarks labelled along the top: (freq Hz, name, index).
+        # Bookmarks labelled along the top: (freq Hz, name, index), by
+        # frequency (and their frequencies alone, to find those in view),
+        # and each label's elided text and width (measured once).
         self._bookmarks: List[Tuple[float, str, int]] = []
+        self._bookmark_freqs: List[float] = []
+        self._label_cache: Dict[Tuple[str, float], Tuple[str, int]] = {}
         self._show_bookmarks = True
         self._bookmark_boxes: List[Tuple["QRectF", int, float, str]] = []
         # Dragging the dB axis: (start y, range at the start).
@@ -1063,10 +1077,12 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._update_reset_button()
         self._canvas.update()
         if changed:
+            self._refit_range()
             self.display_settings_changed.emit()
 
     def _on_reset_peak_clicked(self) -> None:
         self.reset_peak()
+        self._refit_range()  # (Range Auto lets go of what was held)
 
     def _on_avg_changed(self, index: int):
         """Handle averaging mode change."""
@@ -1085,6 +1101,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
     def _on_theme_changed(self, _name: str = "") -> None:
         try:
+            self._label_cache = {}
             self._invalidate_background()
             self._canvas.update()
         except RuntimeError:  # pragma: no cover - widget already deleted
@@ -1157,9 +1174,15 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
     def reset_peak(self):
         """Reset peak hold (and min hold: they start over together)."""
-        self._peak_hold = np.full(self._fft_size, _PEAK_FLOOR_DB)
+        self._peak_hold = np.full(self._fft_size, np.nan)
         self._min_hold = np.full(self._fft_size, np.nan)
         self._canvas.update()
+
+    def _refit_range(self) -> None:
+        """Range Auto: fit the traces drawn at once (the user reset the
+        holds, or showed or hid one) instead of easing toward them."""
+        if self._auto_range and self._has_data:
+            self._observe_range(self._main_trace(), force=True)
 
     def reset_average(self):
         """Reset averaging."""
@@ -1349,6 +1372,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             return
         self._show_min = enabled
         self._update_reset_button()
+        self._refit_range()
         self._canvas.update()
         self.display_settings_changed.emit()
 
@@ -1361,7 +1385,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         values = [f for _t, f in _AVG_CHOICES]
         try:
             frames = int(frames)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # (inf, NaN, junk)
             frames = 0
         index = min(range(len(values)), key=lambda i: abs(values[i] - frames))
         self._avg_combo.setCurrentIndex(index)
@@ -1404,6 +1428,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         items.sort(key=lambda item: item[0])
         if items != self._bookmarks:
             self._bookmarks = items
+            self._bookmark_freqs = [item[0] for item in items]
+            self._label_cache = {}
             self._canvas.update()
 
     def set_bookmark_labels_visible(self, visible: bool) -> None:
@@ -1452,7 +1478,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
                 top = float(settings.get("range_top", self._db_range[1]))
                 if math.isfinite(floor) and math.isfinite(top):
                     self._set_range(floor, top)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 pass
             if "range_auto" in settings:
                 self.set_auto_range(bool(settings.get("range_auto")))
@@ -1615,7 +1641,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         if freq is None or n == 0 or span <= 0:
             return None
         bin_hz = span / n
-        pos = (freq - (center - span / 2)) / bin_hz
+        # (In bins from the first bin's lower edge: bin k is centered at
+        # center - span/2 + k * bin_hz.)
+        pos = (freq - (center - span / 2)) / bin_hz + 0.5
         half = max(0.5, self._hz_per_px() / bin_hz / 2)
         lo = int(math.floor(pos - half))
         hi = int(math.floor(pos + half)) + 1
@@ -1659,6 +1687,18 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         # spike doesn't make the range jump.)
         noise = float(np.partition(finite, n // 2)[n // 2])
         peak = float(finite.max())
+        # The holds drawn count too: a burst caught by Peak hold stays below
+        # the top (where its level can be read), Min hold above the floor.
+        if self._show_peak:
+            held = self._peak_hold[np.isfinite(self._peak_hold)]
+            if held.size:
+                peak = max(peak, float(held.max()))
+        if self._show_min:
+            low = self._min_hold[np.isfinite(self._min_hold)]
+            if low.size >= 16:
+                noise = min(
+                    noise, float(np.partition(low, low.size // 2)[low.size // 2])
+                )
         if self._range_noise is None or force:
             self._range_noise = noise
         else:
@@ -1783,7 +1823,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         low.toggled.connect(self.set_min_hold)
         clear_peak = menu.addAction("R&eset Holds")
         clear_peak.setEnabled(self._show_peak or self._show_min)
-        clear_peak.triggered.connect(lambda _c=False: self.reset_peak())
+        clear_peak.triggered.connect(lambda _c=False: self._on_reset_peak_clicked())
 
         floor, top = self._db_range
         ranges = menu.addMenu("&Range")
@@ -2089,7 +2129,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         center, span = axis if axis is not None else self._trace_axis
         start = center - span / 2
         v_start, v_span = self._view.start, self._view.span
-        bins = visible_bins(n, start, span, v_start, v_span)
+        bins = visible_bins(n, bins_start(center, span, n), span, v_start, v_span)
         if bins is None:
             return None
         # One bin beyond each edge, so the line runs to the plot's edges
@@ -2105,14 +2145,16 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         m = stop - first
         px_per_bin = bin_hz / v_span * plot.width()
         out_cols = max(1, min(int(math.ceil(m * px_per_bin)), cols + 2))
+        # (Bin k is centered at start + k * bin_hz; a column of bins
+        # edges..ends-1 at the middle of their centers.)
         if m > out_cols:
             edges = (np.arange(out_cols) * m // out_cols).astype(np.intp)
             values = np.maximum.reduceat(clean, edges)
             ends = np.append(edges[1:], m)
-            centers = first + (edges + ends) / 2.0
+            centers = first + (edges + ends - 1) / 2.0
         else:
             values = clean
-            centers = first + np.arange(m) + 0.5
+            centers = first + np.arange(m, dtype=np.float64)
         values = np.clip(values, min_db - 2.0, max_db + 2.0)
         xs = plot.left() + (start + centers * bin_hz - v_start) / v_span * plot.width()
         ys = plot.bottom() - (values - min_db) / span_db * plot.height()
@@ -2210,8 +2252,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
                 )
                 painter.restore()
 
-        # Peak hold (only bins that have seen data)
-        if self._show_peak and np.any(self._peak_hold > _PEAK_FLOOR_DB):
+        # Peak hold (once there is data; a bin without any is drawn below
+        # the floor)
+        if self._show_peak and np.isfinite(self._peak_hold).any():
             peak = self._trace_xy(self._peak_hold, plot, cols)
             if peak is not None:
                 painter.setPen(pens["peak"])
@@ -2250,9 +2293,10 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             x = self._freq_x(freq, plot)
             if x is None:
                 continue
-            # The trace covers the whole band whatever the zoom.
+            # The trace covers the whole band whatever the zoom (its bin k
+            # is centered at start + k * bin).
             start = self._center_freq - self._sample_rate / 2
-            k = int((freq - start) / max(self._sample_rate, 1.0) * n)
+            k = int(round((freq - start) / max(self._sample_rate, 1.0) * n))
             lo, hi = max(0, k - 2), min(n, k + 3)
             level = float(np.nanmax(data[lo:hi])) if hi > lo else min_db
             level = min(max(level, min_db), max_db)
@@ -2313,7 +2357,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         return (
             visible_bins(
                 len(self._spectrum),
-                center - span / 2,
+                bins_start(center, span, len(self._spectrum)),
                 span,
                 self._view.start,
                 self._view.span,
@@ -2366,53 +2410,69 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             painter.setPen(p.qcolor("plot_axis"))
             painter.drawText(QPointF(plot.left() + 4, 2 + fm.ascent()), info)
 
+    def _bookmark_label(self, freq: float, name: str) -> Tuple[str, int]:
+        """A bookmark label's text (its name, or its frequency, elided) and
+        width: measured once, not at every repaint."""
+        key = (name, 0.0 if name else freq)
+        found = self._label_cache.get(key)
+        if found is None:
+            text = self._fm.elidedText(
+                name or tuned_mhz_text(freq),
+                Qt.TextElideMode.ElideMiddle,
+                BOOKMARK_LABEL_MAX_PX,
+            )
+            found = self._label_cache[key] = (text, self._fm.horizontalAdvance(text))
+        return found
+
     def _draw_bookmarks(self, painter: "QPainter", plot: "QRectF", p) -> None:
         """Small labels at the bookmarked frequencies in view, along the top
         of the plot. Labels that would overlap the one before are left out
         (the nearer one to the tuned frequency wins), long names are
         elided."""
         self._bookmark_boxes = []
-        if not self._show_bookmarks or not self._bookmarks:
+        if not self._show_bookmarks or not self._bookmarks or plot.width() <= 0:
             return
         fm = self._fm
         height = fm.height() + 2
         top = plot.top() + 9  # below the tuned-frequency flag
         pad = 4
         tuned = self.tuned_frequency()
+        # Only the bookmarks in view (the list is in frequency order): a
+        # long imported list costs nothing where it isn't shown.
+        half_px = 0.5 * self._view.span / plot.width()
+        first = bisect_left(self._bookmark_freqs, self._view.start - half_px)
+        stop = bisect_right(self._bookmark_freqs, self._view.end + half_px)
         candidates = []
-        for freq, name, index in self._bookmarks:
+        for freq, name, index in self._bookmarks[first:stop]:
             x = self._freq_x(freq, plot)
             if x is None:
                 continue
-            text = fm.elidedText(
-                name or tuned_mhz_text(freq),
-                Qt.TextElideMode.ElideMiddle,
-                BOOKMARK_LABEL_MAX_PX,
-            )
-            width = fm.horizontalAdvance(text) + 2 * pad
+            text, text_width = self._bookmark_label(freq, name)
+            width = text_width + 2 * pad
             left = min(max(plot.left() + 1, x - width / 2), plot.right() - 1 - width)
             candidates.append(
-                (
-                    abs(freq - tuned),
-                    QRectF(left, top, width, height),
-                    x,
-                    text,
-                    index,
-                    freq,
-                    name,
-                )
+                (abs(freq - tuned), left, width, x, text, index, freq, name)
             )
-        # Nearest the tuned frequency first, then skip whatever overlaps.
+        # Nearest the tuned frequency first, then skip whatever comes within
+        # 3 px of a label placed already. The labels share one line, so the
+        # placed ones are kept in order (lefts, rights) and each check looks
+        # at the one placed just left of the candidate's right edge.
+        lefts: List[float] = []
+        rights: List[float] = []
         placed = []
         for entry in sorted(candidates, key=lambda c: c[0]):
-            box = entry[1]
-            if any(box.adjusted(-3, 0, 3, 0).intersects(other[1]) for other in placed):
+            left, width = entry[1], entry[2]
+            k = bisect_left(lefts, left + width + 3)
+            if k > 0 and rights[k - 1] > left - 3:
                 continue
+            lefts.insert(k, left)
+            rights.insert(k, left + width)
             placed.append(entry)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
         painter.setFont(self._font)
-        for _dist, box, x, text, index, freq, name in placed:
+        for _dist, left, width, x, text, index, freq, name in placed:
+            box = QRectF(left, top, width, height)
             xi = round(x) + 0.5
             painter.setPen(QPen(p.qcolor("accent", 170), 1))
             painter.drawLine(QPointF(xi, box.bottom()), QPointF(xi, box.bottom() + 4))

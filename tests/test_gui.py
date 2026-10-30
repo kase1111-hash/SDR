@@ -96,7 +96,7 @@ class TestSpectrumWidgetLogic(unittest.TestCase):
         spectrum = np.full(2048, -50.0)
         self.widget.update_spectrum(spectrum)
         self.widget.reset_peak()
-        self.assertTrue(np.all(self.widget._peak_hold == -120.0))
+        self.assertTrue(np.all(np.isnan(self.widget._peak_hold)))  # (nothing held)
 
     def test_averaging(self):
         """Test averaging functionality."""

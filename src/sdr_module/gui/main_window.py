@@ -287,6 +287,15 @@ _TIMED_FRAME = 8 * DISPLAY_BLOCK
 # While frames can't keep up, one frame this often reads (and times) a full
 # frame's worth again, to find out when the computer keeps up once more.
 _OVERLOAD_PROBE_S = 1.0
+# After the LO of a hardware receiver moves, what it took on the old
+# frequency is not drawn at the new one: the transfers it queued are
+# dropped (at most this many), and the plots skip the samples of the
+# transfer in flight (an RTL-SDR reads 256k samples at a time, 0.11 s at
+# 2.4 MS/s; a HackRF 128k) and the tuner's settling time (as the Scanner,
+# see scanner_host).
+_RETUNE_MAX_DROPPED = 256
+_RETUNE_STALE_SAMPLES = 256 * 1024
+_RETUNE_SETTLE_S = 0.12
 
 # Tuning (see SDRMainWindow.set_frequency): the tuned channel may sit
 # anywhere in this inner fraction of the span (the receiver's anti-alias
@@ -2037,6 +2046,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # samples carried over between frames belong to.
         self._frame_spectrum = FrameSpectrumAnalyzer()
         self._frame_axis: Optional[Tuple[float, float]] = None
+        # After a hardware retune the plots skip these samples and until
+        # then (they were taken on the old frequency; see _retune_lo).
+        self._plot_skip_samples = 0
+        self._plot_skip_until = 0.0
+        # The waterfall rows' clock and when it last moved, and the recording
+        # and its read position it last followed (see _plot_time).
+        self._plot_clock = 0.0
+        self._plot_clock_wall: Optional[float] = None
+        self._plot_clock_source: Any = None
+        self._plot_clock_position: Optional[int] = None
         # The part of the span both plots show (View > Zoom).
         self._plot_view = PlotView()
         self._agc_enabled = False
@@ -4890,10 +4909,41 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 ok = False
             if ok is False:
                 return False
+        # What the hardware took before is stale only when the LO moved by
+        # an FFT bin or more: within one (a fine step with Keep Tuned
+        # Frequency Centered) nothing shows anywhere else, and dropping it
+        # would freeze the plots and cut the audio while the wheel turns.
+        bin_hz = self._device_sample_rate() / max(1, self._frame_spectrum.size)
+        moved = abs(lo - self._lo_hz) >= max(0.5, bin_hz)
         self._lo_hz = lo
         self._spectrum.set_center_freq(lo)
         self._waterfall.set_center_freq(lo)
+        if moved and isinstance(dev, SDRDevice):
+            self._drop_stale_samples(dev)
         return True
+
+    def _drop_stale_samples(self, dev: SDRDevice) -> None:
+        """A hardware receiver was retuned: what it took before holds the
+        old frequency. Drop the transfers it queued, and have the plots
+        skip the one in flight and the tuner's settling, so no waterfall
+        row or held peak shows the old frequency's signals at the new one.
+        The dropped transfers count as received (see ``_realtime``)."""
+        for _ in range(_RETUNE_MAX_DROPPED):
+            try:
+                block = dev.read_samples(DISPLAY_BLOCK, timeout=0.0)
+            except Exception as e:  # pragma: no cover - driver specific
+                logger.debug(f"Could not drop the queued samples: {e}")
+                break
+            if block is None or len(block) == 0:
+                break
+            self._note_block(len(block))
+        try:
+            streaming = bool(dev.state.is_streaming)
+        except Exception:  # pragma: no cover - defensive
+            streaming = False
+        if streaming:
+            self._plot_skip_samples = _RETUNE_STALE_SAMPLES
+            self._plot_skip_until = time.monotonic() + _RETUNE_SETTLE_S
 
     def _tune_to(self, freq_hz: float, recenter: bool = False) -> bool:
         """Tune to ``freq_hz`` by the rules of :meth:`set_frequency`.
@@ -9530,7 +9580,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             else:
                 if isinstance(saved, dict):
                     settings.update(saved)
-        self._waterfall.apply_display_settings(settings)
+        try:
+            self._waterfall.apply_display_settings(settings)
+        except Exception as e:
+            # (A damaged setting must never stop the app from starting.)
+            logger.warning(f"Ignoring the saved waterfall settings: {e}")
+            self._waterfall.apply_display_settings(dict(self._WATERFALL_DEFAULTS))
 
     def _save_waterfall_settings(self) -> None:
         if getattr(self, "_restoring", False):
@@ -9572,7 +9627,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _plot_frame(self, samples: np.ndarray) -> None:
         """Hand one frame to the spectrum and the waterfall (see
         :class:`~sdr_module.dsp.frame_spectrum.FrameSpectrumAnalyzer`)."""
-        axis = (float(self._lo_hz), float(self._device_sample_rate()))
+        rate = float(self._device_sample_rate())
+        stamp = self._plot_time(len(samples), rate)
+        if self._plot_skip_samples > 0 or time.monotonic() < self._plot_skip_until:
+            # Taken (at least partly) on the frequency before the last
+            # retune: not drawn at this one (see _drop_stale_samples).
+            self._plot_skip_samples = max(0, self._plot_skip_samples - len(samples))
+            return
+        axis = (float(self._lo_hz), rate)
         if axis != self._frame_axis:
             # Samples kept from the last frame belong to another frequency.
             self._frame_spectrum.reset()
@@ -9581,7 +9643,36 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if frame is None:
             return  # less than one FFT of samples yet (a large FFT size)
         self._spectrum.update_spectrum(frame.mean_db)
-        self._waterfall.add_line(frame.max_db)
+        self._waterfall.add_line(
+            frame.max_db, timestamp=stamp, noise_db=frame.noise_floor_db
+        )
+
+    def _plot_time(self, count: int, rate: float) -> float:
+        """The time (s) on the waterfall row of a frame of ``count``
+        samples: wall-clock time while receiving, but a recording's own
+        time while one plays (at 4x a second holds four of the recording),
+        so its time axis, ages and measured durations are right at any
+        speed. Pauses in reception still show as gaps, and so does the time
+        before a frame that doesn't follow on in the recording (just opened
+        after receiving, or played again from the start)."""
+        now = time.monotonic()
+        last, self._plot_clock_wall = self._plot_clock_wall, now
+        source = self._playback.device if self._playback.active else None
+        position = getattr(source, "position", None)
+        follows = (
+            source is not None
+            and source is self._plot_clock_source
+            and position is not None
+            and position - count == self._plot_clock_position
+        )
+        self._plot_clock_source, self._plot_clock_position = source, position
+        if last is None:
+            self._plot_clock = now
+        elif follows:
+            self._plot_clock += count / max(rate, 1.0)
+        else:
+            self._plot_clock += max(0.0, now - last)
+        return self._plot_clock
 
     def _apply_plot_resolution(self, size: int, window: str, save: bool = True) -> None:
         """Use a ``size``-point FFT with ``window`` for both plots."""
@@ -9715,6 +9806,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             else:
                 if isinstance(saved, dict):
                     settings.update(saved)
+        try:
+            self._apply_spectrum_settings(settings)
+        except Exception as e:
+            # (A damaged setting must never stop the app from starting.)
+            logger.warning(f"Ignoring the saved spectrum settings: {e}")
+            self._apply_spectrum_settings(dict(self._SPECTRUM_DEFAULTS))
+
+    def _apply_spectrum_settings(self, settings: Dict[str, Any]) -> None:
         self._spectrum.apply_display_settings(settings)
         self._apply_plot_resolution(
             settings.get("fft_size", DEFAULT_FFT_SIZE),

@@ -80,6 +80,12 @@ except ImportError:  # pragma: no cover - environment
     HAS_PYQT6 = False
 
 from ..devices.base import SDRDevice
+from ..dsp.frame_spectrum import (
+    WINDOW_LABELS,
+    FrameSpectrumAnalyzer,
+    normalize_fft_size,
+    normalize_window,
+)
 from ..dsp.recording import FileFormat, IQRecorder, SampleFormat
 from . import file_dialogs
 from .audio_chain import (
@@ -119,6 +125,9 @@ from .main_window import (
     _MIN_FREE_BYTES,
     _REALTIME_FRACTION,
     _REALTIME_WINDOW_S,
+    _RETUNE_MAX_DROPPED,
+    _RETUNE_SETTLE_S,
+    _RETUNE_STALE_SAMPLES,
     _SQUELCH_HANG_S,
     _USABLE_SPAN_FRACTION,
     DISPLAY_BLOCK,
@@ -132,8 +141,9 @@ from .main_window import (
     format_frequency,
     format_rate,
 )
+from .plot_view import PlotView
 from .receiver_bar import FrequencyDigits
-from .spectrum_widget import SpectrumWidget
+from .spectrum_widget import SpectrumWidget, format_hz
 from .themes import set_role, set_tone
 from .tuning import (
     STEP_CHOICES_HZ,
@@ -766,15 +776,28 @@ if HAS_PYQT6:
             # The waterfall fills at once (a row per frame) with levels that
             # follow the noise floor.
             self._waterfall.apply_display_settings({"auto_levels": True})
+            # As in the main window: both plots show the same part of the
+            # span (zoom), and every sample of a frame at the FFT size and
+            # window chosen in the spectrum's menu (see _plot_frame).
+            self._plot_view = PlotView()
+            self._frame_spectrum = FrameSpectrumAnalyzer()
+            self._frame_axis: Optional[Tuple[float, float]] = None
+            # After a hardware retune the plots skip these samples and until
+            # then (see _drop_stale_samples).
+            self._plot_skip_samples = 0
+            self._plot_skip_until = 0.0
             for plot in (self._spectrum, self._waterfall):
                 plot.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+                plot.set_view_model(self._plot_view)
                 plot.frequency_clicked.connect(self.tune)
                 plot.tune_steps.connect(self._tune_steps)
+                plot.bookmark_requested.connect(self.bookmark_frequency)
+                plot.message.connect(self._show_plot_message)
                 plot.setMinimumHeight(140)
                 self._plots.addWidget(plot)
             self._plots.setStretchFactor(0, 2)
             self._plots.setStretchFactor(1, 3)
-            self._waterfall.bookmark_requested.connect(self.bookmark_frequency)
+            self._spectrum.resolution_changed.connect(self._apply_plot_resolution)
             self._waterfall.display_settings_changed.connect(
                 self._save_waterfall_settings
             )
@@ -1681,11 +1704,32 @@ if HAS_PYQT6:
                     ok = False
                 if ok is False:
                     return False
+            moved = abs(float(lo_hz) - self._lo_hz) >= 0.5
             self._lo_hz = float(lo_hz)
             rate = self._rate()
             self._spectrum.set_frequency_range(self._lo_hz, rate)
             self._waterfall.set_frequency_range(self._lo_hz, rate)
+            if moved and isinstance(dev, SDRDevice):
+                self._drop_stale_samples(dev)
             return True
+
+        def _drop_stale_samples(self, dev: SDRDevice) -> None:
+            """Hardware was retuned: drop what it queued on the old
+            frequency, and have the plots skip the transfer in flight and
+            the tuner's settling (as the main window does)."""
+            now = time.monotonic()
+            for _ in range(_RETUNE_MAX_DROPPED):
+                try:
+                    block = dev.read_samples(DISPLAY_BLOCK, timeout=0.0)
+                except Exception as e:  # pragma: no cover - driver specific
+                    logger.debug(f"Second receiver: can't drop samples: {e}")
+                    break
+                if block is None or len(block) == 0:
+                    break
+                self._rx_history.append((now, len(block)))  # (received)
+            if getattr(getattr(dev, "state", None), "is_streaming", False):
+                self._plot_skip_samples = _RETUNE_STALE_SAMPLES
+                self._plot_skip_until = now + _RETUNE_SETTLE_S
 
         def tune(self, freq_hz: float, recenter: bool = False) -> bool:
             """Tune this receiver to ``freq_hz``: only the VFO moves while
@@ -2217,8 +2261,7 @@ if HAS_PYQT6:
                 )
             elif realtime:
                 self._realtime_hint = False
-            self._spectrum.update_spectrum(frame.power_db)
-            self._waterfall.add_line(frame.power_db)
+            self._plot_frame(samples)
             gate = self._dsp.squelch
             self._level_meter.set_reading(
                 frame.level_db,
@@ -2233,6 +2276,46 @@ if HAS_PYQT6:
                 self._audio.write(frame.audio)
             if self._recorder is not None:
                 self._record(samples)
+
+        def _plot_frame(self, samples: np.ndarray) -> None:
+            """The plots, as in the main window: every sample of the frame
+            at the FFT size and window chosen in the spectrum's menu (the
+            mean power per bin for the spectrum, the strongest for the
+            waterfall row, so a short burst anywhere shows)."""
+            if self._plot_skip_samples > 0 or time.monotonic() < self._plot_skip_until:
+                # Taken (partly) before the last retune (_drop_stale_samples).
+                self._plot_skip_samples = max(0, self._plot_skip_samples - len(samples))
+                return
+            axis = (float(self._lo_hz), float(self._rate()))
+            if axis != self._frame_axis:
+                # Samples kept from the last frame belong to another span.
+                self._frame_spectrum.reset()
+                self._frame_axis = axis
+            frame = self._frame_spectrum.process(samples)
+            if frame is None:
+                return  # less than one FFT of samples yet (a large FFT size)
+            self._spectrum.update_spectrum(frame.mean_db)
+            self._waterfall.add_line(frame.max_db, noise_db=frame.noise_floor_db)
+
+        def _apply_plot_resolution(self, size: int, window: str) -> None:
+            """The spectrum's FFT Size or Window menu: both plots use it."""
+            size, window = normalize_fft_size(size), normalize_window(window)
+            if not self._frame_spectrum.configure(size, window):
+                return
+            self._spectrum.set_fft_size(size)
+            self._spectrum.set_window_name(window)
+            self._waterfall.set_fft_size(size)
+            rbw = self._frame_spectrum.rbw(self._rate())
+            self._show_message(
+                f"Spectrum: {size}-point FFT, {WINDOW_LABELS[window]} window, "
+                f"RBW {format_hz(rbw)}",
+                None,
+                4000,
+            )
+
+        def _show_plot_message(self, text: str, tone: str) -> None:
+            """A plot's message (Copied ..., a measurement copied)."""
+            self._show_message(text, tone or None, 3000)
 
         def _show_auto_threshold(self, db: float) -> None:
             """The slider shows the Auto threshold (without taking it)."""
@@ -3004,6 +3087,7 @@ if HAS_PYQT6:
             self.persist()
             self._status_timer.stop()
             self._frame_timer.stop()
+            self._frame_spectrum.close()  # (its helper thread)
             self._audio.stop()
             self._audio_open = False
             self._shut_down = True

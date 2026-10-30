@@ -316,6 +316,20 @@ class TestStaleLegend(_SpectrumCase):
         sp.update_spectrum(_line(seed=2))
         self.assertIsNone(sp.stale_text())
 
+    def test_no_trace_legend_once_retuned_away_while_stopped(self):
+        # mc:MC-04: the last trace stays at its own frequency, so after a
+        # retune far away nothing is drawn; the legend must not list it.
+        sp = self.sp
+        sp.update_spectrum(_line())
+        sp.set_stale("Stopped - press Space")
+        sp.set_center_freq(sp._center_freq + 0.5 * RATE)  # still overlaps
+        self.assertIn("Last", self.legend())
+        sp.set_center_freq(433.92e6)
+        texts = self.legend()
+        self.assertNotIn("Last", texts)
+        self.assertNotIn("Peak", texts)
+        self.assertIn("RBW 1.76 kHz", texts)
+
 
 class TestMinHold(_SpectrumCase):
     """fg:FG-G16: a min-hold trace next to peak hold."""

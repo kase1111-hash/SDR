@@ -2207,13 +2207,29 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             text += f" · ×{self._view.zoom}"
         return text
 
+    def _trace_in_view(self) -> bool:
+        """Whether any of the trace (received at its own axis) is in view:
+        not after retuning away while stopped."""
+        center, span = self._trace_axis
+        return (
+            visible_bins(
+                len(self._spectrum),
+                center - span / 2,
+                span,
+                self._view.start,
+                self._view.span,
+            )
+            is not None
+        )
+
     def _draw_legend(self, painter: "QPainter", plot: "QRectF", p) -> None:
         """Tiny legend in the band above the plot (right-aligned), and the
-        resolution bandwidth and zoom at its left."""
+        resolution bandwidth and zoom at its left. A stopped plot retuned
+        away from its last trace (nothing drawn) has no trace legend."""
         fm = self._fm
         y_mid = 2 + fm.height() / 2
         x = plot.right()
-        if self._has_data:
+        if self._has_data and not (self._stale and not self._trace_in_view()):
             items = []
             averaging = self._show_average and self._avg_count > 0
             if self._stale:

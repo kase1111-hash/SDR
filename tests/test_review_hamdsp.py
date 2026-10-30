@@ -802,5 +802,111 @@ class TestSstvInputThatEnds(unittest.TestCase):
         self.assertGreater(_correlation(self.complete[1], card), 0.98)
 
 
+class TestSstvHistoryMemory(unittest.TestCase):
+    """HAMDSP-9: Received Images kept a copy of every image received in
+    the session, also after auto-save had written it to a file: about
+    1 MB per PD 120 image for as long as the app listened (190 MB after
+    200 images). Saved images are now read back from their files."""
+
+    def setUp(self):
+        from tests.test_gui_chrome import require_pyqt6
+
+        require_pyqt6(self)
+        from sdr_module.ham.gui.sstv_panel import SSTVPanel
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.panel = SSTVPanel()
+        self.panel.set_save_directory(self.tmp.name)
+        self.panel.show()
+        settle()
+        self.panel._start_btn.click()  # listening, as through an ISS event
+
+    def tearDown(self):
+        panel = getattr(self, "panel", None)
+        if panel is not None:
+            if panel.is_receiving():
+                panel._start_btn.click()
+            panel.close()
+            panel.deleteLater()
+            settle()
+
+    def receive(self, count: int, mode: str = "PD 120"):
+        """``count`` images through the decoder's completion callback."""
+        from sdr_module.ham.sstv import find_mode
+
+        spec = find_mode(mode)
+        decoder = self.panel._decoder
+        rng = np.random.default_rng(len(self.panel._viewer.images))
+        images = []
+        for _ in range(count):
+            image = rng.integers(0, 256, (spec.height, spec.width, 3), np.uint8)
+            decoder.state.mode = spec
+            decoder.state.image_data = image
+            decoder._on_image_complete(image)
+            images.append(image.copy())
+        return images
+
+    def held(self):
+        """The entries whose pixels are in memory."""
+        return [e for e in self.panel._viewer.images if e.get("image") is not None]
+
+    def held_rows(self):
+        """Their rows in Received Images."""
+        entries = self.panel._viewer.images
+        return [i for i, e in enumerate(entries) if e.get("image") is not None]
+
+    def test_saved_images_are_read_back_from_their_files(self):
+        panel = self.panel
+        images = self.receive(6)
+        entries = panel._viewer.images
+        self.assertEqual(len(entries), 6)
+        self.assertTrue(all(e.get("filename") for e in entries))
+        self.assertEqual(self.held_rows(), [5], "only the newest is held")
+        np.testing.assert_array_equal(panel._viewer.get_current_image(), images[-1])
+        for row in (1, 3, 0, 5, 2):
+            panel._history_list.setCurrentRow(row)
+            settle(1)
+            self.assertEqual(panel._viewer.current_index, row)
+            np.testing.assert_array_equal(panel._current_entry_image(), images[row])
+            # The newest and the one shown.
+            self.assertEqual(self.held_rows(), sorted({row, 5}))
+        # Another image arrives: only it stays in memory.
+        newest = self.receive(1)[0]
+        self.assertEqual(self.held_rows(), [6])
+        np.testing.assert_array_equal(panel._viewer.get_current_image(), newest)
+
+    def test_images_that_were_not_saved_stay_in_memory(self):
+        self.panel._auto_save_check.setChecked(False)
+        images = self.receive(3)
+        self.assertEqual(len(self.held()), 3, "there is no file to read back")
+        self.panel._auto_save_check.setChecked(True)
+        self.receive(2)
+        held = self.held()
+        self.assertEqual(len(held), 4, "the 3 unsaved ones and the newest")
+        for entry, image in zip(held, images, strict=False):
+            np.testing.assert_array_equal(entry["image"], image)
+
+    def test_an_image_whose_save_failed_stays_in_memory(self):
+        from unittest import mock
+
+        from sdr_module.ham.gui import sstv_panel
+
+        with mock.patch.object(sstv_panel, "save_rgb_image", return_value=False):
+            first = self.receive(1)[0]
+        self.receive(2)
+        unsaved = self.panel._viewer.images[0]
+        self.assertIsNone(unsaved.get("filename"))
+        np.testing.assert_array_equal(unsaved["image"], first)
+        self.assertEqual(len(self.held()), 2)
+
+    def test_memory_stays_bounded(self):
+        """200 PD 120 images: 190 MB of pixels before, now one image."""
+        self.receive(200)
+        self.assertEqual(len(self.panel._viewer.images), 200)
+        held = sum(e["image"].nbytes for e in self.held())
+        self.assertLess(held, 2 * 640 * 496 * 3)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

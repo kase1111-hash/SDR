@@ -1351,14 +1351,23 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         if image is None and entry.get("filename"):
             image = qimage_to_rgb(QImage(str(entry["filename"])))
             if image is not None:
-                # Keep one image read from disk in memory at a time.
-                for other in self._viewer.images:
-                    if other.get("from_disk"):
-                        other["image"] = None
                 entry["image"] = image
                 entry["height"] = entry.get("height") or image.shape[0]
                 entry["width"] = entry.get("width") or image.shape[1]
+        # In memory: this image, the newest and those without a file.
+        self._drop_saved_pixels(keep=entry)
         return image
+
+    def _drop_saved_pixels(self, keep: Optional[Dict[str, Any]] = None) -> None:
+        """Free the pixels of the listed images that have a file (they are
+        read back from it when shown), except ``keep`` and the newest one.
+        Images without a file (auto-save off, or the save failed) keep
+        theirs: there is no other copy."""
+        entries = self._viewer.images
+        newest = entries[-1] if entries else None
+        for entry in entries:
+            if entry is not keep and entry is not newest and entry.get("filename"):
+                entry["image"] = None
 
     def _show_viewer_image(self) -> None:
         """Display the viewer's current image and sync the history UI."""
@@ -1458,6 +1467,9 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
                 if path
                 else " It could not be saved automatically."
             )
+        # Only the newest saved image stays in memory: the others are read
+        # back from their files (a long ISS event lists hundreds).
+        self._drop_saved_pixels()
         item = QListWidgetItem(history_label(entry))
         if entry.get("filename"):
             item.setToolTip(entry["filename"])

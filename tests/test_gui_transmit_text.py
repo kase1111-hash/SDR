@@ -166,6 +166,16 @@ class TestWindow(_TextCase):
         fresh = TransmitTextDialog(self.win)
         self.addCleanup(fresh.deleteLater)
         self.assertEqual((fresh.mode(), fresh.settings().wpm), ("CW", 20.0))
+        # NaN or Infinity (JSON accepts them) made the window fail to open.
+        self.store.values["tx/text"] = (
+            '{"mode": "CW", "modes": {"CW": {"wpm": NaN, "audio_hz": Infinity}}}'
+        )
+        fresh = TransmitTextDialog(self.win)
+        self.addCleanup(fresh.deleteLater)
+        self.assertEqual(
+            (fresh.mode(), fresh.settings().wpm, fresh.settings().audio_hz),
+            ("CW", 20.0, 700.0),
+        )
 
     def test_text_is_limited(self):
         from sdr_module.protocols.text_modes import MAX_TEXT_CHARS
@@ -174,6 +184,92 @@ class TestWindow(_TextCase):
         self.assertEqual(len(self.dlg.text()), MAX_TEXT_CHARS)
         self.assertIn("up to 2,000 characters", self.status()[0])
         self.assertIn("2,000 of 2,000 characters", self.dlg._count_label.text())
+
+    def test_a_paste_past_the_limit_keeps_the_text_already_there(self):
+        """What doesn't fit is cut from the paste: the end of the text
+        already there was cut off before, and the undo history cleared, so
+        it couldn't be brought back."""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+
+        from sdr_module.protocols.text_modes import MAX_TEXT_CHARS
+
+        edit = self.dlg._text_edit
+        original = "".join(chr(65 + i % 26) for i in range(MAX_TEXT_CHARS - 10))
+        cursor = edit.textCursor()
+        cursor.insertText(original)
+        cursor.setPosition(10)
+        edit.setTextCursor(cursor)
+        QApplication.clipboard().setText("x" * 50)
+        edit.paste()
+        self.assertEqual(self.dlg.text(), original[:10] + "x" * 10 + original[10:])
+        self.assertIn("up to 2,000 characters", self.status()[0])
+        edit.undo()  # the text from before the paste
+        self.assertEqual(self.dlg.text(), original)
+        edit.redo()
+        # Full: typing adds nothing, a macro that doesn't fit is refused,
+        # and deleting still works.
+        full = self.dlg.text()
+        cursor = edit.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        edit.setTextCursor(cursor)
+        QTest.keyClicks(edit, "zz")
+        QTest.keyClick(edit, Qt.Key.Key_Return)
+        self.assertEqual(self.dlg.text(), full)
+        self.panel.set_callsign("W1AW")
+        self.assertFalse(self.dlg.insert_macro("CQ DE {call}"))
+        self.assertEqual(self.dlg.text(), full)
+        QTest.keyClick(edit, Qt.Key.Key_Backspace)
+        self.assertEqual(self.dlg.text(), full[:-1])
+
+    def test_enter_in_a_field_presses_no_button(self):
+        """The window made its first button (Remove Them) the default, so
+        Enter in the speed or tone box deleted characters from the text."""
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QPushButton
+
+        self.dlg.set_mode("CW")
+        self.dlg.set_text("CQ 50% DE TEST")
+        self.assertTrue(self.dlg._unsupported_row.isVisibleTo(self.dlg))
+        buttons = self.dlg.findChildren(QPushButton)
+        self.assertEqual([b.text() for b in buttons if b.isDefault()], [])
+        for field in (self.dlg._wpm_spin, self.dlg._tone_spin, self.dlg._mode_combo):
+            field.setFocus()
+            QTest.keyClick(field, Qt.Key.Key_Return)
+            self.assertEqual(self.dlg.text(), "CQ 50% DE TEST")
+
+    def test_the_fsk_center_keeps_both_tones_in_the_audio(self):
+        """A 100 Hz center with a 1000 Hz shift showed "space -400 Hz" (and
+        played it as 400 Hz)."""
+        self.dlg.set_mode("ASCII")
+        self.dlg._shift_combo.setCurrentIndex(self.dlg._shift_combo.findData(1000.0))
+        self.dlg._tone_spin.setValue(100)
+        self.assertEqual(self.dlg._tone_spin.minimum(), 600)
+        self.assertEqual(self.dlg._tone_spin.value(), 600)
+        self.assertEqual(self.dlg.settings().tones(), (100.0, 1100.0))
+        self.assertEqual(self.dlg._tones_hint.text(), "Mark 1100 Hz, space 100 Hz")
+        # CW has the whole tone range.
+        self.dlg.set_mode("CW")
+        self.assertEqual(
+            (self.dlg._tone_spin.minimum(), self.dlg._tone_spin.maximum()),
+            (100, 3500),
+        )
+
+    def test_nothing_sendable_says_so(self):
+        self.dlg.set_mode("RTTY")
+        self.dlg.set_text("@@@%")
+        self.refresh()
+        self.assertEqual(
+            self.line(), ("Nothing to send: RTTY can't send @ (3x), %.", "warning")
+        )
+        self.assertFalse(self.dlg._transmit_button.isEnabled())
+
+    def test_the_speed_tooltip_states_todays_rule(self):
+        self.dlg.set_mode("RTTY")
+        tip = self.dlg._baud_combo.toolTip()
+        self.assertNotIn("300 Bd", tip)  # (the old US HF limit)
+        self.assertIn("2.8 kHz", tip)
 
     def test_ham_id_tab_opens_it(self):
         self.dlg.close()
@@ -405,6 +501,15 @@ class TestTransmit(_TextCase):
         text, tone = self.line()
         self.assertTrue(text.startswith("Stopped RTTY “THE QUICK BROWN FOX"), text)
         self.assertEqual(tone, "warning")
+        # Stopped during the first ID: no ID went out, so it says to send one
+        # (as the Ham ID tab does).
+        self.assertEqual(result.ids_sent, 0)
+        self.assertTrue(
+            text.endswith(
+                "Send your ID (Radio > Send Station ID) to finish the contact."
+            ),
+            text,
+        )
 
     def test_closing_the_window_keeps_sending_and_says_so(self):
         dev, backend = self._send("THE QUICK BROWN FOX " * 3, "RTTY", pace=True)

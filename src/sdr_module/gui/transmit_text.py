@@ -27,12 +27,13 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
-    from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
+    from PyQt6.QtCore import QMimeData, QObject, Qt, QTimer, pyqtSignal
     from PyQt6.QtGui import QTextCursor
     from PyQt6.QtWidgets import (
         QComboBox,
@@ -224,6 +225,15 @@ def resolve_emission(mode: str, choice: str, freq_hz: float) -> str:
     )
 
 
+def _finite(values: Dict[str, Any], key: str, default: float) -> float:
+    """``values[key]`` (``default`` when missing) as a number; ValueError
+    when it isn't one (JSON allows NaN and Infinity)."""
+    value = float(values.get(key, default))
+    if not math.isfinite(value):
+        raise ValueError(f"{key} is not a number")
+    return value
+
+
 def snippet(text: str, limit: int = 24) -> str:
     """The start of ``text`` on one line, for messages: “CQ CQ DE W1AW…”."""
     line = " ".join(str(text).split())
@@ -233,6 +243,44 @@ def snippet(text: str, limit: int = 24) -> str:
 
 
 if HAS_PYQT6:
+
+    class _LimitedTextEdit(QPlainTextEdit):
+        """A plain text box that holds at most ``limit`` characters: of what
+        is typed, pasted or dropped, only what fits goes in (``overflow``
+        says some didn't), and the text already there stays, so Undo works
+        as usual."""
+
+        overflow = pyqtSignal()
+
+        def __init__(self, limit: int, parent: Any = None):
+            super().__init__(parent)
+            self.limit = int(limit)
+
+        def room(self) -> int:
+            """How many more characters fit (a selection is replaced)."""
+            used = len(self.toPlainText()) - len(self.textCursor().selectedText())
+            return max(0, self.limit - used)
+
+        def insertFromMimeData(self, source):  # noqa: N802 - Qt naming
+            if source is not None and source.hasText():
+                # (As the box inserts it: CR LF and CR are new lines.)
+                text = source.text().replace("\r\n", "\n").replace("\r", "\n")
+                room = self.room()
+                if len(text) > room:
+                    self.overflow.emit()
+                    fits = QMimeData()
+                    fits.setText(text[:room])
+                    source = fits
+            super().insertFromMimeData(source)
+
+        def keyPressEvent(self, event):  # noqa: N802 - Qt naming
+            text = event.text().replace("\r", "\n")
+            typed = bool(text) and (text.isprintable() or text == "\n")
+            if typed and len(text) > self.room():
+                self.overflow.emit()
+                event.accept()
+                return
+            super().keyPressEvent(event)
 
     class TextPreview(QObject):
         """Plays a :class:`TextSignal`'s audio through an
@@ -353,6 +401,8 @@ if HAS_PYQT6:
             # something it depends on changes: (inputs, text, tone).
             self._outcome: Optional[Tuple[tuple, str, Optional[str]]] = None
             self._line_text = ""
+            # The text before the last edit (to find what an edit added).
+            self._last_text = ""
 
             self._preview = TextPreview(self)
             self._preview.playing_changed.connect(self._on_preview_playing)
@@ -420,8 +470,9 @@ if HAS_PYQT6:
             speed_row.addWidget(self._wpm_spin)
             self._baud_combo = QComboBox()
             self._baud_combo.setToolTip(
-                "Symbols per second. RTTY is 45.45 Bd almost everywhere; below "
-                "28 MHz US rules allow at most 300 Bd"
+                "Symbols per second. RTTY is 45.45 Bd almost everywhere. Below "
+                "29.7 MHz US rules allow RTTY and data at most 2.8 kHz wide (the "
+                "line above Transmit says when a setting is too wide)"
             )
             self._baud_combo.currentIndexChanged.connect(self._on_params_changed)
             speed_row.addWidget(self._baud_combo)
@@ -459,7 +510,8 @@ if HAS_PYQT6:
             text_box = QGroupBox("Text")
             text_layout = QVBoxLayout(text_box)
             text_layout.setSpacing(6)
-            self._text_edit = QPlainTextEdit()
+            self._text_edit = _LimitedTextEdit(MAX_TEXT_CHARS)
+            self._text_edit.overflow.connect(self._on_overflow)
             self._text_edit.setFont(mono_font(11))
             self._text_edit.setPlaceholderText(
                 "Type what to send, or insert a macro below…"
@@ -570,16 +622,18 @@ if HAS_PYQT6:
                 "the ON AIR badge ends it)"
             )
             self._close_button.clicked.connect(self.close)
-            self._close_button.setAutoDefault(False)
             buttons.addWidget(self._close_button)
             self._transmit_button = QPushButton("T&ransmit")
             set_role(self._transmit_button, "danger")
-            self._transmit_button.setAutoDefault(False)
             self._transmit_button.clicked.connect(self._on_transmit_clicked)
             buttons.addWidget(self._transmit_button)
-            for button in (self._preview_button, self._save_button):
-                button.setAutoDefault(False)
             layout.addLayout(buttons)
+            # No default button: Enter in a field (a speed, the tone, a
+            # list) must not press one. A dialog otherwise makes its first
+            # button the default, and Enter pressed Remove Them.
+            for button in self.findChildren(QPushButton):
+                button.setAutoDefault(False)
+                button.setDefault(False)
 
             self.setMinimumWidth(520)
 
@@ -615,10 +669,10 @@ if HAS_PYQT6:
                 try:
                     self._mode_settings[mode] = TextSettings.for_mode(
                         mode,
-                        wpm=float(values.get("wpm", current.wpm)),
-                        baud=float(values.get("baud", current.baud)),
-                        shift_hz=float(values.get("shift_hz", current.shift_hz)),
-                        audio_hz=float(values.get("audio_hz", current.audio_hz)),
+                        wpm=_finite(values, "wpm", current.wpm),
+                        baud=_finite(values, "baud", current.baud),
+                        shift_hz=_finite(values, "shift_hz", current.shift_hz),
+                        audio_hz=_finite(values, "audio_hz", current.audio_hz),
                     )
                 except (TypeError, ValueError):
                     continue
@@ -729,7 +783,7 @@ if HAS_PYQT6:
                     if cw
                     else self._baud_combo if fsk else self._mode_combo
                 )
-                self._tone_spin.setValue(int(round(s.audio_hz)))
+                self._show_tone(s)
                 self._tone_label.setText("&Tone:" if not fsk else "&Center:")
                 self._tone_spin.setToolTip(self._tone_tip(mode))
                 items = _CW_EMISSIONS if cw else _DATA_EMISSIONS[mode]
@@ -805,8 +859,23 @@ if HAS_PYQT6:
                 shift_hz=values.get("shift_hz", s.shift_hz),
                 audio_hz=values["audio_hz"],
             )
+            # (A wider shift narrows the center's range: show what is used.)
+            self._show_tone(self._mode_settings[mode])
             self._update_tones_hint()
             self._after_change()
+
+        def _show_tone(self, s: TextSettings) -> None:
+            """The tone (CW, PSK31) or FSK center box: its range keeps every
+            tone between 100 and 3500 Hz at this shift (a 100 Hz center
+            with a 1000 Hz shift would put space at -400 Hz), and it shows
+            the value that is used."""
+            low, high = s.audio_bounds()
+            blocked = self._tone_spin.blockSignals(True)
+            try:
+                self._tone_spin.setRange(int(math.ceil(low)), int(math.floor(high)))
+                self._tone_spin.setValue(int(round(s.audio_hz)))
+            finally:
+                self._tone_spin.blockSignals(blocked)
 
         def _update_tones_hint(self) -> None:
             s = self.settings()
@@ -829,22 +898,22 @@ if HAS_PYQT6:
 
         # ------------------------------------------------------------ text
 
+        def _on_overflow(self) -> None:
+            self._win._show_status_message(
+                f"Transmit Text holds up to {MAX_TEXT_CHARS:,} characters: what "
+                "didn't fit was left out.",
+                "warning",
+                5000,
+            )
+
         def _on_text_changed(self) -> None:
             text = self.text()
             if len(text) > MAX_TEXT_CHARS:
-                cursor = self._text_edit.textCursor()
-                position = min(cursor.position(), MAX_TEXT_CHARS)
-                self._text_edit.blockSignals(True)
-                self._text_edit.setPlainText(text[:MAX_TEXT_CHARS])
-                cursor = self._text_edit.textCursor()
-                cursor.setPosition(position)
-                self._text_edit.setTextCursor(cursor)
-                self._text_edit.blockSignals(False)
-                self._win._show_status_message(
-                    f"Transmit Text holds up to {MAX_TEXT_CHARS:,} characters.",
-                    "warning",
-                    5000,
-                )
+                # (Typing, pasting and dropping stop at the limit; this is
+                # for whatever else gets past it, e.g. set_text.)
+                text = self._drop_excess(text)
+                self._on_overflow()
+            self._last_text = text
             if self._loading:
                 return
             self._signal_cache = None
@@ -852,6 +921,44 @@ if HAS_PYQT6:
                 self._preview.stop()
             self._update_text_info()
             self.refresh()
+
+        def _drop_excess(self, text: str) -> str:
+            """Take what doesn't fit off the end of what the last edit put
+            in, so the text that was already there stays. Returns the text
+            kept."""
+            old = self._last_text
+            # The edit is where the old and new text differ: the inserted
+            # text is text[start:end].
+            limit = min(len(old), len(text))
+            start = 0
+            while start < limit and old[start] == text[start]:
+                start += 1
+            tail = 0
+            while tail < limit - start and old[-1 - tail] == text[-1 - tail]:
+                tail += 1
+            end = len(text) - tail
+            cut = end - (len(text) - MAX_TEXT_CHARS)
+            if cut < start:  # (not one edit within the limit: cut the end)
+                cut, end = MAX_TEXT_CHARS, len(text)
+
+            def position(index: int) -> int:  # (Qt counts UTF-16 units)
+                return len(text[:index].encode("utf-16-le", "surrogatepass")) // 2
+
+            edit = self._text_edit
+            edit.blockSignals(True)
+            try:
+                cursor = QTextCursor(edit.document())
+                cursor.beginEditBlock()
+                cursor.setPosition(position(cut))
+                cursor.setPosition(position(end), QTextCursor.MoveMode.KeepAnchor)
+                cursor.removeSelectedText()
+                cursor.endEditBlock()
+                view = edit.textCursor()
+                view.setPosition(position(cut))
+                edit.setTextCursor(view)
+            finally:
+                edit.blockSignals(False)
+            return text[:cut] + text[end:]
 
         def current_signal(self) -> TextSignal:
             """The text as a signal with the settings chosen (cached)."""
@@ -966,6 +1073,14 @@ if HAS_PYQT6:
                 insert = " " + insert
             if after and not after[0].isspace():
                 insert += " "
+            if len(insert) > self._text_edit.room():
+                self._win._show_status_message(
+                    f"The macro doesn't fit: Transmit Text holds up to "
+                    f"{MAX_TEXT_CHARS:,} characters.",
+                    "warning",
+                    5000,
+                )
+                return False
             cursor.insertText(insert)
             self._text_edit.setTextCursor(cursor)
             self._text_edit.setFocus()
@@ -1032,6 +1147,13 @@ if HAS_PYQT6:
                     False,
                 )
             signal = self.current_signal()
+            if signal.empty and signal.check.unsupported:
+                return (
+                    f"Nothing to send: {MODE_NAMES[signal.mode]} can't send "
+                    f"{signal.check.describe_unsupported()}.",
+                    "warning",
+                    False,
+                )
             if signal.empty:
                 return "Type the text to send, or insert a macro.", None, False
             freq = float(win._current_frequency())
@@ -1395,7 +1517,17 @@ if HAS_PYQT6:
                 ids += "s" if result.ids_sent > 1 else ""
                 self._set_outcome(f"✓ {result.message}{ids} at {stamp}.", "success")
             elif result.status == "stopped":
-                self._set_outcome(f"{result.message}.", "warning")
+                line = f"{result.message}."
+                if (
+                    not result.ids_sent
+                    and self._callsign()
+                    and _in_amateur_band(result.job.center_hz)
+                ):
+                    # (As the Ham ID tab says: no ID went out with it.)
+                    line += (
+                        " Send your ID (Radio > Send Station ID) to finish the contact."
+                    )
+                self._set_outcome(line, "warning")
             else:
                 self._set_outcome(f"✗ {result.message}.", "danger")
 

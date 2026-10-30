@@ -218,16 +218,17 @@ class TestSpectrumSettingsRemembered(_WindowTestCase):
 
     def test_avg_and_peak_hold_are_saved_and_restored(self):
         sp = self.win._spectrum
+        self.assertFalse(sp._peak_check.isChecked())  # off until turned on
         sp._avg_combo.setCurrentIndex(3)  # 8 frames
-        sp._peak_check.setChecked(False)
+        sp._peak_check.setChecked(True)
         self.win._persist_state()
         saved = json.loads(self.store.values["spectrum_display"])
         self.assertEqual(saved["avg"], 8)
-        self.assertFalse(saved["peak_hold"])
+        self.assertTrue(saved["peak_hold"])
         other = self.mw.SDRMainWindow()
         try:
             self.assertEqual(other._spectrum._avg_combo.currentText(), "8")
-            self.assertFalse(other._spectrum._peak_check.isChecked())
+            self.assertTrue(other._spectrum._peak_check.isChecked())
         finally:
             for timer in (
                 other._display_timer,

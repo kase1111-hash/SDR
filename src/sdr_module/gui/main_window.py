@@ -8380,8 +8380,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # ------------------------------------------------------------------
 
     #: Spectrum display defaults when nothing is saved: a vertical range
-    #: that follows the noise floor and the strongest signal.
-    _SPECTRUM_DEFAULTS: Dict[str, Any] = {"range_auto": True}
+    #: that follows the noise floor and the strongest signal, and one trace
+    #: (Peak hold is a click away in the header; ux:UX-U09).
+    _SPECTRUM_DEFAULTS: Dict[str, Any] = {"range_auto": True, "peak_hold": False}
 
     def _connect_plots(self) -> None:
         """Both plots show the same part of the span (zoom); the spectrum's

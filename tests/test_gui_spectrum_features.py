@@ -542,6 +542,28 @@ class TestWindowSpectrumSettings(_WindowTestCase):
         self.assertTrue(self.win._spectrum.auto_range())
         self.assertTrue(self.win._spectrum.reset_on_gain_jump)
 
+    def test_peak_hold_starts_off_in_the_window(self):
+        # ux:UX-U09: one trace on a first start; Peak hold is in the header.
+        sp = self.win._spectrum
+        self.assertFalse(sp.peak_hold())
+        self.assertFalse(sp._peak_check.isChecked())
+        self.frames(3)
+        texts = []
+
+        class Painter:
+            def setPen(self, *_a):
+                pass
+
+            def drawLine(self, *_a):
+                pass
+
+            def drawText(self, *args):
+                texts.append(args[-1])
+
+        sp._draw_legend(Painter(), sp.plot_rect(), swm.get_palette())
+        self.assertIn("Live", texts)
+        self.assertNotIn("Peak", texts)
+
     def test_bookmark_labels_follow_the_bookmarks_and_tune(self):
         win = self.win
         panel = win._bookmarks_panel

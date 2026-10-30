@@ -4001,7 +4001,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # listener rests meanwhile).
             self._show_rds_station(decoder.station)
 
-    def _push_decoded_message(self, msg: Any, note: str = "") -> None:
+    def _push_decoded_message(
+        self,
+        msg: Any,
+        note: str = "",
+        freq_hz: Optional[float] = None,
+        sample_rate: Optional[float] = None,
+    ) -> None:
         """Render one decoded message into the decoder panel.
 
         Rows use the protocol names of the panel's selector, and a message
@@ -4009,7 +4015,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Invalid). A failed frame with nothing decoded in it (e.g. an AX.25
         CRC error, which noise produces about once a second) is left out.
         ``note`` is added to the message text (where it came from: File >
-        Decode Recording names the file and the time in it).
+        Decode Recording names the file and the time in it). ``freq_hz``
+        and ``sample_rate`` are where it was received and at what rate
+        (default: the tuned frequency and the device's rate; 0 for
+        unknown).
         """
         try:
             address, content = self._describe_message(msg)
@@ -4039,6 +4048,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 raw_text,
                 message=msg,
                 details=message_details(msg),
+                freq_hz=freq_hz,
+                sample_rate=sample_rate,
             )
             self._note_decoded()
         except Exception as exc:  # pragma: no cover - defensive
@@ -7684,8 +7695,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         def show(batch: Any) -> None:
             for msg, when in batch:
                 counts["messages"] += 1
+                # The file's frequency and rate (not the receiver's); 0 when
+                # the file doesn't say where it was made.
                 self._push_decoded_message(
-                    msg, note=f"from {options.name} at {when:.1f} s"
+                    msg,
+                    note=f"from {options.name} at {when:.1f} s",
+                    freq_hz=options.center_hz + offset if options.center_hz else 0.0,
+                    sample_rate=options.sample_rate,
                 )
 
         result = run_job(

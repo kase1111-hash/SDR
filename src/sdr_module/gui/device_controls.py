@@ -60,6 +60,7 @@ from .device_settings import (
     HACKRF_DEFAULT_LNA,
     HACKRF_DEFAULT_VGA,
     KIND_NAMES,
+    RATE_LIMITS,
     FrontEnd,
     auto_gain_db,
     device_kind,
@@ -71,6 +72,7 @@ from .device_settings import (
     load_gain,
     load_rate,
     rate_choice_label,
+    rate_in_range,
     sample_rates_for,
     save_front_end,
     save_gain,
@@ -105,6 +107,17 @@ def format_ppm(ppm: float) -> str:
     """``12 -> "+12 ppm"``, ``-3 -> "-3 ppm"``, ``0 -> "0 ppm"``."""
     value = int(round(float(ppm)))
     return f"{value:+d} ppm" if value else "0 ppm"
+
+
+def _asked_rate(rate: float) -> str:
+    """A sample rate asked for, readable however far out of range."""
+    if rate >= 1e9:
+        return f"{rate / 1e9:,.4g} GS/s"
+    if rate >= 1e6:
+        return format_rate(rate)
+    if rate >= 1e3:
+        return f"{rate / 1e3:g} kS/s"
+    return f"{rate:g} S/s"
 
 
 def _kind_name(kind: str) -> str:
@@ -604,6 +617,29 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
             )
         if win._tx_busy():
             return "Wait until the transmission ends to change the sample rate."
+        return ""
+
+    def rate_refused(self, rate: float, kind: Optional[str] = None) -> str:
+        """Why ``rate`` can't be used by the window's device (or by a
+        ``kind`` device); "" when it can. The demo device runs at 1-3.2 MS/s:
+        it makes its signals in software, and much faster the window can't
+        keep up (such a rate was remembered, and froze every later launch).
+        Asked for before a device is connected (``--sample-rate``), it is
+        for whichever device comes next: one some device runs at."""
+        kind = self.kind() if kind is None else kind
+        if kind == "demo" and not rate_in_range("demo", rate):
+            low, high = RATE_LIMITS["demo"]
+            return (
+                f"The demo device runs at {format_rate(low)} to "
+                f"{format_rate(high)}, not {_asked_rate(rate)}."
+            )
+        if not kind and not any(rate_in_range(k, rate) for k in RATE_LIMITS):
+            low = min(limits[0] for limits in RATE_LIMITS.values())
+            high = max(limits[1] for limits in RATE_LIMITS.values())
+            return (
+                f"{_asked_rate(rate)} is out of range: the devices run at "
+                f"{format_rate(low)} to {format_rate(high)}."
+            )
         return ""
 
     def sync_rates(self) -> None:

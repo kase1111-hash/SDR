@@ -441,6 +441,110 @@ class TestDev3RtlGainAfterHfInTheWindow(_DeviceCase):
 
 
 # --------------------------------------------------------------------------- #
+# DEV-5: a sample rate the device kind doesn't offer is never used or kept
+# --------------------------------------------------------------------------- #
+
+
+class _Store:
+    """Settings with the getters device_settings uses."""
+
+    def __init__(self, **values):
+        self.values = dict(values)
+
+    def get_float(self, key, default):
+        return float(self.values.get(key, default))
+
+    def set(self, key, value):
+        self.values[key] = value
+
+
+@pytest.mark.parametrize(
+    "kind, rate",
+    [
+        ("demo", 2.4e8),
+        ("demo", 2.4),
+        ("demo", 1e12),
+        ("demo", 20e6),
+        ("rtlsdr", 30e6),
+        ("hackrf", 1e12),
+        ("hackrf", 0.5e6),
+    ],
+)
+def test_dev5_a_remembered_rate_the_kind_doesnt_offer_is_ignored(kind, rate):
+    from sdr_module.gui.device_settings import load_rate, save_rate
+
+    store = _Store(**{f"device/{kind}/sample_rate": rate})
+    assert load_rate(store, kind) == 0.0
+    save_rate(store, kind, rate)  # (and never saved)
+    assert store.values[f"device/{kind}/sample_rate"] == rate  # unchanged
+    save_rate(store, kind, 2.0e6)
+    assert load_rate(store, kind) == 2.0e6
+
+
+def test_dev5_the_rate_ranges():
+    from sdr_module.gui.device_settings import rate_in_range
+
+    assert rate_in_range("demo", 1.0e6) and rate_in_range("demo", 3.2e6)
+    assert not rate_in_range("demo", 3.3e6) and not rate_in_range("demo", 0.9e6)
+    assert rate_in_range("hackrf", 20e6) and not rate_in_range("rtlsdr", 3.2e6)
+    for bad in (float("nan"), float("inf"), 0.0, -2.4e6, "fast"):
+        assert not rate_in_range("demo", bad)
+    assert rate_in_range("other", 56e6)  # (no limits known)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestDev5DemoRate(_DeviceCase):
+    KEY = "device/demo/sample_rate"
+
+    def test_a_rate_the_demo_cant_run_at_is_refused_and_not_kept(self):
+        win = self.win
+        for rate in (2.4e8, 20e6, 2.4):
+            self.assertFalse(win.set_sample_rate(rate))  # --sample-rate
+            self.assertEqual(win._device.sample_rate, 2.4e6)
+            self.assertIn("The demo device runs at 1 MS/s to 3.2 MS/s", self.message())
+            self.assertEqual(self.tone(), "warning")
+            self.assertNotEqual(self.store.values.get(self.KEY), rate)
+        self.assertEqual(win._rate_label.text(), "2.4 MS/s")
+        self.assertTrue(win.set_sample_rate(3.2e6))  # its own range still works
+        self.assertEqual(self.store.values[self.KEY], 3.2e6)
+        win._release_device()
+        win._start_demo_mode()  # Use Demo Device
+        self.assertEqual(win._device.sample_rate, 3.2e6)
+
+    def test_a_damaged_remembered_rate_doesnt_reach_the_demo(self):
+        self.store.values[self.KEY] = 2.4e8  # (left by an earlier version)
+        self.win._release_device()
+        self.win._preferred_rate = None
+        self.win._start_demo_mode()
+        self.assertEqual(self.win._device.sample_rate, 2.4e6)
+        self.assertEqual(self.store.values[self.KEY], 2.4e6)  # put right
+
+    def test_a_new_launch_with_a_damaged_rate_starts_at_the_default(self):
+        self.store.values[self.KEY] = 2.4e8
+        again = self.mw.SDRMainWindow(demo_mode=True)
+        for timer in (again._display_timer, again._status_timer, again._hotplug_timer):
+            timer.stop()
+        self.addCleanup(again.deleteLater)
+        self.addCleanup(again.close)
+        self.assertEqual(again._device.sample_rate, 2.4e6)
+
+    def test_without_a_device_the_rate_must_suit_some_device(self):
+        win = self.win
+        win._release_device()
+        win._preferred_rate = None
+        self.assertFalse(win.set_sample_rate(2.4e8))
+        self.assertIn("out of range", self.message())
+        self.assertEqual(win._device_controls.requested_rate, 0.0)
+        # A HackRF's 8 MS/s is preselected in Device > Connect...
+        self.assertTrue(win.set_sample_rate(8e6))
+        rates = win._device_controls.dialog_preferences()[0]
+        self.assertEqual(rates["hackrf"], 8e6)
+        # ...but the demo device doesn't take it.
+        win._start_demo_mode()
+        self.assertEqual(win._device.sample_rate, 2.4e6)
+
+
+# --------------------------------------------------------------------------- #
 # The second receiver on the real drivers (DEV-4, DEV-6, DEV-7)
 # --------------------------------------------------------------------------- #
 

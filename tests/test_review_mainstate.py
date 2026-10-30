@@ -14,11 +14,13 @@ regression tests for the confirmed findings.
   transmission before it closes the HackRF.
 * MS-6: the Recording group's Pause shows the pause of the recording its
   Record choice shows.
+* MS-7: a scan doesn't change the filter width each mode remembers.
 
 Run offscreen: ``QT_QPA_PLATFORM=offscreen python -m pytest
 tests/test_review_mainstate.py``
 """
 
+import json
 import os
 import shutil
 import tempfile
@@ -473,6 +475,62 @@ class TestPauseFollowsTheRecordChoice(_MainStateCase):
         self.assertFalse(win._audio_take.paused)
         win._stop_audio_recording(quiet=True)
         win._toggle_recording(False)
+
+
+# ---------------------------------------------------------------------------
+# MS-7: scans and the filter width each mode remembers
+# ---------------------------------------------------------------------------
+
+
+class TestScansLeaveTheRememberedFilters(_MainStateCase):
+    """AM is listened to with a 15 kHz filter (so AM remembers 15 kHz). A
+    bookmark scan visiting an AM bookmark with a 5 kHz filter made AM
+    remember 5 kHz: picking AM gave 5 kHz, in the next session too,
+    although the scan tunes "quietly"."""
+
+    def setUp(self):
+        super().setUp()
+        win, panel = self.win, self.win._control_panel
+        win._tune_to(100.1e6, recenter=True)
+        panel._demod_combo.setCurrentText("AM")
+        panel._bw_combo.setCurrentText("15 kHz")  # by hand: remembered
+        panel._demod_combo.setCurrentText("FM")
+        self.assertEqual(panel.filter_memory()["AM"], {"width": "15 kHz"})
+        self.memory = panel.filter_memory()
+        win._bookmarks_panel.add_bookmark("Tower", 125.0e6, "AM", "", "5 kHz")
+        self.scanner = win._scanner_panel
+        self.scanner.set_scan_mode("bookmarks")
+        self.assertTrue(self.scanner.start_scan())
+        self.assertTrue(
+            self.frames(1.0, lambda: abs(win._current_frequency() - 125.0e6) < 1)
+        )
+        self.assertEqual(panel._bw_combo.currentText(), "5 kHz")  # (its own)
+
+    def test_a_scan_ending_where_it_started(self):
+        panel = self.win._control_panel
+        self.scanner.stop_scan(stay=False)
+        self.assertEqual(panel.get_demod_mode(), "FM")
+        self.assertEqual(panel.filter_memory(), self.memory)
+        panel._demod_combo.setCurrentText("AM")
+        self.assertEqual(panel._bw_combo.currentText(), "15 kHz")
+        self.win.close()
+        saved = json.loads(self.store.values["audio/mode_filters"])
+        self.assertEqual(saved["AM"], {"width": "15 kHz"})
+
+    def test_a_scan_staying_on_the_bookmark(self):
+        """The bookmark's filter stays on (it is listened to), but AM still
+        remembers the width you chose."""
+        panel = self.win._control_panel
+        self.scanner.stop_scan(stay=True)
+        self.assertEqual(self.listening()[:2], (125.0e6, "AM"))
+        self.assertEqual(panel._bw_combo.currentText(), "5 kHz")
+        self.assertEqual(panel.filter_memory(), self.memory)
+
+    def test_a_width_chosen_by_hand_is_remembered_again_after_it(self):
+        panel = self.win._control_panel
+        self.scanner.stop_scan(stay=True)
+        panel._bw_combo.setCurrentText("8 kHz")
+        self.assertEqual(panel.filter_memory()["AM"], {"width": "8 kHz"})
 
 
 if __name__ == "__main__":  # pragma: no cover

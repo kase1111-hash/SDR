@@ -57,14 +57,16 @@ class WindowScannerHost(ScannerHost):
     # ---- tuning ----------------------------------------------------------- #
     def _quietly(self, tune) -> bool:
         """Tune without the status-bar messages and saved settings that a
-        mode change brings (a memory scan changes modes all the time)."""
+        mode change brings (a memory scan changes modes all the time), and
+        without the scan's filters becoming the widths each mode remembers."""
         win = self._win
-        restoring = win._restoring
-        win._restoring = True
+        panel = win._control_panel
+        restoring, remembering = win._restoring, panel.remember_filters
+        win._restoring, panel.remember_filters = True, False
         try:
             return bool(tune())
         finally:
-            win._restoring = restoring
+            win._restoring, panel.remember_filters = restoring, remembering
 
     def _after_tune(self) -> None:
         win = self._win

@@ -415,6 +415,20 @@ class TestGainMemory(_DeviceCase):
         self.win._persist_state()
         self.assertLessEqual(self.store.values["gain_db"], 50.0)
 
+    def test_a_hackrf_leaves_the_rf_gain_sliders_db_alone(self):
+        """(Review) With a HackRF connected the hidden RF gain slider was
+        read on the LNA's steps: the demo's 20 dB was saved as gain_db 40,
+        and came back as 40 dB on the next start."""
+        self.panel.set_agc_enabled(False)
+        self.win.set_gain(20)  # the demo device
+        self.hackrf()
+        self.assertEqual(self.panel.slider_gain_db(), 20.0)
+        self.win._persist_state()
+        self.assertEqual(self.store.values["gain_db"], 20.0)
+        dev = self.rtl()  # back on a slider: the nearest of its steps
+        self.assertFalse(self.visible(self.panel._lna_slider.parentWidget()))
+        self.assertIn(self.panel.slider_gain_db(), dev.get_tuner_gains())
+
 
 # --------------------------------------------------------------------------- #
 # Sample rate, live

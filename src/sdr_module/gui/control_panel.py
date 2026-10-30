@@ -866,6 +866,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         # device says) and the sample rate choices shown (to skip refilling
         # them).
         self._gain_model: GainModel = DEFAULT_GAIN_MODEL
+        # The dB of each RF gain slider position (a HackRF hides the slider
+        # and leaves it on the steps it had).
+        self._slider_steps: Tuple[float, ...] = DEFAULT_GAIN_MODEL.steps
         self._auto_gain_db: Optional[float] = None
         self._rate_choices: Tuple = ()
         self._current_rate = 0.0
@@ -1555,7 +1558,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
     def _step_db(self, index: int) -> float:
         """The gain (dB) of a step of the RF gain slider."""
-        steps = self._gain_model.steps
+        steps = self._slider_steps
         if not steps:
             return float(index)
         return float(steps[max(0, min(len(steps) - 1, int(index)))])
@@ -1672,7 +1675,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         as the new steps allow. ``locked``: why the gain can't be set (a
         recording playing back), shown on the disabled controls. Nothing is
         emitted: the window applies the gain to the device itself."""
-        old_db = self.gain_db() if self._gain_model.kind != "hackrf" else None
+        old_db = self.slider_gain_db()
         changed = model != self._gain_model
         self._gain_model = model
         hackrf = model.kind == "hackrf"
@@ -1689,8 +1692,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             slider.blockSignals(True)
             slider.setRange(0, max(0, len(model.steps) - 1))
             slider.setPageStep(max(1, len(model.steps) // 10))
-            if old_db is not None:
-                slider.setValue(model.nearest_index(old_db))
+            self._slider_steps = tuple(model.steps)
+            slider.setValue(model.nearest_index(old_db))
             slider.blockSignals(False)
         if not model.agc and self._agc_check.isChecked():
             self.set_agc_silently(False)

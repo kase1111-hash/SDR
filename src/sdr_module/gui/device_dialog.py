@@ -817,6 +817,22 @@ _DEMO_CTCSS_DEVIATION_HZ = 600.0  # 12 % of 5 kHz, as repeaters send it
 _DEMO_SIGNALS += ((145.29e6, "rpt", -44.0, (12.0, 8.0)),)
 # --- end T4 ---
 
+# --- SSTV demo (T3): a test card on the ISS SSTV downlink ------------------ #
+# Robot 36 on 145.800 MHz NBFM, every _SSTV_PERIOD_S seconds (the signal
+# times itself, see MockDevice._add_sstv). Appended, so the signals above
+# keep their seeds.
+_SSTV_HZ = 145.8e6
+_SSTV_MODE = "Robot 36"
+_SSTV_LEVEL_DB = -46.0
+_SSTV_PERIOD_S = 75.0  # one image (about 37 s) every 75 s
+_SSTV_FIRST_S = 8.0  # the first one starts this far into the demo
+_SSTV_DEVIATION_HZ = 3.0e3  # peak FM deviation of the SSTV audio
+_SSTV_LOOP_HZ = 24e3  # FM phase of the transmission, stored at about this rate
+_SSTV_TAIL_S = 0.2  # carrier after the last line
+_SSTV_CACHE: Dict[float, Tuple[Any, int]] = {}
+_DEMO_SIGNALS = _DEMO_SIGNALS + ((_SSTV_HZ, "sstv", _SSTV_LEVEL_DB, None),)
+# --- end SSTV demo ----------------------------------------------------------- #
+
 # Morse keying for the CW beacon ("VVV DE SDR"): 1 = key down, one dit each.
 _MORSE = {"V": "...-", "D": "-..", "E": ".", "S": "...", "R": ".-."}
 
@@ -1172,6 +1188,39 @@ def _loops(kind: str, seed: int, rate: float):
                 _LOOP_CACHE.pop(next(iter(_LOOP_CACHE)))
             _LOOP_CACHE[key] = loops
     return loops
+
+
+def _sstv_transmission(rate: float) -> Tuple[Any, int]:
+    """``(FM phase loop, length in samples)`` of one SSTV demo transmission
+    at the device ``rate`` (built once per rate: about 0.1 s and 3.6 MB).
+
+    The test card is encoded at the loop rate (an exact fraction of the
+    device rate, so its timing is exact) with its VIS header, and its FM
+    phase is stored like the other demo loops. Built outside the lock the
+    other loops share (the scanner reads from its own thread).
+    """
+    key = float(rate)
+    with _LOOP_LOCK:
+        cached = _SSTV_CACHE.get(key)
+    if cached is not None:
+        return cached
+    from ..ham.sstv import find_mode
+    from ..ham.sstv_encoder import encode_sstv, sstv_test_card
+
+    factor = max(1, int(round(rate / _SSTV_LOOP_HZ)))
+    loop_rate = rate / factor
+    spec = find_mode(_SSTV_MODE)
+    card = sstv_test_card(spec.width, spec.height, "SDR MODULE")
+    audio = encode_sstv(card, spec, loop_rate).astype(np.float64)
+    tail = int(_SSTV_TAIL_S * loop_rate)
+    audio = np.concatenate((audio, np.zeros(tail)))
+    phase = (2 * np.pi * _SSTV_DEVIATION_HZ / loop_rate) * np.cumsum(audio)
+    length = (len(audio) - tail // 2) * factor
+    cached = (_Loop(phase, factor), length)
+    with _LOOP_LOCK:
+        _SSTV_CACHE.clear()  # one device rate at a time
+        _SSTV_CACHE[key] = cached
+    return cached
 
 
 # --------------------------------------------------------------------------- #
@@ -1541,7 +1590,10 @@ class MockDevice:
     The strongest station, 100.1 MHz, broadcasts a looping tune in stereo
     FM with the usual 75 us pre-emphasis, so listening to it in FM mode
     (with the receiver's matching de-emphasis) plays music; the others carry
-    tones, voice-like modulation, keyed CW or data bursts. On 1090 MHz an
+    tones, voice-like modulation, keyed CW or data bursts. On 145.800 MHz
+    (the ISS SSTV downlink) a Robot 36 test card is sent in NBFM every 75
+    seconds, the first 8 seconds into the demo, for the SSTV decoder. On
+    1090 MHz an
     airliner's transponder sends real ADS-B frames a few times a second
     (KLM1023, ICAO 4840D6: identification, position, velocity and a squawk
     reply) that the ADS-B decoder decodes, among weaker replies from other
@@ -1777,6 +1829,9 @@ class MockDevice:
         for the same samples.
         """
         n = len(out)
+        if kind == "sstv":
+            self._add_sstv(out, offset, amp, rate, pos)
+            return
         if kind == "cw_steady":
             out += self._carrier(offset, amp, rate, pos, n)
             return
@@ -1829,6 +1884,27 @@ class MockDevice:
         np.sin(phase, out=phase)
         phase *= amp
         out.imag += phase
+
+    def _add_sstv(self, out, offset, amp, rate, pos) -> None:
+        """The SSTV demo: one transmission every _SSTV_PERIOD_S seconds,
+        from _SSTV_FIRST_S into the stream (silent in between)."""
+        loop, length = _sstv_transmission(rate)
+        period = int(round(_SSTV_PERIOD_S * rate))
+        first = int(round(_SSTV_FIRST_S * rate))
+        n = len(out)
+        done = 0
+        while done < n:
+            into = (pos + done - first) % period
+            if into >= length:  # between transmissions
+                done += min(n - done, period - into)
+                continue
+            count = min(n - done, length - into)
+            phase = self._phase(offset, rate, pos + done, count)
+            phase += loop.read(into, count)
+            part = out[done : done + count]
+            part.real += amp * np.cos(phase)
+            part.imag += amp * np.sin(phase)
+            done += count
 
     def _stereo_terms(self, rate: float, pos: int, n: int):
         """Broadcast FM pilot + RDS phase and sin(2 theta), theta the pilot's

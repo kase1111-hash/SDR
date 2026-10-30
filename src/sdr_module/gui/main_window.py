@@ -195,6 +195,9 @@ def _plain(label: str) -> str:
 DISPLAY_BLOCK = 2048
 # Equivalent noise bandwidth of the Hann window, in FFT bins.
 _HANN_ENBW_BINS = 1.5
+# Noise bandwidth of the channel filter relative to the channel width (its
+# transition band, to 1.25x the edge, lets a little more noise through).
+_CHANNEL_NOISE_WIDTH = 1.1
 _DEFAULT_SAMPLE_RATE = 2.4e6
 _AUDIBLE_MODES = ("AM", "FM", "USB", "LSB", "CW")
 _AUDIO_RATE = 48000.0  # target rate of the demodulated audio
@@ -250,7 +253,7 @@ try:
     from ..ham.gui.qrp_panel import QRPPanel
     from ..ham.gui.radio_tuner import RadioTunerWidget
     from ..ham.gui.signal_meter_widget import SignalMeterPanel
-    from ..ham.gui.sstv_panel import SSTVPanel
+    from ..ham.gui.sstv_panel import ISS_FREQUENCY_HZ, SSTVPanel
 
     HAS_HAM_RADIO = True
 except ImportError:
@@ -644,6 +647,28 @@ def _noise_bandwidth(taps: Optional[np.ndarray], rate: float) -> float:
     if gain <= 0.0:
         return float(rate)
     return float(rate * np.sum(np.abs(taps) ** 2) / gain**2)
+
+
+def _noise_per_bin(power_db: np.ndarray) -> float:
+    """Mean noise power per bin (dB) of spectrum bins that are mostly noise.
+
+    White-noise bins are exponentially distributed. Bins above three times
+    the noise mean count as signals and are left out; the median of the
+    rest, corrected for that cut (``1 - exp(-x) = (1 - exp(-3)) / 2``),
+    gives the mean. Two rounds from the plain median: a band where
+    stations fill a third of the bins reads about 0.1 dB above an empty
+    one (the plain median read ~2.5 dB high).
+    """
+    linear = 10.0 ** (np.asarray(power_db, dtype=np.float64) / 10.0)
+    cut = 3.0
+    median_of_cut = -np.log(1.0 - 0.5 * (1.0 - np.exp(-cut)))
+    mean = float(np.median(linear)) / np.log(2.0)
+    for _ in range(2):
+        kept = linear[linear < cut * mean]
+        if len(kept) < 16:
+            break
+        mean = float(np.median(kept)) / median_of_cut
+    return 10.0 * float(np.log10(mean + 1e-30))
 
 
 class _ReceiverChain:
@@ -2422,6 +2447,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "Ctrl+R",
                 "Open the broadcast radio tuner window",
             )
+            self._add_action(
+                tools_menu,
+                "SSTV: Tune to &ISS (145.800 MHz)",
+                self._tune_iss_from_menu,
+                tip="Tune to the ISS SSTV downlink (FM, 5 kHz deviation), start "
+                "receiving and listen for images in the SSTV panel",
+            )
         tools_menu.addSeparator()
         self._add_action(
             tools_menu,
@@ -2687,6 +2719,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._callsign_panel.callsign_changed.connect(self._save_ham_id_settings)
             self._callsign_panel.settings_changed.connect(self._save_ham_id_settings)
             self._sstv_panel.start_requested.connect(self._on_sstv_start_requested)
+            self._connect_sstv_and_smeter()
         # Click-to-tune from spectrum and waterfall. set_frequency keeps the
         # control panel, toolbar readout and plot axes in step. The mouse
         # wheel over them tunes by the step.
@@ -3003,6 +3036,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         # The Decoder panel's hint says whether it is listening.
         self._decoder_panel.set_receiving(running)
+        if HAS_HAM_RADIO:
+            self._sync_signal_meter(running, has_device)
 
         if self._recording:
             self._update_rec_clock()
@@ -3467,6 +3502,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tuner = self._radio_tuner
         if tuner is not None and tuner.isVisible():
             tuner.set_frequency(freq_hz)  # does not emit frequency_changed
+        self._reset_signal_meter_peak()
 
         logger.debug(f"Frequency changed to {freq_hz/1e6:.3f} MHz")
 
@@ -3928,6 +3964,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._device.set_gain(gain_db)
             except Exception as e:
                 self._show_status_error(f"Could not set the gain: {e}")
+        if HAS_HAM_RADIO:
+            self._signal_meter_panel.set_gain(self._signal_meter_gain())
         logger.debug(f"Gain changed to {gain_db:.1f} dB")
 
     def _apply_controls_to_device(self) -> str:
@@ -3972,6 +4010,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._rx_chain = None  # rebuilt for the new channel
         self._update_passband()
         self._ensure_vfo_fits()  # a wider channel may need the LO centered
+        self._reset_signal_meter_peak()
         if self._info_panel.isVisible():
             self._refresh_info_panel()
         logger.debug(f"Bandwidth changed to {bw_hz/1e3:.1f} kHz")
@@ -4187,6 +4226,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Handle AGC toggle."""
         self._agc_enabled = bool(enabled)
         self._settings.set("agc_enabled", self._agc_enabled)
+        if HAS_HAM_RADIO:
+            self._signal_meter_panel.set_gain(self._signal_meter_gain())
         if self._device and hasattr(self._device, "set_gain_mode"):
             try:
                 # set_gain_mode(auto: bool). Passing the strings "auto"/"manual"
@@ -4211,6 +4252,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._show_status_message(f"{mode}: {self._filter_summary()}", None, 3000)
         if mode != "FM" and self._sstv_listening():
             self._hint_sstv_needs_fm()
+        if HAS_HAM_RADIO:
+            self._signal_meter_panel.set_demod_mode(mode)
+            self._reset_signal_meter_peak()
+            self._sstv_panel.show_fm_needed(
+                self._mode_text(mode)
+                if mode != "FM" and self._sstv_listening()
+                else None
+            )
         if self._info_panel.isVisible():
             self._refresh_info_panel()
 
@@ -5022,7 +5071,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         if HAS_HAM_RADIO and len(channel):
             try:
-                self._signal_meter_panel.update_samples(channel)
+                self._signal_meter_panel.update_samples(
+                    channel, self._channel_noise_dbfs(power, chain)
+                )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("S-meter update failed: %s", exc)
 
@@ -5103,6 +5154,42 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if last < first:
             first = last = min(max(center + int(round(offset / bin_hz)), 0), n - 1)
         return float(np.max(power_db[first : last + 1]))
+
+    def _channel_noise_dbfs(
+        self, power_db: np.ndarray, chain: "_ReceiverChain"
+    ) -> Optional[float]:
+        """Noise power in the tuned channel (dBFS), for the S-meter's SNR.
+
+        Measured from the spectrum bins outside the channel (and away from
+        the span's edges, where the anti-alias filter rolls off) by
+        :func:`_noise_per_bin`, robust to the stations among them. A
+        Hann-windowed bin of white noise holds ``ENBW / N`` of its power, so
+        the noise in a channel ``width`` wide is ``bin * N / ENBW * width /
+        rate``.
+        """
+        n = len(power_db)
+        if n < 64:
+            return None
+        rate = chain.rate
+        low, high = chain.band_edges()
+        offset = float(getattr(self, "_vfo_offset_hz", lambda: 0.0)())
+        key = (n, rate, low, high, offset)
+        cached = getattr(self, "_noise_mask", None)
+        if cached is None or cached[0] != key:
+            bin_hz = rate / n
+            freqs = (np.arange(n) - n // 2) * bin_hz  # fftshift order
+            guard = max(0.25 * (high - low), 2.0 * bin_hz)
+            outside = (freqs < offset + low - guard) | (freqs > offset + high + guard)
+            mask = np.nonzero(outside & (np.abs(freqs) <= 0.4 * rate))[0]
+            width = max(high - low, bin_hz)
+            scale = 10.0 * float(
+                np.log10(n / _HANN_ENBW_BINS * _CHANNEL_NOISE_WIDTH * width / rate)
+            )
+            cached = self._noise_mask = (key, mask, scale)
+        _key, mask, scale = cached
+        if len(mask) < 32:
+            return None
+        return _noise_per_bin(power_db[mask]) + scale
 
     def _update_passband(self) -> None:
         """Mark the demodulated channel on the spectrum and the waterfall:
@@ -5186,13 +5273,143 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _on_sstv_start_requested(self) -> None:
         """Tell the user what the SSTV decoder still needs to get audio."""
-        if self._control_panel._demod_combo.currentText() != "FM":
+        mode = self._control_panel._demod_combo.currentText()
+        self._sstv_panel.show_fm_needed(None if mode == "FM" else self._mode_text(mode))
+        if mode != "FM":
             self._hint_sstv_needs_fm()
         elif not (self._is_running and self._device is not None):
             self._show_status_message(
                 "SSTV decoder ready. Start receiving (Space) to feed it audio.",
                 "info",
                 6000,
+            )
+
+    # -- SSTV and S-meter hooks ------------------------------------------
+
+    def _connect_sstv_and_smeter(self) -> None:
+        sstv = self._sstv_panel
+        sstv.tune_iss_requested.connect(self._on_sstv_tune_iss)
+        sstv.switch_to_fm_requested.connect(self._on_sstv_switch_to_fm)
+        sstv.mode_choice_changed.connect(
+            lambda text: self._save_setting("ham/sstv_mode", text)
+        )
+        meter = self._signal_meter_panel
+        meter.set_frequency_source(self._current_frequency)
+        meter.set_demod_mode(self._control_panel._demod_combo.currentText())
+        meter.report_copied.connect(
+            lambda text: self._show_status_message(
+                text, "success" if text.startswith("Copied") else "info", 4000
+            )
+        )
+        meter.calibration_changed.connect(self._save_signal_meter_calibration)
+        self._smeter_device_key: Optional[str] = None
+
+    def _restore_sstv_and_smeter(self) -> None:
+        if not HAS_HAM_RADIO:
+            return
+        choice = self._settings.get_str("ham/sstv_mode", "")
+        if choice:
+            self._sstv_panel.set_mode_choice(choice)
+
+    def _on_sstv_tune_iss(self) -> None:
+        """Tune to ISS: 145.800 MHz, FM with narrowband deviation, then start
+        the receiver and the SSTV decoder."""
+        self.set_frequency(ISS_FREQUENCY_HZ)
+        self._set_demod_mode("FM", "5 kHz", self._bandwidth_for_mode("FM", "5 kHz"))
+        if self._device is not None and not self._is_running:
+            self._start_acquisition()
+        self._sstv_panel.start_listening()
+        self._sstv_panel.show_fm_needed(None)
+        if self._device is None:
+            self._show_status_message(
+                "Tuned to 145.800 MHz FM. No receiver: Device > Use Demo Device "
+                "or Connect... to receive.",
+                "warning",
+                10000,
+            )
+        elif self._is_running:
+            self._show_status_message(
+                "Tuned to the ISS SSTV downlink (145.800 MHz FM). Listening "
+                "for images.",
+                "success",
+                6000,
+            )
+
+    def _tune_iss_from_menu(self) -> None:
+        """Tools > SSTV: Tune to ISS: the SSTV panel's button, from the menu."""
+        self._show_panel("sstv")
+        self._on_sstv_tune_iss()
+
+    def _on_sstv_switch_to_fm(self) -> None:
+        """The SSTV panel's "Switch to FM": narrowband FM, as SSTV is sent."""
+        self._set_demod_mode("FM", "5 kHz", self._bandwidth_for_mode("FM", "5 kHz"))
+        self._sstv_panel.show_fm_needed(None)
+        self._show_status_message("Demodulation set to FM for SSTV.", "info", 3000)
+
+    def _reset_signal_meter_peak(self) -> None:
+        """A retune or a new mode or channel: the S-meter starts afresh."""
+        if HAS_HAM_RADIO and hasattr(self, "_signal_meter_panel"):
+            self._signal_meter_panel.reset_peak()
+
+    def _signal_meter_gain(self) -> Optional[float]:
+        """The RF gain for the S-meter's calibration (None under AGC: the
+        gain the tuner picks isn't known)."""
+        if self._agc_enabled:
+            return None
+        return float(self._control_panel._gain_slider.value())
+
+    def _smeter_device_type(self) -> str:
+        """Key the S-meter calibration is stored under: one per device type."""
+        if self._device is None:
+            return ""
+        name = type(self._device).__name__
+        if self._demo_mode or name == "MockDevice":
+            return "demo"
+        return name.lower()
+
+    def _sync_signal_meter(self, running: bool, has_device: bool) -> None:
+        """Receiver state and the device type's calibration to the S-meter."""
+        meter = self._signal_meter_panel
+        meter.set_receiving(running, has_device)
+        key = self._smeter_device_type()
+        if key and key != getattr(self, "_smeter_device_key", None):
+            self._smeter_device_key = key
+            offset, gain = None, None
+            raw = self._settings.get_str(f"ham/smeter_cal/{key}", "")
+            if raw:
+                try:
+                    saved = json.loads(raw)
+                    offset = float(saved["offset_db"])
+                    gain = saved.get("gain_db")
+                    gain = None if gain is None else float(gain)
+                except (ValueError, KeyError, TypeError):
+                    logger.warning("Ignoring unreadable S-meter calibration")
+                    offset, gain = None, None
+            meter.set_calibration(offset, gain)
+            meter.set_gain(self._signal_meter_gain())
+
+    def _save_signal_meter_calibration(self, offset: Any, gain: Any) -> None:
+        key = self._smeter_device_type()
+        if not key:
+            self._show_status_message(
+                "Connect a device to save the S-meter calibration for it.",
+                "warning",
+                6000,
+            )
+            return
+        value = (
+            ""
+            if offset is None
+            else json.dumps({"offset_db": float(offset), "gain_db": gain})
+        )
+        self._settings.set(f"ham/smeter_cal/{key}", value)
+        if offset is None:
+            self._show_status_message("S-meter calibration cleared.", "info", 3000)
+        else:
+            self._show_status_message(
+                f"S-meter calibrated for this device type ({float(offset):+.1f} dB).",
+                "success",
+                4000,
             )
 
     def _route_audio(self, channel: np.ndarray, level_db: float) -> None:
@@ -6402,6 +6619,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._restore_ham_id_settings()
             self._restore_waterfall_settings()
             self._load_step_for_mode()  # the restored mode's tuning step
+            self._restore_sstv_and_smeter()
         finally:
             self._restoring = False
 

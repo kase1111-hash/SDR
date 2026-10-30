@@ -199,7 +199,10 @@ class TestVfoInsideTheSpan(_TuningCase):
         fed = []
         meter = getattr(self.win, "_signal_meter_panel", None)
         if meter is not None:
-            meter.update_samples = lambda channel: fed.append(np.asarray(channel))
+            # (The window also passes the channel's noise level.)
+            meter.update_samples = lambda channel, *_noise: fed.append(
+                np.asarray(channel)
+            )
 
         def listen(freq):
             fed.clear()

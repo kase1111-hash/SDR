@@ -850,6 +850,10 @@ class TestEveryMenuActionAndThemeSwitching(unittest.TestCase):
         for timer in (win._display_timer, win._status_timer, win._hotplug_timer):
             timer.stop()
         win._persist_state = lambda: None
+        # Record I/Q arms a recording and later actions start the receiver
+        # (e.g. Tools > SSTV: Tune to ISS), so the window may hold samples:
+        # closing it must not stop at the Unsaved Recording prompt.
+        win._confirm_discard_recording = lambda *_args: True
         win.resize(1280, 720)
         win.show()
 

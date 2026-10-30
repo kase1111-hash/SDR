@@ -31,21 +31,23 @@ This system is designed for a **dual-SDR setup** using:
 
 | Feature | Description |
 |---------|-------------|
-| Real-time Spectrum Display | FFT-based frequency spectrum visualization |
-| Waterfall Display | Time-frequency representation showing signal history |
-| Time Domain View | Amplitude vs. time waveform display |
-| Constellation Diagram | I/Q signal visualization for modulation analysis |
-| Signal Strength Meter | Real-time RSSI/signal level indicator |
+| Real-time Spectrum Display | FFT of every sample of each display frame (1024–32768 points; Hann, Blackman-Harris or Flat-top window) in dBFS, with peak and min hold, averaging, an automatic or fixed vertical range, zoom (×2–×16) and bookmark labels |
+| Waterfall Display | Signal history from live to 1 hour; each row keeps the frequency it was received on, so old rows stay true after a retune; drag to measure bandwidth, duration, peak and SNR |
+| Time Domain View | Signal tab → Scope: the tuned channel's magnitude, I and Q, phase or instantaneous frequency over 1, 5, 20 or 100 ms |
+| Constellation Diagram | Signal tab → Scope → Constellation, with a BPSK, QPSK, 8PSK or 16QAM overlay and the EVM (the points are the channel's samples, not symbol-timed) |
+| Signal Strength Meter | The toolbar's LEVEL meter (channel power in dBFS, noise floor, squelch state) and Ham → S-Meter (S-units, RST, SNR) |
+| Signal List and Bursts | Signal tab → Signals (the signals in view) and Bursts (transmissions that come and go, on/off keyed ones taken apart into pulses and bits) |
 
 ### 2.2 Frequency Tuning & Analysis
 
 | Feature | Description |
 |---------|-------------|
-| Center Frequency Selection | Ability to tune to specific frequencies |
-| Frequency Locking | "Zero in" on detected signals |
-| Bandwidth Selection | Adjustable receive bandwidth |
-| Automatic Frequency Control (AFC) | Automatic drift compensation |
-| Frequency Scanning | Sweep across frequency ranges to detect activity |
+| Center Frequency Selection | The tuned frequency moves within the span and the receiver retunes only near its edges (Radio → Keep Tuned Frequency Centered retunes every time). Type a frequency with its unit (`Ctrl+L`), step by the tuning step with the arrow keys or the mouse wheel, scroll a digit of FREQ, go back and forward through the frequencies tuned. A frequency the device can't tune is refused with the reason |
+| Frequency Locking | A click on the spectrum or waterfall lands on the signal's peak or center; Signal → Identify → Apply Mode centers the tuned frequency on the signal |
+| Bandwidth Selection | A filter per mode: USB/LSB 1.8–3.6 kHz, CW 100 Hz–1 kHz, AM 5–15 kHz, FM 12.5–200 kHz, None (I/Q) 10 kHz–2.4 MHz; each mode remembers its own |
+| Automatic Frequency Control (AFC) | Radio → Track Signal (AFC): the tuned frequency follows a drifting narrow FM, AM or CW signal (not SSB, I/Q or broadcast FM) |
+| Frequency Scanning | The Scanner tab sweeps a band once or continuously, stops on signals, or scans the bookmarks, while you keep listening; `sdr-scan scan` sweeps a connected RTL-SDR or HackRF One (or a recording) from the command line |
+| Signal Identification | Signal → Identify (`Ctrl+I`): what the signal is, how sure, and the mode, deviation and filter to listen with |
 
 ---
 
@@ -93,15 +95,26 @@ This system is designed for a **dual-SDR setup** using:
 
 ### 4.2 Supported Protocols
 
+Decoded live in the Decoder tab, from a whole file with File → Decode
+Recording, and from the command line with `sdr-scan decode` (`pocsag`,
+`flex`, `ax25`/`aprs`, `adsb`, `acars`, `rds`, `cw`). Each decoder picks out
+its own channel at the tuned frequency, whatever the Mode and Filter are
+(ADS-B reads the pulses across the whole span).
+
 | Category | Protocols | Status |
 |----------|-----------|--------|
-| ISM Band | 433 MHz, 868 MHz, 915 MHz devices | Implemented |
-| Wireless Sensors | Weather stations, temperature sensors | Implemented (via OOK/FSK decoding) |
-| Remote Controls | Garage doors, car key fobs | Implemented (via OOK/ASK decoding) |
-| Paging | POCSAG, FLEX | Implemented |
-| Amateur Radio | AX.25, APRS | Implemented |
-| Aviation | ADS-B, ACARS | Implemented |
-| Broadcast | RDS (FM Radio Data System) | Implemented |
+| Paging | POCSAG (512, 1200 and 2400 baud, either polarity), FLEX (1600 bps) | Implemented. FLEX at 3200 and 6400 bps is recognized and reported as not supported |
+| Amateur Radio | AX.25/APRS (1200 baud AFSK) | Implemented; APRS positions, messages, status and objects are read |
+| Aviation | ADS-B (1090 MHz), ACARS (2400 bit/s MSK on AM) | Implemented. ADS-B needs at least 2 MS/s (2.4 MS/s or more recommended); the Aircraft tab lists one row per aircraft |
+| Broadcast | RDS (FM Radio Data System) | Implemented: station name, RadioText, program type, clock, traffic flags, alternative frequencies; the name also shows beside FREQ (Radio → RDS Station Names) and on the radio tuner |
+| Morse Code | CW (Morse), 5–60 WPM | Implemented: the text and its speed in the Decoder's Text tab; tune the carrier to within about 200 Hz, as CW mode hears it |
+| Slow-Scan TV | SSTV (Robot, Martin, Scottie, PD, Wraase SC2-180) | Implemented in Ham → SSTV (Section 11.6) |
+| ISM Band (433, 868, 915 MHz) | Sensors, remote controls and other on/off keyed (OOK) or FSK devices | Analyzed, not decoded: Signal tab → Bursts and Identify give the modulation (pulse width, pulse position or PCM), the pulse and gap widths and the bits in hex, laid out like `rtl_433 -A` with an rtl_433 flex decoder line. No device is decoded by brand or model (no temperatures, no button names) |
+| Text Modes | CW, RTTY, PSK31, ASCII FSK | Sent with Tools → Transmit Text (HackRF One, or saved as audio or I/Q) and written to a file by `sdr-scan encode`. RTTY, PSK31 and ASCII FSK are not decoded; CW is (Morse Code above) |
+
+Decoder → Protocol: Auto picks the protocol from where you are tuned: ADS-B
+on 1090 MHz, APRS on 144.390 / 144.800 MHz, ACARS on 129–137 MHz, POCSAG on
+152–159 MHz, FLEX on 929–932 MHz, RDS on broadcast FM, Morse code in CW mode.
 
 ---
 
@@ -122,18 +135,24 @@ This system is designed for a **dual-SDR setup** using:
 
 | Feature | Description |
 |---------|-------------|
-| I/Q Recording | Raw baseband signal capture |
-| Audio Recording | Demodulated audio capture |
-| Playback | Replay recorded I/Q files (Python API; the GUI imports a file only to convert its format) |
-| File Formats | WAV, raw I/Q, SigMF |
+| I/Q Recording | Radio → Record I/Q (`Ctrl+Shift+R`), or Record in the toolbar or the Recording group: the raw samples, kept in a temporary file until saved (or saved automatically to the recordings folder), with pause and resume. A recording holds one sample rate (it can't be changed while recording) and is labelled with the center frequency it started on (a retune while recording says so); it stops when less than 500 MB is free |
+| Audio Recording | Radio → Record Audio (`Ctrl+Shift+A`): what you hear as a 48 kHz 16-bit WAV, silent while the squelch is closed so the file keeps time |
+| Playback | File → Open Recording (`Ctrl+O`) plays a file through the receiver (spectrum, waterfall, audio, decoders, both recorders) in real time, read from disk as it plays, with a playback strip (position, Loop, 0.5x–4x; audio at 1x only). Tune anywhere inside the recording's span |
+| Convert | File → Convert Recording (`Ctrl+Shift+O`) loads a file in the background and saves it in another format |
+| Decode a Recording | File → Decode Recording runs any of the seven live decoders over a whole file, faster than real time; `sdr-scan decode` does the same from the command line |
+| Inspect a Recording | File → Recording Info (format, rate, frequency, span, length, whether the samples look right) and File → Find Signals in Recording (the signals in it and when they were heard) |
+| File Formats | Saved as SigMF, cf32, cs16, 16-bit I/Q WAV, raw float32, cu8 (rtl_sdr) or cs8 (hackrf_transfer); opened from all of these and cf64. Files without a header (.bin, .iq, .dat, .raw ...) get their format, rate and frequency from the Import Options dialog, prefilled from the extension, the data and the file name. Raw and WAV files are saved with a SigMF metadata file beside them (`take.cf32.sigmf-meta`), so their rate and frequency are kept |
+| Limits | A WAV file holds at most 4 GiB (about 7 minutes at 2.4 MS/s). One-channel (audio) WAV files, 24- and 32-bit WAV files and big-endian or real-valued SigMF data can't be played |
 
 ### 5.3 Demodulation
 
 | Feature | Description |
 |---------|-------------|
-| Multi-mode Demod | Support for various modulation schemes |
-| Audio Output | Speaker/headphone output for audio signals |
-| Data Output | Decoded digital data stream |
+| Multi-mode Demod | None (I/Q, no audio), AM, FM, USB, LSB and CW. FM is broadcast (75 kHz deviation, 75 µs de-emphasis) in 87.5–108 MHz and narrow (5 kHz) elsewhere, with 2.5, 12.5 and 25 kHz to choose; CW has a 400–1000 Hz pitch. In USB, LSB and CW the filter is the audio filter (USB at 2.7 kHz hears 200–2900 Hz) |
+| Squelch | Level squelch with Auto (7 dB above the channel's own noise); it opens at the threshold and closes only after 0.3 s at least 3 dB below it (0.5 s in CW). CTCSS tone squelch with the 50 standard tones (no DCS) |
+| Audio Processing | Noise reduction (Off, Light, Strong), audio AGC (AM, SSB, CW), DC blocking in FM, carrier and DC-spike rejection in SSB |
+| Audio Output | Mono, 48 kHz, to the output chosen in Tools → Preferences (the system default otherwise); Mute and volume in Radio → Audio. Broadcast stereo is not decoded (the radio tuner's STEREO lamp only shows that a pilot is received) |
+| Data Output | The Decoder tab's live decoders (CSV export), the RDS station name, SSTV pictures, and the Signal tab's identification and burst analysis |
 
 ---
 
@@ -191,8 +210,8 @@ This system is designed for a **dual-SDR setup** using:
 
 | Parameter | Specification |
 |-----------|---------------|
-| FFT Size | 1024 / 2048 / 4096 / 8192 / 16384 points (configurable) |
-| FFT Window Functions | Hamming, Hann, Blackman, Blackman-Harris, Flat-top |
+| FFT Size | 1024 / 2048 / 4096 / 8192 / 16384 / 32768 points (the display: spectrum ⋯ → FFT Size, 2048 by default) |
+| FFT Window Functions | Rectangular, Hann, Hamming, Blackman, Blackman-Harris, Flat-top (library); the display offers Hann, Blackman-Harris and Flat-top |
 | FFT Overlap | 0% - 75% (configurable) |
 | Averaging Modes | RMS, Peak Hold, Min Hold, Linear |
 | DC Offset Removal | Automatic DC spike suppression |
@@ -236,14 +255,22 @@ This system is designed for a **dual-SDR setup** using:
 
 ### 6.4 Dual-SDR Operation Modes
 
-| Mode | RTL-SDR | HackRF One | Use Case |
-|------|---------|------------|----------|
-| **Dual RX** | RX @ Freq A | RX @ Freq B | Monitor two bands simultaneously |
-| **Full Duplex** | RX @ Freq A | TX @ Freq B | Transceiver with simultaneous RX monitoring |
-| **TX + Monitor** | RX @ TX Freq | TX | Monitor own transmission quality |
-| **Wideband Scan** | Scan 0-1.7 GHz | Scan 1.7-6 GHz | Cover full spectrum faster |
-| **Backup RX** | Primary RX | Secondary RX | Redundancy / comparison |
-| **Signal Relay** | RX Input | TX Output | Receive-and-retransmit applications |
+The modes of the library's `DualSDRController` (`sdr_module.core.dual_sdr`),
+and what the GUI offers for each:
+
+| Mode | RTL-SDR | HackRF One | Use Case | Status |
+|------|---------|------------|----------|--------|
+| **Dual RX** | RX @ Freq A | RX @ Freq B | Monitor two bands at once, or compare two receivers on one | Implemented. GUI: Device → Second Receiver... (`Ctrl+Shift+N`) runs a second receiver window on any RTL-SDR or HackRF One the main window isn't using, or on a second demo device |
+| **Full Duplex** | RX @ Freq A | TX @ Freq B | Transceiver with simultaneous RX monitoring | Implemented. GUI: the second receiver keeps receiving while the main window's HackRF One transmits (the main window's own receiver pauses: the HackRF is half duplex) |
+| **TX + Monitor** | RX @ TX Freq | TX | Monitor own transmission quality | Implemented. GUI: Second Receiver → Transmit monitor → Monitor TX tunes it to the transmission in its mode; Follow transmissions does that for every transmission |
+| **Wideband Scan** | Scan 0-1.7 GHz | Scan 1.7-6 GHz | Cover full spectrum faster | **Not implemented**: `set_mode` refuses it (`NotImplementedError`). Scan with one device at a time: the Scanner tab, or `sdr-scan scan --device rtlsdr` and `--device hackrf` |
+| **Signal Relay** | RX Input | TX Output | Receive-and-retransmit applications | **Not implemented** (refused): retransmitting what is received needs checks the controller doesn't make |
+
+Without hardware, `DualSDRController.use_devices()` takes devices that are
+already open, and `sdr_module.devices.polled.PolledDevice` lets the demo
+device (`MockDevice`) stand in for either receiver. Full Duplex and TX +
+Monitor refuse a "HackRF" that can't transmit and leave the mode and the
+receiver's frequency as they were.
 
 ### 6.5 Dual-SDR Synchronization
 
@@ -339,6 +366,11 @@ Use RTL-SDR for receive while HackRF transmits.
 | SIGINT Training | Any | Test signal | Generate and capture signals |
 | Protocol Testing | Device RX Freq | Device TX Freq | Stimulate and monitor devices |
 
+> **Note**: Retransmitting what is received (the repeater and transponder
+> rows) needs the Signal Relay mode, which is not implemented (6.4). What the
+> app transmits today is a station ID or text from Tools → Transmit Text,
+> through the checks in 11.2.
+
 ### 7.3 Transmit Monitoring
 
 Monitor your own transmissions for quality assurance.
@@ -385,131 +417,358 @@ Combine devices to cover wider spectrum.
 ### 8.1 Main window
 
 ```
-+------------------------------------------------------------------+
-| File  Device  Radio  View  Tools  Help                           |
-| [Start] [Record] | [Audio] vol | FREQ 100.100 MHz | LEVEL dBFS   |
-+---------------------------------------+--------------------------+
-| spectrum                              | control panel (scrolls)  |
-|---------------------------------------|--------------------------|
-| waterfall                             | tabs: Decoder, Bookmarks,|
-|                                       |       Ham Radio, Info    |
-+---------------------------------------+--------------------------+
-| RUNNING  Demo Device  2.4 MS/s  messages...      REC 00:01:23    |
-+------------------------------------------------------------------+
++----------------------------------------------------------------------------+
+| File  Device  Radio  View  Tools  Help                                     |
+| [Start] [Record] (ON AIR) | FREQ 100.100 MHz SDR DEMO | LEVEL ==|- OPEN    |
+| MODE [FM] | FILTER [200 kHz] | STEP [100 kHz] | [Audio] --o-- volume       |
++--------------------------------------------+-------------------------------+
+| SPECTRUM           Peak hold  AVG  ...     | control panel (scrolls):      |
+| RBW 1.76 kHz                               |  Frequency, Presets,          |
+|                                            |  Demodulation, Audio,         |
+|--------------------------------------------|  Receiver, Recording          |
+| WATERFALL ?  Pause  HISTORY  COLORS  ...   |-------------------------------|
+|                                            | Decoder  Bookmarks  Ham       |
+|                                            | Scanner  Signal  Info    ^^   |
+| (playback strip while a recording plays)   |                               |
++--------------------------------------------+-------------------------------+
+| RUNNING  Demo Device  2.4 MS/s  messages...  REC 00:01:23  ADS-B · 37 msgs |
++----------------------------------------------------------------------------+
 ```
 
-The three splitters (plots | right column, spectrum / waterfall, control
-panel / tabs) are resizable; their sizes persist and View → Reset Layout
-restores the defaults. The minimum window size (1024 × 640) fits a
-1366 × 768 screen; the control panel and the tool tabs scroll instead of
-being crushed.
+The window first opens at 1400 × 900 (less on a smaller screen); its minimum,
+1024 × 640, fits a 1366 × 768 laptop. The three splitters (plots | right
+column, spectrum / waterfall, control panel / tool tabs) are resizable and
+remembered; View → Reset Layout restores them and shows both plots. The
+control panel and the tool tabs scroll instead of being crushed. View →
+Maximize Tool Tabs, the double-chevron button at the right of the tab bar or
+a double-click on any tab gives the tool tabs the whole right column
+(remembered; `Ctrl+L` brings the control panel back). The window title says
+where the receiver is: `● REC · 100.100 MHz FM — Demo Mode — SDR Module`.
 
 | Component | Description |
 |-----------|-------------|
-| Toolbar | Start/Stop; Record (red while recording); Audio on/off with a volume slider; FREQ readout (click it, or press `Ctrl+L`, to type a frequency); LEVEL readout: strongest signal inside the tuned channel in dBFS, green while above squelch |
-| Spectrum Analyzer | 2048-point Hann-windowed FFT in dBFS; peak hold (with Reset) and averaging (Off, 2–32 frames); hover readout; dashed tuned-frequency marker and a shaded band for the demodulated channel (passband); left-click to tune |
-| Waterfall | Newest line at the top with a time axis (pauses in reception drawn as separators). Header: Pause (`P`); History (Live, 1 min, 5 min, 15 min, 1 h; slower rows keep the per-bin maximum of their interval, and rows keep an exact cadence); LEVELS, a draggable color-scale legend in dBFS with Auto (floor 6 dB under the median-bin noise floor, ceiling 4 dB over the strongest signal, at least 30 dB apart, moving only on 3 dB changes); ⋯ menu. Hover readout: frequency, level, SNR over the noise floor, age. Left-click tunes; dragging measures a box (Δf, Δt, center, peak and SNR) that follows its rows as they scroll (`Esc` clears it). Right-click: tune/bookmark/copy the frequency, measurement actions, pause, history, levels (Auto, 60–120 dB presets, fit once), colors (Turbo, Viridis, Plasma, Grayscale, Classic), Clear History, Save Image (PNG with axes). Its frequency axis lines up with the spectrum's, and it draws its own when the spectrum is hidden. Colors, history and levels persist |
-| Control Panel | **Frequency** (entry with Hz/kHz/MHz/GHz units, −1M … +1M step buttons); **Presets** (category and preset, with listen/transmit status, Apply Preset); **Demodulation** (None (I/Q), AM, FM, USB, LSB, CW; FM deviation; squelch); **Receiver** (RF gain, automatic gain (AGC), channel bandwidth); **Recording** (format, Record/Pause, status and elapsed time); **License Profile** (class, TX privileges, dummy-load reminder) |
-| Decoder tab | Live protocol decoder: POCSAG, FLEX, AX.25/APRS, ADS-B, ACARS (RDS is listed but needs 57 kHz subcarrier recovery, so it cannot be decoded live yet); Messages table, plain-text Log and Stats; Clear and Export (CSV); a one-click "Tune to …" for protocols with a well-known channel (ADS-B, APRS, ACARS) |
-| Bookmarks tab | Saved channels with name, frequency and mode; Add (name and frequency), Tune, Rename, Remove; double-click or `Enter` tunes (restoring the saved mode), `F2` renames, `Delete` removes; CSV button to import/export CHIRP-compatible CSV |
-| Ham Radio tab | Sub-tabs **S-Meter** (analog meter of the tuned channel, RST and verbal report, peak hold), **Ham ID** (callsign, CW speed and tone, preview, Send ID Now; transmits with a HackRF One only), **SSTV** (decoder fed with FM audio, live image, history, auto-save) and **QRP** (TX power, amplifier chain, power limit, miles per watt) |
-| Info tab | Live summary: device, state, center frequency, sample rate, span, RBW, demodulation, bandwidth, gain, squelch, channel level; audio, recording and buffer state; version, Qt/PyQt and theme; quick tips |
-| Status Bar | State badge (NO DEVICE / STOPPED / RUNNING), device name and sample rate; short feedback messages colored by tone (info, success, warning, error) that clear themselves; while recording, a REC badge with the elapsed time (REC ARMED until the receiver runs, PAUSED while paused) plus recorded size and free disk space |
+| Toolbar | **Start/Stop** (Play/Pause while a recording plays); **Record** (red while recording; it records I/Q or audio, as the Recording group's Record choice says); **ON AIR** (red, only while transmitting; click to stop); **FREQ**, the tuned frequency in a fixed width (click it or press `Ctrl+L` to type one; scroll over a digit to tune that digit; its tooltip gives the band plan there), with the station's RDS name beside it while a broadcast station sends one (hover for the RadioText, program type and PI code); **LEVEL**, a meter of the tuned channel's power in dBFS with a tick at the noise floor, the squelch threshold as a marker (press or drag on the bar to set it) and a lamp: OPEN, SQL (squelched), TONE (a signal without the chosen CTCSS tone), OFF (squelch off) or I/Q (no audio) |
+| Receiver bar | The second toolbar row: **MODE** and **FILTER** (the same controls as the control panel's Mode and Filter); **STEP** (10 Hz … 1 MHz, remembered per mode), what `←`/`→`, the mouse wheel over the plots and the Frequency field's arrows tune by; the **Audio** button and the volume slider. The Audio button reads Audio (playing), Muted, No output (no audio device: a click tries again or opens Preferences on the output choice) or No audio (None (I/Q) has no audio) |
+| Spectrum | Every sample of each display frame is analyzed; the trace is the mean power in dBFS. Header: Peak hold with Reset (which also clears Min hold), AVG (Off, 2–32 frames) and ⋯ (display options); above the plot the resolution and zoom ("RBW 1.76 kHz · ×4"). FFT size 1024–32768 points; window Hann, Blackman-Harris or Flat-top. Range: Auto (follows the noise floor and the strongest signal in 5 dB steps), 60/80/100/120 dB or Top at 0 dBFS; drag the dB labels to move the scale, scroll over them to step it, double-click them for Auto. Bookmarks in view are labelled along the top (click one to tune it). A dashed marker and a shaded band show the tuned channel; the hover readout shows where a click will land. Click tunes the signal near the pointer (`Alt`+click: exactly there), the wheel tunes by STEP (`Shift`: ten steps), `Ctrl`+wheel zooms (×2–×16) around the pointer. Right-click: Tune to, Bookmark, Copy Frequency, Zoom In Here and Identify Signal Here at that frequency, then Peak Hold, Min Hold, Reset Holds, Range, Zoom, FFT Size, Window and Bookmark Labels |
+| Waterfall | Newest row at the top with a time axis. Each row keeps the strongest level per bin and the frequency it was received on, so after a retune the older rows move with their signals ("Not received then" where a row has no data). Header: **?** (the usage hint), Pause (`P`), HISTORY (Live, 1 min, 5 min, 15 min, 1 h; a long history first fills at the live rate), the COLORS scale in dBFS (drag it; Auto by default) and ⋯. Hover readout: frequency, level, SNR over the noise floor, age. Click tunes; dragging measures a box (Δf, Δt, center, peak, SNR); `Esc` clears it. Right-click: Tune to, Bookmark, Copy Frequency, Zoom In Here, Identify Signal Here; Tune to Measured Center, Copy Measurement, Clear Measurement; Pause, History, Levels (Auto, 60–120 dB, Fit to Current Signals), Colors (Viridis, Plasma, Turbo (the default), Grayscale, Classic), Zoom, Clear History, Save Image (PNG). It zooms with the spectrum and draws its own frequency axis when the spectrum is hidden. Both plots dim and say why ("Stopped - press Space") when nothing is being received |
+| Playback strip | Under the plots while a recording plays (File → Open Recording): Play/Pause, position slider, elapsed and total time, Loop, speed (0.5x, 1x, 2x, 4x; audio plays at 1x only), the file name, Signals… (Find Signals in Recording for this file) and Close (back to the device, frequency and receiving state from before) |
+| Frequency group | Frequency field with a unit (Hz, kHz, MHz, GHz); it reads `433.92M`, `7074k`, `1.09 GHz` or a number in Hz, refuses a frequency the device can't tune with the reason, and `Esc` cancels typing. Buttons −1M, −100k, −10k, +10k, +100k, +1M |
+| Presets group | Category (Favourites first) and Preset, which follows the tuned frequency ("No preset at 162.500 MHz"); Apply Preset sets the mode, FM deviation, filter and the preset's decoder. A "Listen ✓ · Transmit …" line shows only while a HackRF One is connected |
+| Demodulation group | Mode (None (I/Q), AM, FM, USB, LSB, CW), FM deviation (FM only: 2.5, 5, 12.5, 25 or 75 kHz), CW pitch (CW only, 400–1000 Hz), Squelch (on/off, Auto: 7 dB over the channel's noise, threshold slider) |
+| Audio group | Noise reduction (Off, Light, Strong), Audio AGC (Off, Fast, Medium, Slow; AM, SSB and CW), Tone squelch (the 50 CTCSS tones, FM) and Tone heard |
+| Receiver group | Sample rate (applied live); RF gain (an RTL-SDR steps through its tuner's own gains) or, on a HackRF One, LNA gain, VGA gain and RF amp (+14 dB); Tuner AGC (only where the hardware has it); Filter (choices per mode); Remove DC spike; Balance I/Q; Correction (ppm) and Direct sampling for an RTL-SDR; Bias tee (RTL-SDR, HackRF One), with a warning while on. Gain and front-end settings are remembered per device type |
+| Recording group | Record (I/Q samples or Audio), Format (SigMF first, cf32, cs16, WAV, raw), Folder, Save automatically, Record / Pause with the elapsed time, then the take: "Unsaved · 00:04 · 77 MB @ 100.100 MHz" with Save... and Discard, a file loaded by Convert Recording ("Loaded …") with Save As... and Unload, or the saved file's name with Open Folder |
+
+The License Profile group sits in Ham → Ham ID, next to the callsign.
+
+| Tool tab | What it does |
+|----------|--------------|
+| Decoder | Protocol (Off, Auto, POCSAG, FLEX, AX.25/APRS, ADS-B, ACARS, RDS, CW (Morse)), Decode (untick to pause), Decode File..., and a status line that says what the decoder hears ("AX.25/APRS · 3 packets · last 4 s ago", "Not tuned to POCSAG: listening on 100.000 MHz"). Tabs: Messages (rows that fail their checks are tinted red; a detail card for the selected row; Clear; Export... to CSV), Log, Stats, plus Aircraft for ADS-B (one row per aircraft) and Text for CW (the text as it arrives, with its speed). An empty table offers "Tune to …" the protocol's usual channel. While the tab is out of sight its title counts new messages ("Decoder (12)", up to 99+) |
+| Bookmarks | Add row (name, frequency, mode; a blank name is filled from the preset or band), a filter box, the list (groups as folders), Tune, Edit... (name, frequency, mode, FM deviation, filter, CTCSS tone, group, repeater shift, Skip, comment), Remove and CSV (Import / Export Bookmarks (CHIRP CSV), Export Built-in Presets (CHIRP CSV)). Right-click: Tune, Edit..., Rename..., Copy Frequency, Move Up/Down, Scan Bookmarks from Here, Remove.... Tuning a bookmark restores its mode, deviation, filter and tone squelch; `Ctrl+B` on a frequency already saved in that mode selects it instead of adding it twice. The tab shown on a first launch |
+| Ham | Four inner tabs. **S-Meter**: the tuned channel in S-units with RST (readability from the measured SNR), a spoken report, peak hold, a 30 s level history, Calibrate (dBFS until calibrated; saved per device type) and Copy. **Ham ID**: callsign, License Profile, CW speed (5–20 WPM) and tone, Sent as (Auto, CW, FM tone), TX Power (HackRF: TX gain, +14 dB amplifier), Automatic ID (start, every 1–10 min, end), Preview ID, Send ID Now (HackRF One only; Stop while on the air), Transmit Text…, and a line saying what Send ID Now would do or why it can't. **SSTV**: Tune to ISS (145.800 MHz), Mode (Auto (VIS) or one of 14 modes), Start Decoder, Start Now, a tone meter, the picture and Received Images (kept across restarts; auto-save). **QRP**: Calculated Output through an amplifier chain (presets, saturation), the legal limit at the tuned frequency, a power limit, Miles Per Watt and Contest Exchange |
+| Scanner | Band (FM Broadcast, NOAA Weather, 2m Ham, 70cm Ham, Airband, ISM 433, ISM 915, or a custom range), Mode (Sweep once, Sweep continuously, Stop on signal, Scan bookmarks with a Group), Threshold (Auto: 12 dB over the measured noise floor), Resume delay, and how long a pass takes. It scans the receiver's own samples, so audio and plots keep running. Results: Frequency, Level, SNR, Mode, Heard; Listen (or double-click, `Enter`), Bookmark, Bookmark All, ⋯ (export CSV, clear). While stopped on a signal: Skip and Hold. With no device it offers Use Demo Device and Connect... |
+| Signal | **Identify** (`Ctrl+I`): what the tuned signal is, how sure, how to listen to it (mode, deviation, filter, SNR) and why, with Apply Mode; on/off keyed bursts are taken apart as rtl_433's analyzer does (Copy Pulse Analysis). **Signals**: the signals in view (MHz, dBFS, SNR, Width, Heard) with Tune, Bookmark, Strongest, ◀ / ▶, Mark on spectrum and SNR ≥. **Scope**: the tuned channel as Magnitude, I and Q, Phase or Frequency over 1–100 ms, or a Constellation with a BPSK/QPSK/8PSK/16QAM overlay and its EVM; Freeze. **Bursts**: transmissions that come and go (Time, MHz, Length, dBFS, What, bits in hex), Clear, Export CSV..., Watch in the background. A page does its work only while it is shown, unless Bursts is told to watch in the background |
+| Info | Receiver: Device, State, Tuned, Band plan, Center (LO), Sample rate, Span, RBW, Demodulation, Filter, Gain, Front end, Squelch, Channel level. Audio & Recording: Audio output, Recording, Buffer. Application: Version, Qt / PyQt, Theme. Quick Tips |
+
+The tab bar reads Decoder, Bookmarks, Ham, Scanner, Signal, Info; `Ctrl+1` …
+`Ctrl+9` open them (8.3).
+
+| Status bar part | Shows | A click |
+|-----------------|-------|---------|
+| State badge | NO DEVICE, STOPPED, RUNNING; PLAYING, PAUSED or ENDED while a recording plays; ON AIR while transmitting | NO DEVICE or STOPPED: start (with no device it asks whether to connect one or start Demo Mode); ON AIR: stop transmitting |
+| Device name | The device in use, e.g. "Demo Device (simulated signals)" | Device → Connect... (with no device, the same choice as Start) |
+| Sample rate | "2.4 MS/s" | The sample rate menu (Device → Sample Rate) |
+| Messages | Short feedback colored by tone (info, success, warning, error) that clears itself; warnings also go to Tools → Error History | The last 20 messages (time, ×2 for repeats), with Copy and Error History... |
+| REC | REC 00:01:23 while recording I/Q (REC ARMED before the first samples, REC WAITING while the receiver is stopped mid-recording, PAUSED), with the recorded size and the free disk space (recording stops below 500 MB) | — |
+| AUDIO | AUDIO 00:12 while Record Audio runs | — |
+| Decoder chip | "ADS-B · 37 msgs" while a decoder runs ("paused" while Decode is unticked) | Opens the Decoder tab |
+| AFC | AFC +1.2 kHz (green when locked on), "lost", "paused" while Radio → Track Signal (AFC) is on | — |
 
 ### 8.2 Menus and dialogs
 
-| Menu / Dialog | Purpose |
-|---|---|
-| File → Import Recording (convert format) | `Ctrl+O`; load an I/Q file (cf32, cs16, cs8, cu8, cf64, raw, SigMF, WAV) into the recording buffer so it can be saved in another format (no playback yet) |
-| File → Save Recording | `Ctrl+S`; write the recording as Complex Float32 (.cf32), Complex Int16 (.cs16), SigMF (.sigmf-data plus .sigmf-meta), 16-bit I/Q WAV or raw float32, with the frequency and sample rate it was captured at |
-| File → Import / Export Channels (CHIRP CSV) | Memory channels as CHIRP-compatible CSV (replace or append on import) |
-| File → Save Screenshot | `Ctrl+P`; PNG of the whole window |
-| File → Exit | `Ctrl+Q` (or the platform's Quit key); offers to save an unsaved recording first |
-| Device → Connect... | Device dialog: detected RTL-SDR / HackRF One plus the Demo Device, and the sample rate |
-| Device → Disconnect | Stop receiving and close the device |
-| Device → Use Demo Device | Simulated signals, no hardware needed (see 8.7) |
-| Device → Scan for Devices | List the SDRs plugged in (when none are found, also which drivers are not installed) |
-| Radio → Start / Stop Receiving | `Space` |
-| Radio → Record I/Q | `Ctrl+Shift+R`; the same recording as the toolbar and the control panel |
-| Radio → Audio Output (toggle) | Same switch as the toolbar's Audio button; on by default; plays AM, FM, USB, LSB and CW through the default audio device while the channel is above squelch |
-| Radio → Band Presets | FM Broadcast, NOAA Weather, 2m Ham, 70cm Ham, Airband AM, ADS-B, ISM 433, ISM 915: tunes and sets the mode, FM deviation and bandwidth |
-| Radio → Enter Frequency | `Ctrl+L`; focus the Frequency field; Enter tunes and returns to the plots |
-| Radio → Bookmark Current Frequency | `Ctrl+B`; saved with the current mode |
-| View → Spectrum / Waterfall | Show or hide each plot (one always stays visible) |
-| View → Panels | `Ctrl+1` … `Ctrl+7`: Decoder, Bookmarks, S-Meter, Ham ID, SSTV, QRP, Info |
-| View → Focus Spectrum | `F6` |
-| View → Theme → Dark / Light / Toggle Theme | `Ctrl+T` toggles; persists across launches |
-| View → Reset Layout | Default panel sizes, both plots shown |
-| Tools → Frequency Scanner | `Ctrl+F`; non-blocking sweep dialog with band presets, progress bar and hit table (Frequency, Peak Level, SNR); double-click or Tune to Signal tunes the receiver |
-| Tools → Protocol Decoder | Brings the Decoder tab to the front |
-| Tools → AM/FM Radio Tuner | `Ctrl+R`; pop-out broadcast tuner (Section 12) |
-| Tools → Error History | `Ctrl+E`; last 500 warning/error log records, Copy All, Export, Clear |
-| Help → Welcome and Quick Start | The first-run wizard again |
-| Help → Keyboard Shortcuts | `F1`; every shortcut, grouped by menu and filterable |
-| Help → About SDR Module | Version and feature summary |
+Generated from the menus the window builds. A key in parentheses is shown in
+the menu but handled elsewhere: by View → Panels, or by the window itself
+when the focused control doesn't use the key (8.3).
 
-Pressing Start with no device asks whether to connect one or start Demo
-Mode. Starting a new recording, importing a file or closing the window with
-an unsaved recording offers to save it first.
+**File**
+
+| Item | Key | What it does |
+|------|-----|--------------|
+| Open Recording... | `Ctrl+O` | Play an I/Q file through the receiver (spectrum, waterfall, audio, decoders, recorders) with the playback strip |
+| Close Recording | | Stop playing; back to the device used before (enabled while a file plays) |
+| Recording Info... | | What a file holds: type, format, rate, center frequency, span, length, size, whether the samples look right; Play, Convert... and Decode... from there |
+| Decode Recording... | | Run one of the Decoder's seven protocols over a whole file, faster than real time, in the background; messages go to the Decoder tab with their time in the file |
+| Find Signals in Recording... | | List a file's signals (frequency, level, SNR, width, first and last heard) in the Signal tab; double-click one to play from just before it |
+| Convert Recording... | `Ctrl+Shift+O` | Load a file in the background to save it in another format; the receiver isn't retuned. The summary offers Save As..., Play and Tune There |
+| Save Recording... | `Ctrl+S` | Write the recorded or converted samples as SigMF, cf32, cs16, 16-bit I/Q WAV, raw float32, cu8 (rtl_sdr) or cs8 (hackrf_transfer) |
+| Import Bookmarks (CHIRP CSV)... | | Add bookmarks from a CHIRP CSV file (replace, or append without duplicates) |
+| Export Bookmarks (CHIRP CSV)... | | Save the bookmarks for CHIRP or a radio |
+| Save Screenshot... | `Ctrl+P` | The window as PNG, JPEG or BMP, in the screenshots folder |
+| Exit | `Ctrl+Q` | Close SDR Module (the platform's Quit key where it has one) |
+
+**Device**
+
+| Item | Key | What it does |
+|------|-----|--------------|
+| Connect... | | Choose and open a detected RTL-SDR or HackRF One (or the Demo Device), with its sample rate and front-end settings |
+| Disconnect | | Stop receiving and close the device (a transmission is ended first) |
+| Sample Rate ▸ | | The connected device's rates, applied live (RTL-SDR 1, 1.4, 1.8, 2, 2.4 and 2.56 MS/s; HackRF One 2, 2.4, 2.56, 3.2, 4, 8, 10 and 20 MS/s; demo device 1–3.2 MS/s); rates under 2 MS/s are marked "(too low for ADS-B)". Refused while a recording plays, while recording I/Q and while transmitting |
+| Use Demo Device | | Simulated signals, no hardware needed (8.7); replaces a connected device and is ticked while in use |
+| Find Connected Devices... | | List the SDRs plugged in, with Connect...; with none, Use Demo Device and the commands that install a missing driver |
+| Second Receiver... | `Ctrl+Shift+N` | A second receiver window on another device or a second demo device (below) |
+
+**Radio**
+
+| Item | Key | What it does |
+|------|-----|--------------|
+| Start Receiving / Stop Receiving | (`Space`) | Start or stop the receiver; play or pause a recording |
+| Record I/Q | `Ctrl+Shift+R` | Start or stop an I/Q recording (kept in a temporary file until saved) |
+| Record Audio | `Ctrl+Shift+A` | Start or stop recording what you hear: a 48 kHz 16-bit WAV in the recordings folder |
+| Audio ▸ Mute | `Ctrl+M` | Silence the speaker or play again (also `M` with the plots focused, and the Audio button) |
+| Audio ▸ Volume Up / Volume Down | `Ctrl+Up` / `Ctrl+Down` | 10% steps |
+| Audio ▸ Output Device... | | Tools → Preferences, on the audio output |
+| Band Presets ▸ | | The favorites (FM Broadcast, NOAA Weather 1, 2m Calling, 70cm Calling, Air Traffic Control, ADS-B, ISM 433 MHz, ISM 915 MHz), then a submenu per category (listed below). Each item shows its frequency and tunes it with its mode, deviation, filter and decoder |
+| Enter Frequency | `Ctrl+L` | Focus the Frequency field; `Enter` tunes and returns to the plots |
+| Bookmark Current Frequency | `Ctrl+B` | Save it with the mode, filter and tone squelch |
+| Tune Back / Tune Forward | `Alt+Left` / `Alt+Right` | Through the frequencies (and modes) you stayed on |
+| Recent Frequencies ▸ | | The last 20 with their modes, and Clear Recent Frequencies |
+| Tuning Step ▸ | (`[` / `]`) | Smaller Step, Larger Step, and the steps from 10 Hz to 1 MHz (10, 50, 100, 500 Hz; 1, 2.5, 5, 6.25, 8.33, 9, 10, 12.5, 25, 50, 100, 200 kHz; 1 MHz) |
+| Keep Tuned Frequency Centered | | Retune the receiver on every tune (off, the default: the tuned channel moves within the span) |
+| Choose Mode From Band Plan | | On by default: a far tune without a mode of its own listens the way the band is usually heard |
+| RDS Station Names | | On by default: decode a broadcast station's RDS in the background (its name beside FREQ and on the radio tuner) |
+| Track Signal (AFC) | | Keep a drifting signal centered (narrow FM, AM, CW) |
+| Send Station ID | | Transmit your callsign in Morse on the tuned frequency (HackRF One; settings in Ham → Ham ID); with another device it says why it can't |
+| Stop Transmitting | | End the transmission now (enabled while on the air) |
+
+Band Presets categories: Amateur (2m Calling, 70cm Calling, APRS), Aviation
+(ADS-B, ACARS, Aviation Emergency, Air Traffic Control), Broadcast (FM
+Broadcast), GNSS (GPS L1 (C/A), GPS L2, GPS L5, GLONASS L1), ISM (ISM 433 MHz,
+ISM 915 MHz), Marine (Marine Ch 16), Paging (POCSAG/FLEX, POCSAG, FLEX), QRP
+(the CW and SSB calling frequencies from 80 m to 10 m), Space (ISS SSTV/Voice,
+ISS APRS, ISS Packet (UHF), ISS Repeater Output, Meteor-M2 LRPT, SO-50
+Downlink) and Weather (NOAA Weather 1 and 2, NOAA APT for NOAA-15, -18 and
+-19).
+
+**View**
+
+| Item | Key | What it does |
+|------|-----|--------------|
+| Spectrum / Waterfall | | Show or hide each plot (one always stays; remembered) |
+| Zoom ▸ Zoom In / Zoom Out / Full Span | `Ctrl+=` or `Ctrl++` / `Ctrl+-` / `Ctrl+0` | Both plots, ×2 to ×16, around the tuned frequency |
+| Panels ▸ | `Ctrl+1` … `Ctrl+9` | Decoder (1), Bookmarks (2); S-Meter (3), Ham ID (4), SSTV (5), QRP (6); Scanner (8), Signal (9), Info (7), in tab-bar order |
+| Maximize Tool Tabs | | Give the tool tabs the whole right column |
+| Focus Spectrum | `F6` | Put the keyboard focus on the spectrum |
+| Theme ▸ Dark / Light / Toggle Theme | `Ctrl+T` (Toggle) | Switch themes (8.6) |
+| Reset Layout | | Default panel sizes, both plots shown, tool tabs back in place |
+
+**Tools**
+
+| Item | Key | What it does |
+|------|-----|--------------|
+| Frequency Scanner | `Ctrl+F` | Show the Scanner tab |
+| Protocol Decoder | (`Ctrl+1`) | Show the Decoder tab |
+| Identify Signal | `Ctrl+I` | Identify the signal at the tuned frequency in the Signal tab (starts the receiver if needed) |
+| Signal ▸ Signals in View / Scope / Bursts | | Show that page of the Signal tab |
+| Signal ▸ Tune to Strongest Signal / Next Signal Up / Next Signal Down | (`Home` / `PgUp` / `PgDown`) | Tune the signals in view (the keys work with the plots focused) |
+| AM/FM Radio Tuner... | `Ctrl+R` | The broadcast tuner window (Section 12) |
+| S-Meter / SSTV Decoder / Ham ID (Station ID) / QRP Calculator | (`Ctrl+3` / `Ctrl+5` / `Ctrl+4` / `Ctrl+6`) | Show that Ham tab |
+| SSTV: Tune to ISS (145.800 MHz) | | Tune the ISS SSTV downlink (FM, 5 kHz deviation), start receiving and listen for images |
+| Transmit Text... | `Ctrl+Shift+T` | Send text in CW, RTTY, PSK31 or ASCII FSK (below) |
+| Error History... | `Ctrl+E` | The last 500 warnings and errors: Copy All, Export..., Copy Version Info, Clear |
+| Preferences... | `Ctrl+,` | Audio output, default folders, recording temp folder, Ask before transmitting |
+
+**Help**
+
+| Item | Key | What it does |
+|------|-----|--------------|
+| Welcome and Quick Start... | | The first-run wizard again (8.5) |
+| Keyboard Shortcuts... | `F1` | Every key and mouse gesture (8.3), with a filter that takes words or a key ("Ctrl+S", "f2") |
+| Online Documentation | | The user guide (the README) in your browser |
+| Report a Problem... | | The issue tracker's new-issue page with the version info filled in (also copied to the clipboard) |
+| About SDR Module... | | What the app does, links, and the version info (app, Python, Qt/PyQt, NumPy, system, SDR drivers, device, audio output) with Copy Version Info |
+
+**Dialogs and windows**
+
+| Dialog | Opened from | What it holds |
+|--------|-------------|---------------|
+| Connect | Device → Connect... | Available Devices (the detected RTL-SDR and HackRF One, and the Demo Device), Sample rate, and only the settings the selected device has: Frequency correction and Direct sampling (RTL-SDR), Bias tee (RTL-SDR, HackRF One). A device the second receiver holds is refused |
+| No Device | Start (or the status bar) with no device | "No SDR hardware detected." with Demo Mode as the default button, or the radio found with Connect... as the default |
+| Devices Found / No Devices Found | Device → Find Connected Devices... | As in the Device menu above |
+| Second Receiver | Device → Second Receiver... | Its own Start/Stop, Record, FREQ and LEVEL, spectrum and waterfall; Device (any RTL-SDR or HackRF One the main window isn't using, or a second demo device; sample rate; gain, or LNA/VGA/amp; Direct sampling and Correction for an RTL-SDR), Tuning (frequency, mode, filter, FM deviation, step), Squelch, Listen (Main window, This receiver, Both (mixed)) with Volume, the main window's bookmarks, Record (SigMF in the recordings folder) and Transmit monitor (Monitor TX, Follow transmissions), for when the main window has a HackRF One. Stop closes its device |
+| Import Options | Opening, converting, decoding or inspecting a file without a header (.bin, .raw, .iq, .dat, .cu8, .cs16 ...) | Sample format (cu8, cs8, cs16, cf32, cf64), sample rate and center frequency, prefilled from the extension, the data and the file name, with a check of whether the samples look right |
+| Decode Recording | File → Decode Recording..., Decoder → Decode File... | Protocol and frequency; progress and Cancel |
+| Convert / Save progress | File → Convert Recording..., Save Recording... | Progress and Cancel; after Convert a summary with Save As..., Play and Tune There |
+| Edit Bookmark | Bookmarks → Edit... | Every field of a bookmark (see the Bookmarks tab) |
+| Transmit Text | Tools → Transmit Text..., Ham → Ham ID → Transmit Text… | Mode (CW, RTTY, PSK31, ASCII FSK) and its settings, sent on the carrier or as FM; the text with its length and air time and the characters the mode can't send (Remove Them); Insert (CQ, QRZ?, 73, My call); Preview through the speakers; Save... (48 kHz WAV, or I/Q as SigMF or cf32); Transmit (HackRF One), with a line saying what it would do or why it can't |
+| AM/FM Radio Tuner | Tools → AM/FM Radio Tuner... | Section 12 |
+| Preferences | Tools → Preferences..., Radio → Audio → Output Device... | Audio Output (with Refresh), Folders (recordings, screenshots), Recording Temp Folder (its free space, Use Default), Transmitting (Ask before transmitting) |
+| Error History | Tools → Error History..., the status bar's message list | The last 500 warnings and errors |
+| Keyboard Shortcuts | Help → Keyboard Shortcuts... (`F1`) | 8.3 |
+| Welcome | Help → Welcome and Quick Start... | 8.5 |
+
+Starting a new recording, converting a file or closing the window with an
+unsaved recording offers to save it first (with Save automatically on,
+closing saves a running recording without asking). Opening a file while a
+recording runs asks "Stop recording and play <file>?". Every transmission
+asks for confirmation until you tick Don't ask again (Tools → Preferences
+turns the question back on).
 
 ### 8.3 Keyboard shortcuts
 
-| Shortcut | Action |
-|---|---|
-| `Space` | Start / stop receiving |
-| `Ctrl+Shift+R` | Start / stop recording |
-| `Ctrl+L` | Type a new center frequency (Enter tunes and returns to the plots) |
+What Help → Keyboard Shortcuts (`F1`) lists, in its order (the nine
+`Ctrl`+number rows are one row here). F1 lists only keys the window really
+answers to: each menu key is checked against the bindings installed, and a
+test presses each key of the lists, fields and windows on the real widget.
+F1 names `Enter` "Return" and `Delete` "Del".
+
+| Keys | Action |
+|------|--------|
+| **Radio** | |
+| `Space` | Start or stop the receiver (play or pause a recording) |
+| `Ctrl+Shift+R` | Start or stop recording I/Q samples |
+| `Ctrl+Shift+A` | Start or stop recording the audio you hear |
+| `Ctrl+L` | Type a frequency to tune to |
 | `Ctrl+B` | Bookmark the current frequency |
-| `←` / `→` | Tune down / up 10 kHz |
-| `Shift+←` / `Shift+→` | Tune down / up 100 kHz |
-| `Ctrl+←` / `Ctrl+→` | Tune down / up 1 MHz |
-| `F6` | Put the keyboard focus on the spectrum |
-| `Esc` | Return the keyboard focus to the spectrum |
-| `Ctrl+1` … `Ctrl+7` | Show the Decoder, Bookmarks, S-Meter, Ham ID, SSTV, QRP or Info panel |
-| `Ctrl+T` | Switch between the dark and light themes |
-| `Ctrl+O` | Import a recording to convert its format |
+| `Alt+←` / `Alt+→` | Go back / forward through the frequencies you tuned |
+| `[` / `]` | Smaller / larger tuning step (with the plots focused) |
+| `Ctrl+M` | Mute or unmute the audio (`M` with the plots focused) |
+| `Ctrl+↑` / `Ctrl+↓` | Volume up / down by 10% |
+| **Tuning** | |
+| `←` / `→` | Tune down / up by one tuning step (F1 shows the step in use, e.g. 100 kHz) |
+| `Shift+←` / `Shift+→` | Tune down / up by ten tuning steps |
+| `Ctrl+←` / `Ctrl+→` | Tune down / up by 1 MHz |
+| **File** | |
+| `Ctrl+O` | Open a recording and play it back |
+| `Ctrl+Shift+O` | Convert a recording to another format |
 | `Ctrl+S` | Save the recording |
 | `Ctrl+P` | Save a screenshot |
-| `Ctrl+Q` | Exit |
-| `Ctrl+F` | Frequency scanner |
-| `Ctrl+R` | AM/FM radio tuner |
-| `Ctrl+E` | Error history |
-| `F1` | Keyboard shortcut reference |
-| Click on spectrum / waterfall | Tune to the clicked frequency |
-| Drag on the waterfall | Measure bandwidth, duration and peak |
-| Right-click on the waterfall | Tune, bookmark or copy that frequency; display options |
-| `P` (waterfall focused) | Pause or resume the waterfall |
+| `Ctrl+Q` | Exit SDR Module |
+| **Device** | |
+| `Ctrl+Shift+N` | Open the second receiver window |
+| **Tools** | |
+| `Ctrl+F` | Open the frequency scanner |
+| `Ctrl+R` | Open the AM/FM radio tuner |
+| `Ctrl+Shift+T` | Send text in CW, RTTY, PSK31 or ASCII FSK |
+| `Ctrl+E` | Show the error history |
+| `Ctrl+,` | Open the preferences (audio output, folders) |
+| `Ctrl+I` | Identify the signal at the tuned frequency (Signal tab) |
+| `Home` | Tune to the strongest signal in view (plots focused) |
+| `PgUp` / `PgDown` | Tune to the next signal up / down (plots focused) |
+| **View** | |
+| `F6` | Put the keyboard focus on the spectrum |
+| `Esc` | Return the keyboard focus to the spectrum |
+| `Ctrl+T` | Switch between the light and dark themes |
+| `Ctrl+=` / `Ctrl++` | Zoom the spectrum and waterfall in around the tuned frequency |
+| `Ctrl+-` | Zoom the spectrum and waterfall out |
+| `Ctrl+0` | Show the full span again |
+| `Ctrl+1` … `Ctrl+9` | Show the Decoder (1), Bookmarks (2), S-Meter (3), Ham ID (4), SSTV (5), QRP (6), Scanner (8), Signal (9) or Info (7) panel |
+| **Help** | |
+| `F1` | Show this list of keyboard shortcuts |
+| **Plots** | |
+| `P` | Pause or resume the waterfall (either plot focused) |
+| `M` | Mute or unmute the audio (like `Ctrl+M`) |
+| `Esc` | Clear the waterfall measurement, if one is shown |
+| **Frequency field** | |
+| `↑` / `↓` | Up / down by one tuning step |
+| `PgUp` / `PgDown` | Up / down by ten tuning steps |
+| `Enter` | Tune to the frequency typed |
+| `Esc` | Cancel typing, back to the plots |
+| **Bookmarks list** | |
+| `Enter` | Tune to the selected bookmark |
+| `F2` | Rename the selected bookmark |
+| `Delete` / `Backspace` | Remove the selected bookmark |
+| `Esc` | Clear the filter (in the filter box) |
+| **Decoder messages** | |
+| `Ctrl+C` | Copy the selected messages |
+| `Esc` | Clear the selection |
+| `Enter` | Aircraft tab: show the selected aircraft's messages |
+| **Scanner results** | |
+| `Enter` | Listen to the selected signal |
+| **Waterfall COLORS scale** | |
+| `Home` | Auto levels (also double-click) |
+| `←` / `→` | Move the floor down / up by 1 dB (`Shift`: 5 dB) |
+| `↓` / `↑` | Move the ceiling down / up by 1 dB (`Shift`: 5 dB) |
+| **Playing a recording** | |
+| `Space` | Play / pause (plots focused; the toolbar's Play) |
+| `←` / `→` | Back / ahead 5 s (position slider focused) |
+| `PgDown` / `PgUp` | Back / ahead 30 s (position slider focused) |
+| **Second receiver window** | |
+| `Space` | Start or stop it |
+| `←` / `→` | Tune by its step (`Shift`: ten steps, `Ctrl`: 1 MHz) |
+| `[` / `]` | Smaller / larger step |
+| `Ctrl+L` | Type a frequency |
+| `Ctrl+B` | Bookmark its frequency (in the main window's Bookmarks) |
+| `Ctrl+Shift+R` | Record its I/Q |
+| `Ctrl+W` | Close it |
+| **Mouse** | |
+| Click | Tune to the signal clicked on the spectrum or waterfall |
+| `Alt`+click | Tune exactly where you click, without snapping to a signal |
+| Scroll | Tune by the step over the spectrum or waterfall (`Shift`: ten steps) |
+| Scroll | Tune one digit over a digit of the FREQ readout |
+| Drag | Measure a signal's bandwidth, duration and peak on the waterfall |
+| `Ctrl`+scroll | Zoom the spectrum and waterfall around the pointer |
+| Right-click | Tune, bookmark, copy or zoom at a frequency on either plot; options |
+| Drag | Move the spectrum's dB scale (over its dB labels; double-click: Auto) |
+| Scroll | Step the spectrum's dB scale (over its dB labels) |
+| Click | Tune a bookmark from its label along the top of the spectrum |
+| Scroll | Shift the waterfall's color levels (over its COLORS scale) |
+| Double-click | Give the tool tabs the whole column (on a tab) and back |
 
-`Space` and the arrow keys act when the focused control does not use them
-itself (a focused slider, list or text field keeps its usual keys); press
-`F6` or `Esc`, or click a plot, first. Without the optional ham radio
-panels the Info panel is `Ctrl+3`. In the Bookmarks list, `Enter` tunes,
-`F2` renames and `Delete` removes.
+`Space`, the arrow keys and the other plot keys act when the focused control
+does not use them itself (a focused slider, list or text field keeps its
+usual keys); if they seem to do nothing, press `F6` or `Esc`, or click a
+plot, first.
 
 ### 8.4 Persisted state
 
-Stored via `QSettings` (platform-specific backing store: Windows registry,
-macOS plist, Linux `~/.config/SDR Module Team/SDR Module.conf`):
+Stored with `QSettings` (Windows registry, macOS plist, Linux
+`~/.config/SDR Module Team/SDR Module.conf`):
 
-- Center frequency (100.1 MHz, in FM, when nothing is saved yet), RF gain,
-  AGC, squelch threshold, channel bandwidth.
-- Demodulation mode and FM deviation, recording format.
-- Theme, audio output on/off and volume.
-- The tool tab that was open, license class and Ham ID settings (callsign,
-  CW speed and tone, automatic ID).
-- Main window geometry and splitter sizes.
-- Saved channels (frequency, label, demodulation mode and FM deviation, and
-  CHIRP fields: mode, duplex/offset, tone, tuning step, skip, power,
-  comment).
-- First-run wizard completion flag.
+| Key or family | What it holds |
+|---------------|---------------|
+| `frequency_hz`, `tuning/lo_hz` | The tuned frequency and the receiver's center (100.1 MHz in FM when nothing is saved) |
+| `demod_mode`, `fm_deviation`, `bandwidth` | Mode, FM deviation and filter |
+| `gain_db`, `agc_enabled` | RF gain slider and Tuner AGC |
+| `squelch_db`, `squelch/enabled`, `squelch/auto` | Squelch threshold, on/off, Auto |
+| `audio/*` | Noise reduction, audio AGC speed, CW pitch, tone squelch, Remove DC spike, Balance I/Q, each mode's own filter and deviation (`audio/mode_filters`) |
+| `audio_enabled`, `audio_volume` | Audio on/off and the volume |
+| `tuning/step/<mode>`, `tuning/recent` | The step chosen for each mode; Recent Frequencies (the last 20, with modes) |
+| `tuning/keep_centered`, `tuning/band_plan_mode`, `decoder/rds_auto` | Radio → Keep Tuned Frequency Centered, Choose Mode From Band Plan, RDS Station Names |
+| `device/<kind>/…` (demo, rtlsdr, hackrf) | Per device type: sample rate, gain (with LNA/VGA/amp and Tuner AGC), frequency correction, direct sampling, bias tee |
+| `prefs/*` | The audio output device (id and name) and the recording temp folder |
+| `recording/*`, `recording_format` | What Record records, Save automatically, the recordings folder, the last folder used for each kind of file (I/Q, audio, decode, screenshots, bookmarks, ...), the Recording group's format |
+| `spectrum_display`, `waterfall_display` | Spectrum: AVG, peak and min hold, range, FFT size, window, zoom, bookmark labels. Waterfall: colors, history, levels |
+| `geom/*`, `layout/*`, `panel` | Window geometry and splitter sizes; which plots are shown; Maximize Tool Tabs; the Frequency field's unit; the tool tab that was open |
+| `theme` | Dark or light |
+| `bookmarks` | The bookmarks: name, frequency, demodulation mode, FM deviation, filter, group, and the CHIRP fields (mode, duplex/offset, tone, tuning step, skip, power, comment) |
+| `scanner/*` | The Scanner's band, range, step, mode, threshold, resume delay, bookmark group and its last results |
+| `license_class`, `ham_id`, `ham/*` | License class; Ham ID (callsign, speed, tone, how the ID is sent, automatic ID); QRP tab (chain, mode, limit, units, logged QSOs, location); S-meter calibration per device type; SSTV mode; the radio tuner's presets |
+| `tx/*` | TX gain and amplifier, Ask before transmitting (`tx/confirm`), and Transmit Text's mode, settings, draft and save format (`tx/text`) |
+| `device/second_receiver/*`, `layout/second_receiver/*` | The second receiver's device, rate, frequency, mode, filter, deviation, steps, squelch, Listen, volume, gain and Follow transmissions; its window size, splitters and waterfall settings |
+| `first_run_done` | Whether the first-run wizard has been shown |
+
+Files are kept outside the settings: recordings in Documents/SDR Recordings
+and screenshots in Pictures (Tools → Preferences changes both), an unsaved
+I/Q recording in the cache folder (or the Recording temp folder), and SSTV
+images in Pictures/SDR Module/SSTV.
 
 ### 8.5 First-run wizard
 
-Launched automatically the first time the GUI starts, and again from
-Help → Welcome and Quick Start. It says whether SDR hardware was found (and
-how to install a missing driver), offers to connect the device it found or
-start Demo Mode (simulated signals), and tunes to a chosen starting band in
-that band's mode. It also shows a few quick tips.
+Shown the first time the GUI starts (Get Started and Skip both count) and
+again from Help → Welcome and Quick Start. A callout says whether SDR
+hardware was found, names it, and gives the command that installs a missing
+driver; reopened while the demo runs, it says "Demo Mode is running".
+**Starting Band** lists the favorite bands (FM Broadcast (88–108 MHz),
+NOAA Weather, 2m Ham, 70cm Ham, Airband, ADS-B (1090 MHz), ISM 433, ISM 915)
+with a line saying which preset it tunes and how ("Tunes to 2m Calling:
+146.520 MHz · FM, 5 kHz deviation, 25 kHz filter"). Below it, "Start Demo
+Mode (simulated signals)" (ticked when no hardware was found) or "Connect
+<device> and start receiving" (when one was). **Quick Tips** lists Click,
+`←`/`→`, `Space`, `Ctrl+I`, `Ctrl+Shift+N` and `F1`. **Get Started** starts
+Demo Mode if ticked, applies the band's preset (mode, filter and decoder) and
+says in one status message what was set; with "Connect ..." ticked it then
+opens Device → Connect so receiving starts on that band. **Skip** closes
+without tuning.
 
 ### 8.6 Themes
 
@@ -517,28 +776,50 @@ Two themes, dark (the default) and light, switch live from View → Theme or
 `Ctrl+T` and persist across launches. Every color comes from the palette
 tokens in `sdr_module/gui/themes.py`: widgets are tagged with style roles
 and tones (`set_role` / `set_tone`) instead of hard-coded colors, and the
-custom-painted views (spectrum, waterfall axes, S-meter, radio tuner) read
-the active palette and repaint when the theme changes. Keyboard focus is
-always visible: a 2 px ring on buttons, check boxes and slider handles, an
-accent outline on tabs, lists and text views, and a focus frame on the
-plots. The waterfall colormaps are the same in both themes.
+custom-painted views (spectrum, waterfall axes, level meter, S-meter, SSTV
+tone meter, Signal tab scope, radio tuner) read the active palette and
+repaint when the theme changes. Keyboard focus is always visible: a 2 px ring
+on buttons, check boxes and slider handles, an accent outline on tabs, lists
+and text views, and a focus frame on the plots. The waterfall colormaps are
+the same in both themes.
 
 ### 8.7 Demo mode
 
-Started with `--demo`, Device → Use Demo Device, the Demo Device entry in
-Device → Connect, or the first-run wizard. The simulated receiver produces
-FM broadcast stations across 88–108 MHz, airband AM, 2 m and 70 cm FM,
-NOAA weather, APRS and ISM bursts, decodable ADS-B frames at 1090 MHz
-(flight KLM1023 with position, speed and squawk), a CW beacon
-and weak carriers elsewhere on a realistic noise floor. The signals sit at
-fixed frequencies and move across the display as you tune, so click-to-tune
-and the frequency scanner work as with real hardware; raising the gain lifts
-signals and noise together and too much gain clips, while AGC keeps the
-signals clear of clipping. The strongest station, 100.1 MHz, carries a
-looping tune in stereo FM, so listening in FM mode plays music. Samples
+Started with `--demo` (`sdr-scan gui --demo` or `python -m sdr_module.gui
+--demo`), Device → Use Demo Device, the Demo Device entry in Device →
+Connect, the No Device box or the first-run wizard. The simulated receiver
+puts signals at fixed frequencies on a realistic noise floor, so they move
+across the display as you tune, and click-to-tune, the scanner and the
+decoders work as with real hardware.
+Raising the gain lifts signals and noise together and too much gain clips;
+Tuner AGC picks the gain itself and keeps the signals clear of clipping.
+
+| Frequency | What is there | Try it with |
+|-----------|---------------|-------------|
+| 660–1260 kHz | AM broadcast stations on the radio tuner's six AM presets (660, 770, 880, 1010, 1050, 1260 kHz), playing the demo tune | AM/FM Radio Tuner |
+| 88.5–107.5 MHz | FM broadcast stations, one on each of the radio tuner's FM presets. The strongest, 100.1 MHz, plays a looping tune in stereo FM (75 µs pre-emphasis) and sends RDS: "SDR DEMO", a RadioText, program type Top 40 | FM; the RDS name beside FREQ; Decoder → RDS |
+| 99.820 MHz | CW beacon sending "VVV DE SDR" | CW mode; Decoder → CW (Morse) |
+| 118.1–127.85 MHz | Airband AM stations | AM; Scanner → Airband |
+| 131.550 MHz | ACARS messages (AM), every 8–13 s | Decoder → ACARS |
+| 144.390 MHz | APRS AFSK1200 position reports from three stations, every 8–13 s | Decoder → AX.25/APRS |
+| 145.290 MHz | 2 m repeater with a 100.0 Hz CTCSS tone, 8 s in every 12 | Audio → Tone squelch, Tone heard |
+| 145.800 MHz | SSTV test card (Robot 36, NBFM) every 75 s, the first 8 s after the demo starts | Ham → SSTV → Tune to ISS |
+| 146.520–147.105 MHz, 446.000, 446.100 MHz | 2 m and 70 cm voice-like narrow FM that comes and goes | FM, 5 kHz deviation |
+| 152.240 MHz | POCSAG 1200 pages (alphanumeric and numeric), every 8–13 s | Decoder → POCSAG |
+| 162.400–162.550 MHz | NOAA weather radio (narrow FM) | Band Presets → NOAA Weather 1 |
+| 433.920 MHz | A remote control of the EV1527 kind (on/off keyed, pulse width 350/1050 µs, code 0x5E3A1C sent eight times every 2.5 s); FSK bursts on 434.100 MHz | Signal → Bursts, Identify |
+| 438.500 MHz | A 70 cm handheld whose narrow FM drifts ±2.5 kHz over 40 s | Radio → Track Signal (AFC) |
+| 915 MHz | ISM bursts | Signal → Bursts |
+| 931.9375 MHz | FLEX 1600 pages, every 8–13 s | Decoder → FLEX |
+| 1090 MHz | ADS-B from an airliner (KLM1023, ICAO 4840D6: identification, position, velocity, squawk) a few times a second, among weaker Mode S and Mode A/C replies the decoder drops | Decoder → ADS-B (2 MS/s or more) |
+
+Weak carriers sit everywhere else. The demo device runs at 1–3.2 MS/s (1,
+1.4, 1.8, 2, 2.4, 2.56 or 3.2 MS/s; 2.4 MS/s by default, then the rate it
+had last; `--sample-rate` chooses one) and refuses any other rate. Samples
 stream in real time for gap-free audio; a computer too slow to keep up gets
-a status-bar hint and muted audio instead of a stutter. Starting the demo
-from "None (I/Q)" switches the mode to FM.
+a status-bar hint and muted audio until it catches up. Starting the demo with
+Device → Use Demo Device or `--demo` while the mode is None (I/Q) switches it
+to FM. The demo device can't transmit.
 
 ---
 
@@ -569,7 +850,7 @@ from "None (I/Q)" switches the mode to FM.
 
 | Format | Description |
 |--------|-------------|
-| I/Q Sample Format | 8-bit unsigned, 16-bit signed, 32-bit float, 64-bit float |
+| I/Q Sample Format | 8-bit unsigned (cu8) and signed (cs8), 16-bit signed, 32-bit float, 64-bit float |
 | Byte Order | Little-endian (I, Q interleaved) |
 | Raw File Format | .raw, .cu8, .cs8, .cs16, .cf32, .cf64 |
 | Metadata Format | SigMF (Signal Metadata Format) |
@@ -629,6 +910,34 @@ from "None (I/Q)" switches the mode to FM.
 | Spurious Emissions | User responsible for filtering |
 | Frequency Coordination | Required for certain services |
 
+**What the transmit path checks.** Everything the app transmits (Ham → Ham ID
+→ Send ID Now, Radio → Send Station ID, Tools → Transmit Text, and the
+automatic IDs added to them) goes through one transmit engine. It refuses,
+with the reason in the status bar and on the Ham ID or Transmit Text line
+("Can't send on 100.100 MHz: your license (None) allows CB/MURS/FRS only."),
+unless all of these hold:
+
+| Check | Rule |
+|-------|------|
+| Device | A HackRF One is connected and open (the demo device and an RTL-SDR only receive), no recording is playing back, and no other transmission is on the air |
+| Frequency | Within the HackRF's 1 MHz – 6 GHz |
+| Lockouts | No part of the emission's occupied bandwidth overlaps a locked band (11.4) |
+| License | The license class (Ham → Ham ID → License Profile) allows the mode at the center and at both edges of the emission, for the transmission and each automatic ID (11.9); 50.0–50.1 MHz and 144.0–144.1 MHz are CW only |
+| Identification | A transmission in an amateur band needs your callsign (Ham → Ham ID) for its ID |
+| Bandwidth | RTTY and data below 29.7 MHz are at most 2.8 kHz wide (Transmit Text refuses wider) |
+| Power | The calculated station output (TX gain, +14 dB amp and the QRP tab's amplifier chain) is within the QRP tab's power limit, when that is on, and within the legal limit at that frequency (1500 W PEP where a segment names none) |
+| Antenna port | The bias tee is off; if it can't be switched off, nothing is sent |
+| Confirmation | Each transmission asks first ("Transmit DE W1AW on 146.520 MHz (FM tone, 20 WPM, about 1 mW)?") until you tick Don't ask again; Tools → Preferences → Ask before transmitting turns the question back on |
+
+Transmissions are made at 2 MS/s with the HackRF's narrowest filter, and the
+HackRF is retuned to the tuned frequency first, so it sends where it was
+checked. While on the air the receiver pauses (the HackRF is half duplex) and
+resumes afterwards; tuning, the sample rate and the TX power can't be
+changed; Stop, the ON AIR badge and Radio → Stop Transmitting end it. The
+HackRF driver checks the lockouts and the license again for the emission's
+own bandwidth and mode, and again whenever the frequency, filter or amplifier
+changes while it transmits. Station IDs go out at no more than 20 WPM.
+
 ### 11.3 Legal Notice
 
 > **WARNING**: Transmitting on frequencies without proper authorization is illegal in most jurisdictions. Users are responsible for compliance with all applicable laws and regulations. This software is intended for educational, amateur radio, and authorized research purposes only.
@@ -637,16 +946,16 @@ from "None (I/Q)" switches the mode to FM.
 
 The software includes **hard-coded TX frequency lockouts** to prevent accidental transmission on critical safety frequencies.
 
-| Category | Frequencies | Reason |
-|----------|-------------|--------|
-| **GPS/GNSS** | L1 (1575.42 MHz), L2 (1227.60 MHz), L5 (1176.45 MHz), GLONASS, Galileo, BeiDou | **CRITICAL SAFETY** - GPS spoofing can cause aircraft navigation failures |
-| **Aviation Emergency** | 121.5 MHz, 243.0 MHz | International distress frequencies |
-| **ADS-B/Mode S** | 1030 MHz, 1090 MHz | Aircraft collision avoidance transponders |
-| **ELT/EPIRB** | 406.0-406.1 MHz | Search and rescue emergency beacons |
-| **Marine Distress** | 156.8 MHz (Ch 16) | VHF marine distress and calling |
+| Category | Locked ranges | Reason |
+|----------|---------------|--------|
+| **GPS/GNSS** | GPS L1 1560.42–1590.42 MHz, L2 1212.6–1242.6 MHz, L5 1161.45–1191.45 MHz (±15 MHz around 1575.42, 1227.60 and 1176.45 MHz); GLONASS L1 1588–1610 MHz and L2 1232–1249 MHz; Galileo E1 1560.42–1590.42 MHz and E5 1151.45–1232.14 MHz; BeiDou B1 1546.098–1576.098 MHz | **CRITICAL SAFETY** - GPS spoofing can cause aircraft navigation failures |
+| **Aviation Emergency** | 121.4–121.6 MHz, 242.9–243.1 MHz | International distress frequencies |
+| **ADS-B/Mode S** | 1088–1092 MHz (1090 MHz replies), 1028–1032 MHz (1030 MHz interrogations) | Aircraft collision avoidance transponders |
+| **ELT/EPIRB** | 405.5–406.6 MHz | Search and rescue emergency beacons |
+| **Marine Distress** | 156.75–156.85 MHz (Ch 16) | VHF marine distress and calling |
 | **Cellular** | 698-806 MHz, 824-894 MHz, 1850-1995 MHz | Commercial cellular bands |
 
-> **Note**: These lockouts **cannot be disabled** in software. TX attempts to these frequencies will be blocked with an error message.
+> **Note**: These lockouts **cannot be disabled** in the app (the library can add more lockouts, not remove these). A transmission is refused when any part of its occupied bandwidth overlaps a locked range, both by the app's transmit engine and by the HackRF driver (11.2), with the reason in the status bar. The band plan line (FREQ's tooltip, Info → Band plan) shows "transmitting locked out" on these frequencies.
 
 ### 11.5 HAM Radio Callsign Identification
 
@@ -654,11 +963,12 @@ For amateur radio compliance, the software includes automatic callsign identific
 
 | Feature | Description |
 |---------|-------------|
-| Automatic ID | Transmits callsign at start/end of transmission and every 10 minutes |
-| CW Mode | Morse code identification at configurable WPM (5-50) |
-| Tone Frequency | Configurable sidetone (default: 700 Hz) |
+| Automatic ID | Sends your callsign at the start, every interval (1–10 min, 10 by default) and at the end of a transmission, as ticked in Ham → Ham ID → Automatic ID; an interval ID goes into Transmit Text's text at a word gap, with the carrier faded around it. An ID that is due anyway goes before the text |
+| CW Mode | Morse code identification at 5–20 WPM (an ID sent by an automatic keyer may not be faster, FCC 97.119(b)(1)) |
+| Emission | Sent as Auto: a keyed carrier (CW) below 30 MHz and in the CW-only segments, otherwise an FM carrier with the Morse sent as a tone (MCW); an automatic ID goes out the way its transmission does. Or CW / FM tone chosen by hand (an FM tone ID in a CW-only segment is refused) |
+| Tone Frequency | The FM tone ID's tone, 400–1000 Hz (default: 700 Hz) |
 | "DE" Prefix | Proper amateur radio format: "DE [CALLSIGN]" |
-| GUI Panel | Ham Radio → Ham ID tab: callsign input, CW speed and tone, Preview ID, Send ID Now (HackRF One only), countdown to the next automatic ID while transmitting |
+| GUI Panel | Ham → Ham ID tab: callsign, License Profile, CW speed and tone, Sent as, TX Power (HackRF), Automatic ID, Preview ID, Send ID Now (HackRF One only; Stop while on the air, with progress) and a countdown to the next automatic ID; also Radio → Send Station ID |
 
 ### 11.6 SSTV Image Reception (ISS/Space)
 
@@ -666,13 +976,13 @@ The software includes an SSTV (Slow Scan Television) decoder for receiving image
 
 | Feature | Description |
 |---------|-------------|
-| ISS SSTV Preset | Pre-configured 145.800 MHz with FM demodulation |
-| Supported Modes | PD120, PD180 (ISS favorites), Robot, Martin, Scottie |
-| Live Preview | Real-time image display as lines are decoded |
-| Auto-Save | Automatic saving of completed images |
-| Image History | Browse previously received images |
-| VIS Detection | Automatic mode detection from VIS header |
-| GUI Panel | Ham Radio → SSTV tab (Start Decoder); decodes the receiver's FM audio (Demodulation → Mode: FM), whether or not the speaker is on |
+| ISS SSTV Preset | Pre-configured 145.800 MHz with FM demodulation; Tune to ISS (145.800 MHz) on the SSTV tab or in the Tools menu tunes it, starts the receiver and the decoder |
+| Supported Modes | Robot 36 and 72, Martin 1 and 2, Scottie 1, 2 and DX, PD 90, 120, 160, 180, 240 and 290 (PD120 and PD180 are the ISS favorites), Wraase SC2-180 |
+| Live Preview | Real-time image display as lines are decoded, following the line syncs (a slightly fast or slow sound-card clock doesn't slant the picture) |
+| Auto-Save | Automatic saving of received images (partial ones too) to Pictures/SDR Module/SSTV |
+| Image History | The newest 50 images in the save folder are listed again after a restart |
+| VIS Detection | Automatic mode detection from VIS header (Mode: Auto (VIS)), or a fixed mode; Start Now decodes a transmission already under way from its line syncs |
+| GUI Panel | Ham → SSTV tab (Start Decoder); decodes the receiver's FM, USB or LSB audio, whether or not the speaker is on (in another mode it offers Switch to FM, or USB/LSB on HF) |
 
 **Space Frequency Presets:**
 
@@ -759,7 +1069,7 @@ HackRF (0 dBm, 1mW) → Driver (+20dB) → PA (+17dB) = 5W QRP
 
 ### 11.9 License Profiles
 
-TX permissions are enforced based on the operator's amateur radio license class.
+TX permissions are enforced based on the operator's amateur radio license class, chosen in Ham → Ham ID → License Profile (remembered).
 
 **License Classes:**
 
@@ -787,23 +1097,27 @@ TX permissions are enforced based on the operator's amateur radio license class.
 | 40m | CW only (7.025-7.125) | Phone 7.175-7.3, CW 7.025-7.125 | Full |
 | 20m | ✗ | Phone 14.225-14.35, CW 14.025-14.15 | Full |
 | 10m | ✓ (28.0-28.5) | ✓ | ✓ |
-| 6m | ✓ | ✓ | ✓ |
-| 2m | ✓ | ✓ | ✓ |
+| 6m | ✓ (50.0-50.1 CW only) | ✓ (50.0-50.1 CW only) | ✓ (50.0-50.1 CW only) |
+| 2m | ✓ (144.0-144.1 CW only) | ✓ (144.0-144.1 CW only) | ✓ (144.0-144.1 CW only) |
 | 70cm | ✓ | ✓ | ✓ |
 
 **TX Validation:**
-- All TX requests are validated against current license class
+- All TX requests are validated against current license class, at the emission's center and at both edges of its occupied bandwidth
 - Hardware lockouts (GPS, aviation, emergency) always apply regardless of license
-- Mode restrictions enforced per band segment
-- Power limits enforced where applicable
+- Mode restrictions enforced per band segment, for the emission's own mode (and its automatic ID's)
+- Power: the app's transmit path refuses a calculated station output above the legal limit (11.2)
 
 **Power Headroom (150%):**
 
-Power limits allow 150% of the legal limit to account for:
+The frequency manager also gives an effective limit of 150% of the legal
+limit (`get_effective_power_limit()`), to account for:
 - Cable and connector losses
 - Filter insertion loss
 - Amplifier efficiency variations
 - Measurement uncertainty
+
+The app's transmit path doesn't use it: Send ID Now and Transmit Text refuse
+a calculated output above the legal limit itself.
 
 | Band | Legal Limit | Effective Max |
 |------|-------------|---------------|
@@ -820,8 +1134,8 @@ Power limits allow 150% of the legal limit to account for:
 
 The software includes a car-radio-style AM/FM tuner for broadcast radio: a
 pop-out window (Tools → AM/FM Radio Tuner, `Ctrl+R`) that tunes the main
-receiver. Audio plays through the main window, with its toolbar Audio button
-and volume slider.
+receiver. Audio plays through the main window, with the Audio button and
+volume slider in its receiver bar.
 
 ### 12.1 Frequency Bands
 
@@ -834,44 +1148,33 @@ and volume slider.
 
 | Feature | Description |
 |---------|-------------|
-| **Frequency Display** | LCD-style readout: band badge, large frequency digits and a station line (the matching preset, or the band's range) |
+| **Frequency Display** | LCD-style readout: band badge, large frequency digits and a station line (the matching preset, then the station's RDS name and RadioText on FM); between channels it shows the receiver's exact frequency ("Between channels"). STEREO lights while a 19 kHz stereo pilot is measured on a broadcast FM station (the audio itself is mono) |
 | **Tuning Dial** | Slide-rule scale with dots marking the band's presets; drag or click to tune; mouse wheel or `←`/`→` step one channel, `Page Up`/`Page Down` ten, `Home`/`End` jump to the band edges |
-| **Step Buttons** | ◀ / ▶ either side of the dial tune one channel; hold to keep tuning |
+| **Seek Buttons** | ◀ / ▶ either side of the dial seek: they step until a station opens the squelch, once round the band at most (click again to stop); `Shift`+click steps one channel. They need the receiver running, and on a device or recording that covers only part of the band they search the part it can tune |
 | **AM/FM Buttons** | Switch bands; each band returns to the last station tuned on it |
-| **Preset Buttons** | 6 station presets per band (12 total); click to tune; right-click or press and hold to store the current station |
-| **Receiver Link** | Tuning here retunes the main receiver and sets FM (75 kHz deviation, 200 kHz bandwidth) or AM (10 kHz bandwidth). The tuner opens on the receiver's frequency and follows it; while the receiver is outside both broadcast bands the display dims and shows the receiver's frequency instead of a station |
+| **Preset Buttons** | 6 station presets per band (12 total); click to tune; right-click for Tune to Preset, Store Current Station Here, Rename... and Clear (press and hold also stores). A preset the device can't tune reads "(out of range)" (a HackRF One tunes from 1 MHz, so the AM presets below it can't be reached); storing is refused while the receiver is outside both broadcast bands |
+| **Receiver Link** | Tuning here retunes the main receiver and sets FM (75 kHz deviation, 200 kHz filter) or AM (10 kHz filter). The tuner opens on the receiver's frequency and follows it; while the receiver is outside both broadcast bands the display dims and shows the receiver's frequency instead of a station |
 
-Stored presets are kept until SDR Module closes; they are not saved between
-launches.
+Presets, with their names, are saved between launches.
 
 ### 12.3 Default Presets
 
-**FM Presets (example):**
+The default presets are frequencies only (name them with right-click →
+Rename...); the demo device has a station on each.
 
-| Preset | Frequency | Label |
-|--------|-----------|-------|
-| 1 | 101.1 MHz | Rock |
-| 2 | 93.3 MHz | Classic |
-| 3 | 97.1 MHz | Pop |
-| 4 | 104.3 MHz | Jazz |
-| 5 | 88.5 MHz | NPR |
-| 6 | 99.5 MHz | Country |
-
-**AM Presets (example):**
-
-| Preset | Frequency | Label |
-|--------|-----------|-------|
-| 1 | 880 kHz | News |
-| 2 | 1010 kHz | Talk |
-| 3 | 770 kHz | Sports |
-| 4 | 1050 kHz | Weather |
-| 5 | 660 kHz | News2 |
-| 6 | 1260 kHz | Oldies |
+| Preset | FM | AM |
+|--------|----|----|
+| 1 | 101.1 MHz | 880 kHz |
+| 2 | 93.3 MHz | 1010 kHz |
+| 3 | 97.1 MHz | 770 kHz |
+| 4 | 104.3 MHz | 1050 kHz |
+| 5 | 88.5 MHz | 660 kHz |
+| 6 | 99.5 MHz | 1260 kHz |
 
 ### 12.4 Styling
 
 The tuner is laid out like a car radio: band buttons beside the frequency
-display, the dial between its step buttons, and two rows of preset buttons.
+display, the dial between its seek buttons, and two rows of preset buttons.
 It is drawn entirely from the active theme palette (Section 8.6), so it
 follows the dark or light theme and switches live:
 - The display uses the theme's LCD colors (the same as the toolbar's FREQ readout)
@@ -898,8 +1201,10 @@ audio = tuner.process_samples(iq_samples)  # scaled by set_volume() / set_muted(
 freq = tuner.get_frequency()
 band = tuner.get_band()  # RadioBand.AM or RadioBand.FM
 
-# Show the STEREO badge on the display (no stereo detection is built in)
+# Show the STEREO badge and the RDS station line (the main window sets them
+# from its own 19 kHz pilot measurement and RDS decoder)
 tuner.set_stereo(True)
+tuner.set_rds_text("SDR DEMO")
 ```
 
 ---
@@ -911,7 +1216,7 @@ tuner.set_stereo(True)
 | Remote Operation | Network-based SDR control |
 | Database Integration | Signal/protocol signature database |
 | Machine Learning | AI-based signal classification |
-| Multi-SDR Support | Multiple receiver operation |
+| Multi-SDR Support | More than two receivers at once (the GUI runs two: Device → Second Receiver...) |
 | Spectral Signature Library | Community-sourced signal database |
 
 ---
@@ -1021,8 +1326,8 @@ If not using the installer:
 
 ---
 
-*Document Version: 4.3*
-*Last Updated: 2026-09-26*
+*Document Version: 4.4*
+*Last Updated: 2026-10-30*
 
 ---
 
@@ -1046,3 +1351,4 @@ If not using the installer:
 | 4.1 | 2025-12-26 | Removed NatLangChain blockchain radio protocol integration |
 | 4.2 | 2026-01-01 | Added AM/FM Radio Tuner documentation (Section 12); vintage car radio-style interface with presets, tuning dial, and volume controls |
 | 4.3 | 2026-09-26 | Section 8 rewritten for the reworked GUI: window layout, Radio menu, tool tabs (Decoder, Bookmarks, Ham Radio, Info), full shortcut list, status bar, persisted state, themes and demo mode; SigMF recording; Section 12 matched to the current radio tuner (volume, tone, balance, seek and power controls removed; audio via the main window) |
+| 4.4 | 2026-10-30 | Section 8 rewritten from the code for the reworked GUI: receiver bar, Scanner, Signal and Ham tabs, playback strip, clickable status bar, every menu item and key, the F1 list, settings keys, demo signals by frequency. Sections 2, 4.2, 5.2, 5.3, 6.4, 11 and 12 brought in line: RDS and Morse decoding, ISM burst analysis, playback and conversion, dual-SDR modes implemented or not, transmit checks and lockout ranges, AM/FM tuner seek and saved presets |

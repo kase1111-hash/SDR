@@ -537,5 +537,94 @@ class TestDemoRecoversFromAHiccup(_WindowTestCase):
         self.win._refresh_state_ui()
 
 
+# ---------------------------------------------------------------------------
+# audio-chain-balance-iq-zero-division
+# ---------------------------------------------------------------------------
+
+
+def _station(n, rate=2.4e6, seed=1):
+    """Noise and a strong station 300 kHz above the center."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(n) / rate
+    x = 0.05 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    x += 0.5 * np.exp(2j * np.pi * 300e3 * t)
+    return x.astype(np.complex64)
+
+
+def _mirror_dbc(samples, rate=2.4e6):
+    """The image at -300 kHz relative to the station at +300 kHz."""
+    n = 65536
+    spectrum = np.fft.fft(samples[:n] * np.hanning(n))
+    k = int(round(300e3 / rate * n))
+    return 20 * np.log10(abs(spectrum[-k]) / abs(spectrum[k]) + 1e-12)
+
+
+class TestBalanceIqWithoutVariance(unittest.TestCase):
+    RATE = 2.4e6
+
+    def _conditioner(self):
+        from sdr_module.gui.audio_chain import IqConditioner
+
+        conditioner = IqConditioner()
+        conditioner.balance_iq = True
+        return conditioner
+
+    def test_blocks_without_i_or_q_variance_pass_and_teach_nothing(self):
+        rng = np.random.default_rng(3)
+        for label, block in (
+            ("zeros", np.zeros(80000, np.complex64)),
+            ("Q = 0", (0.1 * rng.standard_normal(80000)).astype(np.complex64)),
+            ("I = 0", (0.1j * rng.standard_normal(80000)).astype(np.complex64)),
+            ("DC only", np.full(80000, 0.01 + 0.01j, np.complex64)),
+        ):
+            with self.subTest(block=label):
+                conditioner = self._conditioner()
+                for _ in range(3):
+                    out = conditioner.process(block, self.RATE)
+                    self.assertEqual(len(out), len(block))
+                    self.assertTrue(np.all(np.isfinite(out)))
+                self.assertEqual(conditioner.imbalance, (None, None))
+                # The first real signal is corrected at once, not mirrored.
+                out = conditioner.process(_station(80000), self.RATE)
+                self.assertLess(_mirror_dbc(out), -40.0)
+                gain, phase = conditioner.imbalance
+                self.assertLess(abs(gain), 0.05)
+                self.assertLess(abs(phase), 0.05)
+
+    def test_a_stretch_of_zeros_does_not_drag_the_estimate(self):
+        conditioner = self._conditioner()
+        for _ in range(5):
+            conditioner.process(_station(80000), self.RATE)
+        settled = conditioner.imbalance
+        for _ in range(60):  # two seconds of zeros
+            conditioner.process(np.zeros(80000, np.complex64), self.RATE)
+        self.assertEqual(conditioner.imbalance, settled)
+        out = conditioner.process(_station(80000, seed=2), self.RATE)
+        self.assertLess(_mirror_dbc(out), -40.0)
+
+    def test_correction_refuses_a_degenerate_gain(self):
+        from sdr_module.gui.audio_chain import correct_iq
+
+        block = _station(1000)
+        for gain in (-1.0, -0.9999999, float("nan"), float("-inf")):
+            with self.subTest(gain=gain):
+                out = correct_iq(block, gain, 0.0)
+                self.assertTrue(np.all(np.isfinite(out)))
+                self.assertLess(np.max(np.abs(out)), 10 * np.max(np.abs(block)))
+
+
+class TestBalanceIqInTheWindow(_WindowTestCase):
+    demo = True
+
+    def test_zero_padding_in_a_recording_does_not_break_frames(self):
+        self.win._iq_conditioner.balance_iq = True
+        self.win._iq_conditioner.reset()
+        seen = []
+        self.win._spectrum.update_spectrum = seen.append
+        for _ in range(3):
+            self.win._process_block(np.zeros(80000, np.complex64))
+        self.assertEqual(len(seen), 3)  # every frame plotted
+
+
 if __name__ == "__main__":
     unittest.main()

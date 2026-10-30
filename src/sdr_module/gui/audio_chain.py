@@ -617,7 +617,10 @@ class IqConditioner:
       center is removed too.
     * ``balance_iq``: estimates the I/Q gain and phase error over a few
       seconds and corrects it, which suppresses mirror images of strong
-      signals (on the other side of the center).
+      signals (on the other side of the center). A block with (next to)
+      no I or no Q (zeros, a recording's padding, a constant) says nothing
+      about the imbalance and is left out of the estimate; the correction
+      never goes beyond ``IQ_MAX_GAIN`` and ``IQ_MAX_PHASE``.
 
     Both are off by default and cost a few operations per sample.
     """
@@ -625,6 +628,15 @@ class IqConditioner:
     DC_TIME_S = 0.2
     IQ_TIME_S = 2.0
     IQ_SLICE = 16384
+    # The weaker of I and Q must carry at least this fraction of the
+    # stronger's power for a slice to be estimated (-30 dB; hardware is
+    # within a dB or two).
+    IQ_POWER_FLOOR = 1e-3
+    # The largest gain error (Q's gain relative to I's, minus 1) and phase
+    # error (radians) corrected: far beyond any real front end, and Q is
+    # never scaled by more than 2.
+    IQ_MAX_GAIN = 0.5
+    IQ_MAX_PHASE = 0.5
 
     def __init__(self) -> None:
         self.remove_dc = False
@@ -679,24 +691,48 @@ class IqConditioner:
             # difference leaves both out (it is zero at DC and 40 dB down
             # within 5 kHz of it) and keeps the imbalance, which every real
             # filter of I and Q alike preserves.
-            gain, phase = estimate_iq_imbalance(np.diff(x[: self.IQ_SLICE]))
-            gain, phase = float(gain), float(phase)
-            if self._gain is None or self._phase is None:
-                self._gain, self._phase = gain, phase
-            else:
-                alpha = 1.0 - math.exp(-n / (self.IQ_TIME_S * max(rate, 1.0)))
-                self._gain += alpha * (gain - self._gain)
-                self._phase += alpha * (phase - self._phase)
-            x = correct_iq(x, self._gain, self._phase)
+            slope = np.diff(x[: self.IQ_SLICE])
+            estimate = self._estimate(slope)
+            if estimate is not None:
+                gain, phase = estimate
+                if self._gain is None or self._phase is None:
+                    self._gain, self._phase = gain, phase
+                else:
+                    alpha = 1.0 - math.exp(-n / (self.IQ_TIME_S * max(rate, 1.0)))
+                    self._gain += alpha * (gain - self._gain)
+                    self._phase += alpha * (phase - self._phase)
+            if self._gain is not None and self._phase is not None:
+                x = correct_iq(x, self._gain, self._phase)
         return x
+
+    def _estimate(self, slope: np.ndarray) -> Optional[Tuple[float, float]]:
+        """(gain, phase) error of a slice's first difference, within the
+        correctable range; None when it has (next to) no I or Q power
+        (the estimate would be a gain error of -1: Q times infinity)."""
+        i_power = float(np.mean(np.square(slope.real, dtype=np.float64)))
+        q_power = float(np.mean(np.square(slope.imag, dtype=np.float64)))
+        weaker, stronger = sorted((i_power, q_power))
+        if not stronger > 0.0 or weaker <= self.IQ_POWER_FLOOR * stronger:
+            return None
+        gain, phase = estimate_iq_imbalance(slope)
+        gain, phase = float(gain), float(phase)
+        if not (math.isfinite(gain) and math.isfinite(phase)):
+            return None
+        limit_g, limit_p = self.IQ_MAX_GAIN, self.IQ_MAX_PHASE
+        return min(max(gain, -limit_g), limit_g), min(max(phase, -limit_p), limit_p)
 
 
 def correct_iq(samples: np.ndarray, gain: float, phase: float) -> np.ndarray:
     """:func:`~sdr_module.utils.iq.apply_iq_imbalance_correction` in
     float32, as two multiply-adds per sample: with ``q' = Q / (1 + gain)``
-    it keeps ``I - q' sin(phase)`` and ``q' cos(phase)``."""
+    it keeps ``I - q' sin(phase)`` and ``q' cos(phase)``. A gain of -1 or
+    less (Q times infinity) or one that isn't a number leaves the samples
+    as they are."""
     x = np.asarray(samples, dtype=np.complex64)
-    scale = 1.0 / (1.0 + float(gain))
+    gain, phase = float(gain), float(phase)
+    if not (math.isfinite(gain) and math.isfinite(phase)) or 1.0 + gain <= 1e-3:
+        return x
+    scale = 1.0 / (1.0 + gain)
     b = np.float32(math.sin(phase) * scale)
     c = np.float32(math.cos(phase) * scale)
     out = np.empty_like(x)

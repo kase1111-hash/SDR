@@ -343,7 +343,7 @@ class TestRDSLiveDecoder:
         assert status.last_time is not None
 
     def test_a_cheap_channel_from_20_ms_s(self):
-        # A HackRF at 20 MS/s: the channel is decimated by 80 (16 x 5). It
+        # A HackRF at 20 MS/s: the channel is decimated by 80 (40 x 2). It
         # was 81 (9 x 9), whose first stage cost twice as much: the decoder
         # took about 20 ms of each 33 ms frame.
         channelizer = RDSLiveDecoder(20e6, 300e3)._channelizer

@@ -267,14 +267,22 @@ _PROBE_READ_S = 0.05
 _MAX_DRAIN = 1000
 # A display frame (reading and processing its samples) that takes more than
 # this fraction of the time its samples cover means this computer can't keep
-# up; below the second fraction it can again. Frames shorter than
-# _TIMED_FRAME samples aren't timed (their per-frame overhead dominates).
+# up (the median of the last few frames); probe frames below the second
+# fraction show it can again. Frames shorter than _TIMED_FRAME samples
+# aren't timed (their per-frame overhead dominates).
 _OVERLOAD_RATIO = 0.8
-_RECOVER_RATIO = 0.5
+_RECOVER_RATIO = 0.7
 _TIMED_FRAME = 8 * DISPLAY_BLOCK
 # While frames can't keep up, one frame this often reads (and times) a full
-# frame's worth again, to find out when the computer keeps up once more.
+# frame's worth again, to find out when the computer keeps up once more:
+# full frames resume after this many probes in a row below _RECOVER_RATIO,
+# not counting the first (after one-block frames, a full frame allocates
+# its buffers anew, which costs more than the load).
 _OVERLOAD_PROBE_S = 1.0
+_RECOVER_PROBES = 2
+# Timed frames after Start (or a new device or sample rate) that aren't
+# judged: the first frames design filters and plan FFTs.
+_WARM_UP_FRAMES = 2
 
 # Tuning (see SDRMainWindow.set_frequency): the tuned channel may sit
 # anywhere in this inner fraction of the span (the receiver's anti-alias
@@ -1168,16 +1176,21 @@ class _Pacer:
     frames are known to keep up.
 
     :meth:`measured` times whole frames (reading, filtering, demodulating)
-    against the time their samples cover. While frames take more than
-    ``_OVERLOAD_RATIO`` of it, this computer can't keep up (``overloaded``):
-    each frame then reads one block, as it used to, so the window stays
-    responsive, and as samples no longer arrive in real time, audio is
-    muted with a hint. One-block frames are too short to time, so once
-    every ``_OVERLOAD_PROBE_S`` a frame reads a full frame's worth again
-    (a probe, timed like any frame; after a fast one the next frame probes
-    too). Full frames resume below ``_RECOVER_RATIO``, so a passing hiccup
-    (another program busy for a moment) doesn't mute the audio for good.
-    Start (:meth:`restart`) finds out anew.
+    against the time their samples cover (not the first
+    ``_WARM_UP_FRAMES`` after Start, which design filters and plan FFTs).
+    While the median frame takes more than ``_OVERLOAD_RATIO`` of it, this
+    computer can't keep up (``overloaded``): each frame then reads one
+    block, as it used to, so the window stays responsive, and as samples
+    no longer arrive in real time, audio is muted with a hint. One-block
+    frames say nothing about full ones (their cost is mostly per frame,
+    such as painting the plots) and aren't judged: once every
+    ``_OVERLOAD_PROBE_S`` a frame reads a full frame's worth again (a
+    probe), and while probes keep up the next frame probes too. Full
+    frames resume after ``_RECOVER_PROBES`` probes in a row below
+    ``_RECOVER_RATIO`` (not counting the first, which allocates its
+    buffers anew after one-block frames), so a passing hiccup (another
+    program busy for a moment) doesn't mute the audio for good. Start
+    (:meth:`restart`) finds out anew.
     """
 
     def __init__(self) -> None:
@@ -1185,9 +1198,14 @@ class _Pacer:
         self._ratios: Deque[float] = deque(maxlen=5)
         self.overloaded = False
         # While overloaded: when the next probe frame is due (None: not
-        # scheduled yet), or probe on the next frame.
+        # scheduled yet), or probe on the next frame; whether the frame
+        # being read is a probe, and the probes in a row so far.
         self._next_probe: Optional[float] = None
         self._probe_now = False
+        self._probing = False
+        self._probes = 0
+        # Timed frames still to come before frames are judged.
+        self._warm_up = _WARM_UP_FRAMES
         # Samples a paced source (a recording playing back) is owed but not
         # yet given: less than a block, or a little ahead (negative).
         self._owed = 0.0
@@ -1199,6 +1217,9 @@ class _Pacer:
         self.overloaded = False
         self._next_probe = None
         self._probe_now = False
+        self._probing = False
+        self._probes = 0
+        self._warm_up = _WARM_UP_FRAMES
         self._owed = 0.0
 
     def restart(self) -> None:
@@ -1213,7 +1234,8 @@ class _Pacer:
         time ``now``, for a probe frame: at least ``_TIMED_FRAME`` samples.
         """
         if self.overloaded:
-            if now is not None and self._probe_due(now):
+            self._probing = now is not None and self._probe_due(now)
+            if self._probing:
                 return max(float(_TIMED_FRAME), rate * _PROBE_READ_S)
             return 0.0
         return rate * (_MAX_READ_S if self._keeps_up() else _PROBE_READ_S)
@@ -1265,23 +1287,39 @@ class _Pacer:
 
     def measured(self, count: int, rate: float, seconds: float) -> None:
         """A frame of ``count`` samples took ``seconds`` to read and process."""
+        probe, self._probing = self._probing, False
         if count < _TIMED_FRAME or rate <= 0:
             return
         ratio = seconds * rate / count
-        self._ratios.append(ratio)
-        if self.overloaded and ratio < _RECOVER_RATIO:
-            self._probe_now = True  # looks better: check again right away
-        if len(self._ratios) < 3:
+        if self.overloaded:
+            if probe:
+                self._judge_probe(ratio)
             return
-        load = float(np.median(self._ratios))
-        if load > _OVERLOAD_RATIO:
-            if not self.overloaded:
-                self._next_probe = None
-                self._probe_now = False
+        if self._warm_up > 0:
+            self._warm_up -= 1
+            return
+        self._ratios.append(ratio)
+        if len(self._ratios) >= 3 and float(np.median(self._ratios)) > _OVERLOAD_RATIO:
             self.overloaded = True
-        elif load < _RECOVER_RATIO:
-            self.overloaded = False
+            self._ratios.clear()  # (the probes are judged on their own)
+            self._next_probe = None
             self._probe_now = False
+            self._probes = 0
+
+    def _judge_probe(self, ratio: float) -> None:
+        """A probe frame took ``ratio`` of the time its samples cover."""
+        if self._probes == 0:
+            self._ratios.clear()
+        self._probes += 1
+        self._ratios.append(ratio)
+        if self._probes > 1 and ratio >= _RECOVER_RATIO:
+            self._probes = 0  # still too slow: probe again in a while
+            return
+        if self._probes > _RECOVER_PROBES:
+            self.overloaded = False
+            self._probes = 0
+            return
+        self._probe_now = True  # (the next frame probes too)
 
     def _keeps_up(self) -> bool:
         """Frames are known to take under ``_OVERLOAD_RATIO`` of real time."""

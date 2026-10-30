@@ -259,8 +259,9 @@ class TestHardwareDrain(_WindowTestCase):
         return dev
 
     def _keeps_up(self, rate):
-        """Tell the pacer that frames take well under real time."""
-        for _ in range(3):
+        """Tell the pacer that frames take well under real time (after the
+        first frames, which aren't judged)."""
+        for _ in range(self.mw._WARM_UP_FRAMES + 3):
             self.win._pacer.measured(int(rate), rate, 0.1)
 
     def tearDown(self):
@@ -392,6 +393,8 @@ class TestPacer(unittest.TestCase):
         # Unknown speed: a long gap is capped at the probe length...
         probe = int(rate * mw._PROBE_READ_S)
         self.assertEqual(pacer.demo_request(rate, 12.0), probe)
+        for _ in range(mw._WARM_UP_FRAMES):  # (not judged, after Start)
+            pacer.measured(80000, rate, 0.004)
         pacer.measured(80000, rate, 0.004)
         self.assertEqual(pacer.demo_request(rate, 14.0), probe)
         # ...once frames are known to keep up, at a quarter second.
@@ -407,17 +410,26 @@ class TestPacer(unittest.TestCase):
         rate = 2.4e6
         pacer.measured(1024, rate, 1.0)  # too short to judge
         self.assertFalse(pacer.overloaded)
-        for _ in range(3):
+        for _ in range(mw._WARM_UP_FRAMES + 3):
             pacer.measured(80000, rate, 0.045)  # 45 ms for 33 ms of signal
         self.assertTrue(pacer.overloaded)
         self.assertEqual(pacer.read_limit(rate), 0.0)
         pacer.demo_request(rate, 1.0)
         self.assertEqual(pacer.demo_request(rate, 1.5), mw.DISPLAY_BLOCK)
-        for _ in range(2):
-            pacer.measured(80000, rate, 0.02)  # 0.6: in between
+        # Only probe frames (one a second) are judged now: probes in
+        # between (0.75 of real time) don't end it...
+        now = 2.5  # (a second after the first one-block frame)
+        for _ in range(4):
+            count = pacer.demo_request(rate, now)
+            self.assertGreaterEqual(count, mw._TIMED_FRAME)
+            pacer.measured(count, rate, 0.75 * count / rate)
+            now += 1.0
         self.assertTrue(pacer.overloaded)
+        # ...probes that keep up do.
         for _ in range(3):
-            pacer.measured(80000, rate, 0.005)
+            count = pacer.demo_request(rate, now)
+            pacer.measured(count, rate, 0.2 * count / rate)
+            now += 0.033
         self.assertFalse(pacer.overloaded)
         pacer.reset()
         self.assertEqual(pacer.read_limit(rate), rate * mw._PROBE_READ_S)

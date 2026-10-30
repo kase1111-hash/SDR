@@ -14,6 +14,7 @@ Run offscreen:
 ``QT_QPA_PLATFORM=offscreen python -m pytest tests/test_review_mainloop.py``
 """
 
+import collections
 import os
 import queue
 import shutil
@@ -28,8 +29,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from tests.test_gui_chrome import (  # noqa: E402
     HAS_PYQT6,
     _WindowTestCase,
+    require_pyqt6,
 )
-from tests.test_gui_round3_main import _FakeClock  # noqa: E402
+from tests.test_gui_round3_main import _FakeClock, _FakeDemo  # noqa: E402
 
 if HAS_PYQT6:
     from PyQt6.QtWidgets import QApplication
@@ -341,6 +343,198 @@ class TestDriversCountDrops(unittest.TestCase):
             self.assertGreater(dev.dropped_samples, 0)
             self.assertEqual(dev.dropped_samples % 4096, 0)
             dev.close()
+
+
+# ---------------------------------------------------------------------------
+# mainloop-pacer-stuck-overloaded
+# ---------------------------------------------------------------------------
+
+
+def _simulate(
+    source,
+    rate,
+    load,
+    fixed,
+    stall_at=None,
+    stall_frames=3,
+    stall_s=0.3,
+    seconds=20.0,
+    warm_frames=0,
+    judge_from=None,
+):
+    """The real pacer on a virtual clock. The display timer fires every
+    33 ms (or when the last frame ends, if later); a frame of ``n`` samples
+    costs ``fixed + load * n / rate`` seconds; ``stall_frames`` frames
+    from ``stall_at`` take ``stall_s`` each (another program busy), and the
+    first ``warm_frames`` frames 60 ms more (filter designs after Start).
+    The source is the demo device (``demo_request``) or a hardware queue of
+    100 transfers drained as the window does. Returns the fraction of the
+    stream processed from ``judge_from`` (3 s after the stall, or after
+    the start) and whether the pacer is overloaded at the end."""
+    pacer = _mw()._Pacer()
+    t = next_tick = queued_to = 0.0
+    fifo = collections.deque()
+    after = stalled = frames = 0
+    start = judge_from
+    if start is None:
+        start = (stall_at or 0.0) + 3.0
+    while t < seconds:
+        t = max(t, next_tick)
+        if source == "hw":
+            while queued_to + TRANSFER <= rate * t:
+                queued_to += TRANSFER
+                if len(fifo) < 100:
+                    fifo.append(TRANSFER)
+            limit = pacer.read_limit(rate, t)
+            count = 0
+            while fifo and (count == 0 or count < limit):
+                count += fifo.popleft()
+            if count == 0:
+                next_tick = t + 0.033
+                continue
+        else:
+            count = pacer.demo_request(rate, t)
+        cost = fixed + load * count / rate
+        if frames < warm_frames:
+            cost += 0.06
+        if stall_at is not None and t >= stall_at and stalled < stall_frames:
+            cost, stalled = stall_s, stalled + 1
+        frames += 1
+        began, t = t, t + cost
+        pacer.measured(count, rate, cost)
+        if began >= start:
+            after += count
+        next_tick = began + 0.033
+    return after / (rate * (seconds - start)), pacer.overloaded
+
+
+class TestPacerRecovers(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_a_passing_stall_does_not_overload_a_computer_that_keeps_up(self):
+        """Frames at 0.45-0.6x real time (the review measured 0.55-0.63 at
+        20 MS/s): a 3-frame stall used to trap the pacer for good."""
+        for source, rate, fixed in (("demo", 2.4e6, 0.002), ("hw", 20e6, 0.004)):
+            for load in (0.45, 0.55, 0.6):
+                with self.subTest(source=source, load=load):
+                    processed, overloaded = _simulate(
+                        source, rate, load, fixed, stall_at=5.0
+                    )
+                    self.assertFalse(overloaded)
+                    self.assertGreater(processed, 0.99)
+
+    def test_slow_first_frames_after_start_do_not_overload(self):
+        for source, rate, fixed in (("demo", 2.4e6, 0.002), ("hw", 20e6, 0.004)):
+            with self.subTest(source=source):
+                processed, overloaded = _simulate(
+                    source, rate, 0.6, fixed, warm_frames=3, judge_from=0.5
+                )
+                self.assertFalse(overloaded)
+                self.assertGreater(processed, 0.99)
+
+    def test_a_computer_that_cannot_keep_up_stays_overloaded(self):
+        for source, rate, fixed in (("demo", 2.4e6, 0.002), ("hw", 20e6, 0.004)):
+            for load in (0.95, 1.5):
+                with self.subTest(source=source, load=load):
+                    _processed, overloaded = _simulate(source, rate, load, fixed)
+                    self.assertTrue(overloaded)
+
+    def test_one_block_frames_while_overloaded_are_not_judged(self):
+        mw = _mw()
+        pacer, rate = mw._Pacer(), 20e6
+        for _ in range(mw._WARM_UP_FRAMES + 3):
+            pacer.measured(TRANSFER * 5, rate, 0.05)  # 1.5x real time
+        self.assertTrue(pacer.overloaded)
+        self.assertEqual(pacer.read_limit(rate, 10.0), 0.0)  # schedules a probe
+        # One transfer a frame costs more than real time (painting the
+        # plots is per frame), which says nothing about full frames.
+        for _ in range(20):
+            self.assertEqual(pacer.read_limit(rate, 10.5), 0.0)
+            pacer.measured(TRANSFER, rate, 0.012)
+        # The probes keep up: full frames resume.
+        now, probes = 11.0, 0
+        while pacer.overloaded and probes < 10:
+            limit = pacer.read_limit(rate, now)
+            self.assertGreater(limit, 0)
+            pacer.measured(int(limit), rate, 0.6 * limit / rate)
+            probes += 1
+            now += 0.033
+        self.assertFalse(pacer.overloaded)
+        self.assertEqual(probes, 1 + mw._RECOVER_PROBES)
+
+    def test_the_first_probe_after_one_block_frames_is_not_judged(self):
+        mw = _mw()
+        pacer, rate = mw._Pacer(), 20e6
+        for _ in range(mw._WARM_UP_FRAMES + 3):
+            pacer.measured(TRANSFER * 5, rate, 0.05)
+        pacer.read_limit(rate, 10.0)
+        # The first full frame after one-block frames builds its buffers
+        # anew (slower); the next ones show the real load.
+        costs = iter([1.2] + [0.6] * mw._RECOVER_PROBES)
+        now = 11.0
+        for _ in range(1 + mw._RECOVER_PROBES):
+            limit = pacer.read_limit(rate, now)
+            self.assertGreater(limit, 0)
+            pacer.measured(int(limit), rate, next(costs) * limit / rate)
+            now += 0.033
+        self.assertFalse(pacer.overloaded)
+
+    def test_a_slow_probe_waits_for_the_next_one(self):
+        mw = _mw()
+        pacer, rate = mw._Pacer(), 2.4e6
+        for _ in range(mw._WARM_UP_FRAMES + 3):
+            pacer.measured(80000, rate, 0.05)
+        pacer.read_limit(rate, 10.0)
+        for ratio in (0.6, 0.9):  # the second (judged) probe is slow
+            limit = pacer.read_limit(rate, 11.0)
+            self.assertGreater(limit, 0)
+            pacer.measured(int(limit), rate, ratio * limit / rate)
+        self.assertTrue(pacer.overloaded)
+        self.assertEqual(pacer.read_limit(rate, 11.1), 0.0)  # not right away
+        self.assertGreater(pacer.read_limit(rate, 12.1), 0.0)  # a second later
+
+
+class TestDemoRecoversFromAHiccup(_WindowTestCase):
+    demo = True
+
+    def test_a_computer_at_six_tenths_of_real_time_recovers(self):
+        clock = _FakeClock()
+        rate = 2.4e6
+        source = _FakeDemo(clock, cost=0.6 / rate)
+        spoken = []
+        self.win._audio.write = spoken.append
+        self.win._audio_enabled = True
+        self.win._control_panel.set_squelch_db(-100)
+        self.win._set_demod_mode("FM", "75 kHz", "200 kHz")
+
+        def run(seconds):
+            end = clock.now + seconds
+            while clock.now < end:
+                self.win._update_display()
+                clock.advance(0.033)
+
+        with mock.patch.object(self.mw, "time", clock):
+            self.win._stop_acquisition()
+            self.win._device = source  # still in demo mode
+            self.win._start_acquisition()
+            run(2.0)
+            self.assertFalse(self.win._pacer.overloaded)
+            self.assertTrue(spoken)
+            source.cost = 2.0 / rate  # another program hogs the CPU
+            run(1.5)
+            self.assertTrue(self.win._pacer.overloaded)
+            source.cost = 0.6 / rate  # over; this computer keeps up again
+            run(4.0)
+            self.assertFalse(self.win._pacer.overloaded)
+            before = len(spoken)
+            run(1.0)
+            self.assertTrue(self.win._realtime())
+            self.assertGreater(len(spoken), before)  # audio again
+        self.win._stop_acquisition()
+        self.win._device = None
+        self.win._demo_mode = False
+        self.win._refresh_state_ui()
 
 
 if __name__ == "__main__":

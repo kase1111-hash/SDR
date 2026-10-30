@@ -855,5 +855,53 @@ class TestNoStaleAudioInTheWindow(_WindowTestCase):
         self.assertEqual(sum(len(a) for a in given), sum(len(a) for a in checked))
 
 
+# ---------------------------------------------------------------------------
+# mainloop-tone-state-depends-on-speaker
+# ---------------------------------------------------------------------------
+
+
+class TestToneStateWithoutTheSpeaker(_WindowTestCase):
+    demo = True
+
+    def _listen(self, frames=45):
+        states = collections.Counter()
+        present = collections.Counter()
+        dev = self.win._device
+        for _ in range(frames):
+            self.win._process_block(dev.read_samples(80000))
+            states[self.win._squelch_state(True)] += 1
+            present[self.win._scanner_host.scan_signal_present()] += 1
+        return states, present
+
+    def setUp(self):
+        super().setUp()
+        self.win._stop_acquisition()
+        self.win._device.start_rx()
+        self.win._audio.write = lambda _audio: None
+        # Demo NOAA weather radio: narrow FM, no CTCSS tone.
+        self.win.set_frequency(162.55e6)
+        self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        self.win._control_panel.set_tone_squelch_hz(100.0)
+        self.assertEqual(self.win._tone_squelch.tone_hz, 100.0)
+
+    def test_a_carrier_without_the_tone_reads_tone_with_audio_off(self):
+        self.win._set_audio_enabled(True)
+        states, present = self._listen()
+        self.assertEqual(states.most_common(1)[0][0], "tone")
+        self.win._set_audio_enabled(False)
+        states, present = self._listen()
+        # The lamp (and the Info tab, and a scan) see the same: a signal,
+        # but not the chosen tone; the speaker being off changes nothing.
+        self.assertEqual(states.most_common(1)[0][0], "tone")
+        self.assertEqual(present.most_common(1)[0][0], False)
+
+    def test_with_the_tone_squelch_off_audio_off_reads_open(self):
+        self.win._control_panel.set_tone_squelch_hz(0)
+        self.win._set_audio_enabled(False)
+        states, present = self._listen()
+        self.assertEqual(states.most_common(1)[0][0], "open")
+        self.assertEqual(present.most_common(1)[0][0], True)
+
+
 if __name__ == "__main__":
     unittest.main()

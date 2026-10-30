@@ -6790,10 +6790,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # A bookmark scan judges a channel by its CTCSS tone, speaker on or
         # off (see scanner_host.WindowScannerHost.scan_signal_present).
         scan_tone = self._scan_checks_tone and mode == "FM" and gate.is_open
+        # So does the TONE state (the level meter's lamp, the Info tab, a
+        # range scan): a signal without the chosen tone reads TONE whether
+        # the speaker plays or not.
+        tone_check = mode == "FM" and gate.is_open and bool(self._tone_squelch.tone_hz)
         # The block after the speaker stopped is still demodulated: it
         # fades out instead of breaking off.
         fading_out = self._audio_join.playing and not speaker
-        demodulate = speaker or sstv or fading_out or recording or scan_tone
+        demodulate = (
+            speaker or sstv or fading_out or recording or scan_tone or tone_check
+        )
         if not demodulate or not audible:
             if self._demod_running:
                 # Closed for real (not during the hang): start afresh.
@@ -6838,7 +6844,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if self._tones_checked(deviation):
                 if not tones.process(chain.pre_nr_audio):
                     tone_ok = False
-                    self._tone_blocked = speaker or scan_tone
+                    self._tone_blocked = True
                     speaker = False
             elif tones.detected_hz is not None:
                 tones.reset()

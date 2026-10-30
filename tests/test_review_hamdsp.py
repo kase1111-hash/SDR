@@ -1119,7 +1119,42 @@ class TestEncodeFitsTheSampleRate(unittest.TestCase):
         room = 4000.0 - width / 2.0
         self.assertIn("(±4000 Hz)", printed)
         self.assertIn(f"--carrier from {-room:.0f} to {room:.0f} Hz", printed)
-        self.assertIn(f"--sample-rate above {2 * 3900 + width:.0f}", printed)
+        self.assertIn(f"--sample-rate of at least {2 * 3900 + width:.0f}", printed)
+
+    def test_what_the_error_suggests_is_accepted(self):
+        """The carriers and the rate the error names all fit. At its exact
+        bounds it refused what it suggested: "--carrier 3010 Hz reaches
+        4000 Hz, more than --sample-rate 8000 can hold (±4000 Hz): use a
+        --carrier from -3010 to 3010 Hz, or a --sample-rate above 8000"."""
+        import re
+
+        for protocol, rate, carrier in (
+            ("ascii", "8000", "3900"),
+            ("ascii", "8000", "3010.5"),
+            ("psk31", "1000", "1000"),
+            ("morse", "8000", "5000"),
+            ("rtty", "7999.999", "-3900"),
+        ):
+            with self.subTest(protocol=protocol, rate=rate, carrier=carrier):
+                rc, printed, _out = self.encode(
+                    protocol, "--sample-rate", rate, "--carrier", carrier
+                )
+                self.assertEqual(rc, 1, printed)
+                reach = float(re.search(r"reaches ([\d.]+) Hz", printed).group(1))
+                self.assertGreater(reach, float(rate) / 2.0, printed)
+                low, high = re.search(
+                    r"--carrier from (-?[\d.]+) to (-?[\d.]+) Hz", printed
+                ).groups()
+                least = re.search(r"--sample-rate of at least ([\d.]+)", printed)
+                self.assertIsNotNone(least, printed)
+                for args in (
+                    ("--sample-rate", rate, "--carrier", low),
+                    ("--sample-rate", rate, "--carrier", high),
+                    ("--sample-rate", least.group(1), "--carrier", carrier),
+                ):
+                    rc, again, out = self.encode(protocol, *args)
+                    self.assertEqual(rc, 0, f"{args}: {again}")
+                    self.assertTrue(out.exists())
 
     def test_a_signal_wider_than_the_rate_asks_for_a_higher_rate(self):
         rc, printed, _out = self.encode(
@@ -1127,7 +1162,7 @@ class TestEncodeFitsTheSampleRate(unittest.TestCase):
         )
         self.assertEqual(rc, 1)
         self.assertNotIn("--carrier from", printed)
-        self.assertIn("--sample-rate above", printed)
+        self.assertIn("--sample-rate of at least", printed)
 
     def test_what_fits_is_written_and_lands_where_asked(self):
         # (protocol options, carrier, how far the strongest tone may be

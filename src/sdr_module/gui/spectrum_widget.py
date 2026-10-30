@@ -838,6 +838,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         # Spectrum data, and the (center, span) it was received with
         self._spectrum = np.zeros(self._fft_size)
         self._peak_hold = np.full(self._fft_size, _PEAK_FLOOR_DB)
+        # The lowest level per bin since the last reset (NaN: none yet).
+        self._min_hold = np.full(self._fft_size, np.nan)
         self._average = np.zeros(self._fft_size)
         self._avg_count = 0
         self._avg_alpha = 0.3
@@ -853,6 +855,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
         # Display options
         self._show_peak = True
+        self._show_min = False
         self._show_average = False
         self._grid_enabled = True
 
@@ -1020,12 +1023,17 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         event.accept()
 
     def _update_reset_button(self) -> None:
-        self._peak_reset_btn.setEnabled(self._show_peak)
-        self._peak_reset_btn.setToolTip(
-            "Clear the peak-hold trace"
-            if self._show_peak
-            else "Turn on Peak hold to use Reset"
-        )
+        holding = self._show_peak or self._show_min
+        self._peak_reset_btn.setEnabled(holding)
+        if self._show_peak and self._show_min:
+            tip = "Clear the peak-hold and min-hold traces"
+        elif self._show_min:
+            tip = "Clear the min-hold trace"
+        elif self._show_peak:
+            tip = "Clear the peak-hold trace"
+        else:
+            tip = "Turn on Peak hold (or Min hold, in the ⋯ menu) to use Reset"
+        self._peak_reset_btn.setToolTip(tip)
 
     def _on_peak_toggled(self, checked: bool) -> None:
         changed = bool(checked) != self._show_peak
@@ -1108,6 +1116,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
         # Update peak hold (fmax ignores NaN bins instead of latching them)
         self._peak_hold = np.fmax(self._peak_hold, power_db)
+        # ...and the min hold (fmin: likewise; NaN until a bin has data)
+        self._min_hold = np.fmin(self._min_hold, power_db)
 
         # Update average
         if self._show_average:
@@ -1124,8 +1134,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._canvas.update()
 
     def reset_peak(self):
-        """Reset peak hold."""
+        """Reset peak hold (and min hold: they start over together)."""
         self._peak_hold = np.full(self._fft_size, _PEAK_FLOOR_DB)
+        self._min_hold = np.full(self._fft_size, np.nan)
         self._canvas.update()
 
     def reset_average(self):
@@ -1295,6 +1306,20 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
     def peak_hold(self) -> bool:
         return self._show_peak
 
+    def set_min_hold(self, enabled: bool) -> None:
+        """Show the lowest level each bin had since the last reset (the
+        noise floor under intermittent signals)."""
+        enabled = bool(enabled)
+        if enabled == self._show_min:
+            return
+        self._show_min = enabled
+        self._update_reset_button()
+        self._canvas.update()
+        self.display_settings_changed.emit()
+
+    def min_hold(self) -> bool:
+        return self._show_min
+
     def set_average_frames(self, frames: int) -> None:
         """Average over about ``frames`` frames (0 or a value not offered:
         the nearest choice; 0 is Off)."""
@@ -1363,6 +1388,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         return {
             "avg": self.average_frames(),
             "peak_hold": self._show_peak,
+            "min_hold": self._show_min,
             "range_auto": self._auto_range,
             "range_floor": float(floor),
             "range_top": float(top),
@@ -1384,6 +1410,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
                 self.set_average_frames(settings.get("avg"))
             if "peak_hold" in settings:
                 self.set_peak_hold(bool(settings.get("peak_hold")))
+            if "min_hold" in settings:
+                self.set_min_hold(bool(settings.get("min_hold")))
             try:
                 floor = float(settings.get("range_floor", self._db_range[0]))
                 top = float(settings.get("range_top", self._db_range[1]))
@@ -1677,8 +1705,13 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         peak.setCheckable(True)
         peak.setChecked(self._show_peak)
         peak.toggled.connect(self.set_peak_hold)
-        clear_peak = menu.addAction("R&eset Peak Hold")
-        clear_peak.setEnabled(self._show_peak)
+        low = menu.addAction("Mi&n Hold")
+        low.setCheckable(True)
+        low.setChecked(self._show_min)
+        low.setToolTip("The lowest level of each bin since the last reset")
+        low.toggled.connect(self.set_min_hold)
+        clear_peak = menu.addAction("R&eset Holds")
+        clear_peak.setEnabled(self._show_peak or self._show_min)
         clear_peak.triggered.connect(lambda _c=False: self.reset_peak())
 
         floor, top = self._db_range
@@ -1872,6 +1905,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             "trace": QPen(p.qcolor("plot_trace"), 1),
             "live_dim": QPen(p.qcolor("plot_trace", 80), 1),
             "peak": QPen(p.qcolor("plot_peak", 210), 1),
+            "min": QPen(p.qcolor("plot_axis", 220), 1),
             "marker": marker,
             "cursor": QPen(p.qcolor("plot_text", 120), 1),
         }
@@ -2109,6 +2143,13 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
                 painter.setPen(pens["peak"])
                 painter.drawPolyline(self._polyline(peak))
 
+        # Min hold (once every bin has data)
+        if self._show_min and np.isfinite(self._min_hold).all():
+            low = self._trace_xy(self._min_hold, plot, cols)
+            if low is not None:
+                painter.setPen(pens["min"])
+                painter.drawPolyline(self._polyline(low))
+
         # With averaging on, the live trace stays visible but dimmed.
         if averaging:
             live = self._trace_xy(self._spectrum, plot, cols)
@@ -2172,6 +2213,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
                 items.append(("Live", p.qcolor("plot_trace")))
             if self._show_peak:
                 items.append(("Peak", p.qcolor("plot_peak")))
+            if self._show_min:
+                items.append(("Min", p.qcolor("plot_axis")))
             swatch, gap = 12, 12
             widths = [swatch + 4 + fm.horizontalAdvance(t) for t, _ in items]
             total = sum(widths) + gap * (len(items) - 1)

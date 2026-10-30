@@ -223,7 +223,8 @@ class TestContextMenu(_SpectrumCase):
         for name in (
             "Zoom In Here",
             "Peak Hold",
-            "Reset Peak Hold",
+            "Min Hold",
+            "Reset Holds",
             "Range",
             "Auto (follow noise and signals)",
             "80 dB",
@@ -314,6 +315,68 @@ class TestStaleLegend(_SpectrumCase):
         sp._canvas.grab()  # the dimmed plot and its badge paint
         sp.update_spectrum(_line(seed=2))
         self.assertIsNone(sp.stale_text())
+
+
+class TestMinHold(_SpectrumCase):
+    """fg:FG-G16: a min-hold trace next to peak hold."""
+
+    def test_min_hold_keeps_the_lowest_level_per_bin(self):
+        sp = self.sp
+        self.assertFalse(sp.min_hold())
+        changes = []
+        sp.display_settings_changed.connect(lambda: changes.append(1))
+        sp.set_min_hold(True)
+        self.assertEqual(len(changes), 1)
+        sp.update_spectrum(np.full(N, -60.0))
+        sp.update_spectrum(np.full(N, -80.0))
+        sp.update_spectrum(np.full(N, -70.0))
+        self.assertTrue(np.all(sp._min_hold == -80.0))
+        self.assertTrue(np.all(sp._peak_hold == -60.0))
+        sp._canvas.grab()  # draws the min trace
+        # Reset clears both holds; a retune too.
+        sp._peak_reset_btn.click()
+        self.assertTrue(np.all(np.isnan(sp._min_hold)))
+        sp.update_spectrum(np.full(N, -75.0))
+        sp.set_center_freq(101e6)
+        self.assertTrue(np.all(np.isnan(sp._min_hold)))
+
+    def test_reset_button_follows_either_hold_and_the_setting_persists(self):
+        sp = self.sp
+        sp.set_peak_hold(False)
+        self.assertFalse(sp._peak_reset_btn.isEnabled())
+        sp.set_min_hold(True)
+        self.assertTrue(sp._peak_reset_btn.isEnabled())
+        self.assertIn("min-hold", sp._peak_reset_btn.toolTip())
+        saved = sp.display_settings()
+        self.assertTrue(saved["min_hold"])
+        other = swm.SpectrumWidget()
+        try:
+            other.apply_display_settings(saved)
+            self.assertTrue(other.min_hold())
+            self.assertFalse(other.peak_hold())
+        finally:
+            other.deleteLater()
+
+    def test_the_legend_lists_min(self):
+        sp = self.sp
+        sp.set_min_hold(True)
+        sp.update_spectrum(_line())
+        texts = []
+
+        class Painter:
+            def setPen(self, *_a):
+                pass
+
+            def drawLine(self, *_a):
+                pass
+
+            def drawText(self, *args):
+                texts.append(args[-1])
+
+        from sdr_module.gui.themes import get_palette
+
+        sp._draw_legend(Painter(), sp.plot_rect(), get_palette())
+        self.assertIn("Min", texts)
 
 
 class TestClear(_SpectrumCase):

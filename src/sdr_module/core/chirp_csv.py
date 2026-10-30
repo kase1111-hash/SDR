@@ -177,20 +177,23 @@ def listening_tag(bookmark: Mapping[str, Any]) -> str:
     A bookmark with a ``demod`` (a Mode list name) gets its mode, FM
     deviation and width; one saved by this application without a mode
     gets ``mode=keep``; a CHIRP channel that only has CHIRP's own Mode
-    gets no mode in the tag. The group goes in the tag too.
+    gets no mode in the tag (just its filter width, if it has one). The
+    group goes in the tag too.
     """
     parts: List[str] = []
     demod = str(bookmark.get("demod") or "")
+    width = _tag_value(bookmark.get("bandwidth"))
     if demod in APP_DEMODS:
         parts.append(f"mode={_IQ if demod == DEFAULT_DEMOD else demod}")
         deviation = _tag_value(bookmark.get("fm_deviation"))
         if demod == "FM" and deviation:
             parts.append(f"dev={deviation}")
-        width = _tag_value(bookmark.get("bandwidth"))
         if width:
             parts.append(f"bw={width}")
     elif not is_chirp_channel(bookmark):
         parts.append(f"mode={_KEEP}")
+    elif width:
+        parts.append(f"bw={width}")  # listened to in its CHIRP Mode
     group = _tag_value(bookmark.get("group"))
     if group:
         parts.append(f"group={group}")
@@ -564,6 +567,9 @@ class Channel:
                 data["fm_deviation"] = listen["fm_deviation"]
             if listen.get("bandwidth"):
                 data["bandwidth"] = listen["bandwidth"]
+        elif "demod" not in listen and listen.get("bandwidth"):
+            # Listened to in its CHIRP Mode, with its own filter width.
+            data["bandwidth"] = listen["bandwidth"]
         if listen.get("group"):
             data["group"] = listen["group"]
         return data

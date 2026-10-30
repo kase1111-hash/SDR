@@ -92,6 +92,9 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         self.setWindowTitle("Edit Bookmark")
         self.setMinimumWidth(400)
         self._setup_ui(listening, list(groups))
+        # How it is listened to as the dialog opens: Save rewrites the mode
+        # (and CHIRP's Mode) only when the Mode or the FM deviation changed.
+        self._opened_with = self._listening_choice()
 
     # ------------------------------------------------------------------ #
     def _setup_ui(self, listening: tuple, groups: List[str]) -> None:
@@ -290,6 +293,11 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         value = self._mode.currentData()
         return value if isinstance(value, str) else ""
 
+    def _listening_choice(self) -> tuple:
+        """``(mode, FM deviation)`` chosen (the deviation only in FM)."""
+        demod = self.demod()
+        return demod, self._deviation.currentText() if demod == "FM" else ""
+
     def bookmark(self) -> Dict[str, Any]:
         """The bookmark with the dialog's values."""
         from .bookmarks_panel import format_mhz
@@ -298,27 +306,32 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         freq = float(round(self._freq.value() * 1e6))
         b["freq_hz"] = freq
         b["label"] = self._name.text().strip() or format_mhz(freq)
-        demod = self.demod()
-        for key in ("demod", "fm_deviation", "bandwidth"):
-            b.pop(key, None)
-        if demod:
-            b["demod"] = demod
-            deviation = self._deviation.currentText() if demod == "FM" else ""
-            if deviation:
-                b["fm_deviation"] = deviation
-            chirp = chirp_mode_for(demod, deviation)
-            if demod == "None (I/Q)" and not is_chirp_channel(self._original):
-                b.pop("mode", None)  # I/Q has no CHIRP mode to show
+        demod, deviation = self._listening_choice()
+        b.pop("bandwidth", None)
+        width = self._width.currentData()
+        if demod and isinstance(width, str) and width:
+            b["bandwidth"] = width
+        # The Mode list only approximates CHIRP's modes (DV, DMR and NFM
+        # are listened to as FM, RTTY keeps the receiver's mode): unless the
+        # mode or the deviation changed, the saved mode and CHIRP Mode stay
+        # exactly as they were (a radio loaded with the channel needs them).
+        if (demod, deviation) != self._opened_with:
+            for key in ("demod", "fm_deviation"):
+                b.pop(key, None)
+            if demod:
+                b["demod"] = demod
+                if deviation:
+                    b["fm_deviation"] = deviation
+                chirp = chirp_mode_for(demod, deviation)
+                if demod == "None (I/Q)" and not is_chirp_channel(self._original):
+                    b.pop("mode", None)  # I/Q has no CHIRP mode to show
+                else:
+                    b["mode"] = chirp
+            elif is_chirp_channel(self._original):
+                # A CHIRP channel always has a Mode; "Auto" keeps the receiver's.
+                b["mode"] = _CHIRP_KEEP_MODE
             else:
-                b["mode"] = chirp
-            width = self._width.currentData()
-            if isinstance(width, str) and width:
-                b["bandwidth"] = width
-        elif is_chirp_channel(self._original):
-            # A CHIRP channel always has a Mode; "Auto" keeps the receiver's.
-            b["mode"] = _CHIRP_KEEP_MODE
-        else:
-            b.pop("mode", None)
+                b.pop("mode", None)
         # The tone field applies in FM only (greyed out otherwise): in the
         # other modes a channel's tone, e.g. a CHIRP memory's, is kept.
         if demod == "FM":

@@ -670,8 +670,12 @@ class IqConditioner:
             # The statistics are averaged over seconds: a contiguous slice
             # of each block is plenty, and keeps this cheap at 20 MS/s.
             # (Taking every n-th sample instead would alias a strong tone,
-            # possibly to DC, and wreck the estimate.)
-            gain, phase = estimate_iq_imbalance(x[: self.IQ_SLICE])
+            # possibly to DC, and wreck the estimate.) The estimate assumes
+            # no DC, and with Remove DC spike off the hardware's DC offset
+            # would bias it (a -35 dBFS offset made the image worse than
+            # uncorrected): it gets the slice without its mean.
+            part = x[: self.IQ_SLICE]
+            gain, phase = estimate_iq_imbalance(part - part.mean())
             gain, phase = float(gain), float(phase)
             if self._gain is None or self._phase is None:
                 self._gain, self._phase = gain, phase

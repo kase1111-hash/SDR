@@ -397,6 +397,44 @@ class TestAudioHelpers(unittest.TestCase):
                 atol=1e-5,
             )
 
+    def test_balance_iq_ignores_a_dc_offset(self):
+        # The I/Q imbalance estimate assumes no DC; with Remove DC spike off
+        # a hardware DC offset biased it, and "balancing" made the mirror
+        # image worse (-28.9 dBc before, -25.3 dBc after, with a -35 dBFS
+        # offset).
+        from sdr_module.gui.audio_chain import IqConditioner
+
+        rng = np.random.default_rng(12)
+        n = int(1.0 * RATE)
+        t = np.arange(n) / RATE
+        eps, phi = 0.05, np.deg2rad(3.0)
+        noise = (rng.standard_normal(n) + 1j * rng.standard_normal(n)) * 1e-3
+        x = 0.05 * np.exp(2j * np.pi * 300e3 * t) + noise
+        q = (1 + eps) * (x.imag * np.cos(phi) + x.real * np.sin(phi))
+        iq = (x.real + 1j * q + 10 ** (-35 / 20) * np.exp(0.3j)).astype(np.complex64)
+
+        def image_dbc(y):
+            y = y[-131072:]
+            spectrum = np.abs(np.fft.fft(y * np.hanning(len(y)))) ** 2
+            freqs = np.fft.fftfreq(len(y), 1 / RATE)
+            tone = np.argmin(abs(freqs - 300e3))
+            mirror = np.argmin(abs(freqs + 300e3))
+            return 10 * np.log10(
+                spectrum[mirror - 2 : mirror + 3].sum()
+                / spectrum[tone - 2 : tone + 3].sum()
+            )
+
+        conditioner = IqConditioner()
+        conditioner.balance_iq = True  # (Remove DC spike stays off)
+        out = np.concatenate(
+            [conditioner.process(iq[i : i + 80000], RATE) for i in range(0, n, 80000)]
+        )
+        gain, phase = conditioner.imbalance
+        self.assertAlmostEqual(gain, eps, delta=0.005)
+        self.assertAlmostEqual(phase, phi, delta=np.deg2rad(0.2))
+        self.assertGreater(image_dbc(iq), -30)
+        self.assertLess(image_dbc(out), -60)
+
     def test_dc_blocker_chunks_stay_finite_for_high_corners(self):
         from sdr_module.gui.audio_chain import DcBlocker
 

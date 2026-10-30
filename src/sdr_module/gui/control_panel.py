@@ -1178,7 +1178,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._add_row(form, "Correction:", self._ppm_spin).setToolTip(PPM_TIP)
         self._ppm_hint = self._hint(PPM_HINT)
         self._ppm_hint.setToolTip(PPM_TIP)
-        form.addRow("", self._ppm_hint)
+        form.addRow(self._ppm_hint)  # full width: wraps like the other hints
 
         self._direct_combo = self._shrinkable_combo(_ValueComboBox(), 8)
         for value, label, tip in DIRECT_SAMPLING_CHOICES:

@@ -702,6 +702,16 @@ class TestNoiseReductionOffline(unittest.TestCase):
         self.assertEqual(len(median.flush()), 0)
         self.assertEqual(len(median.process_clip(np.ones(100))), 100)
 
+    def test_an_empty_clip_gives_an_empty_result_quietly(self):
+        import warnings
+
+        for method in self.METHODS + ("MEDIAN", "GATE"):
+            with self.subTest(method=method), warnings.catch_warnings():
+                warnings.simplefilter("error")  # ("Mean of empty slice")
+                self.assertEqual(len(self.make(method).process_clip(np.zeros(0))), 0)
+                iq = self.make(method).process_clip(np.zeros(0, np.complex64))
+                self.assertTrue(np.iscomplexobj(iq))
+
 
 def _correlation(a: np.ndarray, b: np.ndarray) -> float:
     a = a.astype(float).ravel() - a.mean()

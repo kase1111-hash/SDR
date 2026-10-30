@@ -2784,7 +2784,7 @@ class NoiseReduction:
         x = np.asarray(samples)
         self.reset_stream()
         if x.size == 0:
-            return self.process(x)
+            return np.zeros(0, np.complex128 if np.iscomplexobj(x) else np.float64)
         out = np.concatenate((self.process(x), self.flush()))
         return out[len(out) - x.size :]
 

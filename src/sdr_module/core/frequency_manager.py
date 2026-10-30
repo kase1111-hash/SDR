@@ -758,16 +758,28 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         licenses=GENERAL_EXTRA,
     ),
     # =========================================================================
-    # 6 Meters (50-54 MHz) - All licenses full privileges
+    # 6 Meters (50-54 MHz) - All licenses full privileges; 50.0-50.1 MHz is
+    # CW only (97.305(c) lists no other emission there)
     # =========================================================================
     BandPrivilege(
-        name="6m", start_hz=50.000e6, end_hz=54.000e6, modes=set(), licenses=ALL_HAM
+        name="6m CW", start_hz=50.000e6, end_hz=50.100e6, modes={"CW"}, licenses=ALL_HAM
+    ),
+    BandPrivilege(
+        name="6m", start_hz=50.100e6, end_hz=54.000e6, modes=set(), licenses=ALL_HAM
     ),
     # =========================================================================
-    # 2 Meters (144-148 MHz) - All licenses full privileges
+    # 2 Meters (144-148 MHz) - All licenses full privileges; 144.0-144.1 MHz
+    # is CW only (97.305(c))
     # =========================================================================
     BandPrivilege(
-        name="2m", start_hz=144.000e6, end_hz=148.000e6, modes=set(), licenses=ALL_HAM
+        name="2m CW",
+        start_hz=144.000e6,
+        end_hz=144.100e6,
+        modes={"CW"},
+        licenses=ALL_HAM,
+    ),
+    BandPrivilege(
+        name="2m", start_hz=144.100e6, end_hz=148.000e6, modes=set(), licenses=ALL_HAM
     ),
     # =========================================================================
     # 1.25 Meters (222-225 MHz) - All licenses full privileges

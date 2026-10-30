@@ -315,16 +315,16 @@ class TestHamId(_WindowTestCase):
     def test_settings_are_saved_and_restored(self):
         panel = self.win._callsign_panel
         panel.set_callsign("w1aw")
-        panel._wpm_spin.setValue(25)
+        panel._wpm_spin.setValue(15)  # (at most 20: an automatic CW ID)
         saved = json.loads(self.store.values["ham_id"])
         self.assertEqual(saved["callsign"], "W1AW")
-        self.assertEqual(saved["cw_wpm"], 25)
+        self.assertEqual(saved["cw_wpm"], 15)
 
         other = self.mw.SDRMainWindow()
         try:
             restored = other._callsign_panel
             self.assertEqual(restored.get_callsign(), "W1AW")
-            self.assertEqual(restored._wpm_spin.value(), 25)
+            self.assertEqual(restored._wpm_spin.value(), 15)
             # Restoring doesn't rewrite the saved settings half-applied.
             self.assertEqual(json.loads(self.store.values["ham_id"]), saved)
         finally:

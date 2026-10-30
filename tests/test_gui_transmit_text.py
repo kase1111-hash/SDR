@@ -434,13 +434,18 @@ class TestTransmit(_TextCase):
             ),
             text,
         )
+        # (It says how the ID goes out: the way the text does, CW here.)
         self.assertTrue(
-            text.endswith("· ID DE W1AW at the start, every 10 min and at the end"),
+            text.endswith(
+                "· ID DE W1AW (CW, 20 WPM) at the start, every 10 min and at the end"
+            ),
             text,
         )
         self.panel._auto_id_check.setChecked(False)
         self.refresh()
-        self.assertTrue(self.line()[0].endswith("· ID DE W1AW at the start and end"))
+        self.assertTrue(
+            self.line()[0].endswith("· ID DE W1AW (CW, 20 WPM) at the start and end")
+        )
 
     def test_psk31_goes_out_and_decodes(self):
         text = "Hello de W1AW: 73!"

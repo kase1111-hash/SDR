@@ -171,9 +171,13 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             return f"the {name} can only receive. Connect a HackRF One"
         return None
 
-    def id_spec(self, freq_hz: float) -> Tuple[str, str, float, str]:
+    def id_spec(
+        self, freq_hz: float, job_mode: Optional[str] = None
+    ) -> Tuple[str, str, float, str]:
         """``(emission, mode, occupied bandwidth, summary)`` of the station
-        ID at ``freq_hz`` with the Ham ID panel's settings."""
+        ID at ``freq_hz`` with the Ham ID panel's settings: Send ID Now's,
+        or (``job_mode``) the one Automatic ID adds to a transmission in
+        that mode ("Auto" sends it the way the transmission is sent)."""
         from ..ham.callsign import (
             EMISSION_MCW,
             choose_id_emission,
@@ -183,9 +187,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
 
         panel = self._panel()
         pref = panel.emission_preference() if panel is not None else "auto"
-        wpm = panel.cw_wpm() if panel is not None else 20
+        wpm = self._id_wpm()
         tone = panel.cw_tone() if panel is not None else 700
-        emission = choose_id_emission(freq_hz, pref)
+        emission = choose_id_emission(freq_hz, pref, job_mode)
         if emission == EMISSION_MCW:
             return (
                 emission,
@@ -194,6 +198,15 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
                 f"FM tone, {wpm} WPM",
             )
         return emission, "CW", cw_occupied_bandwidth(wpm), f"CW, {wpm} WPM"
+
+    def _id_wpm(self) -> int:
+        """The ID's speed: the Ham ID panel's, at most 20 WPM (an ID keyed
+        by an automatic device, FCC 97.119(b)(1))."""
+        from ..ham.callsign import MAX_ID_WPM
+
+        panel = self._panel()
+        wpm = int(panel.cw_wpm()) if panel is not None else MAX_ID_WPM
+        return max(1, min(wpm, MAX_ID_WPM))
 
     def power_problem(self, freq_hz: float, mode: str) -> Optional[str]:
         """Why the calculated output is too high (None: it isn't): over the
@@ -347,7 +360,7 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         callsign = panel.get_callsign()
         source = MorseIdSource(
             f"DE {callsign}",
-            panel.cw_wpm(),
+            self._id_wpm(),
             rate,
             emission=emission,
             tone_hz=panel.cw_tone(),
@@ -373,11 +386,12 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         panel = self._panel()
         if panel is None or not panel.is_callsign_valid():
             return None
-        callsign, wpm, tone = panel.get_callsign(), panel.cw_wpm(), panel.cw_tone()
+        callsign, wpm, tone = panel.get_callsign(), self._id_wpm(), panel.cw_tone()
         pref = panel.emission_preference()
 
         def make(job: TxJob) -> TxJob:
-            emission = choose_id_emission(job.center_hz, pref)
+            # (Sent the way the job is: FM tone with FM, else CW.)
+            emission = choose_id_emission(job.center_hz, pref, job.mode)
             source = MorseIdSource(
                 f"DE {callsign}",
                 wpm,

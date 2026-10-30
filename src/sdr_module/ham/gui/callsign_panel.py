@@ -46,6 +46,8 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
+from ..callsign import MAX_ID_WPM
+
 logger = logging.getLogger(__name__)
 
 # Characters a callsign may contain (portable suffixes use "/").
@@ -61,10 +63,13 @@ _INTERVAL_TIP = (
 # How the ID goes on air: (combo text, saved value, tooltip).
 _EMISSIONS = (
     (
-        "Auto (by frequency)",
+        "Auto",
         "auto",
-        "CW (a keyed carrier) below 30 MHz, where HF stations listen for it; "
-        "an FM tone above, which FM receivers hear",
+        "The way the transmission it identifies goes out, so its listeners "
+        "can read it: an FM tone with FM, CW (a keyed carrier) with CW or "
+        "data on the carrier. Send ID Now on its own: CW below 30 MHz and in "
+        "the CW-only parts of 6 m and 2 m, where stations listen for it; an "
+        "FM tone elsewhere above, which FM receivers hear",
     ),
     (
         "CW (keyed carrier)",
@@ -335,18 +340,23 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
             self._emission_combo.addItem(text, value)
             self._emission_combo.setItemData(index, tip, Qt.ItemDataRole.ToolTipRole)
         self._emission_combo.setToolTip(
-            "How the Morse goes on air. Auto: CW (a keyed carrier) below 30 "
-            "MHz, an FM tone (MCW) above."
+            "How the Morse goes on air. Auto: like the transmission it "
+            "identifies (an FM tone with FM, else CW, a keyed carrier); Send "
+            "ID Now on its own: CW below 30 MHz and in the CW-only segments, "
+            "an FM tone (MCW) above."
         )
         self._emission_combo.currentIndexChanged.connect(self._on_settings_changed)
         self._add_row(form, "Sent as:", self._emission_combo)
 
         self._wpm_spin = QSpinBox()
-        self._wpm_spin.setRange(5, 50)
+        self._wpm_spin.setRange(5, MAX_ID_WPM)
         self._wpm_spin.setValue(20)
         self._wpm_spin.setSuffix(" WPM")
         self._wpm_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
-        self._wpm_spin.setToolTip("CW sending speed in words per minute")
+        self._wpm_spin.setToolTip(
+            f"The ID's speed in words per minute: at most {MAX_ID_WPM} WPM, the "
+            "most a CW ID sent by an automatic keyer may be (FCC 97.119(b)(1))"
+        )
         self._wpm_spin.valueChanged.connect(self._on_settings_changed)
         self._add_row(form, "CW speed:", self._wpm_spin)
 

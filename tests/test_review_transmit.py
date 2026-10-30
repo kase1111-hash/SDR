@@ -19,7 +19,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests import text_demod as demod  # noqa: E402
-from tests.hackrf_fakes import _MORSE  # noqa: E402
+from tests.hackrf_fakes import _MORSE, analyse_cw  # noqa: E402
 
 pytest.importorskip("PyQt6")
 
@@ -309,6 +309,183 @@ class TestConfirmationCountsTheIds(_TxCase):
         job = TxJob(carrier, 2e6, 146.52e6, "FM", 12.5e3, "a test carrier")
         text = self._confirmation(job)
         self.assertIn(f"about {7.0 + id_s:.1f} s with your station ID", text)
+
+    def test_transmit_text_says_the_id_goes_first(self):
+        import time
+
+        self.panel.set_callsign("W1AW")
+        self.panel._id_start_check.setChecked(False)
+        self.hackrf()
+        self.win._show_transmit_text()
+        dlg = self.win._transmit_text
+        self.addCleanup(dlg.close)
+        dlg.set_mode("CW")
+        dlg.set_text("CQ CQ DE W1AW")
+        self.station.engine._last_id_at = time.monotonic() - 598.0
+        dlg.refresh()
+        self.assertTrue(
+            dlg._tx_label.text().endswith(
+                "· ID DE W1AW (FM tone, 20 WPM) at the start (9 min since the "
+                "last), every 10 min and at the end"
+            ),
+            dlg._tx_label.text(),
+        )
+        self.station.engine._last_id_at = time.monotonic() - 60.0
+        dlg.refresh()
+        self.assertTrue(
+            dlg._tx_label.text().endswith(
+                "· ID DE W1AW (FM tone, 20 WPM) every 10 min and at the end"
+            ),
+            dlg._tx_label.text(),
+        )
+
+
+# --------------------------------------------------------------------------- #
+# TX-4: an automatic ID is sent the way the transmission it identifies is
+# --------------------------------------------------------------------------- #
+
+
+class TestCwOnlySegments:
+    def test_the_vhf_cw_only_segments_refuse_fm(self):
+        """47 CFR 97.305(c): 50.0-50.1 and 144.0-144.1 MHz are CW only."""
+        from sdr_module.core import frequency_manager as fm
+        from sdr_module.core.frequency_manager import LicenseClass
+
+        manager = fm.get_frequency_manager()
+        before = manager.get_license_class()
+        manager.set_license_class(LicenseClass.TECHNICIAN)
+        try:
+            for freq in (50.05e6, 144.05e6):
+                assert fm.is_tx_allowed(freq, 150.0, "CW")[0]
+                for mode in ("FM", "DATA", "SSB"):
+                    allowed, reason = fm.is_tx_allowed(freq, 6.4e3, mode)
+                    assert not allowed and "CW" in reason, (freq, mode)
+            for freq in (50.2e6, 144.2e6, 146.52e6):
+                assert fm.is_tx_allowed(freq, 6.4e3, "FM")[0]
+            # (A signal reaching down into it is refused too.)
+            assert not fm.is_tx_allowed(144.102e6, 6.4e3, "FM")[0]
+        finally:
+            manager.set_license_class(before)
+
+
+class TestIdEmissionFollowsTheJob(_TxCase):
+    license = "general"
+
+    def _job(self, mode, freq, width):
+        carrier = np.full(int(0.5 * 2e6), 0.9, np.complex64)
+        return TxJob(carrier, 2e6, freq, mode, width, f"a {mode} test")
+
+    def _sent_ids(self, backend, job):
+        """The start ID of what went on the air, as CW (keyed carrier)."""
+        id_job = self.station.engine.last_result
+        self.assertTrue(id_job.ok, id_job.message)
+        n = self.station._id_factory()(job).total_samples // 32
+        return analyse_cw(backend.tx_iq(32)[:n], 2e6 / 32)
+
+    def test_data_on_the_carrier_above_30_mhz_gets_a_cw_id(self):
+        """PSK31 on the carrier at 50.290 MHz: its listeners are in USB/CW,
+        so its IDs are CW (a keyed carrier), not a 6 kHz FM tone."""
+        self.panel.set_callsign("W1AW")
+        dev, backend = self.hackrf(freq=50.29e6)
+        job = self._job("DATA", 50.29e6, 60.0)
+        self.assertTrue(self.win._transmit_job(job), self.status()[0])
+        self.assertEqual(self.station.engine._run.plan.modes, ("DATA", "CW"))
+        self.wait_done(30)
+        on_air = self._sent_ids(backend, job)
+        self.assertEqual(on_air["text"], "DE W1AW")
+        self.assertLess(on_air["carrier_off_level"], 0.01)  # key up: no carrier
+
+    def test_cw_in_the_2m_cw_segment_gets_a_cw_id(self):
+        """A CW text keyed on the carrier at 144.050 MHz (CW only there):
+        its IDs are CW too; an FM tone ID would be an emission not allowed
+        there."""
+        self.panel.set_callsign("W1AW")
+        dev, backend = self.hackrf(freq=144.05e6)
+        job = self._job("CW", 144.05e6, 150.0)
+        self.assertTrue(self.win._transmit_job(job), self.status()[0])
+        self.assertEqual(self.station.engine._run.plan.modes, ("CW",))
+        self.wait_done(30)
+        self.assertEqual(self._sent_ids(backend, job)["text"], "DE W1AW")
+
+    def test_an_fm_job_keeps_its_fm_tone_id(self):
+        self.panel.set_callsign("W1AW")
+        self.hackrf(freq=146.52e6)
+        job = self._job("FM", 146.52e6, 12.5e3)
+        self.assertTrue(self.win._transmit_job(job), self.status()[0])
+        self.assertEqual(self.station.engine._run.plan.modes, ("FM",))
+        self.station.stop()
+        self.wait_done(10)
+
+    def test_send_id_now_in_a_cw_only_segment_is_cw(self):
+        """Auto picks CW where FM isn't allowed; an FM tone chosen by hand
+        is refused there, with the reason."""
+        self.panel.set_callsign("W1AW")
+        self.hackrf(freq=144.05e6)
+        self.assertIn("· CW ID ·", self.panel.tx_status_text())
+        self.panel._emission_combo.setCurrentIndex(
+            self.panel._emission_combo.findData("mcw")
+        )
+        self.assertEqual(
+            self.panel.tx_status_text(),
+            "Can't send on 144.050 MHz: FM isn't allowed in the 2m CW segment "
+            "(CW only).",
+        )
+
+    def test_transmit_text_says_how_its_ids_go_out(self):
+        self.panel.set_callsign("W1AW")
+        self.hackrf(freq=50.29e6)
+        self.win._show_transmit_text()
+        dlg = self.win._transmit_text
+        self.addCleanup(dlg.close)
+        dlg.set_mode("PSK31")
+        dlg.set_text("CQ CQ DE W1AW")
+        dlg.refresh()
+        line = dlg._tx_label.text()
+        self.assertTrue(
+            line.endswith(
+                "· ID DE W1AW (CW, 20 WPM) at the start, every 10 min and at the end"
+            ),
+            line,
+        )
+
+
+# --------------------------------------------------------------------------- #
+# TX-3: an automatically keyed CW ID goes out at 20 WPM at most
+# --------------------------------------------------------------------------- #
+
+
+class TestIdSpeed(_TxCase):
+    license = "general"
+
+    def test_the_id_speed_tops_out_at_20_wpm(self):
+        """47 CFR 97.119(b)(1): a CW ID keyed by an automatic device may be
+        sent at 20 WPM at most; the Ham ID speed can't be set higher, and a
+        saved faster speed comes back as 20."""
+        spin = self.panel._wpm_spin
+        spin.setValue(40)
+        self.assertEqual(self.panel.cw_wpm(), 20)
+        self.assertEqual(spin.maximum(), 20)
+        self.assertIn("20 WPM", spin.toolTip())
+        self.panel.set_settings({"cw_wpm": 35})
+        self.assertEqual(self.panel.cw_wpm(), 20)
+
+    def test_ids_go_out_at_20_wpm_whatever_the_panel_says(self):
+        self.panel.set_callsign("W1AW")
+        dev, backend = self.hackrf(freq=14.05e6)
+        self.panel.cw_wpm = lambda: 40  # (a speed from elsewhere)
+        job = self.station.make_id_job(14.05e6)
+        self.assertEqual(job.source.wpm, 20)
+        carrier = np.full(1000, 0.9, np.complex64)
+        text_job = TxJob(carrier, 2e6, 14.05e6, "CW", 150.0, "a CW test")
+        self.assertEqual(self.station._id_factory()(text_job).source.wpm, 20)
+        self.assertIn("CW, 20 WPM", self.station.id_spec(14.05e6)[3])
+        # On the air: "DE W1AW" keyed over 67 dits of 60 ms (20 WPM).
+        self.assertTrue(self.station.send_station_id())
+        self.wait_done(30)
+        on_air = analyse_cw(backend.tx_iq(32), 2e6 / 32)
+        self.assertEqual(on_air["text"], "DE W1AW")
+        self.assertAlmostEqual(on_air["keyed_s"], 4.02, delta=0.1)
+
 
 # --------------------------------------------------------------------------- #
 # TX-2 and TX-12: the HackRF driver's start and end of a transmission

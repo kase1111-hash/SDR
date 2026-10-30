@@ -1171,6 +1171,7 @@ __all__ = [
     "format_dbm_power",
     "format_mhz",
     "hackrf_max_output_dbm",
+    "id_goes_first",
     "legality_problem",
     "license_name",
     "quiet_checks",

@@ -625,6 +625,10 @@ CW_ID_MAX_HZ = 30e6
 EMISSION_CW = "cw"
 EMISSION_MCW = "mcw"
 
+#: The fastest a station ID keyed by an automatic device may be sent: 20 WPM
+#: (47 CFR 97.119(b)(1)). The app's IDs are, whatever the speed set.
+MAX_ID_WPM = 20
+
 # The rate the keying and the MCW phase are worked out at; every block is
 # interpolated from it to the transmit rate (so memory stays small at any
 # transmit rate: a 30 s ID is 1.4 M samples here, not 60 M at 2 MS/s).
@@ -721,18 +725,41 @@ def mcw_occupied_bandwidth(tone_hz: float, deviation_hz: float) -> float:
     return 2.0 * (abs(float(deviation_hz)) + abs(float(tone_hz)))
 
 
-def choose_id_emission(freq_hz: float, preference: str = "auto") -> str:
+def choose_id_emission(
+    freq_hz: float, preference: str = "auto", job_mode: Optional[str] = None
+) -> str:
     """``"cw"`` or ``"mcw"`` for an ID at ``freq_hz``.
 
-    ``preference`` "cw" or "mcw" is used as given; "auto" picks CW (a
-    keyed carrier) below 30 MHz, where CW is how HF stations identify and
-    FM is rarely allowed, and MCW (FM with a keyed tone) above, where
-    stations listen in FM.
+    ``preference`` "cw" or "mcw" is used as given. "auto" with ``job_mode``
+    (the mode of the transmission the ID goes with) sends the ID the way
+    that is sent, so its listeners can read it: MCW (FM with a keyed tone)
+    with an FM transmission, CW (a keyed carrier) with anything else (CW
+    or data on the carrier, SSB). "auto" on its own picks CW below 30 MHz,
+    where CW is how HF stations identify and FM is rarely allowed, and in
+    the CW-only segments above (50.0-50.1 and 144.0-144.1 MHz); MCW
+    elsewhere above, where stations listen in FM.
     """
     pref = (preference or "auto").lower()
     if pref in (EMISSION_CW, EMISSION_MCW):
         return pref
-    return EMISSION_CW if float(freq_hz) < CW_ID_MAX_HZ else EMISSION_MCW
+    if job_mode:
+        return EMISSION_MCW if str(job_mode).upper() == "FM" else EMISSION_CW
+    if float(freq_hz) < CW_ID_MAX_HZ or _cw_only(float(freq_hz)):
+        return EMISSION_CW
+    return EMISSION_MCW
+
+
+def _cw_only(freq_hz: float) -> bool:
+    """Whether every amateur segment at ``freq_hz`` allows only CW (for any
+    license class)."""
+    from ..core.frequency_manager import AMATEUR_BAND_PRIVILEGES
+
+    segments = [
+        band
+        for band in AMATEUR_BAND_PRIVILEGES
+        if band.start_hz <= freq_hz <= band.end_hz
+    ]
+    return bool(segments) and all(band.modes == {"CW"} for band in segments)
 
 
 def describe_id_emission(emission: str) -> str:
@@ -876,6 +903,7 @@ __all__ = [
     "CW_ID_MAX_HZ",
     "EMISSION_CW",
     "EMISSION_MCW",
+    "MAX_ID_WPM",
     "MorseIdSource",
     "choose_id_emission",
     "cw_occupied_bandwidth",

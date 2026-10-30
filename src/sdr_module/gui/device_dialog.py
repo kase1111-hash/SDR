@@ -595,7 +595,7 @@ _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ..
     (162.475e6, "nfm", -62.0, None),
     (162.55e6, "nfm", -44.0, None),
     # ISM 433 MHz and 70 cm
-    (433.92e6, "burst", -40.0, (2.5, 0.3)),
+    (433.92e6, "ook", -40.0, None),  # T10: an OOK remote (see _OOK_*)
     (434.1e6, "burst", -56.0, (6.0, 0.5)),
     (446.0e6, "nfm", -48.0, (14.0, 6.0)),
     (446.1e6, "nfm", -58.0, (9.0, 3.0)),
@@ -705,6 +705,8 @@ def _data_transmission(
     with no phase, for ACARS)."""
     from ..dsp import protocol_encoders as enc
 
+    if kind == "ook":  # T10
+        return _ook_transmission(sent, loop_rate)
     phase: Optional[np.ndarray] = None
     if kind == "aprs":
         source, destination, info, path = sent
@@ -923,6 +925,67 @@ _DEMO_SIGNALS = _DEMO_SIGNALS + tuple(
     (freq, "amb", level, None) for freq, level in _AM_BROADCAST
 )
 # --- end T7 ------------------------------------------------------------------ #
+
+# --- T10: an OOK remote control and a drifting transmitter ------------------- #
+# The Signal tab's Bursts list takes on/off keyed devices apart the way
+# rtl_433's analyzer does, and Radio > Track Signal (AFC) keeps a drifting
+# signal centred. So the demo has both:
+#
+# * 433.92 MHz: a remote control (doorbell, gate) of the common EV1527 kind,
+#   pulse width modulated: 24 bits (a 20-bit ID and 4 button bits), a 1 a
+#   long pulse and a short gap, a 0 a short pulse and a long gap (350 and
+#   1050 us), then a sync (a short pulse and a 31-unit gap); the frame sent
+#   _OOK_REPEATS times, every _OOK_PERIOD_S seconds. (It replaces the random
+#   FSK burst there; 434.10 MHz keeps one.)
+# * 438.500 MHz: narrow FM voice from a cheap 70 cm handheld whose
+#   frequency drifts +/- _DRIFT_HZ over _DRIFT_PERIOD_S seconds (away from
+#   the 2 m channels the tests use as empty ones, such as 145.500 MHz).
+_OOK_CODE = 0x5E3A1C  # ID 0x5E3A1, button 0xC
+_OOK_UNIT_S = 350e-6
+_OOK_REPEATS = 8
+_OOK_PERIOD_S = 2.5
+_DATA_KINDS = _DATA_KINDS + ("ook",)
+_DATA_SCHEDULE["ook"] = (_OOK_PERIOD_S, ((0.4, _OOK_CODE),))
+
+_DRIFT_HZ = 2.5e3
+_DRIFT_PERIOD_S = 40.0  # a whole number of _TONE_LOOP_S
+_DEMO_SIGNALS = _DEMO_SIGNALS + ((438.5e6, "drift", -50.0, None),)
+
+
+def _ook_units(code: int, bits: int = 24) -> List[Tuple[int, int]]:
+    """(on units, off units) of one EV1527 frame."""
+    out = [(3, 1) if (code >> i) & 1 else (1, 3) for i in range(bits - 1, -1, -1)]
+    out.append((1, 31))  # sync
+    return out
+
+
+def _ook_transmission(code: int, loop_rate: float) -> Tuple[None, np.ndarray]:
+    """``(None, envelope)`` of an OOK remote's transmission: the frame
+    repeated, keyed with edges of about 20 us (one loop sample)."""
+    unit = _OOK_UNIT_S * loop_rate
+    levels: List[float] = []
+    for _ in range(_OOK_REPEATS):
+        for on, off in _ook_units(code):
+            levels += [1.0] * int(round(on * unit)) + [0.0] * int(round(off * unit))
+    envelope = np.asarray(levels + [0.0], dtype=np.float32)
+    return None, envelope
+
+
+def _drift_loop(rate: float, variant: Any) -> "_Loop":
+    """Voice-like narrow FM whose carrier drifts slowly up and down."""
+    factor, loop_rate, t = _loop_timebase(rate, _DRIFT_PERIOD_S)
+    twist = float(variant) * 2.1
+    voice_t = t % _TONE_LOOP_S  # the voice repeats every 4 s
+    deviation = 2.2e3 * _swept_tone(
+        820.0, 200.0, voice_t[: int(round(_TONE_LOOP_S * loop_rate))], twist
+    )
+    deviation = np.resize(deviation, len(t))
+    deviation += 1.2e3 * _tone(1650.0, t, twist)
+    deviation += _DRIFT_HZ * np.sin(2 * np.pi * t / _DRIFT_PERIOD_S)
+    return _Loop(_fm_phase(deviation, loop_rate), factor)
+
+
+# --- end T10 ----------------------------------------------------------------- #
 
 # Morse keying for the CW beacon ("VVV DE SDR"): 1 = key down, one dit each.
 _MORSE = {"V": "...-", "D": "-..", "E": ".", "S": "...", "R": ".-."}
@@ -1275,6 +1338,8 @@ def _build_loops(kind: str, variant: Any, rate: float):
         return _rds_loop(rate)  # T6
     if kind in _DATA_KINDS:
         return _data_transmitter(kind, rate)
+    if kind == "drift":  # T10
+        return _drift_loop(rate, variant)
     return None
 
 
@@ -1714,6 +1779,11 @@ class MockDevice:
     traffic too (see _DATA_SCHEDULE), every 8 to 13 s: APRS AFSK1200
     position reports on 144.390 MHz, POCSAG 1200 pages on 152.240 MHz, FLEX
     1600 pages on 931.9375 MHz and ACARS messages on 131.550 MHz.
+
+    For the Signal tab, a remote control on 433.920 MHz (the EV1527 kind:
+    on/off keyed, pulse width modulated) sends its code eight times every
+    2.5 s, and a cheap 70 cm handheld on 438.500 MHz drifts +/- 2.5 kHz
+    over 40 s, for Radio > Track Signal (AFC).
 
     The samples form one continuous stream: each read carries on where the
     last one ended, so demodulated audio has no clicks between reads, and

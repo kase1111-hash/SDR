@@ -446,6 +446,26 @@ class TestStatusBar(_WindowTestCase):
         self.assertTrue(texts[0].endswith("Message 24"))
         popup.close()
 
+    def test_the_list_stays_inside_the_window(self):
+        # T12 review: it opened at the message area's left edge, 640 px wide,
+        # so with a long device name before the messages (or a small window)
+        # its right part, Copy and Error History..., left the window.
+        from PyQt6.QtCore import QPoint
+
+        from sdr_module.gui.status_history import StatusHistoryPopup
+
+        win = self.win
+        win.resize(1024, 640)
+        self.settle()
+        win._show_status_message("Tuned to 145.800 MHz", "info")
+        popup = StatusHistoryPopup(win._status_history, win)
+        self.addCleanup(popup.close)
+        popup.show_above(win._volume_slider)  # (an anchor far to the right)
+        self.settle()
+        left = win.mapToGlobal(QPoint(0, 0)).x()
+        self.assertGreaterEqual(popup.geometry().left(), left)
+        self.assertLessEqual(popup.geometry().right(), left + win.width() - 1)
+
     def test_a_repeated_message_counts_instead_of_filling_the_list(self):
         for _ in range(3):
             self.win._show_status_message("Already bookmarked: X", "info")

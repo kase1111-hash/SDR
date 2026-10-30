@@ -179,12 +179,15 @@ class StatusHistoryPopup(QFrame if HAS_PYQT6 else object):
 
     def show_above(self, anchor: Any) -> None:
         """Show over the status bar, its bottom-left corner at ``anchor``'s
-        top-left, sized to the window."""
+        top-left, sized to the window (and moved left as far as it takes to
+        stay inside it)."""
         window = anchor.window()
         width = max(360, min(640, window.width() - 40))
         self.resize(width, 300)
         corner = anchor.mapToGlobal(QPoint(0, 0))
-        left = max(window.mapToGlobal(QPoint(0, 0)).x() + 8, corner.x())
+        window_left = window.mapToGlobal(QPoint(0, 0)).x()
+        right = window_left + window.width() - 8  # (the window's right margin)
+        left = max(window_left + 8, min(corner.x(), right - width))
         self.move(left, corner.y() - self.height() - 4)
         self.show()
         self.list.setFocus(Qt.FocusReason.PopupFocusReason)

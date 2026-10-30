@@ -604,18 +604,7 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
             )
         if win._tx_busy():
             return "Wait until the transmission ends to change the sample rate."
-        if self._scanning():
-            return (
-                "Stop the scan (Scanner tab) to change the sample rate: a scan "
-                "measures every step at the rate it started with."
-            )
         return ""
-
-    def _scanning(self) -> bool:
-        """Whether the Scanner tab's scan runs (it sweeps at one rate)."""
-        panel = getattr(self._win, "_scanner_panel", None)
-        engine = getattr(panel, "engine", None)
-        return bool(getattr(engine, "active", False))
 
     def sync_rates(self) -> None:
         """The Receiver group's Sample rate and the status bar's rate."""

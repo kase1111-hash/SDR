@@ -7069,8 +7069,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         preselected in Device > Connect for every device type. It is
         refused, with the reason in the status bar, while a recording plays
         back (the file sets the rate), while recording I/Q (one take holds
-        one rate), while transmitting or while a scan runs. Returns True
-        when applied.
+        one rate) or while transmitting (a running scan stops itself at the
+        next frame, see _scan_frame). Returns True when applied.
         """
         try:
             rate = float(rate_hz)

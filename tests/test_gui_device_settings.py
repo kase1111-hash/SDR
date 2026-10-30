@@ -622,20 +622,25 @@ class TestSampleRate(_DeviceCase):
         rates = self.win._device_controls.dialog_preferences()[0]
         self.assertEqual(rates, {"demo": 2.0e6, "rtlsdr": 2.0e6, "hackrf": 2.0e6})
 
-    def test_refused_while_a_scan_runs(self):
-        """(Review) A scan measures every step at the rate it started with:
-        a new rate mid-scan put what it found at the wrong frequencies."""
+    def test_a_live_rate_change_stops_a_running_scan(self):
+        """A scan plans its steps for one rate: a rate picked here is
+        applied, and the scan stops itself at the next block (the Scanner
+        tab's guard) instead of measuring it at the old rate."""
+        import numpy as np
+
         scanner = self.win._scanner_panel
         self.assertTrue(self.win._is_running)
         self.assertTrue(scanner.start_scan())
-        self.assertTrue(scanner.engine.active)
-        self.assertFalse(self.win._device_controls.choose_rate(1.0e6))
-        self.assertEqual(self.win._device.sample_rate, 2.4e6)
-        self.assertEqual(scanner.engine.rate, 2.4e6)
-        self.assertIn("Stop the scan", self.message())
-        self.assertEqual(self.panel._rate_combo.currentText(), "2.4 MS/s")
-        scanner.stop_scan(stay=False)
         self.assertTrue(self.win._device_controls.choose_rate(1.0e6))
+        self.assertEqual(self.win._device.sample_rate, 1.0e6)
+        measured = []
+        with mock.patch.object(
+            scanner.engine, "frame", side_effect=lambda block: measured.append(block)
+        ):
+            self.win._scan_frame(np.zeros(4096, np.complex64))
+        self.assertEqual(measured, [])
+        self.assertFalse(scanner.engine.active)
+        self.assertIn("the sample rate changed", scanner._status.text())
 
 
 class TestGainThroughPlayback(_DeviceCase):

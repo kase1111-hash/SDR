@@ -866,5 +866,40 @@ class TestScan12TheWindowStarts(unittest.TestCase):
                 setattr(module, name, value)
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-13: a "Sweep once" that can't tune any step said "complete"
+# --------------------------------------------------------------------------- #
+class TestScan13NoStepTuned(_PanelCase):
+    def test_once_says_the_receiver_could_not_tune_like_continuous(self):
+        from sdr_module.gui.scan_engine import ScanEngine, ScanSettings
+
+        dev = _demo()
+        host = _DemoHost(dev)
+        host.refuse_above = 0.0  # every step is refused
+        engine = ScanEngine(host)
+        finished = []
+        engine.on_finished = finished.append
+        for mode in ("once", "continuous"):
+            error = engine.start(
+                ScanSettings(mode, 118e6, 137e6, 25e3), dev.sample_rate, 0.0
+            )
+            self.assertFalse(engine.active)
+            self.assertEqual(
+                error, "The receiver could not tune to any step of this range.", mode
+            )
+        self.assertEqual(finished, [])  # (no scan ran)
+
+    def test_the_tab_says_why_in_words(self):
+        host = FakeWindow()
+        host.scan_tune_lo = lambda center, vfo=None: False
+        panel = self.panel(host)
+        panel.set_scan_mode("once")
+        self.assertFalse(panel.start_scan())
+        self.assertEqual(
+            panel._status.text(),
+            "The receiver could not tune to any step of this range.",
+        )
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

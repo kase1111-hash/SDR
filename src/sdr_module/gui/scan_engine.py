@@ -81,6 +81,8 @@ DWELL_S = 0.25
 TONE_WAIT_S = 0.9
 #: Why a bookmark scan ended: Skip passed every bookmark by.
 ALL_SKIPPED = "all skipped"
+#: Why a sweep couldn't start, or stopped: no step of the range tuned.
+NO_STEP_TUNED = "The receiver could not tune to any step of this range."
 
 
 class ScanHost:
@@ -515,7 +517,8 @@ class ScanEngine:
             self.page_index += 1
             if self.page_index >= len(self.pages):
                 if self.settings.mode == "once":
-                    self._finish("complete")
+                    # (Still starting: every step was refused.)
+                    self._finish(NO_STEP_TUNED if self._starting else "complete")
                     return
                 self.pass_number += 1
                 self.page_index = 0
@@ -530,7 +533,7 @@ class ScanEngine:
             # Out of what the receiver tunes (the range is planned inside
             # it, so this is rare): on to the next one.
             self.steps_refused += 1
-        self._finish("The receiver could not tune to any step of this range.")
+        self._finish(NO_STEP_TUNED)
 
     def _next_candidate(self) -> None:
         while self._candidates:

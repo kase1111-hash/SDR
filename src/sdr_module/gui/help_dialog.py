@@ -66,6 +66,7 @@ SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
     ("File", ("Ctrl+Q",), "Exit SDR Module"),
     ("Tools", ("Ctrl+F",), "Open the frequency scanner"),
     ("Tools", ("Ctrl+R",), "Open the AM/FM radio tuner"),
+    ("Tools", ("Ctrl+Shift+T",), "Send text in CW, RTTY, PSK31 or ASCII FSK"),
     ("Tools", ("Ctrl+E",), "Show the error history"),
     ("Tools", ("Ctrl+,",), "Open the preferences (audio output, folders)"),
     ("View", ("F6",), "Put the keyboard focus on the spectrum"),

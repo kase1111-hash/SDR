@@ -904,6 +904,10 @@ class TestEveryMenuActionAndThemeSwitching(unittest.TestCase):
                 if win._radio_tuner is not None and win._radio_tuner.isVisible():
                     opened.append("RadioTunerWidget")
                     win._radio_tuner.close()
+                text_tx = getattr(win, "_transmit_text", None)
+                if text_tx is not None and text_tx.isVisible():
+                    opened.append("TransmitTextDialog")
+                    text_tx.close()
         closer.stop()
         _flush_deletes()
 
@@ -915,13 +919,17 @@ class TestEveryMenuActionAndThemeSwitching(unittest.TestCase):
             "HelpDialog",
             "ErrorLogDialog",
             "RadioTunerWidget",
+            "TransmitTextDialog",
         ):
-            if expected == "RadioTunerWidget" and not _ham_radio():
+            if expected in ("RadioTunerWidget", "TransmitTextDialog") and not (
+                _ham_radio()
+            ):
                 continue
             self.assertIn(expected, opened)
-        # Only the reusable radio tuner window is kept.
+        # Only the reusable tool windows (the radio tuner and Transmit
+        # Text, non-modal and kept for their state) are kept.
         leftovers = {type(d).__name__ for d in win.findChildren(QDialog)}
-        self.assertLessEqual(leftovers, {"RadioTunerWidget"})
+        self.assertLessEqual(leftovers, {"RadioTunerWidget", "TransmitTextDialog"})
 
         for i in range(4):
             self.themes.apply_theme(qapp, "light" if i % 2 == 0 else "dark")

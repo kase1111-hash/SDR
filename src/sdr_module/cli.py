@@ -470,6 +470,12 @@ def cmd_decode(args: argparse.Namespace) -> int:
     return 0
 
 
+#: ``sdr-scan encode`` defaults per protocol: (baud, shift in Hz). RTTY is
+#: the amateur standard; ASCII keeps the library's 1 kHz shift.
+_ENCODE_FSK_DEFAULTS = {"rtty": (45.45, 170.0), "ascii": (300.0, 1000.0)}
+_ENCODE_NAMES = {"rtty": "RTTY", "morse": "Morse", "ascii": "ASCII", "psk31": "PSK31"}
+
+
 def cmd_encode(args: argparse.Namespace) -> int:
     """Encode text to protocol."""
     from .protocols.encoder import EncoderConfig, ModulationType
@@ -479,6 +485,12 @@ def cmd_encode(args: argparse.Namespace) -> int:
         PSK31Encoder,
         RTTYEncoder,
     )
+    from .protocols.text_modes import (
+        BAUD_RANGE,
+        SHIFT_RANGE,
+        WPM_RANGE,
+        format_number,
+    )
 
     encoders = {
         "rtty": RTTYEncoder,
@@ -487,22 +499,76 @@ def cmd_encode(args: argparse.Namespace) -> int:
         "psk31": PSK31Encoder,
     }
 
-    if args.protocol not in encoders:
-        print(f"Unknown protocol: {args.protocol}")
+    protocol = args.protocol
+    if protocol not in encoders:
+        print(f"Unknown protocol: {protocol}")
         print(f"Available: {', '.join(encoders.keys())}")
         return 1
+    name = _ENCODE_NAMES[protocol]
+    if not args.sample_rate > 0:
+        print("Error: --sample-rate must be positive")
+        return 1
+
+    # Each protocol its own configuration: one shared config used to make
+    # every protocol 300 Bd with a 1 kHz shift, so RTTY wasn't RTTY.
+    baud = getattr(args, "baud", None)
+    shift = getattr(args, "shift", None)
+    if protocol in _ENCODE_FSK_DEFAULTS:
+        default_baud, default_shift = _ENCODE_FSK_DEFAULTS[protocol]
+        baud = default_baud if baud is None else float(baud)
+        shift = default_shift if shift is None else float(shift)
+        if not BAUD_RANGE[0] <= baud <= BAUD_RANGE[1]:
+            print(
+                f"Error: --baud must be {format_number(BAUD_RANGE[0])} to "
+                f"{format_number(BAUD_RANGE[1])}"
+            )
+            return 1
+        if not SHIFT_RANGE[0] <= shift <= SHIFT_RANGE[1]:
+            print(
+                f"Error: --shift must be {format_number(SHIFT_RANGE[0])} to "
+                f"{format_number(SHIFT_RANGE[1])} Hz"
+            )
+            return 1
+        details = f"{format_number(baud)} Bd, {format_number(shift)} Hz shift"
+        modulation = ModulationType.FSK
+    else:
+        if baud is not None:
+            print(
+                "Error: PSK31 always runs at 31.25 Bd; --baud is for rtty and ascii."
+                if protocol == "psk31"
+                else "Error: Morse speed is set with --wpm; --baud is for rtty "
+                "and ascii."
+            )
+            return 1
+        if shift is not None:
+            print(
+                f"Error: {name} has no frequency shift; --shift is for rtty and ascii."
+            )
+            return 1
+        if protocol == "morse":
+            if not WPM_RANGE[0] <= args.wpm <= WPM_RANGE[1]:
+                print(
+                    f"Error: --wpm must be {format_number(WPM_RANGE[0])} to "
+                    f"{format_number(WPM_RANGE[1])}"
+                )
+                return 1
+            details = f"{args.wpm} WPM"
+            modulation = ModulationType.OOK
+        else:
+            details = "31.25 Bd"
+            modulation = ModulationType.PSK
 
     config = EncoderConfig(
         sample_rate=args.sample_rate,
         carrier_freq=args.carrier,
-        baud_rate=300,
-        modulation=ModulationType.FSK,
+        baud_rate=baud or 0,
+        modulation=modulation,
         amplitude=0.8,
-        frequency_shift=1000,
+        frequency_shift=shift,
     )
 
-    encoder_class = encoders[args.protocol]
-    if args.protocol == "morse":
+    encoder_class = encoders[protocol]
+    if protocol == "morse":
         encoder = encoder_class(config, wpm=args.wpm)
     else:
         encoder = encoder_class(config)
@@ -513,8 +579,21 @@ def cmd_encode(args: argparse.Namespace) -> int:
         return 1
 
     samples = encoder.encode_text(text)
+    check = encoder.last_check
+    if check is not None and check.unsupported:
+        count = check.skipped
+        print(
+            f"Skipped {count} character{'' if count == 1 else 's'} {name} can't "
+            f"send: {check.describe_unsupported()}"
+        )
+    if not len(samples) or check is None:
+        print(f"Error: nothing to send: {name} can't send any of these characters.")
+        return 1
 
-    print(f"Encoded {len(text)} characters using {args.protocol.upper()}")
+    print(
+        f"Encoded {check.characters} characters using {protocol.upper()} "
+        f"({details})"
+    )
     print(f"Generated {len(samples)} samples ({len(samples)/args.sample_rate:.3f}s)")
 
     if args.output:
@@ -873,10 +952,25 @@ def create_parser() -> argparse.ArgumentParser:
         "--carrier",
         type=float,
         default=1000,
-        help="Carrier frequency in Hz (default: 1000)",
+        help="Where the signal sits in Hz: the tone, or the center between the "
+        "FSK tones (default: 1000)",
     )
     encode_parser.add_argument(
         "--wpm", type=int, default=20, help="Words per minute for Morse (default: 20)"
+    )
+    encode_parser.add_argument(
+        "--baud",
+        type=float,
+        default=None,
+        help="Symbol rate for rtty and ascii (default: 45.45 for rtty, the "
+        "amateur standard; 300 for ascii)",
+    )
+    encode_parser.add_argument(
+        "--shift",
+        type=float,
+        default=None,
+        help="Frequency shift between mark and space in Hz, for rtty and ascii "
+        "(default: 170 for rtty; 1000 for ascii)",
     )
     encode_parser.set_defaults(func=cmd_encode)
 

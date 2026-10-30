@@ -1992,9 +1992,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # then (they were taken on the old frequency; see _retune_lo).
         self._plot_skip_samples = 0
         self._plot_skip_until = 0.0
-        # The waterfall rows' clock and when it last moved (see _plot_time).
+        # The waterfall rows' clock and when it last moved, and the recording
+        # and its read position it last followed (see _plot_time).
         self._plot_clock = 0.0
         self._plot_clock_wall: Optional[float] = None
+        self._plot_clock_source: Any = None
+        self._plot_clock_position: Optional[int] = None
         # The part of the span both plots show (View > Zoom).
         self._plot_view = PlotView()
         self._agc_enabled = False
@@ -8819,12 +8822,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         samples: wall-clock time while receiving, but a recording's own
         time while one plays (at 4x a second holds four of the recording),
         so its time axis, ages and measured durations are right at any
-        speed. Pauses in reception still show as gaps."""
+        speed. Pauses in reception still show as gaps, and so does the time
+        before a frame that doesn't follow on in the recording (just opened
+        after receiving, or played again from the start)."""
         now = time.monotonic()
         last, self._plot_clock_wall = self._plot_clock_wall, now
+        source = self._playback.device if self._playback.active else None
+        position = getattr(source, "position", None)
+        follows = (
+            source is not None
+            and source is self._plot_clock_source
+            and position is not None
+            and position - count == self._plot_clock_position
+        )
+        self._plot_clock_source, self._plot_clock_position = source, position
         if last is None:
             self._plot_clock = now
-        elif self._playback.active:
+        elif follows:
             self._plot_clock += count / max(rate, 1.0)
         else:
             self._plot_clock += max(0.0, now - last)

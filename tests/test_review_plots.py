@@ -634,22 +634,16 @@ class TestPlaybackSpeedTimesRows(_WindowTestCase):
         t = np.arange(n) / rate
         burst = (t >= 2.0) & (t < 3.0)  # exactly 1 s, 30 kHz up
         x[burst] += 0.3 * np.exp(2j * np.pi * 30e3 * t[burst])
-        path = os.path.join(folder, "burst.sigmf-data")
+        self.path = os.path.join(folder, "burst.sigmf-data")
         save_iq_file(
-            path,
+            self.path,
             x.astype(np.complex64),
             rate,
             145e6,
             SampleFormat.FLOAT32,
             FileFormat.SIGMF,
         )
-        with mock.patch(
-            "sdr_module.gui.main_window.QFileDialog.getOpenFileName",
-            return_value=(path, ""),
-        ):
-            self.win._open_recording_action.trigger()
-        self.settle()
-        self.assertTrue(self.win._playback.active)
+        self.open_recording()
         self.win._waterfall.set_history_seconds(0)  # a row per frame
         # The waterfall's own clock (wall time) advances a frame a frame.
         self.wall = _Clock()
@@ -658,6 +652,15 @@ class TestPlaybackSpeedTimesRows(_WindowTestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def open_recording(self):
+        with mock.patch(
+            "sdr_module.gui.main_window.QFileDialog.getOpenFileName",
+            return_value=(self.path, ""),
+        ):
+            self.win._open_recording_action.trigger()
+        self.settle()
+        self.assertTrue(self.win._playback.active)
 
     def play(self, speed, seconds=5.5):
         """Frames at 30 a second of wall time, each with ``speed`` / 30 s
@@ -709,6 +712,48 @@ class TestPlaybackSpeedTimesRows(_WindowTestCase):
     def test_and_at_half_speed(self):
         self.play(0.5, seconds=4.0)
         self.assertAlmostEqual(self.measure_burst(), 1.0, delta=0.15)
+
+    def gap_before(self, row):
+        """Seconds between waterfall row ``row`` (oldest first) and the one
+        before it, on the rows' clock."""
+        times = self.win._waterfall._arrival_times()
+        return float(times[row] - times[row - 1])
+
+    def test_rows_received_before_the_recording_end_with_a_gap(self):
+        # Receiving, then a recording opened a moment later: its rows don't
+        # run on from the received ones as if they were one stream (the
+        # time between shows as a gap, as it did before the recording's
+        # own clock, and as it does after the recording).
+        import time
+
+        win, wf = self.win, self.win._waterfall
+        win._playback.close()
+        self.assertFalse(win._playback.active)
+        for _ in range(5):
+            win._plot_frame(win._device.read_samples(80_000))
+        live = len(wf._history)
+        self.assertGreater(live, 0)
+        time.sleep(1.2)
+        self.open_recording()
+        self.play(1.0, seconds=0.5)
+        self.assertGreater(len(wf._history), live)
+        self.assertGreater(self.gap_before(live), 1.0)
+
+    def test_playing_it_again_starts_after_a_gap(self):
+        # The end of the recording, then (Space, a moment later) its start
+        # again: not joined as if the recording went on.
+        import time
+
+        wf = self.win._waterfall
+        self.play(4.0, seconds=6.0)  # to the end
+        rows = len(wf._history)
+        time.sleep(1.2)
+        self.win._device.seek(0)
+        self.play(4.0, seconds=1.0)
+        self.assertGreater(len(wf._history), rows)
+        self.assertGreater(self.gap_before(rows), 1.0)
+        # (Within the recording the rows keep its own time.)
+        self.assertAlmostEqual(self.gap_before(rows + 2), 4.0 / 30, delta=1e-6)
 
 
 class TestAutoRangeFramesTheHolds(unittest.TestCase):

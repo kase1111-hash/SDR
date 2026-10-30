@@ -616,5 +616,92 @@ class TestCorruptQrpSettings(unittest.TestCase):
         self.assertTrue(any("QRP settings" in line for line in logs.output))
 
 
+def _clip_with_bursts(fs: float = 8000.0, n: int = 8000):
+    """Noise with a 1 kHz burst at 800-1600 and another in the last 600."""
+    rng = np.random.default_rng(3)
+    t = np.arange(n) / fs
+    clip = 0.01 * rng.standard_normal(n)
+    clip[800:1600] += 0.5 * np.sin(2 * np.pi * 1000 * t[800:1600])
+    clip[n - 600 :] += 0.5 * np.sin(2 * np.pi * 1000 * t[n - 600 :])
+    return clip
+
+
+def _onset(y: np.ndarray, threshold: float = 0.1) -> int:
+    return int(np.flatnonzero(np.abs(y) > threshold)[0])
+
+
+class TestNoiseReductionOffline(unittest.TestCase):
+    """HAMDSP-7: the spectral methods stream with a delay of
+    latency_samples, and nothing returned the last latency_samples of the
+    signal: a whole clip in one process() call came out shifted and with
+    its end missing (a burst in the last 600 samples was lost)."""
+
+    METHODS = ("SPECTRAL_SUBTRACTION", "WIENER")
+
+    def make(self, method: str, **kw):
+        from sdr_module.dsp.filters import (
+            NoiseReduction,
+            NoiseReductionConfig,
+            NoiseReductionMethod,
+        )
+
+        config = NoiseReductionConfig(
+            method=getattr(NoiseReductionMethod, method), fft_size=1024, **kw
+        )
+        return NoiseReduction(8000.0, config)
+
+    def test_process_clip_lines_up_and_keeps_the_end(self):
+        clip = _clip_with_bursts()
+        for method in self.METHODS:
+            with self.subTest(method=method):
+                y = self.make(method).process_clip(clip)
+                self.assertEqual(len(y), len(clip))
+                self.assertLessEqual(abs(_onset(y) - _onset(clip)), 4)
+                kept = np.sum(y[-600:] ** 2) / np.sum(clip[-600:] ** 2)
+                self.assertGreater(kept, 0.8)
+
+    def test_flush_returns_the_rest_of_the_stream(self):
+        """With every gain at 1 the stream is the input, delayed: the
+        blocks and then flush() give back all of it."""
+        clip = _clip_with_bursts()
+        nr = self.make("SPECTRAL_SUBTRACTION", subtraction_factor=0.0)
+        delay = nr.latency_samples
+        parts = [nr.process(clip[i : i + 333]) for i in range(0, len(clip), 333)]
+        tail = nr.flush()
+        self.assertEqual(len(tail), delay)
+        y = np.concatenate(parts + [tail])
+        np.testing.assert_allclose(y[delay:], clip, atol=1e-9)
+        self.assertEqual(len(nr.flush()), 0, "nothing more is held")
+
+    def test_blocks_then_flush_equal_one_clip(self):
+        clip = _clip_with_bursts()
+        for method in self.METHODS:
+            with self.subTest(method=method):
+                nr = self.make(method)
+                parts = [nr.process(clip[i : i + 500]) for i in range(0, 8000, 500)]
+                y = np.concatenate(parts + [nr.flush()])[nr.latency_samples :]
+                np.testing.assert_allclose(
+                    y, self.make(method).process_clip(clip), atol=1e-12
+                )
+
+    def test_flushing_does_not_count_as_quiet(self):
+        """The zeros that push the tail out don't lower the noise estimate."""
+        nr = self.make("SPECTRAL_SUBTRACTION")
+        nr.process(_clip_with_bursts())
+        before = nr.get_noise_spectrum()
+        nr.flush()
+        np.testing.assert_allclose(nr.get_noise_spectrum(), before)
+
+    def test_complex_input_and_other_methods(self):
+        nr = self.make("WIENER")
+        iq = np.exp(2j * np.pi * 0.05 * np.arange(3000))
+        y = nr.process_clip(iq)
+        self.assertTrue(np.iscomplexobj(y))
+        self.assertEqual(len(y), len(iq))
+        median = self.make("MEDIAN")
+        self.assertEqual(len(median.flush()), 0)
+        self.assertEqual(len(median.process_clip(np.ones(100))), 100)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

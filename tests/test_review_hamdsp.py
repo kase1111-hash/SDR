@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -82,6 +83,79 @@ class TestTuneToIssRefused(_HamWindowCase):
         win._tune_iss_from_menu()
         settle()
         self.assert_nothing_changed(tuned, "AM", "outside the recording")
+
+
+FS = 48000.0
+GUI_BLOCK = 1600
+
+
+def _robot36_audio():
+    from sdr_module.ham.sstv_encoder import encode_sstv, sstv_test_card
+
+    return encode_sstv(sstv_test_card(320, 240), "Robot 36", FS)
+
+
+class TestSstvImageKeptWhenAudioEnds(_HamWindowCase):
+    """HAMDSP-2: an image coming in when the window closed was lost, and
+    after the receiver stopped (or left FM) it waited, unsaved, for audio
+    that never came. The lines received so far are now kept and
+    auto-saved in both cases."""
+
+    def receive_half(self):
+        self.sstv._start_btn.click()
+        audio = _robot36_audio()
+        half = audio[: len(audio) // 2]
+        for i in range(0, len(half), GUI_BLOCK):
+            self.sstv.process_audio(half[i : i + GUI_BLOCK], FS)
+        self.assertTrue(self.sstv._decoder.is_receiving())
+
+    def saved_partials(self):
+        return sorted(
+            p.name for p in Path(self.tmp.name).glob("sstv_*_Robot_36_partial_*.png")
+        )
+
+    def test_closing_the_window_keeps_the_partial_image(self):
+        self.receive_half()
+        self.assertEqual(self.saved_partials(), [])
+        self.win.close()
+        self.assertEqual(len(self.saved_partials()), 1)
+        self.assertEqual(self.sstv._history_list.count(), 1)
+        self.assertIn("partial", self.sstv._history_list.item(0).text())
+
+    def test_audio_that_stops_ends_the_image_without_more_audio(self):
+        self.receive_half()
+        self.win._stop_acquisition()  # no more audio comes
+        self.sstv._last_audio_time -= 2.0  # ... for two seconds
+        self.sstv._update_status()  # the panel's 100 ms tick
+        self.assertFalse(self.sstv._decoder.is_receiving())
+        self.assertTrue(self.sstv.is_receiving(), "still listening")
+        self.assertEqual(len(self.saved_partials()), 1)
+        self.assertIn("audio stopped", self.sstv._status_label.text())
+        self.assertEqual(self.sstv._history_list.count(), 1)
+
+    def test_a_short_silence_does_not_end_the_image(self):
+        self.receive_half()
+        self.sstv._last_audio_time -= 0.5
+        self.sstv._update_status()
+        self.assertTrue(self.sstv._decoder.is_receiving())
+        self.assertEqual(self.saved_partials(), [])
+
+    def test_a_few_lines_that_stop_leave_the_panel_listening(self):
+        from sdr_module.ham.sstv_encoder import encode_sstv, sstv_test_card
+
+        audio = encode_sstv(sstv_test_card(320, 240), "Robot 36", FS, lines=4)
+        self.sstv._start_btn.click()
+        for i in range(0, len(audio), GUI_BLOCK):
+            self.sstv.process_audio(audio[i : i + GUI_BLOCK], FS)
+        self.assertTrue(self.sstv._decoder.is_receiving())
+        self.sstv._last_audio_time -= 2.0
+        self.sstv._update_status()
+        self.assertFalse(self.sstv._decoder.is_receiving())
+        self.assertEqual(self.sstv._history_list.count(), 0, "too few to keep")
+        self.assertNotIn("Receiving", self.sstv._status_label.text())
+        self.assertIn("audio stopped", self.sstv._status_label.text())
+        self.assertFalse(self.sstv._image_display.has_image())
+        self.assertTrue(self.sstv._progress_bar.isHidden())
 
 
 if __name__ == "__main__":  # pragma: no cover

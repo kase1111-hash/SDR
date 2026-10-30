@@ -830,6 +830,14 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         if not self._is_receiving:
             self._on_start_clicked()
 
+    def end_image(self, why: str) -> Optional[str]:
+        """End the image coming in (if any) now, e.g. because the app
+        closes: the lines received so far are kept as a partial image in
+        Received Images (and auto-saved), as when the decoder is stopped.
+        ``why`` completes "The image ended: ...". The decoder keeps
+        listening. Returns the status note (None if nothing was kept)."""
+        return self._end_image_early(why)
+
     def show_fm_needed(self, mode: Optional[str]) -> None:
         """Say in the panel that SSTV needs FM while the receiver is in
         ``mode`` (None hides the hint)."""
@@ -1533,6 +1541,13 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         note = self._keep_partial(image.copy(), lines)
         if why and note:
             self._set_status(f"The image ended: {why}. {note}", "warning")
+        elif why and self._is_receiving:
+            # Too few lines to keep: back to "Listening…", not a stale
+            # "Receiving …: line N" for an image that is over.
+            self._show_listening_viewer()
+            self._set_status(
+                f"The image ended: {why}. Listening for the next one…", "warning"
+            )
         self._update_action_buttons()
         return note
 
@@ -1585,6 +1600,10 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         decoder = self._decoder
         if decoder is None:
             return
+        if silent > AUDIO_GAP_S and decoder.is_receiving():
+            # The audio stopped (the receiver stopped, or left the SSTV
+            # modes): keep what came in now, not when audio comes back.
+            self._end_image_early("the audio stopped for a while")
         if self._display_dirty:
             self._refresh_partial_display()
         status = decoder.get_status()

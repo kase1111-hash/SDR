@@ -9027,6 +9027,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # its settings saved (T13).
         self._second_rx.shutdown()
         self._signal_tools.shutdown()  # (T10) no identification left running
+        if HAS_HAM_RADIO:
+            # An SSTV image coming in: its lines so far are kept (auto-saved).
+            self._sstv_panel.end_image("the app closed")
         self._commit_pending_history()  # the last frequency joins Recent
         if self._transmit_text is not None:
             self._transmit_text.shutdown()  # (its preview; the draft is kept)

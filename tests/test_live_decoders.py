@@ -250,6 +250,59 @@ def test_any_array_layout_and_complex_type():
 
 
 # --------------------------------------------------------------------------- #
+# The channel at every rate
+# --------------------------------------------------------------------------- #
+
+CHANNEL_DECODERS = [n for n, c in LIVE_DECODERS.items() if c is not ADSBLiveDecoder]
+
+
+def _channel_gain_db(channelizer, freqs):
+    """Gain (dB) of ``channelizer`` for complex tones ``freqs`` Hz from the
+    channel, exactly: each stage filters a tone, then its decimation moves
+    the tone to its alias."""
+    f = np.asarray(freqs, dtype=np.float64)
+    gain = np.zeros(len(f))
+    rate = channelizer.rate
+    for stage in channelizer._stages:
+        taps = np.asarray(stage.taps, dtype=np.float64)
+        size = 1 << max(16, int(np.ceil(np.log2(32 * len(taps)))))
+        response = np.abs(np.fft.fft(taps, size)) / abs(np.sum(taps))
+        gain += 20 * np.log10(response[np.round(f / rate * size).astype(int) % size])
+        rate /= stage.factor
+        f = (f + rate / 2) % rate - rate / 2
+    return gain
+
+
+@pytest.mark.parametrize("rate", [2.4e6, 8e6, 20e6])
+@pytest.mark.parametrize("name", CHANNEL_DECODERS)
+def test_the_channel_keeps_out_everything_beyond_its_edge(name, rate):
+    # DEC-02: the CW channel's first stage decimated by 600 to 5000 with a
+    # filter that needed 2.6k-22k taps; it was cut to 2047, so tones near
+    # 4 kHz folded into the +/-250 Hz channel (-40 dB at 2.4 MS/s, -1 dB
+    # at 20 MS/s) and a station 4 kHz away was decoded.
+    cls = LIVE_DECODERS[name]
+    channelizer = cls(rate)._channelizer
+    stop, keep = channelizer.stop_hz, channelizer.pass_hz
+    freqs = np.arange(-rate / 2, rate / 2, stop / 20.0)
+    gain = _channel_gain_db(channelizer, freqs)
+    assert gain[np.abs(freqs) >= stop].max() < -55.0
+    assert np.abs(gain[np.abs(freqs) <= keep]).max() < 0.1
+
+
+@pytest.mark.parametrize("rate", [2.4e6, 8e6, 20e6])
+def test_a_morse_station_4_khz_away_is_not_heard(rate):
+    # DEC-02 as reported: a carrier 3.75 kHz from the tuned frequency came
+    # through the CW channel at -40 dB (2.4 MS/s) to -1 dB (20 MS/s).
+    def channel_power(offset):
+        decoder = CWLiveDecoder(rate)
+        t = np.arange(int(0.15 * rate)) / rate
+        out = decoder._channelizer.process(np.exp(2j * np.pi * offset * t))
+        return np.mean(np.abs(out[len(out) // 2 :]) ** 2)
+
+    assert 10 * np.log10(channel_power(3750.0) / channel_power(0.0)) < -55.0
+
+
+# --------------------------------------------------------------------------- #
 # Factory, registry and status
 # --------------------------------------------------------------------------- #
 

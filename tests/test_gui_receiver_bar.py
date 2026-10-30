@@ -544,6 +544,33 @@ class TestTuningHistory(_WindowTestCase):
         saved = json.loads(self.store.values["tuning/recent"])
         self.assertEqual(saved[0]["freq_hz"], 99.5e6)
 
+    def test_picking_from_the_menu_doesnt_delete_the_action_under_qt(self):
+        """Picking an entry (or Clear) rebuilds the menu from the action's
+        own triggered handler: QMenu.clear() deleted that action while Qt
+        was still delivering its trigger."""
+        from PyQt6 import sip
+        from PyQt6.QtCore import QCoreApplication, QEvent
+
+        self.win._commit_history_entry()
+        self.visit(99.5e6)
+        self.assertTrue(self.win.set_frequency(101.1e6))  # not committed yet
+        menu = self.win._recent_menu
+        action = next(a for a in menu.actions() if a.text() == "99.500 MHz (FM)")
+        action.trigger()  # commits 101.1 MHz first: the menu is rebuilt
+        self.assertEqual(self.freq(), 99.5e6)
+        self.assertFalse(sip.isdeleted(action))
+        self.assertNotIn(action, menu.actions())
+        texts = [a.text() for a in menu.actions() if not a.isSeparator()]
+        self.assertEqual(
+            texts[:3], ["101.100 MHz (FM)", "99.500 MHz (FM)", "100.100 MHz (FM)"]
+        )
+        clear = next(a for a in menu.actions() if "Clear" in a.text())
+        clear.trigger()
+        self.assertFalse(sip.isdeleted(clear))
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
+        self.assertTrue(sip.isdeleted(action))
+        self.assertTrue(sip.isdeleted(clear))
+
     def test_recent_frequencies_menu_and_persistence(self):
         self.win._commit_history_entry()
         self.visit(146.52e6, "FM", "5 kHz")

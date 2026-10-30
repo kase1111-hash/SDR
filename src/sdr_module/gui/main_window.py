@@ -3626,6 +3626,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._show_status_message(
                 f"Back to {self._entry_text(entry)}", "info", 2500
             )
+        else:
+            # Refused (the status bar says why): the history stays where the
+            # receiver is, so Forward and the next visit don't lose entries.
+            self._tuning_history.forward()
         self._update_history_actions()
 
     def _tune_forward(self) -> None:
@@ -3638,6 +3642,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._show_status_message(
                 f"Forward to {self._entry_text(entry)}", "info", 2500
             )
+        else:
+            self._tuning_history.back()  # refused: stay where the receiver is
         self._update_history_actions()
 
     def _tune_recent(self, entry: "TunedEntry") -> None:
@@ -3658,7 +3664,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _rebuild_recent_menu(self) -> None:
         """Radio > Recent Frequencies: the last frequencies tuned."""
         menu = self._recent_menu
-        menu.clear()
+        # Not menu.clear(): that deletes the actions at once, and this runs
+        # from the triggered handler of one of them (an entry or Clear),
+        # which Qt still uses after the handler returns.
+        for old in menu.actions():
+            menu.removeAction(old)
+            if old.parent() is menu:
+                old.deleteLater()
         entries = self._tuning_history.recent()
         if not entries:
             empty = menu.addAction("No recent frequencies yet")

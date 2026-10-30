@@ -475,6 +475,29 @@ class TestRefusedTuning(_TuningCase):
         self.assertNotEqual(self.win._control_panel._demod_combo.currentText(), "AM")
         self.win._device = None
 
+    def test_a_refused_back_keeps_the_history_where_the_receiver_is(self):
+        """Back to a frequency the dongle can't tune moved the history
+        anyway: Forward then offered the frequency already tuned, and the
+        next frequency visited dropped it from the history."""
+        history = self.win._tuning_history
+        self.assertTrue(self.win.set_frequency(2.4e9))  # no device yet
+        self.win._commit_history_entry()
+        self.assertTrue(self.win.set_frequency(100.1e6))
+        self.win._commit_history_entry()
+        self.connect(_rtlsdr())
+        self.win._tune_back()
+        self.assertEqual(self.freq(), 100.1e6)
+        self.assertIn("RTL-SDR tunes 0.5–1766 MHz", self.errors())
+        self.assertEqual(history.current().freq_hz, 100.1e6)
+        self.assertTrue(self.win._back_action.isEnabled())
+        self.assertFalse(self.win._forward_action.isEnabled())
+        self.assertTrue(self.win.set_frequency(100.3e6))
+        self.win._commit_history_entry()
+        self.assertEqual(
+            [e.freq_hz for e in history._history], [2.4e9, 100.1e6, 100.3e6]
+        )
+        self.win._device = None
+
     def test_connecting_with_the_frequency_out_of_its_range(self):
         self.assertTrue(self.win.set_frequency(2.4e9))  # no device: fine
         dev = _rtlsdr()

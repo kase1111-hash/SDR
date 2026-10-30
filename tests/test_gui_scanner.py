@@ -1447,6 +1447,93 @@ class TestScannerInTheWindow(_ScanWindowCase):
         panel.stop_scan()
         self.assertFalse(win._scan_checks_tone)
 
+    def test_transfers_queued_before_a_retune_are_not_measured(self):
+        """A hardware receiver's queued transfers hold the frequency it was
+        on: with the display loop behind (a HackRF at a high rate) a sweep
+        measured them as the new step's, and listed a carrier at 100.300
+        MHz as 100.805 MHz. They are dropped after each retune."""
+        import queue
+
+        from sdr_module.devices.base import SDRDevice
+
+        rate, carrier = 2.4e6, 100.3e6
+
+        class Behind(SDRDevice):
+            """Each transfer holds the carrier as heard at the LO it was
+            made at; the display loop takes them one per frame, 20 late."""
+
+            def __init__(self):
+                super().__init__()
+                self._state.sample_rate = rate
+                self._state.is_streaming = True
+                self.lo = 100.0e6
+                self.rng = np.random.default_rng(1)
+
+            def transfer(self):
+                n = 65536
+                t = np.arange(n) / rate
+                noise = self.rng.standard_normal(n) + 1j * self.rng.standard_normal(n)
+                tone = 0.05 * np.exp(2j * np.pi * (carrier - self.lo) * t)
+                try:
+                    self._sample_queue.put_nowait(
+                        (tone + 1e-4 * noise).astype(np.complex64)
+                    )
+                except queue.Full:
+                    pass
+
+            def set_frequency(self, freq_hz):
+                self.lo = float(freq_hz)
+                return True
+
+            def open(self, index=0):
+                return True
+
+            def close(self):
+                pass
+
+            def set_sample_rate(self, rate_hz):
+                return True
+
+            def set_bandwidth(self, bw_hz):
+                return True
+
+            def set_gain(self, gain_db):
+                return True
+
+            def set_gain_mode(self, auto):
+                return True
+
+            def start_rx(self, callback=None):
+                return True
+
+            def stop_rx(self):
+                return True
+
+        win, panel = self.win, self.win._scanner_panel
+        dev = Behind()
+        for _ in range(20):
+            dev.transfer()
+        win._device = dev
+        panel._preset.setCurrentIndex(0)  # custom: one step, 100-101 MHz
+        panel._start.setValue(100.0)
+        panel._end.setValue(101.0)
+        panel._step.setValue(25.0)
+        panel.set_scan_mode("once")
+        received = len(win._rx_history)
+        self.assertTrue(panel.start_scan())
+        for _ in range(100):
+            dev.transfer()
+            win._pacer.reset()
+            win._process_block(dev.read_samples(65536, timeout=0.0))
+            if not panel.engine.active:
+                break
+        self.assertIn("Scan complete", panel._status.text())
+        self.assertEqual([round(h.frequency_hz) for h in panel.hits()], [100_300_000])
+        # (The dropped transfers count as received.)
+        self.assertGreaterEqual(len(win._rx_history) - received, 20)
+        win._stop_acquisition()
+        win._device = None
+
     def test_the_tab_leaves_the_menu_bar_mnemonics_alone(self):
         """Alt+R and Alt+H open the Radio and Help menus: with the tab
         shown, Resume and Threshold had them too, so every other press

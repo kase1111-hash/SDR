@@ -27,6 +27,9 @@ _AUDIBLE_MODES = ("AM", "FM", "USB", "LSB", "CW")
 #: Extra time a hardware receiver gets after a retune: an RTL-SDR's USB
 #: transfer in flight (0.11 s at 2.4 MS/s) still holds the old frequency.
 _HARDWARE_SETTLE_S = 0.12
+#: At most this many queued transfers are dropped after a retune (the
+#: drivers queue up to 100).
+_MAX_STALE_TRANSFERS = 256
 
 
 def _parse_hz(text: str) -> Optional[float]:
@@ -73,6 +76,29 @@ class WindowScannerHost(ScannerHost):
         win._squelch.reset()
         win._level_average.reset()
         self.expected_hz = win._current_frequency()
+        if self._lo_moved:
+            self._drop_stale_transfers()
+
+    def _drop_stale_transfers(self) -> None:
+        """After a retune, the transfers a hardware receiver has queued hold
+        the old frequency: drop them, so the scan measures (and listens to)
+        the new one. While the display loop keeps up there are hardly any;
+        when it falls behind (a HackRF at a high rate) the queue is full of
+        them, and a sweep listed the old step's signals at the new step's
+        frequencies. They count as received (see ``_realtime``)."""
+        win = self._win
+        dev = win._device
+        if not isinstance(dev, SDRDevice):
+            return
+        for _ in range(_MAX_STALE_TRANSFERS):
+            try:
+                block = dev.read_samples(16384, timeout=0.0)
+            except Exception as exc:  # pragma: no cover - driver specific
+                logger.debug("Could not drop queued samples: %s", exc)
+                return
+            if block is None or len(block) == 0:
+                return
+            win._note_block(len(block))
 
     def scan_tune_lo(self, center_hz: float, vfo_hz: Optional[float] = None) -> bool:
         win = self._win

@@ -262,6 +262,22 @@ def test_ads_b_sums_whole_samples_at_whole_ratios(rate, phases):
     assert slots.max() == pytest.approx(4 / (rate * 0.5e-6), rel=1e-6)
 
 
+@pytest.mark.parametrize("rate", [2e6, 2.4e6, 8e6, 20e6])
+def test_ads_b_absurd_values_decode_to_nothing_quietly(rate):
+    # Values no receiver gives (up to 3e38, as random bytes read as
+    # float32 are) overflowed the float32 slot sums and the clarity of the
+    # bits: a RuntimeWarning per block (in the fuzz tests too).
+    import warnings
+
+    rng = np.random.default_rng(4)
+    decoder = ADSBDecoder(rate)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        for _ in range(10):
+            data = rng.integers(0, 256, 4 * 40000, dtype=np.uint8).view(np.float32)
+            assert decoder.decode(data) == []
+
+
 def test_noise_alone_decodes_nothing_and_fails_nothing():
     rate = 240e3
     rng = np.random.default_rng(9)

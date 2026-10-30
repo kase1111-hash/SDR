@@ -2814,6 +2814,17 @@ class ADSBDecoder(ProtocolDecoder):
         mag = mag.astype(np.float32, copy=False).ravel()
         if not np.all(np.isfinite(mag)):
             mag = np.nan_to_num(mag, nan=0.0, posinf=0.0, neginf=0.0)
+        # Values no receiver gives (near the float32 limit) can overflow the
+        # slot sums: they decode to nothing, without a warning per block.
+        with np.errstate(over="ignore", invalid="ignore"):
+            self._scan(mag)
+        for msg in self._messages:
+            self._notify_callbacks(msg)
+        return self._messages
+
+    def _scan(self, mag: np.ndarray) -> None:
+        """Find and decode the replies in a block of magnitudes (the
+        stream's next samples) into ``_messages``."""
         work = self._to_work_rate(mag)
         if len(self._tail):
             work = np.concatenate((self._tail, work))
@@ -2824,7 +2835,7 @@ class ADSBDecoder(ProtocolDecoder):
         count = len(work) - self._FRAME_SLOTS * phases + 1
         if count <= 0:
             self._tail = work.copy()
-            return self._messages
+            return
 
         self._forget_old_aircraft()
         starts = self._find_preambles(work, count)
@@ -2853,14 +2864,12 @@ class ADSBDecoder(ProtocolDecoder):
                 if msg is None:
                     continue
                 self._messages.append(msg)
-                self._notify_callbacks(msg)
                 next_free = start + phases * (
                     self._PREAMBLE_SLOTS + 16 * len(msg.raw_bits)
                 )
 
         self._tail = work[count:].copy()
         self._skip = max(0, next_free - count)
-        return self._messages
 
     _FORMATS = np.array(_SHORT_FORMATS + _LONG_FORMATS)
 

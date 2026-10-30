@@ -37,6 +37,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import math
 import re
 from dataclasses import dataclass, field, fields
 from decimal import Decimal, InvalidOperation
@@ -289,12 +290,12 @@ def parse_freq(value: Union[str, float, int, None]) -> float:
         Frequency in Hz.
 
     Raises:
-        ValueError: If the text is not a number.
+        ValueError: If the text is not a number (NaN and infinity aren't).
     """
     if value is None:
         return 0.0
     if isinstance(value, (int, float)):
-        return float(Decimal(str(value)) * 1_000_000)
+        return _finite_hz(float(Decimal(str(value)) * 1_000_000), value)
 
     text = str(value).strip().replace(",", "")
     if not text:
@@ -311,9 +312,17 @@ def parse_freq(value: Union[str, float, int, None]) -> float:
     try:
         # Decimal keeps 146.520000 MHz exactly 146520000 Hz instead of
         # 146520000.00000003.
-        return float(Decimal(text) * Decimal(multiplier))
+        hz = float(Decimal(text) * Decimal(multiplier))
     except (InvalidOperation, ArithmeticError) as exc:
         raise ValueError(f"invalid frequency: {value!r}") from exc
+    return _finite_hz(hz, value)
+
+
+def _finite_hz(hz: float, value: Any) -> float:
+    """``hz``, unless it is NaN or infinite ("nan", "inf" in a file)."""
+    if not math.isfinite(hz):
+        raise ValueError(f"invalid frequency: {value!r}")
+    return hz
 
 
 def format_freq(freq_hz: float) -> str:
@@ -334,9 +343,10 @@ def demod_to_chirp_mode(demod: str) -> str:
 def _to_float(value: Any, default: float) -> float:
     try:
         text = str(value).strip()
-        return float(text) if text else default
+        number = float(text) if text else default
     except (TypeError, ValueError):
         return default
+    return number if math.isfinite(number) else default  # ("nan", "inf")
 
 
 def _to_int(value: Any, default: int) -> int:
@@ -344,7 +354,7 @@ def _to_int(value: Any, default: int) -> int:
         text = str(value).strip()
         # int("023") is fine; int("023.0") is not, so go through float.
         return int(float(text)) if text else default
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # (int(inf) overflows)
         return default
 
 

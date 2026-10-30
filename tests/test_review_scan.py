@@ -1201,5 +1201,77 @@ class TestScan17MinimumWidthAtHighRates(unittest.TestCase):
         self.assertEqual([round(r.frequency_hz) for r in readings], [101000000])
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-18: NaN / inf in a CSV
+# --------------------------------------------------------------------------- #
+_ODD_HEADER = (
+    "Location,Name,Frequency,Offset,rToneFreq,cToneFreq,DtcsCode,RxDtcsCode,"
+    "Mode,TStep\n"
+)
+
+
+class TestScan18NotNumbersInACsv(unittest.TestCase):
+    def read(self, rows, strict=False):
+        import io
+
+        from sdr_module.core.chirp_csv import read_chirp_csv
+
+        return read_chirp_csv(io.StringIO(_ODD_HEADER + rows), strict=strict)
+
+    def test_a_frequency_that_isnt_a_number_skips_the_row_and_says_so(self):
+        report = self.read(
+            "1,NAN,nan,0,88.5,88.5,023,023,FM,5\n"
+            "2,INF,inf,0,88.5,88.5,023,023,FM,5\n"
+            "3,MINF,-Infinity,0,88.5,88.5,023,023,FM,5\n"
+            "4,SHIFT,146.94,inf,88.5,88.5,023,023,FM,5\n"
+            "5,OK,146.52,0,88.5,88.5,023,023,FM,5\n"
+        )
+        self.assertEqual([c.name for c in report.channels], ["OK"])
+        self.assertEqual(len(report.skipped), 4)
+        self.assertTrue(report.skipped[0].startswith("line 2:"), report.skipped)
+
+    def test_strict_reading_says_which_line(self):
+        from sdr_module.core.chirp_csv import ChirpCsvError
+
+        with self.assertRaises(ChirpCsvError) as raised:
+            self.read("1,NAN,nan,0,88.5,88.5,023,023,FM,5\n", strict=True)
+        self.assertIn("line 2", str(raised.exception))
+
+    def test_other_columns_that_arent_numbers_fall_back_to_chirps_defaults(self):
+        report = self.read(
+            "inf,A,146.52,0,inf,nan,inf,-inf,FM,inf\n"
+            "nan,B,146.55,0,88.5,100.0,inf,023,FM,5\n"
+        )
+        self.assertEqual([c.name for c in report.channels], ["A", "B"])
+        a, b = report.channels
+        self.assertEqual((a.rtone, a.ctone, a.dtcs, a.rx_dtcs), (88.5, 88.5, 23, 23))
+        self.assertEqual(a.tuning_step_khz, 5.0)
+        self.assertEqual((b.ctone, b.dtcs), (100.0, 23))
+        self.assertEqual(report.skipped, [])
+        for channel in report.channels:
+            channel.to_row()  # (written back without trouble)
+
+    def test_import_channels_in_the_tab_takes_them(self):
+        import tempfile
+
+        require_pyqt6(self)
+        from sdr_module.gui import bookmarks_panel
+        from tests.test_gui_chrome import _FakeSettings
+
+        store = _FakeSettings()
+        real = bookmarks_panel.GuiSettings
+        bookmarks_panel.GuiSettings = lambda: store
+        self.addCleanup(setattr, bookmarks_panel, "GuiSettings", real)
+        panel = bookmarks_panel.BookmarksPanel()
+        self.addCleanup(panel.deleteLater)
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".csv", delete=False, encoding="utf-8"
+        ) as handle:
+            handle.write(_ODD_HEADER + "1,X,146.52,0,88.5,88.5,inf,023,FM,5\n")
+        self.addCleanup(os.unlink, handle.name)
+        self.assertEqual(panel.import_csv(handle.name), 1)
+        self.assertEqual(panel.bookmark(0)["label"], "X")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -703,5 +703,104 @@ class TestNoiseReductionOffline(unittest.TestCase):
         self.assertEqual(len(median.process_clip(np.ones(100))), 100)
 
 
+def _correlation(a: np.ndarray, b: np.ndarray) -> float:
+    a = a.astype(float).ravel() - a.mean()
+    b = b.astype(float).ravel() - b.mean()
+    return float(a @ b / np.sqrt((a @ a) * (b @ b) + 1e-12))
+
+
+class TestSstvInputThatEnds(unittest.TestCase):
+    """HAMDSP-8: the last line waits for a few ms of audio after the
+    transmission, so a recording that ends with it (the encoder's own
+    output, a trimmed WAV) never completed: is_complete() stayed False
+    (Martin 1 at 255/256 lines) and there was no way to say the input had
+    ended."""
+
+    def setUp(self):
+        from sdr_module.ham.sstv import SSTVDecoder
+
+        self.decoder = SSTVDecoder(FS)
+        self.complete = []
+        self.lost = []
+        self.decoder.set_on_image_complete(lambda image: self.complete.append(image))
+        self.decoder.set_on_image_lost(lambda image, rows: self.lost.append(rows))
+
+    def audio(self, mode: str, **kw):
+        from sdr_module.ham.sstv import find_mode
+        from sdr_module.ham.sstv_encoder import encode_sstv, sstv_test_card
+
+        spec = find_mode(mode)
+        card = sstv_test_card(spec.width, spec.height)
+        lead = np.zeros(int(0.3 * FS), np.float32)
+        return card, spec, np.concatenate([lead, encode_sstv(card, spec, FS, **kw)])
+
+    def test_finish_completes_an_image_that_ends_the_input(self):
+        for mode in ("Martin 1", "Scottie 1", "Robot 36", "PD 120"):
+            with self.subTest(mode=mode):
+                self.setUp()
+                card, spec, audio = self.audio(mode)
+                self.decoder.process_audio(audio)
+                self.assertFalse(self.decoder.is_complete())
+                self.assertTrue(self.decoder.finish())
+                self.assertTrue(self.decoder.is_complete())
+                self.assertFalse(self.decoder.is_receiving())
+                self.assertEqual(self.decoder.state.current_line, spec.height)
+                self.assertEqual(len(self.complete), 1)
+                self.assertGreater(_correlation(self.complete[0], card), 0.98)
+
+    def test_a_last_line_cut_short_still_completes(self):
+        card, spec, audio = self.audio("Martin 1")
+        cut = int(0.1 * spec.scan_time_ms / 1000.0 * FS)  # a tenth of a line
+        self.decoder.process_audio(audio[:-cut])
+        self.assertTrue(self.decoder.finish())
+        self.assertGreater(_correlation(self.complete[0][:-1], card[:-1]), 0.98)
+
+    def test_an_input_that_ends_mid_image_keeps_the_lines_received(self):
+        card, spec, audio = self.audio("Robot 36")
+        self.decoder.process_audio(audio[: int(len(audio) * 0.6)])
+        self.assertFalse(self.decoder.finish())
+        self.assertFalse(self.decoder.is_complete())
+        self.assertFalse(self.decoder.is_receiving())
+        self.assertEqual(self.decoder.lost_reason, "the audio ended")
+        self.assertEqual(len(self.lost), 1)
+        self.assertGreater(self.lost[0], 0.5 * spec.height)
+
+    def test_finish_while_idle_does_nothing(self):
+        self.decoder.process_audio(np.zeros(int(FS), np.float32))
+        self.assertFalse(self.decoder.finish())
+        self.assertEqual((self.complete, self.lost), ([], []))
+
+    def test_an_image_that_completed_before_finish_stays_complete(self):
+        """With audio after the transmission the image completes on its
+        own: finish() says so (True) and reports nothing twice."""
+        card, spec, audio = self.audio("Robot 36")
+        self.decoder.process_audio(np.concatenate([audio, np.zeros(4800, np.float32)]))
+        self.assertTrue(self.decoder.is_complete())
+        self.assertTrue(self.decoder.finish())
+        self.assertTrue(self.decoder.finish())
+        self.assertEqual((len(self.complete), self.lost), (1, []))
+
+    def test_finish_while_start_now_still_searches(self):
+        from sdr_module.ham.sstv import find_mode
+
+        self.decoder.process_audio(np.zeros(int(FS), np.float32))
+        self.assertTrue(self.decoder.start_now(find_mode("Martin 1")))
+        self.assertFalse(self.decoder.finish())
+        self.assertFalse(self.decoder.is_receiving())
+        self.assertEqual(self.decoder.lost_reason, "the audio ended")
+        self.assertEqual(self.lost, [0])
+
+    def test_decoding_goes_on_after_finish(self):
+        card, spec, audio = self.audio("Robot 36")
+        self.decoder.process_audio(audio)
+        self.assertTrue(self.decoder.finish())
+        before = self.decoder._freq.end
+        self.assertEqual(before, len(audio), "the padding was taken out again")
+        self.decoder.process_audio(audio)
+        self.decoder.finish()
+        self.assertEqual(len(self.complete), 2)
+        self.assertGreater(_correlation(self.complete[1], card), 0.98)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

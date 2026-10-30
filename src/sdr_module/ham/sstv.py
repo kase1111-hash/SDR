@@ -39,6 +39,7 @@ transmission already under way.
 Usage:
     decoder = SSTVDecoder(sample_rate=48000)
     decoder.process_audio(audio_samples)   # any block size
+    decoder.finish()                       # at the end of a recording
 
     if decoder.is_complete():
         image = decoder.get_image()
@@ -695,6 +696,10 @@ class _Track:
             self._len = rest
             self.start += drop
 
+    def truncate(self, index: int) -> None:
+        """Drop everything from absolute ``index`` on."""
+        self._len = max(0, min(int(index) - self.start, self._len))
+
 
 class _SyncFit:
     """Where line period ``k``'s sync pulse ends.
@@ -808,6 +813,8 @@ class SSTVDecoder:
 
         # Feed audio samples (from FM demodulator output), any block size
         decoder.process_audio(audio_samples)
+        # A recording that ends: decode the rest of the last line
+        decoder.finish()
 
         # Check if image is complete
         if decoder.is_complete():
@@ -891,9 +898,9 @@ class SSTVDecoder:
 
     def set_on_image_lost(self, callback: Callable[[np.ndarray, int], None]) -> None:
         """Set callback for an image that ended early: the signal faded, a
-        new VIS started another image, or Start now found no line syncs
-        (see :attr:`lost_reason`). Gets ``(image, lines received)``; the
-        line count can be 0."""
+        new VIS started another image, Start now found no line syncs, or
+        the input ended (:meth:`finish`) (see :attr:`lost_reason`). Gets
+        ``(image, lines received)``; the line count can be 0."""
         self._on_image_lost = callback
 
     def set_forced_mode(self, mode: Optional[SSTVModeSpec]) -> None:
@@ -945,6 +952,53 @@ class SSTVDecoder:
         rows = rx.rows if rx else 0
         self._end_reception()
         return rows
+
+    def finish(self) -> bool:
+        """The input has ended (a recording or WAV file is over): decode the
+        rest of the image being received from the audio given so far.
+
+        The last line otherwise waits for a few milliseconds of audio after
+        the transmission. When at most the last line period is missing, the
+        image completes (the on_image_complete callback). With more missing
+        it ends early with the lines received (on_image_lost,
+        :attr:`lost_reason` "the audio ended"). Returns :meth:`is_complete`:
+        True when the last image is complete, now or before this call.
+        Decoding can go on with more audio afterwards.
+        """
+        rx = self._rx
+        if rx is None:
+            return self.state.complete
+        if rx.acquire_from is None:
+            spm = self._spm
+            last = self._predicted_end(rx, rx.spec.sync_periods - 1)
+            if last is not None:
+                after = rx.layout.after_ms * spm
+                short = last + after - self._freq.end  # of the last line's tones
+                if short <= rx.period:
+                    self._decode_to_end(rx, last, after)
+                    if self._rx is None:
+                        return self.state.complete
+        self._lose_image("the audio ended")
+        return self.state.complete
+
+    def _decode_to_end(self, rx: _Reception, last: float, after: float) -> None:
+        """Decode the rest of ``rx`` with the frequency track held at its
+        last value past the end of the input, as far as the last line period
+        looks (its sync search and margin), then take that out again."""
+        end = self._freq.end
+        # (With room for the line timing's fit moving the last line a little
+        # as the syncs before it are measured.)
+        need = last + max(0.5 * rx.period, after) + 0.02 * rx.period
+        need += 10.0 * self._spm
+        pad = int(math.ceil(need - end))
+        if pad > 0:
+            held = self._freq.get(end - 1, end)
+            value = float(held[0]) if len(held) else FREQ_BLACK_HZ
+            self._freq.append(np.full(pad, value, dtype=np.float32))
+        try:
+            self._decode_available()
+        finally:
+            self._freq.truncate(end)
 
     def is_receiving(self) -> bool:
         """Check if currently receiving an image."""

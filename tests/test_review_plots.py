@@ -46,7 +46,7 @@ class _Clock:
         return self.t
 
 
-def _on_bin_frame(rate, size, k_off=37, frames=1):
+def _on_bin_frame(rate, size, k_off=37):
     """A frame with a tone exactly on bin ``size // 2 + k_off`` (fftshift
     order: ``CENTER + k_off * rate / size``), through the real analyzer."""
     bin_hz = rate / size

@@ -8,11 +8,13 @@ packet station or an ACARS burst occupies only a few kHz somewhere in it.
 
 1. a phase-continuous NCO mixes the block by minus the channel's offset
    from the centre (the VFO offset), so the channel sits at 0 Hz;
-2. two FIR stages low-pass and decimate it to a protocol rate of about
-   48 kHz: a coarse polyphase stage that reads the full-rate block once,
-   then the sharp channel filter at the lower rate. A much stronger
-   station elsewhere in the span is removed (60 dB down) before anything
-   is demodulated.
+2. FIR stages low-pass and decimate it to a protocol rate of about
+   48 kHz: coarse stages that read the full-rate block once and only
+   protect the channel from what would fold onto it, then the sharp
+   channel filter at the lower rate. The split is planned for each rate
+   (the cheapest one whose filters all reach their stopband). A much
+   stronger station elsewhere in the span is removed (60 dB down) before
+   anything is demodulated.
 
 Everything carries its state between calls: a stream split into blocks of
 any size gives the same output as the whole stream processed at once (to
@@ -24,7 +26,8 @@ NumPy only (scipy is optional for this project); no Qt.
 from __future__ import annotations
 
 import math
-from typing import List, Optional
+from functools import lru_cache
+from typing import List, Optional, Tuple
 
 import numpy as np
 
@@ -45,19 +48,38 @@ _MAX_TAPS = 2047
 _ATTEN_DB = 60.0
 
 
+def _band_edges(pass_hz: float, stop_hz: float, rate_hz: float) -> Tuple[float, float]:
+    """The pass and stop edges :func:`lowpass_taps` designs for (below the
+    Nyquist frequency, the stop edge above the pass edge)."""
+    nyquist = float(rate_hz) / 2.0
+    pass_hz = max(0.0, min(float(pass_hz), 0.98 * nyquist))
+    return pass_hz, min(max(float(stop_hz), pass_hz * 1.02 + 1.0), nyquist)
+
+
+def _taps_needed(
+    pass_hz: float, stop_hz: float, rate_hz: float, atten_db: float = _ATTEN_DB
+) -> int:
+    """The length (odd) of the filter :func:`lowpass_taps` designs, before
+    it is cut to ``_MAX_TAPS`` (Kaiser's estimate)."""
+    pass_hz, stop_hz = _band_edges(pass_hz, stop_hz, rate_hz)
+    width = max((stop_hz - pass_hz) / float(rate_hz), 1e-6)  # cycles per sample
+    taps = int(math.ceil((atten_db - 7.95) / (2.285 * 2.0 * math.pi * width))) + 1
+    return max(taps, 5) | 1
+
+
 def lowpass_taps(
     pass_hz: float, stop_hz: float, rate_hz: float, atten_db: float = _ATTEN_DB
 ) -> np.ndarray:
     """Kaiser-windowed sinc low-pass, flat to ``pass_hz`` and at least
     ``atten_db`` down from ``stop_hz``, with unity gain at DC (float32,
-    odd length, linear phase)."""
+    odd length, linear phase).
+
+    A filter that would need more than ``_MAX_TAPS`` taps is cut to that
+    length and then misses its stopband; :class:`Channelizer` plans its
+    stages so that none of them needs that many."""
     rate_hz = float(rate_hz)
-    nyquist = rate_hz / 2.0
-    pass_hz = max(0.0, min(float(pass_hz), 0.98 * nyquist))
-    stop_hz = min(max(float(stop_hz), pass_hz * 1.02 + 1.0), nyquist)
-    width = max((stop_hz - pass_hz) / rate_hz, 1e-6)  # cycles per sample
-    taps = int(math.ceil((atten_db - 7.95) / (2.285 * 2.0 * math.pi * width))) + 1
-    taps = min(max(taps, 5), _MAX_TAPS) | 1
+    pass_hz, stop_hz = _band_edges(pass_hz, stop_hz, rate_hz)
+    taps = min(_taps_needed(pass_hz, stop_hz, rate_hz, atten_db), _MAX_TAPS) | 1
     cutoff = (pass_hz + stop_hz) / 2.0 / rate_hz
     t = np.arange(taps) - (taps - 1) / 2.0
     h = 2.0 * cutoff * np.sinc(2.0 * cutoff * t)
@@ -256,14 +278,84 @@ def decimation_factor(rate: float, target: float, min_rate: float) -> int:
     return best
 
 
+def _stage_cost(rate: float, factor: int, taps: int) -> float:
+    """Rough CPU cost (ns per second of input at ``rate``) of a
+    :class:`FirDecimator` stage, as measured with NumPy on 33 ms blocks:
+    a polyphase row costs about 20 ns plus 0.4 ns per tap in it, the
+    strided form (small factors) about 1 + 0.45 x ``factor`` ns per tap
+    and output (its reads spread over more of the block), a NumPy call a
+    few microseconds, and copying the input about 2 ns a sample."""
+    outputs = rate / factor
+    if factor >= FirDecimator._POLYPHASE_FROM:
+        groups = -(-taps // factor)
+        cost = groups * (outputs * (20.0 + 0.4 * factor) + 30 * 3000.0)
+    else:
+        cost = taps * (outputs * (1.0 + 0.45 * factor) + 30 * 2 * 2000.0)
+    return cost + 2.0 * rate
+
+
+# Most decimation stages a channel is split into.
+_MAX_STAGES = 4
+
+
+def _plan_stages(
+    rate: float, factor: int, pass_hz: float, stop_hz: float
+) -> List[Tuple[int, float]]:
+    """How to decimate by ``factor`` from ``rate`` keeping +/- ``pass_hz``
+    and removing everything beyond +/- ``stop_hz``: ``[(factor, stop
+    edge)]`` per stage, the cheapest split (by :func:`_stage_cost`) into at
+    most ``_MAX_STAGES`` stages whose filters all fit in ``_MAX_TAPS``.
+
+    The last stage is the sharp channel filter (stop edge ``stop_hz``).
+    Each stage before it only protects the channel from what its own
+    decimation would fold onto it: everything from its output rate minus
+    ``stop_hz`` up goes, so its transition band is wide and its filter
+    short for its factor. A very large factor (a narrow channel at a high
+    rate) needs several such stages: one alone would need tens of
+    thousands of taps.
+    """
+    if factor <= 1:
+        return [(1, stop_hz)] if stop_hz < 0.45 * rate else []
+
+    def plan(cap: int) -> Optional[Tuple[float, Tuple[Tuple[int, float], ...]]]:
+        @lru_cache(maxsize=None)
+        def best(left: int, stages: int):
+            # ``left``: the decimation still to do; the rate is then:
+            r = rate * left / factor
+            found = None
+            taps = _taps_needed(pass_hz, stop_hz, r)
+            if taps <= cap:  # the sharp filter takes the rest
+                found = (_stage_cost(r, left, taps), ((left, stop_hz),))
+            if stages > 1:
+                for d in (d for d in range(2, left) if left % d == 0):
+                    stop = r / d - stop_hz
+                    if stop <= pass_hz:
+                        continue
+                    taps = _taps_needed(pass_hz, stop, r)
+                    rest = best(left // d, stages - 1) if taps <= cap else None
+                    if rest is not None:
+                        cost = _stage_cost(r, d, taps) + rest[0]
+                        if found is None or cost < found[0]:
+                            found = (cost, ((d, stop),) + rest[1])
+            return found
+
+        return best(factor, _MAX_STAGES)
+
+    # A channel too narrow for any split (a degenerate request) gets the
+    # cheapest one, its filters cut to _MAX_TAPS.
+    found = plan(_MAX_TAPS) or plan(1 << 62)
+    assert found is not None
+    return list(found[1])
+
+
 class Channelizer:
     """Mix a channel at ``offset_hz`` to 0 Hz and decimate it to about
     ``target_rate`` (an integer factor of the input rate), keeping
     +/- ``pass_hz`` and removing everything beyond +/- ``stop_hz`` (60 dB).
 
     ``output_rate`` is the exact rate of what :meth:`process` returns. The
-    decimation runs in two stages (see :meth:`_design`): a coarse one whose
-    filter only protects the final channel, then the sharp channel filter.
+    decimation runs in stages (see :meth:`_design`): coarse ones whose
+    filters only protect the final channel, then the sharp channel filter.
     """
 
     def __init__(
@@ -289,31 +381,19 @@ class Channelizer:
         self._stages = self._design(factor)
 
     def _design(self, factor: int) -> List[FirDecimator]:
-        """A coarse stage, then the sharp channel filter.
+        """Coarse stages, then the sharp channel filter (see
+        :func:`_plan_stages`).
 
-        The coarse stage takes the largest divisor of the factor that still
-        leaves 8 times the stopband edge as room: its filter only has to
-        protect the final channel from what would fold onto it, so it is
-        short for its factor, and it reads the full-rate samples just once.
-        The sharp stage, at the lower rate, removes everything beyond
-        ``stop_hz`` and does the rest of the decimation.
+        The coarse stages' filters only protect the final channel from
+        what would fold onto it, so they are short for their factors, and
+        the first reads the full-rate samples just once. The sharp stage,
+        at the lowest rate, removes everything beyond ``stop_hz``.
         """
         rate = self.rate
         stages: List[FirDecimator] = []
-        coarse = 1
-        for d in range(2, factor + 1):
-            if factor % d == 0 and rate / d >= 8.0 * self.stop_hz:
-                coarse = d
-        if coarse > 1:
-            out_rate = rate / coarse
-            taps = lowpass_taps(self.pass_hz, out_rate - self.stop_hz, rate)
-            stages.append(FirDecimator(taps, coarse))
-            rate = out_rate
-        rest = factor // coarse
-        if rest > 1 or self.stop_hz < 0.45 * rate:
-            stages.append(
-                FirDecimator(lowpass_taps(self.pass_hz, self.stop_hz, rate), rest)
-            )
+        for step, stop in _plan_stages(rate, factor, self.pass_hz, self.stop_hz):
+            stages.append(FirDecimator(lowpass_taps(self.pass_hz, stop, rate), step))
+            rate /= step
         return stages
 
     @property

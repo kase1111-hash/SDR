@@ -343,7 +343,7 @@ class TestRDSLiveDecoder:
         assert status.last_time is not None
 
     def test_a_cheap_channel_from_20_ms_s(self):
-        # A HackRF at 20 MS/s: the channel is decimated by 80 (16 x 5). It
+        # A HackRF at 20 MS/s: the channel is decimated by 80 (40 x 2). It
         # was 81 (9 x 9), whose first stage cost twice as much: the decoder
         # took about 20 ms of each 33 ms frame.
         channelizer = RDSLiveDecoder(20e6, 300e3)._channelizer
@@ -352,6 +352,15 @@ class TestRDSLiveDecoder:
         # From the usual rates the channel is as it was.
         assert RDSLiveDecoder(2.4e6).channel_rate == 240e3
         assert RDSLiveDecoder(2.048e6).channel_rate == 256e3
+
+    def test_a_cheap_channel_from_8_ms_s(self):
+        # DEC-07: from 8 MS/s the first stage only decimated by 4 (a fixed
+        # rule kept 8 times the stopband edge as room), so the 183-tap
+        # channel filter ran at 2 MS/s and the decoder took about 9 ms of
+        # each 33 ms frame. The split is now chosen by its cost.
+        channelizer = RDSLiveDecoder(8e6, 300e3)._channelizer
+        assert channelizer.output_rate == 250e3
+        assert channelizer._stages[0].factor >= 8
 
     def test_from_the_receivers_channel(self):
         # The receiver's broadcast FM channel: already at 0 Hz, 480 kS/s.

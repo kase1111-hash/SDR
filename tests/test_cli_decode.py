@@ -92,3 +92,28 @@ def test_ads_b_needs_2_ms_s(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Error: the sample rate is too low for ADS-B" in out
     assert "needs at least 2 MS/s" in out
+
+
+def test_a_malformed_aprs_packet_does_not_stop_the_listing(tmp_path, capsys):
+    # DEC-08: a CRC-valid packet whose compressed speed byte is not ASCII
+    # raised OverflowError while it was described: a traceback, exit 1, and
+    # neither packet listed.
+    from sdr_module.dsp.protocols import AX25Decoder
+
+    good = enc.ax25_frame("N0CALL-9", "APZ001", "PLACEHOLDER", ["WIDE1-1"])
+    payload = good[: good.index(b"PLACEHOLDER")] + b"!/5L!!<*e7>!\xffA bad speed"
+    fcs = AX25Decoder(9600)._compute_crc(payload)
+    bad = payload + bytes([fcs & 0xFF, fcs >> 8])
+    line = enc.hdlc_bits(bad)
+    bad_bb = enc.fm_modulate(enc.APRS_DEVIATION_HZ * enc.afsk_audio(line, RATE), RATE)
+    after = _aprs("!4903.50N/07201.75W>After the bad one")
+    path = _save(
+        tmp_path / "aprs.sigmf-data", np.concatenate([_place(bad_bb), _place(after)])
+    )
+    assert main(["decode", "aprs", "--input", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "Decoded 2 APRS message(s)" in out
+    assert "  [0] N0CALL-9>APZ001  49.5000, -72.7500" in out
+    assert (
+        "  [1] N0CALL-9>APZ001  49.0583, -72.0292  ·  Car  ·  After the bad one" in out
+    )

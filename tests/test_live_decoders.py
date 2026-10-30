@@ -34,6 +34,7 @@ from sdr_module.dsp.live_decoders import (
 )
 from sdr_module.dsp.protocols import (
     ACARSDecoder,
+    ADSBDecoder,
     ADSBMessage,
     AX25Decoder,
     BitSlicer,
@@ -220,6 +221,63 @@ def test_ads_b_in_gui_sized_blocks_away_from_the_lo():
     assert decoder.status.valid == 5
 
 
+@pytest.mark.parametrize("rate", [2.2e6, 2.4e6, 2.56e6, 8e6, 20e6])
+def test_ads_b_replies_decode_wherever_they_start(rate):
+    # DEC-06: the magnitude was read in 0.5 us slots on one fixed grid, so
+    # a reply starting between two slot edges spread every pulse over two
+    # slots: at 2.4 MS/s about half of the strong replies were lost (none
+    # that started 0.2-0.3 us into a slot). Here 20 replies start 0 to
+    # 0.475 us into a slot.
+    from sdr_module.gui import device_dialog as dd
+
+    frame = dd._extended_squitter(0x4840D6, dd._ident_me("KLM1023"))
+    pulses = dd._modes_pulses(frame)
+    rng = np.random.default_rng(16)
+    x = (0.02 * rng.standard_normal(int(0.012 * rate))).astype(np.complex64)
+    x += (0.02j * rng.standard_normal(len(x))).astype(np.complex64)
+    slot = 0.5e-6 * rate  # samples
+    for k in range(20):
+        start, env = dd._pulse_envelope(pulses, (100 + 400 * k + k / 20) * slot, rate)
+        x[start : start + len(env)] += 0.5 * env
+    rows = []
+    for block in (len(x), int(rate * GUI_BLOCK_S), 997):
+        decoder = create_live_decoder("ADS-B", rate)
+        rows.append([(m.icao_address, m.callsign) for m in _decode(decoder, x, block)])
+    assert rows[0] == [("4840D6", "KLM1023")] * 20
+    assert rows[1] == rows[0] and rows[2] == rows[0]
+
+
+@pytest.mark.parametrize("rate, phases", [(8e6, 4), (10e6, 5), (20e6, 5)])
+def test_ads_b_sums_whole_samples_at_whole_ratios(rate, phases):
+    # DEC-07: at 4, 5 or 10 samples per 0.5 us slot every block still went
+    # through a float64 running sum and an interpolation: 9-12 ms of each
+    # 33 ms frame at 20 MS/s. Now the slot values are sums of whole
+    # samples (one value per offset, every 0.1-0.125 us).
+    decoder = ADSBDecoder(rate)
+    assert (decoder._phases, decoder._points) == (phases, 1)
+    x = np.zeros(int(rate * GUI_BLOCK_S), dtype=np.float32)
+    x[1000:1004] = 1.0
+    slots = decoder._to_work_rate(x)
+    assert len(slots) == (len(x) - decoder._need) // decoder._period + 1
+    assert slots.max() == pytest.approx(4 / (rate * 0.5e-6), rel=1e-6)
+
+
+@pytest.mark.parametrize("rate", [2e6, 2.4e6, 8e6, 20e6])
+def test_ads_b_absurd_values_decode_to_nothing_quietly(rate):
+    # Values no receiver gives (up to 3e38, as random bytes read as
+    # float32 are) overflowed the float32 slot sums and the clarity of the
+    # bits: a RuntimeWarning per block (in the fuzz tests too).
+    import warnings
+
+    rng = np.random.default_rng(4)
+    decoder = ADSBDecoder(rate)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        for _ in range(10):
+            data = rng.integers(0, 256, 4 * 40000, dtype=np.uint8).view(np.float32)
+            assert decoder.decode(data) == []
+
+
 def test_noise_alone_decodes_nothing_and_fails_nothing():
     rate = 240e3
     rng = np.random.default_rng(9)
@@ -247,6 +305,59 @@ def test_any_array_layout_and_complex_type():
     for samples in (strided, x.astype(np.complex128)):
         decoder = create_live_decoder("AX.25/APRS", rate)
         assert _rows(_decode(decoder, samples, block)) == expected
+
+
+# --------------------------------------------------------------------------- #
+# The channel at every rate
+# --------------------------------------------------------------------------- #
+
+CHANNEL_DECODERS = [n for n, c in LIVE_DECODERS.items() if c is not ADSBLiveDecoder]
+
+
+def _channel_gain_db(channelizer, freqs):
+    """Gain (dB) of ``channelizer`` for complex tones ``freqs`` Hz from the
+    channel, exactly: each stage filters a tone, then its decimation moves
+    the tone to its alias."""
+    f = np.asarray(freqs, dtype=np.float64)
+    gain = np.zeros(len(f))
+    rate = channelizer.rate
+    for stage in channelizer._stages:
+        taps = np.asarray(stage.taps, dtype=np.float64)
+        size = 1 << max(16, int(np.ceil(np.log2(32 * len(taps)))))
+        response = np.abs(np.fft.fft(taps, size)) / abs(np.sum(taps))
+        gain += 20 * np.log10(response[np.round(f / rate * size).astype(int) % size])
+        rate /= stage.factor
+        f = (f + rate / 2) % rate - rate / 2
+    return gain
+
+
+@pytest.mark.parametrize("rate", [2.4e6, 8e6, 20e6])
+@pytest.mark.parametrize("name", CHANNEL_DECODERS)
+def test_the_channel_keeps_out_everything_beyond_its_edge(name, rate):
+    # DEC-02: the CW channel's first stage decimated by 600 to 5000 with a
+    # filter that needed 2.6k-22k taps; it was cut to 2047, so tones near
+    # 4 kHz folded into the +/-250 Hz channel (-40 dB at 2.4 MS/s, -1 dB
+    # at 20 MS/s) and a station 4 kHz away was decoded.
+    cls = LIVE_DECODERS[name]
+    channelizer = cls(rate)._channelizer
+    stop, keep = channelizer.stop_hz, channelizer.pass_hz
+    freqs = np.arange(-rate / 2, rate / 2, stop / 20.0)
+    gain = _channel_gain_db(channelizer, freqs)
+    assert gain[np.abs(freqs) >= stop].max() < -55.0
+    assert np.abs(gain[np.abs(freqs) <= keep]).max() < 0.1
+
+
+@pytest.mark.parametrize("rate", [2.4e6, 8e6, 20e6])
+def test_a_morse_station_4_khz_away_is_not_heard(rate):
+    # DEC-02 as reported: a carrier 3.75 kHz from the tuned frequency came
+    # through the CW channel at -40 dB (2.4 MS/s) to -1 dB (20 MS/s).
+    def channel_power(offset):
+        decoder = CWLiveDecoder(rate)
+        t = np.arange(int(0.15 * rate)) / rate
+        out = decoder._channelizer.process(np.exp(2j * np.pi * offset * t))
+        return np.mean(np.abs(out[len(out) // 2 :]) ** 2)
+
+    assert 10 * np.log10(channel_power(3750.0) / channel_power(0.0)) < -55.0
 
 
 # --------------------------------------------------------------------------- #
@@ -545,6 +656,38 @@ class TestPOCSAG:
         assert "BCH" in messages[0].error_message
         assert decoder.frames_failed == 1
 
+    LONG_TEXT = (
+        "This is a long page that continues into the next batch so that a "
+        "lost sync word cuts it short in the middle, ok"
+    )
+
+    @pytest.mark.parametrize("errors", [4, 5])
+    def test_a_page_cut_by_a_lost_batch_is_not_valid(self, errors):
+        # DEC-05: the second batch's sync word after a short fade (more
+        # than 4 bit errors) ended the transmission, and the open page came
+        # out valid as "Th" instead of its 111 characters.
+        bits = enc.pocsag_bits([(1234567, 3, self.LONG_TEXT)])  # frame 7
+        sync = POCSAGDecoder.PREAMBLE_BITS + 32 * 17  # the 2nd sync word
+        for k in range(errors):
+            bits[sync + 3 + 6 * k] ^= 1
+        decoder, messages = self._decode(bits)
+        page = messages[0]
+        if errors == 4:  # still found: the whole page
+            assert (page.content, page.valid) == (self.LONG_TEXT, True)
+            return
+        assert page.content == "Th"
+        assert not page.valid
+        assert page.error_message == "cut short: the next batch was lost"
+        assert decoder.frames_failed >= 1
+
+    def test_a_page_cut_at_its_longest_is_not_valid(self):
+        text = ("0123456789abcdefghij" * 40)[:780]  # 273 message codewords
+        decoder, messages = self._decode(enc.pocsag_bits([(8, 3, text)]))
+        page = messages[0]
+        assert text.startswith(page.content) and len(page.content) < len(text)
+        assert not page.valid
+        assert page.error_message == "cut short after 200 codewords"
+
     def test_one_or_two_bit_errors_are_corrected(self):
         bits = enc.pocsag_bits([(1234567, 3, "FIXED")])
         start = 576 + 32 + 15 * 32
@@ -639,6 +782,61 @@ class TestFLEX:
         assert messages == []
         assert decoder.unsupported_frames == 1
         assert decoder.last_unsupported == speed
+
+    @staticmethod
+    def _fast_frames(count, gap_s=1.875, rate=240e3):
+        """``count`` FLEX frame headers saying 3200 bps 2-level, ``gap_s``
+        apart, on an FM channel with a little noise."""
+        rng = np.random.default_rng(3)
+        code = 0x7B18
+        sync = (code << 48) | (0xA6C6AAAA << 16) | (code ^ 0xFFFF)
+        bits = [1 - (i & 1) for i in range(64)]
+        bits += [((sync >> (63 - i)) & 1) ^ 1 for i in range(64)]
+        bits += [1 - (i & 1) for i in range(200)]
+        header = enc.fm_modulate(
+            enc.FLEX_DEVIATION_HZ * enc.bit_levels(bits, rate, 1600), rate
+        )
+        gap = np.zeros(int(gap_s * rate) - len(header), dtype=np.complex64)
+        x = np.concatenate([np.concatenate([gap, header]) for _ in range(count)])
+        noise = rng.standard_normal(2 * len(x)).view(np.complex128)
+        return (x + 0.001 * noise).astype(np.complex64)
+
+    def _feed(self, decoder, x, block=8000):
+        for start in range(0, len(x), block):
+            decoder.process(x[start : start + block])
+
+    def test_a_speed_it_cant_decode_is_a_problem_while_it_is_heard(self):
+        # DEC-09: the problem came from a lifetime count, so it stayed on
+        # a quiet channel, after retuning and after Clear.
+        rate = 240e3
+        decoder = FLEXLiveDecoder(rate)
+        self._feed(decoder, self._fast_frames(4))
+        problem = decoder.status.problem
+        assert problem == (
+            "This channel sends FLEX at 3200 bps 2-level; "
+            "only 1600 bps 2-level FLEX decodes yet"
+        )
+        # Another channel: forgotten at once.
+        decoder.set_offset(50e3)
+        assert decoder.status.problem is None
+        self._feed(decoder, np.zeros(int(9 * rate), dtype=np.complex64))
+        assert decoder.status.problem is None
+        # Back on it: there again with its next frame, and gone a few frames
+        # after the channel goes quiet.
+        decoder.set_offset(0.0)
+        self._feed(decoder, self._fast_frames(2))
+        assert decoder.status.problem == problem
+        quiet = np.zeros(int(4 * rate), dtype=np.complex64)
+        self._feed(decoder, quiet)
+        assert decoder.status.problem == problem
+        self._feed(decoder, quiet)
+        assert decoder.status.problem is None
+
+    def test_reset_forgets_other_speeds(self):
+        decoder = FLEXDecoder(48000.0)
+        decoder.unsupported_frames, decoder.last_unsupported = 3, "3200 bps 2-level"
+        decoder.reset()
+        assert (decoder.unsupported_frames, decoder.last_unsupported) == (0, "")
 
     @staticmethod
     def _long_address(capcode):

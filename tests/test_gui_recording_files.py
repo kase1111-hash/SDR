@@ -736,6 +736,47 @@ class TestDecodeRecording(_FilesCase):
             self.win._right_tabs.currentWidget(), self.win._panel_pages["decoder"]
         )
 
+    def test_messages_keep_the_files_frequency_and_rate(self):
+        # DEC-04: rows from a file were stored with the receiver's tuned
+        # frequency and live sample rate, so the detail card and the CSV
+        # export said 100.1 MHz and 2.4 MS/s for a packet on 144.39 MHz in
+        # a 240 kS/s file.
+        import csv
+
+        path = self._aprs_file(offset=-50e3, center=144.44e6)
+        self.assertTrue(self.win.set_frequency(100.1e6))
+        panel = self.win._decoder_panel
+        panel._proto_combo.setCurrentText("AX.25/APRS")
+        self.settle(2)
+        self.answer()
+        with self.open_dialog(path):
+            self.assertTrue(self.win._decode_recording())
+        self.assertEqual(len(panel._messages), 1)
+        stored = panel._messages[0]
+        self.assertAlmostEqual(stored["freq_hz"], 144.39e6, delta=1.0)
+        self.assertEqual(stored["sample_rate"], RATE)
+        panel._table.selectRow(0)
+        self.settle(1)
+        self.assertIn("144.390 MHz", panel._detail.meta.text())
+        out = self.path("export.csv")
+        with mock.patch("sdr_module.gui.decoder_panel.QMessageBox.information"):
+            self.assertEqual(panel._export_messages(out), 1)
+        with open(out, newline="") as fh:
+            rows = list(csv.reader(fh))
+        self.assertEqual(rows[1][-2:], ["144.390000", "0.24"])
+
+    def test_a_file_without_a_frequency_leaves_it_blank(self):
+        # A recording that doesn't say where it was made: no frequency,
+        # rather than the receiver's.
+        path = self._aprs_file(center=0.0)
+        self.win._decoder_panel._proto_combo.setCurrentText("AX.25/APRS")
+        self.answer()
+        with self.open_dialog(path):
+            self.assertTrue(self.win._decode_recording())
+        stored = self.win._decoder_panel._messages[0]
+        self.assertFalse(stored["freq_hz"])
+        self.assertEqual(stored["sample_rate"], RATE)
+
     def test_nothing_found_says_what_to_check(self):
         path = self._aprs_file()
         self.win._decoder_panel._proto_combo.setCurrentText("POCSAG")

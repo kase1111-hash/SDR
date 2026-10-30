@@ -244,6 +244,81 @@ class TestAircraftView(_PanelCase):
         self.panel.add_message("ADS-B", "ABCDEF", "x", False, message=msg)
         self.assertEqual(self.view.table.rowCount(), 0)
 
+    def feed_fleet(self, count):
+        for i in range(count):
+            icao = f"{0x400000 + i:06X}"
+            for msg in (
+                _adsb(icao_address=icao, downlink_format=17, type_code=4,
+                      callsign=f"FL{i:04d}"),
+                _adsb(icao_address=icao, downlink_format=17, type_code=11,
+                      altitude=30000, latitude=50.5, longitude=4.5),
+                _adsb(icao_address=icao, downlink_format=17, type_code=19,
+                      velocity=400.0, heading=90.0, vertical_rate=0),
+            ):  # fmt: skip
+                self.view.update_message(msg)
+        _settle(2)
+
+    def test_a_hundred_aircraft_stay_cheap_to_update(self):
+        # DEC-01: every column sized itself to its contents on every cell
+        # change, re-measuring all the rows: with 100 aircraft a message
+        # took about 10 ms of the GUI thread and a 1 s tick about 0.5 s.
+        import time
+
+        self.feed_fleet(100)
+        costs = []
+        for k in range(60):
+            self.now += 0.01
+            msg = _adsb(icao_address=f"{0x400000 + (k * 7) % 100:06X}",
+                        downlink_format=17, type_code=11, altitude=30000 + 25 * k,
+                        latitude=50.5, longitude=4.5)  # fmt: skip
+            start = time.perf_counter()
+            self.view.update_message(msg)
+            costs.append(time.perf_counter() - start)
+        costs.sort()
+        self.assertLess(costs[len(costs) // 2], 0.002)
+        self.now += 1.0  # every age changes
+        start = time.perf_counter()
+        self.view.refresh()
+        self.assertLess(time.perf_counter() - start, 0.15)
+
+    def test_columns_still_fit_what_they_show(self):
+        table = self.view.table
+        self.feed_fleet(3)
+        for col in range(table.columnCount() - 1):  # the last one stretches
+            self.assertGreaterEqual(
+                table.columnWidth(col), table.sizeHintForColumn(col), col
+            )
+        # A longer value later (a callsign replacing the address, a
+        # position) widens its column at once.
+        _add(self.panel, _adsb(icao_address="400001", downlink_format=17,
+                               type_code=4, callsign="WIDECALLSIGN1"))  # fmt: skip
+        _add(self.panel, _adsb(icao_address="400002", downlink_format=17,
+                               type_code=11, altitude=1000, latitude=-33.8688,
+                               longitude=-151.2093))  # fmt: skip
+        for col in range(table.columnCount() - 1):
+            self.assertGreaterEqual(
+                table.columnWidth(col), table.sizeHintForColumn(col), col
+            )
+        # A dimmed row (plain name) refitted when another aircraft goes,
+        # then heard again (bold name): still fits.
+        self.now += 200
+        _add(self.panel, _adsb(icao_address="4840D6", downlink_format=17,
+                               type_code=4, callsign="KLMWWWWWWW"))  # fmt: skip
+        self.now += 101  # 4840D6 dimmed, the fleet gone
+        self.view.refresh()
+        self.assertEqual(self.view.table.rowCount(), 1)
+        self.now += 1
+        _add(self.panel, _adsb(icao_address="4840D6", downlink_format=11))
+        self.assertTrue(table.item(0, 0).font().bold())
+        self.assertGreaterEqual(table.columnWidth(0), table.sizeHintForColumn(0))
+        # Columns can be resized by hand (they used to size themselves).
+        from PyQt6.QtWidgets import QHeaderView
+
+        header = table.horizontalHeader()
+        self.assertEqual(
+            header.sectionResizeMode(0), QHeaderView.ResizeMode.Interactive
+        )
+
 
 # --------------------------------------------------------------------------- #
 # Text (Morse)

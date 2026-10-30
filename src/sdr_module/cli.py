@@ -10,7 +10,7 @@ import argparse
 import math
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Tuple
 
 from . import __version__
 
@@ -479,13 +479,21 @@ def cmd_decode(args: argparse.Namespace) -> int:
     if invalid:
         summary += f" ({len(invalid)} failed their checks"
         summary += ")" if args.show_invalid else "; --show-invalid lists them)"
+
+    def describe(msg: Any) -> Tuple[str, str]:
+        # One message that can't be read must not end the listing.
+        try:
+            return describe_message(msg)
+        except Exception as exc:
+            return "", f"(could not be read: {exc})"
+
     print(summary)
     for i, msg in enumerate(valid):
-        address, content = describe_message(msg)
+        address, content = describe(msg)
         print(f"  [{i}] {'  '.join(p for p in (address, content) if p)}")
     if args.show_invalid:
         for msg in invalid:
-            address, content = describe_message(msg)
+            address, content = describe(msg)
             error = getattr(msg, "error_message", "") or "failed its checks"
             text = "  ".join(p for p in (address, content) if p)
             print(

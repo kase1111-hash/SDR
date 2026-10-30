@@ -1446,7 +1446,10 @@ class CWDemodulator(Demodulator):
 
         The element or gap in progress at the end of one call continues
         in the next (the decoder counts samples across calls), and the
-        dit length is learned from the marks.
+        dit length is learned from the marks: the first letters wait
+        until the speed is known, or until a pause of a word or more ends
+        the transmission. Call :meth:`flush` at the end of a capture that
+        stops sooner after its last letter.
 
         Args:
             keying: Binary keying signal
@@ -1457,6 +1460,20 @@ class CWDemodulator(Demodulator):
         """
         before = len(self._morse.text)
         self._morse.process(np.asarray(keying))
+        decoded = self._morse.text[before:]
+        self._decoded_text += decoded
+        return decoded
+
+    def flush(self) -> str:
+        """End the stream (e.g. a complete capture): decode the elements
+        still waiting for the speed and the letter in progress.
+
+        Returns:
+            The text this adds (also added to :attr:`decoded_text`), its
+            line ended with a newline
+        """
+        before = len(self._morse.text)
+        self._morse.flush()
         decoded = self._morse.text[before:]
         self._decoded_text += decoded
         return decoded

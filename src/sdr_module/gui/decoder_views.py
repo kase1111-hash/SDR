@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 try:
     from PyQt6.QtCore import QEvent, Qt, QTimer, pyqtSignal
-    from PyQt6.QtGui import QBrush, QFont, QKeySequence, QTextCursor
+    from PyQt6.QtGui import QBrush, QFont, QFontMetrics, QKeySequence, QTextCursor
     from PyQt6.QtWidgets import (
         QAbstractItemView,
         QHBoxLayout,
@@ -239,6 +239,8 @@ _AC_HEADERS = (
     ("Position", "Latitude, longitude (degrees; south and west negative)"),
     ("ICAO", "The aircraft's 24-bit ICAO address (hex): it never changes"),
 )
+# Columns of numbers (right-aligned).
+_AC_NUMBERS = (AC_ALTITUDE, AC_SPEED, AC_TRACK, AC_VS, AC_SEEN, AC_MESSAGES)
 
 
 class AircraftView(QWidget if HAS_PYQT6 else object):
@@ -260,6 +262,13 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         self._clock = clock
         self.tracker = AircraftTracker(clock)
         self._rows: Dict[str, int] = {}
+        # Whether each row is shown dimmed (its brush and font are only
+        # set when that changes).
+        self._dimmed: Dict[str, bool] = {}
+        # Widest text (pixels) each column has had, and the fonts measured.
+        self._widest: Dict[int, int] = {}
+        self._metrics: Dict[bool, Any] = {}
+        self._fitting_held = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -287,7 +296,11 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         header.setDefaultAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
         )
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # The columns are fitted to their contents only when a value is
+        # wider than any before (see _fill): sizing them to their contents
+        # on every change re-measured every row for each changed cell, and
+        # tens of aircraft then saturated the GUI thread.
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.table.setToolTip(
@@ -343,11 +356,7 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
             return
         row = self._rows.get(aircraft.icao)
         if row is None:
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            self._rows[aircraft.icao] = row
-            for col in range(len(_AC_HEADERS)):
-                self.table.setItem(row, col, QTableWidgetItem())
+            row = self._add_row(aircraft.icao)
         self._fill(row, aircraft)
         self._empty.set_visible(False)
         if not self._timer.isActive():
@@ -358,10 +367,13 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
     def clear(self) -> None:
         self.tracker.clear()
         self._rows.clear()
+        self._dimmed.clear()
+        self._widest.clear()
         self.table.setRowCount(0)
         self.detail.hide()
         self._empty.set_visible(True)
         self._timer.stop()
+        self._fit_columns()
 
     def set_waiting(
         self, text: str, action: Optional[str] = None, tip: str = ""
@@ -414,7 +426,58 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
     # -- internals -----------------------------------------------------------
 
     def _on_theme_changed(self, *_args: Any) -> None:
-        self.refresh()  # the dimmed rows' color comes from the palette
+        self._dimmed.clear()  # every row's color comes from the palette
+        self._metrics.clear()
+        held, self._fitting_held = self._fitting_held, True  # once, after
+        try:
+            self.refresh()
+        finally:
+            self._fitting_held = held
+        self._fit_columns()
+
+    def showEvent(self, event: Any) -> None:  # noqa: N802 (Qt API)
+        super().showEvent(event)
+        self._metrics.clear()
+        self._fit_columns()  # in the fonts it is shown with
+
+    def _add_row(self, icao: str) -> int:
+        """A new, empty row for an aircraft at the bottom; its index."""
+        row = self.table.rowCount()
+        self.table.insertRow(row)
+        self._rows[icao] = row
+        for col in range(len(_AC_HEADERS)):
+            item = QTableWidgetItem()
+            if col in _AC_NUMBERS:
+                item.setTextAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+            self.table.setItem(row, col, item)
+        return row
+
+    def _outgrows(self, col: int, text: str) -> bool:
+        """Note a new text in column ``col``: whether it is wider than any
+        the column had (the Flight column is measured bold, as fresh rows
+        show it)."""
+        bold = col == AC_NAME
+        metrics = self._metrics.get(bold)
+        if metrics is None:
+            font = QFont(self.table.font())
+            font.setBold(bold)
+            metrics = self._metrics[bold] = QFontMetrics(font)
+        width = metrics.horizontalAdvance(text)
+        if width <= self._widest.get(col, 0):
+            return False
+        self._widest[col] = width
+        return True
+
+    def _fit_column(self, col: int) -> None:
+        if not self._fitting_held:
+            self.table.resizeColumnToContents(col)
+
+    def _fit_columns(self) -> None:
+        """Fit every column to its contents and its title."""
+        if not self._fitting_held:
+            self.table.resizeColumnsToContents()
 
     def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802 (Qt API)
         if obj is self.table and event.type() == QEvent.Type.KeyPress:
@@ -448,22 +511,27 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         ``selected`` still selected if it is there: quietly, so the
         Messages filter and its selection are left alone."""
         blocked = self.table.blockSignals(True)
+        self.table.setUpdatesEnabled(False)
+        held, self._fitting_held = self._fitting_held, True  # once, at the end
         try:
             self.table.setRowCount(0)
             self._rows.clear()
+            self._dimmed.clear()
+            self._widest.clear()  # the widest values may have gone
             for aircraft in self.tracker.aircraft():
-                row = self.table.rowCount()
-                self.table.insertRow(row)
-                self._rows[aircraft.icao] = row
-                for col in range(len(_AC_HEADERS)):
-                    self.table.setItem(row, col, QTableWidgetItem())
-                self._fill(row, aircraft)
+                self._fill(self._add_row(aircraft.icao), aircraft)
             if selected in self._rows:
                 self.select(selected)
         finally:
+            self._fitting_held = held
+            self._fit_columns()
+            self.table.setUpdatesEnabled(True)
             self.table.blockSignals(blocked)
 
     def _fill(self, row: int, aircraft: Aircraft) -> None:
+        """Show an aircraft in its row. Only what changed is set: a value
+        wider than any before in its column widens that column, and the
+        color and font change only when the row dims or brightens."""
         now = self._clock()
         stale = self.tracker.is_stale(aircraft)
         if aircraft.on_ground:
@@ -493,27 +561,36 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
             AC_MESSAGES: f"{aircraft.messages:,}",
             AC_SEEN: format_age(now - aircraft.last_seen),
         }
-        palette = get_palette()
-        brush = QBrush(palette.qcolor("disabled" if stale else "text"))
+        was_stale = self._dimmed.get(aircraft.icao)
+        restyle = was_stale is not stale
+        self._dimmed[aircraft.icao] = stale
+        brush = (
+            QBrush(get_palette().qcolor("disabled" if stale else "text"))
+            if restyle
+            else None
+        )
         tip = describe_aircraft(aircraft, now)
         if stale:
             tip += "\nNot heard for over a minute: it may be out of range."
+        # Heard again: its name is bold again, so maybe wider.
+        grown = [AC_NAME] if was_stale and not stale else []
         for col, text in values.items():
             item = self.table.item(row, col)
             if item is None:
                 continue
             if item.text() != text:
                 item.setText(text)
-            if col in (AC_SPEED, AC_TRACK, AC_MESSAGES, AC_SEEN, AC_ALTITUDE, AC_VS):
-                item.setTextAlignment(
-                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
-                )
-            item.setForeground(brush)
-            item.setToolTip(tip)
-            if col == AC_NAME:
-                font = QFont(item.font())
-                font.setBold(not stale)
-                item.setFont(font)
+                if self._outgrows(col, text) and col not in grown:
+                    grown.append(col)
+            item.setToolTip(tip)  # (an unchanged value costs nothing)
+            if brush is not None:
+                item.setForeground(brush)
+                if col == AC_NAME:
+                    font = QFont(item.font())
+                    font.setBold(not stale)
+                    item.setFont(font)
+        for col in grown:  # measured in the row's font
+            self._fit_column(col)
 
     def _on_selection(self) -> None:
         icao = self.selected_icao()

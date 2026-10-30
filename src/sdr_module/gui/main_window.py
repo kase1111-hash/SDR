@@ -261,6 +261,10 @@ _REALTIME_WINDOW_S = 2.0
 # briefly). See _Pacer.
 _MAX_READ_S = 0.25
 _PROBE_READ_S = 0.05
+# The most queued transfers one frame takes while an I/Q recording reads
+# them all (a driver queues 100 at most; this only guards against a source
+# that never runs dry).
+_MAX_DRAIN = 1000
 # A display frame (reading and processing its samples) that takes more than
 # this fraction of the time its samples cover means this computer can't keep
 # up; below the second fraction it can again. Frames shorter than
@@ -1606,6 +1610,13 @@ def _clock_text(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def _span_text(seconds: float) -> str:
+    """``0.0197 -> "20 ms"``, ``1.43 -> "1.4 s"`` (signal lost)."""
+    if seconds < 0.9995:
+        return f"{max(1, round(seconds * 1000))} ms"
+    return f"{seconds:.1f} s"
+
+
 # ---------------------------------------------------------------------------
 # Status bar message label
 # ---------------------------------------------------------------------------
@@ -1933,6 +1944,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # armed recording that captures nothing keeps the previous one.
         self._capture_pending = False
         self._retune_warned = False
+        # Samples the driver dropped (its queue was full) while a take was
+        # captured: (that take's buffer, samples lost), the device, its drop
+        # count and whether a take captured at the last hardware frame, and
+        # what was lost this frame (added to the take once it has a buffer).
+        self._take_lost: Tuple[Any, int] = (None, 0)
+        self._drop_mark: Optional[Tuple[Any, int, bool]] = None
+        self._lost_unreported = 0
         self._demo_mode = False  # set by _start_demo_mode()
         self._radio_tuner = None  # Pop-out radio tuner window
         self._transmit_text = None  # Tools > Transmit Text window (T14)
@@ -5833,6 +5851,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 return text, "loaded", tip
             text = "Unsaved · " + " · ".join(parts) + where
             tip = "This recording is kept in a temporary file until you save it."
+            lost = self._take_lost_seconds()
+            if lost:
+                text += f" · {_span_text(lost)} lost"
+                tip += (
+                    f"\n{_span_text(lost)} of signal were lost while recording "
+                    "(this computer or its disk couldn't keep up): the file has "
+                    "gaps there."
+                )
             return text, "unsaved", tip
         if self._last_saved and os.path.exists(self._last_saved):
             name = os.path.basename(self._last_saved)
@@ -6124,19 +6150,88 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _drain_device(self, dev: SDRDevice) -> Optional[np.ndarray]:
         """The transfers a hardware driver has queued, joined, up to the
-        pacer's limit (the rest stays queued for the next frame)."""
+        pacer's limit (the rest stays queued for the next frame).
+
+        While an I/Q recording captures, every queued transfer is taken:
+        what a frame leaves queued is lost once the driver's queue is full
+        (a computer that can't process the stream in real time reads one
+        transfer a frame), and the recording would have gaps. The newest
+        transfers, up to the limit, are processed (and recorded) as usual;
+        the older ones only go to the recording."""
         limit = self._pacer.read_limit(self._device_sample_rate(), time.monotonic())
+        capturing = self._recording and not self._recording_paused
         blocks: List[np.ndarray] = []
         total = 0
-        while not blocks or total < limit:
+        while (capturing or not blocks or total < limit) and len(blocks) < _MAX_DRAIN:
             block = dev.read_samples(DISPLAY_BLOCK, timeout=0.0)
             if block is None or len(block) == 0:
                 break
             blocks.append(block)
             total += len(block)
+        if self._note_dropped_samples(dev, capturing):
+            return None  # (from before the take, with gaps: see there)
+        if capturing and len(blocks) > 1:
+            first, taken = len(blocks) - 1, len(blocks[-1])
+            while first > 0 and taken < limit:
+                first -= 1
+                taken += len(blocks[first])
+            if first:
+                self._capture(np.concatenate(blocks[:first]))
+                del blocks[:first]
         if len(blocks) <= 1:
             return blocks[0] if blocks else None
         return np.concatenate(blocks)
+
+    def _note_dropped_samples(self, dev: SDRDevice, capturing: bool) -> bool:
+        """Count the samples the driver dropped (its queue was full) since
+        the last frame, when this frame captures: a full queue drops the
+        newest transfer, so they were lost between the queued transfers
+        this frame records and the next ones (the take has gaps there).
+
+        True when a take (re)starts after such drops: what is queued then
+        came before Record (or Resume), spread over seconds with gaps when
+        frames read one transfer each; it is dropped, and the take starts
+        with the next frame."""
+        try:
+            dropped = int(dev.dropped_samples)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        mark, self._drop_mark = self._drop_mark, (dev, dropped, capturing)
+        if not capturing or mark is None or mark[0] is not dev or dropped <= mark[1]:
+            return False
+        if not mark[2]:
+            return True
+        self._lost_unreported += dropped - mark[1]
+        return False
+
+    def _report_lost_samples(self) -> None:
+        """Add the samples lost this frame to the take's gaps (its buffer
+        exists once the frame captured). Said once per take; its take line
+        says how much was lost in all."""
+        lost, self._lost_unreported = self._lost_unreported, 0
+        store = self._samples_buffer
+        known, total = self._take_lost
+        first = known is not store
+        self._take_lost = (store, (0 if first else total) + lost)
+        if first:
+            rate = self._device_sample_rate()
+            lost_s = self._take_lost[1] / max(rate, 1.0)
+            message = (
+                f"The recording has gaps: {_span_text(lost_s)} of signal were "
+                "lost because this computer (or its disk) couldn't keep up "
+                f"with {format_rate(rate)}. A lower sample rate (Receiver > "
+                "Sample rate) helps."
+            )
+            logger.warning(message)
+            self._show_status_message(message, "warning", 15000)
+
+    def _take_lost_seconds(self) -> float:
+        """Signal the take in the buffer lost while it was captured."""
+        known, lost = self._take_lost
+        rate = self._buffer_meta[1]
+        if known is not self._samples_buffer or not lost or not rate:
+            return 0.0
+        return lost / rate
 
     def _stream_died(self) -> bool:
         """Stop and tell the user if a hardware stream ended on its own
@@ -6172,6 +6267,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         self._note_block(len(samples))
         self._process_block(samples)
+        if self._lost_unreported:  # (a recording lost samples: see _drain_device)
+            self._report_lost_samples()
         # How long the frame took against the time its samples cover.
         self._pacer.measured(
             len(samples), self._pacing_rate(), time.perf_counter() - started

@@ -217,7 +217,8 @@ class PolledDevice(SDRDevice):
                     try:
                         self._sample_queue.put_nowait(samples)
                     except queue.Full:
-                        pass  # (as the hardware drivers: the oldest stay)
+                        # (As the hardware drivers: the oldest stay.)
+                        self._dropped_samples += len(samples)
         except Exception as e:
             if not self._stop_event.is_set():
                 # The stream ended on its own (a source or callback error):

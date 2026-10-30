@@ -536,7 +536,8 @@ class HackRFDevice(SDRDevice):
                     try:
                         self._sample_queue.put_nowait(samples)
                     except queue.Full:
-                        pass  # Consumer too slow; drop this transfer.
+                        # Consumer too slow; drop this transfer (counted).
+                        self._dropped_samples += len(samples)
                 return 0
             except Exception as e:
                 # Never raise out of a C callback: log once and stop the stream.

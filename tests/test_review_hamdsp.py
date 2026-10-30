@@ -841,16 +841,21 @@ class TestSstvHistoryMemory(unittest.TestCase):
             panel.deleteLater()
             settle()
 
-    def receive(self, count: int, mode: str = "PD 120"):
-        """``count`` images through the decoder's completion callback."""
+    def receive(self, count: int, mode: str = "PD 120", flat: bool = False):
+        """``count`` images through the decoder's completion callback (noise,
+        or ``flat`` grey ones, whose files are small and quick to write)."""
         from sdr_module.ham.sstv import find_mode
 
         spec = find_mode(mode)
         decoder = self.panel._decoder
         rng = np.random.default_rng(len(self.panel._viewer.images))
         images = []
-        for _ in range(count):
-            image = rng.integers(0, 256, (spec.height, spec.width, 3), np.uint8)
+        for i in range(count):
+            shape = (spec.height, spec.width, 3)
+            if flat:
+                image = np.full(shape, i % 256, np.uint8)
+            else:
+                image = rng.integers(0, 256, shape, np.uint8)
             decoder.state.mode = spec
             decoder.state.image_data = image
             decoder._on_image_complete(image)
@@ -911,9 +916,9 @@ class TestSstvHistoryMemory(unittest.TestCase):
         self.assertEqual(len(self.held()), 2)
 
     def test_memory_stays_bounded(self):
-        """200 PD 120 images: 190 MB of pixels before, now one image."""
-        self.receive(200)
-        self.assertEqual(len(self.panel._viewer.images), 200)
+        """40 PD 120 images held 38 MB of pixels (200 held 190 MB); now one."""
+        self.receive(40, flat=True)
+        self.assertEqual(len(self.panel._viewer.images), 40)
         held = sum(e["image"].nbytes for e in self.held())
         self.assertLess(held, 2 * 640 * 496 * 3)
 

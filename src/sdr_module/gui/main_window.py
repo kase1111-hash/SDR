@@ -7073,7 +7073,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _disconnect_device(self):
         """Disconnect from device (while a recording plays: close it, and
-        the device used before it too)."""
+        the device used before it too). A transmission ends first."""
+        self._tx_station.shutdown()
         if self._playback.active:
             device = self._playback.device
             name = device.options.name if device is not None else "the recording"
@@ -7461,6 +7462,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         S-meter, SSTV and live decoders work on it. The playback strip
         under the plots pauses, seeks, loops, changes the speed and closes
         it (back to the device from before)."""
+        if self._tx_busy():
+            # (The HackRF would then stay stopped: the file would take its
+            # place when the transmission ends.)
+            self._show_status_message(
+                "Wait until the transmission ends (or press Stop) to play a "
+                "recording.",
+                "warning",
+                6000,
+            )
+            return False
         path = path or self._choose_recording("Open Recording")
         if not path:
             return False

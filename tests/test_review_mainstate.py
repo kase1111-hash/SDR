@@ -10,6 +10,8 @@ regression tests for the confirmed findings.
   else, and the refusal is not replaced by an "applied" confirmation.
 * MS-4: a recording made above 6 GHz plays at its own frequency and is
   tuned inside its span.
+* MS-5: no Open Recording while transmitting; Disconnect ends a
+  transmission before it closes the HackRF.
 
 Run offscreen: ``QT_QPA_PLATFORM=offscreen python -m pytest
 tests/test_review_mainstate.py``
@@ -25,6 +27,7 @@ import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_chrome import _WindowTestCase  # noqa: E402
+from tests.test_gui_station_tx import _TxCase  # noqa: E402
 
 FRAME_S = 0.034
 
@@ -321,6 +324,72 @@ class TestRecordingAbove6GHz(_MainStateCase):
         self.assertEqual(win._lo_frequency(), 100.1e6)
         self.assertFalse(win.set_frequency(self.CENTER))  # the demo device: no
         self.assertIn("is out of range", self.status()[0])
+
+
+# ---------------------------------------------------------------------------
+# MS-5: recordings and transmitting
+# ---------------------------------------------------------------------------
+
+
+class TestPlaybackAndTransmitting(_TxCase):
+    """Receiving on a HackRF, Send ID Now, then Open Recording while the ID
+    is on the air: the file opened; when the ID ended, "receiving resumed"
+    into the file, and Close Recording left the HackRF stopped. Disconnect
+    in that state closed the HackRF under the transmit thread ("the HackRF
+    stopped transmitting early")."""
+
+    def setUp(self):
+        super().setUp()
+        folder = tempfile.mkdtemp(prefix="sdr-mainstate-tx-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.path = _save_sigmf(
+            os.path.join(folder, "take.sigmf-data"), 2.4e6, 146.52e6
+        )
+        self.panel.set_callsign("W1AW")
+        self.panel._wpm_spin.setValue(10)  # (a long ID: still on the air below)
+        self.dev, self.backend = self.hackrf(pace=True)
+        self.win._start_acquisition()
+        self.assertTrue(self.station.send_station_id())
+        self.assertTrue(self.station.busy)
+
+    def test_open_recording_waits_for_the_transmission_to_end(self):
+        win = self.win
+        self.assertFalse(win._open_recording(self.path))
+        self.assertFalse(win._playback.active)
+        self.assertIs(win._device, self.dev)
+        self.assertEqual(
+            self.status(),
+            (
+                "Wait until the transmission ends (or press Stop) to play a "
+                "recording.",
+                "warning",
+            ),
+        )
+        self.assertTrue(self.station.busy)  # (on the air still)
+        self.panel._id_now_btn.click()  # Stop
+        self.wait_done(5)
+        self.assertIs(win._device, self.dev)
+        self.assertTrue(win._is_running)  # receiving on the HackRF again
+
+    def test_disconnect_ends_the_transmission_before_closing_the_hackrf(self):
+        """(With a recording opened by a path around Open Recording.)"""
+        from sdr_module.gui.iq_files import describe_iq_file
+
+        options, missing = describe_iq_file(self.path)
+        self.assertEqual(missing, set())
+        self.assertTrue(self.win._playback.open(options))
+        on_air_when_closed = []
+        close = self.dev.close
+
+        def watched_close():
+            on_air_when_closed.append(self.station.busy)
+            return close()
+
+        self.dev.close = watched_close
+        self.win._disconnect_device()
+        self.assertEqual(on_air_when_closed, [False])
+        self.assertIsNone(self.win._device)
+        self.assertEqual(self.station.engine.last_result.status, "stopped")
 
 
 if __name__ == "__main__":  # pragma: no cover

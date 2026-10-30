@@ -1036,7 +1036,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
     # Public API
     # ------------------------------------------------------------------
 
-    def add_line(self, power_db: np.ndarray):
+    def add_line(self, power_db: np.ndarray, timestamp: Optional[float] = None):
         """
         Add a new spectrum line to the waterfall.
 
@@ -1048,12 +1048,21 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         Args:
             power_db: Power spectrum in dB, over the span set with
                 :meth:`set_frequency_range` (the row keeps that span).
+            timestamp: When the line's signal was received, in seconds on
+                the caller's clock (for a recording played at 2x, its own
+                time: two seconds a second). The time axis, the ages and
+                the measured durations are in that time. Default: now
+                (``time.monotonic()``).
         """
         if self._paused:
             self._skipped += 1
             return
         line = self._fit_line(power_db)
-        now = time.monotonic()
+        now = time.monotonic() if timestamp is None else float(timestamp)
+        if not math.isfinite(now):
+            now = time.monotonic()
+        if self._times and not now >= self._times[-1]:
+            now = self._times[-1]  # (a clock never runs backwards here)
         step = self._row_step()
         axis = (float(self._center_freq), float(self._sample_rate))
         if (

@@ -230,7 +230,7 @@ class TestOpenRecording(_PlaybackCase):
         heard = []
         win._audio.write = lambda a: heard.append(np.array(a))
         lines = []
-        win._waterfall.add_line = lambda power: lines.append(power)
+        win._waterfall.add_line = lambda power, **_kw: lines.append(power)
         for _ in range(12):
             win._process_block(win._device.read_samples(24000))
         audio = np.concatenate(heard)

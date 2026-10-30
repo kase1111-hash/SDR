@@ -609,5 +609,107 @@ class TestWaterfallExport(_PlotPair):
         self.assertNotEqual(shown, self.image(live).convertToFormat(shown.format()))
 
 
+class TestPlaybackSpeedTimesRows(_WindowTestCase):
+    """PLOT-5: while a recording plays at 0.5x-4x, the waterfall's time
+    axis, hover age and measured duration are in the recording's time (a
+    1 s burst measures 1 s at any speed), not wall-clock time."""
+
+    demo = True
+    RATE = 240e3
+
+    def setUp(self):
+        super().setUp()
+        import shutil
+        import tempfile
+
+        from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
+
+        folder = tempfile.mkdtemp(prefix="plot5-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.win._recording_folder = folder
+        rate = self.RATE
+        n = int(6 * rate)
+        rng = np.random.default_rng(5)
+        x = 1e-3 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+        t = np.arange(n) / rate
+        burst = (t >= 2.0) & (t < 3.0)  # exactly 1 s, 30 kHz up
+        x[burst] += 0.3 * np.exp(2j * np.pi * 30e3 * t[burst])
+        path = os.path.join(folder, "burst.sigmf-data")
+        save_iq_file(
+            path,
+            x.astype(np.complex64),
+            rate,
+            145e6,
+            SampleFormat.FLOAT32,
+            FileFormat.SIGMF,
+        )
+        with mock.patch(
+            "sdr_module.gui.main_window.QFileDialog.getOpenFileName",
+            return_value=(path, ""),
+        ):
+            self.win._open_recording_action.trigger()
+        self.settle()
+        self.assertTrue(self.win._playback.active)
+        self.win._waterfall.set_history_seconds(0)  # a row per frame
+        # The waterfall's own clock (wall time) advances a frame a frame.
+        self.wall = _Clock()
+        patcher = mock.patch.object(
+            wfm, "time", types.SimpleNamespace(monotonic=self.wall.monotonic)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def play(self, speed, seconds=5.5):
+        """Frames at 30 a second of wall time, each with ``speed`` / 30 s
+        of the recording (as the display loop reads it at that speed)."""
+        win = self.win
+        win._playback_bar.set_speed(speed)
+        dev = win._device
+        per_frame = int(round(self.RATE * speed / 30))
+        for _ in range(int(seconds * 30 / speed)):
+            self.wall.t += 1 / 30
+            samples = dev.read_samples(per_frame)
+            win._plot_frame(samples)
+
+    def burst_rows(self):
+        wf = self.win._waterfall
+        rows = []
+        for i, (line, (center, rate)) in enumerate(
+            zip(wf._history, wf._row_axes, strict=True)
+        ):
+            n = len(line)
+            k = int(round(30e3 / (rate / n) + n / 2))
+            if float(np.max(line[k - 3 : k + 4])) - float(np.median(line)) > 30:
+                rows.append(i)
+        return rows
+
+    def measure_burst(self):
+        wf = self.win._waterfall
+        rows = self.burst_rows()
+        self.assertGreater(len(rows), 3)
+        count = len(wf._history)
+        newest, oldest = count - 1 - rows[-1], count - 1 - rows[0]
+        plot = wf.plot_rect()
+        per_row = plot.height() / wf._rows_shown()
+        x0 = wf._freq_to_x(145e6 + 20e3, plot)
+        x1 = wf._freq_to_x(145e6 + 40e3, plot)
+        y0 = plot.top() + (newest + 0.5) * per_row
+        y1 = plot.top() + (oldest + 0.5) * per_row
+        wf._drag_measure(QPointF(x0, y0), QPointF(x1, y1))
+        wf._finish_measure()
+        return wf.measurement()["duration"]
+
+    def test_a_one_second_burst_measures_one_second_at_4x(self):
+        self.play(4.0)
+        self.assertAlmostEqual(self.measure_burst(), 1.0, delta=0.15)
+        # The rows span the recording's 5.5 s, not 1.4 s of wall time.
+        ages = self.win._waterfall._row_ages()
+        self.assertAlmostEqual(float(ages[-1]), 5.5, delta=0.3)
+
+    def test_and_at_half_speed(self):
+        self.play(0.5, seconds=4.0)
+        self.assertAlmostEqual(self.measure_burst(), 1.0, delta=0.15)
+
+
 if __name__ == "__main__":
     unittest.main()

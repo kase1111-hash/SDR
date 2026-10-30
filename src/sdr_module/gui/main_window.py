@@ -1992,6 +1992,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # then (they were taken on the old frequency; see _retune_lo).
         self._plot_skip_samples = 0
         self._plot_skip_until = 0.0
+        # The waterfall rows' clock and when it last moved (see _plot_time).
+        self._plot_clock = 0.0
+        self._plot_clock_wall: Optional[float] = None
         # The part of the span both plots show (View > Zoom).
         self._plot_view = PlotView()
         self._agc_enabled = False
@@ -8786,12 +8789,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _plot_frame(self, samples: np.ndarray) -> None:
         """Hand one frame to the spectrum and the waterfall (see
         :class:`~sdr_module.dsp.frame_spectrum.FrameSpectrumAnalyzer`)."""
+        rate = float(self._device_sample_rate())
+        stamp = self._plot_time(len(samples), rate)
         if self._plot_skip_samples > 0 or time.monotonic() < self._plot_skip_until:
             # Taken (at least partly) on the frequency before the last
             # retune: not drawn at this one (see _drop_stale_samples).
             self._plot_skip_samples = max(0, self._plot_skip_samples - len(samples))
             return
-        axis = (float(self._lo_hz), float(self._device_sample_rate()))
+        axis = (float(self._lo_hz), rate)
         if axis != self._frame_axis:
             # Samples kept from the last frame belong to another frequency.
             self._frame_spectrum.reset()
@@ -8800,7 +8805,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if frame is None:
             return  # less than one FFT of samples yet (a large FFT size)
         self._spectrum.update_spectrum(frame.mean_db)
-        self._waterfall.add_line(frame.max_db)
+        self._waterfall.add_line(frame.max_db, timestamp=stamp)
+
+    def _plot_time(self, count: int, rate: float) -> float:
+        """The time (s) on the waterfall row of a frame of ``count``
+        samples: wall-clock time while receiving, but a recording's own
+        time while one plays (at 4x a second holds four of the recording),
+        so its time axis, ages and measured durations are right at any
+        speed. Pauses in reception still show as gaps."""
+        now = time.monotonic()
+        last, self._plot_clock_wall = self._plot_clock_wall, now
+        if last is None:
+            self._plot_clock = now
+        elif self._playback.active:
+            self._plot_clock += count / max(rate, 1.0)
+        else:
+            self._plot_clock += max(0.0, now - last)
+        return self._plot_clock
 
     def _apply_plot_resolution(self, size: int, window: str, save: bool = True) -> None:
         """Use a ``size``-point FFT with ``window`` for both plots."""

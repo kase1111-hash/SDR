@@ -1162,7 +1162,7 @@ class TestScannerInTheWindow(_ScanWindowCase):
         panel._preset.setCurrentIndex(1)  # FM broadcast
         panel.set_scan_mode("once")
         lines = []
-        win._waterfall.add_line = lambda power: lines.append(len(power))
+        win._waterfall.add_line = lambda power, **_kw: lines.append(len(power))
         self.assertTrue(panel.start_scan())
         self.assertTrue(win._scan_muted)
         self.frames(5.0, until=lambda: not panel.engine.active)

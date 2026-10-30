@@ -710,6 +710,7 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
         limits = self._range_text or (
             f"Tunes {format_mhz_range(self._min_hz, self._max_hz)}"
         )
+        limits = limits[:1].upper() + limits[1:]  # ("the recording covers")
         self._freq_input.setToolTip(
             "Tuned frequency: what you listen to, decode and measure.\n"
             "Type a value and press Enter (Esc cancels): 145.8, 433.92M, "
@@ -876,6 +877,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         # (see filter_profile), and whether a mode change is applying them.
         self._filter_memory: Dict[str, Dict[str, str]] = {}
         self._applying_filter = False
+        # False while something other than you sets the filters (a scan's
+        # channels): they don't become the widths each mode remembers.
+        self.remember_filters = True
         # The squelch slider shows the Auto threshold without emitting; a
         # threshold set by hand turns Auto off (and is emitted once).
         self._following_auto = False
@@ -1928,7 +1932,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         return filter_profile(mode, self._freq_input.get_frequency())
 
     def _remember_filter(self, key: str, value: str) -> None:
-        if not value:
+        if not value or not self.remember_filters:
             return
         memory = self._filter_memory.setdefault(self._profile(), {})
         if memory.get(key) != value:
@@ -2128,10 +2132,17 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
     def set_squelch_db(self, db: float) -> None:
         """Set the squelch threshold in dB (a manual threshold: Auto goes
-        off)."""
-        value = int(round(db))
+        off). Out of range is the nearest end; a value that isn't a number
+        (e.g. a damaged setting: NaN, infinity) is ignored."""
+        try:
+            db = float(db)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(db):
+            return
         low, high = SQUELCH_RANGE
-        if self._squelch_slider.value() == min(max(value, low), high):
+        value = min(max(int(round(db)), low), high)
+        if self._squelch_slider.value() == value:
             # Same position: still a manual threshold from now on.
             self._squelch_label.setText(f"{self._squelch_slider.value()} dBFS")
             self._auto_off_by_hand()
@@ -2343,6 +2354,17 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     def is_recording_paused(self) -> bool:
         """Whether the current recording is paused."""
         return self._record_btn.isChecked() and self._pause_btn.isChecked()
+
+    def set_recording_paused(self, paused: bool) -> None:
+        """Show whether the recording shown is paused, without emitting
+        :attr:`recording_paused` (the I/Q and the audio recording each have
+        their own pause: the window shows the one the Record choice shows)."""
+        paused = bool(paused) and self._record_btn.isChecked()
+        self._pause_btn.blockSignals(True)
+        self._pause_btn.setChecked(paused)
+        self._pause_btn.blockSignals(False)
+        self._pause_btn.setText(_RESUME_TEXT if paused else _PAUSE_TEXT)
+        self._update_record_status()
 
     def update_record_time(self, seconds: int):
         """Update recording time display."""
@@ -2719,7 +2741,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         finally:
             self._applying_preset = False
         if abs(self._freq_input.get_frequency() - preset.frequency_hz) > 1.0:
-            return
+            return  # refused (the window says why): the mode stays as it is too
 
         # Mode first: the Bandwidth choices depend on it.
         if preset.mode in _PRESET_DEMOD:

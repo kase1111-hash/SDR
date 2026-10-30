@@ -197,8 +197,21 @@ class ParsedFrequency:
 
 
 def format_mhz_range(low_hz: float, high_hz: float) -> str:
-    """``(500e3, 1.766e9) -> "0.5–1766 MHz"``."""
-    return f"{low_hz / 1e6:g}–{high_hz / 1e6:g} MHz"
+    """``(500e3, 1.766e9) -> "0.5–1766 MHz"``: to the kHz, rounded inwards
+    (``10488.55–10490.95 MHz``, not the ``10488.5–10491`` of six significant
+    digits), so a frequency outside the range never reads as inside it."""
+    if not (math.isfinite(low_hz) and math.isfinite(high_hz)):
+        # (A recording's damaged metadata: "nan–nan MHz", not an error.)
+        return f"{low_hz / 1e6:g}–{high_hz / 1e6:g} MHz"
+    low = math.ceil(round(low_hz / 1e3, 6))
+    high = math.floor(round(high_hz / 1e3, 6))
+    if low > high:  # (narrower than a kHz)
+        low, high = round(low_hz / 1e3), round(high_hz / 1e3)
+    return f"{_khz_as_mhz(low)}–{_khz_as_mhz(high)} MHz"
+
+
+def _khz_as_mhz(khz: int) -> str:
+    return f"{khz / 1e3:.3f}".rstrip("0").rstrip(".")
 
 
 def _groups_thousands(digits: str, sep: str) -> bool:
@@ -366,10 +379,11 @@ def _out_of_range(
         f"the receiver tunes {format_mhz_range(minimum_hz, maximum_hz)}"
     )
     message = f"{shown} is out of range: {limits}."
-    if not suffix and hz > ANY_RECEIVER_MAX_HZ:
+    if not suffix and maximum_hz <= ANY_RECEIVER_MAX_HZ < hz:
         # Beyond every receiver, so probably meant in a smaller unit ("7000"
         # for 7000 kHz): say how to type that. Not for a reading with a
-        # fraction of a hertz ("6000.000001" is 1 Hz above 6 GHz, not kHz).
+        # fraction of a hertz ("6000.000001" is 1 Hz above 6 GHz, not kHz),
+        # nor when the field takes more (a recording above 6 GHz plays).
         value = hz / scale
         for smaller, unit, typed in ((1e3, "kHz", "k"), (1.0, "Hz", " Hz")):
             reading = value * smaller

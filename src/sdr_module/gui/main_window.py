@@ -4240,6 +4240,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         panel = self._control_panel
         if panel._record_btn.isChecked() != on:
             panel.set_recording_state(on)
+        if on:  # (and its own Pause: each recording has one)
+            take = self._audio_take
+            panel.set_recording_paused(
+                take.paused if audio and take is not None else self._recording_paused
+            )
         if audio and self._audio_take is not None:
             panel.update_record_time(int(self._audio_take.seconds))
         self._sync_recording_armed()
@@ -4841,9 +4846,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _apply_tuning_range(self) -> None:
         """Let the Frequency field accept the connected device's range (its
-        tooltip and messages say what it is)."""
+        tooltip and messages say what it is), and the span of a recording
+        playing back even where it lies above (a 10 GHz downlink: then they
+        say what the recording covers, not that the receiver tunes there)."""
         low, high = self._tuning_limits()
         text = self._range_text() if self._device_tuning_range() else ""
+        if self._lo_lock is not None:
+            center, span, why = self._lo_lock
+            if center + span / 2 > high:
+                high = center + span / 2
+                text = f"{why} covers {format_mhz_range(center - span / 2, high)}"
         self._control_panel._freq_input.set_tuning_range(low, high, text)
 
     def _device_frequency(self) -> Optional[float]:
@@ -4903,6 +4915,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "transmission to end) first."
             )
         low, high = self._tuning_limits()
+        if self._lo_lock is not None:
+            # A recording plays: nothing is retuned, so its span (checked
+            # below) may lie above the receiver's range.
+            high = math.inf
         if not low <= freq <= high:
             return self._refuse_tuning(
                 f"{format_frequency(freq)} is out of range: {self._range_text()}."
@@ -4980,6 +4996,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         only the VFO, and frequencies outside the span are refused."""
         self._lo_lock = (float(center_hz), float(span_hz), str(why))
         self._lo_hz = float(center_hz)
+        self._apply_tuning_range()  # (the Frequency field takes the span)
         self._spectrum.set_center_freq(center_hz)
         self._waterfall.set_center_freq(center_hz)
         if not self._channel_fits(self._vfo_offset_hz(), rate=span_hz):
@@ -4991,6 +5008,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _unlock_lo(self) -> None:
         """Let the LO follow tuning again (see :meth:`_lock_lo`)."""
         self._lo_lock = None
+        self._apply_tuning_range()
         self._ensure_vfo_fits()
         self._tx_station.refresh()
 
@@ -7603,7 +7621,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _disconnect_device(self):
         """Disconnect from device (while a recording plays: close it, and
-        the device used before it too)."""
+        the device used before it too). A transmission ends first."""
+        self._tx_station.shutdown()
         if self._playback.active:
             device = self._playback.device
             name = device.options.name if device is not None else "the recording"
@@ -7999,6 +8018,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         S-meter, SSTV and live decoders work on it. The playback strip
         under the plots pauses, seeks, loops, changes the speed and closes
         it (back to the device from before)."""
+        if self._tx_busy():
+            # (The HackRF would then stay stopped: the file would take its
+            # place when the transmission ends.)
+            self._show_status_message(
+                "Wait until the transmission ends (or press Stop) to play a "
+                "recording.",
+                "warning",
+                6000,
+            )
+            return False
         path = path or self._choose_recording("Open Recording")
         if not path:
             return False
@@ -8007,6 +8036,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         if not self._confirm_stop_recordings(options.name):
             return False
+        # A scan ends first (back to where it started, unless a channel is
+        # being listened to): Close Recording goes back to that. (Said so
+        # that it stays true if the file then can't be opened.)
+        scanner = getattr(self, "_scanner_panel", None)
+        if scanner is not None:
+            scanner.stop_scan("Scan stopped: you opened a recording.", "warning")
         if not self._playback.open(options):
             return False
         half = options.sample_rate / 2.0
@@ -8644,17 +8679,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if panel is None or not panel.engine.active:
             return
         host = self._scanner_host
-        if self._device_sample_rate() != panel.engine.rate:
-            # Its steps and measurements were planned for the old rate.
-            panel.stop_scan(
-                "Scan stopped: the sample rate changed. Start it again.",
-                "warning",
-                stay=True,
-            )
-            return
         if getattr(self, "_lo_lock", None) is not None:
+            # (Before the rate: a recording has its own. Open Recording
+            # stops a scan before it plays, see _open_recording.)
             panel.stop_scan(
                 "Scan stopped: a recording is playing.", "warning", stay=True
+            )
+            return
+        if self._device_sample_rate() != panel.engine.rate:
+            # Its steps and measurements were planned for the old rate. Back
+            # to where it started, unless a channel is being listened to.
+            panel.stop_scan(
+                "Scan stopped: the sample rate changed. Start it again.", "warning"
             )
             return
         tuned = self._current_frequency()
@@ -9868,7 +9904,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         retuned so the VFO sits in the middle. With Radio > Keep Tuned
         Frequency Centered the LO always follows (every tune retunes the
         device). While the LO is locked (:meth:`_lock_lo`, a recording
-        playing back) frequencies outside its span are refused.
+        playing back) frequencies outside its span are refused, and those
+        inside it are tuned even above the receiver's range.
 
         A frequency outside the connected device's range, or one the device
         rejects, is refused: the status bar says why ("RTL-SDR tunes

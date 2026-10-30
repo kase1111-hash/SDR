@@ -448,8 +448,8 @@ class HackRFDevice(SDRDevice):
         The HackRF's firmware switches it off whenever the HackRF stops
         receiving or transmitting, so :meth:`start_rx` switches it on again;
         it stays off while transmitting (an LNA must not be fed the
-        transmitter's power), and switching it on mid-transmission is
-        refused.
+        transmitter's power: :meth:`start_tx` switches it off), and
+        switching it on mid-transmission is refused.
         """
         if not self._is_open or self._device is None:
             return False
@@ -547,9 +547,12 @@ class HackRFDevice(SDRDevice):
                     self._state.is_streaming = False
                 return -1
 
+        # The firmware bypassed the RF amp, and switched the antenna power
+        # off, when the HackRF last went idle (stop_rx/stop_tx: OFF mode),
+        # and never puts them back itself: set both again for this
+        # reception.
+        self._send_amp()
         if self._bias_tee:
-            # The firmware switched the antenna power off when the HackRF
-            # last went idle: on again for this reception.
             try:
                 self._device.pyhackrf_set_antenna_enable(True)
             except Exception as e:
@@ -587,6 +590,32 @@ class HackRFDevice(SDRDevice):
     def rx_error(self) -> Optional[str]:
         """The last RX callback error, if the stream died unexpectedly."""
         return self._rx_error
+
+    def _send_amp(self) -> None:
+        """Send the RF amp setting again before a stream starts (the
+        firmware bypasses the amp whenever the HackRF goes idle)."""
+        try:
+            self._device.pyhackrf_set_amp_enable(bool(self._amp_enabled))
+        except Exception as e:
+            logger.warning(f"Could not set the RF amplifier again: {e}")
+
+    def _antenna_power_off_for_tx(self) -> bool:
+        """Switch the antenna port power off before transmitting. The
+        firmware does that only when a stream stops, not when the HackRF
+        goes from idle straight to transmitting, so a bias tee switched on
+        while idle would stay powered on the air. False when it is on and
+        couldn't be switched off (``_bias_tee`` stays as it is: start_rx
+        powers the port again)."""
+        try:
+            self._device.pyhackrf_set_antenna_enable(False)
+        except AttributeError:
+            pass  # (a python_hackrf that can't switch it never powered it)
+        except Exception as e:
+            if self._bias_tee:
+                logger.error(f"Could not switch the antenna port power off: {e}")
+                return False
+            logger.debug(f"Could not switch the antenna port power off: {e}")
+        return True
 
     # ------------------------------------------------------------------ #
     # Transmit
@@ -722,6 +751,19 @@ class HackRFDevice(SDRDevice):
             self._last_tx_error = reason or "Transmitting is not allowed here"
             self._tx_bandwidth, self._tx_modes = None, ()
             return False
+
+        # SAFETY: the antenna port is never powered on the air (an LNA or
+        # active antenna there must not get the transmitter's power).
+        if not self._antenna_power_off_for_tx():
+            self._last_tx_error = (
+                "The antenna port power (bias tee) couldn't be switched off, so "
+                "the HackRF didn't transmit"
+            )
+            self._tx_bandwidth, self._tx_modes = None, ()
+            return False
+        # The amp as it is set (the firmware bypassed it when the HackRF
+        # last went idle).
+        self._send_amp()
         self._last_tx_error = None
 
         self._tx_callback = callback

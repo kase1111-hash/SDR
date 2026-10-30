@@ -128,6 +128,24 @@ def sample_rates_for(kind: str) -> Tuple[float, ...]:
     return rates or (DEFAULT_RATE,)
 
 
+def rate_in_range(kind: str, rate: Any) -> bool:
+    """Whether a ``kind`` device runs at ``rate``: inside its
+    :data:`RATE_LIMITS` (a kind without limits: any finite positive
+    rate). The demo device's limit matters too: it makes its signals in
+    software, and much faster than 3.2 MS/s the window can't keep up."""
+    try:
+        value = float(rate)
+    except (TypeError, ValueError):
+        return False
+    if not (math.isfinite(value) and value > 0):
+        return False
+    limits = RATE_LIMITS.get(kind)
+    if limits is None:
+        return True
+    low, high = limits
+    return low - 0.5 <= value <= high + 0.5
+
+
 def rate_choice_label(rate: float) -> str:
     """``"2.4 MS/s"``, or ``"1.8 MS/s (too low for ADS-B)"``."""
     label = format_rate(rate)
@@ -225,9 +243,10 @@ def split_hackrf_gain(gain_db: float) -> Tuple[int, int]:
     return int(lna), int(max(0, min(HACKRF_VGA_STEPS[-1], vga)))
 
 
-def gain_model_for(device: Any) -> GainModel:
-    """How the RF gain of ``device`` is set (see :class:`GainModel`)."""
-    kind = device_kind(device)
+def gain_model_for_kind(kind: str) -> GainModel:
+    """How the RF gain of a ``kind`` device is set, before one is open
+    (an RTL-SDR: the R820T's gain table, the common tuner's; the open
+    device's own table is :func:`gain_model_for`'s)."""
     if kind == "hackrf":
         return GainModel(
             kind="hackrf",
@@ -236,6 +255,19 @@ def gain_model_for(device: Any) -> GainModel:
             agc_tip=NO_AGC_HACKRF,
             name="HackRF One",
         )
+    if kind == "rtlsdr":
+        from ..devices.rtlsdr import RTLSDRDevice
+
+        table = tuple(sorted({float(g) for g in RTLSDRDevice.VALID_GAINS}))
+        return GainModel(kind="steps", steps=table, agc=True, name="RTL-SDR")
+    return DEFAULT_GAIN_MODEL
+
+
+def gain_model_for(device: Any) -> GainModel:
+    """How the RF gain of ``device`` is set (see :class:`GainModel`)."""
+    kind = device_kind(device)
+    if kind == "hackrf":
+        return gain_model_for_kind(kind)
     if kind == "rtlsdr":
         table: Tuple[float, ...] = ()
         try:
@@ -408,18 +440,26 @@ def save_front_end(settings: Any, kind: str, front: FrontEnd) -> None:
 
 
 def load_rate(settings: Any, kind: str) -> float:
-    """The sample rate last used with ``kind`` (0 if none)."""
+    """The sample rate last used with ``kind`` (0 if none, or if the one
+    saved is one ``kind`` doesn't run at: a damaged setting)."""
     if not kind or settings is None:
         return 0.0
     try:
         rate = float(settings.get_float(_key(kind, "sample_rate"), 0.0))
     except (TypeError, ValueError):
         return 0.0
-    return rate if math.isfinite(rate) and rate > 0 else 0.0
+    if not rate_in_range(kind, rate):
+        if rate:
+            logger.debug(
+                f"Ignoring a saved sample rate out of range for {kind}: {rate}"
+            )
+        return 0.0
+    return rate
 
 
 def save_rate(settings: Any, kind: str, rate: float) -> None:
-    if kind and settings is not None and rate > 0:
+    """Remember ``rate`` for ``kind`` (only one ``kind`` runs at)."""
+    if kind and settings is not None and rate_in_range(kind, rate):
         settings.set(_key(kind, "sample_rate"), float(rate))
 
 
@@ -469,9 +509,11 @@ __all__ = [
     "format_db",
     "front_end_features",
     "gain_model_for",
+    "gain_model_for_kind",
     "load_front_end",
     "load_gain",
     "load_rate",
+    "rate_in_range",
     "save_front_end",
     "save_gain",
     "save_rate",

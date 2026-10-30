@@ -574,7 +574,33 @@ class RTLSDRDevice(SDRDevice):
             logger.info(f"Direct sampling enabled ({_DIRECT_SAMPLING_NAMES[mode]})")
         else:
             logger.info("Direct sampling disabled")
+            self._restore_tuner()
         return True
+
+    def _restore_tuner(self) -> None:
+        """Set the tuner's gain and IF filter again. Switching direct
+        sampling off makes librtlsdr initialise the tuner afresh
+        (``tuner->init``): an R820T is then back on automatic gain with its
+        default IF filter, whatever the gain shown says."""
+        device = self._device
+        if device is None:
+            return
+        try:
+            if self._state.gain_mode == "auto":
+                device.gain = "auto"
+            else:
+                device.gain = self._state.gain
+        except Exception as e:
+            logger.error(f"Could not set the tuner gain again: {e}")
+        setter = getattr(device, "set_bandwidth", None)
+        if not callable(setter):
+            return  # (an old pyrtlsdr: the filter is automatic anyway)
+        try:
+            setter(int(self._if_bandwidth))  # 0: it follows the sample rate
+        except AttributeError:
+            pass  # (a librtlsdr without rtlsdr_set_tuner_bandwidth)
+        except Exception as e:
+            logger.warning(f"Could not set the tuner bandwidth again: {e}")
 
     def _enable_direct_sampling(self, enabled: bool) -> bool:
         """Switch direct sampling on (on the chosen input, the Q input when

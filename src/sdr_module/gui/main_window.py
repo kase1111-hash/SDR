@@ -8064,7 +8064,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         Without a device (or with the demo device) the rate is also used by
         the demo device from now on; asked for without a device it is also
-        preselected in Device > Connect for every device type. It is
+        preselected in Device > Connect for every device type. A rate the
+        demo device doesn't run at (1-3.2 MS/s) is refused for it, as is one
+        no device runs at when none is connected. It is also
         refused, with the reason in the status bar, while a recording plays
         back (the file sets the rate), while recording I/Q (one take holds
         one rate) or while transmitting (a running scan stops itself at the
@@ -8081,10 +8083,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if blocked:
                 self._show_status_message(blocked, "warning", 8000)
                 return False
+        refused = self._device_controls.rate_refused(rate)
+        if refused:
+            self._show_status_message(refused, "warning", 8000)
+            return False
         if self._device is None:
             self._device_controls.requested_rate = rate
         if self._device is None or _is_demo_device(self._device):
-            self._preferred_rate = rate
+            if not self._device_controls.rate_refused(rate, "demo"):
+                self._preferred_rate = rate
         self._tx_station.shutdown()  # (a transmission has its own rate)
         applied = True
         dev = self._device

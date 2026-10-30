@@ -106,6 +106,41 @@ _STALE_AFTER_S = 3.0
 # Seconds of level history in the sparkline.
 HISTORY_S = 30.0
 
+# Empty states: (title on the gauge, hint under it, the line in the report,
+# the full sentence for the compact layout's one line).
+_EMPTY_STATES = {
+    "initial": (
+        "No reading yet",
+        "Start the receiver to measure.",
+        "Start the receiver to measure.",
+        "Waiting for a signal. Start the receiver.",
+    ),
+    "waiting": (
+        "Waiting for samples…",
+        "",
+        "Waiting for samples…",
+        "Waiting for samples…",
+    ),
+    "stopped": (
+        "Receiver stopped",
+        "Press Start (Space) to measure.",
+        "Receiver stopped.",
+        "Receiver stopped. Press Start (Space) to measure.",
+    ),
+    "no_device": (
+        "No receiver",
+        "Device › Use Demo Device or Connect…",
+        "No receiver connected.",
+        "No receiver: Device › Use Demo Device or Connect…",
+    ),
+    "stale": (
+        "No new samples",
+        "Start the receiver.",
+        "No new samples.",
+        "No new samples. Start the receiver.",
+    ),
+}
+
 # Shown in place of a reading before data arrives; the em dash matches the
 # rest of the app's empty values.
 _EMPTY = "—"  # em dash
@@ -172,6 +207,8 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
         self._noise_s_units: Optional[float] = None
         self._show_peak: bool = True
         self._active: bool = False  # False until the first reading arrives
+        # Empty-state text drawn on the face while there is no reading.
+        self._placeholder: Tuple[str, str] = ("", "")
 
         # Preferred height fits the full-width scale; in a short panel the
         # gauge shrinks (down to its minimum) before anything scrolls.
@@ -219,6 +256,16 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
         """Show or hide the peak-hold needle."""
         self._show_peak = bool(show)
         self.update()
+
+    def set_placeholder(self, title: str, hint: str = "") -> None:
+        """Text drawn on the face while the meter is inactive (no reading)."""
+        if (title, hint) != self._placeholder:
+            self._placeholder = (title, hint)
+            if not self._active:
+                self.update()
+
+    def placeholder(self) -> Tuple[str, str]:
+        return self._placeholder
 
     def set_noise(self, s_units: Optional[float]) -> None:
         """Mark the channel's noise level on the scale (None hides it)."""
@@ -393,11 +440,26 @@ class AnalogMeterWidget(QWidget if HAS_PYQT6 else object):
             4.0,
         )
 
+        if not self._active and self._placeholder[0]:
+            self._draw_placeholder(painter, p, face)
+
         painter.setClipping(False)
         painter.setPen(QPen(p.qcolor("surface1"), 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawPath(face_path)
         painter.end()
+
+    def _draw_placeholder(self, painter, p, face) -> None:
+        """Empty-state text, in the style of the plots' empty states."""
+        # Imported here: sdr_module.gui imports this module while it
+        # initialises (see _themes()).
+        from ...gui.spectrum_widget import draw_placeholder
+
+        font = QFont(self.font())
+        if font.pointSizeF() <= 0 < font.pixelSize():
+            font.setPointSizeF(font.pixelSize() * 72.0 / max(1, self.logicalDpiY()))
+        title, hint = self._placeholder
+        draw_placeholder(painter, QRectF(face), title, hint, font, p)
 
     def _draw_noise(self, painter, p, cx, cy, radius) -> None:
         """A muted band inside the scale from S0 up to the noise level."""
@@ -566,8 +628,8 @@ class LevelSparkline(QWidget if HAS_PYQT6 else object):
         self.setAccessibleName("Signal level history")
         self.setToolTip(
             f"Signal level over the last {HISTORY_S:.0f} seconds (fading at a "
-            "glance); the dashed line is the noise in the channel. Cleared "
-            "when you retune."
+            "glance); the dashed line is the noise in the channel when the "
+            "signal is near it. Cleared when you retune."
         )
 
     def sizeHint(self) -> "QSize":
@@ -609,8 +671,8 @@ class LevelSparkline(QWidget if HAS_PYQT6 else object):
         if len(points) >= 2:
             values = [v for _t, v in points]
             low, high = min(values), max(values)
-            if self._noise is not None:
-                low = min(low, self._noise)
+            if self._noise is not None and self._noise > low - 12.0:
+                low = min(low, self._noise)  # noise near the trace: show it
             span = max(high - low, 12.0)
             mid = 0.5 * (high + low)
             low, high = mid - span / 2 - 1.0, mid + span / 2 + 1.0
@@ -622,7 +684,7 @@ class LevelSparkline(QWidget if HAS_PYQT6 else object):
                 y = inner.bottom() - (v - low) / (high - low) * inner.height()
                 return QPointF(x, y)
 
-            if self._noise is not None:
+            if self._noise is not None and low <= self._noise <= high:
                 pen = QPen(p.qcolor("caption"), 1, Qt.PenStyle.DashLine)
                 painter.setPen(pen)
                 y = xy(now, self._noise).y()
@@ -735,6 +797,8 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
         self._demod_mode = ""
         self._frequency_source: Optional[Callable[[], float]] = None
         self._compact = False
+        self._empty_hint = ""
+        self._empty_short = ""
         self._roomy_min = 0  # height the full layout needs (px)
         self._watched: Optional[QWidget] = None
         self._last_history_time = 0.0
@@ -937,7 +1001,7 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
 
         self._update_units()
         self._update_mode_face()
-        self._show_empty_state("Waiting for a signal. Start the receiver.")
+        self._show_empty_state("initial")
 
     def _build_copy_button(self) -> "QToolButton":
         button = QToolButton()
@@ -1031,23 +1095,19 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
             self._meter.reset_peak()
             self._sparkline.clear()
             self._stats_label.setText(_EMPTY)
-            if has_device:
-                self._show_empty_state(
-                    "Receiver stopped. Press Start (Space) to measure."
-                )
-            else:
-                self._show_empty_state(
-                    "No receiver: Device › Use Demo Device or Connect…"
-                )
+            self._show_empty_state("stopped" if has_device else "no_device")
         elif changed and self._last_reading is None:
-            self._show_empty_state("Waiting for samples…")
+            self._show_empty_state("waiting")
+
+    def _clear_history(self) -> None:
+        self._sparkline.clear()
+        self._stats_label.setText(_EMPTY)
 
     def reset_peak(self) -> None:
         """Forget the peak hold (and the averaging and history): after a
         retune, a mode change, or a click on PEAK HOLD."""
         self._meter.reset_peak()
-        self._sparkline.clear()
-        self._stats_label.setText(_EMPTY)
+        self._clear_history()
         reading = self._last_reading
         if reading is not None:
             reading.peak_hold_dbm = reading.power_dbm
@@ -1079,6 +1139,7 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
             self._meter.clear_calibration()
         else:
             self._meter.set_calibration(float(offset_db), reference_gain_db)
+        self._clear_history()
         self._update_units()
 
     def is_calibrated(self) -> bool:
@@ -1095,6 +1156,7 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
 
     def clear_calibration(self) -> None:
         self._meter.clear_calibration()
+        self._clear_history()
         self._update_units()
         self.calibration_changed.emit(None, None)
 
@@ -1151,6 +1213,7 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
     def _apply_calibration(self, offset: float) -> None:
         gain = self._meter._gain_db
         self._meter.set_calibration(offset, gain)
+        self._clear_history()
         self._update_units()
         self.calibration_changed.emit(float(offset), gain)
 
@@ -1219,8 +1282,14 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
         if self._showing_data and self._last_reading is not None:
             self._update_display()
 
-    def _show_empty_state(self, hint: str) -> None:
-        """Clear the readouts and show ``hint`` in place of the verbal report."""
+    def _show_empty_state(self, state: str) -> None:
+        """Clear the readouts and say why: ``state`` is a key of
+        ``_EMPTY_STATES`` (or a hint of its own). The gauge shows the title
+        and hint, the report row a short line, the compact layout's one
+        line the whole sentence."""
+        title, gauge_hint, short, sentence = _EMPTY_STATES.get(
+            state, (state, "", state, state)
+        )
         self._showing_data = False
         for lbl in (self._s_meter_label, self._rst_label):
             lbl.setText(_EMPTY)
@@ -1229,9 +1298,13 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
             self._rst_label.setText(f"RST {_EMPTY}")
         for lbl in (self._dbm_label, self._snr_label, self._peak_label):
             lbl.setText(_EMPTY)
-        self._summary_label.setText(hint)
-        self._verbal_label.setText(hint)
+        self._empty_hint = sentence
+        self._empty_short = short
+        self._summary_label.setText(sentence)
+        # (In the compact layout the summary line carries the hint.)
+        self._verbal_label.setText("" if self._compact else short)
         set_role(self._verbal_label, "hint", None)
+        self._analog_meter.set_placeholder(title, gauge_hint)
         self._analog_meter.set_active(False)
         self._analog_meter.set_noise(None)
         self._copy_btn.setEnabled(False)
@@ -1243,7 +1316,7 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
             return
         if time.time() - reading.timestamp > _STALE_AFTER_S:
             if self._showing_data:
-                self._show_empty_state("No new samples. Start the receiver.")
+                self._show_empty_state("stale")
             return
 
         if not self._showing_data:
@@ -1460,7 +1533,8 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
         if self._showing_data:
             self._update_display()
         else:
-            self._summary_label.setText(self._verbal_label.text())
+            self._summary_label.setText(self._empty_hint)
+            self._verbal_label.setText("" if compact else self._empty_short)
             self._rst_label.setText(f"RST {_EMPTY}" if compact else _EMPTY)
 
 

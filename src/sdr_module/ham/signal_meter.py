@@ -344,7 +344,9 @@ class SignalMeter:
             self._peak_hold_dbm = self._power_dbm
             self._peak_hold_time = now
         elif now - self._peak_hold_time > self._peak_hold_duration:
-            elapsed = max(0.0, now - max(previous, self._peak_hold_time))
+            # Falling since the hold ran out (or the last update after that).
+            since = max(previous, self._peak_hold_time + self._peak_hold_duration)
+            elapsed = max(0.0, now - since)
             self._peak_hold_dbm = max(
                 self._power_dbm,
                 self._peak_hold_dbm - self._peak_decay_db_per_s * elapsed,

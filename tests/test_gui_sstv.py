@@ -173,6 +173,23 @@ class TestPartialImages(_PanelCase):
         self.assertEqual(self.panel._status_label.property("tone"), "warning")
         self.assertIn("faded", self.panel._status_label.text())
 
+    def test_a_new_image_cuts_the_last_one_short(self):
+        audio = encode_sstv(sstv_test_card(320, 240), "Robot 36", FS)
+        self.panel._start_btn.click()
+        self.feed(audio[: len(audio) // 2])
+        statuses = []
+        self.panel._decoder.set_on_image_lost(
+            lambda image, lines: (
+                self.panel._on_image_lost(image, lines),
+                statuses.append(self.panel._status_label.text()),
+            )
+        )
+        self.feed(audio[: int(2 * FS)])  # the next VIS arrives
+        self.assertEqual(len(self.history_texts()), 1)
+        self.assertIn("partial", self.history_texts()[0])
+        self.assertTrue(statuses[0].startswith("A new image started before"))
+        self.assertTrue(self.panel._decoder.is_receiving(), "decoding the new one")
+
     def test_a_few_lines_are_not_kept(self):
         audio = encode_sstv(sstv_test_card(320, 240), "Robot 36", FS, lines=4)
         self.panel._start_btn.click()
@@ -266,6 +283,22 @@ class TestHistoryAcrossRestarts(_PanelCase):
         finally:
             again.deleteLater()
 
+    def test_file_names_parse(self):
+        from sdr_module.ham.gui.sstv_panel import parse_image_filename
+
+        entry = parse_image_filename(Path("sstv_20261030_123456_Robot_36_2.png"))
+        self.assertEqual((entry["mode"], entry["height"]), ("Robot 36", 240))
+        entry = parse_image_filename(
+            Path("sstv_20261030_123456_PD_120_partial_180of496.png")
+        )
+        self.assertEqual(
+            (entry["mode"], entry["partial_lines"], entry["height"]),
+            ("PD 120", 180, 496),
+        )
+        entry = parse_image_filename(Path("sstv_20261030_123456.png"))
+        self.assertEqual(entry["mode"], "SSTV")  # saved by hand
+        self.assertIsNone(parse_image_filename(Path("holiday.png")))
+
     def test_history_label_format(self):
         from sdr_module.ham.gui.sstv_panel import history_label
 
@@ -335,6 +368,41 @@ class TestToneMeterAndHints(_PanelCase):
         self.assertIn("145.800 MHz", self.panel._tune_iss_btn.text())
 
 
+class TestShortTab(unittest.TestCase):
+    def test_picture_fits_a_short_tab_and_is_revealed(self):
+        require_pyqt6(self)
+        from PyQt6.QtCore import QPoint, QRect
+        from PyQt6.QtWidgets import QFrame, QScrollArea
+
+        from sdr_module.ham.gui.sstv_panel import SSTVPanel
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        panel = SSTVPanel()
+        panel.set_save_directory(tmp.name)
+        area = QScrollArea()
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.Shape.NoFrame)
+        area.setWidget(panel)
+        area.resize(376, 200)
+        area.show()
+        self.addCleanup(area.deleteLater)
+        settle(4)
+        panel._start_btn.click()
+        audio = encode_sstv(sstv_test_card(320, 240), "Robot 36", FS)
+        for i in range(0, len(audio) + 24000, GUI_BLOCK):
+            panel.process_audio(audio[i : i + GUI_BLOCK], FS)
+        settle(4)
+        panel._start_btn.click()
+        viewport = area.viewport()
+        display = panel._image_display
+        self.assertLessEqual(display.height(), viewport.height())
+        rect = QRect(display.mapTo(viewport, QPoint(0, 0)), display.size())
+        self.assertGreaterEqual(rect.top(), 0)
+        self.assertLessEqual(rect.bottom(), viewport.height())
+        self.assertTrue(display.has_image())
+
+
 class TestSSTVInTheWindow(_WindowTestCase):
     demo = True
 
@@ -366,6 +434,19 @@ class TestSSTVInTheWindow(_WindowTestCase):
         self.assertTrue(self.win._is_running)
         self.assertTrue(self.panel.is_receiving())
         self.assertIn("ISS", self.win._message_label.text())
+
+    def test_tune_to_iss_from_the_tools_menu(self):
+        actions = {}
+        for top in self.win.menuBar().actions():
+            if top.menu() is not None:
+                for a in top.menu().actions():
+                    actions[a.text().replace("&", "")] = a
+        action = actions["SSTV: Tune to ISS (145.800 MHz)"]
+        self.assertTrue(action.statusTip())
+        action.trigger()
+        self.assertAlmostEqual(self.win._current_frequency(), 145.8e6)
+        self.assertTrue(self.panel.is_receiving())
+        self.assertIs(self.win._ham_tabs.currentWidget(), self.win._panel_pages["sstv"])
 
     def test_tune_to_iss_without_a_device(self):
         self.win._disconnect_device()

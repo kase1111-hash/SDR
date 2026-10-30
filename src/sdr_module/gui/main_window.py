@@ -537,15 +537,15 @@ def _noise_per_bin(power_db: np.ndarray) -> float:
     White-noise bins are exponentially distributed. Bins above three times
     the noise mean count as signals and are left out; the median of the
     rest, corrected for that cut (``1 - exp(-x) = (1 - exp(-3)) / 2``),
-    gives the mean. Iterated from the plain median, so a band where
-    stations fill a third of the bins reads within a fraction of a dB of
-    an empty one (the plain median read ~2.5 dB high).
+    gives the mean. Two rounds from the plain median: a band where
+    stations fill a third of the bins reads about 0.1 dB above an empty
+    one (the plain median read ~2.5 dB high).
     """
     linear = 10.0 ** (np.asarray(power_db, dtype=np.float64) / 10.0)
     cut = 3.0
     median_of_cut = -np.log(1.0 - 0.5 * (1.0 - np.exp(-cut)))
     mean = float(np.median(linear)) / np.log(2.0)
-    for _ in range(4):
+    for _ in range(2):
         kept = linear[linear < cut * mean]
         if len(kept) < 16:
             break
@@ -2039,6 +2039,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._show_radio_tuner,
                 "Ctrl+R",
                 "Open the broadcast radio tuner window",
+            )
+            self._add_action(
+                tools_menu,
+                "SSTV: Tune to &ISS (145.800 MHz)",
+                self._tune_iss_from_menu,
+                tip="Tune to the ISS SSTV downlink (FM, 5 kHz deviation), start "
+                "receiving and listen for images in the SSTV panel",
             )
         tools_menu.addSeparator()
         self._add_action(
@@ -3972,20 +3979,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if n < 64:
             return None
         rate = chain.rate
-        bin_hz = rate / n
         low, high = chain.band_edges()
         offset = float(getattr(self, "_vfo_offset_hz", lambda: 0.0)())
-        freqs = (np.arange(n) - n // 2) * bin_hz  # fftshift order
-        guard = max(0.25 * (high - low), 2.0 * bin_hz)
-        outside = (freqs < offset + low - guard) | (freqs > offset + high + guard)
-        mask = outside & (np.abs(freqs) <= 0.4 * rate)
-        if np.count_nonzero(mask) < 32:
+        key = (n, rate, low, high, offset)
+        cached = getattr(self, "_noise_mask", None)
+        if cached is None or cached[0] != key:
+            bin_hz = rate / n
+            freqs = (np.arange(n) - n // 2) * bin_hz  # fftshift order
+            guard = max(0.25 * (high - low), 2.0 * bin_hz)
+            outside = (freqs < offset + low - guard) | (freqs > offset + high + guard)
+            mask = np.nonzero(outside & (np.abs(freqs) <= 0.4 * rate))[0]
+            width = max(high - low, bin_hz)
+            scale = 10.0 * float(
+                np.log10(n / _HANN_ENBW_BINS * _CHANNEL_NOISE_WIDTH * width / rate)
+            )
+            cached = self._noise_mask = (key, mask, scale)
+        _key, mask, scale = cached
+        if len(mask) < 32:
             return None
-        per_bin = _noise_per_bin(power_db[mask])
-        width = max(high - low, bin_hz)
-        return per_bin + 10.0 * float(
-            np.log10(n / _HANN_ENBW_BINS * _CHANNEL_NOISE_WIDTH * width / rate)
-        )
+        return _noise_per_bin(power_db[mask]) + scale
 
     def _update_passband(self) -> None:
         """Mark the demodulated channel on the spectrum and the waterfall."""
@@ -4124,6 +4136,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 6000,
             )
 
+    def _tune_iss_from_menu(self) -> None:
+        """Tools > SSTV: Tune to ISS: the SSTV panel's button, from the menu."""
+        self._show_panel("sstv")
+        self._on_sstv_tune_iss()
+
     def _on_sstv_switch_to_fm(self) -> None:
         """The SSTV panel's "Switch to FM": narrowband FM, as SSTV is sent."""
         self._set_demod_mode("FM", "5 kHz", self._bandwidth_for_mode("FM", "5 kHz"))
@@ -4146,9 +4163,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Key the S-meter calibration is stored under: one per device type."""
         if self._device is None:
             return ""
-        if self._demo_mode:
+        name = type(self._device).__name__
+        if self._demo_mode or name == "MockDevice":
             return "demo"
-        return type(self._device).__name__.lower()
+        return name.lower()
 
     def _sync_signal_meter(self, running: bool, has_device: bool) -> None:
         """Receiver state and the device type's calibration to the S-meter."""

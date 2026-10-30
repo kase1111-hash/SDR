@@ -961,28 +961,31 @@ def _sstv_transmission(rate: float) -> Tuple[Any, int]:
 
     The test card is encoded at the loop rate (an exact fraction of the
     device rate, so its timing is exact) with its VIS header, and its FM
-    phase is stored like the other demo loops.
+    phase is stored like the other demo loops. Built outside the lock the
+    other loops share (the scanner reads from its own thread).
     """
     key = float(rate)
     with _LOOP_LOCK:
         cached = _SSTV_CACHE.get(key)
-        if cached is not None:
-            return cached
-        from ..ham.sstv import find_mode
-        from ..ham.sstv_encoder import encode_sstv, sstv_test_card
-
-        factor = max(1, int(round(rate / _SSTV_LOOP_HZ)))
-        loop_rate = rate / factor
-        spec = find_mode(_SSTV_MODE)
-        card = sstv_test_card(spec.width, spec.height, "SDR MODULE")
-        audio = encode_sstv(card, spec, loop_rate).astype(np.float64)
-        tail = int(_SSTV_TAIL_S * loop_rate)
-        audio = np.concatenate((audio, np.zeros(tail)))
-        phase = (2 * np.pi * _SSTV_DEVIATION_HZ / loop_rate) * np.cumsum(audio)
-        length = (len(audio) - tail // 2) * factor
-        _SSTV_CACHE.clear()  # one device rate at a time
-        cached = _SSTV_CACHE[key] = (_Loop(phase, factor), length)
+    if cached is not None:
         return cached
+    from ..ham.sstv import find_mode
+    from ..ham.sstv_encoder import encode_sstv, sstv_test_card
+
+    factor = max(1, int(round(rate / _SSTV_LOOP_HZ)))
+    loop_rate = rate / factor
+    spec = find_mode(_SSTV_MODE)
+    card = sstv_test_card(spec.width, spec.height, "SDR MODULE")
+    audio = encode_sstv(card, spec, loop_rate).astype(np.float64)
+    tail = int(_SSTV_TAIL_S * loop_rate)
+    audio = np.concatenate((audio, np.zeros(tail)))
+    phase = (2 * np.pi * _SSTV_DEVIATION_HZ / loop_rate) * np.cumsum(audio)
+    length = (len(audio) - tail // 2) * factor
+    cached = (_Loop(phase, factor), length)
+    with _LOOP_LOCK:
+        _SSTV_CACHE.clear()  # one device rate at a time
+        _SSTV_CACHE[key] = cached
+    return cached
 
 
 # --------------------------------------------------------------------------- #

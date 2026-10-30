@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 try:
     from PyQt6.QtCore import (
+        QEvent,
         QPointF,
         QRectF,
         QSize,
@@ -56,6 +57,7 @@ try:
         QMessageBox,
         QProgressBar,
         QPushButton,
+        QScrollArea,
         QSizePolicy,
         QVBoxLayout,
         QWidget,
@@ -231,6 +233,12 @@ def parse_image_filename(path: Path) -> Optional[Dict[str, Any]]:
     stamp, mode_text, rows, height = match.groups()
     name = (mode_text or "SSTV").replace("_", " ")
     spec = mode_by_name(name)
+    if spec is None:
+        # "..._Robot_36_2.png": a second image saved in the same second.
+        base = re.match(r"^(.*) \d+$", name)
+        if base and mode_by_name(base.group(1)):
+            name = base.group(1)
+            spec = mode_by_name(name)
     return {
         "image": None,  # loaded when shown
         "mode": name,
@@ -260,7 +268,7 @@ class ImageDisplayWidget(QWidget if HAS_PYQT6 else object):
         self._placeholder_title = "No image yet"
         self._placeholder_hint = ISS_SSTV_HINT
 
-        self.setMinimumSize(200, 160)
+        self.setMinimumSize(200, 120)
         policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         policy.setHeightForWidth(True)
         self.setSizePolicy(policy)
@@ -541,6 +549,8 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         # Saved images are listed once the panel is first shown (or the
         # folder changes), so tests and other folders are not scanned.
         self._history_loaded_from: Optional[Path] = None
+        # The scroll area's viewport, followed so the picture fits it.
+        self._watched: Optional[QWidget] = None
 
         self._setup_ui()
 
@@ -878,6 +888,32 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         super().showEvent(event)
         if self._history_loaded_from is None:
             self.load_history()
+        parent = self.parentWidget()
+        if parent is not self._watched:
+            if self._watched is not None:
+                self._watched.removeEventFilter(self)
+            self._watched = parent
+            if parent is not None:
+                parent.installEventFilter(self)
+        self._fit_image_to_view()
+
+    def eventFilter(self, obj, event) -> bool:
+        if obj is self._watched and event.type() == QEvent.Type.Resize:
+            self._fit_image_to_view()
+        return super().eventFilter(obj, event)
+
+    def _fit_image_to_view(self) -> None:
+        """In a short tab (a scroll area's viewport), keep the whole picture
+        in view with its status line: the image gets narrower, not cut."""
+        parent = self.parentWidget()
+        if parent is None or parent.objectName() != "qt_scrollarea_viewport":
+            return
+        # Room for a two-line status ("Image received. Saved as ...").
+        status = 2 * self._status_label.fontMetrics().lineSpacing()
+        room = parent.height() - status - 16
+        limit = max(self._image_display.minimumHeight(), room)
+        if self._image_display.maximumHeight() != limit:
+            self._image_display.setMaximumHeight(limit)
 
     def load_history(self) -> int:
         """List the images saved in the save folder (newest
@@ -1134,6 +1170,7 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         self._is_receiving = False
         self._update_timer.stop()
         self._set_listening_ui(False)
+        self.show_fm_needed(None)
         if kept:
             self._set_status(f"Decoder stopped. {kept}", None)
         else:
@@ -1275,6 +1312,10 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         if image is None and entry.get("filename"):
             image = qimage_to_rgb(QImage(str(entry["filename"])))
             if image is not None:
+                # Keep one image read from disk in memory at a time.
+                for other in self._viewer.images:
+                    if other.get("from_disk"):
+                        other["image"] = None
                 entry["image"] = image
                 entry["height"] = entry.get("height") or image.shape[0]
                 entry["width"] = entry.get("width") or image.shape[1]
@@ -1306,6 +1347,29 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         self._showing_complete = False
         self._set_status(f"Receiving {mode.name}…", "success")
         self._update_action_buttons()
+        QTimer.singleShot(0, self.reveal_image)
+
+    def reveal_image(self) -> None:
+        """In a short tab, scroll so the status line and the picture are in
+        view (an image is arriving or just arrived)."""
+        self._fit_image_to_view()
+        QTimer.singleShot(0, self._scroll_to_image)
+
+    def _scroll_to_image(self) -> None:
+        area = self.parentWidget()
+        while area is not None and not isinstance(area, QScrollArea):
+            area = area.parentWidget()
+        if area is None or area.widget() is not self:
+            return
+        top = self._status_label.mapTo(self, self._status_label.rect().topLeft()).y()
+        bottom = self._image_display.mapTo(
+            self, self._image_display.rect().bottomLeft()
+        ).y()
+        bar = area.verticalScrollBar()
+        visible = (bar.value(), bar.value() + area.viewport().height())
+        if top >= visible[0] and bottom <= visible[1]:
+            return
+        bar.setValue(max(0, top - 4))
 
     def _on_line_decoded(self, line: int, line_data: np.ndarray) -> None:
         """Callback for each decoded line (the picture is redrawn at most ten
@@ -1385,12 +1449,19 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         else:
             self._set_status(f"Image received.{saved_note}", tone)
         self._update_action_buttons()
+        QTimer.singleShot(0, self.reveal_image)
 
     def _on_image_lost(self, image: np.ndarray, lines: int) -> None:
         """The decoder ended an image early (signal faded, or a new image
         started)."""
+        reason = self._decoder.lost_reason if self._decoder else ""
+        cut_short = reason == "a new image started"
         note = self._keep_partial(image, lines)
-        if note is None:
+        if cut_short:
+            text = "A new image started before the last one ended."
+            text += f" {note}" if note else ""
+            self._set_status(text, "warning")
+        elif note is None:
             self._set_status(
                 "The signal faded before the image got going. Listening for the "
                 "next one…",

@@ -868,6 +868,9 @@ class SSTVDecoder:
         self._in_band = 0.0  # share of that audio in the SSTV band
         self._tone_hz: Optional[float] = None
         self._activity = "none"
+        # Why the last image ended early ("the signal faded", "a new image
+        # started"), for the on_image_lost callback's caller.
+        self.lost_reason = ""
         logger.debug("SSTV decoder reset")
 
     def set_on_line_decoded(self, callback: Callable[[int, np.ndarray], None]) -> None:
@@ -1592,6 +1595,7 @@ class SSTVDecoder:
         if rx is None:
             return
         rows = rx.last_good_rows if why == "the signal faded" else rx.rows
+        self.lost_reason = why
         logger.info(f"SSTV image ended early ({why}) after {rows} lines")
         self.state.current_line = rows
         self._suppress_auto_until_quiet = True

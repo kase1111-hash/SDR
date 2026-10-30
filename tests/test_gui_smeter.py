@@ -231,6 +231,10 @@ class TestPanelStates(_PanelCase):
         self.assertEqual(self.panel._s_meter_label.text(), "—")
         self.assertEqual(self.panel._peak_label.text(), "—")
         self.assertIn("Receiver stopped", self.panel._verbal_label.text())
+        self.assertEqual(
+            self.panel._analog_meter.placeholder(),
+            ("Receiver stopped", "Press Start (Space) to measure."),
+        )
         self.assertIsNone(self.panel._last_reading)
         self.assertFalse(self.panel._analog_meter._active)
 
@@ -238,9 +242,14 @@ class TestPanelStates(_PanelCase):
         """hm:UX-08."""
         self.panel.set_receiving(False, has_device=False)
         self.assertEqual(
-            self.panel._verbal_label.text(),
+            self.panel._analog_meter.placeholder(),
+            ("No receiver", "Device › Use Demo Device or Connect…"),
+        )
+        self.assertEqual(
+            self.panel._summary_label.text(),
             "No receiver: Device › Use Demo Device or Connect…",
         )
+        self.assertEqual(self.panel._verbal_label.text(), "No receiver connected.")
 
     def test_noise_is_muted_without_a_report(self):
         hiss = noise()
@@ -373,6 +382,26 @@ class TestLevelHistory(_PanelCase):
                 self.panel._update_display()
             self.assertLessEqual(len(self.panel._sparkline.values()), 301)
 
+    def test_gauge_empty_state_paints_in_both_themes(self):
+        from sdr_module.gui import spectrum_widget, themes
+
+        meter = self.panel._analog_meter
+        meter.resize(360, 120)
+        self.panel.set_receiving(False, has_device=False)
+        saved = themes._current_theme
+        try:
+            with mock.patch.object(
+                spectrum_widget,
+                "draw_placeholder",
+                wraps=spectrum_widget.draw_placeholder,
+            ) as draw:
+                for name in ("dark", "light"):
+                    themes._current_theme = name
+                    self.assertFalse(meter.grab().isNull())
+            self.assertEqual(draw.call_args.args[2], "No receiver")
+        finally:
+            themes._current_theme = saved
+
     def test_sparkline_paints_in_both_themes(self):
         from sdr_module.gui import themes
         from sdr_module.ham.gui.signal_meter_widget import LevelSparkline
@@ -498,8 +527,8 @@ class TestSignalMeterInTheWindow(_WindowTestCase):
     def test_no_device_message(self):
         self.win._disconnect_device()
         self.assertEqual(
-            self.panel._verbal_label.text(),
-            "No receiver: Device › Use Demo Device or Connect…",
+            self.panel._analog_meter.placeholder(),
+            ("No receiver", "Device › Use Demo Device or Connect…"),
         )
 
     def test_calibration_is_kept_per_device_type(self):

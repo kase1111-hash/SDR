@@ -148,6 +148,16 @@ class TestModeTable:
         assert preamble_segments(find_mode("Scottie 1")) == [("sync", 9.0, 1200.0)]
         assert preamble_segments(find_mode("Martin 1")) == []
 
+    def test_robot36_sends_every_lines_own_luma(self):
+        """Only R-Y / B-Y are shared by a line pair; Y is per line."""
+        stripes = np.zeros((240, 320, 3), np.uint8)
+        stripes[1::2] = 255  # odd lines white, even lines black
+        freqs, durs = segment_plan(stripes, "Robot 36", vis=False, lines=2)
+        luma = freqs[np.isclose(durs, 88.0 / 320)]
+        first, second = luma[:320], luma[320:640]
+        assert np.allclose(first, 1500 + 800 * 16 / 255.0)  # black: Y = 16
+        assert np.allclose(second, 1500 + 800 * 235 / 255.0, atol=0.5)  # white
+
     def test_encoded_length_is_vis_plus_image(self):
         spec = find_mode("Robot 36")
         audio = encode_sstv(card_for("Robot 36"), spec, FS)
@@ -196,20 +206,33 @@ class TestRoundTrip:
 
     @pytest.mark.parametrize("name", sorted(LINE_MS))
     def test_every_mode_decodes(self, name):
-        """The first 24 line periods of every mode (at 16 kHz, a rate the
-        decoder must also handle) come out like the card."""
-        fs = 16000.0
+        """Every mode: VIS and the first 24 line periods, 33 ms blocks at
+        48 kHz, 20 dB SNR and the sender's clock 0.05% fast."""
         spec = find_mode(name)
         card = card_for(name)
-        decoder = SSTVDecoder(fs)
+        decoder = SSTVDecoder(FS)
         events = Events(decoder)
-        audio = encode_sstv(card, spec, fs, lines=24)
-        feed(decoder, padded(audio, fs, after=0.3), block=int(fs / 30))
+        audio = encode_sstv(card, spec, FS * 1.0005, lines=24)
+        feed(decoder, add_noise(padded(audio, after=0.3), 20.0, seed=len(name)))
         rows = 24 * spec.lines_per_sync
         assert events.modes == [name]
         assert decoder.state.current_line >= rows - 1
         got = decoder.get_image()[: rows - 1]
         assert correlation(got, card[: rows - 1]) >= 0.97
+
+    @pytest.mark.parametrize("name", ("Martin 2", "PD 90"))
+    def test_other_sample_rates(self, name):
+        """The decoder works at the audio rate it is given (16 kHz here)."""
+        fs = 16000.0
+        spec = find_mode(name)
+        card = card_for(name)
+        decoder = SSTVDecoder(fs)
+        events = Events(decoder)
+        audio = encode_sstv(card, spec, fs, lines=16)
+        feed(decoder, padded(audio, fs, after=0.3), block=int(fs / 30))
+        rows = 16 * spec.lines_per_sync - 1
+        assert events.modes == [name]
+        assert correlation(decoder.get_image()[:rows], card[:rows]) >= 0.97
 
     @pytest.mark.parametrize("name", ("Robot 36", "Scottie 1"))
     def test_noise_and_clock_error_full_image(self, name):

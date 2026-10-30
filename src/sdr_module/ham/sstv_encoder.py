@@ -116,8 +116,9 @@ def segment_plan(
                     values = chans["Y"][rows[1]]
                 else:  # R-Y / B-Y shared by the two lines
                     values = 0.5 * (chans[kind][rows[0]] + chans[kind][rows[1]])
-            elif family == "robot36":
-                # Each line sends one chroma channel, averaged over its pair.
+            elif family == "robot36" and kind in ("U", "V"):
+                # Each line sends its own Y and one chroma channel, R-Y on
+                # even lines and B-Y on odd ones, averaged over the pair.
                 first = k - (k % 2)
                 second = min(first + 1, spec.height - 1)
                 values = 0.5 * (chans[kind][first] + chans[kind][second])

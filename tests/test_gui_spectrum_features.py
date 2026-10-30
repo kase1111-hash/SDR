@@ -466,6 +466,19 @@ class TestWindowSpectrumSettings(_WindowTestCase):
         self.assertIn("8192-point FFT", rbw)
         self.assertIn("Blackman-Harris", rbw)
 
+    def test_the_rbw_reads_the_same_everywhere(self):
+        # The menu and the band above the plot say "RBW 110 Hz"; the status
+        # message and the Info tab said "0.11 kHz" for the same thing.
+        win = self.win
+        win._spectrum._choose_resolution(32768, "hann")
+        shown = swm.format_hz(win._spectrum.resolution_bandwidth())
+        self.assertEqual(shown, "110 Hz")
+        self.assertIn(f"RBW {shown}", win._spectrum._info_text())
+        self.assertIn(f"RBW {shown}", win._message_label.text())
+        win._show_panel("info")
+        win._refresh_info_panel()
+        self.assertTrue(win._info_panel.value("rbw").startswith(f"{shown} ("))
+
     def test_level_and_squelch_measure_the_same_whatever_the_display(self):
         win = self.win
         win.set_frequency(100.1e6)

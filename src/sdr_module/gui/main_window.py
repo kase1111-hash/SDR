@@ -159,7 +159,7 @@ from .receiver_bar import FrequencyDigits, ReceiverBar
 from .scanner_host import WindowScannerHost
 from .scanner_panel import ScannerPanel
 from .settings_store import DEFAULT_FREQUENCY_HZ, GuiSettings
-from .spectrum_widget import SpectrumWidget
+from .spectrum_widget import SpectrumWidget, format_hz
 from .themes import (
     apply_theme,
     current_theme,
@@ -3378,7 +3378,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         p.set_value(
             "rbw",
             (
-                f"{format_bandwidth(self._frame_spectrum.rbw(rate))} "
+                f"{format_hz(self._frame_spectrum.rbw(rate))} "
                 f"({self._frame_spectrum.size}-point FFT, "
                 f"{WINDOW_LABELS[self._frame_spectrum.window]})"
                 if has_device
@@ -8428,7 +8428,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             rbw = self._frame_spectrum.rbw(self._device_sample_rate())
             self._show_status_message(
                 f"Spectrum: {size}-point FFT, {WINDOW_LABELS[window]} window, "
-                f"RBW {format_bandwidth(rbw)}",
+                f"RBW {format_hz(rbw)}",
                 None,
                 4000,
             )

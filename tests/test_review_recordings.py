@@ -28,6 +28,7 @@
 """
 
 import contextlib
+import errno
 import json
 import os
 import shutil
@@ -957,3 +958,60 @@ class TestResumedTake(_ReviewCase):
         captures = self._captures()
         self.assertEqual([c["core:sample_start"] for c in captures], [0, first])
         _when(captures[1]["core:datetime"])  # (a valid time)
+
+
+# ---------------------------------------------------------------------------
+# REC-04 (checker): a save that fails on a full disk says so
+# ---------------------------------------------------------------------------
+
+
+class TestAFailedSaveSaysWhy(_ReviewCase):
+    """A save's own error is the one reported (REC-04). The samples were
+    written with numpy's ``tofile``, whose error says only "131072
+    requested and 25000 written": a SigMF or cf32 save onto a disk that
+    filled up said that instead of "No space left on device"."""
+
+    def setUp(self):
+        super().setUp()
+        if not _can_limit_file_size():
+            self.skipTest("needs RLIMIT_FSIZE (POSIX)")
+
+    def test_the_writer_names_the_reason(self):
+        from sdr_module.dsp.recording import FileFormat, SampleFormat
+        from sdr_module.gui.file_jobs import write_recording
+
+        x = np.full(1 << 16, 0.25 + 0.5j, np.complex64)  # 512 KB as cf32
+        for fmt, sample_fmt, name in (
+            (FileFormat.SIGMF, SampleFormat.FLOAT32, "take.sigmf-data"),
+            (FileFormat.RAW, SampleFormat.FLOAT32, "take.cf32"),
+            (FileFormat.RAW, SampleFormat.INT16, "take.cs16"),
+        ):
+            path = self.path(name)
+            with self.assertRaises(OSError) as caught, file_size_limit(100_000):
+                write_recording(
+                    iter([x]),
+                    len(x),
+                    path,
+                    fmt,
+                    sample_fmt,
+                    RATE,
+                    100e6,
+                    lambda _f: None,
+                )
+            # (A size limit fails as a full disk does, with its own errno.)
+            self.assertEqual(caught.exception.errno, errno.EFBIG, name)
+            self.assertFalse(os.path.exists(path), name)
+
+    def test_the_save_failed_box_says_why(self):
+        self.record(3, stop=False)  # (running: written, not moved)
+        target = self.path("take.sigmf-data")
+        with (
+            self.save_dialog(target),
+            self.warnings() as warn,
+            file_size_limit(100_000),
+            self.assertLogs("sdr_module.gui.main_window", level="ERROR"),
+        ):
+            self.assertFalse(self.win._save_recording())
+        self.assertIn(os.strerror(errno.EFBIG), warn.call_args[0][2])
+        self.assertFalse(os.path.exists(target))
+        self.win._record_button.click()

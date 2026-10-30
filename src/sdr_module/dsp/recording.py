@@ -663,7 +663,9 @@ class IQRecorder:
         if self._file_format == FileFormat.WAV:
             self._write_wav(converted)
         elif self._file is not None:
-            converted.tofile(self._file)
+            # (Through the file, not ndarray.tofile: a full disk then raises
+            # "No space left on device", not "N requested and M written".)
+            self._file.write(np.ascontiguousarray(converted).data)
 
         self._samples_written += len(samples)
         return len(samples)

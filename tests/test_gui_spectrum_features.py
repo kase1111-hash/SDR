@@ -316,6 +316,18 @@ class TestStaleLegend(_SpectrumCase):
         self.assertIsNone(sp.stale_text())
 
 
+class TestClear(_SpectrumCase):
+    def test_clear_brings_back_the_placeholder(self):
+        sp = self.sp
+        sp.update_spectrum(_line())
+        sp.set_stale("Stopped - press Space")
+        sp.clear()
+        self.assertFalse(sp._has_data)
+        self.assertIsNone(sp.stale_text())
+        self.assertTrue(np.all(sp._peak_hold <= -120.0))
+        sp._canvas.grab()  # the "No spectrum yet" placeholder paints
+
+
 class TestBookmarkLabels(_SpectrumCase):
     def boxes(self):
         self.sp._canvas.grab()

@@ -177,6 +177,14 @@ class TestPauseKey(_WindowTestCase):
         QTest.keyClick(win._spectrum, Qt.Key.Key_P)
         self.assertFalse(win._waterfall.is_paused())
 
+    def test_p_with_a_header_combo_focused_is_left_to_it(self):
+        win = self.win
+        combo = win._spectrum._avg_combo
+        combo.setFocus()
+        self.settle()
+        QTest.keyClick(combo, Qt.Key.Key_P)
+        self.assertFalse(win._waterfall.is_paused())
+
     def test_p_in_a_text_field_types(self):
         win = self.win
         field = win._frequency_field()

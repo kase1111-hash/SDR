@@ -228,6 +228,17 @@ class TestWaterfallRowsKeepTheirFrequency(_WaterfallHistoryCase):
         x = self.drawn_peak_x(20)
         self.assertAlmostEqual(self.w.frequency_at(x), 100.6e6, delta=6 * BIN)
 
+    def test_hover_says_when_an_old_row_was_not_received_there(self):
+        self.feed(40, carriers=[(100.3e6, -30.0)])
+        self.w.set_center_freq(101.3e6)  # 1 MHz up: half the old span left
+        self.feed(5)
+        plot = self.w.plot_rect()
+        x = self.w._freq_to_x(102.2e6, plot)  # above anything received before
+        lines = self.hover(x, self.row_y(20))
+        self.assertIn("Not received then", lines)
+        lines = self.hover(x, self.row_y(1))  # a new row: a level
+        self.assertIsNotNone(_level(lines), lines)
+
     def test_a_retune_beyond_the_span_leaves_no_ghost(self):
         self.feed(40, carriers=[(100.3e6, -30.0)])
         self.w.set_center_freq(433.92e6)
@@ -239,6 +250,43 @@ class TestWaterfallRowsKeepTheirFrequency(_WaterfallHistoryCase):
                 lines = self.hover(plot.left() + frac * plot.width(), y)
                 level = _level(lines)
                 self.assertTrue(level is None or level < -60.0, (row, frac, lines))
+
+
+class TestRemapReusesCodes(_WaterfallHistoryCase):
+    """Rows still on the span the codes were on are moved, not quantized
+    again: the result is exactly what a full rebuild gives."""
+
+    def rebuilt(self):
+        reused = self.w._codes.copy()
+        self.w._ring = None  # no old codes to reuse: quantize every row
+        fresh = self.w._codes.copy()
+        return reused, fresh
+
+    def test_a_retune_shift_matches_a_full_rebuild(self):
+        self.feed(30, carriers=[(100.3e6, -30.0)])
+        self.w.set_center_freq(100.6e6)
+        self.feed(20, carriers=[(100.3e6, -30.0)])
+        self.w.set_center_freq(100.2e6)  # rows from two spans now
+        reused, fresh = self.rebuilt()
+        np.testing.assert_array_equal(reused, fresh)
+
+    def test_a_span_and_size_change_match_a_full_rebuild(self):
+        self.feed(30, carriers=[(100.3e6, -30.0)])
+        self.w.set_sample_rate(1.2e6)
+        reused, fresh = self.rebuilt()
+        np.testing.assert_array_equal(reused, fresh)
+        self.feed(10, rate=1.2e6)
+        self.w.set_fft_size(4096)
+        reused, fresh = self.rebuilt()
+        np.testing.assert_array_equal(reused, fresh)
+
+    def test_quantize_works_on_a_copy(self):
+        line = np.array([-50.0, np.nan, np.inf, -np.inf], dtype=np.float32)
+        before = line.copy()
+        codes = wfm.quantize_db(line)
+        np.testing.assert_array_equal(line, before)  # the input is untouched
+        self.assertEqual(codes.dtype, np.uint16)
+        self.assertTrue((codes > 0).all())
 
 
 class TestMeasurementReadoutStaysVisible(_WaterfallHistoryCase):
@@ -409,6 +457,26 @@ class TestStoppedPlots(_WindowTestCase):
         self.assertIsNone(win._spectrum.stale_text())
         self.assertIsNone(win._waterfall.stale_text())
         self.assertIn("Live", self._legend_texts(win._spectrum))
+
+    def test_the_stopped_text_follows_the_state(self):
+        win = self.win
+        self.run_frames(2)
+        playback = mock.Mock()
+        playback.finished = False
+        with (
+            mock.patch.object(type(win._playback), "active", True),
+            mock.patch.object(type(win._playback), "device", playback),
+        ):
+            win._sync_plot_state(False, True)
+            self.assertEqual(win._spectrum.stale_text(), "Paused - press Space to play")
+            playback.finished = True
+            win._sync_plot_state(False, True)
+            self.assertIn("End of the recording", win._spectrum.stale_text())
+        with mock.patch.object(win, "_tx_busy", return_value=True):
+            win._sync_plot_state(False, True)
+            self.assertIn("Transmitting", win._waterfall.stale_text())
+        win._sync_plot_state(True, True)
+        self.assertIsNone(win._spectrum.stale_text())
 
     def test_disconnect_says_so_and_clears_peak_hold(self):
         win = self.win

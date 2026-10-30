@@ -3130,7 +3130,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             and mods == Qt.KeyboardModifier.NoModifier
             and self._plots_focused()
         ):
-            # (The waterfall takes P itself when it has the focus.)
+            # P pauses the waterfall from either plot (the waterfall takes P
+            # itself when it has the focus); not while a control in a plot's
+            # header (a combo box) has a use for it.
+            if self._focus_uses_key(key):
+                event.ignore()
+                return
             self._waterfall.set_paused(not self._waterfall.is_paused())
             event.accept()
             return

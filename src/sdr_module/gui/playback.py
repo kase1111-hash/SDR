@@ -335,6 +335,8 @@ if HAS_PYQT6:
         loop_changed = pyqtSignal(bool)
         speed_changed = pyqtSignal(float)
         close_clicked = pyqtSignal()
+        #: Find Signals (T10): list the signals of the file playing.
+        find_clicked = pyqtSignal()
 
         # Slider units: tenths of a second.
         _SCALE = 10.0
@@ -421,6 +423,18 @@ if HAS_PYQT6:
             set_role(self._file, "muted")
             self._file.setMinimumWidth(40)
             row.addWidget(self._file, 2)
+
+            # (T10) The signals in the whole file, in the Signal tab.
+            self._find = QPushButton("Signals…")
+            set_role(self._find, "compact")
+            self._find.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self._find.setToolTip(
+                "Find the signals in the whole recording: when each was heard, "
+                "listed in the Signal tab (double-click one to play it)"
+            )
+            self._find.setAccessibleName("Find signals in the recording")
+            self._find.clicked.connect(lambda _c=False: self.find_clicked.emit())
+            row.addWidget(self._find)
 
             self._close = QPushButton("Close")
             set_role(self._close, "compact")

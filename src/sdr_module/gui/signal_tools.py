@@ -1,0 +1,909 @@
+"""
+The window side of the Signal tab and of Radio > Track Signal (AFC).
+
+:class:`SignalTools` is built by the main window with its
+:class:`~.signal_panel.SignalPanel`. The display loop hands it every block
+(:meth:`SignalTools.frame`: the raw samples, the tuned channel, the
+spectrum frame and the receiver chain), and it does only what is on
+screen or asked for:
+
+* **Identify** (Tools > Identify Signal, Ctrl+I; "Identify Signal Here" on
+  the spectrum and waterfall): collects about half a second around the
+  tuned frequency (longer for a signal that comes and goes, up to 4 s) and
+  classifies it in a worker thread; **Apply Mode** sets Mode, deviation and
+  Bandwidth and centres the tuned frequency on the signal.
+* **Signals in view**: the spectrum averaged over half a second, its
+  signals listed (and marked on the spectrum when asked); Home, Page Up
+  and Page Down (plots focused) tune to the strongest, the next one up
+  and the next one down.
+* **Scope**: the tuned channel, only while the Scope page is on screen.
+* **Bursts**: :class:`~sdr_module.dsp.bursts.BurstWatcher` over the span,
+  while the Bursts page is on screen (or always, when asked).
+* **Track Signal (AFC)**: :class:`~sdr_module.dsp.afc.SignalTracker`
+  nudges the tuned frequency onto a drifting signal (the LO is retuned only
+  when the tuned channel would leave the span); "AFC +1.2 kHz" in the
+  status bar.
+* **Find Signals in Recording** (File menu, the playback strip): runs
+  :class:`~sdr_module.dsp.signal_list.SignalSurvey` over a file in the
+  background and lists what it found; double-click plays the file there.
+"""
+
+from __future__ import annotations
+
+import logging
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Any, List, Optional, Tuple
+
+import numpy as np
+
+from ..dsp.afc import TRACK_METHODS, SignalTracker
+from ..dsp.bursts import BurstWatcher
+from ..dsp.signal_id import (
+    WAIT_S,
+    Identification,
+    SignalIdentifier,
+    analysis_band,
+    better,
+    identify,
+)
+from ..dsp.signal_list import SignalPeak, SignalSurvey, find_signals
+
+try:
+    from PyQt6.QtCore import QObject
+    from PyQt6.QtWidgets import QLabel
+
+    HAS_PYQT6 = True
+except ImportError:  # pragma: no cover - the GUI needs PyQt6
+    HAS_PYQT6 = False
+
+logger = logging.getLogger(__name__)
+
+#: How often the signals list is refreshed (s), and how long a signal no
+#: longer heard stays listed.
+LIST_EVERY_S = 0.5
+FORGET_S = 10.0
+#: Broadcast FM: wide deviations Track Signal leaves alone.
+_BROADCAST_DEVIATION_HZ = 50e3
+
+
+def _format_offset(hz: float) -> str:
+    """``"+1.2 kHz"``, ``"-350 Hz"``."""
+    if abs(hz) >= 1e3:
+        return f"{hz / 1e3:+.1f} kHz"
+    return f"{hz:+.0f} Hz"
+
+
+if HAS_PYQT6:
+
+    from .signal_panel import tune_frequency
+    from .themes import set_role, set_tone
+
+    class SignalTools(QObject):
+        """See the module docstring."""
+
+        def __init__(self, window: Any, panel: Any):
+            super().__init__(window)
+            self._win = window
+            self.panel = panel
+            self._pool = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="identify"
+            )
+            # Identify.
+            self._identifier: Optional[SignalIdentifier] = None
+            self._ident_job: Optional[Future] = None
+            self._ident_best: Optional[Identification] = None
+            self._ident_freq = 0.0
+            self._ident_reach = 0.0
+            self._ident_band: Tuple[float, float] = (0.0, 0.0)
+            self._ident_takes = 0
+            # Signals in view.
+            self._acc: Optional[np.ndarray] = None
+            self._acc_frames = 0
+            self._acc_key: Optional[Tuple[int, float, float]] = None
+            self._list_due = 0.0
+            self._heard: List[Tuple[SignalPeak, float]] = []
+            self._markers = False
+            self._listing_until = 0.0
+            # Bursts.
+            self._watcher = BurstWatcher()
+            self._watch_always = False
+            # AFC.
+            self._tracker: Optional[SignalTracker] = None
+            self._tracking = False
+            self._tracker_key: Optional[Tuple[str, float, float]] = None
+            self._moving = False
+            self._last_frame_t: Optional[float] = None
+            self._afc_badge: Optional[QLabel] = None
+            # A recording's signals (Find Signals in Recording).
+            self._survey_options: Any = None
+            self._connect()
+
+        # -- wiring ------------------------------------------------------------------
+
+        def _connect(self) -> None:
+            win, panel = self._win, self.panel
+            panel.identify_requested.connect(lambda: self.identify())
+            panel.apply_requested.connect(self.apply_identification)
+            panel.tune_requested.connect(self._tune)
+            panel.bookmark_requested.connect(win._bookmark_frequency)
+            panel.markers_changed.connect(self.set_markers)
+            panel.min_snr_changed.connect(lambda _v: self._reset_list())
+            panel.step_requested.connect(self.step)
+            panel.watch_changed.connect(self._set_watch_always)
+            panel.play_requested.connect(self.play_recording_at)
+            panel.live_requested.connect(self._reset_list)
+            panel.page_changed.connect(lambda _p: self._page_changed())
+            panel.export_bursts_btn.clicked.connect(
+                lambda _c=False: self.export_bursts()
+            )
+            for plot in (win._spectrum, win._waterfall):
+                add = getattr(plot, "add_context_action", None)
+                if callable(add):
+                    add(
+                        "&Identify Signal Here",
+                        lambda freq: self.identify(freq),
+                        "Tune here and say what the signal is (Signal tab)",
+                    )
+            bar = getattr(win, "_playback_bar", None)
+            if bar is not None and hasattr(bar, "find_clicked"):
+                bar.find_clicked.connect(self.find_in_current_recording)
+
+        def shutdown(self) -> None:
+            """The window closes: no more work in the background, and no
+            more signals from the panel (its widgets emit some while Qt
+            deletes them, when nothing of theirs may be touched)."""
+            self._identifier = None
+            self._tracking = False
+            self._pool.shutdown(wait=False, cancel_futures=True)
+            for obj in [self.panel, *self.panel.findChildren(QObject)]:
+                obj.blockSignals(True)
+
+        # -- the display loop -----------------------------------------------------------
+
+        def frame(
+            self,
+            samples: np.ndarray,
+            channel: np.ndarray,
+            power: np.ndarray,
+            chain: Any,
+        ) -> None:
+            """One block of the receiver (from the window's display loop)."""
+            now = time.monotonic()
+            dt = 1.0 / 30.0
+            rate = float(self._win._device_sample_rate())
+            if rate > 0 and len(samples):
+                dt = len(samples) / rate
+            self._last_frame_t = now
+            try:
+                self._identify_frame(samples)
+                self._signals_frame(power, now)
+                self._scope_frame(channel, chain)
+                self._bursts_frame(samples, rate)
+                self._afc_frame(samples, dt, chain)
+            except Exception as exc:  # pragma: no cover - never stop the loop
+                logger.warning("Signal tab: %s", exc, exc_info=True)
+
+        def sync_state(self, running: bool, has_device: bool) -> None:
+            """The receiver started, stopped or the device changed."""
+            if running:
+                return
+            if self._identifier is not None:
+                self._identifier = None
+                self.panel.set_identify_busy(False)
+                self.panel.set_identify_status(
+                    "Stopped before the signal could be identified. Press "
+                    "Start (Space), then Identify.",
+                    "warning",
+                )
+            for report in self._watcher.flush():
+                self.panel.add_burst(report)
+            if not self.panel.showing_recording():
+                self.panel.set_signals_empty(
+                    "Receiver stopped\nPress Start (Space): the signals in view "
+                    "are listed here."
+                    if has_device
+                    else "No receiver\nUse Device > Use Demo Device or "
+                    "Connect... to list the signals in view."
+                )
+            self._heard = []
+            self._acc = None
+            self._apply_markers([])
+            if self._tracking:
+                self._set_badge(
+                    "AFC paused", "muted", "Track Signal resumes when receiving does"
+                )
+
+        def frequency_changed(self, freq_hz: float) -> None:
+            """The tuned frequency changed (the window's
+            ``_on_frequency_changed``): by AFC itself, or by the user."""
+            if self._moving:
+                return
+            if self._identifier is not None:
+                # Another frequency: listen there afresh.
+                offset = float(self._win._vfo_offset_hz())
+                if abs(freq_hz - self._ident_freq) > 0.5:
+                    self._ident_freq = float(freq_hz)
+                    self._identifier.set_offset(offset)
+                    self._ident_best = None
+                    self._ident_takes = 0
+            if self._tracker is not None:
+                self._tracker.retuned(float(self._win._vfo_offset_hz()))
+                self._update_badge(0.0, True, False, False)
+
+        # -- Identify -----------------------------------------------------------------------
+
+        def identify(self, freq_hz: Optional[float] = None) -> bool:
+            """Identify the signal at the tuned frequency (or tune to
+            ``freq_hz`` first). Starts the receiver if it is stopped."""
+            win = self._win
+            win._show_panel("signal")
+            self.panel.show_page("identify")
+            if freq_hz is not None and not win.set_frequency(float(freq_hz)):
+                return False  # refused: the status bar says why
+            if win._device is None:
+                self.panel.set_identify_status(
+                    "No receiver: use Device > Use Demo Device or Connect..., "
+                    "then Identify.",
+                    "warning",
+                )
+                return False
+            if not win._is_running:
+                win._start_acquisition()
+                if not win._is_running:
+                    return False
+            panel = win._control_panel
+            mode = panel._demod_combo.currentText()
+            rate = float(win._device_sample_rate())
+            width, reach = analysis_band(mode, win._channel_bandwidth(), rate)
+            self._identifier = SignalIdentifier(rate, win._vfo_offset_hz(), width)
+            self._ident_freq = float(win._current_frequency())
+            self._ident_reach = reach
+            self._ident_band = self._identifier.passband_hz
+            self._ident_best = None
+            self._ident_takes = 0
+            self.panel.set_identify_busy(True)
+            self.panel.set_identify_status(
+                f"Listening to {_mhz(self._ident_freq)}…", None
+            )
+            return True
+
+        def _identify_frame(self, samples: np.ndarray) -> None:
+            ident = self._identifier
+            job = self._ident_job
+            if job is not None and job.done():
+                self._ident_job = None
+                try:
+                    result = job.result()
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.warning("Identify failed: %s", exc)
+                    result = None
+                if result is not None and ident is not None:
+                    if abs(result.tuned_hz - self._ident_freq) < 0.5:
+                        self._ident_takes += 1
+                        self._ident_best = better(self._ident_best, result)
+                        self._maybe_finish()
+            ident = self._identifier
+            if ident is None:
+                return
+            if abs(ident.offset_hz - self._win._vfo_offset_hz()) > 0.5:
+                ident.set_offset(self._win._vfo_offset_hz())
+            ident.feed(samples)
+            seconds = ident.seconds
+            if self._ident_job is None and ident.ready():
+                capture = ident.take()
+                rate, freq, reach, band = (
+                    ident.rate,
+                    self._ident_freq,
+                    self._ident_reach,
+                    self._ident_band,
+                )
+                self._ident_job = self._pool.submit(
+                    identify, capture, rate, freq, reach, None, band
+                )
+            if self._ident_best is None or not self._ident_best.is_signal:
+                self.panel.set_identify_status(
+                    f"Listening to {_mhz(self._ident_freq)}… {seconds:.1f} s"
+                    + ("" if seconds < 1.0 else " (waiting for a signal)"),
+                    None,
+                )
+
+        def _maybe_finish(self) -> None:
+            best = self._ident_best
+            ident = self._identifier
+            if best is None or ident is None:
+                return
+            enough = best.is_signal and (
+                best.confidence >= 0.6 or self._ident_takes >= 3
+            )
+            if not enough and ident.seconds < WAIT_S:
+                return
+            self._identifier = None
+            self.panel.set_identify_busy(False)
+            self.panel.show_identification(best)
+            stamp = time.strftime("%H:%M:%S")
+            if best.is_signal:
+                self.panel.set_identify_status(
+                    f"{_mhz(best.tuned_hz)} at {stamp}, from "
+                    f"{best.seconds:.1f} s of signal. Apply Mode listens to it "
+                    "that way.",
+                    None,
+                )
+                self._win._show_status_message(
+                    f"{_mhz(best.tuned_hz)}: {best.summary()}", "info", 5000
+                )
+            else:
+                self.panel.set_identify_status(
+                    f"Nothing identifiable at {_mhz(best.tuned_hz)} in "
+                    f"{WAIT_S:.0f} s ({stamp}). Tune onto a signal and try "
+                    "again.",
+                    "warning",
+                )
+
+        def apply_identification(self) -> None:
+            """Apply Mode: listen to the identified signal as suggested."""
+            ident = self.panel.identification()
+            if ident is None or not ident.mode:
+                return
+            win = self._win
+            from .control_panel import bandwidth_options, closest_bandwidth
+
+            width = closest_bandwidth(bandwidth_options(ident.mode), ident.filter_hz)
+            win._set_demod_mode(ident.mode, ident.fm_deviation or None, width)
+            target = self._listen_frequency(ident)
+            if abs(target - win._current_frequency()) >= 1.0:
+                win.set_frequency(target)
+            win._show_status_message(
+                f"Listening to {_mhz(win._current_frequency())} in "
+                + ", ".join(
+                    part
+                    for part in (
+                        ident.mode,
+                        f"{ident.fm_deviation} deviation" if ident.fm_deviation else "",
+                        f"{width} filter",
+                    )
+                    if part
+                ),
+                "success",
+                5000,
+            )
+
+        @staticmethod
+        def _listen_frequency(ident: Identification) -> float:
+            """Where to tune to hear it: the signal's centre (CW: its peak;
+            SSB: the suppressed carrier below or above the voice)."""
+            r = ident.result
+            freq = ident.tuned_hz
+            if r.kind in ("cw", "carrier"):
+                peak = float(r.features.get("peak_offset_hz", r.center_offset_hz))
+                return round((freq + peak) / 10.0) * 10.0
+            if r.kind == "ssb":
+                half = 0.5 * r.bandwidth_hz + 200.0
+                shift = -half if ident.mode == "USB" else half
+                return round((freq + r.center_offset_hz + shift) / 10.0) * 10.0
+            if abs(r.center_offset_hz) >= max(0.1 * r.bandwidth_hz, 50.0):
+                return round((freq + r.center_offset_hz) / 100.0) * 100.0
+            return freq
+
+        # -- Signals in view ----------------------------------------------------------------------
+
+        def _signals_active(self) -> bool:
+            if self.panel.showing_recording():
+                return self._markers or time.monotonic() < self._listing_until
+            return (
+                self._markers
+                or self.panel.page_visible("signals")
+                or time.monotonic() < self._listing_until
+            )
+
+        def _reset_list(self) -> None:
+            self._acc = None
+            self._acc_frames = 0
+            self._list_due = 0.0
+            self._heard = []
+
+        def _signals_frame(self, power: np.ndarray, now: float) -> None:
+            if not self._signals_active() or power is None or not len(power):
+                return
+            win = self._win
+            key = (
+                len(power),
+                float(win._lo_frequency()),
+                float(win._device_sample_rate()),
+            )
+            if key != self._acc_key:
+                self._acc_key = key
+                self._reset_list()
+            lin = np.power(10.0, np.asarray(power, dtype=np.float64) / 10.0)
+            if self._acc is None:
+                self._acc = lin
+            else:
+                self._acc = self._acc + lin
+            self._acc_frames += 1
+            if now < self._list_due:
+                return
+            self._list_due = now + LIST_EVERY_S
+            avg_db = 10.0 * np.log10(np.maximum(self._acc / self._acc_frames, 1e-30))
+            self._acc = None
+            self._acc_frames = 0
+            found = find_signals(
+                avg_db, key[1], key[2], float(self.panel.min_snr.value())
+            )
+            self._remember(found, now)
+            current = [s for s, t in self._heard if t >= now - 0.01]
+            if not self.panel.showing_recording():
+                self.panel.set_signals(
+                    [s for s, _t in self._heard],
+                    float(win._current_frequency()),
+                    [now - t for _s, t in self._heard],
+                )
+            self._apply_markers(current if self._markers else [])
+
+        def _remember(self, found: List[SignalPeak], now: float) -> None:
+            """Merge a fresh list into the signals heard lately (a signal
+            not heard for :data:`FORGET_S` seconds is dropped)."""
+            kept: List[Tuple[SignalPeak, float]] = []
+            used = set()
+            for sig in found:
+                # Every older entry of this signal is replaced by it.
+                for i, (old, _t) in enumerate(self._heard):
+                    if abs(old.frequency_hz - sig.frequency_hz) <= max(
+                        0.5 * max(old.width_hz, sig.width_hz), 3e3
+                    ):
+                        used.add(i)
+                kept.append((sig, now))
+            for i, (old, t) in enumerate(self._heard):
+                if i not in used and now - t < FORGET_S:
+                    kept.append((old, t))
+            self._heard = sorted(kept, key=lambda item: item[0].frequency_hz)
+
+        def set_markers(self, on: bool) -> None:
+            self._markers = bool(on)
+            if not on:
+                self._apply_markers([])
+            else:
+                self._list_due = 0.0
+
+        def _apply_markers(self, signals: List[SignalPeak]) -> None:
+            set_markers = getattr(self._win._spectrum, "set_markers", None)
+            if not callable(set_markers):
+                return
+            index = {id(s): n + 1 for n, (s, _t) in enumerate(self._heard)}
+            set_markers([(s.frequency_hz, str(index.get(id(s), ""))) for s in signals])
+
+        def step(self, direction: str) -> bool:
+            """Tune to the strongest signal in view ("strongest") or the next
+            one above ("up") or below ("down") the tuned frequency."""
+            win = self._win
+            if not win._is_running:
+                win._show_status_message(
+                    "Press Start (Space) first: the signals in view are measured "
+                    "while receiving.",
+                    "info",
+                    4000,
+                )
+                return False
+            if not self._heard:
+                # Not listed yet (the page wasn't open): measure now.
+                self._list_due = 0.0
+                win._show_status_message(
+                    "Looking for signals… press it again in a moment.", None, 3000
+                )
+                self._ensure_listing()
+                return False
+            tuned = float(win._current_frequency())
+            signals = [s for s, _t in self._heard]
+            target: Optional[SignalPeak] = None
+            if direction == "strongest":
+                target = max(signals, key=lambda s: s.peak_dbfs)
+            elif direction == "up":
+                ups = [
+                    s
+                    for s in signals
+                    if s.frequency_hz > tuned + max(0.5 * s.width_hz, 1e3)
+                ]
+                target = min(ups, key=lambda s: s.frequency_hz) if ups else None
+            else:
+                downs = [
+                    s
+                    for s in signals
+                    if s.frequency_hz < tuned - max(0.5 * s.width_hz, 1e3)
+                ]
+                target = max(downs, key=lambda s: s.frequency_hz) if downs else None
+            if target is None:
+                where = "above" if direction == "up" else "below"
+                win._show_status_message(
+                    f"No signal {where} {_mhz(tuned)} in view.", None, 3000
+                )
+                return False
+            return bool(self._tune(tune_frequency(target)))
+
+        def _ensure_listing(self) -> None:
+            """List the signals for a while even off the Signals page (for
+            Home / Page Up / Page Down)."""
+            self._listing_until = time.monotonic() + 30.0
+
+        def _tune(self, freq: float) -> bool:
+            return bool(self._win.set_frequency(float(freq)))
+
+        def _page_changed(self) -> None:
+            if self.panel.page_visible("signals"):
+                self._list_due = 0.0
+
+        # -- Scope ------------------------------------------------------------------------------
+
+        def _scope_frame(self, channel: np.ndarray, chain: Any) -> None:
+            panel = self.panel
+            if not panel.page_visible("scope") or panel.scope.frozen:
+                return
+            if channel is None or not len(channel):
+                return
+            rate = float(getattr(chain, "channel_rate", 0.0) or 0.0)
+            panel.scope.set_samples(channel, rate)
+            info = (
+                f"The tuned channel: {chain.mode}, "
+                f"{_width_text(getattr(chain, 'bandwidth', 0.0))} filter, "
+                f"{rate / 1e3:.0f} kS/s"
+            )
+            evm = panel.scope.evm_percent
+            if evm is not None:
+                info += f" · EVM {evm:.1f} %"
+            panel.set_scope_info(info)
+
+        # -- Bursts -------------------------------------------------------------------------------
+
+        def _set_watch_always(self, on: bool) -> None:
+            self._watch_always = bool(on)
+
+        def _bursts_frame(self, samples: np.ndarray, rate: float) -> None:
+            if not (self._watch_always or self.panel.page_visible("bursts")):
+                if self._watcher.detector.active:
+                    for report in self._watcher.flush():
+                        self.panel.add_burst(report)
+                return
+            win = self._win
+            reports = self._watcher.feed(samples, float(win._lo_frequency()), rate)
+            for report in reports:
+                if report.burst.duration_s < 0.02 and report.burst.snr_db < 15:
+                    continue  # a flicker
+                self.panel.add_burst(report)
+
+        def export_bursts(self) -> None:
+            from . import file_dialogs
+
+            win = self._win
+            if not self.panel.bursts():
+                win._show_status_message("No bursts to export yet.", None, 3000)
+                return
+            path, _f = file_dialogs.save_file(
+                win,
+                win._settings,
+                "channels",
+                "Export Bursts",
+                time.strftime("bursts_%Y%m%d_%H%M%S.csv"),
+                "CSV file (*.csv)",
+            )
+            if not path:
+                return
+            try:
+                count = self.panel.export_bursts(path)
+            except OSError as e:
+                win._show_status_error(f"Could not save {path}: {e}")
+                return
+            win._show_status_message(f"Saved {count} bursts to {path}", "success", 5000)
+
+        # -- Track Signal (AFC) ----------------------------------------------------------------------
+
+        def _tracking_problem(self) -> Optional[str]:
+            """Why tracking can't follow in the current mode (None: it can)."""
+            panel = self._win._control_panel
+            mode = panel._demod_combo.currentText()
+            if mode not in TRACK_METHODS:
+                return (
+                    "Track Signal follows FM, AM and CW signals (SSB and I/Q "
+                    "have no carrier to follow)."
+                )
+            if mode == "FM" and panel.get_fm_deviation() >= _BROADCAST_DEVIATION_HZ:
+                return (
+                    "Track Signal follows narrow FM, AM and CW (broadcast FM "
+                    "stations don't drift)."
+                )
+            return None
+
+        def set_tracking(self, on: bool) -> bool:
+            """Radio > Track Signal (AFC)."""
+            win = self._win
+            if on:
+                problem = self._tracking_problem()
+                if problem:
+                    action = getattr(win, "_track_action", None)
+                    if action is not None and action.isChecked():
+                        action.blockSignals(True)
+                        action.setChecked(False)
+                        action.blockSignals(False)
+                    win._show_status_message(problem, "warning", 6000)
+                    self._tracking = False
+                    self._set_badge(None)
+                    return False
+            self._tracking = bool(on)
+            self._tracker = None
+            self._tracker_key = None
+            if on:
+                self._update_badge(0.0, False, False, False)
+                win._show_status_message(
+                    "Track Signal: the tuned frequency follows the signal as it "
+                    "drifts",
+                    "info",
+                    4000,
+                )
+            else:
+                self._set_badge(None)
+            return self._tracking
+
+        @property
+        def tracking(self) -> bool:
+            return self._tracking
+
+        def _afc_frame(self, samples: np.ndarray, dt: float, chain: Any) -> None:
+            if not self._tracking:
+                return
+            win = self._win
+            scanner = getattr(win, "_scanner_panel", None)
+            if scanner is not None and getattr(scanner.engine, "active", False):
+                self._set_badge("AFC paused", "muted", "Paused while a scan runs")
+                self._tracker = None
+                return
+            panel = win._control_panel
+            mode = panel._demod_combo.currentText()
+            key = (
+                mode,
+                float(win._channel_bandwidth()),
+                float(win._device_sample_rate()),
+            )
+            if self._tracking_problem() is not None:
+                self.set_tracking(False)
+                action = getattr(win, "_track_action", None)
+                if action is not None:
+                    action.blockSignals(True)
+                    action.setChecked(False)
+                    action.blockSignals(False)
+                win._show_status_message(
+                    "Track Signal turned off: " + str(self._tracking_problem()),
+                    "warning",
+                    6000,
+                )
+                return
+            if self._tracker is None or key != self._tracker_key:
+                self._tracker = SignalTracker(
+                    key[2], win._vfo_offset_hz(), mode, key[1]
+                )
+                self._tracker_key = key
+            status = self._tracker.process(samples, dt)
+            if status.nudge_hz:
+                self._move_vfo(status.nudge_hz)
+            self._update_badge(
+                status.correction_hz, status.locked, status.lost, status.signal_present
+            )
+
+        def _move_vfo(self, delta_hz: float) -> None:
+            """Move the tuned frequency by ``delta_hz`` for Track Signal: the
+            same signal, so nothing that belongs to a new station is reset
+            (S-meter peak, RDS, decoder status, tuning history). The LO is
+            retuned only when the channel would leave the span."""
+            win = self._win
+            freq = float(win._current_frequency()) + float(delta_hz)
+            lock = getattr(win, "_lo_lock", None)
+            if lock is not None:
+                center, span, _why = lock
+                if not win._channel_fits(freq - center, rate=span):
+                    self.set_tracking(False)
+                    win._show_status_message(
+                        "Track Signal stopped: the signal drifted out of the "
+                        "recording.",
+                        "warning",
+                        6000,
+                    )
+                    return
+            elif not win._channel_fits(freq - win._lo_frequency()):
+                self._moving = True
+                try:
+                    win._tune_to(freq)
+                finally:
+                    self._moving = False
+                if self._tracker is not None:
+                    self._tracker.lo_moved(win._vfo_offset_hz())
+                return
+            self._moving = True
+            try:
+                win._tuned_hz = freq
+                win._control_panel.set_frequency(freq)  # no signal
+                win._freq_label.setText(_format_frequency(win, freq))
+                win._update_passband()
+                win._bookmarks_panel.set_current_frequency(freq)
+                win._decoder_panel.set_current_frequency(freq)
+                # The live decoder follows the channel without starting over.
+                win._decoder_tuned_hz = freq
+                tuner = getattr(win, "_radio_tuner", None)
+                if tuner is not None and tuner.isVisible():
+                    tuner.set_frequency(freq)
+            finally:
+                self._moving = False
+
+        def _update_badge(
+            self, correction: float, locked: bool, lost: bool, present: bool
+        ) -> None:
+            if lost:
+                self._set_badge(
+                    f"AFC {_format_offset(correction)} · lost",
+                    "warning",
+                    "Track Signal: no signal to follow for a few seconds; it "
+                    "holds the frequency and picks the signal up when it is back",
+                )
+            else:
+                self._set_badge(
+                    f"AFC {_format_offset(correction)}",
+                    "success" if locked else "info",
+                    "Track Signal (Radio menu): how far the tuned frequency has "
+                    "been moved to follow the signal"
+                    + (" (locked on)" if locked else ""),
+                )
+
+        def _set_badge(
+            self, text: Optional[str], tone: Optional[str] = None, tip: str = ""
+        ) -> None:
+            if text is None:
+                if self._afc_badge is not None:
+                    self._afc_badge.setVisible(False)
+                return
+            if self._afc_badge is None:
+                badge = QLabel("")
+                set_role(badge, "badge", "info")
+                badge.setAccessibleName("Track Signal (AFC)")
+                self._win.statusBar().addPermanentWidget(badge)
+                self._afc_badge = badge
+            badge = self._afc_badge
+            if badge.text() != text:
+                badge.setText(text)
+            set_tone(badge, tone)
+            badge.setToolTip(tip)
+            badge.setVisible(True)
+
+        def badge_text(self) -> str:
+            badge = self._afc_badge
+            return badge.text() if badge is not None and badge.isVisible() else ""
+
+        # -- Find Signals in Recording -----------------------------------------------------------
+
+        def find_in_current_recording(self) -> bool:
+            """The playback strip's Find Signals: the file playing."""
+            playback = self._win._playback
+            device = playback.device
+            if device is None:
+                return False
+            return self.find_in_recording(device.options.path, device.options)
+
+        def find_in_recording(self, path: str = "", options: Any = None) -> bool:
+            """File > Find Signals in Recording: list the signals of a whole
+            I/Q file (frequency, level, SNR, when heard), read in the
+            background with progress and Cancel."""
+            from .file_jobs import _chunks, run_job
+
+            win = self._win
+            path = path or win._choose_recording("Find Signals in Recording")
+            if not path:
+                return False
+            options = win._recording_options(path, "find", options)
+            if options is None:
+                return False
+            rate, center = float(options.sample_rate), float(options.center_hz)
+
+            def work(report: Any) -> Tuple[List[Any], float]:
+                survey = SignalSurvey(rate, center)
+                for chunk in _chunks(options, report):
+                    survey.add(chunk)
+                return survey.finish(), survey.position / rate
+
+            result = run_job(
+                win,
+                "Find Signals",
+                f"Looking for signals in {options.name}…",
+                work,
+            )
+            if result.error is not None:
+                logger.warning(f"Finding signals in {path} failed: {result.error}")
+                win._show_status_error(
+                    f"Could not read {options.name}: {result.error}", log=False
+                )
+                return False
+            if result.cancelled:
+                win._show_status_message("Stopped looking for signals.", None, 4000)
+                return False
+            signals, seconds = result.value
+            self._survey_options = options
+            self.panel.set_recording_signals(options.name, signals, seconds)
+            win._show_panel("signal")
+            self.panel.show_page("signals")
+            win._show_status_message(
+                f"Found {len(signals)} signal{'s' if len(signals) != 1 else ''} in "
+                f"{options.name}. Double-click one to play it there.",
+                "success" if signals else "info",
+                6000,
+            )
+            return True
+
+        def play_recording_at(self, freq_hz: float, seconds: float) -> bool:
+            """Play the surveyed recording from just before ``seconds``,
+            tuned to ``freq_hz`` (in its band's usual mode)."""
+            win = self._win
+            options = self._survey_options
+            if options is None:
+                return False
+            playback = win._playback
+            device = playback.device
+            if device is None or device.options.path != options.path:
+                if not win._open_recording(options.path, options):
+                    return False
+            playback.seek(max(0.0, float(seconds) - 0.5))
+            # The band's usual mode first (a channel as wide as the one
+            # listened to before may not fit the recording there), narrower
+            # still when it is near the recording's edge.
+            from ..core.band_plan import listening_for
+
+            listen = listening_for(freq_hz)
+            if listen is not None and listen[0]:
+                mode, deviation, bandwidth = listen
+                win._set_demod_mode(mode, deviation or None, bandwidth or None)
+            if not win._channel_fits(
+                float(freq_hz) - float(options.center_hz),
+                rate=float(options.sample_rate),
+            ):
+                self._narrow_to_fit(float(freq_hz) - float(options.center_hz), options)
+            if not win.set_frequency(float(freq_hz)):
+                return False  # the status bar says why
+            if not win._is_running:
+                win._start_acquisition()
+            return True
+
+        def _narrow_to_fit(self, offset_hz: float, options: Any) -> None:
+            """Pick the widest Bandwidth of the mode that fits the recording
+            ``offset_hz`` from its centre."""
+            from .control_panel import bandwidth_options
+
+            win = self._win
+            panel = win._control_panel
+            mode = panel._demod_combo.currentText()
+            for text in sorted(bandwidth_options(mode), key=lambda t: -_parse_width(t)):
+                win._set_demod_mode(mode, None, text)
+                if win._channel_fits(offset_hz, rate=float(options.sample_rate)):
+                    return
+
+
+def _mhz(freq_hz: float) -> str:
+    return f"{float(freq_hz) / 1e6:.3f} MHz"
+
+
+def _parse_width(text: str) -> float:
+    """``"12.5 kHz"`` -> 12500.0 (0 when it isn't a width)."""
+    try:
+        value, unit = str(text).split()
+        return float(value) * {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6}[unit]
+    except (ValueError, KeyError):
+        return 0.0
+
+
+def _width_text(hz: float) -> str:
+    hz = float(hz)
+    if hz >= 1e6:
+        return f"{hz / 1e6:.1f} MHz"
+    if hz >= 1e3:
+        return f"{hz / 1e3:g} kHz"
+    return f"{hz:.0f} Hz"
+
+
+def _format_frequency(window: Any, freq: float) -> str:
+    from .main_window import format_frequency
+
+    return format_frequency(freq)
+
+
+__all__ = ["SignalTools", "LIST_EVERY_S", "FORGET_S"]

@@ -586,6 +586,7 @@ QTabBar::tab:selected {{ background-color: {p.base}; color: {p.accent};
 QTabBar::tab:hover:!selected {{ background-color: {p.surface0}; color: {p.text}; }}
 QTabBar::tab:disabled {{ color: {p.disabled}; }}
 QTabBar QToolButton {{ padding: 2px; }}
+QTabBar#toolTabs::tab {{ padding: 5px 6px; margin-right: 1px; }}
 QTabBar[documentMode="true"]::tab {{ background-color: transparent; border: none;
     border-bottom: 2px solid transparent; border-radius: 0; padding: 4px 8px;
     margin-right: 4px; color: {p.subtext}; }}

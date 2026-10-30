@@ -151,6 +151,8 @@ from .receiver_bar import FrequencyDigits, ReceiverBar
 from .scanner_host import WindowScannerHost
 from .scanner_panel import ScannerPanel
 from .settings_store import DEFAULT_FREQUENCY_HZ, GuiSettings
+from .signal_panel import SignalPanel
+from .signal_tools import SignalTools
 from .spectrum_widget import SpectrumWidget
 from .themes import (
     apply_theme,
@@ -2109,6 +2111,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._right_splitter.addWidget(self._scrollable(self._control_panel))
         self._right_tabs = self._build_panel_tabs()
         self._right_splitter.addWidget(self._right_tabs)
+        # The Signal tab's work and Radio > Track Signal (T10).
+        self._signal_tools = SignalTools(self, self._signal_panel)
         self._right_splitter.setStretchFactor(0, 1)
         self._right_splitter.setStretchFactor(1, 1)
         self._main_splitter.addWidget(self._right_splitter)
@@ -2147,6 +2151,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tabs = QTabWidget()
         tabs.setUsesScrollButtons(True)
         tabs.setElideMode(Qt.TextElideMode.ElideNone)
+        # The theme gives this bar slightly tighter tabs (T10), so all six
+        # top-level tabs (with Signal) fit the column at 1024 px.
+        tabs.tabBar().setObjectName("toolTabs")
 
         self._decoder_panel = DecoderPanel()
         self._add_panel(
@@ -2238,6 +2245,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             tabs.indexOf(self._panel_pages["scanner"]),
             tabs.indexOf(self._panel_pages["info"]),
         )
+
+        # Signal (T10): its panel spec after the Scanner's (Ctrl+9), its tab
+        # before Info.
+        self._signal_panel = SignalPanel()
+        self._add_panel(
+            tabs,
+            "signal",
+            self._signal_panel,
+            "Signal",
+            "Identify the tuned signal (Ctrl+I), list the signals in view, "
+            "look at the channel on a scope and log the bursts in the span",
+        )
+        tabs.tabBar().moveTab(
+            tabs.indexOf(self._panel_pages["signal"]),
+            tabs.indexOf(self._panel_pages["info"]),
+        )
         return tabs
 
     # View > Panels menu text (mnemonics) by panel key; the tab keeps its title.
@@ -2250,6 +2273,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         "qrp": "&QRP",
         "info": "&Info",
         "scanner": "S&canner",
+        "signal": "Si&gnal",
     }
 
     def _add_panel(
@@ -2326,6 +2350,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._decode_recording,
             tip="Run the Decoder panel's protocol over a whole I/Q file, much "
             "faster than real time; the messages go to the Decoder tab",
+        )
+        self._add_action(
+            file_menu,
+            "Find Si&gnals in Recording...",
+            lambda: self._signal_tools.find_in_recording(),
+            tip="List the signals in a whole I/Q file (frequency, level, SNR, "
+            "when heard) in the Signal tab; double-click one to play it there",
         )
         file_menu.addSeparator()
         self._add_action(
@@ -2539,6 +2570,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             checkable=True,
             checked=self._settings.get_bool("decoder/rds_auto", True),
         )
+        self._track_action = self._add_action(
+            radio_menu,
+            "Track Signal (AF&C)",
+            lambda on: self._signal_tools.set_tracking(on),
+            tip="Keep a drifting signal centred: the tuned frequency follows it "
+            "(narrow FM, AM and CW; the receiver retunes only at the span's "
+            "edges). The status bar shows how far it moved",
+            checkable=True,
+        )
         radio_menu.addSeparator()
         self._tx_station.add_menu_actions(radio_menu)  # Send Station ID, Stop TX
         self._rebuild_recent_menu()
@@ -2646,6 +2686,41 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._tune_iss_from_menu,
                 tip="Tune to the ISS SSTV downlink (FM, 5 kHz deviation), start "
                 "receiving and listen for images in the SSTV panel",
+            )
+        self._add_action(
+            tools_menu,
+            "&Identify Signal",
+            lambda: self._signal_tools.identify(),
+            "Ctrl+I",
+            "Say what the signal at the tuned frequency is (type, likely mode "
+            "and width, SNR) in the Signal tab, with Apply Mode",
+        )
+        signal_menu = tools_menu.addMenu("Si&gnal")
+        signal_menu.setToolTipsVisible(True)
+        for text, page, tip in (
+            ("Signals in &View", "signals", "List the signals in the span"),
+            ("&Scope", "scope", "The tuned channel in time or as a constellation"),
+            ("&Bursts", "bursts", "Log the transmissions that come and go"),
+        ):
+            self._add_action(
+                signal_menu,
+                text,
+                lambda p=page: self._show_signal_page(p),
+                tip=tip,
+            )
+        signal_menu.addSeparator()
+        # Home, Page Up and Page Down are handled in keyPressEvent (plots
+        # focused, like Space); the suffix shows the key here and in F1.
+        for text, step, tip in (
+            ("Tune to Strongest Signal\tHome", "strongest", "The strongest in view"),
+            ("Next Signal Up\tPgUp", "up", "The next signal above the tuned one"),
+            ("Next Signal Down\tPgDown", "down", "The next signal below"),
+        ):
+            self._add_action(
+                signal_menu,
+                text,
+                lambda s=step: self._signal_tools.step(s),
+                tip=tip + " (keys work while the plots have the focus)",
             )
         tools_menu.addSeparator()
         self._add_action(
@@ -3103,6 +3178,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._change_step(1 if event.text() == "]" else -1)
             event.accept()
             return
+        steps = {
+            Qt.Key.Key_Home: "strongest",
+            Qt.Key.Key_PageUp: "up",
+            Qt.Key.Key_PageDown: "down",
+        }
+        if (
+            key in steps
+            and mods == Qt.KeyboardModifier.NoModifier
+            and self._plots_focused()
+        ):
+            # (T10) The signals in view: the strongest, the next up / down.
+            self._signal_tools.step(steps[key])
+            event.accept()
+            return
         super().keyPressEvent(event)
 
     # ------------------------------------------------------------------
@@ -3292,6 +3381,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # A recording playing back: Start/Stop play and pause it.
         self._playback.sync_state_ui()
         self._close_recording_action.setEnabled(self._playback.active)
+        signal_tools = self._own("_signal_tools")
+        if signal_tools is not None:
+            signal_tools.sync_state(running, has_device)  # (T10)
 
         self._update_window_title()
         if self._info_panel.isVisible():
@@ -4035,6 +4127,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._qrp_panel.set_station(freq_hz)
         self._tx_station.refresh()
         self._tuner_retuned()
+        # Identify listens afresh; Track Signal starts over from here (T10).
+        signal_tools = self._own("_signal_tools")
+        if signal_tools is not None:
+            signal_tools.frequency_changed(freq_hz)
 
         logger.debug(f"Frequency changed to {freq_hz/1e6:.3f} MHz")
 
@@ -5949,6 +6045,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._listen_rds(channel, chain)
         # The AM/FM radio tuner's seek and STEREO lamp (only while it is open).
         self._tuner_block(channel, chain, power)
+        # The Signal tab and Track Signal (T10): only what is on screen or on.
+        self._signal_tools.frame(samples, channel, power, chain)
 
         # Record if active (and not paused). The REC badge and the Recording
         # panel's timer are refreshed by the status timer.
@@ -7658,6 +7756,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # Tools and dialogs
     # ------------------------------------------------------------------
 
+    def _show_signal_page(self, page: str) -> None:
+        """Tools > Signal > ...: the Signal tab, on ``page`` (T10)."""
+        self._show_panel("signal")
+        self._signal_panel.show_page(page)
+
     def _show_scanner(self):
         """Tools > Frequency Scanner (Ctrl+F): bring up the Scanner tab.
 
@@ -8444,6 +8547,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._scanner_panel.stop_scan(stay=False)
         # A recording playing back: the tuning from before it is saved.
         self._playback.shutdown()
+        self._signal_tools.shutdown()  # (T10) no identification left running
         self._commit_pending_history()  # the last frequency joins Recent
         self._persist_state()
         for timer in (self._display_timer, self._status_timer, self._hotplug_timer):

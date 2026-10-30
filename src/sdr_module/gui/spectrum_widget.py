@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from typing import TYPE_CHECKING, Deque, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Deque, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -51,6 +51,7 @@ try:
         QFrame,
         QHBoxLayout,
         QLabel,
+        QMenu,
         QPushButton,
         QVBoxLayout,
         QWidget,
@@ -543,6 +544,13 @@ class _SpectrumCanvas(QWidget if HAS_PYQT6 else object):
             self._owner.tune_steps.emit(steps)
         event.accept()
 
+    def contextMenuEvent(self, event):  # noqa: N802 - Qt override
+        # (T10) The actions others added (add_context_action).
+        if self._owner._show_context_menu(QPointF(event.pos()), event.globalPos()):
+            event.accept()
+        else:
+            super().contextMenuEvent(event)
+
 
 class SpectrumWidget(QWidget if HAS_PYQT6 else object):
     """
@@ -587,8 +595,11 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._show_average = False
         self._grid_enabled = True
 
-        # Markers
-        self._markers: List[Tuple[float, float]] = []  # (freq, power)
+        # Labelled markers (set_markers): (frequency Hz, label). (T10)
+        self._markers: List[Tuple[float, str]] = []
+        # Right-click actions others add (add_context_action): (text,
+        # callback taking the frequency clicked, tooltip). (T10)
+        self._context_actions: List[Tuple[str, Callable[[float], None], str]] = []
         # Demodulated channel: (low, high) Hz offsets from the center.
         self._passband: Optional[Tuple[float, float]] = None
         # The tuned frequency (None: the center), and how clicks snap: the
@@ -885,6 +896,61 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
     def plot_rect(self) -> "QRectF":
         """The plot area in canvas coordinates (excludes the axis margins)."""
         return QRectF(self._current_plot_rect())
+
+    # -- markers and right-click actions (T10) ---------------------------------
+
+    def set_markers(self, markers: Sequence[Tuple[float, str]]) -> None:
+        """Label frequencies on the spectrum: a small triangle on the trace
+        at each ``(frequency_hz, label)`` with its label above (e.g. the
+        Signal tab's signals in view). An empty list clears them."""
+        clean = [
+            (float(f), str(label))
+            for f, label in markers
+            if isinstance(f, (int, float)) and math.isfinite(float(f))
+        ]
+        if clean != self._markers:
+            self._markers = clean
+            self._canvas.update()
+
+    def markers(self) -> List[Tuple[float, str]]:
+        """The labelled markers shown (see :meth:`set_markers`)."""
+        return list(self._markers)
+
+    def add_context_action(
+        self, text: str, callback: Callable[[float], None], tip: str = ""
+    ) -> None:
+        """Add an item to the plot's right-click menu: ``callback`` gets
+        the frequency (Hz) right-clicked."""
+        self._context_actions.append((str(text), callback, str(tip)))
+
+    def add_context_actions(self, menu: "QMenu", freq: float) -> None:
+        """Put the added right-click items (:meth:`add_context_action`) in
+        ``menu`` for ``freq`` (for a menu built elsewhere)."""
+        for text, callback, tip in self._context_actions:
+            action = menu.addAction(text)
+            if tip:
+                action.setToolTip(tip)
+                action.setStatusTip(tip)
+            action.triggered.connect(lambda _c=False, cb=callback, f=freq: cb(float(f)))
+
+    def _show_context_menu(self, pos: "QPointF", global_pos) -> bool:
+        """Right-click: the added items for the frequency under the cursor
+        (False when there are none or the click is outside the plot)."""
+        if not self._context_actions:
+            return False
+        freq = self.landing_frequency(pos.x())
+        if freq is None:
+            return False
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        decimals = readout_decimals(snap_step_hz(self._hz_per_px()))
+        title = menu.addAction(f"{format_mhz(freq, decimals)} MHz")
+        title.setEnabled(False)
+        menu.addSeparator()
+        self.add_context_actions(menu, freq)
+        menu.exec(global_pos)
+        menu.deleteLater()
+        return True
 
     # ------------------------------------------------------------------
     # Internals: interaction
@@ -1189,6 +1255,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
             if self._has_data:
                 self._draw_traces(painter, plot, p)
+                if self._markers:
+                    self._draw_markers(painter, plot, p)
             self._draw_center_marker(painter, plot, p)
             painter.restore()
             if self.hasFocus():
@@ -1263,6 +1331,48 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         if main is not None:
             painter.setPen(pens["trace"])
             painter.drawPolyline(self._polyline(main))
+
+    def _draw_markers(self, painter: "QPainter", plot: "QRectF", p) -> None:
+        """The labelled markers (set_markers): a triangle on the trace's
+        highest point under the marker, the label above it. (T10)"""
+        data = self._main_trace()
+        n = len(data)
+        min_db, max_db = self._db_range
+        span = max_db - min_db
+        if n == 0 or span <= 0:
+            return
+        fm = self._fm
+        color = p.qcolor("accent")
+        for freq, label in self._markers:
+            x = self._freq_x(freq, plot)
+            if x is None:
+                continue
+            frac = (x - plot.left()) / max(plot.width(), 1.0)
+            k = int(frac * n)
+            lo, hi = max(0, k - 2), min(n, k + 3)
+            level = float(np.nanmax(data[lo:hi])) if hi > lo else min_db
+            level = min(max(level, min_db), max_db)
+            y = plot.bottom() - (level - min_db) / span * plot.height()
+            tip = max(plot.top() + fm.height() + 6, y - 3)
+            tri = QPolygonF(
+                [
+                    QPointF(x - 4, tip - 7),
+                    QPointF(x + 4, tip - 7),
+                    QPointF(x, tip),
+                ]
+            )
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawPolygon(tri)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            if label:
+                tw = fm.horizontalAdvance(label)
+                painter.setPen(color)
+                painter.drawText(
+                    QRectF(x - tw / 2 - 2, tip - 8 - fm.height(), tw + 4, fm.height()),
+                    int(Qt.AlignmentFlag.AlignCenter),
+                    label,
+                )
 
     def _draw_center_marker(self, painter: "QPainter", plot: "QRectF", p) -> None:
         """Dashed line + small flag at the tuned frequency (the VFO)."""

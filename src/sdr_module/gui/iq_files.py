@@ -436,12 +436,14 @@ REQUIRED: Dict[str, Set[str]] = {
     "decode": {"rate"},
     "convert": set(),
     "info": set(),
+    "find": {"rate", "center"},  # T10: Find Signals in Recording
 }
 _ACTION_TEXT = {
     "play": "&Play",
     "decode": "&Decode",
     "convert": "&Convert",
     "info": "&Show Info",
+    "find": "&Find Signals",
 }
 
 

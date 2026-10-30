@@ -1287,6 +1287,21 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         """The plot area in canvas coordinates (excludes the axis margins)."""
         return self._plot_rect()
 
+    def add_context_action(self, text: str, callback: Any, tip: str = "") -> None:
+        """Add an item to the right-click menu, after Copy Frequency:
+        ``callback`` gets the frequency (Hz) right-clicked. (T10)"""
+        actions = self.__dict__.setdefault("_context_actions", [])
+        actions.append((str(text), callback, str(tip)))
+
+    def add_context_actions(self, menu: "QMenu", freq: float) -> None:
+        """Put the added right-click items in ``menu`` for ``freq``."""
+        for text, callback, tip in self.__dict__.get("_context_actions", []):
+            action = menu.addAction(text)
+            if tip:
+                action.setToolTip(tip)
+                action.setStatusTip(tip)
+            action.triggered.connect(lambda _c=False, cb=callback, f=freq: cb(float(f)))
+
     def add_highlight(
         self,
         time_start: int,
@@ -1870,6 +1885,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             copy.triggered.connect(
                 lambda: self._copy_text(format_mhz(freq, max(decimals, 6)))
             )
+            self.add_context_actions(menu, float(freq))  # (T10)
             menu.addSeparator()
         if self._measure is not None:
             stats = self._measure_stats()

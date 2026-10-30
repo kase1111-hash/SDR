@@ -1074,6 +1074,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._update_reset_button()
         self._canvas.update()
         if changed:
+            self._refit_range()
             self.display_settings_changed.emit()
 
     def _on_reset_peak_clicked(self) -> None:
@@ -1170,7 +1171,14 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         """Reset peak hold (and min hold: they start over together)."""
         self._peak_hold = np.full(self._fft_size, _PEAK_FLOOR_DB)
         self._min_hold = np.full(self._fft_size, np.nan)
+        self._refit_range()
         self._canvas.update()
+
+    def _refit_range(self) -> None:
+        """Range Auto: fit the traces drawn at once (the holds were reset,
+        shown or hidden) instead of easing toward them."""
+        if self._auto_range and self._has_data:
+            self._observe_range(self._main_trace(), force=True)
 
     def reset_average(self):
         """Reset averaging."""
@@ -1360,6 +1368,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             return
         self._show_min = enabled
         self._update_reset_button()
+        self._refit_range()
         self._canvas.update()
         self.display_settings_changed.emit()
 
@@ -1672,6 +1681,18 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         # spike doesn't make the range jump.)
         noise = float(np.partition(finite, n // 2)[n // 2])
         peak = float(finite.max())
+        # The holds drawn count too: a burst caught by Peak hold stays below
+        # the top (where its level can be read), Min hold above the floor.
+        if self._show_peak:
+            held = self._peak_hold[self._peak_hold > _PEAK_FLOOR_DB]
+            if held.size:
+                peak = max(peak, float(held.max()))
+        if self._show_min:
+            low = self._min_hold[np.isfinite(self._min_hold)]
+            if low.size >= 16:
+                noise = min(
+                    noise, float(np.partition(low, low.size // 2)[low.size // 2])
+                )
         if self._range_noise is None or force:
             self._range_noise = noise
         else:

@@ -711,5 +711,82 @@ class TestPlaybackSpeedTimesRows(_WindowTestCase):
         self.assertAlmostEqual(self.measure_burst(), 1.0, delta=0.15)
 
 
+class TestAutoRangeFramesTheHolds(unittest.TestCase):
+    """PLOT-6: Range Auto frames the traces drawn: a burst caught by Peak
+    hold stays below the top (it was drawn off the plot a second later),
+    and the Min hold trace above the floor."""
+
+    RATE, N, BLOCK = 2.4e6, 2048, 80_000
+
+    def setUp(self):
+        require_pyqt6(self)
+        self.sp = swm.SpectrumWidget()
+        self.addCleanup(self.sp.deleteLater)
+        self.sp.set_frequency_range(CENTER, self.RATE)
+        self.sp.resize(1000, 360)
+        self.sp.show()
+        _settle()
+        self.sp.set_auto_range(True)
+        self.analyzer = FrameSpectrumAnalyzer(self.N)
+        self.rng = np.random.default_rng(0)
+
+    def frame(self, burst=False, size=None):
+        n = self.BLOCK
+        x = (self.rng.normal(size=n) + 1j * self.rng.normal(size=n)) * 3e-4
+        t = np.arange(n) / self.RATE
+        x = x + 3e-3 * np.exp(2j * np.pi * -400e3 * t)  # a steady -50 dBFS
+        if burst:
+            x = x + 0.056 * np.exp(2j * np.pi * 300e3 * t)  # -25 dBFS
+        frame = self.analyzer.process(x.astype(np.complex64))
+        self.sp.update_spectrum(frame.mean_db)
+
+    def test_a_held_burst_stays_below_the_top(self):
+        sp = self.sp
+        sp.set_peak_hold(True)
+        for _ in range(60):
+            self.frame()
+        self.frame(burst=True)
+        held = float(np.nanmax(sp._peak_hold))
+        self.assertGreater(held, -30.0)
+        for _ in range(150):  # five seconds
+            self.frame()
+            self.assertGreaterEqual(sp.db_range()[1], held)
+        # Reset (or Peak hold off) lets the top come down at once.
+        sp.reset_peak()
+        self.assertLess(sp.db_range()[1], held)
+        self.frame(burst=True)
+        self.assertGreaterEqual(sp.db_range()[1], float(np.nanmax(sp._peak_hold)))
+        self.frame()  # (the live trace without the burst)
+        sp.set_peak_hold(False)
+        self.assertLess(sp.db_range()[1], held)
+
+    def test_turning_peak_hold_on_shows_what_it_held(self):
+        sp = self.sp
+        sp.set_peak_hold(False)
+        for _ in range(30):
+            self.frame()
+        self.frame(burst=True)
+        for _ in range(90):
+            self.frame()
+        self.assertLess(sp.db_range()[1], -30.0)  # only live signals framed
+        sp.set_peak_hold(True)
+        self.assertGreaterEqual(sp.db_range()[1], float(np.nanmax(sp._peak_hold)))
+
+    def test_the_min_hold_trace_stays_above_the_floor(self):
+        # One FFT a frame (as a 32768-point FFT gets): a bin's minimum over
+        # many frames sits far below the noise floor's median.
+        sp = self.sp
+        self.analyzer = FrameSpectrumAnalyzer(32768)
+        sp.set_fft_size(32768)
+        self.BLOCK = 32768
+        sp.set_min_hold(True)
+        for _ in range(200):
+            self.frame()
+        low = sp._min_hold
+        self.assertTrue(np.isfinite(low).all())
+        floor = sp.db_range()[0]
+        self.assertLessEqual(floor, float(np.median(low)))
+
+
 if __name__ == "__main__":
     unittest.main()

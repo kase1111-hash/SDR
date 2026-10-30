@@ -287,6 +287,23 @@ class TestRecordingGapsAreReported(_HardwareCase):
         self.win._toggle_recording(False)
         self.assertNotIn("lost", self.win._take_summary()[0])
 
+    def test_a_take_stopped_by_a_full_disk_keeps_that_message(self):
+        self.win._toggle_recording(True)
+        self.run_frames(3)
+        self.dev._dropped_samples += 2 * TRANSFER
+        # The disk fills up in the same frame as the drops.
+        with mock.patch.object(
+            self.win, "_check_recording_space", side_effect=self._disk_full
+        ):
+            self.run_frames(1)
+        self.assertFalse(self.win._recording)
+        self.assertIn("disk space", self.win._message_label.text())
+        self.assertIn("13 ms lost", self.win._take_summary()[0])
+
+    def _disk_full(self):
+        self.win._stop_recording_with_warning("only 90 MB of disk space is left")
+        return False
+
 
 class TestDriversCountDrops(unittest.TestCase):
     def test_base_class_reports_no_drops(self):

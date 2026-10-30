@@ -5908,7 +5908,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if lost:
                 text += f" · {_span_text(lost)} lost"
                 tip += (
-                    f"\n{_span_text(lost)} of signal were lost while recording "
+                    f"\n{_span_text(lost)} of signal was lost while recording "
                     "(this computer or its disk couldn't keep up): the file has "
                     "gaps there."
                 )
@@ -6266,11 +6266,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         known, total = self._take_lost
         first = known is not store
         self._take_lost = (store, (0 if first else total) + lost)
-        if first:
+        # (A take that just stopped, e.g. on a full disk, keeps that message.)
+        if first and self._recording:
             rate = self._device_sample_rate()
             lost_s = self._take_lost[1] / max(rate, 1.0)
             message = (
-                f"The recording has gaps: {_span_text(lost_s)} of signal were "
+                f"The recording has gaps: {_span_text(lost_s)} of signal was "
                 "lost because this computer (or its disk) couldn't keep up "
                 f"with {format_rate(rate)}. A lower sample rate (Receiver > "
                 "Sample rate) helps."

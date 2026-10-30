@@ -28,6 +28,7 @@ if HAS_PYQT6:
     from PyQt6.QtWidgets import QApplication
 
 from sdr_module.devices.base import DeviceInfo  # noqa: E402
+from sdr_module.devices.hackrf import HackRFDevice  # noqa: E402
 from sdr_module.devices.rtlsdr import RTLSDRDevice  # noqa: E402
 
 RATE = 2.4e6
@@ -212,6 +213,71 @@ class FakeRtl(RTLSDRDevice):
         if not self._state.is_streaming:
             return None
         return noise_only(2048, seed=len(self.frequencies))
+
+
+class FakeHackRF(HackRFDevice):
+    """One HackRF One, no USB; records its baseband filter widths."""
+
+    open_now = False
+
+    @staticmethod
+    def list_devices():
+        return [
+            DeviceInfo(
+                name="HackRF One",
+                serial="0000000000fake77",
+                manufacturer="test",
+                product="HackRF One",
+                index=0,
+            )
+        ]
+
+    def __init__(self):
+        super().__init__()
+        self.filters = []
+
+    def open(self, index=0):
+        if FakeHackRF.open_now:
+            return False
+        FakeHackRF.open_now = True
+        self._info = self.list_devices()[0]
+        self._is_open = True
+        self._state.sample_rate = 10e6
+        self._state.frequency = 100e6
+        return True
+
+    def close(self):
+        FakeHackRF.open_now = False
+        self._is_open = False
+
+    def set_frequency(self, freq_hz):
+        self._state.frequency = float(freq_hz)
+        return True
+
+    def set_sample_rate(self, rate_hz):
+        self._state.sample_rate = float(rate_hz)
+        return True
+
+    def set_bandwidth(self, bw_hz):
+        self.filters.append(float(bw_hz))
+        return True
+
+    def set_gain(self, gain_db):
+        return True
+
+    def set_gain_mode(self, auto):
+        return not auto  # (no automatic gain)
+
+    def start_rx(self, callback=None):
+        self._state.is_streaming = True
+        return True
+
+    def stop_rx(self):
+        self._state.is_streaming = False
+        return True
+
+    def read_samples(self, num_samples, timeout=1.0):
+        return noise_only(2048) if self._state.is_streaming else None
 
 
 # ---------------------------------------------------------------------------
@@ -736,6 +802,28 @@ class TestSampleRate(_SecondCase):
         ]
         self.assertEqual(rates, list(SAMPLE_RATES["rtlsdr"]))
         self.assertEqual(again._rate_combo.currentData(), 1.8e6)
+
+    def test_a_hackrf_gets_its_baseband_filter_for_the_rate(self):
+        """As in the main window: 0.75x the sample rate (the whole span
+        without what would alias into it)."""
+        rx = self.rx
+        FakeHackRF.open_now = False
+        self.win._hardware_classes = [FakeHackRF]
+        rx._refresh_sources()
+        rx._source_combo.setCurrentIndex(1)
+        rx._on_source_activated(1)
+        self.assertEqual(self.rates()[-1], 20e6)
+        self.choose(8e6)
+        self.assertTrue(rx.start())
+        self.assertEqual(rx.device.state.sample_rate, 8e6)
+        self.assertEqual(rx.device.filters[-1], 6e6)
+        self.choose(20e6)
+        self.assertEqual(rx.device.filters[-1], 15e6)
+        # No automatic gain on a HackRF: Auto says so and turns itself off.
+        rx._gain_auto.setChecked(True)
+        self.assertFalse(rx._gain_auto.isChecked())
+        self.assertIn("has no automatic gain", rx.message())
+        rx.stop()
 
     def test_refused_while_recording(self):
         rx = self.rx

@@ -1343,7 +1343,11 @@ if HAS_PYQT6:
                 )
                 return
             # A new span: the filters, the noise floor and the pacing start
-            # afresh; a narrower span may no longer hold the channel.
+            # afresh (the audio fading out first); a narrower span may no
+            # longer hold the channel.
+            self._apply_baseband_filter()
+            if self._audio_open:
+                self._audio.write(self._dsp.release())
             self._dsp.reset()
             self._pacer.reset()
             self._rx_history.clear()
@@ -1355,6 +1359,20 @@ if HAS_PYQT6:
                 None,
                 3000,
             )
+
+        def _apply_baseband_filter(self) -> None:
+            """A HackRF's baseband filter follows its sample rate, as in the
+            main window (0.75x the rate: the span without what would alias
+            into it)."""
+            dev = self._device
+            if dev is None or not SDRMainWindow._has_baseband_filter(dev):
+                return
+            width = SDRMainWindow._BASEBAND_FILTER_FRACTION * self._rate()
+            try:
+                if dev.set_bandwidth(width) is False:
+                    logger.warning("Could not set the HackRF baseband filter")
+            except Exception as e:
+                logger.warning(f"Could not set the HackRF baseband filter: {e}")
 
         def _source_index(self, key: str) -> int:
             for index, source in enumerate(self._sources):
@@ -1443,6 +1461,7 @@ if HAS_PYQT6:
                 logger.warning(f"{source.name}: could not set the sample rate: {e}")
             self._device = device
             self._source = source
+            self._apply_baseband_filter()
             self._apply_gain()
             self._apply_tuning_range()
             note = self._sync_device_tuning()

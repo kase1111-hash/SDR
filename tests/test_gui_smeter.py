@@ -306,6 +306,24 @@ class TestPanelStates(_PanelCase):
         QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)
         self.assertEqual(len(self.panel.findChildren(QMenu)), before)
 
+    def test_calibration_is_on_the_right_click_menu(self):
+        """hm:HAM-11 / hm:GAP-01: at the window's minimum size the compact
+        layout hides the Copy / Calibrate row; Copy stayed on the readouts'
+        right-click menu but Calibrate could not be reached."""
+        from PyQt6.QtWidgets import QMenu
+
+        shown = []
+
+        def fake_exec(menu, *args, **kwargs):
+            shown.append([action.text() for action in menu.actions()])
+
+        self.panel.set_compact(True)
+        with mock.patch.object(QMenu, "exec", fake_exec):
+            self.panel._summary_label.customContextMenuRequested.emit(QPoint(2, 2))
+        self.assertIn("Copy Report", shown[0])
+        self.assertIn("Calibrate", shown[0])
+        self.assertIn("calibrate", self.panel._summary_label.toolTip())
+
     def test_no_device_says_what_to_do(self):
         """hm:UX-08."""
         self.panel.set_receiving(False, has_device=False)

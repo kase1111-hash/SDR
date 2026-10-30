@@ -984,7 +984,8 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
         self._summary_label.setToolTip(
-            f"Power, SNR and peak hold. Right-click to copy the report. {peak_tip}"
+            "Power, SNR and peak hold. Right-click to copy the report or "
+            f"calibrate. {peak_tip}"
         )
         self._summary_label.setCursor(Qt.CursorShape.PointingHandCursor)
         self._summary_label.clicked.connect(self.reset_peak)
@@ -1038,8 +1039,11 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
         return menu
 
     def _show_copy_menu(self, widget: "QWidget", pos) -> None:
-        """The readouts' right-click menu (freed after use)."""
+        """The readouts' right-click menu (freed after use): the copy
+        actions and calibration, whose button a short tab hides."""
         menu = self._copy_menu()
+        menu.addSeparator()
+        menu.addMenu(self._cal_menu)
         menu.exec(widget.mapToGlobal(pos))
         menu.deleteLater()
 
@@ -1076,6 +1080,7 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
             "Use Uncalibrated Readings", self.clear_calibration
         )
         menu.aboutToShow.connect(self._sync_cal_menu)
+        menu.setTitle("Calibrate")  # also a submenu of the right-click menu
         button.setMenu(menu)
         self._cal_menu = menu
         return button

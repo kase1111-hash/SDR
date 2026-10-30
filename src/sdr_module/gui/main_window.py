@@ -4488,7 +4488,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # (broadcast stations send none: not looked for unless asked).
             tones = self._tone_squelch
             self._tone_blocked = False
-            if tones.tone_hz or deviation < _BROADCAST_DEVIATION_HZ:
+            if self._tones_checked(deviation):
                 if not tones.process(chain.pre_nr_audio):
                     self._tone_blocked = speaker
                     speaker = False
@@ -4560,9 +4560,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             gate.auto and noise_db is not None,
         )
 
+    def _tones_checked(self, deviation: float) -> bool:
+        """Whether FM audio is searched for a CTCSS tone: with a tone
+        squelch set, or at a narrow deviation (broadcast stations send
+        none, so they aren't searched unless asked)."""
+        return bool(self._tone_squelch.tone_hz) or deviation < _BROADCAST_DEVIATION_HZ
+
     def _show_detected_tone(self) -> None:
         if self._tone_squelch is not None:
-            self._control_panel.set_detected_tone(self._tone_squelch.detected_hz)
+            # (Tones not searched for say so: "None" read as "this
+            # repeater sends no tone".)
+            checked = self._tones_checked(self._control_panel.get_fm_deviation())
+            self._control_panel.set_detected_tone(
+                self._tone_squelch.detected_hz, checked
+            )
 
     def _check_fm_clipping(
         self, chain: "_ReceiverChain", seconds: float, snr_db: Optional[float]

@@ -1407,9 +1407,18 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         index = self._tone_combo.findText(f"{float(freq):.1f}") if freq else -1
         self._tone_combo.setCurrentIndex(max(index, 0))
 
-    def set_detected_tone(self, freq: Optional[float]) -> None:
-        """Show the sub-audible tone heard on the channel (None: none)."""
-        if freq is None:
+    def set_detected_tone(self, freq: Optional[float], checked: bool = True) -> None:
+        """Show the sub-audible tone heard on the channel (None: none;
+        ``checked`` False: tones aren't looked for, at a broadcast FM
+        deviation without a tone squelch)."""
+        if not checked:
+            text = "Not checked"
+            tip = (
+                "Tones aren't looked for at a broadcast FM deviation "
+                "(broadcast stations send none). Choose 5 kHz (narrow voice) "
+                "for a repeater or PMR channel to see the tone it sends."
+            )
+        elif freq is None:
             text = "None"
             tip = (
                 "No sub-audible (CTCSS) tone heard on the channel. Repeaters "
@@ -1422,7 +1431,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         if self._tone_heard.text() != text:
             self._tone_heard.setText(text)
             self._tone_heard.setToolTip(tip)
-            set_tone(self._tone_heard, "muted" if freq is None else "success")
+            heard = checked and freq is not None
+            set_tone(self._tone_heard, "success" if heard else "muted")
 
     def noise_reduction(self) -> str:
         return self._nr_combo.currentText()

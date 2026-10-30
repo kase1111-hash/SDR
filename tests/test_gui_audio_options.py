@@ -227,7 +227,7 @@ class TestDemoRepeaterTone(_WindowTestCase):
     """The demo's 2 m repeater (145.290 MHz) sends a 100.0 Hz CTCSS tone,
     so Tone squelch and Tone heard can be tried without hardware."""
 
-    def _listen(self, tone_hz, seconds=12.0):
+    def _listen(self, tone_hz, seconds=12.0, deviation="5 kHz", bandwidth="25 kHz"):
         from sdr_module.gui.device_dialog import MockDevice
 
         pretend_audio_output(self.win)
@@ -235,7 +235,7 @@ class TestDemoRepeaterTone(_WindowTestCase):
         device.set_frequency(145.29e6)
         device.start_rx()
         self.win.set_frequency(145.29e6)
-        self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        self.win._set_demod_mode("FM", deviation, bandwidth)
         self.win._control_panel.set_tone_squelch_hz(tone_hz)
         heard, written = set(), []
         self.win._audio.write = written.append
@@ -255,6 +255,19 @@ class TestDemoRepeaterTone(_WindowTestCase):
         self.win._reset_demodulator()
         _heard, played = self._listen(100.0)
         self.assertGreater(played, 4.0)
+
+    def test_a_broadcast_deviation_says_tones_are_not_checked(self):
+        # Tones aren't searched for at a broadcast deviation (FM's settings
+        # after the first launch on 100.1 MHz): the readout said "None" on
+        # the repeater while it sent its 100.0 Hz tone.
+        broadcast = {"deviation": "75 kHz", "bandwidth": "200 kHz"}
+        heard, _played = self._listen(0.0, seconds=4.0, **broadcast)
+        self.assertEqual(heard, {"Not checked"})
+        self.assertIn("5 kHz", self.win._control_panel._tone_heard.toolTip())
+        # With a tone squelch set they are searched for.
+        self.win._reset_demodulator()
+        heard, _played = self._listen(100.0, seconds=4.0, **broadcast)
+        self.assertIn("100.0 Hz (1Z)", heard)
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")

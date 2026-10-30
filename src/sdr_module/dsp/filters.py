@@ -1133,9 +1133,8 @@ class AGC:
         return np.abs(sample)
 
     def _detect_level_log(self, sample: complex) -> float:
-        """Log-domain detection: the level is tracked in dB (attack and
-        decay act on decibels, so a 40 dB swing takes as long as a 10 dB
-        one) and returned as a linear amplitude.
+        """Log-domain detection: the level is smoothed in dB (with the
+        attack and decay coefficients) and returned as a linear amplitude.
 
         (It used to keep the previous level, initially 0, for any sample
         below the 0 dB reference, i.e. every sample of a normal signal,

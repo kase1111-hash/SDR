@@ -56,7 +56,13 @@ from ..core.frequency_manager import (
 )
 from ..dsp.filters import CTCSS_FREQUENCIES, ctcss_label
 from ..utils.tooltips import get_short_tip
-from .audio_chain import AGC_SPEED_LABELS, DEFAULT_AGC_SPEED, NOISE_REDUCTION_LEVELS
+from .audio_chain import (
+    AGC_SPEED_LABELS,
+    CW_PITCH_RANGE,
+    DEFAULT_AGC_SPEED,
+    DEFAULT_CW_PITCH_HZ,
+    NOISE_REDUCTION_LEVELS,
+)
 from .settings_store import DEFAULT_FREQUENCY_HZ
 from .themes import set_role, set_tone
 
@@ -176,7 +182,7 @@ FM_DEVIATIONS: Tuple[Tuple[str, str, str], ...] = (
     (
         "2.5 kHz",
         "2.5 kHz (narrow, 12.5 kHz channels)",
-        "Narrow FM on 12.5 kHz channels: PMR446, business and public-service " "radio",
+        "Narrow FM on 12.5 kHz channels: PMR446, business and public radio",
     ),
     (
         "5 kHz",
@@ -196,10 +202,6 @@ DEFAULT_FM_DEVIATION = "25 kHz"
 
 # Squelch threshold range (dBFS) of the slider and the toolbar meter.
 SQUELCH_RANGE = (-120, 0)
-
-# CW beat note (Hz).
-CW_PITCH_RANGE = (400, 1000)
-DEFAULT_CW_PITCH = 700
 
 # Named like File > Save Recording's filters, which preselect the choice.
 RECORDING_FORMATS = (
@@ -875,7 +877,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._cw_pitch_spin = QSpinBox()
         self._cw_pitch_spin.setRange(*CW_PITCH_RANGE)
         self._cw_pitch_spin.setSingleStep(10)
-        self._cw_pitch_spin.setValue(DEFAULT_CW_PITCH)
+        self._cw_pitch_spin.setValue(DEFAULT_CW_PITCH_HZ)
         self._cw_pitch_spin.setSuffix(" Hz")
         self._cw_pitch_spin.setToolTip(
             "Pitch of the CW tone you hear: the carrier comes out at this "
@@ -883,7 +885,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         )
         self._cw_pitch_spin.setAccessibleName("CW pitch")
         self._cw_pitch_spin.valueChanged.connect(self.cw_pitch_changed)
-        self._cw_pitch_label = self._add_row(form, "CW pitch:", self._cw_pitch_spin)
+        self._add_row(form, "CW pitch:", self._cw_pitch_spin)
         self._demod_form = form
 
         # Squelch: the row's label is its on/off switch; Auto follows the
@@ -1261,7 +1263,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             )
         else:
             self._audio_agc_combo.setToolTip(
-                "Only used in AM, USB, LSB and CW (FM audio has a steady " "level)."
+                "Only used in AM, USB, LSB and CW (FM audio is steady)."
             )
         is_fm = mode == "FM"
         self._tone_combo.setEnabled(is_fm)
@@ -1275,8 +1277,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         )
         audible = not mode.startswith("None")
         self._nr_combo.setEnabled(audible)
-        for widget in (self._squelch_check,):
-            widget.setEnabled(audible)
+        self._squelch_check.setEnabled(audible)
         self._update_squelch_controls()
         self._update_bandwidth_tip()
 

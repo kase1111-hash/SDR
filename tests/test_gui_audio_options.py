@@ -203,3 +203,55 @@ class TestAudioGroup(_WindowTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestRecordingStaysRaw(_WindowTestCase):
+    def test_recordings_keep_the_raw_samples(self):
+        # The I/Q corrections are for listening and looking; a recording is
+        # "raw I/Q" and keeps the spike.
+        self.win._control_panel.set_iq_options(True, True)
+        captured = []
+        self.win._capture = captured.append
+        self.win._recording = True
+        try:
+            iq = noise(FRAME, -80.0, seed=24) + np.complex64(0.01)
+            self.win._process_block(iq)
+        finally:
+            self.win._recording = False
+        self.assertIs(captured[0], iq)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestDemoRepeaterTone(_WindowTestCase):
+    """The demo's 2 m repeater (145.290 MHz) sends a 100.0 Hz CTCSS tone,
+    so Tone squelch and Tone heard can be tried without hardware."""
+
+    def _listen(self, tone_hz, seconds=12.0):
+        from sdr_module.gui.device_dialog import MockDevice
+
+        pretend_audio_output(self.win)
+        device = MockDevice()
+        device.set_frequency(145.29e6)
+        device.start_rx()
+        self.win.set_frequency(145.29e6)
+        self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        self.win._control_panel.set_tone_squelch_hz(tone_hz)
+        heard, written = set(), []
+        self.win._audio.write = written.append
+        for _ in range(int(seconds / (FRAME / RATE))):
+            self.win._process_block(device.read_samples(FRAME))
+            heard.add(self.win._control_panel._tone_heard.text())
+        return heard, sum(len(a) for a in written) / 48000.0
+
+    def test_the_tone_is_heard_and_gates_the_audio(self):
+        heard, played = self._listen(0.0)
+        self.assertIn("100.0 Hz (1Z)", heard)
+        self.assertGreater(played, 4.0)  # 8 s on in every 12
+        self.win._reset_demodulator()
+        heard, played = self._listen(103.5)  # the neighbouring tone
+        self.assertIn("100.0 Hz (1Z)", heard)
+        self.assertLess(played, 0.05)  # (fade-outs at most)
+        self.win._reset_demodulator()
+        _heard, played = self._listen(100.0)
+        self.assertGreater(played, 4.0)

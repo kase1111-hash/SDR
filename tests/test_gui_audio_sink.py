@@ -198,6 +198,10 @@ class TestJitterBuffer(_SinkCase):
         self.assertFalse(sink.is_open)
         sink.write(self.frame())  # closed: nothing happens
         self.assertEqual(sink.queued_seconds(), 0.0)
+        sink, output, device = self.make(limit=100)
+        sink.write(self.frame())
+        sink.set_muted(True)
+        self.assertFalse(sink._backlog)
 
 
 if __name__ == "__main__":

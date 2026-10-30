@@ -93,6 +93,7 @@ from ..utils.tooltips import get_short_tip
 from .audio_chain import (
     AGC_SPEEDS,
     AM_CARRIER_TIME_S,
+    DEFAULT_CW_PITCH_HZ,
     AudioAgc,
     AudioJoin,
     AudioOptions,
@@ -270,7 +271,6 @@ _SSB_LOW_HZ = 200.0
 _SSB_TRANSITION_HZ = 150.0
 _SSB_WIDTH_RANGE = (300.0, 10e3)
 _CW_WIDTH_RANGE = (50.0, 3e3)
-_CW_PITCH_HZ = 700.0  # default beat note
 _NARROW_MODES = ("USB", "LSB", "CW")
 # DC blocking of the demodulated audio: below the lowest broadcast bass
 # for FM, above the hum of a fading carrier for the other modes.
@@ -296,6 +296,7 @@ _CW_SQUELCH_HANG_S = 0.5
 # full scale for this long (the deviation is set too small), at most this
 # often.
 _CLIP_FRACTION = 0.05
+_CLIP_MIN_SNR_DB = 15.0  # (noise clips whatever the deviation)
 _CLIP_WARN_AFTER_S = 0.5
 _CLIP_WARN_EVERY_S = 30.0
 # Highest audio frequency kept after AM/FM detection (broadcast FM is 15 kHz),
@@ -3334,7 +3335,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     panel.set_filter_memory(memory)
         panel.set_squelch_auto(settings.get_bool("squelch/auto", True))
         panel.set_squelch_enabled(settings.get_bool("squelch/enabled", True))
-        panel.set_cw_pitch(settings.get_int("audio/cw_pitch", 700))
+        panel.set_cw_pitch(settings.get_int("audio/cw_pitch", DEFAULT_CW_PITCH_HZ))
         panel.set_noise_reduction(settings.get_str("audio/noise_reduction", "off"))
         panel.set_audio_agc_speed(settings.get_str("audio/agc_speed", "medium"))
         panel.set_tone_squelch_hz(settings.get_float("audio/tone_squelch", 0.0))
@@ -4195,7 +4196,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _process_block(self, samples: np.ndarray) -> None:
         """Plots, level, audio, recording, S-meter and decoder for one frame."""
-        # Remove DC spike / Balance I/Q (Receiver group), when switched on.
+        # Remove DC spike / Balance I/Q (Receiver group), when switched on;
+        # a recording keeps the raw samples.
+        raw = samples
         samples = self._iq_conditioner.process(samples, self._device_sample_rate())
         # The plots show the newest DISPLAY_BLOCK samples (a fixed FFT size, so
         # the RBW shown in the Info tab holds); everything else gets the block.
@@ -4230,7 +4233,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Record if active (and not paused). The REC badge and the Recording
         # panel's timer are refreshed by the status timer.
         if self._recording and not self._recording_paused:
-            self._capture(samples)
+            self._capture(raw)
 
         if HAS_HAM_RADIO and len(channel):
             try:
@@ -4456,6 +4459,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 chain.reset_demodulator()
                 self._tone_squelch.reset()
                 self._demod_running = False
+                self._clip_s = 0.0
             if self._audio_join.playing:
                 self._audio_join.stop()
             self._show_detected_tone()
@@ -4478,7 +4482,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     speaker = False
             elif tones.detected_hz is not None:
                 tones.reset()
-            self._check_fm_clipping(chain, seconds)
+            snr = None if noise_db is None else level_db - noise_db
+            self._check_fm_clipping(chain, seconds, snr)
         self._show_detected_tone()
         join = self._audio_join
         if speaker:
@@ -4536,10 +4541,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._tone_squelch is not None:
             self._control_panel.set_detected_tone(self._tone_squelch.detected_hz)
 
-    def _check_fm_clipping(self, chain: "_ReceiverChain", seconds: float) -> None:
+    def _check_fm_clipping(
+        self, chain: "_ReceiverChain", seconds: float, snr_db: Optional[float]
+    ) -> None:
         """Warn (now and then) while FM audio clips: the station deviates
-        more than the FM deviation setting, which distorts it."""
-        if chain.last_clip_fraction > _CLIP_FRACTION:
+        more than the FM deviation setting, which distorts it. Only a clear
+        signal counts: noise (a squelch tail, an empty channel with the
+        squelch off) clips whatever the setting."""
+        clear = snr_db is not None and snr_db >= _CLIP_MIN_SNR_DB
+        if clear and chain.last_clip_fraction > _CLIP_FRACTION:
             self._clip_s += seconds
         else:
             self._clip_s = max(0.0, self._clip_s - seconds)
@@ -5410,6 +5420,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._volume_slider.setEnabled(available)
         if not available:
             tip = "Audio output needs the PyQt6 QtMultimedia module."
+        elif on and self._control_panel.get_demod_mode() not in _AUDIBLE_MODES:
+            tip = (
+                "Audio is on, but None (I/Q) mode has no audio: choose AM, FM, "
+                "USB, LSB or CW in Demodulation to hear the tuned signal. "
+                "Click to mute (Radio > Audio Output)."
+            )
         elif on:
             tip = (
                 "Audio is on: the tuned signal plays through your speakers "

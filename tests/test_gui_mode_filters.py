@@ -235,6 +235,21 @@ class TestFmDeviation(_WindowTestCase):
         Frames(self, iq).run()
         self.assertNotIn("clipping", self.win._message_label.text())
 
+    def test_squelch_tails_of_noise_do_not_warn(self):
+        # The noise heard for the hang time after each transmission clips;
+        # it used to add up over a few transmissions into a false warning.
+        pretend_audio_output(self.win)
+        self.win.set_frequency(145.29e6)
+        self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        t = np.arange(20 * FRAME) / RATE
+        voice = fm(0.7 * np.sin(2 * np.pi * 800 * t), 5e3, -45.0)
+        burst = noise(40 * FRAME, -85.0)
+        burst[: 20 * FRAME] += voice
+        self.win._clear_status_message()
+        for _ in range(5):  # five transmissions, each with its tail
+            Frames(self, burst).run()
+        self.assertNotIn("clipping", self.win._message_label.text())
+
     def test_a_matching_deviation_does_not_warn(self):
         pretend_audio_output(self.win)
         self.win.set_frequency(100.1e6)

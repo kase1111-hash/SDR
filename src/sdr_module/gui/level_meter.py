@@ -35,7 +35,7 @@ STATES = {
     "open": ("OPEN", "the squelch is open: the signal plays"),
     "closed": ("SQL", "squelched: quieter than the threshold, so muted"),
     "off": ("OFF", "the squelch is off: everything plays, noise too"),
-    "idle": ("—", "no audio in this mode (None / I/Q) or with audio off"),
+    "idle": ("I/Q", "no audio in None (I/Q) mode: choose AM, FM, USB, LSB or CW"),
     "none": ("—", "not receiving"),
 }
 

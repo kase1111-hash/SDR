@@ -10,10 +10,14 @@ tested without a window and costs little at 30 frames a second:
 * :class:`NoiseFloorTracker`: the noise floor of the spectrum, and from it
   the noise power of a channel of a given width (for the Auto squelch and
   the meter's SNR).
-* :class:`SquelchGate`: open at the threshold, close only after the level
-  stays below it (with hysteresis) for a hang time.
+* :class:`LevelAverager` and :class:`SquelchGate`: the squelch decides on
+  at least ~25 ms of signal, opens at the threshold and closes only after
+  the level stays below it (with hysteresis) for a hang time.
+* :class:`AudioOptions`: the listening options the receiver chain reads
+  every block (CW pitch, AGC speed, noise reduction).
 * :class:`DcBlocker`, :class:`AudioAgc`: a one-pole DC blocker and a peak
-  AGC with selectable speed, for the demodulated audio.
+  AGC with selectable speed, for the demodulated audio;
+  :func:`make_noise_reduction` the Light and Strong noise reduction.
 * :class:`AudioJoin`: short fades so the audio never steps (squelch opening
   or closing, a new receiver chain after a Bandwidth or Mode change).
 * :class:`ToneSquelch`: CTCSS tone squelch on FM audio.
@@ -35,7 +39,7 @@ from ..dsp.filters import (
     NoiseReductionMethod,
     ctcss_label,
 )
-from ..utils.iq import apply_iq_imbalance_correction, estimate_iq_imbalance
+from ..utils.iq import estimate_iq_imbalance
 
 #: Level reported for an empty block (dBFS).
 FLOOR_DB = -150.0
@@ -43,9 +47,12 @@ FLOOR_DB = -150.0
 #: Short fade used on every audio discontinuity (squelch, chain change).
 FADE_S = 0.005
 
-# The mean of an exponential distribution (the power of a noise-only FFT
-# bin) is 1/ln 2 times its median: +1.59 dB.
-_MEDIAN_TO_MEAN_DB = 10.0 * math.log10(1.0 / math.log(2.0))
+# The power of a noise-only FFT bin is exponentially distributed: its mean
+# is 1/ln 2 times its median. Bins above _SIGNAL_CUT times the mean count
+# as signals; the median of those below is _MEDIAN_OF_CUT times the mean.
+_MEDIAN_TO_MEAN = 1.0 / math.log(2.0)
+_SIGNAL_CUT = 3.0
+_MEDIAN_OF_CUT = -math.log(1.0 - 0.5 * (1.0 - math.exp(-_SIGNAL_CUT)))
 # Equivalent noise bandwidth of the spectrum's Hann window, in bins.
 _HANN_ENBW_BINS = 1.5
 
@@ -78,9 +85,12 @@ class NoiseFloorTracker:
     """The noise floor of the spectrum, per bin, and of a channel.
 
     Each spectrum line (dBFS per bin, as the spectrum shows it) gives the
-    median of its central 80 % of bins (the band edges roll off), which a
-    few strong signals barely move; the mean noise power per bin is 1.59 dB
-    above that median. It is smoothed with a time constant of
+    mean noise power per bin from its central 80 % of bins (the band edges
+    roll off): noise-only bins are exponentially distributed, so bins above
+    three times the mean count as signals and are dropped, and the median
+    of the rest, corrected for that cut, is the mean (two rounds from the
+    plain median, which stations filling a third of the span would raise
+    by about 2.5 dB). It is smoothed with a time constant of
     ``smoothing_s`` of signal time, but a change of more than ``jump_db``
     (a gain step, the AGC, another band) is taken at once: otherwise the
     Auto squelch would sit below the new noise for a moment and open.
@@ -116,9 +126,7 @@ class NoiseFloorTracker:
         finite = middle[np.isfinite(middle)]
         if finite.size < 16:
             return self._bin_db
-        k = finite.size // 2
-        median = float(np.partition(finite, k)[k])
-        estimate = median + _MEDIAN_TO_MEAN_DB
+        estimate = _robust_noise_db(finite)
         if (
             self._bin_db is None
             or self._bins != n
@@ -141,6 +149,19 @@ class NoiseFloorTracker:
         bin_hz = _HANN_ENBW_BINS * float(sample_rate) / self._bins
         width = max(float(noise_bandwidth_hz), 1.0)
         return self._bin_db + 10.0 * math.log10(width / bin_hz)
+
+
+def _robust_noise_db(power_db: np.ndarray) -> float:
+    """Mean power (dB) of the noise among spectrum bins, ignoring signals
+    (see :class:`NoiseFloorTracker`)."""
+    linear = 10.0 ** (power_db.astype(np.float64) / 10.0)
+    mean = float(np.median(linear)) * _MEDIAN_TO_MEAN
+    for _ in range(2):
+        kept = linear[linear < _SIGNAL_CUT * mean]
+        if kept.size < 16:
+            break
+        mean = float(np.median(kept)) / _MEDIAN_OF_CUT
+    return 10.0 * math.log10(max(mean, 1e-30))
 
 
 class LevelAverager:
@@ -267,7 +288,10 @@ class DcBlocker:
     def __init__(self, corner_hz: float, rate: float, startup: int = 0):
         self.corner_hz = float(corner_hz)
         self.a = float(math.exp(-2.0 * math.pi * float(corner_hz) / float(rate)))
-        powers = self.a ** np.arange(self._CHUNK, dtype=np.float64)
+        # Chunks short enough that a**-chunk stays far from overflowing.
+        decay = max(-math.log(self.a), 1e-12)
+        self._chunk = max(16, min(self._CHUNK, int(300.0 / decay)))
+        powers = self.a ** np.arange(self._chunk, dtype=np.float64)
         self._powers = powers
         self._inverse = 1.0 / powers
         self.startup = max(0, int(startup))
@@ -296,8 +320,8 @@ class DcBlocker:
             self._x = float(x[0])
         out = np.empty(n, dtype=np.float64)
         prev_x, prev_y, a = self._x, self._y, self.a
-        for start in range(0, n, self._CHUNK):
-            chunk = x[start : start + self._CHUNK]
+        for start in range(0, n, self._chunk):
+            chunk = x[start : start + self._chunk]
             m = chunk.size
             diff = np.empty(m, dtype=np.float64)
             diff[0] = chunk[0] - prev_x
@@ -313,7 +337,8 @@ class DcBlocker:
 #: Audio AGC speeds: the release time constant (seconds) of the peak AGC
 #: (SSB and CW). ``"off"`` is a fixed gain.
 AGC_SPEEDS: Dict[str, float] = {"fast": 0.1, "medium": 0.5, "slow": 2.0}
-#: The same speeds for the AM carrier level (attack and release).
+#: The same speeds for the AM carrier level: how fast it follows a falling
+#: carrier (a rising one is followed at once).
 AM_CARRIER_TIME_S: Dict[str, float] = {"fast": 0.05, "medium": 0.15, "slow": 0.6}
 AGC_SPEED_LABELS: Tuple[Tuple[str, str, str], ...] = (
     ("off", "Off", "No automatic level: loud signals clip, weak ones are quiet"),
@@ -582,6 +607,7 @@ class IqConditioner:
 
     DC_TIME_S = 0.2
     IQ_TIME_S = 2.0
+    IQ_SLICE = 16384
 
     def __init__(self) -> None:
         self.remove_dc = False
@@ -624,7 +650,11 @@ class IqConditioner:
             else:
                 x = x - np.complex64(end)
         if self.balance_iq and n >= 64:
-            gain, phase = estimate_iq_imbalance(x)
+            # The statistics are averaged over seconds: a contiguous slice
+            # of each block is plenty, and keeps this cheap at 20 MS/s.
+            # (Taking every n-th sample instead would alias a strong tone,
+            # possibly to DC, and wreck the estimate.)
+            gain, phase = estimate_iq_imbalance(x[: self.IQ_SLICE])
             gain, phase = float(gain), float(phase)
             if self._gain is None or self._phase is None:
                 self._gain, self._phase = gain, phase
@@ -632,7 +662,19 @@ class IqConditioner:
                 alpha = 1.0 - math.exp(-n / (self.IQ_TIME_S * max(rate, 1.0)))
                 self._gain += alpha * (gain - self._gain)
                 self._phase += alpha * (phase - self._phase)
-            x = apply_iq_imbalance_correction(x, self._gain, self._phase).astype(
-                np.complex64
-            )
+            x = correct_iq(x, self._gain, self._phase)
         return x
+
+
+def correct_iq(samples: np.ndarray, gain: float, phase: float) -> np.ndarray:
+    """:func:`~sdr_module.utils.iq.apply_iq_imbalance_correction` in
+    float32, as two multiply-adds per sample: with ``q' = Q / (1 + gain)``
+    it keeps ``I - q' sin(phase)`` and ``q' cos(phase)``."""
+    x = np.asarray(samples, dtype=np.complex64)
+    scale = 1.0 / (1.0 + float(gain))
+    b = np.float32(math.sin(phase) * scale)
+    c = np.float32(math.cos(phase) * scale)
+    out = np.empty_like(x)
+    out.real = x.real - b * x.imag
+    out.imag = c * x.imag
+    return out

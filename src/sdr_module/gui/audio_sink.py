@@ -138,6 +138,8 @@ class AudioSink:
 
     def set_muted(self, muted: bool) -> None:
         self._muted = bool(muted)
+        if self._muted:
+            self._backlog = bytearray()  # stale by the time it would play
 
     def write(self, samples: np.ndarray) -> None:
         """Push mono float samples in [-1, 1].

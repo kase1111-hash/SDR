@@ -317,6 +317,31 @@ class TestAudioHelpers(unittest.TestCase):
         self.assertEqual(channel_power_db(np.zeros(0, np.complex64)), FLOOR_DB)
         self.assertEqual(channel_power_db(np.zeros(10, np.complex64)), FLOOR_DB)
 
+    def test_noise_floor_ignores_stations_and_follows_gain_steps(self):
+        from sdr_module.gui.audio_chain import NoiseFloorTracker
+
+        rng = np.random.default_rng(8)
+
+        def line(noise_db, stations=0):
+            p = (rng.standard_normal(2048) ** 2 + rng.standard_normal(2048) ** 2) / 2
+            p *= 10 ** (noise_db / 10)
+            p[200 : 200 + stations] *= 1e4  # strong signals over some bins
+            return (10 * np.log10(p)).astype(np.float32)
+
+        tracker = NoiseFloorTracker()
+        for _ in range(10):
+            tracker.update(line(-88.0, stations=600), 0.033)
+        self.assertAlmostEqual(tracker.bin_db, -88.0, delta=0.5)
+        # A 20 dB gain step is taken at once (Auto squelch must not open).
+        tracker.update(line(-68.0), 0.033)
+        self.assertAlmostEqual(tracker.bin_db, -68.0, delta=0.5)
+        # A channel 1.5 x the bin width at 2.4 MS/s / 2048 points holds
+        # 1.5 / 1.5 = 1 bin's worth of noise; 100x wider is +20 dB.
+        bin_hz = 2.4e6 / 2048
+        self.assertAlmostEqual(
+            tracker.channel_noise_db(150 * bin_hz, 2.4e6) - tracker.bin_db, 20.0, 3
+        )
+
     def test_dc_blocker_streams_like_one_block(self):
         from sdr_module.gui.audio_chain import DcBlocker
 
@@ -356,6 +381,29 @@ class TestAudioHelpers(unittest.TestCase):
         self.assertEqual(len(tail), 240)
         self.assertLess(abs(float(tail[-1])), 0.01)
         self.assertFalse(join.playing)
+
+    def test_fast_iq_correction_matches_the_library(self):
+        from sdr_module.gui.audio_chain import correct_iq
+        from sdr_module.utils.iq import apply_iq_imbalance_correction
+
+        rng = np.random.default_rng(6)
+        x = (rng.standard_normal(4096) + 1j * rng.standard_normal(4096)).astype(
+            np.complex64
+        )
+        for gain, phase in ((0.1, 0.07), (-0.2, -0.05), (0.0, 0.0)):
+            np.testing.assert_allclose(
+                correct_iq(x, gain, phase),
+                apply_iq_imbalance_correction(x, gain, phase),
+                atol=1e-5,
+            )
+
+    def test_dc_blocker_chunks_stay_finite_for_high_corners(self):
+        from sdr_module.gui.audio_chain import DcBlocker
+
+        x = np.sin(np.arange(20000) * 0.3).astype(np.float32) + 0.5
+        y = DcBlocker(5000.0, AUDIO_RATE).process(x)
+        self.assertTrue(np.all(np.isfinite(y)))
+        self.assertLess(abs(float(np.mean(y[2000:]))), 0.01)
 
     def test_agc_never_overshoots_a_sudden_burst(self):
         from sdr_module.gui.audio_chain import AudioAgc

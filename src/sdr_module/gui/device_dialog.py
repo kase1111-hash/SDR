@@ -593,6 +593,15 @@ _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ..
     (1090.0e6, "modes", -26.0, None),
 )
 
+# --- T4: a repeater with a CTCSS tone (Audio > Tone squelch, Tone heard) ---
+# A 2 m repeater output sending voice-like narrow FM with a 100.0 Hz (1Z)
+# sub-audible tone, 8 s on in every 12. Appended, so the other stations keep
+# their seeds.
+_DEMO_CTCSS_HZ = 100.0
+_DEMO_CTCSS_DEVIATION_HZ = 600.0  # 12 % of 5 kHz, as repeaters send it
+_DEMO_SIGNALS += ((145.29e6, "rpt", -44.0, (12.0, 8.0)),)
+# --- end T4 ---
+
 # Morse keying for the CW beacon ("VVV DE SDR"): 1 = key down, one dit each.
 _MORSE = {"V": "...-", "D": "-..", "E": ".", "S": "...", "R": ".-."}
 
@@ -886,6 +895,15 @@ def _build_loops(kind: str, variant: Any, rate: float):
         twist = variant * 2.1
         deviation = 2.2e3 * _swept_tone(820.0, 200.0, t, twist)
         deviation += 1.2e3 * _swept_tone(1650.0, -250.0, t, twist)
+        return _Loop(_fm_phase(deviation, loop_rate), factor)
+    if kind == "rpt":
+        # (T4) The same voice-like FM plus a CTCSS tone (whole cycles per
+        # loop, so the loop stays seamless).
+        factor, loop_rate, t = _loop_timebase(rate, _TONE_LOOP_S)
+        twist = variant * 2.1
+        deviation = 2.2e3 * _swept_tone(820.0, 200.0, t, twist)
+        deviation += 1.2e3 * _swept_tone(1650.0, -250.0, t, twist)
+        deviation += _DEMO_CTCSS_DEVIATION_HZ * _tone(_DEMO_CTCSS_HZ, t)
         return _Loop(_fm_phase(deviation, loop_rate), factor)
     if kind == "am":
         factor, loop_rate, t = _loop_timebase(rate, _TONE_LOOP_S)
@@ -1296,7 +1314,8 @@ class MockDevice:
     beacon, Mode S and Mode A/C replies on 1090 MHz and a few weak carriers
     everywhere else) on top of a realistic noise floor. Signals move across
     the display as you tune, so click-to-tune and the frequency scanner
-    behave as they would with real hardware. Raising the gain lifts signals and noise together and, as on a
+    behave as they would with real hardware. A 2 m repeater on 145.290 MHz
+    sends a 100.0 Hz CTCSS tone (Audio > Tone squelch shows it). Raising the gain lifts signals and noise together and, as on a
     real receiver, too much gain clips the ADC. With automatic gain
     (``set_gain_mode(True)``) the device picks the gain itself, keeping the
     signals in the passband clear of clipping.

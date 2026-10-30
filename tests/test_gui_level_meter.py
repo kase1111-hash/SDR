@@ -155,6 +155,20 @@ class TestLevelMeterInTheWindow(_WindowTestCase):
         Frames(self, noise(3 * FRAME, -80.0, seed=14)).run()
         self.assertEqual(self.meter.state(), "idle")  # nothing can play
 
+    def test_iq_mode_says_nothing_plays(self):
+        # UX-U06: in I/Q mode the Audio button promised audio and the level
+        # turned green while nothing could play.
+        from sdr_module.gui.level_meter import STATES
+
+        self.win._set_audio_enabled(True)
+        self.win._set_demod_mode("None (I/Q)")
+        Frames(self, carrier(3 * FRAME, 1e3, -30.0)).run()
+        self.assertEqual(self.meter.state(), "idle")
+        self.assertEqual(STATES["idle"][0], "I/Q")
+        self.assertIn("no audio", self.win._audio_button.toolTip())
+        self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        self.assertNotIn("no audio", self.win._audio_button.toolTip())
+
     def test_dragging_on_the_meter_sets_the_squelch_and_the_slider(self):
         self.win.set_frequency(162.55e6)
         self.win._set_demod_mode("FM", "5 kHz", "25 kHz")

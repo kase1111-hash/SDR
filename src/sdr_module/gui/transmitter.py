@@ -833,7 +833,8 @@ class Transmitter(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         """Why ``job`` can't be sent on ``device`` (None: it can).
 
         The device must be a HackRF One, idle, and able to send at the
-        job's sample rate; the job must have samples; and the frequency
+        job's sample rate; the job must have samples (a source already read
+        must be able to start again: ``reset()``); and the frequency
         manager must allow the job's emission (and each ID's) at its
         center, with the license class set.
         """

@@ -626,5 +626,87 @@ class TestBalanceIqInTheWindow(_WindowTestCase):
         self.assertEqual(len(seen), 3)  # every frame plotted
 
 
+# ---------------------------------------------------------------------------
+# audio-sink-rtl-1msps-dropouts
+# ---------------------------------------------------------------------------
+
+
+class TestAudioSinkFeedsBetweenWrites(unittest.TestCase):
+    RATE = 48000
+
+    def setUp(self):
+        require_pyqt6(self)
+        from sdr_module.gui import audio_sink as audio_sink_module
+        from tests.test_gui_audio_sink import Clock, FakeDevice, FakeOutput
+
+        self.clock = Clock()
+        patcher = mock.patch.object(audio_sink_module.time, "monotonic", self.clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.FakeDevice, self.FakeOutput = FakeDevice, FakeOutput
+
+    def make(self):
+        from sdr_module.gui.audio_sink import AudioSink
+
+        sink = AudioSink()
+        output = self.FakeOutput(int(AudioSink.BUFFER_S * self.RATE) * 2)
+        device = self.FakeDevice(output)
+        sink._sink, sink._io, sink._sample_rate = output, device, self.RATE
+        self.addCleanup(sink.stop)
+        return sink, output
+
+    @staticmethod
+    def idle(sink):
+        """The Qt event loop between display frames: the sink's feed timer
+        (if it runs) gets its turn."""
+        timer = getattr(sink, "_feed_timer", None)
+        if timer is not None and timer.isActive():
+            timer.timeout.emit()
+
+    def play(self, sink, output, chunk_s, chunks):
+        """``chunks`` chunks of ``chunk_s`` written every ``chunk_s``, the
+        sound card playing 10 ms at a time; returns the milliseconds it ran
+        dry once playing (an audible gap)."""
+        dry_ms = 0.0
+        started = False
+        for _ in range(chunks):
+            sink.write(np.full(int(round(chunk_s * self.RATE)), 0.25, np.float32))
+            left = int(round(chunk_s * self.RATE))  # samples until the next
+            while left > 0:
+                step = min(left, int(0.01 * self.RATE))
+                left -= step
+                self.clock.now += step / self.RATE
+                taken = output.play(2 * step)
+                started = started or taken > 0
+                if started:
+                    dry_ms += 1000.0 * (2 * step - taken) / (2 * self.RATE)
+                self.idle(sink)
+        return dry_ms
+
+    def test_a_chunk_longer_than_the_output_buffer_plays_without_gaps(self):
+        sink, output = self.make()
+        # An RTL-SDR at 1.0 MS/s: one 262 ms transfer's audio every 262 ms,
+        # more than the output's 250 ms buffer.
+        dry_ms = self.play(sink, output, 0.262, 40)
+        self.assertLess(dry_ms, 15)  # (the first tick at most)
+        self.assertEqual(sink.overruns, 0)
+
+    def test_display_frames_still_play_as_before(self):
+        sink, output = self.make()
+        self.assertLess(self.play(sink, output, 0.033, 200), 15)
+        self.assertEqual(sink.overruns, 0)
+        self.assertEqual(sink.underruns, 0)
+
+    def test_the_feed_stops_with_the_output(self):
+        sink, output = self.make()
+        sink.write(np.full(int(0.4 * self.RATE), 0.25, np.float32))
+        self.assertTrue(sink._backlog)
+        sink.stop()
+        self.idle(sink)  # nothing left to feed, no error
+        self.assertFalse(sink._backlog)
+        timer = getattr(sink, "_feed_timer", None)
+        self.assertTrue(timer is None or not timer.isActive())
+
+
 if __name__ == "__main__":
     unittest.main()

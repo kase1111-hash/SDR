@@ -15,11 +15,15 @@ user instead of playing into nothing.
 The samples arrive a display frame at a time (about every 33 ms, sometimes
 two at once after a slow frame) while the sound card takes them at its own
 pace, from its own clock. ``write`` therefore keeps a small jitter buffer:
-it only hands the output what ``bytesFree()`` says fits and keeps the rest
-for the next call, starts (and restarts after running dry) with a cushion
-of silence, and drops the oldest audio when too much has piled up (the two
-clocks drift apart, or the window stalled). Underruns and drops are logged
-at debug level.
+it only hands the output what ``bytesFree()`` says fits and keeps the rest,
+starts (and restarts after running dry) with a cushion of silence, and
+drops the oldest audio when too much has piled up (the two clocks drift
+apart, or the window stalled), never the audio just written. What the
+output can't take yet is handed over as it makes room (every ``FEED_MS``),
+not only at the next write: a receiver delivering long chunks (an RTL-SDR
+at 1 MS/s: 262 ms of audio a transfer, more than the output's buffer)
+would otherwise run dry before each one. Underruns and drops are logged at
+debug level.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 try:
-    from PyQt6.QtCore import QIODevice
+    from PyQt6.QtCore import QCoreApplication, QIODevice, QTimer
     from PyQt6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QMediaDevices
 
     HAS_QT_AUDIO = True
@@ -81,7 +85,8 @@ class AudioSink:
 
     #: Audio kept queued (in the output plus not yet accepted by it): the
     #: jitter buffer. Running dry pads it back to TARGET_S with silence;
-    #: more than HIGH_S drops the oldest audio back to TARGET_S.
+    #: more than HIGH_S drops the oldest audio back to TARGET_S (or to the
+    #: audio just written, when that is longer).
     TARGET_S = 0.12
     HIGH_S = 0.35
     #: Size of the output's own buffer, asked for when it opens.
@@ -89,6 +94,9 @@ class AudioSink:
     #: A write within this long of the previous one continues the stream
     #: (running dry then is an underrun, not just the start of a stream).
     CONTINUOUS_S = 0.25
+    #: While audio waits for room in the output, it is handed over this
+    #: often (milliseconds).
+    FEED_MS = 10
 
     def __init__(self) -> None:
         self._sink = None
@@ -97,6 +105,7 @@ class AudioSink:
         self._muted = False
         self._volume = 0.7
         self._backlog = bytearray()  # PCM the output hasn't accepted yet
+        self._feed_timer: Any = None  # hands the backlog over (see _feed)
         self._last_write: Optional[float] = None
         self.underruns = 0  # the output ran dry mid-stream (padded)
         self.overruns = 0  # too much queued (oldest audio dropped)
@@ -218,6 +227,7 @@ class AudioSink:
         self._io = None
         self._sample_rate = 0
         self._backlog = bytearray()
+        self._stop_feed()
         self._last_write = None
 
     def set_volume(self, volume: float) -> None:
@@ -229,6 +239,7 @@ class AudioSink:
         self._muted = bool(muted)
         if self._muted:
             self._backlog = bytearray()  # stale by the time it would play
+            self._stop_feed()
 
     def write(self, samples: np.ndarray) -> None:
         """Push mono float samples in [-1, 1].
@@ -249,7 +260,7 @@ class AudioSink:
         )
         self._last_write = now
         self._backlog += pcm
-        self._pump(continuing)
+        self._pump(continuing, len(pcm))
 
     def _bytes(self, seconds: float) -> int:
         """``seconds`` of audio in bytes (whole samples)."""
@@ -270,9 +281,9 @@ class AudioSink:
     def _queued_bytes(self) -> int:
         return self._in_output() + len(self._backlog)
 
-    def _pump(self, continuing: bool) -> None:
+    def _pump(self, continuing: bool, chunk: int = 0) -> None:
         """Keep the jitter buffer near its target and hand the output what
-        fits."""
+        fits (``chunk``: the bytes just written)."""
         sink, io = self._sink, self._io
         if sink is None or io is None:
             return
@@ -291,8 +302,10 @@ class AudioSink:
                 )
         elif queued > self._bytes(self.HIGH_S):
             # Too much queued (the clocks drift, or a stall delivered a
-            # burst): drop the oldest audio not yet handed over.
-            drop = min(len(self._backlog), queued - target)
+            # burst): drop the oldest audio not yet handed over. (A chunk
+            # longer than the target is kept whole: it has to last until
+            # the next one.)
+            drop = min(len(self._backlog), queued - max(target, chunk))
             drop -= drop % 2
             if drop > 0:
                 del self._backlog[:drop]
@@ -302,25 +315,56 @@ class AudioSink:
                     "clocks drift, or the window stalled)",
                     1000.0 * drop / (2.0 * self._sample_rate),
                 )
+        self._feed()
+
+    def _feed(self) -> None:
+        """Hand the output what fits of the backlog. What doesn't is handed
+        over as the output makes room: the feed timer looks again every
+        ``FEED_MS`` while some is left."""
+        sink, io = self._sink, self._io
+        if sink is None or io is None or not self._backlog:
+            self._stop_feed()
+            return
         try:
             free = int(sink.bytesFree())
         except Exception:  # pragma: no cover - backend-dependent
             free = len(self._backlog)
         count = min(free, len(self._backlog))
         count -= count % 2
-        if count <= 0:
-            return
-        try:
-            result = io.write(bytes(self._backlog[:count]))
-        except Exception as e:  # pragma: no cover
-            logger.debug(f"Audio write failed: {e}")
-            return
-        try:
-            written = int(result)
-        except (TypeError, ValueError):
-            written = count  # no count reported: assume it took them all
-        if written < 0:
-            logger.debug("Audio write failed (the output refused the samples)")
-            return
-        written = min(written, count)
-        del self._backlog[: written - written % 2]
+        if count > 0:
+            try:
+                result = io.write(bytes(self._backlog[:count]))
+            except Exception as e:  # pragma: no cover
+                logger.debug(f"Audio write failed: {e}")
+                self._stop_feed()  # (the next write tries again)
+                return
+            try:
+                written = int(result)
+            except (TypeError, ValueError):
+                written = count  # no count reported: assume it took them all
+            if written < 0:
+                logger.debug("Audio write failed (the output refused the samples)")
+                self._stop_feed()
+                return
+            written = min(written, count)
+            del self._backlog[: written - written % 2]
+        if self._backlog:
+            self._start_feed()
+        else:
+            self._stop_feed()
+
+    def _start_feed(self) -> None:
+        timer = self._feed_timer
+        if timer is None:
+            if not HAS_QT_AUDIO or QCoreApplication.instance() is None:
+                return  # (no event loop: the next write hands it over)
+            timer = self._feed_timer = QTimer()
+            timer.setInterval(self.FEED_MS)
+            timer.timeout.connect(self._feed)
+        if not timer.isActive():
+            timer.start()
+
+    def _stop_feed(self) -> None:
+        timer = self._feed_timer
+        if timer is not None and timer.isActive():
+            timer.stop()

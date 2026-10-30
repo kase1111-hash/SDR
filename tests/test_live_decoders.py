@@ -221,7 +221,7 @@ def test_ads_b_in_gui_sized_blocks_away_from_the_lo():
     assert decoder.status.valid == 5
 
 
-@pytest.mark.parametrize("rate", [2.4e6, 2.56e6, 8e6, 20e6])
+@pytest.mark.parametrize("rate", [2.2e6, 2.4e6, 2.56e6, 8e6, 20e6])
 def test_ads_b_replies_decode_wherever_they_start(rate):
     # DEC-06: the magnitude was read in 0.5 us slots on one fixed grid, so
     # a reply starting between two slot edges spread every pulse over two

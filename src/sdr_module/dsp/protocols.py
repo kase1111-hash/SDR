@@ -2191,8 +2191,8 @@ class ADSBDecoder(ProtocolDecoder):
 
     Features:
     - Mode S preamble detection (dump1090's pulse/quiet test) on the
-      magnitude signal in 0.5 us slots. Above about 2.3 MS/s the slots are
-      read at 4 or 5 phases (every 0.1-0.125 us), so a reply decodes
+      magnitude signal in 0.5 us slots. Except at exactly 2 MS/s the slots
+      are read at 4 or 5 phases (every 0.1-0.125 us), so a reply decodes
       wherever it starts between two samples; the best-aligned phase of
       each reply is demodulated
     - Frames that straddle two ``decode()`` calls are still found
@@ -2253,9 +2253,6 @@ class ADSBDecoder(ProtocolDecoder):
 
     # The decoder works on 0.5 us slots: 2 per bit, 16 per preamble.
     WORK_RATE = 2e6
-    # Below this many samples per slot the slots are the samples (2 MS/s,
-    # 2.048 MS/s): there is nothing between them to read other phases at.
-    _PHASED_FROM = 1.15
     # How long an aircraft address stays "known" for address/parity replies.
     ICAO_TIMEOUT_S = 60.0
 
@@ -2336,11 +2333,12 @@ class ADSBDecoder(ProtocolDecoder):
         the area under the input across it). A reply starts anywhere
         between two slot edges, and one that starts half a slot off the
         grid splits every pulse over two slots, so its bits can't be told
-        apart. Above about 2.3 MS/s the slots are therefore read at
-        ``_phases`` offsets per slot (every 0.125 us, or 0.1 us when 5
-        divides the samples per slot): slot values ``_phases`` times a slot
-        apart are the slots of one phase, and each reply is demodulated at
-        the phase that fits it best.
+        apart. The slots are therefore read at ``_phases`` offsets per slot
+        (every 0.125 us, or 0.1 us when 5 divides the samples per slot):
+        slot values ``_phases`` times a slot apart are the slots of one
+        phase, and each reply is demodulated at the phase that fits it
+        best. At exactly 2 MS/s the samples are the slots and the values
+        between them would be mixtures of two samples: one phase.
 
         The offsets repeat every ``_period`` input samples (``_points``
         slot values per period), so each value is a fixed weighting of a
@@ -2349,7 +2347,7 @@ class ADSBDecoder(ProtocolDecoder):
         """
         ratio = self._ratio
         phases = 1
-        if ratio >= self._PHASED_FROM:
+        if abs(ratio - 1.0) > 1e-9:
             whole = round(ratio)
             phases = 5 if abs(ratio - whole) < 1e-9 and whole % 5 == 0 else 4
         self._phases = phases
@@ -2404,7 +2402,7 @@ class ADSBDecoder(ProtocolDecoder):
             for q in range(1, self._phases):
                 out += sums[q : q + count]
             return out / np.float32(period * self._phases)
-        if self._matrix.size <= 4096:
+        if self._matrix.size <= 8192:
             # Each period's samples (overlapping windows) times the weights.
             windows = np.lib.stride_tricks.as_strided(
                 mag,

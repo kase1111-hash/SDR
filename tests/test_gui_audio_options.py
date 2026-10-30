@@ -151,6 +151,29 @@ class TestAudioGroup(_WindowTestCase):
         frames = Frames(self, iq[:n]).run()
         self.assertTrue(all(len(a) for a in frames.audio[-30:]))
 
+    def test_a_new_channel_must_send_the_tone_itself(self):
+        # The tone detector kept the old channel's last second: tuned from
+        # a repeater with the tone to a channel without it, the tone
+        # squelch played the new channel for 0.9 s and Tone heard showed
+        # the old channel's tone.
+        self.win.set_frequency(146.94e6)
+        self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        self.panel.set_squelch_db(-90)
+        self.panel.set_tone_squelch_hz(100.0)
+        with_tone = fm(_voice(3.0, tone_hz=100.0), 5e3, -50.0)
+        with_tone = with_tone + noise(len(with_tone), -95.0)
+        n = len(with_tone) - len(with_tone) % FRAME
+        self.assertTrue(len(Frames(self, with_tone[:n]).run().audio[-1]))
+        self.win.set_frequency(146.52e6)
+        without = fm(_voice(1.0, seed=5), 5e3, -50.0)
+        without = without + noise(len(without), -95.0, seed=6)
+        n = len(without) - len(without) % FRAME
+        frames = Frames(self, without[:n]).run(1)
+        self.assertEqual(self.panel._tone_heard.text(), "None")
+        frames.run()
+        self.assertLessEqual(len(frames.audio[0]), 240)  # (a fade-out)
+        self.assertFalse(any(len(a) for a in frames.audio[1:]))
+
     def test_remove_dc_spike(self):
         # G-06: a DC spike at the center played as a constant CW tone.
         self.win.set_frequency(7.03e6)

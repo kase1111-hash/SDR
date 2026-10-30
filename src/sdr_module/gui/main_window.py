@@ -1702,6 +1702,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._tone_blocked = False  # the tone squelch is muting a signal
         self._demod_running = False
         self._tone_squelch = ToneSquelch(_AUDIO_RATE)
+        self._tone_channel: Optional[float] = None  # where the tone was heard
         self._iq_conditioner = IqConditioner()
         self._clip_s = 0.0
         self._clip_warn_due = 0.0
@@ -4487,6 +4488,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # CTCSS: what tone the station sends, and the tone squelch
             # (broadcast stations send none: not looked for unless asked).
             tones = self._tone_squelch
+            tuned = self._current_frequency()
+            if tuned != self._tone_channel:
+                # Another channel: its tone (if any) must be heard anew.
+                # The last second of the old channel's audio kept a tone
+                # squelch open on a channel without the tone for 0.9 s.
+                self._tone_channel = tuned
+                tones.reset()
             self._tone_blocked = False
             if self._tones_checked(deviation):
                 if not tones.process(chain.pre_nr_audio):

@@ -506,14 +506,18 @@ class TestDecoderPanelFixes(unittest.TestCase):
         )
         self.assertTrue(p._table.viewport().rect().contains(button.geometry()))
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
-        self.assertEqual(tuned, [(1090e6, "ADS-B (1090.000 MHz)", "", "")])
+        # ADS-B selects I/Q: no audio from the pulse bursts (UX-B11).
+        self.assertEqual(tuned, [(1090e6, "ADS-B (1090.000 MHz)", "None (I/Q)", "")])
         p._proto_combo.setCurrentText("AX.25/APRS")
         p._empty.button.click()
         self.assertEqual(tuned[-1][0], 144.39e6)
         self.assertEqual(tuned[-1][2:], ("FM", "5 kHz"))
-        # Pagers use many channels, so there is no single one to offer.
+        # Pagers use many channels; a common one (the demo's) is offered,
+        # in narrowband FM.
         p._proto_combo.setCurrentText("POCSAG")
-        self.assertEqual(p._empty.action_text(), "")
+        self.assertEqual(p._empty.action_text(), "Tune to 152.240 MHz")
+        p._empty.button.click()
+        self.assertEqual(tuned[-1], (152.24e6, "POCSAG (152.240 MHz)", "FM", "5 kHz"))
 
     def test_hint_follows_the_receiver(self):
         self.connect_tuning()

@@ -11,6 +11,7 @@ Supports:
 """
 
 import logging
+import math
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -87,6 +88,211 @@ class ProtocolDecoder(ABC):
 
 
 # ============================================================================
+# Shared helpers: bit timing recovery and the BCH(31,21) code
+# ============================================================================
+
+
+def _as_real(samples: Any) -> np.ndarray:
+    """``samples`` as a flat, finite float64 array (complex input: its real
+    part; NaN and infinities become 0)."""
+    x = np.asarray(samples)
+    if np.iscomplexobj(x):
+        x = x.real
+    with np.errstate(invalid="ignore", over="ignore"):
+        x = x.astype(np.float64, copy=False).ravel()
+    if x.size and not np.all(np.isfinite(x)):
+        x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    return x
+
+
+class BitSlicer:
+    """Streaming symbol timing recovery for a two-level (NRZ) baseband.
+
+    Turns a demodulated baseband (positive = 1, negative = 0) at any sample
+    rate into bits at ``baud``, keeping everything between calls: the
+    fractional position of the next bit, the filter history and the last
+    sample. A stream split into blocks of any size therefore gives exactly
+    the bits of the whole stream.
+
+    - Matched filter: with ``integrate`` (the default) each bit is averaged
+      over one bit period (integrate-and-dump), which is what makes a noisy
+      FM discriminator output usable. Leave it off for a baseband that is
+      already integrated over a bit (e.g. a tone detector's output).
+    - Clock recovery: a digital PLL. Before each decision, the zero
+      crossing of the filtered signal (a data transition) nearest to the
+      time one was expected, half a bit earlier, is compared with that
+      time and the decision is moved by ``gain`` times the difference.
+      Only one crossing counts per bit, so the extra crossings noise adds
+      cannot drag the clock along; long runs without transitions keep the
+      last timing.
+    """
+
+    def __init__(
+        self,
+        sample_rate: float,
+        baud: float,
+        integrate: bool = True,
+        gain: float = 0.2,
+    ):
+        if not sample_rate > 0 or not baud > 0:
+            raise ValueError("sample_rate and baud must be positive")
+        self.sample_rate = float(sample_rate)
+        self.baud = float(baud)
+        self.sps = self.sample_rate / self.baud
+        self._length = max(1, int(round(self.sps))) if integrate else 1
+        self._gain = float(gain)
+        self.reset()
+
+    def reset(self) -> None:
+        """Forget the stream."""
+        self._history = np.zeros(self._length - 1, dtype=np.float64)
+        # The filtered signal's last samples: a decision can fall between
+        # blocks, or a little before a block after a timing correction.
+        self._tail = np.zeros(int(math.ceil(self._gain * self.sps / 2.0)) + 2)
+        # Position of the next decision, relative to the next block's start,
+        # whether it was already adjusted (the decision itself waits for the
+        # samples around it) and crossings not used yet (same reference).
+        self._t = self.sps - 1.0
+        self._adjusted = False
+        self._carried: List[float] = []
+
+    def process(self, samples: Any) -> List[int]:
+        """Bits (0/1) decided in ``samples``."""
+        x = _as_real(samples)
+        n = len(x)
+        if n == 0:
+            return []
+        length = self._length
+        if length > 1:
+            buf = np.concatenate((self._history, x))
+            self._history = buf[len(buf) - (length - 1) :].copy()
+            sums = np.concatenate(([0.0], np.cumsum(buf)))
+            y = sums[length:] - sums[:-length]  # sum over one bit (scale-free)
+        else:
+            y = x
+        # The filtered signal with the previous block's tail in front:
+        # y[j] is yy[j + offset].
+        offset = len(self._tail)
+        yy = np.concatenate((self._tail, y))
+        self._tail = yy[len(yy) - offset :].copy()
+        # Zero crossings (fractional positions, in y's index), including one
+        # between the previous block's last value and y[0].
+        edge = yy[offset - 1 :]
+        positive = edge > 0
+        idx = np.flatnonzero(positive[1:] != positive[:-1])
+        crossings = self._carried
+        if len(idx):
+            a, b = edge[idx], edge[idx + 1]
+            crossings = crossings + (idx - 1 + a / (a - b)).tolist()
+
+        bits: List[int] = []
+        t = self._t
+        adjusted = self._adjusted
+        sps = self.sps
+        half = sps / 2.0
+        gain = self._gain
+        last = n - 1
+        ci, nc = 0, len(crossings)
+        while t <= last:
+            if not adjusted:
+                best = None
+                while ci < nc and crossings[ci] < t:
+                    err = crossings[ci] - (t - half)
+                    if best is None or abs(err) < abs(best):
+                        best = err
+                    ci += 1
+                if best is not None:
+                    t += gain * best
+                adjusted = True
+                if t > last:
+                    break
+            at = t + offset
+            i = int(at)
+            frac = at - i
+            value = yy[i] if frac == 0.0 else yy[i] + frac * (yy[i + 1] - yy[i])
+            bits.append(1 if value > 0 else 0)
+            t += sps
+            adjusted = False
+        self._t = t - n
+        self._adjusted = adjusted
+        self._carried = [c - n for c in crossings[ci:]]
+        return bits
+
+
+def _bch_mod(value: int, top: int) -> int:
+    """``value`` (bits ``top``..0) reduced modulo the BCH(31,21) generator."""
+    for i in range(top, 9, -1):
+        if value >> i & 1:
+            value ^= _BCH_GENERATOR << (i - 10)
+    return value
+
+
+# x^10 + x^9 + x^8 + x^6 + x^5 + x^3 + 1: the BCH(31,21) code of POCSAG
+# and FLEX (single and double errors are correctable).
+_BCH_GENERATOR = 0x769
+# Syndrome of a single 1 bit at each position of a 31-bit codeword, and the
+# syndrome -> error pattern table for every 1- and 2-bit error.
+_BCH_BIT_SYNDROMES = [_bch_mod(1 << i, 30) for i in range(31)]
+_BCH_ERRORS: Dict[int, int] = {}
+for _i in range(31):
+    _BCH_ERRORS.setdefault(_BCH_BIT_SYNDROMES[_i], 1 << _i)
+    for _j in range(_i + 1, 31):
+        _BCH_ERRORS.setdefault(
+            _BCH_BIT_SYNDROMES[_i] ^ _BCH_BIT_SYNDROMES[_j], (1 << _i) | (1 << _j)
+        )
+# Syndromes per byte of the codeword (four table lookups per word).
+_BCH_BYTE_SYNDROMES = [
+    [
+        _bch_mod(b << (8 * k), 30) if (b << (8 * k)) < (1 << 31) else 0
+        for b in range(256)
+    ]
+    for k in range(4)
+]
+
+
+def bch3121_encode(data21: int) -> int:
+    """The 31-bit BCH(31,21) codeword of ``data21`` (data in bits 30..10,
+    check bits in 9..0)."""
+    data21 &= 0x1FFFFF
+    return (data21 << 10) | _bch_mod(data21 << 10, 30)
+
+
+def bch3121_syndrome(codeword31: int) -> int:
+    """Syndrome of a 31-bit codeword (0 when it is valid)."""
+    c = codeword31 & 0x7FFFFFFF
+    t = _BCH_BYTE_SYNDROMES
+    return t[0][c & 0xFF] ^ t[1][c >> 8 & 0xFF] ^ t[2][c >> 16 & 0xFF] ^ t[3][c >> 24]
+
+
+def bch3121_correct(codeword31: int) -> Tuple[bool, int, int]:
+    """``(ok, corrected, errors)`` for a 31-bit codeword: up to two wrong
+    bits are corrected."""
+    codeword31 &= 0x7FFFFFFF
+    syndrome = bch3121_syndrome(codeword31)
+    if syndrome == 0:
+        return True, codeword31, 0
+    pattern = _BCH_ERRORS.get(syndrome)
+    if pattern is None:
+        return False, codeword31, 0
+    return True, codeword31 ^ pattern, bin(pattern).count("1")
+
+
+def _correct_word32(word: int, max_errors: int = 2) -> Tuple[bool, int]:
+    """``(ok, corrected)`` for a 32-bit word: a BCH(31,21) codeword in bits
+    31..1 and an even parity bit in bit 0. At most ``max_errors`` bits,
+    the parity bit included, are corrected."""
+    ok, fixed, errors = bch3121_correct(word >> 1)
+    if not ok:
+        return False, word
+    parity = bin(fixed).count("1") & 1
+    if parity != word & 1:
+        errors += 1
+    if errors > max_errors:
+        return False, word
+    return True, (fixed << 1) | parity
+
+
+# ============================================================================
 # POCSAG Protocol Decoder
 # ============================================================================
 
@@ -108,10 +314,19 @@ class POCSAGDecoder(ProtocolDecoder):
 
     POCSAG is a common pager protocol operating at 512, 1200, or 2400 baud.
 
+    Input is an FM-discriminator baseband (one polarity per symbol, either
+    way round) at any sample rate; consecutive ``decode()`` calls are one
+    continuous stream, so blocks of any size give the same pages.
+
     Features:
-    - Automatic baud rate detection
-    - Numeric and alphanumeric message decoding
-    - BCH error correction
+    - Every baud rate decoded at once with ``auto_baud`` (one bit slicer
+      and sync search per rate), so a mixed-rate channel decodes too
+    - Clock recovery and integrate-and-dump bit decisions (see BitSlicer)
+    - Either FSK polarity (found from the sync word)
+    - Numeric and alphanumeric pages; tone-only pages
+    - BCH(31,21) correction of up to two bit errors per codeword; a page
+      with a codeword that cannot be corrected is returned as invalid
+    - Pages that continue into the next batch are joined
     - Address and function code extraction
     """
 
@@ -126,7 +341,8 @@ class POCSAGDecoder(ProtocolDecoder):
     # provides single-error correction for each 31-bit codeword
     BCH_POLY = 0x769
 
-    # Numeric character set
+    # Numeric character set (BCD 0-9, then spare, urgent, space, hyphen and
+    # brackets); each digit is sent least significant bit first.
     NUMERIC_CHARS = "0123456789*U -)(]"
 
     # Alpha character set (7-bit ASCII mapping)
@@ -149,16 +365,30 @@ class POCSAGDecoder(ProtocolDecoder):
         0x0F: "\x0f",
     }
 
+    BAUD_RATES = (512, 1200, 2400)
+    # Sync word bit errors tolerated when searching (and between batches).
+    _SYNC_ERRORS = 2
+    _NEXT_SYNC_ERRORS = 4
+    # Longest page assembled (message codewords) before it is cut.
+    _MAX_PAGE_WORDS = 80
+
     def __init__(
-        self, sample_rate: float, baud_rate: int = 1200, auto_baud: bool = True
+        self,
+        sample_rate: float,
+        baud_rate: int = 1200,
+        auto_baud: bool = True,
+        matched_filter: bool = True,
     ):
         """
         Initialize POCSAG decoder.
 
         Args:
             sample_rate: Sample rate in Hz
-            baud_rate: Initial baud rate (512, 1200, or 2400)
-            auto_baud: Automatically detect baud rate
+            baud_rate: Baud rate to decode (512, 1200, or 2400)
+            auto_baud: Decode all three baud rates at once (pages report
+                the rate they were sent at)
+            matched_filter: Average each bit over its period before deciding
+                it (leave on for a discriminator output)
         """
         super().__init__(sample_rate)
         self._baud_rate = baud_rate
@@ -169,56 +399,29 @@ class POCSAGDecoder(ProtocolDecoder):
                 f"sample_rate {sample_rate:g} Hz is too low for POCSAG at "
                 f"{baud_rate} baud; need at least {baud_rate} Hz"
             )
-
-        # State machine
-        self._state = "searching"  # searching, synced, receiving
-        self._bit_buffer: List[int] = []
-        self._current_batch: List[int] = []
-        self._current_address = 0
-        self._current_function = 0
-        self._message_bits: List[int] = []
-
-        # Timing
-        self._last_transition = 0
-        self._bit_clock = 0.0
+        rates = [baud_rate]
+        if auto_baud:
+            rates += [b for b in self.BAUD_RATES if b != baud_rate]
+        self._streams = [
+            _POCSAGStream(self, int(b), BitSlicer(sample_rate, b, matched_filter))
+            for b in rates
+            if sample_rate / b >= 2 or b == baud_rate
+        ]
 
         # Messages
         self._messages: List[POCSAGMessage] = []
         self._timestamp = 0.0
+        # Transmissions found (sync words) and pages that failed checks.
+        self.frames_seen = 0
+        self.frames_failed = 0
 
     @property
     def baud_rate(self) -> int:
-        """Get current baud rate."""
+        """Baud rate of the last transmission found (initially the one
+        asked for)."""
         return self._baud_rate
 
-    def _detect_baud_rate(self, samples: np.ndarray) -> int:
-        """Detect baud rate from samples."""
-        # Look for preamble pattern (101010...)
-        # Try each baud rate and find best match
-        best_baud = self._baud_rate
-        best_score = 0
-
-        for baud in [512, 1200, 2400]:
-            sps = int(self._sample_rate / baud)
-            if sps < 2:
-                continue
-
-            # Count transitions at expected rate
-            score = 0
-            for i in range(0, len(samples) - sps, sps):
-                if i + sps < len(samples):
-                    sign1 = 1 if samples[i] > 0 else -1
-                    sign2 = 1 if samples[i + sps] > 0 else -1
-                    if sign1 != sign2:
-                        score += 1
-
-            if score > best_score:
-                best_score = score
-                best_baud = baud
-
-        return best_baud
-
-    def _bits_to_word(self, bits: List[int]) -> int:
+    def _bits_to_word(self, bits: Sequence[int]) -> int:
         """Convert 32 bits to word."""
         word = 0
         for bit in bits[:32]:
@@ -227,55 +430,25 @@ class POCSAGDecoder(ProtocolDecoder):
 
     def _check_bch(self, word: int) -> Tuple[bool, int]:
         """
-        Check BCH(31,21) error correction.
+        Check BCH(31,21) error correction and the parity bit.
+
+        Up to two wrong bits (the parity bit included) are corrected.
 
         Returns:
             (valid, corrected_word)
         """
-        # Extract 31-bit codeword (excluding parity bit)
-        codeword = (word >> 1) & 0x7FFFFFFF
-
-        # Compute syndrome
-        syndrome = 0
-        temp = codeword
-        for _ in range(21):
-            if temp & 0x40000000:
-                temp ^= self.BCH_POLY << 20
-            temp <<= 1
-        syndrome = (temp >> 21) & 0x3FF
-
-        if syndrome == 0:
-            return True, word
-
-        # Try single-bit error correction
-        for i in range(31):
-            test = codeword ^ (1 << i)
-            temp = test
-            for _ in range(21):
-                if temp & 0x40000000:
-                    temp ^= self.BCH_POLY << 20
-                temp <<= 1
-            if ((temp >> 21) & 0x3FF) == 0:
-                # Check parity
-                corrected = (test << 1) | (word & 1)
-                return True, corrected
-
-        return False, word
+        return _correct_word32(word & 0xFFFFFFFF)
 
     def _decode_numeric(self, bits: List[int]) -> str:
-        """Decode numeric message."""
+        """Decode a numeric page: 4-bit characters, each sent least
+        significant bit first."""
         result = ""
         for i in range(0, len(bits) - 3, 4):
             nibble = (
-                (bits[i] << 3) | (bits[i + 1] << 2) | (bits[i + 2] << 1) | bits[i + 3]
+                bits[i] | (bits[i + 1] << 1) | (bits[i + 2] << 2) | (bits[i + 3] << 3)
             )
-            if nibble < len(self.NUMERIC_CHARS):
-                char = self.NUMERIC_CHARS[nibble]
-                if char != "]":  # End of message marker
-                    result += char
-                else:
-                    break
-        return result
+            result += self.NUMERIC_CHARS[nibble]
+        return result.rstrip()
 
     def _decode_alpha(self, bits: List[int]) -> str:
         """Decode alphanumeric message."""
@@ -292,110 +465,60 @@ class POCSAGDecoder(ProtocolDecoder):
 
     def _build_message(
         self,
-        batch: List[int],
+        batch: Sequence[int],
         address: int,
         function: int,
         message_bits: List[int],
+        errors: int = 0,
+        baud: Optional[int] = None,
     ) -> POCSAGMessage:
         """Assemble a POCSAGMessage, decoding the payload per the function code.
 
         Function 0 selects a numeric page (4-bit BCD-style symbols); the other
-        function codes select an alphanumeric page (7-bit characters).
+        function codes select an alphanumeric page (7-bit characters). A page
+        without message codewords is a tone-only page. ``errors`` counts
+        codewords that could not be corrected: such a page is invalid.
         """
-        if function == 0:
+        if not message_bits:
+            content = ""
+            message_type = "tone"
+        elif function == 0:
             content = self._decode_numeric(message_bits)
             message_type = "numeric"
         else:
             content = self._decode_alpha(message_bits)
             message_type = "alpha"
+        error = ""
+        if errors:
+            error = (
+                f"{errors} codeword{'s' if errors != 1 else ''} failed the " "BCH check"
+            )
         return POCSAGMessage(
             protocol=ProtocolType.POCSAG,
             timestamp=self._timestamp,
             raw_bits=bytes(batch),
-            valid=True,
+            valid=not errors,
+            error_message=error,
             address=address,
             function=function,
             message_type=message_type,
             content=content,
-            baud_rate=self._baud_rate,
+            baud_rate=baud or self._baud_rate,
         )
 
-    def _process_batch(self, batch: List[int]) -> List[POCSAGMessage]:
-        """Process a complete batch (16 codewords after sync)."""
-        if len(batch) < 512:  # 16 words * 32 bits
-            return []
+    def _process_batch(
+        self, batch: Sequence[int], flush: bool = True
+    ) -> List[POCSAGMessage]:
+        """Pages in one batch (16 codewords after a sync word).
 
-        messages = []
-        current_address = None
-        current_function: Optional[int] = None
-        message_bits: List[int] = []
-
-        for frame in range(8):  # 8 frames per batch
-            for word_idx in range(2):  # 2 words per frame
-                bit_start = (frame * 2 + word_idx) * 32
-                word_bits = batch[bit_start : bit_start + 32]
-                if len(word_bits) < 32:
-                    continue
-
-                word = self._bits_to_word(word_bits)
-
-                # Check for idle word
-                if word == self.IDLE_WORD:
-                    if message_bits and current_address is not None:
-                        # End of message
-                        messages.append(
-                            self._build_message(
-                                batch,
-                                current_address,
-                                current_function or 0,
-                                message_bits,
-                            )
-                        )
-                        message_bits = []
-                        current_address = None
-                    continue
-
-                # Check BCH
-                valid, corrected = self._check_bch(word)
-                if not valid:
-                    continue
-
-                # Check message type bit (bit 31)
-                if not (corrected & 0x80000000):
-                    # Address word
-                    if message_bits and current_address is not None:
-                        # Save previous message
-                        messages.append(
-                            self._build_message(
-                                batch,
-                                current_address,
-                                current_function or 0,
-                                message_bits,
-                            )
-                        )
-                        message_bits = []
-
-                    # Extract the 18-bit address field (bits 30..13) and the
-                    # 2-bit function code (bits 12..11). The full 21-bit
-                    # receiver address is the field shifted up by 3 with the
-                    # frame number (0-7) supplying the low 3 bits.
-                    address_field = (corrected >> 13) & 0x3FFFF
-                    current_address = (address_field << 3) | frame
-                    current_function = (corrected >> 11) & 0x3
-
-                else:
-                    # Message word - extract 20 data bits
-                    for i in range(20):
-                        message_bits.append((corrected >> (30 - i)) & 1)
-
-        # Handle any remaining message
-        if message_bits and current_address is not None:
-            messages.append(
-                self._build_message(
-                    batch, current_address, current_function or 0, message_bits
-                )
-            )
-
+        With ``flush`` a page still open at the end of the batch is
+        returned too (during a live stream it may continue in the next
+        batch, so ``decode`` keeps it open).
+        """
+        pages = _POCSAGPages(self, self._baud_rate)
+        messages = pages.batch(batch)
+        if flush:
+            messages += pages.flush()
         return messages
 
     def decode(self, samples: np.ndarray) -> List[POCSAGMessage]:
@@ -403,63 +526,190 @@ class POCSAGDecoder(ProtocolDecoder):
         Decode POCSAG from FSK-demodulated samples.
 
         Args:
-            samples: FSK-demodulated samples (positive = mark, negative = space)
+            samples: FSK-demodulated samples (one sign per symbol; the
+                polarity is found from the sync word)
 
         Returns:
             List of decoded POCSAG messages
         """
-        self._messages = []
-        self._timestamp += len(samples) / self._sample_rate
-
-        # Auto-detect baud rate if enabled
-        if self._auto_baud and self._state == "searching":
-            detected = self._detect_baud_rate(samples)
-            if detected != self._baud_rate:
-                self._baud_rate = detected
-                self._samples_per_bit = int(self._sample_rate / self._baud_rate)
-
-        # Convert samples to bits
-        sps = self._samples_per_bit
-        for i in range(0, len(samples) - sps, sps):
-            # Sample at center of bit
-            center = i + sps // 2
-            if center < len(samples):
-                bit = 1 if samples[center] > 0 else 0
-                self._bit_buffer.append(bit)
-
-        # Look for sync word
-        while len(self._bit_buffer) >= 32:
-            # Check for sync word
-            word = self._bits_to_word(self._bit_buffer[:32])
-
-            if word == self.SYNC_WORD:
-                self._state = "synced"
-                self._bit_buffer = self._bit_buffer[32:]
-                self._current_batch = []
-            elif self._state == "synced":
-                # Collect batch bits
-                self._current_batch.append(self._bit_buffer.pop(0))
-
-                if len(self._current_batch) >= 512:
-                    # Process complete batch
-                    batch_msgs = self._process_batch(self._current_batch)
-                    for msg in batch_msgs:
-                        self._messages.append(msg)
-                        self._notify_callbacks(msg)
-                    self._current_batch = []
-                    self._state = "searching"
-            else:
-                self._bit_buffer.pop(0)
-
-        return self._messages
+        x = _as_real(samples)
+        self._timestamp += len(x) / self._sample_rate
+        messages: List[POCSAGMessage] = []
+        for stream in self._streams:
+            messages += stream.feed(stream.slicer.process(x))
+        for msg in messages:
+            self._notify_callbacks(msg)
+        self._messages = messages
+        return messages
 
     def reset(self) -> None:
         """Reset decoder state."""
-        self._state = "searching"
-        self._bit_buffer = []
-        self._current_batch = []
-        self._message_bits = []
+        for stream in self._streams:
+            stream.reset()
+        self._messages = []
         self._timestamp = 0.0
+
+
+class _POCSAGPages:
+    """Turns the codewords of one POCSAG stream into pages.
+
+    A page is an address codeword followed by message codewords; it ends at
+    an idle codeword, the next address codeword or the end of the
+    transmission, so it may continue across batches.
+    """
+
+    def __init__(self, decoder: POCSAGDecoder, baud: int):
+        self._decoder = decoder
+        self.baud = baud
+        self._page: Optional[Dict[str, Any]] = None
+        self._orphan = False  # message codewords whose address was lost
+
+    def reset(self) -> None:
+        self._page = None
+        self._orphan = False
+
+    def batch(self, bits: Sequence[int]) -> List[POCSAGMessage]:
+        """Pages completed by the 16 codewords of a batch."""
+        out: List[POCSAGMessage] = []
+        if len(bits) < 512:
+            return out
+        decoder = self._decoder
+        for index in range(16):
+            out += self.word(
+                decoder._bits_to_word(bits[index * 32 : index * 32 + 32]), index
+            )
+        return out
+
+    def word(self, word: int, index: int) -> List[POCSAGMessage]:
+        """Take codeword ``index`` (0-15) of a batch; returns the page it
+        completes, if any."""
+        decoder = self._decoder
+        ok, fixed = decoder._check_bch(word)
+        if not ok:
+            if self._page is not None:
+                self._page["errors"] += 1
+                self._page["words"].append(word)
+            elif not self._orphan:
+                self._orphan = True
+                decoder.frames_failed += 1
+            return []
+        if fixed == POCSAGDecoder.IDLE_WORD:
+            self._orphan = False
+            return self.flush()
+        if fixed & 0x80000000:
+            # Message codeword: 20 data bits.
+            page = self._page
+            if page is None:
+                if not self._orphan:
+                    self._orphan = True
+                    decoder.frames_failed += 1
+                return []
+            page["bits"].extend((fixed >> (30 - i)) & 1 for i in range(20))
+            page["words"].append(fixed)
+            if len(page["words"]) > POCSAGDecoder._MAX_PAGE_WORDS:
+                return self.flush()
+            return []
+        # Address codeword: the 18-bit address field (bits 30..13) and the
+        # 2-bit function code (bits 12..11). The full 21-bit receiver
+        # address is the field shifted up by 3, the frame number (0-7)
+        # supplying the low 3 bits.
+        out = self.flush()
+        self._orphan = False
+        self._page = {
+            "address": (((fixed >> 13) & 0x3FFFF) << 3) | (index // 2),
+            "function": (fixed >> 11) & 0x3,
+            "bits": [],
+            "errors": 0,
+            "words": [fixed],
+        }
+        return out
+
+    def flush(self) -> List[POCSAGMessage]:
+        """The open page, if any (the transmission or the page ended)."""
+        page, self._page = self._page, None
+        if page is None:
+            return []
+        raw = b"".join(int(w).to_bytes(4, "big") for w in page["words"])
+        msg = self._decoder._build_message(
+            raw,
+            page["address"],
+            page["function"],
+            page["bits"],
+            page["errors"],
+            self.baud,
+        )
+        if not msg.valid:
+            self._decoder.frames_failed += 1
+        return [msg]
+
+
+class _POCSAGStream:
+    """One baud rate of a POCSAG decoder: its bit slicer, the sync search
+    and the batches of the transmission it is in."""
+
+    _SEARCH, _BATCH, _NEXT_SYNC = range(3)
+
+    def __init__(self, decoder: POCSAGDecoder, baud: int, slicer: BitSlicer):
+        self._decoder = decoder
+        self.baud = baud
+        self.slicer = slicer
+        self.pages = _POCSAGPages(decoder, baud)
+        self.reset()
+
+    def reset(self) -> None:
+        self.slicer.reset()
+        self.pages.reset()
+        self._state = self._SEARCH
+        self._reg = 0
+        self._invert = 0
+        self._count = 0
+        self._batch: List[int] = []
+
+    def feed(self, bits: List[int]) -> List[POCSAGMessage]:
+        out: List[POCSAGMessage] = []
+        sync = POCSAGDecoder.SYNC_WORD
+        sync_inv = sync ^ 0xFFFFFFFF
+        state, reg, invert, count = self._state, self._reg, self._invert, self._count
+        batch = self._batch
+        decoder = self._decoder
+        for bit in bits:
+            if state == self._SEARCH:
+                reg = ((reg << 1) | bit) & 0xFFFFFFFF
+                if (reg ^ sync).bit_count() <= POCSAGDecoder._SYNC_ERRORS:
+                    invert = 0
+                elif (reg ^ sync_inv).bit_count() <= POCSAGDecoder._SYNC_ERRORS:
+                    invert = 1
+                else:
+                    continue
+                state, batch = self._BATCH, []
+                decoder.frames_seen += 1
+                decoder._baud_rate = self.baud
+            elif state == self._BATCH:
+                # Codewords are taken as they complete, so a page is out as
+                # soon as the codeword after it arrives.
+                batch.append(bit ^ invert)
+                if len(batch) % 32 == 0:
+                    word = 0
+                    for b in batch[-32:]:
+                        word = (word << 1) | b
+                    out += self.pages.word(word, len(batch) // 32 - 1)
+                if len(batch) == 512:
+                    state, reg, count, batch = self._NEXT_SYNC, 0, 0, []
+            else:
+                reg = ((reg << 1) | (bit ^ invert)) & 0xFFFFFFFF
+                count += 1
+                if count < 32:
+                    continue
+                if (reg ^ sync).bit_count() <= POCSAGDecoder._NEXT_SYNC_ERRORS:
+                    state, batch = self._BATCH, []
+                    continue
+                # No batch follows: the transmission is over.
+                out += self.pages.flush()
+                state = self._SEARCH
+                reg ^= 0xFFFFFFFF if invert else 0
+        self._state, self._reg, self._invert, self._count = state, reg, invert, count
+        self._batch = batch
+        return out
 
 
 # ============================================================================
@@ -503,7 +753,15 @@ class AX25Decoder(ProtocolDecoder):
     AX.25 is the data link layer protocol used for packet radio,
     including APRS (Automatic Packet Reporting System).
 
+    Input is the line signal at any sample rate: for 1200 baud packet
+    (Bell 202 AFSK) a tone detector's output, positive for the mark tone
+    and negative for the space tone, or the levels of direct FSK. Either
+    polarity decodes (the bits are NRZI coded). Consecutive ``decode()``
+    calls are one continuous stream.
+
     Features:
+    - Clock recovery and integrate-and-dump bit decisions (see BitSlicer)
+    - NRZI decoding
     - HDLC frame detection
     - Bit unstuffing
     - CRC-16 validation
@@ -514,14 +772,21 @@ class AX25Decoder(ProtocolDecoder):
     FLAG = 0x7E  # HDLC frame delimiter 01111110 — six consecutive 1s are unique
     # due to bit-stuffing, so this pattern unambiguously marks frame boundaries
     CRC_POLY = 0x8408  # CRC-CCITT bit-reversed form (ITU-T V.41)
+    # Shortest frame: two addresses, control and FCS; longest: AX.25's limit.
+    MIN_FRAME_BYTES = 17
+    MAX_FRAME_BYTES = 340
 
-    def __init__(self, sample_rate: float, baud_rate: int = 1200):
+    def __init__(
+        self, sample_rate: float, baud_rate: int = 1200, matched_filter: bool = True
+    ):
         """
         Initialize AX.25 decoder.
 
         Args:
             sample_rate: Sample rate in Hz
             baud_rate: Baud rate (typically 1200 for VHF APRS)
+            matched_filter: Average each bit over its period before deciding
+                it (turn off for a tone detector output that already is)
         """
         super().__init__(sample_rate)
         self._baud_rate = baud_rate
@@ -531,20 +796,23 @@ class AX25Decoder(ProtocolDecoder):
                 f"sample_rate {sample_rate:g} Hz is too low for AX.25 at "
                 f"{baud_rate} baud; need at least {baud_rate} Hz"
             )
-
-        # State
-        self._bit_buffer: List[int] = []
-        self._frame_buffer: List[int] = []
-        self._in_frame = False
-        self._ones_count = 0
-        self._last_bit = 0
+        self._slicer = BitSlicer(sample_rate, baud_rate, matched_filter)
 
         # NRZI decoding state
         self._nrzi_last = 0
+        # HDLC state: the last 8 bits (newest in bit 7), the octet being
+        # assembled (-1 bits: not inside a frame) and the frame so far.
+        self._pattern = 0
+        self._octet = 0
+        self._octet_bits = -1
+        self._frame_bytes = bytearray()
 
         # Messages
         self._frames: List[AX25Frame] = []
         self._timestamp = 0.0
+        # Frames found (between flags) and frames that failed the CRC.
+        self.frames_seen = 0
+        self.frames_failed = 0
 
     @property
     def baud_rate(self) -> int:
@@ -590,25 +858,36 @@ class AX25Decoder(ProtocolDecoder):
         return callsign, data[6]
 
     def _parse_frame(self, bits: List[int]) -> Optional[AX25Frame]:
-        """Parse AX.25 frame from bits."""
+        """Parse AX.25 frame from bits (LSB first per byte, unstuffed,
+        FCS included)."""
         if len(bits) < 136:  # Minimum frame size (17 bytes)
             return None
-
-        # Convert bits to bytes
         frame_bytes = []
         for i in range(0, len(bits) - 7, 8):
             byte = 0
             for j in range(8):
                 byte |= bits[i + j] << j
             frame_bytes.append(byte)
+        return self._parse_frame_bytes(bytes(frame_bytes))
 
-        if len(frame_bytes) < 17:
-            return None
+    @staticmethod
+    def _looks_like_ax25(data: bytes) -> bool:
+        """Whether a frame that failed its CRC still looks like AX.25 (a
+        destination callsign of letters, digits or spaces), so it counts
+        as a damaged frame rather than noise between two flags."""
+        if len(data) < 7:
+            return False
+        for byte in data[:6]:
+            char = byte >> 1
+            if byte & 1 or not (
+                char == 0x20 or 0x30 <= char <= 0x39 or 0x41 <= char <= 0x5A
+            ):
+                return False
+        return True
 
-        data = bytes(frame_bytes)
-
-        # Verify CRC
-        if len(data) < 2:
+    def _parse_frame_bytes(self, data: bytes) -> Optional[AX25Frame]:
+        """Parse an AX.25 frame (FCS included)."""
+        if len(data) < self.MIN_FRAME_BYTES:
             return None
 
         payload = data[:-2]
@@ -619,7 +898,7 @@ class AX25Decoder(ProtocolDecoder):
             return AX25Frame(
                 protocol=ProtocolType.AX25,
                 timestamp=self._timestamp,
-                raw_bits=bytes(bits),
+                raw_bits=bytes(data),
                 valid=False,
                 error_message="CRC mismatch",
             )
@@ -661,7 +940,7 @@ class AX25Decoder(ProtocolDecoder):
         return AX25Frame(
             protocol=ProtocolType.AX25,
             timestamp=self._timestamp,
-            raw_bits=bytes(bits),
+            raw_bits=bytes(data),
             valid=True,
             source=src_call,
             destination=dest_call,
@@ -786,76 +1065,70 @@ class AX25Decoder(ProtocolDecoder):
         Decode AX.25 frames from AFSK-demodulated samples.
 
         Args:
-            samples: Demodulated samples
+            samples: Demodulated samples (positive = mark, negative = space)
 
         Returns:
-            List of decoded AX.25 frames
+            List of decoded AX.25 frames: valid ones, and frames that look
+            like AX.25 but failed the CRC (``valid`` False)
         """
+        x = _as_real(samples)
         self._frames = []
-        self._timestamp += len(samples) / self._sample_rate
-
-        # Convert to bits
-        sps = self._samples_per_bit
-        for i in range(0, len(samples) - sps, sps):
-            center = i + sps // 2
-            if center < len(samples):
-                raw_bit = 1 if samples[center] > 0 else 0
-                bit = self._nrzi_decode(raw_bit)
-                self._bit_buffer.append(bit)
-
-        # Process bits
-        while self._bit_buffer:
-            bit = self._bit_buffer.pop(0)
-
-            if self._in_frame:
-                if bit == 1:
-                    self._ones_count += 1
-                    if self._ones_count < 6:
-                        self._frame_buffer.append(1)
-                    elif self._ones_count == 6:
-                        # Possible flag or abort
-                        pass
-                    else:
-                        # Abort - too many ones
-                        self._in_frame = False
-                        self._frame_buffer = []
-                        self._ones_count = 0
-                else:
-                    if self._ones_count == 5:
-                        # Stuffed bit - ignore
-                        pass
-                    elif self._ones_count == 6:
-                        # End flag
-                        if len(self._frame_buffer) > 16:
-                            frame = self._parse_frame(self._frame_buffer)
-                            if frame:
-                                self._frames.append(frame)
-                                self._notify_callbacks(frame)
-                        self._frame_buffer = []
-                        self._in_frame = True  # Stay in frame mode for next
-                    else:
-                        self._frame_buffer.append(0)
-                    self._ones_count = 0
-            else:
-                # Looking for flag
-                if bit == 1:
-                    self._ones_count += 1
-                else:
-                    if self._ones_count == 6:
-                        # Found flag
-                        self._in_frame = True
-                        self._frame_buffer = []
-                    self._ones_count = 0
-
+        self._timestamp += len(x) / self._sample_rate
+        for raw_bit in self._slicer.process(x):
+            self._hdlc_bit(self._nrzi_decode(raw_bit))
         return self._frames
+
+    def _hdlc_bit(self, bit: int) -> None:
+        """Feed one NRZI-decoded bit to the HDLC deframer."""
+        pattern = (self._pattern >> 1) | (bit << 7)
+        self._pattern = pattern
+        if pattern == self.FLAG:
+            # The flag's first 7 bits went into the octet as data: a frame
+            # that ended on a byte boundary has exactly 7 bits pending.
+            if self._octet_bits == 7 and len(self._frame_bytes) >= self.MIN_FRAME_BYTES:
+                self._end_frame(bytes(self._frame_bytes))
+            self._octet, self._octet_bits = 0, 0
+            self._frame_bytes = bytearray()
+        elif pattern == 0xFE or pattern == 0xFF:
+            # Seven ones: an abort, or no signal.
+            self._octet_bits = -1
+            self._frame_bytes = bytearray()
+        elif (pattern & 0xFC) == 0x7C:
+            pass  # a 0 stuffed after five 1s
+        elif self._octet_bits >= 0:
+            self._octet = (self._octet >> 1) | (bit << 7)
+            self._octet_bits += 1
+            if self._octet_bits == 8:
+                self._octet_bits = 0
+                if len(self._frame_bytes) >= self.MAX_FRAME_BYTES:
+                    self._octet_bits = -1
+                    self._frame_bytes = bytearray()
+                else:
+                    self._frame_bytes.append(self._octet)
+
+    def _end_frame(self, data: bytes) -> None:
+        frame = self._parse_frame_bytes(data)
+        if frame is None:
+            return
+        if not frame.valid:
+            if not self._looks_like_ax25(data):
+                return  # noise between two flags
+            self.frames_seen += 1
+            self.frames_failed += 1
+        else:
+            self.frames_seen += 1
+        self._frames.append(frame)
+        self._notify_callbacks(frame)
 
     def reset(self) -> None:
         """Reset decoder state."""
-        self._bit_buffer = []
-        self._frame_buffer = []
-        self._in_frame = False
-        self._ones_count = 0
+        self._slicer.reset()
         self._nrzi_last = 0
+        self._pattern = 0
+        self._octet = 0
+        self._octet_bits = -1
+        self._frame_bytes = bytearray()
+        self._frames = []
         self._timestamp = 0.0
 
 
@@ -1790,37 +2063,85 @@ class FLEXDecoder(ProtocolDecoder):
     """
     FLEX pager protocol decoder.
 
-    FLEX is a high-speed paging protocol developed by Motorola,
-    operating at 1600, 3200, or 6400 baud with 2-level or 4-level FSK.
+    FLEX is a high-speed paging protocol developed by Motorola. Every
+    1.875 s frame starts with a 1600 bps header: bit sync, a 64-bit sync
+    pattern naming the data speed (a 16-bit code, the marker 0xA6C6AAAA
+    and the code inverted) and the frame information word (FIW: cycle and
+    frame number). 11 blocks of data follow, each 8 codewords interleaved
+    bit by bit; at 1600 bps 2-level FSK they form one phase of 88
+    codewords: the block information word (BIW), address words, vector
+    words (page type and where its message words are) and message words.
+    Codewords are BCH(31,21) with a parity bit, sent least significant
+    bit first.
+
+    Input is an FM-discriminator baseband (either polarity) at any sample
+    rate; consecutive ``decode()`` calls are one continuous stream.
 
     Features:
-    - Multi-speed detection (1600/3200/6400 baud)
-    - 2-FSK and 4-FSK demodulation
-    - BCH error correction
-    - Alphanumeric and numeric message decoding
-    - Capcode (address) extraction
+    - Sync detection with bit errors and either FSK polarity
+    - Clock recovery and integrate-and-dump bit decisions (see BitSlicer)
+    - BCH(31,21) correction of up to two bit errors per codeword
+    - Short and long addresses (capcodes)
+    - Alphanumeric, numeric and tone-only pages
+    - 1600 bps 2-level frames (the other speeds are recognised and counted
+      in ``unsupported_frames``, not decoded)
     """
 
-    # FLEX constants
-    SYNC_1 = 0xA6C6AAAA  # Sync pattern 1
-    SYNC_2 = 0x5939AAAA  # Sync pattern 2
+    # FLEX constants: the marker in the middle of the 64-bit sync pattern
+    # (SYNC_1) and its complement (SYNC_2, as sent with inverted polarity).
+    SYNC_1 = 0xA6C6AAAA
+    SYNC_2 = 0x5939AAAA
+    MARKER = 0xA6C6AAAA
+    # Sync code (first 16 bits of the pattern) -> (bits/s, FSK levels).
+    SYNC_CODES: Dict[int, Tuple[int, int]] = {
+        0x870C: (1600, 2),
+        0xB068: (3200, 2),
+        0x7B18: (1600, 4),
+        0xDEA0: (3200, 4),
+        0x4C7C: (3200, 4),
+    }
 
     # Frame structure
-    FRAME_SYNC_BITS = 32
+    FRAME_SYNC_BITS = 64
     FRAME_INFO_BITS = 32
-    BLOCK_BITS = 32
+    BLOCK_BITS = 256  # 8 interleaved codewords per block (1600 bps)
     BLOCKS_PER_FRAME = 11  # Data blocks per frame
+    WORDS_PER_PHASE = 88
+    # Bits skipped after the sync pattern before the FIW, and the second
+    # sync (25 ms) before the data, at 1600 bps.
+    _FIW_GAP_BITS = 16
+    _SYNC2_BITS = 40
 
-    # BCH(32,21) polynomial
+    # BCH(31,21) polynomial
     BCH_POLY = 0x769
 
-    def __init__(self, sample_rate: float, baud_rate: int = 1600):
+    # Page types in a vector word.
+    PAGE_TYPES = (
+        "secure",
+        "instruction",
+        "tone",
+        "numeric",
+        "numeric",
+        "alpha",
+        "binary",
+        "numeric",
+    )
+    _NUMERIC_CHARS = "0123456789 U -]["
+
+    _SYNC1, _FIW, _SYNC2, _DATA = range(4)
+
+    def __init__(
+        self, sample_rate: float, baud_rate: int = 1600, matched_filter: bool = True
+    ):
         """
         Initialize FLEX decoder.
 
         Args:
             sample_rate: Sample rate in Hz
-            baud_rate: Initial baud rate (1600, 3200, 6400)
+            baud_rate: Data speed of the frames expected (1600, 3200 or
+                6400 bits/s); the speed each frame names is used
+            matched_filter: Average each bit over its period before deciding
+                it (leave on for a discriminator output)
         """
         super().__init__(sample_rate)
         self._baud_rate = baud_rate
@@ -1830,11 +2151,15 @@ class FLEXDecoder(ProtocolDecoder):
                 f"sample_rate {sample_rate:g} Hz is too low for FLEX at "
                 f"{baud_rate} baud; need at least {baud_rate} Hz"
             )
+        # The frame header is always 1600 bps 2-level FSK.
+        self._slicer = BitSlicer(sample_rate, 1600, matched_filter)
 
         # State
-        self._bit_buffer: List[int] = []
-        self._synced = False
-        self._current_frame: List[int] = []
+        self._state = self._SYNC1
+        self._reg = 0
+        self._count = 0
+        self._bits: List[int] = []
+        self._data_invert = 0  # 1: data bits are the complement of the slicer's
         self._phase = "A"
         self._cycle = 0
         self._frame_num = 0
@@ -1842,208 +2167,234 @@ class FLEXDecoder(ProtocolDecoder):
         # Messages
         self._messages: List[FLEXMessage] = []
         self._timestamp = 0.0
+        self.frames_seen = 0
+        self.frames_failed = 0
+        self.unsupported_frames = 0
+        self.last_unsupported = ""
 
     @property
     def baud_rate(self) -> int:
         """Get baud rate."""
         return self._baud_rate
 
-    def _detect_baud_rate(self, samples: np.ndarray) -> int:
-        """Detect FLEX baud rate from sync pattern."""
-        best_baud = self._baud_rate
-        best_score = 0
-
-        for baud in [1600, 3200, 6400]:
-            sps = int(self._sample_rate / baud)
-            if sps < 2:
-                continue
-
-            # Look for alternating pattern (AAAA portion of sync)
-            score = 0
-            for i in range(0, min(len(samples) - sps, 64 * sps), sps):
-                if i + sps < len(samples):
-                    sign1 = 1 if samples[i] > 0 else -1
-                    sign2 = 1 if samples[i + sps] > 0 else -1
-                    if sign1 != sign2:
-                        score += 1
-
-            if score > best_score:
-                best_score = score
-                best_baud = baud
-
-        return best_baud
-
-    def _bits_to_word(self, bits: List[int]) -> int:
+    def _bits_to_word(self, bits: Sequence[int]) -> int:
         """Convert 32 bits to word."""
         word = 0
         for bit in bits[:32]:
             word = (word << 1) | bit
         return word
 
+    @staticmethod
+    def _word_value(bits: Sequence[int]) -> Tuple[bool, int]:
+        """``(ok, value)`` of one codeword from its 32 bits in the order
+        sent: the 21 data bits (the first one sent is bit 0 of ``value``)
+        after BCH correction.
+
+        The even parity bit counts as one more error when it disagrees, and
+        more than two errors reject the word: three errors would otherwise
+        often be "corrected" into a different codeword.
+        """
+        codeword = 0
+        for bit in bits[:31]:
+            codeword = (codeword << 1) | bit
+        ok, fixed, errors = bch3121_correct(codeword)
+        if ok and len(bits) > 31:
+            errors += (bin(fixed).count("1") & 1) != bits[31]
+            ok = errors <= 2
+        data = fixed >> 10
+        value = 0
+        for _ in range(21):
+            value = (value << 1) | (data & 1)
+            data >>= 1
+        return ok, value
+
     def _check_bch(self, word: int) -> Tuple[bool, int]:
-        """Check BCH(32,21) error correction."""
-        codeword = word
+        """Check BCH(31,21) error correction of a 32-bit word whose bits
+        31..1 are the codeword in the order sent (bit 31 first) and bit 0
+        is the parity bit; up to two wrong bits are corrected."""
+        ok, fixed, _errors = bch3121_correct(word >> 1)
+        if not ok:
+            return False, word
+        return True, (fixed << 1) | (word & 1)
 
-        # Calculate syndrome
-        syndrome = 0
-        for i in range(21):
-            if codeword & (1 << (31 - i)):
-                syndrome ^= (
-                    (self.BCH_POLY << (10 - i))
-                    if i < 11
-                    else (self.BCH_POLY >> (i - 10))
-                )
+    @staticmethod
+    def _checksum_ok(value: int) -> bool:
+        """The 4-bit checksum of a frame or block information word: the
+        nibbles of bits 0-19 plus bit 20 add up to 0xF."""
+        total = value >> 20 & 1
+        for shift in range(0, 20, 4):
+            total += value >> shift & 0xF
+        return total & 0xF == 0xF
 
-        syndrome &= 0x7FF
+    def _decode_alpha(self, words: Sequence[int], skip_first: bool = False) -> str:
+        """Characters of an alphanumeric page: three 7-bit characters per
+        message word (bits 0-6, 7-13 and 14-20); ETX (0x03) is filler. With
+        ``skip_first`` the first character (the signature of a page's first
+        fragment) is not text."""
+        chars = []
+        for index, word in enumerate(words):
+            for slot in range(3):
+                if skip_first and index == 0 and slot == 0:
+                    continue
+                code = (word >> (7 * slot)) & 0x7F
+                if code == 0x03:
+                    continue
+                if 32 <= code < 127:
+                    chars.append(chr(code))
+                elif code in (0x0A, 0x0D):
+                    chars.append(" ")
+        return "".join(chars).strip()
 
-        if syndrome == 0:
-            return True, word
-
-        # Try single-bit error correction
-        for i in range(32):
-            test = word ^ (1 << (31 - i))
-            test_syndrome = 0
-            for j in range(21):
-                if test & (1 << (31 - j)):
-                    test_syndrome ^= (
-                        (self.BCH_POLY << (10 - j))
-                        if j < 11
-                        else (self.BCH_POLY >> (j - 10))
-                    )
-            test_syndrome &= 0x7FF
-
-            if test_syndrome == 0:
-                return True, test
-
-        return False, word
-
-    def _decode_alpha(self, words: List[int]) -> str:
-        """Decode alphanumeric message from words."""
-        result = ""
-
+    def _decode_numeric(self, words: Sequence[int], skip_bits: int = 2) -> str:
+        """Digits of a numeric page: 4-bit characters (least significant bit
+        first) packed across the 21 bits of each word, after ``skip_bits``
+        header bits; 0xC is filler."""
+        chars = []
+        digit = 0
+        count = 4 + skip_bits
         for word in words:
-            # Extract 7-bit characters
-            for i in range(4):
-                char_code = (word >> (21 - i * 7)) & 0x7F
-                if 32 <= char_code < 127:
-                    result += chr(char_code)
-                elif char_code == 0:
-                    return result
+            for _ in range(21):
+                digit = (digit >> 1) & 0x07
+                if word & 1:
+                    digit |= 0x08
+                word >>= 1
+                count -= 1
+                if count == 0:
+                    if digit != 0x0C:
+                        chars.append(self._NUMERIC_CHARS[digit])
+                    count = 4
+        return "".join(chars).strip()
 
-        return result
+    @staticmethod
+    def _capcode(first: int, second: Optional[int]) -> Tuple[int, bool]:
+        """``(capcode, long address)`` from an address word (and the next
+        one, for a long address)."""
+        long_address = (
+            first < 0x008001 or 0x1E0000 < first < 0x1F0001 or first > 0x1F7FFE
+        )
+        if not long_address or second is None:
+            return first - 0x8000, long_address
+        return first + ((second ^ 0x1FFFFF) << 15) + 0x1F9000, True
 
-    def _decode_numeric(self, words: List[int]) -> str:
-        """Decode numeric message from words."""
-        result = ""
-        # FLEX numeric uses 4-bit BCD
-        num_chars = "0123456789 U-][("
-
-        for word in words:
-            for i in range(5):  # 5 nibbles per 21-bit data field
-                nibble = (word >> (17 - i * 4)) & 0x0F
-                if nibble < len(num_chars):
-                    char = num_chars[nibble]
-                    if char != "[":  # End marker
-                        result += char
-                    else:
-                        return result
-
-        return result
-
-    def _parse_frame(self, frame_bits: List[int]) -> List[FLEXMessage]:
-        """Parse FLEX frame and extract messages."""
-        messages: List["FLEXMessage"] = []
-
+    def _parse_frame(self, frame_bits: Sequence[int]) -> List[FLEXMessage]:
+        """Pages in the data of one 1600 bps frame (2816 bits as sent)."""
+        messages: List[FLEXMessage] = []
         if len(frame_bits) < self.BLOCKS_PER_FRAME * self.BLOCK_BITS:
             return messages
+        bits = np.asarray(frame_bits[: self.BLOCKS_PER_FRAME * self.BLOCK_BITS])
+        # Block b holds 8 codewords, sent one bit of each in turn.
+        by_word = bits.reshape(self.BLOCKS_PER_FRAME, 32, 8).transpose(0, 2, 1)
+        by_word = by_word.reshape(self.WORDS_PER_PHASE, 32).tolist()
+        values: List[int] = []
+        good: List[bool] = []
+        for word_bits in by_word:
+            ok, value = self._word_value(word_bits)
+            values.append(value)
+            good.append(ok)
 
-        # Extract blocks
-        blocks: List[Optional[int]] = []
-        for i in range(self.BLOCKS_PER_FRAME):
-            start = i * self.BLOCK_BITS
-            word = self._bits_to_word(frame_bits[start : start + self.BLOCK_BITS])
-            valid, corrected = self._check_bch(word)
-            if valid:
-                blocks.append(corrected)
-            else:
-                blocks.append(None)
-
-        # First block contains block information word
-        if blocks[0] is None:
+        biw = values[0]
+        if not good[0]:
+            self.frames_failed += 1
+            return messages
+        if biw in (0, 0x1FFFFF):
+            return messages  # an idle frame
+        first_address = ((biw >> 8) & 0x3) + 1
+        first_vector = (biw >> 10) & 0x3F
+        if first_vector <= first_address - 1 or first_vector >= self.WORDS_PER_PHASE:
+            self.frames_failed += 1
             return messages
 
-        biw = blocks[0]
-
-        # Extract address and message fields
-        # BIW contains pointers to address and vector fields
-        addr_start = ((biw >> 16) & 0x1F) if biw else 1
-        vector_start = ((biw >> 8) & 0x1F) if biw else 1
-
-        # Find addresses (capcodes)
-        capcodes: List[int] = []
-        for i in range(1, min(addr_start + 1, len(blocks))):
-            block = blocks[i]
-            if block is not None:
-                capcode = (block >> 10) & 0x1FFFFF
-                capcodes.append(capcode)
-
-        # Find message vectors and content
-        for i, capcode in enumerate(capcodes):
-            if vector_start + i >= len(blocks):
-                break
-
-            vector = (
-                blocks[vector_start + i] if vector_start + i < len(blocks) else None
-            )
-            if vector is None:
+        i = first_address
+        while i < first_vector:
+            address = values[i]
+            if address in (0, 0x1FFFFF):
+                i += 1
                 continue
-
-            # Determine message type
-            msg_type_bits = (vector >> 18) & 0x07
-            msg_types = [
-                "tone",
-                "tone",
-                "numeric",
-                "numeric",
-                "alpha",
-                "alpha",
-                "secure",
-                "secure",
-            ]
-            msg_type = (
-                msg_types[msg_type_bits]
-                if msg_type_bits < len(msg_types)
-                else "unknown"
-            )
-
-            # Get message content from remaining blocks
-            content_blocks = [
-                b for b in blocks[vector_start + len(capcodes) :] if b is not None
-            ]
-
-            if msg_type == "alpha":
-                content = self._decode_alpha(content_blocks)
-            elif msg_type == "numeric":
-                content = self._decode_numeric(content_blocks)
-            else:
-                content = ""
-
+            second = values[i + 1] if i + 1 < first_vector else None
+            capcode, long_address = self._capcode(address, second)
+            used = [i] + ([i + 1] if long_address else [])
+            vector_index = first_vector + (i - first_address)
+            i += 2 if long_address else 1
+            if vector_index >= self.WORDS_PER_PHASE:
+                break
+            vector = values[vector_index]
+            used.append(vector_index)
+            page_type = self.PAGE_TYPES[(vector >> 4) & 0x7]
+            start = (vector >> 7) & 0x7F
+            length = (vector >> 14) & 0x7F
+            content = ""
+            if page_type == "alpha":
+                header = start
+                if long_address:
+                    header = vector_index + 1
+                    used.append(header)
+                    words = list(range(start, min(start + length - 1, 88)))
+                else:
+                    words = list(range(start + 1, min(start + length, 88)))
+                    used.append(header)
+                if header >= self.WORDS_PER_PHASE:
+                    continue
+                fragment = (values[header] >> 11) & 0x3
+                used += words
+                content = self._decode_alpha(
+                    [values[w] for w in words], skip_first=fragment == 3
+                )
+            elif page_type == "numeric":
+                end = start + ((vector >> 14) & 0x7)
+                words = list(range(start, min(end + 1, 88)))
+                used += words
+                skip = 10 if (vector >> 4) & 0x7 == 7 else 2
+                content = self._decode_numeric([values[w] for w in words], skip)
+            elif page_type == "instruction":
+                continue
+            bad = sum(1 for w in used if w < len(good) and not good[w])
+            error = ""
+            if bad:
+                error = f"{bad} codeword{'s' if bad != 1 else ''} failed the BCH check"
+                self.frames_failed += 1
             msg = FLEXMessage(
                 protocol=ProtocolType.FLEX,
                 timestamp=self._timestamp,
-                raw_bits=bytes(frame_bits),
-                valid=True,
+                raw_bits=b"".join(int(values[w]).to_bytes(3, "big") for w in used),
+                valid=not bad,
+                error_message=error,
                 capcode=capcode,
                 cycle=self._cycle,
                 frame=self._frame_num,
                 phase=self._phase,
-                message_type=msg_type,
+                message_type=page_type,
                 content=content,
-                baud_rate=self._baud_rate,
+                baud_rate=1600,
             )
             messages.append(msg)
-
         return messages
+
+    def _sync_mode(self, reg: int) -> Optional[Tuple[int, bool]]:
+        """``(code, inverted)`` if the last 64 bits are a sync pattern."""
+        for inverted in (False, True):
+            value = reg ^ 0xFFFFFFFFFFFFFFFF if inverted else reg
+            marker = (value >> 16) & 0xFFFFFFFF
+            if (marker ^ self.MARKER).bit_count() >= 4:
+                continue
+            high = value >> 48
+            low = value & 0xFFFF
+            if (high ^ low ^ 0xFFFF).bit_count() >= 4:
+                continue
+            return high, inverted
+        return None
+
+    def _read_fiw(self, bits: Sequence[int]) -> bool:
+        """Check the frame information word (32 bits as sent) and keep its
+        cycle and frame numbers. The data polarity is confirmed here: the
+        checksum fails for complemented bits."""
+        for invert in (self._data_invert, 1 - self._data_invert):
+            ok, value = self._word_value([b ^ invert for b in bits])
+            if ok and self._checksum_ok(value):
+                self._data_invert = invert
+                self._cycle = (value >> 4) & 0xF
+                self._frame_num = (value >> 8) & 0x7F
+                return True
+        return False
 
     def decode(self, samples: np.ndarray) -> List[FLEXMessage]:
         """
@@ -2055,57 +2406,79 @@ class FLEXDecoder(ProtocolDecoder):
         Returns:
             List of decoded FLEX messages
         """
+        x = _as_real(samples)
         self._messages = []
-        self._timestamp += len(samples) / self._sample_rate
-
-        # Convert to bits
-        sps = self._samples_per_bit
-        for i in range(0, len(samples) - sps, sps):
-            center = i + sps // 2
-            if center < len(samples):
-                bit = 1 if samples[center] > 0 else 0
-                self._bit_buffer.append(bit)
-
-        # Look for sync
-        while len(self._bit_buffer) >= 64:
-            # Check for sync words
-            word1 = self._bits_to_word(self._bit_buffer[:32])
-            self._bits_to_word(self._bit_buffer[32:64])
-
-            if word1 == self.SYNC_1 or word1 == self.SYNC_2:
-                self._synced = True
-                self._current_frame = []
-                self._bit_buffer = self._bit_buffer[64:]
-
-                # Parse Frame Info Word
-                if len(self._bit_buffer) >= 32:
-                    fiw = self._bits_to_word(self._bit_buffer[:32])
-                    self._cycle = (fiw >> 24) & 0x0F
-                    self._frame_num = (fiw >> 17) & 0x7F
-                    self._bit_buffer = self._bit_buffer[32:]
-
-            elif self._synced:
-                # Collect frame bits
-                self._current_frame.append(self._bit_buffer.pop(0))
-
-                frame_size = self.BLOCKS_PER_FRAME * self.BLOCK_BITS
-                if len(self._current_frame) >= frame_size:
-                    msgs = self._parse_frame(self._current_frame)
-                    for msg in msgs:
-                        self._messages.append(msg)
-                        self._notify_callbacks(msg)
-                    self._current_frame = []
-                    self._synced = False
-            else:
-                self._bit_buffer.pop(0)
-
+        self._timestamp += len(x) / self._sample_rate
+        for bit in self._slicer.process(x):
+            self._feed_bit(bit)
         return self._messages
+
+    def _feed_bit(self, bit: int) -> None:
+        state = self._state
+        if state == self._SYNC1:
+            self._reg = ((self._reg << 1) | bit) & 0xFFFFFFFFFFFFFFFF
+            if ((self._reg >> 16 ^ self.MARKER) & 0xFFFFFFFF).bit_count() >= 4 and (
+                (self._reg >> 16 ^ ~self.MARKER) & 0xFFFFFFFF
+            ).bit_count() >= 4:
+                return  # (quick reject before the full check)
+            found = self._sync_mode(self._reg)
+            if found is None:
+                return
+            code, inverted = found
+            mode = None
+            for known, value in self.SYNC_CODES.items():
+                if (known ^ code).bit_count() <= 2:
+                    mode = value
+                    break
+            if mode is None:
+                return
+            self.frames_seen += 1
+            if mode != (1600, 2):
+                self.unsupported_frames += 1
+                self.last_unsupported = f"{mode[0]} bps {mode[1]}-level"
+                self._reg = 0
+                return
+            # The sync pattern is sent with the opposite polarity to the
+            # data (as multimon-ng reads FLEX).
+            self._data_invert = 0 if inverted else 1
+            self._state, self._count, self._bits = self._FIW, 0, []
+            self._reg = 0
+        elif state == self._FIW:
+            self._count += 1
+            if self._count <= self._FIW_GAP_BITS:
+                return
+            self._bits.append(bit)
+            if len(self._bits) < 32:
+                return
+            if self._read_fiw(self._bits):
+                self._state, self._count = self._SYNC2, 0
+            else:
+                self.frames_failed += 1
+                self._state = self._SYNC1
+            self._bits = []
+        elif state == self._SYNC2:
+            self._count += 1
+            if self._count >= self._SYNC2_BITS:
+                self._state, self._bits = self._DATA, []
+        else:
+            self._bits.append(bit ^ self._data_invert)
+            if len(self._bits) < self.BLOCKS_PER_FRAME * self.BLOCK_BITS:
+                return
+            self._baud_rate = 1600
+            for msg in self._parse_frame(self._bits):
+                self._messages.append(msg)
+                self._notify_callbacks(msg)
+            self._bits = []
+            self._state = self._SYNC1
 
     def reset(self) -> None:
         """Reset decoder state."""
-        self._bit_buffer = []
-        self._synced = False
-        self._current_frame = []
+        self._slicer.reset()
+        self._state = self._SYNC1
+        self._reg = 0
+        self._count = 0
+        self._bits = []
+        self._messages = []
         self._timestamp = 0.0
 
 
@@ -2136,30 +2509,61 @@ class ACARSDecoder(ProtocolDecoder):
     ACARS is a digital data link system for aircraft communications
     on VHF frequencies (129.125, 130.025, 130.450 MHz etc.).
 
+    The 2400 bit/s data is MSK on an AM carrier: the audio is a 1200 Hz or
+    a 2400 Hz tone for each bit period, 2400 Hz when the bit equals the
+    previous one and 1200 Hz when it changes (as acarsdec demodulates it).
+    Characters are 7-bit ASCII with odd parity, least significant bit
+    first: pre-key, '+' '*' (bit sync), SYN SYN, SOH, mode, address,
+    acknowledgement, label, block ID, STX and the text, ETX or ETB, a
+    CRC-16 and DEL.
+
+    Input, at any sample rate, is either the data itself from a coherent
+    MSK demodulator (the default: one sign per bit value, the polarity is
+    found from the SYN characters), or with ``differential`` a tone
+    baseband (positive while 2400 Hz is heard, negative for 1200 Hz), from
+    which the bits are rebuilt; there one wrong tone inverts the rest of
+    the block, so a coherent demodulator is better. Consecutive
+    ``decode()`` calls are one continuous stream.
+
     Features:
-    - 2400 baud AM MSK modulation
-    - Message structure parsing
-    - CRC-16 validation
+    - Clock recovery and integrate-and-dump bit decisions (see BitSlicer)
+    - Bit-level SYN SYN search in either polarity
+    - Parity check and CRC-16 validation
     - Flight ID and registration extraction
     - Message text decoding
     """
 
-    # ACARS constants
+    # ACARS constants (7-bit values; the 8th bit sent is odd parity)
     PREKEY = 0x2B2B  # Preamble: ++
+    SYN = 0x16
     SOH = 0x01  # Start of header
     STX = 0x02  # Start of text
     ETX = 0x03  # End of text
     ETB = 0x17  # End of transmission block
+    DEL = 0x7F  # Block check sequence suffix
+    NAK = 0x15
 
     # Character set (odd parity, 7-bit ASCII)
     BAUD_RATE = 2400
+    MAX_BLOCK = 240  # characters from mode to ETX/ETB
 
-    def __init__(self, sample_rate: float):
+    _SEARCH, _SOH, _TEXT, _CRC = range(4)
+
+    def __init__(
+        self,
+        sample_rate: float,
+        matched_filter: bool = True,
+        differential: bool = False,
+    ):
         """
         Initialize ACARS decoder.
 
         Args:
             sample_rate: Sample rate in Hz
+            matched_filter: Average each bit over its period before deciding
+                it (leave on for a demodulator output)
+            differential: The input is a tone baseband (2400 Hz positive)
+                rather than the data bits
         """
         super().__init__(sample_rate)
         self._samples_per_bit = int(sample_rate / self.BAUD_RATE)
@@ -2168,146 +2572,107 @@ class ACARSDecoder(ProtocolDecoder):
                 f"sample_rate {sample_rate:g} Hz is too low for ACARS at "
                 f"{self.BAUD_RATE} baud; need at least {self.BAUD_RATE} Hz"
             )
+        self._slicer = BitSlicer(sample_rate, self.BAUD_RATE, matched_filter)
+        self._differential = differential
 
         # State
-        self._bit_buffer: List[int] = []
+        self._last_bit = 0  # last data bit (differential decoding)
+        self._state = self._SEARCH
+        self._reg = 0  # last 16 data bits, the newest in bit 15
+        self._invert = 0
+        self._byte = 0
+        self._nbits = 0
+        self._block = bytearray()
+        self._crc_bytes = bytearray()
         self._byte_buffer: List[int] = []
-        self._in_message = False
-        self._last_bit = 0
 
         # Messages
         self._messages: List[ACARSMessage] = []
         self._timestamp = 0.0
-
-    def _nrzi_decode(self, bit: int) -> int:
-        """NRZI decode."""
-        result = 0 if bit != self._last_bit else 1
-        self._last_bit = bit
-        return result
+        self.frames_seen = 0
+        self.frames_failed = 0
 
     def _remove_parity(self, byte: int) -> int:
         """Remove parity bit and return 7-bit character."""
         return byte & 0x7F
 
+    @staticmethod
+    def with_parity(char: int) -> int:
+        """``char`` (7 bits) with its odd parity bit (bit 7)."""
+        char &= 0x7F
+        return char | (0x80 if bin(char).count("1") % 2 == 0 else 0)
+
     def _compute_crc(self, data: bytes) -> int:
-        """Compute ACARS CRC-16."""
+        """ACARS block check: CRC-16 (CCITT polynomial, reflected, initial
+        value 0) over the characters as sent, parity bits included.
+        Running it over a block and its two CRC bytes gives 0."""
         crc = 0
         for byte in data:
-            crc ^= byte << 8
+            crc ^= byte
             for _ in range(8):
-                if crc & 0x8000:
-                    crc = (crc << 1) ^ 0x1021
-                else:
-                    crc <<= 1
-            crc &= 0xFFFF
+                crc = (crc >> 1) ^ 0x8408 if crc & 1 else crc >> 1
         return crc
 
-    def _parse_message(self, data: bytes) -> Optional[ACARSMessage]:
-        """Parse ACARS message from bytes."""
-        if len(data) < 10:
+    def _parse_message(
+        self, data: bytes, crc_ok: bool = True, parity_errors: int = 0
+    ) -> Optional[ACARSMessage]:
+        """Parse an ACARS block from its characters (as sent).
+
+        ``data`` starts at the mode character (anything up to SOH before
+        it is skipped) and runs to ETX/ETB.
+        """
+        soh = data.find(bytes([self.SOH]))
+        if 0 <= soh < 3:
+            data = data[soh + 1 :]
+        if len(data) < 12:
             return None
+        chars = [b & 0x7F for b in data]
 
-        # Find SOH
-        soh_idx = -1
-        for i in range(len(data)):
-            if data[i] == self.SOH:
-                soh_idx = i
-                break
+        def text(part: Sequence[int]) -> str:
+            return "".join(chr(c) for c in part if 32 <= c < 127)
 
-        if soh_idx < 0 or soh_idx + 8 > len(data):
-            return None
-
-        # Extract fields after SOH
-        mode = chr(data[soh_idx + 1]) if data[soh_idx + 1] < 128 else ""
-
-        # Registration (7 characters)
-        reg_start = soh_idx + 2
-        registration = ""
-        for i in range(7):
-            if reg_start + i < len(data):
-                char = self._remove_parity(data[reg_start + i])
-                if 32 <= char < 127:
-                    registration += chr(char)
-
-        # Acknowledgement
-        ack_idx = soh_idx + 9
-        ack = chr(data[ack_idx]) if ack_idx < len(data) and data[ack_idx] < 128 else ""
-
-        # Label (2 characters)
-        label_start = soh_idx + 10
-        label = ""
-        for i in range(2):
-            if label_start + i < len(data):
-                char = self._remove_parity(data[label_start + i])
-                if 32 <= char < 127:
-                    label += chr(char)
-
-        # Block ID
-        block_id_idx = soh_idx + 12
-        block_id = (
-            chr(data[block_id_idx])
-            if block_id_idx < len(data) and data[block_id_idx] < 128
-            else ""
-        )
-
-        # Find STX for message text
-        stx_idx = -1
-        for i in range(block_id_idx, len(data)):
-            if data[i] == self.STX:
-                stx_idx = i
-                break
-
-        # Find message number and flight ID before STX
+        mode = text(chars[0:1])
+        registration = text(chars[1:8]).lstrip(".").strip()
+        ack = "!" if chars[8] == self.NAK else text(chars[8:9])
+        label = text(chars[9:11])
+        block_id = text(chars[11:12])
         msg_number = ""
         flight_id = ""
-        if stx_idx > 0:
-            header = data[block_id_idx + 1 : stx_idx]
-            if len(header) >= 4:
-                msg_number = "".join(
-                    chr(self._remove_parity(b))
-                    for b in header[:4]
-                    if 32 <= self._remove_parity(b) < 127
-                )
-            if len(header) >= 10:
-                flight_id = "".join(
-                    chr(self._remove_parity(b))
-                    for b in header[4:10]
-                    if 32 <= self._remove_parity(b) < 127
-                )
-
-        # Find message text
-        text = ""
+        body = ""
         block_end = ""
-        if stx_idx >= 0:
-            # Find ETX or ETB
-            end_idx = len(data) - 2  # Leave room for CRC
-            for i in range(stx_idx + 1, len(data)):
-                if data[i] in (self.ETX, self.ETB):
-                    end_idx = i
-                    block_end = chr(data[i])
-                    break
-
-            # Extract text
-            text_bytes = data[stx_idx + 1 : end_idx]
-            text = "".join(
-                chr(self._remove_parity(b))
-                for b in text_bytes
-                if 32 <= self._remove_parity(b) < 127
+        end = len(chars)
+        for i in range(12, len(chars)):
+            if chars[i] in (self.ETX, self.ETB):
+                end = i
+                block_end = chr(chars[i])
+                break
+        if len(chars) > 12 and chars[12] == self.STX:
+            body = text(chars[13:end])
+            # A downlink (block ID a digit) starts with the message number
+            # and the flight ID.
+            if block_id.isdigit() and len(body) >= 10:
+                msg_number, flight_id, body = body[:4], body[4:10], body[10:]
+        problems = []
+        if not crc_ok:
+            problems.append("CRC mismatch")
+        if parity_errors:
+            problems.append(
+                f"{parity_errors} parity error{'s' if parity_errors != 1 else ''}"
             )
-
         return ACARSMessage(
             protocol=ProtocolType.ACARS,
             timestamp=self._timestamp,
-            raw_bits=data,
-            valid=True,
+            raw_bits=bytes(data),
+            valid=crc_ok,
+            error_message=", ".join(problems),
             mode=mode,
-            registration=registration.strip(),
+            registration=registration,
             ack=ack,
             label=label,
             block_id=block_id,
             message_number=msg_number.strip(),
             flight_id=flight_id.strip(),
-            text=text,
+            text=body.strip(),
             block_end=block_end,
         )
 
@@ -2316,82 +2681,87 @@ class ACARSDecoder(ProtocolDecoder):
         Decode ACARS messages from MSK-demodulated samples.
 
         Args:
-            samples: MSK-demodulated samples
+            samples: MSK-demodulated samples (the data bits; with
+                ``differential``, positive for 2400 Hz)
 
         Returns:
-            List of decoded ACARS messages
+            List of decoded ACARS messages (blocks that fail the CRC are
+            returned with ``valid`` False)
         """
+        x = _as_real(samples)
         self._messages = []
-        self._timestamp += len(samples) / self._sample_rate
-
-        # Convert to bits
-        sps = self._samples_per_bit
-        for i in range(0, len(samples) - sps, sps):
-            center = i + sps // 2
-            if center < len(samples):
-                raw_bit = 1 if samples[center] > 0 else 0
-                bit = self._nrzi_decode(raw_bit)
-                self._bit_buffer.append(bit)
-
-        # Convert bits to bytes
-        while len(self._bit_buffer) >= 8:
-            byte = 0
-            for i in range(8):
-                byte |= self._bit_buffer[i] << i
-            self._bit_buffer = self._bit_buffer[8:]
-
-            if not self._in_message:
-                # Look for preamble (++)
-                self._byte_buffer.append(byte)
-                if len(self._byte_buffer) >= 2:
-                    if self._byte_buffer[-2] == 0x2B and self._byte_buffer[-1] == 0x2B:
-                        self._in_message = True
-                        self._byte_buffer = [0x2B, 0x2B]
-
-                # Limit buffer size
-                if len(self._byte_buffer) > 20:
-                    self._byte_buffer.pop(0)
-            else:
-                self._byte_buffer.append(byte)
-
-                # Check for message end
-                if byte in (self.ETX, self.ETB) and len(self._byte_buffer) >= 13:
-                    # Wait for CRC (2 bytes)
-                    pass
-                elif len(self._byte_buffer) >= 300:  # Max message size
-                    # Try to parse
-                    msg = self._parse_message(bytes(self._byte_buffer))
-                    if msg:
-                        self._messages.append(msg)
-                        self._notify_callbacks(msg)
-                    self._byte_buffer = []
-                    self._in_message = False
-
-                # Also try to parse if we have ETX/ETB + CRC
-                if len(self._byte_buffer) >= 15:
-                    # Check if we have a complete message
-                    for i in range(
-                        len(self._byte_buffer) - 3,
-                        max(10, len(self._byte_buffer) - 50),
-                        -1,
-                    ):
-                        if self._byte_buffer[i] in (self.ETX, self.ETB):
-                            msg = self._parse_message(bytes(self._byte_buffer[: i + 3]))
-                            if msg:
-                                self._messages.append(msg)
-                                self._notify_callbacks(msg)
-                            self._byte_buffer = []
-                            self._in_message = False
-                            break
-
+        self._timestamp += len(x) / self._sample_rate
+        for value in self._slicer.process(x):
+            if self._differential:
+                # 2400 Hz: the same bit again; 1200 Hz: the bit changes.
+                value = self._last_bit if value else self._last_bit ^ 1
+                self._last_bit = value
+            self._feed_bit(value)
         return self._messages
+
+    def _feed_bit(self, bit: int) -> None:
+        state = self._state
+        if state == self._SEARCH:
+            self._reg = (self._reg >> 1) | (bit << 15)
+            if self._reg == 0x1616:
+                self._invert = 0
+            elif self._reg == 0xE9E9:
+                self._invert = 1
+            else:
+                return
+            self._state, self._byte, self._nbits = self._SOH, 0, 0
+            return
+        self._byte = (self._byte >> 1) | ((bit ^ self._invert) << 7)
+        self._nbits += 1
+        if self._nbits < 8:
+            return
+        byte, self._byte, self._nbits = self._byte, 0, 0
+        if state == self._SOH:
+            if byte == self.SOH:
+                self._state = self._TEXT
+                self._block = bytearray()
+            elif byte != self.SYN:
+                self._restart()
+        elif state == self._TEXT:
+            self._block.append(byte)
+            if byte & 0x7F in (self.ETX, self.ETB) and len(self._block) >= 13:
+                self._state = self._CRC
+                self._crc_bytes = bytearray()
+            elif len(self._block) > self.MAX_BLOCK:
+                self._restart()
+        else:
+            self._crc_bytes.append(byte)
+            if len(self._crc_bytes) == 2:
+                self._end_block()
+
+    def _restart(self) -> None:
+        self._state = self._SEARCH
+        self._reg = 0
+        self._block = bytearray()
+
+    def _end_block(self) -> None:
+        block = bytes(self._block)
+        crc_ok = self._compute_crc(block + bytes(self._crc_bytes)) == 0
+        parity_errors = sum(1 for b in block if bin(b).count("1") % 2 == 0)
+        self._restart()
+        if not crc_ok and parity_errors > max(2, len(block) // 4):
+            return  # noise that happened to look like SYN SYN SOH
+        msg = self._parse_message(block, crc_ok, parity_errors)
+        self.frames_seen += 1
+        if msg is None:
+            self.frames_failed += 1
+            return
+        if not msg.valid:
+            self.frames_failed += 1
+        self._messages.append(msg)
+        self._notify_callbacks(msg)
 
     def reset(self) -> None:
         """Reset decoder state."""
-        self._bit_buffer = []
-        self._byte_buffer = []
-        self._in_message = False
+        self._slicer.reset()
         self._last_bit = 0
+        self._restart()
+        self._messages = []
         self._timestamp = 0.0
 
 

@@ -2491,8 +2491,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
 
         # A live decoder is built for one sample rate; rebuild it when the
-        # device (and so the rate) changes.
-        if self._decoder is not None and self._decoder_rate != rate:
+        # device (and so the rate) changes, also after a build that failed
+        # (e.g. one that needs a higher rate).
+        if self._decoder_panel.protocol() is not None and self._decoder_rate != rate:
             self._rebuild_decoder()
 
         # The Decoder panel's hint says whether it is listening.
@@ -2787,26 +2788,63 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     }
 
     def _on_decoder_protocol_changed(self, text: str) -> None:
-        """Build (or clear) the live decoder for the panel's selected protocol."""
-        from ..dsp.protocols import ProtocolType, create_protocol_decoder
+        """Build (or clear) the live decoder for the panel's selected protocol.
+
+        The live decoder (``sdr_module.dsp.live_decoders``) takes the raw
+        blocks and picks out its own channel at the VFO, so it works
+        whatever the Mode and Bandwidth are.
+        """
+        from ..dsp.live_decoders import create_live_decoder, live_decoder_class
+        from ..dsp.protocols import ProtocolType
 
         proto_value = self._DECODER_PROTOCOLS.get(text)
-        if proto_value is None:
-            # "Off" (or unknown): no live decoder.
+        if proto_value is None or live_decoder_class(text) is None:
+            # "Off" (or a protocol without a live decoder): no live decoder.
             self._decoder = None
             self._decoder_protocol = None
+            self._decoder_panel.set_decoder_status(None)
             return
 
         rate = self._device_sample_rate()
+        # Remember the rate even if the build fails, so a later rate change
+        # retries it.
+        self._decoder_rate = rate
         try:
-            protocol = ProtocolType(proto_value)
-            self._decoder = create_protocol_decoder(protocol, sample_rate=float(rate))
-            self._decoder_protocol = protocol
-            self._decoder_rate = rate
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Could not create %s decoder: %s", text, exc)
+            self._decoder = create_live_decoder(
+                text, float(rate), self._decoder_offset_hz()
+            )
+            self._decoder_protocol = ProtocolType(proto_value)
+        except Exception as exc:
+            from ..dsp.live_decoders import LiveDecoderStatus
+
+            logger.warning("Could not start the %s decoder: %s", text, exc)
             self._decoder = None
             self._decoder_protocol = None
+            problem = f"The {text} decoder could not start: {exc}"
+            self._decoder_panel.set_decoder_status(
+                LiveDecoderStatus(name=text, problem=problem)
+            )
+            self._show_status_error(problem)
+            return
+        status = self._decoder.status
+        self._decoder_panel.set_decoder_status(status)
+        if status.problem:
+            # E.g. ADS-B at 1.8 MS/s: say so instead of "listening" forever.
+            logger.warning("%s decoder: %s", text, status.problem)
+            self._show_status_message(
+                f"{status.problem}. Choose a higher sample rate in "
+                "Device > Connect...",
+                "warning",
+                10000,
+            )
+
+    def _decoder_offset_hz(self) -> float:
+        """The tuned channel's offset from the LO (0 until the window tunes
+        a VFO inside the span)."""
+        try:
+            return float(getattr(self, "_vfo_offset_hz", lambda: 0.0)())
+        except Exception:  # pragma: no cover - defensive (partial windows)
+            return 0.0
 
     def _rebuild_decoder(self) -> None:
         """Recreate the live decoder for the current device's sample rate."""
@@ -2815,24 +2853,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
 
     def _run_decoder(self, samples: np.ndarray) -> None:
-        """Feed demodulated samples to the active decoder and show any messages."""
-        if self._decoder is None or self._decoder_protocol is None:
+        """Feed a raw block to the live decoder and show what it decoded."""
+        decoder = self._decoder
+        if decoder is None or self._decoder_protocol is None:
             return
         if not self._decoder_panel._enabled_check.isChecked():
             return
-
-        from ..dsp.protocols import demodulate_for_protocol
-
-        baseband = demodulate_for_protocol(samples, self._decoder_protocol)
-        if baseband is None:
-            return
+        offset = self._decoder_offset_hz()
+        if offset != getattr(decoder, "offset_hz", offset):
+            decoder.set_offset(offset)
         try:
-            messages = self._decoder.decode(baseband)
+            messages = decoder.process(samples)
         except Exception as exc:  # pragma: no cover - defensive
-            logger.debug("Decoder error: %s", exc)
+            if not getattr(self, "_decoder_error_logged", False):
+                self._decoder_error_logged = True
+                logger.warning("The %s decoder failed: %s", decoder.name, exc)
             return
         for msg in messages:
             self._push_decoded_message(msg)
+        self._decoder_panel.set_decoder_status(decoder.status)
 
     def _push_decoded_message(self, msg: Any) -> None:
         """Render one decoded message into the decoder panel.
@@ -2876,51 +2915,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     @staticmethod
     def _describe_message(msg: Any) -> Tuple[str, str]:
-        """(address, content) columns for a decoded message."""
-        name = type(msg).__name__
+        """(address, content) columns for a decoded message (shared with the
+        command line: ``sdr_module.dsp.live_decoders.describe_message``)."""
+        from ..dsp.live_decoders import describe_message
 
-        def text(attr: str) -> str:
-            return str(getattr(msg, attr, "") or "").strip()
-
-        def position() -> str:
-            lat = getattr(msg, "latitude", 0.0) or 0.0
-            lon = getattr(msg, "longitude", 0.0) or 0.0
-            return f"{lat:.4f}, {lon:.4f}" if lat and lon else ""
-
-        def joined(*parts: str) -> str:
-            return "  ·  ".join(p for p in parts if p)
-
-        if name == "POCSAGMessage":
-            return f"{msg.address} (F{msg.function})", text("content")
-        if name == "FLEXMessage":
-            return str(getattr(msg, "capcode", "") or ""), text("content")
-        if name == "ADSBMessage":
-            altitude = getattr(msg, "altitude", 0) or 0
-            speed = getattr(msg, "velocity", 0.0) or 0.0
-            squawk = text("squawk")
-            return text("icao_address"), joined(
-                text("callsign"),
-                f"{altitude:,} ft" if altitude else "",
-                position(),
-                f"{speed:.0f} kt" if speed else "",
-                f"Squawk {squawk}" if squawk else "",
-            )
-        if name in ("AX25Frame", "APRSMessage"):
-            source, dest = text("source"), text("destination")
-            address = f"{source}>{dest}" if source or dest else ""
-            return address, joined(position(), text("info") or text("comment"))
-        if name == "ACARSMessage":
-            return text("registration") or text("flight_id"), joined(
-                text("label"), text("text")
-            )
-        if name == "RDSData":
-            pi_code = getattr(msg, "pi_code", 0) or 0
-            return (
-                f"PI {pi_code:04X}" if pi_code else "",
-                joined(text("ps_name"), text("radio_text")),
-            )
-        address = text("address") or text("icao_address")
-        return address, text("content") or text("info")
+        return describe_message(msg)
 
     # ------------------------------------------------------------------
     # Control panel handlers

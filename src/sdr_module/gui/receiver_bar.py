@@ -17,7 +17,7 @@ width whatever the frequency, and scrolling over a digit tunes that digit.
 from __future__ import annotations
 
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 try:
     from PyQt6.QtCore import QEvent, QObject, QPointF, Qt, QTimer, pyqtSignal
@@ -270,6 +270,8 @@ class ReceiverBar(QToolBar if HAS_PYQT6 else object):
 
         self._mode_source = mode_source
         self._filter_source = filter_source
+        # id(source combo) -> the model whose item changes are copied.
+        self._watched_models: Dict[int, object] = {}
         self._mode_combo = self._mirror(
             mode_source, "MODE", "Demodulation mode", self.MODE_TIP
         )
@@ -315,7 +317,16 @@ class ReceiverBar(QToolBar if HAS_PYQT6 else object):
         source.currentIndexChanged.connect(
             lambda _index, s=source, c=combo: self._from_source(s, c)
         )
+        self._watch_model(source, combo)
+        return combo
+
+    def _watch_model(self, source: "QComboBox", combo: "QComboBox") -> None:
+        """Copy ``source``'s items into ``combo`` whenever its model changes
+        them (once per model: a combo can be given a new one)."""
         model = source.model()
+        if self._watched_models.get(id(source)) is model:
+            return
+        self._watched_models[id(source)] = model
         for signal in (
             model.rowsInserted,
             model.rowsRemoved,
@@ -325,7 +336,6 @@ class ReceiverBar(QToolBar if HAS_PYQT6 else object):
             model.dataChanged,
         ):
             signal.connect(lambda *_args, s=source, c=combo: self._copy_items(s, c))
-        return combo
 
     # -- mirroring ------------------------------------------------------------
     @staticmethod
@@ -357,8 +367,10 @@ class ReceiverBar(QToolBar if HAS_PYQT6 else object):
             source.setCurrentIndex(index)  # the panel's handlers run as usual
 
     def _from_source(self, source: "QComboBox", combo: "QComboBox") -> None:
-        # Compare the items too: a combo given a new model (setModel) no
+        # Compare the items too, and watch the model: a combo given a new
+        # model (setModel, which reports itself with currentIndexChanged) no
         # longer reports its item changes to the old model's signals.
+        self._watch_model(source, combo)
         self._copy_items(source, combo)
 
     # -- step -------------------------------------------------------------------

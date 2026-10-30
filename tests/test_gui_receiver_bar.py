@@ -129,6 +129,14 @@ class TestReceiverBar(_WindowTestCase):
             [bar_combo.itemText(i) for i in range(bar_combo.count())], texts
         )
         self.assertEqual(bar_combo.currentText(), "200 Hz")
+        # Later changes to the new model (no change of choice) show too.
+        model.item(0).setText("150 Hz")
+        model.appendRow(QStandardItem("5 kHz"))
+        self.assertEqual(
+            [bar_combo.itemText(i) for i in range(bar_combo.count())],
+            ["150 Hz"] + texts[1:] + ["5 kHz"],
+        )
+        self.assertEqual(bar_combo.currentText(), "200 Hz")
 
     def test_step_choices(self):
         combo = self.bar().step_combo

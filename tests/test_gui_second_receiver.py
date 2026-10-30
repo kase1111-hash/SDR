@@ -1369,7 +1369,7 @@ class TestTxMonitorWithoutTransmitter(_SecondCase):
         rx._update_tx_group()
         self.assertIsNone(rx.tx_target())
         self.assertFalse(rx._monitor_button.isEnabled())
-        self.assertIn("With a HackRF One in the main window", rx._tx_label.text())
+        self.assertIn("Once it can, this receiver", rx._tx_label.text())
         self.assertIn("can't transmit: no device is connected", rx._tx_label.text())
         self.assertFalse(rx.monitor_tx())
         self.assertIn("Nothing to monitor", rx.message())

@@ -2579,7 +2579,12 @@ if HAS_PYQT6:
                     "keeps receiving while you transmit."
                 )
                 if problem:
-                    text = f"The main window can't transmit: {problem}. " + text
+                    text = (
+                        f"The main window can't transmit: {problem}. Once it "
+                        "can, this receiver (another device, such as an "
+                        "RTL-SDR) hears your transmissions and keeps receiving "
+                        "while you transmit."
+                    )
                 tone: Optional[str] = None
             else:
                 freq, mode, _width, what = target

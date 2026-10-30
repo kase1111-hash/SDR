@@ -2949,6 +2949,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             entry.editingFinished.connect(self._on_frequency_entry_finished)
         if HAS_HAM_RADIO:
             self._callsign_panel.id_requested.connect(self._on_callsign_id_requested)
+            self._callsign_panel.transmit_text_requested.connect(
+                self._show_transmit_text
+            )
             self._callsign_panel.callsign_changed.connect(self._save_ham_id_settings)
             self._callsign_panel.settings_changed.connect(self._save_ham_id_settings)
             self._tx_station.connect_panel()

@@ -12,7 +12,7 @@ in view while it is open):
   callsign from Ham Radio > Ham ID;
 * **Preview** plays it through the speakers (what a receiver would play),
   **Save...** writes it as WAV audio (for a radio's data input) or as I/Q
-  (SigMF or cf32, centred on the tuned frequency), and **Transmit** sends it
+  (SigMF or cf32, centered on the tuned frequency), and **Transmit** sends it
   on a HackRF One through the window's transmit engine
   (:meth:`~sdr_module.gui.main_window.SDRMainWindow._transmit_job`): the
   legality check, the first-use confirmation, your automatic station IDs,
@@ -71,9 +71,10 @@ from ..protocols.text_modes import (
     TEXT_MODES,
     TextSettings,
     TextSignal,
+    bandwidth_rule_problem,
     char_name,
     format_number,
-    symbol_rate_problem,
+    remove_unsupported,
     write_audio_wav,
     write_iq_file,
 )
@@ -275,11 +276,19 @@ if HAS_PYQT6:
         def duration_s(self) -> float:
             return self._total / float(self.RATE)
 
-        def start(self, signal: TextSignal, volume: float = 0.7) -> bool:
-            """Play ``signal``; False when there is no audio output."""
+        def start(
+            self,
+            signal: TextSignal,
+            volume: float = 0.7,
+            configure: Optional[Callable[[AudioSink], None]] = None,
+        ) -> bool:
+            """Play ``signal``; False when there is no audio output.
+            ``configure(sink)`` sets the new sink up first (its output)."""
             self.stop()
             sink = AudioSink()
             sink.set_volume(volume)
+            if configure is not None:
+                configure(sink)
             if not sink.start(self.RATE):
                 return False
             self._sink = sink
@@ -541,7 +550,7 @@ if HAS_PYQT6:
             self._preview_button = QPushButton("&Preview")
             self._preview_button.clicked.connect(self._on_preview_clicked)
             buttons.addWidget(self._preview_button)
-            self._save_button = QPushButton("&Save…")
+            self._save_button = QPushButton("Sa&ve…")
             self._save_button.setToolTip(
                 "Save as WAV audio (for a radio's data input, or any player), "
                 "or as I/Q centered on the tuned frequency (SigMF or cf32, 48 "
@@ -710,6 +719,11 @@ if HAS_PYQT6:
                     shifts = RTTY_SHIFTS if mode == MODE_RTTY else ASCII_SHIFTS
                     self._fill(self._baud_combo, bauds, s.baud, " Bd")
                     self._fill(self._shift_combo, shifts, s.shift_hz, " Hz")
+                self._speed_label.setBuddy(
+                    self._wpm_spin
+                    if cw
+                    else self._baud_combo if fsk else self._mode_combo
+                )
                 self._tone_spin.setValue(int(round(s.audio_hz)))
                 self._tone_label.setText("&Tone:" if not fsk else "&Center:")
                 self._tone_spin.setToolTip(self._tone_tip(mode))
@@ -861,6 +875,8 @@ if HAS_PYQT6:
                     f"{n:,} character{'' if n == 1 else 's'} · "
                     f"{format_seconds(signal.duration_s)} at {rate}"
                 )
+            if s.mode in (MODE_CW, MODE_RTTY) and any(c.islower() for c in self.text()):
+                count += " · sent in capitals"
             if typed >= 0.9 * MAX_TEXT_CHARS:
                 count += f" · {typed:,} of {MAX_TEXT_CHARS:,} characters"
             self._count_label.setText(count)
@@ -883,11 +899,10 @@ if HAS_PYQT6:
 
         def _remove_unsupported(self) -> None:
             """Delete the characters the mode can't send (an undoable edit)."""
-            check = self.current_signal().check
-            if not check.unsupported:
+            signal = self.current_signal()
+            if not signal.check.unsupported:
                 return
-            text = self.text()
-            cleaned = "".join(c for c in text if c not in check.unsupported)
+            cleaned = remove_unsupported(self.text(), signal.mode)
             cursor = self._text_edit.textCursor()
             cursor.beginEditBlock()
             cursor.select(QTextCursor.SelectionType.Document)
@@ -1026,7 +1041,7 @@ if HAS_PYQT6:
             emission = self.emission(freq)
             mode = signal.tx_mode(emission)
             width = signal.occupied_bandwidth_hz(emission)
-            problem = symbol_rate_problem(freq, signal.settings)
+            problem = bandwidth_rule_problem(freq, signal.mode, width)
             if problem is None:
                 problem = legality_problem(freq, width, mode, quiet=True)
             if problem is not None:
@@ -1092,7 +1107,8 @@ if HAS_PYQT6:
                 self._transmit_button.setEnabled(True)
                 self._transmit_button.setToolTip("Stop transmitting now")
                 return
-            text, tone, can = self.readiness()
+            ready, tone, can = self.readiness()
+            text = ready
             if self._outcome is not None:
                 if self._outcome[0] == self._inputs():
                     _inputs, text, tone = self._outcome
@@ -1105,7 +1121,7 @@ if HAS_PYQT6:
                 "Transmit the text on the tuned frequency (HackRF One): checked, "
                 "with your automatic station ID; the first time asks first"
                 if can
-                else self.readiness()[0]
+                else ready
             )
             empty = self.current_signal().empty
             self._save_button.setEnabled(not empty)
@@ -1142,7 +1158,7 @@ if HAS_PYQT6:
             saved_volume = getattr(self._win, "_saved_volume", None)
             if callable(saved_volume):
                 volume = saved_volume() / 100.0
-            if not self._preview.start(signal, volume):
+            if not self._preview.start(signal, volume, self._configure_sink):
                 self._set_outcome(
                     "No audio output to preview on. Save… writes a WAV file you "
                     "can play elsewhere.",
@@ -1150,6 +1166,20 @@ if HAS_PYQT6:
                 )
                 return
             logger.info(f"Previewing {signal.describe()} ({signal.duration_s:.1f} s)")
+
+        def _configure_sink(self, sink: AudioSink) -> None:
+            """Play on the audio output chosen in Tools > Preferences, as the
+            receiver does (when the sink can choose one; else the default)."""
+            choose = getattr(sink, "set_output_device", None)
+            if not callable(choose):
+                return
+            try:
+                device = self._settings.get_str("prefs/audio_output", "")
+                name = self._settings.get_str("prefs/audio_output_name", "")
+                if device:
+                    choose(device, name)
+            except Exception as e:  # pragma: no cover - backend-dependent
+                logger.debug(f"Preview plays on the default output: {e}")
 
         def _on_preview_playing(self, playing: bool) -> None:
             self._preview_button.setText("Stop &Preview" if playing else "&Preview")

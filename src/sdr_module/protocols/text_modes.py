@@ -62,6 +62,7 @@ NumPy only; no Qt.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import wave
@@ -447,7 +448,8 @@ def ita2_codes(text: str, figures: str = "us") -> Tuple[List[int], TextCheck]:
             if shift == _FIGS:
                 unsure = True
             continue
-        upper = char.upper()
+        # (Only ASCII letters: "\u00df".upper() is "SS", "\u0131".upper() "I".)
+        upper = char.upper() if char.isascii() else char
         if upper in letters and upper.isalpha():
             if shift != _LTRS:
                 codes.append(_LTRS)
@@ -514,7 +516,8 @@ def morse_elements(text: str) -> Tuple[List[List[str]], TextCheck]:
     check = TextCheck(MODE_CW)
     words: List[List[str]] = []
     sent_words: List[str] = []
-    normalized = _normalize(text).upper()
+    # Capitals (ASCII letters only: other letters are reported, not changed).
+    normalized = "".join(c.upper() if c.isascii() else c for c in _normalize(text))
     for raw_word in normalized.split():
         word: List[str] = []
         shown: List[str] = []
@@ -555,6 +558,32 @@ def check_text(text: str, mode: str, figures: str = "us") -> TextCheck:
     if mode == MODE_PSK31:
         return varicode_bits(text)[1]
     return ascii_bytes(text)[1]
+
+
+def remove_unsupported(text: str, mode: str, figures: str = "us") -> str:
+    """``text`` without the characters ``mode`` can't send, everything else
+    kept as typed (curly quotes, new lines, small letters). In CW the
+    brackets of a good prosign (``<SK>``) stay; those of a broken one go."""
+    mode = normalize_mode(mode)
+    out: List[str] = []
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if mode == MODE_CW and char == "<":
+            end = text.find(">", i + 1)
+            inner = text[i + 1 : end] if end > i + 1 else ""
+            if (
+                inner
+                and inner.isascii()
+                and all(c in MORSE_CODES for c in inner.upper())
+            ):
+                out.append(text[i : end + 1])
+                i = end + 1
+                continue
+        if check_text(char, mode, figures).ok:
+            out.append(char)
+        i += 1
+    return "".join(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -796,12 +825,11 @@ class TextSignal:
         self, emission: str = EMISSION_DIRECT, deviation_hz: float = FM_DEVIATION_HZ
     ) -> float:
         """What the emission occupies (for the legality check, which tests
-        both its edges), never less than its 99% power bandwidth: CW about
-        five times the keying rate (at least 150 Hz); FSK 1.2 times the
-        larger of the ITU's necessary bandwidth (baud + 1.2 x shift) and
-        shift + 2 x baud (keyed FSK spreads a little wider than the ITU
-        formula: standard RTTY measures 252 Hz, declared 313 Hz); PSK31 60
-        Hz (it measures about 45 Hz); on FM, Carson's rule over the highest
+        both its edges), never less than its 99% power bandwidth whatever
+        the text: CW about five times the keying rate (at least 150 Hz); FSK
+        from the 99% bandwidth of alternating keying, the widest a text makes
+        (:func:`fsk_bandwidth_hz`: 330 Hz for standard RTTY); PSK31 60 Hz
+        (it measures about 45 Hz); on FM, Carson's rule over the highest
         audio frequency."""
         s = self.settings
         if emission == EMISSION_FM:
@@ -815,7 +843,7 @@ class TextSignal:
             return max(150.0, 5.0 * s.wpm / 1.2)
         if s.mode == MODE_PSK31:
             return 60.0
-        return 1.2 * max(s.baud + 1.2 * s.shift_hz, s.shift_hz + 2.0 * s.baud)
+        return fsk_bandwidth_hz(s.mode, s.baud, s.shift_hz)
 
     def describe(self) -> str:
         return self.settings.describe()
@@ -877,6 +905,41 @@ class TextSignal:
 
 def build_text_signal(text: str, settings: TextSettings) -> TextSignal:
     return TextSignal(text, settings)
+
+
+def _power_bandwidth(iq: np.ndarray, rate: float, fraction: float = 0.99) -> float:
+    """The width (Hz) holding ``fraction`` of the power of ``iq``, with
+    half the rest below it and half above (the ITU's occupied bandwidth)."""
+    spectrum = np.abs(np.fft.fftshift(np.fft.fft(iq))) ** 2
+    freqs = np.fft.fftshift(np.fft.fftfreq(len(iq), 1.0 / float(rate)))
+    cumulative = np.cumsum(spectrum) / max(float(np.sum(spectrum)), 1e-300)
+    tail = (1.0 - fraction) / 2.0
+    low = freqs[int(np.searchsorted(cumulative, tail))]
+    high = freqs[min(len(freqs) - 1, int(np.searchsorted(cumulative, 1.0 - tail)))]
+    return float(high - low)
+
+
+@functools.lru_cache(maxsize=64)
+def fsk_bandwidth_hz(mode: str, baud: float, shift_hz: float) -> float:
+    """Occupied bandwidth (Hz) of RTTY or ASCII FSK at ``baud`` and
+    ``shift_hz``, whatever the text: 10% more than the larger of the ITU's
+    necessary bandwidth (baud + 1.2 x shift) and the 99% power bandwidth of
+    alternating keying ("RY" in RTTY, "U" in ASCII: a change of tone every
+    bit, which spreads the most power into the keying sidebands). Keyed FSK
+    is wider than the ITU formula for some patterns (up to a third), and
+    other texts measure up to about 1.5% wider than the larger of the two,
+    hence the margin. Measured once per setting (a few ms) and kept."""
+    settings = TextSettings.for_mode(mode, baud=baud, shift_hz=shift_hz)
+    pattern = "RY" * 24 if settings.mode == MODE_RTTY else "U" * 48
+    signal = TextSignal(pattern, settings)
+    rate = max(8000.0, 16.0 * (settings.shift_hz + 2.0 * settings.baud))
+    # The keying only (the idle mark before and after is a pure tone).
+    start = _FSK_LEAD_S + _RTTY_PREAMBLE * 7.5 / settings.baud
+    stop = signal.duration_s - _RTTY_TAIL_S
+    t = np.arange(int(start * rate), int(stop * rate)) / rate
+    measured = _power_bandwidth(signal.baseband(t), rate)
+    itu = settings.baud + 1.2 * settings.shift_hz
+    return float(1.1 * max(itu, measured))
 
 
 # --------------------------------------------------------------------------- #
@@ -1075,29 +1138,28 @@ def _remove(path: str) -> None:
 # Rules
 # --------------------------------------------------------------------------- #
 
-#: FCC 97.307(f): the highest data symbol rate by frequency (Hz, baud).
-_SYMBOL_RATE_LIMITS = ((28e6, 300.0), (50e6, 1200.0), (222e6, 19600.0))
+#: US rules (FCC 97.307(f), as amended in 2024, when the 300 Bd limit for
+#: RTTY and data on HF was replaced by a bandwidth limit): RTTY and data
+#: below 29.7 MHz may be at most 2.8 kHz wide.
+HF_DATA_MAX_HZ = 29.7e6
+HF_DATA_BANDWIDTH_HZ = 2800.0
 
 
-def symbol_rate_problem(freq_hz: float, settings: TextSettings) -> Optional[str]:
-    """Why ``settings``' symbol rate is too high at ``freq_hz`` under the
-    US amateur rules (300 Bd below 28 MHz, 1200 Bd to 50 MHz, 19.6 kBd to
-    222 MHz; the frequency shift at most 1 kHz below 50 MHz), or None."""
-    s = settings.clamped()
-    if s.mode not in (MODE_RTTY, MODE_ASCII):
+def bandwidth_rule_problem(
+    freq_hz: float, mode: str, bandwidth_hz: float
+) -> Optional[str]:
+    """Why an emission of text ``mode`` ``bandwidth_hz`` wide may not be sent
+    at ``freq_hz`` under the rule above, or None. Morse code (telegraphy,
+    not data) isn't limited by it."""
+    if normalize_mode(mode) == MODE_CW or float(freq_hz) >= HF_DATA_MAX_HZ:
         return None
-    for limit_hz, max_baud in _SYMBOL_RATE_LIMITS:
-        if float(freq_hz) < limit_hz:
-            if s.baud > max_baud + 1e-6:
-                return (
-                    f"{format_number(s.baud)} Bd is over the "
-                    f"{format_number(max_baud)} Bd limit for data below "
-                    f"{format_number(limit_hz / 1e6)} MHz"
-                )
-            if limit_hz <= 50e6 and s.shift_hz > 1000.0 + 1e-6:
-                return "the shift is over the 1 kHz limit for data below 50 MHz"
-            return None
-    return None
+    if float(bandwidth_hz) <= HF_DATA_BANDWIDTH_HZ:
+        return None
+    return (
+        f"the signal is {float(bandwidth_hz) / 1e3:.1f} kHz wide, and RTTY "
+        "and data below 29.7 MHz may be at most 2.8 kHz wide (choose a lower "
+        "baud rate or shift, or send it on the carrier)"
+    )
 
 
 __all__ = [
@@ -1109,6 +1171,8 @@ __all__ = [
     "EMISSION_DIRECT",
     "EMISSION_FM",
     "FM_DEVIATION_HZ",
+    "HF_DATA_BANDWIDTH_HZ",
+    "HF_DATA_MAX_HZ",
     "ITA2_FIGURES_INTL",
     "ITA2_FIGURES_US",
     "ITA2_LETTERS",
@@ -1138,7 +1202,9 @@ __all__ = [
     "ita2_codes",
     "morse_elements",
     "normalize_mode",
-    "symbol_rate_problem",
+    "remove_unsupported",
+    "bandwidth_rule_problem",
+    "fsk_bandwidth_hz",
     "varicode_bits",
     "write_audio_wav",
     "write_iq_file",

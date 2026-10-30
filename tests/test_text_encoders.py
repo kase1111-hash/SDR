@@ -285,6 +285,10 @@ class TestCliEncode:
         assert main(["encode", "psk31", "--text", "x", "--baud", "63"]) == 1
         assert "PSK31 always runs at 31.25" in capsys.readouterr().out
 
+    def test_sample_rate_must_be_positive(self, capsys):
+        assert main(["encode", "rtty", "--text", "RY", "--sample-rate", "0"]) == 1
+        assert "--sample-rate must be positive" in capsys.readouterr().out
+
     def test_nothing_sendable_is_an_error(self, capsys):
         assert main(["encode", "rtty", "--text", "@@@"]) == 1
         assert "nothing to send" in capsys.readouterr().out.lower()

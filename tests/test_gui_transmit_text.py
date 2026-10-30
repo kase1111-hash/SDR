@@ -95,7 +95,8 @@ class TestWindow(_TextCase):
             "RTTY can't send %, @: they are left out.",
         )
         self.assertEqual(
-            self.dlg._count_label.text(), "10 characters · 2.5 s at 45.45 Bd"
+            self.dlg._count_label.text(),
+            "10 characters · 2.5 s at 45.45 Bd · sent in capitals",
         )
         self.dlg._remove_button.click()
         self.assertEqual(self.dlg.text(), "50  home")
@@ -104,6 +105,13 @@ class TestWindow(_TextCase):
         self.assertEqual(self.dlg.text(), "50% @ home")
         # PSK31 has every ASCII character.
         self.dlg.set_mode("PSK31")
+        self.assertFalse(self.dlg._unsupported_row.isVisibleTo(self.dlg))
+
+    def test_remove_keeps_good_prosigns(self):
+        self.dlg.set_mode("CW")
+        self.dlg.set_text("73 <SK> 5% <#>")
+        self.dlg._remove_button.click()
+        self.assertEqual(self.dlg.text(), "73 <SK> 5 ")
         self.assertFalse(self.dlg._unsupported_row.isVisibleTo(self.dlg))
 
     def test_macros_use_the_ham_id_callsign(self):
@@ -154,6 +162,42 @@ class TestWindow(_TextCase):
         self.assertEqual(len(self.dlg.text()), MAX_TEXT_CHARS)
         self.assertIn("up to 2,000 characters", self.status()[0])
         self.assertIn("2,000 of 2,000 characters", self.dlg._count_label.text())
+
+    def test_ham_id_tab_opens_it(self):
+        self.dlg.close()
+        self.panel._text_tx_btn.click()
+        self.assertTrue(self.dlg.isVisible())
+        self.assertIn("Ctrl+Shift+T", self.panel._text_tx_btn.toolTip())
+
+    def test_capitals_are_mentioned_where_only_capitals_go(self):
+        self.dlg.set_mode("RTTY")
+        self.dlg.set_text("cq de w1aw")
+        self.assertTrue(self.dlg._count_label.text().endswith("· sent in capitals"))
+        self.dlg.set_mode("PSK31")
+        self.assertNotIn("capitals", self.dlg._count_label.text())
+        self.dlg.set_mode("CW")
+        self.assertIn("capitals", self.dlg._count_label.text())
+        self.dlg.set_text("CQ DE W1AW")
+        self.assertNotIn("capitals", self.dlg._count_label.text())
+
+    def test_access_keys_are_unique(self):
+        import re
+
+        from PyQt6.QtWidgets import QAbstractButton, QGroupBox, QLabel
+
+        keys = []
+        for widget in self.dlg.findChildren((QLabel, QAbstractButton, QGroupBox)):
+            text = widget.title() if isinstance(widget, QGroupBox) else widget.text()
+            match = re.search(r"&([^&])", text or "")
+            if match and widget.isVisibleTo(self.dlg):
+                keys.append(match.group(1).lower())
+        self.assertEqual(len(keys), len(set(keys)), keys)
+
+    def test_speed_access_key_goes_to_the_control_shown(self):
+        self.dlg.set_mode("CW")
+        self.assertIs(self.dlg._speed_label.buddy(), self.dlg._wpm_spin)
+        self.dlg.set_mode("ASCII")
+        self.assertIs(self.dlg._speed_label.buddy(), self.dlg._baud_combo)
 
     def test_mode_controls(self):
         self.dlg.set_mode("RTTY")
@@ -357,7 +401,7 @@ class TestTransmit(_TextCase):
         )
         self.assertFalse(self.dlg._transmit_button.isEnabled())
 
-    def test_symbol_rate_and_license_are_checked(self):
+    def test_hf_data_width_and_license_are_checked(self):
         from sdr_module.core.frequency_manager import LicenseClass
 
         self.panel.set_callsign("W1AW")
@@ -366,17 +410,23 @@ class TestTransmit(_TextCase):
         self.dlg._baud_combo.setCurrentIndex(self.dlg._baud_combo.findData(1200.0))
         self.dlg.set_text("fast")
         self.refresh()
-        self.assertEqual(
-            self.line(),
-            (
-                "Can't send on 14.080 MHz: 1200 Bd is over the 300 Bd limit for "
-                "data below 28 MHz.",
-                "danger",
-            ),
+        self.assertEqual(self.line()[1], "info")  # (no baud limit on HF now)
+        self.dlg._emission_combo.setCurrentIndex(
+            self.dlg._emission_combo.findData("fm")
         )
-        self.dlg._baud_combo.setCurrentIndex(self.dlg._baud_combo.findData(300.0))
         self.refresh()
-        self.assertEqual(self.line()[1], "info")
+        text, tone = self.line()
+        width = self.dlg.current_signal().occupied_bandwidth_hz("fm")
+        self.assertEqual(
+            text,
+            f"Can't send on 14.080 MHz: the signal is {width / 1e3:.1f} kHz wide, "
+            "and RTTY and data below 29.7 MHz may be at most 2.8 kHz wide (choose "
+            "a lower baud rate or shift, or send it on the carrier).",
+        )
+        self.assertEqual(tone, "danger")
+        self.dlg._emission_combo.setCurrentIndex(
+            self.dlg._emission_combo.findData("direct")
+        )
         self.win._control_panel.set_license_class(LicenseClass.NONE)
         self.refresh()
         self.assertEqual(
@@ -488,6 +538,26 @@ class TestPreview(_TextCase):
         self.assertTrue(self.dlg._preview.playing)
         self.dlg.set_text("hello there")
         self.assertFalse(self.dlg._preview.playing)
+
+    def test_preview_uses_the_output_chosen_in_preferences(self):
+        from sdr_module.gui import audio_sink
+
+        chosen = []
+        # (AudioSink chooses its output once Preferences has one: T11.)
+        cls = audio_sink.AudioSink
+        before = cls.__dict__.get("set_output_device")
+        cls.set_output_device = lambda sink, device, name="": chosen.append(
+            (device, name)
+        )
+        if before is None:
+            self.addCleanup(delattr, cls, "set_output_device")
+        else:
+            self.addCleanup(setattr, cls, "set_output_device", before)
+        self.store.values["prefs/audio_output"] = "usb-headset"
+        self.store.values["prefs/audio_output_name"] = "USB Headset"
+        self.dlg.set_text("TEST")
+        self.dlg._preview_button.click()
+        self.assertEqual(chosen, [("usb-headset", "USB Headset")])
 
     def test_no_audio_output_says_so(self):
         from sdr_module.gui import audio_sink

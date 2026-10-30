@@ -181,6 +181,7 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         stop_requested = pyqtSignal()  # Stop (while on the air)
         settings_changed = pyqtSignal(dict)
         tx_power_changed = pyqtSignal(int, bool)  # TX gain dB, amplifier on
+        transmit_text_requested = pyqtSignal()  # Transmit Text... (T14)
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -456,6 +457,22 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         self._auto_note.setWordWrap(True)
         t.set_role(self._auto_note, "hint")
         auto_form.addRow(self._auto_note)
+
+        # Transmit Text (Tools > Transmit Text, Ctrl+Shift+T) uses these IDs.
+        self._text_tx_btn = QPushButton("Transmit Text…")
+        t.set_role(self._text_tx_btn, "compact")
+        self._text_tx_btn.setToolTip(
+            "Send text in CW, RTTY, PSK31 or ASCII FSK with your automatic ID "
+            "(Tools > Transmit Text, Ctrl+Shift+T)"
+        )
+        self._text_tx_btn.clicked.connect(
+            lambda _checked=False: self.transmit_text_requested.emit()
+        )
+        text_row = QHBoxLayout()
+        text_row.setContentsMargins(0, 0, 0, 0)
+        text_row.addStretch(1)
+        text_row.addWidget(self._text_tx_btn)
+        auto_form.addRow(text_row)
 
         layout.addWidget(auto_group)
         layout.addStretch(1)

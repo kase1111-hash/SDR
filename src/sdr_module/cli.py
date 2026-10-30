@@ -505,6 +505,9 @@ def cmd_encode(args: argparse.Namespace) -> int:
         print(f"Available: {', '.join(encoders.keys())}")
         return 1
     name = _ENCODE_NAMES[protocol]
+    if not args.sample_rate > 0:
+        print("Error: --sample-rate must be positive")
+        return 1
 
     # Each protocol its own configuration: one shared config used to make
     # every protocol 300 Bd with a 1 kHz shift, so RTTY wasn't RTTY.
@@ -949,7 +952,7 @@ def create_parser() -> argparse.ArgumentParser:
         "--carrier",
         type=float,
         default=1000,
-        help="Where the signal sits in Hz: the tone, or the centre between the "
+        help="Where the signal sits in Hz: the tone, or the center between the "
         "FSK tones (default: 1000)",
     )
     encode_parser.add_argument(

@@ -141,6 +141,14 @@ class TestCharacterSets:
             "control character 0x01"
         )
 
+    def test_only_ascii_letters_are_capitalised(self):
+        # "\u00df".upper() is "SS" and "\u0131".upper() is "I": those would
+        # change the text without a word. They are reported instead.
+        for mode in (MODE_CW, MODE_RTTY):
+            check = tm.check_text("Stra\u00dfe \u0131n", mode)
+            assert check.unsupported == {"\u00df": 1, "\u0131": 1}, mode
+            assert check.sent == ("STRAE N" if mode == MODE_CW else "STRAE N")
+
     def test_cw_prosigns(self):
         words, check = tm.morse_elements("73 <SK> <AR>")
         assert words[1] == ["...-.-"] and words[2] == [".-.-."]
@@ -149,6 +157,22 @@ class TestCharacterSets:
         check = tm.check_text("<SK", MODE_CW)
         assert check.unsupported == {"<": 1} and check.sent == "SK"
         assert tm.check_text("<#>", MODE_CW).unsupported == {"<": 1, "#": 1, ">": 1}
+
+    def test_remove_unsupported_keeps_what_can_be_sent(self):
+        # A broken prosign's brackets go; a good one's stay.
+        assert tm.remove_unsupported("73 <SK> 5% <#>", MODE_CW) == "73 <SK> 5 "
+        assert tm.remove_unsupported("<sk> <AR", MODE_CW) == "<sk> AR"
+        assert tm.remove_unsupported("50% @ \u201chome\u201d", MODE_RTTY) == (
+            "50  \u201chome\u201d"
+        )
+        assert tm.remove_unsupported("caf\u00e9\r\nok", MODE_ASCII) == "caf\r\nok"
+        assert tm.remove_unsupported("Stra\u00dfe", MODE_CW) == "Strae"
+        # White space a mode can't send goes too (and tabs, new lines stay).
+        assert tm.remove_unsupported("A\u3000B\tC\nD", MODE_RTTY) == "AB\tC\nD"
+        assert tm.remove_unsupported("A\u3000B", MODE_CW) == "A\u3000B"
+        for mode in tm.TEXT_MODES:
+            text = tm.remove_unsupported("Mixed: 50% <SK> caf\u00e9 #1 ~", mode)
+            assert tm.check_text(text, mode).ok, mode
 
     def test_cw_punctuation_from_the_decoders_table(self):
         check = tm.check_text(
@@ -384,21 +408,58 @@ class TestBandwidth:
         assert _signal("A", MODE_PSK31).occupied_bandwidth_hz() == 60.0
         assert _signal("A", MODE_CW, wpm=20).occupied_bandwidth_hz() == 150.0
         rtty = _signal("A", MODE_RTTY).occupied_bandwidth_hz()
-        assert 250.0 < rtty < 320.0
+        assert 300.0 < rtty < 350.0  # (the ITU's 250 Hz is too little)
+
+    def test_fsk_bound_holds_for_any_text(self):
+        """Alternating keying is the widest: the declared width holds the
+        99% power of other texts too, across rates and shifts."""
+        rng = np.random.default_rng(11)
+        texts = [
+            "THE QUICK BROWN FOX 0123456789",
+            "EEEE TTTT 3333",
+            "".join(chr(c) for c in rng.integers(32, 127, 40)),
+            "".join(chr(c) for c in rng.integers(32, 127, 40)),
+        ]
+        for mode in (MODE_RTTY, MODE_ASCII):
+            for baud in (45.45, 75.0, 110.0, 300.0, 1200.0):
+                for shift in (85.0, 170.0, 425.0, 1000.0):
+                    declared = tm.fsk_bandwidth_hz(mode, baud, shift)
+                    assert declared >= 1.1 * (baud + 1.2 * shift)
+                    rate = max(8000.0, 10 * (shift + 2 * baud))
+                    for text in texts:
+                        sig = _signal(text, mode, baud=baud, shift_hz=shift)
+                        if sig.empty:
+                            continue
+                        iq = sig.baseband(sig.times(rate))
+                        measured = demod.occupied_bandwidth(iq, rate)
+                        assert measured <= declared, (mode, baud, shift, text[:8])
+
+    def test_cw_and_psk31_bounds(self):
+        for wpm in (5.0, 20.0, 40.0, 60.0):
+            sig = _signal("PARIS 73 = CQ?", MODE_CW, wpm=wpm)
+            rate = 8000.0
+            measured = demod.occupied_bandwidth(sig.baseband(sig.times(rate)), rate)
+            assert measured <= sig.occupied_bandwidth_hz(), wpm
+        for text in ("e" * 40, " " * 40, "Hello, PSK31 world 0123456789"):
+            sig = _signal(text, MODE_PSK31)
+            rate = 4000.0
+            measured = demod.occupied_bandwidth(sig.baseband(sig.times(rate)), rate)
+            assert measured <= 60.0, text[:4]
 
 
 class TestRules:
-    def test_symbol_rate_limits(self):
-        fast = TextSettings.for_mode(MODE_ASCII, baud=1200.0)
-        assert "300 Bd limit" in tm.symbol_rate_problem(14.08e6, fast)
-        assert tm.symbol_rate_problem(29.0e6, fast) is None
-        assert (
-            tm.symbol_rate_problem(14.08e6, TextSettings.for_mode(MODE_ASCII)) is None
-        )
-        assert (
-            tm.symbol_rate_problem(14.08e6, TextSettings.for_mode(MODE_PSK31)) is None
-        )
-        assert tm.symbol_rate_problem(3.58e6, TextSettings.for_mode(MODE_RTTY)) is None
+    def test_hf_data_must_fit_in_2_8_khz(self):
+        sig = _signal("TEST", MODE_ASCII, baud=1200.0, shift_hz=1000.0)
+        width = sig.occupied_bandwidth_hz()
+        assert width < 2800.0  # 1200 Bd is fine on HF now (no baud limit)
+        assert tm.bandwidth_rule_problem(14.08e6, MODE_ASCII, width) is None
+        fm = sig.occupied_bandwidth_hz(EMISSION_FM)
+        problem = tm.bandwidth_rule_problem(14.08e6, MODE_ASCII, fm)
+        assert problem.startswith(f"the signal is {fm / 1e3:.1f} kHz wide, and RTTY ")
+        assert tm.bandwidth_rule_problem(29.7e6, MODE_ASCII, fm) is None
+        assert tm.bandwidth_rule_problem(146.52e6, MODE_RTTY, fm) is None
+        # Morse code is telegraphy, not data.
+        assert tm.bandwidth_rule_problem(14.05e6, MODE_CW, 6400.0) is None
 
 
 class TestExports:

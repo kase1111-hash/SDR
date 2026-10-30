@@ -7254,8 +7254,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         else:
             # The samples so far, mapped here on the GUI thread: the worker
             # only reads them, while a recording still running may go on
-            # adding to the file.
+            # adding to the file. (So is when the take was recorded, for
+            # SigMF's core:datetime.)
             snapshot = store.samples()[:count]
+            recorded = self._take_started
 
             def chunks():
                 for start in range(0, len(snapshot), _SAVE_CHUNK):
@@ -7274,6 +7276,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     rate,
                     center,
                     report,
+                    start_time=recorded,
                 ),
             )
             if result.cancelled:

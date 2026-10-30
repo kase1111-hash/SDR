@@ -522,6 +522,26 @@ class TestSaving(_FilesCase):
             any(type(b).__name__ == "ImportOptionsDialog" for b in self.boxes)
         )
 
+    def test_a_sigmf_save_keeps_when_the_take_was_recorded(self):
+        # core:datetime was the time of saving (IQRecorder's start), not of
+        # recording, while raw saves' sidecars had the take's start.
+        win = self.win
+        win._record_button.click()
+        win._update_display()
+        win._record_button.click()
+        win._take_started = "2020-01-02T03:04:05Z"  # (recorded long ago)
+        for name, meta_name in (
+            ("old.sigmf-data", "old.sigmf-meta"),
+            ("old.cf32", "old.cf32.sigmf-meta"),
+        ):
+            with self.save_dialog(self.path(name)):
+                self.assertTrue(win._save_recording())
+            with open(self.path(meta_name)) as handle:
+                meta = json.load(handle)
+            self.assertEqual(
+                meta["captures"][0]["core:datetime"], "2020-01-02T03:04:05Z", name
+            )
+
     def test_cu8_and_cs8_can_be_written(self):
         names = [spec[1] for spec in self.win._SAVE_FORMATS]
         self.assertEqual(names[0], ".sigmf-data")  # SigMF first

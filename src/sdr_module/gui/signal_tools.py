@@ -32,13 +32,14 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, List, Optional, Tuple
+from typing import Any, Deque, List, Optional, Tuple
 
 import numpy as np
 
 from ..dsp.afc import TRACK_METHODS, SignalTracker
-from ..dsp.bursts import BurstWatcher
+from ..dsp.bursts import BurstReport, BurstWatcher, analyze_report
 from ..dsp.signal_id import (
     WAIT_S,
     Identification,
@@ -50,7 +51,7 @@ from ..dsp.signal_id import (
 from ..dsp.signal_list import SignalPeak, SignalSurvey, find_signals
 
 try:
-    from PyQt6.QtCore import QObject
+    from PyQt6.QtCore import QObject, QTimer
     from PyQt6.QtWidgets import QLabel
 
     HAS_PYQT6 = True
@@ -63,6 +64,9 @@ logger = logging.getLogger(__name__)
 #: longer heard stays listed.
 LIST_EVERY_S = 0.5
 FORGET_S = 10.0
+#: Bursts waiting for their analysis (a busy band): beyond this many, a
+#: burst is listed without one rather than late.
+MAX_PENDING_BURSTS = 8
 #: Broadcast FM: wide deviations Track Signal leaves alone.
 _BROADCAST_DEVIATION_HZ = 50e3
 
@@ -105,9 +109,18 @@ if HAS_PYQT6:
             self._heard: List[Tuple[SignalPeak, float]] = []
             self._markers = False
             self._listing_until = 0.0
-            # Bursts.
-            self._watcher = BurstWatcher()
+            self._listed_at = -1e9  # when the list was last measured
+            # Bursts: each finished one is taken apart off the display loop
+            # (50-200 ms each), and listed in order once it is.
+            self._watcher = BurstWatcher(defer=True)
             self._watch_always = False
+            self._burst_pool = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="bursts"
+            )
+            self._burst_jobs: Deque[Tuple[Future, BurstReport, float]] = deque()
+            self._burst_timer = QTimer(self)
+            self._burst_timer.setInterval(100)
+            self._burst_timer.timeout.connect(self._collect_bursts)
             # AFC.
             self._tracker: Optional[SignalTracker] = None
             self._tracking = False
@@ -156,6 +169,9 @@ if HAS_PYQT6:
             self._identifier = None
             self._tracking = False
             self._pool.shutdown(wait=False, cancel_futures=True)
+            self._burst_timer.stop()
+            self._burst_jobs.clear()
+            self._burst_pool.shutdown(wait=False, cancel_futures=True)
             for obj in [self.panel, *self.panel.findChildren(QObject)]:
                 obj.blockSignals(True)
 
@@ -196,8 +212,7 @@ if HAS_PYQT6:
                     "Start (Space), then Identify.",
                     "warning",
                 )
-            for report in self._watcher.flush():
-                self.panel.add_burst(report)
+            self._queue_bursts(self._watcher.flush())
             if not self.panel.showing_recording():
                 self.panel.set_signals_empty(
                     "Receiver stopped\nPress Start (Space): the signals in view "
@@ -208,11 +223,10 @@ if HAS_PYQT6:
                 )
             self._heard = []
             self._acc = None
+            self._listed_at = -1e9
             self._apply_markers([])
             if self._tracking:
-                self._set_badge(
-                    "AFC paused", "muted", "Track Signal resumes when receiving does"
-                )
+                self._set_paused_badge()
 
         def frequency_changed(self, freq_hz: float) -> None:
             """The tuned frequency changed (the window's
@@ -229,7 +243,11 @@ if HAS_PYQT6:
                     self._ident_takes = 0
             if self._tracker is not None:
                 self._tracker.retuned(float(self._win._vfo_offset_hz()))
-                self._update_badge(0.0, True, False, False)
+                if self._win._is_running:
+                    # Nothing measured here yet: not locked on.
+                    self._update_badge(0.0, False, False, False)
+                else:
+                    self._set_paused_badge()
 
         # -- Identify -----------------------------------------------------------------------
 
@@ -431,6 +449,7 @@ if HAS_PYQT6:
             found = find_signals(
                 avg_db, key[1], key[2], float(self.panel.min_snr.value())
             )
+            self._listed_at = now
             self._remember(found, now)
             current = [s for s, t in self._heard if t >= now - 0.01]
             if not self.panel.showing_recording():
@@ -486,18 +505,29 @@ if HAS_PYQT6:
                     4000,
                 )
                 return False
-            if not self._heard:
-                # Not listed yet (the page wasn't open): measure now.
+            # (Pressing the keys keeps the list measured off the page.)
+            self._ensure_listing()
+            key = self._acc_key
+            here = (float(win._lo_frequency()), float(win._device_sample_rate()))
+            if (
+                key is None
+                or (key[1], key[2]) != here
+                or time.monotonic() - self._listed_at > 3.0 * LIST_EVERY_S
+            ):
+                # Not measured lately in this span (the page wasn't open,
+                # or it was long ago, elsewhere): measure now.
                 self._list_due = 0.0
                 win._show_status_message(
                     "Looking for signals… press it again in a moment.", None, 3000
                 )
-                self._ensure_listing()
                 return False
             tuned = float(win._current_frequency())
             signals = [s for s, _t in self._heard]
             target: Optional[SignalPeak] = None
             if direction == "strongest":
+                if not signals:
+                    win._show_status_message("No signals in view.", None, 3000)
+                    return False
                 target = max(signals, key=lambda s: s.peak_dbfs)
             elif direction == "up":
                 ups = [
@@ -523,7 +553,7 @@ if HAS_PYQT6:
 
         def _ensure_listing(self) -> None:
             """List the signals for a while even off the Signals page (for
-            Home / Page Up / Page Down)."""
+            Home / Page Up / Page Down: 30 s from the last press)."""
             self._listing_until = time.monotonic() + 30.0
 
         def _tune(self, freq: float) -> bool:
@@ -561,17 +591,50 @@ if HAS_PYQT6:
             self._watch_always = bool(on)
 
         def _bursts_frame(self, samples: np.ndarray, rate: float) -> None:
+            if self._burst_jobs:
+                self._collect_bursts()
             if not (self._watch_always or self.panel.page_visible("bursts")):
                 if self._watcher.detector.active:
-                    for report in self._watcher.flush():
-                        self.panel.add_burst(report)
+                    self._queue_bursts(self._watcher.flush())
                 return
             win = self._win
             reports = self._watcher.feed(samples, float(win._lo_frequency()), rate)
+            self._queue_bursts(reports)
+
+        def _queue_bursts(self, reports: List[BurstReport]) -> None:
+            """Take the finished bursts apart on the bursts worker (it takes
+            50-200 ms each, too long for the display loop); they are listed
+            in order as their analyses come back."""
             for report in reports:
-                if report.burst.duration_s < 0.02 and report.burst.snr_db < 15:
+                burst = report.burst
+                if burst.duration_s < 0.02 and burst.snr_db < 15:
                     continue  # a flicker
-                self.panel.add_burst(report)
+                # The list's Time is when it started, not when it was done.
+                ago = max(0.0, self._watcher.time_s - burst.start_s)
+                when = time.time() - ago
+                job: Future
+                if len(self._burst_jobs) < MAX_PENDING_BURSTS:
+                    job = self._burst_pool.submit(analyze_report, report)
+                else:
+                    job = Future()  # a busy band: listed now, not taken apart
+                    job.set_result(report)
+                self._burst_jobs.append((job, report, when))
+            if self._burst_jobs:
+                self._collect_bursts()
+                if self._burst_jobs and not self._burst_timer.isActive():
+                    self._burst_timer.start()
+
+        def _collect_bursts(self) -> None:
+            """List the bursts whose analysis came back, oldest first."""
+            while self._burst_jobs and self._burst_jobs[0][0].done():
+                job, report, when = self._burst_jobs.popleft()
+                try:
+                    job.result()
+                except Exception as exc:  # pragma: no cover - a bonus only
+                    logger.warning("Taking a burst apart failed: %s", exc)
+                self.panel.add_burst(report, when)
+            if not self._burst_jobs:
+                self._burst_timer.stop()
 
         def export_bursts(self) -> None:
             from . import file_dialogs
@@ -634,7 +697,10 @@ if HAS_PYQT6:
             self._tracker = None
             self._tracker_key = None
             if on:
-                self._update_badge(0.0, False, False, False)
+                if win._is_running:
+                    self._update_badge(0.0, False, False, False)
+                else:
+                    self._set_paused_badge()
                 win._show_status_message(
                     "Track Signal: the tuned frequency follows the signal as it "
                     "drifts",
@@ -648,6 +714,22 @@ if HAS_PYQT6:
         @property
         def tracking(self) -> bool:
             return self._tracking
+
+        def _stop_tracking(self, message: str) -> None:
+            """Track Signal turns itself off, its menu item and status-bar
+            badge too, saying why."""
+            self.set_tracking(False)
+            action = getattr(self._win, "_track_action", None)
+            if action is not None and action.isChecked():
+                action.blockSignals(True)
+                action.setChecked(False)
+                action.blockSignals(False)
+            self._win._show_status_message(message, "warning", 6000)
+
+        def _set_paused_badge(self) -> None:
+            self._set_badge(
+                "AFC paused", "muted", "Track Signal resumes when receiving does"
+            )
 
         def _afc_frame(self, samples: np.ndarray, dt: float, chain: Any) -> None:
             if not self._tracking:
@@ -665,18 +747,9 @@ if HAS_PYQT6:
                 float(win._channel_bandwidth()),
                 float(win._device_sample_rate()),
             )
-            if self._tracking_problem() is not None:
-                self.set_tracking(False)
-                action = getattr(win, "_track_action", None)
-                if action is not None:
-                    action.blockSignals(True)
-                    action.setChecked(False)
-                    action.blockSignals(False)
-                win._show_status_message(
-                    "Track Signal turned off: " + str(self._tracking_problem()),
-                    "warning",
-                    6000,
-                )
+            problem = self._tracking_problem()
+            if problem is not None:
+                self._stop_tracking("Track Signal turned off: " + problem)
                 return
             if self._tracker is None or key != self._tracker_key:
                 self._tracker = SignalTracker(
@@ -686,6 +759,8 @@ if HAS_PYQT6:
             status = self._tracker.process(samples, dt)
             if status.nudge_hz:
                 self._move_vfo(status.nudge_hz)
+                if not self._tracking:
+                    return  # it stopped there (the edge of a recording)
             self._update_badge(
                 status.correction_hz, status.locked, status.lost, status.signal_present
             )
@@ -701,12 +776,9 @@ if HAS_PYQT6:
             if lock is not None:
                 center, span, _why = lock
                 if not win._channel_fits(freq - center, rate=span):
-                    self.set_tracking(False)
-                    win._show_status_message(
+                    self._stop_tracking(
                         "Track Signal stopped: the signal drifted out of the "
-                        "recording.",
-                        "warning",
-                        6000,
+                        "recording."
                     )
                     return
             elif not win._channel_fits(freq - win._lo_frequency()):

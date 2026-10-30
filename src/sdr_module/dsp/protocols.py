@@ -2127,6 +2127,9 @@ class ADSBMessage(DecodedMessage):
     squawk: str = ""  # Transponder code
     on_ground: bool = False
     category: str = ""  # Aircraft category
+    #: The velocity message carried a vertical rate (an all-zero field
+    #: means "no information").
+    vertical_rate_known: bool = True
 
 
 class ADSBDecoder(ProtocolDecoder):
@@ -2547,10 +2550,10 @@ class ADSBDecoder(ProtocolDecoder):
             if heading < 0:
                 heading += 360
 
-            # Vertical rate
+            # Vertical rate (an all-zero field: no information)
             vr_sign = (data[4] >> 3) & 0x01
             vr_value = ((data[4] & 0x07) << 6) | (data[5] >> 2)
-            vertical_rate = (vr_value - 1) * 64
+            vertical_rate = (vr_value - 1) * 64 if vr_value else 0
             if vr_sign:
                 vertical_rate = -vertical_rate
 
@@ -2652,6 +2655,7 @@ class ADSBDecoder(ProtocolDecoder):
             msg.velocity = velocity
             msg.heading = heading
             msg.vertical_rate = vrate
+            msg.vertical_rate_known = bool(((data[8] & 0x07) << 6) | (data[9] >> 2))
 
         # Surface position (TC 5-8)
         elif 5 <= tc <= 8:

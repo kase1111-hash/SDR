@@ -27,13 +27,16 @@ from sdr_module.dsp.protocols import ProtocolType
 MESSAGE = "CQ CQ DE N0CALL PARIS 73"
 
 
-def _noisy(x, snr_db, seed, rate_bw=None):
-    """``x`` (unit carrier) plus complex white noise ``snr_db`` below it
-    (in the full bandwidth of the samples)."""
+def _noisy(x, snr_db, seed, rate=2000.0):
+    """``x`` (unit carrier) plus noise ``snr_db`` below it in 500 Hz: white
+    noise band-limited to +/-250 Hz, as a CW channel filter leaves it."""
     rng = np.random.default_rng(seed)
-    sigma = np.sqrt(10 ** (-snr_db / 10) / 2)
-    noise = sigma * (rng.standard_normal(len(x)) + 1j * rng.standard_normal(len(x)))
-    return (x + noise).astype(np.complex64)
+    n = len(x)
+    spectrum = np.fft.fft(rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    spectrum[np.abs(np.fft.fftfreq(n, 1.0 / rate)) > 250.0] = 0.0
+    noise = np.fft.ifft(spectrum)
+    noise /= np.sqrt(np.mean(np.abs(noise) ** 2))
+    return (np.sqrt(10 ** (snr_db / 10)) * x + noise).astype(np.complex64)
 
 
 def _decode(x, rate, block=None):
@@ -120,9 +123,9 @@ class TestSpeeds:
         assert lines[0].protocol is ProtocolType.CW
 
     @pytest.mark.parametrize("wpm", [15, 20, 25])
-    @pytest.mark.parametrize("snr_db", [10.0, 6.0])
+    @pytest.mark.parametrize("snr_db", [12.0, 8.0])
     def test_with_noise(self, wpm, snr_db):
-        # SNR in the 2 kHz channel: a +/-250 Hz filter would add 6 dB.
+        # SNR in 500 Hz (the CW channel).
         rate = 2000.0
         x = enc.cw_baseband(MESSAGE, rate, wpm, offset_hz=30.0)
         for seed in (1, 2):
@@ -132,22 +135,21 @@ class TestSpeeds:
 
     @pytest.mark.parametrize("wpm", [15, 20, 25])
     def test_weak_signal_mostly_right(self, wpm):
-        # 4 dB in 2 kHz (about 10 dB in a 500 Hz filter): a letter or two
-        # may be lost, the rest reads.
+        # 6 dB in 500 Hz: a letter or two may be lost, the rest reads.
         rate = 2000.0
         x = enc.cw_baseband(MESSAGE, rate, wpm)
         ratios = []
         for seed in (7, 8, 9):
-            text, _ = _decode(_noisy(x, 4.0, seed), rate)
+            text, _ = _decode(_noisy(x, 6.0, seed), rate)
             ratios.append(
                 difflib.SequenceMatcher(None, " ".join(text), MESSAGE).ratio()
             )
-        assert min(ratios) > 0.85 and np.mean(ratios) > 0.9
+        assert min(ratios) > 0.6 and np.mean(ratios) > 0.8
 
     @pytest.mark.parametrize("block", [66, 333, 2000])
     def test_noisy_stream_in_blocks_decodes_like_whole(self, block):
         rate = 2000.0
-        x = _noisy(enc.cw_baseband(MESSAGE, rate, 20), 4.0, 11)
+        x = _noisy(enc.cw_baseband(MESSAGE, rate, 20), 6.0, 11)
         whole, _ = _decode(x, rate)
         assert _decode(x, rate, block)[0] == whole
 
@@ -159,6 +161,9 @@ class TestSpeeds:
                 rng.standard_normal(120_000) + 1j * rng.standard_normal(120_000)
             )
             text, morse = _decode(noise, rate)
+            assert text == [] and morse.characters == 0, seed
+            # As the CW channel leaves it, band-limited.
+            text, morse = _decode(_noisy(np.zeros(120_000), 0.0, seed), rate)
             assert text == [] and morse.characters == 0, seed
 
     def test_silence_decodes_nothing(self):
@@ -233,6 +238,14 @@ class TestTextLayout:
             keying[start : start + 4] = 1.0
         lines, _morse = self.lines(keying)
         assert lines == ["PARIS PARIS"]
+
+    def test_flush_keeps_a_mark_cut_off_by_the_end(self):
+        # A recording that stops while the key is down: its last dash
+        # still counts ("TEST" ends in T, a dash).
+        keying = self.keying((0.5,), "TEST")
+        morse = MorseDecoder(self.RATE)
+        morse.process(keying[:-20])
+        assert [m.text for m in morse.flush()] == ["TEST"]
 
     def test_unknown_codes_show_a_star(self):
         morse = MorseDecoder(self.RATE)
@@ -314,6 +327,19 @@ class TestCWLiveDecoder:
         assert messages == []
         assert decoder.status.live_text == "CQ CQ"
 
+    def test_flush_ends_the_line_and_counts_all_of_it(self):
+        # The stream stops during the last dash: flush() gives the line,
+        # and the status counts its last letter too.
+        offset = 50e3
+        key = enc.morse_keying("CQ CQ", self.RATE, 20)
+        end = np.nonzero(key > 0.5)[0][-1] - int(0.02 * self.RATE)
+        x = self.span(offset, "CQ CQ", seconds_extra=0.0)[:end]
+        decoder, messages = self.decode(x, offset, block=8_000)
+        assert decoder.status.live_text == "CQ C"
+        assert messages == []
+        assert [m.text for m in decoder.flush()] == ["CQ CQ"]
+        assert decoder.status.valid == 4
+
     def test_retuning_ends_the_line(self):
         offset = 50e3
         x = self.span(offset, "CQ CQ", seconds_extra=0.3)
@@ -322,6 +348,7 @@ class TestCWLiveDecoder:
         messages = decoder.process(np.zeros(8_000, dtype=np.complex64))
         assert [m.text for m in messages] == ["CQ CQ"]
         assert decoder.status.live_text == ""
+        assert decoder.status.valid == 4  # its last letter counted too
 
     def test_message_rows(self):
         msg = MorseMessage(

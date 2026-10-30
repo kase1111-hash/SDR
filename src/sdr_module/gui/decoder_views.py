@@ -111,7 +111,7 @@ def describe_aircraft(aircraft: Aircraft, now: float) -> str:
     if aircraft.speed is not None:
         speed = f"{aircraft.speed:.0f} kt"
         if aircraft.track is not None:
-            speed += f", track {aircraft.track:.0f}°"
+            speed += f", track {round(aircraft.track) % 360}°"
         parts.append(speed)
     if aircraft.latitude is not None and aircraft.longitude is not None:
         parts.append(f"{aircraft.latitude:.4f}, {aircraft.longitude:.4f}")
@@ -182,7 +182,10 @@ class AircraftTracker:
         if type_code == 19 and speed:
             aircraft.speed = speed
             aircraft.track = float(getattr(msg, "heading", 0.0) or 0.0)
-            aircraft.vertical_rate = int(getattr(msg, "vertical_rate", 0) or 0)
+            if getattr(msg, "vertical_rate_known", True):
+                aircraft.vertical_rate = int(getattr(msg, "vertical_rate", 0) or 0)
+            else:
+                aircraft.vertical_rate = None
         lat = float(getattr(msg, "latitude", 0.0) or 0.0)
         lon = float(getattr(msg, "longitude", 0.0) or 0.0)
         if lat or lon:
@@ -394,9 +397,9 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
             selected = self.selected_icao()
             for icao in gone:
                 self._rows.pop(icao, None)
-            self._rebuild()
+            self._rebuild(selected)
             if selected in gone:
-                self.aircraft_selected.emit("")
+                self._on_selection()  # nothing picked now
         for icao, row in self._rows.items():
             aircraft = self.tracker.get(icao)
             if aircraft is not None:
@@ -440,20 +443,25 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
                 return icao
         return ""
 
-    def _rebuild(self) -> None:
-        """Rows again after aircraft were dropped (order kept)."""
-        selected = self.selected_icao()
-        self.table.setRowCount(0)
-        self._rows.clear()
-        for aircraft in self.tracker.aircraft():
-            row = self.table.rowCount()
-            self.table.insertRow(row)
-            self._rows[aircraft.icao] = row
-            for col in range(len(_AC_HEADERS)):
-                self.table.setItem(row, col, QTableWidgetItem())
-            self._fill(row, aircraft)
-        if selected in self._rows:
-            self.select(selected)
+    def _rebuild(self, selected: str) -> None:
+        """Rows again after aircraft were dropped (order kept), the aircraft
+        ``selected`` still selected if it is there: quietly, so the
+        Messages filter and its selection are left alone."""
+        blocked = self.table.blockSignals(True)
+        try:
+            self.table.setRowCount(0)
+            self._rows.clear()
+            for aircraft in self.tracker.aircraft():
+                row = self.table.rowCount()
+                self.table.insertRow(row)
+                self._rows[aircraft.icao] = row
+                for col in range(len(_AC_HEADERS)):
+                    self.table.setItem(row, col, QTableWidgetItem())
+                self._fill(row, aircraft)
+            if selected in self._rows:
+                self.select(selected)
+        finally:
+            self.table.blockSignals(blocked)
 
     def _fill(self, row: int, aircraft: Aircraft) -> None:
         now = self._clock()
@@ -475,7 +483,9 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
                 f"{aircraft.speed:.0f}" if aircraft.speed is not None else _NO_VALUE
             ),
             AC_TRACK: (
-                f"{aircraft.track:.0f}°" if aircraft.track is not None else _NO_VALUE
+                f"{round(aircraft.track) % 360}°"
+                if aircraft.track is not None
+                else _NO_VALUE
             ),
             AC_VS: format_vertical_rate(aircraft.vertical_rate),
             AC_POSITION: position,

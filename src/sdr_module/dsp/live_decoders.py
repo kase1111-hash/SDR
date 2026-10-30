@@ -55,7 +55,7 @@ from .channelizer import (
     Nco,
     lowpass_taps,
 )
-from .morse import KeyingDetector, MorseDecoder
+from .morse import KeyingDetector, MorseDecoder, MorseMessage
 from .protocols import (
     APRS_TYPE_NAMES,
     ACARSDecoder,
@@ -576,15 +576,15 @@ class CWLiveDecoder(ChannelDecoder):
         super().channel_changed()
         # Another station: its line ends here, and its levels and speed
         # are its own.
-        self._held.extend(self._morse.flush())
+        self._held.extend(self._counted(self._morse.flush))
         self._keyer.reset()
         self._morse.reset()
 
-    def _demodulate(self, channel: np.ndarray) -> List[DecodedMessage]:
+    def _counted(self, step: Callable[[], List[MorseMessage]]) -> List[MorseMessage]:
+        """Run a step of the Morse decoder and count the characters it
+        decoded."""
         before = self._morse.characters
-        lines: List[DecodedMessage] = list(self._held)
-        self._held = []
-        lines += self._morse.process(self._keyer.process(np.abs(channel)))
+        lines = step()
         new = self._morse.characters - before
         if new > 0:
             self._chars += new
@@ -592,13 +592,17 @@ class CWLiveDecoder(ChannelDecoder):
             self._undecoded = 0.0  # it decodes
         return lines
 
+    def _demodulate(self, channel: np.ndarray) -> List[DecodedMessage]:
+        lines: List[DecodedMessage] = list(self._held)
+        self._held = []
+        keying = self._keyer.process(np.abs(channel))
+        lines += self._counted(lambda: self._morse.process(keying))
+        return lines
+
     def flush(self) -> List[DecodedMessage]:
         lines: List[DecodedMessage] = list(self._held)
         self._held = []
-        return lines + list(self._morse.flush())
-
-    def reset(self) -> None:
-        super().reset()  # rebuilds the keyer and the decoder
+        return lines + list(self._counted(self._morse.flush))
 
     @property
     def wpm(self) -> Optional[float]:
@@ -915,11 +919,9 @@ def _adsb_content(msg: Any) -> str:
     parts.append(_position(msg))
     if speed and getattr(msg, "type_code", 0) == 19:
         heading = float(getattr(msg, "heading", 0.0) or 0.0)
-        parts += [
-            f"{speed:.0f} kt",
-            f"track {heading:.0f}°",
-            _vertical(int(getattr(msg, "vertical_rate", 0) or 0)),
-        ]
+        parts += [f"{speed:.0f} kt", f"track {round(heading) % 360}°"]
+        if getattr(msg, "vertical_rate_known", True):
+            parts.append(_vertical(int(getattr(msg, "vertical_rate", 0) or 0)))
     elif speed:
         parts.append(f"{speed:.0f} kt")
     squawk = _text(msg, "squawk")
@@ -930,8 +932,13 @@ def _adsb_content(msg: Any) -> str:
     content = _joined(*parts)
     if content:
         return content
-    if getattr(msg, "downlink_format", 0) == 11:
+    df = int(getattr(msg, "downlink_format", 0) or 0)
+    if df == 11:
         return "Address only (all-call reply)"
+    if df in (17, 18):
+        tc = int(getattr(msg, "type_code", 0) or 0)
+        kind = _ADSB_KINDS.get(tc, f"type code {tc}")
+        return f"{kind[0].upper()}{kind[1:]} (not read)"
     return "Address only"
 
 

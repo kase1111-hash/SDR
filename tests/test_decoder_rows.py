@@ -62,6 +62,38 @@ class TestADSB:
         )
         assert describe_message(msg)[1] == f"450 kt  ·  track 265°  ·  {text}"
 
+    def test_no_vertical_rate_information_is_not_level(self):
+        # An all-zero vertical rate field means "no information"; it was
+        # read as -64 ft/min ("descending 64 ft/min").
+        from sdr_module.gui import device_dialog as dd
+
+        me = dd._velocity_me(450.0, 265.0) & ~(0x1FF << 10)  # no rate
+        frame = dd._extended_squitter(dd._AIRCRAFT_ICAO, me)
+        msg = ADSBDecoder(2e6)._parse_frame(frame)
+        assert (msg.vertical_rate, msg.vertical_rate_known) == (0, False)
+        assert describe_message(msg)[1] == "450 kt  ·  track 265°"
+        level = ADSBDecoder(2e6)._parse_frame(
+            dd._extended_squitter(dd._AIRCRAFT_ICAO, dd._velocity_me(450.0, 265.0))
+        )
+        assert level.vertical_rate_known and describe_message(level)[1].endswith(
+            "level"
+        )
+
+    def test_track_rounds_into_the_compass(self):
+        msg = adsb(downlink_format=17, type_code=19, velocity=300.0, heading=359.7)
+        assert "track 0°" in describe_message(msg)[1]
+
+    def test_unread_squitters_say_what_they_are(self):
+        assert describe_message(adsb(downlink_format=17, type_code=31))[1] == (
+            "Operational status (not read)"
+        )
+        assert describe_message(adsb(downlink_format=17, type_code=19))[1] == (
+            "Airborne velocity (not read)"
+        )
+        assert describe_message(adsb(downlink_format=18, type_code=27))[1] == (
+            "Type code 27 (not read)"
+        )
+
     def test_a_track_of_north_is_shown(self):
         msg = adsb(downlink_format=17, type_code=19, velocity=300.0, heading=0.0)
         assert "track 0°" in describe_message(msg)[1]

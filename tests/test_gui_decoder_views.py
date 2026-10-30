@@ -28,6 +28,7 @@ from tests.test_gui_chrome import (  # noqa: E402
 
 if HAS_PYQT6:
     from PyQt6.QtCore import Qt
+    from PyQt6.QtGui import QAction
     from PyQt6.QtWidgets import QApplication
 
 
@@ -122,6 +123,13 @@ class TestAircraftView(_PanelCase):
         self.assertEqual(self.cells(1)[0], "DLH9U")
         self.assertEqual(len(self.panel._messages), 5)  # the rows stay too
 
+    def test_unknown_vertical_rate_is_a_dash(self):
+        _add(self.panel, _adsb(icao_address="ABC123", downlink_format=17, type_code=19,
+                               velocity=300.0, heading=359.7, vertical_rate=0,
+                               vertical_rate_known=False))  # fmt: skip
+        cells = self.cells(0)
+        self.assertEqual((cells[3], cells[4]), ("0°", "–"))
+
     def test_rows_dim_after_a_minute_and_go_after_five(self):
         self.feed_klm()
         self.now += 61
@@ -137,6 +145,35 @@ class TestAircraftView(_PanelCase):
         self.view.refresh()
         self.assertEqual(self.view.table.rowCount(), 0)
         self.assertTrue(self.view._empty.is_visible())
+
+    def test_another_aircraft_going_keeps_the_selection(self):
+        # An aircraft dropped while another is picked: the pick, its
+        # filter and the message picked under Messages all stay.
+        _add(self.panel, _adsb(icao_address="3C6586", downlink_format=11))
+        self.now += 200
+        self.feed_klm()
+        self.view.select("4840D6")
+        self.panel._table.selectRow(1)
+        _settle(1)
+        seen = []
+        self.view.aircraft_selected.connect(seen.append)
+        self.now += 150  # 3C6586 is gone, KLM1023 stays
+        self.view.refresh()
+        _settle(1)
+        self.assertEqual(self.view.table.rowCount(), 1)
+        self.assertEqual(self.view.selected_icao(), "4840D6")
+        self.assertEqual(self.panel.address_filter(), "4840D6")
+        self.assertEqual(seen, [])
+        self.assertEqual(
+            [i.row() for i in self.panel._table.selectionModel().selectedRows()], [1]
+        )
+        # The picked aircraft going clears the pick and the filter.
+        self.now += 400
+        self.view.refresh()
+        _settle(1)
+        self.assertEqual(seen, [""])
+        self.assertEqual(self.panel.address_filter(), "")
+        self.assertTrue(self.view.detail.isHidden())
 
     def test_picking_an_aircraft_shows_only_its_messages(self):
         self.feed_klm()
@@ -374,6 +411,18 @@ class TestWindowActivity(_WindowTestCase):
         win._push_decoded_message(_adsb(icao_address="4840D6", downlink_format=11))
         win._run_decoder(np.zeros(8, dtype=np.complex64))
         self.assertEqual(chip.text(), "ADS-B · 1 msg")
+        # Its tooltip names the shortcut View > Panels gives the Decoder.
+        shortcut = next(
+            a.shortcut().toString()
+            for a in win.findChildren(QAction)
+            if a.text().replace("&", "") == "Decoder" and not a.shortcut().isEmpty()
+        )
+        self.assertIn(f"Click to open the Decoder tab ({shortcut}).", chip.toolTip())
+        win._decoder_panel._proto_combo.setCurrentText("Auto")
+        _settle(1)
+        self.assertIn("(chosen by Auto)", chip.toolTip())
+        win._decoder_panel._proto_combo.setCurrentText("ADS-B")
+        _settle(1)
         win._decoder_panel._enabled_check.setChecked(False)
         win._update_decoder_chip()
         self.assertEqual(chip.text(), "ADS-B · paused")
@@ -527,6 +576,14 @@ class TestRdsStation(_WindowTestCase):
         self.assertFalse(self.store.get_bool("decoder/rds_auto", True))
         self.receive(0.3)
         self.assertFalse(win._rds_badge_action.isVisible())
+
+    def test_disconnecting_forgets_the_station(self):
+        win = self.win
+        self.listen_to_the_station()
+        self.assertTrue(win._rds_badge_action.isVisible())
+        win._disconnect_device()
+        self.assertFalse(win._rds_badge_action.isVisible())
+        self.assertIsNone(win._rds_listener.decoder)
 
     def test_the_decoders_rds_names_it_instead(self):
         win = self.win

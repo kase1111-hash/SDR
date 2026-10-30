@@ -3065,6 +3065,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder_panel.set_sample_rate(rate)
         self._decoder_panel.set_demod_mode(self._control_panel.get_demod_mode())
         self._update_decoder_chip()
+        listener = self._own("_rds_listener")
+        if not has_device and listener is not None:
+            # No receiver: no station to name.
+            listener.reset()
+            self._show_rds_station(None)
         if HAS_HAM_RADIO:
             self._sync_signal_meter(running, has_device)
 
@@ -3613,12 +3618,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         text = " · ".join(parts)
         if chip.text() != text:
             chip.setText(text)
-            chip.setToolTip(
-                f"Decoder: {proto}"
-                + (" (chosen by Auto)" if panel.is_auto() else "")
-                + f", {count:,} message{'' if count == 1 else 's'} since "
-                "Clear. Click to open the Decoder tab (Ctrl+1)."
-            )
+        # Its View > Panels shortcut (Ctrl+1 while it is the first panel).
+        index = next(
+            (i for i, spec in enumerate(self._panel_specs) if spec[0] == "decoder"),
+            9,
+        )
+        tip = (
+            f"Decoder: {proto}"
+            + (" (chosen by Auto)" if panel.is_auto() else "")
+            + f", {count:,} message{'' if count == 1 else 's'} since Clear. "
+            + "Click to open the Decoder tab"
+            + (f" (Ctrl+{index + 1})." if index < 9 else ".")
+        )
+        if chip.toolTip() != tip:
+            chip.setToolTip(tip)
         if chip.isHidden():
             chip.show()
 

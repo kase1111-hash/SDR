@@ -8,7 +8,7 @@ steps, each keeping its state from one block to the next, so a stream
 decoded 33 ms at a time gives the same text as the whole recording at once:
 
 - :class:`KeyingDetector` decides key down / key up from the envelope. The
-  envelope is smoothed over 10 ms and two levels are tracked across
+  envelope is smoothed over 15 ms and two levels are tracked across
   blocks: the signal's peak (it follows a rising envelope at once and
   decays over seconds) and the noise floor (it follows a falling envelope
   at once and rises over seconds, far more slowly while a strong signal
@@ -143,7 +143,7 @@ class KeyingDetector:
 
     #: Decisions per second (the input is smoothed, then read at this rate).
     WORK_RATE = 1000.0
-    SMOOTH_S = 0.010
+    SMOOTH_S = 0.015
     PEAK_ATTACK_S = 0.005
     PEAK_DECAY_S = 2.0
     FLOOR_FALL_S = 0.05
@@ -157,13 +157,13 @@ class KeyingDetector:
     #: key up below ``RELEASE``.
     PRESS = 0.6
     RELEASE = 0.4
-    #: The peak must be this many times the floor before anything keys
-    #: (noise alone stays below it: about two spurious characters in a
-    #: quarter of an hour of noise, while a keyed carrier 3 dB above the
-    #: noise in a 2 kHz channel still decodes). Once keying, it may drop
-    #: to ``GATE_LOW``.
-    GATE = 1.9
-    GATE_LOW = 1.7
+    #: The peak must be this many times the floor before anything keys.
+    #: Noise alone, through a +/-250 Hz CW channel, stays below it (no
+    #: character in minutes of it), while a keyed carrier 8 dB above the
+    #: noise in 500 Hz decodes fully and 6 dB mostly. Once keying, the
+    #: ratio may drop to ``GATE_LOW``.
+    GATE = 2.6
+    GATE_LOW = 2.3
     #: A change of state must hold this long (seconds).
     DEBOUNCE_S = 0.004
     #: The levels settle this long after a reset (the floor starts from
@@ -582,7 +582,10 @@ class MorseDecoder:
             self._dit = self._clamp_dit(self.rate * 1.2 / self.default_wpm)
 
     def flush(self) -> List[MorseMessage]:
-        """End the line in progress (e.g. at the end of a recording)."""
+        """End the line in progress (e.g. at the end of a recording),
+        with the mark under way if the key is down."""
+        if self._key:
+            self._mark_ended(self._run)
         if not self._calibrated and self._queue:
             self._calibrate()
         self._end_line()

@@ -13,11 +13,19 @@ firmware/common/rf_path.c, user_config.c, hackrf_usb/usb_api_transceiver.c):
   and power the amp only if it isn't bypassed; nothing un-bypasses it but
   ``set_amp_enable(1)``;
 - going from idle (OFF) straight to TX switches nothing off.
+
+For the RTL-SDR, :class:`R820TRtlSdr` adds what librtlsdr does to an R820T
+tuner (osmocom and rtl-sdr-blog librtlsdr.c, tuner_r82xx.c):
+``rtlsdr_set_direct_sampling(dev, 0)`` runs ``tuner->init`` (``r82xx_init``),
+which puts the LNA and mixer back on automatic gain, the VGA and the IF
+filter back to their defaults; nothing sets the gain chosen before again.
 """
 
 from __future__ import annotations
 
 import os
+import sys
+import types
 import unittest
 
 import numpy as np
@@ -28,6 +36,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import sdr_module.devices.hackrf as hackrf_mod  # noqa: E402
 from tests.hackrf_fakes import ThreadedFakeHackRF, install_fake_backend  # noqa: E402
 from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
+from tests.test_gui_device_settings import FakeRtlSdr, _DeviceCase  # noqa: E402
 from tests.test_gui_station_tx import _TxCase  # noqa: E402
 
 # --------------------------------------------------------------------------- #
@@ -286,6 +295,148 @@ class TestDev2HackRFBiasTeeOnTheAir(_FirmwareCase):
         self.assertTrue(self.station.send_station_id())
         self.wait_done(30)
         self.assertEqual([antenna for _m, _a, antenna in fake.tx_starts()], [False])
+
+
+# --------------------------------------------------------------------------- #
+# DEV-3: the RTL-SDR's tuner gets its gain and IF filter back after HF
+# --------------------------------------------------------------------------- #
+
+
+class R820TRtlSdr(FakeRtlSdr):
+    """The tests' pyrtlsdr fake plus an R820T's gain and IF filter, as
+    librtlsdr leaves them (see the module notes)."""
+
+    def __init__(self, device_index=0):
+        # rtlsdr_open -> tuner->init: automatic gain, defaults.
+        self.tuner_agc = True
+        self.vga = "init"  # "init", "agc" (fixed for AGC) or "manual"
+        self.manual_gain = 0.0  # librtlsdr's dev->gain
+        self.if_filter: object = "init"  # "init", "rate" or a width (Hz)
+        self.tuner_bw = 0  # librtlsdr's dev->bw (0: follows the rate)
+        self.rate = 0.0
+        super().__init__(device_index)
+
+    # pyrtlsdr's properties
+    @property
+    def gain(self):
+        return self.manual_gain
+
+    @gain.setter
+    def gain(self, value):
+        if isinstance(value, str) and value == "auto":
+            self.tuner_agc, self.vga = True, "agc"
+        else:
+            self.tuner_agc, self.vga = False, "manual"
+            self.manual_gain = float(value)
+
+    @property
+    def sample_rate(self):
+        return self.rate
+
+    @sample_rate.setter
+    def sample_rate(self, rate):
+        self.rate = float(rate)
+        self.if_filter = self.tuner_bw or "rate"  # (rtlsdr_set_sample_rate)
+
+    def set_bandwidth(self, bw):
+        self.tuner_bw = int(bw)
+        self.if_filter = self.tuner_bw or "rate"
+
+    def set_direct_sampling(self, mode):
+        super().set_direct_sampling(mode)
+        if not mode:  # tuner->init (r82xx_init)
+            self.tuner_agc, self.vga, self.if_filter = True, "init", "init"
+
+    def tuner(self) -> str:
+        """What the tuner's gain does: "manual 29.7 dB", "auto" (as
+        ``gain = "auto"`` sets it), or "auto after init"."""
+        if not self.tuner_agc:
+            return f"manual {self.manual_gain:g} dB"
+        return "auto" if self.vga == "agc" else "auto after init"
+
+
+@pytest.fixture
+def r820t(monkeypatch):
+    from sdr_module.devices.rtlsdr import RTLSDRDevice
+
+    rtlsdr = types.ModuleType("rtlsdr")
+    librtlsdr = types.ModuleType("rtlsdr.librtlsdr")
+    librtlsdr.rtlsdr_get_device_count = lambda: 1
+    rtlsdr.RtlSdr = R820TRtlSdr
+    rtlsdr.librtlsdr = librtlsdr
+    monkeypatch.setitem(sys.modules, "rtlsdr", rtlsdr)
+    monkeypatch.setitem(sys.modules, "rtlsdr.librtlsdr", librtlsdr)
+    monkeypatch.setattr(FakeRtlSdr, "gains_db", None)
+    monkeypatch.setattr(FakeRtlSdr, "fail", set())
+    device = RTLSDRDevice()
+    assert device.open(0)
+    yield device, device._device
+    device.close()
+
+
+def _visit_hf(device, tuner):
+    assert device.set_frequency(7.1e6)  # 40 m: direct sampling (Q branch)
+    assert tuner.direct == 2
+    assert device.set_frequency(145.5e6)  # the tuner again
+    assert tuner.direct == 0
+
+
+def test_dev3_the_manual_gain_is_set_again_after_hf(r820t):
+    device, tuner = r820t
+    assert device.set_gain_mode(False) and device.set_gain(29.7)
+    assert tuner.tuner() == "manual 29.7 dB"
+    _visit_hf(device, tuner)
+    assert tuner.tuner() == "manual 29.7 dB"
+    assert (device.state.gain_mode, device.state.gain) == ("manual", 29.7)
+
+
+def test_dev3_automatic_gain_is_set_up_again_too(r820t):
+    device, tuner = r820t
+    assert device.set_gain_mode(True)
+    _visit_hf(device, tuner)
+    assert tuner.tuner() == "auto"  # (not the VGA r82xx_init leaves)
+
+
+def test_dev3_the_if_filter_is_set_again(r820t):
+    device, tuner = r820t
+    assert device.set_bandwidth(1.5e6)
+    _visit_hf(device, tuner)
+    assert tuner.if_filter == 1_500_000
+    assert device.set_bandwidth(0)  # automatic: it follows the sample rate
+    _visit_hf(device, tuner)
+    assert tuner.if_filter == "rate"
+
+
+def test_dev3_direct_sampling_switched_off_at_hf_sets_the_gain_too(r820t):
+    """Choosing "Off (V4 or upconverter)" while tuned to HF leaves direct
+    sampling there and then."""
+    device, tuner = r820t
+    assert device.set_gain_mode(False) and device.set_gain(29.7)
+    assert device.set_frequency(7.1e6)
+    assert device.set_direct_sampling("off")
+    assert tuner.direct == 0
+    assert tuner.tuner() == "manual 29.7 dB"
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestDev3RtlGainAfterHfInTheWindow(_DeviceCase):
+    def test_the_gain_shown_is_the_gain_applied_after_a_visit_to_hf(self):
+        self.patch.setattr(sys.modules["rtlsdr"], "RtlSdr", R820TRtlSdr)
+        dev = self.rtl()
+        tuner = dev._device
+        self.panel.set_agc_enabled(False)
+        self.win.set_gain(29.7)
+        self.assertTrue(self.win.set_frequency(145.5e6))
+        self.assertEqual(tuner.tuner(), "manual 29.7 dB")
+        self.assertTrue(self.win.set_frequency(7.1e6))
+        self.assertEqual(tuner.direct, 2)
+        self.assertTrue(self.win.set_frequency(145.5e6))
+        self.assertEqual(tuner.direct, 0)
+        self.assertEqual(tuner.tuner(), "manual 29.7 dB")
+        self.assertEqual(self.panel._gain_label.text(), "29.7 dB")
+        self.assertFalse(self.panel.is_agc_enabled())
+        self.win._refresh_info_panel()
+        self.assertEqual(self.win._info_panel.value("gain"), "29.7 dB")
 
 
 if __name__ == "__main__":

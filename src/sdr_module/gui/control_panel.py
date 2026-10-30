@@ -699,6 +699,7 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
         limits = self._range_text or (
             f"Tunes {format_mhz_range(self._min_hz, self._max_hz)}"
         )
+        limits = limits[:1].upper() + limits[1:]  # ("the recording covers")
         self._freq_input.setToolTip(
             "Tuned frequency: what you listen to, decode and measure.\n"
             "Type a value and press Enter (Esc cancels): 145.8, 433.92M, "

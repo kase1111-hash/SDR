@@ -4350,12 +4350,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _apply_tuning_range(self) -> None:
         """Let the Frequency field accept the connected device's range (its
         tooltip and messages say what it is), and the span of a recording
-        playing back even where it lies above (a 10 GHz downlink)."""
+        playing back even where it lies above (a 10 GHz downlink: then they
+        say what the recording covers, not that the receiver tunes there)."""
         low, high = self._tuning_limits()
         text = self._range_text() if self._device_tuning_range() else ""
         if self._lo_lock is not None:
-            center, span, _why = self._lo_lock
-            high = max(high, center + span / 2)
+            center, span, why = self._lo_lock
+            if center + span / 2 > high:
+                high = center + span / 2
+                text = f"{why} covers {format_mhz_range(center - span / 2, high)}"
         self._control_panel._freq_input.set_tuning_range(low, high, text)
 
     def _device_frequency(self) -> Optional[float]:

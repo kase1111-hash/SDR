@@ -613,5 +613,117 @@ class TestDamagedSquelchSetting(unittest.TestCase):
         self.assertEqual(panel.get_squelch_db(), 0.0)
 
 
+# ---------------------------------------------------------------------------
+# Checker, after MS-4: what the messages say a recording above 6 GHz covers
+# ---------------------------------------------------------------------------
+
+
+class TestFrequencyRangeText(unittest.TestCase):
+    """format_mhz_range gave six significant digits: 10488.55–10490.95 MHz
+    read "10488.5–10491 MHz", wider than the range itself."""
+
+    def test_to_the_khz(self):
+        from sdr_module.gui.tuning import format_mhz_range
+
+        self.assertEqual(
+            format_mhz_range(10488.55e6, 10490.95e6), "10488.55–10490.95 MHz"
+        )
+        self.assertEqual(
+            format_mhz_range(1088.976e6, 1091.024e6), "1088.976–1091.024 MHz"
+        )
+
+    def test_as_before_where_six_digits_were_enough(self):
+        from sdr_module.gui.tuning import format_mhz_range
+
+        for (low, high), text in (
+            ((500e3, 1.766e9), "0.5–1766 MHz"),
+            ((1e6, 6e9), "1–6000 MHz"),
+            ((1e3, 6e9), "0.001–6000 MHz"),
+            ((143.8e6, 146.2e6), "143.8–146.2 MHz"),
+            ((-0.7e6, 1.7e6), "-0.7–1.7 MHz"),
+            ((145.8e6 - 1e-7, 146.2e6 + 1e-7), "145.8–146.2 MHz"),  # (float noise)
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(format_mhz_range(low, high), text)
+
+    def test_never_wider_than_the_range(self):
+        """A frequency outside the range never reads as inside it."""
+        from sdr_module.gui.tuning import format_mhz_range
+
+        self.assertEqual(format_mhz_range(143.8005e6, 146.2005e6), "143.801–146.2 MHz")
+
+
+class TestTheSpanOfARecordingAbove6GHz(_MainStateCase):
+    """The QO-100 recording (10488.55–10490.95 MHz) once MS-4 made it
+    tunable: "10490.980 MHz is outside the recording, which covers
+    10488.5–10491 MHz" contradicted itself, and a frequency typed above it
+    was refused with "the receiver tunes 0.001–10491 MHz" (the receiver
+    doesn't; the recording ends there) and a hint to type it in kHz."""
+
+    CENTER = 10489.75e6
+    COVERED = "10488.55–10490.95 MHz"
+
+    def setUp(self):
+        super().setUp()
+        path = self.recording(self.CENTER, 2.4e6, seconds=0.5, offset_hz=50e3)
+        self.assertTrue(self.win._open_recording(path))
+
+    def range_line(self):
+        """The Frequency field's tooltip line that says what can be tuned."""
+        tip = self.win._control_panel._freq_input._freq_input.toolTip()
+        return tip.splitlines()[2].partition(". ")[0]
+
+    def test_the_playing_message_gives_its_span(self):
+        self.assertIn(f"Playing take.sigmf-data ({self.COVERED}).", self.status()[0])
+
+    def test_a_refusal_never_shows_a_range_holding_the_frequency(self):
+        win = self.win
+        win._set_demod_mode("AM", None, "5 kHz")
+        for freq, text in ((10490.98e6, "10490.980"), (10488.52e6, "10488.520")):
+            with self.subTest(freq=text):
+                self.assertFalse(win.set_frequency(freq))
+                self.assertEqual(
+                    self.status(),
+                    (
+                        f"{text} MHz is outside the recording, which covers "
+                        f"{self.COVERED}.",
+                        "danger",
+                    ),
+                )
+
+    def test_typing_above_it_says_what_the_recording_covers(self):
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QApplication
+
+        self.assertEqual(self.range_line(), f"The recording covers {self.COVERED}")
+        self.win._focus_frequency_entry()
+        self.settle()
+        field = QApplication.focusWidget()
+        QTest.keyClicks(field, "10491.5")
+        QTest.keyClick(field, Qt.Key.Key_Return)
+        self.settle()
+        self.assertEqual(self.win._current_frequency(), self.CENTER)
+        self.assertEqual(
+            self.status(),
+            (
+                f"10491.5 MHz is out of range: the recording covers {self.COVERED}.",
+                "danger",
+            ),
+        )
+
+    def test_closed_the_field_describes_the_receiver_again(self):
+        self.win._playback.close(restore=True)
+        self.assertEqual(self.range_line(), "Tunes 0.001–6000 MHz")
+
+    def test_a_recording_below_6ghz_keeps_the_receivers_wording(self):
+        """(Only a recording above the receiver's range changes it.)"""
+        win = self.win
+        win._playback.close(restore=True)
+        path = self.recording(145.0e6, 2.4e6, "fm.sigmf-data")
+        self.assertTrue(win._open_recording(path))
+        self.assertEqual(self.range_line(), "Tunes 0.001–6000 MHz")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

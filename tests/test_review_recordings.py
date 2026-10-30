@@ -23,6 +23,8 @@
   chunk (up to 22 s late), not where it is in the file.
 * REC-12: cu8/cs8/cs16 saves truncated instead of rounding (a DC offset).
 * REC-14: the recording buffer kept a Python tuple per display frame.
+* REC-15: a take resumed after a pause or REC WAITING was saved as one
+  continuous capture, so its times after the gap were wrong.
 """
 
 import contextlib
@@ -32,6 +34,7 @@ import shutil
 import signal
 import tempfile
 import threading
+import time
 import tracemalloc
 import unittest
 from collections import namedtuple
@@ -785,3 +788,54 @@ class TestBlockList(unittest.TestCase):
         np.testing.assert_array_equal(memory[0], blocks[2])
         store.discard()
         self.assertEqual((len(store), store.sample_count), (0, 0))
+
+
+# ---------------------------------------------------------------------------
+# REC-15: a take resumed after a gap
+# ---------------------------------------------------------------------------
+
+
+class TestResumedTake(_ReviewCase):
+    def _captures(self, name="take.sigmf-data", meta_name="take.sigmf-meta"):
+        with self.save_dialog(self.path(name)):
+            self.assertTrue(self.win._save_recording())
+        return _read_json(self.path(meta_name))["captures"]
+
+    def test_a_pause_starts_a_new_capture_with_its_own_time(self):
+        win = self.win
+        win._record_button.click()
+        win._update_display()
+        first = win._buffer_sample_count()
+        win._on_panel_record_paused(True)
+        win._update_display()  # (not captured)
+        time.sleep(0.05)
+        win._on_panel_record_paused(False)
+        win._update_display()
+        win._record_button.click()
+        captures = self._captures()
+        self.assertEqual([c["core:sample_start"] for c in captures], [0, first])
+        self.assertEqual(captures[0]["core:datetime"], win._take_started)
+        start, resumed = (_when(c["core:datetime"]) for c in captures)
+        self.assertGreaterEqual(resumed, start)
+        for capture in captures:
+            self.assertEqual(capture["core:frequency"], 100.1e6)
+        # The sidecar of a raw file says so too.
+        sidecar = self._captures("take.cs16", "take.cs16.sigmf-meta")
+        self.assertEqual([c["core:sample_start"] for c in sidecar], [0, first])
+
+    def test_the_receiver_stopped_while_recording(self):
+        win = self.win
+        win._record_button.click()
+        win._update_display()
+        first = win._buffer_sample_count()
+        win._stop_acquisition()  # REC WAITING
+        win._start_acquisition()
+        win._update_display()
+        win._update_display()
+        win._record_button.click()
+        captures = self._captures()
+        self.assertEqual([c["core:sample_start"] for c in captures], [0, first])
+
+    def test_a_continuous_take_is_one_capture(self):
+        self.record(4)
+        self.assertEqual(len(self._captures()), 1)

@@ -1472,6 +1472,8 @@ class _SampleStore:
         self._nblocks = 0
         self._count = 0
         self._map: Optional[np.ndarray] = None
+        # (first sample, UTC start) of each stretch recorded after a gap.
+        self._segments: List[Tuple[int, str]] = []
 
     @classmethod
     def from_samples(cls, samples: np.ndarray) -> "_SampleStore":
@@ -1503,6 +1505,23 @@ class _SampleStore:
         if self._path:
             return os.path.dirname(self._path)
         return self._folder
+
+    @property
+    def segments(self) -> List[Tuple[int, str]]:
+        """(first sample, UTC start) of each stretch recorded after a gap
+        in time (see :meth:`start_segment`), for SigMF's captures."""
+        return [(first, when) for first, when in self._segments if first < self._count]
+
+    def start_segment(self, start_time: str) -> None:
+        """The samples added from now on were recorded from ``start_time``
+        (UTC, ISO 8601), after a gap in time (a pause, or the receiver
+        stopped): they don't follow on from the ones before."""
+        if not self._count:
+            return  # (the take's own start)
+        if self._segments and self._segments[-1][0] == self._count:
+            self._segments[-1] = (self._count, start_time)
+        else:
+            self._segments.append((self._count, start_time))
 
     def _add_block(self, length: int) -> None:
         if self._nblocks == len(self._starts):
@@ -1649,6 +1668,7 @@ class _SampleStore:
         self._starts = np.zeros(0, dtype=np.int64)
         self._nblocks = 0
         self._count = 0
+        self._segments = []
 
     # The list of blocks it replaces -----------------------------------------
 
@@ -1676,6 +1696,13 @@ class _SampleStore:
         return other is self
 
     __hash__ = object.__hash__
+
+
+def _utc_stamp() -> str:
+    """Now in UTC, ISO 8601 to the millisecond (SigMF's ``core:datetime``)."""
+    now = time.time()
+    millis = int(now % 1 * 1000)
+    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{millis:03d}Z"
 
 
 def _clock_text(seconds: float) -> str:
@@ -2018,6 +2045,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # A new recording replaces the buffer only once samples arrive, so an
         # armed recording that captures nothing keeps the previous one.
         self._capture_pending = False
+        # Capturing stopped mid-take (paused, or the receiver stopped): the
+        # next samples don't follow on, and start a segment of their own.
+        self._capture_gap = False
         self._retune_warned = False
         self._demo_mode = False  # set by _start_demo_mode()
         self._radio_tuner = None  # Pop-out radio tuner window
@@ -5755,6 +5785,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._rec_since = None
         if self._recording_capturing():
             self._rec_since = now
+        elif self._recording and not self._capture_pending:
+            self._capture_gap = True  # (see _capture)
 
     def _recording_elapsed(self) -> float:
         """Seconds spent capturing in the current recording."""
@@ -6339,6 +6371,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tuned = (self._lo_frequency(), self._device_sample_rate())
         if self._capture_pending:
             self._capture_pending = False
+            self._capture_gap = False
             self._replace_buffer(_SampleStore(self._capture_folder()))
             self._buffer_meta = tuned
             self._buffer_source = ""
@@ -6364,6 +6397,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "warning",
                 10000,
             )
+        if self._capture_gap:
+            # Capturing again after a pause or with the receiver started
+            # again (REC WAITING): these samples were received now, not
+            # straight after the last ones (SigMF: a capture of their own).
+            self._capture_gap = False
+            self._samples_buffer.start_segment(_utc_stamp())
         try:
             self._samples_buffer.append(samples)
         except (OSError, ValueError) as e:
@@ -7998,11 +8037,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         center, rate = self._buffer_meta
         center, rate = float(center or 0.0), float(rate or 0.0)
         name = os.path.basename(filename)
-        # When (and on what) the samples were recorded.
+        # When (and on what) the samples were recorded, and where the take
+        # resumed after a gap: SigMF's captures, so its times are right.
         details: Dict[str, Any] = {
             "start_time": self._take_started,
             "hardware": self._take_hardware,
             "description": self._take_description,
+            "segments": store.segments,
         }
 
         error: Optional[BaseException] = None

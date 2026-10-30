@@ -23,11 +23,11 @@ from __future__ import annotations
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from ..dsp.recording import FileFormat, IQRecorder, SampleFormat
+from ..dsp.recording import FileFormat, IQRecorder, SampleFormat, Segment
 from .iq_files import IqFileOptions
 
 try:
@@ -155,12 +155,15 @@ def write_recording(
     *,
     hardware: str = "",
     description: str = "",
+    segments: Sequence[Segment] = (),
 ) -> int:
     """Write ``chunks`` (``total`` samples) to ``filename``; a cancelled or
     failed write leaves no partial file behind. ``start_time`` (UTC, ISO
     8601) is when the samples were recorded, for SigMF's ``core:datetime``
     (left out when unknown); ``hardware`` and ``description`` are SigMF's
-    ``core:hw`` and ``core:description``. Returns the samples written."""
+    ``core:hw`` and ``core:description``, and ``segments`` where the
+    recording resumed after a gap (each a capture with its own time).
+    Returns the samples written."""
     if file_format is FileFormat.WAV and not sample_rate > 0:
         # (Its header must hold one: nothing is written.)
         raise ValueError(
@@ -190,6 +193,8 @@ def write_recording(
         # (start() stamps the time of writing: the samples' own time
         # replaces it, and an unknown one is left out, never invented.)
         recorder.set_metadata(start_time=start_time)
+        for first, when in segments:
+            recorder.add_capture(first, when)
         try:
             report(0.0)
             for chunk in chunks:

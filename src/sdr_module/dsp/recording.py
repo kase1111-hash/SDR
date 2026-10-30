@@ -283,11 +283,14 @@ def write_sidecar(
     start_time: str = "",
     description: str = "",
     hardware: str = "",
+    segments: Sequence[Segment] = (),
 ) -> Path:
     """Describe a raw or WAV recording in ``<name>.sigmf-meta`` beside it
     (a SigMF non-conforming dataset: ``core:dataset`` names the file), so
     its sample rate and centre frequency survive. A rate or frequency of 0
-    (unknown) is left out rather than invented. Returns the metadata path.
+    (unknown) is left out rather than invented. ``segments``: where the
+    recording resumed after a gap (see :data:`Segment`). Returns the
+    metadata path.
     """
     path = Path(data_path)
     global_meta: Dict[str, Any] = {
@@ -303,9 +306,7 @@ def write_sidecar(
         global_meta["core:description"] = description
     if hardware:
         global_meta["core:hw"] = hardware
-    captures = _capture_segments(
-        center_frequency, start_time, header_bytes=header_bytes
-    )
+    captures = _capture_segments(center_frequency, start_time, segments, header_bytes)
     meta = {"global": global_meta, "captures": captures, "annotations": []}
     meta_path = sidecar_path(path)
     _write_json(meta_path, meta)
@@ -431,6 +432,8 @@ class IQRecorder:
         self._recording = False
         self._samples_written = 0
         self._start_time: Optional[datetime] = None
+        # Capture segments after the first (see add_capture).
+        self._segments: List[Segment] = []
 
         # Buffer for streaming
         self._buffer = np.array([], dtype=np.complex64)
@@ -561,6 +564,14 @@ class IQRecorder:
             else:
                 self._metadata.custom[key] = value
 
+    def add_capture(self, sample_start: int, start_time: str = "") -> None:
+        """The samples from ``sample_start`` on were recorded from
+        ``start_time`` (UTC, ISO 8601), after a gap in time (a pause): a
+        SigMF capture segment of their own, so the times after the gap are
+        right. Call after :meth:`start` (which begins with one segment, from
+        sample 0 at the recording's start time)."""
+        self._segments.append((int(sample_start), str(start_time or "")))
+
     def start(self, filepath: Union[str, Path]) -> None:
         """
         Start recording to file.
@@ -573,6 +584,7 @@ class IQRecorder:
 
         self._filepath = Path(filepath)
         self._samples_written = 0
+        self._segments = []
         self._start_time = _utc_now()
         self._metadata.start_time = self._start_time.isoformat() + "Z"
 
@@ -705,7 +717,7 @@ class IQRecorder:
     def _sigmf_meta(self) -> Dict[str, Any]:
         """The SigMF metadata. A rate, frequency or time that is unknown (0
         or empty) is left out rather than written as 0 (as write_sidecar
-        does)."""
+        does); each capture segment (see add_capture) has its own time."""
         # SigMF format type string
         format_map = {
             SampleFormat.UINT8: "cu8",
@@ -734,7 +746,7 @@ class IQRecorder:
         return {
             "global": global_meta,
             "captures": _capture_segments(
-                self._center_frequency, self._metadata.start_time
+                self._center_frequency, self._metadata.start_time, self._segments
             ),
             "annotations": [],
         }
@@ -753,6 +765,7 @@ def write_sigmf_meta(
     start_time: str = "",
     description: str = "",
     hardware: str = "",
+    segments: Sequence[Segment] = (),
 ) -> Path:
     """Write the ``.sigmf-meta`` of a SigMF recording whose samples are
     already in ``data_path`` (``<stem>.sigmf-data``; e.g. a cf32 take moved
@@ -762,6 +775,7 @@ def write_sigmf_meta(
     recorder.set_metadata(
         start_time=start_time, description=description, hardware=hardware
     )
+    recorder._segments = [(int(first), str(when or "")) for first, when in segments]
     meta_path = Path(data_path).with_suffix(SIDECAR_SUFFIX)
     _write_json(meta_path, recorder._sigmf_meta())
     return meta_path

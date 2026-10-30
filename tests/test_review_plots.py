@@ -414,5 +414,98 @@ class TestRetuneDropsStaleSamples(_WindowTestCase):
         self.assertEqual(len(win._waterfall._history), rows + 1)
 
 
+class TestSecondReceiverPlots(unittest.TestCase):
+    """PLOT-3: the Second Receiver window's spectrum menus work there as in
+    the main window: both plots zoom together, Bookmark adds a bookmark,
+    FFT Size and Window change what is computed (for both plots), and the
+    plots' messages show in its status line."""
+
+    def setUp(self):
+        require_pyqt6(self)
+        from tests.test_gui_second_receiver import _SecondCase
+
+        class Case(_SecondCase):
+            def runTest(self):  # pragma: no cover - not run
+                pass
+
+        self.case = Case()
+        self.case.setUp()
+        self.addCleanup(self.case.tearDown)
+        self.win, self.rx = self.case.win, self.case.rx
+        self.assertTrue(self.rx.start())
+        self.rx._frame_timer.stop()
+        self.rx.tune(145.8e6)
+        self.feed()
+
+    def feed(self, count=6):
+        for _ in range(count):
+            self.rx._process(self.rx.device.read_samples(80_000))
+
+    def menu_pick(self, plot, freq, prefix):
+        from PyQt6.QtCore import QPoint
+        from PyQt6.QtWidgets import QMenu
+
+        def fake_exec(menu, *_args, **_kwargs):
+            for action in menu.actions():
+                if action.text().replace("&", "").startswith(prefix):
+                    action.trigger()
+                    return action
+            self.fail(f"no {prefix!r} in the menu")
+
+        rect = plot.plot_rect()
+        x = (
+            plot._freq_x(freq, rect)
+            if hasattr(plot, "_freq_x")
+            else plot._freq_to_x(freq, rect)
+        )
+        with mock.patch.object(QMenu, "exec", fake_exec):
+            plot._show_context_menu(QPointF(x, rect.center().y()), QPoint(0, 0))
+        _settle()
+
+    def test_both_plots_share_one_view(self):
+        sp, wf = self.rx._spectrum, self.rx._waterfall
+        self.assertIs(sp.view_model(), wf.view_model())
+        self.menu_pick(sp, 145.8e6, "Zoom In Here")
+        self.assertEqual(wf.view_model().zoom, 2)
+        self.assertEqual(
+            (sp.view_model().start, sp.view_model().end),
+            (wf.view_model().start, wf.view_model().end),
+        )
+
+    def test_the_spectrums_bookmark_item_adds_a_bookmark(self):
+        panel = self.win._bookmarks_panel
+        before = panel.bookmark_count()
+        self.menu_pick(self.rx._spectrum, 145.8e6, "Bookmark")
+        self.assertEqual(panel.bookmark_count(), before + 1)
+        self.assertIn("Bookmarked", self.rx.message())
+
+    def test_fft_size_and_window_change_what_both_plots_show(self):
+        rx = self.rx
+        sp, wf = rx._spectrum, rx._waterfall
+        sp._choose_resolution(16384, "blackman-harris")
+        self.feed(4)
+        self.assertEqual(wf.fft_size(), 16384)
+        self.assertEqual(len(wf._history[-1]), 16384)
+        self.assertEqual(len(sp._spectrum), 16384)
+        # Real 16384-point bins (not 2048 interpolated): the demo's
+        # strongest carrier is a few bins wide, not ~3 kHz.
+        s = np.asarray(sp._spectrum)
+        k = int(np.argmax(s))
+        lo = hi = k
+        while lo > 0 and s[lo - 1] >= s[k] - 6:
+            lo -= 1
+        while hi < len(s) - 1 and s[hi + 1] >= s[k] - 6:
+            hi += 1
+        width = (hi - lo + 1) * sp._sample_rate / len(s)
+        self.assertLess(width, 1500.0)
+        self.assertIn("16384-point", rx.message())
+
+    def test_the_plots_messages_show_in_the_status_line(self):
+        self.rx._spectrum.message.emit("Copied 145.800 MHz", "info")
+        self.assertEqual(self.rx.message(), "Copied 145.800 MHz")
+        self.rx._waterfall.message.emit("Copied the measurement", "info")
+        self.assertEqual(self.rx.message(), "Copied the measurement")
+
+
 if __name__ == "__main__":
     unittest.main()

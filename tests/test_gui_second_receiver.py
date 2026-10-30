@@ -845,6 +845,34 @@ class TestSampleRate(_SecondCase):
         self.assertEqual(rx.device.sample_rate, 3.2e6)
         self.assertEqual(rx._spectrum._sample_rate, 3.2e6)
 
+    def test_a_rate_the_device_refuses_isnt_remembered(self):
+        """The rate remembered for a kind of device is one it took: a
+        refused one would be asked for again every time it opens."""
+        from sdr_module.gui.device_dialog import MockDevice
+
+        key = "device/second_receiver/sample_rate/demo"
+        rx = self.rx
+        rx.start()
+        original = MockDevice.set_sample_rate
+
+        def refuse_1_ms(device, rate):
+            return False if rate == 1.0e6 else original(device, rate)
+
+        MockDevice.set_sample_rate = refuse_1_ms
+        self.addCleanup(lambda: setattr(MockDevice, "set_sample_rate", original))
+        self.choose(1.0e6)
+        self.assertEqual(rx.device.sample_rate, 2.4e6)
+        self.assertEqual(rx._rate_combo.currentData(), 2.4e6)
+        self.assertIn("didn't take 1 MS/s", rx.message())
+        self.assertNotEqual(self.store.values.get(key), 1.0e6)
+        # One it takes is remembered, running or stopped.
+        self.choose(1.8e6)
+        self.assertEqual(rx.device.sample_rate, 1.8e6)
+        self.assertEqual(self.store.values[key], 1.8e6)
+        rx.stop()
+        self.choose(3.2e6)
+        self.assertEqual(self.store.values[key], 3.2e6)
+
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestSquelch(_SecondCase):
@@ -860,6 +888,22 @@ class TestSquelch(_SecondCase):
         self.assertTrue(rx._squelch_slider.isEnabled())
         self.assertEqual(rx._squelch_label.text(), "-55 dBFS")
         self.assertEqual(self.store.values["device/second_receiver/squelch_db"], -55.0)
+
+    def test_dragging_the_threshold_turns_the_squelch_on(self):
+        """As on the main window's LEVEL: a threshold dragged with the
+        squelch off turns it on (otherwise the drag shows nothing: the
+        marker is hidden while the squelch is off)."""
+        rx = self.rx
+        rx._squelch_check.setChecked(False)
+        rx._level_meter.threshold_changed.emit(-60.0)
+        gate = rx._dsp.squelch
+        self.assertTrue(rx._squelch_check.isChecked())
+        self.assertTrue(gate.enabled)
+        self.assertFalse(gate.auto)
+        self.assertEqual(gate.manual_db, -60.0)
+        self.assertTrue(rx._squelch_slider.isEnabled())
+        self.assertEqual(rx._squelch_label.text(), "-60 dBFS")
+        self.assertTrue(self.store.values["device/second_receiver/squelch_on"])
 
     def test_off_plays_everything(self):
         rx = self.rx
@@ -989,6 +1033,40 @@ class TestListen(_SecondCase):
         self.rx._volume_slider.setValue(35)
         self.assertAlmostEqual(self.second_sink.volume, 0.35)
         self.assertEqual(self.store.values["device/second_receiver/volume"], 35)
+
+    def test_an_output_that_wont_open_says_so(self):
+        """A second audio stream can fail to open (an output that takes one
+        stream at a time): the note says this receiver is silent, not that
+        both play."""
+
+        class FailingSink(_FakeSink):
+            def start(self, rate=48000):
+                return False
+
+        rx = self.rx
+        rx.set_listen("main")
+        rx._audio = FailingSink()
+        rx._audio_open = False
+        rx.set_listen("both")
+        self.assertFalse(rx._audio_open)
+        note = rx._audio_note.text()
+        self.assertIn("audio output didn't open", note)
+        self.assertNotIn("Both receivers play", note)
+        self.assertEqual(rx._audio_note.property("tone"), "warning")
+        # Only this receiver: the main window is muted too, so nothing plays.
+        rx.set_listen("second")
+        self.assertIn("audio output didn't open", rx._audio_note.text())
+        self.assertIn("main window is muted too", rx._audio_note.text())
+        # Not wanted (Main window), or opened at last: the usual note.
+        rx.set_listen("main")
+        self.assertIn("Only the main window plays", rx._audio_note.text())
+        rx.set_listen("both")
+        rx._audio = _FakeSink()
+        rx._audio_retry_at = 0.0
+        rx._update_status()
+        self.assertTrue(rx._audio_open)
+        self.assertIn("Both receivers play", rx._audio_note.text())
+        self.assertIsNone(rx._audio_note.property("tone") or None)
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")

@@ -1326,8 +1326,8 @@ if HAS_PYQT6:
                     "warning",
                 )
                 return
-            self._save(f"{KEY}sample_rate/{kind}", rate)
             if self._device is None or abs(rate - self._rate()) < 1.0:
+                self._save(f"{KEY}sample_rate/{kind}", rate)
                 self._refresh_state()
                 return
             try:
@@ -1336,12 +1336,14 @@ if HAS_PYQT6:
                 logger.warning(f"Second receiver: sample rate {rate}: {e}")
                 ok = False
             if ok is False:
+                # (Not remembered: it would be asked for at every open.)
                 self._fill_rates()
                 self._show_message(
                     f"{self._device_name()} didn't take {format_rate(rate)}.",
                     "danger",
                 )
                 return
+            self._save(f"{KEY}sample_rate/{kind}", rate)
             # A new span: the filters, the noise floor and the pacing start
             # afresh (the audio fading out first); a narrower span may no
             # longer hold the channel.
@@ -1957,8 +1959,11 @@ if HAS_PYQT6:
             self._dsp.squelch.manual_db = float(value)
 
         def _on_meter_threshold(self, db: float) -> None:
-            """A threshold dragged on LEVEL: by hand from now on."""
+            """A threshold dragged on LEVEL: the squelch is on and set by
+            hand from now on (as on the main window's LEVEL)."""
             self._squelch_auto.setChecked(False)
+            if not self._squelch_check.isChecked():
+                self._squelch_check.setChecked(True)
             self._set_threshold(db)
 
         def _on_listen_index(self, index: int) -> None:
@@ -2039,6 +2044,17 @@ if HAS_PYQT6:
             if not self._restoring:
                 self._save(KEY + "volume", int(value))
 
+        def _output_failed(self) -> bool:
+            """This receiver should play, but its audio output didn't open
+            (it is tried again every few seconds)."""
+            return (
+                self._audio_failed
+                and not self._audio_open
+                and self._running
+                and self._plays_here()
+                and self._dsp.audible
+            )
+
         def _update_audio_note(self) -> None:
             problem = self._audio_problem()
             if problem:
@@ -2049,6 +2065,19 @@ if HAS_PYQT6:
                     "Audio is off in the main window (its Audio button): "
                     "neither receiver plays."
                 )
+                tone = "warning"
+            elif self._output_failed():
+                # (An output that takes one stream at a time refuses the
+                # second one.)
+                text = (
+                    "This receiver's audio output didn't open, so it is "
+                    "silent; trying again every few seconds."
+                )
+                if self._listen == LISTEN_SECOND:
+                    text += (
+                        " The main window is muted too: choose Main window to "
+                        "hear it."
+                    )
                 tone = "warning"
             elif self._listen == LISTEN_SECOND:
                 text = "The main window is muted while this window is open."

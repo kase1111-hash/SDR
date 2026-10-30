@@ -114,7 +114,8 @@ class TestPacerRecovers(unittest.TestCase):
         self.pacer = self.mw._Pacer()
 
     def _overload(self, rate):
-        for _ in range(3):
+        # (The first frames after Start aren't judged.)
+        for _ in range(self.mw._WARM_UP_FRAMES + 3):
             self.pacer.measured(80000, rate, 0.045 * 80000 / (rate * 0.033))
         self.assertTrue(self.pacer.overloaded)
 

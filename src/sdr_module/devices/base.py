@@ -97,6 +97,16 @@ class SDRDevice(ABC):
         self._rx_thread: Optional[Thread] = None
         self._stop_event: Event = Event()
         self._sample_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=100)
+        # Samples received but dropped because the queue was full.
+        self._dropped_samples: int = 0
+
+    @property
+    def dropped_samples(self) -> int:
+        """Samples the device delivered that were lost because nobody read
+        the queue :meth:`read_samples` takes from in time (it holds 100
+        transfers). Only ever grows: compare two readings to find out
+        whether samples went missing in between."""
+        return self._dropped_samples
 
     @property
     def info(self) -> Optional[DeviceInfo]:

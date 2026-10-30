@@ -460,7 +460,8 @@ class RTLSDRDevice(SDRDevice):
                         try:
                             self._sample_queue.put_nowait(samples)
                         except queue.Full:
-                            pass  # Queue full, drop samples
+                            # Queue full, drop samples (counted).
+                            self._dropped_samples += len(samples)
             except Exception as e:
                 if not self._stop_event.is_set():
                     # The stream died on its own (USB unplug, read error, or a

@@ -279,16 +279,34 @@ _REALTIME_WINDOW_S = 2.0
 # briefly). See _Pacer.
 _MAX_READ_S = 0.25
 _PROBE_READ_S = 0.05
+# ...and the most samples: a bigger frame costs more per sample (it no
+# longer fits the processor's caches; at 20 MS/s on a 4-core computer,
+# 0.6-0.75x real time up to 2.6 M samples but 0.8-1.3x at 5.1 M, a quarter
+# second), so catching up after a stall in bigger frames looked like a
+# computer that can't keep up, again and again.
+_MAX_READ_SAMPLES = 1 << 21
+# The most queued transfers one frame takes while an I/Q recording reads
+# them all (a driver queues 100 at most; this only guards against a source
+# that never runs dry).
+_MAX_DRAIN = 1000
 # A display frame (reading and processing its samples) that takes more than
 # this fraction of the time its samples cover means this computer can't keep
-# up; below the second fraction it can again. Frames shorter than
-# _TIMED_FRAME samples aren't timed (their per-frame overhead dominates).
+# up (the median of the last few frames); probe frames below the second
+# fraction show it can again. Frames shorter than _TIMED_FRAME samples
+# aren't timed (their per-frame overhead dominates).
 _OVERLOAD_RATIO = 0.8
-_RECOVER_RATIO = 0.5
+_RECOVER_RATIO = 0.7
 _TIMED_FRAME = 8 * DISPLAY_BLOCK
 # While frames can't keep up, one frame this often reads (and times) a full
-# frame's worth again, to find out when the computer keeps up once more.
+# frame's worth again, to find out when the computer keeps up once more:
+# full frames resume after this many probes in a row below _RECOVER_RATIO,
+# not counting the first (after one-block frames, a full frame allocates
+# its buffers anew, which costs more than the load).
 _OVERLOAD_PROBE_S = 1.0
+_RECOVER_PROBES = 2
+# Timed frames after Start (or a new device or sample rate) that aren't
+# judged: the first frames design filters and plan FFTs.
+_WARM_UP_FRAMES = 2
 # After the LO of a hardware receiver moves, what it took on the old
 # frequency is not drawn at the new one: the transfers it queued are
 # dropped (at most this many), and the plots skip the samples of the
@@ -1076,6 +1094,10 @@ class _ReceiverChain:
     def demodulate(self, channel: np.ndarray, fm_deviation: float) -> np.ndarray:
         """Mono float32 audio in [-1, 1] at ``audio_rate`` (48 kHz)."""
         if len(channel) == 0:
+            # No audio from this block: what the last one saw (its audio for
+            # the SSTV decoder and the tone squelch) isn't this one's.
+            self.pre_nr_audio = np.empty(0, dtype=np.float32)
+            self.last_clip_fraction = 0.0
             return np.empty(0, dtype=np.float32)
         if self.mode == "FM":
             broadcast = float(fm_deviation) >= _BROADCAST_DEVIATION_HZ
@@ -1102,6 +1124,8 @@ class _ReceiverChain:
             if audio.size:
                 over = np.count_nonzero(np.abs(audio) > 1.0)
                 self.last_clip_fraction = float(over) / audio.size
+            else:
+                self.last_clip_fraction = 0.0
             audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
             self.pre_nr_audio = audio
             return self._reduce_noise(audio)
@@ -1194,19 +1218,24 @@ class _Pacer:
     every queued hardware transfer, or as many demo samples as the time
     since the last frame covers (:meth:`demo_request`), up to
     :meth:`read_limit`: ``_MAX_READ_S`` of signal, ``_PROBE_READ_S`` until
-    frames are known to keep up.
+    frames are known to keep up, and never more than ``_MAX_READ_SAMPLES``.
 
     :meth:`measured` times whole frames (reading, filtering, demodulating)
-    against the time their samples cover. While frames take more than
-    ``_OVERLOAD_RATIO`` of it, this computer can't keep up (``overloaded``):
-    each frame then reads one block, as it used to, so the window stays
-    responsive, and as samples no longer arrive in real time, audio is
-    muted with a hint. One-block frames are too short to time, so once
-    every ``_OVERLOAD_PROBE_S`` a frame reads a full frame's worth again
-    (a probe, timed like any frame; after a fast one the next frame probes
-    too). Full frames resume below ``_RECOVER_RATIO``, so a passing hiccup
-    (another program busy for a moment) doesn't mute the audio for good.
-    Start (:meth:`restart`) finds out anew.
+    against the time their samples cover (not the first
+    ``_WARM_UP_FRAMES`` after Start, which design filters and plan FFTs).
+    While the median frame takes more than ``_OVERLOAD_RATIO`` of it, this
+    computer can't keep up (``overloaded``): each frame then reads one
+    block, as it used to, so the window stays responsive, and as samples
+    no longer arrive in real time, audio is muted with a hint. One-block
+    frames say nothing about full ones (their cost is mostly per frame,
+    such as painting the plots) and aren't judged: once every
+    ``_OVERLOAD_PROBE_S`` a frame reads a full frame's worth again (a
+    probe), and while probes keep up the next frame probes too. Full
+    frames resume after ``_RECOVER_PROBES`` probes in a row below
+    ``_RECOVER_RATIO`` (not counting the first, which allocates its
+    buffers anew after one-block frames), so a passing hiccup (another
+    program busy for a moment) doesn't mute the audio for good. Start
+    (:meth:`restart`) finds out anew.
     """
 
     def __init__(self) -> None:
@@ -1214,9 +1243,14 @@ class _Pacer:
         self._ratios: Deque[float] = deque(maxlen=5)
         self.overloaded = False
         # While overloaded: when the next probe frame is due (None: not
-        # scheduled yet), or probe on the next frame.
+        # scheduled yet), or probe on the next frame; whether the frame
+        # being read is a probe, and the probes in a row so far.
         self._next_probe: Optional[float] = None
         self._probe_now = False
+        self._probing = False
+        self._probes = 0
+        # Timed frames still to come before frames are judged.
+        self._warm_up = _WARM_UP_FRAMES
         # Samples a paced source (a recording playing back) is owed but not
         # yet given: less than a block, or a little ahead (negative).
         self._owed = 0.0
@@ -1228,6 +1262,9 @@ class _Pacer:
         self.overloaded = False
         self._next_probe = None
         self._probe_now = False
+        self._probing = False
+        self._probes = 0
+        self._warm_up = _WARM_UP_FRAMES
         self._owed = 0.0
 
     def restart(self) -> None:
@@ -1242,10 +1279,12 @@ class _Pacer:
         time ``now``, for a probe frame: at least ``_TIMED_FRAME`` samples.
         """
         if self.overloaded:
-            if now is not None and self._probe_due(now):
+            self._probing = now is not None and self._probe_due(now)
+            if self._probing:
                 return max(float(_TIMED_FRAME), rate * _PROBE_READ_S)
             return 0.0
-        return rate * (_MAX_READ_S if self._keeps_up() else _PROBE_READ_S)
+        seconds = _MAX_READ_S if self._keeps_up() else _PROBE_READ_S
+        return min(rate * seconds, float(_MAX_READ_SAMPLES))
 
     def _probe_due(self, now: float) -> bool:
         if self._probe_now or (
@@ -1294,23 +1333,39 @@ class _Pacer:
 
     def measured(self, count: int, rate: float, seconds: float) -> None:
         """A frame of ``count`` samples took ``seconds`` to read and process."""
+        probe, self._probing = self._probing, False
         if count < _TIMED_FRAME or rate <= 0:
             return
         ratio = seconds * rate / count
-        self._ratios.append(ratio)
-        if self.overloaded and ratio < _RECOVER_RATIO:
-            self._probe_now = True  # looks better: check again right away
-        if len(self._ratios) < 3:
+        if self.overloaded:
+            if probe:
+                self._judge_probe(ratio)
             return
-        load = float(np.median(self._ratios))
-        if load > _OVERLOAD_RATIO:
-            if not self.overloaded:
-                self._next_probe = None
-                self._probe_now = False
+        if self._warm_up > 0:
+            self._warm_up -= 1
+            return
+        self._ratios.append(ratio)
+        if len(self._ratios) >= 3 and float(np.median(self._ratios)) > _OVERLOAD_RATIO:
             self.overloaded = True
-        elif load < _RECOVER_RATIO:
-            self.overloaded = False
+            self._ratios.clear()  # (the probes are judged on their own)
+            self._next_probe = None
             self._probe_now = False
+            self._probes = 0
+
+    def _judge_probe(self, ratio: float) -> None:
+        """A probe frame took ``ratio`` of the time its samples cover."""
+        if self._probes == 0:
+            self._ratios.clear()
+        self._probes += 1
+        self._ratios.append(ratio)
+        if self._probes > 1 and ratio >= _RECOVER_RATIO:
+            self._probes = 0  # still too slow: probe again in a while
+            return
+        if self._probes > _RECOVER_PROBES:
+            self.overloaded = False
+            self._probes = 0
+            return
+        self._probe_now = True  # (the next frame probes too)
 
     def _keeps_up(self) -> bool:
         """Frames are known to take under ``_OVERLOAD_RATIO`` of real time."""
@@ -1637,6 +1692,13 @@ def _clock_text(seconds: float) -> str:
     if hours:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+def _span_text(seconds: float) -> str:
+    """``0.0197 -> "20 ms"``, ``1.43 -> "1.4 s"`` (signal lost)."""
+    if seconds < 0.9995:
+        return f"{max(1, round(seconds * 1000))} ms"
+    return f"{seconds:.1f} s"
 
 
 # ---------------------------------------------------------------------------
@@ -2002,6 +2064,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # armed recording that captures nothing keeps the previous one.
         self._capture_pending = False
         self._retune_warned = False
+        # Samples the driver dropped (its queue was full) while a take was
+        # captured: (that take's buffer, samples lost), the device (a weak
+        # reference: one let go is freed, with its queue), its drop count
+        # and whether a take captured at the last hardware frame, and what
+        # was lost this frame (added to the take once it has a buffer).
+        self._take_lost: Tuple[Any, int] = (None, 0)
+        self._drop_mark: Optional[Tuple[Any, int, bool]] = None
+        self._lost_unreported = 0
         self._demo_mode = False  # set by _start_demo_mode()
         self._radio_tuner = None  # Pop-out radio tuner window
         self._transmit_text = None  # Tools > Transmit Text window (T14)
@@ -3853,10 +3923,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder_panel.set_demod_mode(self._control_panel.get_demod_mode())
         self._update_decoder_chip()
         listener = self._own("_rds_listener")
-        if not has_device and listener is not None:
-            # No receiver: no station to name.
+        source = self._device
+        if listener is not None and (
+            not has_device or source is not self._own("_decoded_source")
+        ):
+            # No receiver, or another one (a device, the demo, a recording,
+            # maybe on the same frequency): no station to name yet, and
+            # the live decoder's channel carries something else now.
             listener.reset()
             self._show_rds_station(None)
+            decoder = self._own("_decoder")
+            if has_device and decoder is not None:
+                decoder.channel_changed()
+        self._decoded_source = source
         if HAS_HAM_RADIO:
             self._sync_signal_meter(running, has_device)
 
@@ -6436,6 +6515,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 return text, "loaded", tip
             text = "Unsaved · " + " · ".join(parts) + where
             tip = "This recording is kept in a temporary file until you save it."
+            lost = self._take_lost_seconds()
+            if lost:
+                text += f" · {_span_text(lost)} lost"
+                tip += (
+                    f"\n{_span_text(lost)} of signal was lost while recording "
+                    "(this computer or its disk couldn't keep up): the file has "
+                    "gaps there."
+                )
             return text, "unsaved", tip
         if self._last_saved and os.path.exists(self._last_saved):
             name = os.path.basename(self._last_saved)
@@ -6727,19 +6814,90 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _drain_device(self, dev: SDRDevice) -> Optional[np.ndarray]:
         """The transfers a hardware driver has queued, joined, up to the
-        pacer's limit (the rest stays queued for the next frame)."""
+        pacer's limit (the rest stays queued for the next frame).
+
+        While an I/Q recording captures, every queued transfer is taken:
+        what a frame leaves queued is lost once the driver's queue is full
+        (a computer that can't process the stream in real time reads one
+        transfer a frame), and the recording would have gaps. The newest
+        transfers, up to the limit, are processed (and recorded) as usual;
+        the older ones only go to the recording."""
         limit = self._pacer.read_limit(self._device_sample_rate(), time.monotonic())
+        capturing = self._recording and not self._recording_paused
         blocks: List[np.ndarray] = []
         total = 0
-        while not blocks or total < limit:
+        while (capturing or not blocks or total < limit) and len(blocks) < _MAX_DRAIN:
             block = dev.read_samples(DISPLAY_BLOCK, timeout=0.0)
             if block is None or len(block) == 0:
                 break
             blocks.append(block)
             total += len(block)
+        if self._note_dropped_samples(dev, capturing):
+            return None  # (from before the take, with gaps: see there)
+        if capturing and len(blocks) > 1:
+            first, taken = len(blocks) - 1, len(blocks[-1])
+            while first > 0 and taken < limit:
+                first -= 1
+                taken += len(blocks[first])
+            if first:
+                self._capture(np.concatenate(blocks[:first]))
+                del blocks[:first]
         if len(blocks) <= 1:
             return blocks[0] if blocks else None
         return np.concatenate(blocks)
+
+    def _note_dropped_samples(self, dev: SDRDevice, capturing: bool) -> bool:
+        """Count the samples the driver dropped (its queue was full) since
+        the last frame, when this frame captures: a full queue drops the
+        newest transfer, so they were lost between the queued transfers
+        this frame records and the next ones (the take has gaps there).
+
+        True when a take (re)starts after such drops: what is queued then
+        came before Record (or Resume), spread over seconds with gaps when
+        frames read one transfer each; it is dropped, and the take starts
+        with the next frame."""
+        try:
+            dropped = int(dev.dropped_samples)
+        except (AttributeError, TypeError, ValueError):
+            return False
+        mark = self._drop_mark
+        self._drop_mark = (weakref.ref(dev), dropped, capturing)
+        if not capturing or mark is None or mark[0]() is not dev or dropped <= mark[1]:
+            return False
+        if not mark[2]:
+            return True
+        self._lost_unreported += dropped - mark[1]
+        return False
+
+    def _report_lost_samples(self) -> None:
+        """Add the samples lost this frame to the take's gaps (its buffer
+        exists once the frame captured). Said once per take; its take line
+        says how much was lost in all."""
+        lost, self._lost_unreported = self._lost_unreported, 0
+        store = self._samples_buffer
+        known, total = self._take_lost
+        first = known is not store
+        self._take_lost = (store, (0 if first else total) + lost)
+        # (A take that just stopped, e.g. on a full disk, keeps that message.)
+        if first and self._recording:
+            rate = self._device_sample_rate()
+            lost_s = self._take_lost[1] / max(rate, 1.0)
+            message = (
+                f"The recording has gaps: {_span_text(lost_s)} of signal was "
+                "lost because this computer (or its disk) couldn't keep up "
+                f"with {format_rate(rate)}. A lower sample rate (Receiver > "
+                "Sample rate) helps."
+            )
+            logger.warning(message)
+            self._show_status_message(message, "warning", 15000)
+
+    def _take_lost_seconds(self) -> float:
+        """Signal the take in the buffer lost while it was captured."""
+        known, lost = self._take_lost
+        rate = self._buffer_meta[1]
+        if known is not self._samples_buffer or not lost or not rate:
+            return 0.0
+        return lost / rate
 
     def _stream_died(self) -> bool:
         """Stop and tell the user if a hardware stream ended on its own
@@ -6775,6 +6933,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         self._note_block(len(samples))
         self._process_block(samples)
+        if self._lost_unreported:  # (a recording lost samples: see _drain_device)
+            self._report_lost_samples()
         # How long the frame took against the time its samples cover.
         self._pacer.measured(
             len(samples), self._pacing_rate(), time.perf_counter() - started
@@ -7280,10 +7440,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # A bookmark scan judges a channel by its CTCSS tone, speaker on or
         # off (see scanner_host.WindowScannerHost.scan_signal_present).
         scan_tone = self._scan_checks_tone and mode == "FM" and gate.is_open
+        # So does the TONE state (the level meter's lamp, the Info tab, a
+        # range scan): a signal without the chosen tone reads TONE whether
+        # the speaker plays or not.
+        tone_check = mode == "FM" and gate.is_open and bool(self._tone_squelch.tone_hz)
         # The block after the speaker stopped is still demodulated: it
         # fades out instead of breaking off.
         fading_out = self._audio_join.playing and not speaker
-        demodulate = speaker or sstv or fading_out or recording or scan_tone
+        demodulate = (
+            speaker or sstv or fading_out or recording or scan_tone or tone_check
+        )
         if not demodulate or not audible:
             if self._demod_running:
                 # Closed for real (not during the hang): start afresh.
@@ -7328,7 +7494,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if self._tones_checked(deviation):
                 if not tones.process(chain.pre_nr_audio):
                     tone_ok = False
-                    self._tone_blocked = speaker or scan_tone
+                    self._tone_blocked = True
                     speaker = False
             elif tones.detected_hz is not None:
                 tones.reset()

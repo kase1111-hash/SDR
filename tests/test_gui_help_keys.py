@@ -506,6 +506,28 @@ class TestTheDialogListsTheBindings(_WindowTestCase):
         )
         self.assertTrue(any("mute" in s for s in self.visible(dialog, "mute")))
 
+    def test_typing_a_word_never_flashes_no_match(self):
+        # T12 review: the first letter of a word ("t" of "tune") read as a
+        # key nothing is bound to, and the list went empty ("No shortcuts
+        # match") until the second letter.
+        dialog = self.dialog()
+        for text in ("t", "tu", "tune", "c", "ctrl", "ctrl+"):
+            found = self.visible(dialog, text)
+            self.assertTrue(found, text)
+            self.assertTrue(dialog._no_match.isHidden(), text)
+
+    def test_a_single_key_finds_its_combinations(self):
+        dialog = self.dialog()
+        muting = self.visible(dialog, "m")
+        self.assertTrue(any(s.startswith("plots") for s in muting), muting)
+        self.assertTrue(any("ctrl+m" in s for s in muting), muting)
+        # Every row shown has the key M: alone or last (Ctrl+M).
+        self.assertTrue(all(" m" in s or "+m" in s for s in muting), muting)
+        self.assertTrue(any("ctrl+1" in s for s in self.visible(dialog, "1")))
+        ctrl = self.visible(dialog, "Ctrl+")
+        self.assertTrue(all("ctrl+" in s for s in ctrl), ctrl)
+        self.assertTrue(any("ctrl+s" in s for s in ctrl), ctrl)
+
 
 if __name__ == "__main__":
     unittest.main()

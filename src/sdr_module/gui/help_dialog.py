@@ -14,7 +14,7 @@ window's shortcuts change (and on platforms without, say, a Quit key).
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     from PyQt6.QtCore import QEvent, QObject, Qt
@@ -522,6 +522,23 @@ def _key_needle(text: str) -> str:
     return ""
 
 
+def _key_matches(needle: str, keys: Iterable[str]) -> bool:
+    """Whether a row bound to ``keys`` (portable text, lowercase) answers
+    the key filter ``needle``: the whole key ("ctrl+s" is not
+    "ctrl+shift+r"); a single key also as the last of a combination ("m":
+    M and Ctrl+M); modifiers still being typed ("ctrl+") every key with
+    them."""
+    for key in keys:
+        if key == needle:
+            return True
+        if needle.endswith("+") and len(needle) > 1:
+            if f"+{needle}" in f"+{key}":
+                return True
+        elif "+" not in needle and key.endswith(f"+{needle}"):
+            return True
+    return False
+
+
 class _SwallowEnter(QObject if HAS_PYQT6 else object):
     """Keys for the filter box: Enter doesn't close the dialog, and Page Up /
     Page Down scroll the list (which takes no keyboard focus itself)."""
@@ -707,11 +724,16 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
     def _apply_filter(self, text: str) -> None:
         needle = text.strip().lower()
         key = _key_needle(text)
+        if key and not any(_key_matches(key, keys) for keys in self._keys):
+            # No key like that (e.g. the first letter of a word, the "t" of
+            # "tune"): look for the text instead of showing nothing.
+            key = ""
         visible_sections = set()
         for (row, search, section), keys in zip(self._rows, self._keys, strict=True):
             if key:
-                # "Ctrl+S" finds Ctrl+S, not Ctrl+Shift+R; "f2" finds F2.
-                show = key in keys
+                # "Ctrl+S" finds Ctrl+S, not Ctrl+Shift+R; "f2" finds F2;
+                # "m" finds M and Ctrl+M.
+                show = _key_matches(key, keys)
             else:
                 show = not needle or needle in search
             row.setVisible(show)

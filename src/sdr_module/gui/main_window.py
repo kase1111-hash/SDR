@@ -2556,6 +2556,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         toolbar.addWidget(self._record_button)
         self._update_record_button_tip()
 
+        # ON AIR (red) while transmitting, beside Start and Record (so it
+        # never falls into the toolbar's overflow); a click stops it.
+        self._tx_station.add_toolbar_badge(toolbar)
+
         toolbar.addSeparator()
 
         # Audio on/off (the same switch as Radio > Audio Output) and volume.
@@ -2621,9 +2625,6 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # The readout's old name: text() / setText() work on the meter.
         self._level_label = self._level_meter
         toolbar.addWidget(self._level_meter)
-
-        # ON AIR (red) while transmitting; a click stops it.
-        self._tx_station.add_toolbar_badge(toolbar)
 
     def _setup_receiver_bar(self) -> None:
         """Second toolbar row: MODE and FILTER (mirroring the control panel's
@@ -3034,6 +3035,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._state_badge.setText("STOPPED")
             set_tone(self._state_badge, "muted")
             self._state_badge.setToolTip("Press Start or Space to receive")
+        if self._tx_busy():
+            self._show_tx_state(True)
         if has_device:
             self._device_label.setText(self._device_display_name())
         else:
@@ -4646,6 +4649,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """True while a transmission is on the air (or being set up)."""
         station = getattr(self, "_tx_station", None)
         return bool(station is not None and station.busy)
+
+    def _show_tx_state(self, on_air: bool) -> None:
+        """The status bar's state badge says ON AIR while transmitting (the
+        state comes back with the next _refresh_state_ui)."""
+        if on_air:
+            self._state_badge.setText("ON AIR")
+            set_tone(self._state_badge, "danger")
+            self._state_badge.setToolTip(
+                "Transmitting; receiving resumes when the transmission ends"
+            )
 
     def _transmit_job(self, job: "TxJob", confirm: bool = True) -> bool:
         """Transmit ``job`` (see :class:`~.transmitter.TxJob`) on the HackRF:

@@ -478,10 +478,14 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         logger.info(text)
         panel = self._panel()
         if panel is not None:
-            self._result_line = (self._inputs(), f"Can't send: {problem}.", "danger")
-            panel.set_tx_status(
-                f"Can't send: {problem}.", "danger", self.readiness()[2]
-            )
+            line, tone, can = self.readiness()
+            if can:  # (a reason the TX line doesn't check, e.g. the rate)
+                line, tone = (
+                    f"Can't send on {format_mhz(freq_hz)}: {problem}.",
+                    "danger",
+                )
+            self._result_line = (self._inputs(), line, tone)
+            panel.set_tx_status(line, tone, can)
 
     def confirm(self, job: TxJob) -> bool:
         """The first-use question ("Transmit DE W1AW on 146.520 MHz (FM
@@ -538,6 +542,7 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
     def _on_started(self, job: TxJob) -> None:
         win = self._win
         where = format_mhz(job.center_hz)
+        win._show_tx_state(True)
         if self._badge_action is not None:
             self._badge_action.setVisible(True)
             self._badge.setToolTip(

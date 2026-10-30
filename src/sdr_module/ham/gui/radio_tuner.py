@@ -1127,10 +1127,28 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
             self.stop_seek()
         self._update_seek_tips()
         self._update_presets(self._current_presets())
-        self._apply_frequency(self._band_frequency[band], emit)
+        self._apply_frequency(self._reachable(band, self._band_frequency[band]), emit)
         if not self.is_seeking():
             self._hint_timer.stop()
             self._reset_hint()  # (the AM band's note, if any)
+
+    def _reachable(self, band: RadioBand, freq_hz: float) -> float:
+        """``freq_hz``, or (when the device can't tune it) the first preset
+        of ``band`` it can, else its lowest reachable channel: a HackRF
+        switched to AM lands on 1000 kHz or above instead of being refused."""
+        if self._device_range is None:
+            return freq_hz
+        low, high = self._device_range
+        if low <= freq_hz <= high:
+            return freq_hz
+        presets = self._fm_presets if band == RadioBand.FM else self._am_presets
+        for preset in presets:
+            if preset is not None and low <= preset.frequency_hz <= high:
+                return preset.frequency_hz
+        step = band_step(band)
+        band_low, band_high = band_range(band)
+        channel = math.ceil(max(low, band_low) / step) * step
+        return min(max(channel, band_low), band_high)
 
     def _update_presets(self, presets: List[Optional[RadioPreset]]) -> None:
         """Update preset buttons for current band."""

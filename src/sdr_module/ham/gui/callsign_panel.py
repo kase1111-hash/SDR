@@ -20,7 +20,7 @@ from typing import Any, Optional
 import numpy as np
 
 try:
-    from PyQt6.QtCore import Qt, pyqtSignal
+    from PyQt6.QtCore import Qt, QTimer, pyqtSignal
     from PyQt6.QtGui import QStandardItemModel, QValidator
     from PyQt6.QtWidgets import (
         QCheckBox,
@@ -32,6 +32,7 @@ try:
         QLineEdit,
         QProgressBar,
         QPushButton,
+        QScrollArea,
         QSizePolicy,
         QSlider,
         QSpinBox,
@@ -783,6 +784,8 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         if self._is_transmitting:
             self._tx_progress.setValue(0)
             self._tx_progress.setFormat("Starting…")
+            # In a short tab, bring Stop and the progress into view.
+            QTimer.singleShot(0, self._show_stop)
         else:
             self.set_id_countdown(None)
         self._refresh_status()
@@ -791,6 +794,14 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
 
     def is_transmitting(self) -> bool:
         return self._is_transmitting
+
+    def _show_stop(self) -> None:
+        """Scroll the tab (if it scrolls) so Stop and the progress show."""
+        widget = self.parentWidget()
+        while widget is not None and not isinstance(widget, QScrollArea):
+            widget = widget.parentWidget()
+        if widget is not None and self._is_transmitting:
+            widget.ensureWidgetVisible(self._tx_progress, 0, 8)
 
     def set_tx_progress(self, done_s: float, total_s: float) -> None:
         """Air time sent so far and in all, while transmitting."""

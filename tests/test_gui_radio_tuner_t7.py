@@ -232,6 +232,11 @@ class TestAmBandPerDevice(_TunerCase):
         t.set_device_range(1e6, 6e9, "HackRF One")
         t._am_btn.click()
         self.assertTrue(t._am_btn.isEnabled())
+        # The band opens on a station the HackRF can tune (the last AM
+        # station, 880 kHz, can't be): the first reachable preset.
+        self.assertEqual(t.get_band(), self.rt.RadioBand.AM)
+        self.assertEqual(t.get_frequency(), 1010e3)
+        self.assertEqual(self.emitted[-1], (1010e3, "AM"))
         reachable = {
             b.get_preset().frequency_hz: b.isEnabled() for b in t._preset_buttons
         }
@@ -421,6 +426,11 @@ class TestTunerInTheWindow(_WindowTestCase):
         self.win._device = _hackrf()
         self.win._refresh_state_ui()
         self.assertIn("HackRF One tunes from 1000 kHz", tuner._am_note())
+        # AM opens where the HackRF can tune (not refused, back on FM).
+        tuner._am_btn.click()
+        self.assertEqual(self.win._current_frequency(), 1010e3)
+        self.assertEqual(self.win._control_panel.get_demod_mode(), "AM")
+        self.assertEqual(tuner.get_band().value, "AM")
         self.win._device = None
         self.win._refresh_state_ui()
         self.assertEqual(tuner._am_note(), "")

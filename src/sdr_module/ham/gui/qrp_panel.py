@@ -1441,9 +1441,9 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
                 f"{distance:,.0f} {unit} · {format_watts(qso['watts'])} · "
                 f"{per_watt:,.0f} {name}"
             )
-            if qso.get("when"):
-                text += f" · {qso['when']}"
             item = QListWidgetItem(text)
+            if qso.get("when"):
+                item.setToolTip(f"Logged {qso['when']}")
             item.setData(Qt.ItemDataRole.UserRole, index)
             self._qso_list.addItem(item)
         self._qso_list.setVisible(bool(self._qsos))

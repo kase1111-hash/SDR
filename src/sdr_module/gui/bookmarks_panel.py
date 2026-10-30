@@ -428,7 +428,9 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._list.setTextElideMode(Qt.TextElideMode.ElideRight)
-        self._list.setMinimumHeight(96)
+        # (Header and two rows: with the filter row, the tab still fits a
+        # 1024x640 window without scrolling.)
+        self._list.setMinimumHeight(70)
         self._list.setAccessibleName("Bookmarks")
         header = self._list.header()
         header.setStretchLastSection(False)

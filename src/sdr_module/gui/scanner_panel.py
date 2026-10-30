@@ -305,6 +305,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._host = host
         self._engine = ScanEngine(host, self._guess)
         self._connect_engine()
+        # The groups are the window's bookmarks': now the saved one can be
+        # chosen again.
+        self._refresh_groups(prefer=getattr(self, "_saved_group", ""))
         self.refresh()
 
     @property
@@ -846,9 +849,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._update_steps_hint()
         self._update_controls()
 
-    def _refresh_groups(self) -> None:
-        """The Group list: all bookmarks, or one of their groups."""
-        wanted = self._group.currentData()
+    def _refresh_groups(self, prefer: Optional[str] = None) -> None:
+        """The Group list: all bookmarks, or one of their groups (keeping
+        the one chosen, or ``prefer``)."""
+        wanted = prefer if prefer is not None else self._group.currentData()
         if not isinstance(wanted, str):
             wanted = getattr(self, "_saved_group", "")
         self._group.blockSignals(True)

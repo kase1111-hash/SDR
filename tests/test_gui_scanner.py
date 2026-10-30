@@ -622,6 +622,19 @@ class TestScannerTab(_PanelCase):
         )
         self.assertEqual(again._table.rowCount(), len(panel.hits()))
 
+    def test_the_bookmark_group_is_kept_between_sessions(self):
+        self.host.groups = ["Airport", "Ham"]
+        self.host.bookmarks = [
+            {"index": 0, "label": "A", "freq_hz": 118.1e6, "group": "Ham"}
+        ]
+        panel = self.panel()
+        panel.set_scan_mode("bookmarks")
+        panel._group.setCurrentIndex(panel._group.findData("Ham"))
+        self.assertEqual(self.store.values["scanner/bookmark_group"], "Ham")
+        again = self.panel()
+        self.assertEqual(again._group.currentData(), "Ham")
+        self.assertEqual(again.scan_mode(), "bookmarks")
+
     def test_damaged_saved_results_are_ignored(self):
         self.store.values["scanner/results"] = "not json"
         self.assertEqual(self.panel().hits(), [])

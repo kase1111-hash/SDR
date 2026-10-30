@@ -647,6 +647,20 @@ class TestBookmarksInTheWindow(_WindowTestCase):
         win._set_demod_mode("USB")
         self.assertEqual(panel._mode_input.currentData(), "USB")
 
+    def test_the_tab_fits_the_smallest_window(self):
+        from PyQt6.QtWidgets import QScrollArea
+
+        win = self.win
+        win.resize(1024, 640)
+        self.settle()
+        win._apply_default_splitter_sizes()
+        win._show_panel("bookmarks")
+        self.settle()
+        page = win._panel_pages["bookmarks"]
+        area = page if isinstance(page, QScrollArea) else page.findChild(QScrollArea)
+        self.assertIsNotNone(area)
+        self.assertEqual(area.verticalScrollBar().maximum(), 0)  # nothing hidden
+
     def test_messages_reach_the_status_bar(self):
         win, panel = self.win, self.win._bookmarks_panel
         panel.add_bookmark("A", 146.52e6, "FM", "5 kHz")

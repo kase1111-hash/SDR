@@ -768,6 +768,61 @@ class TestFLEX:
         assert decoder.last_unsupported == speed
 
     @staticmethod
+    def _fast_frames(count, gap_s=1.875, rate=240e3):
+        """``count`` FLEX frame headers saying 3200 bps 2-level, ``gap_s``
+        apart, on an FM channel with a little noise."""
+        rng = np.random.default_rng(3)
+        code = 0x7B18
+        sync = (code << 48) | (0xA6C6AAAA << 16) | (code ^ 0xFFFF)
+        bits = [1 - (i & 1) for i in range(64)]
+        bits += [((sync >> (63 - i)) & 1) ^ 1 for i in range(64)]
+        bits += [1 - (i & 1) for i in range(200)]
+        header = enc.fm_modulate(
+            enc.FLEX_DEVIATION_HZ * enc.bit_levels(bits, rate, 1600), rate
+        )
+        gap = np.zeros(int(gap_s * rate) - len(header), dtype=np.complex64)
+        x = np.concatenate([np.concatenate([gap, header]) for _ in range(count)])
+        noise = rng.standard_normal(2 * len(x)).view(np.complex128)
+        return (x + 0.001 * noise).astype(np.complex64)
+
+    def _feed(self, decoder, x, block=8000):
+        for start in range(0, len(x), block):
+            decoder.process(x[start : start + block])
+
+    def test_a_speed_it_cant_decode_is_a_problem_while_it_is_heard(self):
+        # DEC-09: the problem came from a lifetime count, so it stayed on
+        # a quiet channel, after retuning and after Clear.
+        rate = 240e3
+        decoder = FLEXLiveDecoder(rate)
+        self._feed(decoder, self._fast_frames(4))
+        problem = decoder.status.problem
+        assert problem == (
+            "This channel sends FLEX at 3200 bps 2-level; "
+            "only 1600 bps 2-level FLEX decodes yet"
+        )
+        # Another channel: forgotten at once.
+        decoder.set_offset(50e3)
+        assert decoder.status.problem is None
+        self._feed(decoder, np.zeros(int(9 * rate), dtype=np.complex64))
+        assert decoder.status.problem is None
+        # Back on it: there again with its next frame, and gone a few frames
+        # after the channel goes quiet.
+        decoder.set_offset(0.0)
+        self._feed(decoder, self._fast_frames(2))
+        assert decoder.status.problem == problem
+        quiet = np.zeros(int(4 * rate), dtype=np.complex64)
+        self._feed(decoder, quiet)
+        assert decoder.status.problem == problem
+        self._feed(decoder, quiet)
+        assert decoder.status.problem is None
+
+    def test_reset_forgets_other_speeds(self):
+        decoder = FLEXDecoder(48000.0)
+        decoder.unsupported_frames, decoder.last_unsupported = 3, "3200 bps 2-level"
+        decoder.reset()
+        assert (decoder.unsupported_frames, decoder.last_unsupported) == (0, "")
+
+    @staticmethod
     def _long_address(capcode):
         """The two address words of a long address (set 1-2)."""
         first = (capcode - 2068480) % 32768

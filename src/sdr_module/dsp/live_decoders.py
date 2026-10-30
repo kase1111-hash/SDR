@@ -423,30 +423,55 @@ class POCSAGLiveDecoder(ChannelDecoder):
 
 
 class FLEXLiveDecoder(ChannelDecoder):
-    """FLEX pages (1600 bps, 2-level FSK) on an NBFM channel."""
+    """FLEX pages (1600 bps, 2-level FSK) on an NBFM channel.
+
+    Frames sent at a speed it can't decode yet (3200 or 6400 bps) are a
+    status problem while they are heard: until ``_OTHER_SPEED_S`` (about
+    three frames) after the last one, and only while no page has decoded
+    since the channel changed.
+    """
 
     name = "FLEX"
     unit = "page"
     _DC_S = 0.25
+    _OTHER_SPEED_S = 6.0
 
     def _build(self) -> None:
         rate = self.channel_rate
         self._fm = FMDiscriminator(rate)
         self._dc = _DCBlocker(int(self._DC_S * rate))
         self._decoder = FLEXDecoder(rate, 1600)
+        self._other_speed_s: Optional[float] = None  # stream time last heard
+        self._valid_before = self._valid  # pages decoded before this channel
 
     def _decoders(self) -> List[ProtocolDecoder]:
         return [self._decoder]
 
+    def channel_changed(self) -> None:
+        super().channel_changed()
+        # What the old channel sent says nothing about this one.
+        self._decoder.unsupported_frames = 0
+        self._decoder.last_unsupported = ""
+        self._other_speed_s = None
+        self._valid_before = self._valid
+
     def _demodulate(self, channel: np.ndarray) -> List[DecodedMessage]:
+        before = self._decoder.unsupported_frames
         baseband = self._dc.process(self._fm.process(channel))
-        return list(self._decoder.decode(baseband))
+        messages: List[DecodedMessage] = list(self._decoder.decode(baseband))
+        if self._decoder.unsupported_frames > before:
+            self._other_speed_s = self._stream_s
+        return messages
 
     @property
     def status(self) -> LiveDecoderStatus:
         base = super().status
         decoder = self._decoder
-        if decoder.unsupported_frames and not base.valid:
+        heard = (
+            self._other_speed_s is not None
+            and self._stream_s - self._other_speed_s <= self._OTHER_SPEED_S
+        )
+        if heard and decoder.last_unsupported and self._valid == self._valid_before:
             return replace(
                 base,
                 problem=(

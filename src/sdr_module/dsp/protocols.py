@@ -3341,6 +3341,8 @@ class FLEXDecoder(ProtocolDecoder):
         self._bits = []
         self._messages = []
         self._timestamp = 0.0
+        self.unsupported_frames = 0
+        self.last_unsupported = ""
 
 
 # ============================================================================

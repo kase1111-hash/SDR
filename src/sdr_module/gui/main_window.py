@@ -7460,6 +7460,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         if not self._confirm_stop_recordings(options.name):
             return False
+        # A scan ends first (back to where it started, unless a channel is
+        # being listened to): Close Recording goes back to that.
+        scanner = getattr(self, "_scanner_panel", None)
+        if scanner is not None:
+            scanner.stop_scan("Scan stopped: a recording is playing.", "warning")
         if not self._playback.open(options):
             return False
         half = options.sample_rate / 2.0
@@ -8062,17 +8067,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if panel is None or not panel.engine.active:
             return
         host = self._scanner_host
-        if self._device_sample_rate() != panel.engine.rate:
-            # Its steps and measurements were planned for the old rate.
-            panel.stop_scan(
-                "Scan stopped: the sample rate changed. Start it again.",
-                "warning",
-                stay=True,
-            )
-            return
         if getattr(self, "_lo_lock", None) is not None:
+            # (Before the rate: a recording has its own. Open Recording
+            # stops a scan before it plays, see _open_recording.)
             panel.stop_scan(
                 "Scan stopped: a recording is playing.", "warning", stay=True
+            )
+            return
+        if self._device_sample_rate() != panel.engine.rate:
+            # Its steps and measurements were planned for the old rate. Back
+            # to where it started, unless a channel is being listened to.
+            panel.stop_scan(
+                "Scan stopped: the sample rate changed. Start it again.", "warning"
             )
             return
         tuned = self._current_frequency()

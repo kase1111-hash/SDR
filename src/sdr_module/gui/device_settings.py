@@ -225,9 +225,10 @@ def split_hackrf_gain(gain_db: float) -> Tuple[int, int]:
     return int(lna), int(max(0, min(HACKRF_VGA_STEPS[-1], vga)))
 
 
-def gain_model_for(device: Any) -> GainModel:
-    """How the RF gain of ``device`` is set (see :class:`GainModel`)."""
-    kind = device_kind(device)
+def gain_model_for_kind(kind: str) -> GainModel:
+    """How the RF gain of a ``kind`` device is set, before one is open
+    (an RTL-SDR: the R820T's gain table, the common tuner's; the open
+    device's own table is :func:`gain_model_for`'s)."""
     if kind == "hackrf":
         return GainModel(
             kind="hackrf",
@@ -236,6 +237,19 @@ def gain_model_for(device: Any) -> GainModel:
             agc_tip=NO_AGC_HACKRF,
             name="HackRF One",
         )
+    if kind == "rtlsdr":
+        from ..devices.rtlsdr import RTLSDRDevice
+
+        table = tuple(sorted({float(g) for g in RTLSDRDevice.VALID_GAINS}))
+        return GainModel(kind="steps", steps=table, agc=True, name="RTL-SDR")
+    return DEFAULT_GAIN_MODEL
+
+
+def gain_model_for(device: Any) -> GainModel:
+    """How the RF gain of ``device`` is set (see :class:`GainModel`)."""
+    kind = device_kind(device)
+    if kind == "hackrf":
+        return gain_model_for_kind(kind)
     if kind == "rtlsdr":
         table: Tuple[float, ...] = ()
         try:
@@ -469,6 +483,7 @@ __all__ = [
     "format_db",
     "front_end_features",
     "gain_model_for",
+    "gain_model_for_kind",
     "load_front_end",
     "load_gain",
     "load_rate",

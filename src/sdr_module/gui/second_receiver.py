@@ -105,6 +105,20 @@ from .control_panel import (
     closest_bandwidth,
     filter_profile,
 )
+from .device_settings import (
+    AMP_TEXT,
+    AMP_TIP,
+    AMP_WARNING,
+    DEFAULT_GAIN_MODEL,
+    HACKRF_DEFAULT_LNA,
+    HACKRF_DEFAULT_VGA,
+    HACKRF_LNA_STEPS,
+    HACKRF_VGA_STEPS,
+    GainModel,
+    format_db,
+    gain_model_for,
+    gain_model_for_kind,
+)
 from .level_meter import LevelMeter
 
 # The receiver chain and the display loop's helpers are the main window's,
@@ -172,8 +186,10 @@ SAMPLE_RATES: Dict[str, Tuple[float, ...]] = {
     "rtlsdr": (1.0e6, 1.4e6, 1.8e6, 2.0e6, 2.4e6, 2.56e6),
     "hackrf": (2.0e6, 2.4e6, 4e6, 8e6, 10e6, 20e6),
 }
-#: Gain range of the RF gain slider (dB), and its default (the demo
-#: device's reference gain).
+#: Gain range of the RF gain slider (dB) with the demo device, and the
+#: gain to start with (the demo device's reference gain). The slider steps
+#: through the device's own gains (an RTL-SDR: its tuner's table); a HackRF
+#: One has its LNA, VGA and RF amp instead, as in the main window.
 GAIN_RANGE = (0, 50)
 DEFAULT_GAIN_DB = 20
 
@@ -247,6 +263,18 @@ def _number(value: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return number if math.isfinite(number) else 0.0
+
+
+def _step_index(steps: Tuple[int, ...], value: Any, default: int) -> int:
+    """Index of the step nearest ``value`` (``default``'s when it isn't a
+    finite number)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = float(default)
+    if not math.isfinite(number):
+        number = float(default)
+    return min(range(len(steps)), key=lambda i: abs(steps[i] - number))
 
 
 def _model_name(kind: str) -> str:
@@ -678,6 +706,12 @@ if HAS_PYQT6:
             self._next_space_check = 0.0
             # Transmit monitor: tune here when the main window transmits.
             self._follow_tx = False
+            # RF gain: how the device sets it, the RF gain slider's steps
+            # and the gain chosen on it (dB; it carries over between devices
+            # to the nearest step each has).
+            self._gain_model: GainModel = DEFAULT_GAIN_MODEL
+            self._slider_steps: Tuple[float, ...] = tuple(DEFAULT_GAIN_MODEL.steps)
+            self._gain_db = float(DEFAULT_GAIN_DB)
             self._restoring = False
             self._shut_down = False
             self._main_gone = False  # (the main window was deleted)
@@ -905,7 +939,7 @@ if HAS_PYQT6:
             )
             self._gain_slider.valueChanged.connect(self._on_gain_changed)
             row.addWidget(self._gain_slider, 1)
-            self._gain_label = self._value_label(f"{DEFAULT_GAIN_DB} dB", "50 dB")
+            self._gain_label = self._value_label(f"{DEFAULT_GAIN_DB} dB", "49.6 dB")
             row.addWidget(self._gain_label)
             self._gain_auto = QCheckBox("Auto")
             self._gain_auto.setToolTip(
@@ -917,9 +951,70 @@ if HAS_PYQT6:
             label.setBuddy(self._gain_slider)
             form.addRow(label, gain_row)
 
+            # A HackRF One: its two gain stages and the RF amp instead of
+            # the RF gain slider, as in the main window's Receiver group.
+            self._lna_slider, self._lna_label = self._stage_row(
+                form,
+                "LNA gain:",
+                "Second receiver's LNA gain",
+                HACKRF_LNA_STEPS,
+                HACKRF_DEFAULT_LNA,
+                "The HackRF's RF (LNA) gain: 0-40 dB in 8 dB steps. Raise it "
+                "first for weak signals, then the VGA gain; turn it down when "
+                "this receiver monitors your own transmitter nearby.",
+            )
+            self._vga_slider, self._vga_label = self._stage_row(
+                form,
+                "VGA gain:",
+                "Second receiver's VGA gain",
+                HACKRF_VGA_STEPS,
+                HACKRF_DEFAULT_VGA,
+                "The HackRF's baseband (VGA) gain: 0-62 dB in 2 dB steps, after "
+                "the LNA.",
+            )
+            self._amp_check = QCheckBox(AMP_TEXT)
+            self._amp_check.setToolTip(AMP_TIP)
+            self._amp_check.setAccessibleName("Second receiver's RF amp")
+            self._amp_check.toggled.connect(self._on_amp_toggled)
+            form.addRow("", self._amp_check)
+            self._amp_warning = self._hint(AMP_WARNING)
+            set_tone(self._amp_warning, "warning")
+            form.addRow(self._amp_warning)
+
             self._device_note = self._hint()
             form.addRow(self._device_note)
+            self._device_form = form
             return group
+
+        def _stage_row(
+            self,
+            form: "QFormLayout",
+            caption: str,
+            name: str,
+            steps: Tuple[int, ...],
+            value: int,
+            tip: str,
+        ) -> Tuple["QSlider", "QLabel"]:
+            """A HackRF gain stage's row: a slider over its steps (their
+            index) and a dB readout."""
+            widget = QWidget()
+            row = QHBoxLayout(widget)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.setSpacing(8)
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, len(steps) - 1)
+            slider.setPageStep(1 if len(steps) < 10 else 5)
+            slider.setValue(steps.index(value))
+            slider.setToolTip(tip)
+            slider.setAccessibleName(name)
+            slider.valueChanged.connect(self._on_stage_changed)
+            row.addWidget(slider, 1)
+            label = self._value_label(format_db(value), "49.6 dB")
+            row.addWidget(label)
+            text = QLabel(caption)
+            text.setBuddy(slider)
+            form.addRow(text, widget)
+            return slider, label
 
         def _build_tuning_group(self) -> "QGroupBox":
             group = QGroupBox("Tuning")
@@ -1346,6 +1441,7 @@ if HAS_PYQT6:
             combo.setCurrentIndex(index)
             combo.blockSignals(False)
             self._fill_rates()
+            self._sync_gain_model()
             self._update_device_note()
 
         def _rate_kind(self) -> str:
@@ -1492,6 +1588,7 @@ if HAS_PYQT6:
                 self.start()
             else:
                 self._fill_rates()  # (its rates; it opens on Start)
+                self._sync_gain_model()
                 self._refresh_state()
 
         def _open(self, source: Source) -> Optional[str]:
@@ -1526,6 +1623,7 @@ if HAS_PYQT6:
             self._device = device
             self._source = source
             self._apply_baseband_filter()
+            self._sync_gain_model()
             self._apply_gain()
             self._apply_tuning_range()
             note = self._sync_device_tuning()
@@ -1948,21 +2046,146 @@ if HAS_PYQT6:
 
         # ------------------------------------------------------------ gain
 
+        def _gain_step_db(self, index: Optional[int] = None) -> float:
+            """The RF gain slider's gain (dB): the step it is on."""
+            steps = self._slider_steps
+            if not steps:
+                return 0.0
+            if index is None:
+                index = self._gain_slider.value()
+            return float(steps[min(max(int(index), 0), len(steps) - 1)])
+
+        def _hackrf_gains(self) -> Tuple[int, int, bool]:
+            """``(lna, vga, amp)`` shown for a HackRF One."""
+            lna = HACKRF_LNA_STEPS[self._lna_slider.value()]
+            vga = HACKRF_VGA_STEPS[self._vga_slider.value()]
+            return int(lna), int(vga), bool(self._amp_check.isChecked())
+
+        def _sync_gain_model(self) -> None:
+            """Show the gain controls of the device open, else of the one
+            chosen: its own gain steps (an RTL-SDR's tuner table, the demo
+            device's 1 dB steps), or a HackRF One's LNA, VGA and RF amp. The
+            gain stays as close as the new steps allow."""
+            if self._device is not None:
+                model = gain_model_for(self._device)
+            else:
+                model = gain_model_for_kind(self._rate_kind())
+            hackrf = model.kind == "hackrf"
+            form = self._device_form
+            form.setRowVisible(self._gain_slider.parentWidget(), not hackrf)
+            for widget in (
+                self._lna_slider.parentWidget(),
+                self._vga_slider.parentWidget(),
+                self._amp_check,
+            ):
+                form.setRowVisible(widget, hackrf)
+            self._gain_model = model
+            if not hackrf and tuple(model.steps) != self._slider_steps:
+                slider = self._gain_slider
+                slider.blockSignals(True)
+                self._slider_steps = tuple(model.steps)
+                slider.setRange(0, max(0, len(model.steps) - 1))
+                slider.setPageStep(max(1, len(model.steps) // 10))
+                slider.setValue(model.nearest_index(self._gain_db))
+                slider.blockSignals(False)
+            self._show_gain()
+            self._update_amp_warning()
+
+        def _show_gain(self) -> None:
+            """The gain readouts: the gain the device applied (an RTL-SDR
+            says which step of its tuner it took), else the step shown."""
+            db = self._gain_step_db()
+            dev = self._device
+            if (
+                isinstance(dev, SDRDevice)
+                and self._gain_model.kind != "hackrf"
+                and not self._gain_auto.isChecked()
+            ):
+                try:
+                    state = dev.state
+                    if state.gain_mode == "manual" and math.isfinite(state.gain):
+                        db = float(state.gain)
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.debug(f"Second receiver gain readout: {e}")
+            self._gain_label.setText(format_db(db))
+            lna, vga, _amp = self._hackrf_gains()
+            self._lna_label.setText(format_db(lna))
+            self._vga_label.setText(format_db(vga))
+
+        def _update_amp_warning(self) -> None:
+            show = self._gain_model.kind == "hackrf" and self._amp_check.isChecked()
+            self._device_form.setRowVisible(self._amp_warning, show)
+
         def _on_gain_changed(self, value: int) -> None:
-            self._gain_label.setText(f"{int(value)} dB")
             if not self._restoring:
-                self._save(KEY + "gain_db", int(value))
+                self._gain_db = self._gain_step_db(value)
+                self._save(KEY + "gain_db", self._gain_db)
+            self._show_gain()
+            self._apply_gain()
+
+        def _on_stage_changed(self, _index: int) -> None:
+            lna, vga, _amp = self._hackrf_gains()
+            self._save(KEY + "hackrf_lna", lna)
+            self._save(KEY + "hackrf_vga", vga)
+            self._show_gain()
+            self._apply_gain()
+
+        def _on_amp_toggled(self, on: bool) -> None:
+            self._save(KEY + "hackrf_amp", bool(on))
+            self._update_amp_warning()
             self._apply_gain()
 
         def _on_gain_auto(self, on: bool) -> None:
+            if on and not self._gain_model.agc:
+                # (A HackRF One: no automatic gain.)
+                name = (
+                    self._device_name()
+                    if self._device is not None
+                    else self._gain_model.name or "This device"
+                )
+                self._gain_auto.blockSignals(True)
+                self._gain_auto.setChecked(False)
+                self._gain_auto.blockSignals(False)
+                self._show_message(
+                    f"{name} has no automatic gain: set it by hand.", "warning"
+                )
+                return
             self._gain_slider.setEnabled(not on)
             if not self._restoring:
                 self._save(KEY + "gain_auto", bool(on))
+            self._show_gain()
             self._apply_gain()
+
+        def _apply_hackrf_gain(self, dev: Any) -> None:
+            """Set a HackRF One's LNA, VGA and RF amp as shown."""
+            lna, vga, amp = self._hackrf_gains()
+            ok = True
+            for name, value in (
+                ("set_lna_gain", lna),
+                ("set_vga_gain", vga),
+                ("set_amp", amp),
+            ):
+                method = getattr(dev, name, None)
+                try:
+                    done = callable(method) and method(value) is not False
+                except Exception as e:
+                    logger.warning(f"Second receiver {name}({value}): {e}")
+                    done = False
+                ok = ok and done
+            if not ok:
+                self._show_message(
+                    f"{self._device_name()} didn't take LNA {lna} dB, VGA {vga} dB "
+                    f"and the RF amp {'on' if amp else 'off'} (Tools > Error "
+                    "History says why).",
+                    "danger",
+                )
 
         def _apply_gain(self) -> None:
             dev = self._device
             if dev is None:
+                return
+            if self._gain_model.kind == "hackrf":
+                self._apply_hackrf_gain(dev)
                 return
             auto = self._gain_auto.isChecked()
             try:
@@ -1982,9 +2205,10 @@ if HAS_PYQT6:
                 auto = False
             if not auto:
                 try:
-                    dev.set_gain(float(self._gain_slider.value()))
+                    dev.set_gain(self._gain_step_db())
                 except Exception as e:
                     logger.debug(f"Second receiver gain: {e}")
+            self._show_gain()
 
         # ---------------------------------------------------- squelch, audio
 
@@ -2869,11 +3093,22 @@ if HAS_PYQT6:
                 self._set_threshold(s.get_float(KEY + "squelch_db", -80.0))
                 self._on_squelch_enabled(self._squelch_check.isChecked())
                 self._dsp.squelch.auto = self._squelch_auto.isChecked()
-                gain = s.get_int(KEY + "gain_db", DEFAULT_GAIN_DB)
-                self._gain_slider.setValue(min(max(gain, GAIN_RANGE[0]), GAIN_RANGE[1]))
-                self._gain_label.setText(f"{self._gain_slider.value()} dB")
+                gain = s.get_float(KEY + "gain_db", DEFAULT_GAIN_DB)
+                self._gain_db = gain if math.isfinite(gain) else float(DEFAULT_GAIN_DB)
+                self._gain_slider.setValue(
+                    self._gain_model.nearest_index(self._gain_db)
+                )
                 self._gain_auto.setChecked(s.get_bool(KEY + "gain_auto", False))
                 self._gain_slider.setEnabled(not self._gain_auto.isChecked())
+                lna = s.get_float(KEY + "hackrf_lna", HACKRF_DEFAULT_LNA)
+                vga = s.get_float(KEY + "hackrf_vga", HACKRF_DEFAULT_VGA)
+                self._lna_slider.setValue(
+                    _step_index(HACKRF_LNA_STEPS, lna, HACKRF_DEFAULT_LNA)
+                )
+                self._vga_slider.setValue(
+                    _step_index(HACKRF_VGA_STEPS, vga, HACKRF_DEFAULT_VGA)
+                )
+                self._amp_check.setChecked(s.get_bool(KEY + "hackrf_amp", False))
                 volume = s.get_int(KEY + "volume", 70)
                 self._volume_slider.setValue(min(max(volume, 0), 100))
                 self._on_volume_changed(self._volume_slider.value())
@@ -2892,6 +3127,7 @@ if HAS_PYQT6:
                 if index >= 0 and not self._sources[index].busy:
                     self._source_combo.setCurrentIndex(index)
                 self._fill_rates()  # (the chosen device's rates)
+                self._sync_gain_model()  # (and its gain controls)
             finally:
                 self._restoring = False
             self._on_tuned()

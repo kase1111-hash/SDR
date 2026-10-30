@@ -37,7 +37,8 @@ import sdr_module.devices.hackrf as hackrf_mod  # noqa: E402
 from tests.hackrf_fakes import ThreadedFakeHackRF, install_fake_backend  # noqa: E402
 from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
 from tests.test_gui_device_settings import FakeRtlSdr, _DeviceCase  # noqa: E402
-from tests.test_gui_station_tx import _TxCase  # noqa: E402
+from tests.test_gui_second_receiver import _SecondCase  # noqa: E402
+from tests.test_gui_station_tx import _Patch, _TxCase  # noqa: E402
 
 # --------------------------------------------------------------------------- #
 # A HackRF One whose firmware changes the RF path with the transceiver mode
@@ -437,6 +438,159 @@ class TestDev3RtlGainAfterHfInTheWindow(_DeviceCase):
         self.assertFalse(self.panel.is_agc_enabled())
         self.win._refresh_info_panel()
         self.assertEqual(self.win._info_panel.value("gain"), "29.7 dB")
+
+
+# --------------------------------------------------------------------------- #
+# The second receiver on the real drivers (DEV-4, DEV-6, DEV-7)
+# --------------------------------------------------------------------------- #
+
+
+def _install_rtl(patch, tuner_class=FakeRtlSdr):
+    """A fake ``rtlsdr`` module (pyrtlsdr's surface) opening ``tuner_class``."""
+    patch.setattr(FakeRtlSdr, "gains_db", None)
+    patch.setattr(FakeRtlSdr, "fail", set())
+    rtlsdr = types.ModuleType("rtlsdr")
+    librtlsdr = types.ModuleType("rtlsdr.librtlsdr")
+    librtlsdr.rtlsdr_get_device_count = lambda: 1
+    rtlsdr.RtlSdr = tuner_class
+    rtlsdr.librtlsdr = librtlsdr
+    patch.setitem(sys.modules, "rtlsdr", rtlsdr)
+    patch.setitem(sys.modules, "rtlsdr.librtlsdr", librtlsdr)
+
+
+class _SecondDriverCase(_SecondCase):
+    """The second receiver with a real RTLSDRDevice or HackRFDevice on the
+    fakes of their libraries."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch = _Patch()
+        self.addCleanup(self.patch.undo)
+
+    def use_hackrf(self):
+        from sdr_module.devices.hackrf import HackRFDevice
+
+        fake = FirmwareHackRF()
+        install_fake_backend(self.patch, fake)
+        self.win._hardware_classes = [HackRFDevice]
+        return fake
+
+    def use_rtl(self, tuner_class=FakeRtlSdr):
+        from sdr_module.devices.rtlsdr import RTLSDRDevice
+
+        _install_rtl(self.patch, tuner_class)
+        self.win._hardware_classes = [RTLSDRDevice]
+
+    def choose(self, kind):
+        rx = self.rx
+        rx._refresh_sources()
+        index = next(i for i, s in enumerate(rx._sources) if s.kind == kind)
+        rx._source_combo.setCurrentIndex(index)
+        rx._on_source_activated(index)
+
+    def start_on(self, kind):
+        self.choose(kind)
+        self.assertTrue(self.rx.start(), self.rx.message())
+        return self.rx.device
+
+    def shown(self, widget):
+        return self.rx._device_form.isRowVisible(widget)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestDev4SecondReceiverGain(_SecondDriverCase):
+    def test_a_hackrf_gets_lna_vga_and_the_rf_amp(self):
+        fake = self.use_hackrf()
+        rx = self.rx
+        self.choose("hackrf")
+        # The HackRF's own controls, before it is even open.
+        self.assertFalse(self.shown(rx._gain_slider.parentWidget()))
+        self.assertTrue(self.shown(rx._lna_slider.parentWidget()))
+        self.assertTrue(self.shown(rx._vga_slider.parentWidget()))
+        self.assertTrue(self.shown(rx._amp_check))
+        dev = self.start_on("hackrf")
+        self.assertEqual((fake.lna, fake.vga, fake.amp), (16, 20, False))
+        rx._lna_slider.setValue(rx._lna_slider.maximum())  # 40 dB
+        rx._vga_slider.setValue(rx._vga_slider.maximum())  # 62 dB
+        self.assertEqual((dev.lna_gain, dev.vga_gain), (40, 62))
+        self.assertEqual((fake.lna, fake.vga), (40, 62))
+        self.assertEqual(rx._lna_label.text(), "40 dB")
+        self.assertEqual(rx._vga_label.text(), "62 dB")
+        rx._lna_slider.setValue(4)  # the usual LNA 32 + VGA 30
+        rx._vga_slider.setValue(15)
+        self.assertEqual((fake.lna, fake.vga), (32, 30))
+        self.assertFalse(self.shown(rx._amp_warning))
+        rx._amp_check.setChecked(True)
+        self.assertTrue(fake.amp and dev.amp_enabled and fake.amp_active)
+        self.assertTrue(self.shown(rx._amp_warning))
+        rx._amp_check.setChecked(False)
+        self.assertFalse(fake.amp or dev.amp_enabled)
+
+    def test_the_hackrf_stages_are_remembered(self):
+        from sdr_module.gui.second_receiver import SecondReceiverWindow
+
+        fake = self.use_hackrf()
+        self.start_on("hackrf")
+        self.rx._lna_slider.setValue(3)  # 24 dB
+        self.rx._vga_slider.setValue(17)  # 34 dB
+        self.rx._amp_check.setChecked(True)
+        self.rx.shutdown()
+        self.assertTrue(fake.closed)
+        values = self.store.values
+        self.assertEqual(values["device/second_receiver/hackrf_lna"], 24)
+        self.assertEqual(values["device/second_receiver/hackrf_vga"], 34)
+        self.assertTrue(values["device/second_receiver/hackrf_amp"])
+        fake.closed = False
+        again = self.extra(SecondReceiverWindow(self.win))
+        self.assertTrue(again.start(), again.message())
+        self.assertEqual((fake.lna, fake.vga, fake.amp), (24, 34, True))
+        again.stop()
+
+    def test_damaged_hackrf_stages_fall_back_to_the_defaults(self):
+        from sdr_module.gui.second_receiver import SecondReceiverWindow
+
+        self.rx.shutdown()
+        self.store.values.update(
+            {
+                "device/second_receiver/hackrf_lna": float("nan"),
+                "device/second_receiver/hackrf_vga": 1000.0,
+                "device/second_receiver/gain_db": float("inf"),
+            }
+        )
+        again = self.extra(SecondReceiverWindow(self.win))
+        self.assertEqual(again._hackrf_gains(), (16, 62, False))
+        self.assertEqual(again._gain_slider.value(), 20)
+
+    def test_an_rtl_sdr_steps_through_its_tuners_gains_and_shows_them(self):
+        from sdr_module.devices.rtlsdr import RTLSDRDevice
+
+        self.use_rtl()
+        rx = self.rx
+        dev = self.start_on("rtlsdr")
+        slider = rx._gain_slider
+        table = dev.get_tuner_gains()
+        self.assertEqual(table, RTLSDRDevice.VALID_GAINS)
+        self.assertEqual((slider.minimum(), slider.maximum()), (0, len(table) - 1))
+        self.assertFalse(self.shown(rx._lna_slider.parentWidget()))
+        for index in (16, 26, 27, len(table) - 1):  # 29.7, 44.5, 48, 49.6 dB
+            slider.setValue(index)
+            self.assertEqual(dev.state.gain, table[index])
+            self.assertEqual(dev._device.gain, table[index])
+            expected = f"{table[index]:.1f}".rstrip("0").rstrip(".") + " dB"
+            self.assertEqual(rx._gain_label.text(), expected)
+        self.assertEqual(self.store.values["device/second_receiver/gain_db"], 49.6)
+
+    def test_the_gain_carries_over_between_devices_to_the_nearest_step(self):
+        self.use_rtl()
+        rx = self.rx
+        rx._gain_slider.setValue(30)  # the demo device: 30 dB
+        self.start_on("rtlsdr")
+        self.assertEqual(rx.device.state.gain, 29.7)
+        self.assertEqual(rx._gain_label.text(), "29.7 dB")
+        rx.stop()
+        self.choose("demo")
+        self.assertEqual(rx._gain_slider.value(), 30)  # 29.7 -> 30 dB
+        self.assertEqual(rx._gain_label.text(), "30 dB")
 
 
 if __name__ == "__main__":

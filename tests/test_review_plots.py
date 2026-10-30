@@ -841,7 +841,8 @@ class TestWaterfallSnr(unittest.TestCase):
                 float(np.mean(values)), self.expected_noise_db(size), delta=0.3
             )
 
-    def hover_snr(self, wf, freq):
+    def hover_level(self, wf, freq):
+        """The hover readout's level line at ``freq`` (newest row)."""
         lines = []
 
         def record(painter, text, *args, **kwargs):
@@ -853,12 +854,16 @@ class TestWaterfallSnr(unittest.TestCase):
         with mock.patch.object(wfm, "draw_readout", record):
             wf._canvas.repaint()
         wf._hover = None
-        found = [line for line in lines if "SNR" in line]
+        found = [line for line in lines if "dBFS" in line]
         self.assertTrue(found, lines)
-        return float(found[0].split("SNR")[1].split("dB")[0])
+        return found[0]
 
-    def check(self, rate, size):
-        analyzer = FrameSpectrumAnalyzer(size)
+    def hover_snr(self, wf, freq):
+        line = self.hover_level(wf, freq)
+        self.assertIn("SNR", line)
+        return float(line.split("SNR")[1].split("dB")[0])
+
+    def waterfall(self, rate, size):
         wf = wfm.WaterfallWidget(history_size=200)
         self.addCleanup(wf.deleteLater)
         wf.set_frequency_range(CENTER, rate)
@@ -867,6 +872,41 @@ class TestWaterfallSnr(unittest.TestCase):
         wf.resize(1000, 360)
         wf.show()
         _settle()
+        return wf
+
+    def test_plain_noise_reads_no_snr(self):
+        # Each row is the strongest of 39 FFTs, so plain noise is drawn about
+        # 6 dB above its mean: no signal, yet the hover read "SNR 6 dB" all
+        # over it. An SNR shows where the level stands out from the noise as
+        # the rows show it (a weak carrier still does).
+        rate, size = 2.4e6, 2048
+        analyzer = FrameSpectrumAnalyzer(size)
+        wf = self.waterfall(rate, size)
+        count = int(rate / 30)
+        t = np.arange(count) / rate
+        weak = -300  # bins from the center: 6 dB above the mean noise per bin
+        power = 4 * 2 * self.SIGMA**2 * 1.5 / size  # (Hann: 1.5 bins of noise)
+        for _ in range(40):
+            x = (self.rng.normal(size=count) + 1j * self.rng.normal(size=count)) * (
+                self.SIGMA
+            )
+            x = x + np.sqrt(power) * np.exp(2j * np.pi * weak * rate / size * t)
+            frame = analyzer.process(x.astype(np.complex64))
+            wf.add_line(frame.max_db, noise_db=frame.noise_floor_db)
+        bin_hz = rate / size
+        spots = [
+            f
+            for f in CENTER + rate * np.linspace(-0.45, 0.45, 61)
+            if abs(f - (CENTER + weak * bin_hz)) > 10 * bin_hz
+        ]
+        readouts = [self.hover_level(wf, float(f)) for f in spots]
+        with_snr = [line for line in readouts if "SNR" in line]
+        self.assertLessEqual(len(with_snr), len(spots) // 10, readouts)
+        self.assertGreaterEqual(self.hover_snr(wf, CENTER + weak * bin_hz), 3.0)
+
+    def check(self, rate, size):
+        analyzer = FrameSpectrumAnalyzer(size)
+        wf = self.waterfall(rate, size)
         means = []
         for _ in range(40):
             frame = self.noise_frame(analyzer, int(rate / 30), 100, rate)

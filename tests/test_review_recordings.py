@@ -933,3 +933,27 @@ class TestResumedTake(_ReviewCase):
     def test_a_continuous_take_is_one_capture(self):
         self.record(4)
         self.assertEqual(len(self._captures()), 1)
+
+    def test_a_resume_asks_the_time_module_only_what_tests_fake(self):
+        # Tests stand in for main_window's ``time`` with a clock that has
+        # monotonic, perf_counter, strftime and gmtime (the display loop's
+        # and a recording's needs); the stamp of a resumed stretch failed
+        # under it ("'_Clock' object has no attribute 'time'").
+        from tests.test_gui_round3_main import _FakeClock
+
+        class Clock(_FakeClock):
+            gmtime = staticmethod(time.gmtime)
+
+        win = self.win
+        with mock.patch.object(self.mw, "time", Clock()):
+            win._record_button.click()
+            win._update_display()
+            first = win._buffer_sample_count()
+            win._on_panel_record_paused(True)
+            win._on_panel_record_paused(False)
+            win._update_display()
+            win._record_button.click()
+        self.assertGreater(win._buffer_sample_count(), first)
+        captures = self._captures()
+        self.assertEqual([c["core:sample_start"] for c in captures], [0, first])
+        _when(captures[1]["core:datetime"])  # (a valid time)

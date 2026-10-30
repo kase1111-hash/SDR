@@ -1706,10 +1706,13 @@ class _SampleStore:
 
 
 def _utc_stamp() -> str:
-    """Now in UTC, ISO 8601 to the millisecond (SigMF's ``core:datetime``)."""
-    now = time.time()
-    millis = int(now % 1 * 1000)
-    return time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now)) + f".{millis:03d}Z"
+    """Now in UTC, ISO 8601 to the millisecond (SigMF's ``core:datetime``).
+    (From datetime: tests stand in for this module's ``time`` with a clock
+    that has only what the display loop and a recording's start ask it.)"""
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S") + f".{now.microsecond // 1000:03d}Z"
 
 
 def _clock_text(seconds: float) -> str:

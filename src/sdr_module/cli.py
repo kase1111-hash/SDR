@@ -455,6 +455,7 @@ def cmd_decode(args: argparse.Namespace) -> int:
     if invalid:
         summary += f" ({len(invalid)} failed their checks"
         summary += ")" if args.show_invalid else "; --show-invalid lists them)"
+
     def describe(msg: Any) -> Tuple[str, str]:
         # One message that can't be read must not end the listing.
         try:

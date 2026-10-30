@@ -8,6 +8,7 @@ threaded transform giving the same result.
 
 import math
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -174,6 +175,34 @@ class TestWholeFrame(unittest.TestCase):
         )
         self.assertTrue(np.all(spec.mean_db <= -200.0))
         self.assertTrue(np.all(np.isfinite(spec.mean_db)))
+
+
+class TestOlderNumpy(unittest.TestCase):
+    """NumPy 1.x, which the package still allows (numpy>=1.21), has no
+    ``out`` argument to ``np.fft.fft``: the plots must work there too (a
+    TypeError would stop every display frame, and the audio with it)."""
+
+    def test_works_without_the_fft_out_argument(self):
+        data = noise(200_000, -50.0, seed=4) + tone(200_000, 300e3, 0.01)
+        reference = fs.FrameSpectrumAnalyzer(2048, threads=2)
+        try:
+            want = reference.process(data)
+        finally:
+            reference.close()
+        numpy2_fft = np.fft.fft
+
+        def numpy1_fft(a, n=None, axis=-1, norm=None):  # no out, double only
+            return numpy2_fft(np.asarray(a, np.complex128), n, axis, norm)
+
+        with mock.patch.object(np.fft, "fft", numpy1_fft):
+            analyzer = fs.FrameSpectrumAnalyzer(2048, threads=2)
+            try:
+                got = analyzer.process(data)
+            finally:
+                analyzer.close()
+        self.assertEqual(got.segments, want.segments)
+        np.testing.assert_allclose(got.mean_db, want.mean_db, atol=0.01)
+        np.testing.assert_allclose(got.max_db, want.max_db, atol=0.01)
 
 
 if __name__ == "__main__":

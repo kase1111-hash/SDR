@@ -30,6 +30,7 @@ in buffers reused from frame to frame: about 0.6 ms a frame at 2.4 MS/s and
 
 from __future__ import annotations
 
+import inspect
 import math
 import threading
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -76,6 +77,15 @@ _COEFFICIENTS: Dict[str, Tuple[float, ...]] = {
 _THREAD_MIN_SAMPLES = 1 << 16
 #: Power floor before taking logs (-240 dBFS).
 _POWER_FLOOR = 1e-24
+
+
+def _fft_takes_out() -> bool:
+    """Whether ``np.fft.fft`` writes into an ``out`` buffer (NumPy 2.0 and
+    later; NumPy 1.x, which the package still allows, has no ``out``)."""
+    try:
+        return "out" in inspect.signature(np.fft.fft).parameters
+    except (TypeError, ValueError):  # pragma: no cover - no signature
+        return False
 
 
 def normalize_window(name: Optional[str]) -> str:
@@ -161,6 +171,7 @@ class FrameSpectrumAnalyzer:
         self._size = normalize_fft_size(size)
         self._window_name = normalize_window(window)
         self._threads = max(1, int(threads))
+        self._fft_out = _fft_takes_out()
         self._pool: Optional[ThreadPoolExecutor] = None
         self._pool_lock = threading.Lock()
         self._window = make_window(self._window_name, self._size)
@@ -316,7 +327,10 @@ class FrameSpectrumAnalyzer:
         p = self._power[start:stop]
         s = self._scratch[start:stop]
         np.multiply(segments[start:stop], self._window, out=w)
-        np.fft.fft(w, axis=1, out=f)
+        if self._fft_out:
+            np.fft.fft(w, axis=1, out=f)
+        else:  # NumPy 1.x: no out argument (and the FFT is complex128)
+            f[...] = np.fft.fft(w, axis=1)
         np.multiply(f.real, f.real, out=p)
         np.multiply(f.imag, f.imag, out=s)
         np.add(p, s, out=p)

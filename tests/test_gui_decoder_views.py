@@ -198,6 +198,34 @@ class TestAircraftView(_PanelCase):
         self.assertEqual(self.view.selected_icao(), "")
         self.assertIn("Messages", self.tab_titles())
 
+    def test_the_filter_line_keeps_count(self):
+        # The line said "(1 here)" for good while the aircraft's messages
+        # kept coming in under it.
+        _add(self.panel, _adsb(icao_address="4840D6", downlink_format=11))
+        self.view.select("4840D6")
+        _settle(1)
+        self.assertEqual(
+            self.panel._filter_label.text(), "Messages from 4840D6 only (1 here)"
+        )
+        self.feed_klm()  # its callsign arrives too
+        _add(self.panel, _adsb(icao_address="3C6586", downlink_format=11))
+        self.assertEqual(
+            self.panel._filter_label.text(),
+            "Messages from KLM1023 (4840D6) only (5 here)",
+        )
+        # The oldest rows go when the table is full: so does their count.
+        self.panel._max_messages = 4
+        _add(self.panel, _adsb(icao_address="4840D6", downlink_format=11))
+        table = self.panel._table
+        shown = [r for r in range(table.rowCount()) if not table.isRowHidden(r)]
+        addresses = [m["address"] for m in self.panel._messages]
+        self.assertEqual(addresses, ["4840D6", "4840D6", "3C6586", "4840D6"])
+        self.assertEqual(shown, [0, 1, 3])
+        self.assertEqual(
+            self.panel._filter_label.text(),
+            "Messages from KLM1023 (4840D6) only (3 here)",
+        )
+
     def test_double_click_goes_to_the_messages(self):
         self.feed_klm()
         self.view.aircraft_activated.emit("4840D6")
@@ -434,6 +462,90 @@ class TestWindowActivity(_WindowTestCase):
         _settle(1)
         self.assertTrue(chip.isHidden())
 
+    def test_unread_count_clears_when_the_window_is_back(self):
+        # Messages that came while the window was minimized: the count
+        # stayed on the title after it was restored with the Decoder tab
+        # in front (only switching tabs cleared it).
+        win = self.win
+        win._decoder_panel._proto_combo.setCurrentText("ADS-B")
+        win._show_panel("decoder")
+        _settle(1)
+        owner = win._panel_owners["decoder"]
+        index = owner.indexOf(win._panel_pages["decoder"])
+        with mock.patch.object(type(win), "isMinimized", return_value=True):
+            for _ in range(2):
+                win._push_decoded_message(
+                    _adsb(icao_address="4840D6", downlink_format=11)
+                )
+            win._update_status()  # still minimized: still counted
+        self.assertEqual(owner.tabText(index), "Decoder (2)")
+        win._update_status()  # restored (the status timer ticks)
+        self.assertEqual(owner.tabText(index), "Decoder")
+
+    def test_chip_counts_like_the_status_line(self):
+        # Chosen again, a protocol's status line counts from zero; the chip
+        # went on counting its old rows too ("ADS-B · 43 msgs" beside
+        # "20 messages").
+        win = self.win
+        panel = win._decoder_panel
+        panel._proto_combo.setCurrentText("ADS-B")
+        _settle(1)
+        for _ in range(3):
+            win._push_decoded_message(_adsb(icao_address="4840D6", downlink_format=11))
+        win._update_decoder_chip()
+        self.assertEqual(win._decoder_chip.text(), "ADS-B · 3 msgs")
+        panel._proto_combo.setCurrentText("POCSAG")
+        panel._proto_combo.setCurrentText("ADS-B")
+        _settle(1)
+        self.assertEqual(win._decoder_chip.text(), "ADS-B · 0 msgs")
+        win._push_decoded_message(_adsb(icao_address="4840D6", downlink_format=11))
+        win._update_decoder_chip()
+        self.assertEqual(win._decoder_chip.text(), "ADS-B · 1 msg")
+        self.assertIn(
+            "1 message since it started (or since Clear)", win._decoder_chip.toolTip()
+        )
+        panel.clear()
+        win._update_decoder_chip()
+        self.assertEqual(win._decoder_chip.text(), "ADS-B · 0 msgs")
+
+    def test_chip_goes_when_the_decoder_cannot_start(self):
+        # It stayed on the old protocol ("ADS-B · 0 msgs") while nothing
+        # decoded.
+        win = self.win
+        panel = win._decoder_panel
+        panel._proto_combo.setCurrentText("ADS-B")
+        _settle(1)
+        self.assertFalse(win._decoder_chip.isHidden())
+        with (
+            mock.patch(
+                "sdr_module.dsp.live_decoders.create_live_decoder",
+                side_effect=ValueError("the sample rate is too low for RDS"),
+            ),
+            mock.patch.object(win, "_show_status_error"),
+        ):
+            panel._proto_combo.setCurrentText("RDS")
+            _settle(1)
+        self.assertIsNone(win._decoder)
+        self.assertTrue(win._decoder_chip.isHidden())
+
+    def test_an_ampersand_in_a_station_name_is_no_shortcut(self):
+        # "R&B HITS" showed as "RB HITS" with B underlined, and Alt+B
+        # clicked the chip.
+        from dataclasses import replace
+
+        win = self.win
+        win._decoder_panel._proto_combo.setCurrentText("RDS")
+        _settle(1)
+        decoder = win._decoder
+        status = replace(decoder.status, detail="R&B HITS")
+        with mock.patch.object(
+            type(decoder), "status", new_callable=mock.PropertyMock, return_value=status
+        ):
+            win._update_decoder_chip()
+        chip = win._decoder_chip
+        self.assertEqual(chip.text(), "RDS · R&&B HITS · 0 msgs")
+        self.assertTrue(chip.shortcut().isEmpty())
+
     def test_messages_remember_frequency_and_rate(self):
         win = self.win
         win._decoder_panel._proto_combo.setCurrentText("ADS-B")
@@ -584,6 +696,19 @@ class TestRdsStation(_WindowTestCase):
         win._disconnect_device()
         self.assertFalse(win._rds_badge_action.isVisible())
         self.assertIsNone(win._rds_listener.decoder)
+
+    def test_the_name_is_plain_text(self):
+        # The badge took a name like "<b>HITS" for markup (bold "HITS").
+        from sdr_module.dsp.protocols import ProtocolType, RDSData
+
+        win = self.win
+        station = RDSData(
+            protocol=ProtocolType.RDS, timestamp=0.0, raw_bits=b"", valid=True,
+            ps_name="<b>HITS", ps_complete=True, pi_code=0x1234,
+        )  # fmt: skip
+        win._show_rds_station(station)
+        self.assertEqual(win._rds_badge.text(), "<b>HITS")
+        self.assertEqual(win._rds_badge.textFormat(), Qt.TextFormat.PlainText)
 
     def test_the_decoders_rds_names_it_instead(self):
         win = self.win

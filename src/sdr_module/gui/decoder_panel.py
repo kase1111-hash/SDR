@@ -621,6 +621,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._total = 0
         self._invalid = 0
         self._per_protocol: Counter = Counter()
+        # _per_protocol when the protocol being decoded was chosen: what
+        # it decoded since then (or since Clear) is what the status line
+        # and the window's status-bar chip count.
+        self._chosen_counts: Counter = Counter()
         # Widest cell text seen per size-to-contents column, in px.
         self._col_content: Dict[int, int] = {}
         # Receiver state, when the main window reports it (None: unknown).
@@ -642,8 +646,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # What Auto chose (None: nothing to decode where it is tuned).
         self._auto_choice: Optional[str] = None
         # Messages shows only this address (an aircraft picked under
-        # Aircraft), or "" for all.
+        # Aircraft), or "" for all, and how many of its messages are there.
         self._filter_address = ""
+        self._filter_count = 0
 
         self._setup_ui()
         self._update_views()  # the protocol views hide until chosen
@@ -1038,6 +1043,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # the new one's (or none) while handling the signal.
         self._decoder_status = None
         self._count_base = (0, 0, 0)
+        self._chosen_counts = Counter(self._per_protocol)
         self._update_views()
         self._update_state()
         self.protocol_changed.emit(proto or PROTOCOL_OFF)
@@ -1142,19 +1148,16 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             if self._table.isRowHidden(row) != hide:
                 self._table.setRowHidden(row, hide)
         if address:
-            aircraft = self._aircraft_view.tracker.get(address)
-            name = (
-                f"{aircraft.callsign} ({address})"
-                if aircraft is not None and aircraft.callsign
-                else address
+            self._filter_count = sum(
+                1 for m in self._messages if m["address"] == address
             )
-            count = sum(1 for m in self._messages if m["address"] == address)
-            self._filter_label.setText(f"Messages from {name} only ({count:,} here)")
+            self._show_filter_label()
             self._filter_bar.show()
             self._tabs.setTabText(self._tabs.indexOf(self._messages_page), "Messages*")
             self._tabs.setTabToolTip(
                 self._tabs.indexOf(self._messages_page),
-                f"Decoded messages from {name} only (Show All shows every one)",
+                f"Decoded messages from {self._filter_name()} only (Show All "
+                "shows every one)",
             )
         else:
             self._filter_bar.hide()
@@ -1169,6 +1172,21 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
     def address_filter(self) -> str:
         return self._filter_address
+
+    def _filter_name(self) -> str:
+        """The filtered aircraft: its callsign and address, once heard."""
+        address = self._filter_address
+        aircraft = self._aircraft_view.tracker.get(address)
+        if aircraft is not None and aircraft.callsign:
+            return f"{aircraft.callsign} ({address})"
+        return address
+
+    def _show_filter_label(self) -> None:
+        """Say whose messages show and how many (kept up to date as they
+        come in)."""
+        text = f"Messages from {self._filter_name()} only ({self._filter_count:,} here)"
+        if self._filter_label.text() != text:
+            self._filter_label.setText(text)
 
     def _show_aircraft_messages(self, icao: str) -> None:
         """Double-click (or Enter) on an aircraft: its messages."""
@@ -1556,6 +1574,12 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # Keep the table and the stored list the same length.
         overflow = len(self._messages) - self._max_messages
         if overflow > 0:
+            if self._filter_address:
+                self._filter_count -= sum(
+                    1
+                    for m in self._messages[:overflow]
+                    if m["address"] == self._filter_address
+                )
             del self._messages[:overflow]
             for _ in range(overflow):
                 self._table.removeRow(0)
@@ -1581,6 +1605,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._grow_columns({COL_PROTOCOL: protocol, COL_ADDRESS: address})
         if self._filter_address and address != self._filter_address:
             self._table.setRowHidden(row, True)
+        elif self._filter_address:
+            self._filter_count += 1
 
         self._append_log(msg)
 
@@ -1589,6 +1615,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             self._aircraft_view.update_message(message)
         elif kind == "MorseMessage":
             self._cw_view.add_line(str(getattr(message, "text", "") or content))
+        if self._filter_address:
+            self._show_filter_label()  # its count (and the callsign, once heard)
 
         self._empty.set_visible(False)
         self._log_empty.set_visible(False)
@@ -1741,6 +1769,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._total = 0
         self._invalid = 0
         self._per_protocol.clear()
+        self._chosen_counts.clear()
         self._table.setRowCount(0)
         self._table_tail.reset()
         self._col_content.clear()
@@ -1849,5 +1878,11 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         return len(self._messages)
 
     def count_for(self, protocol: Optional[str]) -> int:
-        """Messages of ``protocol`` since the last Clear."""
-        return int(self._per_protocol.get(protocol or "", 0))
+        """Messages of ``protocol`` since it was chosen or since the last
+        Clear, whichever came later (what the status line counts too)."""
+        name = protocol or ""
+        return max(
+            0,
+            int(self._per_protocol.get(name, 0))
+            - int(self._chosen_counts.get(name, 0)),
+        )

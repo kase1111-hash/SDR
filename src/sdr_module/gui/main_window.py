@@ -2594,6 +2594,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # The broadcast station's name from its RDS, while there is one.
         self._rds_badge = QLabel("")
         set_role(self._rds_badge, "badge", "info")
+        # A received name is data, never markup ("<b>HITS" stays literal).
+        self._rds_badge.setTextFormat(Qt.TextFormat.PlainText)
         self._rds_badge.setAccessibleName("Station name (RDS)")
         self._rds_badge_action = toolbar.addWidget(self._rds_badge)
         self._rds_badge_action.setVisible(False)
@@ -3165,6 +3167,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _on_panel_tab_changed(self, _index: int) -> None:
         if self._right_tabs.currentWidget() is self._panel_pages.get("info"):
             self._refresh_info_panel()
+        self._decoder_tab_seen()
+
+    def _decoder_tab_seen(self) -> None:
+        """The Decoder tab is on screen again (shown, or its window restored
+        from the taskbar): its title stops counting new messages."""
         if self._own("_decoder_unread") and self._decoder_page_visible():
             self._decoder_unread = 0
             self._update_decoder_tab_title()
@@ -3397,6 +3404,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._decoder = None
             self._decoder_protocol = None
             self._decoder_panel.set_decoder_status(None)
+            self._update_decoder_chip()  # (no decoder runs: no chip)
             return
         try:
             self._decoder = create_live_decoder(
@@ -3412,6 +3420,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._decoder_panel.set_decoder_status(
                 LiveDecoderStatus(name=text, problem=problem)
             )
+            self._update_decoder_chip()  # (no decoder runs: no chip)
             self._show_status_error(problem)  # (also logged)
             return
         self._decoder_error_logged = False
@@ -3615,7 +3624,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             parts.append("paused")
         else:
             parts.append(f"{count:,} msg{'' if count == 1 else 's'}")
-        text = " · ".join(parts)
+        # "&&": an "&" in a station's name is not a keyboard mnemonic.
+        text = " · ".join(parts).replace("&", "&&")
         if chip.text() != text:
             chip.setText(text)
         # Its View > Panels shortcut (Ctrl+1 while it is the first panel).
@@ -3626,8 +3636,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tip = (
             f"Decoder: {proto}"
             + (" (chosen by Auto)" if panel.is_auto() else "")
-            + f", {count:,} message{'' if count == 1 else 's'} since Clear. "
-            + "Click to open the Decoder tab"
+            + f", {count:,} message{'' if count == 1 else 's'} since it started"
+            + " (or since Clear). Click to open the Decoder tab"
             + (f" (Ctrl+{index + 1})." if index < 9 else ".")
         )
         if chip.toolTip() != tip:
@@ -5907,6 +5917,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._update_recording_status()
         if self._info_panel.isVisible():
             self._refresh_info_panel()
+        # (T6) Messages counted while the window was minimized are seen once
+        # it is back with the Decoder tab in front.
+        self._decoder_tab_seen()
 
     # ------------------------------------------------------------------
     # Devices

@@ -250,7 +250,11 @@ class TestSSTVAudio(_WindowTestCase):
         self.win._set_demod_mode("FM")
         self.panel._start_btn.click()
         self.win._clear_status_message()
+        # USB and LSB carry HF SSTV (HAMDSP-3): no hint for them...
         self.win._set_demod_mode("USB")
+        self.assertNotIn("SSTV", self.win._message_label.text())
+        # ... but a mode whose audio can't carry SSTV hints.
+        self.win._set_demod_mode("CW")
         self.assertIn("SSTV", self.win._message_label.text())
 
     def test_start_while_stopped_says_to_start_receiving(self):

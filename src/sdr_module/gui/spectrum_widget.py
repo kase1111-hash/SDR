@@ -6,6 +6,12 @@ Provides real-time spectrum visualization with:
 - Peak hold and exponential averaging
 - Frequency axis with "nice" tick steps and a unit caption
 - Hover readout (frequency and level), tuned-frequency marker, click-to-tune
+- Zoom (x1 to x16, shared with the waterfall through a
+  :class:`~sdr_module.gui.plot_view.PlotView`), Ctrl+wheel around the cursor
+- A vertical range that follows the noise floor and the strongest signal
+  (Auto), or a fixed one that the dB axis drags and scrolls
+- A right-click menu (tune, bookmark, copy, zoom, peak hold, range, FFT size,
+  window), labels at bookmarked frequencies, and a dimmed "Stopped" state
 
 The widget is a header strip (title, hint and trace controls) above a plot
 canvas. All plot colors come from the active theme palette (``plot_*``
@@ -21,11 +27,22 @@ from __future__ import annotations
 
 import math
 from collections import deque
-from typing import TYPE_CHECKING, Deque, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Deque, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ..dsp.frame_spectrum import (
+    DEFAULT_WINDOW,
+    FFT_SIZES,
+    WINDOW_HINTS,
+    WINDOW_LABELS,
+    WINDOWS,
+    normalize_fft_size,
+    normalize_window,
+    rbw_hz,
+)
 from ..utils.tooltips import get_short_tip
+from .plot_view import ZOOM_LEVELS, PlotView, normalize_zoom
 from .themes import get_palette, mono_font, set_role, theme_notifier
 from .tuning import snap_click_frequency
 
@@ -35,6 +52,7 @@ if TYPE_CHECKING:
 try:
     from PyQt6.QtCore import QLineF, QPointF, QRectF, Qt, pyqtSignal
     from PyQt6.QtGui import (
+        QActionGroup,
         QBrush,
         QFont,
         QFontMetrics,
@@ -51,6 +69,7 @@ try:
         QFrame,
         QHBoxLayout,
         QLabel,
+        QMenu,
         QPushButton,
         QVBoxLayout,
         QWidget,
@@ -89,6 +108,11 @@ PASSBAND_MIN_PX = 3.0
 #: Floor used for "no peak yet" in the peak-hold trace.
 _PEAK_FLOOR_DB = -120.0
 
+#: A jump of the noise floor (the trace's median) at least this big between
+#: two frames is a gain or AGC change: peak hold and the average start over
+#: (peaks held at the old gain would sit far above the new trace).
+_PEAK_RESET_JUMP_DB = 6.0
+
 #: Frames a click looks back over for the signal it snaps to (about half a
 #: second at 30 frames/s): a station's whole width, and a keyed signal
 #: between its dits (see snap_click_frequency's ``recent_db``).
@@ -96,6 +120,28 @@ SNAP_HOLD_FRAMES = 15
 
 # Averaging combo entries: label -> number of frames (0 = off).
 _AVG_CHOICES = (("Off", 0), ("2", 2), ("4", 4), ("8", 8), ("16", 16), ("32", 32))
+
+#: Fixed vertical ranges offered (dB from the top of the plot to its floor).
+RANGE_SPANS = (60, 80, 100, 120)
+#: Where the vertical range may go (dBFS).
+_RANGE_LIMITS_DB = (-200.0, 40.0)
+#: Narrowest and widest vertical range (dB).
+_RANGE_SPAN_LIMITS = (20.0, 160.0)
+# Auto range: the floor this far below the noise floor, the top this far
+# above the strongest signal, at least this span; both on a 5 dB grid and
+# moved only when the target is a grid step away (so the axis doesn't twitch).
+_AUTO_RANGE_BELOW_NOISE_DB = 15.0
+_AUTO_RANGE_ABOVE_PEAK_DB = 10.0
+_AUTO_RANGE_MIN_SPAN_DB = 50.0
+_AUTO_RANGE_GRID_DB = 5.0
+#: dB a notch of the wheel (or a key) moves the range.
+_RANGE_WHEEL_DB = 5.0
+
+#: Opacity of the plot-colored veil over a stopped (stale) plot.
+STALE_VEIL_ALPHA = 150
+
+#: Widest a bookmark label gets (its name is elided past that), in pixels.
+BOOKMARK_LABEL_MAX_PX = 120
 
 
 def axis_font() -> "QFont":
@@ -200,6 +246,17 @@ def tuned_mhz_text(freq_hz: float, min_decimals: int = 3) -> str:
     return f"{whole}.{frac.ljust(min_decimals, '0')} MHz"
 
 
+def format_hz(hz: float) -> str:
+    """A small bandwidth with three significant digits: ``586 Hz``,
+    ``1.76 kHz``, ``14.6 kHz``."""
+    hz = abs(float(hz))
+    if hz < 1e3:
+        return f"{hz:.0f} Hz"
+    if hz < 1e6:
+        return f"{hz / 1e3:.3g} kHz"
+    return f"{hz / 1e6:.3g} MHz"
+
+
 class WheelTuner:
     """Turns mouse wheel turns over a plot into tuning steps: one per notch
     (high-resolution wheels and touchpads add up to notches), ten with
@@ -230,6 +287,28 @@ class WheelTuner:
         return notches
 
 
+class NotchCounter:
+    """Whole wheel notches from wheel events (high-resolution wheels and
+    touchpads add up), for zooming and for moving the dB range."""
+
+    NOTCH = 120
+
+    def __init__(self) -> None:
+        self._accum = 0
+
+    def notches(self, event) -> int:
+        angle = event.angleDelta()
+        delta = angle.y() or angle.x()
+        if not delta:
+            return 0
+        if (delta > 0) != (self._accum > 0):
+            self._accum = 0
+        self._accum += delta
+        notches = int(self._accum / self.NOTCH)
+        self._accum -= notches * self.NOTCH
+        return notches
+
+
 def draw_readout(
     painter: "QPainter",
     lines: List[str],
@@ -238,23 +317,47 @@ def draw_readout(
     fm: "QFontMetrics",
     palette,
     dim_last: bool = True,
-) -> None:
-    """Draw a small boxed readout next to ``anchor_x`` at the top of ``plot``.
+    avoid: Optional["QRectF"] = None,
+) -> "QRectF":
+    """Draw a small boxed readout next to ``anchor_x`` at the top of ``plot``
+    and return its box.
 
     The box flips to the left of the cursor near the right edge so it never
-    leaves the plot.
+    leaves the plot. With ``avoid`` (another readout's box), it goes where it
+    doesn't cover that box: on the other side of the cursor, or below (or
+    above) that box; when there is no such place inside the plot, nothing is
+    drawn (an empty box is returned).
     """
     pad_x, pad_y = 6, 3
     text_w = max(fm.horizontalAdvance(line) for line in lines)
     line_h = fm.height()
     box_w = text_w + 2 * pad_x
     box_h = line_h * len(lines) + 2 * pad_y
-    x = anchor_x + 10
-    if x + box_w > plot.right() - 2:
-        x = anchor_x - 10 - box_w
-    x = max(plot.left() + 2, x)
-    y = plot.top() + 6
-    box = QRectF(x, y, box_w, box_h)
+
+    def place(side: int, top: float) -> "QRectF":
+        x = anchor_x + 10 if side > 0 else anchor_x - 10 - box_w
+        if side > 0 and x + box_w > plot.right() - 2:
+            x = anchor_x - 10 - box_w
+        elif side < 0 and x < plot.left() + 2:
+            x = anchor_x + 10
+        x = min(max(plot.left() + 2, x), max(plot.left() + 2, plot.right() - 2 - box_w))
+        return QRectF(x, top, box_w, box_h)
+
+    box = place(1, plot.top() + 6)
+    if avoid is not None and not avoid.isEmpty() and box.intersects(avoid):
+        tops = (plot.top() + 6, avoid.bottom() + 4, avoid.top() - 4 - box_h)
+        candidates = [place(side, top) for top in tops for side in (-1, 1)]
+        free = [
+            c
+            for c in candidates
+            if not c.intersects(avoid)
+            and c.top() >= plot.top()
+            and c.bottom() <= plot.bottom()
+        ]
+        if not free:
+            return QRectF()
+        box = free[0]
+    x, y = box.left(), box.top()
     painter.setPen(QPen(palette.qcolor("plot_grid"), 1))
     painter.setBrush(palette.qcolor("plot_bg", 235))
     painter.drawRoundedRect(box, 3, 3)
@@ -267,6 +370,7 @@ def draw_readout(
             QPointF(x + pad_x, y + pad_y + i * line_h + fm.ascent()),
             line,
         )
+    return box
 
 
 def draw_placeholder(
@@ -327,6 +431,37 @@ def draw_placeholder(
     )
 
 
+def draw_stale(
+    painter: "QPainter", plot: "QRectF", text: str, font: "QFont", palette
+) -> "QRectF":
+    """Dim ``plot`` (the data in it is no longer live) and say why in a
+    centered badge (``"Stopped - press Space"``). Returns the badge."""
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+    painter.fillRect(plot, palette.qcolor("plot_bg", STALE_VEIL_ALPHA))
+    badge_font = QFont(font)
+    badge_font.setBold(True)
+    fm = QFontMetrics(badge_font)
+    width = min(plot.width() - 8, fm.horizontalAdvance(text) + 24)
+    height = fm.height() + 10
+    badge = QRectF(
+        plot.center().x() - width / 2, plot.center().y() - height / 2, width, height
+    )
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(palette.qcolor("plot_grid"), 1))
+    painter.setBrush(palette.qcolor("plot_bg", 235))
+    painter.drawRoundedRect(badge, 5, 5)
+    painter.setFont(badge_font)
+    painter.setPen(palette.qcolor("plot_text"))
+    painter.drawText(
+        badge,
+        int(Qt.AlignmentFlag.AlignCenter),
+        fm.elidedText(text, Qt.TextElideMode.ElideRight, int(width - 12)),
+    )
+    painter.restore()
+    return badge
+
+
 def normalize_passband(
     low_hz: Optional[float], high_hz: Optional[float]
 ) -> Optional[Tuple[float, float]]:
@@ -351,23 +486,25 @@ def passband_px(
     plot: "QRectF",
     span_hz: float,
     anchor_hz: float = 0.0,
+    view_offset_hz: float = 0.0,
 ) -> Optional[Tuple[float, float]]:
     """Canvas x extent ``(left, right)`` of a passband drawn on ``plot``.
 
-    ``passband`` holds offsets (Hz) from the plot's center frequency (the
-    LO); ``plot`` shows ``span_hz``. ``anchor_hz`` is the tuned frequency's
-    offset from the center (the VFO's; 0 when it is at the center). The
-    extent is snapped to whole pixels and at least :data:`PASSBAND_MIN_PX`
-    wide (a CW or SSB channel on a 2.4 MHz span is narrower than one pixel),
-    growing away from the tuned frequency for a one-sided (SSB) band. It is
-    not clipped to the plot. None when there is no passband or nothing to
-    map it onto.
+    ``passband`` holds offsets (Hz) from the receiver's center frequency
+    (the LO); ``plot`` shows ``span_hz``. ``view_offset_hz`` is the LO's
+    offset from the middle of the plot (0 unless zoomed in off-center).
+    ``anchor_hz`` is the tuned frequency's offset from the LO (the VFO's; 0
+    when it is at the LO). The extent is snapped to whole pixels and at
+    least :data:`PASSBAND_MIN_PX` wide (a CW or SSB channel on a 2.4 MHz span
+    is narrower than one pixel), growing away from the tuned frequency for a
+    one-sided (SSB) band. It is not clipped to the plot. None when there is
+    no passband or nothing to map it onto.
     """
     if passband is None or span_hz <= 0 or plot.width() <= 0:
         return None
     low, high = passband
     scale = plot.width() / span_hz
-    center = plot.center().x()
+    center = plot.center().x() + view_offset_hz * scale
     x0, x1 = center + low * scale, center + high * scale
     if x1 - x0 < PASSBAND_MIN_PX:
         if low >= anchor_hz:  # upper sideband: grow to the right of the marker
@@ -495,6 +632,61 @@ def columns_max(data: np.ndarray, cols: int, axis: int = -1) -> np.ndarray:
     return out
 
 
+def visible_bins(
+    n: int, data_start: float, data_span: float, view_start: float, view_span: float
+) -> Optional[Tuple[int, int]]:
+    """``(first, stop)``: the bins of an ``n``-bin line covering
+    ``data_start`` .. ``data_start + data_span`` that overlap the view
+    ``view_start`` .. ``view_start + view_span`` (None: none do)."""
+    if n <= 0 or data_span <= 0 or view_span <= 0:
+        return None
+    bin_hz = data_span / n
+    first = int(math.floor((view_start - data_start) / bin_hz + 1e-9))
+    stop = int(math.ceil((view_start + view_span - data_start) / bin_hz - 1e-9))
+    first, stop = max(0, first), min(n, stop)
+    if stop <= first:
+        return None
+    return first, stop
+
+
+def add_zoom_menu(menu: "QMenu", view: PlotView, choose) -> "QMenu":
+    """A "Zoom" submenu (Full span, x2 ... x16) on ``menu``; ``choose(zoom)``
+    applies a choice. Shared by the spectrum's and the waterfall's menus."""
+    zoom = menu.addMenu("&Zoom")
+    zoom.setToolTipsVisible(True)
+    group = QActionGroup(zoom)
+    for level in ZOOM_LEVELS:
+        if level == 1:
+            act = zoom.addAction("&Full Span")
+            act.setToolTip("Show the whole span (Ctrl+0)")
+        else:
+            act = zoom.addAction(f"×&{level}")
+            act.setToolTip(
+                f"Show 1/{level} of the span around the tuned frequency "
+                "(Ctrl+= and Ctrl+- step through these)"
+            )
+        act.setCheckable(True)
+        act.setChecked(level == view.zoom)
+        group.addAction(act)
+        act.triggered.connect(lambda _c=False, z=level: choose(z))
+    return zoom
+
+
+def auto_range_targets(noise_db: float, peak_db: float) -> Tuple[float, float]:
+    """Floor and top (dBFS) of an Auto vertical range: the noise floor in
+    the lower part of the plot (with room below it for the noise's
+    wiggles) and the strongest signal below the top, on a 5 dB grid, at
+    least ``_AUTO_RANGE_MIN_SPAN_DB`` apart."""
+    grid = _AUTO_RANGE_GRID_DB
+    lo, hi = _RANGE_LIMITS_DB
+    floor = grid * math.floor((noise_db - _AUTO_RANGE_BELOW_NOISE_DB) / grid)
+    top = grid * math.ceil((peak_db + _AUTO_RANGE_ABOVE_PEAK_DB) / grid)
+    top = max(top, floor + _AUTO_RANGE_MIN_SPAN_DB)
+    top = min(max(top, lo + _AUTO_RANGE_MIN_SPAN_DB), hi)
+    floor = max(lo, min(floor, top - _AUTO_RANGE_MIN_SPAN_DB))
+    return float(floor), float(top)
+
+
 # ---------------------------------------------------------------------------
 # Widgets
 # ---------------------------------------------------------------------------
@@ -519,7 +711,14 @@ class _SpectrumCanvas(QWidget if HAS_PYQT6 else object):
         super().resizeEvent(event)
 
     def mouseMoveEvent(self, event):  # noqa: N802 - Qt override
-        self._owner._set_hover(event.position())
+        owner = self._owner
+        pos = event.position()
+        if owner._axis_drag is not None:
+            owner._drag_range_to(pos.y())
+            event.accept()
+            return
+        owner._set_hover(pos)
+        self.setCursor(owner._cursor_at(pos))
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):  # noqa: N802 - Qt override
@@ -527,20 +726,60 @@ class _SpectrumCanvas(QWidget if HAS_PYQT6 else object):
         super().leaveEvent(event)
 
     def mousePressEvent(self, event):  # noqa: N802 - Qt override
+        owner = self._owner
+        pos = event.position()
         if event.button() == Qt.MouseButton.LeftButton:
+            if owner._on_db_axis(pos):
+                owner._start_range_drag(pos.y())
+                event.accept()
+                return
+            index = owner._bookmark_at(pos)
+            if index is not None:
+                owner.bookmark_clicked.emit(int(index))
+                event.accept()
+                return
             exact = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
-            if self._owner._click_at(event.position(), exact=exact):
+            if owner._click_at(pos, exact=exact):
                 event.accept()
                 return
         super().mousePressEvent(event)
 
+    def mouseReleaseEvent(self, event):  # noqa: N802 - Qt override
+        if self._owner._axis_drag is not None:
+            self._owner._finish_range_drag()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):  # noqa: N802 - Qt override
+        if self._owner._on_db_axis(event.position()):
+            self._owner._finish_range_drag()
+            self._owner.set_auto_range(True)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
     def wheelEvent(self, event):  # noqa: N802 - Qt override
-        steps = self._owner._wheel_tuner.steps(event)
+        owner = self._owner
+        pos = event.position()
+        if owner._on_db_axis(pos):
+            owner._wheel_range(event)
+            event.accept()
+            return
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            owner._wheel_zoom(event, pos)
+            event.accept()
+            return
+        steps = owner._wheel_tuner.steps(event)
         if steps is None:
             super().wheelEvent(event)
             return
         if steps:
-            self._owner.tune_steps.emit(steps)
+            owner.tune_steps.emit(steps)
+        event.accept()
+
+    def contextMenuEvent(self, event):  # noqa: N802 - Qt override
+        self._owner._show_context_menu(QPointF(event.pos()), event.globalPos())
         event.accept()
 
 
@@ -553,14 +792,31 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
     :attr:`frequency_clicked` with that frequency (Hz), moved onto the signal
     under the click and the tuning step's raster once
     :meth:`set_click_snap` gave a step (Alt+click: exactly where clicked).
-    The mouse wheel emits :attr:`tune_steps`. The dashed marker is the tuned
+    The mouse wheel emits :attr:`tune_steps`; Ctrl+wheel zooms around the
+    cursor (see :meth:`set_view_model`). The dashed marker is the tuned
     frequency (:meth:`set_tuned_frequency`, the center until set).
+
+    Each trace keeps the center and span it was received with: after a
+    retune it is drawn where its signals really are (or not at all), never
+    relabelled with the new frequencies.
     """
 
     if HAS_PYQT6:
         frequency_clicked = pyqtSignal(float)  # Hz
         #: Tuning steps the mouse wheel asked for (negative: down).
         tune_steps = pyqtSignal(int)
+        #: A frequency (Hz) the user asked to bookmark from the context menu.
+        bookmark_requested = pyqtSignal(float)
+        #: A bookmark label was clicked: the bookmark's index.
+        bookmark_clicked = pyqtSignal(int)
+        #: A short message for the status bar: (text, tone).
+        message = pyqtSignal(str, str)
+        #: AVG, Peak hold, range, labels, FFT size or window changed (save).
+        display_settings_changed = pyqtSignal()
+        #: The FFT size or window was chosen (points, window key).
+        resolution_changed = pyqtSignal(int, str)
+        #: The user zoomed or panned (Ctrl+wheel, the menus).
+        view_changed = pyqtSignal()
 
     def __init__(self, parent=None):
         if not HAS_PYQT6:
@@ -570,17 +826,30 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
         # Display settings
         self._fft_size = 2048
+        self._window_name = DEFAULT_WINDOW
         self._center_freq = 100e6
         self._sample_rate = 2.4e6
         self._db_range = (-100, 0)
+        # Auto range: follows the noise floor and the strongest signal.
+        self._auto_range = False
+        self._range_noise: Optional[float] = None
+        self._range_peak: Optional[float] = None
 
-        # Spectrum data
+        # Spectrum data, and the (center, span) it was received with
         self._spectrum = np.zeros(self._fft_size)
         self._peak_hold = np.full(self._fft_size, _PEAK_FLOOR_DB)
         self._average = np.zeros(self._fft_size)
         self._avg_count = 0
         self._avg_alpha = 0.3
         self._has_data = False
+        self._trace_axis: Tuple[float, float] = (self._center_freq, self._sample_rate)
+        # With ``reset_on_gain_jump``, a jump of the noise floor (the
+        # trace's median, dBFS) resets the peak hold and the average: the
+        # gain changed. (The main window turns it on.)
+        self.reset_on_gain_jump = False
+        self._floor_db: Optional[float] = None
+        # Why the data is no longer live ("Stopped - press Space"), or None.
+        self._stale: Optional[str] = None
 
         # Display options
         self._show_peak = True
@@ -599,6 +868,18 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         # The last live frames, where a click also looks for its signal.
         self._recent_frames: Deque[np.ndarray] = deque(maxlen=SNAP_HOLD_FRAMES)
         self._wheel_tuner = WheelTuner()
+        self._zoom_wheel = NotchCounter()
+        self._range_wheel = NotchCounter()
+        # What part of the span is shown (shared with the waterfall by the
+        # main window; see set_view_model).
+        self._view = PlotView(self._center_freq, self._sample_rate)
+        self._view.subscribe(self._on_view_changed)
+        # Bookmarks labelled along the top: (freq Hz, name, index).
+        self._bookmarks: List[Tuple[float, str, int]] = []
+        self._show_bookmarks = True
+        self._bookmark_boxes: List[Tuple["QRectF", int, float, str]] = []
+        # Dragging the dB axis: (start y, range at the start).
+        self._axis_drag: Optional[Tuple[float, Tuple[float, float]]] = None
 
         # Paint caches (rebuilt on resize, theme, range or axis changes)
         self._font = axis_font()
@@ -636,14 +917,17 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         set_role(title, "caption")
         controls.addWidget(title)
 
-        hint = QLabel("Click to tune · scroll to step")
+        hint = QLabel("Click to tune · scroll to step · Ctrl+scroll to zoom")
         set_role(hint, "hint")
         hint.setToolTip(
             "Click a signal to tune to it (Alt+click tunes exactly where you "
             "click). The dashed line marks the tuned frequency and the shaded "
             "band the channel being demodulated. The mouse wheel and, with the "
             "plot focused, Left/Right tune by the STEP in the receiver bar "
-            "(Shift: ten steps; Ctrl+Left/Right: 1 MHz)."
+            "(Shift: ten steps; Ctrl+Left/Right: 1 MHz).\n"
+            "Ctrl+wheel zooms around the pointer (View > Zoom: Ctrl+= and "
+            "Ctrl+-, Ctrl+0 for the full span). Drag or scroll the dB axis to "
+            "move the range; double-click it for Auto. Right-click for more."
         )
         # Never let the optional hint raise the widget's minimum width:
         # fit_header_hint() hides it before it would be squeezed.
@@ -657,7 +941,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._peak_check.setChecked(self._show_peak)
         self._peak_check.setToolTip(
             get_short_tip("averaging_peak_hold")
-            + " Cleared automatically when you retune."
+            + " Cleared automatically when you retune or the gain changes."
         )
         self._peak_check.toggled.connect(self._on_peak_toggled)
         # Header controls don't take focus on click, so Space/arrow keys keep
@@ -691,13 +975,25 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._avg_combo.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         controls.addWidget(self._avg_combo)
 
+        self._options_btn = QPushButton("⋯")
+        set_role(self._options_btn, "compact")
+        self._options_btn.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self._options_btn.setAccessibleName("Spectrum options")
+        self._options_btn.setToolTip(
+            "More: FFT size and resolution, window, vertical range, zoom, "
+            "bookmark labels"
+        )
+        self._options_btn.clicked.connect(self._show_options_menu)
+        controls.addWidget(self._options_btn)
+
         layout.addWidget(header)
 
         self._canvas = _SpectrumCanvas(self)
         self._canvas.setAccessibleName("Spectrum plot")
         self._canvas.setAccessibleDescription(
             "Power versus frequency. A shaded band marks the demodulated "
-            "channel. Click to tune to a frequency; scroll to tune by the step."
+            "channel. Click to tune to a frequency; scroll to tune by the step; "
+            "Ctrl+scroll to zoom; right-click for options."
         )
         layout.addWidget(self._canvas, 1)
 
@@ -714,6 +1010,15 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         super().focusOutEvent(event)
         self._canvas.update()
 
+    def contextMenuEvent(self, event):  # noqa: N802 - Qt override
+        """The context-menu key while the plot has focus."""
+        if not self._canvas.geometry().contains(event.pos()):
+            super().contextMenuEvent(event)
+            return
+        pos = QPointF(self._canvas.mapFrom(self, event.pos()))
+        self._show_context_menu(pos, event.globalPos())
+        event.accept()
+
     def _update_reset_button(self) -> None:
         self._peak_reset_btn.setEnabled(self._show_peak)
         self._peak_reset_btn.setToolTip(
@@ -723,9 +1028,12 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         )
 
     def _on_peak_toggled(self, checked: bool) -> None:
+        changed = bool(checked) != self._show_peak
         self._show_peak = bool(checked)
         self._update_reset_button()
         self._canvas.update()
+        if changed:
+            self.display_settings_changed.emit()
 
     def _on_reset_peak_clicked(self) -> None:
         self.reset_peak()
@@ -743,6 +1051,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._avg_count = 0
         self._average = np.zeros(self._fft_size)
         self._canvas.update()
+        self.display_settings_changed.emit()
 
     def _on_theme_changed(self, _name: str = "") -> None:
         try:
@@ -760,7 +1069,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         Update spectrum with new data.
 
         Args:
-            power_db: Power spectrum in dB. An empty array is ignored (the
+            power_db: Power spectrum in dB, over the span set with
+                :meth:`set_frequency_range`. An empty array is ignored (the
                 previous frame stays on screen).
         """
         power_db = np.asarray(power_db, dtype=np.float64).ravel()
@@ -774,8 +1084,26 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
                 power_db,
             )
 
+        axis = (self._center_freq, self._sample_rate)
+        if self._has_data and axis != self._trace_axis:
+            self._recent_frames.clear()
+        if self.reset_on_gain_jump:
+            sample = power_db[:: max(1, len(power_db) // 2048)]
+            sample = sample[np.isfinite(sample)]
+            floor = float(np.median(sample)) if sample.size else None
+            if (
+                floor is not None
+                and self._floor_db is not None
+                and abs(floor - self._floor_db) >= _PEAK_RESET_JUMP_DB
+            ):
+                # Another gain (or the AGC moved): what was held is history.
+                self.reset_peak()
+                self.reset_average()
+            self._floor_db = floor
         self._spectrum = power_db
+        self._trace_axis = axis
         self._has_data = True
+        self._stale = None
         self._recent_frames.append(power_db)
 
         # Update peak hold (fmax ignores NaN bins instead of latching them)
@@ -791,6 +1119,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
                 )
             self._avg_count += 1
 
+        if self._auto_range:
+            self._observe_range(self._main_trace())
         self._canvas.update()
 
     def reset_peak(self):
@@ -809,18 +1139,69 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._center_freq = center_freq
         self._sample_rate = sample_rate
         if changed:
+            self._view.set_full(center_freq, sample_rate)
             self._on_axis_changed()
 
     def set_center_freq(self, center_freq: float):
         """Convenience setter used by the main window."""
-        changed = center_freq != self._center_freq
-        self._center_freq = center_freq
-        if changed:
-            self._on_axis_changed()
+        self.set_frequency_range(center_freq, self._sample_rate)
 
     def set_sample_rate(self, sample_rate: float) -> None:
         """Set the displayed span (equal to the complex sample rate)."""
         self.set_frequency_range(self._center_freq, sample_rate)
+
+    def set_fft_size(self, size: int) -> None:
+        """Expect spectra of ``size`` bins (the FFT size of the frames the
+        main window computes). Clears the peak hold and the average."""
+        size = int(size)
+        if size <= 0 or size == self._fft_size:
+            return
+        self._fft_size = size
+        if self._has_data:
+            self._spectrum = np.interp(
+                np.linspace(0, 1, size),
+                np.linspace(0, 1, len(self._spectrum)),
+                self._spectrum,
+            )
+        else:
+            self._spectrum = np.zeros(size)
+        self._recent_frames.clear()
+        self.reset_peak()
+        self.reset_average()
+        self._invalidate_background()
+        self._canvas.update()
+
+    def fft_size(self) -> int:
+        return self._fft_size
+
+    def set_window_name(self, name: str) -> None:
+        """The FFT window in use (for the menus and the RBW shown)."""
+        name = normalize_window(name)
+        if name != self._window_name:
+            self._window_name = name
+            self._invalidate_background()
+            self._canvas.update()
+
+    def window_name(self) -> str:
+        return self._window_name
+
+    def resolution_bandwidth(self) -> float:
+        """The resolution bandwidth (Hz) of the spectrum shown."""
+        return rbw_hz(self._sample_rate, self._fft_size, self._window_name)
+
+    def set_view_model(self, view: PlotView) -> None:
+        """Show the part of the span ``view`` says (the main window gives
+        the spectrum and the waterfall the same one, so they zoom
+        together)."""
+        if view is self._view:
+            return
+        self._view = view
+        view.subscribe(self._on_view_changed)
+        view.set_full(self._center_freq, self._sample_rate)
+        self._on_view_changed()
+
+    def view_model(self) -> PlotView:
+        return self._view
 
     def set_passband(self, low_hz: Optional[float], high_hz: Optional[float]) -> None:
         """Shade the demodulated channel, ``low_hz`` to ``high_hz`` around the
@@ -844,7 +1225,8 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
     def set_tuned_frequency(self, freq_hz: Optional[float]) -> None:
         """Put the tuned-frequency marker at ``freq_hz`` (the VFO, anywhere
-        in the span); None puts it at the center frequency."""
+        in the span); None puts it at the center frequency. A zoomed view
+        follows it when it goes out of sight."""
         value: Optional[float] = None
         if freq_hz is not None:
             value = float(freq_hz)
@@ -854,6 +1236,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             self._tuned_freq = value
             self._invalidate_background()  # the passband's direction
             self._canvas.update()
+        self._view.follow(self.tuned_frequency())
 
     def tuned_frequency(self) -> float:
         """The frequency the marker shows (Hz)."""
@@ -869,18 +1252,160 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._canvas.update()
 
     def set_db_range(self, min_db: float, max_db: float):
-        """Set dB range for display."""
-        self._db_range = (min_db, max_db)
-        self._invalidate_background()
-        self._canvas.update()
+        """Show ``min_db``..``max_db`` dBFS (a fixed range: Auto turns off)."""
+        self._auto_range = False
+        self._set_range(min_db, max_db)
+
+    def db_range(self) -> Tuple[float, float]:
+        """The vertical range shown: (floor, top) in dBFS."""
+        return (float(self._db_range[0]), float(self._db_range[1]))
+
+    def set_auto_range(self, enabled: bool) -> None:
+        """Let the vertical range follow the noise floor and the strongest
+        signal (like the waterfall's Auto levels)."""
+        enabled = bool(enabled)
+        changed = enabled != self._auto_range
+        self._auto_range = enabled
+        if enabled and self._has_data:
+            self._range_noise = self._range_peak = None
+            self._observe_range(self._main_trace(), force=True)
+        if changed:
+            self._canvas.update()
+            self.display_settings_changed.emit()
+
+    def auto_range(self) -> bool:
+        return self._auto_range
+
+    def set_range_span(self, span_db: float) -> None:
+        """A fixed range ``span_db`` deep, from the current top down."""
+        span = min(max(float(span_db), _RANGE_SPAN_LIMITS[0]), _RANGE_SPAN_LIMITS[1])
+        top = float(self._db_range[1])
+        self._user_range(top - span, top)
+
+    def shift_range(self, delta_db: float) -> None:
+        """Move the (fixed) range up (positive) or down by ``delta_db``."""
+        floor, top = self._db_range
+        lo, hi = _RANGE_LIMITS_DB
+        delta = min(max(float(delta_db), lo - floor), hi - top)
+        self._user_range(floor + delta, top + delta)
+
+    def set_peak_hold(self, enabled: bool) -> None:
+        self._peak_check.setChecked(bool(enabled))
+
+    def peak_hold(self) -> bool:
+        return self._show_peak
+
+    def set_average_frames(self, frames: int) -> None:
+        """Average over about ``frames`` frames (0 or a value not offered:
+        the nearest choice; 0 is Off)."""
+        values = [f for _t, f in _AVG_CHOICES]
+        try:
+            frames = int(frames)
+        except (TypeError, ValueError):
+            frames = 0
+        index = min(range(len(values)), key=lambda i: abs(values[i] - frames))
+        self._avg_combo.setCurrentIndex(index)
+
+    def average_frames(self) -> int:
+        return int(self._avg_combo.currentData() or 0)
+
+    def set_stale(self, text: Optional[str]) -> None:
+        """Dim the plot and say ``text`` (e.g. ``"Stopped - press Space"``)
+        until the next spectrum arrives; None shows it as live again."""
+        text = str(text) if text else None
+        if text != self._stale:
+            self._stale = text
+            self._canvas.update()
+
+    def stale_text(self) -> Optional[str]:
+        """What the dimmed plot says, or None while it is live (or empty)."""
+        return self._stale if self._has_data else None
+
+    def clear(self) -> None:
+        """Forget the trace (back to the "No spectrum yet" placeholder)."""
+        self._has_data = False
+        self._stale = None
+        self._spectrum = np.zeros(self._fft_size)
+        self._recent_frames.clear()
+        self.reset_average()
+        self.reset_peak()
+
+    def set_bookmarks(self, bookmarks: Sequence[Tuple[float, str, int]]) -> None:
+        """Label these bookmarks (frequency Hz, name, index) along the top of
+        the plot; a click on a label emits :attr:`bookmark_clicked`."""
+        items: List[Tuple[float, str, int]] = []
+        for entry in bookmarks or ():
+            try:
+                freq, name, index = float(entry[0]), str(entry[1]), int(entry[2])
+            except (TypeError, ValueError, IndexError):
+                continue
+            if math.isfinite(freq):
+                items.append((freq, name, index))
+        items.sort(key=lambda item: item[0])
+        if items != self._bookmarks:
+            self._bookmarks = items
+            self._canvas.update()
+
+    def set_bookmark_labels_visible(self, visible: bool) -> None:
+        visible = bool(visible)
+        if visible != self._show_bookmarks:
+            self._show_bookmarks = visible
+            self._bookmark_boxes = []
+            self._canvas.update()
+            self.display_settings_changed.emit()
+
+    def bookmark_labels_visible(self) -> bool:
+        return self._show_bookmarks
+
+    def display_settings(self) -> Dict[str, Any]:
+        """The user's display choices, for saving between sessions."""
+        floor, top = self._db_range
+        return {
+            "avg": self.average_frames(),
+            "peak_hold": self._show_peak,
+            "range_auto": self._auto_range,
+            "range_floor": float(floor),
+            "range_top": float(top),
+            "fft_size": self._fft_size,
+            "window": self._window_name,
+            "zoom": self._view.zoom,
+            "bookmark_labels": self._show_bookmarks,
+        }
+
+    def apply_display_settings(self, settings: Dict[str, Any]) -> None:
+        """Restore :meth:`display_settings` output (unknown keys ignored).
+        The FFT size, window and zoom are the main window's to apply (they
+        concern the waterfall too); this restores the rest."""
+        if not isinstance(settings, dict):
+            return
+        blocked = self.blockSignals(True)
+        try:
+            if "avg" in settings:
+                self.set_average_frames(settings.get("avg"))
+            if "peak_hold" in settings:
+                self.set_peak_hold(bool(settings.get("peak_hold")))
+            try:
+                floor = float(settings.get("range_floor", self._db_range[0]))
+                top = float(settings.get("range_top", self._db_range[1]))
+                if math.isfinite(floor) and math.isfinite(top):
+                    self._set_range(floor, top)
+            except (TypeError, ValueError):
+                pass
+            if "range_auto" in settings:
+                self.set_auto_range(bool(settings.get("range_auto")))
+            if "bookmark_labels" in settings:
+                self.set_bookmark_labels_visible(bool(settings.get("bookmark_labels")))
+            if "window" in settings:
+                self.set_window_name(str(settings.get("window")))
+        finally:
+            self.blockSignals(blocked)
 
     def frequency_at(self, x: float) -> Optional[float]:
         """Frequency (Hz) under canvas x-coordinate ``x``, or None outside."""
         plot = self._current_plot_rect()
         if plot.width() <= 0 or x < plot.left() or x > plot.right():
             return None
-        frac = (x - plot.left()) / plot.width()
-        return self._center_freq - self._sample_rate / 2 + frac * self._sample_rate
+        return self._view.frequency_at((x - plot.left()) / plot.width())
 
     def plot_rect(self) -> "QRectF":
         """The plot area in canvas coordinates (excludes the axis margins)."""
@@ -896,12 +1421,17 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self.reset_peak()
         self.reset_average()
         self._recent_frames.clear()
+        self._floor_db = None
+        self._invalidate_background()
+        self._canvas.update()
+
+    def _on_view_changed(self) -> None:
         self._invalidate_background()
         self._canvas.update()
 
     def _hz_per_px(self) -> float:
         plot = self._current_plot_rect()
-        return self._sample_rate / plot.width() if plot.width() > 0 else 0.0
+        return self._view.span / plot.width() if plot.width() > 0 else 0.0
 
     def _snapped_frequency_at(self, x: float) -> Optional[float]:
         freq = self.frequency_at(x)
@@ -909,6 +1439,12 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             return None
         step = snap_step_hz(self._hz_per_px())
         return round(freq / step) * step
+
+    def _trace_is_current(self) -> bool:
+        return self._has_data and self._trace_axis == (
+            self._center_freq,
+            self._sample_rate,
+        )
 
     def landing_frequency(self, x: float, exact: bool = False) -> Optional[float]:
         """Where a click at canvas x ``x`` tunes (None outside the plot):
@@ -919,15 +1455,16 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         freq = self.frequency_at(x)
         if freq is None:
             return None
+        current = self._trace_is_current()
         return snap_click_frequency(
             freq,
-            self._main_trace() if self._has_data else None,
+            self._main_trace() if current else None,
             self._center_freq - self._sample_rate / 2,
             self._sample_rate,
             self._hz_per_px(),
             self._snap_step,
             self._snap_mode,
-            recent_db=self._recent_hold(),
+            recent_db=self._recent_hold() if current else None,
         )
 
     def _recent_hold(self) -> Optional[np.ndarray]:
@@ -948,10 +1485,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
     def _freq_x(self, freq_hz: float, plot: "QRectF") -> Optional[float]:
         """Canvas x of ``freq_hz`` (None outside the plot)."""
-        if self._sample_rate <= 0 or plot.width() <= 0:
+        if self._view.span <= 0 or plot.width() <= 0:
             return None
-        start = self._center_freq - self._sample_rate / 2
-        x = plot.left() + (freq_hz - start) / self._sample_rate * plot.width()
+        x = plot.left() + self._view.fraction_of(freq_hz) * plot.width()
         if x < plot.left() - 0.5 or x > plot.right() + 0.5:
             return None
         return x
@@ -967,6 +1503,291 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             return False
         self.frequency_clicked.emit(float(freq))
         return True
+
+    def _level_at(self, x: float, plot: "QRectF") -> Optional[float]:
+        """The main trace's level under canvas ``x`` (the strongest bin under
+        the pixel, as drawn), or None where the trace has no data."""
+        if not self._has_data:
+            return None
+        data = self._main_trace()
+        n = len(data)
+        center, span = self._trace_axis
+        freq = self.frequency_at(x)
+        if freq is None or n == 0 or span <= 0:
+            return None
+        bin_hz = span / n
+        pos = (freq - (center - span / 2)) / bin_hz
+        half = max(0.5, self._hz_per_px() / bin_hz / 2)
+        lo = int(math.floor(pos - half))
+        hi = int(math.floor(pos + half)) + 1
+        if hi <= 0 or lo >= n:
+            return None
+        window = np.asarray(data[max(0, lo) : min(n, max(hi, lo + 1))], dtype=float)
+        finite = window[np.isfinite(window)]
+        return float(finite.max()) if finite.size else None
+
+    # -- vertical range ---------------------------------------------------
+    def _set_range(self, floor: float, top: float) -> None:
+        floor, top = float(floor), float(top)
+        if not (math.isfinite(floor) and math.isfinite(top)):
+            return
+        if top - floor < 1.0:
+            top = floor + 1.0
+        if (floor, top) == tuple(self._db_range):
+            return
+        self._db_range = (floor, top)
+        self._invalidate_background()
+        self._canvas.update()
+
+    def _user_range(self, floor: float, top: float) -> None:
+        """A range chosen by hand (menu, drag, wheel): Auto turns off."""
+        before = (self._auto_range, tuple(self._db_range))
+        self._auto_range = False
+        self._set_range(floor, top)
+        if (self._auto_range, tuple(self._db_range)) != before:
+            self.display_settings_changed.emit()
+
+    def _observe_range(self, trace: np.ndarray, force: bool = False) -> None:
+        """Auto range: track the noise floor (median) and the strongest
+        signal, and move the range when they leave its comfortable part."""
+        values = np.asarray(trace, dtype=np.float64)
+        finite = values[np.isfinite(values)]
+        n = finite.size
+        if n < 16:
+            return
+        # The strongest bin counts, however narrow: a carrier is two or
+        # three bins of a 32k FFT. (Its estimate falls slowly, so a lone
+        # spike doesn't make the range jump.)
+        noise = float(np.partition(finite, n // 2)[n // 2])
+        peak = float(finite.max())
+        if self._range_noise is None or force:
+            self._range_noise = noise
+        else:
+            self._range_noise += 0.2 * (noise - self._range_noise)
+        if self._range_peak is None or peak > self._range_peak or force:
+            self._range_peak = peak
+        else:
+            self._range_peak += 0.03 * (peak - self._range_peak)
+        floor, top = auto_range_targets(self._range_noise, self._range_peak)
+        cur_floor, cur_top = self._db_range
+        grid = _AUTO_RANGE_GRID_DB
+        if (
+            force
+            or abs(floor - cur_floor) > grid
+            or abs(top - cur_top) > grid
+            or self._range_noise < cur_floor + 5.0  # the noise is clipped
+            or self._range_peak > cur_top  # a signal is clipped
+        ):
+            self._set_range(floor, top)
+
+    def _on_db_axis(self, pos: "QPointF") -> bool:
+        """Whether ``pos`` is over the dB labels left of the plot."""
+        plot = self._current_plot_rect()
+        return (
+            pos.x() < plot.left() - 1 and plot.top() - 4 <= pos.y() <= plot.bottom() + 4
+        )
+
+    def _cursor_at(self, pos: "QPointF") -> "Qt.CursorShape":
+        if self._on_db_axis(pos):
+            return Qt.CursorShape.SizeVerCursor
+        if self._bookmark_at(pos) is not None:
+            return Qt.CursorShape.PointingHandCursor
+        return Qt.CursorShape.CrossCursor
+
+    def _start_range_drag(self, y: float) -> None:
+        self._axis_drag = (float(y), self.db_range())
+
+    def _drag_range_to(self, y: float) -> None:
+        if self._axis_drag is None:
+            return
+        start_y, (floor, top) = self._axis_drag
+        plot = self._current_plot_rect()
+        if plot.height() <= 0:
+            return
+        # Grab and move: the level under the pointer stays under it.
+        delta = (y - start_y) / plot.height() * (top - floor)
+        delta = round(delta)
+        lo, hi = _RANGE_LIMITS_DB
+        delta = min(max(delta, lo - floor), hi - top)
+        self._user_range(floor + delta, top + delta)
+
+    def _finish_range_drag(self) -> None:
+        self._axis_drag = None
+
+    def _wheel_range(self, event) -> None:
+        notches = self._range_wheel.notches(event)
+        if not notches:
+            return
+        if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            floor, top = self._db_range
+            self.set_range_span((top - floor) - 10.0 * notches)
+        else:
+            self.shift_range(-_RANGE_WHEEL_DB * notches)
+
+    # -- zoom ----------------------------------------------------------------
+    def _wheel_zoom(self, event, pos: "QPointF") -> None:
+        notches = self._zoom_wheel.notches(event)
+        if not notches:
+            return
+        plot = self._current_plot_rect()
+        anchor = self.frequency_at(pos.x())
+        frac = (pos.x() - plot.left()) / plot.width() if plot.width() > 0 else 0.5
+        if self._view.zoom_steps(notches, anchor, frac):
+            self.view_changed.emit()
+
+    def zoom_to(self, freq_hz: float, steps: int = 1) -> None:
+        """Zoom in ``steps`` factors of two, centered on ``freq_hz``."""
+        if self._view.zoom_steps(steps, freq_hz, 0.5):
+            self.view_changed.emit()
+
+    def set_zoom(self, zoom: int) -> None:
+        """Zoom to ``zoom`` (1 to 16) around the tuned frequency."""
+        anchor = self.tuned_frequency()
+        if not self._view.in_span(anchor):
+            anchor = None
+        if self._view.set_zoom(normalize_zoom(zoom), anchor, 0.5):
+            self.view_changed.emit()
+
+    # -- bookmark labels -----------------------------------------------------
+    def _bookmark_at(self, pos: "QPointF") -> Optional[int]:
+        if not self._show_bookmarks:
+            return None
+        for box, index, _freq, _name in self._bookmark_boxes:
+            if box.contains(pos):
+                return index
+        return None
+
+    def _bookmark_box_at(self, pos: "QPointF"):
+        for entry in self._bookmark_boxes if self._show_bookmarks else ():
+            if entry[0].contains(pos):
+                return entry
+        return None
+
+    # -- menus -------------------------------------------------------------
+    def _copy_frequency(self, freq_hz: float, decimals: int) -> None:
+        text = tuned_mhz_text(freq_hz, decimals)
+        clipboard = QGuiApplication.clipboard()
+        if clipboard is not None:
+            clipboard.setText(text)
+        self.message.emit(f"Copied {text}", "info")
+
+    def _display_menu(self, menu: "QMenu") -> None:
+        """The display options (shared by the context and options menus)."""
+        peak = menu.addAction("Peak &Hold")
+        peak.setCheckable(True)
+        peak.setChecked(self._show_peak)
+        peak.toggled.connect(self.set_peak_hold)
+        clear_peak = menu.addAction("R&eset Peak Hold")
+        clear_peak.setEnabled(self._show_peak)
+        clear_peak.triggered.connect(lambda _c=False: self.reset_peak())
+
+        floor, top = self._db_range
+        ranges = menu.addMenu("&Range")
+        ranges.setToolTipsVisible(True)
+        group = QActionGroup(ranges)
+        auto = ranges.addAction("&Auto (follow noise and signals)")
+        auto.setCheckable(True)
+        auto.setChecked(self._auto_range)
+        auto.setToolTip(
+            "The floor follows the noise floor and the top the strongest "
+            "signal. Dragging or scrolling the dB axis sets a fixed range."
+        )
+        group.addAction(auto)
+        auto.triggered.connect(lambda _c=False: self.set_auto_range(True))
+        ranges.addSeparator()
+        for span in RANGE_SPANS:
+            act = ranges.addAction(f"{span} dB")
+            act.setCheckable(True)
+            act.setChecked(not self._auto_range and abs((top - floor) - span) < 0.5)
+            act.setToolTip(f"A fixed range {span} dB deep, from {top:.0f} dBFS down")
+            group.addAction(act)
+            act.triggered.connect(lambda _c=False, s=span: self.set_range_span(s))
+        ranges.addSeparator()
+        full = ranges.addAction("&Top at 0 dBFS")
+        full.setToolTip("Move the range so its top is full scale")
+        full.triggered.connect(
+            lambda _c=False: self._user_range(
+                -(self._db_range[1] - self._db_range[0]), 0.0
+            )
+        )
+
+        add_zoom_menu(menu, self._view, self.set_zoom)
+
+        sizes = menu.addMenu("FFT &Size")
+        group = QActionGroup(sizes)
+        for size in FFT_SIZES:
+            rbw = rbw_hz(self._sample_rate, size, self._window_name)
+            act = sizes.addAction(f"{size} points · RBW {format_hz(rbw)}")
+            act.setCheckable(True)
+            act.setChecked(size == self._fft_size)
+            group.addAction(act)
+            act.triggered.connect(lambda _c=False, s=size: self._choose_resolution(s))
+
+        windows = menu.addMenu("&Window")
+        windows.setToolTipsVisible(True)
+        group = QActionGroup(windows)
+        for name in WINDOWS:
+            act = windows.addAction(WINDOW_LABELS[name])
+            act.setCheckable(True)
+            act.setChecked(name == self._window_name)
+            act.setToolTip(WINDOW_HINTS[name])
+            group.addAction(act)
+            act.triggered.connect(
+                lambda _c=False, n=name: self._choose_resolution(window=n)
+            )
+
+        labels = menu.addAction("Bookmark &Labels")
+        labels.setCheckable(True)
+        labels.setChecked(self._show_bookmarks)
+        labels.toggled.connect(self.set_bookmark_labels_visible)
+
+    def _choose_resolution(
+        self, size: Optional[int] = None, window: Optional[str] = None
+    ) -> None:
+        size = self._fft_size if size is None else normalize_fft_size(size)
+        window = self._window_name if window is None else normalize_window(window)
+        if (size, window) == (self._fft_size, self._window_name):
+            return
+        self.set_fft_size(size)
+        self.set_window_name(window)
+        self.resolution_changed.emit(size, window)
+        self.display_settings_changed.emit()
+
+    def _show_options_menu(self) -> None:
+        menu = QMenu(self)
+        self._display_menu(menu)
+        button = self._options_btn
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()))
+        menu.deleteLater()
+
+    def _show_context_menu(self, pos: "QPointF", global_pos) -> None:
+        """Right-click: tune, bookmark, copy or zoom to the frequency under
+        the cursor, then the display options."""
+        menu = QMenu(self)
+        freq = self._snapped_frequency_at(pos.x())
+        if freq is not None:
+            decimals = readout_decimals(snap_step_hz(self._hz_per_px()))
+            text = tuned_mhz_text(freq, decimals)
+            tune = menu.addAction(f"&Tune to {text}")
+            tune.triggered.connect(
+                lambda _c=False: self.frequency_clicked.emit(float(freq))
+            )
+            mark = menu.addAction(f"&Bookmark {text}")
+            mark.triggered.connect(
+                lambda _c=False: self.bookmark_requested.emit(float(freq))
+            )
+            copy = menu.addAction(f"&Copy Frequency ({text})")
+            copy.setToolTip(f"Copy {text} to the clipboard")
+            copy.triggered.connect(
+                lambda _c=False: self._copy_frequency(freq, decimals)
+            )
+            zoom_in = menu.addAction("Zoom &In Here")
+            zoom_in.setEnabled(self._view.zoom < ZOOM_LEVELS[-1])
+            zoom_in.triggered.connect(lambda _c=False: self.zoom_to(freq, 1))
+            menu.addSeparator()
+        self._display_menu(menu)
+        menu.exec(global_pos)
+        menu.deleteLater()
 
     # ------------------------------------------------------------------
     # Internals: painting
@@ -1000,9 +1821,11 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             canvas.height(),
             dpr,
             p.name,
-            self._db_range,
+            tuple(self._db_range),
             self._center_freq,
             self._sample_rate,
+            self._view.start,
+            self._view.span,
             self._grid_enabled,
             self._passband,
             self._tuned_freq,
@@ -1025,8 +1848,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             extent = passband_px(
                 self._passband,
                 self._plot_rect,
-                self._sample_rate,
+                self._view.span,
                 self._tuned_offset(),
+                view_offset_hz=self._center_freq - self._view.center,
             )
             if extent is not None:
                 fill, edge = PASSBAND_ALPHAS[bool(p.is_dark)]
@@ -1064,8 +1888,9 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
         min_db, max_db = self._db_range
         db_span = max_db - min_db
-        f_start = self._center_freq - self._sample_rate / 2
-        f_end = self._center_freq + self._sample_rate / 2
+        f_start = self._view.start
+        f_end = self._view.end
+        span = self._view.span
 
         # --- y (power) ticks
         y_ticks: List[float] = []
@@ -1081,7 +1906,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         x_ticks, decimals = freq_ticks(f_start, f_end, plot.width(), fm)
 
         def f_to_x(f: float) -> float:
-            return plot.left() + (f - f_start) / self._sample_rate * plot.width()
+            return plot.left() + (f - f_start) / span * plot.width()
 
         # Grid
         if self._grid_enabled:
@@ -1140,29 +1965,51 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             last_right = left + tw
 
     def _trace_xy(
-        self, data: np.ndarray, plot: "QRectF", cols: int
+        self,
+        data: np.ndarray,
+        plot: "QRectF",
+        cols: int,
+        axis: Optional[Tuple[float, float]] = None,
     ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
-        """Canvas x/y arrays for ``data`` (dB), decimated to the plot width."""
+        """Canvas x/y arrays for ``data`` (dB per bin over ``axis``, its
+        (center, span); the trace's own by default): the part inside the
+        view, decimated to the pixel columns it covers (``cols`` across the
+        whole plot)."""
         min_db, max_db = self._db_range
-        span = max_db - min_db
-        if span <= 0 or len(data) == 0 or cols <= 0:
+        span_db = max_db - min_db
+        n = len(data)
+        if span_db <= 0 or n == 0 or cols <= 0 or plot.width() <= 0:
             return None
+        center, span = axis if axis is not None else self._trace_axis
+        start = center - span / 2
+        v_start, v_span = self._view.start, self._view.span
+        bins = visible_bins(n, start, span, v_start, v_span)
+        if bins is None:
+            return None
+        # One bin beyond each edge, so the line runs to the plot's edges
+        # (the painter clips it there).
+        first, stop = max(0, bins[0] - 1), min(n, bins[1] + 1)
+        bin_hz = span / n
         clean = np.nan_to_num(
-            np.asarray(data, dtype=np.float64),
+            np.asarray(data[first:stop], dtype=np.float64),
             nan=min_db - 10.0,
             posinf=max_db + 10.0,
             neginf=min_db - 10.0,
         )
-        values = columns_max(clean, cols)
-        n = len(values)
-        if n == 0:
-            return None
-        values = np.clip(values, min_db - 2.0, max_db + 2.0)
-        if n == cols:
-            xs = plot.left() + (np.arange(n) + 0.5) * (plot.width() / n)
+        m = stop - first
+        px_per_bin = bin_hz / v_span * plot.width()
+        out_cols = max(1, min(int(math.ceil(m * px_per_bin)), cols + 2))
+        if m > out_cols:
+            edges = (np.arange(out_cols) * m // out_cols).astype(np.intp)
+            values = np.maximum.reduceat(clean, edges)
+            ends = np.append(edges[1:], m)
+            centers = first + (edges + ends) / 2.0
         else:
-            xs = plot.left() + np.arange(n) * (plot.width() / n)
-        ys = plot.bottom() - (values - min_db) / span * plot.height()
+            values = clean
+            centers = first + np.arange(m) + 0.5
+        values = np.clip(values, min_db - 2.0, max_db + 2.0)
+        xs = plot.left() + (start + centers * bin_hz - v_start) / v_span * plot.width()
+        ys = plot.bottom() - (values - min_db) / span_db * plot.height()
         return xs, ys
 
     @staticmethod
@@ -1191,6 +2038,10 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
                 self._draw_traces(painter, plot, p)
             self._draw_center_marker(painter, plot, p)
             painter.restore()
+            if self._has_data and self._stale:
+                draw_stale(painter, plot, self._stale, canvas.font(), p)
+                painter.setFont(self._font)
+            self._draw_bookmarks(painter, plot, p)
             if self.hasFocus():
                 draw_focus_frame(painter, plot, p)
 
@@ -1230,21 +2081,26 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
 
         # Soft fill under the main trace, drawn as one vertical line per
         # pixel column (a filled 900-point polygon costs ~10 ms per frame).
-        if main is not None:
+        if main is not None and len(main[0]) > 1:
             xs, ys = main
-            col_x = plot.left() + np.arange(cols) + 0.5
-            col_y = np.interp(col_x, xs, ys)
-            bottom = plot.bottom()
-            painter.save()
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-            painter.setPen(pens["fill"])
-            painter.drawLines(
-                [
-                    QLineF(x, y, x, bottom)
-                    for x, y in zip(col_x.tolist(), col_y.tolist(), strict=True)
-                ]
-            )
-            painter.restore()
+            lo = max(plot.left(), float(xs[0]))
+            hi = min(plot.right(), float(xs[-1]))
+            col_x = np.arange(math.floor(lo - plot.left()), math.ceil(hi - plot.left()))
+            col_x = plot.left() + col_x + 0.5
+            col_x = col_x[(col_x >= lo) & (col_x <= hi)]
+            if col_x.size:
+                col_y = np.interp(col_x, xs, ys)
+                bottom = plot.bottom()
+                painter.save()
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+                painter.setPen(pens["fill"])
+                painter.drawLines(
+                    [
+                        QLineF(x, y, x, bottom)
+                        for x, y in zip(col_x.tolist(), col_y.tolist(), strict=True)
+                    ]
+                )
+                painter.restore()
 
         # Peak hold (only bins that have seen data)
         if self._show_peak and np.any(self._peak_hold > _PEAK_FLOOR_DB):
@@ -1284,40 +2140,126 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         painter.drawPolygon(tri)
         painter.setBrush(Qt.BrushStyle.NoBrush)
 
+    def _info_text(self) -> str:
+        """``"RBW 1.76 kHz · ×4"``: the resolution and the zoom, for the band
+        above the plot."""
+        text = f"RBW {format_hz(self.resolution_bandwidth())}"
+        if self._view.is_zoomed():
+            text += f" · ×{self._view.zoom}"
+        return text
+
     def _draw_legend(self, painter: "QPainter", plot: "QRectF", p) -> None:
-        """Tiny legend in the band above the plot (right-aligned)."""
-        if not self._has_data:
-            return
-        items = []
-        averaging = self._show_average and self._avg_count > 0
-        if averaging:
-            frames = max(1, round(2.0 / max(self._avg_alpha, 1e-6) - 1))
-            items.append((f"Avg {frames}", p.qcolor("plot_trace")))
-            items.append(("Live", p.qcolor("plot_trace", 110)))
-        else:
-            items.append(("Live", p.qcolor("plot_trace")))
-        if self._show_peak:
-            items.append(("Peak", p.qcolor("plot_peak")))
+        """Tiny legend in the band above the plot (right-aligned), and the
+        resolution bandwidth and zoom at its left."""
         fm = self._fm
-        swatch, gap = 12, 12
-        widths = [swatch + 4 + fm.horizontalAdvance(t) for t, _ in items]
-        total = sum(widths) + gap * (len(items) - 1)
-        x = plot.right() - total
-        if x < plot.left() + 60:
-            return  # too narrow to be useful
         y_mid = 2 + fm.height() / 2
-        for (text, color), w in zip(items, widths, strict=True):
-            painter.setPen(QPen(color, 2))
-            painter.drawLine(QPointF(x, y_mid), QPointF(x + swatch, y_mid))
+        x = plot.right()
+        if self._has_data:
+            items = []
+            averaging = self._show_average and self._avg_count > 0
+            if self._stale:
+                # Not live any more: the last trace received.
+                if averaging:
+                    frames = max(1, round(2.0 / max(self._avg_alpha, 1e-6) - 1))
+                    items.append((f"Avg {frames}", p.qcolor("plot_trace")))
+                else:
+                    items.append(("Last", p.qcolor("plot_trace")))
+            elif averaging:
+                frames = max(1, round(2.0 / max(self._avg_alpha, 1e-6) - 1))
+                items.append((f"Avg {frames}", p.qcolor("plot_trace")))
+                items.append(("Live", p.qcolor("plot_trace", 110)))
+            else:
+                items.append(("Live", p.qcolor("plot_trace")))
+            if self._show_peak:
+                items.append(("Peak", p.qcolor("plot_peak")))
+            swatch, gap = 12, 12
+            widths = [swatch + 4 + fm.horizontalAdvance(t) for t, _ in items]
+            total = sum(widths) + gap * (len(items) - 1)
+            start = plot.right() - total
+            if start >= plot.left() + 60:
+                x = start
+                for (text, color), w in zip(items, widths, strict=True):
+                    painter.setPen(QPen(color, 2))
+                    painter.drawLine(QPointF(x, y_mid), QPointF(x + swatch, y_mid))
+                    painter.setPen(p.qcolor("plot_axis"))
+                    painter.drawText(QPointF(x + swatch + 4, 2 + fm.ascent()), text)
+                    x += w + gap
+                x = start
+        info = self._info_text()
+        if plot.left() + fm.horizontalAdvance(info) + 16 <= x:
             painter.setPen(p.qcolor("plot_axis"))
-            painter.drawText(QPointF(x + swatch + 4, 2 + fm.ascent()), text)
-            x += w + gap
+            painter.drawText(QPointF(plot.left() + 4, 2 + fm.ascent()), info)
+
+    def _draw_bookmarks(self, painter: "QPainter", plot: "QRectF", p) -> None:
+        """Small labels at the bookmarked frequencies in view, along the top
+        of the plot. Labels that would overlap the one before are left out
+        (the nearer one to the tuned frequency wins), long names are
+        elided."""
+        self._bookmark_boxes = []
+        if not self._show_bookmarks or not self._bookmarks:
+            return
+        fm = self._fm
+        height = fm.height() + 2
+        top = plot.top() + 9  # below the tuned-frequency flag
+        pad = 4
+        tuned = self.tuned_frequency()
+        candidates = []
+        for freq, name, index in self._bookmarks:
+            x = self._freq_x(freq, plot)
+            if x is None:
+                continue
+            text = fm.elidedText(
+                name or tuned_mhz_text(freq),
+                Qt.TextElideMode.ElideMiddle,
+                BOOKMARK_LABEL_MAX_PX,
+            )
+            width = fm.horizontalAdvance(text) + 2 * pad
+            left = min(max(plot.left() + 1, x - width / 2), plot.right() - 1 - width)
+            candidates.append(
+                (
+                    abs(freq - tuned),
+                    QRectF(left, top, width, height),
+                    x,
+                    text,
+                    index,
+                    freq,
+                    name,
+                )
+            )
+        # Nearest the tuned frequency first, then skip whatever overlaps.
+        placed = []
+        for entry in sorted(candidates, key=lambda c: c[0]):
+            box = entry[1]
+            if any(box.adjusted(-3, 0, 3, 0).intersects(other[1]) for other in placed):
+                continue
+            placed.append(entry)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setFont(self._font)
+        for _dist, box, x, text, index, freq, name in placed:
+            xi = round(x) + 0.5
+            painter.setPen(QPen(p.qcolor("accent", 170), 1))
+            painter.drawLine(QPointF(xi, box.bottom()), QPointF(xi, box.bottom() + 4))
+            # (Translucent: a station under its label stays visible.)
+            painter.fillRect(box, p.qcolor("plot_bg", 150))
+            painter.setPen(QPen(p.qcolor("accent", 150), 1))
+            painter.drawRect(box.adjusted(0.5, 0.5, -0.5, -0.5))
+            painter.setPen(p.qcolor("plot_text"))
+            painter.drawText(box, int(Qt.AlignmentFlag.AlignCenter), text)
+            self._bookmark_boxes.append((box, index, freq, name))
+        painter.restore()
 
     def _draw_hover(self, painter: "QPainter", plot: "QRectF", p) -> None:
         """Cursor line, a dot on the trace and a readout of where a click
         tunes (marked when it snaps away from the cursor) and the level."""
         pos = self._hover
         if pos is None or not plot.contains(pos):
+            return
+        label = self._bookmark_box_at(pos)
+        if label is not None:
+            _box, _index, freq, name = label
+            lines = [name or "Bookmark", tuned_mhz_text(freq), "Click to tune"]
+            draw_readout(painter, lines, pos.x(), plot, self._fm, p)
             return
         exact = bool(
             QGuiApplication.keyboardModifiers() & Qt.KeyboardModifier.AltModifier
@@ -1332,31 +2274,18 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         if landing_x is not None and abs(landing_x - x) >= 2:
             draw_landing_mark(painter, plot, landing_x, p)
 
-        data = self._main_trace()
         decimals = readout_decimals(snap_step_hz(self._hz_per_px()))
         lines = [tuned_mhz_text(freq, decimals)]
-        if self._has_data and len(data):
-            frac = (x - plot.left()) / plot.width()
-            n = len(data)
-            # Strongest bin under this pixel, matching what the trace shows.
-            lo = int(frac * n - n / plot.width() / 2)
-            hi = int(frac * n + n / plot.width() / 2) + 1
-            lo, hi = max(0, lo), min(n, max(hi, lo + 1))
-            window = np.asarray(data[lo:hi], dtype=np.float64)
-            finite = window[np.isfinite(window)]
-            if finite.size:
-                level = float(finite.max())
-                lines.append(f"{level:.1f} dBFS")
-                min_db, max_db = self._db_range
-                if max_db > min_db and min_db <= level <= max_db:
-                    y = (
-                        plot.bottom()
-                        - (level - min_db) / (max_db - min_db) * plot.height()
-                    )
-                    painter.setPen(QPen(p.qcolor("plot_bg"), 1.5))
-                    painter.setBrush(p.qcolor("plot_text"))
-                    painter.drawEllipse(QPointF(x, y), 3.0, 3.0)
-                    painter.setBrush(Qt.BrushStyle.NoBrush)
+        level = self._level_at(x, plot)
+        if level is not None:
+            lines.append(f"{level:.1f} dBFS")
+            min_db, max_db = self._db_range
+            if max_db > min_db and min_db <= level <= max_db:
+                y = plot.bottom() - (level - min_db) / (max_db - min_db) * plot.height()
+                painter.setPen(QPen(p.qcolor("plot_bg"), 1.5))
+                painter.setBrush(p.qcolor("plot_text"))
+                painter.drawEllipse(QPointF(x, y), 3.0, 3.0)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
         lines.append(
             "Click to tune here"
             if exact or self._snap_step <= 0

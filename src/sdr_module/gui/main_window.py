@@ -99,6 +99,13 @@ except ImportError:
 
 from .. import __version__
 from ..devices.base import SDRDevice
+from ..dsp.frame_spectrum import (
+    DEFAULT_FFT_SIZE,
+    WINDOW_LABELS,
+    FrameSpectrumAnalyzer,
+    normalize_fft_size,
+    normalize_window,
+)
 from ..dsp.nco import Nco
 from ..dsp.stereo_pilot import StereoPilotDetector
 from ..utils.tooltips import get_short_tip
@@ -146,6 +153,7 @@ from .iq_files import (
 )
 from .level_meter import LevelMeter
 from .playback import PlaybackBar, PlaybackController
+from .plot_view import PlotView, normalize_zoom
 from .rds_station import RdsListener, badge_text, badge_tooltip, tuner_text
 from .receiver_bar import FrequencyDigits, ReceiverBar
 from .scanner_host import WindowScannerHost
@@ -214,7 +222,9 @@ def _plain(label: str) -> str:
     return label.replace("&&", "\0").replace("&", "").replace("\0", "&")
 
 
-# Samples read per display frame; also the spectrum FFT length.
+# Samples read per display frame (at least); also the length of the fixed
+# measurement FFT (noise floor, S-meter). The plots' FFT size is the
+# spectrum menu's choice (see dsp.frame_spectrum).
 DISPLAY_BLOCK = 2048
 # Equivalent noise bandwidth of the Hann window, in FFT bins.
 _HANN_ENBW_BINS = 1.5
@@ -1667,7 +1677,7 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
                     "rbw",
                     "RBW",
                     get_short_tip("resolution_bandwidth")
-                    + f" ({DISPLAY_BLOCK}-point FFT, Hann window.)",
+                    + " Choose the FFT size and window in the spectrum's ⋯ menu.",
                 ),
                 ("demod", "Demodulation", "Selected in the Demodulation panel."),
                 (
@@ -1937,10 +1947,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # and has a bookmark's CTCSS tone checked even with the speaker off.
         self._scan_muted = False
         self._scan_checks_tone = False
-        # Cached analysis window for the spectrum display (built lazily to
-        # match the sample-block length).
+        # Cached analysis window for the measurement spectrum (built lazily
+        # to match the sample-block length): a fixed 2048-point Hann FFT of
+        # the newest samples, whatever the plots show, so the noise floor
+        # (Auto squelch), the S-meter's SNR and LEVEL never depend on the
+        # display settings.
         self._spectrum_window: Optional[np.ndarray] = None
         self._spectrum_window_gain = 1.0
+        # What the plots show: every sample of each frame, at the FFT size
+        # and window chosen in the spectrum's menu, and the (LO, rate) the
+        # samples carried over between frames belong to.
+        self._frame_spectrum = FrameSpectrumAnalyzer()
+        self._frame_axis: Optional[Tuple[float, float]] = None
+        # The part of the span both plots show (View > Zoom).
+        self._plot_view = PlotView()
         self._agc_enabled = False
         self._recording_bytes = 0  # for free-space display
         self._recording_paused = False  # Pause in the Recording panel
@@ -2568,6 +2588,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._spectrum_action.toggled.connect(
             lambda shown: self._waterfall.set_frequency_axis_visible(not shown)
         )
+        self._add_zoom_menu(view_menu)
         view_menu.addSeparator()
         panels_menu = view_menu.addMenu("&Panels")
         for index, (key, title, tip) in enumerate(self._panel_specs):
@@ -2955,6 +2976,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._waterfall.tune_steps.connect(self._tune_steps)
         self._waterfall.bookmark_requested.connect(self._bookmark_frequency)
         self._waterfall.display_settings_changed.connect(self._save_waterfall_settings)
+        self._connect_plots()
         self._right_tabs.currentChanged.connect(self._on_panel_tab_changed)
         self._connect_bookmarks_and_scanner()
 
@@ -3101,6 +3123,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         if event.text() in ("[", "]") and self._plots_focused():
             self._change_step(1 if event.text() == "]" else -1)
+            event.accept()
+            return
+        if (
+            key == Qt.Key.Key_P
+            and mods == Qt.KeyboardModifier.NoModifier
+            and self._plots_focused()
+        ):
+            # (The waterfall takes P itself when it has the focus.)
+            self._waterfall.set_paused(not self._waterfall.is_paused())
             event.accept()
             return
         super().keyPressEvent(event)
@@ -3255,6 +3286,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._spectrum.set_frequency_range(center, rate)
         self._waterfall.set_frequency_range(center, rate)
         self._update_passband()
+        self._sync_plot_state(running, has_device)
 
         # Only a HackRF One can send the Ham ID: what Send ID Now would do
         # (or why it can't), and the QRP calculator's SDR output.
@@ -3341,7 +3373,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         p.set_value(
             "rbw",
             (
-                format_bandwidth(_HANN_ENBW_BINS * rate / DISPLAY_BLOCK)
+                f"{format_bandwidth(self._frame_spectrum.rbw(rate))} "
+                f"({self._frame_spectrum.size}-point FFT, "
+                f"{WINDOW_LABELS[self._frame_spectrum.window]})"
                 if has_device
                 else _NO_VALUE
             ),
@@ -5916,18 +5950,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # a recording keeps the raw samples.
         raw = samples
         samples = self._iq_conditioner.process(samples, self._device_sample_rate())
-        # The plots show the newest DISPLAY_BLOCK samples (a fixed FFT size, so
-        # the RBW shown in the Info tab holds); everything else gets the block.
+        # The measurement line: a 2048-point Hann FFT of the newest samples
+        # (dBFS), the same whatever the plots show. The noise floor (Auto
+        # squelch), the S-meter's noise and the radio tuner use it.
         display = samples[-DISPLAY_BLOCK:] if len(samples) > DISPLAY_BLOCK else samples
-
-        # Compute spectrum (windowed, referenced to dBFS)
         power = self._power_spectrum_dbfs(display)
 
-        # Update spectrum widget
-        self._spectrum.update_spectrum(power)
-
-        # Update waterfall
-        self._waterfall.add_line(power)
+        # The plots: every sample of the frame, at the chosen FFT size and
+        # window (the mean power per bin for the spectrum, the strongest
+        # for the waterfall row, so a short burst anywhere shows).
+        self._plot_frame(samples)
 
         # Level of the tuned channel: a strong station elsewhere in the span
         # no longer holds the squelch open. (The meter and the squelch use
@@ -6770,6 +6802,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._realtime_hint_shown = False
         self._rx_history.clear()
         self._pacer.reset()
+        self._frame_spectrum.reset()
+        self._spectrum.reset_peak()  # (another device's levels)
         self._apply_tuning_range()  # back to every receiver's range
 
     def _disconnect_device(self):
@@ -8277,6 +8311,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._restore_ham_id_settings()
             self._restore_qrp_settings()
             self._restore_waterfall_settings()
+            self._restore_spectrum_settings()
             self._load_step_for_mode()  # the restored mode's tuning step
             self._restore_sstv_and_smeter()
         finally:
@@ -8335,6 +8370,198 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         except Exception as e:  # pragma: no cover - defensive
             logger.debug(f"Could not save waterfall settings: {e}")
 
+    # ------------------------------------------------------------------
+    # Spectrum and waterfall display (T9)
+    # ------------------------------------------------------------------
+
+    #: Spectrum display defaults when nothing is saved: a vertical range
+    #: that follows the noise floor and the strongest signal.
+    _SPECTRUM_DEFAULTS: Dict[str, Any] = {"range_auto": True}
+
+    def _connect_plots(self) -> None:
+        """Both plots show the same part of the span (zoom); the spectrum's
+        menus (bookmark, FFT size, window, range, labels) and both plots'
+        messages; bookmark labels on the spectrum."""
+        sp, wf = self._spectrum, self._waterfall
+        # A gain or AGC change moves the noise floor: peak hold starts over.
+        sp.reset_on_gain_jump = True
+        for plot in (sp, wf):
+            plot.set_view_model(self._plot_view)
+            plot.message.connect(self._show_plot_message)
+            plot.view_changed.connect(self._on_plot_zoomed)
+        sp.bookmark_requested.connect(self._bookmark_frequency)
+        sp.bookmark_clicked.connect(self._tune_bookmark_label)
+        sp.display_settings_changed.connect(self._save_spectrum_settings)
+        sp.resolution_changed.connect(self._apply_plot_resolution)
+        self._bookmarks_panel.bookmarks_changed.connect(self._sync_bookmark_labels)
+        self._sync_bookmark_labels()
+
+    def _plot_frame(self, samples: np.ndarray) -> None:
+        """Hand one frame to the spectrum and the waterfall (see
+        :class:`~sdr_module.dsp.frame_spectrum.FrameSpectrumAnalyzer`)."""
+        axis = (float(self._lo_hz), float(self._device_sample_rate()))
+        if axis != self._frame_axis:
+            # Samples kept from the last frame belong to another frequency.
+            self._frame_spectrum.reset()
+            self._frame_axis = axis
+        frame = self._frame_spectrum.process(samples)
+        if frame is None:
+            return  # less than one FFT of samples yet (a large FFT size)
+        self._spectrum.update_spectrum(frame.mean_db)
+        self._waterfall.add_line(frame.max_db)
+
+    def _apply_plot_resolution(self, size: int, window: str, save: bool = True) -> None:
+        """Use a ``size``-point FFT with ``window`` for both plots."""
+        size, window = normalize_fft_size(size), normalize_window(window)
+        changed = self._frame_spectrum.configure(size, window)
+        self._spectrum.set_fft_size(size)
+        self._spectrum.set_window_name(window)
+        self._waterfall.set_fft_size(size)
+        if self._info_panel.isVisible():
+            self._refresh_info_panel()
+        if save and changed:
+            rbw = self._frame_spectrum.rbw(self._device_sample_rate())
+            self._show_status_message(
+                f"Spectrum: {size}-point FFT, {WINDOW_LABELS[window]} window, "
+                f"RBW {format_bandwidth(rbw)}",
+                None,
+                4000,
+            )
+            self._save_spectrum_settings()
+
+    def _sync_plot_state(self, running: bool, has_device: bool) -> None:
+        """Dim the plots, and say why, while nothing new arrives (their data
+        is the last received, not live)."""
+        playback = self._playback.device if self._playback.active else None
+        if running:
+            text = None
+        elif self._tx_busy():
+            text = "Transmitting - receiving resumes when it ends"
+        elif not has_device:
+            text = "No device - press Space to connect one"
+        elif playback is not None and getattr(playback, "finished", False):
+            text = "End of the recording - press Space to play it again"
+        elif playback is not None:
+            text = "Paused - press Space to play"
+        else:
+            text = "Stopped - press Space"
+        for plot in (self._spectrum, self._waterfall):
+            plot.set_stale(text)
+
+    def _show_plot_message(self, text: str, tone: str) -> None:
+        self._show_status_message(text, tone or None, 3000)
+
+    def _tune_bookmark_label(self, index: int) -> None:
+        """A bookmark label on the spectrum was clicked: tune it as the
+        Bookmarks tab does (its mode, filter and tone)."""
+        self._bookmarks_panel._tune_index(int(index))
+
+    def _sync_bookmark_labels(self) -> None:
+        items = []
+        for index, bookmark in enumerate(self._bookmarks_panel.bookmarks()):
+            try:
+                freq = float(bookmark.get("freq_hz") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if freq > 0:
+                items.append((freq, str(bookmark.get("label") or ""), index))
+        self._spectrum.set_bookmarks(items)
+
+    # -- zoom ----------------------------------------------------------------
+    def _add_zoom_menu(self, view_menu: Any) -> None:
+        zoom_menu = view_menu.addMenu("&Zoom")
+        self._zoom_in_action = self._add_action(
+            zoom_menu,
+            "Zoom &In",
+            lambda: self._zoom_by(1),
+            "Ctrl+=",
+            "Show half as much of the span, around the tuned frequency, on "
+            "both plots (Ctrl+wheel over a plot zooms around the pointer)",
+        )
+        self._zoom_in_action.setShortcuts(
+            [QKeySequence("Ctrl+="), QKeySequence("Ctrl++")]
+        )
+        self._zoom_out_action = self._add_action(
+            zoom_menu,
+            "Zoom &Out",
+            lambda: self._zoom_by(-1),
+            "Ctrl+-",
+            "Show twice as much of the span",
+        )
+        self._zoom_full_action = self._add_action(
+            zoom_menu,
+            "&Full Span",
+            self._zoom_full,
+            "Ctrl+0",
+            "Show the whole span the receiver covers",
+        )
+
+    def _zoom_anchor(self) -> Optional[float]:
+        """The tuned frequency, when it is inside the span (zooming keeps it
+        in the middle)."""
+        tuned = self._current_frequency()
+        return tuned if self._plot_view.in_span(tuned) else None
+
+    def _zoom_by(self, steps: int) -> None:
+        view = self._plot_view
+        before = view.zoom
+        view.zoom_steps(int(steps), self._zoom_anchor(), 0.5)
+        if view.zoom == before:
+            limit = "in all the way" if steps > 0 else "out to the full span"
+            self._show_status_message(f"Already zoomed {limit}", None, 2500)
+            return
+        self._on_plot_zoomed()
+
+    def _zoom_full(self) -> None:
+        if self._plot_view.set_zoom(1):
+            self._on_plot_zoomed()
+
+    def _on_plot_zoomed(self) -> None:
+        """The zoom changed (menu, keys, Ctrl+wheel): say so, remember it."""
+        view = self._plot_view
+        if view.is_zoomed():
+            text = (
+                f"Zoom {view.describe()}: "
+                f"{format_mhz_range(view.start, view.end)}. Ctrl+0 shows the "
+                "full span."
+            )
+        else:
+            text = "Full span"
+        self._show_status_message(text, None, 3000)
+        self._save_spectrum_settings()
+
+    # -- settings ------------------------------------------------------------
+    def _restore_spectrum_settings(self) -> None:
+        settings = dict(self._SPECTRUM_DEFAULTS)
+        raw = self._settings.get_str("spectrum_display", "")
+        if raw:
+            try:
+                saved = json.loads(raw)
+            except ValueError:
+                logger.debug("Ignoring unreadable spectrum settings: %r", raw)
+            else:
+                if isinstance(saved, dict):
+                    settings.update(saved)
+        self._spectrum.apply_display_settings(settings)
+        self._apply_plot_resolution(
+            settings.get("fft_size", DEFAULT_FFT_SIZE),
+            settings.get("window", ""),
+            save=False,
+        )
+        self._plot_view.set_zoom(
+            normalize_zoom(settings.get("zoom", 1)), self._zoom_anchor(), 0.5
+        )
+
+    def _save_spectrum_settings(self) -> None:
+        if getattr(self, "_restoring", False):
+            return
+        try:
+            self._settings.set(
+                "spectrum_display", json.dumps(self._spectrum.display_settings())
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug(f"Could not save spectrum settings: {e}")
+
     def _restore_license_class(self) -> None:
         from ..core.frequency_manager import LicenseClass
 
@@ -8385,6 +8612,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._save_qrp_settings()
             self._save_radio_presets()
             self._save_waterfall_settings()
+            self._save_spectrum_settings()
             self._settings.save_geometry("main", self.saveGeometry())
             if self._spectrum.isVisible() and self._waterfall.isVisible():
                 for name, splitter in self._splitters().items():
@@ -8454,6 +8682,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._release_device()
         # Saved or declined by now: delete the temporary recording file.
         self._samples_buffer.discard()
+        self._frame_spectrum.close()  # (its FFT helper thread)
 
         logger.info("Application closing")
         event.accept()

@@ -70,6 +70,13 @@ SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
     ("View", ("F6",), "Put the keyboard focus on the spectrum"),
     ("View", ("Esc",), "Return the keyboard focus to the spectrum"),
     ("View", ("Ctrl+T",), "Switch between the light and dark themes"),
+    (
+        "View",
+        ("Ctrl+=", "Ctrl++"),
+        "Zoom the spectrum and waterfall in around the tuned frequency",
+    ),
+    ("View", ("Ctrl+-",), "Zoom the spectrum and waterfall out"),
+    ("View", ("Ctrl+0",), "Show the full span again"),
     ("Help", ("F1",), "Show this list of keyboard shortcuts"),
 )
 
@@ -87,7 +94,7 @@ Entry = Tuple[str, Tuple[str, ...], str]
 # Keys a plot handles while it has the keyboard focus (click it, or F6):
 # always listed, since they belong to the plot rather than the window.
 PLOT_KEYS: Tuple[Entry, ...] = (
-    ("Waterfall", ("P",), "Pause or resume the waterfall"),
+    ("Waterfall", ("P",), "Pause or resume the waterfall (either plot focused)"),
     ("Waterfall", ("Esc",), "Clear the waterfall measurement, if one is shown"),
 )
 
@@ -98,7 +105,14 @@ MOUSE_ACTIONS: Tuple[Tuple[str, str], ...] = (
     ("Scroll", "Tune by the step over the spectrum or waterfall (Shift: ten steps)"),
     ("Scroll", "Tune one digit over a digit of the FREQ readout"),
     ("Drag", "Measure a signal's bandwidth, duration and peak on the waterfall"),
-    ("Right-click", "Tune, bookmark or copy a waterfall frequency; display options"),
+    ("Ctrl+Scroll", "Zoom the spectrum and waterfall around the pointer"),
+    (
+        "Right-click",
+        "Tune, bookmark, copy or zoom at a frequency on either plot; options",
+    ),
+    ("Drag", "Move the spectrum's dB scale (over its dB labels; double-click: Auto)"),
+    ("Scroll", "Step the spectrum's dB scale (over its dB labels)"),
+    ("Click", "Tune a bookmark from its label along the top of the spectrum"),
     ("Scroll", "Shift the waterfall's color levels (over its LEVELS scale)"),
 )
 

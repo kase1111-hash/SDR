@@ -326,13 +326,25 @@ class TestDemoMusic(unittest.TestCase):
         self.assertGreater(best, 30.0)  # clean: no clicks, no distortion
 
     def test_scanner_finds_the_music_station_on_its_channel(self):
-        from sdr_module.gui.scanner_dialog import _ScanWorker
+        from sdr_module.dsp.sweep import SpectrumAverager, measure_page, plan_sweep
+        from sdr_module.gui.scan_engine import MEASURE_S
 
         dev = _demo(100.1e6)
-        worker = _ScanWorker(dev, 100.1e6, 100.1e6, 200e3, -60.0)
+        (page,) = plan_sweep(100.1e6, 100.1e6, 200e3, dev.sample_rate)
+        dev.set_frequency(page.lo_hz)
         reports = set()
         for _ in range(24):  # all through the tune's loop
-            reports.add(worker._measure(100.1e6, 200e3)[0])
+            averager = SpectrumAverager()
+            averager.add(dev.read_samples(int(dev.sample_rate * MEASURE_S) + 2048))
+            readings, _noise, _thr = measure_page(
+                averager.power_db(),
+                page.lo_hz,
+                dev.sample_rate,
+                page.channels,
+                200e3,
+                -60.0,
+            )
+            reports.update(r.frequency_hz for r in readings)
             dev.read_samples(int(dev.sample_rate * 0.3))
         self.assertEqual(reports, {100.1e6})
 

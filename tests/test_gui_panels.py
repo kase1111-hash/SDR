@@ -304,10 +304,19 @@ class TestBookmarksPanel(unittest.TestCase):
         self.assertEqual(panel._selected_index(), 0)
 
     def test_blank_name_uses_frequency(self):
+        # A blank name is the band and frequency (UX-U16: "FM Broadcast
+        # 100.1" rather than repeating the frequency), or the preset's name.
         panel = self.make()
         panel._freq_input.setValue(145.8125)
         panel._add_btn.click()
-        self.assertEqual(self.store.bookmarks[-1]["label"], "145.8125 MHz")
+        self.assertEqual(self.store.bookmarks[-1]["label"], "2m Ham 145.8125")
+        panel._freq_input.setValue(162.55)
+        panel._add_btn.click()
+        self.assertEqual(self.store.bookmarks[-1]["label"], "NOAA Weather 1")
+        # Outside every band: the frequency.
+        panel._freq_input.setValue(2500.0)
+        panel._add_btn.click()
+        self.assertEqual(self.store.bookmarks[-1]["label"], "2500.000 MHz")
 
     def test_double_click_and_enter_tune(self):
         panel = self.make(self.SAMPLE)

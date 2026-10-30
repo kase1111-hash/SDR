@@ -179,64 +179,67 @@ class TestHelpDialogKeyboard(_DialogCase):
 
 
 class TestScannerKeyboard(_DialogCase):
-    def _dialog_with_results(self):
-        from sdr_module.gui.device_dialog import MockDevice
-        from sdr_module.gui.scanner_dialog import ScannerDialog
+    """The Scanner tab from the keyboard (it replaced the scanner dialog)."""
 
-        dialog = self.keep(ScannerDialog(device=MockDevice()))
+    def _panel_with_results(self):
+        from sdr_module.gui.scan_engine import Found
+        from tests.test_gui_dialogs import _scanner_panel
+
+        panel, host, _dev = _scanner_panel()
+        self.keep(panel)
+        panel.resize(420, 560)
         for freq in (100.1e6, 101.1e6, 102.7e6):
-            dialog._on_hit(freq, -30.0, -88.0)
-        return dialog
+            panel._on_found(Found(freq, -30.0, -88.0, 150e3, ("FM", "75 kHz", "")))
+        return panel, host
 
     def test_enter_on_a_result_tunes_instead_of_rescanning(self):
-        dialog = self._dialog_with_results()
-        tuned = []
-        dialog.frequency_selected.connect(tuned.append)
-        dialog.show()
+        panel, host = self._panel_with_results()
+        panel.show()
         _settle()
-        dialog._table.setFocus()
-        dialog._table.selectRow(1)
-        QTest.keyClick(dialog._table, Qt.Key.Key_Return)
+        panel._table.setFocus()
+        panel._table.selectRow(1)
+        QTest.keyClick(panel._table, Qt.Key.Key_Return)
         _settle()
-        self.assertEqual(tuned, [101.1e6])
-        self.assertFalse(dialog._scanning)
-        self.assertIsNone(dialog._worker)
-        self.assertEqual(dialog._table.rowCount(), 3)
-        self.assertIn("Tuned to 101.100 MHz", dialog._status.text())
+        self.assertEqual(host.listened, [101.1e6])
+        self.assertFalse(panel.engine.active)
+        self.assertEqual(panel._table.rowCount(), 3)
+        self.assertIn("Listening to 101.100 MHz", panel._status.text())
         # Arrow keys move through the results; Enter tunes the current one.
-        QTest.keyClick(dialog._table, Qt.Key.Key_Down)
-        QTest.keyClick(dialog._table, Qt.Key.Key_Enter)
-        self.assertEqual(tuned, [101.1e6, 102.7e6])
-        self.assertIn("Enter", dialog._table.toolTip())
+        QTest.keyClick(panel._table, Qt.Key.Key_Down)
+        QTest.keyClick(panel._table, Qt.Key.Key_Enter)
+        self.assertEqual(host.listened, [101.1e6, 102.7e6])
+        self.assertIn("Enter", panel._table.toolTip())
 
     def test_tab_leaves_the_results_for_the_buttons(self):
-        dialog = self._dialog_with_results()
-        dialog._table.selectRow(0)
-        self.assertFalse(dialog._table.tabKeyNavigation())
-        self.assertEqual(dialog._table.accessibleName(), "Scan results")
-        stops = _tab_stops(dialog, dialog._table, 5)
+        panel, _host = self._panel_with_results()
+        panel._table.selectRow(0)
+        self.assertFalse(panel._table.tabKeyNavigation())
+        self.assertEqual(panel._table.accessibleName(), "Scan results")
+        stops = _tab_stops(panel, panel._table, 5)
         self.assertEqual(
-            sorted(_button_texts(stops[1:4])),
-            ["Clear Results", "Close", "Tune to Signal"],
+            _button_texts(stops[1:5]),
+            ["Listen", "Bookmark", "Bookmark All", "⋯"],
         )
 
     def test_no_mnemonic_is_used_twice(self):
-        dialog = self._dialog_with_results()
+        panel, _host = self._panel_with_results()
         keys = {}
-        for widget in dialog.findChildren((QLabel, QAbstractButton)):
+        for widget in panel.findChildren((QLabel, QAbstractButton)):
             match = re.search(r"&([^&])", widget.text())
             if match:
                 keys.setdefault(match.group(1).lower(), []).append(widget.text())
         self.assertEqual({k: v for k, v in keys.items() if len(v) > 1}, {})
 
     def test_no_device_is_said_once(self):
-        from sdr_module.gui.scanner_dialog import ScannerDialog
+        from tests.test_gui_dialogs import _scanner_panel
 
-        dialog = self.keep(ScannerDialog(device=None))
-        self.assertEqual(dialog._status.text(), "No device connected.")
-        self.assertEqual(dialog._status.property("tone"), "warning")
-        self.assertNotIn("No device connected", dialog._empty.text())
-        self.assertIn("Device > Connect", dialog._empty.text())
+        reason = "No receiver: use the demo device or connect an SDR to scan."
+        panel, _host, _dev = _scanner_panel(blocker=("device", reason))
+        self.keep(panel)
+        self.assertEqual(panel._status.text(), reason)
+        self.assertEqual(panel._status.property("tone"), "warning")
+        self.assertNotIn("No receiver", panel._empty.text())
+        self.assertIn("Connect...", panel._empty.text())
 
 
 # --------------------------------------------------------------------------- #
@@ -245,14 +248,21 @@ class TestScannerKeyboard(_DialogCase):
 class TestScannerFrequencies(_DialogCase):
     def _sweep(self, start, end, step, threshold):
         from sdr_module.gui.device_dialog import MockDevice
-        from sdr_module.gui.scanner_dialog import _ScanWorker
+        from sdr_module.gui.scan_engine import ScanEngine, ScanSettings
+        from tests.test_gui_scanner import _DemoHost
 
         dev = MockDevice()
         dev.start_rx()
+        engine = ScanEngine(_DemoHost(dev))
         hits = []
-        worker = _ScanWorker(dev, start, end, step, threshold)
-        worker.detected.connect(lambda f, p, n: hits.append(f))
-        worker.run()  # synchronous
+        engine.on_found = lambda found: hits.append(found.frequency_hz)
+        engine.start(
+            ScanSettings("once", start, end, step, threshold), dev.sample_rate, 0.0
+        )
+        for _ in range(100):
+            if not engine.active:
+                break
+            engine.frame(dev.read_samples(int(dev.sample_rate * 0.034)))
         return hits
 
     def test_broadcast_stations_are_reported_on_the_channel_raster(self):
@@ -279,61 +289,66 @@ class TestScannerFrequencies(_DialogCase):
 
 class TestScannerRobustness(_DialogCase):
     def test_a_short_capture_is_a_failed_step_not_a_crash(self):
-        from sdr_module.gui.scanner_dialog import _ScanWorker
+        from sdr_module.gui.scan_engine import MEASURE, ScanEngine, ScanSettings
+        from tests.test_gui_scanner import _demo, _DemoHost
 
-        class OneSample:
-            sample_rate = 2.4e6
-
-            def set_frequency(self, freq):
-                return True
-
-            def read_samples(self, n):
-                return np.ones(1, dtype=np.complex64)
-
-        worker = _ScanWorker(OneSample(), 88e6, 88.4e6, 200e3, -60.0)
+        dev = _demo()
+        engine = ScanEngine(_DemoHost(dev))
         finished = []
-        worker.finished_scan.connect(lambda: finished.append(True))
-        worker.run()
-        self.assertEqual(finished, [True])
-        self.assertEqual(worker.steps_measured, 0)
-        self.assertTrue(worker.no_samples)
-        self.assertEqual(worker.error, "")
+        engine.on_finished = finished.append
+        engine.start(ScanSettings("once", 88e6, 88.4e6, 200e3), dev.sample_rate, 0.0)
+        engine.frame(np.ones(1, dtype=np.complex64))  # dropped after the retune
+        for _ in range(20):
+            engine.frame(np.ones(1, dtype=np.complex64))
+        # One sample a block never makes a measurement; it waits for more.
+        self.assertEqual(engine.state, MEASURE)
+        self.assertEqual(engine.steps_measured, 0)
+        self.assertEqual(finished, [])
 
     def test_an_analysis_error_fails_only_that_step(self):
-        from sdr_module.gui import scanner_dialog
-        from sdr_module.gui.device_dialog import MockDevice
+        from sdr_module.dsp import sweep
+        from sdr_module.gui import scan_engine
 
-        dev = MockDevice()
-        dev.start_rx()
-        worker = scanner_dialog._ScanWorker(dev, 100e6, 100.2e6, 200e3, -60.0)
-        with mock.patch.object(
-            scanner_dialog, "_power_spectrum_dbfs", side_effect=ValueError("bad")
-        ):
-            self.assertIsNone(worker._measure(100e6, 200e3))
-        self.assertEqual(worker._last_failure, "error")
+        # The measurement code is robust to a damaged spectrum...
+        readings, _noise, _thr = sweep.measure_page(
+            np.full(2048, np.nan), 100e6, 2.4e6, [100e6], 200e3
+        )
+        self.assertEqual(readings, [])
+        # ...and an error inside it stops the scan, not the display loop.
+        from sdr_module.gui.scan_engine import ScanEngine, ScanSettings
+        from tests.test_gui_scanner import _demo, _DemoHost
 
-    def test_nothing_escapes_the_thread_and_the_dialog_says_why(self):
-        from sdr_module.gui.device_dialog import MockDevice
-        from sdr_module.gui.scanner_dialog import ScannerDialog, _ScanWorker
-
-        dialog = self.keep(ScannerDialog(device=MockDevice()))
+        dev = _demo()
+        engine = ScanEngine(_DemoHost(dev))
+        engine.start(ScanSettings("once", 100e6, 100.2e6, 200e3), dev.sample_rate, 0.0)
         with (
             mock.patch.object(
-                _ScanWorker, "_measure", side_effect=RuntimeError("tuner went away")
+                scan_engine, "measure_page", side_effect=ValueError("bad")
             ),
-            self.assertLogs("sdr_module.gui.scanner_dialog", "WARNING"),
+            self.assertLogs("sdr_module.gui.scan_engine", "WARNING"),
         ):
-            dialog._toggle_scan()
-            self.assertTrue(dialog._worker.wait(5000))
-            for _ in range(20):
-                _settle()
-                if not dialog._scanning:
-                    break
-        self.assertFalse(dialog._scanning)
-        self.assertEqual(dialog._worker.error, "tuner went away")
-        self.assertIn("tuner went away", dialog._status.text())
-        self.assertEqual(dialog._status.property("tone"), "warning")
-        self.assertTrue(dialog._start_btn.isEnabled())
+            for _ in range(10):
+                engine.frame(dev.read_samples(80000))
+        self.assertFalse(engine.active)
+
+    def test_nothing_escapes_the_thread_and_the_dialog_says_why(self):
+        from sdr_module.gui import scan_engine
+        from tests.test_gui_dialogs import _feed, _scanner_panel
+
+        panel, _host, dev = _scanner_panel()
+        self.keep(panel)
+        with (
+            mock.patch.object(
+                scan_engine, "measure_page", side_effect=RuntimeError("tuner went away")
+            ),
+            self.assertLogs("sdr_module.gui", "WARNING"),
+        ):
+            panel.start_scan()
+            _feed(panel, dev, seconds=1.0)
+        self.assertFalse(panel.engine.active)
+        self.assertIn("tuner went away", panel._status.text())
+        self.assertEqual(panel._status.property("tone"), "warning")
+        self.assertTrue(panel._start_btn.isEnabled())
 
 
 # --------------------------------------------------------------------------- #

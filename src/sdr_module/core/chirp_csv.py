@@ -16,7 +16,17 @@ application opens directly in CHIRP and can be uploaded to a radio.
 Reading is deliberately more forgiving than writing: columns are matched by
 name (case-insensitively), any subset of the optional columns may be present,
 unknown columns are ignored, and a UTF-8 BOM (added by spreadsheet editors) is
-stripped. Only ``Frequency`` is required.
+stripped. Only ``Frequency`` is required. Files saved by a spreadsheet with
+semicolons or tabs between the columns (and decimal commas, "146,520000")
+read too.
+
+How this application listens to a channel (its demodulator, FM deviation
+and filter width, which CHIRP's Mode column can't express, e.g. airband AM
+next to "keep the current mode") rides in the Comment column as a short tag,
+``[sdr mode=FM | dev=12.5 kHz | bw=25 kHz]``, together with the bookmark's
+group. CHIRP and radios keep comments as they are, so a file exported here
+and imported again tunes every channel as before; the tag never shows in
+the application.
 
 This module is pure Python — no PyQt6, no NumPy — so it can be used from the
 GUI, the CLI, or a script without pulling in the GUI stack.
@@ -25,11 +35,24 @@ GUI, the CLI, or a script without pulling in the GUI stack.
 from __future__ import annotations
 
 import csv
+import io
 import logging
+import re
 from dataclasses import dataclass, field, fields
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, TextIO, Union
+from typing import (
+    Any,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Sequence,
+    TextIO,
+    Tuple,
+    Union,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +152,113 @@ _DEMOD_TO_MODE = {
 _HZ_PER_UNIT = (("ghz", 1e9), ("mhz", 1e6), ("khz", 1e3), ("hz", 1.0))
 
 DEFAULT_DEMOD = "None (I/Q)"
+
+# ---- How the application listens to a channel (the Comment tag) ---------- #
+#: Bookmark keys the tag carries: how to listen, and the group.
+LISTEN_KEYS = ("demod", "fm_deviation", "bandwidth", "group")
+#: Demodulator names of the application's Mode list.
+APP_DEMODS = ("AM", "FM", "USB", "LSB", "CW", DEFAULT_DEMOD)
+#: The tag's word for "keep whatever mode the receiver is in" (a bookmark
+#: saved without a mode) and for the no-audio mode.
+_KEEP = "keep"
+_IQ = "I/Q"
+_TAG_RE = re.compile(r"\s*\[sdr\s+([^\]]*)\]\s*$")
+_TAG_FIELDS = (("mode", "demod"), ("dev", "fm_deviation"), ("bw", "bandwidth"))
+
+
+def _tag_value(value: Any) -> str:
+    """A tag value: no separators or brackets inside it."""
+    return re.sub(r"[|;\]\[=]", ",", str(value or "")).strip()
+
+
+def listening_tag(bookmark: Mapping[str, Any]) -> str:
+    """The Comment tag for how ``bookmark`` is listened to ("" for none).
+
+    A bookmark with a ``demod`` (a Mode list name) gets its mode, FM
+    deviation and width; one saved by this application without a mode
+    gets ``mode=keep``; a CHIRP channel that only has CHIRP's own Mode
+    gets no mode in the tag. The group goes in the tag too.
+    """
+    parts: List[str] = []
+    demod = str(bookmark.get("demod") or "")
+    if demod in APP_DEMODS:
+        parts.append(f"mode={_IQ if demod == DEFAULT_DEMOD else demod}")
+        deviation = _tag_value(bookmark.get("fm_deviation"))
+        if demod == "FM" and deviation:
+            parts.append(f"dev={deviation}")
+        width = _tag_value(bookmark.get("bandwidth"))
+        if width:
+            parts.append(f"bw={width}")
+    elif not is_chirp_channel(bookmark):
+        parts.append(f"mode={_KEEP}")
+    group = _tag_value(bookmark.get("group"))
+    if group:
+        parts.append(f"group={group}")
+    # "|" between the fields: no CSV dialect separates columns with it, so
+    # the tag survives a spreadsheet that saves with ";" or tabs.
+    return f"[sdr {' | '.join(parts)}]" if parts else ""
+
+
+def split_listening_tag(comment: str) -> Tuple[str, Dict[str, str]]:
+    """``(comment without the tag, fields)`` for a Comment field.
+
+    ``fields`` maps bookmark keys (``demod``, ``fm_deviation``,
+    ``bandwidth``, ``group``) to the tag's values; ``demod`` is ``"keep"``
+    for a bookmark that keeps the current mode. No tag: ``(comment, {})``.
+    """
+    text = str(comment or "")
+    match = _TAG_RE.search(text)
+    if match is None:
+        return text, {}
+    found: Dict[str, str] = {}
+    for item in re.split(r"[|;]", match.group(1)):
+        key, sep, value = item.partition("=")
+        if not sep:
+            continue
+        key, value = key.strip().lower(), value.strip()
+        for tag_key, bookmark_key in _TAG_FIELDS + (("group", "group"),):
+            if key == tag_key and value:
+                found[bookmark_key] = value
+    demod = found.get("demod", "")
+    if demod:
+        if demod.lower() == _KEEP:
+            found["demod"] = _KEEP
+        elif demod.upper() in ("I/Q", "IQ", DEFAULT_DEMOD.upper()):
+            found["demod"] = DEFAULT_DEMOD
+        else:
+            known = {d.upper(): d for d in APP_DEMODS}
+            if demod.upper() in known:
+                found["demod"] = known[demod.upper()]
+            else:
+                del found["demod"]  # not a mode this application has
+    return text[: match.start()].rstrip(), found
+
+
+def is_chirp_channel(bookmark: Mapping[str, Any]) -> bool:
+    """Whether a stored bookmark came from a CHIRP channel: it has a CHIRP
+    field this application doesn't set itself (a memory location, CHIRP's
+    Mode, a repeater shift, a tone, a power level...). Such a channel
+    without a ``demod`` is listened to in its CHIRP Mode (FM by default);
+    a bookmark of this application without one keeps the current mode."""
+    own = {"name", "frequency_hz", "comment", "skip"}
+    chirp_only = {f.name for f in fields(Channel)} - own
+    return bool(chirp_only & set(bookmark))
+
+
+def chirp_mode_for(demod: str, fm_deviation: str = "") -> str:
+    """CHIRP's Mode for an application mode: FM at 75 kHz is WFM, at 2.5
+    kHz NFM; AM, USB, LSB and CW are themselves; I/Q (no CHIRP mode) is
+    written as FM, CHIRP's default."""
+    if demod == "FM":
+        deviation = str(fm_deviation or "").replace(" ", "").lower()
+        if deviation == "75khz":
+            return "WFM"
+        if deviation == "2.5khz":
+            return "NFM"
+        return "FM"
+    if demod in ("AM", "USB", "LSB", "CW"):
+        return demod
+    return "FM"
 
 
 class ChirpCsvError(ValueError):
@@ -397,18 +527,45 @@ class Channel:
         "label" and "freq_hz" are kept as the primary keys for backward
         compatibility with bookmarks saved before CSV support existed; the
         remaining CHIRP fields ride along so a GUI round-trip is lossless.
+        A listening tag in the comment (see :func:`listening_tag`) becomes
+        the bookmark's ``demod``, ``fm_deviation``, ``bandwidth`` and
+        ``group`` again.
         """
         data: Dict[str, Any] = {
             "label": self.name,
             "freq_hz": self.frequency_hz,
         }
+        comment, listen = split_listening_tag(self.comment)
         defaults = Channel()
         for f in fields(self):
             if f.name in ("name", "frequency_hz"):
                 continue
-            value = getattr(self, f.name)
+            value = comment if f.name == "comment" else getattr(self, f.name)
             if value != getattr(defaults, f.name):
                 data[f.name] = value
+        demod = listen.get("demod", "")
+        # The tag holds while CHIRP's Mode is still what was exported with
+        # it; a Mode changed in CHIRP since then wins.
+        exported = (
+            "FM"
+            if demod == _KEEP
+            else chirp_mode_for(demod, listen.get("fm_deviation", ""))
+        )
+        if demod and self.mode.upper() != exported.upper():
+            demod = ""
+        if demod == _KEEP:
+            # Saved without a mode: it keeps the receiver's mode, as before
+            # (its memory slot and CHIRP's default Mode don't change that).
+            data.pop("location", None)
+            data.pop("mode", None)
+        elif demod:
+            data["demod"] = demod
+            if demod == "FM" and listen.get("fm_deviation"):
+                data["fm_deviation"] = listen["fm_deviation"]
+            if listen.get("bandwidth"):
+                data["bandwidth"] = listen["bandwidth"]
+        if listen.get("group"):
+            data["group"] = listen["group"]
         return data
 
     @classmethod
@@ -416,7 +573,9 @@ class Channel:
         """
         Build a channel from a bookmark dict stored in GUI settings.
 
-        Accepts legacy bookmarks that only carry "label" and "freq_hz".
+        Accepts legacy bookmarks that only carry "label" and "freq_hz". A
+        bookmark's listening mode sets CHIRP's Mode (AM, WFM...) and, with
+        its group, goes in the comment's listening tag.
         """
         known = {f.name for f in fields(cls)}
         kwargs: Dict[str, Any] = {
@@ -426,6 +585,15 @@ class Channel:
         kwargs["frequency_hz"] = float(
             bookmark.get("freq_hz", bookmark.get("frequency_hz", 0.0)) or 0.0
         )
+        demod = str(bookmark.get("demod") or "")
+        if demod in APP_DEMODS:
+            kwargs["mode"] = chirp_mode_for(
+                demod, str(bookmark.get("fm_deviation") or "")
+            )
+        tag = listening_tag(bookmark)
+        if tag:
+            comment, _old = split_listening_tag(str(kwargs.get("comment") or ""))
+            kwargs["comment"] = f"{comment} {tag}".strip()
         return cls(**kwargs)
 
 
@@ -443,14 +611,55 @@ class ImportReport:
         return iter(self.channels)
 
 
-def _open_for_read(source: Union[str, Path, TextIO]):
-    """Open a path (BOM-tolerant) or reuse an already-open text stream."""
+def _read_text(source: Union[str, Path, TextIO]) -> str:
+    """The whole text of a path or an open text stream, without a BOM.
+
+    A file that isn't UTF-8 (a spreadsheet saved it in the system's
+    encoding) is read as Windows-1252, so accented names still import.
+    """
     if isinstance(source, (str, Path)):
         path = Path(source).expanduser()
         if not path.exists():
             raise ChirpCsvError(f"file not found: {path}")
-        return open(path, "r", encoding="utf-8-sig", newline=""), True
-    return source, False
+        try:
+            raw = path.read_bytes()
+        except OSError as exc:
+            raise ChirpCsvError(f"can't read {path}: {exc}") from exc
+        try:
+            return raw.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            return raw.decode("cp1252", errors="replace")
+    text = source.read()
+    return text[1:] if text.startswith("﻿") else text
+
+
+#: Column separators a spreadsheet may have saved the file with.
+_DELIMITERS = (",", ";", "\t")
+#: Number columns, which may use a decimal comma when the columns are
+#: separated by semicolons or tabs ("146,520000").
+_NUMBER_COLUMNS = ("frequency", "offset", "rtonefreq", "ctonefreq", "tstep")
+_DECIMAL_COMMA = re.compile(r"^\s*[-+]?\d+,\d+\s*$")
+
+
+def _detect_delimiter(text: str) -> str:
+    """The column separator of a CSV text: the one its header uses most."""
+    header = next((line for line in text.splitlines() if line.strip()), "")
+    counts = {d: header.count(d) for d in _DELIMITERS}
+    best = max(_DELIMITERS, key=lambda d: counts[d])
+    return best if counts[best] > 0 else ","
+
+
+def _fix_decimal_commas(row: Dict[str, Any]) -> Dict[str, Any]:
+    """``"146,520000"`` -> ``"146.520000"`` in the number columns."""
+    for key, value in row.items():
+        if (
+            key is not None
+            and str(key).strip().lower() in _NUMBER_COLUMNS
+            and isinstance(value, str)
+            and _DECIMAL_COMMA.match(value)
+        ):
+            row[key] = value.replace(",", ".")
+    return row
 
 
 def read_chirp_csv(
@@ -458,6 +667,10 @@ def read_chirp_csv(
 ) -> ImportReport:
     """
     Read channels from a CHIRP generic-CSV file.
+
+    The columns may be separated by commas (CHIRP), semicolons or tabs (a
+    spreadsheet's export); with semicolons or tabs the numbers may use a
+    decimal comma.
 
     Args:
         source: Path to the CSV file, or an open text stream.
@@ -471,46 +684,45 @@ def read_chirp_csv(
         ChirpCsvError: If the file is missing, has no header, lacks a
             "Frequency" column, or (in strict mode) contains a bad row.
     """
-    stream, should_close = _open_for_read(source)
-    try:
-        reader = csv.DictReader(stream)
-        if not reader.fieldnames:
-            raise ChirpCsvError("CSV file is empty (no header row)")
+    text = _read_text(source)
+    delimiter = _detect_delimiter(text)
+    reader = csv.DictReader(io.StringIO(text, newline=""), delimiter=delimiter)
+    if not reader.fieldnames:
+        raise ChirpCsvError("CSV file is empty (no header row)")
 
-        headers = {
-            str(name).strip().lower() for name in reader.fieldnames if name is not None
-        }
-        if "frequency" not in headers:
-            raise ChirpCsvError(
-                "not a CHIRP CSV: no 'Frequency' column "
-                f"(found: {', '.join(str(n) for n in reader.fieldnames)})"
-            )
+    headers = {
+        str(name).strip().lower() for name in reader.fieldnames if name is not None
+    }
+    if "frequency" not in headers:
+        raise ChirpCsvError(
+            "not a CHIRP CSV: no 'Frequency' column "
+            f"(found: {', '.join(str(n) for n in reader.fieldnames)})"
+        )
 
-        report = ImportReport()
-        for line_no, row in enumerate(reader, start=2):
-            # Blank lines and CHIRP's empty memory slots have no frequency.
-            if not any(str(v or "").strip() for v in row.values()):
-                continue
-            try:
-                channel = Channel.from_row(row)
-            except ValueError as exc:
-                message = f"line {line_no}: {exc}"
-                if strict:
-                    raise ChirpCsvError(message) from exc
-                logger.warning("Skipping bad channel row: %s", message)
-                report.skipped.append(message)
-                continue
-            if channel.frequency_hz <= 0:
-                message = f"line {line_no}: missing or zero frequency"
-                if strict:
-                    raise ChirpCsvError(message)
-                report.skipped.append(message)
-                continue
-            report.channels.append(channel)
-        return report
-    finally:
-        if should_close:
-            stream.close()
+    report = ImportReport()
+    for line_no, row in enumerate(reader, start=2):
+        # Blank lines and CHIRP's empty memory slots have no frequency.
+        if not any(str(v or "").strip() for v in row.values()):
+            continue
+        if delimiter != ",":
+            row = _fix_decimal_commas(row)
+        try:
+            channel = Channel.from_row(row)
+        except ValueError as exc:
+            message = f"line {line_no}: {exc}"
+            if strict:
+                raise ChirpCsvError(message) from exc
+            logger.warning("Skipping bad channel row: %s", message)
+            report.skipped.append(message)
+            continue
+        if channel.frequency_hz <= 0:
+            message = f"line {line_no}: missing or zero frequency"
+            if strict:
+                raise ChirpCsvError(message)
+            report.skipped.append(message)
+            continue
+        report.channels.append(channel)
+    return report
 
 
 def write_chirp_csv(
@@ -624,21 +836,40 @@ def presets_to_channels(presets: Iterable[Any]) -> List[Channel]:
     Convert built-in `FrequencyPreset` objects to channels.
 
     Lets the shipped RX preset list be exported to CHIRP without the GUI.
+    Each channel's comment carries the preset's listening tag (its mode and
+    width), so importing the file here tunes every preset as the
+    application's own preset list does.
     """
+    from .band_plan import preset_listening
+
     channels: List[Channel] = []
     for preset in presets:
+        comment = str(getattr(preset, "description", ""))
+        listening = preset_listening(preset)
+        if listening is not None:
+            demod, deviation, width = listening
+            tag = listening_tag(
+                {"demod": demod, "fm_deviation": deviation, "bandwidth": width}
+            )
+            comment = f"{comment} {tag}".strip()
         channels.append(
             Channel(
                 name=str(getattr(preset, "name", "")),
                 frequency_hz=float(getattr(preset, "frequency_hz", 0.0)),
                 mode=demod_to_chirp_mode(str(getattr(preset, "mode", "FM"))),
-                comment=str(getattr(preset, "description", "")),
+                comment=comment,
             )
         )
     return channels
 
 
 __all__ = [
+    "APP_DEMODS",
+    "LISTEN_KEYS",
+    "chirp_mode_for",
+    "is_chirp_channel",
+    "listening_tag",
+    "split_listening_tag",
     "CHIRP_COLUMNS",
     "VALID_DUPLEX",
     "VALID_TONE_MODES",

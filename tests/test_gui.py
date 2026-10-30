@@ -596,44 +596,72 @@ class TestSpectrumDbfsNormalization(unittest.TestCase):
 
 
 class TestScannerNoDeviceHonesty(unittest.TestCase):
-    """The scanner must not fabricate detections when no device is present."""
+    """The scanner must not fabricate detections when no device is present.
+
+    (The scanner is the Scanner tab now, driven by the display loop: it only
+    measures the blocks the receiver delivers, so without a device there is
+    nothing to measure and no scan can start.)
+    """
 
     def setUp(self):
         require_pyqt6(self)
 
-    def test_worker_measure_peak_returns_none_without_device(self):
-        from sdr_module.gui.scanner_dialog import _ScanWorker
+    @staticmethod
+    def _host(blocker=("", "")):
+        from sdr_module.gui.scanner_panel import ScannerHost
 
-        worker = _ScanWorker(None, 88e6, 108e6, 200e3, -20.0)
-        # Repeated calls must never invent a measurement from synthetic noise.
+        class Host(ScannerHost):
+            def scan_blocker(self):
+                return blocker
+
+            def scan_tune_lo(self, center_hz, vfo_hz=None):
+                return True
+
+            def scan_lo_hz(self):
+                return 100e6
+
+        return Host()
+
+    def test_worker_measure_peak_returns_none_without_device(self):
+        from sdr_module.gui.scan_engine import ScanEngine, ScanSettings
+
+        engine = ScanEngine(self._host())
+        found = []
+        engine.on_found = found.append
+        engine.start(ScanSettings("continuous", 88e6, 108e6, 200e3), 2.4e6, 0.0)
+        # No blocks arrive without a device: repeated empty frames must
+        # never invent a measurement.
         for _ in range(20):
-            self.assertIsNone(worker._measure_peak(100e6))
+            engine.frame(np.zeros(0, np.complex64))
+        self.assertEqual(found, [])
+        self.assertEqual(engine.steps_measured, 0)
+        engine.stop()
 
     def test_dialog_disables_scan_without_device(self):
-        from sdr_module.gui.scanner_dialog import ScannerDialog
+        from sdr_module.gui.scanner_panel import ScannerPanel
 
-        dialog = ScannerDialog(device=None)
-        self.assertFalse(dialog._start_btn.isEnabled())
+        panel = ScannerPanel()
+        panel.set_host(self._host(("device", "No receiver: connect one to scan.")))
+        self.assertTrue(panel._start_btn.isHidden() or not panel._start_btn.isEnabled())
         # Toggling anyway produces no hits.
-        dialog._toggle_scan()
-        self.assertEqual(dialog._table.rowCount(), 0)
+        panel.toggle_scan()
+        self.assertFalse(panel.engine.active)
+        self.assertEqual(panel._table.rowCount(), 0)
+        panel.deleteLater()
 
     def test_measure_peak_is_dbfs_referenced_with_device(self):
-        from sdr_module.gui.scanner_dialog import _ScanWorker
+        from sdr_module.dsp.sweep import SpectrumAverager, measure_page
 
-        class FakeDevice:
-            def set_frequency(self, freq):
-                self._freq = freq
-
-            def read_samples(self, n):
-                t = np.arange(n)
-                return np.exp(2j * np.pi * 0.1 * t).astype(np.complex64)
-
-        worker = _ScanWorker(FakeDevice(), 88e6, 108e6, 200e3, -20.0)
-        peak = worker._measure_peak(100e6)
-        self.assertIsNotNone(peak)
+        t = np.arange(2048 * 8)
+        tone = np.exp(2j * np.pi * 0.1 * t).astype(np.complex64)  # +240 kHz
+        averager = SpectrumAverager()
+        averager.add(tone)
+        readings, _noise, _thr = measure_page(
+            averager.power_db(), 100e6, 2.4e6, [100.24e6], 200e3, threshold_db=-20.0
+        )
+        self.assertEqual(len(readings), 1)
         # A full-scale tone should read near 0 dBFS, not tens of dB.
-        self.assertLess(abs(peak), 3.0)
+        self.assertLess(abs(readings[0].peak_db), 3.0)
 
 
 class TestGUISignalEmission(unittest.TestCase):

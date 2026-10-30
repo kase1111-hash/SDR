@@ -56,35 +56,39 @@ def _demo(freq=1090e6, rate=2.4e6):
 # Scanner empty state
 # --------------------------------------------------------------------------- #
 class TestScannerEmptyState(unittest.TestCase):
+    """The Scanner tab's empty results read like the other empty states."""
+
     def setUp(self):
         require_pyqt6(self)
-        self._dialogs = []
+        self._panels = []
 
     def tearDown(self):
-        for dialog in self._dialogs:
-            dialog.close()
-            dialog.deleteLater()
+        for panel in self._panels:
+            panel.engine.stop()
+            panel.close()
+            panel.deleteLater()
         _settle()
 
     def dialog(self, device="demo"):
-        from sdr_module.gui.device_dialog import MockDevice
-        from sdr_module.gui.scanner_dialog import ScannerDialog
+        from tests.test_gui_dialogs import _scanner_panel
 
-        dialog = ScannerDialog(device=MockDevice() if device == "demo" else device)
-        self._dialogs.append(dialog)
-        dialog.resize(620, 600)
-        dialog.show()
+        blocker = ("", "") if device == "demo" else ("device", "No receiver.")
+        panel, _host, _dev = _scanner_panel(blocker=blocker)
+        self._panels.append(panel)
+        panel.resize(420, 600)
+        panel.show()
         _settle()
-        return dialog
+        return panel
 
     def test_idle_table_shows_a_title_over_a_hint(self):
         from sdr_module.gui.decoder_panel import placeholder_html
 
-        dialog = self.dialog()
-        empty = dialog._empty
+        panel = self.dialog()
+        empty = panel._empty
         self.assertTrue(empty.is_visible())
         self.assertEqual(
-            empty.text(), "No results yet\nChoose a range and click Start Scan."
+            empty.text(),
+            "No results yet\nChoose a band or range and click Start Scan.",
         )
         # Rendered like the other empty states: bold title, italic hint.
         self.assertEqual(empty.label.textFormat(), Qt.TextFormat.RichText)
@@ -93,34 +97,38 @@ class TestScannerEmptyState(unittest.TestCase):
         self.assertEqual(empty.label.property("role"), "placeholder")
 
     def test_every_state_has_a_short_title_and_a_hint(self):
-        dialog = self.dialog()
-        texts = [dialog._empty.text()]
-        dialog._update_empty_state(True)  # scanning
-        texts.append(dialog._empty.text())
-        with mock.patch.object(dialog, "_worker", object()):
-            dialog._update_empty_state(False)  # a sweep found nothing
-            texts.append(dialog._empty.text())
+        panel = self.dialog()
+        texts = [panel._empty.text()]
+        panel.start_scan()  # scanning
+        texts.append(panel._empty.text())
+        panel.stop_scan()  # stopped early
+        texts.append(panel._empty.text())
+        panel._empty_reason = "nothing"  # a sweep found nothing
+        panel._update_controls()
+        texts.append(panel._empty.text())
         texts.append(self.dialog(device=None)._empty.text())
-        self.assertEqual(len(set(texts)), 4)
+        self.assertEqual(len(set(texts)), 5)
         for text in texts:
             title, _sep, hint = text.partition("\n")
             self.assertTrue(hint, text)
             self.assertFalse(title.endswith("."), title)
             self.assertLess(len(title), 40, title)
-        self.assertIn("Device > Connect", texts[-1])
+        self.assertIn("Connect...", texts[-1])
         self.assertIn("Use Demo Device", texts[-1])
 
     def test_placeholder_covers_the_table_and_hides_with_results(self):
-        dialog = self.dialog()
-        viewport = dialog._table.viewport()
-        self.assertEqual(dialog._empty.label.geometry(), viewport.rect())
-        dialog.resize(700, 660)
+        from sdr_module.gui.scan_engine import Found
+
+        panel = self.dialog()
+        viewport = panel._table.viewport()
+        self.assertEqual(panel._empty.label.geometry(), viewport.rect())
+        panel.resize(700, 660)
         _settle()
-        self.assertEqual(dialog._empty.label.geometry(), viewport.rect())
-        dialog._on_hit(100.1e6, -30.0, -90.0)
-        self.assertFalse(dialog._empty.is_visible())
-        dialog._clear_results()
-        self.assertTrue(dialog._empty.is_visible())
+        self.assertEqual(panel._empty.label.geometry(), viewport.rect())
+        panel._on_found(Found(100.1e6, -30.0, -90.0, 150e3, ("FM", "", "")))
+        self.assertFalse(panel._empty.is_visible())
+        panel.clear_results()
+        self.assertTrue(panel._empty.is_visible())
 
 
 # --------------------------------------------------------------------------- #

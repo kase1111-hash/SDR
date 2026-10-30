@@ -327,6 +327,19 @@ class TestSeekWithinReach(_SeekCase):
             "1700 kHz, the part of the band the receiver can tune.",
         )
 
+    def test_one_channel_it_can_tune_is_named_once(self):
+        """A recording narrow enough to hold one channel: the seek said
+        "from 1000 kHz to 1000 kHz"."""
+        self.tuner._am_btn.click()
+        self.tuner._tuning_dial.tune_to(1000e3)
+        self.tuner.set_tune_check(lambda f: abs(f - 1000e3) < 1.0)
+        self.seek(-1)
+        self.assertEqual(
+            self.tuner._hint_label.text(),
+            "No station strong enough to open the squelch on 1000 kHz, the only "
+            "channel of the band the receiver can tune.",
+        )
+
     def test_the_whole_band_when_it_can_tune_it(self):
         self.tuner._am_btn.click()
         self.emitted.clear()

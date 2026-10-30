@@ -1560,6 +1560,12 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         whole = int(round((high - low) / band_step(self._band))) + 1
         if not channels or len(channels) >= whole:
             return "No station strong enough to open the squelch anywhere in the band."
+        if len(channels) == 1:
+            return (
+                "No station strong enough to open the squelch on "
+                f"{format_station(channels[0], self._band)}, the only channel of "
+                "the band the receiver can tune."
+            )
         first = format_station(channels[0], self._band)
         last = format_station(channels[-1], self._band)
         return (

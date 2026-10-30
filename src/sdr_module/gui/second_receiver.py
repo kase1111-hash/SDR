@@ -125,6 +125,9 @@ from .main_window import (
     _MIN_FREE_BYTES,
     _REALTIME_FRACTION,
     _REALTIME_WINDOW_S,
+    _RETUNE_MAX_DROPPED,
+    _RETUNE_SETTLE_S,
+    _RETUNE_STALE_SAMPLES,
     _SQUELCH_HANG_S,
     _USABLE_SPAN_FRACTION,
     DISPLAY_BLOCK,
@@ -779,6 +782,10 @@ if HAS_PYQT6:
             self._plot_view = PlotView()
             self._frame_spectrum = FrameSpectrumAnalyzer()
             self._frame_axis: Optional[Tuple[float, float]] = None
+            # After a hardware retune the plots skip these samples and until
+            # then (see _drop_stale_samples).
+            self._plot_skip_samples = 0
+            self._plot_skip_until = 0.0
             for plot in (self._spectrum, self._waterfall):
                 plot.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
                 plot.set_view_model(self._plot_view)
@@ -1697,11 +1704,32 @@ if HAS_PYQT6:
                     ok = False
                 if ok is False:
                     return False
+            moved = abs(float(lo_hz) - self._lo_hz) >= 0.5
             self._lo_hz = float(lo_hz)
             rate = self._rate()
             self._spectrum.set_frequency_range(self._lo_hz, rate)
             self._waterfall.set_frequency_range(self._lo_hz, rate)
+            if moved and isinstance(dev, SDRDevice):
+                self._drop_stale_samples(dev)
             return True
+
+        def _drop_stale_samples(self, dev: SDRDevice) -> None:
+            """Hardware was retuned: drop what it queued on the old
+            frequency, and have the plots skip the transfer in flight and
+            the tuner's settling (as the main window does)."""
+            now = time.monotonic()
+            for _ in range(_RETUNE_MAX_DROPPED):
+                try:
+                    block = dev.read_samples(DISPLAY_BLOCK, timeout=0.0)
+                except Exception as e:  # pragma: no cover - driver specific
+                    logger.debug(f"Second receiver: can't drop samples: {e}")
+                    break
+                if block is None or len(block) == 0:
+                    break
+                self._rx_history.append((now, len(block)))  # (received)
+            if getattr(getattr(dev, "state", None), "is_streaming", False):
+                self._plot_skip_samples = _RETUNE_STALE_SAMPLES
+                self._plot_skip_until = now + _RETUNE_SETTLE_S
 
         def tune(self, freq_hz: float, recenter: bool = False) -> bool:
             """Tune this receiver to ``freq_hz``: only the VFO moves while
@@ -2254,6 +2282,10 @@ if HAS_PYQT6:
             at the FFT size and window chosen in the spectrum's menu (the
             mean power per bin for the spectrum, the strongest for the
             waterfall row, so a short burst anywhere shows)."""
+            if self._plot_skip_samples > 0 or time.monotonic() < self._plot_skip_until:
+                # Taken (partly) before the last retune (_drop_stale_samples).
+                self._plot_skip_samples = max(0, self._plot_skip_samples - len(samples))
+                return
             axis = (float(self._lo_hz), float(self._rate()))
             if axis != self._frame_axis:
                 # Samples kept from the last frame belong to another span.

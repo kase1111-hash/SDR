@@ -507,5 +507,66 @@ class TestSecondReceiverPlots(unittest.TestCase):
         self.assertEqual(self.rx.message(), "Copied the measurement")
 
 
+class TestSecondReceiverRetuneDropsStaleSamples(unittest.TestCase):
+    """PLOT-2 in the Second Receiver window (its own hardware and plot
+    feed): no ghost of the old frequency after its LO is retuned."""
+
+    def setUp(self):
+        require_pyqt6(self)
+        from sdr_module.gui import second_receiver
+        from tests.test_gui_second_receiver import _SecondCase
+
+        class Case(_SecondCase):
+            def runTest(self):  # pragma: no cover - not run
+                pass
+
+        self.case = Case()
+        self.case.setUp()
+        self.addCleanup(self.case.tearDown)
+        rx = self.rx = self.case.rx
+        self.dev = _Hardware.make()
+        rx._device = self.dev
+        rx._running = True
+        self.addCleanup(setattr, rx, "_device", None)
+        self.addCleanup(setattr, rx, "_running", False)
+        self.dev.start_rx()
+        rx._waterfall.set_history_seconds(0)
+        patcher = mock.patch.object(second_receiver, "_RETUNE_SETTLE_S", 0.0)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.assertTrue(rx.tune(100.1e6, recenter=True))
+
+    def frame(self):
+        self.rx._pacer.reset()
+        self.rx._frame()
+
+    def test_no_ghost_row_after_a_retune(self):
+        rx, dev = self.rx, self.dev
+        for _ in range(3):
+            dev.transfer()
+            self.frame()
+        dev.transfer()  # queued at 100.1 MHz
+        self.assertTrue(rx.tune(101.5e6, recenter=True))
+        self.assertEqual(dev.state.frequency, 101.5e6)
+        dev.transfer(lo=100.1e6)  # in flight at the retune
+        for _ in range(3):
+            self.frame()
+            dev.transfer()
+        self.frame()
+        wf = rx._waterfall
+        ghost_f = 101.5e6 + (_Hardware.CARRIER - 100.1e6)
+        rows = 0
+        for line, (center, rate) in zip(wf._history, wf._row_axes, strict=True):
+            if center != 101.5e6:
+                continue
+            rows += 1
+            n = len(line)
+            k = int(round((ghost_f - center) / (rate / n) + n / 2))
+            self.assertLess(
+                float(np.max(line[k - 2 : k + 3])) - float(np.median(line)), 15.0
+            )
+        self.assertGreater(rows, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

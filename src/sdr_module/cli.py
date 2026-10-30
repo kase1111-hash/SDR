@@ -93,6 +93,21 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return _scan_live(args)
 
 
+def _applied_rate(device, requested: float) -> float:
+    """The sample rate a device runs at after ``set_sample_rate`` (a driver
+    clamps a rate it can't do into its range), else ``requested``."""
+    import math
+
+    state = getattr(device, "state", None)
+    for value in (
+        getattr(state, "sample_rate", None),
+        getattr(device, "sample_rate", None),
+    ):
+        if isinstance(value, (int, float)) and math.isfinite(value) and value > 0:
+            return float(value)
+    return float(requested)
+
+
 def _drain(device) -> None:
     """Throw away the samples a device has queued."""
     for _ in range(1000):
@@ -175,10 +190,18 @@ def _scan_live(args: argparse.Namespace) -> int:
 
     hits: List[Any] = []
     try:
-        rate = float(args.rate)
-        if device.set_sample_rate(rate) is False:
-            print(f"Error: {name} can't run at {rate / 1e6:g} MS/s (--rate).")
+        requested = float(args.rate)
+        if device.set_sample_rate(requested) is False:
+            print(f"Error: {name} can't run at {requested / 1e6:g} MS/s (--rate).")
             return 1
+        # Planned and measured at the rate it runs at: the steps and the
+        # frequencies found depend on it.
+        rate = _applied_rate(device, requested)
+        if abs(rate - requested) >= 1.0:
+            print(
+                f"Note: {name} can't run at {requested / 1e6:g} MS/s (--rate); "
+                f"scanning at {rate / 1e6:g} MS/s, the nearest rate it can."
+            )
         if args.gain is None:
             device.set_gain_mode(True)
         else:

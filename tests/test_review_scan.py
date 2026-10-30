@@ -633,5 +633,94 @@ class TestScan08TransmittingDuringAScan(_BookmarkScanCase):
         self.assertEqual(win._listening_mode(), ("FM", "5 kHz"))
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-09: sdr-scan scan --rate the driver can't do
+# --------------------------------------------------------------------------- #
+class TestScan09CliRateTheDeviceRuns(unittest.TestCase):
+    """Through the real RTLSDRDevice and DeviceManager, with pyrtlsdr
+    faked: the "hardware" samples at the rate the driver actually set."""
+
+    CARRIERS = (100.1e6, 101.3e6)
+
+    def scan(self, rate):
+        import contextlib
+        import io
+        import sys
+        import types
+        from unittest import mock
+
+        import numpy as np
+
+        from sdr_module import cli
+
+        carriers = self.CARRIERS
+
+        class RtlSdr:
+            def __init__(self, device_index=0):
+                self.sample_rate, self.center_freq, self.gain = 2.4e6, 100e6, "auto"
+                self._rng = np.random.default_rng(1)
+
+            @staticmethod
+            def get_device_serial_addresses():
+                return ["00000001"]
+
+            def set_manual_gain_enabled(self, *_args):
+                pass
+
+            def get_gains(self):
+                return [0, 100, 200]
+
+            def read_samples(self, n):
+                t = np.arange(n) / self.sample_rate
+                x = (
+                    self._rng.standard_normal(n) + 1j * self._rng.standard_normal(n)
+                ) * 1e-4
+                for freq in carriers:
+                    offset = freq - self.center_freq
+                    if abs(offset) < self.sample_rate / 2:
+                        x = x + 0.05 * np.exp(2j * np.pi * offset * t)
+                return x.astype(np.complex64)
+
+            def close(self):
+                pass
+
+        class _Lib:
+            @staticmethod
+            def rtlsdr_get_device_count():
+                return 1
+
+        fake = types.ModuleType("rtlsdr")
+        fake.RtlSdr, fake.librtlsdr = RtlSdr, _Lib
+        out = io.StringIO()
+        with (
+            mock.patch.dict(sys.modules, {"rtlsdr": fake}),
+            mock.patch.object(cli, "_LIVE_SETTLE_S", 0.0),
+            mock.patch(
+                "sdr_module.devices.hackrf.HackRFDevice.list_devices", return_value=[]
+            ),
+            contextlib.redirect_stdout(out),
+        ):
+            rc = cli.main(
+                ["scan", "--start", "99", "--end", "102", "--single", "--rate", rate]
+            )
+        return rc, out.getvalue()
+
+    def test_a_rate_the_driver_clamps_is_scanned_at_the_rate_it_runs(self):
+        rc, out = self.scan("3.2e6")  # an RTL-SDR runs at 2.56 MS/s at most
+        self.assertEqual(rc, 0, out)
+        self.assertIn("100.1000 MHz", out)
+        self.assertIn("101.3000 MHz", out)
+        self.assertIn("(2.56 MS/s)", out)
+        self.assertIn("can't run at 3.2 MS/s", out)
+
+    def test_a_rate_it_runs_at_says_nothing_more(self):
+        rc, out = self.scan("2.4e6")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("100.1000 MHz", out)
+        self.assertIn("101.3000 MHz", out)
+        self.assertIn("(2.4 MS/s)", out)
+        self.assertNotIn("can't run", out)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

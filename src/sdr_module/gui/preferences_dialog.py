@@ -46,6 +46,7 @@ except ImportError:  # pragma: no cover - the GUI needs PyQt6
 
 from . import file_dialogs
 from .audio_sink import default_output_name, output_devices
+from .tx_station import KEY_CONFIRM
 
 if HAS_PYQT6:
     from .themes import set_role, set_tone
@@ -56,7 +57,7 @@ logger = logging.getLogger(__name__)
 KEY_AUDIO_OUTPUT = "prefs/audio_output"
 KEY_AUDIO_OUTPUT_NAME = "prefs/audio_output_name"
 KEY_CAPTURE_FOLDER = "prefs/capture_folder"
-KEY_TX_CONFIRM = "tx/confirm"
+KEY_TX_CONFIRM = KEY_CONFIRM  # the transmitter's first-use confirmation
 
 #: Bytes one I/Q sample takes while recording (complex64).
 _BYTES_PER_SAMPLE = 8
@@ -440,9 +441,6 @@ class PreferencesDialog(QDialog if HAS_PYQT6 else object):
         s.set(KEY_CAPTURE_FOLDER, prefs.capture_folder)
         s.set(KEY_TX_CONFIRM, prefs.tx_confirm)
         return prefs
-
-    def changed(self) -> bool:
-        return self.preferences() != self._initial
 
 
 __all__ = [

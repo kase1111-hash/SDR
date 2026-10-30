@@ -134,6 +134,17 @@ class TestAudioSinkOutput(unittest.TestCase):
         self.assertTrue(sink.output_missing)
         self.assertEqual(sink.output_name(), "USB Headset (not found; using Speakers)")
 
+    def test_a_replugged_output_is_taken_again(self):
+        sink = AudioSink()
+        sink.set_output_device("usb.headset", "USB Headset")
+        FakeMediaDevices.outputs = [SPEAKERS]
+        self.assertTrue(sink.start(48000))
+        self.assertTrue(sink.output_missing)
+        FakeMediaDevices.outputs = [SPEAKERS, HEADSET]  # plugged in again
+        sink.set_output_device("usb.headset", "USB Headset")
+        self.assertEqual(FakeQAudioSink.opened, ["Speakers", "USB Headset"])
+        self.assertFalse(sink.output_missing)
+
     def test_output_list(self):
         self.assertEqual(
             audio_sink_module.output_devices(),

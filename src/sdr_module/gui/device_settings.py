@@ -136,15 +136,6 @@ def rate_choice_label(rate: float) -> str:
     return label
 
 
-def clamp_rate(kind: str, rate: float) -> float:
-    """``rate`` inside what ``kind`` offers (its nearest choice when not)."""
-    rates = sample_rates_for(kind)
-    low, high = RATE_LIMITS.get(kind, RATE_LIMITS["demo"])
-    if low <= rate <= high:
-        return float(rate)
-    return float(min(rates, key=lambda r: abs(r - rate)))
-
-
 # --------------------------------------------------------------------------- #
 # Gain
 # --------------------------------------------------------------------------- #

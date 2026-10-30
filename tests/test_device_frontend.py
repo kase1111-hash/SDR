@@ -386,3 +386,13 @@ def test_hackrf_without_antenna_power_in_the_binding(hackrf):
 
 
 _antenna_method = FakeHackRF.pyhackrf_set_antenna_enable
+
+
+def test_queued_samples_can_be_discarded(rtl):
+    import numpy as np
+
+    for _ in range(3):
+        rtl._sample_queue.put(np.zeros(8, np.complex64))
+    assert rtl.discard_queued_samples() == 3
+    assert rtl.read_samples(8, timeout=0) is None
+    assert rtl.discard_queued_samples() == 0

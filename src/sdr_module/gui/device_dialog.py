@@ -234,7 +234,12 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         form.addRow("&Direct sampling:", self._direct_combo)
 
         self._bias_check = QCheckBox(device_settings.BIAS_TEE_TEXT)
+        self._bias_check.toggled.connect(lambda _on: self._show_bias_warning())
         form.addRow(self._bias_check)
+        self._bias_warning = QLabel(device_settings.BIAS_TEE_WARNING)
+        self._bias_warning.setWordWrap(True)
+        set_role(self._bias_warning, "hint", "warning")
+        form.addRow(self._bias_warning)
 
         layout.addWidget(settings_group)
 
@@ -458,6 +463,12 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
             if label is not None:
                 label.setEnabled(has)
                 label.setToolTip(field.toolTip())
+        self._show_bias_warning()
+
+    def _show_bias_warning(self) -> None:
+        """The bias tee's warning while it is ticked (and offered)."""
+        show = self._bias_check.isEnabled() and self._bias_check.isChecked()
+        self._settings_form.setRowVisible(self._bias_warning, show)
 
     def _front_end_shown(self) -> "device_settings.FrontEnd":
         return device_settings.FrontEnd(

@@ -127,8 +127,8 @@ class AudioSink:
         it at once."""
         device_id = str(device_id or "")
         self._output_label = str(name or "")
-        if device_id == self._output_id:
-            return
+        if device_id == self._output_id and not (self.output_missing and self.is_open):
+            return  # (one that was missing is looked for again)
         self._output_id = device_id
         if self.is_open:
             rate = self._sample_rate

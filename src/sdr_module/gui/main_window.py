@@ -5389,7 +5389,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # The next recording starts in the temp folder chosen (one running
         # goes on where it is).
         self._recording_folder = None
-        self._sync_audio_ui()
+        # Audio on the new output (or off, saying why, if it can't open).
+        self._refresh_audio_output(announce=True)
         if prefs.audio_output != before:
             self._show_status_message(
                 f"Audio plays through {self._audio.output_name()}.", None, 5000
@@ -7079,13 +7080,41 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._preferred_rate = rate
         self._tx_station.shutdown()  # (a transmission has its own rate)
         applied = True
-        if self._device is not None:
+        dev = self._device
+        if dev is not None:
+            # Hardware takes the new rate between two streams, and what it
+            # queued at the old rate is dropped (the plots, decoders and
+            # recordings would take it for the new one).
+            pause = isinstance(dev, SDRDevice) and self._is_running
+            if pause:
+                try:
+                    dev.stop_rx()
+                except Exception as e:  # pragma: no cover - driver-dependent
+                    logger.debug(f"stop_rx before the rate change failed: {e}")
             try:
-                applied = self._device.set_sample_rate(rate) is not False
+                applied = dev.set_sample_rate(rate) is not False
+                if not applied:
+                    self._show_status_error(
+                        f"{self._device_display_name()} didn't take "
+                        f"{format_rate(rate)} (Tools > Error History says why)."
+                    )
             except Exception as e:
                 applied = False
                 self._show_status_error(f"Could not set the sample rate: {e}")
             self._apply_baseband_filter()
+            if pause:
+                dev.discard_queued_samples()
+                try:
+                    started = dev.start_rx() is not False
+                except Exception as e:
+                    logger.error(f"Could not restart receiving: {e}")
+                    started = False
+                if not started:
+                    self._is_running = False
+                    self._show_status_error(
+                        "The device didn't restart receiving after the sample "
+                        "rate change: press Start (Space)."
+                    )
         self._reset_demodulator()
         # Whether frames keep up depends on the rate: find out anew.
         self._pacer.reset()
@@ -8510,7 +8539,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Save settings on exit."""
         try:
             freq = self._current_frequency()
-            gain = float(self._control_panel.gain_db())
+            gain = float(self._control_panel.slider_gain_db())
             self._settings.set("frequency_hz", freq)
             self._settings.set("tuning/lo_hz", self._lo_frequency())
             self._settings.set("gain_db", gain)

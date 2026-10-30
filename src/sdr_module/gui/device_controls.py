@@ -91,8 +91,15 @@ _DIRECT_LABELS = {value: label for value, label, _tip in DIRECT_SAMPLING_CHOICES
 _BRANCH_VALUES = {0: "off", 1: "i", 2: "q"}
 
 
+def format_ppm(ppm: float) -> str:
+    """``12 -> "+12 ppm"``, ``-3 -> "-3 ppm"``, ``0 -> "0 ppm"``."""
+    value = int(round(float(ppm)))
+    return f"{value:+d} ppm" if value else "0 ppm"
+
+
 def _kind_name(kind: str) -> str:
-    """ "the RTL-SDR", "the HackRF One", "the demo device", "the device"."""
+    """How messages name a device kind: "the RTL-SDR", "the HackRF One",
+    "the demo device" (or "the device")."""
     return KIND_NAMES.get(kind, "the device")
 
 
@@ -196,6 +203,12 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
                 panel.set_agc_silently(agc and model.agc)
             front = load_front_end(self._settings, kind)
             note = self._apply_front_end(dev, kind, front)
+            if model.kind == "hackrf" and panel.hackrf_gains()[2]:
+                # (Set with the gain, after tuning.)
+                note = (
+                    f"{note} The RF amp is on (+{HACKRF_AMP_DB} dB): strong "
+                    "signals can overload the HackRF."
+                ).strip()
             panel.set_front_end(kind, self._front_end_of(dev, kind, front))
             self._shown_for = (id(dev) if dev is not None else 0, kind, locked)
         finally:
@@ -252,7 +265,7 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
             getattr(dev, "freq_correction", 0) or 0
         ):
             if not self._call(dev, "set_freq_correction", int(front.ppm)):
-                failed.append(f"the {int(front.ppm):+d} ppm correction")
+                failed.append(f"the {format_ppm(front.ppm)} correction")
         bias_on = bool(getattr(getattr(dev, "state", None), "bias_tee_enabled", False))
         if "bias_tee" in features and bool(front.bias_tee) != bias_on:
             if not self._call(dev, "set_bias_tee", bool(front.bias_tee)):
@@ -437,7 +450,7 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
         front = self._front_end_of(dev, kind)
         parts = []
         if "ppm" in features:
-            parts.append(f"{front.ppm:+d} ppm")
+            parts.append(format_ppm(front.ppm))
         if "direct" in features:
             label = _DIRECT_LABELS.get(front.direct_sampling, front.direct_sampling)
             text = f"HF: {label}"
@@ -476,12 +489,12 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
         if not self._call(dev, "set_freq_correction", int(ppm)):
             self._show_device_front_end()
             self._win._show_status_error(
-                f"The RTL-SDR didn't take a {int(ppm):+d} ppm correction (Tools > "
+                f"The RTL-SDR didn't take a {format_ppm(ppm)} correction (Tools > "
                 "Error History says why)."
             )
             return
         self._save_front_end()
-        self._status(f"Frequency correction {int(ppm):+d} ppm.", None, 3000)
+        self._status(f"Frequency correction {format_ppm(ppm)}.", None, 3000)
 
     def _on_direct_changed(self, value: str) -> None:
         dev = self._front_end_device("direct")

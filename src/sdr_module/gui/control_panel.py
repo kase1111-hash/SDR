@@ -863,11 +863,10 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._manual_threshold = False
         # How the RF gain is set on the connected device (its steps, or the
         # HackRF's LNA/VGA/amp), the gain an automatic gain chose (when the
-        # device says), why the gain can't be set (a recording playing),
-        # and the sample rate choices shown (to skip refilling them).
+        # device says) and the sample rate choices shown (to skip refilling
+        # them).
         self._gain_model: GainModel = DEFAULT_GAIN_MODEL
         self._auto_gain_db: Optional[float] = None
-        self._gain_locked = ""
         self._rate_choices: Tuple = ()
         self._current_rate = 0.0
         self._front_end_kind = ""
@@ -1658,6 +1657,11 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             return float(lna + vga + (HACKRF_AMP_DB if amp else 0))
         return self._step_db(self._gain_slider.value())
 
+    def slider_gain_db(self) -> float:
+        """The RF gain slider's gain in dB (what the window saves as the
+        gain to start with; a HackRF's LNA/VGA are remembered apart)."""
+        return self._step_db(self._gain_slider.value())
+
     def gain_model(self) -> GainModel:
         return self._gain_model
 
@@ -1690,7 +1694,6 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             slider.blockSignals(False)
         if not model.agc and self._agc_check.isChecked():
             self.set_agc_silently(False)
-        self._gain_locked = locked
         rows = [
             self._gain_slider.parentWidget(),
             self._lna_slider.parentWidget(),
@@ -1803,14 +1806,6 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         combo.setEnabled(bool(enabled and values))
         combo.setToolTip(tip or self._RATE_TIP)
         combo.blockSignals(False)
-
-    def sample_rate_choices(self) -> List[float]:
-        """The sample rates offered (for the status bar's menu)."""
-        return [
-            float(self._rate_combo.itemData(i) or 0.0)
-            for i in range(self._rate_combo.count())
-            if self._rate_combo.itemData(i)
-        ]
 
     def _on_rate_activated(self, index: int) -> None:
         rate = float(self._rate_combo.itemData(index) or 0.0)

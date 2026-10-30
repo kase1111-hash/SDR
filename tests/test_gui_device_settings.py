@@ -269,6 +269,15 @@ class TestHackRFGain(_DeviceCase):
         self.assertIn("no automatic gain", self.message())
         self.assertEqual(self.tone(), "warning")
 
+    def test_a_remembered_amp_is_said_on_connect(self):
+        self.hackrf()
+        self.panel._amp_check.setChecked(True)
+        self.win._release_device()
+        dev, fake = open_hackrf(self.patch, rate=10e6)
+        note = self.connect(dev)
+        self.assertTrue(fake.amp)
+        self.assertIn("RF amp is on", note)
+
     def test_saved_agc_does_not_carry_over_to_a_hackrf(self):
         self.panel.set_agc_enabled(True)  # on the demo device
         dev, fake = self.hackrf()
@@ -387,6 +396,13 @@ class TestGainMemory(_DeviceCase):
         self.win.set_gain(30)
         self.win._persist_state()
         self.assertEqual(self.store.values["gain_db"], 29.7)
+        # A HackRF's LNA + VGA + amp (up to 116 dB) is not what the next
+        # start's 0-50 dB slider gets: that stays the slider's gain.
+        self.hackrf()
+        self.panel._lna_slider.setValue(5)
+        self.panel._amp_check.setChecked(True)
+        self.win._persist_state()
+        self.assertLessEqual(self.store.values["gain_db"], 50.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -487,6 +503,41 @@ class TestSampleRate(_DeviceCase):
         self.assertIn("Stop recording to change the sample rate", self.message())
         self.assertEqual(self.panel._rate_combo.currentText(), "2.4 MS/s")
         win._toggle_recording(False)
+
+    def test_running_hardware_pauses_for_the_change(self):
+        """The stream stops for the new rate and restarts at once; blocks
+        queued at the old rate are dropped."""
+        import numpy as np
+
+        dev = self.rtl()
+        calls = []
+        for name in ("stop_rx", "start_rx", "set_sample_rate"):
+            real = getattr(dev, name)
+
+            def spy(*args, _real=real, _name=name):
+                calls.append(_name)
+                return _real(*args)
+
+            setattr(dev, name, spy)
+        self.win._start_acquisition()
+        dev.stop_rx()  # (the fake's reader thread: no new blocks meanwhile)
+        dev._state.is_streaming = True
+        dev.discard_queued_samples()  # (it may have filled the queue)
+        dev._sample_queue.put_nowait(np.zeros(16, np.complex64))  # old rate
+        calls.clear()
+        self.assertTrue(self.win._device_controls.choose_rate(1.8e6))
+        self.assertEqual(calls[:3], ["stop_rx", "set_sample_rate", "start_rx"])
+        self.assertTrue(self.win._is_running)
+        self.assertEqual(dev.state.sample_rate, 1.8e6)
+        dev.stop_rx()
+        stale = [b for b in list(dev._sample_queue.queue) if len(b) == 16]
+        self.assertEqual(stale, [])
+
+    def test_a_refused_rate_is_said(self):
+        dev = self.rtl()
+        dev.set_sample_rate = lambda rate: False
+        self.assertFalse(self.win._device_controls.choose_rate(1.8e6))
+        self.assertIn("didn't take 1.8 MS/s", self.message())
 
     def test_without_a_device_the_choice_waits(self):
         self.win._release_device()
@@ -709,6 +760,13 @@ class TestConnectDialog(_DeviceCase):
             self.assertNotIn("yet", field.toolTip())
         self.select(dialog, "hackrf")
         self.assertEqual(self.shown(dialog), [False, False, True])
+        warning = dialog._bias_warning
+        self.assertFalse(dialog._settings_form.isRowVisible(warning))
+        dialog._bias_check.setChecked(True)
+        self.assertTrue(dialog._settings_form.isRowVisible(warning))
+        self.assertIn("antenna socket is powered", warning.text())
+        self.select(dialog, "demo")
+        self.assertFalse(dialog._settings_form.isRowVisible(warning))
 
     def test_preselects_what_each_type_used_last(self):
         from sdr_module.gui.device_settings import FrontEnd
@@ -895,3 +953,32 @@ class TestScanForDevices(_DeviceCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------- #
+# Receive gain and the transmit power stay separate (T7's TxPower)
+# --------------------------------------------------------------------------- #
+from tests.test_gui_station_tx import _TxCase  # noqa: E402
+
+
+class TestReceiveAmpAndTransmit(_TxCase):
+    """A transmission uses Ham ID > TX Power's own amp setting; the receive
+    amp, LNA and VGA come back (or stay) as the Receiver group has them."""
+
+    def test_the_receive_amp_is_back_after_a_transmission(self):
+        self.panel.set_callsign("W1AW")
+        dev, backend = self.hackrf()
+        receiver = self.win._control_panel
+        receiver._amp_check.setChecked(True)  # receive with the amp
+        self.assertTrue(backend.amp)
+        self.panel._amp_check.setChecked(False)  # transmit without it
+        amp_during = []
+        self.station.engine.started.connect(lambda _j: amp_during.append(backend.amp))
+        self.assertTrue(self.station.send_station_id())
+        self.wait_done(10)
+        self.assertEqual(amp_during, [False])
+        self.assertTrue(dev.amp_enabled)
+        self.assertTrue(backend.amp)
+        self.assertEqual(receiver.hackrf_gains(), (16, 20, True))
+        self.assertEqual((backend.lna, backend.vga), (16, 20))
+        self.assertFalse(self.store.values.get("tx/amp", False))

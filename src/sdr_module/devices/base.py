@@ -253,6 +253,17 @@ class SDRDevice(ABC):
         except queue.Empty:
             return None
 
+    def discard_queued_samples(self) -> int:
+        """Drop the sample blocks waiting for :meth:`read_samples` (e.g.
+        taken at a sample rate no longer in use). Returns how many."""
+        dropped = 0
+        while True:
+            try:
+                self._sample_queue.get_nowait()
+            except queue.Empty:
+                return dropped
+            dropped += 1
+
     def has_capability(self, cap: DeviceCapability) -> bool:
         """Check if device has a specific capability."""
         if self._info is None:

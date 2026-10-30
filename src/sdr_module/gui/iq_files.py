@@ -319,6 +319,9 @@ class IqFileOptions:
     start_time: str = ""
     hardware: str = ""
     description: str = ""
+    #: Where it resumed after a gap in time: (first sample, UTC start) of
+    #: each SigMF capture after the first.
+    segments: Tuple[Tuple[int, str], ...] = ()
 
     @property
     def name(self) -> str:
@@ -411,6 +414,7 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
         start_time=str(meta.get("sigmf_datetime", "") or ""),
         hardware=str(meta.get("sigmf_hardware", "") or ""),
         description=str(meta.get("sigmf_description", "") or ""),
+        segments=tuple(meta.get("sigmf_segments") or ()),
     )
     missing: Set[str] = set()
     if options.headerless:

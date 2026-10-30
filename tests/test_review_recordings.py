@@ -680,6 +680,58 @@ class TestConvertKeepsTheRecording(_ReviewCase):
         self.assertIn("the recording you converted", warn.call_args[0][2])
         np.testing.assert_array_equal(np.fromfile(path, np.complex64), x)
 
+    GAP = [(0, "2020-01-02T03:04:05Z"), (20000, "2020-01-02T03:09:00.250Z")]
+
+    def _captures(self, meta_path):
+        return [
+            (c["core:sample_start"], c.get("core:datetime"))
+            for c in _read_json(meta_path)["captures"]
+        ]
+
+    def test_a_recording_with_a_gap_keeps_its_captures(self):
+        # A take resumed after a pause is saved with a capture per stretch
+        # (REC-15); converted, it was labelled one continuous capture from
+        # its first time again.
+        path, _x = self._source("gap")
+        meta = json.loads(json.dumps(self.META))
+        meta["captures"].append(
+            {"core:sample_start": 20000, "core:datetime": self.GAP[1][1]}
+        )
+        with open(self.path("gap.sigmf-meta"), "w") as handle:
+            json.dump(meta, handle)
+        self._convert(path)
+        os.makedirs(self.path("out"))
+        for name, meta_name in (
+            ("out/copy.sigmf-data", "out/copy.sigmf-meta"),
+            ("out/copy.cs16", "out/copy.cs16.sigmf-meta"),
+        ):
+            with self.save_dialog(self.path(name)):
+                self.assertTrue(self.win._save_recording(), name)
+            self.assertEqual(self._captures(self.path(meta_name)), self.GAP, name)
+
+    def test_a_sidecar_with_a_gap_is_read_too(self):
+        from sdr_module.dsp.recording import SampleFormat, write_sidecar
+        from sdr_module.gui.iq_files import describe_iq_file
+
+        path = self.path("cap.cs16")
+        np.zeros(2 * 30000, np.int16).tofile(path)
+        write_sidecar(
+            path,
+            SampleFormat.INT16,
+            1e6,
+            433.92e6,
+            start_time=self.GAP[0][1],
+            segments=self.GAP[1:] + [(90000, "2020-01-02T04:00:00Z")],
+        )
+        options, _missing = describe_iq_file(path)
+        self.assertEqual(options.start_time, self.GAP[0][1])
+        self.assertEqual(options.segments[0], self.GAP[1])
+        self._convert(path)
+        with self.save_dialog(self.path("copy.sigmf-data")):
+            self.assertTrue(self.win._save_recording())
+        # (A capture past the end of the samples is left out.)
+        self.assertEqual(self._captures(self.path("copy.sigmf-meta")), self.GAP)
+
 
 # ---------------------------------------------------------------------------
 # REC-10: Decode Recording says where in the file each message is

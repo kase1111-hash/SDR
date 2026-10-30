@@ -1523,6 +1523,13 @@ class _SampleStore:
         else:
             self._segments.append((self._count, start_time))
 
+    def set_segments(self, segments: Tuple[Tuple[int, str], ...]) -> None:
+        """The stretches after a gap that a converted recording's own
+        metadata names (its SigMF captures after the first)."""
+        self._segments = sorted(
+            (int(first), str(when or "")) for first, when in segments if first > 0
+        )
+
     def _add_block(self, length: int) -> None:
         if self._nblocks == len(self._starts):
             grown = np.zeros(max(64, 2 * len(self._starts)), dtype=np.int64)
@@ -7673,10 +7680,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._buffer_source = options.name
         self._buffer_source_path = os.path.abspath(options.path)
         # What its metadata says about it is kept too (an unknown time is
-        # left out, never stamped with the time of saving).
+        # left out, never stamped with the time of saving), and where it
+        # resumed after a gap.
         self._take_started = options.start_time
         self._take_hardware = options.hardware
         self._take_description = options.description
+        store.set_segments(options.segments)
         self._update_take_panel()
         logger.info(
             f"Loaded {loaded.samples} samples from {path} "

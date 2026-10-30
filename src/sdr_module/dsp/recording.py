@@ -125,6 +125,11 @@ def sigmf_format(datatype: Any) -> Optional[SampleFormat]:
     return _SIGMF_FORMATS.get(str(datatype or "").strip().lower())
 
 
+#: (first sample, UTC start time) of a stretch of a recording made after a
+#: gap in time (a pause): a SigMF capture segment of its own.
+Segment = Tuple[int, str]
+
+
 @dataclass
 class SidecarInfo:
     """What a SigMF metadata file says about the data file it describes."""
@@ -138,6 +143,8 @@ class SidecarInfo:
     start_time: str = ""
     description: str = ""
     hardware: str = ""
+    #: Its captures after the first: where it resumed after a gap.
+    segments: Tuple[Segment, ...] = ()
 
 
 def sidecar_path(data_path: Union[str, Path]) -> Path:
@@ -187,7 +194,22 @@ def _sidecar_info(
         start_time=str(first.get("core:datetime", "") or ""),
         description=str(global_meta.get("core:description", "") or ""),
         hardware=str(global_meta.get("core:hw", "") or ""),
+        segments=_later_captures(captures),
     )
+
+
+def _later_captures(captures: Any) -> Tuple[Segment, ...]:
+    """The SigMF captures after the first, as segments (its sample start
+    and its time, "" if it has none)."""
+    segments = []
+    for capture in captures[1:] if isinstance(captures, list) else ():
+        try:
+            first = int(capture.get("core:sample_start", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue  # (not a capture)
+        if first > 0:
+            segments.append((first, str(capture.get("core:datetime", "") or "")))
+    return tuple(segments)
 
 
 def _dataset_path(meta_path: Path, meta: Dict[str, Any]) -> Optional[Path]:
@@ -214,11 +236,6 @@ def _write_json(path: Path, data: Dict[str, Any]) -> None:
         except OSError:
             pass
         raise
-
-
-#: (first sample, UTC start time) of a stretch of a recording made after a
-#: gap in time (a pause): a SigMF capture segment of its own.
-Segment = Tuple[int, str]
 
 
 def _capture_segments(
@@ -2901,6 +2918,7 @@ class FormatDetector:
             "sigmf_datetime": sidecar.start_time,
             "sigmf_description": sidecar.description,
             "sigmf_hardware": sidecar.hardware,
+            "sigmf_segments": list(sidecar.segments),
         }
 
     def _detect_with_sidecar(
@@ -2998,7 +3016,8 @@ class FormatDetector:
             dataset = _dataset_path(meta_path, sigmf_meta)
             if dataset is not None and dataset.exists():
                 data_path = dataset
-            header = _sidecar_info(meta_path, data_path, sigmf_meta).header_bytes
+            described = _sidecar_info(meta_path, data_path, sigmf_meta)
+            header = described.header_bytes
 
             global_meta = sigmf_meta.get("global", {})
             captures = sigmf_meta.get("captures", [{}])
@@ -3046,6 +3065,7 @@ class FormatDetector:
                     "sigmf_datetime": (
                         captures[0].get("core:datetime", "") if captures else ""
                     ),
+                    "sigmf_segments": list(described.segments),
                     "data_file": str(data_path),
                 },
             )

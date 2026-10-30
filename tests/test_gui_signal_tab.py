@@ -239,9 +239,9 @@ class TestSignalsInView(_SignalCase):
         table = self.panel.signals_table
         self.assertEqual(table.rowCount(), len(freqs))
         headers = [table.horizontalHeaderItem(c).text() for c in range(5)]
-        self.assertEqual(headers, ["Frequency", "dBFS", "SNR", "Width", "Heard"])
+        self.assertEqual(headers, ["MHz", "dBFS", "SNR", "Width", "Heard"])
         row = freqs.index(100.1e6)
-        self.assertEqual(table.item(row, 0).text(), "100.100 MHz")
+        self.assertEqual(table.item(row, 0).text(), "100.100")
         self.assertEqual(table.item(row, 4).text(), "now")
         self.assertGreater(float(table.item(row, 2).text()), 40)
 
@@ -490,7 +490,15 @@ class TestFindSignalsInRecording(_SignalCase):
         )
 
     def test_lists_them_and_plays_from_one(self):
+        self.listen(100.3e6)
+        self.panel.markers_check.setChecked(True)
+        self.win._show_signal_page("signals")
+        self.frames(0.6)
+        self.assertTrue(self.win._spectrum.markers())  # the live signals
         self.assertTrue(self.tools.find_in_recording(self.path))
+        # The live markers go: their numbers would not be the list's rows.
+        self.assertEqual(self.win._spectrum.markers(), [])
+        self.assertFalse(self.panel.markers_check.isEnabled())
         self.assertEqual(self.win._current_panel_key(), "signal")
         self.assertEqual(self.panel.current_page(), "signals")
         self.assertTrue(self.panel.showing_recording())

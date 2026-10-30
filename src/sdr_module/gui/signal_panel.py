@@ -123,11 +123,13 @@ def format_width(hz: float) -> str:
     return f"{hz:.0f} Hz"
 
 
-def format_signal_mhz(freq_hz: float, width_hz: float) -> str:
+def format_signal_mhz(freq_hz: float, width_hz: float, unit: bool = True) -> str:
     """A signal's frequency: to the kHz for a wide one, to 100 Hz for a
-    narrow one (CW, a carrier)."""
+    narrow one (CW, a carrier); ``unit=False`` leaves out " MHz" (a column
+    headed MHz)."""
     decimals = 4 if 0 < float(width_hz) < 5e3 else 3
-    return f"{float(freq_hz) / 1e6:.{decimals}f} MHz"
+    text = f"{float(freq_hz) / 1e6:.{decimals}f}"
+    return f"{text} MHz" if unit else text
 
 
 def format_ago(seconds: float) -> str:
@@ -180,7 +182,7 @@ if HAS_PYQT6:
 
         def __init__(self, parent: Any = None):
             super().__init__(parent)
-            self.setMinimumHeight(140)
+            self.setMinimumHeight(90)
             self.setSizePolicy(
                 QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
             )
@@ -547,7 +549,7 @@ if HAS_PYQT6:
             table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
             table.setTabKeyNavigation(False)
             table.setAccessibleName(name)
-            table.setMinimumHeight(90)
+            table.setMinimumHeight(64)
             return table
 
         # -- Identify ---------------------------------------------------------------
@@ -750,7 +752,7 @@ if HAS_PYQT6:
             self.recording_row.setVisible(False)
             layout.addWidget(self.recording_row)
             self.signals_table = self._table(
-                ["Frequency", "dBFS", "SNR", "Width", "Heard"],
+                ["MHz", "dBFS", "SNR", "Width", "Heard"],
                 [
                     "Where the signal's power is centred (double-click to tune). "
                     "The row number is its number on the spectrum's markers.",
@@ -860,7 +862,7 @@ if HAS_PYQT6:
                     )
                     items = [
                         _NumericItem(
-                            format_signal_mhz(sig.frequency_hz, sig.width_hz),
+                            format_signal_mhz(sig.frequency_hz, sig.width_hz, False),
                             sig.frequency_hz,
                         ),
                         _NumericItem(f"{sig.peak_dbfs:.0f}", sig.peak_dbfs),
@@ -895,9 +897,12 @@ if HAS_PYQT6:
             """The signals found in a recording (File > Find Signals in
             Recording): :class:`~sdr_module.dsp.signal_list.SurveySignal`."""
             self._recording = (name, list(signals), float(seconds))
-            self.recording_label.setText(
-                f"Signals in {name} ({format_clock_s(seconds)} long): "
-                "double-click one to play it there"
+            short = name if len(name) <= 30 else f"{name[:14]}…{name[-14:]}"
+            self.recording_label.setText(f"In {short} ({format_clock_s(seconds)}):")
+            self.recording_label.setToolTip(
+                f"The signals found in {name} ({format_clock_s(seconds)} long). "
+                "Double-click one to play the recording from just before it, "
+                "tuned to it."
             )
             self.recording_row.setVisible(True)
             self.markers_check.setEnabled(False)
@@ -908,7 +913,7 @@ if HAS_PYQT6:
                 heard = f"{format_clock_s(sig.first_s)}–{format_clock_s(sig.last_s)}"
                 items = [
                     _NumericItem(
-                        format_signal_mhz(sig.frequency_hz, sig.width_hz),
+                        format_signal_mhz(sig.frequency_hz, sig.width_hz, False),
                         sig.frequency_hz,
                     ),
                     _NumericItem(f"{sig.peak_dbfs:.0f}", sig.peak_dbfs),
@@ -1110,7 +1115,7 @@ if HAS_PYQT6:
             self.burst_details = QPlainTextEdit()
             self.burst_details.setReadOnly(True)
             self.burst_details.setMaximumHeight(150)
-            self.burst_details.setMinimumHeight(60)
+            self.burst_details.setMinimumHeight(40)
             mono = QFont("monospace")
             mono.setStyleHint(QFont.StyleHint.Monospace)
             self.burst_details.setFont(mono)

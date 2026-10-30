@@ -149,6 +149,19 @@ class TestBurstDetector:
             ended += det.process(row, 100e6, self.SPAN, i / 30)
         assert ended == [] and det.active == []
 
+    def test_a_gain_change_is_no_burst(self):
+        """The whole floor moving 10 dB (the gain raised) re-settles the
+        floor instead of calling every bin a burst."""
+        det = BurstDetector()
+        ended = []
+        for i in range(30):
+            ended += det.process(_noise_row(seed=i), 100e6, self.SPAN, i / 30)
+        for i in range(30, 60):
+            row = _noise_row(seed=i, level_db=-70.0)
+            ended += det.process(row, 100e6, self.SPAN, i / 30)
+        ended += det.flush()
+        assert ended == []
+
     def test_a_retune_starts_afresh(self):
         det = BurstDetector()
         row = _noise_row(seed=3)

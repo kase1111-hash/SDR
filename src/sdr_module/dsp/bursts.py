@@ -168,6 +168,13 @@ class BurstDetector:
         else:
             ended = []
         lin = _db_to_lin(np.nan_to_num(row, nan=-200.0, posinf=0.0, neginf=-200.0))
+        if self._floor is not None and self._rows > self.settle_rows:
+            # The whole floor moved 6 dB or more (the gain changed): start
+            # again from this row rather than call the band a burst.
+            moved = float(np.median(lin / np.maximum(self._floor, 1e-30)))
+            if not 0.25 <= moved <= 4.0:
+                ended += self.flush(t)
+                self._floor = None
         if self._floor is None:
             # The first row is the floor (averaged over a few bins): what is
             # on now, stations included, is not a burst.

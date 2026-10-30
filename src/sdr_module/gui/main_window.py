@@ -2249,10 +2249,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Signal (T10): its panel spec after the Scanner's (Ctrl+9), its tab
         # before Info.
         self._signal_panel = SignalPanel()
+        # Scrolling as a whole like the other panels (its Identify page
+        # scrolls on its own too, which _scrollable would take for enough):
+        # the column's split may leave it less than its pages need.
+        signal_area = QScrollArea()
+        signal_area.setWidgetResizable(True)
+        signal_area.setFrameShape(QFrame.Shape.NoFrame)
+        signal_area.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        signal_area.setWidget(self._signal_panel)
         self._add_panel(
             tabs,
             "signal",
-            self._signal_panel,
+            signal_area,
             "Signal",
             "Identify the tuned signal (Ctrl+I), list the signals in view, "
             "look at the channel on a scope and log the bursts in the span",

@@ -389,7 +389,9 @@ if HAS_PYQT6:
 
         def _signals_active(self) -> bool:
             if self.panel.showing_recording():
-                return self._markers or time.monotonic() < self._listing_until
+                # (The list is the recording's: no live markers, whose
+                # numbers would not be its rows.)
+                return time.monotonic() < self._listing_until
             return (
                 self._markers
                 or self.panel.page_visible("signals")
@@ -437,7 +439,8 @@ if HAS_PYQT6:
                     float(win._current_frequency()),
                     [now - t for _s, t in self._heard],
                 )
-            self._apply_markers(current if self._markers else [])
+            live = not self.panel.showing_recording()
+            self._apply_markers(current if self._markers and live else [])
 
         def _remember(self, found: List[SignalPeak], now: float) -> None:
             """Merge a fresh list into the signals heard lately (a signal
@@ -529,6 +532,8 @@ if HAS_PYQT6:
         def _page_changed(self) -> None:
             if self.panel.page_visible("signals"):
                 self._list_due = 0.0
+            if self.panel.page_visible("bursts") and not self._watch_always:
+                self._watcher.reset()  # its floor is from when it was last shown
 
         # -- Scope ------------------------------------------------------------------------------
 
@@ -726,6 +731,13 @@ if HAS_PYQT6:
                 tuner = getattr(win, "_radio_tuner", None)
                 if tuner is not None and tuner.isVisible():
                     tuner.set_frequency(freq)
+                # Transmitting (Send ID, QRP) goes where the signal is now.
+                qrp = getattr(win, "_qrp_panel", None)
+                if qrp is not None:
+                    qrp.set_station(freq)
+                station = getattr(win, "_tx_station", None)
+                if station is not None:
+                    station.refresh()
             finally:
                 self._moving = False
 
@@ -821,6 +833,7 @@ if HAS_PYQT6:
             signals, seconds = result.value
             self._survey_options = options
             self.panel.set_recording_signals(options.name, signals, seconds)
+            self._apply_markers([])
             win._show_panel("signal")
             self.panel.show_page("signals")
             win._show_status_message(

@@ -488,3 +488,23 @@ class TestDecodersOnPlayback(_PlaybackCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPlaybackWithoutDevice(_PlaybackCase):
+    demo = False
+
+    def test_plays_and_closes_back_to_no_device(self):
+        win = self.win
+        self.assertIsNone(win._device)
+        win.set_frequency(433.92e6)
+        self.play()
+        self.assertTrue(win._playback.active)
+        self.assertTrue(win._is_running)
+        self.assertEqual(win._lo_frequency(), CENTER)
+        self.assertEqual(win._playback_bar._close.toolTip()[-9:], "no device")
+        win._playback.close()
+        self.assertIsNone(win._device)
+        self.assertFalse(win._is_running)
+        self.assertEqual(win._state_badge.text(), "NO DEVICE")
+        self.assertEqual(win._current_frequency(), 433.92e6)
+        self.assertEqual(win._lo_frequency(), 433.92e6)

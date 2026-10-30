@@ -131,6 +131,15 @@ class TestRecordAudio(_AudioCase):
         self.assertGreater(len(audio), 0.08 * 48000)
         self.assertLess(float(np.max(np.abs(audio))), 1e-4)
 
+    def test_info_tab_shows_it(self):
+        self.win._record_audio_action.trigger()
+        self.frames(2)
+        self.win._refresh_info_panel()
+        self.assertEqual(self.win._info_panel.value("recording"), "Audio 00:00")
+        self.win._record_audio_action.trigger()
+        self.win._refresh_info_panel()
+        self.assertEqual(self.win._info_panel.value("recording"), "Idle")
+
     def test_none_iq_mode_is_refused(self):
         self.win._set_demod_mode("None (I/Q)")
         self.win._record_audio_action.trigger()

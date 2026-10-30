@@ -3237,6 +3237,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             p.set_value("recording", "Armed, waiting for the receiver", "warning")
         else:
             p.set_value("recording", self._recording_elapsed_text(), "danger")
+        take = self._audio_take
+        if take is not None:  # Record Audio
+            audio = f"Audio {_clock_text(take.seconds)}"
+            iq = p.value("recording")
+            p.set_value(
+                "recording", audio if iq == "Idle" else f"{iq} · {audio}", "danger"
+            )
         count = self._buffer_sample_count()
         if count:
             p.set_value("buffer", f"{count:,} samples ({count * 8 / 1e6:.1f} MB)")

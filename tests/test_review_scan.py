@@ -634,6 +634,25 @@ class TestScan08TransmittingDuringAScan(_BookmarkScanCase):
         self.assertAlmostEqual(win._current_frequency(), 145.5e6)
         self.assertEqual(win._listening_mode(), ("FM", "5 kHz"))
 
+    def test_stop_pressed_as_a_transmission_starts(self):
+        """Stop pressed on a channel being checked, before the tab's refresh
+        saw the transmission: the scan doesn't try to go back (the receiver
+        can't be retuned while it transmits), so no "Can't tune while
+        transmitting" replaces the on-air status."""
+        from sdr_module.gui.scan_engine import DWELL
+
+        win, panel = self.win, self.win._scanner_panel
+        quiet = dict(_QUIET_TONE, label="Quiet FM", tone_mode="")
+        self.scan([quiet], seconds=1.0, until=lambda: panel.engine.state == DWELL)
+        self.transmit()
+        self.messages.clear()
+        panel.stop_scan()  # (stay=False: not listening to anything)
+        self.assertFalse(panel.engine.active)
+        self.assertEqual(self.messages, [])
+        self.assertAlmostEqual(win._current_frequency(), 145.5e6)
+        self.assertEqual(win._listening_mode(), ("FM", "5 kHz"))
+        self.receive_again()
+
 
 # --------------------------------------------------------------------------- #
 # SCAN-09: sdr-scan scan --rate the driver can't do

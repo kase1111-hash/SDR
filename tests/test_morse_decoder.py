@@ -158,6 +158,36 @@ class TestSpeeds:
         assert [m.text for m in lines] == [text]
         assert morse.wpm == pytest.approx(wpm, rel=0.05)
 
+    @pytest.mark.parametrize("wpm", [5, 6, 8, 10])
+    def test_slow_code_that_starts_with_dits(self, wpm):
+        # Before the speed was known, marks all of one kind were taken for
+        # dits or dashes by the default 20 WPM alone, so slow dits (0.15 s
+        # and longer) were dashes. A pause of 7 of those "dits" (shorter
+        # than a letter gap) then ended the transmission after the first
+        # letter: "SOS DE W1AW" at 8 WPM read "TTT OS DE W1AW", and twelve
+        # dits were twelve dashes ("HI HI" read "TTTT TT TTTT TT"). The
+        # gaps between the marks tell: a letter's elements are a dit apart.
+        rate = 2000.0
+        for text in ("SOS DE W1AW", "HI HI DE W1AW", "5NN TU", "IS IT OK"):
+            key = enc.morse_keying(text, rate, wpm, lead_s=1.0, tail_s=4.0)
+            morse = MorseDecoder(rate)
+            lines = []
+            for i in range(0, len(key), int(rate / 30)):
+                lines += morse.process(key[i : i + int(rate / 30)])
+            lines += morse.flush()
+            assert [m.text for m in lines] == [text], text
+            assert morse.wpm == pytest.approx(wpm, rel=0.05), text
+
+    @pytest.mark.parametrize("text", ["SOS DE N0CALL K", "HI HI DE N0CALL"])
+    def test_slow_code_that_starts_with_dits_in_noise(self, text):
+        rate = 2000.0
+        x = enc.cw_baseband(text, rate, 8, offset_hz=30.0)
+        x = np.concatenate([np.zeros(int(rate)), x, np.zeros(int(3 * rate))])
+        for seed in (1, 2, 3):
+            lines, morse = _decode(_noisy(x, 12.0, seed), rate, block=66)
+            assert lines == [text], seed
+            assert morse.wpm == pytest.approx(8, rel=0.05), seed
+
     @pytest.mark.parametrize("wpm", [8, 20])
     def test_a_tuning_carrier_before_the_first_letters(self, wpm):
         # A beacon's carrier of about a second, then its text: the carrier

@@ -383,6 +383,10 @@ class MorseDecoder:
     END_GAP_DITS = 7.0
     CALIBRATE_GAP_MARKS = 3
     WPM_RANGE = (5.0, 60.0)
+    #: Before the speed is known, marks all of one kind are dashes when a
+    #: gap between them is shorter than this many times their length (the
+    #: elements of a letter are a dit apart), else dits.
+    DASH_GAP = 0.6
 
     def __init__(self, rate: float, wpm: float = 20.0, line_chars: int = 60):
         rate = float(rate)
@@ -481,9 +485,23 @@ class MorseDecoder:
                 dit = (sum(short) + sum(long) / 3.0) / count
                 return self._clamp_dit(dit), True
         mean = sum(marks) / count
-        # One kind only: dits if they are nearer one dit than three.
-        dit = mean if mean < 2.0 * self._dit else mean / 3.0
-        return self._clamp_dit(dit), False
+        return self._clamp_dit(self._one_kind_dit(mean)), False
+
+    def _one_kind_dit(self, mean: float) -> float:
+        """The dit when the marks (``mean`` samples long) are all of one
+        kind. Until the speed is known the gaps between them tell: marks
+        about three times the shortest gap are dashes (a letter's elements
+        are a dit apart), marks as long as it (S, H, 5) or shorter
+        (letters of one element) dits. Otherwise (no gap between marks
+        yet, or the speed is known) they are dits if nearer one dit than
+        three: slow dits would be dashes at the default speed."""
+        if not self._calibrated:
+            # The queued gaps after the first mark (the one before it is
+            # the silence before the transmission).
+            gaps = [length for kind, length in self._queue[2:] if kind == "gap"]
+            if gaps:
+                return mean / 3.0 if min(gaps) < self.DASH_GAP * mean else mean
+        return mean if mean < 2.0 * self._dit else mean / 3.0
 
     def _calibrate(self) -> None:
         """Measure the speed from the marks heard so far and decode the

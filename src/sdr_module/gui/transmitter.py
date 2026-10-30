@@ -465,7 +465,8 @@ class _Plan:
         self._since_id = int(max(0.0, since) * self.rate)
         # Job air time since the last ID ended: interval IDs never come back
         # to back (an ID longer than the interval would otherwise starve
-        # the job); at least half an interval of the job goes between them.
+        # the job); at least half an interval of the job goes between them
+        # (a quarter when the ID waits for the end of a word: _choose_splice).
         self._job_since_id = self._since_id
         self._min_gap = (self._interval or 0) // 2
         # The job's samples read so far, and where in them the next

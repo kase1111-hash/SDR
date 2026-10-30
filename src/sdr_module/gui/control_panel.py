@@ -2088,10 +2088,17 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
     def set_squelch_db(self, db: float) -> None:
         """Set the squelch threshold in dB (a manual threshold: Auto goes
-        off)."""
-        value = int(round(db))
+        off). Out of range is the nearest end; a value that isn't a number
+        (e.g. a damaged setting: NaN, infinity) is ignored."""
+        try:
+            db = float(db)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(db):
+            return
         low, high = SQUELCH_RANGE
-        if self._squelch_slider.value() == min(max(value, low), high):
+        value = min(max(int(round(db)), low), high)
+        if self._squelch_slider.value() == value:
             # Same position: still a manual threshold from now on.
             self._squelch_label.setText(f"{self._squelch_slider.value()} dBFS")
             self._auto_off_by_hand()

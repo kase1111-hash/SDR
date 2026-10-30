@@ -15,6 +15,8 @@ regression tests for the confirmed findings.
 * MS-6: the Recording group's Pause shows the pause of the recording its
   Record choice shows.
 * MS-7: a scan doesn't change the filter width each mode remembers.
+* MS-8: a damaged squelch threshold setting (not a number, infinite or
+  huge) doesn't stop the window from opening.
 
 Run offscreen: ``QT_QPA_PLATFORM=offscreen python -m pytest
 tests/test_review_mainstate.py``
@@ -25,12 +27,17 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
 import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from tests.test_gui_chrome import _WindowTestCase  # noqa: E402
+from tests.test_gui_chrome import (  # noqa: E402
+    _FakeSettings,
+    _WindowTestCase,
+    require_pyqt6,
+)
 from tests.test_gui_station_tx import _TxCase  # noqa: E402
 
 FRAME_S = 0.034
@@ -531,6 +538,63 @@ class TestScansLeaveTheRememberedFilters(_MainStateCase):
         self.scanner.stop_scan(stay=True)
         panel._bw_combo.setCurrentText("8 kHz")
         self.assertEqual(panel.filter_memory()["AM"], {"width": "8 kHz"})
+
+
+# ---------------------------------------------------------------------------
+# MS-8: a damaged squelch setting
+# ---------------------------------------------------------------------------
+
+
+class TestDamagedSquelchSetting(unittest.TestCase):
+    """squelch_db = nan, inf or 1e400 in the settings file (damaged, or
+    edited by hand) stopped the window from opening, at every launch:
+    ControlPanel.set_squelch_db's int(round(db)) raised in __init__ (and a
+    huge finite value overflowed the slider)."""
+
+    def window(self, squelch):
+        require_pyqt6(self)
+        from sdr_module.gui import bookmarks_panel, main_window
+
+        store = _FakeSettings()
+        store.values["squelch_db"] = squelch  # (QSettings gives text)
+        for module in (main_window, bookmarks_panel):
+            patcher = mock.patch.object(module, "GuiSettings", lambda: store)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        win = main_window.SDRMainWindow(demo_mode=False)
+        for timer in (win._display_timer, win._status_timer, win._hotplug_timer):
+            timer.stop()
+        self.addCleanup(win.deleteLater)
+        self.addCleanup(win.close)
+        return win
+
+    def test_the_window_opens_with_the_default_threshold(self):
+        for value in ("nan", "inf", "-inf", "1e400"):
+            with self.subTest(value=value):
+                win = self.window(value)
+                self.assertEqual(win._control_panel.get_squelch_db(), -80.0)
+                self.assertEqual(win._squelch_db, -80.0)
+
+    def test_a_huge_threshold_is_the_nearest_end(self):
+        win = self.window("1e12")
+        self.assertEqual(win._control_panel.get_squelch_db(), 0.0)
+        self.assertEqual(win._squelch_db, 0.0)
+
+    def test_the_panel_ignores_a_threshold_that_is_not_a_number(self):
+        require_pyqt6(self)
+        from sdr_module.gui.control_panel import ControlPanel
+
+        panel = ControlPanel()
+        self.addCleanup(panel.deleteLater)
+        panel.set_squelch_db(-50.4)
+        self.assertEqual(panel.get_squelch_db(), -50.0)
+        for value in (float("nan"), float("inf"), float("-inf"), None, "x"):
+            panel.set_squelch_db(value)
+            self.assertEqual(panel.get_squelch_db(), -50.0)
+        panel.set_squelch_db(-1e300)
+        self.assertEqual(panel.get_squelch_db(), -120.0)
+        panel.set_squelch_db(1e300)
+        self.assertEqual(panel.get_squelch_db(), 0.0)
 
 
 if __name__ == "__main__":  # pragma: no cover

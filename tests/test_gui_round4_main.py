@@ -475,21 +475,34 @@ class TestRecordingOnDisk(_RecordingCase):
         self.assertEqual(len(second), 1)
         self.assertNotEqual(first, second)
 
-    def test_import_still_loads_into_memory(self):
+    def test_converted_files_stream_to_disk_too(self):
+        # Converting (the old Import) reads the file a chunk at a time into a
+        # temporary file, like a recording, instead of all of it into memory
+        # (mc:MC-02, rx:RX-08).
         from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
+        from sdr_module.gui import iq_files
 
         samples = (np.arange(5000) * (1 + 1j) / 5000).astype(np.complex64)
         path = os.path.join(self.folder, "import.cs16")
         save_iq_file(path, samples, 1e6, 433.92e6, SampleFormat.INT16, FileFormat.RAW)
-        with (
-            mock.patch.object(
-                self.mw.QFileDialog, "getOpenFileName", return_value=(path, "")
-            ),
-            mock.patch.object(self.mw.QMessageBox, "information"),
+
+        def answer(dialog):
+            if isinstance(dialog, iq_files.ImportOptionsDialog):
+                dialog._rate_edit.setText("1M")
+                dialog._center_edit.setText("433.92")
+                dialog._on_accept()
+                return dialog.result()
+            dialog.buttons()[-1].click()  # the summary: Close
+            return 0
+
+        self.win._exec_dialog = answer
+        with mock.patch.object(
+            self.mw.QFileDialog, "getOpenFileName", return_value=(path, "")
         ):
-            self.win._open_recording()
+            self.win._convert_recording()
         store = self.win._samples_buffer
-        self.assertIsNone(store.path)
+        self.assertIsNotNone(store.path)
+        self.assertEqual(os.path.dirname(store.path), self.folder)
         self.assertEqual(store.sample_count, len(samples))
         target = os.path.join(self.folder, "converted.cf32")
         with mock.patch.object(

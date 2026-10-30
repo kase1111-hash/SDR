@@ -335,26 +335,30 @@ class TestRecordingProtection(_WindowTestCase):
             side_effect=fake_save,
         ):
             self.win._save_recording()
-        self.assertTrue(seen["suggested"].startswith("iq_100.000MHz_"))
+        self.assertTrue(
+            os.path.basename(seen["suggested"]).startswith("iq_100.000MHz_")
+        )
         _samples, meta = load_iq_file(os.path.join(folder, "take.sigmf-data"))
         self.assertAlmostEqual(meta.center_frequency, 100e6)
 
-        # An imported file keeps its own sample rate when converted.
-        with (
-            mock.patch(
-                "sdr_module.gui.main_window.QFileDialog.getOpenFileName",
-                return_value=(os.path.join(folder, "take.sigmf-data"), ""),
-            ),
-            mock.patch.object(QMessageBox, "information"),
-            mock.patch(
-                "sdr_module.dsp.recording.load_iq_file",
-                return_value=(
-                    np.zeros(100, np.complex64),
-                    mock.Mock(sample_rate=2.0e6, center_frequency=145.8e6),
-                ),
-            ),
+        # A converted file keeps its own sample rate and frequency.
+        from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
+
+        other = os.path.join(folder, "other.sigmf-data")
+        save_iq_file(
+            other,
+            np.zeros(100, np.complex64),
+            2.0e6,
+            145.8e6,
+            SampleFormat.FLOAT32,
+            FileFormat.SIGMF,
+        )
+        self.win._exec_dialog = lambda box: box.buttons()[-1].click()  # Close
+        with mock.patch(
+            "sdr_module.gui.main_window.QFileDialog.getOpenFileName",
+            return_value=(other, ""),
         ):
-            self.win._open_recording()
+            self.win._convert_recording()
         self.assertFalse(self.win._buffer_unsaved)
         self.win.set_sample_rate(2.4e6)
         with mock.patch(

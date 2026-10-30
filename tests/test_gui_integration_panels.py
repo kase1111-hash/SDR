@@ -141,10 +141,13 @@ class TestControlPanelFixes(unittest.TestCase):
         names = [combo.itemText(i) for i in range(combo.count())]
         self.assertEqual(names, list(RECORDING_FORMATS))
         self.assertTrue(all("IQ" not in n.replace("I/Q", "") for n in names))
-        # The main window maps the label to a file type by these tests.
-        self.assertIn(".cf32", names[0])
-        self.assertTrue(names[1].lower().startswith("wav"))
-        self.assertIn("sigmf", names[2].lower())
+        # All five save formats, SigMF first (it keeps the frequency and
+        # rate, rx:UX-06); the window maps each label to its file type by the
+        # extension in parentheses.
+        self.assertEqual(len(names), 5)
+        self.assertEqual(names[0], "SigMF, keeps frequency & rate")
+        extensions = [combo.itemData(i) for i in range(combo.count())]
+        self.assertEqual(extensions, [".sigmf-data", ".cf32", ".cs16", ".wav", ".raw"])
         self.assertIn("not audio", combo.toolTip())
 
     # -- Frequency ------------------------------------------------------

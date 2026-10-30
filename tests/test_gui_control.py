@@ -341,7 +341,9 @@ class TestRecording(_PanelTestCase):
         self.panel._record_btn.setChecked(True)
         self.assertEqual(self.panel._record_status.property("tone"), "danger")
         self.assertTrue(self.panel._pause_btn.isEnabled())
-        self.assertFalse(self.panel._format_combo.isEnabled())
+        # The format only picks how the take is saved: it can still change
+        # (rx:UX-06).
+        self.assertTrue(self.panel._format_combo.isEnabled())
 
         self.panel._pause_btn.click()
         self.assertEqual(paused, [True])

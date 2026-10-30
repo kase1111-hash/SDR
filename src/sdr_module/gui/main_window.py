@@ -101,6 +101,7 @@ from .. import __version__
 from ..devices.base import SDRDevice
 from ..dsp.nco import Nco
 from ..utils.tooltips import get_short_tip
+from . import file_dialogs
 from .audio_chain import (
     AGC_SPEEDS,
     AM_CARRIER_TIME_S,
@@ -117,6 +118,7 @@ from .audio_chain import (
     channel_power_db,
     make_noise_reduction,
 )
+from .audio_recording import AudioTake, audio_file_name
 from .audio_sink import AudioSink
 from .bookmarks_panel import BookmarksPanel
 from .control_panel import (
@@ -127,7 +129,21 @@ from .control_panel import (
     closest_bandwidth,
 )
 from .decoder_panel import DecoderPanel
+from .file_jobs import decode_recording, load_recording, run_job, write_recording
+from .iq_files import (
+    OPEN_FILTERS,
+    REQUIRED,
+    DecodeOptionsDialog,
+    ImportOptionsDialog,
+    IqFileOptions,
+    RecordingInfoDialog,
+    ask_recording_details,
+    describe_iq_file,
+    needs_options,
+    split_name,
+)
 from .level_meter import LevelMeter
+from .playback import PlaybackBar, PlaybackController
 from .receiver_bar import FrequencyDigits, ReceiverBar
 from .settings_store import DEFAULT_FREQUENCY_HZ, GuiSettings
 from .spectrum_widget import SpectrumWidget
@@ -1502,6 +1518,16 @@ class _SampleStore:
     __hash__ = object.__hash__
 
 
+def _clock_text(seconds: float) -> str:
+    """``12.3 -> "00:12"``, ``3725 -> "1:02:05"`` (recording lengths)."""
+    total = max(0, int(seconds))
+    hours, rest = divmod(total, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
 # ---------------------------------------------------------------------------
 # Status bar message label
 # ---------------------------------------------------------------------------
@@ -1809,6 +1835,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # live samples that haven't been saved yet.
         self._buffer_meta: Tuple[Optional[float], Optional[float]] = (None, None)
         self._buffer_unsaved = False
+        # The buffer holds a converted file (its name) rather than a take,
+        # and the file the last take (I/Q or audio) was saved to.
+        self._buffer_source = ""
+        self._last_saved = ""
+        # Record Audio: the take being written (None while not recording).
+        self._audio_take: Optional[AudioTake] = None
+        # When the take in the buffer started: UTC (ISO, for its metadata)
+        # and local time (for its file name).
+        self._take_started = ""
+        self._take_stamp = ""
         # A new recording replaces the buffer only once samples arrive, so an
         # armed recording that captures nothing keeps the previous one.
         self._capture_pending = False
@@ -1978,7 +2014,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._display_splitter.addWidget(plot)
         self._display_splitter.setStretchFactor(0, 2)
         self._display_splitter.setStretchFactor(1, 3)
-        self._main_splitter.addWidget(self._display_splitter)
+        # The plots, with the playback strip under them while a recording
+        # plays (File > Open Recording).
+        display_column = QWidget()
+        column = QVBoxLayout(display_column)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+        column.addWidget(self._display_splitter, 1)
+        self._playback_bar = PlaybackBar()
+        column.addWidget(self._playback_bar)
+        self._playback = PlaybackController(self, self._playback_bar)
+        self._main_splitter.addWidget(display_column)
 
         # Right side: control panel over the tabbed tool panels
         self._right_splitter = QSplitter(Qt.Orientation.Vertical)
@@ -2158,20 +2204,51 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         # ---- File ----
         file_menu = menubar.addMenu("&File")
-        self._add_action(
+        self._open_recording_action = self._add_action(
             file_menu,
-            "Import &Recording (convert format)...",
+            "&Open Recording...",
             self._open_recording,
             QKeySequence.StandardKey.Open,
-            "Load an I/Q file so you can save it in another format with Save "
-            "Recording (playback isn't supported yet)",
+            "Play an I/Q recording through the receiver: spectrum, waterfall, "
+            "audio and decoders, with a position slider, Loop and speed",
+        )
+        self._close_recording_action = self._add_action(
+            file_menu,
+            "C&lose Recording",
+            lambda: self._playback.close(restore=True),
+            tip="Stop playing the recording and go back to the device used " "before",
+        )
+        self._close_recording_action.setEnabled(False)
+        self._add_action(
+            file_menu,
+            "Recording &Info...",
+            self._show_recording_info,
+            tip="Show what an I/Q file holds: format, sample rate, center "
+            "frequency, length, and whether its samples look right",
         )
         self._add_action(
+            file_menu,
+            "&Decode Recording...",
+            self._decode_recording,
+            tip="Run the Decoder panel's protocol over a whole I/Q file, much "
+            "faster than real time; the messages go to the Decoder tab",
+        )
+        file_menu.addSeparator()
+        self._add_action(
+            file_menu,
+            "Con&vert Recording...",
+            self._convert_recording,
+            "Ctrl+Shift+O",
+            "Load an I/Q file (any format, including rtl_sdr and HackRF "
+            "captures) to save it in another format; the receiver isn't "
+            "retuned",
+        )
+        self._save_recording_action = self._add_action(
             file_menu,
             "&Save Recording...",
             self._save_recording,
             QKeySequence.StandardKey.Save,
-            "Write the recorded I/Q samples to a file",
+            "Write the recorded (or converted) I/Q samples to a file",
         )
         file_menu.addSeparator()
         self._add_action(
@@ -2251,6 +2328,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         self._record_action.triggered.connect(self._toggle_recording)
         radio_menu.addAction(self._record_action)
+        self._record_audio_action = self._add_action(
+            radio_menu,
+            "Record &Audio",
+            self._toggle_audio_recording,
+            "Ctrl+Shift+A",
+            "Record what you hear (the demodulated audio) to a WAV file in the "
+            "recordings folder",
+            checkable=True,
+        )
         radio_menu.addSeparator()
         self._audio_action = self._add_action(
             radio_menu,
@@ -2515,7 +2601,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._text_width(self._record_button, self._RECORD_TEXT)
         )
         self._record_button.clicked.connect(
-            lambda _checked=False: self._record_action.trigger()
+            lambda _checked=False: self._on_record_button()
         )
         toolbar.addWidget(self._record_button)
         self._update_record_button_tip()
@@ -2644,6 +2730,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         self._recording_info_label.setVisible(False)
         statusbar.addPermanentWidget(self._recording_info_label)
+        # Record Audio: "AUDIO 00:12" while what you hear is recorded.
+        self._audio_rec_label = QLabel("AUDIO")
+        set_role(self._audio_rec_label, "badge", "danger")
+        self._audio_rec_label.setAccessibleName("Audio recording time")
+        self._audio_rec_label.setVisible(False)
+        statusbar.addPermanentWidget(self._audio_rec_label)
 
     def _setup_timers(self):
         """Setup update timers."""
@@ -2704,6 +2796,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._connect_audio_controls()
         self._control_panel._format_combo.currentTextChanged.connect(
             lambda text: self._save_setting("recording_format", text)
+        )
+        # The Recording group: what Record records, the take after Stop,
+        # the recordings folder and auto-save.
+        panel = self._control_panel
+        panel.record_kind_changed.connect(self._on_record_kind_changed)
+        panel.take_save_requested.connect(self._on_take_save)
+        panel.take_discard_requested.connect(self._on_take_discard)
+        panel.open_folder_requested.connect(self._on_open_folder)
+        panel.folder_change_requested.connect(self._on_change_recordings_folder)
+        panel.auto_save_changed.connect(self._on_auto_save_changed)
+        # The Decoder tab's Decode File... (File > Decode Recording).
+        self._decoder_panel.decode_file_requested.connect(
+            lambda: self._decode_recording()
         )
         # Apply Preset tunes silently; confirm it in the status bar. (The
         # panel's own handler is connected first, so this runs after it.)
@@ -2898,10 +3003,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         set_tone(self._message_label, tone)
         self._message_timer.start(max(500, int(duration_ms)))
 
-    def _show_status_error(self, message: str, duration_ms: int = 6000) -> None:
-        """Show a transient error message (red) in the status bar."""
+    def _show_status_error(
+        self, message: str, duration_ms: int = 6000, log: bool = True
+    ) -> None:
+        """Show a transient error message (red) in the status bar, and log
+        it for Tools > Error History (``log=False``: the caller logged it
+        already, so the event is listed once)."""
         self._show_status_message(message, "danger", duration_ms)
-        logger.warning(f"Status bar error: {message}")
+        if log:
+            logger.warning(f"Status bar error: {message}")
 
     def _clear_status_message(self) -> None:
         self._message_label.setText("")
@@ -3044,6 +3154,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._update_recording_status()  # also armed / capturing
         else:
             self._sync_recording_armed()
+        self._update_audio_recording_status()
+
+        # A recording playing back: Start/Stop play and pause it.
+        self._playback.sync_state_ui()
+        self._close_recording_action.setEnabled(self._playback.active)
 
         self._update_window_title()
         if self._info_panel.isVisible():
@@ -3077,8 +3192,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         p.set_value(
             "device", self._device_display_name(), None if has_device else "warning"
         )
+        playback_state = self._playback.info_state()
         if not has_device:
             p.set_value("state", "Not connected", "warning")
+        elif playback_state:
+            p.set_value("state", playback_state, "success" if running else "muted")
         elif running:
             p.set_value("state", "Receiving", "success")
         else:
@@ -3269,17 +3387,54 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # Recording sync between toolbar, menu and control panel
     # ------------------------------------------------------------------
 
+    def _record_kind(self) -> str:
+        """What the Record buttons record: "iq" or "audio" (the Recording
+        group's Record choice)."""
+        try:
+            return self._control_panel.record_kind()
+        except AttributeError:  # pragma: no cover - partial windows in tests
+            return "iq"
+
+    def _on_record_button(self) -> None:
+        """The toolbar's Record: records what the Recording group's Record
+        choice says (Radio > Record I/Q or Record Audio)."""
+        if self._record_kind() == "audio":
+            self._record_audio_action.toggle()
+        else:
+            self._record_action.trigger()
+        self._sync_record_buttons()
+
     def _on_panel_record_started(self, fmt: str) -> None:
-        """Start recording from the control panel's Record button."""
-        if not self._start_recording():
-            self._control_panel.set_recording_state(False)
+        """Start recording from the control panel's Record button (I/Q or
+        audio, as its Record choice says)."""
+        if self._record_kind() == "audio":
+            self._start_audio_recording()
+        else:
+            self._start_recording()
+        self._sync_record_buttons()
 
     def _on_panel_record_stopped(self) -> None:
         """Stop recording from the control panel's Record button."""
-        self._stop_recording()
+        if self._record_kind() == "audio":
+            self._stop_audio_recording()
+        else:
+            self._stop_recording()
+        self._sync_record_buttons()
 
     def _on_panel_record_paused(self, paused: bool) -> None:
         """Pause or resume capturing from the control panel's Pause button."""
+        if self._record_kind() == "audio":
+            take = self._audio_take
+            if take is None or bool(paused) == take.paused:
+                return
+            take.paused = bool(paused)
+            self._update_audio_recording_status()
+            self._show_status_message(
+                "Audio recording paused" if paused else "Audio recording resumed",
+                "warning" if paused else None,
+                2500,
+            )
+            return
         paused = bool(paused) and self._recording
         if paused == self._recording_paused:
             return
@@ -3292,24 +3447,60 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             2500,
         )
 
+    def _on_record_kind_changed(self, kind: str) -> None:
+        """The Recording group's Record choice: the Record buttons now
+        record that (and show its state)."""
+        self._save_setting("recording/kind", kind)
+        self._sync_record_buttons()
+        if kind == "audio" and self._audio_take is not None:
+            self._update_audio_recording_status()
+
     def _sync_record_ui(self, recording: bool) -> None:
-        for control in (self._record_action, self._record_button):
-            control.blockSignals(True)
-            control.setChecked(recording)
-            control.blockSignals(False)
-        role = "danger" if recording else ""
-        if (self._record_button.property("role") or "") != role:
-            set_role(self._record_button, role or None)
-        self._update_record_button_tip()
+        """The I/Q recording's state on Radio > Record I/Q, the REC badge
+        and (when they record I/Q) the Record buttons."""
+        self._record_action.blockSignals(True)
+        self._record_action.setChecked(recording)
+        self._record_action.blockSignals(False)
         self._recording_label.setVisible(recording)
         self._recording_info_label.setVisible(recording)
+        self._sync_record_buttons()
         if recording:
             self._update_recording_status()
         else:
             self._sync_recording_armed()
 
+    def _sync_record_buttons(self) -> None:
+        """Show on the toolbar's and the Recording group's Record buttons
+        whether what they record (I/Q or audio) is recording."""
+        audio = self._record_kind() == "audio"
+        on = (self._audio_take is not None) if audio else bool(self._recording)
+        button = self._record_button
+        button.blockSignals(True)
+        button.setChecked(on)
+        button.blockSignals(False)
+        role = "danger" if on else ""
+        if (button.property("role") or "") != role:
+            set_role(button, role or None)
+        button.setAccessibleName("Record audio" if audio else "Record I/Q")
+        self._update_record_button_tip()
+        panel = self._control_panel
+        if panel._record_btn.isChecked() != on:
+            panel.set_recording_state(on)
+        if audio and self._audio_take is not None:
+            panel.update_record_time(int(self._audio_take.seconds))
+        self._sync_recording_armed()
+
     def _update_record_button_tip(self) -> None:
-        if self._recording:
+        if self._record_kind() == "audio":
+            if self._audio_take is not None:
+                tip = "Stop recording audio (Ctrl+Shift+A)"
+            else:
+                tip = (
+                    "Record what you hear to a WAV file in the recordings "
+                    "folder (Ctrl+Shift+A). The Recording group's Record choice "
+                    "switches this button to I/Q."
+                )
+        elif self._recording:
             tip = "Stop recording (Ctrl+Shift+R)"
         else:
             tip = (
@@ -3431,16 +3622,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._push_decoded_message(msg)
         self._decoder_panel.set_decoder_status(decoder.status)
 
-    def _push_decoded_message(self, msg: Any) -> None:
+    def _push_decoded_message(self, msg: Any, note: str = "") -> None:
         """Render one decoded message into the decoder panel.
 
         Rows use the protocol names of the panel's selector, and a message
         that failed its checks is added as invalid (tinted, counted under
         Invalid). A failed frame with nothing decoded in it (e.g. an AX.25
         CRC error, which noise produces about once a second) is left out.
+        ``note`` is added to the message text (where it came from: File >
+        Decode Recording names the file and the time in it).
         """
         try:
             address, content = self._describe_message(msg)
+            if note and (address or content):
+                content = f"{content}  ({note})" if content else f"({note})"
             valid = bool(getattr(msg, "valid", True))
             if not valid:
                 if not (address or content):
@@ -3654,6 +3849,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             center, span, why = lock
             if not self._channel_fits(freq - center, rate=span):
                 covered = format_mhz_range(center - span / 2, center + span / 2)
+                if abs(freq - center) < span / 2:
+                    # Inside, but the channel (the Bandwidth) sticks out.
+                    width = self._control_panel._bw_combo.currentText()
+                    return self._refuse_tuning(
+                        f"A {width} channel at {format_frequency(freq)} doesn't "
+                        f"fit inside {why} ({covered}): choose a narrower "
+                        "Bandwidth, or tune nearer its middle."
+                    )
                 return self._refuse_tuning(
                     f"{format_frequency(freq)} is outside {why}, which covers "
                     f"{covered}."
@@ -4491,7 +4694,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             started = self._device.start_rx()
         except Exception as e:
             logger.error(f"Could not start receiving: {e}")
-            self._show_status_error(f"Could not start receiving: {e}")
+            self._show_status_error(f"Could not start receiving: {e}", log=False)
             return
         if started is False:
             self._show_status_error("The device did not start streaming")
@@ -4679,8 +4882,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._sync_record_ui(False)  # cancelled: stay stopped
         else:
             self._stop_recording()
-        # Keep the control panel's Record button in sync (without re-emitting).
-        self._control_panel.set_recording_state(self._recording)
+        # Keep the Record buttons in sync (without re-emitting).
+        self._sync_record_buttons()
 
     def _start_recording(self) -> bool:
         """Start (or arm) a recording. False if the user kept an unsaved one
@@ -4740,7 +4943,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         except OSError as e:  # pragma: no cover - disk trouble
             logger.warning(f"Could not write the end of the recording: {e}")
         count = self._buffer_sample_count()
-        if captured and count:
+        if captured and count and self._control_panel.is_auto_save():
+            self._auto_save_take()
+        elif captured and count:
             self._show_status_message(
                 f"Recorded {count:,} samples. Use File > Save Recording (Ctrl+S) "
                 "to write them to disk.",
@@ -4754,6 +4959,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "warning",
                 6000,
             )
+        self._update_take_panel()
         logger.info("Recording stopped")
 
     def _buffer_sample_count(self) -> int:
@@ -4783,6 +4989,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if not (self._buffer_unsaved and self._samples_buffer):
             return True
         live = self._recording and not self._capture_pending
+        if live and self._control_panel.is_auto_save():
+            # Stopping saves it (Save automatically): nothing to ask.
+            self._toggle_recording(False)
+            if not self._buffer_unsaved:
+                return True
+            live = False
         count = self._buffer_sample_count()
         freq, _rate = self._buffer_meta
         # (A non-breaking space keeps "100.000 MHz" on one line.)
@@ -4830,7 +5042,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._replace_buffer(_SampleStore())
         self._buffer_meta = (None, None)
         self._buffer_unsaved = False
+        self._buffer_source = ""
         self._clear_status_message()  # e.g. "Use File > Save Recording"
+        self._update_take_panel()
 
     def _recording_capturing(self) -> bool:
         """True while samples are actually being added to the recording."""
@@ -4847,9 +5061,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return self._recording and not (self._is_running and self._device is not None)
 
     def _sync_recording_armed(self) -> None:
-        """Show on the Recording panel whether the recording is armed or
-        capturing, as the status bar's REC badge does."""
-        self._control_panel.set_recording_armed(self._recording_armed())
+        """Show on the Recording panel whether the recording is armed (or
+        waiting for the receiver after capturing some) or capturing, as the
+        status bar's REC (or AUDIO) badge does."""
+        panel = self._control_panel
+        if self._record_kind() == "audio":
+            take = self._audio_take
+            waiting = take is not None and not (
+                self._is_running and self._device is not None
+            )
+            panel.set_recording_armed(waiting, waiting=bool(take and take.samples))
+            return
+        armed = self._recording_armed()
+        panel.set_recording_armed(armed, waiting=armed and not self._capture_pending)
 
     def _update_rec_clock(self) -> None:
         """Bank the running stretch of the recording clock and restart it if
@@ -4883,6 +5107,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             badge.setText(f"PAUSED {elapsed}")
             set_tone(badge, "warning")
             badge.setToolTip("Recording paused. Resume it in the Recording panel.")
+        elif not self._recording_capturing() and not self._capture_pending:
+            # Stopped mid-recording: what was captured is kept.
+            badge.setText(f"REC WAITING {elapsed}")
+            set_tone(badge, "warning")
+            badge.setToolTip(
+                "The receiver is stopped: the recording resumes when it starts "
+                "again (Space)"
+            )
         elif not self._recording_capturing():
             badge.setText("REC ARMED")
             set_tone(badge, "warning")
@@ -4942,7 +5174,298 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         message = f"Recording stopped: {reason}.{kept}"
         logger.warning(message)
-        self._show_status_error(message, 20000)
+        self._show_status_error(message, 20000, log=False)  # (logged once)
+
+    # -- the take, the recordings folder and auto-save ---------------------
+
+    def _auto_save_take(self) -> bool:
+        """Save automatically is on: the take just stopped goes to the
+        recordings folder with an automatic name, in the panel's format."""
+        folder = file_dialogs.recordings_folder(self._settings)
+        if not file_dialogs.ensure_folder(folder):
+            self._show_status_error(
+                f"Couldn't save the recording automatically: the folder "
+                f"{file_dialogs.display_path(folder)} can't be created. Use "
+                "Save... in the Recording group."
+            )
+            return False
+        ext = self._panel_recording_extension()
+        path = file_dialogs.unique_path(folder, self._suggested_iq_name(ext))
+        if not self._write_buffer(path, quiet=True):
+            return False
+        self._show_status_message(
+            f"Saved the recording to {file_dialogs.display_path(path)}",
+            "success",
+            8000,
+        )
+        return True
+
+    def _take_summary(self) -> Tuple[str, Optional[str], str]:
+        """(text, state, tooltip) of the Recording group's take line."""
+        store = self._samples_buffer
+        count = store.sample_count if store else 0
+        if self._recording and not self._capture_pending:
+            return "", None, ""  # the status line shows it
+        if count and (self._buffer_unsaved or self._buffer_source):
+            center, rate = self._buffer_meta
+            parts = []
+            if rate:
+                parts.append(_clock_text(count / rate))
+            parts.append(f"{count * 8 / 1e6:,.0f} MB")
+            where = f" @ {format_frequency(center)}" if center else ""
+            if self._buffer_source:
+                text = f"Loaded {self._buffer_source} · " + " · ".join(parts) + where
+                tip = (
+                    f"{self._buffer_source} is loaded to be saved in another "
+                    "format (File > Convert Recording)."
+                )
+                return text, "loaded", tip
+            text = "Unsaved · " + " · ".join(parts) + where
+            tip = "This recording is kept in a temporary file until you save it."
+            return text, "unsaved", tip
+        if self._last_saved and os.path.exists(self._last_saved):
+            name = os.path.basename(self._last_saved)
+            return f"Saved {name}", "saved", self._last_saved
+        return "", None, ""
+
+    def _update_take_panel(self) -> None:
+        """Show the take (unsaved, loaded or saved) in the Recording group."""
+        text, state, tip = self._take_summary()
+        self._control_panel.show_take(text, state, tip)
+
+    def _on_take_save(self) -> None:
+        """The Recording group's Save... (Save As... for a loaded file)."""
+        self._save_recording()
+
+    def _on_take_discard(self) -> None:
+        """The Recording group's Discard (Unload for a loaded file)."""
+        if not self._samples_buffer:
+            self._update_take_panel()
+            return
+        if self._buffer_unsaved and not self._buffer_source:
+            count = self._buffer_sample_count()
+            answer = QMessageBox.question(
+                self,
+                "Discard Recording",
+                f"Delete the {count * 8 / 1e6:,.0f} MB recording without saving it?",
+                QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Discard:
+                return
+        name = self._buffer_source
+        self._discard_recording()
+        self._show_status_message(
+            f"Unloaded {name}." if name else "Recording discarded.", None, 3000
+        )
+
+    def _on_open_folder(self) -> None:
+        """Show the last saved recording in the file manager."""
+        target = self._last_saved or file_dialogs.recordings_folder(self._settings)
+        if not file_dialogs.show_in_folder(target):
+            self._show_status_message(
+                f"Couldn't open the folder: {file_dialogs.display_path(target)}",
+                "warning",
+                6000,
+            )
+
+    def _on_change_recordings_folder(self) -> None:
+        """Choose where audio recordings and auto-saved takes go."""
+        current = file_dialogs.recordings_folder(self._settings)
+        folder = file_dialogs.choose_folder(
+            self,
+            self._settings,
+            "iq",
+            "Recordings Folder",
+            current if os.path.isdir(current) else "",
+        )
+        if not folder:
+            return
+        file_dialogs.set_recordings_folder(self._settings, folder)
+        self._control_panel.set_recordings_folder(folder)
+        self._show_status_message(
+            f"Recordings go to {file_dialogs.display_path(folder)}", None, 4000
+        )
+
+    def _on_auto_save_changed(self, on: bool) -> None:
+        self._save_setting("recording/auto_save", bool(on))
+        if on and not self._restoring:
+            folder = file_dialogs.display_path(
+                file_dialogs.recordings_folder(self._settings)
+            )
+            self._show_status_message(
+                f"I/Q recordings are saved to {folder} when they stop.", None, 5000
+            )
+
+    # -- Record Audio --------------------------------------------------------
+
+    def _toggle_audio_recording(self, checked: bool) -> None:
+        """Radio > Record Audio (Ctrl+Shift+A)."""
+        if checked:
+            self._start_audio_recording()
+        else:
+            self._stop_audio_recording()
+
+    def _start_audio_recording(self) -> bool:
+        """Record what you hear: the demodulated audio, as 48 kHz 16-bit
+        WAV in the recordings folder, named after the frequency, mode and
+        time. It records whether or not the speaker is on (squelched
+        stretches as silence), also while a recording plays back."""
+        if self._audio_take is not None:
+            return True
+        mode = self._control_panel.get_demod_mode()
+        if mode not in _AUDIBLE_MODES:
+            self._show_status_message(
+                "None (I/Q) has no audio to record: choose AM, FM, USB, LSB or "
+                "CW in Demodulation first.",
+                "warning",
+                8000,
+            )
+            self._sync_audio_record_ui()
+            return False
+        folder = file_dialogs.recordings_folder(self._settings)
+        if not file_dialogs.ensure_folder(folder):
+            self._show_status_error(
+                f"Can't record audio: the folder {file_dialogs.display_path(folder)} "
+                "can't be created. Choose another in the Recording group."
+            )
+            self._sync_audio_record_ui()
+            return False
+        freq = self._current_frequency()
+        path = file_dialogs.unique_path(
+            folder, audio_file_name(freq, self._mode_text(mode))
+        )
+        try:
+            take = AudioTake(path, freq, mode, int(_AUDIO_RATE))
+        except (OSError, RuntimeError) as e:
+            logger.error(f"Could not start an audio recording in {path}: {e}")
+            self._show_status_error(
+                f"Can't record audio to {file_dialogs.display_path(path)}: {e}",
+                log=False,
+            )
+            self._sync_audio_record_ui()
+            return False
+        self._audio_take = take
+        self._sync_audio_record_ui()
+        note = ""
+        if not (self._is_running and self._device is not None):
+            note = " It starts with the receiver (Space)."
+        elif not self._audio_enabled:
+            note = " (The speaker is off; the recording still gets the audio.)"
+        self._show_status_message(
+            f"Recording audio to {os.path.basename(path)}.{note}", "info", 5000
+        )
+        logger.info(f"Audio recording started: {path}")
+        return True
+
+    def _stop_audio_recording(self, quiet: bool = False) -> Optional[str]:
+        """Finish the audio recording (it is saved as it records); returns
+        its path, None if none was running."""
+        take = self._audio_take
+        if take is None:
+            return None
+        self._audio_take = None
+        seconds = take.stop()
+        if take.samples:
+            self._last_saved = take.path
+        else:
+            # Nothing was received: no empty file left behind.
+            try:
+                os.remove(take.path)
+            except OSError:
+                pass
+        self._sync_audio_record_ui()
+        self._update_take_panel()
+        if not quiet:
+            if take.samples:
+                self._show_status_message(
+                    f"Saved {_clock_text(seconds)} of audio to "
+                    f"{file_dialogs.display_path(take.path)}",
+                    "success",
+                    8000,
+                )
+            else:
+                self._show_status_message(
+                    "Audio recording stopped: nothing was received, so nothing "
+                    "was saved.",
+                    "warning",
+                    6000,
+                )
+        logger.info(f"Audio recording stopped: {take.path} ({seconds:.1f} s)")
+        return take.path
+
+    def _sync_audio_record_ui(self) -> None:
+        on = self._audio_take is not None
+        action = self._record_audio_action
+        if action.isChecked() != on:
+            action.blockSignals(True)
+            action.setChecked(on)
+            action.blockSignals(False)
+        self._update_audio_recording_status()
+        self._sync_record_buttons()
+
+    def _update_audio_recording_status(self) -> None:
+        """The AUDIO badge ("AUDIO 00:12") and, when the Record buttons
+        record audio, the Recording group's timer."""
+        take = getattr(self, "_audio_take", None)
+        label = getattr(self, "_audio_rec_label", None)
+        if label is None:
+            return
+        label.setVisible(take is not None)
+        if take is None:
+            return
+        clock = _clock_text(take.seconds)
+        receiving = self._is_running and self._device is not None
+        where = file_dialogs.display_path(take.path)
+        if take.paused:
+            label.setText(f"AUDIO PAUSED {clock}")
+            set_tone(label, "warning")
+            label.setToolTip(f"Audio recording paused ({where})")
+        elif not receiving:
+            label.setText(f"AUDIO {clock}")
+            set_tone(label, "warning")
+            label.setToolTip(
+                f"Recording audio to {where}: waiting for the receiver to "
+                "start (Space)"
+            )
+        else:
+            label.setText(f"AUDIO {clock}")
+            set_tone(label, "danger")
+            label.setToolTip(
+                f"Recording what you hear to {where}. Radio > Record Audio "
+                "(Ctrl+Shift+A) stops it."
+            )
+        if self._record_kind() == "audio":
+            self._control_panel.update_record_time(int(take.seconds))
+            self._sync_recording_armed()
+
+    def _record_audio_block(
+        self, audio: Optional[np.ndarray], open_: bool, seconds: float, joined: bool
+    ) -> None:
+        """Give the audio recording this block: ``audio`` as heard while the
+        squelch is ``open_`` (silence otherwise), or ``seconds`` of silence
+        when nothing was demodulated."""
+        take = self._audio_take
+        if take is None:
+            return
+        try:
+            if audio is None:
+                take.silence(seconds)
+            else:
+                take.write(audio, open_, continuous=not joined)
+        except Exception as e:
+            self._audio_take = None
+            try:
+                take.stop()
+            except Exception as stop_error:  # pragma: no cover - disk trouble
+                logger.debug(f"Could not finish {take.path}: {stop_error}")
+            message = (
+                f"Audio recording stopped: {file_dialogs.display_path(take.path)} "
+                f"can't be written ({e}). What was recorded is kept."
+            )
+            logger.warning(message)
+            self._show_status_error(message, 20000, log=False)
+            self._sync_audio_record_ui()
 
     # ------------------------------------------------------------------
     # Periodic updates
@@ -4968,10 +5491,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         dev = self._device
         if isinstance(dev, SDRDevice):
             return self._drain_device(dev)
-        if self._demo_mode or _is_demo_device(dev):
-            rate = self._device_sample_rate()
+        if self._demo_mode or _is_demo_device(dev) or getattr(dev, "paced", False):
+            # (A recording playing back is paced like the demo, times its
+            # playback speed.)
+            rate = self._pacing_rate()
             return dev.read_samples(self._pacer.demo_request(rate, time.monotonic()))
         return dev.read_samples(DISPLAY_BLOCK)
+
+    def _pacing_rate(self) -> float:
+        """Samples per second the display loop takes: the sample rate, times
+        the speed of a recording playing back."""
+        rate = self._device_sample_rate()
+        speed = getattr(self._device, "speed", 1.0) if self._playback.active else 1.0
+        try:
+            return rate * max(0.01, float(speed))
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            return rate
 
     def _drain_device(self, dev: SDRDevice) -> Optional[np.ndarray]:
         """The transfers a hardware driver has queued, joined, up to the
@@ -5025,7 +5560,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._process_block(samples)
         # How long the frame took against the time its samples cover.
         self._pacer.measured(
-            len(samples), self._device_sample_rate(), time.perf_counter() - started
+            len(samples), self._pacing_rate(), time.perf_counter() - started
         )
 
     def _process_block(self, samples: np.ndarray) -> None:
@@ -5090,8 +5625,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._capture_pending = False
             self._replace_buffer(_SampleStore(self._capture_folder()))
             self._buffer_meta = tuned
+            self._buffer_source = ""
+            self._take_started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            self._take_stamp = time.strftime("%Y%m%d_%H%M%S")
             self._retune_warned = False
             self._sync_recording_armed()
+            self._update_take_panel()  # (the status line shows the new take)
         elif not self._retune_warned and any(
             known is not None and abs(known - now) > 0.5
             for known, now in zip(self._buffer_meta, tuned, strict=True)
@@ -5225,8 +5764,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _realtime(self) -> bool:
         """Whether the device delivers (close to) its full sample rate.
 
-        True until there is a second of history to judge by.
+        True until there is a second of history to judge by. A recording
+        playing faster or slower than real time isn't (its audio would
+        stutter): audio plays at 1x only.
         """
+        if self._playback.active and self._playback.speed != 1.0:
+            return False
         history = self._rx_history
         if len(history) < 2:
             return True
@@ -5464,10 +6007,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # SSTV is FM; it gets every block (no squelch) so its line timing
         # stays intact, and it listens even with the speaker off.
         sstv = mode == "FM" and self._sstv_listening()
+        # Record Audio gets every block too: what is heard, and silence
+        # while the squelch is closed (or there is no audio in this mode).
+        take = self._audio_take
+        recording = take is not None and not take.paused
         # The block after the speaker stopped is still demodulated: it
         # fades out instead of breaking off.
         fading_out = self._audio_join.playing and not speaker
-        if not (speaker or sstv or fading_out) or not audible:
+        if not (speaker or sstv or fading_out or recording) or not audible:
             if self._demod_running:
                 # Closed for real (not during the hang): start afresh.
                 chain.reset_demodulator()
@@ -5479,6 +6026,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 # (Another mode with no audio: no block to fade out.)
                 self._audio.write(self._audio_join.release())
             self._show_detected_tone()
+            if recording:
+                self._record_audio_block(None, False, seconds, False)
             return
         deviation = self._control_panel.get_fm_deviation()
         try:
@@ -5489,8 +6038,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._demod_running = False
             if self._audio_join.playing:
                 self._audio.write(self._audio_join.release())
+            if recording:
+                self._record_audio_block(None, False, seconds, False)
             return
         self._demod_running = True
+        tone_ok = True
         if mode == "FM":
             # CTCSS: what tone the station sends, and the tone squelch
             # (broadcast stations send none: not looked for unless asked).
@@ -5505,6 +6057,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._tone_blocked = False
             if self._tones_checked(deviation):
                 if not tones.process(chain.pre_nr_audio):
+                    tone_ok = False
                     self._tone_blocked = speaker
                     speaker = False
             elif tones.detected_hz is not None:
@@ -5521,6 +6074,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             or deviation != self._join_deviation
             or nr is not self._join_nr
         )
+        if recording and take is not None:
+            # (Its own crossfade when a new chain takes over.)
+            last = take.stream_key
+            joined = last is not None and not (
+                last[0] is chain and last[1] == deviation and last[2] is nr
+            )
+            take.stream_key = (chain, deviation, nr)
+            self._record_audio_block(audio, gate.is_open and tone_ok, seconds, joined)
         if speaker:
             if join.playing and new_stream:
                 out = join.join(audio)  # crossfade from the last sample
@@ -5618,6 +6179,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
 
     def _realtime_hint(self) -> str:
+        if self._playback.active and self._playback.speed != 1.0:
+            return (
+                f"Playing at {self._playback.speed:g}x: audio plays at 1x only "
+                "(the spectrum, decoders and recordings keep working)."
+            )
         if self._demo_mode:
             return (
                 "The demo device can't keep up in real time right now, so "
@@ -5685,6 +6251,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Update status bar (and the Info tab while it is visible)."""
         if self._recording:
             self._update_recording_status()
+        if self._audio_take is not None:
+            self._update_audio_recording_status()
         if self._info_panel.isVisible():
             self._refresh_info_panel()
 
@@ -5717,6 +6285,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """
         from .device_dialog import DeviceDialog
 
+        # Choosing a device ends a playback: back to the device from before
+        # (it may be the one chosen again, which must be free to open).
+        self._playback.close(restore=True, resume=False)
         was_running = self._is_running and self._device is not None
         released: List[str] = []
         dialog = DeviceDialog(self)
@@ -5816,7 +6387,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._apply_tuning_range()  # back to every receiver's range
 
     def _disconnect_device(self):
-        """Disconnect from device."""
+        """Disconnect from device (while a recording plays: close it, and
+        the device used before it too)."""
+        if self._playback.active:
+            device = self._playback.device
+            name = device.options.name if device is not None else "the recording"
+            before = self._playback.previous_name()
+            self._playback.close(restore=False, quiet=True)
+            self._show_status_message(
+                f"Closed {name}"
+                + (f" and disconnected from {before}." if before else ".")
+            )
+            return
         if self._device is None:
             return
         name = self._device_display_name()
@@ -5928,6 +6510,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Start demo mode with simulated signals."""
         from .device_dialog import MockDevice
 
+        if self._playback.active:
+            self._playback.close(restore=True, resume=False, quiet=True)
         if self._device is not None and not self._demo_mode:
             self._release_device()
         if self._device is None:
@@ -5991,87 +6575,421 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # Files
     # ------------------------------------------------------------------
 
-    def _open_recording(self):
-        """Load an I/Q file into the recording buffer (to save it in another
-        format; there is no playback)."""
-        filename, _ = QFileDialog.getOpenFileName(
-            self,
-            "Import Recording",
-            "",
-            ";;".join(
-                (
-                    "I/Q Recordings (*.cf32 *.cs16 *.cs8 *.cu8 *.cf64 *.raw *.iq "
-                    "*.bin *.sigmf-data *.sigmf-meta *.wav)",
-                    "SigMF (*.sigmf-data *.sigmf-meta)",
-                    "WAV Files (*.wav)",
-                    "All Files (*)",
+    def _choose_recording(self, caption: str) -> str:
+        """Ask for an I/Q file (the dialog opens where the last one was)."""
+        path, _filter = file_dialogs.open_file(
+            self, self._settings, "iq", caption, OPEN_FILTERS
+        )
+        return path
+
+    def _recording_options(
+        self, path: str, purpose: str, options: Optional[IqFileOptions] = None
+    ) -> Optional[IqFileOptions]:
+        """How to read ``path`` for ``purpose`` ("play", "convert", "decode"
+        or "info"): what its metadata says, or what the user tells Import
+        Options when it doesn't (always for a headerless file). ``options``
+        already chosen (Recording Info) are asked about only if ``purpose``
+        needs more. None when the file can't be read, holds no samples, or
+        the user cancelled."""
+        name = os.path.basename(path)
+        if options is None:
+            try:
+                options, missing = describe_iq_file(path)
+            except (OSError, ValueError) as e:
+                logger.warning(f"Can't read the recording {path}: {e}")
+                QMessageBox.warning(
+                    self, "Can't Read Recording", f"{name} can't be read:\n{e}"
                 )
-            ),
-        )
-        if not filename:
-            return
-
-        from ..dsp.recording import load_iq_file
-
-        try:
-            samples, metadata = load_iq_file(filename)
-        except Exception as e:
-            logger.error(f"Failed to open recording: {e}")
+                return None
+        else:
+            missing = {
+                key
+                for key, value in (
+                    ("rate", options.sample_rate),
+                    ("center", options.center_hz),
+                )
+                if not value
+            }
+            if options.confirmed:
+                # Already asked (Recording Info): only what this needs.
+                missing &= REQUIRED.get(purpose, set())
+        if options.total_samples <= 0:
+            # (Before anything is replaced or retuned.)
             QMessageBox.warning(
-                self, "Import Failed", f"Could not import the recording:\n{e}"
+                self,
+                "Empty Recording",
+                f"{name} holds no I/Q samples, so there is nothing to "
+                f"{'show' if purpose == 'info' else purpose}.",
             )
-            return
+            return None
+        if needs_options(missing, purpose):
+            guesses = {
+                "rate": self._device_sample_rate(),
+                "center": self._current_frequency(),
+            }
+            dialog = ImportOptionsDialog(options, missing, purpose, guesses, self)
+            if not self._exec_dialog(dialog):
+                return None
+            options = dialog.options()
+            if options is None:
+                return None
+        return options
 
+    def _confirm_stop_recordings(self, name: str) -> bool:
+        """Before a recording plays back: a recording in progress (I/Q or
+        audio) would go on recording the file, so offer to stop it. True to
+        go ahead (stopped, or nothing was recording)."""
+        iq = self._recording
+        audio = self._audio_take is not None
+        if not (iq or audio):
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Recording in Progress")
+        box.setText(f"Stop recording and play {name}?")
+        detail = (
+            "Playing a file switches the receiver to it, so the recording stops "
+            "here."
+        )
+        if iq:
+            detail += (
+                " The I/Q samples recorded so far stay in the Recording group, "
+                "to save."
+            )
+        if audio:
+            detail += " The audio recording is saved as it is."
+        box.setInformativeText(detail)
+        play_btn = box.addButton("Stop and &Play", QMessageBox.ButtonRole.AcceptRole)
+        set_role(play_btn, "primary")
+        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(play_btn)
+        box.setEscapeButton(cancel_btn)
+        self._exec_dialog(box)
+        if box.clickedButton() is not play_btn:
+            return False
         if self._recording:
-            # Don't mix live samples into the loaded file.
             self._toggle_recording(False)
-        if not self._confirm_discard_recording("importing another file"):
-            return
-        self._replace_buffer(_SampleStore.from_samples(samples))
-        rate = float(metadata.sample_rate or 0.0)
-        center = float(metadata.center_frequency or 0.0)
-        # Saved with the file's own rate and frequency (not the receiver's).
-        self._buffer_meta = (center if center > 0 else None, rate if rate > 0 else None)
-        self._buffer_unsaved = False  # it is on disk already
-        if center > 0:
-            self.set_frequency(center)
-        logger.info(
-            f"Loaded {len(samples)} samples from {filename} "
-            f"(rate={metadata.sample_rate}, freq={metadata.center_frequency})"
-        )
-        unknown = "not stored in the file"
-        rate_text = format_rate(rate) if rate > 0 else unknown
-        freq_text = format_frequency(center) if center > 0 else unknown
-        self._show_status_message(
-            f"Imported {len(samples):,} samples into the recording buffer", "success"
-        )
-        QMessageBox.information(
-            self,
-            "Recording Imported",
-            f"Imported {len(samples):,} samples into the recording buffer.\n\n"
-            f"Sample rate: {rate_text}\n"
-            f"Center frequency: {freq_text}\n\n"
-            "Use File > Save Recording to write it in another format.",
-        )
+        self._stop_audio_recording()
+        return True
 
+    def _open_recording(
+        self, path: str = "", options: Optional[IqFileOptions] = None
+    ) -> bool:
+        """File > Open Recording (Ctrl+O): play an I/Q recording through the
+        receiver. The spectrum and waterfall show the file's span; tuning
+        inside it moves the tuned frequency, and the audio, squelch,
+        S-meter, SSTV and live decoders work on it. The playback strip
+        under the plots pauses, seeks, loops, changes the speed and closes
+        it (back to the device from before)."""
+        path = path or self._choose_recording("Open Recording")
+        if not path:
+            return False
+        options = self._recording_options(path, "play", options)
+        if options is None:
+            return False
+        if not self._confirm_stop_recordings(options.name):
+            return False
+        if not self._playback.open(options):
+            return False
+        half = options.sample_rate / 2.0
+        self._show_status_message(
+            f"Playing {options.name} "
+            f"({format_mhz_range(options.center_hz - half, options.center_hz + half)})."
+            " Click a signal to tune to it; Space pauses.",
+            "info",
+            8000,
+        )
+        return True
+
+    def _convert_recording(
+        self, path: str = "", options: Optional[IqFileOptions] = None
+    ) -> bool:
+        """File > Convert Recording (Ctrl+Shift+O): load an I/Q file (any
+        format, also headerless captures) into the recording buffer, to save
+        it in another format. It is read a chunk at a time into a temporary
+        file in a background thread (progress, Cancel), never all at once
+        into memory. The receiver isn't retuned; the summary offers Tune
+        there and Play."""
+        path = path or self._choose_recording("Convert Recording")
+        if not path:
+            return False
+        options = self._recording_options(path, "convert", options)
+        if options is None:
+            return False
+        # First the unsaved take (Cancel keeps a running recording going),
+        # then the work: Cancel there costs nothing.
+        if not self._confirm_discard_recording(f"converting {options.name}"):
+            return False
+        if self._recording:
+            self._toggle_recording(False)  # armed: nothing captured
+        need = options.total_samples * 8  # held as complex64
+        free = self._free_recording_space()
+        if free is not None and free - need < _MIN_FREE_BYTES:
+            QMessageBox.warning(
+                self,
+                "Not Enough Disk Space",
+                f"Converting {options.name} needs {need / 1024**2:,.0f} MB of "
+                f"space in {file_dialogs.display_path(self._capture_folder())}, "
+                f"which has {free / 1024**2:,.0f} MB free. Free up some space, "
+                "then try again.",
+            )
+            return False
+        store = _SampleStore(self._capture_folder())
+        result = run_job(
+            self,
+            "Convert Recording",
+            f"Reading {options.name}…",
+            lambda report: load_recording(options, store.append, report),
+        )
+        if not result.ok:
+            store.discard()
+            if result.cancelled:
+                self._show_status_message(
+                    f"Stopped reading {options.name}; nothing was loaded.", None, 5000
+                )
+            else:
+                logger.error(f"Could not convert {path}: {result.error}")
+                QMessageBox.warning(
+                    self,
+                    "Convert Failed",
+                    f"Could not read {options.name}:\n{result.error}",
+                )
+            return False
+        store.finish()
+        loaded = result.value
+        self._replace_buffer(store)
+        self._buffer_meta = (options.center_hz or None, options.sample_rate or None)
+        self._buffer_unsaved = False  # the file is on disk already
+        self._buffer_source = options.name
+        self._take_started = ""
+        self._update_take_panel()
+        logger.info(
+            f"Loaded {loaded.samples} samples from {path} "
+            f"({options.sample_format.value}, rate={options.sample_rate}, "
+            f"center={options.center_hz})"
+        )
+        self._show_status_message(
+            f"Loaded {options.name}: Save Recording (Ctrl+S) writes it in another "
+            "format.",
+            "success",
+            8000,
+        )
+        self._show_conversion_summary(options, loaded)
+        return True
+
+    def _show_conversion_summary(self, options: IqFileOptions, loaded: Any) -> None:
+        """What was loaded, and what to do next: Save As (the conversion),
+        Play, or tune the receiver there."""
+        unknown = "unknown (not stored in the file)"
+        rate = options.sample_rate
+        center = options.center_hz
+        lines = [
+            f"Sample format: {options.sample_format.value}",
+            f"Sample rate: {format_rate(rate) if rate else unknown}",
+            f"Center frequency: {format_frequency(center) if center else unknown}",
+        ]
+        if rate:
+            lines.append(f"Length: {loaded.samples / rate:.1f} s")
+        text = "\n".join(lines) + (
+            "\n\nSave As writes it in another format (SigMF keeps the frequency "
+            "and rate). The receiver wasn't retuned."
+        )
+        if loaded.nonfinite:
+            text += (
+                f"\n\n{loaded.nonfinite:,} samples aren't numbers (NaN or "
+                "infinity): the sample format may be wrong."
+            )
+        box = QMessageBox(self)
+        box.setIcon(
+            QMessageBox.Icon.Warning
+            if loaded.nonfinite
+            else QMessageBox.Icon.Information
+        )
+        box.setWindowTitle("Recording Loaded")
+        box.setText(f"Loaded {loaded.samples:,} samples from {options.name}.")
+        box.setInformativeText(text)
+        save_btn = box.addButton("&Save As...", QMessageBox.ButtonRole.AcceptRole)
+        set_role(save_btn, "primary")
+        play_btn = box.addButton("&Play", QMessageBox.ButtonRole.ActionRole)
+        play_btn.setEnabled(bool(rate and center))
+        tune_btn = None
+        if center:
+            tune_btn = box.addButton("&Tune There", QMessageBox.ButtonRole.ActionRole)
+            tune_btn.setToolTip(
+                f"Tune the receiver to {format_frequency(center)}, where the "
+                "recording was made"
+            )
+        close_btn = box.addButton(QMessageBox.StandardButton.Close)
+        box.setDefaultButton(save_btn)
+        box.setEscapeButton(close_btn)
+        self._exec_dialog(box)
+        clicked = box.clickedButton()
+        if clicked is save_btn:
+            self._save_recording()
+        elif clicked is play_btn:
+            self._open_recording(options.path, options)
+        elif tune_btn is not None and clicked is tune_btn:
+            if self.set_frequency(center):
+                self._show_status_message(
+                    f"Tuned to {format_frequency(center)}", "info", 3000
+                )
+
+    def _show_recording_info(self, path: str = "") -> None:
+        """File > Recording Info: what an I/Q file holds, whether its
+        samples look right, and Play / Convert / Decode from there."""
+        path = path or self._choose_recording("Recording Info")
+        if not path:
+            return
+        options = self._recording_options(path, "info")
+        if options is None:
+            return
+        dialog = RecordingInfoDialog(options, self)
+        self._exec_dialog(dialog)
+        action = dialog.action()
+        if action == "play":
+            self._open_recording(path, options)
+        elif action == "convert":
+            self._convert_recording(path, options)
+        elif action == "decode":
+            self._decode_recording(path, options)
+
+    def _decode_default_frequency(self, protocol: str, options: IqFileOptions) -> float:
+        """Where the Decode dialog starts: the protocol's usual channel, the
+        tuned frequency or the file's center, the first inside the file."""
+        from .decoder_panel import PROTOCOL_TUNE
+
+        center, half = options.center_hz, 0.5 * options.sample_rate
+        candidates = [
+            PROTOCOL_TUNE.get(protocol, (0.0,))[0],
+            self._current_frequency(),
+        ]
+        for freq in candidates:
+            if freq and abs(freq - center) < 0.8 * half:
+                return float(freq)
+        return center
+
+    def _decode_recording(
+        self, path: str = "", options: Optional[IqFileOptions] = None
+    ) -> bool:
+        """File > Decode Recording (and the Decoder tab's Decode File...):
+        run the Decoder panel's protocol over a whole I/Q file in a
+        background thread, much faster than real time, with progress and
+        Cancel. Each message goes to the Decoder tab as it is found, noted
+        with the file and where in it."""
+        from ..dsp.live_decoders import LIVE_DECODERS
+
+        protocols = list(LIVE_DECODERS)
+        path = path or self._choose_recording("Decode Recording")
+        if not path:
+            return False
+        options = self._recording_options(path, "decode", options)
+        if options is None:
+            return False
+        current = self._decoder_panel.protocol() or ""
+        protocol = current if current in protocols else protocols[0]
+        dialog = DecodeOptionsDialog(
+            options,
+            protocols,
+            protocol,
+            self._decode_default_frequency(protocol, options),
+            self,
+        )
+        if not self._exec_dialog(dialog):
+            return False
+        choice = dialog.choice()
+        if choice is None:
+            return False
+        protocol, offset = choice
+        self._show_panel("decoder")
+        counts = {"messages": 0}
+
+        def show(batch: Any) -> None:
+            for msg, when in batch:
+                counts["messages"] += 1
+                self._push_decoded_message(
+                    msg, note=f"from {options.name} at {when:.1f} s"
+                )
+
+        result = run_job(
+            self,
+            "Decode Recording",
+            f"Decoding {protocol} in {options.name}…",
+            lambda report, partial: decode_recording(
+                options, protocol, offset, report, partial
+            ),
+            on_partial=show,
+        )
+        where = (
+            f" at {format_frequency(options.center_hz + offset)}"
+            if options.center_hz
+            else ""
+        )
+        if result.error is not None:
+            logger.warning(f"Decoding {path} failed: {result.error}")
+            QMessageBox.warning(
+                self,
+                "Decode Failed",
+                f"Could not decode {protocol} in {options.name}:\n{result.error}",
+            )
+            return False
+        if result.cancelled:
+            self._show_status_message(
+                f"Decoding stopped: {counts['messages']} message(s) from "
+                f"{options.name} so far.",
+                None,
+                6000,
+            )
+            return False
+        decoded = result.value
+        if decoded.valid:
+            failed = (
+                f" ({decoded.failed} failed their checks)" if decoded.failed else ""
+            )
+            self._show_status_message(
+                f"Decoded {decoded.valid} {protocol} message(s) from "
+                f"{options.name}{where}{failed}.",
+                "success",
+                8000,
+            )
+        else:
+            self._show_status_message(
+                f"No {protocol} messages in {options.name}{where}. Check the "
+                "protocol and the frequency (the signal must be in the file).",
+                "warning",
+                10000,
+            )
+        return True
+
+    # Formats File > Save Recording writes:
     # (file dialog filter, extension, FileFormat name, SampleFormat name)
     _SAVE_FORMATS: Tuple[Tuple[str, str, str, str], ...] = (
+        (
+            "SigMF, keeps frequency and rate (*.sigmf-data)",
+            ".sigmf-data",
+            "SIGMF",
+            "FLOAT32",
+        ),
         ("Complex Float32 (*.cf32)", ".cf32", "RAW", "FLOAT32"),
         ("Complex Int16 (*.cs16)", ".cs16", "RAW", "INT16"),
-        ("SigMF (*.sigmf-data)", ".sigmf-data", "SIGMF", "FLOAT32"),
         ("WAV, 16-bit I/Q (*.wav)", ".wav", "WAV", "INT16"),
         ("Raw I/Q, Float32 (*.raw)", ".raw", "RAW", "FLOAT32"),
+        ("Complex Uint8, rtl_sdr (*.cu8)", ".cu8", "RAW", "UINT8"),
+        ("Complex Int8, hackrf_transfer (*.cs8)", ".cs8", "RAW", "INT8"),
     )
 
     def _panel_recording_extension(self) -> str:
         """Extension matching the Recording panel's Format choice."""
         try:
-            fmt = self._control_panel.get_recording_format().lower()
+            ext = self._control_panel.get_recording_extension()
+            fmt = self._control_panel.get_recording_format()
         except Exception:  # pragma: no cover - defensive
-            fmt = ""
-        if fmt.startswith("wav"):
+            ext, fmt = "", ""
+        if any(spec[1] == ext for spec in self._SAVE_FORMATS):
+            return ext
+        lower = (fmt or "").lower()
+        if lower.startswith("wav"):
             return ".wav"
-        if "sigmf" in fmt:
+        if "sigmf" in lower:
             return ".sigmf-data"
         return ".cf32"
 
@@ -6098,12 +7016,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         return filename + spec[1], spec
 
+    def _suggested_iq_name(self, ext: str) -> str:
+        """``iq_100.100MHz_2.4MSps_20261030_142233.sigmf-data`` (the take's
+        center, rate and start), or a converted file's own name."""
+        if self._buffer_source:
+            return split_name(self._buffer_source)[0] + ext
+        center, rate = self._buffer_meta
+        parts = ["iq"]
+        if center:
+            parts.append(f"{center / 1e6:.3f}MHz")
+        if rate:
+            parts.append(format_rate(rate).replace(" ", "").replace("/s", "ps"))
+        parts.append(self._take_stamp or time.strftime("%Y%m%d_%H%M%S"))
+        return "_".join(parts) + ext
+
     def _save_recording(self) -> bool:
         """Save the recording buffer to an I/Q file. True when saved.
 
         The file gets the center frequency and sample rate the samples were
-        captured at (or read from), not what the receiver is set to now.
-        """
+        captured at (or read from), not what the receiver is set to now: a
+        recording that doesn't say them (a converted headerless file) asks
+        for them first. Raw and WAV files get a ``.sigmf-meta`` beside them
+        so the rate and frequency survive."""
         if not self._samples_buffer:
             QMessageBox.information(
                 self,
@@ -6114,76 +7048,145 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
             return False
 
-        center_freq, sample_rate = self._buffer_meta
-        if not center_freq:
-            center_freq = self._lo_frequency()
-        if not sample_rate:
-            sample_rate = self._device_sample_rate()
+        if not self._ask_missing_details():
+            return False
 
         # Preselect the format chosen in the Recording panel.
         ext = self._panel_recording_extension()
         initial = next(f[0] for f in self._SAVE_FORMATS if f[1] == ext)
-        suggested = (
-            f"iq_{center_freq / 1e6:.3f}MHz_" f"{time.strftime('%Y%m%d_%H%M%S')}{ext}"
-        )
-        filename, selected_filter = QFileDialog.getSaveFileName(
+        filename, selected_filter = file_dialogs.save_file(
             self,
+            self._settings,
+            "iq",
             "Save Recording",
-            suggested,
+            self._suggested_iq_name(ext),
             ";;".join(f[0] for f in self._SAVE_FORMATS),
             initial,
         )
         if not filename:
             return False
+        return self._write_buffer(filename, selected_filter)
 
-        from ..dsp.recording import FileFormat, IQRecorder, SampleFormat
+    def _ask_missing_details(self) -> bool:
+        """Ask for the buffer's unknown sample rate or center frequency
+        (never stamped from the receiver unasked). False if cancelled."""
+        center, rate = self._buffer_meta
+        if center and rate:
+            return True
+        values = ask_recording_details(
+            self,
+            rate or 0.0,
+            center or 0.0,
+            self._device_sample_rate() if self._device is not None else 0.0,
+            self._current_frequency(),
+            exec_dialog=self._exec_dialog,
+        )
+        if values is None:
+            return False
+        new_rate, new_center = values
+        self._buffer_meta = (new_center or None, new_rate or None)
+        return True
+
+    def _write_buffer(
+        self, filename: str, selected_filter: str = "", quiet: bool = False
+    ) -> bool:
+        """Write the recording buffer to ``filename`` (its format from the
+        extension or ``selected_filter``), a chunk at a time in a background
+        thread; a raw or WAV file gets its metadata in a ``.sigmf-meta``
+        beside it. True when saved; failures are reported."""
+        from ..dsp.recording import (
+            FileFormat,
+            SampleFormat,
+            wav_data_offset,
+            write_sidecar,
+        )
 
         filename, spec = self._resolve_save_format(filename, selected_filter)
         fmt, sample_fmt = FileFormat[spec[2]], SampleFormat[spec[3]]
         store = self._samples_buffer
         count = store.sample_count
+        center, rate = self._buffer_meta
+        center, rate = float(center or 0.0), float(rate or 0.0)
+        name = os.path.basename(filename)
 
-        error: Optional[Exception] = None
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            if (
-                fmt is FileFormat.RAW
-                and sample_fmt is SampleFormat.FLOAT32
-                and store.path is not None
-            ):
-                # Already in this layout: move (or copy) the file itself.
+        error: Optional[BaseException] = None
+        if (
+            fmt is FileFormat.RAW
+            and sample_fmt is SampleFormat.FLOAT32
+            and store.path is not None
+        ):
+            # Already in this layout: move (or copy) the file itself.
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
                 store.save_raw(filename, move=not self._recording)
-            else:
-                recorder = IQRecorder(
-                    sample_rate=sample_rate,
-                    center_frequency=center_freq,
-                    sample_format=sample_fmt,
-                    file_format=fmt,
+            except Exception as e:
+                error = e
+            finally:
+                QApplication.restoreOverrideCursor()
+        else:
+            # The samples so far, mapped here on the GUI thread: the worker
+            # only reads them, while a recording still running may go on
+            # adding to the file.
+            snapshot = store.samples()[:count]
+
+            def chunks():
+                for start in range(0, len(snapshot), _SAVE_CHUNK):
+                    yield np.asarray(snapshot[start : start + _SAVE_CHUNK])
+
+            result = run_job(
+                self,
+                "Save Recording",
+                f"Writing {name}…",
+                lambda report: write_recording(
+                    chunks(),
+                    count,
+                    filename,
+                    fmt,
+                    sample_fmt,
+                    rate,
+                    center,
+                    report,
+                ),
+            )
+            if result.cancelled:
+                self._show_status_message(f"Not saved: {name} was cancelled.", None)
+                return False
+            error = result.error
+        if error is None and fmt is not FileFormat.SIGMF:
+            try:
+                write_sidecar(
+                    filename,
+                    sample_fmt,
+                    rate,
+                    center,
+                    header_bytes=(
+                        wav_data_offset(filename) if fmt is FileFormat.WAV else 0
+                    ),
+                    start_time=self._take_started,
                 )
-                # A chunk at a time, so a recording larger than memory saves
-                # too; the same file as save_iq_file (SigMF metadata too).
-                recorder.start(filename)
-                try:
-                    for chunk in store.chunks():
-                        recorder.write(chunk)
-                finally:
-                    recorder.stop()
-        except Exception as e:
-            error = e
-        finally:
-            QApplication.restoreOverrideCursor()
+            except OSError as e:
+                logger.warning(f"Could not write the metadata of {filename}: {e}")
         if error is not None:
             logger.error(f"Failed to save recording: {error}")
-            QMessageBox.warning(
-                self, "Save Failed", f"Could not save recording:\n{error}"
-            )
+            if quiet:
+                self._show_status_error(
+                    f"Could not save the recording to {name}: {error}", log=False
+                )
+            else:
+                QMessageBox.warning(
+                    self, "Save Failed", f"Could not save recording:\n{error}"
+                )
             return False
 
         self._buffer_unsaved = False
+        self._last_saved = filename
         logger.info(f"Saved {count} samples to {filename}")
         self._show_status_message(
-            f"Saved {count:,} samples to {filename}", "success", 6000
+            f"Saved {count:,} samples to {file_dialogs.display_path(filename)}",
+            "success",
+            6000,
         )
+        self._update_take_panel()
         return True
 
     def _import_channels_csv(self) -> None:
@@ -6613,6 +7616,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             combo = self._control_panel._format_combo
             if rec_format and combo.findText(rec_format) >= 0:
                 combo.setCurrentText(rec_format)
+            self._control_panel.set_record_kind(
+                self._settings.get_str("recording/kind", "iq")
+            )
+            self._control_panel.set_auto_save(
+                self._settings.get_bool("recording/auto_save", False)
+            )
+            self._control_panel.set_recordings_folder(
+                file_dialogs.recordings_folder(self._settings)
+            )
             if panel in self._panel_pages:
                 self._show_panel(panel)
             self._restore_license_class()
@@ -6778,6 +7790,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         if self._recording:
             self._toggle_recording(False)  # armed, or nothing left to lose
+        self._stop_audio_recording(quiet=True)  # (saved as it records)
+        # A recording playing back: the tuning from before it is saved.
+        self._playback.shutdown()
         self._commit_pending_history()  # the last frequency joins Recent
         self._persist_state()
         for timer in (self._display_timer, self._status_timer, self._hotplug_timer):

@@ -63,8 +63,13 @@ class TestShortcutTable(unittest.TestCase):
         from sdr_module.gui.help_dialog import SHORTCUTS
 
         table = {keys: (cat, desc) for cat, keys, desc in SHORTCUTS}
+        # Ctrl+O plays a recording now; converting is Ctrl+Shift+O (fg:FG-U01).
         self.assertEqual(
-            table[("Ctrl+O",)], ("File", "Import a recording to convert its format")
+            table[("Ctrl+O",)], ("File", "Open a recording and play it back")
+        )
+        self.assertEqual(
+            table[("Ctrl+Shift+O",)],
+            ("File", "Convert a recording to another format"),
         )
         self.assertEqual(
             table[("F6",)], ("View", "Put the keyboard focus on the spectrum")

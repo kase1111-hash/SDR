@@ -46,7 +46,8 @@ if HAS_PYQT6:
 # entries the same way as the live list (which groups by the real menus).
 SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
     ("Radio", ("Space",), "Start or stop the receiver"),
-    ("Radio", ("Ctrl+Shift+R",), "Start or stop recording"),
+    ("Radio", ("Ctrl+Shift+R",), "Start or stop recording I/Q samples"),
+    ("Radio", ("Ctrl+Shift+A",), "Start or stop recording the audio you hear"),
     ("Radio", ("Ctrl+L",), "Type a frequency to tune to"),
     ("Radio", ("Ctrl+B",), "Bookmark the current frequency"),
     (
@@ -58,7 +59,8 @@ SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
     ("Tuning", ("Left", "Right"), "Tune down / up by one tuning step"),
     ("Tuning", ("Shift+Left", "Shift+Right"), "Tune down / up by ten tuning steps"),
     ("Tuning", ("Ctrl+Left", "Ctrl+Right"), "Tune down / up by 1 MHz"),
-    ("File", ("Ctrl+O",), "Import a recording to convert its format"),
+    ("File", ("Ctrl+O",), "Open a recording and play it back"),
+    ("File", ("Ctrl+Shift+O",), "Convert a recording to another format"),
     ("File", ("Ctrl+S",), "Save the recording"),
     ("File", ("Ctrl+P",), "Save a screenshot"),
     ("File", ("Ctrl+Q",), "Exit SDR Module"),

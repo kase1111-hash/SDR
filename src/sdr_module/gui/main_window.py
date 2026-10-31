@@ -3541,7 +3541,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Bookmarks and the Decoder panel's "Tune to ..." tune the receiver
         # (and select the mode they listen with); "Add" saves that mode.
         self._bookmarks_panel.tune_requested.connect(self._on_bookmark_tune)
-        self._decoder_panel.tune_requested.connect(self._on_bookmark_tune)
+        self._decoder_panel.tune_requested.connect(self._on_decoder_tune)
         self._bookmarks_panel.set_mode_source(self._listening_mode)
         # The license class decides where transmitting is allowed; remember it.
         self._control_panel.license_changed.connect(self._on_license_changed)
@@ -6083,11 +6083,35 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Short mode name for messages: ``"None (I/Q)"`` -> ``"I/Q"``."""
         return "I/Q" if mode.startswith("None") else mode
 
-    def _on_bookmark_tune(
+    def _on_decoder_tune(
         self, freq_hz: float, label: str, mode: str = "", deviation: str = ""
     ) -> None:
+        """The Decoder's "Tune to ...": tune there and, when a preset channel
+        is there in the same mode, listen as it is heard (its deviation and
+        filter: ACARS in AM with 15 kHz, ADS-B's 2.4 MHz), as Radio > Band
+        Presets and typing the frequency do."""
+        from . import presets
+
+        bandwidth: Optional[str] = None
+        preset = presets.preset_at(freq_hz)
+        if preset is not None and mode:
+            heard_mode, heard_deviation, heard_width = presets.listening(preset)
+            if heard_mode == mode:
+                deviation = heard_deviation or deviation
+                bandwidth = heard_width or None
+        self._on_bookmark_tune(freq_hz, label, mode, deviation, bandwidth)
+
+    def _on_bookmark_tune(
+        self,
+        freq_hz: float,
+        label: str,
+        mode: str = "",
+        deviation: str = "",
+        bandwidth: Optional[str] = None,
+    ) -> None:
         """Tune to a bookmark (or the Decoder panel's suggested channel), in
-        its mode when it names one, with a channel width that suits it."""
+        its mode when it names one, with a channel width that suits it (or
+        ``bandwidth``, a Bandwidth option)."""
         before = self._current_frequency()
         if not self.set_frequency(freq_hz):
             return  # refused: the status bar says why
@@ -6097,7 +6121,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._show_status_message(f"Tuned to {label}", "info", 2500)
             return
         self._set_demod_mode(
-            mode, deviation or None, self._bandwidth_for_mode(mode, deviation)
+            mode,
+            deviation or None,
+            bandwidth or self._bandwidth_for_mode(mode, deviation),
         )
         mode = self._mode_text(mode)
         if label.endswith(")"):  # "ACARS (131.550 MHz)" -> "(131.550 MHz, AM)"

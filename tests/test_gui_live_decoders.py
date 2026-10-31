@@ -222,8 +222,9 @@ class TestTuneToModes(_WindowTestCase):
         ):
             self.assertEqual(self.tune(name), ("FM", "5 kHz", "25 kHz"), name)
             self.assertAlmostEqual(self.freq(), freq)
+        # (As the ACARS preset is heard: 15 kHz, DEC-E2E-14.)
         mode, _dev, bandwidth = self.tune("ACARS")
-        self.assertEqual((mode, bandwidth), ("AM", "10 kHz"))
+        self.assertEqual((mode, bandwidth), ("AM", "15 kHz"))
         self.assertAlmostEqual(self.freq(), 131.55e6)
 
 

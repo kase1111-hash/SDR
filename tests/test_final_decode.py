@@ -234,6 +234,42 @@ class TestCwTuneToInTheWindow(_WindowTestCase):
 
 
 # --------------------------------------------------------------------------- #
+# DEC-E2E-14: "Tune to" listens the way the presets do
+# --------------------------------------------------------------------------- #
+
+
+class TestTuneToListensLikeThePresets(_WindowTestCase):
+    def tune(self, name):
+        win = self.win
+        panel = win._decoder_panel
+        panel._proto_combo.setCurrentText(name)
+        self.assertTrue(win.set_frequency(100e6))  # away: the button shows
+        self.settle(2)
+        self.assertTrue(panel._tune_action(name)[0], name)
+        panel._tune_to_protocol()
+        self.settle(2)
+        cp = win._control_panel
+        return cp.get_demod_mode(), cp._bw_combo.currentText()
+
+    def test_each_channel_is_heard_as_its_preset_is(self):
+        # ACARS came in AM with a 10 kHz filter (the preset, Radio > Band
+        # Presets and typing 131.55: 15 kHz), and ADS-B kept the 200 kHz
+        # filter (the preset: 2.4 MHz).
+        from sdr_module.gui import presets
+
+        for name, freq in (
+            ("ACARS", 131.55e6),
+            ("ADS-B", 1090e6),
+            ("POCSAG", 152.24e6),
+            ("AX.25/APRS", 144.39e6),
+            ("FLEX", 931.9375e6),
+        ):
+            mode, _deviation, width = presets.listening(presets.preset_at(freq))
+            self.assertEqual(self.tune(name), (mode, width), name)
+            self.assertAlmostEqual(self.freq(), freq)
+
+
+# --------------------------------------------------------------------------- #
 # DEC-E2E-19: one name for Decode Recording; Start or Play as it is
 # --------------------------------------------------------------------------- #
 

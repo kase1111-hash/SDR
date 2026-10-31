@@ -308,3 +308,57 @@ class TestListeningFollowsTheRecording(_FilesCase):
         self.win._playback.close(restore=True)
         self.assertEqual(self.win._current_frequency(), 100.1e6)
         self.assertEqual(self.listening(), ("FM", "75 kHz", "200 kHz"))
+
+
+class TestImportOptionsFitsItsRows(_FilesCase):
+    """REC-E2E-04: the dialog was sized before its check text was set, so
+    the Sample rate and Center frequency fields lost their bottom edge."""
+
+    def assert_rows_whole(self, dialog):
+        from PyQt6.QtWidgets import QLineEdit
+
+        layout = dialog.layout()
+        self.assertGreaterEqual(
+            dialog.height(), layout.totalHeightForWidth(dialog.width())
+        )
+        for edit in dialog.findChildren(QLineEdit):
+            row = edit.parentWidget()
+            self.assertGreaterEqual(
+                row.height(), edit.y() + edit.height(), edit.accessibleName()
+            )
+
+    def test_rows_are_whole(self):
+        from PyQt6.QtWidgets import QApplication
+
+        from sdr_module.gui import themes
+        from sdr_module.gui.iq_files import ImportOptionsDialog, describe_iq_file
+
+        # (A name whose intro takes two lines, and a two-line check.)
+        path = self.path("iss_145.75MHz_1Msps.bin")
+        rng = np.random.default_rng(2)
+        noise = np.round(127.5 + rng.normal(0, 2.2, 2_000_000))
+        np.clip(noise, 0, 255).astype(np.uint8).tofile(path)
+        options, missing = describe_iq_file(path)
+        # Measured the way the app shows it: themed.
+        qapp = QApplication.instance()
+        old_sheet, old_palette = qapp.styleSheet(), qapp.palette()
+        old_theme = themes.current_theme()
+        try:
+            for theme in themes.THEMES:
+                themes.apply_theme(qapp, theme)
+                dialog = ImportOptionsDialog(options, missing, "play", parent=self.win)
+                self.addCleanup(dialog.deleteLater)
+                self.assertFalse(dialog._format_hint_row.isVisibleTo(dialog))
+                dialog.show()
+                self.settle()
+                self.assert_rows_whole(dialog)
+                # A longer check (a problem over three lines) grows it too.
+                dialog._rate_edit.setText("2.4 MS/s per second, surely")
+                self.settle()
+                self.assertIn("Can't read the sample rate", dialog.check_text())
+                self.assert_rows_whole(dialog)
+                dialog.hide()
+        finally:
+            qapp.setStyleSheet(old_sheet)
+            qapp.setPalette(old_palette)
+            themes.apply_theme(None, old_theme)

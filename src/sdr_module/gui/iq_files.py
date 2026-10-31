@@ -525,6 +525,7 @@ if HAS_PYQT6:
                 _content_guess(options.path, sure=True) if "format" in missing else None
             )
             self._result: Optional[IqFileOptions] = None
+            self._refit = False
             self.setWindowTitle(f"Import Options – {options.name}")
             self.setMinimumWidth(500)
             self._build(guesses or {})
@@ -753,8 +754,9 @@ if HAS_PYQT6:
             if hint != self._format_hint_row.isVisibleTo(self):
                 self._format_hint_row.setVisible(hint)
                 # Fit the row in (or close the gap) instead of squeezing
-                # the fields.
-                self.adjustSize()
+                # the fields: once the check below is shown (its text may
+                # take another line).
+                self._refit = True
             self._rate_hint.setText(
                 self._note(self._rate_edit, self._rate_prefill, self._rate_note)
             )
@@ -805,6 +807,19 @@ if HAS_PYQT6:
         def _show_check(self, text: str, tone: str) -> None:
             self._check_label.setText(text)
             set_role(self._check_label, "callout", tone)
+            self._fit_height()
+
+        def _fit_height(self) -> None:
+            """Show every row whole. The size hint leaves out how much
+            taller word-wrapped text gets at the dialog's width, so the
+            fields were cut off at the bottom."""
+            if self._refit:
+                self._refit = False
+                self.adjustSize()
+            layout = self.layout()
+            need = layout.totalHeightForWidth(self.width()) if layout else -1
+            if need > self.height():
+                self.resize(self.width(), need)
 
         def check_text(self) -> str:
             return self._check_label.text()

@@ -23,7 +23,7 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from tests.test_gui_chrome import require_pyqt6  # noqa: E402
+from tests.test_gui_chrome import _WindowTestCase, require_pyqt6  # noqa: E402
 
 RATE = 20e6
 FRAME = 666_667  # one display frame at 20 MS/s
@@ -206,8 +206,95 @@ class TestDecoderChannelCost(unittest.TestCase):
                     ]
                 )
                 full = np.convolve(x.astype(np.complex128), taps.astype(np.float64))
-                want = full[: n : factor]
+                want = full[:n:factor]
                 self.assertEqual(len(got), len(want), (taps_n, factor))
                 np.testing.assert_allclose(
                     got, want, atol=2e-5, err_msg=str((taps_n, factor, complex_))
                 )
+
+
+# ---------------------------------------------------------------------------
+# Leftover 6, DEV-E2E-19: the plots' spectrum of a long frame
+# ---------------------------------------------------------------------------
+
+
+def _tone(n, freq, rate, amplitude=1.0):
+    t = np.arange(n) / rate
+    return (amplitude * np.exp(2j * np.pi * freq * t)).astype(np.complex64)
+
+
+class TestFrameSpectrumWorkIsBounded(unittest.TestCase):
+    CAP = 1 << 19
+
+    def test_a_long_frame_is_analysed_in_evenly_spread_segments(self):
+        # Every FFT segment of every frame: 325 at 20 MS/s (13-17 ms a
+        # frame), 1024 for a 2 M-sample catch-up frame after a stall
+        # (60-330 ms: a visible hitch that made the next frame later
+        # still). With a cap, a long frame is analysed in evenly spread
+        # segments, the newest included.
+        from sdr_module.dsp.frame_spectrum import FrameSpectrumAnalyzer
+
+        size = 2048
+        n = 1 << 21
+        data = _noise(n, seed=4) * np.float32(0.01) + _tone(n, 3e6, RATE, 0.1)
+        whole = FrameSpectrumAnalyzer(size, threads=1).process(data)
+        capped = FrameSpectrumAnalyzer(size, threads=1, max_samples=self.CAP)
+        spread = capped.process(data)
+        self.assertEqual(whole.segments, n // size)
+        self.assertLessEqual(spread.segments, self.CAP // size)
+        self.assertGreaterEqual(spread.segments, self.CAP // size // 2)
+        # The same spectrum: the tone and the noise floor read the same.
+        b = size // 2 + int(round(3e6 / (RATE / size)))
+        self.assertAlmostEqual(
+            float(spread.mean_db[b]), float(whole.mean_db[b]), delta=0.2
+        )
+        self.assertAlmostEqual(spread.noise_floor_db, whole.noise_floor_db, delta=0.5)
+
+    def test_the_newest_segment_and_longer_bursts_still_show(self):
+        from sdr_module.dsp.frame_spectrum import FrameSpectrumAnalyzer
+
+        size = 2048
+        n = 1 << 21
+        burst = _tone(4 * size, -2e6, RATE, 0.1)
+        b = size // 2 + int(round(-2e6 / (RATE / size)))
+        for start in (0, 777_777, n - 4 * size, n - size):
+            data = _noise(n, seed=6) * np.float32(0.001)
+            stop = min(n, start + len(burst))
+            data[start:stop] += burst[: stop - start]
+            a = FrameSpectrumAnalyzer(size, threads=1, max_samples=self.CAP)
+            spec = a.process(data)
+            floor = float(np.median(spec.max_db))
+            self.assertGreater(float(spec.max_db[b]), floor + 30, start)
+
+    def test_frames_within_the_cap_are_analysed_whole(self):
+        from sdr_module.dsp.frame_spectrum import FrameSpectrumAnalyzer
+
+        a = FrameSpectrumAnalyzer(2048, threads=1, max_samples=self.CAP)
+        self.assertEqual(a.max_samples, self.CAP)
+        self.assertEqual(a.process(_noise(80_000)).segments, 39)  # 2.4 MS/s
+        self.assertEqual(a.process(_noise(333_334)).segments, 162)  # 10 MS/s
+        a.max_samples = None
+        self.assertEqual(a.process(_noise(1 << 21)).segments, 1024)
+
+
+class TestPlotsInTheWindow(_WindowTestCase):
+    demo = True
+
+    def test_a_catch_up_frame_costs_the_plots_no_more_than_a_usual_one(self):
+        analyzer = self.win._frame_spectrum
+        self.assertEqual(analyzer.max_samples, self.mw._PLOT_MAX_SAMPLES)
+        frames = []
+        process = analyzer.process
+
+        def spy(samples):
+            frame = process(samples)
+            frames.append(frame)
+            return frame
+
+        analyzer.process = spy
+        self.win._plot_frame(_noise(80_000))  # 2.4 MS/s: every sample
+        self.win._plot_frame(_noise(1 << 21))  # a stall's backlog at 20 MS/s
+        self.assertEqual(frames[0].segments, 80_000 // 2048)
+        self.assertLessEqual(
+            frames[1].segments, self.mw._PLOT_MAX_SAMPLES // analyzer.size
+        )

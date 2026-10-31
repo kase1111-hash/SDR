@@ -146,6 +146,7 @@ from .main_window import (
     _DEVICE_MODELS,
     _FREE_SPACE_CHECK_S,
     _MIN_FREE_BYTES,
+    _PLOT_MAX_SAMPLES,
     _REALTIME_FRACTION,
     _REALTIME_WINDOW_S,
     _RETUNE_MAX_DROPPED,
@@ -836,7 +837,7 @@ if HAS_PYQT6:
             # span (zoom), and every sample of a frame at the FFT size and
             # window chosen in the spectrum's menu (see _plot_frame).
             self._plot_view = PlotView()
-            self._frame_spectrum = FrameSpectrumAnalyzer()
+            self._frame_spectrum = FrameSpectrumAnalyzer(max_samples=_PLOT_MAX_SAMPLES)
             self._frame_axis: Optional[Tuple[float, float]] = None
             # After a hardware retune the plots skip these samples and until
             # then (see _drop_stale_samples).

@@ -292,6 +292,11 @@ _PROBE_READ_S = 0.05
 # second), so catching up after a stall in bigger frames looked like a
 # computer that can't keep up, again and again.
 _MAX_READ_SAMPLES = 1 << 21
+# The plots analyse at most about this many samples of a frame (evenly
+# spread FFT segments of a longer one: see FrameSpectrumAnalyzer): every
+# sample up to 15 MS/s, half of them at 20 MS/s, and a catch-up frame
+# after a stall costs no more than a usual one (it cost up to 0.3 s).
+_PLOT_MAX_SAMPLES = 1 << 19
 # The most queued transfers one frame takes while an I/Q recording reads
 # them all (a driver queues 100 at most; this only guards against a source
 # that never runs dry).
@@ -2257,10 +2262,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # display settings.
         self._spectrum_window: Optional[np.ndarray] = None
         self._spectrum_window_gain = 1.0
-        # What the plots show: every sample of each frame, at the FFT size
+        # What the plots show: every sample of each frame (of a longer
+        # frame than _PLOT_MAX_SAMPLES, spread segments), at the FFT size
         # and window chosen in the spectrum's menu, and the (LO, rate) the
         # samples carried over between frames belong to.
-        self._frame_spectrum = FrameSpectrumAnalyzer()
+        self._frame_spectrum = FrameSpectrumAnalyzer(max_samples=_PLOT_MAX_SAMPLES)
         self._frame_axis: Optional[Tuple[float, float]] = None
         # After a hardware retune the plots skip these samples and until
         # then (they were taken on the old frequency; see _retune_lo).

@@ -470,6 +470,13 @@ _MAX_TAPS = 2047
 # which the receiver undoes with the matching de-emphasis.
 _BROADCAST_DEVIATION_HZ = 50e3
 _DEEMPHASIS_S = 75e-6
+# Narrow FM (a deviation of at most this much: 2.5 and 5 kHz) is voice: its
+# audio is low-passed for voice, as on scanners and ham radios (above
+# 3 kHz a weak station has only hiss). Wide voice (12.5 kHz) and
+# satellite APT (25 kHz) keep the wider audio.
+_FM_VOICE_DEVIATION_HZ = 5e3
+_VOICE_AUDIO_HZ = 3.2e3
+_VOICE_STOP_HZ = 4.5e3
 # The de-emphasis runs at no less than this rate, where its FIR matches the
 # analog response to within 0.1 dB up to 15 kHz.
 _MIN_DEEMPHASIS_RATE = 192e3
@@ -884,11 +891,12 @@ class _ReceiverChain:
         self._audio_factor = total // first
         self._audio_cutoff = min(half, _MAX_AUDIO_HZ, 0.45 * self.intermediate_rate)
         self._deemphasis = False  # set by demodulate() for broadcast FM
+        self._voice = False  # set by demodulate() for narrow FM (voice)
         self._design_demodulator()
         # Stream objects are built once and only reset after a gap: muted or
         # squelched frames reset the demodulator every frame, and rebuilding
         # the resampler table and filter designs each time cost ~0.6 ms.
-        self._audio_cache: Dict[bool, List[_FirDecimator]] = {}
+        self._audio_cache: Dict[Tuple[bool, bool], List[_FirDecimator]] = {}
         self._sideband: Optional[_FirDecimator] = None  # (now in the channel)
         self._resampler: Optional[_Resampler] = None
         if abs(self.intermediate_rate - self.audio_rate) > 1e-6 * self.audio_rate:
@@ -1068,13 +1076,15 @@ class _ReceiverChain:
         self._audio_taps = _lowpass_taps(cutoff, stop, fine_rate)
 
     def _audio_stages(self) -> List[_FirDecimator]:
-        """The audio filters (with de-emphasis for broadcast FM) and the
-        decimation to the intermediate rate, reset to a fresh stream.
+        """The audio filters (with de-emphasis for broadcast FM, for voice
+        in narrow FM) and the decimation to the intermediate rate, reset to
+        a fresh stream.
 
-        Built once per de-emphasis setting and reused."""
-        cached = self._audio_cache.get(self._deemphasis)
+        Built once per de-emphasis and voice setting and reused."""
+        key = (self._deemphasis, self._voice)
+        cached = self._audio_cache.get(key)
         if cached is None:
-            cached = self._audio_cache[self._deemphasis] = self._build_audio_stages()
+            cached = self._audio_cache[key] = self._build_audio_stages()
         for stage in cached:
             stage.reset()
         return cached
@@ -1084,6 +1094,10 @@ class _ReceiverChain:
         if self._audio_coarse_factor > 1:
             stages.append(_FirDecimator(self._audio_coarse, self._audio_coarse_factor))
         taps = self._audio_taps
+        if self._voice:
+            # (Narrower than the audio filter, so it keeps the decimation
+            # free of aliases too.)
+            taps = _lowpass_taps(_VOICE_AUDIO_HZ, _VOICE_STOP_HZ, self._audio_rate_in)
         if self._deemphasis:
             deemphasis = _deemphasis_taps(self._audio_rate_in)
             taps = (
@@ -1144,14 +1158,17 @@ class _ReceiverChain:
             return np.empty(0, dtype=np.float32)
         if self.mode == "FM":
             broadcast = float(fm_deviation) >= _BROADCAST_DEVIATION_HZ
-            if broadcast != self._deemphasis:
-                self._deemphasis = broadcast
+            voice = float(fm_deviation) <= _FM_VOICE_DEVIATION_HZ
+            if (broadcast, voice) != (self._deemphasis, self._voice):
+                changed = broadcast != self._deemphasis
+                self._deemphasis, self._voice = broadcast, voice
                 self._audio = self._audio_stages()
-                # Broadcast keeps its deepest bass (a 2 Hz corner still
-                # removes a tuning offset within a few tenths of a second).
-                self._dc_blocker = self._make_dc_blocker(
-                    _FM_BROADCAST_DC_CORNER_HZ if broadcast else _FM_DC_CORNER_HZ
-                )
+                if changed:
+                    # Broadcast keeps its deepest bass (a 2 Hz corner still
+                    # removes a tuning offset within a few tenths of a second).
+                    self._dc_blocker = self._make_dc_blocker(
+                        _FM_BROADCAST_DC_CORNER_HZ if broadcast else _FM_DC_CORNER_HZ
+                    )
             # Discriminator; the previous block's last sample keeps the phase
             # difference continuous. Scaled so +/- the deviation is full scale.
             if self._prev is not None:

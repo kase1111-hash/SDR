@@ -94,6 +94,59 @@ class TestFmAudioIsCentred(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestNarrowFmVoiceBand(unittest.TestCase):
+    """LISTEN-07: narrow FM (2.5 and 5 kHz deviation) is voice: its audio
+    is low-passed near 3 kHz, as on scanners and ham radios. It passed up
+    to half the filter (12.5 kHz with a 25 kHz filter), so a weak 2 m or
+    NOAA station played broadband hiss."""
+
+    def setUp(self):
+        require_pyqt6(self)
+        self.mw = _mw()
+
+    def _weak_station(self, deviation, width=25e3, seconds=1.0):
+        """A weak station (a 1 kHz tone at 60 % of ``deviation``, about
+        10 dB above the noise in the channel), as heard."""
+        rng = np.random.default_rng(3)
+        n = int(seconds * RATE)
+        t = np.arange(n) / RATE
+        iq = _fm(0.6 * np.sin(2 * np.pi * 1e3 * t), RATE, deviation)
+        noise = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+        iq = iq + noise * np.sqrt(0.1 * RATE / width / 2)
+        chain = self.mw._ReceiverChain(RATE, "FM", width)
+        return _receive(chain, iq.astype(np.complex64), deviation)[4800:]
+
+    @staticmethod
+    def _share_above(audio, freq):
+        spectrum = np.abs(np.fft.rfft(audio * np.hanning(len(audio)))) ** 2
+        freqs = np.fft.rfftfreq(len(audio), 1 / AUDIO_RATE)
+        return float(spectrum[freqs > freq].sum() / spectrum.sum())
+
+    def test_narrow_fm_hiss_stays_in_the_voice_band(self):
+        for deviation in (2.5e3, 5e3):
+            audio = self._weak_station(deviation)
+            # (Was 23-48 % of the audio, all hiss, above 4.5 kHz.)
+            self.assertLess(self._share_above(audio, 4.5e3), 0.01, deviation)
+
+    def test_wide_voice_and_apt_keep_their_audio(self):
+        t = np.arange(int(0.5 * RATE)) / RATE
+        tone = 0.5 * np.sin(2 * np.pi * 6e3 * t)
+        for deviation in (12.5e3, 25e3):
+            chain = self.mw._ReceiverChain(RATE, "FM", 50e3)
+            audio = _receive(chain, _fm(tone, RATE, deviation), deviation)
+            level = _tone_level(audio[int(0.2 * AUDIO_RATE) :], 6e3)
+            self.assertAlmostEqual(level, 0.5, delta=0.03, msg=deviation)
+
+    def test_voice_tones_are_untouched(self):
+        t = np.arange(int(0.5 * RATE)) / RATE
+        for freq in (300.0, 1e3, 3e3):
+            chain = self.mw._ReceiverChain(RATE, "FM", 25e3)
+            audio = _receive(chain, _fm(0.5 * np.sin(2 * np.pi * freq * t), RATE, 5e3))
+            level = _tone_level(audio[int(0.2 * AUDIO_RATE) :], freq)
+            self.assertAlmostEqual(level, 0.5, delta=0.03, msg=freq)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestSidebandWidths(unittest.TestCase):
     """RX-11, UX-B10, G-09: the Bandwidth control sets the SSB/CW filter."""
 

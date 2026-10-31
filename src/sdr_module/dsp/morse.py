@@ -398,6 +398,10 @@ class MorseDecoder:
     #: gap between them is shorter than this many times their length (the
     #: elements of a letter are a dit apart), else dits.
     DASH_GAP = 0.6
+    #: ... or when longer than this many dits at the slowest speed (dashes
+    #: a letter apart, as in "TTT"): room for 5 WPM dits sent or measured
+    #: a little long, which stay dits ("SOS", "S", "EEE").
+    SLOW_DIT_SLACK = 1.2
     #: A word that is a lone E or T (what a crash of static keys) waits.
     #: Next to a word of several letters it is static: dropped.
     #: Next to a word of one letter, up to this many in a row show while
@@ -521,18 +525,19 @@ class MorseDecoder:
         kind. Until the speed is known the gaps between them tell: marks
         about three times the shortest gap are dashes (a letter's elements
         are a dit apart), marks as long as it (S, H, 5) or shorter
-        (letters of one element) dits, unless longer than a dit at the
-        slowest speed: then they are dashes, letters apart (T T T).
-        Otherwise (no gap between marks yet, or the speed is known) they
-        are dits if nearer one dit than three: slow dits would be dashes at
-        the default speed."""
+        (letters of one element) dits, unless clearly longer than a dit at
+        the slowest speed (``SLOW_DIT_SLACK``): then they are dashes,
+        letters apart (T T T). Otherwise (no gap between marks yet, or the
+        speed is known) they are dits if nearer one dit than three: slow
+        dits would be dashes at the default speed."""
         if not self._calibrated:
             # The queued gaps after the first mark (the one before it is
             # the silence before the transmission).
             gaps = [length for kind, length in self._queue[2:] if kind == "gap"]
             if gaps:
                 slowest_dit = self.rate * 1.2 / self.WPM_RANGE[0]
-                if min(gaps) < self.DASH_GAP * mean or mean > slowest_dit:
+                longest_dit = self.SLOW_DIT_SLACK * slowest_dit
+                if min(gaps) < self.DASH_GAP * mean or mean > longest_dit:
                     return mean / 3.0
                 return mean
         return mean if mean < 2.0 * self._dit else mean / 3.0

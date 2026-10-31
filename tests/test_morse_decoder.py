@@ -194,6 +194,27 @@ class TestSpeeds:
         assert [m.text for m in lines] == ["TTT"]
         assert morse.wpm == pytest.approx(wpm, rel=0.05)
 
+    @pytest.mark.parametrize("text", ["S", "SSS", "H", "5", "EEE", "II", "SOS"])
+    def test_dits_at_5_wpm_a_little_long_stay_dits(self, text):
+        # The "TTT" rule above took every mark longer than a 5 WPM dit
+        # (0.24 s) for a dash, so dits at 5 WPM measured a few ms long read
+        # as dashes: "SOS" read "TTT OS", "S" "TTT", "EEE" nothing. The
+        # keying detector measures 5 WPM dits at 234-246 ms in noise, and
+        # a keyer's weight (or a slow hand) makes them longer still.
+        rate = 2000.0
+        key = enc.morse_keying(text, rate, 5, lead_s=1.0, tail_s=4.0)
+        weight = int(0.015 * rate)  # each mark 15 ms longer
+        heavy = np.convolve(key > 0.5, np.ones(weight + 1))[: len(key)] > 0
+        morse = MorseDecoder(rate)
+        lines = []
+        for i in range(0, len(key), int(rate / 30)):
+            lines += morse.process(heavy[i : i + int(rate / 30)].astype(np.float64))
+        lines += morse.flush()
+        assert [m.text for m in lines] == [text]
+        for seed in range(3):
+            noisy = _noisy(key.astype(np.complex64), 12.0, seed)
+            assert _decode(noisy, rate, block=66)[0] == [text], seed
+
     @pytest.mark.parametrize("text", ["SOS DE N0CALL K", "HI HI DE N0CALL"])
     def test_slow_code_that_starts_with_dits_in_noise(self, text):
         rate = 2000.0

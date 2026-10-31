@@ -2136,6 +2136,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     _START_TEXT = "▶  Start"
     _STOP_TEXT = "■  Stop"
     _RECORD_TEXT = "●  Record"
+    # What the dimmed plots say while transmitting.
+    _ON_AIR_PLOT_TEXT = "Transmitting - receiving resumes when it ends"
     # The Audio button's four states (see _audio_state). (A leading space:
     # Qt leaves almost no gap after a button's icon.)
     _AUDIO_ON_TEXT = " Audio"
@@ -3937,9 +3939,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         has_device = self._device is not None
         running = self._is_running and has_device
 
-        # Toolbar Start/Stop
+        # Toolbar Start/Stop (off while transmitting: _show_tx_state, below)
         button = self._start_button
         button.setText(self._STOP_TEXT if running else self._START_TEXT)
+        button.setEnabled(True)
+        self._start_action.setEnabled(True)
         role = "" if running else "primary"
         if (button.property("role") or "") != role:
             set_role(button, role or None)
@@ -6195,8 +6199,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return bool(station is not None and station.busy)
 
     def _show_tx_state(self, on_air: bool) -> None:
-        """The status bar's state badge says ON AIR while transmitting (the
-        state comes back with the next _refresh_state_ui)."""
+        """While transmitting, the status bar's state badge says ON AIR, the
+        plots say receiving resumes when it ends, and Start is off (the
+        HackRF is half duplex: Start or Space would only be refused). All
+        of it comes back with the next _refresh_state_ui."""
         if on_air:
             self._state_badge.setText("ON AIR")
             set_tone(self._state_badge, "danger")
@@ -6205,6 +6211,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "Click to stop transmitting."
             )
             self._state_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+            button = self._start_button
+            button.setText(self._START_TEXT)
+            if button.property("role"):
+                set_role(button, None)
+            button.setToolTip(
+                "Receiving resumes when the transmission ends (the ON AIR "
+                "badge stops it)"
+            )
+            button.setEnabled(False)
+            self._start_action.setText("&Start Receiving\tSpace")
+            self._start_action.setEnabled(False)
+            for plot in (self._spectrum, self._waterfall):
+                plot.set_stale(self._ON_AIR_PLOT_TEXT)
 
     def _transmit_job(self, job: "TxJob", confirm: bool = True) -> bool:
         """Transmit ``job`` (see :class:`~.transmitter.TxJob`) on the HackRF:
@@ -6279,7 +6298,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._rec_since = None
         self._update_rec_clock()
         self._sync_record_ui(True)
-        if not self._is_running:
+        if self._tx_busy():  # (Space is refused until it ends)
+            self._show_status_message(
+                "Recording armed: samples are captured when receiving resumes "
+                "after the transmission",
+                "warning",
+                6000,
+            )
+        elif not self._is_running:
             self._show_status_message(
                 "Recording armed: samples are captured once receiving starts "
                 "(Space)",
@@ -6797,7 +6823,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._audio_take = take
         self._sync_audio_record_ui()
         note = ""
-        if not (self._is_running and self._device is not None):
+        if self._tx_busy():  # (Space is refused until it ends)
+            note = " It starts when receiving resumes after the transmission."
+        elif not (self._is_running and self._device is not None):
             note = " It starts with the receiver (Space)."
         elif not self._audio_enabled:
             note = " (The speaker is off; the recording still gets the audio.)"
@@ -10247,7 +10275,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if running:
             text = None
         elif self._tx_busy():
-            text = "Transmitting - receiving resumes when it ends"
+            text = self._ON_AIR_PLOT_TEXT
         elif not has_device:
             text = "No device - press Space to connect one"
         elif playback is not None and getattr(playback, "finished", False):

@@ -21,6 +21,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from sdr_module.ham.sstv import find_mode  # noqa: E402
 from sdr_module.ham.sstv_encoder import encode_sstv, sstv_test_card  # noqa: E402
 from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
+from tests.test_gui_smeter import _PanelCase as _SMeterCase  # noqa: E402
+from tests.test_gui_smeter import noise, tone  # noqa: E402
 from tests.test_gui_sstv import FS, _PanelCase, correlation  # noqa: E402
 from tests.test_gui_station_tx import _TxCase  # noqa: E402
 
@@ -254,6 +256,46 @@ class TestStartNowWithoutAudio(_PanelCase):
         self.panel._last_audio_time -= 2.0  # the receiver stopped
         self.panel._update_status()
         self.assertIn("the audio stopped for a while", self.panel._status_label.text())
+
+
+class TestCopiedReportIsTheReadingShown(_SMeterCase):
+    """HAM-E2E-4: the panel showed S9+25 while Copy put S9+30 in the log
+    (the core rounds over S9 to 10 dB; the panel reads 1 dB)."""
+
+    def test_copy_report_gives_the_s_reading_shown(self):
+        panel = self.panel
+        panel.set_frequency_source(lambda: 100.1e6)
+        seen = set()
+        for amplitude in (0.05, 0.1, 0.02, 0.08):
+            self.show_reading(tone(amplitude) + noise())
+            shown = panel._s_meter_label.text()
+            seen.add(shown)
+            text = panel.copy_report()
+            self.assertRegex(
+                text, r"^RST 5\d · S9\+\d+ · 100\.100 MHz · \d\d:\d\d UTC$"
+            )
+            self.assertEqual(text.split(" · ")[1], shown, text)
+        self.assertGreater(len(seen), 2)
+
+    def test_the_spoken_report_keeps_ten_db_steps(self):
+        self.show_reading(tone(0.1) + noise())  # S9+23
+        self.assertEqual(self.panel._s_meter_label.text(), "S9+23")
+        self.assertEqual(self.panel._verbal_label.text(), "Five and nine, 20 over")
+
+    def test_library_default_is_unchanged(self):
+        from sdr_module.ham.signal_meter import SignalMeter
+
+        meter = SignalMeter()
+        for _ in range(3):
+            meter.update(tone(0.1) + noise())
+        self.assertEqual(
+            meter.get_log_report(14.25e6, when=0.0),
+            "RST 59 · S9+20 · 14.250 MHz · 00:00 UTC",
+        )
+        self.assertEqual(
+            meter.get_log_report(14.25e6, when=0.0, s_text="S9+23"),
+            "RST 59 · S9+23 · 14.250 MHz · 00:00 UTC",
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

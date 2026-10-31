@@ -1193,8 +1193,9 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
         return self._meter.get_contest_report()
 
     def report_text(self) -> Optional[str]:
-        """The report to copy: 'RST 59 · S9+20 · 14.250 MHz · 12:34 UTC'
-        (None while there is no reading)."""
+        """The report to copy: 'RST 59 · S9+23 · 14.250 MHz · 12:34 UTC',
+        with the S reading shown (1 dB steps over S9, not the spoken
+        report's 10) (None while there is no reading)."""
         if not self._showing_data:
             return None
         frequency = None
@@ -1203,7 +1204,10 @@ class SignalMeterPanel(QWidget if HAS_PYQT6 else object):
                 frequency = float(self._frequency_source())
             except Exception:  # pragma: no cover - defensive
                 frequency = None
-        return self._meter.get_log_report(frequency)
+        shown = self._s_meter_label.text()
+        return self._meter.get_log_report(
+            frequency, s_text=shown if shown.startswith("S") else None
+        )
 
     def copy_report(self) -> Optional[str]:
         return self._copy(self.report_text())

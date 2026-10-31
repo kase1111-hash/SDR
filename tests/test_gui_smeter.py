@@ -423,7 +423,8 @@ class TestCopyReport(_PanelCase):
         p.set_frequency_source(lambda: 145.8e6)
         self.show_reading(tone(0.05) + noise())
         text = p.copy_report()
-        self.assertRegex(text, r"^RST 59 · S9\+20 · 145\.800 MHz · \d\d:\d\d UTC$")
+        # The S reading shown (S9+17), not rounded to S9+20 (HAM-E2E-4).
+        self.assertRegex(text, r"^RST 59 · S9\+17 · 145\.800 MHz · \d\d:\d\d UTC$")
         self.assertEqual(QGuiApplication.clipboard().text(), text)
         self.assertEqual(copied[-1][0], f"Copied: {text}")
         self.assertEqual(p.copy_rst(), "59")

@@ -151,6 +151,7 @@ from .file_jobs import (
     load_recording,
     run_job,
     wav_fits,
+    wav_problem,
     write_recording,
 )
 from .iq_files import (
@@ -9072,6 +9073,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         snapshot: Any = None
         try:
             self._check_save_target(filename, fmt)
+            # (What a WAV file can't hold is said before whether it fits.)
+            problem = (
+                wav_problem(count, sample_fmt, rate) if fmt is FileFormat.WAV else ""
+            )
+            if problem:
+                raise ValueError(problem)
             moved = self._move_take(filename, fmt, sample_fmt, rate, center, details)
             if not moved:
                 self._check_save_room(filename, sample_fmt, count, reserve=quiet)
@@ -9129,11 +9136,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             logger.error(f"Failed to save recording: {error}")
             if quiet:
                 # (Nobody watches an automatic save: shown as long as the
-                # warning it may replace, "Recording stopped: ...".)
+                # warning it may replace, "Recording stopped: ...". Short
+                # enough for the status bar at 1366 px, what to do too.)
                 reason = str(error).rstrip(".")
                 self._show_status_error(
-                    f"Could not save the recording to {name}: {reason}. It is "
-                    "kept: save it elsewhere with Save... in the Recording group.",
+                    f"Not saved automatically: {reason}. It is kept: save it "
+                    "elsewhere (Ctrl+S).",
                     20000,
                     log=False,
                 )
@@ -9265,16 +9273,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 f"has {free_text} free. Save it to another drive, or free up "
                 "some space."
             )
-        # (Save automatically says what to do next itself.)
+        # (Save automatically says what to do next itself, and where: the
+        # recordings folder.)
         if need > free:
             raise ValueError(
-                f"there isn't enough space (it needs {need_text}, and "
-                f"{where} has {free_text} free)"
+                f"there isn't enough space (it needs {need_text}, the drive has "
+                f"{free_text} free)"
             )
         raise ValueError(
-            f"the drive would be nearly full (it needs {need_text} of the "
-            f"{free_text} free in {where}, and recording keeps "
-            f"{format_size(_MIN_FREE_BYTES)} free)"
+            f"the drive would be nearly full (it needs {need_text} of "
+            f"{free_text} free; recording keeps {format_size(_MIN_FREE_BYTES)} "
+            "free)"
         )
 
     def _import_channels_csv(self) -> None:

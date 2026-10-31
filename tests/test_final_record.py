@@ -23,6 +23,7 @@ from sdr_module.dsp.recording import (
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_recording_files import _FilesCase  # noqa: E402
+from tests.test_review_recordings import _ReviewCase  # noqa: E402
 
 N = 16384  # complex samples: 64 KiB of cs16, what Import Options reads
 
@@ -985,3 +986,88 @@ class TestCentersAboveTheReceiversRange(_FilesCase):
         dialog._center_edit.setText("5000G")
         self.assertIsNone(dialog.center_hz())
         self.assertIn("Can't read the center frequency", dialog.check_text())
+
+
+class TestAutoSaveRefusalFitsTheStatusBar(_ReviewCase):
+    """Leftover 30: the 'Save automatically' refusal was ~280 characters;
+    at 1366 px the status bar cut off what to do (the tooltip had it)."""
+
+    def test_short_with_the_advice(self):
+        self.win._control_panel.set_auto_save(True)
+        self.set_format(".cs16")  # (a full copy: refused on the full drive)
+        self.record(3, stop=False)
+        with self.assertLogs("sdr_module.gui.main_window", level="ERROR"):
+            self.stop_for_disk_space(420)
+        text = self.message()
+        self.assertIn("would be nearly full", text)
+        self.assertIn("It is kept: save it elsewhere", text)
+        self.assertLessEqual(len(text), 160, text)
+
+
+class TestWavLimitBeforeRoom(_ReviewCase):
+    """Leftover 30: a WAV save over 4 GiB onto a drive with less room was
+    first told there isn't room, then (room made) that WAV can't hold it."""
+
+    def test_the_wav_limit_is_said_first(self):
+        from unittest import mock
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        from sdr_module.gui import file_jobs
+
+        self.record(3)
+        count = self.win._buffer_sample_count()
+        small = count * 4 - 1  # (this take is "over 4 GiB")
+        target = self.path("take.wav")
+        with (
+            mock.patch.object(file_jobs, "WAV_MAX_DATA_BYTES", small),
+            self.free(0.01),  # (and the drive has no room for it)
+            self.save_dialog(target),
+            mock.patch.object(QMessageBox, "warning") as warn,
+        ):
+            self.assertFalse(self.win._save_recording())
+        self.assertIn("too long for a WAV file", warn.call_args[0][2])
+        self.assertNotIn("enough space", warn.call_args[0][2])
+        self.assertFalse(os.path.exists(target))
+
+
+class TestTextModeIqWriteCleansUp:
+    """Leftover 30: text_modes.write_iq_file stopped the recorder in a
+    finally: when stop() failed (a full disk), the partial files stayed."""
+
+    def _source(self):
+        from sdr_module.protocols import text_modes as tm
+
+        sig = tm.TextSignal("CQ CQ", tm.TextSettings.for_mode(tm.MODE_ASCII))
+        return tm, sig.source(48000.0)
+
+    @pytest.mark.parametrize(
+        "fmt, names", [("sigmf", ["a.sigmf-data"]), ("cf32", ["a.cf32"])]
+    )
+    def test_a_failing_stop_leaves_nothing(self, tmp_path, fmt, names):
+        from unittest import mock
+
+        from sdr_module.dsp.recording import IQRecorder
+
+        tm, source = self._source()
+        path = tmp_path / names[0]
+        with (
+            mock.patch.object(IQRecorder, "stop", side_effect=OSError(28, "full")),
+            pytest.raises(OSError),
+        ):
+            tm.write_iq_file(str(path), source, fmt)
+        assert list(tmp_path.iterdir()) == []
+
+    def test_a_failing_write_reports_its_own_error(self, tmp_path):
+        from unittest import mock
+
+        from sdr_module.dsp.recording import IQRecorder
+
+        tm, source = self._source()
+        with (
+            mock.patch.object(IQRecorder, "write", side_effect=ValueError("bad")),
+            mock.patch.object(IQRecorder, "stop", side_effect=OSError(28, "full")),
+            pytest.raises(ValueError, match="bad"),
+        ):
+            tm.write_iq_file(str(tmp_path / "b.sigmf-data"), source, "sigmf")
+        assert list(tmp_path.iterdir()) == []

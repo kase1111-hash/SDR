@@ -1439,21 +1439,30 @@ def write_iq_file(
     try:
         recorder.start(path)
         started = True
-        if report is not None:
-            report(0.0)
-        while True:
-            block = source.read(_CHUNK)
-            if not len(block):
-                break
-            recorder.write(block)
-            written += len(block)
+        try:
             if report is not None:
-                report(written / max(1, total))
+                report(0.0)
+            while True:
+                block = source.read(_CHUNK)
+                if not len(block):
+                    break
+                recorder.write(block)
+                written += len(block)
+                if report is not None:
+                    report(written / max(1, total))
+        except BaseException:
+            # (Its own error is the one to report: the files go below.)
+            try:
+                recorder.stop()
+            except Exception as e:
+                logger.debug(f"Closing the failed write also failed: {e}")
+            raise
+        # Flushes and closes the file (and writes SigMF's metadata): a full
+        # disk can fail here too, and leaves no partial file either.
+        recorder.stop()
         finished = True
     finally:
-        if started:
-            recorder.stop()
-        if not finished:
+        if started and not finished:
             if sigmf:
                 stem = os.path.splitext(str(path))[0]
                 _remove(stem + ".sigmf-data")

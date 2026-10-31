@@ -133,6 +133,25 @@ def wav_fits(samples: int, sample_format: SampleFormat = SampleFormat.INT16) -> 
     return int(samples) * 2 * width <= WAV_MAX_DATA_BYTES
 
 
+def wav_problem(total: int, sample_format: SampleFormat, sample_rate: float) -> str:
+    """Why ``total`` samples can't be saved as one WAV file ("" when they
+    can): its header must hold the sample rate, and it holds 4 GiB at
+    most (writing more would fail only after 4 GiB)."""
+    if not sample_rate > 0:
+        return (
+            "a WAV file needs the sample rate, and this recording doesn't say "
+            "it. Save again and enter it, or choose another format (SigMF can "
+            "leave it unknown)."
+        )
+    if not wav_fits(total, sample_format):
+        return (
+            "it is too long for a WAV file, which holds 4 GiB at most "
+            f"({_wav_limit_text(sample_format, sample_rate)}). Choose SigMF or "
+            "cs16, which have no such limit."
+        )
+    return ""
+
+
 def _wav_limit_text(sample_format: SampleFormat, sample_rate: float) -> str:
     """How long a recording one WAV file holds at ``sample_rate``."""
     width = 1 if sample_format in (SampleFormat.UINT8, SampleFormat.INT8) else 2
@@ -164,20 +183,10 @@ def write_recording(
     ``core:hw`` and ``core:description``, and ``segments`` where the
     recording resumed after a gap (each a capture with its own time).
     Returns the samples written."""
-    if file_format is FileFormat.WAV and not sample_rate > 0:
-        # (Its header must hold one: nothing is written.)
-        raise ValueError(
-            "a WAV file needs the sample rate, and this recording doesn't say "
-            "it. Save again and enter it, or choose another format (SigMF can "
-            "leave it unknown)."
-        )
-    if file_format is FileFormat.WAV and not wav_fits(total, sample_format):
-        # (It would fail after writing 4 GiB: nothing is written.)
-        raise ValueError(
-            "it is too long for a WAV file, which holds 4 GiB at most "
-            f"({_wav_limit_text(sample_format, sample_rate)}). Choose SigMF or "
-            "cs16, which have no such limit."
-        )
+    if file_format is FileFormat.WAV:
+        problem = wav_problem(total, sample_format, sample_rate)
+        if problem:
+            raise ValueError(problem)  # (nothing is written)
     recorder = IQRecorder(
         sample_rate=sample_rate,
         center_frequency=center_frequency,

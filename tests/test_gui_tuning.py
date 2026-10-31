@@ -243,10 +243,12 @@ class TestVfoInsideTheSpan(_TuningCase):
         self.win.set_frequency(100.6e6)
         self.win._update_display()
         self.assertFalse(self.win._retune_warned)
-        # Moving the LO does.
-        self.win.set_frequency(145e6)
+        # Moving the LO is refused while it records (a take holds one
+        # center): the samples stay labelled right.
+        self.assertFalse(self.win.set_frequency(145e6))
         self.win._update_display()
-        self.assertTrue(self.win._retune_warned)
+        self.assertEqual(self.win._lo_frequency(), 100.1e6)
+        self.assertEqual(self.win._buffer_meta[0], 100.1e6)
         self.win._toggle_recording(False)
         self.win._discard_recording()
 

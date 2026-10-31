@@ -5264,6 +5264,32 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             lo = center
         elif recenter or self._keep_centered() or not self._channel_fits(freq - lo):
             lo = freq
+        if (
+            abs(lo - self._lo_hz) >= 0.5
+            and self._recording
+            and not self._capture_pending
+        ):
+            # An I/Q recording holds one center frequency (as it holds one
+            # rate): while it has samples the LO stays, and only the tuned
+            # frequency moves inside the span. (A retune labelled what
+            # followed with the old center, and lost the transfers drained.)
+            if not self._channel_fits(freq - self._lo_hz):
+                rate = self._device_sample_rate()
+                covered = format_mhz_range(
+                    self._lo_hz - rate / 2, self._lo_hz + rate / 2
+                )
+                if abs(freq - self._lo_hz) < rate / 2:
+                    width = self._control_panel._bw_combo.currentText()
+                    return self._refuse_tuning(
+                        f"A {width} channel at {format_frequency(freq)} doesn't "
+                        f"fit inside the I/Q recording's span ({covered}): tune "
+                        "nearer its middle, or stop recording to retune."
+                    )
+                return self._refuse_tuning(
+                    f"{format_frequency(freq)} is outside the I/Q recording's "
+                    f"span ({covered}): stop recording to retune there."
+                )
+            lo = self._lo_hz
         if abs(lo - self._lo_hz) >= 0.5 and not self._retune_lo(lo):
             return self._refuse_tuning(
                 f"{self._device_model_name()} didn't tune to "

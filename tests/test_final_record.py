@@ -1071,3 +1071,51 @@ class TestTextModeIqWriteCleansUp:
         ):
             tm.write_iq_file(str(tmp_path / "b.sigmf-data"), source, "sigmf")
         assert list(tmp_path.iterdir()) == []
+
+
+class TestNoRetuneWhileRecordingIq(_FilesCase):
+    """Leftover 24: tuning far during an I/Q take retuned the LO: the take
+    silently lost the transfers drained after the retune, and its metadata
+    kept the first center for the samples recorded after it."""
+
+    def start_take(self):
+        win = self.win
+        self.assertTrue(win.set_frequency(100.1e6))
+        win._toggle_recording(True)
+        win._update_display()
+        self.assertFalse(win._capture_pending)
+
+    def test_a_far_tune_is_refused_while_recording(self):
+        win = self.win
+        self.start_take()
+        lo = win._lo_frequency()
+        self.assertFalse(win.set_frequency(145.8e6))
+        self.assertEqual(win._lo_frequency(), lo)
+        self.assertEqual(win._current_frequency(), 100.1e6)
+        self.assertIn("stop recording to retune", self.message())
+        # Inside the span only the tuned frequency moves.
+        self.assertTrue(win.set_frequency(100.4e6))
+        self.assertEqual(win._lo_frequency(), lo)
+        win._update_display()
+        self.assertEqual(win._buffer_meta[0], lo)
+        win._toggle_recording(False)
+        self.assertTrue(win.set_frequency(145.8e6))  # stopped: as before
+
+    def test_keep_centered_doesnt_move_the_lo_while_recording(self):
+        win = self.win
+        win._keep_centered_action.setChecked(True)
+        self.start_take()
+        lo = win._lo_frequency()
+        self.assertTrue(win.set_frequency(100.3e6))
+        self.assertEqual(win._lo_frequency(), lo)
+        win._toggle_recording(False)
+        win._keep_centered_action.setChecked(False)
+
+    def test_armed_recordings_still_tune(self):
+        win = self.win
+        win._stop_acquisition()
+        win._toggle_recording(True)  # armed: nothing captured yet
+        self.assertTrue(win._capture_pending)
+        self.assertTrue(win.set_frequency(145.8e6))
+        self.assertEqual(win._current_frequency(), 145.8e6)
+        win._toggle_recording(False)

@@ -652,6 +652,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # Aircraft), or "" for all, and how many of its messages are there.
         self._filter_address = ""
         self._filter_count = 0
+        # The "Tune to ..." on offer (text, tooltip; None: none).
+        self._tune_offer: Tuple[Optional[str], str] = (None, "")
 
         self._setup_ui()
         self._update_views()  # the protocol views hide until chosen
@@ -732,7 +734,18 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._status_label.setSizePolicy(
             QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
         )
-        layout.addWidget(self._status_label)
+        status_row = QHBoxLayout()
+        status_row.setSpacing(6)
+        status_row.addWidget(self._status_label, 1)
+        # "Tune to ..." beside it whenever the receiver is tuned elsewhere:
+        # the empty table's own button goes once messages are listed.
+        self._tune_btn = QPushButton()
+        set_role(self._tune_btn, "compact")
+        self._tune_btn.setAutoDefault(False)
+        self._tune_btn.clicked.connect(lambda _checked=False: self._tune_to_protocol())
+        self._tune_btn.hide()
+        status_row.addWidget(self._tune_btn, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addLayout(status_row)
 
         # Output tabs, with Clear / Export in the tab bar's corner so the
         # table keeps as much height as possible in the short right column.
@@ -878,6 +891,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             "CW (Morse)": self._cw_view,
         }
         self._tabs.setCurrentWidget(self._messages_page)
+        # The status line's "Tune to ..." stands in for the button of an
+        # empty view only while that view is out of sight.
+        self._tabs.currentChanged.connect(lambda _index: self._update_tune_button())
 
         layout.addWidget(self._tabs, 1)
 
@@ -1390,9 +1406,38 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         view = self._protocol_views.get(proto or "")
         if view is not None:
             view.set_waiting(self._view_hint(proto, empty), *action)
+        self._tune_offer = action
+        self._update_tune_button()
         self._update_buttons()
         self._update_status_line()
         self._update_decoder_stats()
+
+    def _update_tune_button(self) -> None:
+        """The status line's "Tune to ...": offered whenever the receiver is
+        tuned elsewhere, whatever the table holds; hidden only while the
+        view in front shows the same button in its empty state."""
+        text, tip = self._tune_offer
+        front = self._tabs.currentWidget()
+        if front is self._messages_page:
+            placeholder: Any = self._empty
+        elif front in self._protocol_views.values():
+            placeholder = front.placeholder()
+        else:
+            placeholder = None
+        in_view = (
+            placeholder is not None
+            and placeholder.is_visible()
+            and placeholder.action_text() == text
+        )
+        show = bool(text) and not in_view
+        button = self._tune_btn
+        if show and button.text() != text:
+            button.setText(text)
+            button.setAccessibleName(text)
+        if show and button.toolTip() != tip:
+            button.setToolTip(tip)
+        if button.isHidden() == show:
+            button.setVisible(show)
 
     def _view_hint(self, proto: Optional[str], empty: str) -> str:
         """The empty-state text for a protocol's view: the table's, but
@@ -1638,6 +1683,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
         self._empty.set_visible(False)
         self._log_empty.set_visible(False)
+        self._update_tune_button()  # (the empty view's own button went)
         self._update_stats()
         self._update_buttons()
 

@@ -24,6 +24,15 @@ def _settle(n=5):
         QApplication.processEvents()
 
 
+def _status(name, unit="message", **fields):
+    """A live decoder's status, as the window passes it to the panel."""
+    from sdr_module.dsp.live_decoders import LiveDecoderStatus
+
+    base = dict(name=name, unit=unit, signal_measured=True)
+    base.update(fields)
+    return LiveDecoderStatus(**base)
+
+
 class _PanelCase(unittest.TestCase):
     """A Decoder panel on its own, shown, with a clock the test sets."""
 
@@ -85,6 +94,71 @@ class TestProtocolViewInFront(_PanelCase):
         p._tabs.setCurrentWidget(p._raw_output)
         p.set_current_frequency(1090.2e6)  # (nothing changes the protocol)
         self.assertIs(self.front(), p._raw_output)
+
+
+# --------------------------------------------------------------------------- #
+# DEC-E2E-01: "Tune to ..." stays offered once messages are listed
+# --------------------------------------------------------------------------- #
+
+
+class TestTuneToStaysOffered(_PanelCase):
+    def setUp(self):
+        super().setUp()
+        self.tuned = []
+        self.panel.tune_requested.connect(lambda *args: self.tuned.append(args))
+        self.panel.set_receiving(True)
+
+    def test_offered_beside_the_status_line_with_rows_in_the_table(self):
+        # The only button was the empty table's: one row (of any protocol)
+        # hid it, and only Clear (losing the messages) brought it back.
+        p = self.panel
+        p.set_current_frequency(144.39e6)
+        p._proto_combo.setCurrentText("AX.25/APRS")
+        p.add_message("AX.25/APRS", "N0CALL-9", "49.0583, -72.0292")
+        p._proto_combo.setCurrentText("POCSAG")
+        p.set_decoder_status(_status("POCSAG", "page"))  # (as the window does)
+        _settle(1)
+        self.assertFalse(p._empty.is_visible())  # the table lists the packet
+        self.assertTrue(
+            p.decoder_status_text().startswith("Not tuned to POCSAG"),
+            p.decoder_status_text(),
+        )
+        button = p._tune_btn
+        self.assertTrue(button.isVisible())
+        self.assertEqual(button.text(), "Tune to 152.240 MHz")
+        self.assertIn("pager channel", button.toolTip())
+        button.click()
+        self.assertEqual(self.tuned[-1][:3], (152.24e6, "POCSAG (152.240 MHz)", "FM"))
+        p.set_current_frequency(152.24e6)  # (the window reports the tune)
+        self.assertFalse(button.isVisible())
+
+    def test_one_button_while_the_empty_view_in_front_has_its_own(self):
+        p = self.panel
+        p.set_current_frequency(100.1e6)
+        p._proto_combo.setCurrentText("ADS-B")
+        _settle(1)
+        aircraft = p._aircraft_view.placeholder()
+        self.assertTrue(aircraft.button.isVisible())
+        self.assertFalse(p._tune_btn.isVisible())
+        p._tabs.setCurrentWidget(p._raw_output)  # the Log: no button there
+        self.assertTrue(p._tune_btn.isVisible())
+        p._tabs.setCurrentWidget(p._messages_page)  # the empty table has one
+        self.assertTrue(p._empty.button.isVisible())
+        self.assertFalse(p._tune_btn.isVisible())
+        p.add_message("ADS-B", "4840D6", "KLM1023")
+        self.assertTrue(p._tune_btn.isVisible())
+
+    def test_not_offered_while_paused_or_off(self):
+        p = self.panel
+        p.set_current_frequency(100.1e6)
+        p._proto_combo.setCurrentText("POCSAG")
+        p.add_message("POCSAG", "1 (F0)", "page")
+        self.assertTrue(p._tune_btn.isVisible())
+        p._enabled_check.setChecked(False)
+        self.assertFalse(p._tune_btn.isVisible())
+        p._enabled_check.setChecked(True)
+        p._proto_combo.setCurrentText("Off")
+        self.assertFalse(p._tune_btn.isVisible())
 
 
 if __name__ == "__main__":

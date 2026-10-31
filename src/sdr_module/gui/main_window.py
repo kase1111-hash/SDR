@@ -9412,7 +9412,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         elif band == "AM":
             self._set_demod_mode("AM", bandwidth=_BROADCAST_AM_BANDWIDTH)
         tuner = self._radio_tuner
-        if tuner is None or not tuner.is_seeking():  # (seek says it itself)
+        if self._device is None:  # (tuned, but nothing can play)
+            self._show_status_message(
+                f"Tuned to {format_frequency(freq_hz)} ({band}). No receiver: "
+                "Device > Use Demo Device or Connect... to listen.",
+                "warning",
+                6000,
+            )
+        elif tuner is None or not tuner.is_seeking():  # (seek says it itself)
             self._show_status_message(
                 f"Tuned to {format_frequency(freq_hz)} ({band})", "info", 2500
             )
@@ -9453,6 +9460,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tuner.set_device_range(
             low if has_range else None, high if has_range else None, name
         )
+        tuner.set_receiver_available(self._device is not None)
         if not (self._is_running and self._device is not None):
             tuner.set_stereo(False)
             if self._pilot is not None:

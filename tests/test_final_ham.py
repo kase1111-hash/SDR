@@ -767,5 +767,55 @@ class TestSSTVHistoryAfterARestart(_PanelCase):
         self.assertEqual(panel._status_label.text(), "")
 
 
+class TestRadioTunerWithoutADevice(_WindowTestCase):
+    """HAM-E2E-13: with no device, the tuner's footer still said "Tunes the
+    main receiver. Use the toolbar's Audio button to listen." and a preset
+    said "Tuned to 101.100 MHz (FM)", while nothing could play."""
+
+    demo = True
+
+    def setUp(self):
+        super().setUp()
+        if not self.mw.HAS_HAM_RADIO:
+            self.skipTest("ham radio panels not installed")
+
+    def tearDown(self):
+        tuner = getattr(self.win, "_radio_tuner", None) if HAS_PYQT6 else None
+        if tuner is not None:
+            tuner.close()
+        super().tearDown()
+
+    NO_RECEIVER = "No receiver: Device › Use Demo Device or Connect…"
+
+    def test_footer_and_status_say_there_is_no_receiver(self):
+        win = self.win
+        win._disconnect_device()
+        win._show_radio_tuner()
+        tuner = win._radio_tuner
+        footer = tuner._hint_label
+        self.assertEqual(footer.text(), self.NO_RECEIVER)
+        self.assertEqual(footer.property("tone"), "warning")
+        tuner._preset_buttons[0].click()
+        status = win._message_label.text()
+        self.assertTrue(status.startswith("Tuned to "), status)
+        self.assertIn("No receiver", status)
+        self.assertEqual(win._message_label.property("tone"), "warning")
+        tuner._hint_timer.stop()
+        tuner._reset_hint()  # (after any feedback the footer showed)
+        self.assertEqual(footer.text(), self.NO_RECEIVER)
+        # A device again: the usual footer.
+        win._start_demo_mode()
+        settle()
+        self.assertEqual(footer.text(), tuner._FOOTER_HINT)
+        self.assertNotEqual(footer.property("tone"), "warning")
+
+    def test_with_the_demo_device_the_usual_footer(self):
+        self.win._show_radio_tuner()
+        tuner = self.win._radio_tuner
+        self.assertEqual(tuner._hint_label.text(), tuner._FOOTER_HINT)
+        tuner._preset_buttons[0].click()
+        self.assertNotIn("No receiver", self.win._message_label.text())
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

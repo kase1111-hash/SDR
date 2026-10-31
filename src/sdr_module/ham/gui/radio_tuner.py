@@ -909,6 +909,8 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
     ]
 
     _FOOTER_HINT = "Tunes the main receiver. Use the toolbar's Audio button to listen."
+    #: The footer while the main window has no device (as the S-meter says).
+    _NO_RECEIVER_HINT = "No receiver: Device › Use Demo Device or Connect…"
 
     def __init__(self, parent=None, sample_rate: float = 2.4e6):
         if not HAS_PYQT6:
@@ -964,6 +966,9 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         # for the AM band's reach.
         self._device_range: Optional[tuple] = None
         self._device_name = ""
+        # Whether the main window has a device at all (see
+        # set_receiver_available).
+        self._receiver_available = True
 
         self._setup_ui()
         self._connect_signals()
@@ -1355,13 +1360,16 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
 
     def _reset_hint(self) -> None:
         """Back to the standing footer text for the current state."""
-        if self._off_band_hz is not None:
+        tone: Optional[str]
+        if not self._receiver_available:
+            text, tone = self._NO_RECEIVER_HINT, "warning"
+        elif self._off_band_hz is not None:
             text = (
                 f"The receiver is on {format_receiver_frequency(self._off_band_hz)}, "
                 "outside the broadcast bands. Pick a preset or tune the dial to "
                 "switch it to a station."
             )
-            tone: Optional[str] = "info"
+            tone = "info"
         elif self._band == RadioBand.AM and self._am_note():
             text, tone = self._am_note(), "info"
         else:
@@ -1590,6 +1598,16 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         super().hideEvent(event)
 
     # ------------------------------------------------------------- device
+
+    def set_receiver_available(self, available: bool) -> None:
+        """Whether the main window has a device: without one the footer
+        says so (presets and the dial still tune, nothing can play)."""
+        available = bool(available)
+        if available == self._receiver_available:
+            return
+        self._receiver_available = available
+        self._hint_timer.stop()
+        self._reset_hint()
 
     def set_device_range(
         self, low_hz: Optional[float], high_hz: Optional[float], name: str = ""

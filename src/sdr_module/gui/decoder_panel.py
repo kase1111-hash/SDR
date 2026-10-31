@@ -37,7 +37,6 @@ try:
         QAbstractItemView,
         QCheckBox,
         QComboBox,
-        QFileDialog,
         QFormLayout,
         QFrame,
         QHBoxLayout,
@@ -601,6 +600,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
     :attr:`tune_requested`. Tell the panel the tuned frequency and whether
     the receiver runs (:meth:`set_current_frequency`, :meth:`set_receiving`)
     and it confirms when it is listening in the right place.
+
+    ``settings`` (the window's :class:`~.settings_store.GuiSettings`) keeps
+    the folder Export last saved to.
     """
 
     if HAS_PYQT6:
@@ -612,12 +614,15 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # one): the same shape as BookmarksPanel.tune_requested.
         tune_requested = pyqtSignal(float, str, str, str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, settings: Any = None):
         if not HAS_PYQT6:
             raise ImportError("PyQt6 is required")
 
         super().__init__(parent)
 
+        # Where Export saved last (file_dialogs' "decode" folder); without
+        # settings it starts in Documents/SDR Recordings every time.
+        self._settings = settings
         self._messages: List[Dict[str, Any]] = []
         self._max_messages = 1000
         # Totals since the last Clear (the table keeps only the newest rows).
@@ -1877,9 +1882,16 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         if not self._messages:
             return 0
         if not path:
+            from . import file_dialogs
+
+            # In Documents/SDR Recordings or the folder of the last export,
+            # like the app's other files (a bare name started in the folder
+            # the app was started from).
             default = datetime.now().strftime("decoded-%Y%m%d-%H%M%S.csv")
-            path, _ = QFileDialog.getSaveFileName(
+            path, _ = file_dialogs.save_file(
                 self,
+                self._settings,
+                "decode",
                 "Export Decoded Messages",
                 default,
                 "CSV files (*.csv);;All files (*)",

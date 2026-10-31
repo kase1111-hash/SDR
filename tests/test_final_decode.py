@@ -248,5 +248,64 @@ class TestDecodeRecordingDefaults(_WindowTestCase):
         self.assertEqual(seen["acars"], "144.090 MHz")
 
 
+# --------------------------------------------------------------------------- #
+# DEC-E2E-05: Export starts in the recordings folder and remembers its own
+# --------------------------------------------------------------------------- #
+
+
+class TestExportFolder(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+        import tempfile
+
+        from sdr_module.gui import decoder_panel, file_dialogs
+        from tests.test_gui_chrome import _FakeSettings
+
+        self.mod = decoder_panel
+        self.dialogs = file_dialogs
+        self.store = _FakeSettings()
+        self.panel = decoder_panel.DecoderPanel(settings=self.store)
+        self.addCleanup(self.panel.deleteLater)
+        self.panel.add_message("POCSAG", "1 (F0)", "first page")
+        self.folder = tempfile.mkdtemp(prefix="sdr-export-")
+        self.addCleanup(__import__("shutil").rmtree, self.folder, True)
+
+    def export(self, answer):
+        from unittest import mock
+
+        with (
+            mock.patch.object(
+                self.dialogs.QFileDialog, "getSaveFileName", return_value=(answer, "")
+            ) as dialog,
+            mock.patch.object(self.mod.QMessageBox, "information"),
+        ):
+            count = self.panel._export_messages()
+        return count, dialog.call_args[0][2]
+
+    def test_starts_in_the_recordings_folder_not_the_working_directory(self):
+        # The suggested name was bare ("decoded-....csv"): the dialog opened
+        # in the folder the app was started from ("/", or System32 when
+        # started from a Windows shortcut).
+        count, suggested = self.export("")
+        self.assertEqual(count, 0)  # (cancelled)
+        self.assertEqual(
+            os.path.dirname(suggested), self.dialogs.default_folder("decode")
+        )
+        self.assertRegex(os.path.basename(suggested), r"^decoded-\d{8}-\d{6}\.csv$")
+
+    def test_remembers_the_folder_used(self):
+        target = os.path.join(self.folder, "mine.csv")
+        count, _suggested = self.export(target)
+        self.assertEqual(count, 1)
+        self.assertTrue(os.path.exists(target))
+        _count, suggested = self.export("")
+        self.assertEqual(os.path.dirname(suggested), self.folder)
+
+
+class TestExportFolderInTheWindow(_WindowTestCase):
+    def test_the_panel_remembers_in_the_windows_settings(self):
+        self.assertIs(self.win._decoder_panel._settings, self.win._settings)
+
+
 if __name__ == "__main__":
     unittest.main()

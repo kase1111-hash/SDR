@@ -2499,7 +2499,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # top-level tabs (with Signal) fit the column at 1024 px.
         tabs.tabBar().setObjectName("toolTabs")
 
-        self._decoder_panel = DecoderPanel()
+        # (It keeps the folder Export saved to in the window's settings.)
+        self._decoder_panel = DecoderPanel(settings=self._settings)
         self._add_panel(
             tabs,
             "decoder",

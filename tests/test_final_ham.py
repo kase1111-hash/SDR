@@ -454,5 +454,82 @@ class TestSSTVWrongSideband(_SSTVWindowCase):
         self.assertTrue(panel._fm_callout.isHidden())
 
 
+class _FakeSink:
+    """Stands in for gui.audio_sink.AudioSink (no sound card here) and
+    logs what is asked of it."""
+
+    log: list = []
+
+    def __init__(self):
+        self.log.append(("new",))
+
+    def set_volume(self, volume):
+        self.log.append(("volume", round(float(volume), 2)))
+
+    def set_output_device(self, device_id, name=""):
+        self.log.append(("output", device_id, name))
+
+    def start(self, rate=48000):
+        self.log.append(("start", rate))
+        return True
+
+    def write(self, samples):
+        self.log.append(("write", len(samples)))
+
+    def stop(self):
+        self.log.append(("stop",))
+
+
+class TestPreviewIdPlaysOnThePreferredOutput(_WindowTestCase):
+    """HAM-E2E-7: Ham ID > Preview ID opened its own output on the system
+    default at a fixed level, unlike the receiver and Transmit Text's
+    Preview (the output chosen in Tools > Preferences, the app volume)."""
+
+    def setUp(self):
+        super().setUp()
+        if not self.mw.HAS_HAM_RADIO:
+            self.skipTest("ham radio panels not installed")
+        from sdr_module.gui import transmit_text
+
+        _FakeSink.log = []
+        old = transmit_text.AudioSink
+        transmit_text.AudioSink = _FakeSink
+        self.addCleanup(setattr, transmit_text, "AudioSink", old)
+        self.store.values["prefs/audio_output"] = "usb-headset-0001"
+        self.store.values["prefs/audio_output_name"] = "USB Headset"
+        self.store.values["audio_volume"] = 40
+
+    def test_preview_id(self):
+        panel = self.win._callsign_panel
+        panel.set_callsign("W1AW")
+        panel._test_btn.click()
+        log = _FakeSink.log
+        self.assertIn(("output", "usb-headset-0001", "USB Headset"), log)
+        self.assertIn(("volume", 0.4), log)
+        self.assertIn(("start", 48000), log)
+        self.assertTrue(any(entry[0] == "write" for entry in log))
+        self.assertEqual(panel._test_btn.text(), "Stop Preview")
+        self.assertTrue(
+            panel._status_label.text().startswith("Playing preview: DE W1AW")
+        )
+        panel._test_btn.click()  # Stop Preview
+        self.assertEqual(log[-1], ("stop",))
+        self.assertEqual(panel._test_btn.text(), "Preview ID")
+
+    def test_the_preview_ends_by_itself(self):
+        panel = self.win._callsign_panel
+        panel.set_callsign("W1AW")
+        panel._test_btn.click()
+        preview = panel._preview
+        clock = [preview._clock()]
+        preview._clock = lambda: clock[0]
+        clock[0] += 60.0  # (long after the ID)
+        preview.tick()
+        settle()
+        self.assertEqual(_FakeSink.log[-1], ("stop",))
+        self.assertEqual(panel._test_btn.text(), "Preview ID")
+        self.assertNotIn("Playing preview", panel._status_label.text())
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

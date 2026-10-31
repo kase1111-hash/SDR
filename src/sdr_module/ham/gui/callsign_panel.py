@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -54,6 +54,32 @@ logger = logging.getLogger(__name__)
 _CALLSIGN_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/")
 # Audio rate used for the CW preview.
 _PREVIEW_RATE = 48000
+
+
+class _Clip:
+    """A ready-made audio clip in the shape transmit_text.TextPreview plays
+    (it asks for the times of the samples due, then their audio)."""
+
+    def __init__(self, audio: np.ndarray, rate: int) -> None:
+        self._audio = np.asarray(audio, dtype=np.float64).reshape(-1)
+        self._rate = float(rate)
+
+    def sample_count(self, rate: float) -> int:
+        return int(round(len(self._audio) * float(rate) / self._rate))
+
+    def times(self, rate: float, start: int = 0, count: Optional[int] = None):
+        stop = self.sample_count(rate)
+        if count is not None:
+            stop = min(stop, start + int(count))
+        return np.arange(start, max(start, stop), dtype=np.float64) / float(rate)
+
+    def audio(self, t: np.ndarray) -> np.ndarray:
+        if not len(self._audio):
+            return np.zeros(len(t))
+        index = np.rint(np.asarray(t, np.float64) * self._rate).astype(np.int64)
+        return self._audio[np.clip(index, 0, len(self._audio) - 1)]
+
+
 # Combo index of the only mode that can actually be transmitted.
 _CW_INDEX = 0
 _INTERVAL_TIP = (
@@ -207,8 +233,11 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
         # When Send ID Now was last clicked (a double-click's second click,
         # on Stop by then, is ignored).
         self._send_clicked_at = float("-inf")
-        self._preview_sink: Any = None
-        self._preview_buffer: Any = None
+        # Preview ID: plays through the window's audio output when it says
+        # how (set_audio_output), as Transmit Text's Preview does.
+        self._preview: Any = None  # a transmit_text.TextPreview, once used
+        self._audio_configure: Optional[Callable[[Any], None]] = None
+        self._audio_volume: Optional[Callable[[], float]] = None
         self._form_labels: list = []
 
         self._setup_ui()
@@ -762,64 +791,58 @@ class CallsignPanel(QWidget if HAS_PYQT6 else object):
             )
         self._update_controls()
 
+    def set_audio_output(
+        self,
+        configure: Optional[Callable[[Any], None]],
+        volume: Optional[Callable[[], float]] = None,
+    ) -> None:
+        """Where Preview ID plays: ``configure(sink)`` sets the AudioSink up
+        (the output chosen in Tools > Preferences, as the receiver plays),
+        and ``volume()`` gives the app volume (0-1). Without them it plays
+        on the default output."""
+        self._audio_configure = configure
+        self._audio_volume = volume
+
     def _play_preview(self, audio: np.ndarray) -> bool:
-        """Play mono float ``audio`` once on the default output device."""
+        """Play mono float ``audio`` once (see set_audio_output); False
+        when there is no audio output."""
         try:
-            from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
-            from PyQt6.QtMultimedia import QAudioFormat, QAudioSink, QMediaDevices
-        except ImportError:
+            from ...gui.transmit_text import TextPreview
+        except ImportError:  # pragma: no cover - PyQt6 is there
             return False
+        self._stop_preview()
+        if self._preview is None:
+            self._preview = TextPreview(self)
+            self._preview.playing_changed.connect(self._on_preview_playing)
+        volume = 0.7
+        if self._audio_volume is not None:
+            try:
+                volume = min(1.0, max(0.0, float(self._audio_volume())))
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug(f"Preview at the default volume: {e}")
         try:
-            device = QMediaDevices.defaultAudioOutput()
-            if device.isNull():
-                return False
-            fmt = QAudioFormat()
-            fmt.setSampleRate(_PREVIEW_RATE)
-            fmt.setChannelCount(1)
-            fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
-            if not device.isFormatSupported(fmt):
-                return False
-            pcm = (np.clip(audio, -1.0, 1.0) * 0.5 * 32767.0).astype(np.int16)
-            self._stop_preview()
-            buffer = QBuffer(self)
-            buffer.setData(QByteArray(pcm.tobytes()))
-            buffer.open(QIODevice.OpenModeFlag.ReadOnly)
-            sink = QAudioSink(device, fmt, self)
-            sink.stateChanged.connect(self._on_preview_state_changed)
-            self._preview_sink, self._preview_buffer = sink, buffer
-            sink.start(buffer)
-            return True
+            return bool(
+                self._preview.start(
+                    _Clip(audio, _PREVIEW_RATE), volume, self._audio_configure
+                )
+            )
         except Exception as e:  # pragma: no cover - backend dependent
             logger.debug(f"CW preview playback failed: {e}")
             self._stop_preview()
             return False
 
     def _preview_playing(self) -> bool:
-        return self._preview_sink is not None
+        return self._preview is not None and self._preview.playing
 
-    def _on_preview_state_changed(self, state: Any) -> None:
-        try:
-            from PyQt6.QtMultimedia import QAudio
-        except ImportError:  # pragma: no cover
-            return
-        if state in (QAudio.State.IdleState, QAudio.State.StoppedState):
-            self._stop_preview()
+    def _on_preview_playing(self, playing: bool) -> None:
+        if not playing:  # (it ended, or was stopped)
+            self._test_btn.setText("Preview ID")
             self._refresh_status()
             self._update_controls()
 
     def _stop_preview(self) -> None:
-        sink, buffer = self._preview_sink, self._preview_buffer
-        self._preview_sink = self._preview_buffer = None
-        if sink is not None:
-            try:
-                sink.stateChanged.disconnect(self._on_preview_state_changed)
-            except (TypeError, RuntimeError):
-                pass
-            sink.stop()
-            sink.deleteLater()
-        if buffer is not None:
-            buffer.close()
-            buffer.deleteLater()
+        if self._preview is not None:
+            self._preview.stop()
         self._test_btn.setText("Preview ID")
 
     # ------------------------------------------------------------------

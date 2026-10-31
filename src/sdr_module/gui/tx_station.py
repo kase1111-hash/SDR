@@ -131,6 +131,20 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         panel.tx_power_changed.connect(self._on_power_changed)
         panel.settings_changed.connect(lambda _settings: self.refresh())
         panel.callsign_changed.connect(lambda _text: self.refresh())
+        # Preview ID plays where the receiver does (Tools > Preferences), at
+        # the app volume, as Transmit Text's Preview does.
+        set_output = getattr(panel, "set_audio_output", None)
+        if callable(set_output):
+            set_output(self._configure_preview_sink, self._preview_volume)
+
+    def _configure_preview_sink(self, sink: Any) -> None:
+        from .transmit_text import use_preferred_output
+
+        use_preferred_output(self._win._settings, sink)
+
+    def _preview_volume(self) -> float:
+        saved = getattr(self._win, "_saved_volume", None)
+        return saved() / 100.0 if callable(saved) else 0.7
 
     def eventFilter(self, obj, event):  # noqa: N802 - Qt naming
         if (

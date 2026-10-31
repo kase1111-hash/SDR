@@ -8467,6 +8467,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             scanner.stop_scan("Scan stopped: you opened a recording.", "warning")
         if not self._playback.open(options):
             return False
+        if self._playback.band_plan_applied:
+            return True  # its status line says how the file is heard
         half = options.sample_rate / 2.0
         self._show_status_message(
             f"Playing {options.name} "

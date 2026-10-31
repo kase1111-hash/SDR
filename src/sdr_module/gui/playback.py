@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import numpy as np
 
@@ -255,6 +255,9 @@ class _PreviousSource:
     lo_hz: float
     name: str
     rate: float = 0.0  # the device's sample rate
+    #: How it was heard: (mode, FM deviation, filter), as the window's
+    #: _set_demod_mode takes them ("" for one that doesn't apply).
+    listening: Tuple[str, str, str] = ("", "", "")
 
 
 if HAS_PYQT6:
@@ -545,6 +548,9 @@ if HAS_PYQT6:
             self._device: Optional[FilePlaybackDevice] = None
             self._previous: Optional[_PreviousSource] = None
             self._device_tip = ""
+            #: The last open() changed the listening by the band plan (its
+            #: status line is the one to keep).
+            self.band_plan_applied = False
             self._timer = QTimer(self)
             self._timer.setInterval(self._TICK_MS)
             self._timer.timeout.connect(self._tick)
@@ -598,6 +604,8 @@ if HAS_PYQT6:
                     f"Can't play {options.name}: {e}", "danger", 8000
                 )
                 return False
+            tuned_before = float(win._current_frequency())
+            self.band_plan_applied = False
             if self.active:
                 # Another file: the device from before stays the one to go
                 # back to.
@@ -615,6 +623,10 @@ if HAS_PYQT6:
                     lo_hz=float(win._lo_frequency()),
                     name=win._device_display_name() if win._device else "",
                     rate=float(win._device_sample_rate()) if win._device else 0.0,
+                    listening=(
+                        *win._listening_mode(),
+                        win._control_panel._bw_combo.currentText(),
+                    ),
                 )
                 if running:
                     win._stop_acquisition()
@@ -628,6 +640,12 @@ if HAS_PYQT6:
             win._realtime_hint_shown = False
             win._apply_tuning_range()
             win._lock_lo(options.center_hz, options.sample_rate, "the recording")
+            # Heard the way its band usually is (a 2 m recording opened from
+            # broadcast FM: narrow FM), as a frequency typed there would be;
+            # the band plan's status line says so.
+            self.band_plan_applied = bool(
+                win._listen_by_band_plan(tuned_before, win._current_frequency())
+            )
             win._reset_demodulator()
             self._bar.show_file(options, self.back_to_text())
             self._bar.setVisible(True)
@@ -683,10 +701,14 @@ if HAS_PYQT6:
             win._realtime_hint_shown = False
             win._apply_tuning_range()
             if prev is not None:
-                # Back where the receiver was before the recording.
+                # Back where the receiver was before the recording, and
+                # listening as it was there.
                 if not win._retune_lo(prev.lo_hz):
                     win._lo_hz = float(prev.lo_hz)
                 win._finish_tune(prev.tuned_hz)
+                mode, deviation, width = prev.listening
+                if mode:
+                    win._set_demod_mode(mode, deviation or None, width or None)
             win._unlock_lo()  # the LO follows tuning again
             win._reset_demodulator()
             self._bar.setVisible(False)

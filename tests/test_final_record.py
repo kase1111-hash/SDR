@@ -241,3 +241,70 @@ class TestImportOptionsReadsQuietCs16(_FilesCase):
         self.assertEqual(
             dialog._check.text(), "The samples look right (peak -41 dBFS)."
         )
+
+
+def _save_sigmf(path, center, rate=1e6, seconds=0.2):
+    from sdr_module.dsp.recording import FileFormat, save_iq_file
+
+    rng = np.random.default_rng(7)
+    n = int(rate * seconds)
+    noise = 0.001 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    save_iq_file(
+        path,
+        noise.astype(np.complex64),
+        rate,
+        center,
+        SampleFormat.FLOAT32,
+        FileFormat.SIGMF,
+    )
+    return path
+
+
+class TestListeningFollowsTheRecording(_FilesCase):
+    """REC-E2E-02 / REC-E2E-03: a recording is heard the way its band
+    usually is, and Close goes back to the listening from before."""
+
+    def setUp(self):
+        super().setUp()
+        win = self.win
+        self.assertTrue(win.set_frequency(100.1e6))
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        self.assertTrue(win._band_plan_action.isChecked())
+
+    def listening(self):
+        win = self.win
+        return (*win._listening_mode(), win._control_panel._bw_combo.currentText())
+
+    def play(self, path):
+        with self.open_dialog(path):
+            self.assertTrue(self.win._open_recording())
+
+    def test_a_2_m_recording_plays_in_narrow_fm(self):
+        self.play(_save_sigmf(self.path("aprs2m.sigmf-data"), 144.39e6))
+        self.assertEqual(self.win._current_frequency(), 144.39e6)
+        self.assertEqual(self.listening(), ("FM", "5 kHz", "25 kHz"))
+        self.assertIn("APRS: listening in FM (narrow", self.message())
+
+    def test_not_when_the_band_plan_is_off(self):
+        self.win._band_plan_action.setChecked(False)
+        self.play(_save_sigmf(self.path("aprs2m.sigmf-data"), 144.39e6))
+        self.assertEqual(self.listening(), ("FM", "75 kHz", "200 kHz"))
+        self.assertIn("Playing aprs2m.sigmf-data", self.message())
+
+    def test_close_goes_back_to_the_listening_from_before(self):
+        self.play(_save_sigmf(self.path("aprs2m.sigmf-data"), 144.39e6))
+        self.win._set_demod_mode("FM", "2.5 kHz", "12.5 kHz")  # changed there
+        self.win._playback.close(restore=True)
+        self.assertEqual(self.win._current_frequency(), 100.1e6)
+        self.assertEqual(self.listening(), ("FM", "75 kHz", "200 kHz"))
+
+    def test_another_file_then_close(self):
+        # From one file to another in another band: the band plan from the
+        # first file's channel; Close still goes back to the very first.
+        self.play(_save_sigmf(self.path("aprs2m.sigmf-data"), 144.39e6))
+        self.play(_save_sigmf(self.path("fm.sigmf-data"), 98.5e6))
+        self.assertEqual(self.listening(), ("FM", "75 kHz", "200 kHz"))
+        self.win._set_demod_mode("AM", "", "10 kHz")
+        self.win._playback.close(restore=True)
+        self.assertEqual(self.win._current_frequency(), 100.1e6)
+        self.assertEqual(self.listening(), ("FM", "75 kHz", "200 kHz"))

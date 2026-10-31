@@ -588,5 +588,36 @@ class TestOneWarningPerRateStep(_WindowTestCase):
         self.assertEqual(win._message_label.property("tone"), "warning")
 
 
+# --------------------------------------------------------------------------- #
+# L28: the sample-rate tips recommend 2.4 MS/s for ADS-B
+# --------------------------------------------------------------------------- #
+
+
+class TestAdsbRateTips(_WindowTestCase):
+    demo = True
+
+    def test_the_tips_say_2_4_ms_s_or_more(self):
+        # They said "at least 2 MS/s", but 2.0-2.1 MS/s decode poorly.
+        from sdr_module.dsp.live_decoders import create_live_decoder
+        from sdr_module.gui.device_settings import ADSB_RATE_TIP
+
+        self.assertIn("needs 2.4 MS/s or more", ADSB_RATE_TIP)
+        remedy = create_live_decoder("ADS-B", 1.8e6).status.remedy
+        self.assertIn("Choose 2.4 MS/s or more", remedy)
+
+    def test_a_rate_that_decodes_poorly_says_so(self):
+        win = self.win
+        win._decoder_panel._proto_combo.setCurrentText("ADS-B")
+        self.settle(2)
+        self.assertTrue(win._device_controls.choose_rate(2.0e6))
+        self.assertIn(
+            "ADS-B decodes best at 2.4 MS/s or more", win._message_label.text()
+        )
+        self.assertTrue(win._device_controls.choose_rate(1.8e6))
+        self.assertIn("ADS-B needs 2.4 MS/s or more", win._message_label.text())
+        self.assertTrue(win._device_controls.choose_rate(2.4e6))
+        self.assertNotIn("ADS-B", win._message_label.text())
+
+
 if __name__ == "__main__":
     unittest.main()

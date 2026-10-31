@@ -839,7 +839,7 @@ class ADSBLiveDecoder(LiveDecoder):
                 f"the device runs at {format_rate(self.sample_rate)}"
             )
             self._remedy = (
-                "Choose a higher sample rate in Receiver > Sample rate (or "
+                "Choose 2.4 MS/s or more in Receiver > Sample rate (or "
                 "click the rate in the status bar)."
             )
         else:

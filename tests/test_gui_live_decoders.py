@@ -159,8 +159,8 @@ class TestLiveDecoderRates(_WindowTestCase):
         self.assertEqual(panel.decoder_status_text(), problem)
         self.assertEqual(panel._status_label.property("tone"), "warning")
         self.assertIn("ADS-B can't decode here", panel._empty.text())
-        self.assertIn("Choose a higher sample rate", panel._empty.text())
-        self.assertIn("Choose a higher sample rate", win._message_label.text())
+        self.assertIn("Choose 2.4 MS/s or more", panel._empty.text())
+        self.assertIn("Choose 2.4 MS/s or more", win._message_label.text())
         # A valid rate rebuilds it (TOOLS-04).
         win.set_sample_rate(2.4e6)
         self.assertEqual(win._decoder.sample_rate, 2.4e6)
@@ -534,7 +534,7 @@ class TestDeviceDialogRates(unittest.TestCase):
                 low = rate < 2e6
                 self.assertEqual(combo.itemText(i).endswith("(too low for ADS-B)"), low)
                 tip = combo.itemData(i, Qt.ItemDataRole.ToolTipRole) or ""
-                self.assertEqual("needs at least 2 MS/s" in tip, low)
+                self.assertEqual("needs 2.4 MS/s or more" in tip, low)
             self.assertTrue(any(combo.itemData(i) < 2e6 for i in range(combo.count())))
         finally:
             dialog.close()

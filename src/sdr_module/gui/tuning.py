@@ -17,6 +17,7 @@ Pure Python and NumPy (no Qt), so they are easy to test:
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 from dataclasses import dataclass
@@ -546,6 +547,17 @@ def _pixel_resolution(hz: float) -> float:
 # Tuning history
 # ---------------------------------------------------------------------------
 
+logger = logging.getLogger(__name__)
+
+#: What a saved entry may hold: the control panel's mode names (DEMOD_MODES)
+#: and FM deviations (FM_DEVIATIONS) - the tests check they agree. A mode
+#: not among them is dropped, so the band plan's mode applies.
+ENTRY_MODES = ("None (I/Q)", "AM", "FM", "USB", "LSB", "CW")
+ENTRY_DEVIATIONS = ("2.5 kHz", "5 kHz", "12.5 kHz", "25 kHz", "75 kHz")
+#: A remembered frequency: 1 kHz up to 300 GHz (a recording made through a
+#: downconverter plays at its own frequency, far above a receiver's range).
+ENTRY_RANGE_HZ = (1e3, 300e9)
+
 
 @dataclass(frozen=True)
 class TunedEntry:
@@ -570,17 +582,25 @@ class TunedEntry:
 
     @classmethod
     def from_dict(cls, data: Any) -> Optional["TunedEntry"]:
+        """A saved entry (None when it isn't one: damaged settings). A
+        frequency outside :data:`ENTRY_RANGE_HZ` drops the entry; an
+        unknown mode or FM deviation is left out of it."""
         if not isinstance(data, dict):
             return None
         try:
             freq = float(data.get("freq_hz"))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
-        if not (math.isfinite(freq) and freq > 0):
+        low, high = ENTRY_RANGE_HZ
+        if not (math.isfinite(freq) and low <= freq <= high):
             return None
-        return cls(
-            freq, str(data.get("mode", "") or ""), str(data.get("deviation", "") or "")
-        )
+        mode = str(data.get("mode", "") or "")
+        deviation = str(data.get("deviation", "") or "")
+        if mode not in ENTRY_MODES:
+            mode = ""  # (the band plan's mode applies)
+        if mode != "FM" or deviation not in ENTRY_DEVIATIONS:
+            deviation = ""
+        return cls(freq, mode, deviation)
 
 
 class TuningHistory:
@@ -685,8 +705,20 @@ class TuningHistory:
         try:
             data = json.loads(raw) if raw else []
         except (TypeError, ValueError):
-            return []
+            data = None
         if not isinstance(data, list):
+            logger.warning(f"Ignoring damaged recent frequencies: {raw!r}")
             return []
         entries = [TunedEntry.from_dict(item) for item in data]
-        return [e for e in entries if e is not None]
+        kept = [e for e in entries if e is not None]
+        damaged = [
+            item
+            for item, entry in zip(data, entries, strict=True)
+            if entry is None or entry.to_dict() != item
+        ]
+        if damaged:
+            logger.warning(
+                f"Ignoring damaged recent frequencies (or their modes): "
+                f"{damaged[:3]!r}{' ...' if len(damaged) > 3 else ''}"
+            )
+        return kept

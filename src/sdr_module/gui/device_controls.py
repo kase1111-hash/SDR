@@ -30,6 +30,7 @@ after tuning. :class:`ScanResultsDialog` is Device > Scan for Devices.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
@@ -222,19 +223,27 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
                         lna = int(saved.get("lna", lna))
                         vga = int(saved.get("vga", vga))
                         amp = bool(saved.get("amp", amp))
-                    except (TypeError, ValueError):
-                        logger.debug(f"Ignoring an unreadable HackRF gain: {saved!r}")
+                    except (TypeError, ValueError, OverflowError):
+                        logger.warning(f"Ignoring an unreadable HackRF gain: {saved!r}")
                 panel.set_hackrf_gains(lna, vga, amp)
                 panel.set_agc_silently(False)
             else:
                 agc = panel.is_agc_enabled()
                 if saved:
-                    try:
-                        if "db" in saved:
-                            panel.set_gain_silently(float(saved["db"]))
-                        agc = bool(saved.get("agc", agc))
-                    except (TypeError, ValueError):
-                        logger.debug(f"Ignoring an unreadable saved gain: {saved!r}")
+                    # Only what the app saves: a finite gain and a yes/no
+                    # (a damaged value keeps the default, logged).
+                    db, auto = saved.get("db"), saved.get("agc", agc)
+                    finite = isinstance(db, (int, float)) and not isinstance(db, bool)
+                    if finite and math.isfinite(db):
+                        panel.set_gain_silently(float(db))
+                    if isinstance(auto, bool):
+                        agc = auto
+                    if ("db" in saved and not (finite and math.isfinite(db))) or (
+                        not isinstance(auto, bool)
+                    ):
+                        logger.warning(
+                            f"Ignoring a damaged saved gain for {kind}: {saved!r}"
+                        )
                 panel.set_agc_silently(agc and model.agc)
             front = load_front_end(self._settings, kind)
             note = self._apply_front_end(dev, kind, front)

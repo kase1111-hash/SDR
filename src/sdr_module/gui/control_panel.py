@@ -2256,7 +2256,14 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         return int(self._cw_pitch_spin.value())
 
     def set_cw_pitch(self, hz: float) -> None:
-        self._cw_pitch_spin.setValue(int(round(hz)))
+        """The CW tone, in Hz (out of range: the nearest end; not a number,
+        e.g. a damaged setting: the default)."""
+        low, high = CW_PITCH_RANGE
+        try:
+            value = int(round(float(hz)))
+        except (TypeError, ValueError, OverflowError):
+            value = DEFAULT_CW_PITCH_HZ
+        self._cw_pitch_spin.setValue(min(max(value, low), high))
 
     def _on_iq_options_changed(self, _checked: bool = False) -> None:
         self.iq_options_changed.emit(

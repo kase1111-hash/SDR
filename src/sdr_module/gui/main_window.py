@@ -5704,19 +5704,74 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             try:
                 memory = json.loads(raw)
             except ValueError:
-                logger.debug("Ignoring unreadable saved mode filters: %r", raw)
+                logger.warning("Ignoring unreadable saved mode filters: %r", raw)
             else:
                 if isinstance(memory, dict):
                     panel.set_filter_memory(memory)
-        panel.set_squelch_auto(settings.get_bool("squelch/auto", True))
-        panel.set_squelch_enabled(settings.get_bool("squelch/enabled", True))
-        panel.set_cw_pitch(settings.get_int("audio/cw_pitch", DEFAULT_CW_PITCH_HZ))
-        panel.set_noise_reduction(settings.get_str("audio/noise_reduction", "off"))
-        panel.set_audio_agc_speed(settings.get_str("audio/agc_speed", "medium"))
-        panel.set_tone_squelch_hz(settings.get_float("audio/tone_squelch", 0.0))
-        panel.set_iq_options(
-            settings.get_bool("audio/remove_dc", False),
-            settings.get_bool("audio/balance_iq", False),
+
+        def restore(key: str, apply: Any) -> None:
+            # One damaged value is logged and left at its default: it never
+            # stops the others (or the app) from starting.
+            try:
+                apply()
+            except Exception as e:
+                logger.warning(f"Ignoring the damaged setting {key}: {e}")
+
+        def choose(key: str, default: str, setter: Any, getter: Any) -> None:
+            value = settings.get_str(key, default)
+            setter(value)
+            if getter() != value:  # (not one of its choices)
+                logger.warning(
+                    f"Ignoring the damaged setting {key}={value!r}: using "
+                    f"{getter()!r} instead."
+                )
+
+        restore(
+            "squelch/auto",
+            lambda: panel.set_squelch_auto(settings.get_bool("squelch/auto", True)),
+        )
+        restore(
+            "squelch/enabled",
+            lambda: panel.set_squelch_enabled(
+                settings.get_bool("squelch/enabled", True)
+            ),
+        )
+        restore(
+            "audio/cw_pitch",
+            lambda: panel.set_cw_pitch(
+                settings.get_int("audio/cw_pitch", DEFAULT_CW_PITCH_HZ)
+            ),
+        )
+        restore(
+            "audio/noise_reduction",
+            lambda: choose(
+                "audio/noise_reduction",
+                "off",
+                panel.set_noise_reduction,
+                panel.noise_reduction,
+            ),
+        )
+        restore(
+            "audio/agc_speed",
+            lambda: choose(
+                "audio/agc_speed",
+                "medium",
+                panel.set_audio_agc_speed,
+                panel.audio_agc_speed,
+            ),
+        )
+        restore(
+            "audio/tone_squelch",
+            lambda: panel.set_tone_squelch_hz(
+                settings.get_float("audio/tone_squelch", 0.0)
+            ),
+        )
+        restore(
+            "audio/remove_dc, audio/balance_iq",
+            lambda: panel.set_iq_options(
+                settings.get_bool("audio/remove_dc", False),
+                settings.get_bool("audio/balance_iq", False),
+            ),
         )
         # (The panel's signals applied these; make sure even unchanged
         # defaults are in effect.)
@@ -10083,6 +10138,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
             deviation = bandwidth = rec_format = ""
             panel = "bookmarks"
+        from .control_panel import SQUELCH_RANGE
+
+        if not SQUELCH_RANGE[0] <= squelch <= SQUELCH_RANGE[1]:
+            # Damaged (only the slider's range is ever saved): its nearest
+            # end, 0 dBFS, would keep the squelch shut for good.
+            logger.warning(
+                f"Ignoring the damaged setting squelch_db={squelch!r}: using "
+                "-80.0 instead."
+            )
+            squelch = -80.0
         if not deviation and _FM_BROADCAST_BAND[0] <= freq <= _FM_BROADCAST_BAND[1]:
             deviation = _BROADCAST_FM_DEVIATION  # broadcast FM is wideband
         if math.isfinite(freq):  # (a damaged setting: the nearest end)
@@ -10197,7 +10262,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             try:
                 saved = json.loads(raw)
             except ValueError:
-                logger.debug("Ignoring unreadable waterfall settings: %r", raw)
+                logger.warning("Ignoring unreadable waterfall settings: %r", raw)
             else:
                 if isinstance(saved, dict):
                     settings.update(saved)
@@ -10423,7 +10488,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             try:
                 saved = json.loads(raw)
             except ValueError:
-                logger.debug("Ignoring unreadable spectrum settings: %r", raw)
+                logger.warning("Ignoring unreadable spectrum settings: %r", raw)
             else:
                 if isinstance(saved, dict):
                     settings.update(saved)

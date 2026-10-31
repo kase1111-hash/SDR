@@ -9,7 +9,10 @@ tests/test_final_window.py``
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
+import tempfile
 import unittest
 from unittest import mock
 
@@ -17,12 +20,12 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
+from tests.test_gui_chrome import HAS_PYQT6, require_pyqt6  # noqa: E402
 from tests.test_gui_device_settings import _DeviceCase  # noqa: E402
 
 if HAS_PYQT6:
-    from PyQt6.QtCore import Qt
-    from PyQt6.QtWidgets import QMessageBox
+    from PyQt6.QtCore import QSettings, Qt
+    from PyQt6.QtWidgets import QApplication, QMessageBox
 
 
 def _block(n=4096, seed=1):
@@ -270,6 +273,264 @@ class TestConnectDialogBusyDevice(_DeviceCase):
         self.assertEqual(info.call_args_list[1].args[2], "in use elsewhere")
         critical.assert_not_called()
         self.assertNotEqual(dialog.result(), 1)  # (still open)
+
+
+# --------------------------------------------------------------------------- #
+# Saved settings read back at startup (ROB-02, ROB-07, ROB-08, ROB-09, ROB-13)
+# --------------------------------------------------------------------------- #
+class _IniSettings(unittest.TestCase):
+    """Real GuiSettings on a QSettings INI file in a temporary folder,
+    holding what a damaged or hand-edited settings file can hold."""
+
+    def setUp(self):
+        require_pyqt6(self)
+        from sdr_module.gui import settings_store
+
+        folder = tempfile.mkdtemp(prefix="fw-settings-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.path = os.path.join(folder, "settings.ini")
+        path = self.path
+        patcher = mock.patch.object(
+            settings_store,
+            "QSettings",
+            lambda *_args: QSettings(path, QSettings.Format.IniFormat),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, **values):
+        """Store ``values`` as QSettings writes them (text, or a list)."""
+        raw = QSettings(self.path, QSettings.Format.IniFormat)
+        for key, value in values.items():
+            raw.setValue(key.replace("__", "/"), value)
+        raw.sync()
+
+    def settings(self):
+        from sdr_module.gui.settings_store import GuiSettings
+
+        return GuiSettings()
+
+
+class TestDamagedValuesGiveTheDefault(_IniSettings):
+    """ROB-07 / ROB-02: a value that isn't of the key's type gives the
+    key's default (not False, not True, not an overflow), logged once."""
+
+    def test_booleans(self):
+        self.write(
+            audio_enabled="garbage",
+            squelch__enabled="nope",
+            tuning__keep_centered=["a", "b"],
+            audio__balance_iq=["y"],
+            ok_true="true",
+            ok_off="off",
+        )
+        s = self.settings()
+        with self.assertLogs("sdr_module.gui.settings_store", "WARNING") as logs:
+            self.assertTrue(s.get_bool("audio_enabled", True))
+            self.assertTrue(s.get_bool("squelch/enabled", True))
+            self.assertFalse(s.get_bool("tuning/keep_centered", False))
+            self.assertFalse(s.get_bool("audio/balance_iq", False))
+            s.get_bool("audio_enabled", True)  # (said once per key)
+        self.assertEqual(len(logs.records), 4)
+        self.assertIn("audio_enabled", logs.output[0])
+        self.assertTrue(s.get_bool("ok_true", False))
+        self.assertFalse(s.get_bool("ok_off", True))
+        self.assertTrue(s.get_bool("missing", True))
+
+    def test_numbers(self):
+        self.write(
+            audio__cw_pitch="2147483648",
+            big="99999999999999999999",
+            small="-99999999999999999999",
+            gain_db="nan",
+            squelch_db="inf",
+            fine="-7",
+        )
+        s = self.settings()
+        with self.assertLogs("sdr_module.gui.settings_store", "WARNING"):
+            self.assertEqual(s.get_int("audio/cw_pitch", 700), 700)
+            self.assertEqual(s.get_int("big", 5), 5)
+            self.assertEqual(s.get_int("small", 5), 5)
+            self.assertEqual(s.get_float("gain_db", 20.0), 20.0)
+            self.assertEqual(s.get_float("squelch_db", -80.0), -80.0)
+        self.assertEqual(s.get_int("fine", 0), -7)
+        self.assertEqual(s.get_float("fine", 0.0), -7.0)
+
+    def test_a_list_is_no_text(self):
+        self.write(recording__folder=["a", "b"])
+        with self.assertLogs("sdr_module.gui.settings_store", "WARNING"):
+            self.assertEqual(self.settings().get_str("recording/folder", ""), "")
+
+    def test_a_damaged_first_run_flag_is_not_a_first_run(self):
+        self.assertTrue(self.settings().is_first_run())  # (nothing saved)
+        self.write(first_run_done="garbage")
+        with self.assertLogs("sdr_module.gui.settings_store", "WARNING"):
+            self.assertFalse(self.settings().is_first_run())
+
+
+class TestDamagedSettingsInTheWindow(_IniSettings):
+    """The window starts with each damaged value at its default (ROB-02:
+    the app couldn't start at all with a 64-bit CW pitch)."""
+
+    def window(self, **values):
+        from sdr_module.gui import bookmarks_panel, main_window
+        from sdr_module.gui.settings_store import GuiSettings
+
+        self.write(first_run_done="true", **values)
+        for module in (main_window, bookmarks_panel):
+            patcher = mock.patch.object(module, "GuiSettings", GuiSettings)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        win = main_window.SDRMainWindow(demo_mode=False)
+        for timer in (win._display_timer, win._status_timer, win._hotplug_timer):
+            timer.stop()
+        win._confirm_discard_recording = lambda *_a: True
+
+        def close():
+            win.close()
+            win.deleteLater()
+            QApplication.processEvents()
+
+        self.addCleanup(close)
+        return win
+
+    def test_a_cw_pitch_beyond_32_bits_starts_at_the_default(self):
+        for raw in ("2147483648", "99999999999999999999", "-99999999999999999999"):
+            with self.subTest(raw=raw):
+                win = self.window(audio__cw_pitch=raw)
+                self.assertEqual(win._control_panel.cw_pitch(), 700)
+        # In range but beyond the spin box: its nearest end, as before.
+        win = self.window(audio__cw_pitch="100000")
+        self.assertEqual(win._control_panel.cw_pitch(), 1000)
+
+    def test_set_cw_pitch_takes_anything(self):
+        panel = self.window()._control_panel
+        for value, pitch in ((2**40, 1000), (-(2**40), 400), (float("nan"), 700)):
+            panel.set_cw_pitch(value)
+            self.assertEqual(panel.cw_pitch(), pitch)
+
+    def test_damaged_switches_keep_their_defaults(self):
+        win = self.window(
+            audio_enabled="garbage",
+            squelch__enabled="garbage",
+            tuning__band_plan_mode="garbage",
+            decoder__rds_auto="garbage",
+            layout__spectrum_visible="garbage",
+            tuning__keep_centered=["a", "b"],
+            audio__balance_iq=["y"],
+        )
+        # (audio_enabled: no output here to tell; see test_booleans.)
+        self.assertTrue(win._control_panel.is_squelch_enabled())
+        self.assertTrue(win._band_plan_action.isChecked())
+        self.assertTrue(win._rds_auto_action.isChecked())
+        self.assertTrue(win._spectrum_action.isChecked())
+        self.assertFalse(win._keep_centered_action.isChecked())
+        self.assertFalse(win._control_panel.iq_options()[1])
+
+    def test_a_huge_squelch_threshold_is_the_default(self):
+        # ROB-08: 0 dBFS (the slider's end) kept the squelch shut for good.
+        for raw in ("1e12", "50", "nan"):
+            with self.subTest(raw=raw):
+                with self.assertLogs(level="WARNING") as logs:
+                    win = self.window(squelch_db=raw, squelch__auto="false")
+                self.assertEqual(win._control_panel.get_squelch_db(), -80.0)
+                self.assertTrue(any("squelch_db" in line for line in logs.output))
+
+    def test_a_nan_gain_is_the_default(self):
+        win = self.window(gain_db="nan")
+        self.assertAlmostEqual(win._control_panel.gain_db(), 20.0, delta=1.0)
+
+    def test_unknown_choices_are_logged(self):
+        with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+            win = self.window(audio__noise_reduction="loud", audio__agc_speed="x")
+        self.assertEqual(win._control_panel.noise_reduction(), "off")
+        self.assertEqual(win._control_panel.audio_agc_speed(), "medium")
+        self.assertTrue(any("audio/noise_reduction" in m for m in logs.output))
+
+    def test_unreadable_display_settings_are_logged(self):
+        with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+            self.window(spectrum_display="garbage{", waterfall_display="[[[")
+        text = "\n".join(logs.output)
+        self.assertIn("unreadable spectrum settings", text)
+        self.assertIn("unreadable waterfall settings", text)
+
+
+class TestSavedDeviceGain(_DeviceCase):
+    """ROB-08: a damaged saved gain ({"db": NaN, "agc": "x"}) keeps the
+    defaults instead of 0 dB with Tuner AGC on."""
+
+    def test_nan_gain_and_a_non_bool_agc(self):
+        panel = self.panel
+        self.win._release_device()
+        self.store.values["device/demo/gain"] = '{"db": NaN, "agc": "x"}'
+        before = panel.gain_db()
+        with self.assertLogs("sdr_module.gui.device_controls", "WARNING"):
+            self.win._start_demo_mode()
+        self.assertEqual(panel.gain_db(), before)
+        self.assertFalse(panel.is_agc_enabled())
+
+
+class TestRecordingsFolder(unittest.TestCase):
+    """ROB-09: only a full path is a recordings folder; anything else is
+    the default (recordings never land where the app was started)."""
+
+    def folder(self, value):
+        from sdr_module.gui import file_dialogs
+
+        class Store:
+            def get_str(self, key, default):
+                return value
+
+        return file_dialogs.recordings_folder(Store())
+
+    def test_relative_and_damaged_values(self):
+        from sdr_module.gui import file_dialogs
+
+        default = file_dialogs.default_recordings_folder()
+        for bad in ("garbage", "['a', 'b']", "rec/sub"):
+            with self.subTest(bad=bad):
+                with self.assertLogs("sdr_module.gui.file_dialogs", "WARNING"):
+                    self.assertEqual(self.folder(bad), default)
+        self.assertEqual(self.folder("/data/rec"), "/data/rec")
+        self.assertEqual(self.folder("~/rec"), os.path.expanduser("~/rec"))
+        self.assertEqual(self.folder(""), default)
+
+
+class TestRecentFrequencies(unittest.TestCase):
+    """ROB-13: saved recent frequencies outside 1 kHz-300 GHz are dropped,
+    an unknown mode or FM deviation is left out of the entry; logged."""
+
+    def test_damaged_entries(self):
+        from sdr_module.gui.tuning import TunedEntry, TuningHistory
+
+        raw = json.dumps(
+            [
+                {"freq_hz": 1e30, "mode": "AM"},
+                {"freq_hz": 145290000, "mode": "XYZ"},
+                {"freq_hz": 145290001, "mode": "FM", "deviation": "banana"},
+                {"freq_hz": 7000e6, "mode": "FM", "deviation": "5 kHz"},
+                {"freq_hz": 7.074e6, "mode": "USB"},
+            ]
+        )
+        with self.assertLogs("sdr_module.gui.tuning", "WARNING"):
+            entries = TuningHistory.entries_from_json(raw)
+        self.assertEqual(
+            entries,
+            [
+                TunedEntry(145290000.0, "", ""),
+                TunedEntry(145290001.0, "FM", ""),
+                TunedEntry(7000e6, "FM", "5 kHz"),
+                TunedEntry(7.074e6, "USB", ""),
+            ],
+        )
+
+    def test_the_names_agree_with_the_control_panel(self):
+        require_pyqt6(self)
+        from sdr_module.gui.control_panel import DEMOD_MODES, FM_DEVIATIONS
+        from sdr_module.gui.tuning import ENTRY_DEVIATIONS, ENTRY_MODES
+
+        self.assertEqual(ENTRY_MODES, tuple(name for name, _tip in DEMOD_MODES))
+        self.assertEqual(ENTRY_DEVIATIONS, tuple(v for v, _t, _tip in FM_DEVIATIONS))
 
 
 if __name__ == "__main__":

@@ -1427,6 +1427,9 @@ _RECORDING_SUFFIX = ".cf32"
 # A recording stops, with a warning, when the drive it is written to has
 # less than this much free space left.
 _MIN_FREE_BYTES = 500_000_000
+# A take peaking under this many of an 8-bit sample's 127 steps is asked
+# about before it is saved as cu8 or cs8 (it would keep a bit or two).
+_QUIET_8BIT_STEPS = 4
 _FREE_SPACE_CHECK_S = 0.5
 _SAVE_CHUNK = 1 << 20  # samples converted and written per step when saving
 _SAVE_OVERHEAD = 1 << 20  # a saved file's header and metadata, to spare
@@ -8953,7 +8956,61 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         if not filename:
             return False
+        if not self._confirm_quiet_8bit_save(filename, selected_filter):
+            return False
         return self._write_buffer(filename, selected_filter)
+
+    def _confirm_quiet_8bit_save(self, filename: str, selected_filter: str) -> bool:
+        """A cu8 or cs8 file has 127 steps from zero to full scale: a take
+        peaking under ``_QUIET_8BIT_STEPS`` of them keeps a bit or two of
+        its signal, which plays back as noise ("FM audio is clipping").
+        Ask before saving one so; True to go on."""
+        _name, spec = self._resolve_save_format(filename, selected_filter)
+        if spec[3] not in ("UINT8", "INT8"):
+            return True
+        peak = self._buffer_peak()
+        steps = peak * 127.0
+        if peak <= 0 or steps >= _QUIET_8BIT_STEPS:
+            return True
+        kind = spec[1].lstrip(".")
+        level = 20.0 * math.log10(peak)
+        whole = int(round(steps))
+        held = (
+            f"only {whole} step{'' if whole == 1 else 's'} of 127"
+            if whole >= 1
+            else "less than one step of 127"
+        )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Quiet Recording")
+        box.setText(f"Save this quiet recording as {kind} anyway?")
+        box.setInformativeText(
+            f"It peaks at {level:.0f} dBFS: in an 8-bit file that is {held}, "
+            "so most of the signal is lost and plays back as noise. cs16 and "
+            "SigMF keep it."
+        )
+        save = box.addButton("Save &Anyway", QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel)
+        self._exec_dialog(box)
+        return box.clickedButton() is save
+
+    def _buffer_peak(self) -> float:
+        """The recording buffer's peak (of full scale) over stretches spread
+        through it (reading all of a long take would take seconds)."""
+        data = self._samples_buffer.samples()[: self._buffer_sample_count()]
+        count = len(data)
+        if count == 0:
+            return 0.0
+        per = 16384
+        starts = {int(i * max(0, count - per) / 15) for i in range(16)}
+        peak = 0.0
+        for start in sorted(starts):
+            block = np.asarray(data[start : start + per]).view(np.float32)
+            finite = block[np.isfinite(block)]
+            if finite.size:
+                peak = max(peak, float(np.max(np.abs(finite))))
+        return peak
 
     def _ask_missing_details(self) -> bool:
         """Ask for the buffer's unknown sample rate or center frequency

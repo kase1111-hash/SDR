@@ -835,3 +835,53 @@ class TestPlaybackStripAt1024(_FilesCase):
             qapp.setPalette(old_palette)
             themes.apply_theme(None, old_theme)
             self.win._playback.close()
+
+
+class TestQuietEightBitSaves(_FilesCase):
+    """REC-E2E-16: a quiet take saved as cu8 or cs8 kept about one bit of
+    its signal, with no warning; played back it said "FM audio is
+    clipping"."""
+
+    def take(self, freq_hz):
+        win = self.win
+        self.assertTrue(win.set_frequency(freq_hz))
+        win._toggle_recording(True)
+        for _ in range(3):
+            win._update_display()
+        win._toggle_recording(False)
+
+    def test_saving_a_quiet_take_as_8_bit_asks_first(self):
+        self.take(145.29e6)  # the demo's 2 m: noise about -36 dBFS
+        for ext in (".cu8", ".cs8"):
+            path = self.path("rt" + ext)
+            self.boxes.clear()
+            self.answer("Cancel")
+            with self.save_dialog(path):
+                self.assertFalse(self.win._save_recording())
+            self.assertFalse(os.path.exists(path))
+            box = self.boxes[-1]
+            self.assertEqual(box.windowTitle(), "Quiet Recording")
+            self.assertIn("dBFS", box.informativeText())
+            self.assertIn("cs16", box.informativeText())
+        self.answer("Save Anyway")
+        with self.save_dialog(self.path("rt.cu8")):
+            self.assertTrue(self.win._save_recording())
+        self.settle(5)
+        self.assertTrue(os.path.exists(self.path("rt.cu8")))
+
+    def test_16_bit_and_loud_takes_save_without_asking(self):
+        self.take(145.29e6)
+        with self.save_dialog(self.path("rt.cs16")):
+            self.assertTrue(self.win._save_recording())
+        self.take(100.1e6)  # the demo's broadcast station: loud enough
+        self.boxes.clear()
+        with self.save_dialog(self.path("fm.cu8")):
+            self.assertTrue(self.win._save_recording())
+        self.assertEqual(
+            [
+                b
+                for b in self.boxes
+                if getattr(b, "windowTitle", str)() == "Quiet Recording"
+            ],
+            [],
+        )

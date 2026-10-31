@@ -422,6 +422,10 @@ class TestQrpInTheWindow(_WindowTestCase):
 
     def test_exchange_takes_the_s_meter_report(self):
         meter = self.win._signal_meter_panel
+        # The panel's own 10 Hz refresh would display the stand-in reading
+        # below (it has no timestamp) whenever the test runs long enough
+        # for a tick, e.g. under load: only the report is tested here.
+        meter._update_timer.stop()
         self.assertIsNone(self.win._smeter_rst())  # no reading yet
         reading = type("Reading", (), {"signal_present": True})()
         meter._last_reading = reading

@@ -565,6 +565,18 @@ class TestSignalMeterInTheWindow(_WindowTestCase):
             self.skipTest("ham radio panels not installed")
         self.panel = self.win._signal_meter_panel
         self.panel._update_timer.stop()
+        # Every display frame reads one 30 Hz frame of demo samples, and the
+        # demo never skips ahead to the wall clock, however long the test
+        # takes. (Its signals come and go on its clock: the carrier at
+        # 100.715 MHz, at the edge of a 200 kHz channel on 100.6 MHz, is on
+        # from 4.5 s. On a loaded machine the stream had got there and the
+        # empty channel read 2.5 dB over its noise.)
+        from sdr_module.gui import device_dialog
+
+        patcher = mock.patch.object(device_dialog, "_MAX_LAG_S", 1e9)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.win._pacer.demo_request = lambda rate, now: int(rate / 30)
 
     def settle_on(self, freq, mode="FM", deviation="75 kHz", bandwidth="200 kHz"):
         self.win.set_frequency(freq)

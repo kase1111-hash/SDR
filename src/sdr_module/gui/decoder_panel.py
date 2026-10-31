@@ -24,6 +24,7 @@ try:
         QBrush,
         QFont,
         QFontMetrics,
+        QFontMetricsF,
         QGuiApplication,
         QKeySequence,
         QPalette,
@@ -644,8 +645,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._chosen_counts: Counter = Counter()
         # clock() time of each protocol's last valid message.
         self._row_times: Dict[str, float] = {}
-        # Widest cell text seen per size-to-contents column, in px.
+        # Widest cell seen per size-to-contents column, in px, and the
+        # padding the style puts around a cell's text (None: not measured).
         self._col_content: Dict[int, int] = {}
+        self._cell_pad: Optional[int] = None
         # Receiver state, when the main window reports it (None: unknown),
         # and the clock() time the tuned frequency last changed.
         self._tuned_hz: Optional[float] = None
@@ -1036,7 +1039,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 continue
             content = self._col_content.get(col, 0)
             if col == COL_TIME:
-                content = fm.horizontalAdvance("00:00:00") + _CELL_PAD
+                content = self._time_width()
             want[col] = max(self._header_width(col), content)
 
         avail = table.viewport().width()
@@ -1053,12 +1056,33 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             if table.columnWidth(col) != width:
                 table.setColumnWidth(col, width)
 
-    def _grow_columns(self, texts: Dict[int, str]) -> None:
-        """Note new cell text; refit when a column's contents got wider."""
-        fm = self._table.fontMetrics()
+    def _time_width(self) -> int:
+        """Width that shows any time of day in full: the digits of the UI
+        font are not all as wide ("04:44:44" is wider than "00:00:00")."""
+        fm = QFontMetricsF(self._table.font())
+        digit = max(fm.horizontalAdvance(d) for d in "0123456789")
+        pad = _CELL_PAD if self._cell_pad is None else self._cell_pad
+        return math.ceil(6 * digit + 2 * fm.horizontalAdvance(":")) + pad
+
+    def _grow_columns(self, row: int) -> None:
+        """Note a new row's cells; refit when a column's contents got
+        wider. Cells are measured as the table draws them (the delegate's
+        size hint: the text with the style's padding and margins)."""
+        table = self._table
+        model = table.model()
         grown = False
-        for col, text in texts.items():
-            wanted = min(fm.horizontalAdvance(text) + _CELL_PAD, _MAX_COL_WIDTH[col])
+        if self._cell_pad is None:
+            # The padding around a cell's text, measured once on a time
+            # (the Time column is sized from the widest digit with it).
+            item = table.item(row, COL_TIME)
+            if item is not None:
+                hint = table.sizeHintForIndex(model.index(row, COL_TIME)).width()
+                text = QFontMetricsF(table.font()).horizontalAdvance(item.text())
+                self._cell_pad = max(0, hint - math.ceil(text))
+                grown = True
+        for col in (COL_PROTOCOL, COL_ADDRESS):
+            hint = table.sizeHintForIndex(model.index(row, col)).width()
+            wanted = min(hint, _MAX_COL_WIDTH[col])
             if wanted > self._col_content.get(col, 0):
                 self._col_content[col] = wanted
                 grown = True
@@ -1748,7 +1772,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             if tip:
                 item.setToolTip(tip)
             self._table.setItem(row, col, item)
-        self._grow_columns({COL_PROTOCOL: protocol, COL_ADDRESS: address})
+        self._grow_columns(row)
         if self._filter_address and address != self._filter_address:
             self._table.setRowHidden(row, True)
         elif self._filter_address:
@@ -1931,6 +1955,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._table.setRowCount(0)
         self._table_tail.reset()
         self._col_content.clear()
+        self._cell_pad = None  # (measured again: the theme may have changed)
         self._fit_columns()
         self._detail.hide()
         self._raw_output.clear()

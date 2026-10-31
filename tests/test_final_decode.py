@@ -383,6 +383,72 @@ class TestOnlyTheNewestAreKept(_PanelCase):
 
 
 # --------------------------------------------------------------------------- #
+# DEC-E2E-11: short columns show their text in full
+# --------------------------------------------------------------------------- #
+
+
+class TestColumnsShowTheirText(_PanelCase):
+    def widest_time(self, font):
+        """The time of day widest in ``font`` (its digits are proportional,
+        with fractional advances)."""
+        from PyQt6.QtGui import QFontMetricsF
+
+        fm = QFontMetricsF(font)
+
+        def best(digits):
+            return max(digits, key=fm.horizontalAdvance)
+
+        def width(digit):
+            return fm.horizontalAdvance(digit)
+
+        h1 = max("012", key=lambda d: width(d) + width(best("0123" if d == "2" else "0123456789")))
+        h2 = best("0123" if h1 == "2" else "0123456789")
+        return f"{h1}{h2}:{best('012345')}{best('0123456789')}:{best('012345')}{best('0123456789')}"  # fmt: skip
+
+    def test_protocol_address_and_time_are_not_elided(self):
+        # 'CW (Mors…' (83 px wanted, 82 given: the theme pads cells by 15
+        # px, not 14) and '20:44:…' (sized from "00:00:00", while 4 is
+        # wider than 0 and 1 narrower). Measured in the app's themes.
+        from datetime import datetime
+        from unittest import mock
+
+        from sdr_module.gui import themes
+
+        qapp = QApplication.instance()
+        old_sheet, old_palette = qapp.styleSheet(), qapp.palette()
+        old_theme = themes.current_theme()
+        mod = self.mod
+        try:
+            for theme in themes.THEMES:
+                themes.apply_theme(qapp, theme)
+                p = mod.DecoderPanel()
+                self.addCleanup(p.deleteLater)
+                p.resize(420, 520)
+                p.show()
+                _settle(2)
+                table = p._table
+                widest = self.widest_time(table.font())
+                fake = mock.Mock(wraps=datetime)
+                fake.now.return_value = datetime.strptime(widest, "%H:%M:%S")
+                with mock.patch.object(mod, "datetime", fake):
+                    p.add_message("RDS", "C0DE", "Station name: SDR DEMO")
+                    p.add_message("CW (Morse)", "15 WPM", "VVV DE SDR")
+                _settle(2)
+                self.assertFalse(table.isColumnHidden(mod.COL_PROTOCOL))
+                for col in (mod.COL_TIME, mod.COL_PROTOCOL, mod.COL_ADDRESS):
+                    self.assertGreaterEqual(
+                        table.columnWidth(col),
+                        table.sizeHintForColumn(col),
+                        (theme, col, widest),
+                    )
+                p.close()
+        finally:
+            qapp.setStyleSheet(old_sheet)
+            qapp.setPalette(old_palette)
+            themes.apply_theme(None, old_theme)
+
+
+# --------------------------------------------------------------------------- #
 # DEC-E2E-08: the status line and the chip count the same messages
 # DEC-E2E-10: tuned away, the status line says so (not the green count)
 # --------------------------------------------------------------------------- #

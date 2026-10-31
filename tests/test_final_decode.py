@@ -305,6 +305,26 @@ class TestStartOrPlayWording(_PanelCase):
 
 
 # --------------------------------------------------------------------------- #
+# DEC-E2E-21: F1 lists the Aircraft tab's keys
+# --------------------------------------------------------------------------- #
+
+
+class TestHelpListsTheAircraftKeys(unittest.TestCase):
+    def test_copy_and_double_click_are_listed(self):
+        # Only "Return: show the selected aircraft's messages" was there,
+        # while Ctrl+C copies the aircraft's line and a double-click works
+        # like Return.
+        from sdr_module.gui.help_dialog import PANEL_KEYS
+
+        rows = {rid: (section, keys, desc) for rid, section, keys, desc in PANEL_KEYS}
+        self.assertEqual(
+            rows["air_copy"],
+            ("Decoder messages", ("Ctrl+C",), "Aircraft tab: copy the selected aircraft's line"),
+        )  # fmt: skip
+        self.assertIn("double-click", rows["air_enter"][2])
+
+
+# --------------------------------------------------------------------------- #
 # DEC-E2E-04: Decode Recording's frequency follows the protocol chosen
 # --------------------------------------------------------------------------- #
 

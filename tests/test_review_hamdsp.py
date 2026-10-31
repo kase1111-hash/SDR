@@ -242,9 +242,14 @@ class TestSstvOnHf(_HamWindowCase):
         win._set_demod_mode("CW")
         settle()
         self.assertFalse(self.sstv._fm_callout.isHidden())
-        win._set_demod_mode("LSB")
+        win._set_demod_mode("USB")
         settle()
         self.assertTrue(self.sstv._fm_callout.isHidden())
+        # (LSB on 20 m gets the other-sideband hint: HAM-E2E-6.)
+        win._set_demod_mode("LSB")
+        settle()
+        self.assertFalse(self.sstv._fm_callout.isHidden())
+        self.assertIn("usually sent in USB", self.sstv._fm_label.text())
 
 
 class _SeekCase(unittest.TestCase):

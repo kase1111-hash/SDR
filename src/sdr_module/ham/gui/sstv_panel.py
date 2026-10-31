@@ -44,6 +44,7 @@ try:
         QPolygonF,
     )
     from PyQt6.QtWidgets import (
+        QApplication,
         QCheckBox,
         QComboBox,
         QFileDialog,
@@ -664,7 +665,8 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         layout.addLayout(mode_row)
 
         # Shown when the receiver is in a mode whose audio can't carry SSTV
-        # (AM, CW, I/Q): SSTV is FM on VHF/UHF, USB or LSB on HF.
+        # (AM, CW, I/Q): SSTV is FM on VHF/UHF, USB or LSB on HF. (Or in the
+        # other sideband than the band's.)
         self._fm_callout = QFrame()
         t.set_role(self._fm_callout, "callout", "warning")
         fm_row = QHBoxLayout(self._fm_callout)
@@ -679,6 +681,9 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
             "Set Demodulation > Mode to FM with 5 kHz deviation (narrowband)"
         )
         self._switch_fm_btn.clicked.connect(self._on_switch_fm_clicked)
+        # A click leaves the keyboard focus where it was (Space stays the
+        # window's Start/Stop); the button hides once it has done its job.
+        self._switch_fm_btn.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         fm_row.addWidget(self._switch_fm_btn)
         self._fm_callout.setVisible(False)
         layout.addWidget(self._fm_callout)
@@ -864,12 +869,18 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         listening. Returns the status note (None if nothing was kept)."""
         return self._end_image_early(why)
 
-    def show_fm_needed(self, mode: Optional[str], switch_to: str = "FM") -> None:
+    def show_fm_needed(
+        self, mode: Optional[str], switch_to: str = "FM", band: str = ""
+    ) -> None:
         """Say in the panel that the receiver's ``mode`` (AM, CW, I/Q) can't
         carry SSTV, offering to switch to ``switch_to``: "FM" (VHF/UHF, e.g.
-        the ISS) or "USB"/"LSB" (HF). None hides the hint."""
+        the ISS) or "USB"/"LSB" (HF). With ``band`` ("40 m"), ``mode`` is
+        the other sideband than the one SSTV is usually sent in there. None
+        hides the hint. A hint that appears is scrolled into view."""
         wanted = switch_to if switch_to in ("USB", "LSB") else "FM"
         self._switch_to = wanted
+        callout = self._fm_callout
+        before = (callout.isVisible(), self._fm_label.text())
         if mode:
             if wanted == "FM":
                 text = (
@@ -877,13 +888,36 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
                     f"the receiver is in {mode}."
                 )
                 tip = "Set Demodulation > Mode to FM with 5 kHz deviation (narrowband)"
+            elif band:
+                text = (
+                    f"SSTV on {band} is usually sent in {wanted}; the receiver "
+                    f"is in {mode}."
+                )
+                tip = f"Set Demodulation > Mode to {wanted} (2.7 kHz filter)"
             else:
                 text = f"SSTV on HF is sent in {wanted}; the receiver is in {mode}."
                 tip = f"Set Demodulation > Mode to {wanted} (2.7 kHz filter)"
             self._fm_label.setText(text)
             self._switch_fm_btn.setText(f"Switch to {wanted}")
             self._switch_fm_btn.setToolTip(tip)
-        self._fm_callout.setVisible(bool(mode))
+        elif callout.isVisible():
+            focus = QApplication.focusWidget()
+            if focus is not None and callout.isAncestorOf(focus):
+                # (Hidden with the focus, it would pass on to the next
+                # control, Auto-save at the bottom, scrolling the tab there.)
+                self._start_btn.setFocus(Qt.FocusReason.OtherFocusReason)
+        callout.setVisible(bool(mode))
+        if mode and before != (True, self._fm_label.text()):
+            QTimer.singleShot(0, self._reveal_callout)
+
+    def _reveal_callout(self) -> None:
+        """Scroll the tab so the mode hint is in view."""
+        area = self.parentWidget()
+        while area is not None and not isinstance(area, QScrollArea):
+            area = area.parentWidget()
+        if area is None or area.widget() is not self or self._fm_callout.isHidden():
+            return
+        area.ensureWidgetVisible(self._fm_callout, 0, 8)
 
     def switch_mode(self) -> str:
         """The mode the hint's Switch button asks for: "FM", "USB" or "LSB"."""

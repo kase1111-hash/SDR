@@ -7399,12 +7399,31 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _show_sstv_mode_needed(self, mode: str) -> None:
         """The SSTV panel's callout, while it listens in a mode whose audio
-        can't carry SSTV, offering the mode SSTV is sent in here."""
-        if mode in _SSTV_MODES or not self._sstv_listening():
+        can't carry SSTV, offering the mode SSTV is sent in here; or, in an
+        HF ham band, in the other sideband than SSTV is usually sent in
+        there (USB kept from 20 m to 40 m, for FT8, can't hear LSB SSTV)."""
+        if not self._sstv_listening():
             self._sstv_panel.show_fm_needed(None)
             return
-        wanted = self._sstv_mode_for(self._current_frequency())
-        self._sstv_panel.show_fm_needed(self._mode_text(mode), wanted)
+        freq = self._current_frequency()
+        if mode not in _SSTV_MODES:
+            wanted = self._sstv_mode_for(freq)
+            self._sstv_panel.show_fm_needed(self._mode_text(mode), wanted)
+            return
+        from ..core.band_plan import band_for
+
+        band = band_for(freq)
+        if (
+            band is not None
+            and band.name.endswith(" Ham")
+            and band.mode in ("USB", "LSB")
+            and mode in ("USB", "LSB")
+            and mode != band.mode
+        ):
+            name = band.name[: -len(" Ham")].replace("m", " m")  # "40 m"
+            self._sstv_panel.show_fm_needed(mode, band.mode, band=name)
+            return
+        self._sstv_panel.show_fm_needed(None)
 
     def _on_sstv_start_requested(self) -> None:
         """Tell the user what the SSTV decoder still needs to get audio."""

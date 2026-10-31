@@ -12,6 +12,7 @@ A HackRFDevice runs on the threaded fake ``python_hackrf`` backend
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 
 import numpy as np
@@ -20,14 +21,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from sdr_module.ham.sstv import find_mode  # noqa: E402
 from sdr_module.ham.sstv_encoder import encode_sstv, sstv_test_card  # noqa: E402
-from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
+from tests.test_gui_chrome import HAS_PYQT6, _WindowTestCase  # noqa: E402
 from tests.test_gui_smeter import _PanelCase as _SMeterCase  # noqa: E402
 from tests.test_gui_smeter import noise, tone  # noqa: E402
 from tests.test_gui_sstv import FS, _PanelCase, correlation  # noqa: E402
 from tests.test_gui_station_tx import _TxCase  # noqa: E402
 
 if HAS_PYQT6:
-    from PyQt6.QtWidgets import QApplication  # noqa: F401
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtTest import QTest
+    from PyQt6.QtWidgets import QApplication, QScrollArea
 
 ON_AIR_TEXT = "Transmitting - receiving resumes when it ends"
 
@@ -296,6 +299,159 @@ class TestCopiedReportIsTheReadingShown(_SMeterCase):
             meter.get_log_report(14.25e6, when=0.0, s_text="S9+23"),
             "RST 59 · S9+23 · 14.250 MHz · 00:00 UTC",
         )
+
+
+def settle(n: int = 5) -> None:
+    for _ in range(n):
+        QApplication.processEvents()
+
+
+class _SSTVWindowCase(_WindowTestCase):
+    """The real window (demo device) at 1366x768 with the SSTV tab shown."""
+
+    demo = True
+
+    def setUp(self):
+        super().setUp()
+        if not self.mw.HAS_HAM_RADIO:
+            self.skipTest("ham radio panels not installed")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.panel = self.win._sstv_panel
+        self.panel.set_save_directory(self.tmp.name)
+        self.win._audio.write = lambda audio: None
+        self.win.resize(1366, 768)
+        self.win._show_panel("sstv")
+        settle()
+        area = self.panel.parentWidget()
+        while area is not None and not isinstance(area, QScrollArea):
+            area = area.parentWidget()
+        self.area = area
+
+    def tearDown(self):
+        if HAS_PYQT6 and getattr(self, "panel", None) and self.panel.is_receiving():
+            self.panel._start_btn.click()
+        super().tearDown()
+        if hasattr(self, "tmp"):
+            self.tmp.cleanup()
+
+    def in_view(self, widget) -> bool:
+        if not widget.isVisible():
+            return False
+        top = widget.mapTo(self.area.viewport(), QPoint(0, 0)).y()
+        return top >= 0 and top + widget.height() <= self.area.viewport().height()
+
+    def mode(self) -> str:
+        return self.win._control_panel._demod_combo.currentText()
+
+
+class TestSSTVSwitchKeepsThePanelInView(_SSTVWindowCase):
+    """HAM-E2E-5: Switch to USB took the keyboard focus to the Auto-save
+    check box (Space then un-ticked it) and scrolled the tab to the bottom,
+    so the next hint (Switch to LSB) came up out of view."""
+
+    def test_switch_then_the_next_hint(self):
+        win, panel = self.win, self.panel
+        bar = self.area.verticalScrollBar()
+        self.assertGreater(bar.maximum(), 0, "the tab scrolls at 1366x768")
+        win.set_frequency(14.23e6)
+        win._set_demod_mode("USB")
+        panel._start_btn.click()  # Start Decoder
+        win._set_demod_mode("AM")
+        settle()
+        self.assertTrue(self.in_view(panel._fm_callout))
+        QTest.mouseClick(panel._switch_fm_btn, Qt.MouseButton.LeftButton)
+        settle()
+        self.assertEqual(self.mode(), "USB")
+        self.assertFalse(panel._fm_callout.isVisible())
+        self.assertIsNot(QApplication.focusWidget(), panel._auto_save_check)
+        self.assertEqual(bar.value(), 0)
+        self.assertTrue(self.in_view(panel._start_btn))
+        # Space is the window's Start/Stop again, not a panel control's.
+        self.assertTrue(panel._auto_save_check.isChecked())
+        # 40 m in AM: the Switch to LSB hint is in view.
+        win.set_frequency(7.171e6)
+        win._set_demod_mode("AM")
+        settle()
+        self.assertEqual(panel._switch_fm_btn.text(), "Switch to LSB")
+        self.assertTrue(self.in_view(panel._fm_callout))
+
+    def test_a_hint_scrolls_into_view(self):
+        win, panel = self.win, self.panel
+        bar = self.area.verticalScrollBar()
+        win.set_frequency(14.23e6)
+        win._set_demod_mode("USB")
+        panel._start_btn.click()
+        bar.setValue(bar.maximum())  # looking at Received Images
+        settle()
+        self.assertFalse(self.in_view(panel._start_btn))
+        win._set_demod_mode("AM")
+        settle()
+        self.assertTrue(self.in_view(panel._fm_callout))
+
+    def test_keyboard_switch_leaves_the_focus_in_the_panel(self):
+        win, panel = self.win, self.panel
+        bar = self.area.verticalScrollBar()
+        win.set_frequency(14.23e6)
+        win._set_demod_mode("USB")
+        panel._start_btn.click()
+        win._set_demod_mode("AM")
+        settle()
+        panel._switch_fm_btn.setFocus(Qt.FocusReason.TabFocusReason)
+        settle()
+        self.assertTrue(panel._switch_fm_btn.hasFocus())
+        QTest.keyClick(panel._switch_fm_btn, Qt.Key.Key_Space)
+        settle()
+        self.assertEqual(self.mode(), "USB")
+        self.assertIs(QApplication.focusWidget(), panel._start_btn)
+        self.assertEqual(bar.value(), 0)
+
+
+class TestSSTVWrongSideband(_SSTVWindowCase):
+    """HAM-E2E-6: from 14.230 MHz (USB) to 7.171 MHz the receiver stays in
+    USB (on purpose, for FT8), where SSTV is sent in LSB: no hint."""
+
+    def test_40m_in_usb_offers_lsb(self):
+        win, panel = self.win, self.panel
+        win.set_frequency(14.23e6)
+        win._set_demod_mode("USB")
+        panel._start_btn.click()
+        settle()
+        self.assertTrue(panel._fm_callout.isHidden())
+        win.set_frequency(7.171e6)
+        settle()
+        self.assertEqual(self.mode(), "USB")
+        self.assertFalse(panel._fm_callout.isHidden())
+        self.assertEqual(
+            panel._fm_label.text(),
+            "SSTV on 40 m is usually sent in LSB; the receiver is in USB.",
+        )
+        self.assertEqual(panel._switch_fm_btn.text(), "Switch to LSB")
+        panel._switch_fm_btn.click()
+        settle()
+        self.assertEqual(self.mode(), "LSB")
+        self.assertTrue(panel._fm_callout.isHidden())
+        # Back on 20 m in LSB: USB is offered.
+        win.set_frequency(14.23e6)
+        settle()
+        if self.mode() == "LSB":
+            self.assertEqual(panel._switch_fm_btn.text(), "Switch to USB")
+            self.assertFalse(panel._fm_callout.isHidden())
+
+    def test_no_hint_when_not_listening_or_on_vhf(self):
+        win, panel = self.win, self.panel
+        win.set_frequency(7.171e6)
+        win._set_demod_mode("USB")
+        settle()
+        self.assertTrue(panel._fm_callout.isHidden(), "decoder not listening")
+        panel._start_btn.click()
+        win.set_frequency(144.5e6)
+        win._set_demod_mode("USB")  # (SSB SSTV on 2 m is fine)
+        settle()
+        self.assertTrue(panel._fm_callout.isHidden())
+        win.set_frequency(14.23e6)
+        win._set_demod_mode("USB")
+        settle()
+        self.assertTrue(panel._fm_callout.isHidden())
 
 
 if __name__ == "__main__":  # pragma: no cover

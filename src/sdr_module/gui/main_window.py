@@ -5108,11 +5108,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # Control panel handlers
     # ------------------------------------------------------------------
 
-    def _on_frequency_changed(self, freq_hz: float):
+    def _on_frequency_changed(self, freq_hz: float, same_signal: bool = False):
         """The tuned frequency is now ``freq_hz``: show it everywhere.
 
         Tuning itself (the LO, the device) is :meth:`_tune_to`'s; this
-        updates what shows the tuned frequency.
+        updates what shows the tuned frequency. ``same_signal``: Track
+        Signal followed the signal there, so nothing that belongs to a new
+        station starts over (its RDS name, the S-meter peak, the tuner's
+        seek and STEREO lamp, Identify and Track Signal themselves).
         """
         # The readout, and the channel marked on the plots (their axes follow
         # the LO, see _retune_lo)
@@ -5127,9 +5130,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tuner = self._radio_tuner
         if tuner is not None and tuner.isVisible():
             tuner.set_frequency(freq_hz)  # does not emit frequency_changed
-        # Another station: its RDS name is not known yet.
-        self._show_rds_station(None)
-        self._reset_signal_meter_peak()
+        if not same_signal:
+            # Another station: its RDS name is not known yet.
+            self._show_rds_station(None)
+            self._reset_signal_meter_peak()
         # Ham ID: where Send ID Now would transmit, and whether it may; QRP:
         # the legal limit here.
         if HAS_HAM_RADIO:
@@ -5137,11 +5141,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # SSTV's mode hint: FM on VHF/UHF, USB or LSB on HF.
             self._show_sstv_mode_needed(self._control_panel._demod_combo.currentText())
         self._tx_station.refresh()
-        self._tuner_retuned()
-        # Identify listens afresh; Track Signal starts over from here (T10).
-        signal_tools = self._own("_signal_tools")
-        if signal_tools is not None:
-            signal_tools.frequency_changed(freq_hz)
+        if not same_signal:
+            self._tuner_retuned()
+            # Identify listens afresh; Track Signal starts over from here
+            # (T10).
+            signal_tools = self._own("_signal_tools")
+            if signal_tools is not None:
+                signal_tools.frequency_changed(freq_hz)
         # The taskbar says where it is tuned; the Info tab (and FREQ's
         # tooltip) the band plan here; the Presets group the preset here.
         self._update_window_title()

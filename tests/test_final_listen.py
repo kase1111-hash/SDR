@@ -714,3 +714,44 @@ class TestBelowZeroHertz(_WindowTestCase):
         win = self.win
         self.type_frequency("7.2")
         self.assertEqual(win._lo_hz, 7.2e6)
+
+
+# --------------------------------------------------------------------------- #
+# Track Signal (AFC)
+# --------------------------------------------------------------------------- #
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestTrackSignalMovesEverything(_WindowTestCase):
+    """Leftover 11: Track Signal moved the tuned frequency without the
+    window's _on_frequency_changed: the title, the band plan, the Presets
+    group and the frequency the next far tune starts from stayed where the
+    signal was first tuned."""
+
+    demo = True
+
+    def test_a_drift_shows_everywhere_but_keeps_the_station(self):
+        from unittest import mock
+
+        win = self.win
+        win.set_frequency(438.5e6)
+        win._set_demod_mode("FM", "5 kHz", "12.5 kHz")
+        tools = win._signal_tools
+        with (
+            mock.patch.object(win, "_reset_signal_meter_peak") as peak,
+            mock.patch.object(win, "_show_rds_station") as rds,
+            mock.patch.object(win, "_tuner_retuned") as tuner,
+            mock.patch.object(win, "_update_band_plan") as band_plan,
+            mock.patch.object(win._control_panel, "show_preset_for") as preset,
+        ):
+            tools._move_vfo(2400.0)
+        self.assertEqual(win._current_frequency(), 438.5024e6)
+        self.assertEqual(win._freq_label.text(), "438.5024 MHz")
+        self.assertTrue(win.windowTitle().startswith("438.5024 MHz"), win.windowTitle())
+        self.assertEqual(win._shown_freq_hz, 438.5024e6)
+        band_plan.assert_called_with(438.5024e6)
+        preset.assert_called_with(438.5024e6)
+        # The same signal: nothing of a new station starts over.
+        peak.assert_not_called()
+        rds.assert_not_called()
+        tuner.assert_not_called()

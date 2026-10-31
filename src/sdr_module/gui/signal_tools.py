@@ -794,22 +794,12 @@ if HAS_PYQT6:
             try:
                 win._tuned_hz = freq
                 win._control_panel.set_frequency(freq)  # no signal
-                win._freq_label.setText(_format_frequency(win, freq))
-                win._update_passband()
-                win._bookmarks_panel.set_current_frequency(freq)
-                win._decoder_panel.set_current_frequency(freq)
                 # The live decoder follows the channel without starting over.
                 win._decoder_tuned_hz = freq
-                tuner = getattr(win, "_radio_tuner", None)
-                if tuner is not None and tuner.isVisible():
-                    tuner.set_frequency(freq)
-                # Transmitting (Send ID, QRP) goes where the signal is now.
-                qrp = getattr(win, "_qrp_panel", None)
-                if qrp is not None:
-                    qrp.set_station(freq)
-                station = getattr(win, "_tx_station", None)
-                if station is not None:
-                    station.refresh()
+                # Everything that shows the tuned frequency follows (FREQ,
+                # the plots' channel, the title, the band plan, the Presets
+                # group, the tuner, where Send ID and QRP transmit).
+                win._on_frequency_changed(freq, same_signal=True)
             finally:
                 self._moving = False
 

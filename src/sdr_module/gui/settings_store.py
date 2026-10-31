@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import math
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 try:
     from PyQt6.QtCore import QSettings
@@ -77,15 +77,8 @@ class GuiSettings:
         except (ValueError, TypeError):
             logger.warning("Corrupt bookmarks in settings; resetting")
             return []
-        # Only real bookmarks: one damaged entry must not stop the app.
-        bookmarks, dropped = valid_bookmarks(data)
-        if dropped:
-            logger.warning(
-                "Ignored %s in the saved settings: not a bookmark, or no "
-                "usable frequency.",
-                describe_dropped(dropped),
-            )
-        return bookmarks
+        # (One damaged entry must not stop the app starting.)
+        return usable_bookmarks(data)
 
     def set_bookmarks(self, bookmarks: List[Dict[str, Any]]) -> None:
         self._s.setValue("bookmarks", json.dumps(bookmarks))
@@ -105,41 +98,67 @@ class GuiSettings:
         return self._s.value(f"geom/{name}")
 
 
-def _usable_bookmark(entry: Any) -> bool:
-    """Whether a saved entry is a bookmark: an object whose frequency is a
-    finite, positive number."""
-    if not isinstance(entry, dict):
-        return False
+def _finite_number(value: Any) -> bool:
     try:
-        freq = float(entry.get("freq_hz"))
+        return math.isfinite(float(value))
     except (TypeError, ValueError, OverflowError):
         return False
-    return math.isfinite(freq) and freq > 0
 
 
-def valid_bookmarks(data: Any) -> Tuple[List[Dict[str, Any]], List[Any]]:
-    """``(bookmarks, dropped)``: the usable bookmarks of a saved list, and
-    the entries left out. A damaged settings file can hold anything (null,
-    numbers, text, a bookmark without a frequency): such an entry is
-    skipped rather than stopping the app from starting."""
-    if not isinstance(data, list):
-        return [], ([] if data is None else [data])
-    kept: List[Dict[str, Any]] = []
-    dropped: List[Any] = []
-    for entry in data:
-        (kept if _usable_bookmark(entry) else dropped).append(entry)
-    return kept, dropped
-
-
-def describe_dropped(dropped: List[Any]) -> str:
-    """``"2 damaged bookmarks (null, 1)"``: what was left out, for the log."""
+def _examples(entries: List[Any]) -> str:
+    """``"null, 1, ..."``: the first entries, short, for the log."""
     shown = []
-    for entry in dropped[:3]:
+    for entry in entries[:3]:
         try:
             text = json.dumps(entry)
         except (TypeError, ValueError):
             text = repr(entry)
         shown.append(text if len(text) <= 60 else text[:57] + "...")
-    more = ", ..." if len(dropped) > 3 else ""
-    noun = "bookmark" if len(dropped) == 1 else "bookmarks"
-    return f"{len(dropped)} damaged {noun} ({', '.join(shown)}{more})"
+    return ", ".join(shown) + (", ..." if len(entries) > 3 else "")
+
+
+def usable_bookmarks(data: Any) -> List[Dict[str, Any]]:
+    """The bookmarks of a saved list, safe to list, tune and scan.
+
+    A damaged settings file can hold anything, and one bad entry stopped the
+    app starting. An entry that isn't a bookmark (null, a number, a text) is
+    skipped; a bookmark whose frequency isn't a number (missing, "abc", NaN,
+    too big for a float) stays in the list at 0 Hz, to be edited or
+    removed. Each kind of damage is logged once (Tools > Error History).
+    """
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        logger.warning(
+            "Ignored the saved bookmarks: not a list (%s).", _examples([data])
+        )
+        return []
+    kept: List[Dict[str, Any]] = []
+    dropped: List[Any] = []
+    repaired: List[Dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            dropped.append(entry)
+            continue
+        if not _finite_number(entry.get("freq_hz")):
+            repaired.append(dict(entry))
+            entry["freq_hz"] = 0.0
+        kept.append(entry)
+    if dropped:
+        noun = "entry" if len(dropped) == 1 else "entries"
+        logger.warning(
+            "Ignored %d damaged %s of the saved bookmarks (%s): not a bookmark.",
+            len(dropped),
+            noun,
+            _examples(dropped),
+        )
+    if repaired:
+        noun = "bookmark has" if len(repaired) == 1 else "bookmarks have"
+        logger.warning(
+            "%d saved %s no usable frequency (%s): listed at 0 Hz, to be "
+            "edited or removed.",
+            len(repaired),
+            noun,
+            _examples(repaired),
+        )
+    return kept

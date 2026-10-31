@@ -72,13 +72,32 @@ class TestDamagedSavedBookmarks(unittest.TestCase):
         settings._s = QSettings(path, QSettings.Format.IniFormat)
         return settings
 
-    def test_get_bookmarks_keeps_only_usable_bookmarks_and_says_so(self):
+    def test_get_bookmarks_skips_what_isnt_a_bookmark_and_says_so(self):
         settings = self._settings_file(json.dumps(_DAMAGED))
         with self.assertLogs("sdr_module.gui.settings_store", "WARNING") as logs:
             bookmarks = settings.get_bookmarks()
-        self.assertEqual([b["label"] for b in bookmarks], ["ok", 5])
-        self.assertEqual(len(logs.records), 1)  # one line, not one per entry
-        self.assertIn("8 damaged bookmarks", logs.output[0])
+        # The bookmarks stay (a frequency that isn't a number reads 0 Hz, to
+        # be edited); what isn't a bookmark goes. One line per kind.
+        self.assertEqual(
+            [b["label"] for b in bookmarks],
+            ["no frequency", "text", "zero", "nan", "ok", 5],
+        )
+        self.assertEqual(
+            [b["freq_hz"] for b in bookmarks],
+            [0.0, 0.0, 0, 0.0, 100100000, 145290000.0],
+        )
+        self.assertEqual(len(logs.records), 2)
+        self.assertIn("Ignored 4 damaged entries", logs.output[0])
+        self.assertIn("3 saved bookmarks have no usable frequency", logs.output[1])
+
+    def test_a_frequency_too_big_for_a_float_doesnt_stop_the_app(self):
+        # (A whole number of 400 digits: json reads it, float() can't.)
+        settings = self._settings_file(
+            '[{"label": "big", "freq_hz": 1%s}]' % ("0" * 400)
+        )
+        with self.assertLogs("sdr_module.gui.settings_store", "WARNING"):
+            bookmarks = settings.get_bookmarks()
+        self.assertEqual(bookmarks, [{"label": "big", "freq_hz": 0.0}])
 
     def test_a_list_of_nothing_but_damage_gives_no_bookmarks(self):
         for value in ("[1, 2, 3]", '[null, 1, "x"]'):
@@ -101,14 +120,17 @@ class TestDamagedSavedBookmarks(unittest.TestCase):
         saved = bookmarks_panel.GuiSettings
         bookmarks_panel.GuiSettings = lambda: store
         try:
-            with self.assertLogs("sdr_module.gui.bookmarks_panel", "WARNING"):
+            with self.assertLogs("sdr_module.gui.settings_store", "WARNING"):
                 panel = bookmarks_panel.BookmarksPanel()
         finally:
             bookmarks_panel.GuiSettings = saved
         try:
-            self.assertEqual(panel.bookmark_count(), 2)
+            self.assertEqual(panel.bookmark_count(), 6)
             self.assertEqual(panel.groups(), [])
-            self.assertEqual(panel._list.topLevelItemCount(), 2)
+            self.assertEqual(panel._list.topLevelItemCount(), 6)
+            self.assertEqual(
+                panel._list.topLevelItem(3).text(1), "0.000 MHz"
+            )  # NaN: listed at 0 Hz
         finally:
             panel.deleteLater()
             _settle()
@@ -132,7 +154,7 @@ class TestTheWindowStartsWithDamagedBookmarks(_WindowTestCase):
 
         test_gui_chrome._FakeSettings = _Damaged
         try:
-            with self.assertLogs("sdr_module.gui.bookmarks_panel", "WARNING"):
+            with self.assertLogs("sdr_module.gui.settings_store", "WARNING"):
                 super().setUp()
         finally:
             test_gui_chrome._FakeSettings = original

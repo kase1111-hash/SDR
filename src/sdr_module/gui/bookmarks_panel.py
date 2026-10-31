@@ -64,12 +64,7 @@ from .bookmark_editor import bookmark_tone_hz
 from .bookmark_editor import edit_bookmark as _edit_dialog
 from .control_panel import DEMOD_MODES, MAX_FREQUENCY_HZ, MIN_FREQUENCY_HZ
 from .decoder_panel import ViewPlaceholder
-from .settings_store import (
-    DEFAULT_FREQUENCY_HZ,
-    GuiSettings,
-    describe_dropped,
-    valid_bookmarks,
-)
+from .settings_store import DEFAULT_FREQUENCY_HZ, GuiSettings, usable_bookmarks
 
 logger = logging.getLogger(__name__)
 
@@ -904,15 +899,11 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
 
     # ---- Internal ----
     def _load_bookmarks(self) -> List[Dict[str, Any]]:
-        """The saved bookmarks. An entry of a damaged settings file that
-        isn't one (null, a number, no usable frequency) is skipped with a
-        log line: it must not stop the app starting."""
-        bookmarks, dropped = valid_bookmarks(self._settings.get_bookmarks())
-        if dropped:
-            logger.warning(
-                "Ignored %s in the saved bookmarks.", describe_dropped(dropped)
-            )
-        return bookmarks
+        """The saved bookmarks, whatever the settings object holds: an entry
+        of a damaged settings file that isn't a bookmark is skipped with a
+        log line (see settings_store.usable_bookmarks); it must not stop the
+        app starting."""
+        return usable_bookmarks(self._settings.get_bookmarks())
 
     def _save(self) -> None:
         self._settings.set_bookmarks(self._bookmarks)

@@ -207,7 +207,12 @@ class TestRecordAudio(_AudioCase):
         win._recording_elapsed = lambda: 65.0
         win._update_status()
         self.assertTrue(win._recording_label.text().startswith("REC 00:01:05"))
-        self.assertEqual(panel._record_status.text(), "Ready")
+        # (Its status line names the I/Q recording and how to stop it, not
+        # "Ready": REC-E2E-12.)
+        self.assertEqual(
+            panel._record_status.text(),
+            "● Recording I/Q 01:05 (Ctrl+Shift+R stops it)",
+        )
         self.assertEqual(panel._record_time.text(), "00:00:00")
         win._record_action.trigger()
 

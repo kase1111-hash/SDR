@@ -873,6 +873,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         # ("waiting" once it has captured something: it resumes).
         self._armed = False
         self._waiting = False
+        # A recording of the kind the Record choice doesn't show (its text).
+        self._other_recording = ""
         # Bandwidth and FM deviation last used with each filter profile
         # (see filter_profile), and whether a mode change is applying them.
         self._filter_memory: Dict[str, Dict[str, str]] = {}
@@ -2329,14 +2331,27 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             audio = self.record_kind() == "audio"
             text = _STATUS_RECORDING_AUDIO if audio else _STATUS_RECORDING
             tone = "danger"
+        elif self._other_recording:  # (see set_other_recording)
+            text, tone = self._other_recording, "danger"
         else:
             text, tone = _STATUS_READY, None
         self._record_status.setText(text)
         self._record_status.setToolTip(tip)
         set_tone(self._record_status, tone)
         # The timer only runs while samples are captured; idle or armed it is
-        # muted (the LCD's default amber read as a warning).
-        set_tone(self._record_time, "muted" if armed else tone or "muted")
+        # muted (the LCD's default amber read as a warning), as it is while
+        # the other kind records (it times this one).
+        set_tone(self._record_time, tone if recording and not armed else "muted")
+
+    def set_other_recording(self, text: str) -> None:
+        """Name a recording of the kind the Record choice doesn't show, while
+        that kind isn't recording: "● Recording audio 00:06 (Ctrl+Shift+A
+        stops it)" ("" when there is none). Without it the group said
+        "Ready" while audio recorded."""
+        text = str(text or "")
+        if text != self._other_recording:
+            self._other_recording = text
+            self._update_record_status()
 
     def _on_record_toggled(self, checked: bool):
         """Handle record button toggle."""

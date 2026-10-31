@@ -705,3 +705,37 @@ class TestTakeMetadata(_FilesCase):
             "Tuned to 144.390 MHz (FM), played back from orig.sigmf-data",
         )
         win._playback.close()
+
+
+class TestRecordingGroupShowsTheOtherKind(_FilesCase):
+    """REC-E2E-12: with Record set to I/Q, the Recording group said "Ready"
+    while an audio recording ran (and the other way round)."""
+
+    def test_an_audio_recording_shows_while_record_is_iq(self):
+        win = self.win
+        panel = win._control_panel
+        self.store.values["recording/folder"] = self.folder
+        self.assertEqual(panel.record_kind(), "iq")
+        win._record_audio_action.trigger()
+        self.assertIsNotNone(win._audio_take)
+        win._update_audio_recording_status()
+        text = panel._record_status.text()
+        self.assertTrue(text.startswith("● Recording audio 00:0"), text)
+        self.assertIn("Ctrl+Shift+A", text)
+        self.assertFalse(panel._record_btn.isChecked())  # (I/Q isn't)
+        win._record_audio_action.trigger()  # stop
+        self.assertEqual(panel._record_status.text(), "Ready")
+
+    def test_an_iq_recording_shows_while_record_is_audio(self):
+        win = self.win
+        panel = win._control_panel
+        panel.set_record_kind("audio")
+        win._record_action.trigger()
+        win._update_display()
+        win._update_recording_status()
+        text = panel._record_status.text()
+        self.assertTrue(text.startswith("● Recording I/Q 00:0"), text)
+        self.assertIn("Ctrl+Shift+R", text)
+        win._record_action.trigger()  # stop
+        self.assertEqual(panel._record_status.text(), "Ready")
+        panel.set_record_kind("iq")

@@ -4484,6 +4484,35 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if audio and self._audio_take is not None:
             panel.update_record_time(int(self._audio_take.seconds))
         self._sync_recording_armed()
+        self._sync_other_recording()
+
+    def _sync_other_recording(self) -> None:
+        """The Recording group shows the kind its Record choice records; a
+        recording of the other kind is named in its status line, with how
+        to stop it (it said "Ready" while audio recorded)."""
+        text = ""
+        if self._record_kind() == "audio":
+            if not self._recording:
+                pass
+            elif self._capture_pending:
+                text = "◌ I/Q recording armed (Ctrl+Shift+R stops it)"
+            elif self._recording_paused:
+                text = "❚❚ I/Q recording paused (Ctrl+Shift+R stops it)"
+            else:
+                text = (
+                    f"● Recording I/Q {_clock_text(self._recording_elapsed())} "
+                    "(Ctrl+Shift+R stops it)"
+                )
+        else:
+            take = getattr(self, "_audio_take", None)
+            if take is not None and take.paused:
+                text = "❚❚ Audio recording paused (Ctrl+Shift+A stops it)"
+            elif take is not None:
+                text = (
+                    f"● Recording audio {_clock_text(take.seconds)} "
+                    "(Ctrl+Shift+A stops it)"
+                )
+        self._control_panel.set_other_recording(text)
 
     def _update_record_button_tip(self) -> None:
         if self._record_kind() == "audio":
@@ -6557,6 +6586,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._sync_recording_armed()
         if self._record_kind() != "audio":  # (else the group times the audio)
             self._control_panel.update_record_time(int(self._recording_elapsed()))
+        else:  # (named in the group's status line)
+            self._sync_other_recording()
 
         # Recorded size + free space on the drive the recording goes to
         free = self._free_recording_space()
@@ -6908,6 +6939,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._record_kind() == "audio":
             self._control_panel.update_record_time(int(take.seconds))
             self._sync_recording_armed()
+        else:  # (named in the group's status line)
+            self._sync_other_recording()
 
     def _record_audio_block(
         self, audio: Optional[np.ndarray], open_: bool, seconds: float, joined: bool

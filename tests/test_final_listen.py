@@ -338,3 +338,84 @@ class TestPresetDecoderLifetime(_WindowTestCase):
         texts = self.history()
         self.assertFalse(any("SSTV decoding needs" in text for text in texts), texts)
         self.assertTrue(any(text.startswith("SSTV decoder stopped") for text in texts))
+
+
+# --------------------------------------------------------------------------- #
+# Noise reduction on a clean station
+# --------------------------------------------------------------------------- #
+
+
+def _chords(seconds, rate):
+    """Music the noise estimate mistook for noise: chords held 3 s each,
+    rich in 200-500 Hz harmonics."""
+    import numpy as np
+
+    t = np.arange(int(seconds * rate)) / rate
+    out = np.zeros(len(t))
+    for start, roots in ((0.0, (220.0, 277.2, 329.6)), (3.0, (246.9, 311.1, 370.0))):
+        on = (t >= start) & (t < start + 3.0)
+        for root in roots:
+            for k, weight in ((1, 1.0), (2, 0.5), (3, 0.3)):
+                out[on] += weight * np.sin(2 * np.pi * root * k * t[on])
+    return 0.5 * out / np.max(np.abs(out))
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestNoiseReductionLeavesACleanSignalAlone(_WindowTestCase):
+    """LISTEN-08: Strong took 2-3 dB off a clean music station (6 dB at
+    200-500 Hz): its noise estimate learned held chords as noise."""
+
+    def _listen(self, level, snr_db, deviation="75 kHz", width="200 kHz"):
+        import numpy as np
+
+        from tests.test_gui_squelch import (
+            FRAME,
+            RATE,
+            Frames,
+            fm,
+            noise,
+            pretend_audio_output,
+        )
+
+        pretend_audio_output(self.win)
+        win = self.win
+        win.set_frequency(100.1e6 if deviation == "75 kHz" else 146.52e6)
+        win._set_demod_mode("AM")
+        win._set_demod_mode("FM", deviation, width)
+        win._control_panel.set_noise_reduction(level)
+        win._reset_demodulator()
+        audio = _chords(6.0, RATE)
+        dev = 75e3 if deviation == "75 kHz" else 5e3
+        # (``snr_db`` in the channel: the noise spreads over the span.)
+        spread_db = 10 * np.log10(RATE / float(width.split()[0]) / 1e3)
+        iq = fm(audio, dev, -20.0) + noise(
+            len(audio), -20.0 - snr_db + spread_db, seed=8
+        )
+        frames = Frames(self, iq[: len(iq) // FRAME * FRAME]).run()
+        out = frames.played()
+        return out[int(1.5 * 48000) : int(5.5 * 48000)]
+
+    @staticmethod
+    def _rms_db(audio):
+        import numpy as np
+
+        return 10 * np.log10(np.mean(np.square(audio)) + 1e-30)
+
+    def test_strong_and_light_leave_a_clean_station_at_its_level(self):
+        off = self._rms_db(self._listen("off", 60.0))
+        for level in ("light", "strong"):
+            on = self._rms_db(self._listen(level, 60.0))
+            self.assertAlmostEqual(on, off, delta=0.3, msg=level)  # was -2.7 dB
+
+    def test_a_noisy_station_still_loses_its_hiss(self):
+        import numpy as np
+
+        # Narrow FM 15 dB above the noise: the hiss above 4 kHz still goes.
+        def hiss(audio):
+            spectrum = np.abs(np.fft.rfft(audio * np.hanning(len(audio)))) ** 2
+            freqs = np.fft.rfftfreq(len(audio), 1 / 48000)
+            return float(spectrum[(freqs > 1.5e3) & (freqs < 3e3)].sum())
+
+        off = hiss(self._listen("off", 15.0, "5 kHz", "25 kHz"))
+        strong = hiss(self._listen("strong", 15.0, "5 kHz", "25 kHz"))
+        self.assertLess(strong, 0.5 * off)

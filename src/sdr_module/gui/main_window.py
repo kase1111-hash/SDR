@@ -459,6 +459,8 @@ _CLIP_FRACTION = 0.05
 _CLIP_MIN_SNR_DB = 15.0  # (noise clips whatever the deviation)
 _CLIP_WARN_AFTER_S = 0.5
 _CLIP_WARN_EVERY_S = 30.0
+# Noise reduction leaves an FM or AM channel this far above its noise alone.
+_NR_CLEAN_SNR_DB = 30.0
 # Highest audio frequency kept after AM/FM detection (broadcast FM is 15 kHz),
 # and where the audio low-pass stops: below broadcast FM's 19 kHz stereo
 # pilot tone, which would otherwise come through as a faint whistle.
@@ -7882,6 +7884,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if recording:
                 self._record_audio_block(None, False, seconds, False)
             return
+        self._guard_noise_reduction(mode, level_db, noise_db)
         deviation = self._control_panel.get_fm_deviation()
         try:
             audio = chain.demodulate(channel, deviation)
@@ -7961,6 +7964,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("SSTV decoder failed: %s", exc)
+
+    def _guard_noise_reduction(
+        self, mode: str, level_db: float, noise_db: Optional[float]
+    ) -> None:
+        """LISTEN-08: noise reduction leaves a clean FM or AM signal alone
+        (its noise estimate takes chords held a few seconds for noise and
+        took 2-3 dB off a clean music station). Clean: the channel at least
+        _NR_CLEAN_SNR_DB above its noise (until 6 dB less). SSB and CW come
+        and go with the voice or the keying: their level can't tell."""
+        nr = self._audio_options.noise_reduction
+        if nr is None or not hasattr(nr, "clean"):
+            return
+        snr = None if noise_db is None else level_db - noise_db
+        if mode not in ("FM", "AM") or snr is None:
+            nr.clean = False
+        elif snr >= _NR_CLEAN_SNR_DB:
+            nr.clean = True
+        elif snr < _NR_CLEAN_SNR_DB - 6.0:
+            nr.clean = False
 
     def _track_noise_floor(self, power: np.ndarray, count: int) -> None:
         """The spectrum's noise floor (for Auto squelch and the SNR)."""

@@ -1119,3 +1119,73 @@ class TestNoRetuneWhileRecordingIq(_FilesCase):
         self.assertTrue(win.set_frequency(145.8e6))
         self.assertEqual(win._current_frequency(), 145.8e6)
         win._toggle_recording(False)
+
+
+class TestInputWaitsWithTheProgressDialogUp(_FilesCase):
+    """Flaky test_gui_recording_files::TestInputWhileAJobRuns: on a busy
+    computer the progress dialog came up before the test's click, and from
+    then on only its window modality held input back, which QTest's
+    events (offscreen) bypass: the click started a recording. Input other
+    than the dialog's now waits whether it shows or not."""
+
+    def test_a_click_waits_while_the_dialog_shows(self):
+        import time
+
+        from PyQt6.QtCore import Qt, QTimer
+        from PyQt6.QtTest import QTest
+
+        from sdr_module.gui.file_jobs import run_job
+
+        win = self.win
+        seen = {}
+
+        def press():
+            seen["dialog"] = any(
+                type(w).__name__ == "QProgressDialog" and w.isVisible()
+                for w in win.findChildren(object)
+                if hasattr(w, "isVisible")
+            )
+            QTest.mouseClick(win._record_button, Qt.MouseButton.LeftButton)
+            win._spectrum.setFocus()
+            QTest.keyClick(win._spectrum, Qt.Key.Key_Space)
+
+        def work(report):
+            for i in range(40):
+                time.sleep(0.01)
+                report(i / 40)
+            return "done"
+
+        QTimer.singleShot(150, press)
+        result = run_job(win, "Test", "Working…", work, show_after_ms=0)
+        self.assertEqual(result.value, "done")
+        self.assertTrue(seen["dialog"])  # (the case tested: it was up)
+        self.assertFalse(win._recording)
+        self.assertTrue(win._is_running)
+
+    def test_the_dialogs_cancel_still_works(self):
+        import time
+
+        from PyQt6.QtCore import Qt, QTimer
+        from PyQt6.QtTest import QTest
+        from PyQt6.QtWidgets import QProgressDialog, QPushButton
+
+        from sdr_module.gui.file_jobs import run_job
+
+        win = self.win
+
+        def cancel():
+            dialog = next(
+                w for w in win.findChildren(QProgressDialog) if w.isVisible()
+            )
+            button = dialog.findChild(QPushButton)
+            QTest.mouseClick(button, Qt.MouseButton.LeftButton)
+
+        def work(report):
+            for i in range(300):
+                time.sleep(0.01)
+                report(i / 300)
+            return "done"
+
+        QTimer.singleShot(150, cancel)
+        result = run_job(win, "Test", "Working…", work, show_after_ms=0)
+        self.assertTrue(result.cancelled)

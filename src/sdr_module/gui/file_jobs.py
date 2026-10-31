@@ -32,7 +32,7 @@ from .iq_files import IqFileOptions
 
 try:
     from PyQt6.QtCore import QEvent, QEventLoop, QObject, Qt, QThread, pyqtSignal
-    from PyQt6.QtWidgets import QApplication, QProgressDialog
+    from PyQt6.QtWidgets import QApplication, QProgressDialog, QWidget
 
     HAS_PYQT6 = True
 except ImportError:  # pragma: no cover - the GUI needs PyQt6
@@ -328,9 +328,10 @@ if HAS_PYQT6:
         """Keyboard and mouse input waits while a job runs: the window's
         event loop goes on (the spectrum keeps running), but a click on
         Record or a shortcut must not start something under the job's feet
-        (a recording going into the buffer being converted). Once the
-        progress dialog is up its modality does this; before (the first
-        moment) this filter swallows the input."""
+        (a recording going into the buffer being converted). Only the
+        progress dialog (its Cancel) takes input, once it is up. (Its
+        window modality isn't relied on: input that bypasses it, as QTest's
+        does offscreen, started a recording under a busy job.)"""
 
         _INPUT = frozenset(
             {
@@ -351,11 +352,20 @@ if HAS_PYQT6:
             self._dialog = dialog
 
         def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802 - Qt
-            if event.type() not in self._INPUT or self._dialog.isVisible():
+            if event.type() not in self._INPUT:
+                return False
+            if self._dialog.isVisible() and self._in_dialog(obj):
                 return False
             if event.type() == QEvent.Type.ShortcutOverride:
                 event.accept()  # (taken as a key press: no shortcut fires)
             return True
+
+        def _in_dialog(self, obj: Any) -> bool:
+            """Whether ``obj`` (a widget, or a window) is the dialog's."""
+            dialog = self._dialog
+            if not isinstance(obj, QWidget):
+                return obj is dialog.windowHandle()
+            return obj is dialog or dialog.isAncestorOf(obj)
 
     def run_job(
         parent: Any,

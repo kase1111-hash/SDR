@@ -305,6 +305,99 @@ class TestAudioAgcSpeed(unittest.TestCase):
             self.assertAlmostEqual(level, 0.5, delta=0.05)
 
 
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestAmKeyUpAndKeyDown(unittest.TestCase):
+    """LISTEN-01: a keyed AM transmission (airband) starts and ends at
+    programme level. The carrier level came from the mean of each whole
+    33 ms block, so the block a transmission started in (from a reset
+    level, half of it noise) was divided by a level far too low: a clipped
+    pop at every key-up. At key-down the vanished carrier left a full-scale
+    negative pulse, then hiss that swelled as the level decayed through the
+    squelch's hang time."""
+
+    KEY_UP_S = 0.45  # inside a 33 ms block (as the demo's stations key)
+    KEY_DOWN_S = 1.71
+    END_S = 2.1  # the squelch's 0.3 s hang after it, and a little more
+
+    def setUp(self):
+        require_pyqt6(self)
+        self.mw = _mw()
+
+    def _transmission(self, seed=3):
+        """An airband-like AM transmission (600 and 1700 Hz at 35 and 20 %,
+        about 0.285 RMS once detected) with noise 30 dB below the carrier."""
+        rng = np.random.default_rng(seed)
+        n = int(self.END_S * RATE)
+        t = np.arange(n) / RATE
+        on = (t >= self.KEY_UP_S) & (t < self.KEY_DOWN_S)
+        envelope = 1.0 + 0.35 * np.sin(2 * np.pi * 600 * t)
+        envelope += 0.2 * np.sin(2 * np.pi * 1700 * t)
+        iq = 1e-3 * envelope * on
+        noise = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+        return (iq + 1e-3 * 10 ** (-30 / 20) / np.sqrt(2) * noise).astype(np.complex64)
+
+    def _listen(self, speed):
+        """The audio from the block the squelch opens on (the key-up's; the
+        demodulator was reset while it was closed) to the end."""
+        from sdr_module.gui.audio_chain import AudioOptions
+
+        options = AudioOptions()
+        options.agc_speed = speed
+        chain = self.mw._ReceiverChain(RATE, "AM", 10e3)
+        chain.options = options
+        first = int(self.KEY_UP_S * RATE) // 80000 * 80000
+        audio = _receive(chain, self._transmission()[first:])
+        return audio, first / RATE
+
+    def test_key_up_starts_at_programme_level(self):
+        for speed in ("fast", "medium", "slow"):
+            with self.subTest(speed=speed):
+                audio, start_s = self._listen(speed)
+                up = int((self.KEY_UP_S - start_s) * AUDIO_RATE)
+                head = audio[up : up + int(0.25 * AUDIO_RATE)]
+                steady = audio[int((0.9 - start_s) * AUDIO_RATE) :][
+                    : int(0.5 * AUDIO_RATE)
+                ]
+                programme = float(np.sqrt(np.mean(steady**2)))
+                self.assertAlmostEqual(programme, 0.285, delta=0.02)
+                # No clipped pop (was 300-600 samples at full scale, the
+                # first 5 ms 8-10 dB above the programme).
+                self.assertEqual(int(np.sum(np.abs(head) >= 0.999)), 0)
+                w = int(0.005 * AUDIO_RATE)
+                pieces = head[: len(head) // w * w].reshape(-1, w)
+                rms5 = np.sqrt(np.mean(pieces**2, axis=1))
+                self.assertLess(float(rms5.max()), 1.3 * programme)
+
+    def test_key_down_ends_without_a_thump_or_hiss(self):
+        for speed in ("fast", "medium", "slow"):
+            with self.subTest(speed=speed):
+                audio, start_s = self._listen(speed)
+                down = int((self.KEY_DOWN_S - start_s) * AUDIO_RATE)
+                w = int(0.01 * AUDIO_RATE)
+                # No negative pulse: the programme averages to nothing over
+                # any 10 ms (wherever it ends), the old detector's thump to
+                # -0.4.
+                tail = audio[down - w : down + int(0.3 * AUDIO_RATE)]
+                means = tail[: len(tail) // w * w].reshape(-1, w).mean(axis=1)
+                self.assertGreater(float(means.min()), -0.05)
+                # Silence once it ended (the detector may play the programme
+                # up to ~15 ms late): no full-scale peak...
+                after = audio[down + 2 * w :]
+                self.assertLess(float(np.max(np.abs(after))), 0.1)
+                # ...and no hiss rising through the hang (was 0.02 -> 0.08
+                # RMS at Medium, 0.04 -> 0.39 at Fast).
+                hang = after[3 * w : 28 * w].reshape(-1, w)
+                self.assertLess(float(np.sqrt(np.mean(hang**2, axis=1)).max()), 0.005)
+
+    def test_programme_is_not_delayed_much(self):
+        # The detector looks a few ms ahead to fade out before a carrier
+        # ends: the delay that costs stays small.
+        audio, start_s = self._listen("medium")
+        heard = np.flatnonzero(np.abs(audio) > 0.05)
+        last = heard[-1] / AUDIO_RATE + start_s
+        self.assertLess(last - self.KEY_DOWN_S, 0.02)
+
+
 class TestAudioHelpers(unittest.TestCase):
     """gui/audio_chain.py building blocks (no Qt)."""
 

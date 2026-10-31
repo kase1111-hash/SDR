@@ -435,6 +435,23 @@ _DEFAULT_AUDIO_OPTIONS = AudioOptions()
 # gaps between characters must not chop it.
 _SQUELCH_HANG_S = 0.3
 _CW_SQUELCH_HANG_S = 0.5
+# The AM detector (_ReceiverChain._am_detect) tells where the carrier is
+# from the envelope averaged over _AM_WINDOW_S (centred): it is gone where
+# that stays below _AM_GONE of its level (-10.5 dB) for _AM_DIP_S or more
+# (shorter dips are deep, low-pitched modulation). The audio fades in over
+# _AM_FADE_S after a carrier appears and out over the same time before it
+# goes, so it looks that far ahead: AM audio comes 13 ms late. A carrier's
+# level is taken from the carrier itself when one appears (after a reset,
+# _AM_JUMP times the level, or _AM_NEW times the floor of the gap the last
+# one left) and held for _AM_HOLD_S once it has gone (the squelch's hang
+# time), so the hiss behind a transmission isn't turned up.
+_AM_WINDOW_S = 0.004
+_AM_GONE = 0.3
+_AM_DIP_S = 0.006
+_AM_FADE_S = 0.005
+_AM_JUMP = 2.0
+_AM_NEW = 4.0
+_AM_HOLD_S = _SQUELCH_HANG_S
 # FM audio clipping warning: more than this fraction of the samples beyond
 # full scale for this long (the deviation is set too small), at most this
 # often.
@@ -884,6 +901,11 @@ class _ReceiverChain:
         # the audio before noise reduction (for the SSTV decoder).
         self.last_clip_fraction = 0.0
         self.pre_nr_audio = np.empty(0, dtype=np.float32)
+        # The AM detector's averaging (half of it), dip and fade lengths, in
+        # samples at the channel rate (see _am_detect).
+        self._am_half = max(1, int(round(_AM_WINDOW_S / 2.0 * self.channel_rate)))
+        self._am_dip = max(1, int(round(_AM_DIP_S * self.channel_rate)))
+        self._am_fade = max(1, int(round(_AM_FADE_S * self.channel_rate)))
         self.reset_demodulator()
 
     def _options(self) -> AudioOptions:
@@ -1078,6 +1100,20 @@ class _ReceiverChain:
         """Forget the audio state (after a gap); the channel filter keeps its."""
         self._prev: Optional[complex] = None
         self._level = 0.0  # AM carrier level
+        # AM: the envelope already played (history) and the look-ahead not
+        # played yet (silence after a reset), the lowest average since the
+        # carrier went (inf while it is there), how long it has been gone,
+        # the level before a recent jump (and for how long it counts), and
+        # the last sample played and its gain.
+        span = self._am_half + self._am_dip + self._am_fade
+        self._am_past = np.zeros(0, dtype=np.float32)
+        self._am_ahead = np.zeros(span, dtype=np.float32)
+        self._am_floor = math.inf
+        self._am_gone_s = 0.0
+        self._am_before = 0.0
+        self._am_before_s = 0.0
+        self._am_last = 0.0
+        self._am_last_gain = 0.0
         self._bfo_phase = 0.0
         self._audio = self._audio_stages()
         if self._sideband is not None:
@@ -1167,31 +1203,177 @@ class _ReceiverChain:
     def _am_detect(self, channel: np.ndarray, speed: str) -> np.ndarray:
         """AM envelope relative to the carrier (at the channel rate).
 
-        The carrier level is tracked with the AGC speed's time constant and
-        interpolated across the block (no steps between blocks), and the
-        envelope is divided by it: the loudness follows the modulation
-        depth, not the signal strength. With the AGC off it isn't divided,
-        so the loudness follows the signal."""
+        The envelope is divided by the carrier level, so the loudness
+        follows the modulation depth, not the signal strength (with the AGC
+        off it isn't divided: the loudness follows the signal). The level
+        follows the carrier with the AGC speed's time constant (a rising
+        one within 10 ms) and is interpolated across the block.
+
+        Keyed transmissions start and end at programme level. Where the
+        carrier is comes from the envelope averaged over 4 ms, a little
+        ahead of what is played (see _AM_GONE: the audio comes 13 ms late).
+        A carrier that appears (after a reset, or far above the level or
+        the gap before it) sets the level from its own samples and fades
+        in; one that goes fades out before it ends, and its level is held
+        for the squelch's hang time. (The level of a whole block, half of
+        it noise, made every key-up a clipped pop; dividing a vanished
+        carrier by a falling level made every key-down a full-scale thump
+        followed by swelling hiss.)
+        """
         envelope = np.abs(channel).astype(np.float32)
-        carrier = float(np.mean(envelope))
-        seconds = len(channel) / max(self.channel_rate, 1.0)
-        if carrier > self._level:
-            tau = _AM_ATTACK_S  # a rising carrier is followed at once
-        else:
-            tau = _AM_CARRIER_TIME_S.get(speed, _AM_CARRIER_TIME_S["medium"])
-        if self._level <= 0.0:
+        n = len(envelope)
+        half, dip, fade = self._am_half, self._am_dip, self._am_fade
+        buf = np.concatenate((self._am_past, self._am_ahead, envelope))
+        total = len(buf)
+        first = len(self._am_past)  # buf[first:last] is played now
+        last = first + n
+        known = total - half  # averaged over the whole window before this
+        sums = np.concatenate(([0.0], np.cumsum(buf, dtype=np.float64)))
+        index = np.arange(total)
+        lo = np.maximum(index - half, 0)
+        hi = np.minimum(index + half + 1, total)
+        average = (sums[hi] - sums[lo]) / (hi - lo)
+        level = self._level
+        ahead = average[first:known]  # never empty: the look-ahead
+        newest = float(ahead[-1])
+        seconds = n / max(self.channel_rate, 1.0)
+        # A carrier sets the level from its own samples when one appears:
+        # after a reset, far above the level, far above the gap the last
+        # one left (a weaker one too), or when the carrier from before a
+        # jump in the level (a crash of static) is still there once the
+        # jump has passed.
+        gap = self._am_floor < math.inf
+        before = self._am_before
+        restore = (
+            before > 0.0
+            and float(ahead.max()) < _AM_JUMP * before
+            and newest >= _AM_GONE * before
+        )
+        seed = (
+            restore
+            or level <= 0.0
+            or newest > _AM_JUMP * level
+            or (gap and _AM_NEW * self._am_floor < newest < _AM_GONE * level)
+        )
+        ref = carrier = level
+        if seed:
+            # Its level from the samples well inside it (half its strongest
+            # average or more: not the edge), once 4 ms of them are seen.
+            # Until then it is only in the look-ahead, not in what is
+            # played: that keeps the level it had (silence after a reset).
+            ref = float(average[first:].max())
+            inside = average[first:known] >= 0.5 * ref
+            if np.count_nonzero(inside) >= 2 * half:
+                carrier = float(np.mean(buf[first:known][inside]))
+            elif level > 0.0:
+                seed = restore = False
+                ref = level
+            else:
+                self._am_past = buf[max(last - (half + dip + fade), 0) : last].copy()
+                self._am_ahead = buf[last:].copy()
+                self._am_last = self._am_last_gain = 0.0
+                return np.zeros(n, dtype=np.float32)
+        gone = self._am_gone(average[:known], ref)
+        gone = np.concatenate((gone, np.zeros(total - known, dtype=bool)))
+        played = buf[first:last]
+        there = ~gone[first:last]
+        release = _AM_CARRIER_TIME_S.get(speed, _AM_CARRIER_TIME_S["medium"])
+        if seed:
             start = end = carrier
+            self._am_gone_s = 0.0
+        elif there.any():
+            carrier = float(np.mean(played[there]))
+            tau = _AM_ATTACK_S if carrier > level else release
+            held = np.count_nonzero(there) / max(self.channel_rate, 1.0)
+            start = level
+            end = level + (1.0 - math.exp(-held / tau)) * (carrier - level)
+            self._am_gone_s = 0.0
         else:
-            start = self._level
-            end = start + (1.0 - np.exp(-seconds / tau)) * (carrier - start)
+            # Gone: the level holds through the squelch's hang time (no
+            # hiss turned up behind a transmission), then falls.
+            start = end = level
+            self._am_gone_s += seconds
+            over = min(seconds, self._am_gone_s - _AM_HOLD_S)
+            if over > 0.0:
+                end += (1.0 - math.exp(-over / release)) * (
+                    float(np.mean(played)) - level
+                )
         self._level = float(end)
-        if len(channel) > 1 and start != end:
-            level = np.linspace(start, end, len(channel), dtype=np.float32)
+        # The level before a jump counts for the hang time after it.
+        if before > 0.0:
+            self._am_before_s += seconds
+            if restore or self._am_before_s > _AM_HOLD_S:
+                self._am_before = 0.0
+        if self._am_before <= 0.0 and 0.0 < _AM_JUMP * level < end and not restore:
+            self._am_before, self._am_before_s = level, 0.0
+        if n > 1 and start != end:
+            divisor = np.linspace(start, end, n, dtype=np.float32)
         else:
-            level = np.float32(end)
+            divisor = np.float32(end)
         if speed not in AGC_SPEEDS:  # AGC off
-            return (envelope - level) * np.float32(_AM_FIXED_GAIN)
-        return (envelope - level) / np.maximum(level, np.float32(1e-9))
+            audio = (played - divisor) * np.float32(_AM_FIXED_GAIN)
+        else:
+            audio = (played - divisor) / np.maximum(divisor, np.float32(1e-9))
+        # Fades: in over `fade` after the carrier appears, out over `fade`
+        # before it goes (raised cosine), silence while it is gone.
+        gain: Optional[np.ndarray] = None
+        near = slice(max(first - fade, 0), min(last + fade, total))
+        if gone[near].any():
+            where = index[near]
+            marks = np.where(gone[near], where, where[0] - fade)
+            since = where - np.maximum.accumulate(marks)
+            marks = np.where(gone[near], where, where[-1] + fade)
+            until = np.minimum.accumulate(marks[::-1])[::-1] - where
+            distance = np.minimum(since, until)[first - near.start : last - near.start]
+            gain = np.minimum(distance, fade).astype(np.float64)
+        if self._am_last_gain <= 0.0 and there[0]:
+            # The last block ended in silence and this one starts with the
+            # carrier (a decision only the new samples could make): fade in.
+            ramp = np.minimum(np.arange(1.0, n + 1.0), fade)
+            gain = ramp if gain is None else np.minimum(gain, ramp)
+        if gain is not None:
+            gain = 0.5 - 0.5 * np.cos(np.pi * gain / fade)
+            audio = np.where(there, audio * gain.astype(np.float32), np.float32(0.0))
+            if gone[first] and self._am_last != 0.0:
+                # It went just as the last block ended (seen only now): a
+                # short decay from the last sample played, not a step.
+                count = min(fade, n)
+                back = np.flatnonzero(there[:count])
+                count = int(back[0]) if back.size else count
+                ramp = 0.5 + 0.5 * np.cos(np.pi * (np.arange(count) + 1.0) / count)
+                audio[:count] += np.float32(self._am_last) * ramp.astype(np.float32)
+        self._am_last = float(audio[-1])
+        self._am_last_gain = 1.0 if gain is None else float(gain[-1]) * there[-1]
+        # The floor of the gap a carrier left (to tell the next one from it).
+        if gone[last - 1]:
+            kept = np.flatnonzero(there)
+            begin = int(kept[-1]) + 1 if kept.size else 0
+            floor = float(average[first + begin : last].min())
+            self._am_floor = min(self._am_floor, floor) if begin == 0 else floor
+        else:
+            self._am_floor = math.inf
+        keep = half + dip + fade
+        self._am_past = buf[max(last - keep, 0) : last].copy()
+        self._am_ahead = buf[last:].copy()
+        return audio.astype(np.float32, copy=False)
+
+    def _am_gone(self, average: np.ndarray, level: float) -> np.ndarray:
+        """Where the carrier of ``level`` is gone, from the envelope's 4 ms
+        averages: runs below _AM_GONE of it, but not the short dips deep,
+        low-pitched modulation makes (shorter than _AM_DIP_S, with the
+        carrier on both sides)."""
+        low = average < _AM_GONE * level
+        gone = np.zeros(len(average), dtype=bool)
+        if not low.any():
+            return gone
+        edges = np.diff(np.concatenate(([0], low.view(np.int8), [0])))
+        starts = np.flatnonzero(edges == 1)
+        ends = np.flatnonzero(edges == -1)
+        for start, end in zip(starts, ends, strict=True):
+            if 0 < start and end < len(low) and end - start < self._am_dip:
+                continue
+            gone[start:end] = True
+        return gone
 
     def _reduce_noise(self, audio: np.ndarray) -> np.ndarray:
         nr = self._options().noise_reduction

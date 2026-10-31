@@ -7,6 +7,7 @@ Run offscreen: ``QT_QPA_PLATFORM=offscreen python -m pytest tests/test_final_lis
 """
 
 import os
+import time
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -512,3 +513,65 @@ class TestSeekNeedsABroadcastStation(_WindowTestCase):
 
     def test_a_weak_broadcast_station_is_one_too(self):
         self.assertTrue(self._decide([(0.0, 40e3, 12.0)]))
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestTunerHintFollowsTheTuning(unittest.TestCase):
+    """LISTEN-11: after a seek said "Found a station on 101.2 MHz.", a
+    Shift+click (one channel up) or a retune elsewhere left that hint for
+    up to 4 s on a tuner showing another station."""
+
+    def setUp(self):
+        from PyQt6.QtWidgets import QApplication
+
+        from sdr_module.ham.gui import radio_tuner
+
+        self.app = QApplication.instance() or QApplication([])
+        self.tuner = t = radio_tuner.RadioTunerWidget(None, 2.4e6)
+        t.set_signal_probe(
+            lambda: "signal" if round(t.get_frequency()) == 101200000 else "quiet"
+        )
+        t.show()
+        t._seek_up_btn.click()  # from 101.1 MHz
+        deadline = time.monotonic() + 3
+        while t.is_seeking() and time.monotonic() < deadline:
+            self.app.processEvents()
+            time.sleep(0.005)
+        self.assertEqual(t._hint_label.text(), "Found a station on 101.2 MHz.")
+
+    def tearDown(self):
+        self.tuner.close()
+        self.tuner.deleteLater()
+        self.app.processEvents()
+
+    def assert_standing_footer(self):
+        t = self.tuner
+        self.assertEqual(t._hint_label.text(), t._FOOTER_HINT)
+        self.assertFalse(t._hint_label.property("tone"))  # (not "success")
+        self.assertFalse(t._hint_timer.isActive())
+
+    def test_shift_click_steps_and_drops_the_seek_result(self):
+        t = self.tuner
+        QTest.mouseClick(
+            t._seek_up_btn, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.ShiftModifier
+        )
+        self.assertAlmostEqual(t.get_frequency(), 101.3e6)
+        self.assertFalse(t.is_seeking())
+        self.assert_standing_footer()
+
+    def test_tuning_the_dial_drops_it(self):
+        t = self.tuner
+        t._tuning_dial.step(-1)
+        self.assertAlmostEqual(t.get_frequency(), 101.1e6)
+        self.assert_standing_footer()
+
+    def test_a_retune_elsewhere_drops_it(self):
+        """The main window retuned the receiver (a click on the spectrum)."""
+        t = self.tuner
+        t.set_frequency(100.9e6)
+        self.assert_standing_footer()
+
+    def test_the_receivers_echo_of_the_station_keeps_it(self):
+        t = self.tuner
+        t.set_frequency(101.2e6)
+        self.assertEqual(t._hint_label.text(), "Found a station on 101.2 MHz.")

@@ -7425,9 +7425,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _show_sstv_mode_needed(self, mode: str) -> None:
         """The SSTV panel's callout, while it listens in a mode whose audio
-        can't carry SSTV, offering the mode SSTV is sent in here; or, in an
-        HF ham band, in the other sideband than SSTV is usually sent in
-        there (USB kept from 20 m to 40 m, for FT8, can't hear LSB SSTV)."""
+        can't carry SSTV, offering the mode SSTV is sent in here; or, in a
+        ham band where SSTV is sent in SSB (160 m to 6 m), in the sideband
+        it isn't usually sent in there (USB kept from 20 m to 40 m, for FT8,
+        can't hear LSB SSTV)."""
         if not self._sstv_listening():
             self._sstv_panel.show_fm_needed(None)
             return
@@ -7446,7 +7447,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             and mode in ("USB", "LSB")
             and mode != band.mode
         ):
-            name = band.name[: -len(" Ham")].replace("m", " m")  # "40 m"
+            short = band.name[: -len(" Ham")]  # "40m" (or "70cm")
+            unit = "cm" if short.endswith("cm") else "m"
+            name = f"{short[: -len(unit)]} {unit}"  # "40 m"
             self._sstv_panel.show_fm_needed(mode, band.mode, band=name)
             return
         self._sstv_panel.show_fm_needed(None)

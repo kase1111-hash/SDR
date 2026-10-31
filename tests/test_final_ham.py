@@ -448,6 +448,31 @@ class TestSSTVWrongSideband(_SSTVWindowCase):
         )
         self.assertEqual(panel._switch_fm_btn.text(), "Switch to USB")
 
+    def test_the_band_is_named_with_its_unit(self):
+        from dataclasses import replace
+        from unittest import mock
+
+        from sdr_module.core import band_plan
+
+        win, panel = self.win, self.panel
+        win.set_frequency(50.2e6)
+        win._set_demod_mode("LSB")
+        panel._start_btn.click()
+        settle()
+        self.assertEqual(
+            panel._fm_label.text(),
+            "SSTV on 6 m is usually sent in USB; the receiver is in LSB.",
+        )
+        # (A band plan in centimetres, with SSB: "70 cm", not "70c m".)
+        seventy = replace(band_plan.band_for(432.1e6), mode="USB")
+        self.assertEqual(seventy.name, "70cm Ham")
+        with mock.patch.object(band_plan, "band_for", lambda freq: seventy):
+            win._show_sstv_mode_needed("LSB")
+        self.assertEqual(
+            panel._fm_label.text(),
+            "SSTV on 70 cm is usually sent in USB; the receiver is in LSB.",
+        )
+
     def test_no_hint_when_not_listening_or_on_vhf(self):
         win, panel = self.win, self.panel
         win.set_frequency(7.171e6)

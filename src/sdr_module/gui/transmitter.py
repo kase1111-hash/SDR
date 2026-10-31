@@ -206,7 +206,9 @@ def _band_outside_license(freq_hz: float) -> str:
         overlaps = segment.start_hz < band.end_hz and segment.end_hz > band.start_hz
         if overlaps and segment.is_granted_to(license_class):
             return ""
-    return band.name[: -len(" Ham")].replace("m", " m")  # "60m Ham" -> "60 m"
+    short = band.name[: -len(" Ham")]  # "60m" (or "70cm")
+    unit = "cm" if short.endswith("cm") else "m"
+    return f"{short[: -len(unit)]} {unit}"  # "60 m"
 
 
 # --------------------------------------------------------------------------- #

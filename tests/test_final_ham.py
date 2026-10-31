@@ -796,6 +796,23 @@ class TestSixtyMetreWording(_LicenseCase):
         allowed, reason = self.fm.is_tx_allowed(14.2e6, 0.0, "USB")
         self.assertIn("14.200 MHz", reason)
 
+    def test_a_centimetre_band_is_named_with_its_unit(self):
+        """(Checker.) A band the class has no part of reads "70 cm", as the
+        SSTV hint names it, not "70c m"."""
+        from dataclasses import replace
+        from unittest import mock
+
+        from sdr_module.core import band_plan
+        from sdr_module.gui.transmitter import _band_outside_license
+
+        self.license("technician")
+        self.assertEqual(_band_outside_license(5.3305e6), "60 m")
+        self.assertEqual(_band_outside_license(1.9e6), "160 m")
+        # (A band plan naming the band in centimetres.)
+        named = replace(band_plan.band_for(5.3305e6), name="70cm Ham")
+        with mock.patch.object(band_plan, "band_for", lambda freq: named):
+            self.assertEqual(_band_outside_license(5.3305e6), "70 cm")
+
 
 class TestQrpCardDigits(_QrpCase):
     """HAM-E2E-11: the QRP card read 5.330 MHz for the 5.3305 MHz channel."""

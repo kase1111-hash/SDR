@@ -386,10 +386,9 @@ class _TestClock:
         return getattr(time, name)
 
 
-class TestDemoTakesWhileOverloaded(_FilesCase):
-    """REC-E2E-05: while frames couldn't keep up, the demo device was read
-    one display block a frame, fell behind and skipped ahead: the take had
-    silent gaps that nothing reported."""
+class _DemoTakeCase(_FilesCase):
+    """The demo device at 1 MS/s on a fake clock, with processing that
+    takes ``load`` times real time."""
 
     RATE = 1e6
 
@@ -438,6 +437,12 @@ class TestDemoTakesWhileOverloaded(_FilesCase):
     def recorded(self):
         return sum(len(block) for block in self.win._samples_buffer)
 
+
+class TestDemoTakesWhileOverloaded(_DemoTakeCase):
+    """REC-E2E-05: while frames couldn't keep up, the demo device was read
+    one display block a frame, fell behind and skipped ahead: the take had
+    silent gaps that nothing reported."""
+
     def test_the_take_keeps_every_sample(self):
         win = self.win
         self.run_frames(1.0)
@@ -469,6 +474,27 @@ class TestDemoTakesWhileOverloaded(_FilesCase):
         total = self.recorded() / self.RATE + lost
         self.assertAlmostEqual(total, win._recording_elapsed(), delta=0.2)
 
+    def test_a_skip_after_a_disk_full_stop_isnt_the_takes(self):
+        from unittest import mock
+
+        win = self.win
+        win._toggle_recording(True)
+        self.run_frames(0.5)
+        check = win._check_recording_space
+
+        def disk_full():
+            # (The disk fills up in the frame after a long freeze.)
+            if self.clock.now >= stall_end:
+                win._stop_recording_with_warning("only 1 MB of disk space is left")
+                return False
+            return check()
+
+        stall_end = self.clock.now + 0.2 + 4.0
+        with mock.patch.object(win, "_check_recording_space", disk_full):
+            self.run_frames(1.0, stall_at=self.clock.now + 0.2, stall=4.0)
+        self.assertFalse(win._recording)
+        self.assertNotIn("lost", win._take_summary()[0])
+
     def test_stopping_and_starting_again_is_not_a_gap(self):
         win = self.win
         self.load = 0.3
@@ -482,7 +508,7 @@ class TestDemoTakesWhileOverloaded(_FilesCase):
         self.assertNotIn("lost", win._take_summary()[0])
 
 
-class TestGapsAreLoggedOnce(TestDemoTakesWhileOverloaded):
+class TestGapsAreLoggedOnce(_DemoTakeCase):
     """REC-E2E-06: the 'recording has gaps' warning was listed twice in
     Error History (logged, then logged again by the status bar)."""
 
@@ -494,11 +520,6 @@ class TestGapsAreLoggedOnce(TestDemoTakesWhileOverloaded):
             self.run_frames(1.0, stall_at=self.clock.now + 0.2, stall=4.0)
         gaps = [line for line in logs.output if "The recording has gaps" in line]
         self.assertEqual(len(gaps), 1, logs.output)
-
-    # (The inherited tests run here too: skip them.)
-    test_the_take_keeps_every_sample = None
-    test_a_skip_ahead_during_a_take_is_reported = None
-    test_stopping_and_starting_again_is_not_a_gap = None
 
 
 class TestStatusFollowsTheState(_FilesCase):

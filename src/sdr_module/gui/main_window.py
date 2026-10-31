@@ -7058,7 +7058,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if older is not None and len(older):
                 self._capture(older)
         samples = dev.read_samples(count)
-        # (A skip in the frame a take starts in came before it.)
+        # (A skip in the frame a take starts in came before it; one after
+        # it stopped, e.g. on a full disk, isn't its.)
+        capturing = capturing and self._recording and not self._recording_paused
         self._note_dropped_samples(dev, capturing)
         return samples
 

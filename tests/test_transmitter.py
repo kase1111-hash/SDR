@@ -411,8 +411,9 @@ class TestRefusals:
         assert engine.check(_id_job(1575.42e6), dev).startswith(
             "1575.420 MHz is a protected frequency (GPS L1"
         )
+        # (The edge to the hertz, as FREQ would show it: HAM-E2E-11.)
         assert engine.check(_id_job(147.999e6), dev) == (
-            "the signal's edge at 148.002 MHz is outside the amateur and "
+            "the signal's edge at 148.0022 MHz is outside the amateur and "
             "license-free bands"
         )
         # (144.0-144.1 MHz is CW only: no FM tone ID there.)

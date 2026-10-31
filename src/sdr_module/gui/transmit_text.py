@@ -17,8 +17,8 @@ in view while it is open):
   (:meth:`~sdr_module.gui.main_window.SDRMainWindow._transmit_job`): the
   legality check, the confirmation before each transmission (until "Don't
   ask again"), your automatic station IDs, the ON AIR badge and Stop all
-  apply. A line above the buttons says what
-  Transmit would do now, or why it can't.
+  apply. A line above the buttons says what Transmit would do now, or why
+  it can't.
 
 The text is turned into a signal by :mod:`sdr_module.protocols.text_modes`
 (no Qt), the same code as the library encoders and ``sdr-scan encode``.

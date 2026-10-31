@@ -474,8 +474,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
     def transmit(self, job: TxJob, confirm: bool = True) -> bool:
         """Send ``job`` (Send ID Now, Transmit Text, ...): check it, ask
         before sending it (``confirm``; until "Don't ask again"), center the
-        HackRF on ``job.center_hz``, stop the receiver, and start. False, with the reason in the status
-        bar and on the Ham ID panel's TX line, when it isn't sent."""
+        HackRF on ``job.center_hz``, stop the receiver, and start. False,
+        with the reason in the status bar and on the Ham ID panel's TX line,
+        when it isn't sent."""
         win = self._win
         if self.busy:
             win._show_status_message(
@@ -594,8 +595,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         """The question asked before each transmission ("Transmit DE W1AW on
         146.520 MHz (FM tone, 20 WPM, about 1 mW)?", with the station's
         output through the QRP tab's amplifiers when there are any); "Don't
-        ask again" skips it from then on. ``on_air_s``: the whole air time, station IDs included
-        (the job's own by default). True to transmit."""
+        ask again" skips it from then on. ``on_air_s``: the whole air time,
+        station IDs included (the job's own by default). True to
+        transmit."""
         settings = self._win._settings
         if not asks_before_transmitting(settings):
             return True
@@ -736,8 +738,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
 def asks_before_transmitting(settings: Any) -> bool:
     """Whether the question before each transmission is asked
     (``tx/confirm``): only an explicit no ("Don't ask again": False, or
-    "false", "0", "no", "off") turns it off. Anything else asks, a missing, empty or unreadable value
-    included, so a damaged settings file never turns the question off."""
+    "false", "0", "no", "off") turns it off. Anything else asks, a missing,
+    empty or unreadable value included, so a damaged settings file never
+    turns the question off."""
     try:
         raw = settings.get_str(KEY_CONFIRM, "true")
     except Exception:  # pragma: no cover - defensive

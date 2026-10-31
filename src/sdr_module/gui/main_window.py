@@ -1503,6 +1503,12 @@ def _remove_stale_recordings(folder: str) -> int:
     return removed
 
 
+class _SaveRefused(ValueError):
+    """A save the user asked for that isn't done, with the reason (over the
+    recording converted, or the take's own temporary file): explained, but
+    no failure for Error History."""
+
+
 def _same_file(path: str, other: str) -> bool:
     """Whether two paths name the same file (one that may not exist yet)."""
     try:
@@ -8407,7 +8413,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             try:
                 options, missing = describe_iq_file(path)
             except (OSError, ValueError) as e:
-                logger.warning(f"Can't read the recording {path}: {e}")
+                # (A file this app doesn't read, e.g. audio, is explained,
+                # not listed in Error History; a read error is.)
+                if isinstance(e, OSError):
+                    logger.warning(f"Can't read the recording {path}: {e}")
+                else:
+                    logger.info(f"Can't read the recording {path}: {e}")
                 QMessageBox.warning(
                     self, "Can't Read Recording", f"{name} can't be read:\n{e}"
                 )
@@ -9053,6 +9064,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 )
             except OSError as e:
                 logger.warning(f"Could not write the metadata of {filename}: {e}")
+        if isinstance(error, _SaveRefused) and not quiet:
+            logger.info(f"Not saved to {filename}: {error}")
+            QMessageBox.warning(self, "Can't Save There", f"Not saved: {error}")
+            return False
         if error is not None:
             logger.error(f"Failed to save recording: {error}")
             if quiet:
@@ -9097,7 +9112,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             targets.append(str(sidecar_path(filename)))
         store = self._samples_buffer
         if store.temporary and any(_same_file(t, store.path) for t in targets):
-            raise ValueError(
+            raise _SaveRefused(
                 "that is the recording's own temporary file. Choose another name."
             )
         source = self._buffer_source_path
@@ -9113,7 +9128,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if sidecar is not None:
                 originals.append(str(sidecar.path))
         if any(_same_file(t, o) for t in targets for o in originals):
-            raise ValueError(
+            raise _SaveRefused(
                 f"saving there would replace {self._buffer_source}, the "
                 "recording you converted (or its metadata). Choose another name."
             )

@@ -757,3 +757,44 @@ class TestOneNameForEachFormat(_FilesCase):
         tip = combo.toolTip()
         self.assertIn("cu8", tip)
         self.assertIn("cs8", tip)
+
+
+class TestRefusalsAreNotErrors(_FilesCase):
+    """REC-E2E-14: saving over the recording you converted was logged as an
+    ERROR in Error History, in a box titled "Save Failed"; a mono WAV's
+    "it is audio, not I/Q" as a WARNING."""
+
+    def test_saving_over_the_converted_recording_is_refused_quietly(self):
+        from unittest import mock
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        path = _save_sigmf(self.path("orig.sigmf-data"), 144.39e6, seconds=0.05)
+        self.answer("Close")
+        with self.open_dialog(path):
+            self.assertTrue(self.win._convert_recording())
+        with (
+            self.save_dialog(path),
+            mock.patch.object(QMessageBox, "warning") as warn,
+            self.assertNoLogs("sdr_module.gui.main_window", level="WARNING"),
+        ):
+            self.assertFalse(self.win._save_recording())
+        self.assertEqual(warn.call_args[0][1], "Can't Save There")
+        self.assertIn("the recording you converted", warn.call_args[0][2])
+
+    def test_an_audio_wav_is_refused_quietly(self):
+        from unittest import mock
+
+        from PyQt6.QtWidgets import QMessageBox
+
+        from sdr_module.dsp.recording import save_audio_file
+
+        path = self.path("mono_audio.wav")
+        save_audio_file(path, np.zeros(4800, np.float32), 48000)
+        with (
+            self.open_dialog(path),
+            mock.patch.object(QMessageBox, "warning") as warn,
+            self.assertNoLogs("sdr_module.gui.main_window", level="WARNING"),
+        ):
+            self.win._show_recording_info()
+        self.assertIn("it is audio, not I/Q", warn.call_args[0][2])

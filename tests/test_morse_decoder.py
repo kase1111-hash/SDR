@@ -362,15 +362,37 @@ class TestSpeeds:
         assert text == [MESSAGE], seed
 
     def test_a_blip_before_a_long_pause_is_not_a_letter(self):
-        # One or two marks and then silence: noise, not a transmission.
+        # One mark, or two not keyed like a letter (a dit and a mark that is
+        # neither a dit nor a dash), and then silence: noise, not a
+        # transmission. (A dit and a dash a dit apart are an A: see
+        # test_a_transmission_of_one_letter_of_two_elements.)
         rate = 1000.0
-        for marks in ([60], [60, 180]):
+        for marks in ([60], [60, 110]):
             key = np.zeros(500)
             for length in marks:
                 key = np.concatenate([key, np.ones(length), np.zeros(60)])
             morse = MorseDecoder(rate)
             lines = morse.process(np.concatenate([key, np.zeros(3000)]))
             assert lines + morse.flush() == [] and morse.characters == 0, marks
+
+    @pytest.mark.parametrize("wpm", [6, 12, 20, 30])
+    def test_a_transmission_of_one_letter_of_two_elements(self, wpm):
+        # Leftover 27: a whole transmission of two marks was dropped as a
+        # blip of noise, so "A", "I", "N", "M" and "EE" sent on their own
+        # (a test, a reply) never showed. Two marks keyed like code (a dit
+        # and a dash a dit apart; two alike an element or a letter apart)
+        # are decoded. ("TT" at 15 WPM or faster has the timing of a slow
+        # "I": it is tried below that.)
+        rate = 2000.0
+        texts = ["A", "I", "N", "M", "EE"] + (["TT"] if wpm < 15 else [])
+        for text in texts:
+            key = enc.morse_keying(text, rate, wpm, lead_s=1.0, tail_s=4.0)
+            morse = MorseDecoder(rate)
+            lines = []
+            for i in range(0, len(key), int(rate / 30)):
+                lines += morse.process(key[i : i + int(rate / 30)])
+            lines += morse.flush()
+            assert [m.text for m in lines] == [text], (text, wpm)
 
     def test_silence_decodes_nothing(self):
         text, morse = _decode(np.zeros(20_000, dtype=np.complex64), 2000.0)

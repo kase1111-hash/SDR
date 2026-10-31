@@ -31,9 +31,10 @@ decoded 33 ms at a time gives the same text as the whole recording at once:
   or a T as a word of its own: what a crash of static gives) is not shown
   next to words of several letters, nor in a line of nothing else; in
   code spaced letter by letter (Farnsworth practice, a loose hand: a word
-  per letter) it shows once the code is heard to go so. A blip of fewer
-  than three marks is not shown either. The speed is ``1.2 / dit`` words
-  per minute (PARIS), 5 to 60 WPM.
+  per letter) it shows once the code is heard to go so. A blip of one
+  mark, or of two not timed like a letter (A, I, N, M, EE, TT), is not
+  shown either. The speed is ``1.2 / dit`` words per minute (PARIS), 5 to
+  60 WPM.
 
 NumPy only; no Qt.
 """
@@ -387,7 +388,8 @@ class MorseDecoder:
     #: marks heard so far suggest, ends a transmission: what was heard is
     #: decoded even if it had too few marks for a confident speed, when it
     #: had at least ``CALIBRATE_GAP_MARKS`` marks (fewer are a blip of
-    #: noise and are dropped, after ``CALIBRATE_GAP_S``).
+    #: noise and are dropped, after ``CALIBRATE_GAP_S``, but two keyed
+    #: like a letter: see ``_two_marks_like_code``).
     CALIBRATE_GAP_S = 1.5
     END_GAP_DITS = 7.0
     CALIBRATE_GAP_MARKS = 3
@@ -652,12 +654,41 @@ class MorseDecoder:
         """The queued transmission ended before the speed was known: decode
         it if it had enough marks to be one, else drop it (a blip of
         noise). Whether it was decoded."""
-        if len(self._marks) >= self.CALIBRATE_GAP_MARKS:
+        if (
+            len(self._marks) >= self.CALIBRATE_GAP_MARKS
+            or self._two_marks_like_code()
+        ):
             self._calibrate()
             return True
         self._queue = []
         self._marks.clear()
         return False
+
+    def _two_marks_like_code(self) -> bool:
+        """Whether the queued transmission is two marks keyed like a letter
+        of two elements (A, I, N, M) or two of one (EE, TT) at 5 to 60
+        WPM: a dit and a dash (about three dits) a dit apart, or two marks
+        alike an element apart (a dit, or a third of a dash) or a letter
+        apart (three dits, or a dash). Two marks of a crash of static are
+        seldom timed like that."""
+        marks = [length for kind, length in self._queue if kind == "mark"]
+        if len(marks) != 2 or len(self._marks) != 2:
+            return False
+        gap = self._queue[2][1]  # the gap between them
+        short, long = sorted(marks)
+        fastest_dit = self.rate * 1.2 / self.WPM_RANGE[1]
+        slowest_dit = self.rate * 1.2 / self.WPM_RANGE[0]
+        if short < 0.8 * fastest_dit:
+            return False
+        if 2.4 <= long / short <= 4.0:  # a dit and a dash: A or N
+            return short <= 1.2 * slowest_dit and 0.5 * short <= gap <= 2.0 * short
+        mean = (short + long) / 2.0
+        if long / short > 1.3 or mean / 3.0 > 1.2 * slowest_dit:
+            return False
+        ratio = gap / mean
+        # Dashes a dit apart (M); dits a dit or dashes a letter apart (I,
+        # TT); dits a letter apart (EE).
+        return 0.2 <= ratio <= 0.5 or 0.7 <= ratio <= 1.5 or 2.2 <= ratio <= 4.0
 
     # -- text ----------------------------------------------------------------
 

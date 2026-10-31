@@ -178,6 +178,22 @@ class TestSpeeds:
             assert [m.text for m in lines] == [text], text
             assert morse.wpm == pytest.approx(wpm, rel=0.05), text
 
+    @pytest.mark.parametrize("wpm", [5, 6, 8, 10, 12])
+    def test_a_transmission_of_only_dashes(self, wpm):
+        # Leftover 27: "TTT" at 8 WPM read "S". Marks all of one kind with
+        # gaps as long as themselves were taken for dits; at the slowest
+        # speed (5 WPM) a dit is 0.24 s, and these marks (0.3-0.72 s) were
+        # measured against that clamped dit, which made them dits too.
+        rate = 2000.0
+        key = enc.morse_keying("TTT", rate, wpm, lead_s=1.0, tail_s=4.0)
+        morse = MorseDecoder(rate)
+        lines = []
+        for i in range(0, len(key), int(rate / 30)):
+            lines += morse.process(key[i : i + int(rate / 30)])
+        lines += morse.flush()
+        assert [m.text for m in lines] == ["TTT"]
+        assert morse.wpm == pytest.approx(wpm, rel=0.05)
+
     @pytest.mark.parametrize("text", ["SOS DE N0CALL K", "HI HI DE N0CALL"])
     def test_slow_code_that_starts_with_dits_in_noise(self, text):
         rate = 2000.0

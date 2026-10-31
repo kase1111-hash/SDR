@@ -519,15 +519,20 @@ class MorseDecoder:
         kind. Until the speed is known the gaps between them tell: marks
         about three times the shortest gap are dashes (a letter's elements
         are a dit apart), marks as long as it (S, H, 5) or shorter
-        (letters of one element) dits. Otherwise (no gap between marks
-        yet, or the speed is known) they are dits if nearer one dit than
-        three: slow dits would be dashes at the default speed."""
+        (letters of one element) dits, unless longer than a dit at the
+        slowest speed: then they are dashes, letters apart (T T T).
+        Otherwise (no gap between marks yet, or the speed is known) they
+        are dits if nearer one dit than three: slow dits would be dashes at
+        the default speed."""
         if not self._calibrated:
             # The queued gaps after the first mark (the one before it is
             # the silence before the transmission).
             gaps = [length for kind, length in self._queue[2:] if kind == "gap"]
             if gaps:
-                return mean / 3.0 if min(gaps) < self.DASH_GAP * mean else mean
+                slowest_dit = self.rate * 1.2 / self.WPM_RANGE[0]
+                if min(gaps) < self.DASH_GAP * mean or mean > slowest_dit:
+                    return mean / 3.0
+                return mean
         return mean if mean < 2.0 * self._dit else mean / 3.0
 
     def _calibrate(self) -> None:

@@ -305,6 +305,60 @@ class TestStartOrPlayWording(_PanelCase):
 
 
 # --------------------------------------------------------------------------- #
+# DEC-E2E-17: a recording's messages are told apart from live ones
+# --------------------------------------------------------------------------- #
+
+
+def _adsb(**fields):
+    from sdr_module.dsp.protocols import ADSBMessage, ProtocolType
+
+    base = dict(protocol=ProtocolType.ADSB, timestamp=0.0, raw_bits=b"", valid=True)
+    base.update(fields)
+    return ADSBMessage(**base)
+
+
+class TestFileRowsApart(_PanelCase):
+    def test_marked_with_the_recordings_time_and_kept_out_of_the_live_views(self):
+        # Decode File during live ADS-B: the file's rows interleaved with
+        # the live ones, both with today's time, and the file's messages
+        # updated the live aircraft (position, "Seen now", Msgs).
+        from datetime import datetime, timezone
+
+        from sdr_module.dsp.morse import MorseMessage
+        from sdr_module.dsp.protocols import ProtocolType
+
+        p = self.panel
+        mod = self.mod
+        table = p._table
+        p.set_receiving(True)
+        p.set_current_frequency(1090e6)
+        p._proto_combo.setCurrentText("ADS-B")
+        live = _adsb(icao_address="4840D6", downlink_format=17, type_code=11,
+                     altitude=38000, latitude=52.2568, longitude=3.913)  # fmt: skip
+        p.add_message("ADS-B", "4840D6", "38,000 ft", message=live)
+        recorded = datetime(2026, 10, 30, 7, 0, 1, tzinfo=timezone.utc)
+        old = _adsb(icao_address="4840D6", downlink_format=17, type_code=11,
+                    altitude=12000, latitude=50.0, longitude=4.0)  # fmt: skip
+        p.add_message("ADS-B", "4840D6", "12,000 ft  (from adsb.cs16 at 0.4 s)",
+                      message=old, source="adsb.cs16", when=recorded)  # fmt: skip
+        self.assertFalse(table.isColumnHidden(mod.COL_PROTOCOL))
+        self.assertEqual(table.item(1, mod.COL_PROTOCOL).text(), "ADS-B (file)")
+        local = recorded.astimezone().strftime("%H:%M:%S")
+        self.assertEqual(table.item(1, mod.COL_TIME).text(), local)
+        self.assertIn("adsb.cs16", table.item(1, mod.COL_ADDRESS).toolTip())
+        aircraft = p._aircraft_view.tracker.get("4840D6")
+        self.assertEqual((aircraft.messages, aircraft.altitude), (1, 38000))
+        self.assertEqual(p.count_for("ADS-B"), 1)  # (the chip's count: live)
+        # Morse code from a recording stays out of the live Text view too.
+        p._proto_combo.setCurrentText("CW (Morse)")
+        line = MorseMessage(protocol=ProtocolType.CW, timestamp=0.0, raw_bits=b"",
+                            valid=True, text="CQ DE N0CALL", wpm=18.0)  # fmt: skip
+        p.add_message("CW (Morse)", "18 WPM", "CQ DE N0CALL", message=line,
+                      source="cw.wav")  # fmt: skip
+        self.assertEqual(p._cw_view.plain_text(), "")
+
+
+# --------------------------------------------------------------------------- #
 # DEC-E2E-21: F1 lists the Aircraft tab's keys
 # --------------------------------------------------------------------------- #
 
@@ -870,6 +924,54 @@ class TestClearForgetsTheFlexSpeedNote(_WindowTestCase):
         panel._clear_btn.click()
         self.assertIsNone(decoder.status.problem)
         self.assertNotIn("3200 bps", panel.decoder_status_text())
+
+
+# (The Decode Recording window test answers the dialogs as the recording
+# tests do.)
+from tests.test_gui_recording_files import RATE, _FilesCase  # noqa: E402
+
+
+class TestFileRowsApartInTheWindow(_FilesCase):
+    def test_decode_recording_marks_its_rows(self):
+        import numpy as np
+
+        from sdr_module.dsp import protocol_encoders as enc
+        from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
+        from sdr_module.gui.iq_files import describe_iq_file
+
+        burst = enc.aprs_baseband(
+            "N0CALL-9", "APZ001", "!4903.50N/07201.75W>From a file", RATE, ["WIDE1-1"]
+        ).astype(np.complex64)
+        pad = np.zeros(int(0.3 * RATE), np.complex64)
+        path = self.path("aprs.sigmf-data")
+        save_iq_file(
+            path,
+            np.concatenate([pad, burst, pad, pad]),
+            RATE,
+            144.39e6,
+            SampleFormat.FLOAT32,
+            FileFormat.SIGMF,
+        )
+        panel = self.win._decoder_panel
+        panel._proto_combo.setCurrentText("AX.25/APRS")
+        self.settle(2)
+        self.answer()
+        with self.open_dialog(path):
+            self.assertTrue(self.win._decode_recording())
+        self.assertEqual([m["protocol"] for m in panel._messages], ["AX.25/APRS (file)"])
+        self.assertEqual(panel._messages[0]["source"], "aprs.sigmf-data")
+        self.assertEqual(panel.count_for("AX.25/APRS"), 0)  # (the live count)
+        # Stamped with the recording's time (its start plus where in it).
+        from datetime import datetime, timedelta
+
+        options, _missing = describe_iq_file(path)
+        start = datetime.fromisoformat(options.start_time.replace("Z", "+00:00"))
+        stamped = datetime.strptime(
+            f"{panel._messages[0]['date']} {panel._messages[0]['time']}",
+            "%Y-%m-%d %H:%M:%S.%f",
+        )
+        expected = (start + timedelta(seconds=0.3)).astimezone().replace(tzinfo=None)
+        self.assertLess(abs((stamped - expected).total_seconds()), 1.0)
 
 
 if __name__ == "__main__":

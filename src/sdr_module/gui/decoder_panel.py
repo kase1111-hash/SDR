@@ -1762,6 +1762,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         details: Optional[List[str]] = None,
         freq_hz: Optional[float] = None,
         sample_rate: Optional[float] = None,
+        source: str = "",
+        when: Optional[datetime] = None,
     ):
         """
         Add a decoded message.
@@ -1777,10 +1779,21 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             details: More lines about it, for the card under the table
             freq_hz: Where it was received (default: the tuned frequency)
             sample_rate: The receiver's sample rate (default: as reported)
+            source: The recording it was decoded from ("": the live
+                signal). Its rows say "(file)" after the protocol and are
+                counted apart; they stay out of the live Aircraft and Text
+                views.
+            when: When it was sent (a recording's time; default: now)
         """
         now = datetime.now()
+        if when is not None:
+            # (A recording's UTC time, shown in local time like live rows.)
+            now = when.astimezone().replace(tzinfo=None) if when.tzinfo else when
         timestamp = now.strftime("%H:%M:%S.%f")[:-3]
         protocol, address, content = str(protocol), str(address), str(content)
+        source = str(source or "")
+        if source:
+            protocol = f"{protocol} (file)"
         valid = bool(valid)
         if freq_hz is None:
             freq_hz = self._tuned_hz
@@ -1798,6 +1811,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             "freq_hz": freq_hz,
             "sample_rate": sample_rate,
             "details": list(details or []),
+            "source": source,
         }
         self._messages.append(msg)
         self._total += 1
@@ -1836,6 +1850,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             if not valid:
                 item.setData(_INVALID_ROLE, True)
                 tip = f"{tip}\nInvalid: failed a checksum or parity check"
+            if source:
+                tip = f"{tip}\nDecoded from the recording {source}"
             if tip:
                 item.setToolTip(tip)
             self._table.setItem(row, col, item)
@@ -1847,7 +1863,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
         self._append_log(msg)
 
-        kind = type(message).__name__ if message is not None else ""
+        # A recording's messages stay out of the live views: an aircraft
+        # heard in it is not one heard now.
+        kind = type(message).__name__ if message is not None and not source else ""
         if kind == "ADSBMessage" and valid:
             self._aircraft_view.update_message(message)
         elif kind == "MorseMessage":

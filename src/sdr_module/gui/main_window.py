@@ -4652,6 +4652,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         note: str = "",
         freq_hz: Optional[float] = None,
         sample_rate: Optional[float] = None,
+        source: str = "",
+        when: Any = None,
     ) -> None:
         """Render one decoded message into the decoder panel.
 
@@ -4663,7 +4665,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Decode Recording names the file and the time in it). ``freq_hz``
         and ``sample_rate`` are where it was received and at what rate
         (default: the tuned frequency and the device's rate; 0 for
-        unknown).
+        unknown). ``source`` names the recording it came from (its row is
+        marked and kept out of the live views) and ``when`` is its time
+        there, when the recording says when it was made.
         """
         try:
             address, content = self._describe_message(msg)
@@ -4695,6 +4699,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 details=message_details(msg),
                 freq_hz=freq_hz,
                 sample_rate=sample_rate,
+                source=source,
+                when=when,
             )
             self._note_decoded()
         except Exception as exc:  # pragma: no cover - defensive
@@ -8759,17 +8765,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         protocol, offset = choice
         self._show_panel("decoder")
         counts = {"messages": 0}
+        # When the recording was made (SigMF's core:datetime), to stamp its
+        # messages with their own time rather than the decode's.
+        from datetime import datetime, timedelta
+
+        start: Any = None
+        try:
+            start = datetime.fromisoformat(options.start_time.replace("Z", "+00:00"))
+        except ValueError:
+            pass
 
         def show(batch: Any) -> None:
-            for msg, when in batch:
+            for msg, at in batch:
                 counts["messages"] += 1
                 # The file's frequency and rate (not the receiver's); 0 when
                 # the file doesn't say where it was made.
                 self._push_decoded_message(
                     msg,
-                    note=f"from {options.name} at {when:.1f} s",
+                    note=f"from {options.name} at {at:.1f} s",
                     freq_hz=options.center_hz + offset if options.center_hz else 0.0,
                     sample_rate=options.sample_rate,
+                    source=options.name,
+                    when=start + timedelta(seconds=at) if start else None,
                 )
 
         result = run_job(

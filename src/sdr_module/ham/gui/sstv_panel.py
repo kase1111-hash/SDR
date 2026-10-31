@@ -869,6 +869,16 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         listening. Returns the status note (None if nothing was kept)."""
         return self._end_image_early(why)
 
+    def finish_input(self) -> None:
+        """The audio has ended for good (a recording played to its end): an
+        image coming in completes when only its last line is missing (that
+        line waits for no more audio), else it is kept as a partial image
+        (SSTVDecoder.finish)."""
+        decoder = self._decoder
+        if self._is_receiving and decoder is not None and decoder.is_receiving():
+            decoder.finish()
+            self._update_action_buttons()
+
     def show_fm_needed(
         self, mode: Optional[str], switch_to: str = "FM", band: str = ""
     ) -> None:
@@ -1647,6 +1657,11 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
             self._set_status(
                 f"No {name} line syncs were heard, so nothing was decoded. "
                 "Check the Mode, or wait for the next image's start tone.",
+                "warning",
+            )
+        elif reason == "the audio ended":  # (finish_input: no more audio)
+            self._set_status(
+                f"The audio ended before the image did. {note or ''}".strip(),
                 "warning",
             )
         elif note is None:

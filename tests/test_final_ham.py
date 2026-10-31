@@ -836,5 +836,113 @@ class TestHamIdTooltips(_WindowTestCase):
         self.assertEqual(ham.tabToolTip(index), tip)
 
 
+class TestSSTVImageEndingWithTheInput(_PanelCase):
+    """L23: the GUI never called SSTVDecoder.finish(), so an image that
+    ended with a played-back recording waited for audio after its last
+    line and was kept as a partial image of N-1 lines."""
+
+    def test_finish_input_completes_the_last_line(self):
+        audio = encode_sstv(sstv_test_card(320, 240), "Robot 36", FS)
+        self.panel._start_btn.click()
+        self.feed(audio)  # (the recording ends with the image)
+        self.assertTrue(self.panel._decoder.is_receiving(), "the last line waits")
+        self.panel.finish_input()
+        self.assertFalse(self.panel._decoder.is_receiving())
+        texts = self.history_texts()
+        self.assertEqual(len(texts), 1)
+        self.assertNotIn("partial", texts[0])
+        self.assertTrue(self.panel._status_label.text().startswith("Image received"))
+
+    def test_finish_input_keeps_a_partial_image_and_says_why(self):
+        audio = encode_sstv(sstv_test_card(320, 240), "Robot 36", FS)
+        self.panel._start_btn.click()
+        self.feed(audio[: len(audio) // 2])
+        self.panel.finish_input()
+        texts = self.history_texts()
+        self.assertEqual(len(texts), 1)
+        self.assertIn("partial", texts[0])
+        self.assertIn("audio ended", self.panel._status_label.text())
+        self.assertNotIn("faded", self.panel._status_label.text())
+
+    def test_nothing_to_finish(self):
+        self.panel.finish_input()  # not listening
+        self.panel._start_btn.click()
+        self.panel.finish_input()  # listening, no image
+        self.assertEqual(self.history_texts(), [])
+
+
+class TestSSTVFinishedAtTheEndOfPlayback(_WindowTestCase):
+    """L23: the window tells the SSTV panel when a recording played to its
+    end (not when the receiver is merely stopped)."""
+
+    demo = True
+
+    def setUp(self):
+        super().setUp()
+        if not self.mw.HAS_HAM_RADIO:
+            self.skipTest("ham radio panels not installed")
+
+    def test_end_of_a_recording_finishes_the_sstv_input(self):
+        from unittest import mock
+
+        from tests.test_gui_playback import _fm_tone, _save_sigmf
+
+        folder = tempfile.mkdtemp(prefix="sdr-final-ham-")
+        self.addCleanup(__import__("shutil").rmtree, folder, True)
+        panel = self.win._sstv_panel
+        with mock.patch.object(panel, "finish_input") as finish:
+            self.win._stop_acquisition()  # a live receiver stopped
+            finish.assert_not_called()
+            self.win._start_acquisition()
+            path = _save_sigmf(f"{folder}/sstv.sigmf-data", _fm_tone(0.5))
+            self.assertTrue(self.win._open_recording(path))
+            device = self.win._device
+            while not device.finished:
+                self.win._process_block(device.read_samples(8000))
+            self.win._playback._tick()  # (the playback's timer: the end)
+            self.assertFalse(self.win._is_running)
+            finish.assert_called_once()
+
+
+class TestTunerSeekInARecording(_WindowTestCase):
+    """L23: during playback, the tuner tuned first and switched to the
+    band's mode after, so in a mode wider than the band's filter (I/Q at
+    1 MHz, say) only the recording's centre channel fitted: seek counted
+    no other station."""
+
+    demo = True
+
+    def setUp(self):
+        super().setUp()
+        if not self.mw.HAS_HAM_RADIO:
+            self.skipTest("ham radio panels not installed")
+        from tests.test_gui_playback import _fm_tone, _save_sigmf
+
+        folder = tempfile.mkdtemp(prefix="sdr-final-ham-")
+        self.addCleanup(__import__("shutil").rmtree, folder, True)
+        path = _save_sigmf(
+            f"{folder}/fm.sigmf-data", _fm_tone(1.0, rate=1e6), rate=1e6, center=100.1e6
+        )
+        self.assertTrue(self.win._open_recording(path))
+        self.win._set_demod_mode("None (I/Q)", bandwidth="1 MHz")
+
+    def test_a_station_off_centre_can_be_tuned(self):
+        win = self.win
+        self.assertTrue(win._tuner_can_tune(100.3e6))
+        self.assertFalse(win._tuner_can_tune(100.6e6), "outside the recording")
+        win._on_radio_frequency_changed(100.3e6, "FM")
+        self.assertFalse(win._tuner_refused)
+        self.assertEqual(win._current_frequency(), 100.3e6)
+        self.assertEqual(win._control_panel.get_demod_mode(), "FM")
+        self.assertEqual(win._control_panel._bw_combo.currentText(), "200 kHz")
+
+    def test_a_refused_station_keeps_the_mode(self):
+        win = self.win
+        win._on_radio_frequency_changed(100.6e6, "FM")  # outside the file
+        self.assertTrue(win._tuner_refused)
+        self.assertEqual(win._current_frequency(), 100.1e6)
+        self.assertEqual(win._control_panel.get_demod_mode(), "None (I/Q)")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

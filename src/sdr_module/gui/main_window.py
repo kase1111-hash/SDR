@@ -251,6 +251,11 @@ _BROADCAST_FM_DEVIATION = "75 kHz"
 _BROADCAST_FM_BANDWIDTH = "200 kHz"
 _BROADCAST_AM_BANDWIDTH = "10 kHz"
 _FM_BROADCAST_BAND = (87.5e6, 108e6)
+# How the radio tuner listens to each band: (mode, FM deviation, filter).
+_TUNER_LISTENING: Dict[str, Tuple[str, Optional[str], str]] = {
+    "FM": ("FM", _BROADCAST_FM_DEVIATION, _BROADCAST_FM_BANDWIDTH),
+    "AM": ("AM", None, _BROADCAST_AM_BANDWIDTH),
+}
 
 
 def _plain(label: str) -> str:
@@ -5041,17 +5046,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
         self._show_status_message(text, None, 4000)
 
-    def _channel_fits(self, offset_hz: float, rate: Optional[float] = None) -> bool:
+    def _channel_fits(
+        self,
+        offset_hz: float,
+        rate: Optional[float] = None,
+        mode: Optional[str] = None,
+        bandwidth_hz: Optional[float] = None,
+    ) -> bool:
         """Whether the tuned channel, ``offset_hz`` from the LO, lies inside
         the usable inner part (``_USABLE_SPAN_FRACTION``) of a span of
         ``rate`` Hz (the device's). At the LO itself it always does (a
-        channel wider than that is best centered)."""
+        channel wider than that is best centered). ``mode`` and
+        ``bandwidth_hz``: a channel in that mode and width instead of the
+        one tuned."""
         if abs(offset_hz) < 0.5:
             return True
         rate = float(rate or self._device_sample_rate())
         low, high = _channel_edges(
-            self._control_panel._demod_combo.currentText(),
-            self._channel_bandwidth(),
+            mode or self._control_panel._demod_combo.currentText(),
+            bandwidth_hz or self._channel_bandwidth(),
             rate,
         )
         half = 0.5 * _USABLE_SPAN_FRACTION * rate
@@ -6185,6 +6198,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._device.stop_rx()
             except Exception as e:  # pragma: no cover - defensive
                 logger.debug(f"stop_rx failed: {e}")
+
+        # A recording played to its end: an SSTV image ending with it
+        # completes (its last line would wait for audio that never comes).
+        if (
+            HAS_HAM_RADIO
+            and self._playback.active
+            and getattr(self._device, "finished", False)
+        ):
+            self._sstv_panel.finish_input()
 
         self._refresh_state_ui()
         logger.info("Acquisition stopped")
@@ -9406,13 +9428,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # panel, toolbar readout and plot axes together. A frequency the
         # device can't tune is refused (the status bar says why) and the
         # tuner shows the frequency still tuned (its seek then stops).
+        listening = _TUNER_LISTENING.get(band)
+        early = listening is not None and self._fits_only_in_band_mode(freq_hz, band)
+        if early:
+            # (A recording plays: the station fits its span in the band's
+            # mode, not in the wider one in use. Switch first.)
+            self._set_demod_mode(*listening)
         self._tuner_refused = not self.set_frequency(freq_hz)
         if self._tuner_refused:
             return
-        if band == "FM":
-            self._set_demod_mode("FM", _BROADCAST_FM_DEVIATION, _BROADCAST_FM_BANDWIDTH)
-        elif band == "AM":
-            self._set_demod_mode("AM", bandwidth=_BROADCAST_AM_BANDWIDTH)
+        if listening is not None and not early:
+            self._set_demod_mode(*listening)
         tuner = self._radio_tuner
         if self._device is None:  # (tuned, but nothing can play)
             self._show_status_message(
@@ -9543,15 +9569,34 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _tuner_can_tune(self, freq_hz: float) -> bool:
         """For the tuner's seek: whether ``freq_hz`` can be tuned now (inside
         the device's range and, while a recording plays back, inside its
-        span), by the rules :meth:`_tune_to` refuses with."""
+        span, in the band's mode the tuner switches to), by the rules
+        :meth:`_tune_to` refuses with."""
         low, high = self._tuning_limits()
         if not low <= freq_hz <= high:
             return False
         lock = self._lo_lock
         if lock is not None:
             center, span, _why = lock
-            return self._channel_fits(freq_hz - center, rate=span)
+            mode, _deviation, width = _TUNER_LISTENING["AM" if freq_hz < 30e6 else "FM"]
+            return self._channel_fits(
+                freq_hz - center, rate=span, mode=mode, bandwidth_hz=_parse_hz(width)
+            )
         return True
+
+    def _fits_only_in_band_mode(self, freq_hz: float, band: str) -> bool:
+        """While a recording plays: whether a channel at ``freq_hz`` fits the
+        recording's span in ``band``'s mode (the tuner's) but not in the
+        mode in use (a wider one, e.g. I/Q at 1 MHz)."""
+        lock = self._lo_lock
+        listening = _TUNER_LISTENING.get(band)
+        if lock is None or listening is None:
+            return False
+        center, span, _why = lock
+        mode, _deviation, width = listening
+        offset = freq_hz - center
+        return not self._channel_fits(offset, rate=span) and self._channel_fits(
+            offset, rate=span, mode=mode, bandwidth_hz=_parse_hz(width)
+        )
 
     def _show_decoder_config(self):
         """Bring the Decoder panel to the front."""

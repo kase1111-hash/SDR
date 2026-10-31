@@ -424,7 +424,9 @@ class TestTunerInTheWindow(_WindowTestCase):
         for button in tuner._preset_buttons:
             button.click()
             self.assertEqual(self.win._control_panel.get_demod_mode(), "AM")
-            self.run_receiver(0.4)
+            # (Blocks of the new channel, as seek waits for, not a fixed
+            # time: a loaded machine processed none in 0.4 s now and then.)
+            self.run_receiver(5.0, until=lambda: self.win._tuner_blocks >= 3)
             levels[button.get_preset().frequency_hz] = self.win._tuner_signal
         self.assertTrue(all(levels.values()), levels)
 

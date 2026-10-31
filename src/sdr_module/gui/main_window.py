@@ -461,6 +461,11 @@ _CLIP_WARN_AFTER_S = 0.5
 _CLIP_WARN_EVERY_S = 30.0
 # Noise reduction leaves an FM or AM channel this far above its noise alone.
 _NR_CLEAN_SNR_DB = 30.0
+# The radio tuner's FM seek stops on a broadcast station: one filling at
+# least this much of the channel this far above the noise (or sending the
+# stereo pilot), not a narrow carrier near the channel's middle.
+_SEEK_FM_STATION_HZ = 60e3
+_SEEK_ABOVE_NOISE_DB = 10.0
 # Highest audio frequency kept after AM/FM detection (broadcast FM is 15 kHz),
 # and where the audio low-pass stops: below broadcast FM's 19 kHz stereo
 # pilot tone, which would otherwise come through as a faint whistle.
@@ -792,6 +797,23 @@ def _channel_centroid_hz(power_db: np.ndarray, chain: Any) -> Optional[float]:
     freqs = (np.arange(first, last + 1) - center) * bin_hz - offset
     total = float(np.sum(weights))
     return float(np.dot(weights, freqs) / total) if total > 0 else 0.0
+
+
+def _channel_occupied_hz(power_db: np.ndarray, chain: Any, floor_db: float) -> float:
+    """How much of the tuned channel (Hz) the spectrum ``power_db`` (dB per
+    bin, the LO in the middle) shows above ``floor_db``."""
+    n = len(power_db)
+    if n == 0:
+        return 0.0
+    bin_hz = chain.rate / n
+    low, high = chain.band_edges()
+    offset = float(getattr(chain, "offset_hz", 0.0))
+    center = n // 2
+    first = max(0, center + int(np.floor((offset + low) / bin_hz + 0.5)))
+    last = min(n - 1, center + int(np.ceil((offset + high) / bin_hz - 0.5)))
+    if last < first:
+        return 0.0
+    return float(np.count_nonzero(power_db[first : last + 1] >= floor_db)) * bin_hz
 
 
 def _noise_per_bin(power_db: np.ndarray) -> float:
@@ -9747,7 +9769,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # channel's power is centered, within half a channel step.
         centroid = None if power is None else _channel_centroid_hz(power, chain)
         step = band_step(tuner.get_band())
-        self._tuner_centered = centroid is None or abs(centroid) <= 0.5 * step
+        centered = centroid is None or abs(centroid) <= 0.5 * step
         stereo = False
         broadcast = (
             chain.mode == "FM"
@@ -9761,6 +9783,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             stereo = pilot.process(channel)
         elif self._pilot is not None:
             self._pilot.reset()
+        noise_bin = self._noise_floor.bin_db
+        if broadcast and centered and not stereo and power is not None and noise_bin:
+            # A broadcast station fills most of the channel (or sends the
+            # stereo pilot): a narrow carrier near its middle is none (seek
+            # stopped on 100.7 MHz for the demo's 100.715 MHz carrier).
+            floor = noise_bin + _SEEK_ABOVE_NOISE_DB
+            centered = _channel_occupied_hz(power, chain, floor) >= _SEEK_FM_STATION_HZ
+        self._tuner_centered = centered
         tuner.set_stereo(stereo)
 
     def _tuner_probe(self) -> Optional[str]:

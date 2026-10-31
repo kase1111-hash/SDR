@@ -465,3 +465,50 @@ class TestToneSquelchOnBroadcastFm(_WindowTestCase):
         self.win._set_demod_mode("FM", "75 kHz", "200 kHz")
         panel.set_tone_squelch_hz(100.0)
         self.assertIn("narrow FM", self.win._message_label.text())
+
+
+# --------------------------------------------------------------------------- #
+# The radio tuner's seek
+# --------------------------------------------------------------------------- #
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestSeekNeedsABroadcastStation(_WindowTestCase):
+    """LISTEN-10: FM seek stopped on 100.7 MHz for the demo's narrow FM
+    carrier 15 kHz off the channel (its power is centred within half a
+    100 kHz step), not on the next broadcast station."""
+
+    def _decide(self, bumps):
+        """The tuner's verdict on a 200 kHz FM channel at 100.7 MHz whose
+        spectrum holds ``bumps`` ((offset Hz, half width Hz, dB above the
+        noise), ...)."""
+        import numpy as np
+
+        from sdr_module.gui.main_window import HAS_HAM_RADIO
+
+        if not HAS_HAM_RADIO:
+            self.skipTest("no ham radio tools")
+        win = self.win
+        win.set_frequency(100.7e6)
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        win._show_radio_tuner()
+        chain = win._receiver_chain()
+        n = 2048
+        freqs = (np.arange(n) - n // 2) * chain.rate / n - chain.offset_hz
+        power = np.full(n, -95.0) + np.random.default_rng(1).normal(0, 1, n)
+        for offset, half, above in bumps:
+            power[np.abs(freqs - offset) <= half] = -95.0 + above
+        for _ in range(5):
+            win._track_noise_floor(power, 80000)
+        win._last_peak_db = -40.0  # (the channel opens the squelch)
+        win._tuner_block(np.zeros(16, dtype=np.complex64), chain, power)
+        return win._tuner_signal and win._tuner_centered
+
+    def test_a_narrow_carrier_off_centre_is_no_station(self):
+        self.assertFalse(self._decide([(15e3, 6e3, 40.0)]))
+
+    def test_a_broadcast_station_is_one(self):
+        self.assertTrue(self._decide([(0.0, 90e3, 40.0)]))
+
+    def test_a_weak_broadcast_station_is_one_too(self):
+        self.assertTrue(self._decide([(0.0, 40e3, 12.0)]))

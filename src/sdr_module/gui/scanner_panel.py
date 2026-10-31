@@ -97,6 +97,9 @@ _HIT_ROLE = Qt.ItemDataRole.UserRole + 1 if HAS_PYQT6 else 0
 
 #: A scan whose pass takes longer than this asks before it starts.
 CONFIRM_SECONDS = 120.0
+#: Bookmark All of more results than this asks first, and files them in a
+#: group of their own (removed together with the group's Remove Group).
+CONFIRM_BOOKMARKS = 20
 #: A running scan that gets no blocks for this long stops (and says why).
 NO_BLOCKS_S = 3.0
 #: Display frames per second (the window's display timer).
@@ -263,8 +266,11 @@ class ScannerHost(ScanHost):
         """Tune to a result in its mode (Listen)."""
         return False
 
-    def scan_add_bookmarks(self, hits: List[ScanHit]) -> Tuple[int, List[str]]:
-        """Bookmark results: ``(added, names already bookmarked)``."""
+    def scan_add_bookmarks(
+        self, hits: List[ScanHit], group: str = ""
+    ) -> Tuple[int, List[str]]:
+        """Bookmark results (in ``group``, when given): ``(added, names
+        already bookmarked)``."""
         return 0, []
 
     def scan_bookmark_list(self, group: str = "") -> List[Dict[str, Any]]:
@@ -1648,11 +1654,43 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             self._bookmark([hit])
 
     def bookmark_all(self) -> None:
-        if self._hits:
-            self._bookmark(sorted(self._hits, key=lambda h: h.frequency_hz))
+        """Bookmark every result. More than :data:`CONFIRM_BOOKMARKS` ask
+        first and go in a group of their own ("Scan 2026-10-31 22:00"), so
+        they can be removed together."""
+        if not self._hits:
+            return
+        hits = sorted(self._hits, key=lambda h: h.frequency_hz)
+        group = ""
+        if len(hits) > CONFIRM_BOOKMARKS:
+            group = datetime.now().strftime("Scan %Y-%m-%d %H:%M")
+            if not self._confirm_bookmark_all(len(hits), group):
+                return
+        self._bookmark(hits, group)
 
-    def _bookmark(self, hits: List[ScanHit]) -> None:
-        added, existing = self._host.scan_add_bookmarks(hits)
+    def _confirm_bookmark_all(self, count: int, group: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Bookmark All")
+        box.setText(f"Bookmark all {count:,} signals?")
+        box.setInformativeText(
+            f"They go in the group “{group}” of the Bookmarks tab (those "
+            "already bookmarked are skipped). To remove them all, right-click "
+            "the group there and choose Remove Group."
+        )
+        add = box.addButton("Bookmark All", QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(add)
+        box.setEscapeButton(cancel)
+        box.exec()
+        ok = box.clickedButton() is add
+        box.deleteLater()
+        return ok
+
+    def _bookmark(self, hits: List[ScanHit], group: str = "") -> None:
+        # (A group only for Bookmark All's many: hosts written before it
+        # take the results alone.)
+        extra = {"group": group} if group else {}
+        added, existing = self._host.scan_add_bookmarks(hits, **extra)
         if len(hits) == 1:
             if added:
                 text = f"Bookmarked {_format_freq(hits[0].frequency_hz)}."
@@ -1660,6 +1698,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 text = f"Already bookmarked: {existing[0] if existing else ''}"
         else:
             text = f"Bookmarked {added} of {len(hits)} signals"
+            if added and group:
+                text += f" in the group “{group}”"
             text += f" ({len(existing)} already bookmarked)." if existing else "."
         tone = "success" if added else "info"
         self._set_status(text, tone)

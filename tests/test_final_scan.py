@@ -338,5 +338,112 @@ class TestListenToABookmarkResult(_ScanWindowCase):
         self.assertIn("Tuned to Rpt 100 (FM, tone squelch 100.0 Hz)", messages)
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-06: Bookmark All asks first; many bookmarks are removed at once
+# --------------------------------------------------------------------------- #
+class TestBookmarkAllAndBulkRemove(_ScanWindowCase):
+    demo = True
+
+    def _hits(self, count):
+        from sdr_module.gui.scanner_panel import ScanHit
+
+        return [
+            ScanHit(440.0e6 + i * 25e3, -60.0, 20.0, 5e3, "FM", "5 kHz", "25 kHz")
+            for i in range(count)
+        ]
+
+    def test_many_results_ask_first_and_go_in_a_group(self):
+        win, panel = self.win, self.win._scanner_panel
+        bookmarks = win._bookmarks_panel
+        panel._hits = self._hits(30)
+        panel._rebuild_table()
+        asked = []
+        panel._confirm_bookmark_all = lambda count, group: (
+            asked.append((count, group)),
+            False,
+        )[1]
+        panel.bookmark_all()
+        self.assertEqual(bookmarks.bookmark_count(), 0)  # cancelled
+        self.assertEqual(asked[0][0], 30)
+        self.assertTrue(asked[0][1].startswith("Scan "))
+        panel._confirm_bookmark_all = lambda count, group: True
+        panel.bookmark_all()
+        self.assertEqual(bookmarks.bookmark_count(), 30)
+        group = asked[0][1][:15]  # "Scan YYYY-MM-DD"
+        self.assertTrue(
+            all(b["group"].startswith(group) for b in bookmarks.bookmarks())
+        )
+        self.assertIn("in the group", panel._status.text())
+        # A few results: no question, no group (as before).
+        bookmarks._bookmarks = []
+        bookmarks._save()
+        panel._hits = self._hits(3)
+        panel._rebuild_table()
+        panel._confirm_bookmark_all = lambda count, group: self.fail("asked")
+        panel.bookmark_all()
+        self.assertEqual(bookmarks.bookmark_count(), 3)
+        self.assertNotIn("group", bookmarks.bookmark(0))
+
+    def test_a_group_is_removed_with_one_question(self):
+        bookmarks = self.win._bookmarks_panel
+        bookmarks.add_bookmark("Mine", 145.5e6, "FM", "5 kHz")
+        bookmarks.add_unique_many(
+            [(f"S{i}", 440e6 + i * 25e3, "FM", "5 kHz", "") for i in range(25)],
+            group="Scan 2026-10-31 22:00",
+        )
+        self.assertEqual(bookmarks.groups(), ["Scan 2026-10-31 22:00"])
+        folder = bookmarks._list.topLevelItem(0)
+        self.assertEqual(folder.childCount(), 25)
+        menu = bookmarks._group_menu(folder.text(0))
+        remove = next(a for a in menu.actions() if a.text().startswith("Remove Group"))
+        asked = []
+        bookmarks._confirm_remove_many = lambda count, group="": (
+            asked.append((count, group)),
+            True,
+        )[1]
+        remove.trigger()
+        menu.deleteLater()
+        self.assertEqual(asked, [(25, "Scan 2026-10-31 22:00")])
+        self.assertEqual([b["label"] for b in bookmarks.bookmarks()], ["Mine"])
+
+    def test_several_selected_bookmarks_are_removed_with_one_question(self):
+        from PyQt6.QtWidgets import QAbstractItemView
+
+        bookmarks = self.win._bookmarks_panel
+        for i in range(5):
+            bookmarks.add_bookmark(f"B{i}", 146.5e6 + i * 25e3, "FM", "5 kHz")
+        tree = bookmarks._list
+        self.assertEqual(
+            tree.selectionMode(), QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        tree.clearSelection()
+        for row in (1, 2, 4):
+            tree.topLevelItem(row).setSelected(True)
+        self.assertEqual(bookmarks._selected_indices(), [1, 2, 4])
+        self.assertTrue(bookmarks._remove_btn.isEnabled())
+        self.assertFalse(bookmarks._tune_btn.isEnabled())  # which one?
+        self.assertIn("3 selected", bookmarks._remove_btn.toolTip())
+        asked = []
+        bookmarks._confirm_remove_many = lambda count, group="": (
+            asked.append(count),
+            True,
+        )[1]
+        bookmarks._confirm_remove = lambda _b: self.fail("asked one by one")
+        tree.setFocus()
+        QTest.keyClick(tree, Qt.Key.Key_Delete)
+        self.assertEqual(asked, [3])
+        self.assertEqual([b["label"] for b in bookmarks.bookmarks()], ["B0", "B3"])
+        # The right-click menu of a selection removes the selection too.
+        tree.clearSelection()
+        for row in (0, 1):
+            tree.topLevelItem(row).setSelected(True)
+        menu = bookmarks._context_menu(1)
+        remove = next(a for a in menu.actions() if a.text().startswith("Remove"))
+        self.assertTrue(remove.text().startswith("Remove 2 Bookmarks"))
+        remove.trigger()
+        menu.deleteLater()
+        self.assertEqual(bookmarks.bookmarks(), [])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1388,6 +1388,9 @@ class TestScannerInTheWindow(_ScanWindowCase):
             saves.append(len(items)),
             real_save(items),
         )
+        # (So many ask first, and go in a group: see test_final_scan.)
+        groups = []
+        panel._confirm_bookmark_all = lambda count, group: groups.append(group) or True
         with mock.patch.object(
             bookmarks, "_refresh_list", wraps=bookmarks._refresh_list
         ) as refresh:
@@ -1397,7 +1400,8 @@ class TestScannerInTheWindow(_ScanWindowCase):
         self.assertEqual(bookmarks.bookmark_count(), 300)
         self.assertEqual(
             panel._status.text(),
-            "Bookmarked 299 of 301 signals (2 already bookmarked).",
+            f"Bookmarked 299 of 301 signals in the group “{groups[0]}” "
+            "(2 already bookmarked).",
         )
         added = bookmarks.bookmark(1)
         self.assertEqual(

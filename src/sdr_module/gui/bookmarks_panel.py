@@ -24,7 +24,7 @@ import math
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
-    from PyQt6.QtCore import QEvent, Qt, pyqtSignal
+    from PyQt6.QtCore import QEvent, QItemSelectionModel, Qt, pyqtSignal
     from PyQt6.QtGui import QFont, QGuiApplication
     from PyQt6.QtWidgets import (
         QAbstractItemView,
@@ -446,7 +446,9 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         self._list.setUniformRowHeights(True)
         self._list.setAlternatingRowColors(True)
         self._list.setAllColumnsShowFocus(True)
-        self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # Several at once (Shift/Ctrl+click, Ctrl+A): Remove (Delete) takes
+        # them all with one question.
+        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self._list.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._list.setTextElideMode(Qt.TextElideMode.ElideRight)
         # (Header and two rows: with the filter row, the tab still fits a
@@ -571,23 +573,24 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         return index
 
     def add_unique_many(
-        self, entries: List[Tuple[str, float, str, str, str]]
+        self, entries: List[Tuple[str, float, str, str, str]], group: str = ""
     ) -> List[Tuple[int, bool]]:
         """:meth:`add_unique` for many ``(label, freq_hz, mode,
         fm_deviation, bandwidth)`` at once (the Scanner's Bookmark All):
         saved, and the list rebuilt, once. An entry already bookmarked (or
-        twice in ``entries``) isn't added again. Returns ``(index, added)``
-        per entry; the last one added (else the first one already there) is
-        selected."""
+        twice in ``entries``) isn't added again. The new ones go in
+        ``group`` when given. Returns ``(index, added)`` per entry; the last
+        one added (else the first one already there) is selected."""
         results: List[Tuple[int, bool]] = []
         for label, freq_hz, mode, fm_deviation, bandwidth in entries:
             index = self.find_bookmark(freq_hz, mode, fm_deviation)
             if index >= 0:
                 results.append((index, False))
                 continue
-            self._bookmarks.append(
-                _new_bookmark(label, freq_hz, mode, fm_deviation, bandwidth)
-            )
+            bookmark = _new_bookmark(label, freq_hz, mode, fm_deviation, bandwidth)
+            if group:
+                bookmark["group"] = str(group)
+            self._bookmarks.append(bookmark)
             results.append((len(self._bookmarks) - 1, True))
         added = [index for index, new in results if new]
         if added:
@@ -667,8 +670,18 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         parent = item.parent()
         if parent is not None:
             parent.setExpanded(True)
-        self._list.setCurrentItem(item)
+        self._select_only(item)
         self._list.scrollToItem(item)
+
+    def _select_only(self, item: "QTreeWidgetItem") -> None:
+        """Make ``item`` the current and only selected one (whatever keys
+        are held: with Ctrl, as after Ctrl+B, the list would toggle it)."""
+        self._list.setCurrentItem(
+            item,
+            0,
+            QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QItemSelectionModel.SelectionFlag.Rows,
+        )
 
     def set_mode_source(self, source: Optional[Callable[[], Tuple[str, str]]]) -> None:
         """Set a callable returning the current ``(demod, fm_deviation)``.
@@ -993,9 +1006,9 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             self._empty.set_visible(True)
         else:
             self._empty.set_visible(False)
-        selected = self._list.selectedItems()
-        if selected and selected[0].isHidden():
-            self._list.clearSelection()
+        for item in self._list.selectedItems():
+            if item.isHidden():
+                item.setSelected(False)  # (Remove takes only those shown)
 
     def _on_group_toggled(self, item: "QTreeWidgetItem") -> None:
         if item.childCount():
@@ -1006,8 +1019,9 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
                 self._collapsed.add(group)
 
     def _update_buttons(self) -> None:
-        """Enable the selection actions only when a bookmark is selected."""
-        has_sel = self._selected_index() >= 0
+        """Enable the selection actions only when a bookmark is selected
+        (Tune and Edit: one of them; Remove: any number)."""
+        count = len(self._selected_indices())
         for btn, tip in (
             (self._tune_btn, "Tune the receiver to the selected bookmark (Enter)"),
             (
@@ -1015,10 +1029,28 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
                 "Edit the selected bookmark: name, frequency, mode, filter, "
                 "tone, group (F2 renames it)",
             ),
-            (self._remove_btn, "Delete the selected bookmark (Delete)"),
         ):
-            btn.setEnabled(has_sel)
-            btn.setToolTip(tip if has_sel else "Select a bookmark in the list first")
+            btn.setEnabled(count == 1)
+            btn.setToolTip(
+                tip
+                if count == 1
+                else (
+                    "Select one bookmark (several are selected)"
+                    if count
+                    else "Select a bookmark in the list first"
+                )
+            )
+        self._remove_btn.setEnabled(count > 0)
+        self._remove_btn.setToolTip(
+            "Delete the selected bookmark (Delete)"
+            if count == 1
+            else (
+                f"Delete the {count:,} selected bookmarks (Delete)"
+                if count
+                else "Select a bookmark in the list first (Shift or Ctrl+click "
+                "selects several)"
+            )
+        )
         has_any = bool(self._bookmarks)
         self._export_action.setEnabled(has_any)
         self._export_action.setToolTip(
@@ -1028,10 +1060,20 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         )
 
     def _selected_index(self) -> int:
+        """The selected bookmark (of several: the current one when it is
+        selected, else the first), or -1."""
         items = self._list.selectedItems()
         if not items:
             return -1
+        current = self._list.currentItem()
+        if len(items) > 1 and current is not None and current.isSelected():
+            return self._index_of(current)
         return self._index_of(items[0])
+
+    def _selected_indices(self) -> List[int]:
+        """The selected bookmarks, in the order they are stored."""
+        indices = (self._index_of(item) for item in self._list.selectedItems())
+        return sorted(i for i in indices if i >= 0)
 
     def _index_of(self, item: Optional["QTreeWidgetItem"]) -> int:
         if item is None:
@@ -1211,15 +1253,32 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
 
     def _show_context_menu(self, pos: Any) -> None:
         """Right-click: Tune, Edit, Rename, Copy Frequency, Remove, Scan
-        from Here."""
+        from Here; on a group's folder: Remove Group."""
         item = self._list.itemAt(pos)
         idx = self._index_of(item)
         if idx < 0:
+            if item is not None and item.childCount():
+                menu = self._group_menu(item.text(COL_NAME))
+                menu.exec(self._list.viewport().mapToGlobal(pos))
+                menu.deleteLater()
             return
-        self._list.setCurrentItem(item)
+        if not (item.isSelected() and len(self._selected_indices()) > 1):
+            self._select_only(item)  # (a selection of several stays)
         menu = self._context_menu(idx)
         menu.exec(self._list.viewport().mapToGlobal(pos))
         menu.deleteLater()
+
+    def _group_menu(self, group: str) -> "QMenu":
+        """The right-click menu of a group's folder."""
+        count = sum(1 for b in self._bookmarks if str(b.get("group") or "") == group)
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        remove = menu.addAction("Remove Group...")
+        remove.setToolTip(
+            f"Delete the group “{group}” and its {_plural(count, 'bookmark')}"
+        )
+        remove.triggered.connect(lambda _c=False, g=group: self.remove_group(g))
+        return menu
 
     def _context_menu(self, idx: int) -> "QMenu":
         """The right-click menu for bookmark ``idx``."""
@@ -1254,8 +1313,16 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         scan.setEnabled(self.receivers(self.scan_requested) > 0)
         scan.triggered.connect(lambda _c=False, i=idx: self.scan_requested.emit(i))
         menu.addSeparator()
-        remove = menu.addAction("Remove...\tDelete")
-        remove.triggered.connect(lambda _c=False, i=idx: self._remove_index(i))
+        selected = self._selected_indices()
+        if idx in selected and len(selected) > 1:
+            # Right-clicked one of several selected: Remove takes them all.
+            remove = menu.addAction(f"Remove {len(selected):,} Bookmarks...\tDelete")
+            remove.triggered.connect(
+                lambda _c=False, s=tuple(selected): self._remove_indices(list(s))
+            )
+        else:
+            remove = menu.addAction("Remove...\tDelete")
+            remove.triggered.connect(lambda _c=False, i=idx: self._remove_index(i))
         return menu
 
     def _neighbour(self, idx: int, direction: int) -> int:
@@ -1312,8 +1379,60 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         box.deleteLater()  # it is parented to the panel; don't keep it around
         return removed
 
+    def _confirm_remove_many(self, count: int, group: str = "") -> bool:
+        """Ask once before deleting ``count`` bookmarks (``group``'s)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Remove Group" if group else "Remove Bookmarks")
+        if group:
+            box.setText(
+                f"Remove the group “{group}” and its {_plural(count, 'bookmark')}?"
+            )
+        else:
+            box.setText(f"Remove {_plural(count, 'bookmark')}?")
+        box.setInformativeText("This can't be undone.")
+        remove_btn = box.addButton("&Remove", QMessageBox.ButtonRole.DestructiveRole)
+        # (As for one: Enter doesn't confirm an irreversible delete.)
+        cancel_btn = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel_btn)
+        box.setEscapeButton(cancel_btn)
+        box.exec()
+        removed = box.clickedButton() is remove_btn
+        box.deleteLater()
+        return removed
+
+    def _remove_indices(self, indices: List[int], group: str = "") -> int:
+        """Delete the bookmarks ``indices`` after one question; how many
+        were removed."""
+        gone = {i for i in indices if 0 <= i < len(self._bookmarks)}
+        if not gone or not self._confirm_remove_many(len(gone), group):
+            return 0
+        first = min(gone)
+        self._bookmarks = [b for i, b in enumerate(self._bookmarks) if i not in gone]
+        self._save()
+        self._refresh_list(
+            select=min(first, len(self._bookmarks) - 1) if self._bookmarks else None
+        )
+        self.message.emit(f"Removed {_plural(len(gone), 'bookmark')}", "info")
+        return len(gone)
+
+    def remove_group(self, group: str) -> int:
+        """Delete every bookmark of ``group`` after one question (e.g. the
+        Scanner's Bookmark All, filed in a group of its own); how many were
+        removed."""
+        indices = [
+            i
+            for i, b in enumerate(self._bookmarks)
+            if str(b.get("group") or "") == group
+        ]
+        return self._remove_indices(indices, group) if group else 0
+
     def _remove_selected(self):
-        self._remove_index(self._selected_index())
+        selected = self._selected_indices()
+        if len(selected) > 1:
+            self._remove_indices(selected)
+        else:
+            self._remove_index(self._selected_index())
 
     def _remove_index(self, idx: int) -> None:
         if not 0 <= idx < len(self._bookmarks):

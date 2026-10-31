@@ -352,7 +352,9 @@ class WindowScannerHost(ScannerHost):
             win._start_acquisition()
         return True
 
-    def scan_add_bookmarks(self, hits: List[ScanHit]) -> Tuple[int, List[str]]:
+    def scan_add_bookmarks(
+        self, hits: List[ScanHit], group: str = ""
+    ) -> Tuple[int, List[str]]:
         panel = self._win._bookmarks_panel
         names = [hit.label or default_bookmark_name(hit.frequency_hz) for hit in hits]
         # All at once: saved and listed once (Bookmark All of 500 results
@@ -361,7 +363,8 @@ class WindowScannerHost(ScannerHost):
             [
                 (name, hit.frequency_hz, hit.mode, hit.fm_deviation, hit.bandwidth)
                 for name, hit in zip(names, hits, strict=True)
-            ]
+            ],
+            group=group,
         )
         added, existing = 0, []
         for name, (index, new) in zip(names, results, strict=True):

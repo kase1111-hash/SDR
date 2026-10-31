@@ -12,6 +12,7 @@ A HackRFDevice runs on the threaded fake ``python_hackrf`` backend
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import unittest
 
@@ -436,12 +437,16 @@ class TestSSTVWrongSideband(_SSTVWindowCase):
         settle()
         self.assertEqual(self.mode(), "LSB")
         self.assertTrue(panel._fm_callout.isHidden())
-        # Back on 20 m in LSB: USB is offered.
+        # Back on 20 m, still in LSB: USB is offered.
         win.set_frequency(14.23e6)
         settle()
-        if self.mode() == "LSB":
-            self.assertEqual(panel._switch_fm_btn.text(), "Switch to USB")
-            self.assertFalse(panel._fm_callout.isHidden())
+        self.assertEqual(self.mode(), "LSB")
+        self.assertFalse(panel._fm_callout.isHidden())
+        self.assertEqual(
+            panel._fm_label.text(),
+            "SSTV on 20 m is usually sent in USB; the receiver is in LSB.",
+        )
+        self.assertEqual(panel._switch_fm_btn.text(), "Switch to USB")
 
     def test_no_hint_when_not_listening_or_on_vhf(self):
         win, panel = self.win, self.panel
@@ -893,7 +898,7 @@ class TestSSTVFinishedAtTheEndOfPlayback(_WindowTestCase):
         from tests.test_gui_playback import _fm_tone, _save_sigmf
 
         folder = tempfile.mkdtemp(prefix="sdr-final-ham-")
-        self.addCleanup(__import__("shutil").rmtree, folder, True)
+        self.addCleanup(shutil.rmtree, folder, True)
         panel = self.win._sstv_panel
         with mock.patch.object(panel, "finish_input") as finish:
             self.win._stop_acquisition()  # a live receiver stopped
@@ -902,8 +907,11 @@ class TestSSTVFinishedAtTheEndOfPlayback(_WindowTestCase):
             path = _save_sigmf(f"{folder}/sstv.sigmf-data", _fm_tone(0.5))
             self.assertTrue(self.win._open_recording(path))
             device = self.win._device
-            while not device.finished:
+            for _ in range(1000):  # (0.5 s of samples: a few reads)
+                if device.finished:
+                    break
                 self.win._process_block(device.read_samples(8000))
+            self.assertTrue(device.finished)
             self.win._playback._tick()  # (the playback's timer: the end)
             self.assertFalse(self.win._is_running)
             finish.assert_called_once()
@@ -924,7 +932,7 @@ class TestTunerSeekInARecording(_WindowTestCase):
         from tests.test_gui_playback import _fm_tone, _save_sigmf
 
         folder = tempfile.mkdtemp(prefix="sdr-final-ham-")
-        self.addCleanup(__import__("shutil").rmtree, folder, True)
+        self.addCleanup(shutil.rmtree, folder, True)
         path = _save_sigmf(
             f"{folder}/fm.sigmf-data", _fm_tone(1.0, rate=1e6), rate=1e6, center=100.1e6
         )

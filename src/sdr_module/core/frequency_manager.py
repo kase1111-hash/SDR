@@ -1295,6 +1295,11 @@ class FrequencyManager:
             if band.start_hz <= frequency_hz <= band.end_hz
         ]
         usable = [band for band in segments if band.is_allowed(license_class, mode)]
+        if not usable and str(mode).strip().upper() == "CW":
+            # FCC 97.305(a): CW may be sent on any frequency the operator may
+            # transmit on, the phone segments too (whose modes list the band
+            # plan's use; an automatic CW ID goes out there).
+            usable = [band for band in segments if band.is_granted_to(license_class)]
         if usable:
             # The segment listed for the operator's own class sets the power
             # limit; otherwise the most restrictive of the inherited ones.

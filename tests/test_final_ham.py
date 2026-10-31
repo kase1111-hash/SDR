@@ -944,5 +944,66 @@ class TestTunerSeekInARecording(_WindowTestCase):
         self.assertEqual(win._control_panel.get_demod_mode(), "None (I/Q)")
 
 
+class TestCwOnEveryAmateurFrequency(_LicenseCase):
+    """L25: the HF phone segments listed no CW, so a data or SSB
+    transmission there couldn't carry its automatic CW ID. FCC 97.305(a):
+    CW may be sent on any frequency the operator may transmit on."""
+
+    PHONE = (1.9e6, 3.9e6, 7.2e6, 14.23e6, 18.15e6, 21.3e6, 24.95e6, 28.4e6)
+
+    def test_cw_in_the_phone_segments(self):
+        self.license("general")
+        for freq in self.PHONE:
+            allowed, reason = self.fm.is_tx_allowed(freq, 100.0, "CW")
+            self.assertTrue(allowed, f"{freq / 1e6} MHz: {reason}")
+        self.license("amateur_extra")
+        allowed, reason = self.fm.is_tx_allowed(14.2e6, 100.0, "CW")
+        self.assertTrue(allowed, reason)
+
+    def test_only_where_the_license_reaches(self):
+        self.license("technician")
+        self.assertFalse(self.fm.is_tx_allowed(14.23e6, 100.0, "CW")[0])
+        self.license("general")
+        self.assertFalse(self.fm.is_tx_allowed(14.2e6, 100.0, "CW")[0])  # Extra
+        self.license("none")
+        self.assertFalse(self.fm.is_tx_allowed(14.23e6, 100.0, "CW")[0])
+
+    def test_other_modes_keep_their_segments(self):
+        self.license("general")
+        self.assertFalse(self.fm.is_tx_allowed(14.07e6, 2.7e3, "USB")[0])
+        self.assertFalse(self.fm.is_tx_allowed(50.05e6, 2.7e3, "USB")[0])
+        self.assertFalse(self.fm.is_tx_allowed(7.2e6, 300.0, "FM")[0])
+        self.assertEqual(self.fm.get_power_limit(10.12e6, "CW"), 200.0)
+
+
+class TestDataJobCarriesItsCwId(_TxCase):
+    """L25 through the transmit path: PSK31 on 14.230 MHz (General) with
+    automatic ID was refused for its CW ID."""
+
+    license = "general"
+
+    def test_data_in_a_phone_segment_with_a_cw_id(self):
+        from sdr_module.gui.transmitter import ArraySource, TxJob
+
+        self.panel.set_callsign("W1AW")
+        self.panel._id_end_check.setChecked(True)
+        self.hackrf(pace=True, freq=14.23e6)
+        rate = 2e6
+        tone = np.exp(2j * np.pi * 1000.0 * np.arange(int(2 * rate)) / rate)
+        job = TxJob(
+            ArraySource(tone.astype(np.complex64)),
+            rate,
+            14.23e6,
+            "DATA",
+            100.0,
+            "PSK31 “CQ DE W1AW”",
+            "31.25 Bd",
+            identify=True,
+        )
+        self.assertTrue(self.station.transmit(job, confirm=False), self.status()[0])
+        self.station.stop()
+        self.wait_done(5)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

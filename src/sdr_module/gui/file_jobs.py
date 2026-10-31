@@ -245,11 +245,19 @@ def decode_recording(
     channel ``offset_hz`` from the file's center, a chunk at a time (as
     fast as the computer goes). ``found`` gets each chunk's messages with
     their time in the file as they come."""
-    from ..dsp.live_decoders import create_live_decoder
+    from ..dsp.live_decoders import create_live_decoder, format_rate
 
     decoder = create_live_decoder(protocol, options.sample_rate, offset_hz)
     status = decoder.status
     if status.problem:
+        low = float(getattr(decoder, "MIN_SAMPLE_RATE", 0.0) or 0.0)
+        if options.sample_rate < low:
+            # (The live decoder words it for the device: "the device runs
+            # at 1 MS/s", whatever the receiver runs at.)
+            raise ValueError(
+                f"{decoder.name} needs at least {format_rate(low)}; this "
+                f"recording is {format_rate(options.sample_rate)}"
+            )
         raise ValueError(status.problem)
     result = DecodeResult()
     rate = float(options.sample_rate)

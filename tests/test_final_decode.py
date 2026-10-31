@@ -220,6 +220,42 @@ class TestDecodeDialogFrequency(unittest.TestCase):
         dialog._protocol.setCurrentText("AX.25/APRS")
         self.assertEqual(dialog._freq.text(), "144.090 MHz")
 
+    # DEC-E2E-09: a protocol the recording's rate is too low for
+
+    def test_a_protocol_too_fast_for_the_recording_is_greyed_out(self):
+        from PyQt6.QtCore import Qt
+
+        dialog = self.dialog(_options(rate=1e6), "POCSAG")
+        combo = dialog._protocol
+        index = combo.findText("ADS-B")
+        self.assertFalse(combo.model().item(index).isEnabled())
+        self.assertEqual(
+            combo.itemData(index, Qt.ItemDataRole.ToolTipRole),
+            "ADS-B needs at least 2 MS/s; this recording is 1 MS/s",
+        )
+        self.assertTrue(combo.model().item(combo.findText("POCSAG")).isEnabled())
+
+    def test_chosen_in_the_decoder_it_gives_way_and_says_why(self):
+        dialog = self.dialog(_options(rate=1e6), "ADS-B")
+        self.assertNotEqual(dialog._protocol.currentText(), "ADS-B")
+        self.assertIn(
+            "ADS-B needs at least 2 MS/s; this recording is 1 MS/s",
+            dialog._note.text(),
+        )
+        self.assertEqual(dialog._note.property("tone"), "warning")
+
+    def test_the_decode_job_names_the_recording_not_the_device(self):
+        # "ADS-B needs at least 2 MS/s; the device runs at 1 MS/s" while
+        # the receiver ran at 2.4 MS/s.
+        from sdr_module.gui.file_jobs import decode_recording
+
+        with self.assertRaises(ValueError) as caught:
+            decode_recording(_options(rate=1e6), "ADS-B", 0.0, lambda _f: None)
+        self.assertEqual(
+            str(caught.exception),
+            "ADS-B needs at least 2 MS/s; this recording is 1 MS/s",
+        )
+
 
 class TestDecodeRecordingDefaults(_WindowTestCase):
     def test_the_window_gives_each_protocol_its_channel(self):

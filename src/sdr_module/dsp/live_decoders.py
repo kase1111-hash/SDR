@@ -187,6 +187,12 @@ class LiveDecoder:
         the channel carries now is something else, so forget what was
         measured in it (the counts and the protocol state stay)."""
 
+    def messages_cleared(self) -> None:
+        """The decoded messages were cleared (the Decoder's Clear): forget
+        notes about what was heard so far, such as FLEX's "sends FLEX at
+        3200 bps", which would otherwise outlive the messages (the counts
+        and the protocol state stay; a note still true comes back)."""
+
     def process(self, iq: np.ndarray) -> List[DecodedMessage]:
         """Decode a block of raw I/Q (complex, any length); returns the
         messages that completed in it (valid ones and ones that failed
@@ -452,6 +458,13 @@ class FLEXLiveDecoder(ChannelDecoder):
         # What the old channel sent says nothing about this one.
         self._decoder.unsupported_frames = 0
         self._decoder.last_unsupported = ""
+        self._other_speed_s = None
+        self._valid_before = self._valid
+
+    def messages_cleared(self) -> None:
+        super().messages_cleared()
+        # Back with the next frame at that speed, if the channel still
+        # sends them.
         self._other_speed_s = None
         self._valid_before = self._valid
 

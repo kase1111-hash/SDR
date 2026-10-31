@@ -3537,6 +3537,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder_panel.decode_toggled.connect(
             lambda _on: self._update_decoder_chip()
         )
+        self._decoder_panel.cleared.connect(self._on_decoder_cleared)
         # Bookmarks and the Decoder panel's "Tune to ..." tune the receiver
         # (and select the mode they listen with); "Add" saves that mode.
         self._bookmarks_panel.tune_requested.connect(self._on_bookmark_tune)
@@ -4573,6 +4574,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._show_status_message(  # (logged just above: listed once)
                 f"{status.problem}.{remedy}", "warning", 10000, log=False
             )
+
+    def _on_decoder_cleared(self) -> None:
+        """The Decoder's Clear: the live decoder forgets its notes too (FLEX's
+        "sends FLEX at 3200 bps" stayed until it expired)."""
+        decoder = self._decoder
+        if decoder is None:
+            return
+        decoder.messages_cleared()
+        self._decoder_panel.set_decoder_status(decoder.status)
+        self._update_decoder_chip()
 
     def _decoder_offset_hz(self) -> float:
         """The tuned channel's offset from the LO (0 until the window tunes

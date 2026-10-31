@@ -619,5 +619,29 @@ class TestAdsbRateTips(_WindowTestCase):
         self.assertNotIn("ADS-B", win._message_label.text())
 
 
+# --------------------------------------------------------------------------- #
+# L29: Clear clears FLEX's "sends FLEX at 3200 bps"
+# --------------------------------------------------------------------------- #
+
+
+class TestClearForgetsTheFlexSpeedNote(_WindowTestCase):
+    def test_clear_takes_the_note_away(self):
+        win = self.win
+        panel = win._decoder_panel
+        self.assertTrue(win.set_frequency(931.9375e6))
+        panel._proto_combo.setCurrentText("FLEX")
+        self.settle(2)
+        decoder = win._decoder
+        decoder._decoder.last_unsupported = "3200 bps 2-level"
+        decoder._other_speed_s = decoder._stream_s  # (one was just heard)
+        panel.set_receiving(True)
+        panel.set_decoder_status(decoder.status)
+        self.assertIn("sends FLEX at 3200 bps", panel.decoder_status_text())
+        panel.add_message("FLEX", "1234567", "page")  # (Clear needs one)
+        panel._clear_btn.click()
+        self.assertIsNone(decoder.status.problem)
+        self.assertNotIn("3200 bps", panel.decoder_status_text())
+
+
 if __name__ == "__main__":
     unittest.main()

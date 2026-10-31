@@ -618,6 +618,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         tune_requested = pyqtSignal(float, str, str, str)
         # Decode was ticked (True) or unticked by the user.
         decode_toggled = pyqtSignal(bool)
+        # Clear removed the messages (the live decoder forgets its notes).
+        cleared = pyqtSignal()
 
     def __init__(self, parent=None, settings: Any = None):
         if not HAS_PYQT6:
@@ -1939,6 +1941,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._cw_view.clear()
         self._update_stats()
         self._update_state()
+        self.cleared.emit()
 
     def copy_selected(self) -> int:
         """Copy the selected rows to the clipboard as tab-separated text."""

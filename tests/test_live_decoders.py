@@ -832,6 +832,19 @@ class TestFLEX:
         self._feed(decoder, quiet)
         assert decoder.status.problem is None
 
+    def test_clear_forgets_a_speed_it_cant_decode(self):
+        # Leftover 29: the Decoder's Clear left "This channel sends FLEX at
+        # 3200 bps" on the status line until 6 s after the last such frame.
+        decoder = FLEXLiveDecoder(240e3)
+        self._feed(decoder, self._fast_frames(4))
+        problem = decoder.status.problem
+        assert problem
+        decoder.messages_cleared()
+        assert decoder.status.problem is None
+        # Still sent: back with the next such frame.
+        self._feed(decoder, self._fast_frames(1))
+        assert decoder.status.problem == problem
+
     def test_reset_forgets_other_speeds(self):
         decoder = FLEXDecoder(48000.0)
         decoder.unsupported_frames, decoder.last_unsupported = 3, "3200 bps 2-level"

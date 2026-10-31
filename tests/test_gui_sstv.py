@@ -130,8 +130,15 @@ class TestModeChoiceAndStartNow(_PanelCase):
         self.assertGreater(best, 0.97)
 
     def test_start_now_on_auto_without_syncs_asks_for_a_mode(self):
+        """(It first listens a few seconds for line syncs that tell the
+        mode: HAM-E2E-2.)"""
+        from sdr_module.ham.gui.sstv_panel import START_NOW_AUTO_WAIT_S
+
         self.panel._start_now_btn.click()
         self.assertTrue(self.panel.is_receiving(), "Start now also starts listening")
+        rng = np.random.default_rng(4)
+        hiss = 0.3 * rng.standard_normal(int((START_NOW_AUTO_WAIT_S + 0.5) * FS))
+        self.feed(hiss.astype(np.float32))
         self.assertEqual(self.panel._status_label.property("tone"), "warning")
         self.assertIn("Mode", self.panel._status_label.text())
         self.assertFalse(self.panel._decoder.is_receiving())

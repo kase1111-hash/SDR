@@ -18,7 +18,10 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from sdr_module.ham.sstv import find_mode  # noqa: E402
+from sdr_module.ham.sstv_encoder import encode_sstv, sstv_test_card  # noqa: E402
 from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
+from tests.test_gui_sstv import FS, _PanelCase, correlation  # noqa: E402
 from tests.test_gui_station_tx import _TxCase  # noqa: E402
 
 if HAS_PYQT6:
@@ -105,6 +108,152 @@ class TestWindowWhileOnTheAir(_TxCase):
         self.win._stop_recording()
         self.station.stop()
         self.wait_done(5)
+
+
+class TestStartNowOnAuto(_PanelCase):
+    """HAM-E2E-2: Start Now with Mode "Auto (VIS)" from an idle decoder (or
+    just after Stop Decoder) failed at once, as the decoder had heard no
+    line syncs yet, while the tone line went on to name the mode. It now
+    listens a few seconds for the syncs that tell the mode."""
+
+    def robot36(self):
+        spec = find_mode("Robot 36")
+        card = sstv_test_card(spec.width, spec.height)
+        return spec, card, encode_sstv(card, spec, FS, vis=False)
+
+    def assert_decodes(self, spec, card, min_rows=40, min_corr=0.93):
+        """(Robot 36 sends colour at half resolution: started mid-image it
+        correlates 0.95-0.97 with the card, as with the mode chosen.)"""
+        decoder = self.panel._decoder
+        self.assertTrue(decoder.is_receiving())
+        self.assertEqual(decoder.get_mode().name, spec.name)
+        rows = decoder.state.current_line - 1
+        self.assertGreater(rows, min_rows)
+        best = max(
+            correlation(decoder.get_image()[:rows], card[o : o + rows])
+            for o in range(0, spec.height - rows)
+        )
+        self.assertGreater(best, min_corr)
+
+    def test_from_an_idle_decoder(self):
+        spec, card, audio = self.robot36()
+        self.assertFalse(self.panel.is_receiving())
+        self.assertEqual(self.panel.mode_choice(), "Auto (VIS)")
+        self.panel._start_now_btn.click()
+        self.assertTrue(self.panel.is_receiving(), "Start Now starts listening")
+        status = self.panel._status_label
+        self.assertEqual(status.text(), "Listening for line syncs to tell the mode…")
+        self.assertNotEqual(status.property("tone"), "warning")
+        start = int(len(audio) * 0.25)  # the transmission is under way
+        self.feed(audio[start : start + int(1.5 * FS)])
+        self.assertTrue(self.panel._decoder.is_receiving())
+        self.assertIn("Robot 36", status.text())
+        self.assertNotEqual(status.property("tone"), "warning")
+        self.feed(audio[start + int(1.5 * FS) : start + int(10 * FS)])
+        self.assert_decodes(spec, card)
+
+    def test_right_after_stop_decoder(self):
+        """j2_1: Stop Decoder mid-image, then Start Now at once: the rest of
+        the image was never decoded."""
+        spec = find_mode("Robot 36")
+        card = sstv_test_card(spec.width, spec.height)
+        audio = encode_sstv(card, spec, FS)
+        self.panel._start_btn.click()
+        half = len(audio) // 3
+        self.feed(audio[:half])
+        self.assertTrue(self.panel._decoder.is_receiving())
+        self.panel._start_btn.click()  # Stop Decoder (keeps the partial)
+        self.assertEqual(len(self.history_texts()), 1)
+        self.panel._start_now_btn.click()
+        self.feed(audio[half : half + int(10 * FS)])
+        self.assert_decodes(spec, card)
+
+    def test_gives_up_when_no_syncs_come_and_clears_later(self):
+        from sdr_module.ham.gui.sstv_panel import START_NOW_AUTO_WAIT_S
+
+        rng = np.random.default_rng(3)
+        hiss = (0.3 * rng.standard_normal(int(12 * FS))).astype(np.float32)
+        status = self.panel._status_label
+        self.panel._start_now_btn.click()
+        self.feed(hiss[: int((START_NOW_AUTO_WAIT_S - 0.5) * FS)])
+        self.assertEqual(status.text(), "Listening for line syncs to tell the mode…")
+        self.feed(hiss[int((START_NOW_AUTO_WAIT_S - 0.5) * FS) :])
+        self.assertEqual(
+            status.text(),
+            "Can't tell the mode: no line syncs were heard. Choose the mode in "
+            "the Mode list, then press Start Now.",
+        )
+        self.assertEqual(status.property("tone"), "warning")
+        self.assertFalse(self.panel._decoder.is_receiving())
+        # Line syncs turn up later (a transmission without its VIS): the
+        # warning gives way to what the tone line says.
+        _spec, _card, audio = self.robot36()
+        self.feed(audio[int(len(audio) * 0.3) : int(len(audio) * 0.3 + 1.5 * FS)])
+        self.panel._update_status()
+        self.assertEqual(
+            status.text(),
+            "Robot 36 line syncs heard: press Start Now to decode the image "
+            "under way.",
+        )
+        self.assertNotEqual(status.property("tone"), "warning")
+        self.assertFalse(self.panel._decoder.is_receiving())
+
+    def test_stop_decoder_cancels_the_wait(self):
+        self.panel._start_now_btn.click()
+        self.panel._start_btn.click()  # Stop Decoder
+        self.assertFalse(self.panel.is_receiving())
+        _spec, _card, audio = self.robot36()
+        self.panel._start_btn.click()  # Start Decoder (no Start Now)
+        self.feed(audio[int(len(audio) * 0.3) : int(len(audio) * 0.3 + 2 * FS)])
+        self.assertFalse(self.panel._decoder.is_receiving())
+
+
+class TestStartNowWithoutAudio(_PanelCase):
+    """L23: Start Now with no audio coming in ended after 1.5 s with "the
+    audio stopped for a while" although none ever came."""
+
+    def test_chosen_mode(self):
+        self.panel.set_mode_choice("Robot 36")
+        self.panel._start_now_btn.click()
+        self.assertTrue(self.panel._decoder.is_receiving())
+        self.panel._last_audio_time -= 2.0  # 2 s later, still no audio
+        self.panel._update_status()
+        text = self.panel._status_label.text()
+        self.assertNotIn("stopped for a while", text)
+        self.assertEqual(
+            text,
+            "Start Now heard no audio to decode. Start the receiver, tuned to "
+            "the SSTV signal, then press Start Now.",
+        )
+        self.assertFalse(self.panel._decoder.is_receiving())
+        self.assertTrue(self.panel.is_receiving(), "still listening")
+        self.assertEqual(self.history_texts(), [])
+
+    def test_auto(self):
+        self.panel._start_now_btn.click()
+        self.panel._last_audio_time -= 2.0
+        self.panel._update_status()
+        self.assertEqual(
+            self.panel._status_label.text(),
+            "Start Now heard no audio to decode. Start the receiver, tuned to "
+            "the SSTV signal, then press Start Now.",
+        )
+        # The wait is over: syncs heard later don't start an image.
+        spec = find_mode("Robot 36")
+        audio = encode_sstv(sstv_test_card(320, 240), spec, FS, vis=False)
+        self.feed(audio[int(len(audio) * 0.3) : int(len(audio) * 0.3 + 2 * FS)])
+        self.assertFalse(self.panel._decoder.is_receiving())
+
+    def test_audio_that_stops_is_still_said_so(self):
+        spec = find_mode("Robot 36")
+        audio = encode_sstv(sstv_test_card(320, 240), spec, FS, vis=False)
+        self.panel.set_mode_choice("Robot 36")
+        self.panel._start_now_btn.click()
+        self.feed(audio[int(len(audio) * 0.3) : int(len(audio) * 0.6)])
+        self.assertTrue(self.panel._decoder.is_receiving())
+        self.panel._last_audio_time -= 2.0  # the receiver stopped
+        self.panel._update_status()
+        self.assertIn("the audio stopped for a while", self.panel._status_label.text())
 
 
 if __name__ == "__main__":  # pragma: no cover

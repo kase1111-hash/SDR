@@ -462,12 +462,19 @@ def _next_pow2(n: int) -> int:
     return 1 << max(0, int(n) - 1).bit_length()
 
 
-def _polyphase_is_cheaper(groups: int, factor: int) -> bool:
-    """Whether a decimating FIR of ``groups`` x ``factor`` taps costs less
-    computed per kept output (one row-by-row dot product per group) than
-    by FFT overlap-save. Measured per input sample: about 0.7 + 7 / factor
-    units per group against 25 for the FFT."""
-    return groups * (0.7 + 7.0 / max(1, factor)) <= 25.0
+def _polyphase_is_cheaper(taps: int, factor: int) -> bool:
+    """Whether a decimating FIR of ``taps`` taps costs less computed per
+    kept output (one dot product each, see :meth:`_FirDecimator._polyphase`)
+    than by FFT overlap-save of every sample. Measured per input sample
+    (ns, on a 4-core computer): about 1.5 + (28 + 0.2 x taps) / factor for
+    the dot products (a fixed cost per kept output, then per tap), against
+    14 + 0.06 x min(taps, 300) for the FFT. So it is several times cheaper
+    whenever the filter decimates by 3 or more, except for very long
+    filters with small factors."""
+    if factor < 2:
+        return False
+    dots = 1.5 + (28.0 + 0.2 * taps) / factor
+    return dots <= 14.0 + 0.06 * min(taps, 300)
 
 
 _VECDOT = getattr(np, "vecdot", None)  # numpy 2.0+
@@ -544,12 +551,11 @@ class _FirDecimator:
     so a stream split into blocks gives exactly the output of one long
     block.
 
-    A decimating filter with few taps per kept sample only computes the
-    samples it keeps (polyphase: the block, viewed as rows of ``factor``
-    samples, dotted with the taps one group of ``factor`` taps at a time),
+    A decimating filter only computes the samples it keeps (polyphase: one
+    dot product of the taps with the input ending at each kept sample),
     several times cheaper than filtering every sample by FFT and discarding
-    most. Longer filters, and filters that don't decimate, use FFT
-    overlap-save.
+    most (see :func:`_polyphase_is_cheaper`). Very long filters with small
+    factors, and filters that don't decimate, use FFT overlap-save.
     """
 
     def __init__(self, taps: Optional[np.ndarray], factor: int = 1):
@@ -558,14 +564,14 @@ class _FirDecimator:
         self._history: Optional[np.ndarray] = None
         self._phase = 0  # index, in the next block, of the next kept sample
         self._spectra: Dict[Tuple[int, bool], np.ndarray] = {}
-        # Polyphase: the reversed taps (zero-padded to whole groups) as
-        # (groups, factor) rows, by sample dtype.
+        # Polyphase (nonzero: computed per kept output): the input rows of
+        # ``factor`` samples each output spans; the reversed taps, by
+        # sample dtype.
         self._groups = 0
         self._weights: Dict[Any, np.ndarray] = {}
         if self._taps is not None and self._factor > 1:
-            groups = -(-len(self._taps) // self._factor)
-            if _polyphase_is_cheaper(groups, self._factor):
-                self._groups = groups
+            if _polyphase_is_cheaper(len(self._taps), self._factor):
+                self._groups = -(-len(self._taps) // self._factor)
 
     def reset(self) -> None:
         """Forget the stream (history and decimation phase); keep the design."""
@@ -583,9 +589,19 @@ class _FirDecimator:
         return out
 
     def _polyphase(self, x: np.ndarray) -> np.ndarray:
-        """The kept outputs of the filter, computed directly."""
-        factor, groups = self._factor, self._groups
-        length = groups * factor  # taps, padded with zeros
+        """The kept outputs of the filter, computed directly.
+
+        Output j is the input window of ``len(taps)`` samples ending at its
+        sample, dotted with the reversed taps: all of them in one call, over
+        rows of an overlapping view of the input (``factor`` samples
+        apart), so each kept output costs one dot product. (Splitting the
+        taps into groups of ``factor`` dotted with rows of ``factor``
+        samples cost several times as much for small factors: most of the
+        time went into the per-row overhead of the short rows.)"""
+        factor = self._factor
+        taps = self._taps
+        assert taps is not None  # (polyphase stages have taps)
+        length = len(taps)
         dtype = np.result_type(x.dtype, np.float32)
         if self._history is None or self._history.dtype != dtype:
             self._history = np.zeros(length - 1, dtype=dtype)
@@ -595,20 +611,20 @@ class _FirDecimator:
         count = -(-(len(x) - phase) // factor) if len(x) > phase else 0
         if count <= 0:
             return np.empty(0, dtype=dtype)
-        # Output j is padded[phase + j*factor : ... + length] . reversed taps,
-        # i.e. the sum over groups g of row (j + g) times that group's taps.
-        rows = count + groups - 1
-        view = padded[phase : phase + rows * factor].reshape(rows, factor)
         weights = self._weights.get(dtype)
         if weights is None:
-            padded_taps = np.zeros(length, dtype=np.float32)
-            padded_taps[: len(self._taps)] = self._taps
-            weights = padded_taps[::-1].reshape(groups, factor).astype(dtype)
+            weights = np.ascontiguousarray(taps[::-1]).astype(dtype)
             self._weights[dtype] = weights
-        out = _row_dot(view[0:count], weights[0])
-        for g in range(1, groups):
-            out += _row_dot(view[g : g + count], weights[g])
-        return out
+        # Row j is padded[phase + j*factor : ... + length] (the last ends at
+        # the last sample: phase + (count - 1) * factor < len(x)).
+        step = padded.strides[0]
+        rows = np.lib.stride_tricks.as_strided(
+            padded[phase:],
+            shape=(count, length),
+            strides=(factor * step, step),
+            writeable=False,
+        )
+        return _row_dot(rows, weights)
 
     def _filter(self, x: np.ndarray) -> np.ndarray:
         taps = self._taps

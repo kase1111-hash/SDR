@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 from functools import lru_cache
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -103,19 +103,32 @@ def _row_dot(rows: np.ndarray, weights: np.ndarray) -> np.ndarray:
     return np.einsum("ij,j->i", rows, weights)
 
 
+def _dot_cost(taps: int) -> float:
+    """Rough CPU cost (ns) of one kept output computed as one dot product
+    (a row of :class:`FirDecimator`'s overlapping view): a fixed cost per
+    row, then per tap (complex samples; real ones cost about half)."""
+    return 28.0 + 0.2 * taps
+
+
+def _strided_cost(taps: int, factor: int) -> float:
+    """Rough CPU cost (ns) of one kept output computed as one multiply-add
+    per tap over a strided view of the block (its reads spread over more of
+    the block as the factor grows)."""
+    return taps * (1.0 + 0.45 * factor)
+
+
 class FirDecimator:
     """Streaming FIR low-pass followed by integer decimation.
 
-    Only the kept outputs are computed. A large factor works polyphase: the
-    block is viewed as contiguous rows of ``factor`` samples and each group
-    of ``factor`` (reversed) taps is dotted with every row. A small factor
-    would make those rows too short to be efficient, so there each tap
-    multiplies a strided view of the block instead. The filter history and
-    the decimation phase carry over between calls, so block boundaries
-    leave no trace.
+    Only the kept outputs are computed. Output j is the window of
+    ``len(taps)`` samples ending at its input sample dotted with the
+    reversed taps: all the kept outputs in one call, over the rows of an
+    overlapping view of the block (``factor`` samples apart), one dot
+    product each. A short filter that hardly decimates (where a row's
+    fixed cost outweighs its few taps) multiplies each tap with a strided
+    view of the block instead. The filter history and the decimation phase
+    carry over between calls, so block boundaries leave no trace.
     """
-
-    _POLYPHASE_FROM = 8  # smallest factor computed row by row
 
     def __init__(self, taps: np.ndarray, factor: int = 1):
         taps = np.asarray(taps, dtype=np.float32).ravel()
@@ -124,18 +137,13 @@ class FirDecimator:
         self.factor = max(1, int(factor))
         self.taps = taps
         # Output j is the window of len(taps) samples ending at its input
-        # sample, dotted with the reversed taps.
+        # sample, dotted with the reversed taps: one dot product per kept
+        # output (the reversed taps by sample dtype), or one strided
+        # multiply-add per tap.
         self._reversed = [float(w) for w in taps[::-1]]
-        self._groups = 0
-        if self.factor >= self._POLYPHASE_FROM:
-            self._groups = -(-len(taps) // self.factor)
-            padded = np.zeros(self._groups * self.factor, dtype=np.float32)
-            padded[: len(taps)] = taps[::-1]
-            # Row g multiplies input row (j + g) for output j.
-            self._weights = padded.reshape(self._groups, self.factor)
-        self._length = (
-            self._groups * self.factor if self._groups else len(self._reversed)
-        )
+        self._dots = _dot_cost(len(taps)) <= _strided_cost(len(taps), self.factor)
+        self._weights: Dict[object, np.ndarray] = {}
+        self._length = len(self._reversed)
         self._history: Optional[np.ndarray] = None
         self._phase = 0  # index, in the next block, of the next kept sample
 
@@ -161,14 +169,21 @@ class FirDecimator:
         self._phase = phase + count * factor - n
         if count <= 0:
             return np.zeros(0, dtype=dtype)
-        if self._groups:
-            rows = count + self._groups - 1
-            view = padded[phase : phase + rows * factor].reshape(rows, factor)
-            weights = self._weights
-            out = _row_dot(view[0:count], weights[0])
-            for g in range(1, self._groups):
-                out += _row_dot(view[g : g + count], weights[g])
-            return out.astype(dtype, copy=False)
+        if self._dots:
+            weights = self._weights.get(dtype)
+            if weights is None:
+                weights = np.ascontiguousarray(self.taps[::-1]).astype(dtype)
+                self._weights[dtype] = weights
+            # Row j is padded[phase + j*factor : ... + length]; the last one
+            # ends at the block's last sample at most.
+            step = padded.strides[0]
+            rows = np.lib.stride_tricks.as_strided(
+                padded[phase:],
+                shape=(count, length),
+                strides=(factor * step, step),
+                writeable=False,
+            )
+            return _row_dot(rows, weights).astype(dtype, copy=False)
         stop = phase + (count - 1) * factor + 1
         out = np.zeros(count, dtype=dtype)
         scratch = np.empty(count, dtype=dtype)
@@ -281,14 +296,13 @@ def decimation_factor(rate: float, target: float, min_rate: float) -> int:
 def _stage_cost(rate: float, factor: int, taps: int) -> float:
     """Rough CPU cost (ns per second of input at ``rate``) of a
     :class:`FirDecimator` stage, as measured with NumPy on 33 ms blocks:
-    a polyphase row costs about 20 ns plus 0.4 ns per tap in it, the
-    strided form (small factors) about 1 + 0.45 x ``factor`` ns per tap
-    and output (its reads spread over more of the block), a NumPy call a
-    few microseconds, and copying the input about 2 ns a sample."""
+    each kept output costs :func:`_dot_cost` (one dot product) or
+    :func:`_strided_cost` (a strided multiply-add per tap), whichever the
+    stage uses; a NumPy call a few microseconds, and copying the input
+    about 2 ns a sample."""
     outputs = rate / factor
-    if factor >= FirDecimator._POLYPHASE_FROM:
-        groups = -(-taps // factor)
-        cost = groups * (outputs * (20.0 + 0.4 * factor) + 30 * 3000.0)
+    if _dot_cost(taps) <= _strided_cost(taps, factor):
+        cost = outputs * _dot_cost(taps) + 30 * 5000.0
     else:
         cost = taps * (outputs * (1.0 + 0.45 * factor) + 30 * 2 * 2000.0)
     return cost + 2.0 * rate

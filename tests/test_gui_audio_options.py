@@ -287,10 +287,13 @@ class TestDemoRepeaterTone(_WindowTestCase):
         heard, _played = self._listen(0.0, seconds=4.0, **broadcast)
         self.assertEqual(heard, {"Not checked"})
         self.assertIn("5 kHz", self.win._control_panel._tone_heard.toolTip())
-        # With a tone squelch set they are searched for.
+        # Nor with a tone squelch set: broadcast stations send none, and
+        # their bass notes passed for tones, so a tone squelch left set
+        # chopped them (LISTEN-09). It doesn't apply at this deviation.
         self.win._reset_demodulator()
-        heard, _played = self._listen(100.0, seconds=4.0, **broadcast)
-        self.assertIn("100.0 Hz (1Z)", heard)
+        heard, played = self._listen(103.5, seconds=4.0, **broadcast)
+        self.assertEqual(heard, {"Not checked"})
+        self.assertGreater(played, 1.0)  # (the repeater, unchopped)
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")

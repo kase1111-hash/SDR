@@ -419,3 +419,49 @@ class TestNoiseReductionLeavesACleanSignalAlone(_WindowTestCase):
         off = hiss(self._listen("off", 15.0, "5 kHz", "25 kHz"))
         strong = hiss(self._listen("strong", 15.0, "5 kHz", "25 kHz"))
         self.assertLess(strong, 0.5 * off)
+
+
+# --------------------------------------------------------------------------- #
+# The tone squelch at a broadcast deviation
+# --------------------------------------------------------------------------- #
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestToneSquelchOnBroadcastFm(_WindowTestCase):
+    """LISTEN-09: a tone squelch left set from a repeater chopped a
+    broadcast station into ~20 % fragments (the music's bass notes passed
+    for CTCSS tones) and Tone heard listed fake tones."""
+
+    def test_broadcast_fm_ignores_the_tone_squelch(self):
+        from tests.test_gui_audio_options import _voice
+        from tests.test_gui_squelch import (
+            FRAME,
+            RATE,
+            Frames,
+            fm,
+            noise,
+            pretend_audio_output,
+        )
+
+        pretend_audio_output(self.win)
+        panel = self.win._control_panel
+        self.win.set_frequency(100.1e6)
+        self.win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        panel.set_squelch_db(-90)
+        panel.set_tone_squelch_hz(131.8)
+        # A bass note right on a CTCSS tone (110.9 Hz) under the programme.
+        audio = _voice(3.0, tone_hz=110.9)
+        iq = fm(audio, 75e3, -30.0) + noise(int(3.0 * RATE), -95.0)
+        n = len(iq) - len(iq) % FRAME
+        self.win._reset_demodulator()
+        frames = Frames(self, iq[:n]).run()
+        self.assertTrue(all(len(a) for a in frames.audio[1:]))  # never muted
+        self.assertEqual(panel._tone_heard.text(), "Not checked")
+        self.assertNotEqual(self.win._squelch_state(True), "tone")
+
+    def test_setting_one_on_broadcast_fm_says_it_is_for_narrow_fm(self):
+        panel = self.win._control_panel
+        self.win.set_frequency(100.1e6)
+        self.win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        panel.set_tone_squelch_hz(100.0)
+        self.assertIn("narrow FM", self.win._message_label.text())

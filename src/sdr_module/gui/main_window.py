@@ -5936,6 +5936,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _on_tone_squelch_changed(self, hz: float) -> None:
         self._tone_squelch.tone_hz = float(hz) if hz else None
         self._save_setting("audio/tone_squelch", float(hz))
+        panel = self._control_panel
+        if (
+            hz
+            and not self._restoring
+            and panel.get_demod_mode() == "FM"
+            and not self._tones_checked(panel.get_fm_deviation())
+        ):
+            self._show_status_message(
+                "Tone squelch works on narrow FM (repeaters, PMR): it isn't "
+                f"used at {panel.get_fm_deviation_text()} deviation, so this "
+                "station plays as before.",
+                "info",
+                6000,
+            )
 
     def _on_iq_options_changed(self, remove_dc: bool, balance_iq: bool) -> None:
         conditioner = self._iq_conditioner
@@ -8019,10 +8033,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
 
     def _tones_checked(self, deviation: float) -> bool:
-        """Whether FM audio is searched for a CTCSS tone: with a tone
-        squelch set, or at a narrow deviation (broadcast stations send
-        none, so they aren't searched unless asked)."""
-        return bool(self._tone_squelch.tone_hz) or deviation < _BROADCAST_DEVIATION_HZ
+        """Whether FM audio is searched for a CTCSS tone: below a broadcast
+        deviation. Broadcast stations send none, and their bass notes pass
+        for tones: a tone squelch left set from a repeater chopped a
+        broadcast station into fragments (LISTEN-09), so it doesn't apply
+        there."""
+        return deviation < _BROADCAST_DEVIATION_HZ
 
     def _show_detected_tone(self) -> None:
         if self._tone_squelch is not None:

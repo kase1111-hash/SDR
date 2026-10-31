@@ -1078,7 +1078,6 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         proto = self.protocol()
         chosen = proto != getattr(self, "_views_for", None)
         self._views_for = proto
-        current = self._tabs.currentWidget()
         for name, view in self._protocol_views.items():
             index = self._tabs.indexOf(view)
             shown = name == proto
@@ -1086,6 +1085,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 self._tabs.setTabVisible(index, shown)
             if shown and chosen:
                 self._tabs.setCurrentWidget(view)
+        # A view that went with its protocol leaves Messages in front. (What
+        # is in front now: the tab in front before may be the view that
+        # just went, while the new protocol's view is in front already.)
+        current = self._tabs.currentWidget()
         if current in self._protocol_views.values() and not self._tabs.isTabVisible(
             self._tabs.indexOf(current)
         ):

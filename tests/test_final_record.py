@@ -362,3 +362,187 @@ class TestImportOptionsFitsItsRows(_FilesCase):
             qapp.setStyleSheet(old_sheet)
             qapp.setPalette(old_palette)
             themes.apply_theme(None, old_theme)
+
+
+class _TestClock:
+    """The ``time`` module of main_window and the demo device, run by hand."""
+
+    def __init__(self, start=1000.0):
+        self.now = float(start)
+
+    def monotonic(self):
+        return self.now
+
+    def perf_counter(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += float(seconds)
+
+    def __getattr__(self, name):  # strftime, gmtime, time...
+        import time
+
+        return getattr(time, name)
+
+
+class TestDemoTakesWhileOverloaded(_FilesCase):
+    """REC-E2E-05: while frames couldn't keep up, the demo device was read
+    one display block a frame, fell behind and skipped ahead: the take had
+    silent gaps that nothing reported."""
+
+    RATE = 1e6
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+
+        from sdr_module.gui import device_dialog, main_window
+
+        self.clock = _TestClock()
+        for module in (main_window, device_dialog):
+            patcher = mock.patch.object(module, "time", self.clock)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        win = self.win
+        win._stop_acquisition()
+        self.dev = device_dialog.MockDevice()
+        self.dev.set_sample_rate(self.RATE)
+        win._device = self.dev
+        win._start_acquisition()
+        self.load = 1.5  # processing takes 1.5x real time: overloaded
+        process = win._process_block
+
+        def slow_process(samples):
+            self.clock.advance(self.load * len(samples) / self.RATE)
+            process(samples)
+
+        win._process_block = slow_process
+
+    def tearDown(self):
+        if self.win._recording:
+            self.win._toggle_recording(False)
+        self.win._stop_acquisition()
+        super().tearDown()
+
+    def run_frames(self, seconds, stall_at=None, stall=0.0):
+        end = self.clock.now + seconds
+        while self.clock.now < end:
+            tick = self.clock.now
+            if stall_at is not None and tick >= stall_at:
+                self.clock.advance(stall)  # the window froze for a moment
+                stall_at = None
+            self.win._update_display()
+            self.clock.now = max(self.clock.now, tick + 0.033)
+
+    def recorded(self):
+        return sum(len(block) for block in self.win._samples_buffer)
+
+    def test_the_take_keeps_every_sample(self):
+        win = self.win
+        self.run_frames(1.0)
+        self.assertTrue(win._pacer.overloaded)
+        win._toggle_recording(True)
+        started = self.clock.now
+        self.run_frames(2.0)
+        win._toggle_recording(False)
+        seconds = self.clock.now - started
+        self.assertGreater(self.recorded(), 0.97 * seconds * self.RATE)
+        self.assertNotIn("lost", win._take_summary()[0])
+        # The window still processes about a block a frame (it stays
+        # responsive), and its audio is paused.
+        self.assertTrue(win._pacer.overloaded)
+
+    def test_a_skip_ahead_during_a_take_is_reported(self):
+        win = self.win
+        win._toggle_recording(True)
+        self.run_frames(0.5)
+        # Frozen for 4 s: more than a frame can catch up (and the demo
+        # follows the clock), so the take has a gap.
+        self.run_frames(1.0, stall_at=self.clock.now + 0.2, stall=4.0)
+        self.assertIn("The recording has gaps", self.message())
+        win._toggle_recording(False)
+        text, _state, tip = win._take_summary()
+        self.assertIn("lost", text)
+        lost = win._take_lost_seconds()
+        self.assertGreater(lost, 1.0)
+        total = self.recorded() / self.RATE + lost
+        self.assertAlmostEqual(total, win._recording_elapsed(), delta=0.2)
+
+    def test_stopping_and_starting_again_is_not_a_gap(self):
+        win = self.win
+        self.load = 0.3
+        win._toggle_recording(True)
+        self.run_frames(0.5)
+        win._stop_acquisition()  # REC WAITING
+        self.clock.advance(3.0)
+        win._start_acquisition()
+        self.run_frames(0.5)
+        win._toggle_recording(False)
+        self.assertNotIn("lost", win._take_summary()[0])
+
+
+class TestGapsAreLoggedOnce(TestDemoTakesWhileOverloaded):
+    """REC-E2E-06: the 'recording has gaps' warning was listed twice in
+    Error History (logged, then logged again by the status bar)."""
+
+    def test_the_gap_warning_is_logged_once(self):
+        win = self.win
+        win._toggle_recording(True)
+        self.run_frames(0.5)
+        with self.assertLogs("sdr_module.gui.main_window", level="WARNING") as logs:
+            self.run_frames(1.0, stall_at=self.clock.now + 0.2, stall=4.0)
+        gaps = [line for line in logs.output if "The recording has gaps" in line]
+        self.assertEqual(len(gaps), 1, logs.output)
+
+    # (The inherited tests run here too: skip them.)
+    test_the_take_keeps_every_sample = None
+    test_a_skip_ahead_during_a_take_is_reported = None
+    test_stopping_and_starting_again_is_not_a_gap = None
+
+
+class TestPlaybackSaysItsRealSpeed(_FilesCase):
+    """REC-E2E-05 (playback): at 4x on a computer that can't keep up the
+    recording played at about 0.3x while the status bar only said "Playing
+    at 4x: audio plays at 1x only"."""
+
+    def test_a_speed_that_cannot_be_kept_up_is_said(self):
+        from unittest import mock
+
+        from sdr_module.gui import playback
+
+        path = _save_sigmf(self.path("aprs2m.sigmf-data"), 144.39e6, seconds=10.0)
+        with self.open_dialog(path):
+            self.assertTrue(self.win._open_recording())
+        controller = self.win._playback
+        controller._timer.stop()  # (ticked by hand)
+        device = controller.device
+        clock = _TestClock()
+        with mock.patch.object(playback, "time", clock):
+            self.win._playback_bar.set_speed(4.0)
+            for _ in range(20):  # 4 s: the file moves 0.3 s a second
+                device.seek(device.position + int(0.06 * device.sample_rate))
+                clock.advance(0.2)
+                controller._tick()
+        self.assertIn("Playing at about 0.3x, not 4x", self.message())
+        controller.close()
+
+    def test_a_speed_kept_up_says_nothing_more(self):
+        from unittest import mock
+
+        from sdr_module.gui import playback
+
+        path = _save_sigmf(self.path("aprs2m.sigmf-data"), 144.39e6, seconds=10.0)
+        with self.open_dialog(path):
+            self.assertTrue(self.win._open_recording())
+        controller = self.win._playback
+        controller._timer.stop()
+        device = controller.device
+        clock = _TestClock()
+        with mock.patch.object(playback, "time", clock):
+            self.win._playback_bar.set_speed(2.0)
+            for _ in range(20):
+                device.seek(device.position + int(0.4 * device.sample_rate))
+                clock.advance(0.2)
+                controller._tick()
+        self.assertIn("Playing at 2x", self.message())
+        controller.close()

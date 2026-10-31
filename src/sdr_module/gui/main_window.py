@@ -1261,6 +1261,9 @@ class _Pacer:
         # Samples a paced source (a recording playing back) is owed but not
         # yet given: less than a block, or a little ahead (negative).
         self._owed = 0.0
+        #: Demo samples the time since the last frame covers beyond what
+        #: :meth:`demo_request` gave (a frame that can't keep up).
+        self.backlog = 0
 
     def reset(self) -> None:
         """Forget everything (new device or sample rate)."""
@@ -1273,6 +1276,7 @@ class _Pacer:
         self._probes = 0
         self._warm_up = _WARM_UP_FRAMES
         self._owed = 0.0
+        self.backlog = 0
 
     def restart(self) -> None:
         """Reading pauses (receiver stopped): the next demo read starts
@@ -1309,12 +1313,15 @@ class _Pacer:
         the previous read times the rate, at least one display block (and
         a probe frame at least ``_TIMED_FRAME``, so it is timed)."""
         last, self._last = self._last, now
+        self.backlog = 0
         if last is None or rate <= 0:
             return DISPLAY_BLOCK
         wanted = round(rate * max(0.0, now - last))
         limit = self.read_limit(rate, now)
         smallest = _TIMED_FRAME if self.overloaded and limit > 0 else DISPLAY_BLOCK
-        return int(max(smallest, min(wanted, limit)))
+        count = int(max(smallest, min(wanted, limit)))
+        self.backlog = max(0, int(wanted) - count)
+        return count
 
     def paced_request(self, rate: float, now: float) -> int:
         """Like :meth:`demo_request`, for a source that must not run ahead
@@ -6161,6 +6168,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._is_running = True
         self._rx_history.clear()
         self._pacer.restart()
+        # What a device dropped (or the demo skipped) while stopped is no
+        # gap in a take: it resumes as a capture of its own (REC WAITING).
+        self._drop_mark = None
         self._refresh_state_ui()
         logger.info("Acquisition started")
 
@@ -6947,8 +6957,29 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return dev.read_samples(self._pacer.paced_request(rate, time.monotonic()))
         if self._demo_mode or _is_demo_device(dev):
             rate = self._pacing_rate()
-            return dev.read_samples(self._pacer.demo_request(rate, time.monotonic()))
+            count = self._pacer.demo_request(rate, time.monotonic())
+            return self._read_demo(dev, count)
         return dev.read_samples(DISPLAY_BLOCK)
+
+    def _read_demo(self, dev: Any, count: int) -> Optional[np.ndarray]:
+        """``count`` demo samples for this frame. While an I/Q recording
+        captures, the recording takes every sample the time covers, as
+        from hardware (see :meth:`_drain_device`): what a frame that can't
+        keep up leaves (the pacer's backlog) goes only to the recording.
+        Read one block a frame, the demo fell behind and skipped ahead
+        (following the clock), and the take had silent gaps. Samples it
+        still skips (a long stall) are counted as lost, as a driver's
+        dropped samples are."""
+        capturing = self._recording and not self._recording_paused
+        backlog = min(self._pacer.backlog, _MAX_READ_SAMPLES) if capturing else 0
+        if backlog >= DISPLAY_BLOCK:
+            older = dev.read_samples(backlog)
+            if older is not None and len(older):
+                self._capture(older)
+        samples = dev.read_samples(count)
+        # (A skip in the frame a take starts in came before it.)
+        self._note_dropped_samples(dev, capturing)
+        return samples
 
     def _pacing_rate(self) -> float:
         """Samples per second the display loop takes: the sample rate, times
@@ -6994,11 +7025,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return blocks[0] if blocks else None
         return np.concatenate(blocks)
 
-    def _note_dropped_samples(self, dev: SDRDevice, capturing: bool) -> bool:
-        """Count the samples the driver dropped (its queue was full) since
-        the last frame, when this frame captures: a full queue drops the
-        newest transfer, so they were lost between the queued transfers
-        this frame records and the next ones (the take has gaps there).
+    def _note_dropped_samples(self, dev: Any, capturing: bool) -> bool:
+        """Count the samples the driver dropped (its queue was full), or the
+        demo device skipped, since the last frame, when this frame captures:
+        a full queue drops the newest transfer, so they were lost between
+        the queued transfers this frame records and the next ones (the take
+        has gaps there).
 
         True when a take (re)starts after such drops: what is queued then
         came before Record (or Resume), spread over seconds with gaps when
@@ -7037,7 +7069,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "Sample rate) helps."
             )
             logger.warning(message)
-            self._show_status_message(message, "warning", 15000)
+            self._show_status_message(message, "warning", 15000, log=False)
 
     def _take_lost_seconds(self) -> float:
         """Signal the take in the buffer lost while it was captured."""

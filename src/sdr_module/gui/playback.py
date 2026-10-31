@@ -22,6 +22,7 @@ the window to a file and back to the device it was using.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
@@ -55,6 +56,8 @@ logger = logging.getLogger(__name__)
 
 #: Playback speeds offered (the strip's Speed list).
 SPEEDS = (0.5, 1.0, 2.0, 4.0)
+#: Seconds over which the speed a recording really plays at is measured.
+_SPEED_CHECK_S = 3.0
 
 
 def format_clock(seconds: float, total: float = 0.0) -> str:
@@ -551,6 +554,11 @@ if HAS_PYQT6:
             #: The last open() changed the listening by the band plan (its
             #: status line is the one to keep).
             self.band_plan_applied = False
+            # Where the file was (monotonic time, sample, loops) when the
+            # speed it really plays at was last measured; and whether a
+            # speed that can't be kept up was said.
+            self._speed_mark: Optional[Tuple[float, int, int]] = None
+            self._slow_said = False
             self._timer = QTimer(self)
             self._timer.setInterval(self._TICK_MS)
             self._timer.timeout.connect(self._tick)
@@ -606,6 +614,8 @@ if HAS_PYQT6:
                 return False
             tuned_before = float(win._current_frequency())
             self.band_plan_applied = False
+            self._speed_mark = None
+            self._slow_said = False
             if self.active:
                 # Another file: the device from before stays the one to go
                 # back to.
@@ -749,6 +759,7 @@ if HAS_PYQT6:
             if device is None:
                 return
             device.seek_seconds(seconds)
+            self._speed_mark = None
             # A jump in the stream: the demodulator starts afresh (no click).
             self._win._reset_demodulator()
             self._win._pacer.restart()
@@ -769,6 +780,8 @@ if HAS_PYQT6:
             win._pacer.reset()
             win._rx_history.clear()
             win._realtime_hint_shown = False
+            self._speed_mark = None
+            self._slow_said = False
             if speed != 1.0:
                 win._show_status_message(
                     f"Playing at {speed:g}x: audio plays at 1x only.", "info", 4000
@@ -796,6 +809,7 @@ if HAS_PYQT6:
                 )
             self._bar.set_position(device.position_s)
             self._bar.set_playing(win._is_running, device.finished)
+            self._check_speed(device)
             if device.bad_samples and not getattr(device, "_warned", False):
                 device._warned = True  # type: ignore[attr-defined]
                 win._show_status_error(
@@ -803,6 +817,41 @@ if HAS_PYQT6:
                     "(NaN or infinity); they are played as silence. Is the "
                     "sample format right?"
                 )
+
+        def _check_speed(self, device: FilePlaybackDevice) -> None:
+            """Faster than 1x, say once when the recording plays much slower
+            than chosen: this computer can't read and show it that fast
+            (frames that can't keep up take what they can), and the speed
+            note said nothing of it."""
+            now = time.monotonic()
+            here = (now, device.position, device.loops)
+            mark, self._speed_mark = self._speed_mark, here
+            speed = float(device.speed)
+            if (
+                mark is None
+                or speed <= 1.0
+                or self._slow_said
+                or not self._win._is_running
+                or device.finished
+                or mark[2] != device.loops  # (looped: the position wrapped)
+                or here[1] < mark[1]
+            ):
+                return
+            if now - mark[0] < _SPEED_CHECK_S:
+                self._speed_mark = mark  # (measured over a few seconds)
+                return
+            real = (here[1] - mark[1]) / device.sample_rate / (now - mark[0])
+            if real >= 0.6 * speed:
+                return
+            self._slow_said = True
+            shown = f"{real:.1f}" if real >= 0.1 else "less than 0.1"
+            self._win._show_status_message(
+                f"Playing at about {shown}x, not {speed:g}x: this computer "
+                "can't read and show the recording that fast right now. A "
+                "lower speed helps.",
+                "info",
+                10000,
+            )
 
         # -- the window's state shown as playback --------------------------------
 

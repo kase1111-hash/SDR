@@ -285,6 +285,8 @@ class ViewPlaceholder(QObject if HAS_PYQT6 else object):
 
     if HAS_PYQT6:
         action_triggered = pyqtSignal()
+        # Shown (True) or hidden by set_visible.
+        visibility_changed = pyqtSignal(bool)
 
     _ACTION_GAP = 4
 
@@ -370,8 +372,11 @@ class ViewPlaceholder(QObject if HAS_PYQT6 else object):
         return self.button.text() if self._has_action else ""
 
     def set_visible(self, visible: bool) -> None:
+        changed = bool(visible) != self.is_visible()
         self.label.setVisible(visible)
         self.button.setVisible(visible and self._has_action)
+        if changed:
+            self.visibility_changed.emit(bool(visible))
 
     def is_visible(self) -> bool:
         return not self.label.isHidden()
@@ -926,8 +931,17 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         }
         self._tabs.setCurrentWidget(self._messages_page)
         # The status line's "Tune to ..." stands in for the button of an
-        # empty view only while that view is out of sight.
+        # empty view only while that view is out of sight, or filled (live
+        # Morse text, aircraft; the list empties by itself too).
         self._tabs.currentChanged.connect(lambda _index: self._update_tune_button())
+        for placeholder in (
+            self._empty,
+            self._aircraft_view.placeholder(),
+            self._cw_view.placeholder(),
+        ):
+            placeholder.visibility_changed.connect(
+                lambda _shown: self._update_tune_button()
+            )
 
         layout.addWidget(self._tabs, 1)
 

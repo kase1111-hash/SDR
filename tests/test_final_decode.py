@@ -148,6 +148,51 @@ class TestTuneToStaysOffered(_PanelCase):
         p.add_message("ADS-B", "4840D6", "KLM1023")
         self.assertTrue(p._tune_btn.isVisible())
 
+    def test_offered_when_live_morse_fills_the_text_view(self):
+        # The Text view's own "Listen in CW" went with its empty state when
+        # the line in progress came (CW decodes in any mode), and the one
+        # beside the status line stayed hidden.
+        p = self.panel
+        p.set_source("demo")
+        p.set_current_frequency(99.82e6)
+        p.set_demod_mode("FM")  # (the band plan's mode for 99.82 MHz)
+        p._proto_combo.setCurrentText("CW (Morse)")
+        _settle(1)
+        text_view = p._cw_view.placeholder()
+        self.assertEqual(text_view.action_text(), "Listen in CW")
+        self.assertFalse(p._tune_btn.isVisible())
+        p.set_decoder_status(_status("CW (Morse)", "character", live_text="VVV DE"))
+        self.assertFalse(text_view.is_visible())
+        self.assertTrue(p._tune_btn.isVisible())
+        self.assertEqual(p._tune_btn.text(), "Listen in CW")
+
+    def test_one_button_when_the_aircraft_list_empties_by_itself(self):
+        # Aircraft go five minutes after their last message: the list's
+        # own "Tune to" came back beside the status line's.
+        from sdr_module.dsp.protocols import ADSBMessage, ProtocolType
+
+        p = self.panel
+        view = p._aircraft_view
+        view._clock = view.tracker._clock = lambda: self.now
+        p.set_current_frequency(100.1e6)
+        p._proto_combo.setCurrentText("ADS-B")
+        msg = ADSBMessage(
+            protocol=ProtocolType.ADSB,
+            timestamp=0.0,
+            raw_bits=b"",
+            valid=True,
+            icao_address="4840D6",
+            downlink_format=17,
+            type_code=4,
+            callsign="KLM1023",
+        )
+        p.add_message("ADS-B", "4840D6", "KLM1023", message=msg)
+        self.assertTrue(p._tune_btn.isVisible())
+        self.now += 400
+        view.refresh()
+        self.assertTrue(view.placeholder().button.isVisible())
+        self.assertFalse(p._tune_btn.isVisible())
+
     def test_not_offered_while_paused_or_off(self):
         p = self.panel
         p.set_current_frequency(100.1e6)

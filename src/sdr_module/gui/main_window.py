@@ -9244,6 +9244,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._scanner_panel.set_host(self._scanner_host)
         bookmarks.bookmarks_changed.connect(self._scanner_panel.bookmarks_changed)
         bookmarks.scan_requested.connect(self._scan_bookmarks_from)
+        # (Keys only: textEdited isn't emitted when a tune rewrites it.)
+        line = self._frequency_field().lineEdit()
+        if line is not None:
+            line.textEdited.connect(self._on_frequency_typed)
+
+    def _on_frequency_typed(self, _text: str) -> None:
+        """A key typed in the Frequency field stops a scan, as tuning does:
+        each scan step would retune under the typing. Enter then tunes what
+        was typed."""
+        panel = self._scanner_panel
+        if panel.engine.active:
+            panel.stop_scan("Scan stopped: you are typing a frequency.", "info")
 
     def _scan_frame(self, samples: np.ndarray) -> None:
         """Hand a block to a running scan (after everything else saw it).

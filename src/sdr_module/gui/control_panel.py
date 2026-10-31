@@ -776,6 +776,12 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
         Values that are not finite numbers (NaN, infinity, e.g. from a
         corrupted setting or ``-f nan``) are ignored: the entry keeps the
         frequency it had.
+
+        A frequency being typed is never replaced (a scan step or another
+        retune while you type would garble it): the field's value follows,
+        its text and cursor stay, and Enter tunes what was typed (Esc shows
+        the tuned frequency). A field selected to be typed over (Ctrl+L)
+        stays selected.
         """
         try:
             freq_hz = float(freq_hz)
@@ -785,10 +791,28 @@ class FrequencyInput(QWidget if HAS_PYQT6 else object):
             return
         self._frequency_hz = min(max(freq_hz, self._min_hz), self._max_hz)
         mult = self._get_multiplier()
-        self._freq_input.blockSignals(True)
-        self._freq_input.setValue(self._frequency_hz / mult)
-        self._freq_input.blockSignals(False)
-        self._freq_input._update_tone()
+        spin = self._freq_input
+        line = spin.lineEdit()
+        focused = line is not None and spin.hasFocus()
+        typing = focused and spin._edited()
+        if typing:
+            text, cursor = line.text(), line.cursorPosition()
+            start, length = line.selectionStart(), len(line.selectedText())
+        whole = focused and bool(line.text()) and line.selectedText() == line.text()
+        spin.blockSignals(True)
+        spin.setValue(self._frequency_hz / mult)
+        spin.blockSignals(False)
+        if typing:
+            # (Not blocked: the spin box then interprets the text on Enter
+            # or when the field loses the focus, as for any typing.)
+            line.setText(text)
+            if length and start >= 0:
+                line.setSelection(start, length)
+            else:
+                line.setCursorPosition(cursor)
+        elif whole:
+            spin.selectAll()
+        spin._update_tone()
 
     def get_frequency(self) -> float:
         """Get frequency in Hz."""

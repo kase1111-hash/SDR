@@ -22,9 +22,11 @@ from tests.test_gui_chrome import (  # noqa: E402
     _WindowTestCase,
     require_pyqt6,
 )
+from tests.test_gui_scanner import FRAME_S, _ScanWindowCase  # noqa: E402
 
 if HAS_PYQT6:
-    from PyQt6.QtCore import QSettings
+    from PyQt6.QtCore import QSettings, Qt
+    from PyQt6.QtTest import QTest
     from PyQt6.QtWidgets import QApplication
 
 
@@ -139,6 +141,86 @@ class TestTheWindowStartsWithDamagedBookmarks(_WindowTestCase):
         panel = self.win._bookmarks_panel
         self.assertEqual([b["label"] for b in panel.bookmarks()], ["ok"])
         self.assertEqual(self.win._scanner_host.scan_bookmark_counts(), (1, 0))
+
+
+# --------------------------------------------------------------------------- #
+# SCAN-01: typing a frequency while a scan runs
+# --------------------------------------------------------------------------- #
+class TestTypingAFrequencyDuringAScan(_ScanWindowCase):
+    demo = True
+
+    def _sweep(self):
+        panel = self.win._scanner_panel
+        panel._preset.setCurrentIndex(1)  # FM broadcast
+        panel.set_scan_mode("continuous")
+        self.assertTrue(panel.start_scan())
+        self.frames(0.2)
+        return panel
+
+    def _type(self, field, keys, seconds_between=0.3):
+        """Type at a person's speed: the display loop runs between keys."""
+        for key in keys:
+            QTest.keyClicks(field, key)
+            self.frames(seconds_between)
+
+    def test_typing_stops_the_scan_and_enter_tunes_what_was_typed(self):
+        win = self.win
+        panel = self._sweep()
+        field = win._frequency_field()
+        line = field.lineEdit()
+        win._focus_frequency_entry()  # Ctrl+L
+        self.settle()
+        self.assertTrue(field.hasFocus())
+        # The scan goes on retuning (and FREQ follows it) until a key is
+        # pressed; the field stays selected, ready to be typed over.
+        tuned = set()
+        for _ in range(6):
+            self.frames(FRAME_S * 3)
+            tuned.add(round(win._current_frequency()))
+            self.assertEqual(line.selectedText(), line.text())
+        self.assertGreater(len(tuned), 1)
+        self._type(field, "8")
+        self.assertFalse(panel.engine.active)  # the first key stopped it
+        self.assertEqual(
+            panel._status.text(), "Scan stopped: you are typing a frequency."
+        )
+        self._type(field, "9.3")
+        self.assertEqual(line.text(), "89.3")
+        QTest.keyClick(field, Qt.Key.Key_Return)
+        self.settle()
+        self.assertAlmostEqual(win._current_frequency(), 89.3e6)
+        self.assertFalse(panel.engine.active)
+
+    def test_a_retune_while_typing_keeps_the_typed_text(self):
+        win = self.win
+        field = win._frequency_field()
+        line = field.lineEdit()
+        win._focus_frequency_entry()
+        self.settle()
+        QTest.keyClicks(field, "14")
+        cursor = line.cursorPosition()
+        # Something else retunes meanwhile (the scan's last step, Track
+        # Signal, a device that moved): FREQ follows, the typing stays.
+        self.assertTrue(win._tune_to(100.5e6))
+        self.assertEqual(line.text(), "14")
+        self.assertEqual(line.cursorPosition(), cursor)
+        QTest.keyClicks(field, "5.29")
+        QTest.keyClick(field, Qt.Key.Key_Return)
+        self.settle()
+        self.assertAlmostEqual(win._current_frequency(), 145.29e6)
+
+    def test_esc_after_a_retune_shows_the_frequency_tuned(self):
+        win = self.win
+        field = win._frequency_field()
+        win._focus_frequency_entry()
+        self.settle()
+        QTest.keyClicks(field, "14")
+        self.assertTrue(win._tune_to(100.5e6))
+        QTest.keyClick(field, Qt.Key.Key_Escape)
+        self.settle()
+        self.assertAlmostEqual(win._current_frequency(), 100.5e6)
+        self.assertEqual(win._control_panel._freq_input.get_frequency(), 100.5e6)
+        self.assertAlmostEqual(field.value(), 100.5)
 
 
 if __name__ == "__main__":

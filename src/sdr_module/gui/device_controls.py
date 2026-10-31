@@ -896,30 +896,47 @@ def missing_driver_text(missing: Sequence[Tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def confirm_switch_to_demo(window: Any) -> bool:
-    """Use Demo Device while a recording runs on hardware: ask first (the
-    recording would go on with simulated samples). True to go ahead (the
-    recordings are stopped), False to keep the device."""
+def records_from_device(window: Any) -> bool:
+    """Whether a recording takes its samples from the window's device: an
+    audio recording, or an I/Q recording that has samples (also waiting for
+    the receiver, REC WAITING) or captures them now. One armed before
+    receiving (nothing captured yet) records whichever device starts."""
+    if window._audio_take is not None:
+        return True
+    return bool(window._recording) and bool(
+        window._is_running or not window._capture_pending
+    )
+
+
+def confirm_stop_recordings(
+    window: Any,
+    question: str,
+    why: str,
+    accept: str = "Stop and &Switch",
+    parent: Any = None,
+) -> bool:
+    """Before the window's device is closed or replaced while a recording
+    takes its samples from it (:func:`records_from_device`): ask first, as
+    one recording holds one device's samples at one rate. True to go ahead
+    (the I/Q and audio recordings are stopped, the I/Q samples kept to
+    save), False (Cancel) to keep everything as it is."""
+    if not records_from_device(window):
+        return True
     iq = bool(window._recording)
     audio = window._audio_take is not None
-    if not (iq or audio):
-        return True
-    box = QMessageBox(window)
+    box = QMessageBox(parent if parent is not None else window)
     box.setIcon(QMessageBox.Icon.Question)
     box.setWindowTitle("Recording in Progress")
-    box.setText(
-        f"Stop recording and switch from {window._device_display_name()} to the "
-        "demo device?"
-    )
-    detail = "The recording would otherwise go on with simulated signals."
+    box.setText(question)
+    detail = why
     if iq:
         detail += (
             " The I/Q samples recorded so far stay in the Recording group, to save."
         )
     if audio:
         detail += " The audio recording is saved as it is."
-    box.setInformativeText(detail)
-    go = box.addButton("Stop and &Switch", QMessageBox.ButtonRole.AcceptRole)
+    box.setInformativeText(detail.strip())
+    go = box.addButton(accept, QMessageBox.ButtonRole.AcceptRole)
     set_role(go, "primary")
     cancel = box.addButton(QMessageBox.StandardButton.Cancel)
     box.setDefaultButton(cancel)
@@ -934,11 +951,25 @@ def confirm_switch_to_demo(window: Any) -> bool:
     return True
 
 
+def confirm_switch_to_demo(window: Any) -> bool:
+    """Use Demo Device while a recording runs on hardware: ask first (the
+    recording would go on with simulated samples). True to go ahead (the
+    recordings are stopped), False to keep the device."""
+    return confirm_stop_recordings(
+        window,
+        f"Stop recording and switch from {window._device_display_name()} to the "
+        "demo device?",
+        "The recording would otherwise go on with simulated signals.",
+    )
+
+
 __all__ = [
     "PLAYBACK_GAIN",
     "REMEMBERED_KINDS",
     "DeviceControls",
     "ScanResultsDialog",
+    "confirm_stop_recordings",
     "confirm_switch_to_demo",
     "missing_driver_text",
+    "records_from_device",
 ]

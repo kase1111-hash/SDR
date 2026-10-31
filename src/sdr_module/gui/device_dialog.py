@@ -16,7 +16,7 @@ import logging
 import math
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     from PyQt6.QtCore import Qt
@@ -106,6 +106,22 @@ def _format_rate(rate: float) -> str:
     return device_settings.format_rate(rate)
 
 
+class ConnectRefused(Exception):
+    """Raised by the dialog's ``_open_device`` (as the main window wraps it)
+    to stop a connect that is no failure: the device is in use elsewhere,
+    or a question before connecting was cancelled. The dialog stays open,
+    shows the reason in an information box (none when the message is
+    empty) and logs no error."""
+
+
+#: ``busy(entry)``: why a listed device can't be connected, as ``(status,
+#: reason)`` (e.g. ``("In use by the second receiver", "...")``), or None.
+BusyCheck = Callable[[Dict[str, Any]], Optional[Tuple[str, str]]]
+#: ``before_connect(entry, name)``: asked right before the device chosen
+#: is opened (e.g. to stop a recording first); False keeps the dialog open.
+BeforeConnect = Callable[[Dict[str, Any], str], bool]
+
+
 class DeviceDialog(QDialog if HAS_PYQT6 else object):
     """
     Device selection and configuration dialog.
@@ -128,6 +144,9 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         self._rates: Dict[str, float] = {}
         self._fronts: Dict[str, device_settings.FrontEnd] = {}
         self._shown_kind = ""
+        # The window's checks (set_busy_check, set_before_connect).
+        self._busy_check: Optional[BusyCheck] = None
+        self._before_connect: Optional[BeforeConnect] = None
 
         self.setWindowTitle("Connect SDR Device")
         self.setMinimumSize(540, 480)
@@ -335,7 +354,7 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
                 )
         self._devices.append({"type": "demo", "index": 0, "info": {}})
 
-        self._device_table.selectRow(0)
+        self._mark_busy_rows()
         self._update_status(hardware_count)
 
     def _enumerate_rtlsdr(self):
@@ -363,7 +382,62 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
             serial = getattr(info, "serial", None) or "Unknown"
             index = getattr(info, "index", i)
             self._add_device(label, name, serial, "Available")
-            self._devices.append({"type": dev_type, "index": index, "info": info})
+            self._devices.append(
+                {"type": dev_type, "index": index, "info": info, "name": name}
+            )
+
+    def set_busy_check(self, busy: Optional[BusyCheck]) -> None:
+        """``busy(entry)`` says why a listed device can't be connected (the
+        main window: the second receiver has it). Such a row says so in its
+        Status (the reason in its tooltip) and Connect is off while it is
+        selected; checked now and on every Refresh."""
+        self._busy_check = busy
+        self._mark_busy_rows()
+
+    def set_before_connect(self, before: Optional[BeforeConnect]) -> None:
+        """``before(entry, name)`` is asked right before the device chosen
+        is opened (the main window: stop a recording first); False keeps
+        the dialog open with nothing changed."""
+        self._before_connect = before
+
+    def _busy_reason(self, dev: Optional[dict]) -> str:
+        return str((dev or {}).get("busy", "") or "")
+
+    def _mark_busy_rows(self) -> None:
+        """Mark the rows of devices in use elsewhere, and select the first
+        row that can be connected."""
+        check = self._busy_check
+        first_free = None
+        for row, entry in enumerate(self._devices):
+            found = None
+            if check is not None and entry.get("type") != "demo":
+                try:
+                    found = check(entry)
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.debug(f"Device busy check failed: {e}")
+            status, reason = found if found else ("Available", "")
+            entry["busy"] = reason
+            if entry.get("type") != "demo":
+                status_item = self._device_table.item(row, 3)
+                if status_item is not None:
+                    status_item.setText(status)
+                for col in range(self._device_table.columnCount()):
+                    item = self._device_table.item(row, col)
+                    if item is None:
+                        continue
+                    if col == 2 and not reason and len(item.text()) > 12:
+                        item.setToolTip(f"Serial number {item.text()}")
+                    elif col != 2 or reason:
+                        item.setToolTip(reason)
+                    # Greyed out, as the second receiver lists the main
+                    # window's device (the tooltip still says why).
+                    flags = item.flags()
+                    enabled = Qt.ItemFlag.ItemIsEnabled
+                    item.setFlags(flags & ~enabled if reason else flags | enabled)
+            if first_free is None and not reason:
+                first_free = row
+        self._device_table.selectRow(first_free if first_free is not None else 0)
+        self._update_setting_controls(self._selected_entry())
 
     def _add_device(self, dev_type: str, name: str, serial: str, status: str):
         """Add device to table."""
@@ -428,9 +502,12 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         frequency correction, direct sampling and bias tee; a HackRF One:
         bias tee; the demo device: the sample rate alone), with what that
         type used last."""
-        self._connect_btn.setEnabled(dev is not None)
+        busy = self._busy_reason(dev)
+        self._connect_btn.setEnabled(dev is not None and not busy)
         self._connect_btn.setToolTip(
-            "" if dev is not None else "Select a device in the list first"
+            busy
+            if busy
+            else "" if dev is not None else "Select a device in the list first"
         )
         kind = self._kind_of(dev)
         if self._shown_kind and self._shown_kind != kind:
@@ -551,11 +628,26 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         dev = self._devices[row]
         name_item = self._device_table.item(row, 1)
         name = name_item.text() if name_item is not None else "the device"
+        busy = self._busy_reason(dev)
+        if busy:
+            # (Double-click or Enter on a row in use elsewhere.)
+            QMessageBox.information(self, "Device in Use", busy)
+            return
+        before = self._before_connect
+        if before is not None and not before(dev, name):
+            return  # (asked first, and cancelled: nothing changed)
 
         # Try to open device
         QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             self._selected_device = self._open_device(dev)
+        except ConnectRefused as e:
+            # No failure: in use elsewhere (or a question was cancelled).
+            self._selected_device = None
+            QGuiApplication.restoreOverrideCursor()
+            if str(e):
+                QMessageBox.information(self, "Device in Use", str(e))
+            return
         except Exception as e:
             self._selected_device = None
             QGuiApplication.restoreOverrideCursor()

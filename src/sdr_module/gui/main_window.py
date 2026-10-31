@@ -143,6 +143,7 @@ from .decoder_panel import DecoderPanel
 from .device_controls import (
     DeviceControls,
     ScanResultsDialog,
+    confirm_stop_recordings,
     confirm_switch_to_demo,
 )
 from .file_jobs import (
@@ -7173,8 +7174,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # One file has one center frequency and rate: say which it keeps.
             self._retune_warned = True
             freq, rate = self._buffer_meta
+            # (Say what changed: a device or rate change is no retune.)
+            changed = (
+                "The sample rate changed while recording"
+                if rate is not None and abs(rate - tuned[1]) > 0.5
+                else "Retuned while recording"
+            )
             self._show_status_message(
-                "Retuned while recording: the saved file will be labelled "
+                f"{changed}: the saved file will be labelled "
                 f"{format_frequency(freq or 0)} at {format_rate(rate or 0)}, "
                 "where the recording started. Stop and record again for a "
                 "clean capture.",
@@ -7892,12 +7899,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         as "in use". Receiving resumes on the new device if it was running,
         and starts on it with ``start_after`` (Start pressed with no device).
         """
-        from .device_dialog import DeviceDialog
+        from .device_dialog import ConnectRefused, DeviceDialog
 
         was_running = self._is_running and self._device is not None
         released: List[str] = []
         ended: List[str] = []
         dialog = DeviceDialog(self)
+        # A device the second receiver has is listed as in use; a recording
+        # taking its samples from the current device is stopped first.
+        set_busy = getattr(dialog, "set_busy_check", None)
+        if callable(set_busy):
+            set_busy(self._device_entry_busy)
+        set_before = getattr(dialog, "set_before_connect", None)
+        if callable(set_before):
+            set_before(
+                lambda entry, name: self._confirm_device_switch(entry, name, dialog)
+            )
         self._preselect_rate(dialog)
         open_device = getattr(dialog, "_open_device", None)
         driver_class = getattr(DeviceDialog, "_device_class", None)
@@ -7917,7 +7934,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # before anything here is closed (the dialog shows why).
             problem = self._second_rx.entry_problem(entry)
             if problem:
-                raise RuntimeError(problem)
+                raise ConnectRefused(problem)
+            # A recording from the current device stops first (asked before
+            # the dialog opened anything; a dialog without that asks here).
+            if not self._confirm_device_switch(entry, "", dialog):
+                raise ConnectRefused("")
             end_playback()
             try:
                 device_class = driver_class(str(entry.get("type", "")))
@@ -8015,10 +8036,48 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             min(range(len(rates)), key=lambda i: abs(rates[i] - wanted))
         )
 
+    def _device_entry_busy(self, entry: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+        """Device > Connect...: ``(status, reason)`` for a device listed that
+        can't be connected (the second receiver has it), else None."""
+        problem = self._second_rx.entry_problem(entry)
+        return ("In use by the second receiver", problem) if problem else None
+
+    def _confirm_device_switch(
+        self, entry: Dict[str, Any], name: str = "", parent: Any = None
+    ) -> bool:
+        """Device > Connect... (``entry``, listed as ``name``) while a
+        recording takes its samples from the current device: ask first, as
+        Use Demo Device does (one recording holds one device's samples at
+        one rate). True to go ahead (the recordings are stopped, the I/Q
+        samples kept to save). A recording playing back ends by itself."""
+        if self._device is None or self._playback.active:
+            return True
+        demo = str(entry.get("type", "")) == "demo"
+        current = "the demo device" if self._demo_mode else self._device_display_name()
+        new = "the demo device" if demo else str(entry.get("name") or name or "")
+        if new == current or not new:
+            question = f"Stop recording and reconnect {current}?"
+        else:
+            question = f"Stop recording and switch from {current} to {new}?"
+        return confirm_stop_recordings(
+            self,
+            question,
+            "A recording holds one device's samples, at one sample rate.",
+            parent=parent,
+        )
+
     def _release_device(self) -> None:
-        """Stop and close the current device (if any)."""
+        """Stop and close the current device (if any). A recording taking its
+        samples from it ends here (the I/Q samples stay to save), so the next
+        device never adds its own to it (callers ask first, as
+        :func:`confirm_stop_recordings` does)."""
         # A transmission ends first (and puts the HackRF back as it was).
         self._tx_station.shutdown()
+        if self._device is not None:
+            if self._recording and not self._capture_pending:
+                self._toggle_recording(False)
+            if self._audio_take is not None:
+                self._stop_audio_recording()
         if self._is_running:
             self._stop_acquisition()
         if self._device is not None:
@@ -8037,7 +8096,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _disconnect_device(self):
         """Disconnect from device (while a recording plays: close it, and
-        the device used before it too). A transmission ends first."""
+        the device used before it too). A transmission ends first. While a
+        recording takes its samples from the device, ask first: it ends
+        with the device."""
+        which = "the demo device" if self._demo_mode else self._device_display_name()
+        if (
+            self._device is not None
+            and not self._playback.active
+            and not confirm_stop_recordings(
+                self,
+                f"Stop recording and disconnect {which}?",
+                "A recording holds one device's samples, so it ends with the "
+                "device.",
+                accept="Stop and &Disconnect",
+            )
+        ):
+            return
         self._tx_station.shutdown()
         if self._playback.active:
             device = self._playback.device

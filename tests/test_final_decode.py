@@ -346,6 +346,139 @@ class TestOnlyTheNewestAreKept(_PanelCase):
         self.assertEqual(p._kept_label.text(), "0")
 
 
+# --------------------------------------------------------------------------- #
+# DEC-E2E-08: the status line and the chip count the same messages
+# DEC-E2E-10: tuned away, the status line says so (not the green count)
+# --------------------------------------------------------------------------- #
+
+
+class TestOneCount(_PanelCase):
+    def setUp(self):
+        super().setUp()
+        self.panel.tune_requested.connect(lambda *_args: None)  # (the window)
+        self.panel.set_receiving(True)
+
+    def test_rds_counts_its_messages_and_names_the_groups(self):
+        # The line said "802 groups" beside the chip's "3 msgs".
+        p = self.panel
+        p.set_current_frequency(100.1e6)
+        p._proto_combo.setCurrentText("RDS")
+        p.set_decoder_status(_status("RDS", "group", frames=40, valid=40,
+                                     last_time=self.now, detail="SDR DEMO"))  # fmt: skip
+        self.assertEqual(
+            p.decoder_status_text(),
+            "RDS  ·  SDR DEMO  ·  0 messages (40 groups)  ·  last just now",
+        )
+        for text in ("Station name: SDR DEMO", "Program type: Top 40", "Radio text"):
+            p.add_message("RDS", "C0DE", text)
+        self.assertEqual(p.count_for("RDS"), 3)
+        self.assertEqual(
+            p.decoder_status_text(),
+            "RDS  ·  SDR DEMO  ·  3 messages (40 groups)  ·  last just now",
+        )
+
+    def test_a_rebuilt_decoder_does_not_start_the_count_again(self):
+        # After a sample-rate change the line counted from zero ("ADS-B ·
+        # 4 messages") while the chip went on ("ADS-B · 32 msgs").
+        p = self.panel
+        p.set_current_frequency(1090e6)
+        p._proto_combo.setCurrentText("ADS-B")
+        for _ in range(5):
+            p.add_message("ADS-B", "4840D6", "KLM1023")
+        p.set_decoder_status(_status("ADS-B", frames=5, valid=5, last_time=self.now))
+        self.assertEqual(
+            p.decoder_status_text(), "ADS-B  ·  5 messages  ·  last just now"
+        )
+        # Rebuilt (another rate): its own counts start again.
+        p.set_decoder_status(_status("ADS-B", frames=1, valid=1, last_time=self.now))
+        p.add_message("ADS-B", "4840D6", "KLM1023")
+        self.assertEqual(
+            p.decoder_status_text(), "ADS-B  ·  6 messages  ·  last just now"
+        )
+        self.assertEqual(p.count_for("ADS-B"), 6)
+
+    def test_failed_messages_are_not_counted_as_decoded(self):
+        p = self.panel
+        p.set_current_frequency(152.24e6)
+        p._proto_combo.setCurrentText("POCSAG")
+        p.add_message("POCSAG", "1 (F0)", "good")
+        p.add_message("POCSAG", "2 (F0)", "bad", valid=False)
+        p.set_decoder_status(_status("POCSAG", "page", frames=2, valid=1, failed=1,
+                                     last_time=self.now))  # fmt: skip
+        self.assertEqual(p.count_for("POCSAG"), 1)
+        self.assertEqual(
+            p.decoder_status_text(),
+            "POCSAG  ·  1 page  ·  last just now  ·  1 failed check",
+        )
+
+    def test_tuned_away_says_not_tuned_with_what_came_before(self):
+        p = self.panel
+        p.set_current_frequency(100.1e6)
+        p._proto_combo.setCurrentText("RDS")
+        for text in ("Station name: SDR DEMO", "Program type: Top 40", "Radio text"):
+            p.add_message("RDS", "C0DE", text)
+        p.set_decoder_status(_status("RDS", "group", frames=56, valid=56,
+                                     last_time=self.now, detail="SDR DEMO"))  # fmt: skip
+        self.assertEqual(p._status_label.property("tone"), "success")
+        self.now += 1.0
+        p.set_current_frequency(145e6)  # Ctrl+L 145.0
+        self.now += 12.0
+        p.set_decoder_status(_status("RDS", "group", frames=56, valid=56,
+                                     last_time=self.now - 13.0))  # fmt: skip
+        self.assertEqual(
+            p.decoder_status_text(),
+            "Not tuned to RDS: listening on 145.000 MHz (3 messages earlier)",
+        )
+        self.assertFalse(p._status_label.property("tone"))  # not the green
+        self.assertEqual(p._tune_btn.text(), "Tune to 100.100 MHz")
+
+    def test_still_decoding_off_the_band_shows_the_count(self):
+        # ADS-B decodes from the whole span: with the VFO moved off 1090 MHz
+        # (the LO still there) the messages go on, and so does the count.
+        p = self.panel
+        p.set_current_frequency(1090e6)
+        p._proto_combo.setCurrentText("ADS-B")
+        p.add_message("ADS-B", "4840D6", "KLM1023")
+        self.now += 1.0
+        p.set_current_frequency(1091.5e6)
+        self.now += 1.0
+        p.add_message("ADS-B", "4840D6", "KLM1023")
+        p.set_decoder_status(_status("ADS-B", frames=2, valid=2, last_time=self.now))
+        self.assertEqual(
+            p.decoder_status_text(), "ADS-B  ·  2 messages  ·  last just now"
+        )
+
+
+class TestOneCountInTheWindow(_WindowTestCase):
+    def test_the_chip_and_the_status_line_agree(self):
+        import numpy as np
+
+        from tests.test_gui_decoder_views import _adsb
+
+        win = self.win
+        panel = win._decoder_panel
+        self.assertTrue(win.set_frequency(1090e6))
+        panel._proto_combo.setCurrentText("ADS-B")
+        self.settle(2)
+        panel.set_receiving(True)  # (no device runs in this test)
+        for _ in range(3):
+            win._push_decoded_message(_adsb(icao_address="4840D6", downlink_format=11))
+        win._run_decoder(np.zeros(64, dtype=np.complex64))
+        self.assertEqual(win._decoder_chip.text(), "ADS-B · 3 msgs")
+        self.assertTrue(
+            panel.decoder_status_text().startswith("ADS-B  ·  3 messages"),
+            panel.decoder_status_text(),
+        )
+        # A new decoder (as after a sample-rate change) keeps both at 3.
+        win._rebuild_decoder()
+        win._run_decoder(np.zeros(64, dtype=np.complex64))
+        self.assertEqual(win._decoder_chip.text(), "ADS-B · 3 msgs")
+        self.assertTrue(
+            panel.decoder_status_text().startswith("ADS-B  ·  3 messages"),
+            panel.decoder_status_text(),
+        )
+
+
 class TestExportFolderInTheWindow(_WindowTestCase):
     def test_the_panel_remembers_in_the_windows_settings(self):
         self.assertIs(self.win._decoder_panel._settings, self.win._settings)

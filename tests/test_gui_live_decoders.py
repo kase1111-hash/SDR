@@ -118,6 +118,9 @@ class TestLiveDecoderWiring(_WindowTestCase):
         # Regression: "Signal present but nothing decodes" stayed on after
         # retuning to a quiet channel (seen in the window going from a
         # 146.940 MHz voice channel to 150.000 MHz with POCSAG selected).
+        # (On a pager channel: elsewhere the line says "Not tuned to POCSAG"
+        # instead, the signal heard or not.)
+        self.assertTrue(self.win.set_frequency(152.24e6))
         decoder = self.select("POCSAG")
         panel = self.win._decoder_panel
         block = np.zeros(4096, dtype=np.complex64)
@@ -373,15 +376,30 @@ class TestDecoderPanelStatus(unittest.TestCase):
             "Not tuned to POCSAG: listening on 100.000 MHz",
         )
 
+    def add_pages(self, count, age):
+        """``count`` pages in the table, decoded ``age`` seconds ago."""
+        now, self.now = self.now, self.now - age
+        for i in range(count):
+            self.panel.add_message("POCSAG", f"{i} (F0)", "page")
+        self.now = now
+
     def test_counts_and_age(self):
+        # The pages in the table count (as the status-bar chip counts them);
+        # the decoder's own counts give the failed checks.
+        self.show(self.status())
+        self.add_pages(3, 4)
         text, tone = self.show(self.status(valid=3, last_time=self.now - 4))
         self.assertEqual(text, "POCSAG  ·  3 pages  ·  last 4 s ago")
         self.assertEqual(tone, "success")
+        self.panel.clear()
+        self.add_pages(1, 600)
         text, tone = self.show(self.status(valid=1, failed=2, last_time=self.now - 600))
         self.assertEqual(
             text, "POCSAG  ·  1 page  ·  last 10 min ago  ·  2 failed checks"
         )
         self.assertIsNone(tone)
+        self.panel.clear()
+        self.add_pages(2, 0)
         text, _tone = self.show(self.status(valid=2, failed=1, last_time=self.now))
         self.assertEqual(
             text, "POCSAG  ·  2 pages  ·  last just now  ·  1 failed check"
@@ -399,6 +417,7 @@ class TestDecoderPanelStatus(unittest.TestCase):
             (p._frames_label.text(), p._decoded_label.text(), p._failed_label.text()),
             ("0", "0", "0"),
         )
+        p.add_message("POCSAG", "1 (F0)", "page")  # (the page it decoded)
         p.set_decoder_status(
             self.status(frames=7, valid=6, failed=1, last_time=self.now)
         )

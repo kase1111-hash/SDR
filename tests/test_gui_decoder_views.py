@@ -346,9 +346,10 @@ class TestMorseText(_PanelCase):
         self.assertEqual(view.plain_text(), "CQ")
         self.assertEqual(view.speed.text(), "18 WPM")
         self.assertEqual(view.state.text(), "Receiving")
+        # (No line finished yet: no message in the table, as the chip says.)
         self.assertEqual(
             p.decoder_status_text(),
-            "CW (Morse)  ·  18 WPM  ·  3 characters  ·  last just now",
+            "CW (Morse)  ·  18 WPM  ·  0 messages (3 characters)  ·  last just now",
         )
         msg = MorseMessage(protocol=ProtocolType.CW, timestamp=0.0, raw_bits=b"",
                            valid=True, text="CQ DE N0CALL", wpm=18.0)  # fmt: skip
@@ -466,7 +467,8 @@ class TestMessageContext(_PanelCase):
             detail="SDR DEMO", signal_measured=True,
         ))  # fmt: skip
         self.assertEqual(
-            p.decoder_status_text(), "RDS  ·  SDR DEMO  ·  5 groups  ·  last just now"
+            p.decoder_status_text(),
+            "RDS  ·  SDR DEMO  ·  0 messages (5 groups)  ·  last just now",
         )
         p.set_decoder_status(LiveDecoderStatus(
             name="RDS", unit="group", signal_measured=True, signal_present=True,

@@ -205,6 +205,9 @@ _NO_VALUE = "–"
 _UNDECODED_SIGNAL_S = 6.0
 # A last message older than this is no longer shown as good news.
 _FRESH_S = 120.0
+# Decoder units that are one table row each; a decoder counting something
+# else (RDS groups, Morse characters) has it shown after its messages.
+_ROW_UNITS = ("message", "page", "packet")
 
 
 def _plural(count: int, unit: str) -> str:
@@ -629,14 +632,20 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._total = 0
         self._invalid = 0
         self._per_protocol: Counter = Counter()
-        # _per_protocol when the protocol being decoded was chosen: what
-        # it decoded since then (or since Clear) is what the status line
-        # and the window's status-bar chip count.
+        # Valid messages per protocol since Clear, and their count when the
+        # protocol being decoded was chosen: what it decoded since then (or
+        # since Clear) is what the status line and the window's status-bar
+        # chip count, alike.
+        self._valid_per_protocol: Counter = Counter()
         self._chosen_counts: Counter = Counter()
+        # clock() time of each protocol's last valid message.
+        self._row_times: Dict[str, float] = {}
         # Widest cell text seen per size-to-contents column, in px.
         self._col_content: Dict[int, int] = {}
-        # Receiver state, when the main window reports it (None: unknown).
+        # Receiver state, when the main window reports it (None: unknown),
+        # and the clock() time the tuned frequency last changed.
         self._tuned_hz: Optional[float] = None
+        self._tuned_at = -math.inf
         self._receiving: Optional[bool] = None
         # The user's Decode choice; the box shows unticked while Off.
         self._decode_wanted = True
@@ -1087,7 +1096,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # the new one's (or none) while handling the signal.
         self._decoder_status = None
         self._count_base = (0, 0, 0)
-        self._chosen_counts = Counter(self._per_protocol)
+        self._chosen_counts = Counter(self._valid_per_protocol)
         self._update_views()
         self._update_state()
         self.protocol_changed.emit(proto or PROTOCOL_OFF)
@@ -1164,6 +1173,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             return
         if math.isfinite(freq_hz) and freq_hz != self._tuned_hz:
             self._tuned_hz = freq_hz
+            self._tuned_at = self._clock()
             self._update_state()
             self._update_auto()
 
@@ -1494,14 +1504,27 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         if not self._receiving:
             return f"Stopped: {_START_HINT} to decode", "muted", ""
         here = _format_mhz(self._tuned_hz) if self._tuned_hz else ""
-        if status is None:
-            return (f"Listening on {here}" if here else "Listening"), None, ""
+        # One count with the status-bar chip: the protocol's messages since
+        # it was chosen (or Clear). A decoder counting something else (RDS
+        # groups, Morse characters) has its own count after it.
         unit = str(getattr(status, "unit", "message") or "message")
+        rows = self.count_for(proto)
+        row_unit = unit if unit in _ROW_UNITS else "message"
         frames, valid, failed = self._decoder_counts()
         tip = (
-            f"Since the decoder started (or Clear): {_plural(frames, 'frame')} "
-            f"heard, {valid:,} decoded, {failed:,} failed their checks."
+            (
+                f"Since the decoder started (or Clear): {_plural(frames, 'frame')} "
+                f"heard, {valid:,} decoded, {failed:,} failed their checks."
+            )
+            if status is not None
+            else ""
         )
+        if here and self._tuned_away(proto, status):
+            # The count stays, but not as good news from here.
+            earlier = f" ({_plural(rows, row_unit)} earlier)" if rows else ""
+            return f"Not tuned to {proto}: listening on {here}{earlier}", None, tip
+        if status is None:
+            return (f"Listening on {here}" if here else "Listening"), None, ""
         # Seconds of signal since the last valid message: a channel that
         # decoded before but carries something else now says so too.
         undecoded = float(getattr(status, "undecoded_signal_s", 0.0) or 0.0)
@@ -1516,10 +1539,13 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 tip,
             )
         detail = str(getattr(status, "detail", "") or "")
-        if valid:
-            last = getattr(status, "last_time", None)
+        if rows or valid:
+            last = self._last_heard(proto, status)
             age = self._clock() - last if last is not None else 0.0
-            parts = [proto, detail, _plural(valid, unit), f"last {_format_age(age)}"]
+            count = _plural(rows, row_unit)
+            if unit not in _ROW_UNITS:
+                count += f" ({_plural(valid, unit)})"
+            parts = [proto, detail, count, f"last {_format_age(age)}"]
             parts = [p for p in parts if p]
             if failed:
                 parts.append(f"{failed:,} failed check{'' if failed == 1 else 's'}")
@@ -1534,9 +1560,28 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         if getattr(status, "signal_present", False):
             text = f"Signal on {here}: waiting for {proto} {unit}s"
             return text, "info", tip
-        if here and not self._tuned_for(proto) and proto in PROTOCOL_BANDS:
-            return f"Not tuned to {proto}: listening on {here}", None, tip
         return (f"Listening on {here}" if here else "Listening"), None, tip
+
+    def _tuned_away(self, proto: str, status: Any) -> bool:
+        """Whether the receiver is tuned away from where ``proto`` is heard
+        and nothing decoded since it was tuned there. (ADS-B decodes the
+        whole span: off 1090 MHz with the span still holding it, its
+        messages go on, and so does its count.)"""
+        if proto not in PROTOCOL_BANDS or self._tuned_hz is None:
+            return False
+        if self._tuned_for(proto):
+            return False
+        last = getattr(status, "last_time", None)
+        return last is None or last < self._tuned_at
+
+    def _last_heard(self, proto: str, status: Any) -> Optional[float]:
+        """clock() time of the protocol's last message or decoded unit."""
+        times = [
+            t
+            for t in (getattr(status, "last_time", None), self._row_times.get(proto))
+            if t is not None
+        ]
+        return max(times) if times else None
 
     def _update_status_line(self) -> None:
         text, tone, tip = self._status_parts()
@@ -1663,6 +1708,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         if not valid:
             self._invalid += 1
         self._per_protocol[protocol] += 1
+        if valid:
+            self._valid_per_protocol[protocol] += 1
+            self._row_times[protocol] = self._clock()
 
         # Keep the table and the stored list the same length.
         overflow = len(self._messages) - self._max_messages
@@ -1716,6 +1764,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._update_tune_button()  # (the empty view's own button went)
         self._update_stats()
         self._update_buttons()
+        self._update_status_line()  # (it counts the messages)
 
     def _append_log(self, msg: Dict[str, Any]) -> None:
         """Append one message to the log with a hanging indent."""
@@ -1871,7 +1920,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._total = 0
         self._invalid = 0
         self._per_protocol.clear()
+        self._valid_per_protocol.clear()
         self._chosen_counts.clear()
+        self._row_times.clear()
         self._table.setRowCount(0)
         self._table_tail.reset()
         self._col_content.clear()
@@ -1992,11 +2043,13 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         return len(self._messages)
 
     def count_for(self, protocol: Optional[str]) -> int:
-        """Messages of ``protocol`` since it was chosen or since the last
-        Clear, whichever came later (what the status line counts too)."""
+        """Messages of ``protocol`` that passed their checks since it was
+        chosen or since the last Clear, whichever came later: what the
+        status line and the window's status-bar chip count (a decoder
+        rebuilt for another sample rate goes on counting)."""
         name = protocol or ""
         return max(
             0,
-            int(self._per_protocol.get(name, 0))
+            int(self._valid_per_protocol.get(name, 0))
             - int(self._chosen_counts.get(name, 0)),
         )

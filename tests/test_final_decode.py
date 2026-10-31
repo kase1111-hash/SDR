@@ -701,7 +701,10 @@ class TestColumnsShowTheirText(_PanelCase):
         def width(digit):
             return fm.horizontalAdvance(digit)
 
-        h1 = max("012", key=lambda d: width(d) + width(best("0123" if d == "2" else "0123456789")))
+        h1 = max(
+            "012",
+            key=lambda d: width(d) + width(best("0123" if d == "2" else "0123456789")),
+        )
         h2 = best("0123" if h1 == "2" else "0123456789")
         return f"{h1}{h2}:{best('012345')}{best('0123456789')}:{best('012345')}{best('0123456789')}"  # fmt: skip
 
@@ -1041,7 +1044,9 @@ class TestFileRowsApartInTheWindow(_FilesCase):
         self.answer()
         with self.open_dialog(path):
             self.assertTrue(self.win._decode_recording())
-        self.assertEqual([m["protocol"] for m in panel._messages], ["AX.25/APRS (file)"])
+        self.assertEqual(
+            [m["protocol"] for m in panel._messages], ["AX.25/APRS (file)"]
+        )
         self.assertEqual(panel._messages[0]["source"], "aprs.sigmf-data")
         self.assertEqual(panel.count_for("AX.25/APRS"), 0)  # (the live count)
         # Stamped with the recording's time (its start plus where in it).

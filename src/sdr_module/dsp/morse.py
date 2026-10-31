@@ -654,10 +654,7 @@ class MorseDecoder:
         """The queued transmission ended before the speed was known: decode
         it if it had enough marks to be one, else drop it (a blip of
         noise). Whether it was decoded."""
-        if (
-            len(self._marks) >= self.CALIBRATE_GAP_MARKS
-            or self._two_marks_like_code()
-        ):
+        if len(self._marks) >= self.CALIBRATE_GAP_MARKS or self._two_marks_like_code():
             self._calibrate()
             return True
         self._queue = []

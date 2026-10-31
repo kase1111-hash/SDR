@@ -1495,14 +1495,11 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 "the message table says where to listen."
             )
             check.setToolTip("Choose a protocol first")
-            empty = (
-                "No decoder selected\n"
-                + (
-                    "Choose a protocol above and tune to its frequency."
-                    if self._receiving
-                    else "Choose a protocol above, tune to its frequency and "
-                    f"{self._start_hint()}."
-                )
+            empty = "No decoder selected\n" + (
+                "Choose a protocol above and tune to its frequency."
+                if self._receiving
+                else "Choose a protocol above, tune to its frequency and "
+                f"{self._start_hint()}."
             )
         else:
             what, where = PROTOCOL_INFO.get(proto, ("", ""))

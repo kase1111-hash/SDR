@@ -1045,7 +1045,26 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         else:
             self._viewer.current_index = len(self._viewer.images) - 1
         self._rebuild_history_list()
+        self._show_newest_listed()
         return len(entries)
+
+    def _show_newest_listed(self) -> None:
+        """With nothing in the viewer (just started, say), show the image
+        selected in Received Images (the newest), as if just received, not
+        "No image yet" over a list of them. Quietly does nothing if its
+        file can't be read."""
+        if self._image_display.has_image() or self._decoder_busy():
+            return
+        if not 0 <= self._viewer.current_index < self._viewer.get_image_count():
+            return
+        image = self._current_entry_image()
+        if image is None:
+            return
+        self._image_display.set_image(image)
+        self._showing_complete = True
+        self._update_image_info()
+        self._refresh_history_ui()
+        self._update_action_buttons()
 
     def _rebuild_history_list(self) -> None:
         self._history_list.blockSignals(True)

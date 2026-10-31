@@ -711,5 +711,61 @@ class TestQrpCardDigits(_QrpCase):
         )
 
 
+class TestSSTVHistoryAfterARestart(_PanelCase):
+    """HAM-E2E-12: after a restart Received Images listed the saved images,
+    but the viewer said "No image yet" and Save Image was off until a row
+    was clicked."""
+
+    def write_image(self, name, height=240):
+        from pathlib import Path
+
+        from sdr_module.ham.gui.sstv_panel import save_rgb_image
+
+        path = Path(self.tmp.name) / name
+        save_rgb_image(sstv_test_card(320, height), str(path))
+        return path
+
+    def open_panel(self):
+        from sdr_module.ham.gui.sstv_panel import SSTVPanel
+
+        panel = SSTVPanel()
+        self.addCleanup(panel.deleteLater)
+        panel.set_save_directory(self.tmp.name)
+        panel.resize(360, 900)
+        panel.show()
+        settle()
+        return panel
+
+    def test_the_newest_saved_image_is_shown(self):
+        self.write_image("sstv_20261029_101530_Martin_1.png", 256)
+        self.write_image("sstv_20261029_111500_Robot_36_partial_180of240.png")
+        panel = self.open_panel()
+        self.assertEqual(panel._history_list.count(), 2)
+        self.assertTrue(panel._image_display.has_image())
+        self.assertEqual(panel._history_list.currentRow(), 1)
+        self.assertEqual(panel._image_count_label.text(), "2 of 2")
+        self.assertEqual(panel._mode_label.text(), "Robot 36")
+        self.assertTrue(panel._save_btn.isEnabled())
+        # Start Decoder: listening, the old picture stays until a new one.
+        panel._start_btn.click()
+        self.assertEqual(panel._status_label.text(), "Listening for an SSTV signal…")
+
+    def test_no_saved_images_keeps_the_empty_state(self):
+        panel = self.open_panel()
+        self.assertFalse(panel._image_display.has_image())
+        self.assertEqual(panel._image_count_label.text(), "No images")
+        self.assertFalse(panel._save_btn.isEnabled())
+
+    def test_an_unreadable_newest_file_stays_quiet(self):
+        from pathlib import Path
+
+        (Path(self.tmp.name) / "sstv_20261029_111500_Robot_36.png").write_bytes(
+            b"not a png"
+        )
+        panel = self.open_panel()
+        self.assertFalse(panel._image_display.has_image())
+        self.assertEqual(panel._status_label.text(), "")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

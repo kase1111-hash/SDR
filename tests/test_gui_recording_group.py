@@ -91,7 +91,7 @@ class TestFormats(_GroupCase):
         combo = self.panel._format_combo
         items = [combo.itemText(i) for i in range(combo.count())]
         self.assertEqual(len(items), 5)
-        self.assertEqual(items[0], "SigMF, keeps frequency & rate")
+        self.assertEqual(items[0], "SigMF, keeps frequency and rate")
         self.assertEqual(combo.currentIndex(), 0)
         self.win._record_button.click()
         self.assertTrue(combo.isEnabled())

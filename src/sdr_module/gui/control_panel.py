@@ -246,18 +246,27 @@ DEFAULT_FM_DEVIATION = "25 kHz"
 # Squelch threshold range (dBFS) of the slider and the toolbar meter.
 SQUELCH_RANGE = (-120, 0)
 
-# Named like File > Save Recording's filters, which preselect the choice.
-# SigMF first: it keeps the frequency and sample rate in a form every SDR
-# program reads.
-RECORDING_FORMATS = (
-    "SigMF, keeps frequency & rate",
-    "Complex Float32 I/Q (.cf32)",
-    "Complex Int16 I/Q (.cs16)",
-    "WAV, 16-bit I/Q (.wav)",
-    "Raw Float32 I/Q (.raw)",
+#: Every format File > Save Recording writes: (name, extension, file
+#: format, sample format). Its filters are "<name> (*<ext>)"; the Recording
+#: group's Format list offers the first five by the same names. SigMF
+#: first: it keeps the frequency and sample rate in a form every SDR
+#: program reads.
+SAVE_FORMATS: Tuple[Tuple[str, str, str, str], ...] = (
+    ("SigMF, keeps frequency and rate", ".sigmf-data", "SIGMF", "FLOAT32"),
+    ("Complex Float32", ".cf32", "RAW", "FLOAT32"),
+    ("Complex Int16", ".cs16", "RAW", "INT16"),
+    ("WAV, 16-bit I/Q", ".wav", "WAV", "INT16"),
+    ("Raw I/Q, Float32", ".raw", "RAW", "FLOAT32"),
+    ("Complex Uint8, rtl_sdr", ".cu8", "RAW", "UINT8"),
+    ("Complex Int8, hackrf_transfer", ".cs8", "RAW", "INT8"),
+)
+# The Recording group's choices (Save... preselects the same one).
+RECORDING_FORMATS = tuple(
+    name if ext == ".sigmf-data" else f"{name} ({ext})"
+    for name, ext, _kind, _sample in SAVE_FORMATS[:5]
 )
 #: The file extension of each of RECORDING_FORMATS (the save format).
-RECORDING_FORMAT_EXTENSIONS = (".sigmf-data", ".cf32", ".cs16", ".wav", ".raw")
+RECORDING_FORMAT_EXTENSIONS = tuple(ext for _n, ext, _k, _s in SAVE_FORMATS[:5])
 # What the Record buttons record: (key, Record list text, tooltip).
 RECORD_KINDS: Tuple[Tuple[str, str, str], ...] = (
     (
@@ -310,7 +319,8 @@ _VALUE_LABEL_WIDEST = "-120 dBFS"
 
 _FORMAT_TIP = (
     "File format for the recorded I/Q samples; File > Save Recording offers "
-    "it first. These are raw radio samples, not audio."
+    "it first, and can also write cu8 (rtl_sdr) and cs8 (hackrf_transfer). "
+    "These are raw radio samples, not audio."
 )
 
 _APPLY_PRESET_TIP = "Tune to this preset and set its bandwidth and demodulation mode"

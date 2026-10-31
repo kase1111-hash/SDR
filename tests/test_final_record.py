@@ -739,3 +739,21 @@ class TestRecordingGroupShowsTheOtherKind(_FilesCase):
         win._record_action.trigger()  # stop
         self.assertEqual(panel._record_status.text(), "Ready")
         panel.set_record_kind("iq")
+
+
+class TestOneNameForEachFormat(_FilesCase):
+    """REC-E2E-13: the Recording group's Format list and File > Save
+    Recording's filters named the same formats differently ("SigMF, keeps
+    frequency & rate" / "... and rate", "Raw Float32 I/Q" / "Raw I/Q,
+    Float32"), and the group didn't say Save... also writes cu8 and cs8."""
+
+    def test_the_group_and_the_save_dialog_use_the_same_names(self):
+        combo = self.win._control_panel._format_combo
+        filters = {spec[1]: spec[0] for spec in self.win._SAVE_FORMATS}
+        for i in range(combo.count()):
+            ext = combo.itemData(i)
+            name = combo.itemText(i).removesuffix(f" ({ext})")
+            self.assertEqual(filters[ext], f"{name} (*{ext})")
+        tip = combo.toolTip()
+        self.assertIn("cu8", tip)
+        self.assertIn("cs8", tip)

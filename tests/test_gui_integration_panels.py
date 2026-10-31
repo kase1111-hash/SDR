@@ -145,7 +145,7 @@ class TestControlPanelFixes(unittest.TestCase):
         # rate, rx:UX-06); the window maps each label to its file type by the
         # extension in parentheses.
         self.assertEqual(len(names), 5)
-        self.assertEqual(names[0], "SigMF, keeps frequency & rate")
+        self.assertEqual(names[0], "SigMF, keeps frequency and rate")
         extensions = [combo.itemData(i) for i in range(combo.count())]
         self.assertEqual(extensions, [".sigmf-data", ".cf32", ".cs16", ".wav", ".raw"])
         self.assertIn("not audio", combo.toolTip())

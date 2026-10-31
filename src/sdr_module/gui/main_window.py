@@ -135,6 +135,7 @@ from .bookmarks_panel import listening as bookmark_listening
 from .control_panel import (
     MAX_FREQUENCY_HZ,
     MIN_FREQUENCY_HZ,
+    SAVE_FORMATS,
     ControlPanel,
     bandwidth_options,
     closest_bandwidth,
@@ -8841,19 +8842,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     # Formats File > Save Recording writes:
     # (file dialog filter, extension, FileFormat name, SampleFormat name)
-    _SAVE_FORMATS: Tuple[Tuple[str, str, str, str], ...] = (
-        (
-            "SigMF, keeps frequency and rate (*.sigmf-data)",
-            ".sigmf-data",
-            "SIGMF",
-            "FLOAT32",
-        ),
-        ("Complex Float32 (*.cf32)", ".cf32", "RAW", "FLOAT32"),
-        ("Complex Int16 (*.cs16)", ".cs16", "RAW", "INT16"),
-        ("WAV, 16-bit I/Q (*.wav)", ".wav", "WAV", "INT16"),
-        ("Raw I/Q, Float32 (*.raw)", ".raw", "RAW", "FLOAT32"),
-        ("Complex Uint8, rtl_sdr (*.cu8)", ".cu8", "RAW", "UINT8"),
-        ("Complex Int8, hackrf_transfer (*.cs8)", ".cs8", "RAW", "INT8"),
+    # (filter, extension, file format, sample format): the Recording group's
+    # formats first, by the same names (control_panel.SAVE_FORMATS).
+    _SAVE_FORMATS: Tuple[Tuple[str, str, str, str], ...] = tuple(
+        (f"{name} (*{ext})", ext, kind, sample)
+        for name, ext, kind, sample in SAVE_FORMATS
     )
 
     def _panel_recording_extension(self) -> str:

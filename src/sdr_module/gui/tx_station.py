@@ -163,6 +163,13 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
     def busy(self) -> bool:
         return self.engine.busy
 
+    @property
+    def resumes_receiving(self) -> bool:
+        """While transmitting: whether receiving starts again when the
+        transmission ends (the receiver was running before it; otherwise it
+        stays off after it)."""
+        return bool(self.busy and self._resume_rx)
+
     def _panel(self) -> Any:
         return getattr(self._win, "_callsign_panel", None)
 

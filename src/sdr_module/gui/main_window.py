@@ -2141,8 +2141,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     _START_TEXT = "▶  Start"
     _STOP_TEXT = "■  Stop"
     _RECORD_TEXT = "●  Record"
-    # What the dimmed plots say while transmitting.
+    # What the dimmed plots say while transmitting: receiving resumes when it
+    # ends, or (not receiving before it) the receiver stays off after it.
     _ON_AIR_PLOT_TEXT = "Transmitting - receiving resumes when it ends"
+    _ON_AIR_IDLE_PLOT_TEXT = "Transmitting - press Space to receive once it ends"
     # The Audio button's four states (see _audio_state). (A leading space:
     # Qt leaves almost no gap after a button's icon.)
     _AUDIO_ON_TEXT = " Audio"
@@ -6151,9 +6153,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._is_running:
             return
         if self._tx_busy():
+            after = (
+                "receiving resumes when the transmission ends."
+                if self._tx_resumes_rx()
+                else "start receiving once the transmission ends (Space)."
+            )
             self._show_status_message(
-                "Can't receive while transmitting (the HackRF is half duplex): "
-                "receiving resumes when the transmission ends.",
+                f"Can't receive while transmitting (the HackRF is half duplex): "
+                f"{after}",
                 "warning",
             )
             return
@@ -6223,17 +6230,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         station = getattr(self, "_tx_station", None)
         return bool(station is not None and station.busy)
 
+    def _tx_resumes_rx(self) -> bool:
+        """While transmitting: whether receiving resumes when it ends (the
+        receiver was running before; otherwise it stays off after it)."""
+        station = getattr(self, "_tx_station", None)
+        return bool(station is not None and station.resumes_receiving)
+
     def _show_tx_state(self, on_air: bool) -> None:
         """While transmitting, the status bar's state badge says ON AIR, the
-        plots say receiving resumes when it ends, and Start is off (the
-        HackRF is half duplex: Start or Space would only be refused). All
-        of it comes back with the next _refresh_state_ui."""
+        plots say whether receiving resumes when it ends, and Start is off
+        (the HackRF is half duplex: Start or Space would only be refused).
+        All of it comes back with the next _refresh_state_ui."""
         if on_air:
+            resumes = self._tx_resumes_rx()
             self._state_badge.setText("ON AIR")
             set_tone(self._state_badge, "danger")
             self._state_badge.setToolTip(
-                "Transmitting; receiving resumes when the transmission ends. "
-                "Click to stop transmitting."
+                (
+                    "Transmitting; receiving resumes when the transmission ends. "
+                    if resumes
+                    else "Transmitting. "
+                )
+                + "Click to stop transmitting."
             )
             self._state_badge.setCursor(Qt.CursorShape.PointingHandCursor)
             button = self._start_button
@@ -6241,14 +6259,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if button.property("role"):
                 set_role(button, None)
             button.setToolTip(
-                "Receiving resumes when the transmission ends (the ON AIR "
-                "badge stops it)"
+                ("Receiving resumes when" if resumes else "Start receiving once")
+                + " the transmission ends (the ON AIR badge stops it)"
             )
             button.setEnabled(False)
             self._start_action.setText("&Start Receiving\tSpace")
             self._start_action.setEnabled(False)
+            text = self._ON_AIR_PLOT_TEXT if resumes else self._ON_AIR_IDLE_PLOT_TEXT
             for plot in (self._spectrum, self._waterfall):
-                plot.set_stale(self._ON_AIR_PLOT_TEXT)
+                plot.set_stale(text)
 
     def _transmit_job(self, job: "TxJob", confirm: bool = True) -> bool:
         """Transmit ``job`` (see :class:`~.transmitter.TxJob`) on the HackRF:
@@ -6326,8 +6345,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._sync_record_ui(True)
         if self._tx_busy():  # (Space is refused until it ends)
             self._show_status_message(
-                "Recording armed: samples are captured when receiving resumes "
-                "after the transmission",
+                "Recording armed: samples are captured "
+                + (
+                    "when receiving resumes after the transmission"
+                    if self._tx_resumes_rx()
+                    else "once you start receiving after the transmission (Space)"
+                ),
                 "warning",
                 6000,
             )
@@ -6850,7 +6873,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._sync_audio_record_ui()
         note = ""
         if self._tx_busy():  # (Space is refused until it ends)
-            note = " It starts when receiving resumes after the transmission."
+            note = (
+                " It starts when receiving resumes after the transmission."
+                if self._tx_resumes_rx()
+                else " It starts with the receiver after the transmission (Space)."
+            )
         elif not (self._is_running and self._device is not None):
             note = " It starts with the receiver (Space)."
         elif not self._audio_enabled:
@@ -10354,7 +10381,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if running:
             text = None
         elif self._tx_busy():
-            text = self._ON_AIR_PLOT_TEXT
+            text = (
+                self._ON_AIR_PLOT_TEXT
+                if self._tx_resumes_rx()
+                else self._ON_AIR_IDLE_PLOT_TEXT
+            )
         elif not has_device:
             text = "No device - press Space to connect one"
         elif playback is not None and getattr(playback, "finished", False):

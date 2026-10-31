@@ -35,6 +35,8 @@ if HAS_PYQT6:
     from PyQt6.QtWidgets import QApplication, QScrollArea
 
 ON_AIR_TEXT = "Transmitting - receiving resumes when it ends"
+# (Not receiving before the transmission: the receiver stays off after it.)
+ON_AIR_IDLE_TEXT = "Transmitting - press Space to receive once it ends"
 
 
 class TestWindowWhileOnTheAir(_TxCase):
@@ -56,14 +58,19 @@ class TestWindowWhileOnTheAir(_TxCase):
         self.assertTrue(self.station.busy)
         QApplication.processEvents()
 
-    def _assert_on_air_state(self):
+    def _assert_on_air_state(self, resumes=True):
+        """``resumes``: the receiver was running before the transmission,
+        so it starts again when it ends (else it stays off)."""
         win = self.win
-        self.assertEqual(win._spectrum.stale_text(), ON_AIR_TEXT)
-        self.assertEqual(win._waterfall.stale_text(), ON_AIR_TEXT)
+        text = ON_AIR_TEXT if resumes else ON_AIR_IDLE_TEXT
+        self.assertEqual(win._spectrum.stale_text(), text)
+        self.assertEqual(win._waterfall.stale_text(), text)
         button = win._start_button
         self.assertFalse(button.isEnabled())
         self.assertNotEqual(button.property("role"), "primary")
-        self.assertIn("transmission ends", button.toolTip())
+        tip = button.toolTip()
+        self.assertIn("transmission ends", tip)
+        self.assertEqual(tip.startswith("Receiving resumes"), resumes, tip)
         self.assertFalse(win._start_action.isEnabled())
         self.assertEqual(win._state_badge.text(), "ON AIR")
 
@@ -89,10 +96,14 @@ class TestWindowWhileOnTheAir(_TxCase):
         self.win._stop_acquisition()
 
     def test_receiver_stopped_before(self):
+        """(Checker: the receiver stays off after this transmission, so the
+        plots and Start don't say receiving resumes when it ends.)"""
         self.hackrf(pace=True)
         self.assertFalse(self.win._is_running)
         self._send_slow_id()
-        self._assert_on_air_state()
+        self._assert_on_air_state(resumes=False)
+        self.win._refresh_state_ui()
+        self._assert_on_air_state(resumes=False)
         self.station.stop()
         self.wait_done(5)
         QApplication.processEvents()
@@ -107,6 +118,7 @@ class TestWindowWhileOnTheAir(_TxCase):
 
     def test_recording_armed_on_the_air_says_when_it_captures(self):
         self.hackrf(pace=True)
+        self.win._start_acquisition()  # (receiving resumes after the ID)
         self._send_slow_id()
         self.assertTrue(self.win._start_recording())
         text = self.win._message_label.text()
@@ -115,6 +127,64 @@ class TestWindowWhileOnTheAir(_TxCase):
         self.win._stop_recording()
         self.station.stop()
         self.wait_done(5)
+        self.win._stop_acquisition()
+
+    def _record_audio_folder(self):
+        folder = tempfile.mkdtemp(prefix="sdr-final-ham-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.store.set("recording/folder", folder)
+
+    def test_recording_armed_while_not_receiving_says_to_start_it(self):
+        """(Checker.) The receiver was off before the transmission and
+        stays off after it: capturing starts when the user starts receiving
+        then (Space), not by itself, and the messages say so."""
+        self._record_audio_folder()
+        self.hackrf(pace=True)
+        self._send_slow_id()
+        self.assertTrue(self.win._start_recording())
+        text = self.win._message_label.text()
+        self.assertNotIn("resumes", text)
+        self.assertIn("once you start receiving after the transmission (Space)", text)
+        self.win._stop_recording()
+        self.assertTrue(self.win._start_audio_recording())
+        text = self.win._message_label.text()
+        self.assertNotIn("resumes", text)
+        self.assertIn(
+            "It starts with the receiver after the transmission (Space)", text
+        )
+        self.win._stop_audio_recording(quiet=True)
+        # Space (Start) on the air: refused, saying what to do after it.
+        self.win._start_acquisition()
+        text = self.win._message_label.text()
+        self.assertTrue(text.startswith("Can't receive while transmitting"), text)
+        self.assertNotIn("resumes", text)
+        self.assertIn("start receiving once the transmission ends (Space)", text)
+        self.station.stop()
+        self.wait_done(5)
+        QApplication.processEvents()
+        self.assertFalse(self.win._is_running)
+
+    def test_the_audio_recording_and_space_while_receiving_resumes(self):
+        """(Checker.) The receiver was running: the messages say receiving
+        resumes when the transmission ends."""
+        self._record_audio_folder()
+        self.hackrf(pace=True)
+        self.win._start_acquisition()
+        self._send_slow_id()
+        self.assertTrue(self.win._start_audio_recording())
+        text = self.win._message_label.text()
+        self.assertIn("It starts when receiving resumes after the transmission.", text)
+        self.win._stop_audio_recording(quiet=True)
+        self.win._start_acquisition()
+        self.assertIn(
+            "receiving resumes when the transmission ends",
+            self.win._message_label.text(),
+        )
+        self.station.stop()
+        self.wait_done(5)
+        QApplication.processEvents()
+        self.assertTrue(self.win._is_running)
+        self.win._stop_acquisition()
 
 
 class TestStartNowOnAuto(_PanelCase):

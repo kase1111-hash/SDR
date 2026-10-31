@@ -948,3 +948,40 @@ class TestNonFiniteCenterAsksInTheWindow(_FilesCase):
         self.assertTrue(np.isfinite(self.win._lo_frequency()))
         self.assertNotIn("nan", self.win._playback_bar.file_text().lower())
         self.win._playback.close()
+
+
+class TestCentersAboveTheReceiversRange(_FilesCase):
+    """Leftover 21: Import Options refused a typed center above 6 GHz (the
+    receiver's range), though recordings there play (a 10 GHz downlink)."""
+
+    def test_a_headerless_10_ghz_capture_can_be_given_its_center(self):
+        from sdr_module.gui.iq_files import ImportOptionsDialog, describe_iq_file
+
+        path = self.path("qo100.cs16")
+        with open(path, "wb") as handle:
+            handle.write(_cs16_noise(30, n=4 * N))
+        options, missing = describe_iq_file(path)
+        dialog = ImportOptionsDialog(options, missing, "play")
+        self.addCleanup(dialog.deleteLater)
+        dialog._rate_edit.setText("2.4M")
+        dialog._center_edit.setText("10489.75")
+        self.assertEqual(dialog.center_hz(), 10489.75e6)
+        dialog._on_accept()
+        self.assertEqual(dialog.options().center_hz, 10489.75e6)
+        # It plays there (the window's range follows the recording).
+        self.assertTrue(self.win._playback.open(dialog.options()))
+        self.assertEqual(self.win._lo_frequency(), 10489.75e6)
+        self.win._playback.close()
+
+    def test_far_too_high_is_still_refused(self):
+        from sdr_module.gui.iq_files import ImportOptionsDialog, describe_iq_file
+
+        path = self.path("odd.cs16")
+        with open(path, "wb") as handle:
+            handle.write(_cs16_noise(30, n=N))
+        options, missing = describe_iq_file(path)
+        dialog = ImportOptionsDialog(options, missing, "play")
+        self.addCleanup(dialog.deleteLater)
+        dialog._center_edit.setText("5000G")
+        self.assertIsNone(dialog.center_hz())
+        self.assertIn("Can't read the center frequency", dialog.check_text())

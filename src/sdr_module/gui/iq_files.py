@@ -135,9 +135,11 @@ _COMMON_RATES = {
 }
 _UNIT = {"": 1.0, "k": 1e3, "m": 1e6, "g": 1e9}
 _MIN_CENTER_HZ = 1e3
-_MAX_CENTER_HZ = 6e9
-#: Frequencies the playback can be tuned to: what the receiver tunes.
-PLAYBACK_RANGE = (_MIN_CENTER_HZ, _MAX_CENTER_HZ)
+_MAX_CENTER_HZ = 6e9  # (a bare number in a file name: what receivers tune)
+#: Where a recording can be centered (typed in Import Options): a capture
+#: through a downconverter lies above the receiver's range (a 10 GHz
+#: downlink), and plays there too.
+PLAYBACK_RANGE = (_MIN_CENTER_HZ, 300e9)
 
 
 @dataclass
@@ -731,8 +733,8 @@ if HAS_PYQT6:
             if center is None:
                 return None, (
                     "Can't read the center frequency: type it in MHz (433.92) "
-                    "or with a unit (7074k, 1.09G); the receiver tunes "
-                    "0.001–6000 MHz."
+                    "or with a unit (7074k, 1.09G); a recording is centered "
+                    "between 0.001 MHz and 300 GHz."
                 )
             for key, value in (("rate", rate), ("center", center)):
                 if key in self._required and not value:

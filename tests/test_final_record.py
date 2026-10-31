@@ -1174,9 +1174,7 @@ class TestInputWaitsWithTheProgressDialogUp(_FilesCase):
         win = self.win
 
         def cancel():
-            dialog = next(
-                w for w in win.findChildren(QProgressDialog) if w.isVisible()
-            )
+            dialog = next(w for w in win.findChildren(QProgressDialog) if w.isVisible())
             button = dialog.findChild(QPushButton)
             QTest.mouseClick(button, Qt.MouseButton.LeftButton)
 

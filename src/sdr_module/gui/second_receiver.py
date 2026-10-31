@@ -2803,7 +2803,7 @@ if HAS_PYQT6:
             free = self._free_space(folder)
             if free is not None and free < _MIN_FREE_BYTES:
                 self._show_message(
-                    f"Can't record: only {format_size(free)} of disk space " "is left.",
+                    f"Can't record: only {format_size(free)} of disk space is left.",
                     "danger",
                     10000,
                 )
@@ -2897,11 +2897,12 @@ if HAS_PYQT6:
             if problem:
                 text = f"Recording stopped: {problem}. {text}"
                 logger.warning(text)
-                self._recording_said = (text, "danger", 20000)
+                said = (text, "danger", 20000)
             else:
                 logger.info(text)
-                self._recording_said = (text, "success", 10000)
-            self._show_message(*self._recording_said)
+                said = (text, "success", 10000)
+            self._recording_said = said
+            self._show_message(*said)
 
         def _sync_record_ui(self) -> None:
             on = self._recorder is not None

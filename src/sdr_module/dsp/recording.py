@@ -3659,7 +3659,7 @@ def check_iq_samples(
     if integer and good.size:
         # (Within 1% of it: cs8's 126..127 and -127..-128, cu8's 0..1 and
         # 254..255.)
-        parts = np.abs(good.view(np.float32))
+        parts = np.abs(good.astype(np.complex64, copy=False).view(np.float32))
         full_scale = int(np.count_nonzero(parts >= 0.99))
         spread_i = float(np.var(good.real.astype(np.float64)))
         spread_q = float(np.var(good.imag.astype(np.float64)))

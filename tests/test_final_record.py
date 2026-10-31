@@ -620,3 +620,36 @@ class TestOneSizeUnit(_FilesCase):
         with mock.patch.object(self.mw.shutil, "disk_usage", return_value=usage):
             self.assertFalse(self.win._start_recording())
         self.assertIn("only 420 MB of disk space", self.message())
+
+
+class TestSecondReceiverStopSaysWhereTheRecordingWent(_FilesCase):
+    """REC-E2E-11: Stop during a second-receiver recording kept the file but
+    only said "Stopped; Demo Device (simulated) is closed."; the demo device
+    had two names."""
+
+    def test_stop_says_the_recording_was_saved(self):
+        win = self.win
+        self.store.values["recording/folder"] = self.folder
+        rx = win._second_rx.show()
+        rx._status_timer.stop()
+        self.assertTrue(rx.start())
+        rx.tune(145.8e6, recenter=True)
+        self.assertTrue(rx._set_recording(True))
+        for _ in range(4):
+            rx._frame()
+        rx.stop()
+        text = rx.message()
+        self.assertTrue(
+            text.startswith(
+                "Stopped; Demo Device (simulated signals) is closed. Saved "
+            ),
+            text,
+        )
+        self.assertIn("_rx2.sigmf-data", text)
+        self.assertIn("File > Open Recording", text)
+        self.assertEqual(rx._message_label.property("tone"), "success")
+
+    def test_one_name_for_the_demo_device(self):
+        from sdr_module.gui.second_receiver import DEMO_NAME
+
+        self.assertEqual(DEMO_NAME, self.win._device_display_name())

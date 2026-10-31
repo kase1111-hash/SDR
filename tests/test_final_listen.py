@@ -755,3 +755,61 @@ class TestTrackSignalMovesEverything(_WindowTestCase):
         peak.assert_not_called()
         rds.assert_not_called()
         tuner.assert_not_called()
+
+
+# --------------------------------------------------------------------------- #
+# Audio: Mute without an output, Ctrl+arrows in fields and lists
+# --------------------------------------------------------------------------- #
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestMuteWithoutAnOutput(_WindowTestCase):
+    """Leftover 12: with no audio output device the Audio button said "No
+    output" while Radio > Audio > Mute showed checked, as if muted by
+    you."""
+
+    def no_output(self):
+        from unittest import mock
+
+        return mock.patch.object(
+            type(self.win),
+            "_audio_output_problem",
+            return_value="No audio output device",
+        )
+
+    def plugged_in(self):
+        from unittest import mock
+
+        return (
+            mock.patch.object(
+                type(self.win), "_audio_output_problem", return_value=None
+            ),
+            mock.patch.object(self.win._audio, "start", return_value=True),
+        )
+
+    def test_mute_is_not_checked_without_an_output(self):
+        win = self.win
+        with self.no_output():
+            win._set_audio_enabled(True)
+        self.assertEqual(win._audio_state(), "no_output")
+        self.assertEqual(win._audio_button.text().strip(), "No output")
+        self.assertFalse(win._mute_action.isChecked())
+
+    def test_ctrl_m_there_tries_the_output_again(self):
+        win = self.win
+        with self.no_output():
+            win._set_audio_enabled(True)
+            win._mute_action.trigger()  # Ctrl+M
+        self.assertEqual(win._audio_state(), "no_output")
+        self.assertFalse(win._mute_action.isChecked())
+        self.assertIn("No audio output device", win._message_label.text())
+        self.assertNotEqual(self.store.values.get("audio_enabled"), False)
+        present, opens = self.plugged_in()
+        with present, opens:
+            win._set_demod_mode("FM", "5 kHz", "25 kHz")
+            win._mute_action.trigger()  # plugged in: it plays
+            self.assertEqual(win._audio_state(), "on")
+            self.assertFalse(win._mute_action.isChecked())
+            win._mute_action.trigger()  # muted by you
+        self.assertEqual(win._audio_state(), "muted")
+        self.assertTrue(win._mute_action.isChecked())

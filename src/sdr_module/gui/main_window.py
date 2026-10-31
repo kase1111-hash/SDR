@@ -3134,7 +3134,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._mute_action = self._add_action(
             audio_menu,
             "&Mute",
-            lambda muted: self._set_audio_enabled(not muted),
+            self._on_mute_action,
             "Ctrl+M",
             "Silence the speaker, or play the tuned signal (AM, FM, SSB or CW) "
             "again while it is above squelch (also M with the plots focused, "
@@ -10187,6 +10187,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 2000,
             )
 
+    def _on_mute_action(self, muted: bool) -> None:
+        """Radio > Audio > Mute (Ctrl+M, M with the plots focused)."""
+        if self._audio_state() == "no_output":
+            # Nothing plays (no output device), so Mute isn't checked: like
+            # the Audio button there, it tries the output again.
+            self._set_audio_enabled(True)
+            self._sync_audio_ui()
+            return
+        self._set_audio_enabled(not muted)
+
     def _audio_state(self) -> str:
         """What the Audio button shows: ``"on"``, ``"muted"`` (by you),
         ``"no_output"`` (no audio output device, or no QtMultimedia) or
@@ -10286,7 +10296,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         _audio_state) and Radio > Audio > Mute."""
         state = self._audio_state()
         on = bool(self._audio_enabled and self._audio.available)
-        controls = ((self._mute_action, not on), (self._audio_button, on))
+        # Mute is checked when you muted it, not when nothing can play
+        # ("No output").
+        muted = not on and state != "no_output"
+        controls = ((self._mute_action, muted), (self._audio_button, on))
         for control, checked in controls:
             if control.isChecked() != checked:
                 control.blockSignals(True)

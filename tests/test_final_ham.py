@@ -1005,5 +1005,21 @@ class TestDataJobCarriesItsCwId(_TxCase):
         self.wait_done(5)
 
 
+class TestPresetPowerTip(unittest.TestCase):
+    """L31: the Presets group's 'Transmit (legal limit ...)' tooltip said
+    the app only blocks power above 150% of the legal limit; the transmit
+    path refuses a calculated output above the legal limit itself."""
+
+    def test_the_tip_says_what_the_app_does(self):
+        from sdr_module.gui.control_panel import _power_limit_tip
+
+        tip = _power_limit_tip(50.0)
+        self.assertTrue(tip.startswith("Legal limit: 50 W at your transmitter"))
+        self.assertNotIn("150", tip)
+        self.assertNotIn("75 W", tip)
+        self.assertIn("won't transmit", tip)
+        self.assertIn("QRP tab", tip)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

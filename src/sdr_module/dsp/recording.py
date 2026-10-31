@@ -3038,8 +3038,12 @@ class FormatDetector:
             }
             sample_format = format_map.get(datatype, SampleFormat.FLOAT32)
 
-            sample_rate = global_meta.get("core:sample_rate", 0.0)
-            center_freq = captures[0].get("core:frequency", 0.0) if captures else 0.0
+            # (NaN, infinity, 0 or below, or not a number: unknown, so the
+            # app asks rather than tuning to "nan MHz".)
+            sample_rate = _positive(global_meta.get("core:sample_rate"))
+            center_freq = (
+                _positive(captures[0].get("core:frequency")) if captures else 0.0
+            )
 
             # Calculate samples from file size
             file_size = data_path.stat().st_size if data_path.exists() else 0

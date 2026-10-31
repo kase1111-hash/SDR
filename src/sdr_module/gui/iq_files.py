@@ -413,8 +413,9 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
     options = IqFileOptions(
         path=str(path),
         sample_format=info.sample_format,
-        sample_rate=float(info.sample_rate or 0.0),
-        center_hz=float(info.center_frequency or 0.0),
+        # (A value that isn't a finite positive number is unknown: asked.)
+        sample_rate=_known(info.sample_rate),
+        center_hz=_known(info.center_frequency),
         file_format=info.file_format,
         total_samples=int(info.num_samples),
         source=source,
@@ -438,6 +439,15 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
     if not options.center_hz:
         missing.add("center")
     return options, missing
+
+
+def _known(value: Any) -> float:
+    """``value`` as a finite positive float, else 0.0 (unknown)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) and number > 0 else 0.0
 
 
 def _content_guess(path: str, sure: bool = False) -> Optional[SampleFormat]:

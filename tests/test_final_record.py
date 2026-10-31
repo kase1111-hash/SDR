@@ -885,3 +885,66 @@ class TestQuietEightBitSaves(_FilesCase):
             ],
             [],
         )
+
+
+class TestNonFiniteMetadataIsMissing:
+    """Leftover 20: a recording whose metadata center (or rate) was NaN or
+    Infinity played with a NaN LO ("(nan-nan MHz)") instead of asking."""
+
+    @pytest.mark.parametrize(
+        "center, rate",
+        [
+            (float("nan"), 1e6),
+            (float("inf"), 1e6),
+            (-144.39e6, 1e6),
+            (144.39e6, float("nan")),
+            (144.39e6, float("-inf")),
+            (144.39e6, "fast"),
+        ],
+    )
+    def test_treated_as_unknown(self, tmp_path, center, rate):
+        import json
+
+        from sdr_module.dsp.recording import detect_format
+        from sdr_module.gui.iq_files import describe_iq_file
+
+        base = tmp_path / "odd"
+        np.zeros(1000, np.complex64).tofile(str(base) + ".sigmf-data")
+        meta = {
+            "global": {"core:datatype": "cf32_le", "core:sample_rate": rate},
+            "captures": [{"core:sample_start": 0, "core:frequency": center}],
+            "annotations": [],
+        }
+        with open(str(base) + ".sigmf-meta", "w") as handle:
+            json.dump(meta, handle)  # (writes NaN / Infinity as JSON does)
+        info = detect_format(str(base) + ".sigmf-data")
+        assert info.is_valid, info.error_message
+        for value in (info.sample_rate, info.center_frequency):
+            assert np.isfinite(value) and value >= 0
+        options, missing = describe_iq_file(str(base) + ".sigmf-data")
+        good_center = isinstance(center, float) and np.isfinite(center) and center > 0
+        good_rate = isinstance(rate, float) and np.isfinite(rate) and rate > 0
+        assert ("center" in missing) is not good_center
+        assert ("rate" in missing) is not good_rate
+        assert np.isfinite(options.center_hz) and np.isfinite(options.sample_rate)
+
+
+class TestNonFiniteCenterAsksInTheWindow(_FilesCase):
+    def test_import_options_asks_for_the_center(self):
+        import json
+
+        base = self.path("odd_center")
+        np.zeros(48000, np.complex64).tofile(base + ".sigmf-data")
+        meta = {
+            "global": {"core:datatype": "cf32_le", "core:sample_rate": 240e3},
+            "captures": [{"core:sample_start": 0, "core:frequency": float("nan")}],
+        }
+        with open(base + ".sigmf-meta", "w") as handle:
+            json.dump(meta, handle)
+        with self.open_dialog(base + ".sigmf-data"):
+            self.assertTrue(self.win._open_recording())
+        kinds = [type(b).__name__ for b in self.boxes]
+        self.assertEqual(kinds, ["ImportOptionsDialog"])
+        self.assertTrue(np.isfinite(self.win._lo_frequency()))
+        self.assertNotIn("nan", self.win._playback_bar.file_text().lower())
+        self.win._playback.close()

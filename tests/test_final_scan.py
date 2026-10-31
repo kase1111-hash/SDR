@@ -223,5 +223,98 @@ class TestTypingAFrequencyDuringAScan(_ScanWindowCase):
         self.assertAlmostEqual(field.value(), 100.5)
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-05: Listen on a bookmark-scan result keeps the bookmark's tone squelch
+# --------------------------------------------------------------------------- #
+class TestBookmarkResultsKeepTheirTone(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_the_engine_reports_the_bookmark_tone(self):
+        from sdr_module.gui.scan_engine import LISTEN, ScanEngine, ScanSettings
+        from tests.test_gui_scanner import _demo, _DemoHost, _run
+
+        dev = _demo(145.29e6)
+        host = _DemoHost(dev, active=[145.29e6])
+        engine = ScanEngine(host)
+        found = []
+        engine.on_found = found.append
+        visit = {
+            "index": 0,
+            "label": "Rpt 100",
+            "freq_hz": 145.29e6,
+            "demod": "FM",
+            "fm_deviation": "5 kHz",
+            "bandwidth": "",
+            "tone_hz": 100.0,
+        }
+        settings = ScanSettings(mode="bookmarks", bookmarks=[visit])
+        self.assertEqual(engine.start(settings, dev.sample_rate, 0.0), "")
+        _run(engine, dev, 2.0, until=lambda: engine.state == LISTEN)
+        engine.stop()
+        self.assertEqual([(f.label, f.tone_hz) for f in found], [("Rpt 100", 100.0)])
+
+    def test_results_keep_the_tone_and_two_tones_are_two_results(self):
+        from sdr_module.gui.scan_engine import Found
+        from sdr_module.gui.scanner_panel import ScanHit, ScannerPanel
+        from tests.test_gui_scanner import FakeWindow
+
+        store = _FakeSettings()
+        panel = ScannerPanel(settings=store)
+        panel.set_host(FakeWindow())
+        try:
+            panel.set_scan_mode("bookmarks")
+            panel.engine.settings.mode = "bookmarks"
+            listening = ("FM", "5 kHz", "")
+            for tone in (100.0, 88.5, 100.0):
+                panel._on_found(
+                    Found(145.29e6, -50.0, -90.0, 10e3, listening, "Rpt", tone_hz=tone)
+                )
+            hits = panel.hits()
+            self.assertEqual(sorted(h.tone_hz for h in hits), [88.5, 100.0])
+            self.assertEqual([h.count for h in hits if h.tone_hz == 100.0], [2])
+            # Kept between sessions (and a damaged saved tone means none).
+            again = ScanHit.from_dict(hits[0].to_dict())
+            self.assertEqual(again.tone_hz, hits[0].tone_hz)
+            data = dict(hits[0].to_dict(), tone_hz="nan")
+            self.assertEqual(ScanHit.from_dict(data).tone_hz, 0.0)
+            self.assertEqual(ScanHit.from_dict({"frequency_hz": 1e8}).tone_hz, 0.0)
+        finally:
+            panel.engine.stop()
+            panel.deleteLater()
+            _settle()
+
+
+class TestListenToABookmarkResult(_ScanWindowCase):
+    demo = True
+
+    def test_listen_restores_the_bookmark_tone_squelch(self):
+        from sdr_module.gui.scan_engine import LISTEN
+
+        win, panel = self.win, self.win._scanner_panel
+        bookmarks = win._bookmarks_panel
+        index = bookmarks.add_bookmark("Rpt 100", 145.29e6, "FM", "5 kHz")
+        bookmarks.set_tone(index, 100.0)  # the demo repeater's tone
+        panel.set_scan_mode("bookmarks")
+        self.assertTrue(panel.start_scan())
+        self.assertTrue(self.frames(4.0, until=lambda: panel.engine.state == LISTEN))
+        panel.stop_scan()
+        self.assertEqual([h.label for h in panel.hits()], ["Rpt 100"])
+        # Somewhere else, with no tone squelch; then Listen to the result.
+        win.set_frequency(100.1e6)
+        win._control_panel.set_tone_squelch_hz(0.0)
+        messages = []
+        real = win._show_status_message
+        win._show_status_message = lambda text, *a, **k: (
+            messages.append(text),
+            real(text, *a, **k),
+        )
+        panel._table.selectRow(0)
+        panel.listen_selected()
+        self.assertAlmostEqual(win._current_frequency(), 145.29e6)
+        self.assertEqual(win._control_panel.tone_squelch_hz(), 100.0)
+        self.assertIn("Tuned to Rpt 100 (FM, tone squelch 100.0 Hz)", messages)
+
+
 if __name__ == "__main__":
     unittest.main()

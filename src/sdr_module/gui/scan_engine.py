@@ -162,6 +162,7 @@ class Found:
     listening: Listening
     label: str = ""  # a bookmark's name
     heard: bool = False  # the scan stopped on it and the squelch opened
+    tone_hz: float = 0.0  # a bookmark's CTCSS tone squelch (0: none)
 
     @property
     def snr_db(self) -> float:
@@ -582,6 +583,7 @@ class ScanEngine:
                 float(b.get("width_hz") or 10e3),
                 listening,
                 label=str(b.get("label") or ""),
+                tone_hz=tone,
             )
             self.host.scan_set_muted(True)
             if self.host.scan_tune_channel(freq, listening, tone):

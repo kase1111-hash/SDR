@@ -330,8 +330,9 @@ class WindowScannerHost(ScannerHost):
 
     # ---- results ---------------------------------------------------------- #
     def scan_listen(self, hit: ScanHit) -> bool:
-        """Tune to a result in its mode, filter and (no) tone squelch, and
-        start the receiver if it is stopped, so it is heard."""
+        """Tune to a result in its mode, filter and tone squelch (a
+        bookmark's own, else none), and start the receiver if it is
+        stopped, so it is heard."""
         win = self._win
         label = hit.label or default_bookmark_name(hit.frequency_hz)
         win._on_bookmark_tune(hit.frequency_hz, label, hit.mode, hit.fm_deviation)
@@ -340,7 +341,13 @@ class WindowScannerHost(ScannerHost):
         if hit.mode and hit.bandwidth:
             win._set_demod_mode(hit.mode, hit.fm_deviation or None, hit.bandwidth)
         if hit.mode == "FM":
-            win._control_panel.set_tone_squelch_hz(0.0)
+            tone = float(hit.tone_hz or 0.0)
+            win._control_panel.set_tone_squelch_hz(tone)
+            if tone:
+                # (As tuning the bookmark says.)
+                win._show_status_message(
+                    f"Tuned to {label} (FM, tone squelch {tone:.1f} Hz)", "info", 3000
+                )
         if win._device is not None and not win._is_running:
             win._start_acquisition()
         return True

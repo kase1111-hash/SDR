@@ -158,6 +158,7 @@ class ScanHit:
     first_seen: float = 0.0
     last_seen: float = 0.0
     count: int = 1
+    tone_hz: float = 0.0  # a bookmark's CTCSS tone squelch (0: none)
 
     @property
     def listening(self) -> Listening:
@@ -181,6 +182,7 @@ class ScanHit:
                 first_seen=float(data.get("first_seen", 0.0)),
                 last_seen=float(data.get("last_seen", 0.0)),
                 count=int(data.get("count", 1)),
+                tone_hz=float(data.get("tone_hz", 0.0) or 0.0),
             )
         except (KeyError, TypeError, ValueError, OverflowError):
             return None
@@ -188,6 +190,8 @@ class ScanHit:
             return None
         hit.first_seen = _valid_time(hit.first_seen)
         hit.last_seen = _valid_time(hit.last_seen)
+        if not (math.isfinite(hit.tone_hz) and hit.tone_hz > 0):
+            hit.tone_hz = 0.0
         return hit
 
 
@@ -1408,6 +1412,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 now,
                 now,
                 1,
+                float(getattr(found, "tone_hz", 0.0) or 0.0),
             )
         )
         index = len(self._hits) - 1
@@ -1422,6 +1427,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         -1: in a sweep the same signal (see ``same_signal``); in a bookmark
         scan the same bookmark (two on one frequency, a repeater's users
         with different tones, are two results)."""
+        tone = float(getattr(found, "tone_hz", 0.0) or 0.0)
         bookmarks = self._engine.mode == "bookmarks"
         freq = found.frequency_hz
         if bookmarks:
@@ -1442,6 +1448,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                     abs(hit.frequency_hz - freq) < 10.0
                     and hit.label == found.label
                     and hit.listening == tuple(found.listening)
+                    and hit.tone_hz == tone
                 )
             else:
                 same = same_signal(hit.frequency_hz, hit.width_hz, freq, step)
@@ -1592,7 +1599,12 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         mode = mode_text(hit.mode, hit.fm_deviation)
         if mode:
             width = f", {hit.bandwidth} filter" if hit.bandwidth else ""
-            lines.append(f"Listen: {mode}{width}")
+            tone = (
+                f", tone squelch {hit.tone_hz:.1f} Hz"
+                if hit.tone_hz and hit.mode == "FM"
+                else ""
+            )
+            lines.append(f"Listen: {mode}{width}{tone}")
         if hit.first_seen:
             first = datetime.fromtimestamp(hit.first_seen).strftime("%H:%M:%S")
             times = "once" if hit.count == 1 else f"{hit.count} times"

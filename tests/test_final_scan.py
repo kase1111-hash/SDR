@@ -445,5 +445,77 @@ class TestBookmarkAllAndBulkRemove(_ScanWindowCase):
         self.assertEqual(bookmarks.bookmarks(), [])
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-02: at 1366x768 the results' buttons are in view after a scan
+# --------------------------------------------------------------------------- #
+class TestResultsButtonsInView(_ScanWindowCase):
+    demo = True
+
+    def setUp(self):
+        super().setUp()
+        self.win.resize(1366, 768)
+        self.win._show_panel("scanner")
+        self.settle()
+        # The tool tabs' default share of a 1366x768 window (305 px; the
+        # tab's scroll area shows 276 of them).
+        splitter = self.win._right_splitter
+        total = sum(splitter.sizes())
+        splitter.setSizes([total - 305, 305])
+        self.settle()
+
+    def _area(self):
+        from PyQt6.QtWidgets import QScrollArea
+
+        area = self.win._scanner_panel.parentWidget()
+        while area is not None and not isinstance(area, QScrollArea):
+            area = area.parentWidget()
+        return area
+
+    def _shown(self, *widgets):
+        """The widgets wholly inside the tab's visible part."""
+        from PyQt6.QtCore import QPoint
+
+        viewport = self._area().viewport()
+        out = []
+        for widget in widgets:
+            top = widget.mapTo(viewport, QPoint(0, 0)).y()
+            out.append(top >= 0 and top + widget.height() <= viewport.height())
+        return out
+
+    def test_after_a_sweep_the_status_and_the_buttons_are_in_view(self):
+        panel = self.win._scanner_panel
+        self.assertLess(self._area().viewport().height(), 300)  # (a short tab)
+        panel._preset.setCurrentIndex(1)  # FM broadcast
+        panel.set_scan_mode("once")
+        self.assertTrue(panel.start_scan())
+        self.frames(6.0, until=lambda: not panel.engine.active)
+        self.settle()
+        self.assertGreater(len(panel.hits()), 10)
+        self.assertEqual(
+            self._shown(
+                panel._run_row,
+                panel._listen_btn,
+                panel._bookmark_all_btn,
+                panel._results_btn,
+            ),
+            [True] * 4,
+        )
+
+    def test_while_listening_skip_hold_and_the_buttons_are_in_view(self):
+        from sdr_module.gui.scan_engine import LISTEN
+
+        panel = self.win._scanner_panel
+        panel._preset.setCurrentIndex(1)
+        panel.set_scan_mode("stop")
+        self.assertTrue(panel.start_scan())
+        self.assertTrue(self.frames(15.0, until=lambda: panel.engine.state == LISTEN))
+        self.settle()
+        self.assertEqual(
+            self._shown(panel._skip_btn, panel._hold_btn, panel._listen_btn),
+            [True] * 3,
+        )
+        panel.stop_scan()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -33,7 +33,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from PyQt6.QtCore import QEvent, Qt, QTimer
+    from PyQt6.QtCore import QEvent, QSize, Qt, QTimer
     from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWidgets import (
         QAbstractItemView,
@@ -295,6 +295,17 @@ class ScannerHost(ScanHost):
         """Show a status-bar message."""
 
 
+class _ResultsTable(QTableWidget if HAS_PYQT6 else object):
+    """The results list: it takes the height the tab has left (scrolling
+    its rows) instead of asking for a table's usual 192 px, which in the
+    short tab of a 1366x768 window pushed the buttons under it out of
+    view."""
+
+    def sizeHint(self):  # noqa: N802 (Qt API)
+        hint = super().sizeHint()
+        return QSize(hint.width(), self.minimumHeight())
+
+
 class ScannerPanel(QWidget if HAS_PYQT6 else object):
     """The Scanner tab (see the module docstring)."""
 
@@ -320,6 +331,11 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._stay = False  # end the scan on the channel listened to
         self._restarting = False  # a new scan replaces the one running
         self._setup_ui()
+        # (See _show_results_buttons: after the layout's next pass.)
+        self._buttons_timer = QTimer(self)
+        self._buttons_timer.setSingleShot(True)
+        self._buttons_timer.setInterval(0)
+        self._buttons_timer.timeout.connect(self._ensure_buttons_visible)
         self._restore_settings()
         self._timer = QTimer(self)
         self._timer.setInterval(500)
@@ -566,7 +582,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         layout.addWidget(self._listen_row)
 
         # Results
-        self._table = QTableWidget(0, 5)
+        self._table = _ResultsTable(0, 5)
         self._table.setHorizontalHeaderLabels(
             ["Frequency", "Level", "SNR", "Mode", "Heard"]
         )
@@ -1116,7 +1132,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 self._set_status(reason, "warning")
 
         listening = scanning and engine.state in (DWELL, LISTEN)
-        self._listen_row.setVisible(listening and engine.mode in ("stop", "bookmarks"))
+        show_row = listening and engine.mode in ("stop", "bookmarks")
+        if show_row and self._listen_row.isHidden():
+            self._show_results_buttons()  # (the row pushes them down)
+        self._listen_row.setVisible(show_row)
 
         has_rows = self._table.rowCount() > 0
         has_selection = bool(self._table.selectionModel().selectedRows())
@@ -1277,17 +1296,42 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._reveal_results()
         return True
 
-    def _reveal_results(self) -> None:
-        """In a short tab (1366x768), scroll so the status, the progress and
-        the results are in view rather than the settings."""
+    def _scroll_area(self) -> Optional["QScrollArea"]:
         area = self.parentWidget()
         while area is not None and not isinstance(area, QScrollArea):
             area = area.parentWidget()
+        return area
+
+    def _reveal_results(self) -> None:
+        """In a short tab (1366x768), scroll so the status, the progress and
+        the results are in view rather than the settings."""
+        area = self._scroll_area()
         if area is None:
             return
         bar = area.verticalScrollBar()
         if bar is not None and bar.maximum() > 0:
             bar.setValue(min(bar.maximum(), self._run_row.y() - 6))
+        self._show_results_buttons()
+
+    def _show_results_buttons(self) -> None:
+        """Bring the buttons under the results into view, once the layout
+        has settled (the listen row or a longer status may push them
+        down)."""
+        self._buttons_timer.start()
+
+    def _ensure_buttons_visible(self) -> None:
+        area = self._scroll_area()
+        if area is None or not self.isVisible():
+            return
+        # The layouts first, from the status row up (a status that wrapped,
+        # the listen row shown), then the tab's height and scroll range, so
+        # the buttons are measured where they now are.
+        for widget in (self._run_row, self):
+            layout = widget.layout()
+            if layout is not None:
+                layout.activate()
+        QGuiApplication.sendEvent(area, QEvent(QEvent.Type.LayoutRequest))
+        area.ensureWidgetVisible(self._results_btn, 0, 6)
 
     def scan_bookmarks_from(self, index: int) -> bool:
         """Scan all the bookmarks, starting at bookmark ``index`` (the
@@ -1539,6 +1583,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             self._timer.stop()
         self._save_results()
         self._update_controls()
+        self._show_results_buttons()
 
     # ------------------------------------------------------------------ #
     # Results

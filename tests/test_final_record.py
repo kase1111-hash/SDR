@@ -772,6 +772,28 @@ class TestRecordingGroupShowsTheOtherKind(_FilesCase):
         self.assertEqual(panel._record_status.text(), "Ready")
         panel.set_record_kind("iq")
 
+    def test_a_paused_one_is_shown_in_the_paused_tone(self):
+        """As the group's own "❚❚ Paused" line (red read as recording)."""
+        win = self.win
+        panel = win._control_panel
+        win._record_action.trigger()
+        win._update_display()
+        panel._pause_btn.click()
+        self.assertTrue(win._recording_paused)
+        panel.set_record_kind("audio")
+        self.assertEqual(
+            panel._record_status.text(),
+            "❚❚ I/Q recording paused (Ctrl+Shift+R stops it)",
+        )
+        self.assertEqual(panel._record_status.property("tone"), "warning")
+        panel.set_record_kind("iq")
+        panel._pause_btn.click()  # resume
+        panel.set_record_kind("audio")
+        self.assertEqual(panel._record_status.property("tone"), "danger")
+        win._record_action.trigger()  # stop
+        self.assertEqual(panel._record_status.text(), "Ready")
+        panel.set_record_kind("iq")
+
 
 class TestOneNameForEachFormat(_FilesCase):
     """REC-E2E-13: the Recording group's Format list and File > Save

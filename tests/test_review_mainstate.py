@@ -477,7 +477,12 @@ class TestPauseFollowsTheRecordChoice(_MainStateCase):
         self.assertTrue(win._recording_paused)
         self.assertEqual(self.group(), self.PAUSED)
         panel.set_record_kind("audio")
-        self.assertEqual(self.group()[0], "Ready")  # (no audio recording)
+        # No audio recording: the group names the paused I/Q one (F-record,
+        # REC-E2E-12; it said "Ready").
+        self.assertEqual(
+            self.group(),
+            ("❚❚ I/Q recording paused (Ctrl+Shift+R stops it)", "❚❚ Pause", False),
+        )
         panel.set_record_kind("iq")
         self.assertEqual(self.group(), self.PAUSED)
         self.assertTrue(panel.is_recording_paused())
@@ -698,8 +703,28 @@ class TestARecordingWithADamagedCentre(_MainStateCase):
     """(Second checker) A SigMF whose core:frequency is NaN or Infinity
     (Python's json writes and reads those): Open Recording raised half way
     once the range text was given to the kHz (the LO on the file, the
-    receiver stopped, the strip not shown). It opens as it did before, and
-    Close Recording goes back to the receiver."""
+    receiver stopped, the strip not shown). Its centre counts as unknown
+    (F-record, leftover 20: it played at "nan MHz"), so Import Options asks
+    for it; then it opens, and Close Recording goes back to the receiver."""
+
+    def setUp(self):
+        super().setUp()
+        from sdr_module.gui.iq_files import ImportOptionsDialog
+
+        self.asked = []
+        self.center_text = "145.000"
+
+        def fake_exec(dialog):
+            # (Answered here: a dialog nobody expected fails, not waits.)
+            self.assertIsInstance(dialog, ImportOptionsDialog)
+            self.asked.append(dialog._center_edit.isEnabled())
+            if not self.center_text:
+                return 0  # Cancel
+            dialog._center_edit.setText(self.center_text)
+            dialog._on_accept()
+            return dialog.result()
+
+        self.win._exec_dialog = fake_exec
 
     def damaged(self, value):
         path = self.recording(145.0e6, 2.4e6, f"damaged_{value}.sigmf-data")
@@ -716,8 +741,11 @@ class TestARecordingWithADamagedCentre(_MainStateCase):
         before = (win._device, win._is_running, self.listening())
         for value in ("nan", "inf"):
             with self.subTest(value=value):
+                self.asked.clear()
                 win._open_recording(self.damaged(value))
+                self.assertEqual(self.asked, [True])  # (the centre is asked)
                 self.assertTrue(win._playback.active)
+                self.assertEqual(win._lo_frequency(), 145.0e6)
                 win._playback.close(restore=True)
                 self.assertFalse(win._playback.active)
                 self.assertIsNone(win._lo_lock)
@@ -725,6 +753,16 @@ class TestARecordingWithADamagedCentre(_MainStateCase):
                 self.assertEqual(
                     (win._device, win._is_running, self.listening()), before
                 )
+
+    def test_cancelling_import_options_changes_nothing(self):
+        win = self.win
+        before = (win._device, win._is_running, self.listening())
+        self.center_text = ""
+        win._open_recording(self.damaged("nan"))
+        self.assertEqual(self.asked, [True])
+        self.assertFalse(win._playback.active)
+        self.assertEqual(win._lo_frequency(), 100.1e6)
+        self.assertEqual((win._device, win._is_running, self.listening()), before)
 
 
 class TestTheSpanOfARecordingAbove6GHz(_MainStateCase):

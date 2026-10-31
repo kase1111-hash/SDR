@@ -4501,14 +4501,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """The Recording group shows the kind its Record choice records; a
         recording of the other kind is named in its status line, with how
         to stop it (it said "Ready" while audio recorded)."""
-        text = ""
+        text, tone = "", "danger"
         if self._record_kind() == "audio":
             if not self._recording:
                 pass
             elif self._capture_pending:
                 text = "◌ I/Q recording armed (Ctrl+Shift+R stops it)"
+                tone = "warning"
             elif self._recording_paused:
                 text = "❚❚ I/Q recording paused (Ctrl+Shift+R stops it)"
+                tone = "warning"
             else:
                 text = (
                     f"● Recording I/Q {_clock_text(self._recording_elapsed())} "
@@ -4518,12 +4520,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             take = getattr(self, "_audio_take", None)
             if take is not None and take.paused:
                 text = "❚❚ Audio recording paused (Ctrl+Shift+A stops it)"
+                tone = "warning"
             elif take is not None:
                 text = (
                     f"● Recording audio {_clock_text(take.seconds)} "
                     "(Ctrl+Shift+A stops it)"
                 )
-        self._control_panel.set_other_recording(text)
+        self._control_panel.set_other_recording(text, tone)
 
     def _update_record_button_tip(self) -> None:
         if self._record_kind() == "audio":

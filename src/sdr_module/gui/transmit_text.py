@@ -15,8 +15,9 @@ in view while it is open):
   (SigMF or cf32, centered on the tuned frequency), and **Transmit** sends it
   on a HackRF One through the window's transmit engine
   (:meth:`~sdr_module.gui.main_window.SDRMainWindow._transmit_job`): the
-  legality check, the first-use confirmation, your automatic station IDs,
-  the ON AIR badge and Stop all apply. A line above the buttons says what
+  legality check, the confirmation before each transmission (until "Don't
+  ask again"), your automatic station IDs, the ON AIR badge and Stop all
+  apply. A line above the buttons says what
   Transmit would do now, or why it can't.
 
 The text is turned into a signal by :mod:`sdr_module.protocols.text_modes`
@@ -1302,7 +1303,9 @@ if HAS_PYQT6:
             self._transmit_button.setEnabled(bool(can))
             self._transmit_button.setToolTip(
                 "Transmit the text on the tuned frequency (HackRF One): checked, "
-                "with your automatic station ID; the first time asks first"
+                "with your automatic station ID; asks before each transmission "
+                "until you tick Don't ask again (Tools > Preferences turns it "
+                "back on)"
                 if can
                 else ready
             )

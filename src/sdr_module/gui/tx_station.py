@@ -4,14 +4,15 @@ The main window's transmit side.
 :class:`StationTx` owns the :class:`~.transmitter.Transmitter` and connects it
 to the window: the Ham ID panel (what Send ID Now would do, its progress and
 Stop, the TX power), the red ON AIR badge in the toolbar, Radio > Send
-Station ID / Stop Transmitting, the first-use confirmation, the receiver
-(stopped for the transmission, resumed after it) and the status bar (every
-message replaced by the outcome, so none goes stale).
+Station ID / Stop Transmitting, the confirmation asked before each
+transmission (until "Don't ask again"), the receiver (stopped for the
+transmission, resumed after it) and the status bar (every message replaced
+by the outcome, so none goes stale).
 
 Anything the app transmits goes through :meth:`StationTx.transmit` (Transmit
-Text included): it checks the job, asks the first time, centers the HackRF on
-the frequency and adds the station IDs the Ham ID panel's Automatic ID asks
-for.
+Text included): it checks the job, asks before sending it (until "Don't ask
+again"), centers the HackRF on the frequency and adds the station IDs the Ham
+ID panel's Automatic ID asks for.
 """
 
 from __future__ import annotations
@@ -471,9 +472,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         return self.transmit(job)
 
     def transmit(self, job: TxJob, confirm: bool = True) -> bool:
-        """Send ``job`` (Send ID Now, Transmit Text, ...): check it, ask the
-        first time (``confirm``), center the HackRF on ``job.center_hz``,
-        stop the receiver, and start. False, with the reason in the status
+        """Send ``job`` (Send ID Now, Transmit Text, ...): check it, ask
+        before sending it (``confirm``; until "Don't ask again"), center the
+        HackRF on ``job.center_hz``, stop the receiver, and start. False, with the reason in the status
         bar and on the Ham ID panel's TX line, when it isn't sent."""
         win = self._win
         if self.busy:
@@ -590,10 +591,10 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         )
 
     def confirm(self, job: TxJob, on_air_s: Optional[float] = None) -> bool:
-        """The first-use question ("Transmit DE W1AW on 146.520 MHz (FM
-        tone, 20 WPM, about 1 mW)?", with the station's output through the
-        QRP tab's amplifiers when there are any); "Don't ask again" skips it
-        from then on. ``on_air_s``: the whole air time, station IDs included
+        """The question asked before each transmission ("Transmit DE W1AW on
+        146.520 MHz (FM tone, 20 WPM, about 1 mW)?", with the station's
+        output through the QRP tab's amplifiers when there are any); "Don't
+        ask again" skips it from then on. ``on_air_s``: the whole air time, station IDs included
         (the job's own by default). True to transmit."""
         settings = self._win._settings
         if not asks_before_transmitting(settings):
@@ -733,9 +734,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
 
 
 def asks_before_transmitting(settings: Any) -> bool:
-    """Whether the first-use question is asked (``tx/confirm``): only an
-    explicit no ("Don't ask again": False, or "false", "0", "no", "off")
-    turns it off. Anything else asks, a missing, empty or unreadable value
+    """Whether the question before each transmission is asked
+    (``tx/confirm``): only an explicit no ("Don't ask again": False, or
+    "false", "0", "no", "off") turns it off. Anything else asks, a missing, empty or unreadable value
     included, so a damaged settings file never turns the question off."""
     try:
         raw = settings.get_str(KEY_CONFIRM, "true")

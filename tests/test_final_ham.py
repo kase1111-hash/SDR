@@ -1021,5 +1021,39 @@ class TestPresetPowerTip(unittest.TestCase):
         self.assertIn("QRP tab", tip)
 
 
+class TestTransmitQuestionWording(_TxCase):
+    """L32: the transmit confirmation asks before every transmission until
+    "Don't ask again" is ticked, but Transmit Text's button said "the first
+    time asks first" (and the docs called it a first-use question)."""
+
+    license = "general"
+
+    def test_transmit_text_button(self):
+        self.panel.set_callsign("W1AW")
+        self.hackrf(freq=14.08e6)
+        self.win._show_transmit_text()
+        dlg = self.win._transmit_text
+        self.addCleanup(dlg.close)
+        dlg.set_text("CQ DE W1AW")
+        dlg.refresh()
+        tip = dlg._transmit_button.toolTip()
+        self.assertTrue(dlg._transmit_button.isEnabled(), tip)
+        self.assertNotIn("first time", tip)
+        self.assertIn("asks before each transmission", tip)
+
+    def test_no_first_use_wording_left(self):
+        from pathlib import Path
+
+        import sdr_module.gui.main_window as mw
+        import sdr_module.gui.preferences_dialog as prefs
+        import sdr_module.gui.transmit_text as text
+        import sdr_module.gui.tx_station as station
+
+        for module in (mw, prefs, text, station):
+            source = Path(module.__file__).read_text(encoding="utf-8")
+            for words in ("first-use", "asked the first time", "asks the first time"):
+                self.assertFalse(words in source, f"{module.__name__}: {words}")
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

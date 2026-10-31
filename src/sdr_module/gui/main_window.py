@@ -6214,7 +6214,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _on_callsign_id_requested(self):
         """Ham ID > Send ID Now (or Radio > Send Station ID): the station ID
         on the tuned frequency, through the transmit engine (checked, asked
-        the first time, sent without blocking the window)."""
+        about first unless "Don't ask again" is ticked, sent without blocking
+        the window)."""
         self._tx_station.send_station_id()
 
     def _tx_busy(self) -> bool:
@@ -6251,8 +6252,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _transmit_job(self, job: "TxJob", confirm: bool = True) -> bool:
         """Transmit ``job`` (see :class:`~.transmitter.TxJob`) on the HackRF:
-        checked (license, mode, bandwidth, power), asked the first time,
-        with the Ham ID panel's automatic IDs, without blocking the window.
+        checked (license, mode, bandwidth, power), asked about before each
+        transmission (until "Don't ask again"), with the Ham ID panel's
+        automatic IDs, without blocking the window.
         False (the status bar says why) when it isn't sent. Transmit Text
         and any other transmission come through here."""
         return self._tx_station.transmit(job, confirm=confirm)

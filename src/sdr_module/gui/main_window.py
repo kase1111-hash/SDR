@@ -2543,7 +2543,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "ham_id",
                 self._callsign_panel,
                 "Ham ID",
-                "Station identification with your callsign (CW ID, HackRF only)",
+                "Your callsign and license class, how your station ID is sent "
+                "(CW or FM tone), TX power and automatic ID (transmitting needs "
+                "a HackRF One)",
             )
 
             self._sstv_panel = SSTVPanel()

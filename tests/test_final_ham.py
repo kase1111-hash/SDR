@@ -817,5 +817,24 @@ class TestRadioTunerWithoutADevice(_WindowTestCase):
         self.assertNotIn("No receiver", self.win._message_label.text())
 
 
+class TestHamIdTooltips(_WindowTestCase):
+    """HAM-E2E-14: View > Panels > Ham ID (and the tab) said "Station
+    identification with your callsign (CW ID, HackRF only)" though the ID
+    is sent as an FM tone above 30 MHz and the tab holds the license class
+    and TX power too."""
+
+    def test_panel_tip_describes_the_tab(self):
+        if not self.mw.HAS_HAM_RADIO:
+            self.skipTest("ham radio panels not installed")
+        tips = {key: tip for key, _title, tip in self.win._panel_specs}
+        tip = tips["ham_id"]
+        self.assertNotIn("CW ID, HackRF only", tip)
+        for words in ("callsign", "license class", "CW or FM tone", "TX power"):
+            self.assertIn(words, tip)
+        ham = self.win._ham_tabs
+        index = ham.indexOf(self.win._panel_pages["ham_id"])
+        self.assertEqual(ham.tabToolTip(index), tip)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

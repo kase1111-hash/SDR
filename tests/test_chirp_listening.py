@@ -222,7 +222,9 @@ class TestBandPlan:
         assert default_name(145.8125e6) == "ISS SSTV/Voice" or default_name(
             145.8125e6
         ).startswith("2m Ham")
-        assert default_name(446.05e6) == "PMR446 446.05"  # narrower than 70 cm
+        # (The US 70 cm FM simplex segment, not Europe's PMR446: leftover 14.)
+        assert default_name(446.05e6) == "70cm Ham 446.05"
+        assert default_name(433.92e6) == "ISM 433 433.92"  # narrower than 70 cm
         assert default_name(7.074e6) == "40m Ham 7.074"
         assert default_name(3e9) == ""
 

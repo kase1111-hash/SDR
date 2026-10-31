@@ -2293,6 +2293,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # How F1 names the arrow keys' steps (by modifier prefix): they follow
     # the tuning step.
     _TUNE_STEP_WORDS = {"": "one tuning step", "Shift+": "ten tuning steps"}
+    # The last Choose Mode From Band Plan message and the band (and part of
+    # it) it was about; a mode changed by something that says so itself
+    # (the band plan) isn't announced on its own as well.
+    _band_plan_note: Optional[Tuple[str, Tuple[str, str]]] = None
+    _quiet_mode_change = False
 
     @property
     def _TUNE_STEPS_HZ(self) -> Dict[Any, float]:  # noqa: N802 - existing name
@@ -5135,27 +5140,46 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         profile, listen that way (the mode, filter and FM deviation of the
         preset channel there, else of the band) and say so. Radio > Choose
         Mode From Band Plan turns this off. True when it changed."""
+        from ..core.band_plan import (
+            band_for,
+            preset_for,
+            preset_listening,
+            segment_listening,
+        )
+
+        zone = self._band_plan_zone(freq_hz)
+        # The message about the band you came from no longer applies
+        # (LISTEN-13: "2m Ham: listening in FM ..." stayed at 446.1 MHz).
+        note = self._band_plan_note
+        if note is not None and note[1] != zone:
+            self._band_plan_note = None
+            if self._message_label.text() == note[0]:
+                self._clear_status_message()
         action = self._own("_band_plan_action")
         if action is not None and not action.isChecked():
             return False
-        from ..core.band_plan import band_for, preset_for, preset_listening
-
         band = band_for(freq_hz)
         # A preset channel is heard the preset's way (7.030 MHz, QRP 40m
-        # CW: in CW, though 40 m is an LSB band; 446.000 MHz, 70cm Calling:
-        # not as the narrower PMR446 band it borders), else as its band is.
+        # CW: in CW, though 40 m is an LSB band; 446.000 MHz, 70cm
+        # Calling), a digital-mode channel (FT8: USB) or the CW/data
+        # segment of an SSB band (CW) as it is used, else as its band is.
         preset = preset_for(freq_hz)
+        segment = segment_listening(freq_hz)
         heard = preset_listening(preset) if preset is not None else None
         if heard is not None and heard[0]:
-            name, where = str(preset.name), "this channel"
+            kind, name, where = "preset", str(preset.name), "this channel"
+        elif segment is not None:
+            heard, name = segment.listening, segment.name
+            kind = "data" if segment.channel else "segment"
+            where = "this channel" if segment.channel else "this part of the band"
         elif band is not None and band.mode:
             heard, name, where = band.listening, band.name, "the band"
+            kind = "band"
         else:
             return False
         target, target_deviation, target_width = heard
-        before = band_for(before_hz)
-        if band is not None and before is not None and before.name == band.name:
-            return False  # the same band: the mode you chose there stays
+        if band is not None and self._band_plan_zone(before_hz) == zone:
+            return False  # the same band (and segment): your mode stays
         mode, deviation = self._listening_mode()
         broadcast = _BROADCAST_FM_DEVIATION
         if mode == target:
@@ -5163,28 +5187,46 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 target_deviation == broadcast
             ):
                 return False  # already listening that way
-        elif mode == "USB" and target == "LSB":
-            # USB stays: the digital modes (FT8...) are USB on every band,
-            # 40 m too. (LSB in a USB band does switch: voice above 10 MHz
-            # and data are USB.)
+        elif mode == "USB" and (
+            target == "LSB" or (target == "CW" and kind != "preset")
+        ):
+            # USB stays: the digital modes (FT8, RTTY...) are USB on every
+            # band, 40 m too, and in the CW/data segments. (LSB in a USB band
+            # does switch: voice above 10 MHz and data are USB.)
             return False
-        elif mode == "CW" and self._segment_allows_cw(freq_hz):
-            return False  # Morse code in a CW segment stays CW
-        self._set_demod_mode(target, target_deviation or None, target_width or None)
+        elif mode == "CW" and kind != "data" and self._segment_allows_cw(freq_hz):
+            return False  # Morse code in a CW segment stays CW (not on FT8)
+        self._quiet_mode_change = True  # (this says how instead)
+        try:
+            self._set_demod_mode(target, target_deviation or None, target_width or None)
+        finally:
+            self._quiet_mode_change = False
         how = self._mode_text(target)
         if target == "FM":
-            kind = "broadcast" if target_deviation == broadcast else "narrow"
-            how = (
-                f"FM ({kind}, {self._control_panel.get_fm_deviation_text()} deviation)"
-            )
-        self._show_status_message(
+            fm = "broadcast" if target_deviation == broadcast else "narrow"
+            how = f"FM ({fm}, {self._control_panel.get_fm_deviation_text()} deviation)"
+        text = (
             f"{name}: listening in {how} with a "
             f"{self._control_panel._bw_combo.currentText()} filter, as {where} is "
-            "usually heard (Radio > Choose Mode From Band Plan)",
-            "info",
-            6000,
+            "usually heard (Radio > Choose Mode From Band Plan)"
         )
+        self._show_status_message(text, "info", 6000)
+        self._band_plan_note = (text, zone)
         return True
+
+    @staticmethod
+    def _band_plan_zone(freq_hz: float) -> Tuple[str, str]:
+        """The band and, in an amateur band, the part of it (an FT8
+        channel, the CW/data segment) ``freq_hz`` is in: a mode chosen
+        there stays while you tune within it."""
+        from ..core.band_plan import band_for, segment_listening
+
+        band = band_for(freq_hz)
+        segment = segment_listening(freq_hz)
+        return (
+            band.name if band is not None else "",
+            segment.name if segment is not None else "",
+        )
 
     @staticmethod
     def _segment_allows_cw(freq_hz: float) -> bool:
@@ -6006,8 +6048,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._note_tuned()
         self._update_window_title()
         self._sync_audio_ui()  # (no audio in I/Q mode)
-        if not self._restoring and mode in _AUDIBLE_MODES:
+        # (A preset or the band plan says what it set, filter included: the
+        # mode alone, with the width it had, would come first and differ.)
+        quiet = (
+            self._restoring
+            or self._quiet_mode_change
+            or self._control_panel._applying_preset
+        )
+        if not quiet and mode in _AUDIBLE_MODES:
             self._show_status_message(f"{mode}: {self._filter_summary()}", None, 3000)
+        elif not quiet:
+            # LISTEN-13: I/Q kept the last mode's "CW: 500 Hz filter ...".
+            width = self._control_panel._bw_combo.currentText()
+            self._show_status_message(f"{mode}: {width} filter, no audio", None, 3000)
         if mode not in _SSTV_MODES and self._sstv_listening():
             self._hint_sstv_needs_fm()
         if HAS_HAM_RADIO:

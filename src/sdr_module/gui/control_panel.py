@@ -2733,37 +2733,40 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             return
 
         # Set frequency (the window tunes; it may refuse, e.g. out of the
-        # device's range: then the mode stays as it was too).
+        # device's range: then the mode stays as it was too). The preset's
+        # own frequency: the field's would be clamped to its range, so a
+        # preset outside it retuned to the range's edge without a word.
         self._freq_input.set_frequency(preset.frequency_hz)
+        # (Applying: the window says what was set once it is all set.)
         self._applying_preset = True
         try:
-            self.frequency_changed.emit(self._freq_input.get_frequency())
+            self.frequency_changed.emit(float(preset.frequency_hz))
+            if abs(self._freq_input.get_frequency() - preset.frequency_hz) > 1.0:
+                return  # refused (the window says why): the mode stays as is too
+
+            # Mode first: the Bandwidth choices depend on it.
+            if preset.mode in _PRESET_DEMOD:
+                idx = self._demod_combo.findText(_PRESET_DEMOD[preset.mode])
+                if idx >= 0:
+                    self._demod_combo.setCurrentIndex(idx)
+
+            # FM deviation that suits the channel width
+            if preset.mode in ("FM", "WFM"):
+                if preset.mode == "WFM" or preset.bandwidth_hz >= 150e3:
+                    self._fm_dev_combo.setCurrentText("75 kHz")
+                elif preset.bandwidth_hz >= 40e3:
+                    self._fm_dev_combo.setCurrentText("25 kHz")
+                else:
+                    self._fm_dev_combo.setCurrentText("5 kHz")
+
+            # Bandwidth: the narrowest of the mode's options that fits the
+            # preset (the old substring match picked 25 kHz for 2.7 kHz SSB
+            # and missed 2 MHz).
+            index = self._closest_bandwidth_index(preset.bandwidth_hz)
+            if index >= 0:
+                self._bw_combo.setCurrentIndex(index)
         finally:
             self._applying_preset = False
-        if abs(self._freq_input.get_frequency() - preset.frequency_hz) > 1.0:
-            return  # refused (the window says why): the mode stays as it is too
-
-        # Mode first: the Bandwidth choices depend on it.
-        if preset.mode in _PRESET_DEMOD:
-            idx = self._demod_combo.findText(_PRESET_DEMOD[preset.mode])
-            if idx >= 0:
-                self._demod_combo.setCurrentIndex(idx)
-
-        # FM deviation that suits the channel width
-        if preset.mode in ("FM", "WFM"):
-            if preset.mode == "WFM" or preset.bandwidth_hz >= 150e3:
-                self._fm_dev_combo.setCurrentText("75 kHz")
-            elif preset.bandwidth_hz >= 40e3:
-                self._fm_dev_combo.setCurrentText("25 kHz")
-            else:
-                self._fm_dev_combo.setCurrentText("5 kHz")
-
-        # Bandwidth: the narrowest of the mode's options that fits the
-        # preset (the old substring match picked 25 kHz for 2.7 kHz SSB
-        # and missed 2 MHz).
-        index = self._closest_bandwidth_index(preset.bandwidth_hz)
-        if index >= 0:
-            self._bw_combo.setCurrentIndex(index)
         self._preset_freq_hz = float(preset.frequency_hz)
         self.preset_applied.emit(preset.name)
 

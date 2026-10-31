@@ -396,7 +396,8 @@ class TestBookmarksPanelFixes(unittest.TestCase):
         # A typed-in frequency is saved in its band's usual mode, which the
         # Add row's Mode shows (TOOLS-14, UX-07: it used to be saved without
         # one, and turned into FM after a CHIRP round trip).
-        self.panel._freq_input.setValue(7.1)
+        # (7.2 MHz: 40 m's phone segment; its CW/data segment is CW.)
+        self.panel._freq_input.setValue(7.2)
         self.assertEqual(self.panel._mode_input.currentData(), "LSB")
         self.panel._add_btn.click()
         self.assertEqual(self.store.bookmarks[-1]["demod"], "LSB")

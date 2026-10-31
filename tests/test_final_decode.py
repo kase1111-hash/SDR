@@ -359,6 +359,75 @@ class TestFileRowsApart(_PanelCase):
 
 
 # --------------------------------------------------------------------------- #
+# DEC-E2E-18: the Aircraft list puts Seen and Msgs early and sorts
+# --------------------------------------------------------------------------- #
+
+
+class TestAircraftList(_PanelCase):
+    def setUp(self):
+        super().setUp()
+        self.panel._proto_combo.setCurrentText("ADS-B")
+        _settle(1)
+        self.view = self.panel._aircraft_view
+        self.table = self.view.table
+
+    def heard(self, icao, altitude, callsign):
+        for msg in (
+            _adsb(icao_address=icao, downlink_format=17, type_code=4, callsign=callsign),
+            _adsb(icao_address=icao, downlink_format=17, type_code=11,
+                  altitude=altitude, latitude=50.5, longitude=4.5),
+        ):  # fmt: skip
+            self.view.update_message(msg)
+
+    def names(self):
+        return [self.table.item(r, 0).text() for r in range(self.table.rowCount())]
+
+    def click_header(self, col):
+        from PyQt6.QtCore import QPoint, Qt
+        from PyQt6.QtTest import QTest
+
+        header = self.table.horizontalHeader()
+        x = header.sectionViewportPosition(col) + header.sectionSize(col) // 2
+        QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton,
+                         pos=QPoint(x, header.height() // 2))  # fmt: skip
+        _settle(1)
+
+    def test_seen_and_msgs_come_before_track_and_vertical_speed(self):
+        # Seen and Msgs were behind the sideways scroll at every size.
+        titles = [
+            self.table.horizontalHeaderItem(c).text()
+            for c in range(self.table.columnCount())
+        ]
+        self.assertEqual(
+            titles,
+            ["Flight", "Altitude", "Speed", "Seen", "Msgs", "Track", "V/S",
+             "Squawk", "Position", "ICAO"],
+        )  # fmt: skip
+
+    def test_a_click_on_a_title_sorts_by_it_as_numbers(self):
+        from sdr_module.gui import decoder_views
+
+        self.heard("400001", 5000, "LOW1")
+        self.heard("400002", 38000, "HIGH1")
+        self.heard("400003", 12000, "MID1")
+        self.assertEqual(self.names(), ["LOW1", "HIGH1", "MID1"])  # as heard
+        self.click_header(decoder_views.AC_ALTITUDE)
+        self.assertEqual(self.names(), ["LOW1", "MID1", "HIGH1"])
+        self.click_header(decoder_views.AC_ALTITUDE)
+        self.assertEqual(self.names(), ["HIGH1", "MID1", "LOW1"])
+        # An update moves its row; picking and copying still find it.
+        self.view.select("400003")
+        self.view.update_message(
+            _adsb(icao_address="400003", downlink_format=17, type_code=11,
+                  altitude=41000, latitude=50.5, longitude=4.5)
+        )  # fmt: skip
+        self.assertEqual(self.names(), ["MID1", "HIGH1", "LOW1"])
+        self.assertEqual(self.view.selected_icao(), "400003")
+        self.assertEqual(self.panel.address_filter(), "400003")
+        self.assertIn("MID1 (400003)", self.view.detail.text())
+
+
+# --------------------------------------------------------------------------- #
 # DEC-E2E-21: F1 lists the Aircraft tab's keys
 # --------------------------------------------------------------------------- #
 

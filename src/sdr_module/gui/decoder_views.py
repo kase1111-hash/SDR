@@ -214,16 +214,17 @@ class AircraftTracker:
 
 # Aircraft table columns: the most telling first, the long ones last (a
 # narrow panel scrolls sideways to them; the line under the table and the
-# tooltips have everything).
+# tooltips have everything). When it was last heard and how often come
+# early: the right column shows about six of them.
 (
     AC_NAME,
     AC_ALTITUDE,
     AC_SPEED,
+    AC_SEEN,
+    AC_MESSAGES,
     AC_TRACK,
     AC_VS,
     AC_SQUAWK,
-    AC_SEEN,
-    AC_MESSAGES,
     AC_POSITION,
     AC_ICAO,
 ) = range(10)
@@ -231,16 +232,38 @@ _AC_HEADERS = (
     ("Flight", "Callsign (flight number); the ICAO address until one is heard"),
     ("Altitude", "Barometric altitude in feet ('ground' on the ground)"),
     ("Speed", "Ground speed in knots"),
+    ("Seen", "Time since its last message (rows dim after a minute)"),
+    ("Msgs", "Messages heard from this aircraft"),
     ("Track", "Direction of travel over the ground, degrees from north"),
     ("V/S", "Vertical speed in feet per minute: + climbing, - descending"),
     ("Squawk", "Transponder code set by the crew (7500, 7600, 7700: emergencies)"),
-    ("Seen", "Time since its last message (rows dim after a minute)"),
-    ("Msgs", "Messages heard from this aircraft"),
     ("Position", "Latitude, longitude (degrees; south and west negative)"),
     ("ICAO", "The aircraft's 24-bit ICAO address (hex): it never changes"),
 )
 # Columns of numbers (right-aligned).
 _AC_NUMBERS = (AC_ALTITUDE, AC_SPEED, AC_TRACK, AC_VS, AC_SEEN, AC_MESSAGES)
+# Item roles: the aircraft's ICAO address (on its Flight item) and a cell's
+# sort key (numbers sort as numbers: "5,000" before "12,000").
+_ICAO_ROLE = Qt.ItemDataRole.UserRole.value + 2 if HAS_PYQT6 else 0
+_SORT_ROLE = Qt.ItemDataRole.UserRole.value + 3 if HAS_PYQT6 else 0
+# Sort key of a value not known yet (it sorts before every known one).
+_UNKNOWN = float("-inf")
+
+
+def _number(value: Optional[float]) -> float:
+    """A sort key: the value, or ``_UNKNOWN``."""
+    return float(value) if value is not None else _UNKNOWN
+
+
+class _AircraftItem(QTableWidgetItem if HAS_PYQT6 else object):
+    """A cell that sorts by its key when it has one, else by its text."""
+
+    def __lt__(self, other: Any) -> bool:
+        mine = self.data(_SORT_ROLE)
+        theirs = other.data(_SORT_ROLE) if isinstance(other, _AircraftItem) else None
+        if mine is not None and theirs is not None:
+            return bool(mine < theirs)
+        return bool(super().__lt__(other))
 
 
 class AircraftView(QWidget if HAS_PYQT6 else object):
@@ -261,7 +284,9 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         super().__init__(parent)
         self._clock = clock
         self.tracker = AircraftTracker(clock)
-        self._rows: Dict[str, int] = {}
+        # Each aircraft's Flight item (its row moves when the list is
+        # sorted: the row is looked up from the item).
+        self._items: Dict[str, Any] = {}
         # Whether each row is shown dimmed (its brush and font are only
         # set when that changes).
         self._dimmed: Dict[str, bool] = {}
@@ -302,12 +327,16 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         # tens of aircraft then saturated the GUI thread.
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(True)
+        # A click on a title sorts by it (numbers as numbers; again: the
+        # other way); until then the aircraft are listed as first heard.
+        header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        self.table.setSortingEnabled(True)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.table.setToolTip(
             "One row per aircraft heard, with its latest information. Click an "
             "aircraft to show only its messages under Messages (double-click "
-            "to go there). Rows dim after a minute without a message and are "
-            "removed after five."
+            "to go there); click a title to sort by it. Rows dim after a "
+            "minute without a message and are removed after five."
         )
         self.table.setMinimumHeight(110)
         self.table.itemSelectionChanged.connect(self._on_selection)
@@ -354,10 +383,9 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         aircraft = self.tracker.update(msg)
         if aircraft is None:
             return
-        row = self._rows.get(aircraft.icao)
-        if row is None:
-            row = self._add_row(aircraft.icao)
-        self._fill(row, aircraft)
+        if aircraft.icao not in self._items:
+            self._add_row(aircraft.icao)
+        self._fill(aircraft)
         self._empty.set_visible(False)
         if not self._timer.isActive():
             self._timer.start()
@@ -366,7 +394,7 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
 
     def clear(self) -> None:
         self.tracker.clear()
-        self._rows.clear()
+        self._items.clear()
         self._dimmed.clear()
         self._widest.clear()
         self.table.setRowCount(0)
@@ -396,11 +424,11 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
 
     def select(self, icao: str) -> None:
         """Select an aircraft by address ("" clears the selection)."""
-        row = self._rows.get(icao)
-        if row is None:
+        item = self._items.get(icao)
+        if item is None:
             self.table.clearSelection()
         else:
-            self.table.selectRow(row)
+            self.table.selectRow(item.row())
 
     def refresh(self) -> None:
         """Update the ages, dim stale rows and drop old ones."""
@@ -408,14 +436,14 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         if gone:
             selected = self.selected_icao()
             for icao in gone:
-                self._rows.pop(icao, None)
+                self._items.pop(icao, None)
             self._rebuild(selected)
             if selected in gone:
                 self._on_selection()  # nothing picked now
-        for icao, row in self._rows.items():
+        for icao in list(self._items):
             aircraft = self.tracker.get(icao)
             if aircraft is not None:
-                self._fill(row, aircraft)
+                self._fill(aircraft)
         current = self.tracker.get(self.selected_icao())
         if current is not None:
             self._show_detail(current)
@@ -440,19 +468,25 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         self._metrics.clear()
         self._fit_columns()  # in the fonts it is shown with
 
-    def _add_row(self, icao: str) -> int:
-        """A new, empty row for an aircraft at the bottom; its index."""
-        row = self.table.rowCount()
-        self.table.insertRow(row)
-        self._rows[icao] = row
+    def _add_row(self, icao: str) -> None:
+        """A new, empty row for an aircraft at the bottom (a sorted list
+        moves it to its place as its values are filled in)."""
+        table = self.table
+        sorting = table.isSortingEnabled()
+        table.setSortingEnabled(False)  # (else setItem may move the row)
+        row = table.rowCount()
+        table.insertRow(row)
         for col in range(len(_AC_HEADERS)):
-            item = QTableWidgetItem()
+            item = _AircraftItem()
             if col in _AC_NUMBERS:
                 item.setTextAlignment(
                     Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
                 )
-            self.table.setItem(row, col, item)
-        return row
+            if col == AC_NAME:
+                item.setData(_ICAO_ROLE, icao)
+                self._items[icao] = item
+            table.setItem(row, col, item)
+        table.setSortingEnabled(sorting)
 
     def _outgrows(self, col: int, text: str) -> bool:
         """Note a new text in column ``col``: whether it is wider than any
@@ -501,10 +535,8 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         return super().eventFilter(obj, event)
 
     def _icao_at(self, row: int) -> str:
-        for icao, r in self._rows.items():
-            if r == row:
-                return icao
-        return ""
+        item = self.table.item(row, AC_NAME)
+        return str(item.data(_ICAO_ROLE) or "") if item is not None else ""
 
     def _rebuild(self, selected: str) -> None:
         """Rows again after aircraft were dropped (order kept), the aircraft
@@ -513,25 +545,38 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         blocked = self.table.blockSignals(True)
         self.table.setUpdatesEnabled(False)
         held, self._fitting_held = self._fitting_held, True  # once, at the end
+        sorting = self.table.isSortingEnabled()
+        self.table.setSortingEnabled(False)  # (sorted once, at the end)
         try:
             self.table.setRowCount(0)
-            self._rows.clear()
+            self._items.clear()
             self._dimmed.clear()
             self._widest.clear()  # the widest values may have gone
             for aircraft in self.tracker.aircraft():
-                self._fill(self._add_row(aircraft.icao), aircraft)
-            if selected in self._rows:
+                self._add_row(aircraft.icao)
+                self._fill(aircraft)
+            self.table.setSortingEnabled(sorting)
+            if selected in self._items:
                 self.select(selected)
         finally:
+            if self.table.isSortingEnabled() != sorting:  # (an error above)
+                self.table.setSortingEnabled(sorting)
             self._fitting_held = held
             self._fit_columns()
             self.table.setUpdatesEnabled(True)
             self.table.blockSignals(blocked)
 
-    def _fill(self, row: int, aircraft: Aircraft) -> None:
+    def _fill(self, aircraft: Aircraft) -> None:
         """Show an aircraft in its row. Only what changed is set: a value
         wider than any before in its column widens that column, and the
         color and font change only when the row dims or brightens."""
+        name_item = self._items.get(aircraft.icao)
+        if name_item is None:
+            return
+        # The row's cells, taken first: in a sorted list a changed value
+        # moves the row.
+        row = name_item.row()
+        items = [self.table.item(row, col) for col in range(len(_AC_HEADERS))]
         now = self._clock()
         stale = self.tracker.is_stale(aircraft)
         if aircraft.on_ground:
@@ -561,6 +606,15 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
             AC_MESSAGES: f"{aircraft.messages:,}",
             AC_SEEN: format_age(now - aircraft.last_seen),
         }
+        # Sort keys of the columns of numbers (unknown values sort first).
+        keys = {
+            AC_ALTITUDE: 0.0 if aircraft.on_ground else _number(aircraft.altitude),
+            AC_SPEED: _number(aircraft.speed),
+            AC_SEEN: now - aircraft.last_seen,
+            AC_MESSAGES: float(aircraft.messages),
+            AC_TRACK: _number(aircraft.track),
+            AC_VS: _number(aircraft.vertical_rate),
+        }
         was_stale = self._dimmed.get(aircraft.icao)
         restyle = was_stale is not stale
         self._dimmed[aircraft.icao] = stale
@@ -575,9 +629,12 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         # Heard again: its name is bold again, so maybe wider.
         grown = [AC_NAME] if was_stale and not stale else []
         for col, text in values.items():
-            item = self.table.item(row, col)
+            item = items[col]
             if item is None:
                 continue
+            key = keys.get(col)
+            if key is not None and item.data(_SORT_ROLE) != key:
+                item.setData(_SORT_ROLE, key)  # (before the text: sorted once)
             if item.text() != text:
                 item.setText(text)
                 if self._outgrows(col, text) and col not in grown:

@@ -6502,6 +6502,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         elif self._recording and not self._capture_pending:
             self._capture_gap = True  # (see _capture)
 
+    def _take_details(self) -> Tuple[str, str]:
+        """(hardware, description) of a take starting now, for its SigMF
+        metadata: the device, and where it was tuned in what mode (a take
+        of a recording playing: that recording's hardware, and its name)."""
+        mode = self._mode_text(self._control_panel.get_demod_mode())
+        what = f"Tuned to {format_frequency(self._current_frequency())} ({mode})"
+        device = self._playback.device
+        if device is not None:
+            options = device.options
+            return options.hardware, f"{what}, played back from {options.name}"
+        return (self._device_display_name() if self._device else ""), what
+
     def _recording_elapsed(self) -> float:
         """Seconds spent capturing in the current recording."""
         elapsed = self._rec_accum
@@ -7191,9 +7203,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._buffer_meta = tuned
             self._buffer_source = ""
             self._buffer_source_path = ""
-            self._take_started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            # (To the millisecond, as the stretches after a gap are.)
+            self._take_started = _utc_stamp()
             self._take_stamp = time.strftime("%Y%m%d_%H%M%S")
-            self._take_hardware = self._take_description = ""
+            self._take_hardware, self._take_description = self._take_details()
             self._retune_warned = False
             self._sync_recording_armed()
             self._update_take_panel()  # (the status line shows the new take)

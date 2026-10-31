@@ -653,3 +653,55 @@ class TestSecondReceiverStopSaysWhereTheRecordingWent(_FilesCase):
         from sdr_module.gui.second_receiver import DEMO_NAME
 
         self.assertEqual(DEMO_NAME, self.win._device_display_name())
+
+
+class TestTakeMetadata(_FilesCase):
+    """REC-E2E-10: SigMF from main-window takes had an empty author, the
+    generic description "SDR Recording", no core:hw and a whole-second first
+    timestamp, unlike the second receiver's."""
+
+    def test_a_saved_take_says_what_and_where_it_was(self):
+        import json
+        import re
+
+        win = self.win
+        self.assertTrue(win.set_frequency(145.29e6))
+        win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        win._toggle_recording(True)
+        for _ in range(3):
+            win._update_display()
+        win._toggle_recording(False)
+        path = self.path("rt.sigmf-data")
+        with self.save_dialog(path):
+            win._save_recording()
+        self.settle(5)
+        with open(self.path("rt.sigmf-meta")) as handle:
+            meta = json.load(handle)
+        glob = meta["global"]
+        self.assertEqual(glob["core:hw"], "Demo Device (simulated signals)")
+        self.assertEqual(glob["core:description"], "Tuned to 145.290 MHz (FM)")
+        self.assertNotIn("core:author", glob)  # (unknown: left out)
+        stamp = meta["captures"][0]["core:datetime"]
+        self.assertRegex(stamp, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
+        self.assertTrue(re.match(r"^\d{4}", stamp))
+
+    def test_a_take_of_a_recording_playing_keeps_its_hardware(self):
+        win = self.win
+        path = _save_sigmf(self.path("orig.sigmf-data"), 144.39e6, seconds=1.0)
+        from sdr_module.dsp.recording import write_sigmf_meta
+
+        write_sigmf_meta(
+            path, SampleFormat.FLOAT32, 1e6, 144.39e6, hardware="RTL-SDR v3"
+        )
+        with self.open_dialog(path):
+            self.assertTrue(win._open_recording())
+        win._toggle_recording(True)
+        for _ in range(3):
+            win._update_display()
+        win._toggle_recording(False)
+        self.assertEqual(win._take_hardware, "RTL-SDR v3")
+        self.assertEqual(
+            win._take_description,
+            "Tuned to 144.390 MHz (FM), played back from orig.sigmf-data",
+        )
+        win._playback.close()

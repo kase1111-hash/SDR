@@ -752,7 +752,6 @@ class IQRecorder:
             "core:sample_rate": self._sample_rate,
             "core:version": "1.0.0",
             "core:description": self._metadata.description or "SDR Recording",
-            "core:author": "",
             "core:recorder": "SDR Module IQRecorder",
         }
 

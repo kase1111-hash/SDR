@@ -786,6 +786,8 @@ if HAS_PYQT6:
                 win._show_status_message(
                     f"Playing at {speed:g}x: audio plays at 1x only.", "info", 4000
                 )
+            else:  # (the note on another speed no longer applies)
+                win._show_status_message("Playing at 1x.", "info", 2500)
 
         def _tick(self) -> None:
             """Follow the playing position; pause at the end of the file."""

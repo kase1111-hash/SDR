@@ -500,6 +500,35 @@ class TestGapsAreLoggedOnce(TestDemoTakesWhileOverloaded):
     test_stopping_and_starting_again_is_not_a_gap = None
 
 
+class TestStatusFollowsTheState(_FilesCase):
+    """REC-E2E-07: stale status-bar messages."""
+
+    def test_back_to_1x_replaces_the_speed_note(self):
+        path = _save_sigmf(self.path("fm.sigmf-data"), 100.1e6, seconds=1.0)
+        with self.open_dialog(path):
+            self.assertTrue(self.win._open_recording())
+        bar = self.win._playback_bar
+        bar.set_speed(0.5)
+        self.assertIn("Playing at 0.5x", self.message())
+        bar.set_speed(1.0)
+        self.assertEqual(self.message(), "Playing at 1x.")
+        self.win._playback.close()
+
+    def test_capturing_replaces_the_armed_note(self):
+        win = self.win
+        win._stop_acquisition()
+        win._toggle_recording(True)
+        self.assertTrue(self.message().startswith("Recording armed:"))
+        win._start_acquisition()
+        win._update_display()
+        self.assertFalse(win._capture_pending)
+        self.assertEqual(
+            self.message(), "Recording I/Q samples. Press Record again to stop."
+        )
+        win._toggle_recording(False)
+        win._stop_acquisition()
+
+
 class TestPlaybackSaysItsRealSpeed(_FilesCase):
     """REC-E2E-05 (playback): at 4x on a computer that can't keep up the
     recording played at about 0.3x while the status bar only said "Playing

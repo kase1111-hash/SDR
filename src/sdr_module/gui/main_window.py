@@ -7198,6 +7198,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._retune_warned = False
             self._sync_recording_armed()
             self._update_take_panel()  # (the status line shows the new take)
+            if self._message_label.text().startswith("Recording armed:"):
+                # (Capturing now: the note on waiting no longer applies.)
+                self._show_status_message(
+                    "Recording I/Q samples. Press Record again to stop.", "info", 3000
+                )
         elif not self._retune_warned and any(
             known is not None and abs(known - now) > 0.5
             for known, now in zip(self._buffer_meta, tuned, strict=True)

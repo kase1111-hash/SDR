@@ -575,3 +575,48 @@ class TestPlaybackSaysItsRealSpeed(_FilesCase):
                 controller._tick()
         self.assertIn("Playing at 2x", self.message())
         controller.close()
+
+
+class TestOneSizeUnit(_FilesCase):
+    """REC-E2E-09: 'MB' meant MiB in some places (the REC info, the second
+    receiver, free space) and decimal MB in others (the take line, Recording
+    Info), so the same file showed two sizes."""
+
+    def test_the_same_bytes_read_the_same_everywhere(self):
+        from sdr_module.gui.iq_files import RecordingInfoDialog, describe_iq_file
+
+        size = 72_474_856  # (69.1 MiB)
+        path = self.path("take.cf32")
+        with open(path, "wb") as handle:
+            handle.truncate(size)
+        options, _missing = describe_iq_file(path)
+        options.sample_rate, options.center_hz = 2.4e6, 145.8e6
+        info = RecordingInfoDialog(options)
+        self.addCleanup(info.deleteLater)
+        self.assertEqual(info.value("Size"), "72.5 MB")
+        # The main window's recording info, while recording.
+        win = self.win
+        win._recording_bytes = size
+        win._update_recording_status()
+        self.assertTrue(win._recording_info_label.text().startswith("72.5 MB"))
+        # The second receiver's REC label (shut down with the window).
+        second = win._second_rx.show()
+        second._status_timer.stop()
+
+        class Recorder:
+            file_size_bytes = size
+            duration_seconds = 3.0
+
+        second._recorder = Recorder()
+        second._update_rec_label()
+        self.assertEqual(second._rec_label.text(), "REC 00:03 · 72.5 MB")
+        second._recorder = None
+
+    def test_free_space_is_in_the_same_unit(self):
+        from collections import namedtuple
+        from unittest import mock
+
+        usage = namedtuple("Usage", "total used free")(10**12, 0, 420_000_000)
+        with mock.patch.object(self.mw.shutil, "disk_usage", return_value=usage):
+            self.assertFalse(self.win._start_recording())
+        self.assertIn("only 420 MB of disk space", self.message())

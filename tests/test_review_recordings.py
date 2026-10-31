@@ -109,7 +109,7 @@ class _ReviewCase(_FilesCase):
         return self.path("recordings")
 
     def free(self, megabytes):
-        usage = Usage(10**12, 0, int(megabytes * 1024**2))
+        usage = Usage(10**12, 0, int(megabytes * 10**6))
         return mock.patch.object(self.mw.shutil, "disk_usage", return_value=usage)
 
     def set_format(self, ext):
@@ -190,7 +190,7 @@ class TestAutoSaveOnANearlyFullDisk(_ReviewCase):
         self.assertTrue(self.win._buffer_unsaved)
         text = self.message()
         self.assertIn("there isn't enough space (it needs ", text)
-        self.assertIn("has 0 MB free)", text)
+        self.assertIn("has 500 kB free)", text)
         self.assertNotIn("nearly full", text)
         # (Said once: what to do is the auto-save's own advice.)
         self.assertNotIn("free up some space", text)

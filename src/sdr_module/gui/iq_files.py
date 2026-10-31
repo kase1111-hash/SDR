@@ -293,10 +293,16 @@ def format_datetime(text: str) -> str:
 
 
 def format_size(size: float) -> str:
+    """A size in decimal units, as the app shows every size (recordings,
+    free space): ``72_474_856 -> "72.5 MB"``, ``440_401_920 -> "440 MB"``,
+    ``2.5e9 -> "2.5 GB"``."""
     size = float(size)
     for unit, scale in (("GB", 1e9), ("MB", 1e6), ("kB", 1e3)):
-        if size >= scale:
-            return f"{size / scale:.1f} {unit}"
+        if size >= 0.9995 * scale:  # (999.96 MB is "1 GB")
+            value = size / scale
+            if value >= 99.95:
+                return f"{value:.0f} {unit}"
+            return f"{value:.1f}".removesuffix(".0") + f" {unit}"
     return f"{size:.0f} bytes"
 
 

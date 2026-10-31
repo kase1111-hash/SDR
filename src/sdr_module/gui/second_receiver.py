@@ -134,6 +134,7 @@ from .device_settings import (
     gain_model_for_kind,
     load_front_end,
 )
+from .iq_files import format_size
 from .level_meter import LevelMeter
 
 # The receiver chain and the display loop's helpers are the main window's,
@@ -2792,8 +2793,7 @@ if HAS_PYQT6:
             free = self._free_space(folder)
             if free is not None and free < _MIN_FREE_BYTES:
                 self._show_message(
-                    f"Can't record: only {free / 1024 ** 2:.0f} MB of disk space "
-                    "is left.",
+                    f"Can't record: only {format_size(free)} of disk space " "is left.",
                     "danger",
                     10000,
                 )
@@ -2840,7 +2840,7 @@ if HAS_PYQT6:
                 free = self._free_space(self._record_path)
                 if free is not None and free < _MIN_FREE_BYTES:
                     self._stop_recording(
-                        f"only {free / 1024 ** 2:.0f} MB of disk space is left"
+                        f"only {format_size(free)} of disk space is left"
                     )
                     self._sync_record_ui()
                     return
@@ -2881,7 +2881,7 @@ if HAS_PYQT6:
             else:
                 text = (
                     f"Saved {where} ({_clock_text(seconds)}, "
-                    f"{size / 1024 ** 2:,.0f} MB). File > Open Recording in "
+                    f"{format_size(size)}). File > Open Recording in "
                     "the main window plays it."
                 )
             if problem:
@@ -2918,9 +2918,9 @@ if HAS_PYQT6:
             recorder = self._recorder
             if recorder is None:
                 return
-            size = recorder.file_size_bytes / 1024**2
+            size = format_size(recorder.file_size_bytes)
             self._rec_label.setText(
-                f"REC {_clock_text(recorder.duration_seconds)} · {size:,.0f} MB"
+                f"REC {_clock_text(recorder.duration_seconds)} · {size}"
             )
             self._rec_label.setToolTip(f"Recording to {self._record_path}")
 

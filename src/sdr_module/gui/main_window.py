@@ -161,6 +161,7 @@ from .iq_files import (
     RecordingInfoDialog,
     ask_recording_details,
     describe_iq_file,
+    format_size,
     needs_options,
     split_name,
 )
@@ -1424,7 +1425,7 @@ _RECORDING_PREFIX = "sdr-recording-"
 _RECORDING_SUFFIX = ".cf32"
 # A recording stops, with a warning, when the drive it is written to has
 # less than this much free space left.
-_MIN_FREE_BYTES = 500 * 1024 * 1024
+_MIN_FREE_BYTES = 500_000_000
 _FREE_SPACE_CHECK_S = 0.5
 _SAVE_CHUNK = 1 << 20  # samples converted and written per step when saving
 _SAVE_OVERHEAD = 1 << 20  # a saved file's header and metadata, to spare
@@ -4184,7 +4185,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
         count = self._buffer_sample_count()
         if count:
-            p.set_value("buffer", f"{count:,} samples ({count * 8 / 1e6:.1f} MB)")
+            p.set_value("buffer", f"{count:,} samples ({format_size(count * 8)})")
         else:
             p.set_value("buffer", "Empty")
 
@@ -6273,7 +6274,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         free = self._free_recording_space()
         if free is not None and free < _MIN_FREE_BYTES:
             self._show_status_error(
-                f"Can't record: only {free / 1024**2:.0f} MB of disk space is "
+                f"Can't record: only {format_size(free)} of disk space is "
                 "left. Free up some space, then record again.",
                 10000,
             )
@@ -6421,12 +6422,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             state = "paused" if self._recording_paused else "in progress"
             box.setInformativeText(
                 f"A recording is {state}: {count:,} I/Q samples "
-                f"({count * 8 / 1e6:.1f} MB) so far{where}. Save and Don't Save "
+                f"({format_size(count * 8)}) so far{where}. Save and Don't Save "
                 "stop it; Cancel keeps it going."
             )
         else:
             box.setInformativeText(
-                f"{count:,} I/Q samples ({count * 8 / 1e6:.1f} MB) "
+                f"{count:,} I/Q samples ({format_size(count * 8)}) "
                 f"recorded{where} haven't been saved. If you don't save them, "
                 "they are lost."
             )
@@ -6545,13 +6546,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._record_kind() != "audio":  # (else the group times the audio)
             self._control_panel.update_record_time(int(self._recording_elapsed()))
 
-        mb = self._recording_bytes / (1024 * 1024)
         # Recorded size + free space on the drive the recording goes to
         free = self._free_recording_space()
-        if free is None:
-            info = f"{mb:.1f} MB"
-        else:
-            info = f"{mb:.1f} MB · {free / 1024**3:.1f} GB free"
+        info = format_size(self._recording_bytes)
+        if free is not None:
+            info += f" · {format_size(free)} free"
         self._recording_info_label.setText(info)
 
     def _free_recording_space(self) -> Optional[int]:
@@ -6577,7 +6576,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if free is None or free >= _MIN_FREE_BYTES:
             return True
         self._stop_recording_with_warning(
-            f"only {free / 1024**2:.0f} MB of disk space is left"
+            f"only {format_size(free)} of disk space is left"
         )
         return False
 
@@ -6593,12 +6592,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._toggle_recording(False)
         finally:
             self._auto_save_later = False
-        size = self._samples_buffer.nbytes / 1024**2
+        size = format_size(self._samples_buffer.nbytes)
         if captured and self._samples_buffer and self._control_panel.is_auto_save():
-            kept = f" The {size:,.0f} MB recorded so far are kept."
+            kept = f" The {size} recorded so far are kept."
         elif captured and self._samples_buffer:
             kept = (
-                f" The {size:,.0f} MB recorded so far are kept: save them with "
+                f" The {size} recorded so far are kept: save them with "
                 "File > Save Recording (Ctrl+S)"
                 + (", on another drive if this one is full." if elsewhere else ".")
             )
@@ -6662,7 +6661,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             parts = []
             if rate:
                 parts.append(_clock_text(count / rate))
-            parts.append(f"{count * 8 / 1e6:,.0f} MB")
+            parts.append(format_size(count * 8))
             where = f" @ {format_frequency(center)}" if center else ""
             if self._buffer_source:
                 text = f"Loaded {self._buffer_source} · " + " · ".join(parts) + where
@@ -6706,7 +6705,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             answer = QMessageBox.question(
                 self,
                 "Discard Recording",
-                f"Delete the {count * 8 / 1e6:,.0f} MB recording without saving it?",
+                f"Delete the {format_size(count * 8)} recording without saving it?",
                 QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
@@ -8546,9 +8545,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             QMessageBox.warning(
                 self,
                 "Not Enough Disk Space",
-                f"Converting {options.name} needs {need / 1024**2:,.0f} MB of "
+                f"Converting {options.name} needs {format_size(need)} of "
                 f"space in {file_dialogs.display_path(self._capture_folder())}, "
-                f"which has {free / 1024**2:,.0f} MB free. Free up some space, "
+                f"which has {format_size(free)} free. Free up some space, "
                 "then try again.",
             )
             return False
@@ -9148,23 +9147,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if need + (_MIN_FREE_BYTES if reserve else 0) <= free:
             return
         where = file_dialogs.display_path(folder)
-        need_mb, free_mb = need / 1024**2, free / 1024**2
+        need_text, free_text = format_size(need), format_size(free)
         if not reserve:
             raise ValueError(
-                f"there isn't enough space: it needs {need_mb:,.0f} MB, and {where} "
-                f"has {free_mb:,.0f} MB free. Save it to another drive, or free up "
+                f"there isn't enough space: it needs {need_text}, and {where} "
+                f"has {free_text} free. Save it to another drive, or free up "
                 "some space."
             )
         # (Save automatically says what to do next itself.)
         if need > free:
             raise ValueError(
-                f"there isn't enough space (it needs {need_mb:,.0f} MB, and "
-                f"{where} has {free_mb:,.0f} MB free)"
+                f"there isn't enough space (it needs {need_text}, and "
+                f"{where} has {free_text} free)"
             )
         raise ValueError(
-            f"the drive would be nearly full (it needs {need_mb:,.0f} MB of the "
-            f"{free_mb:,.0f} MB free in {where}, and recording keeps "
-            f"{_MIN_FREE_BYTES // 1024**2} MB free)"
+            f"the drive would be nearly full (it needs {need_text} of the "
+            f"{free_text} free in {where}, and recording keeps "
+            f"{format_size(_MIN_FREE_BYTES)} free)"
         )
 
     def _import_channels_csv(self) -> None:

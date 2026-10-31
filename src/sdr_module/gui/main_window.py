@@ -2298,6 +2298,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # (the band plan) isn't announced on its own as well.
     _band_plan_note: Optional[Tuple[str, Tuple[str, str]]] = None
     _quiet_mode_change = False
+    # The decoder a preset turned on (decoder, preset, its frequency, where
+    # it is heard), and the note that it went off for the next preset's
+    # message.
+    _preset_decoder: Optional[
+        Tuple[str, str, float, Tuple[Tuple[float, float], ...]]
+    ] = None
+    _preset_decoder_note = ""
 
     @property
     def _TUNE_STEPS_HZ(self) -> Dict[Any, float]:  # noqa: N802 - existing name
@@ -5088,6 +5095,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._update_window_title()
         self._update_band_plan(freq_hz)
         self._control_panel.show_preset_for(freq_hz)
+        self._release_preset_decoder(freq_hz)
         self._shown_freq_hz = float(freq_hz)
 
         logger.debug(f"Frequency changed to {freq_hz/1e6:.3f} MHz")
@@ -9828,19 +9836,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         panel = self._control_panel
         decoder = preset_table.decoder_for(preset)
-        note = ""
+        # The last preset's decoder, turned off as the tuning left it.
+        note = self._preset_decoder_note
+        self._preset_decoder_note = ""
         if decoder == "SSTV":
             if HAS_HAM_RADIO:
                 self._show_panel("sstv")
                 if self._device is not None and self._is_running:
                     self._sstv_panel.start_listening()
-                    note = " · SSTV decoder listening"
+                    note += " · SSTV decoder listening"
+                    self._own_preset_decoder(decoder, preset)
                 else:
-                    note = " · SSTV tab (press Start Decoder once receiving)"
+                    note += " · SSTV tab (press Start Decoder once receiving)"
         elif decoder:
             if self._select_decoder(decoder):
                 self._show_panel("decoder")
-                note = f" · {decoder} decoder on"
+                note += f" · {decoder} decoder on"
+                self._own_preset_decoder(decoder, preset)
         mode = self._mode_text(panel.get_demod_mode())
         prefix = str(self.__dict__.get("_preset_message_prefix", "") or "")
         self._show_status_message(
@@ -9848,6 +9860,53 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             f"{mode}, {panel._bw_combo.currentText()} filter{note}",
             "info",
             8000 if prefix else 4000,
+        )
+
+    def _own_preset_decoder(self, decoder: str, preset: Any) -> None:
+        """Remember that ``preset`` turned ``decoder`` on, and where it is
+        heard: the protocol's bands and the preset's own channel (Doppler
+        and fine tuning included). Tuned away from them, it goes off."""
+        from .decoder_panel import PROTOCOL_BANDS
+
+        freq = float(preset.frequency_hz)
+        bands = PROTOCOL_BANDS.get(decoder, ()) + ((freq - 25e3, freq + 25e3),)
+        self._preset_decoder = (decoder, str(preset.name), freq, bands)
+
+    def _release_preset_decoder(self, freq_hz: float) -> None:
+        """LISTEN-05: the receiver is tuned to ``freq_hz``; once that is
+        away from where the decoder a preset turned on is heard, turn it off
+        (unless you changed it since: another protocol, or off already) and
+        say so (the next preset's message, while one is being applied)."""
+        owned = self._preset_decoder
+        if owned is None:
+            return
+        decoder, name, freq, bands = owned
+        if any(low <= freq_hz <= high for low, high in bands):
+            return
+        self._preset_decoder = None
+        if decoder == "SSTV":
+            if not self._sstv_listening():
+                return
+            self._sstv_panel._on_stop_clicked()  # (as its Stop button does)
+            note = "SSTV decoder stopped"
+        else:
+            panel = self._decoder_panel
+            if (
+                panel._proto_combo.currentText() != decoder
+                or not panel._enabled_check.isChecked()
+            ):
+                return
+            panel._enabled_check.setChecked(False)
+            self._update_decoder_chip()  # ("ADS-B · paused")
+            note = f"{decoder} decoder off"
+        if self._control_panel._applying_preset:
+            self._preset_decoder_note = f" · {note}"
+            return
+        self._show_status_message(
+            f"{note}: tuned away from the {name} preset ({format_frequency(freq)}), "
+            "which had turned it on.",
+            "info",
+            5000,
         )
 
     def _select_decoder(self, protocol: str) -> bool:

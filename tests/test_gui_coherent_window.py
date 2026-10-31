@@ -714,8 +714,10 @@ class TestWelcomeAgain(_WindowTestCase):
         self.assertIn("ADS-B decoder on", message)
         self.assertNotIn("Mode set to FM", message)
         self.run_welcome("ISM 433 (433.05–434.79 MHz)", seen)
+        # (The ADS-B preset's decoder goes off with it: LISTEN-05.)
         self.assertEqual(
-            win._message_label.text(), "ISM 433 MHz: 433.920 MHz, I/Q, 500 kHz filter"
+            win._message_label.text(),
+            "ISM 433 MHz: 433.920 MHz, I/Q, 500 kHz filter · ADS-B decoder off",
         )
         self.assertEqual(win._control_panel._bw_combo.currentText(), "500 kHz")
 

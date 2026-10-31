@@ -266,3 +266,75 @@ class TestPresetOutOfRange(_WindowTestCase):
         self.assertEqual(win._current_frequency(), 100.1e6)
         self.assertIn("7.030 MHz is out of range", win._message_label.text())
         self.assertEqual(win._control_panel.get_demod_mode(), "FM")
+
+
+# --------------------------------------------------------------------------- #
+# A preset's decoder
+# --------------------------------------------------------------------------- #
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestPresetDecoderLifetime(_WindowTestCase):
+    """LISTEN-05: the decoder a preset turned on stayed on after another
+    preset or a far tune (ADS-B decoding at 100.1 MHz; SSTV listening, and
+    warning about the mode, on every airband tune)."""
+
+    demo = True
+
+    type_frequency = TestBandPlanListeningSegments.type_frequency
+
+    def decoding(self):
+        panel = self.win._decoder_panel
+        return panel._proto_combo.currentText(), panel._enabled_check.isChecked()
+
+    def history(self):
+        return [entry.text for entry in self.win._status_history.entries()]
+
+    def test_another_preset_turns_the_last_ones_decoder_off(self):
+        self.assertTrue(self.win._apply_preset_named("ADS-B"))
+        self.assertEqual(self.decoding(), ("ADS-B", True))
+        self.assertTrue(self.win._apply_preset_named("FM Broadcast"))
+        self.assertEqual(self.decoding(), ("ADS-B", False))
+        self.assertIn("ADS-B decoder off", self.win._message_label.text())
+
+    def test_a_preset_with_a_decoder_of_its_own_switches_to_it(self):
+        self.win._apply_preset_named("ADS-B")
+        self.win._apply_preset_named("ACARS")
+        self.assertEqual(self.decoding(), ("ACARS", True))
+
+    def test_a_far_tune_out_of_its_band_turns_it_off(self):
+        self.win._apply_preset_named("ACARS")
+        self.assertEqual(self.decoding(), ("ACARS", True))
+        self.type_frequency("131.6")  # still where ACARS is heard
+        self.assertEqual(self.decoding(), ("ACARS", True))
+        self.type_frequency("100.1")
+        self.assertEqual(self.decoding(), ("ACARS", False))
+        self.assertTrue(
+            any(text.startswith("ACARS decoder off") for text in self.history()),
+            self.history(),
+        )
+
+    def test_a_decoder_you_changed_is_yours(self):
+        self.win._apply_preset_named("ADS-B")
+        combo = self.win._decoder_panel._proto_combo
+        combo.setCurrentIndex(combo.findText("POCSAG"))
+        self.win._decoder_panel._enabled_check.setChecked(True)
+        self.type_frequency("100.1")
+        self.assertEqual(self.decoding(), ("POCSAG", True))
+
+    def test_the_sstv_preset_stops_listening_when_you_leave_it(self):
+        from sdr_module.gui.main_window import HAS_HAM_RADIO
+
+        if not HAS_HAM_RADIO:
+            self.skipTest("no ham radio tools")
+        win = self.win
+        if not win._is_running:
+            win._toggle_acquisition()
+        self.assertTrue(win._apply_preset_named("ISS SSTV/Voice"))
+        self.assertTrue(win._sstv_listening())
+        win._status_history.clear()
+        self.type_frequency("125")  # airband: AM
+        self.assertFalse(win._sstv_listening())
+        texts = self.history()
+        self.assertFalse(any("SSTV decoding needs" in text for text in texts), texts)
+        self.assertTrue(any(text.startswith("SSTV decoder stopped") for text in texts))

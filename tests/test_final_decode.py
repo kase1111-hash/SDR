@@ -560,5 +560,33 @@ class TestChipPausedAndProblems(_WindowTestCase):
         self.assertFalse(chip.property("tone"))
 
 
+# --------------------------------------------------------------------------- #
+# DEC-E2E-16: one Error History entry per sample-rate step with ADS-B
+# --------------------------------------------------------------------------- #
+
+
+class TestOneWarningPerRateStep(_WindowTestCase):
+    demo = True
+
+    def test_each_step_too_low_for_ads_b_is_listed_once(self):
+        # Each step gave two warnings: the rebuilt decoder's ("ADS-B
+        # decoder: ADS-B needs at least 2 MS/s; the device runs at 1.8
+        # MS/s") and the rate's status message saying it again.
+        import logging
+
+        win = self.win
+        win._decoder_panel._proto_combo.setCurrentText("ADS-B")
+        self.settle(2)
+        with self.assertLogs(level=logging.WARNING) as logs:
+            self.assertTrue(win._device_controls.choose_rate(1.8e6))
+            self.assertTrue(win._device_controls.choose_rate(1.4e6))
+        records = [r.getMessage() for r in logs.records]
+        self.assertEqual(len(records), 2, records)
+        self.assertTrue(all("ADS-B" in text for text in records), records)
+        # The status bar still says it.
+        self.assertIn("ADS-B needs", win._message_label.text())
+        self.assertEqual(win._message_label.property("tone"), "warning")
+
+
 if __name__ == "__main__":
     unittest.main()

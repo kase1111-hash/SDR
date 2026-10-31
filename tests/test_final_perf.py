@@ -298,3 +298,67 @@ class TestPlotsInTheWindow(_WindowTestCase):
         self.assertLessEqual(
             frames[1].segments, self.mw._PLOT_MAX_SAMPLES // analyzer.size
         )
+
+
+# ---------------------------------------------------------------------------
+# ROB-06: the Decoder's RDS and the receiver's broadcast FM channel
+# ---------------------------------------------------------------------------
+
+
+class TestRdsFromTheReceiversChannel(unittest.TestCase):
+    def test_a_raw_decoder_decodes_a_channel_handed_to_it(self):
+        from sdr_module.dsp.live_decoders import RDSLiveDecoder, describe_message
+        from tests.test_rds import _wfm
+
+        # The receiver's broadcast FM channel at 20 MS/s: 444 kS/s at 0 Hz.
+        decoder = RDSLiveDecoder(RATE, 0.0)
+        rate = RATE / 45
+        x = _wfm(rate, 2.5, 0.0)
+        own = mock.Mock(wraps=decoder._channelizer.process)
+        decoder._channelizer.process = own
+        messages = []
+        block = int(rate / 30)
+        for i in range(0, len(x), block):
+            messages += decoder.process_channel(x[i : i + block], rate)
+        rows = [describe_message(m) for m in messages]
+        self.assertIn(("PI C0DE", "Station name: SDR DEMO"), rows)
+        self.assertEqual(own.call_count, 0)
+        status = decoder.status
+        self.assertEqual(status.channel_rate, rate)
+        self.assertGreater(status.valid, 0)
+        self.assertAlmostEqual(status.stream_s, len(x) / rate, places=3)
+        # Raw blocks again: its own channel, at its own rate (the station
+        # it knows stays known).
+        decoder.process(np.zeros(int(RATE / 30), dtype=np.complex64))
+        self.assertEqual(own.call_count, 1)
+        self.assertEqual(decoder.status.channel_rate, 250e3)
+        self.assertEqual(decoder.station.ps_name, "SDR DEMO")
+
+
+class TestDecoderRdsInTheWindow(_WindowTestCase):
+    demo = True
+
+    def test_the_decoders_rds_decodes_the_receivers_fm_channel(self):
+        # ROB-06: with the receiver on broadcast FM the Decoder's RDS
+        # picked the same station out of the raw block a second time (8-14
+        # ms of each 33 ms frame at 20 MS/s), where the background RDS
+        # took 1.2 ms from the receiver's own channel.
+        self.win.set_frequency(100.1e6)
+        self.win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        self.win._decoder_panel._proto_combo.setCurrentText("RDS")
+        self.settle(1)
+        decoder = self.win._decoder
+        own = mock.Mock(wraps=decoder._channelizer.process)
+        decoder._channelizer.process = own
+        for _ in range(300):  # (up to 10 s of the demo station)
+            self.win._process_block(self.win._device.read_samples(80000))
+            if decoder.station.ps_complete:
+                break
+        self.assertTrue(decoder.station.ps_complete)
+        self.assertEqual(own.call_count, 0)
+        self.assertTrue(self.win._decoder_panel.count_for("RDS"))
+        # A narrow FM channel can't carry the station's RDS: the decoder
+        # picks the station out of the raw block itself again.
+        self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        self.win._process_block(self.win._device.read_samples(80000))
+        self.assertEqual(own.call_count, 1)

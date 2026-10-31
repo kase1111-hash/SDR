@@ -173,7 +173,13 @@ from .preferences_dialog import (
     PreferencesDialog,
     preferred_capture_folder,
 )
-from .rds_station import RdsListener, badge_text, badge_tooltip, tuner_text
+from .rds_station import (
+    MIN_CHANNEL_RATE,
+    RdsListener,
+    badge_text,
+    badge_tooltip,
+    tuner_text,
+)
 from .receiver_bar import FrequencyDigits, ReceiverBar
 from .scanner_host import WindowScannerHost
 from .scanner_panel import ScannerPanel
@@ -4614,8 +4620,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Recreate the live decoder for the current device's sample rate."""
         self._on_decoder_protocol_changed(self._decoder_panel.protocol() or "Off")
 
-    def _run_decoder(self, samples: np.ndarray) -> None:
-        """Feed a raw block to the live decoder and show what it decoded."""
+    def _run_decoder(
+        self,
+        samples: np.ndarray,
+        channel: Optional[np.ndarray] = None,
+        chain: Optional["_ReceiverChain"] = None,
+    ) -> None:
+        """Feed a raw block to the live decoder and show what it decoded.
+
+        Given the receiver's ``channel`` (by ``chain``), a decoder that can
+        decode it gets that instead (see :meth:`_decoder_takes_channel`)."""
         decoder = self._decoder
         if decoder is None or self._decoder_protocol is None:
             return
@@ -4629,7 +4643,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # decodes") says nothing about this one.
             decoder.channel_changed()
         try:
-            messages = decoder.process(samples)
+            if self._decoder_takes_channel(decoder, channel, chain):
+                assert channel is not None and chain is not None
+                messages = decoder.process_channel(channel, chain.channel_rate)
+            else:
+                messages = decoder.process(samples)
         except Exception as exc:  # pragma: no cover - defensive
             if not getattr(self, "_decoder_error_logged", False):
                 self._decoder_error_logged = True
@@ -4643,6 +4661,27 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # The Decoder's own RDS names the station (the background
             # listener rests meanwhile).
             self._show_rds_station(decoder.station)
+
+    def _decoder_takes_channel(
+        self,
+        decoder: Any,
+        channel: Optional[np.ndarray],
+        chain: Optional["_ReceiverChain"],
+    ) -> bool:
+        """Whether the live decoder decodes the receiver's own channel: the
+        Decoder's RDS while broadcast FM is received through a filter as
+        wide as its own (the same station, already at 0 Hz; picking it out
+        of the raw block again cost 8-14 ms of each frame at 20 MS/s)."""
+        if channel is None or chain is None:
+            return False
+        if not callable(getattr(decoder, "process_channel", None)):
+            return False
+        return (
+            chain.mode == "FM"
+            and self._control_panel.get_fm_deviation() >= _BROADCAST_DEVIATION_HZ
+            and chain.channel_rate >= MIN_CHANNEL_RATE
+            and chain.bandwidth >= 2.0 * float(getattr(decoder, "PASS_HZ", 0.0))
+        )
 
     def _push_decoded_message(
         self,
@@ -7164,7 +7203,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 logger.debug("S-meter update failed: %s", exc)
 
         # Feed the live protocol decoder (if the Decoder panel selected one).
-        self._run_decoder(samples)
+        self._run_decoder(samples, channel, chain)
 
         # The Scanner tab's scan runs on the same blocks.
         self._scan_frame(samples)

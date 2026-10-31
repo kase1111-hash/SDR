@@ -404,8 +404,9 @@ class TestRefusals:
             "your license (None) allows CB/MURS/FRS only"
         )
         _license.set_license_class(LicenseClass.TECHNICIAN)
+        # (No part of 20 m is the Technician's: the band is named.)
         assert engine.check(_id_job(14.2e6, emission="cw"), dev) == (
-            "your license (Technician) doesn't include 14.200 MHz"
+            "your license (Technician) doesn't include 20 m (14.200 MHz)"
         )
         assert engine.check(_id_job(1575.42e6), dev).startswith(
             "1575.420 MHz is a protected frequency (GPS L1"

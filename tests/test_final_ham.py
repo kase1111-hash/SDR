@@ -22,6 +22,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from sdr_module.ham.sstv import find_mode  # noqa: E402
 from sdr_module.ham.sstv_encoder import encode_sstv, sstv_test_card  # noqa: E402
 from tests.test_gui_chrome import HAS_PYQT6, _WindowTestCase  # noqa: E402
+from tests.test_gui_qrp import _PanelCase as _QrpCase  # noqa: E402
 from tests.test_gui_smeter import _PanelCase as _SMeterCase  # noqa: E402
 from tests.test_gui_smeter import noise, tone  # noqa: E402
 from tests.test_gui_sstv import FS, _PanelCase, correlation  # noqa: E402
@@ -620,6 +621,94 @@ class TestSecondReceiverTxLine(_TxCase):
         self.assertNotIn("DATA", text)
         self.station.stop()
         self.wait_done(5)
+
+
+class _LicenseCase(unittest.TestCase):
+    def setUp(self):
+        from sdr_module.core import frequency_manager
+
+        self.fm = frequency_manager.get_frequency_manager()
+        before = self.fm.get_license_class()
+        self.addCleanup(lambda: self.fm.set_license_class(before))
+
+    def license(self, name):
+        from sdr_module.core.frequency_manager import LicenseClass
+
+        self.fm.set_license_class(LicenseClass(name))
+
+    @staticmethod
+    def problem(freq_hz, width_hz, mode):
+        from sdr_module.gui.transmitter import legality_problem
+
+        return legality_problem(freq_hz, width_hz, mode, quiet=True)
+
+
+class TestSixtyMetreWording(_LicenseCase):
+    """HAM-E2E-11: a Technician at 5.3305 MHz was told the license doesn't
+    include "the signal's edge at 5.330 MHz": the refused frequency came
+    back rounded to 3 decimals, 500 Hz off, and was taken for an edge."""
+
+    def test_a_band_the_class_has_no_part_of_is_named(self):
+        self.license("technician")
+        self.assertEqual(
+            self.problem(5.3305e6, 0.0, "USB"),
+            "your license (Technician) doesn't include 60 m (5.3305 MHz)",
+        )
+        self.assertEqual(
+            self.problem(5.3465e6, 2.8e3, "USB"),
+            "your license (Technician) doesn't include 60 m (5.3465 MHz)",
+        )
+        self.assertEqual(
+            self.problem(14.2e6, 60.0, "CW"),
+            "your license (Technician) doesn't include 20 m (14.200 MHz)",
+        )
+        # A band with privileges for the class: the frequency alone.
+        self.assertEqual(
+            self.problem(7.15e6, 2.7e3, "LSB"),
+            "your license (Technician) doesn't include 7.150 MHz",
+        )
+
+    def test_edges_are_named_to_the_hertz(self):
+        self.license("technician")
+        # A CW signal 30 Hz above the edge of the Technician's segment.
+        self.assertEqual(
+            self.problem(7.02503e6, 100.0, "CW"),
+            "your license (Technician) doesn't include the signal's edge at "
+            "7.02498 MHz",
+        )
+        self.license("general")
+        self.assertEqual(
+            self.problem(5.3305e6, 60.0, "CW"),
+            "the signal's edge at 5.33047 MHz is outside the amateur and "
+            "license-free bands",
+        )
+
+    def test_the_frequency_manager_names_the_frequency_exactly(self):
+        self.license("technician")
+        allowed, reason = self.fm.is_tx_allowed(5.3305e6, 0.0, "USB")
+        self.assertFalse(allowed)
+        self.assertIn("5.3305 MHz", reason)
+        allowed, reason = self.fm.is_tx_allowed(14.2e6, 0.0, "USB")
+        self.assertIn("14.200 MHz", reason)
+
+
+class TestQrpCardDigits(_QrpCase):
+    """HAM-E2E-11: the QRP card read 5.330 MHz for the 5.3305 MHz channel."""
+
+    def test_half_khz_channel(self):
+        self.license("general")
+        self.panel.set_station(5.3305e6, "USB")
+        self.assertEqual(
+            self.panel._legal_label.text(),
+            "At 5.3305 MHz (General, SSB): legal limit 100 W PEP.",
+        )
+        self.license("technician")
+        self.panel.set_station(5.3305e6, "USB")
+        self.assertEqual(
+            self.panel._legal_label.text(),
+            "Not permitted at 5.3305 MHz in SSB: your license (Technician) "
+            "doesn't include 60 m (5.3305 MHz).",
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

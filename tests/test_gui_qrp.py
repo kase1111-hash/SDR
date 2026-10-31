@@ -104,7 +104,7 @@ class TestCalculatedOutput(_PanelCase):
         self.assertEqual(
             p._legal_label.text(),
             "Not permitted at 14.050 MHz in CW: your license (Technician) "
-            "doesn't include 14.050 MHz.",
+            "doesn't include 20 m (14.050 MHz).",
         )
         self.assertEqual(p._legal_label.property("tone"), "danger")
         self.license("general")

@@ -799,7 +799,12 @@ class RDSLiveDecoder(LiveDecoder):
             if update.update in ("pty", "ptyn") and not station.ps_complete:
                 waiting.append(update)
                 continue
-            ready.append(replace(update, pi_code=station.pi_code))
+            # The station's codes and flags as they are now: a program type
+            # that waited for the name may have come before any group 0
+            # (whose music/speech flag it would then lack).
+            ready.append(
+                replace(update, pi_code=station.pi_code, ta=station.ta, ms=station.ms)
+            )
         # The name first: an earlier program type follows it.
         ready.sort(key=lambda u: 0 if getattr(u, "update", "") == "ps" else 1)
         self._held = waiting

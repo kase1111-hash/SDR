@@ -90,6 +90,15 @@ class TestGroups:
         assert [s.group for s in snapshots] == ["0A"] * 4
         assert snapshots[-1].ps_name == NAME
 
+    def test_the_program_type_update_has_its_groups_music_flag(self):
+        # DEC-E2E-15: the program type was taken (with its update) before
+        # the group's own music/speech bit was read: a music station's
+        # "Program type" card said "Speech".
+        decoder = RDSDecoder(1187.5)
+        updates = dict(_updates(decoder, enc.rds_bits(enc.rds_ps_groups(PI, NAME))))
+        assert updates["pty"].ms is True
+        assert updates["ps"].ms is True
+
     def test_a_new_name_needs_all_four_segments(self):
         decoder = RDSDecoder(1187.5)
         decoder.decode_bits(enc.rds_bits(enc.rds_ps_groups(PI, NAME)))
@@ -393,6 +402,23 @@ class TestRDSLiveDecoder:
         status = decoder.status
         # The pilot is there: the panel says nothing decodes after a while.
         assert status.signal_present and status.undecoded_signal_s > 1.5
+
+    def test_a_held_program_type_shows_the_stations_flags(self):
+        # DEC-E2E-15: the program type, first heard in a RadioText group
+        # (no group 0 yet: music/speech unknown), waited for the name and
+        # then said "speech" for a music station.
+        from sdr_module.dsp.live_decoders import message_details
+
+        live = RDSLiveDecoder(250e3)
+        groups = enc.rds_radiotext_groups(PI, TEXT, pty=9)[:1] + enc.rds_ps_groups(
+            PI, NAME, pty=9
+        )
+        updates = live._decoder.decode_bits(enc.rds_bits(groups), updates_only=True)
+        rows = live._rows([u for u in updates if u.update in live.ROW_UPDATES])
+        assert [r.update for r in rows] == ["ps", "pty"]
+        pty = rows[1]
+        assert pty.ms is True
+        assert message_details(pty)[-1] == "Music"
 
     def test_message_rows(self):
         def row(**fields):

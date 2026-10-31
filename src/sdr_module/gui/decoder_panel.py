@@ -616,6 +616,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # freq_hz, label, demod mode and FM deviation ("" = keep the current
         # one): the same shape as BookmarksPanel.tune_requested.
         tune_requested = pyqtSignal(float, str, str, str)
+        # Decode was ticked (True) or unticked by the user.
+        decode_toggled = pyqtSignal(bool)
 
     def __init__(self, parent=None, settings: Any = None):
         if not HAS_PYQT6:
@@ -1163,6 +1165,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         if self.selection() != PROTOCOL_OFF:
             self._decode_wanted = bool(checked)
         self._update_state()
+        self.decode_toggled.emit(bool(checked))  # (the window's chip: "paused")
 
     def set_current_frequency(self, freq_hz: float) -> None:
         """Tell the panel the tuned frequency (updates the empty-table hint;

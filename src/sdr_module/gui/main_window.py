@@ -3533,6 +3533,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # The decoder panel's protocol selector drives a live decoder over the
         # acquired samples (the panel was previously fed no data at all).
         self._decoder_panel.protocol_changed.connect(self._on_decoder_protocol_changed)
+        # Decode unticked or ticked: the status-bar chip says "paused" at once.
+        self._decoder_panel.decode_toggled.connect(
+            lambda _on: self._update_decoder_chip()
+        )
         # Bookmarks and the Decoder panel's "Tune to ..." tune the receiver
         # (and select the mode they listen with); "Add" saves that mode.
         self._bookmarks_panel.tune_requested.connect(self._on_bookmark_tune)
@@ -4772,27 +4776,40 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         count = panel.count_for(proto)
         status = getattr(self._decoder, "status", None)
         detail = str(getattr(status, "detail", "") or "")
+        paused = not panel._enabled_check.isChecked()
+        # A decoder that can't work here (ADS-B below 2 MS/s, FLEX at a
+        # speed it can't read) says so rather than counting on.
+        problem = "" if paused else str(getattr(status, "problem", "") or "")
         parts = [proto]
         if detail:
             parts.append(detail)
-        if not panel._enabled_check.isChecked():
+        if paused:
             parts.append("paused")
+        elif problem:
+            parts.append("can't decode")
         else:
             parts.append(f"{count:,} msg{'' if count == 1 else 's'}")
         # "&&": an "&" in a station's name is not a keyboard mnemonic.
         text = " · ".join(parts).replace("&", "&&")
         if chip.text() != text:
             chip.setText(text)
+        set_tone(chip, "warning" if problem else None)
         # Its View > Panels shortcut (Ctrl+1 while it is the first panel).
         index = next(
             (i for i, spec in enumerate(self._panel_specs) if spec[0] == "decoder"),
             9,
         )
+        remedy = str(getattr(status, "remedy", "") or "")
+        why = (
+            f"It can't decode: {problem}." + (f" {remedy}" if remedy else "") + " "
+            if problem
+            else ""
+        )
         tip = (
             f"Decoder: {proto}"
             + (" (chosen by Auto)" if panel.is_auto() else "")
             + f", {count:,} message{'' if count == 1 else 's'} since it started"
-            + " (or since Clear). Click to open the Decoder tab"
+            + f" (or since Clear). {why}Click to open the Decoder tab"
             + (f" (Ctrl+{index + 1})." if index < 9 else ".")
         )
         if chip.toolTip() != tip:

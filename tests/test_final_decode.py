@@ -484,5 +484,45 @@ class TestExportFolderInTheWindow(_WindowTestCase):
         self.assertIs(self.win._decoder_panel._settings, self.win._settings)
 
 
+# --------------------------------------------------------------------------- #
+# DEC-E2E-07: the status-bar chip says "paused" and the decoder's problem
+# --------------------------------------------------------------------------- #
+
+
+class TestChipPausedAndProblems(_WindowTestCase):
+    demo = True  # (its sample rate can be changed)
+
+    def select(self, name):
+        self.win._decoder_panel._proto_combo.setCurrentText(name)
+        self.settle(2)
+
+    def test_unticking_decode_says_paused_at_once(self):
+        # The chip went on saying "AX.25/APRS · 0 msgs" while the status
+        # line said "Paused" (only an unrelated refresh updated it).
+        win = self.win
+        chip = win._decoder_chip
+        self.select("AX.25/APRS")
+        self.assertEqual(chip.text(), "AX.25/APRS · 0 msgs")
+        win._decoder_panel._enabled_check.click()  # untick, as a user does
+        self.assertEqual(chip.text(), "AX.25/APRS · paused")
+        win._decoder_panel._enabled_check.click()
+        self.assertEqual(chip.text(), "AX.25/APRS · 0 msgs")
+
+    def test_a_decoder_that_cannot_decode_says_so(self):
+        # ADS-B at 1.8 MS/s: "ADS-B · 3 msgs" with no hint that nothing
+        # can decode.
+        win = self.win
+        chip = win._decoder_chip
+        self.assertTrue(win.set_sample_rate(1.8e6))
+        self.select("ADS-B")
+        self.assertEqual(chip.text(), "ADS-B · can't decode")
+        self.assertEqual(chip.property("tone"), "warning")
+        self.assertIn("ADS-B needs at least 2 MS/s", chip.toolTip())
+        self.assertIn("Click to open the Decoder tab", chip.toolTip())
+        self.assertTrue(win.set_sample_rate(2.4e6))
+        self.assertEqual(chip.text(), "ADS-B · 0 msgs")
+        self.assertFalse(chip.property("tone"))
+
+
 if __name__ == "__main__":
     unittest.main()

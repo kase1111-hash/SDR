@@ -30,6 +30,7 @@ from ..dsp.recording import (
     SampleFormat,
     bytes_per_complex_sample,
     check_iq_samples,
+    confident_sample_format,
     detect_format,
     get_file_info,
     guess_sample_format,
@@ -433,13 +434,33 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
     return options, missing
 
 
-def _content_guess(path: str) -> Optional[SampleFormat]:
+def _content_guess(path: str, sure: bool = False) -> Optional[SampleFormat]:
+    """The sample format the start of the file looks like (None if it can't
+    be read; with ``sure``, also None when the data doesn't clearly say)."""
     try:
         with open(path, "rb") as handle:
             data = handle.read(65536)
     except OSError:
         return None
-    return guess_sample_format(data) if len(data) >= 64 else None
+    if len(data) < 64:
+        return None
+    return confident_sample_format(data) if sure else guess_sample_format(data)
+
+
+def format_dbfs(level_db: float) -> str:
+    """``-41.3 -> "-41 dBFS"``, ``2.6 -> "+3 dBFS"``."""
+    if not math.isfinite(level_db):
+        return "silent"
+    rounded = int(round(level_db))
+    return f"+{rounded} dBFS" if rounded > 0 else f"{rounded} dBFS"
+
+
+def sample_check_text(check: SampleCheck) -> str:
+    """What a sample check found, for samples that read as I/Q (its note,
+    or "The samples look right (peak -41 dBFS).")."""
+    if check.note:
+        return check.note
+    return f"The samples look right (peak {format_dbfs(check.peak_dbfs)})."
 
 
 #: What each use of a file needs to know (the others may stay unknown).
@@ -499,8 +520,9 @@ if HAS_PYQT6:
             self._missing = set(missing)
             self._purpose = purpose
             self._required = REQUIRED.get(purpose, set())
+            # (Only a clear one: "looks more like" a wild guess misleads.)
             self._content = (
-                _content_guess(options.path) if "format" in missing else None
+                _content_guess(options.path, sure=True) if "format" in missing else None
             )
             self._result: Optional[IqFileOptions] = None
             self.setWindowTitle(f"Import Options – {options.name}")
@@ -760,10 +782,8 @@ if HAS_PYQT6:
                     f", {format_mhz(options.center_hz - half).split(' ')[0]}–"
                     f"{format_mhz(options.center_hz + half)}"
                 )
-            text += (
-                f". The samples look right (peak {check.max_abs:.2f} of full scale)."
-            )
-            self._show_check(text, "success")
+            text += f". {sample_check_text(check)}"
+            self._show_check(text, "warning" if check.note else "success")
 
         @staticmethod
         def _note(edit: "QLineEdit", prefill: str, note: str) -> str:
@@ -837,12 +857,14 @@ if HAS_PYQT6:
                 ),
             )
             self._check = QLabel(
-                f"The samples look right (peak {check.max_abs:.2f} of full scale)."
-                if check.ok
-                else check.problem
+                sample_check_text(check) if check.ok else check.problem
             )
             self._check.setWordWrap(True)
-            set_role(self._check, "callout", "success" if check.ok else "warning")
+            set_role(
+                self._check,
+                "callout",
+                "success" if check.ok and not check.note else "warning",
+            )
             layout.addWidget(self._check)
 
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)

@@ -15,6 +15,7 @@ Also provides Audio Recording and Playback for demodulated audio:
 
 import json
 import logging
+import math
 import os
 import struct
 import wave
@@ -3138,9 +3139,27 @@ def guess_sample_format(data: bytes) -> SampleFormat:
     rtl_sdr) sits around 128 in both; signed 8-bit (cs8, hackrf_transfer)
     around 0, which as bytes is near 0 or 255, in both; little-endian
     16-bit (cs16) has spread-out low bytes and high bytes near 0 or 255.
-    Signals so strong that these don't tell go to the reading whose
-    consecutive samples jump least (a wrong 8-bit reading wraps around).
+    The two bytes of an 8-bit pair are I and Q: alike, and independent of
+    each other. The two bytes of a 16-bit sample aren't: the high byte of
+    a small sample only repeats the low byte's sign (0x00 or 0xFF), the
+    low byte of 8-bit samples widened to 16 bits is always 0, and a low
+    byte spreads far wider than its high byte. Signals so strong that
+    these don't tell go to the reading whose consecutive samples jump
+    least (a wrong 8-bit reading wraps around).
     """
+    return _guess_sample_format(data)[0]
+
+
+def confident_sample_format(data: bytes) -> Optional[SampleFormat]:
+    """The sample format ``data``'s bytes clearly show (as
+    :func:`guess_sample_format` reads them), or None when only a guess is
+    possible (signals so strong that the byte statistics don't tell)."""
+    fmt, sure = _guess_sample_format(data)
+    return fmt if sure else None
+
+
+def _guess_sample_format(data: bytes) -> Tuple[SampleFormat, bool]:
+    """:func:`guess_sample_format`, and whether the data clearly says so."""
     for fmt, dtype in ((SampleFormat.FLOAT32, "<f4"), (SampleFormat.FLOAT64, "<f8")):
         size = np.dtype(dtype).itemsize
         values = np.frombuffer(data[: len(data) // size * size], dtype=dtype)
@@ -3151,10 +3170,10 @@ def guess_sample_format(data: bytes) -> SampleFormat:
                 continue
             magnitude = np.abs(values)
             if magnitude.max() < 10.0 and np.percentile(magnitude, 90) > 1e-6:
-                return fmt
+                return fmt, True
     raw = np.frombuffer(data[: len(data) // 4 * 4], dtype=np.uint8)
     if raw.size < 32:
-        return SampleFormat.FLOAT32
+        return SampleFormat.FLOAT32, False
     low, high = raw[0::2], raw[1::2]
 
     def near_middle(x: np.ndarray) -> float:
@@ -3164,20 +3183,47 @@ def guess_sample_format(data: bytes) -> SampleFormat:
         return float(np.mean(np.abs(x.view(np.int8).astype(np.int16)) < 32))
 
     if near_middle(low) > 0.5 and near_middle(high) > 0.5:
-        return SampleFormat.UINT8
+        return SampleFormat.UINT8, True
+    # Small 16-bit samples (|x| < 128): the high byte is the low byte's
+    # sign extension. Independent 8-bit I and Q match that only by chance.
+    negative = low >= 128
+    follows = float(np.mean(high == np.where(negative, 255, 0)))
+    share = float(np.mean(negative))
+    by_chance = (1.0 - share) * float(np.mean(high == 0)) + share * float(
+        np.mean(high == 255)
+    )
+    if follows > 0.75 and follows - by_chance > 0.25:
+        return SampleFormat.INT16, True
+    # 8-bit samples widened to 16 bits (shifted left by 8, as SoapySDR's
+    # CS16 from an RTL-SDR or HackRF): the low byte is always 0.
+    zero_bytes = float(np.mean(low == 0))
+    if zero_bytes > 0.9 and float(np.mean(high == 0)) < zero_bytes - 0.25:
+        return SampleFormat.INT16, True
+    # 8-bit I and Q spread alike; a 16-bit sample's low byte spreads far
+    # wider than its high byte (also when a strong burst fills part of
+    # the data).
+    spread_low = float(np.var(low.view(np.int8).astype(np.float32)))
+    spread_high = float(np.var(high.view(np.int8).astype(np.float32)))
+    if spread_high > 0 and spread_low > 10.0 * spread_high:
+        return SampleFormat.INT16, True
     zero_low, zero_high = near_zero(low), near_zero(high)
     if zero_high > 0.5 and zero_low < 0.4:
-        return SampleFormat.INT16
+        return SampleFormat.INT16, True
     if zero_low > 0.4 and zero_high > 0.4:
-        return SampleFormat.INT8
+        return SampleFormat.INT8, True
 
     def roughness(fmt: SampleFormat) -> float:
         samples = iq_from_bytes(bytes(raw), fmt)
         return float(np.mean(np.abs(np.diff(samples)))) if samples.size > 1 else 0.0
 
-    return min(
-        (SampleFormat.UINT8, SampleFormat.INT8, SampleFormat.INT16), key=roughness
+    ranked = sorted(
+        (roughness(fmt), index, fmt)
+        for index, fmt in enumerate(
+            (SampleFormat.UINT8, SampleFormat.INT8, SampleFormat.INT16)
+        )
     )
+    # A clearly smoother reading (a signal) is sure; noise is rough in all.
+    return ranked[0][2], ranked[0][0] < 0.8 * ranked[1][0]
 
 
 class FormatConverter:
@@ -3547,10 +3593,20 @@ class SampleCheck:
     nonfinite: int = 0
     #: Why the samples don't look right, in plain words ("" when they do).
     problem: str = ""
+    #: I and Q components at the integer format's full scale (clipped).
+    full_scale: int = 0
+    #: What else to know about samples that look right ("" if nothing):
+    #: they reach full scale, or are all zero.
+    note: str = ""
 
     @property
     def ok(self) -> bool:
         return not self.problem
+
+    @property
+    def peak_dbfs(self) -> float:
+        """The peak in dB relative to full scale (-inf when all zero)."""
+        return 20.0 * math.log10(self.max_abs) if self.max_abs > 0 else -math.inf
 
 
 def check_iq_samples(
@@ -3561,14 +3617,20 @@ def check_iq_samples(
     """Read a few stretches of a recording (its start, middle and end) as
     ``sample_format`` and say whether they look like I/Q samples: finite
     numbers within a few times full scale. Data read in the wrong format
-    (an rtl_sdr ``.bin`` read as cf32) gives NaNs or values like 1e31.
+    (an rtl_sdr ``.bin`` read as cf32) gives NaNs or values like 1e31; a
+    16-bit file read as 8-bit gives an I far louder than its Q (the low
+    and high bytes of each sample), which real I/Q never has.
     A file that states its own format (SigMF, WAV, a sidecar) can't be
-    read in another one: its problem says so instead."""
+    read in another one: its problem says so instead. Integer samples at
+    full scale (clipped, or read in the wrong format) are counted and
+    noted, as are samples that are all zero."""
     pieces = []
+    read_as: Optional[SampleFormat] = None
     try:
         with IQPlayer(filepath, sample_format) as player:
             total = player.total_samples
-            name = (player.sample_format or SampleFormat.FLOAT32).value
+            read_as = player.sample_format
+            name = (read_as or SampleFormat.FLOAT32).value
             stated = player.metadata_path is not None or player._wav_file is not None
             if total == 0:
                 return SampleCheck(problem="The file holds no I/Q samples.")
@@ -3588,7 +3650,20 @@ def check_iq_samples(
         max_abs = float(magnitude.max()) if magnitude.size else 0.0
         rms = float(np.sqrt(np.mean(magnitude**2))) if magnitude.size else 0.0
     nonfinite = int(samples.size - good.size)
+    integer = read_as in (SampleFormat.UINT8, SampleFormat.INT8, SampleFormat.INT16)
+    full_scale = 0
+    imbalance_db = 0.0
+    if integer and good.size:
+        # (Within 1% of it: cs8's 126..127 and -127..-128, cu8's 0..1 and
+        # 254..255.)
+        parts = np.abs(good.view(np.float32))
+        full_scale = int(np.count_nonzero(parts >= 0.99))
+        spread_i = float(np.var(good.real.astype(np.float64)))
+        spread_q = float(np.var(good.imag.astype(np.float64)))
+        if min(spread_i, spread_q) > 0:
+            imbalance_db = abs(10.0 * math.log10(spread_i / spread_q))
     problem = ""
+    note = ""
     beyond = max_abs > 4.0 or not np.isfinite(max_abs)
     if nonfinite and stated:
         problem = (
@@ -3611,6 +3686,30 @@ def check_iq_samples(
             f"The samples reach {max_abs:.3g}, far beyond full scale (1.0), so "
             f"this is probably not {name} data. Choose another sample format."
         )
+    elif imbalance_db > 10.0 and not stated:
+        # (cs16 read as cs8: I is each sample's low byte, Q its high byte.)
+        problem = (
+            f"I and Q differ by {imbalance_db:.0f} dB (in I/Q samples they are "
+            f"about equal), so this is probably not {name} data. Choose another "
+            "sample format."
+        )
+    elif full_scale and 100.0 * full_scale >= 5.0 * 2 * good.size and not stated:
+        share = 100.0 * full_scale / (2 * good.size)
+        problem = (
+            f"{share:.0f}% of the samples are at full scale, so this is probably "
+            f"not {name} data (or the recording is badly clipped). Choose another "
+            "sample format."
+        )
+    elif full_scale:
+        share = 100.0 * full_scale / (2 * good.size)
+        amount = f"{share:.1f}%" if share >= 0.1 else "under 0.1%"
+        note = f"Some samples reach full scale ({amount}): " + (
+            "the signal was clipped when it was recorded (too much gain)."
+            if stated
+            else f"the signal was clipped (too much gain), or this isn't {name} data."
+        )
+    elif good.size and max_abs == 0:
+        note = "The samples are all zero: the recording is silent."
     return SampleCheck(
         samples=int(samples.size),
         total=int(total),
@@ -3618,6 +3717,8 @@ def check_iq_samples(
         rms=rms,
         nonfinite=nonfinite,
         problem=problem,
+        full_scale=full_scale,
+        note=note,
     )
 
 

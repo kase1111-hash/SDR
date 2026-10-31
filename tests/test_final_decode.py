@@ -302,6 +302,50 @@ class TestExportFolder(unittest.TestCase):
         self.assertEqual(os.path.dirname(suggested), self.folder)
 
 
+# --------------------------------------------------------------------------- #
+# DEC-E2E-06: only the newest messages are kept, and it says so
+# --------------------------------------------------------------------------- #
+
+
+class TestOnlyTheNewestAreKept(_PanelCase):
+    def test_the_table_stats_and_export_say_so(self):
+        import csv
+        import tempfile
+        from unittest import mock
+
+        p = self.panel
+        p._max_messages = 5  # (1,000 in the app)
+        base_tip = p._table.toolTip()
+        for i in range(3):
+            p.add_message("POCSAG", f"{i} (F0)", f"page {i}")
+        self.assertEqual(p._table.toolTip(), base_tip)  # nothing dropped yet
+        self.assertEqual(p._kept_label.text(), "3")
+        for i in range(3, 8):
+            p.add_message("POCSAG", f"{i} (F0)", f"page {i}")
+        self.assertEqual(p._table.rowCount(), 5)
+        # The oldest went without a word; now the table says it...
+        self.assertIn("newest 5 of 8 messages", p._table.toolTip())
+        self.assertEqual(p._msg_count_label.text(), "8")
+        self.assertEqual(p._kept_label.text(), "5 (the newest)")
+        self.assertIn("newest 5 of the 8", p._export_btn.toolTip())
+        # ... and so does Export.
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            mock.patch.object(self.mod.QMessageBox, "information") as box,
+        ):
+            path = os.path.join(tmp, "out.csv")
+            self.assertEqual(p._export_messages(path), 5)
+            with open(path, newline="", encoding="utf-8") as handle:
+                rows = list(csv.reader(handle))
+        self.assertEqual(len(rows), 6)  # the header and the newest 5
+        text = box.call_args[0][2]
+        self.assertIn("Exported the newest 5 of 8 messages", text)
+        self.assertIn("older ones", text)
+        p.clear()
+        self.assertEqual(p._table.toolTip(), base_tip)
+        self.assertEqual(p._kept_label.text(), "0")
+
+
 class TestExportFolderInTheWindow(_WindowTestCase):
     def test_the_panel_remembers_in_the_windows_settings(self):
         self.assertIs(self.win._decoder_panel._settings, self.win._settings)

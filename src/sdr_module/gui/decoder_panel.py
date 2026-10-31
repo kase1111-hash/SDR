@@ -809,11 +809,12 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         for col in (COL_TIME, COL_PROTOCOL, COL_ADDRESS):
             header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
         header.setSectionResizeMode(COL_MESSAGE, QHeaderView.ResizeMode.Stretch)
-        self._table.setToolTip(
+        self._table_tip = (
             "Decoded messages, newest at the bottom. Click a message to read "
             "it in full below; invalid messages (failed checks) are tinted "
             "red. Ctrl+C copies the selected rows."
         )
+        self._table.setToolTip(self._table_tip)
         self._table.setMinimumHeight(110)
         # Stick to the newest message unless the user scrolled up to read.
         self._table_tail = TailFollower(self._table.verticalScrollBar())
@@ -930,6 +931,13 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         form.addRow(invalid_caption, self._invalid_count_label)
         self._last_msg_label = value_label()
         form.addRow("Last message", self._last_msg_label)
+        self._kept_label = value_label()
+        kept_caption = QLabel("In the table")
+        kept_caption.setToolTip(
+            f"The table, the Log and Export keep the newest {self._max_messages:,} "
+            "messages"
+        )
+        form.addRow(kept_caption, self._kept_label)
 
         decoder_caption = QLabel("LIVE DECODER")
         set_role(decoder_caption, "caption")
@@ -1574,10 +1582,27 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             if has
             else "Nothing to clear yet"
         )
-        self._export_btn.setToolTip(
-            "Save the decoded messages to a CSV file"
-            if has
-            else "No messages to export yet"
+        kept, total = len(self._messages), self._total
+        if not has:
+            export_tip = "No messages to export yet"
+        elif total > kept:
+            export_tip = (
+                f"Save the newest {kept:,} of the {total:,} decoded messages to a "
+                f"CSV file (the Decoder keeps the newest {self._max_messages:,})"
+            )
+        else:
+            export_tip = "Save the decoded messages to a CSV file"
+        if self._export_btn.toolTip() != export_tip:
+            self._export_btn.setToolTip(export_tip)
+
+    def _dropped_note(self) -> str:
+        """What the table says once its oldest messages went ("" before)."""
+        kept, total = len(self._messages), self._total
+        if total <= kept:
+            return ""
+        return (
+            f"Showing the newest {kept:,} of {total:,} messages since Clear: the "
+            f"table, the Log and Export keep the newest {self._max_messages:,}."
         )
 
     # ------------------------------------------------------------------
@@ -1772,6 +1797,14 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             self._last_msg_label.setText(self._messages[-1].get("time", _NO_VALUE))
         else:
             self._last_msg_label.setText(_NO_VALUE)
+        # The oldest messages go once the table is full: say so.
+        note = self._dropped_note()
+        kept = f"{len(self._messages):,}" + (" (the newest)" if note else "")
+        if self._kept_label.text() != kept:
+            self._kept_label.setText(kept)
+        tip = f"{self._table_tip}\n{note}" if note else self._table_tip
+        if self._table.toolTip() != tip:
+            self._table.setToolTip(tip)
 
         if not self._per_protocol and self._proto_rows:
             for label in self._proto_rows.values():
@@ -1942,11 +1975,16 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             return 0
 
         count = len(self._messages)
-        QMessageBox.information(
-            self,
-            "Export Messages",
-            f"Exported {count:,} message{'' if count == 1 else 's'} to:\n{path}",
-        )
+        if self._total > count:
+            # The oldest went when the table was full: not in the file.
+            text = (
+                f"Exported the newest {count:,} of {self._total:,} messages to:\n"
+                f"{path}\n\nThe Decoder keeps the newest {self._max_messages:,}; "
+                "the older ones were not saved."
+            )
+        else:
+            text = f"Exported {count:,} message{'' if count == 1 else 's'} to:\n{path}"
+        QMessageBox.information(self, "Export Messages", text)
         return count
 
     def get_message_count(self) -> int:

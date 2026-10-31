@@ -161,5 +161,92 @@ class TestTuneToStaysOffered(_PanelCase):
         self.assertFalse(p._tune_btn.isVisible())
 
 
+# --------------------------------------------------------------------------- #
+# DEC-E2E-04: Decode Recording's frequency follows the protocol chosen
+# --------------------------------------------------------------------------- #
+
+
+def _options(center=144.09e6, rate=1e6, seconds=10.0, name="aprs_1M_offset.cs16"):
+    from sdr_module.gui.iq_files import IqFileOptions
+
+    return IqFileOptions(
+        path=os.path.join(os.sep, "recordings", name),
+        sample_rate=rate,
+        center_hz=center,
+        total_samples=int(seconds * rate),
+        source="a sidecar file",
+    )
+
+
+class TestDecodeDialogFrequency(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+
+    def dialog(self, options, protocol="POCSAG", defaults=None):
+        from sdr_module.gui.iq_files import DecodeOptionsDialog
+
+        protocols = ["POCSAG", "FLEX", "AX.25/APRS", "ADS-B", "ACARS", "RDS"]
+        start = (defaults or {}).get(protocol, options.center_hz)
+        dialog = DecodeOptionsDialog(
+            options, protocols, protocol, start, None, defaults=defaults
+        )
+        self.addCleanup(dialog.deleteLater)
+        return dialog
+
+    def test_choosing_a_protocol_moves_to_its_channel(self):
+        # It stayed on the frequency of the protocol it opened with (the
+        # file's center, for POCSAG), and APRS at 144.390 MHz was missed.
+        defaults = {"POCSAG": 144.09e6, "AX.25/APRS": 144.39e6, "RDS": 144.09e6}
+        dialog = self.dialog(_options(), "POCSAG", defaults)
+        self.assertEqual(dialog._freq.text(), "144.090 MHz")
+        dialog._protocol.setCurrentText("AX.25/APRS")
+        self.assertEqual(dialog._freq.text(), "144.390 MHz")
+        dialog._on_accept()
+        self.assertEqual(dialog.choice()[0], "AX.25/APRS")
+        self.assertAlmostEqual(dialog.choice()[1], 300e3, delta=1.0)
+
+    def test_a_frequency_typed_by_hand_stays(self):
+        from PyQt6.QtTest import QTest
+
+        defaults = {"POCSAG": 144.09e6, "AX.25/APRS": 144.39e6}
+        dialog = self.dialog(_options(), "POCSAG", defaults)
+        dialog._freq.selectAll()
+        QTest.keyClicks(dialog._freq, "144.2")
+        dialog._protocol.setCurrentText("AX.25/APRS")
+        self.assertEqual(dialog._freq.text(), "144.2")
+
+    def test_without_defaults_nothing_changes(self):
+        dialog = self.dialog(_options(), "POCSAG")
+        dialog._protocol.setCurrentText("AX.25/APRS")
+        self.assertEqual(dialog._freq.text(), "144.090 MHz")
+
+
+class TestDecodeRecordingDefaults(_WindowTestCase):
+    def test_the_window_gives_each_protocol_its_channel(self):
+        from sdr_module.gui import iq_files
+
+        win = self.win
+        win._decoder_panel._proto_combo.setCurrentText("Off")
+        self.settle(2)
+        self.assertTrue(win.set_frequency(100.1e6))
+        options = _options()
+        seen = {}
+
+        def fake_exec(dialog):
+            if isinstance(dialog, iq_files.DecodeOptionsDialog):
+                seen["start"] = dialog._freq.text()
+                dialog._protocol.setCurrentText("AX.25/APRS")
+                seen["aprs"] = dialog._freq.text()
+                dialog._protocol.setCurrentText("ACARS")  # (not in the file)
+                seen["acars"] = dialog._freq.text()
+            return 0  # cancelled: nothing is decoded
+
+        win._exec_dialog = fake_exec
+        self.assertFalse(win._decode_recording(options.path, options))
+        self.assertEqual(seen["start"], "144.090 MHz")  # POCSAG: the center
+        self.assertEqual(seen["aprs"], "144.390 MHz")
+        self.assertEqual(seen["acars"], "144.090 MHz")
+
+
 if __name__ == "__main__":
     unittest.main()

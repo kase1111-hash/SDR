@@ -971,7 +971,10 @@ if HAS_PYQT6:
         """File > Decode Recording: which protocol to decode, and where in
         the recording its channel is (a frequency inside the recorded span,
         or an offset from the center when the file doesn't say where it was
-        tuned)."""
+        tuned).
+
+        ``defaults`` gives each protocol's channel (Hz): choosing a protocol
+        moves the frequency there, until one is typed by hand."""
 
         def __init__(
             self,
@@ -980,10 +983,13 @@ if HAS_PYQT6:
             protocol: str = "",
             frequency_hz: float = 0.0,
             parent: Any = None,
+            defaults: Optional[Dict[str, float]] = None,
         ):
             super().__init__(parent)
             self._options = options
             self._result: Optional[Tuple[str, float]] = None
+            self._defaults = dict(defaults or {})
+            self._freq_typed = False  # a frequency typed by hand stays
             self.setWindowTitle(f"Decode Recording – {options.name}")
             self.setMinimumWidth(440)
             layout = QVBoxLayout(self)
@@ -1038,6 +1044,9 @@ if HAS_PYQT6:
             self._note.setWordWrap(True)
             set_role(self._note, "hint")
             layout.addWidget(self._note)
+            if self._has_center:
+                self._freq.textEdited.connect(self._on_freq_typed)
+                self._protocol.currentTextChanged.connect(self._on_protocol_changed)
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
             ok = QPushButton("&Decode")
             set_role(ok, "primary")
@@ -1081,7 +1090,21 @@ if HAS_PYQT6:
             return self._result
 
         def set_frequency_text(self, text: str) -> None:
+            """Enter a frequency (or offset) as if typed: it stays."""
+            self._freq_typed = True
             self._freq.setText(text)
+
+        def _on_freq_typed(self, _text: str) -> None:
+            self._freq_typed = True
+
+        def _on_protocol_changed(self, protocol: str) -> None:
+            """Another protocol: its channel, unless a frequency was typed."""
+            freq = self._defaults.get(protocol)
+            if self._freq_typed or not freq:
+                return
+            self._freq.setText(format_mhz(freq))
+            self._note.setText(self._span_text)  # (a refusal no longer applies)
+            set_tone(self._note, None)
 
     class RecordingDetailsDialog(QDialog):
         """Save Recording, when the recording doesn't say its sample rate or

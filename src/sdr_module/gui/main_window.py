@@ -8677,12 +8677,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         current = self._decoder_panel.protocol() or ""
         protocol = current if current in protocols else protocols[0]
+        # Each protocol's channel: choosing another one in the dialog moves
+        # the frequency there (until one is typed).
+        defaults = {p: self._decode_default_frequency(p, options) for p in protocols}
         dialog = DecodeOptionsDialog(
             options,
             protocols,
             protocol,
-            self._decode_default_frequency(protocol, options),
+            defaults[protocol],
             self,
+            defaults=defaults,
         )
         if not self._exec_dialog(dialog):
             return False

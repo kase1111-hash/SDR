@@ -9,7 +9,6 @@ the source, the live decoders decode it.
 import os
 import shutil
 import tempfile
-import time
 import tracemalloc
 import unittest
 from unittest import mock
@@ -270,28 +269,28 @@ class TestOpenRecording(_PlaybackCase):
 
     def test_the_display_loop_reads_in_real_time(self):
         self.play()
-        win = self.win
-        dev = win._device
-        win._update_display()  # first frame: one block
-        start = time.monotonic()
-        while time.monotonic() - start < 0.4:
-            time.sleep(0.03)
-            win._update_display()
-        elapsed = time.monotonic() - start
-        played = dev.position / RATE
+        played, elapsed = self._play_for(0.4)
         self.assertAlmostEqual(played, elapsed, delta=0.12)
 
     def _play_for(self, seconds):
-        """Run the display loop on the real clock; seconds of file played."""
+        """Run the display loop a frame every 30 ms for ``seconds`` of a
+        fake clock; (seconds of file played, seconds elapsed). (On the real
+        clock, a busy computer's late frames made these tests fail now and
+        then: what a late frame can't take is dropped, by design.)"""
+        from tests.test_gui_round3_main import _FakeClock
+
         win = self.win
         dev = win._device
-        win._update_display()  # first frame: one block
-        first = dev.position
-        start = time.monotonic()
-        while time.monotonic() - start < seconds:
-            time.sleep(0.03)
-            win._update_display()
-        return (dev.position - first) / dev.sample_rate, time.monotonic() - start
+        clock = _FakeClock()
+        with mock.patch.object(self.mw, "time", clock):
+            win._pacer.restart()  # (its last read was on the real clock)
+            win._update_display()  # first frame: one block
+            first = dev.position
+            start = clock.now
+            while clock.now - start < seconds - 1e-9:
+                clock.advance(0.03)
+                win._update_display()
+        return (dev.position - first) / dev.sample_rate, clock.now - start
 
     def test_a_slow_recording_isnt_read_faster_than_real_time(self):
         # A 48 kHz I/Q recording (HDSDR, SDR#) is less than a display block

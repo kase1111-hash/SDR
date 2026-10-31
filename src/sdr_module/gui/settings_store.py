@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List
+import math
+from typing import Any, Dict, List, Tuple
 
 try:
     from PyQt6.QtCore import QSettings
@@ -73,10 +74,18 @@ class GuiSettings:
         raw = self._s.value("bookmarks", "[]")
         try:
             data = json.loads(raw if isinstance(raw, str) else "[]")
-            return data if isinstance(data, list) else []
         except (ValueError, TypeError):
             logger.warning("Corrupt bookmarks in settings; resetting")
             return []
+        # Only real bookmarks: one damaged entry must not stop the app.
+        bookmarks, dropped = valid_bookmarks(data)
+        if dropped:
+            logger.warning(
+                "Ignored %s in the saved settings: not a bookmark, or no "
+                "usable frequency.",
+                describe_dropped(dropped),
+            )
+        return bookmarks
 
     def set_bookmarks(self, bookmarks: List[Dict[str, Any]]) -> None:
         self._s.setValue("bookmarks", json.dumps(bookmarks))
@@ -94,3 +103,43 @@ class GuiSettings:
 
     def load_geometry(self, name: str):
         return self._s.value(f"geom/{name}")
+
+
+def _usable_bookmark(entry: Any) -> bool:
+    """Whether a saved entry is a bookmark: an object whose frequency is a
+    finite, positive number."""
+    if not isinstance(entry, dict):
+        return False
+    try:
+        freq = float(entry.get("freq_hz"))
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(freq) and freq > 0
+
+
+def valid_bookmarks(data: Any) -> Tuple[List[Dict[str, Any]], List[Any]]:
+    """``(bookmarks, dropped)``: the usable bookmarks of a saved list, and
+    the entries left out. A damaged settings file can hold anything (null,
+    numbers, text, a bookmark without a frequency): such an entry is
+    skipped rather than stopping the app from starting."""
+    if not isinstance(data, list):
+        return [], ([] if data is None else [data])
+    kept: List[Dict[str, Any]] = []
+    dropped: List[Any] = []
+    for entry in data:
+        (kept if _usable_bookmark(entry) else dropped).append(entry)
+    return kept, dropped
+
+
+def describe_dropped(dropped: List[Any]) -> str:
+    """``"2 damaged bookmarks (null, 1)"``: what was left out, for the log."""
+    shown = []
+    for entry in dropped[:3]:
+        try:
+            text = json.dumps(entry)
+        except (TypeError, ValueError):
+            text = repr(entry)
+        shown.append(text if len(text) <= 60 else text[:57] + "...")
+    more = ", ..." if len(dropped) > 3 else ""
+    noun = "bookmark" if len(dropped) == 1 else "bookmarks"
+    return f"{len(dropped)} damaged {noun} ({', '.join(shown)}{more})"

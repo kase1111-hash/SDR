@@ -496,12 +496,15 @@ class TestQrpSidebandOn60m(_QrpCase):
     def test_usb_is_permitted_on_every_60m_channel(self):
         p = self.panel
         self.license("general")
+        from sdr_module.gui.transmitter import format_mhz
+
         for freq in CHANNELS_60M:
             p.set_station(freq, "USB")
             self.assertEqual(p.mode(), "SSB", "the class is still judged as phone")
+            # (The channel as FREQ shows it, 5.3305 MHz: HAM-E2E-11.)
             self.assertEqual(
                 p._legal_label.text(),
-                f"At {freq / 1e6:.3f} MHz (General, SSB): legal limit 100 W PEP.",
+                f"At {format_mhz(freq)} (General, SSB): legal limit 100 W PEP.",
             )
             self.assertEqual(p._legal_label.property("tone"), "success")
             self.assertEqual(p._legal_limit, 100.0)
@@ -550,7 +553,7 @@ class TestQrpSidebandInTheWindow(_HamWindowCase):
         self.win._set_demod_mode("USB")
         self.assertEqual(
             qrp._legal_label.text(),
-            "At 5.330 MHz (General, SSB): legal limit 100 W PEP.",
+            "At 5.3305 MHz (General, SSB): legal limit 100 W PEP.",
         )
 
 

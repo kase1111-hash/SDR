@@ -657,3 +657,60 @@ class TestKilohertzInTheWindow(_WindowTestCase):
             self.skipTest("ham radio panels not installed")
         win._on_radio_frequency_changed(1260e3, "AM")
         self.assertEqual(win._message_label.text(), "Tuned to 1260 kHz (AM)")
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestBelowZeroHertz(_WindowTestCase):
+    """LISTEN-14: "0.000 MHz is out of range" for a click at -0.3 MHz; the
+    refusal stayed after a good tune; the span reached below 0 Hz."""
+
+    demo = True
+
+    type_frequency = TestBandPlanListeningSegments.type_frequency
+
+    def test_the_refusal_names_the_frequency_asked(self):
+        win = self.win
+        win.set_frequency(660e3)
+        self.assertFalse(win._tune_to(-300e3))
+        self.assertTrue(
+            win._message_label.text().startswith("-300 kHz is out of range"),
+            win._message_label.text(),
+        )
+        self.assertEqual(win._current_frequency(), 660e3)
+
+    def test_a_good_tune_clears_the_refusal(self):
+        win = self.win
+        win.set_frequency(660e3)
+        self.assertFalse(win._tune_to(-300e3))
+        self.assertTrue(win._tune_to(50e3))
+        self.assertEqual(win._message_label.text(), "")
+        self.assertFalse(win._message_timer.isActive())
+
+    def test_other_messages_stay(self):
+        win = self.win
+        win._show_status_message("Something else", "info", 6000)
+        self.assertTrue(win._tune_to(660e3))
+        self.assertEqual(win._message_label.text(), "Something else")
+
+    def test_the_span_starts_at_0_hz(self):
+        win = self.win
+        self.type_frequency("660k")
+        rate = win._device_sample_rate()
+        self.assertEqual(win._current_frequency(), 660e3)
+        self.assertGreaterEqual(win._lo_hz - rate / 2, 0.0)
+        self.assertTrue(win._channel_fits(660e3 - win._lo_hz))
+        self.assertEqual(win._spectrum._center_freq, win._lo_hz)
+
+    def test_lowest_channel_the_span_can_hold(self):
+        """At 50 kHz the channel can't be 1.2 MHz from the LO: the LO goes
+        as high as keeps it in the usable span."""
+        win = self.win
+        win._set_demod_mode("AM")
+        self.assertTrue(win._tune_to(50e3))
+        self.assertGreater(win._lo_hz, 50e3)
+        self.assertTrue(win._channel_fits(50e3 - win._lo_hz))
+
+    def test_above_half_the_span_the_lo_follows_as_before(self):
+        win = self.win
+        self.type_frequency("7.2")
+        self.assertEqual(win._lo_hz, 7.2e6)

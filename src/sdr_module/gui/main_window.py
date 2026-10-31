@@ -2354,6 +2354,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Tuple[str, str, float, Tuple[Tuple[float, float], ...]]
     ] = None
     _preset_decoder_note = ""
+    # Why the last tune was refused (the status line says so until a tune
+    # goes through).
+    _tuning_refusal: Optional[str] = None
 
     @property
     def _TUNE_STEPS_HZ(self) -> Dict[Any, float]:  # noqa: N802 - existing name
@@ -5332,6 +5335,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         half = 0.5 * _USABLE_SPAN_FRACTION * rate
         return -half <= offset_hz + low and offset_hz + high <= half
 
+    def _lo_for(self, freq_hz: float) -> float:
+        """Where the LO goes to bring ``freq_hz`` into the span: on it, but
+        below half the span no lower than keeps the span above 0 Hz (or, at
+        the lowest frequencies, as high as the channel stays inside the
+        usable span): a 660 kHz station is seen from 0 Hz up, not from
+        -0.54 MHz."""
+        rate = self._device_sample_rate()
+        floor = 0.5 * rate
+        if freq_hz >= floor:
+            return freq_hz
+        low, _high = _channel_edges(
+            self._control_panel._demod_combo.currentText(),
+            self._channel_bandwidth(),
+            rate,
+        )
+        reach = freq_hz + 0.5 * _USABLE_SPAN_FRACTION * rate + low
+        lo = min(floor, math.floor(reach / 1e3) * 1e3, self._tuning_limits()[1])
+        return max(lo, freq_hz)
+
     def _device_model_name(self) -> str:
         """``"RTL-SDR"``, ``"HackRF One"`` or the device's name, for messages."""
         dev = self._device
@@ -5451,7 +5473,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _tune_to(self, freq_hz: float, recenter: bool = False) -> bool:
         """Tune to ``freq_hz`` by the rules of :meth:`set_frequency`.
 
-        ``recenter`` puts the LO on the tuned frequency whatever the span.
+        ``recenter`` puts the LO on the tuned frequency whatever the span
+        (near 0 Hz: see :meth:`_lo_for`).
         True when tuned; otherwise the reason is in the status bar and
         everything stays on the frequency tuned.
         """
@@ -5496,7 +5519,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 )
             lo = center
         elif recenter or self._keep_centered() or not self._channel_fits(freq - lo):
-            lo = freq
+            lo = self._lo_for(freq)
         if abs(lo - self._lo_hz) >= 0.5 and not self._retune_lo(lo):
             return self._refuse_tuning(
                 f"{self._device_model_name()} didn't tune to "
@@ -5513,6 +5536,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         (after a moment on it) the tuning history."""
         self._tuned_hz = float(freq_hz)
         self._control_panel.set_frequency(freq_hz)  # no signal
+        refusal, self._tuning_refusal = self._tuning_refusal, None
+        if refusal is not None and self._message_label.text() == refusal:
+            # (Why the last frequency was refused no longer applies here.)
+            self._message_timer.stop()
+            self._clear_status_message()
         self._on_frequency_changed(self._current_frequency())
         self._note_tuned()
 
@@ -5529,6 +5557,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._show_status_error(reason)
         else:
             self._show_status_message(reason, "danger", 6000)
+        self._tuning_refusal = reason
         return False
 
     def _ensure_vfo_fits(self) -> None:
@@ -5583,7 +5612,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 or self._keep_centered()
                 or not self._channel_fits(wanted - lo)
             ):
-                lo = wanted
+                lo = self._lo_for(wanted)
             if self._retune_lo(lo):
                 self._finish_tune(wanted)
                 return ""

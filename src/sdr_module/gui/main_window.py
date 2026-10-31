@@ -366,11 +366,19 @@ logger = logging.getLogger(__name__)
 
 
 def format_frequency(freq_hz: float) -> str:
-    """Format a frequency in MHz with 3 to 6 decimals.
+    """Format a frequency in MHz with 3 to 6 decimals; below 2 MHz in kHz
+    with up to 3 (as long- and medium-wave stations are known).
 
-    ``100e6 -> "100.000 MHz"``, ``146.5125e6 -> "146.5125 MHz"``.
+    ``100e6 -> "100.000 MHz"``, ``146.5125e6 -> "146.5125 MHz"``,
+    ``880e3 -> "880 kHz"``; a frequency below 0 Hz (refused) keeps its
+    sign: ``-300e3 -> "-300 kHz"``.
     """
-    text = f"{max(0.0, float(freq_hz)) / 1e6:.6f}".rstrip("0")
+    from ..core.band_plan import KHZ_BELOW_HZ, short_khz
+
+    freq = float(freq_hz)
+    if abs(freq) < KHZ_BELOW_HZ:
+        return f"{short_khz(freq)} kHz"
+    text = f"{freq / 1e6:.6f}".rstrip("0")
     whole, _, frac = text.partition(".")
     return f"{whole}.{frac.ljust(3, '0')} MHz"
 

@@ -475,7 +475,7 @@ class TestRefusedTuning(_TuningCase):
         self.assertEqual(self.freq(), 100.1e6)
         self.assertEqual(dev.state.frequency, 100.1e6)
         self.assertEqual(
-            self.errors(), "0.880 MHz is out of range: HackRF One tunes 1–6000 MHz."
+            self.errors(), "880 kHz is out of range: HackRF One tunes 1–6000 MHz."
         )
         self.assertNotIn("Tuned to", self.win._message_label.text())
         self.assertEqual(self.win._control_panel._demod_combo.currentText(), mode)

@@ -355,7 +355,12 @@ def _elide_middle(text: str, limit: int) -> str:
 
 
 def _format_mhz(freq_hz: float) -> str:
-    """``146.52e6 -> "146.520 MHz"``, ``137.9125e6 -> "137.9125 MHz"``."""
+    """``146.52e6 -> "146.520 MHz"``, ``137.9125e6 -> "137.9125 MHz"``;
+    below 2 MHz in kHz, as the window says it: ``660e3 -> "660 kHz"``."""
+    from ..core.band_plan import KHZ_BELOW_HZ, short_khz
+
+    if abs(float(freq_hz)) < KHZ_BELOW_HZ:
+        return f"{short_khz(freq_hz)} kHz"
     text = f"{float(freq_hz) / 1e6:.6f}".rstrip("0")
     whole, _, frac = text.partition(".")
     return f"{whole}.{frac.ljust(3, '0')} MHz"

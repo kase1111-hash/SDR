@@ -575,3 +575,85 @@ class TestTunerHintFollowsTheTuning(unittest.TestCase):
         t = self.tuner
         t.set_frequency(101.2e6)
         self.assertEqual(t._hint_label.text(), "Found a station on 101.2 MHz.")
+
+
+# --------------------------------------------------------------------------- #
+# Frequencies below 2 MHz, and below 0 Hz
+# --------------------------------------------------------------------------- #
+
+
+class TestKilohertzBelowTwoMegahertz(unittest.TestCase):
+    """LISTEN-12: medium-wave stations read "0.880 MHz" everywhere but in
+    the radio tuner ("880 kHz", as listeners know them)."""
+
+    def test_format_frequency(self):
+        from sdr_module.gui.main_window import format_frequency
+
+        self.assertEqual(format_frequency(880e3), "880 kHz")
+        self.assertEqual(format_frequency(1260.5e3), "1260.5 kHz")
+        self.assertEqual(format_frequency(198e3), "198 kHz")
+        self.assertEqual(format_frequency(1999.999e3), "1999.999 kHz")
+        self.assertEqual(format_frequency(2e6), "2.000 MHz")
+        self.assertEqual(format_frequency(7.074e6), "7.074 MHz")
+        self.assertEqual(format_frequency(100.1e6), "100.100 MHz")
+
+    def test_signed(self):
+        """LISTEN-14: a refused frequency below 0 Hz is named as asked."""
+        from sdr_module.gui.main_window import format_frequency
+
+        self.assertEqual(format_frequency(-300e3), "-300 kHz")
+        self.assertEqual(format_frequency(-40e3), "-40 kHz")
+        self.assertEqual(format_frequency(-2.5e6), "-2.500 MHz")
+        self.assertEqual(format_frequency(0.0), "0 kHz")
+        self.assertEqual(format_frequency(-0.0), "0 kHz")
+
+    def test_bookmark_names(self):
+        from sdr_module.core.band_plan import default_name
+
+        self.assertEqual(default_name(880e3), "AM Broadcast 880 kHz")
+        self.assertEqual(default_name(1260.5e3), "AM Broadcast 1260.5 kHz")
+        self.assertEqual(default_name(198e3), "LW Broadcast 198 kHz")
+        self.assertEqual(default_name(1.84e6), "160m Ham 1840 kHz")
+        self.assertEqual(default_name(100.1e6), "FM Broadcast 100.1")
+        self.assertEqual(default_name(7.074e6), "40m Ham 7.074")
+
+    def test_band_plan_line(self):
+        from sdr_module.core.band_info import band_plan_line
+
+        self.assertTrue(
+            band_plan_line(880e3).startswith("AM Broadcast · 525–1705 kHz"),
+            band_plan_line(880e3),
+        )
+        self.assertIn("1.8–2 MHz", band_plan_line(1.84e6))
+        self.assertIn("87.5–108 MHz", band_plan_line(100.1e6))
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestKilohertzInTheWindow(_WindowTestCase):
+    """LISTEN-12 in the window: FREQ, the title, the status line, Recent
+    Frequencies and Ctrl+B's bookmark."""
+
+    demo = True
+
+    type_frequency = TestBandPlanListeningSegments.type_frequency
+
+    def test_a_medium_wave_station(self):
+        win = self.win
+        self.type_frequency("880k")
+        self.assertEqual(win._current_frequency(), 880e3)
+        self.assertEqual(win._freq_label.text(), "880 kHz")
+        self.assertTrue(win.windowTitle().startswith("880 kHz AM"), win.windowTitle())
+        self.assertIn("525–1705 kHz", win._freq_label.toolTip())
+        self.assertIn("No preset at 880 kHz.", win._control_panel._preset_info.text())
+        win._commit_history_entry()
+        entries = [a.text().replace("&", "") for a in win._recent_menu.actions()]
+        self.assertTrue(any("880 kHz (AM)" in text for text in entries), entries)
+        win._bookmark_current_frequency()
+        self.assertIn("Bookmarked AM Broadcast 880 kHz (AM)", win._message_label.text())
+
+    def test_the_radio_tuner_says_kilohertz_too(self):
+        win = self.win
+        if not self.mw.HAS_HAM_RADIO:
+            self.skipTest("ham radio panels not installed")
+        win._on_radio_frequency_changed(1260e3, "AM")
+        self.assertEqual(win._message_label.text(), "Tuned to 1260 kHz (AM)")

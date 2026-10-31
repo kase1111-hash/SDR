@@ -159,6 +159,18 @@ def preset_for(
     return None
 
 
+#: Below this, frequencies are named in kHz ("AM Broadcast 880 kHz", as
+#: long- and medium-wave stations are known); from it up, in MHz.
+KHZ_BELOW_HZ = 2e6
+
+
+def short_khz(freq_hz: float) -> str:
+    """kHz without trailing zeros: ``880e3`` -> ``"880"``, ``1260.5e3`` ->
+    ``"1260.5"``, ``-300e3`` -> ``"-300"``."""
+    text = f"{float(freq_hz) / 1e3:.3f}".rstrip("0").rstrip(".")
+    return "0" if text == "-0" else text
+
+
 def short_mhz(freq_hz: float) -> str:
     """MHz without trailing zeros, keeping one decimal: ``100.1e6`` ->
     ``"100.1"``, ``146.52e6`` -> ``"146.52"``, ``125e6`` -> ``"125.0"``."""
@@ -171,16 +183,19 @@ def default_name(freq_hz: float) -> str:
 
     The built-in channel preset's name when there is one ("2m Calling",
     "NOAA Weather 1"); otherwise the band and the frequency ("FM
-    Broadcast 100.1", "Airband 118.1"); otherwise the frequency ("7.074
-    MHz" style is left to the caller: this returns "" then).
+    Broadcast 100.1", "Airband 118.1"; below 2 MHz in kHz: "AM Broadcast
+    880 kHz"); otherwise the frequency ("7.074 MHz" style is left to the
+    caller: this returns "" then).
     """
     preset = preset_for(freq_hz)
     if preset is not None:
         return str(preset.name)
     band = band_for(freq_hz)
-    if band is not None:
-        return f"{band.name} {short_mhz(freq_hz)}"
-    return ""
+    if band is None:
+        return ""
+    if abs(freq_hz) < KHZ_BELOW_HZ:
+        return f"{band.name} {short_khz(freq_hz)} kHz"
+    return f"{band.name} {short_mhz(freq_hz)}"
 
 
 def listening_for(freq_hz: float) -> Optional[Tuple[str, str, str]]:
@@ -272,6 +287,7 @@ def _width_text(width_hz: float) -> str:
 __all__ = [
     "BANDS",
     "DATA_CHANNELS",
+    "KHZ_BELOW_HZ",
     "Band",
     "SegmentListening",
     "band_for",
@@ -280,5 +296,6 @@ __all__ = [
     "preset_for",
     "preset_listening",
     "segment_listening",
+    "short_khz",
     "short_mhz",
 ]

@@ -3569,7 +3569,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         panel.open_folder_requested.connect(self._on_open_folder)
         panel.folder_change_requested.connect(self._on_change_recordings_folder)
         panel.auto_save_changed.connect(self._on_auto_save_changed)
-        # The Decoder tab's Decode File... (File > Decode Recording).
+        # The Decoder tab's Decode Recording... (File > Decode Recording).
         self._decoder_panel.decode_file_requested.connect(
             lambda: self._decode_recording()
         )
@@ -4048,8 +4048,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._decoder_panel.protocol() is not None and self._decoder_rate != rate:
             self._rebuild_decoder()
 
-        # The Decoder panel's hint says whether it is listening; its
-        # messages note the sample rate, and Auto follows the mode.
+        # The Decoder panel's hint says whether it is listening (and Play
+        # for a recording); its messages note the sample rate, Auto follows
+        # the mode, and CW's "Tune to" offers the demo device's beacon.
+        if self._playback.active:
+            listening_to: Optional[str] = "recording"
+        elif _is_demo_device(self._device):
+            listening_to = "demo"
+        else:
+            listening_to = "device" if has_device else None
+        self._decoder_panel.set_source(listening_to)
         self._decoder_panel.set_receiving(running)
         self._decoder_panel.set_sample_rate(rate)
         self._decoder_panel.set_demod_mode(self._control_panel.get_demod_mode())
@@ -8690,7 +8698,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _decode_recording(
         self, path: str = "", options: Optional[IqFileOptions] = None
     ) -> bool:
-        """File > Decode Recording (and the Decoder tab's Decode File...):
+        """File > Decode Recording (and the Decoder tab's Decode Recording...):
         run the Decoder panel's protocol over a whole I/Q file in a
         background thread, much faster than real time, with progress and
         Cancel. Each message goes to the Decoder tab as it is found, noted

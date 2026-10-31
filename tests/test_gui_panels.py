@@ -438,6 +438,10 @@ class TestDecoderReadability(unittest.TestCase):
 
     def test_long_message_is_cut_to_a_few_lines_without_widening_panel(self):
         p = self.panel
+        # (The protocol row sets the panel's narrowest; the message must
+        # not widen it.)
+        narrowest = p.minimumSizeHint().width()
+        width = p.width()
         p.add_message("ACARS", ".N12345", self.LONG, valid=False)
         p._table.selectRow(0)
         _settle(10)
@@ -446,8 +450,8 @@ class TestDecoderReadability(unittest.TestCase):
         self.assertTrue(body.endswith("…"))
         self.assertEqual(p._detail.body.toolTip(), self.LONG)
         self.assertEqual(p._detail.meta.property("tone"), "danger")
-        self.assertLessEqual(p.minimumSizeHint().width(), 360)
-        self.assertEqual(p.width(), 360)
+        self.assertLessEqual(p.minimumSizeHint().width(), narrowest)
+        self.assertEqual(p.width(), width)
 
     def test_multi_selection_summarises_and_clear_hides(self):
         p = self.panel

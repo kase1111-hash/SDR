@@ -162,6 +162,113 @@ class TestTuneToStaysOffered(_PanelCase):
 
 
 # --------------------------------------------------------------------------- #
+# DEC-E2E-13: CW (Morse) has a "Tune to" too
+# --------------------------------------------------------------------------- #
+
+
+class TestCwTuneTo(_PanelCase):
+    def setUp(self):
+        super().setUp()
+        self.tuned = []
+        self.panel.tune_requested.connect(lambda *args: self.tuned.append(args))
+        self.panel.set_receiving(True)
+
+    def test_the_demo_beacon_is_offered(self):
+        # The hint named the demo beacon (99.820 MHz) with no button: a
+        # typed frequency landed in FM, and Mode had to be changed by hand.
+        p = self.panel
+        p.set_source("demo")
+        p.set_current_frequency(100.1e6)
+        p.set_demod_mode("FM")
+        p._proto_combo.setCurrentText("CW (Morse)")
+        placeholder = p._cw_view.placeholder()
+        self.assertIs(self.front(), p._cw_view)
+        self.assertEqual(placeholder.action_text(), "Tune to 99.820 MHz")
+        placeholder.button.click()
+        self.assertEqual(self.tuned[-1], (99.82e6, "CW (Morse) (99.820 MHz)", "CW", ""))
+        p.set_current_frequency(99.82e6)
+        p.set_demod_mode("CW")
+        self.assertEqual(placeholder.action_text(), "")
+        self.assertFalse(p._tune_btn.isVisible())
+
+    def test_elsewhere_it_offers_cw_mode(self):
+        p = self.panel
+        p.set_source("device")
+        p.set_current_frequency(7.03e6)
+        p.set_demod_mode("USB")
+        p._proto_combo.setCurrentText("CW (Morse)")
+        placeholder = p._cw_view.placeholder()
+        self.assertEqual(placeholder.action_text(), "Listen in CW")
+        placeholder.button.click()
+        self.assertEqual(self.tuned[-1], (7.03e6, "CW (Morse) (7.030 MHz)", "CW", ""))
+        p.set_demod_mode("CW")
+        self.assertEqual(placeholder.action_text(), "")
+
+    def test_auto_offers_nothing(self):
+        p = self.panel
+        p.set_source("demo")
+        p.set_current_frequency(7.03e6)
+        p._proto_combo.setCurrentText("Auto")
+        p.set_demod_mode("CW")  # Auto: Morse code in CW
+        self.assertEqual(p.protocol(), "CW (Morse)")
+        self.assertEqual(p._cw_view.placeholder().action_text(), "")
+
+
+class TestCwTuneToInTheWindow(_WindowTestCase):
+    demo = True
+
+    def test_the_beacon_in_cw(self):
+        win = self.win
+        panel = win._decoder_panel
+        self.assertEqual(panel._source, "demo")
+        panel._proto_combo.setCurrentText("CW (Morse)")
+        self.settle(2)
+        self.assertEqual(
+            panel._cw_view.placeholder().action_text(), "Tune to 99.820 MHz"
+        )
+        panel._cw_view.placeholder().button.click()
+        self.settle(2)
+        self.assertAlmostEqual(win._current_frequency(), 99.82e6, delta=1.0)
+        self.assertEqual(win._control_panel.get_demod_mode(), "CW")
+        self.assertEqual(panel._cw_view.placeholder().action_text(), "")
+
+
+# --------------------------------------------------------------------------- #
+# DEC-E2E-19: one name for Decode Recording; Start or Play as it is
+# --------------------------------------------------------------------------- #
+
+
+class TestStartOrPlayWording(_PanelCase):
+    def test_the_button_is_named_like_the_menu_item(self):
+        self.assertEqual(self.panel._decode_file_btn.text(), "Decode Recording...")
+
+    def test_off_while_receiving_does_not_ask_for_start(self):
+        p = self.panel
+        p.set_receiving(True)
+        self.assertNotIn("Start", p._empty.text())
+        self.assertIn("Choose a protocol above", p._empty.text())
+        p.set_receiving(False)
+        self.assertIn("press Start (Space)", p._empty.text())
+
+    def test_a_recording_says_play(self):
+        p = self.panel
+        p.set_source("recording")
+        p.set_receiving(False)
+        p.set_current_frequency(152.24e6)
+        p._proto_combo.setCurrentText("POCSAG")
+        p.set_decoder_status(_status("POCSAG", "page"))
+        self.assertEqual(
+            p.decoder_status_text(), "Not playing: press Play (Space) to decode"
+        )
+        self.assertIn("press Play (Space)", p._empty.text())
+        self.assertNotIn("Start", p._empty.text())
+        p.set_source("demo")
+        self.assertEqual(
+            p.decoder_status_text(), "Stopped: press Start (Space) to decode"
+        )
+
+
+# --------------------------------------------------------------------------- #
 # DEC-E2E-04: Decode Recording's frequency follows the protocol chosen
 # --------------------------------------------------------------------------- #
 

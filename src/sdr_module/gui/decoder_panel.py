@@ -152,6 +152,10 @@ PROTOCOL_BANDS: Dict[str, Tuple[Tuple[float, float], ...]] = {
 #: Protocols listed but not decodable from live signals yet (shown disabled).
 PROTOCOL_UNAVAILABLE: Dict[str, str] = {}
 
+#: The demo device's Morse code beacon: CW's "Tune to" while it is the
+#: receiver's source.
+DEMO_CW_BEACON_HZ = 99.82e6
+
 #: Empty-table hint per protocol whose signal is not at one frequency.
 PROTOCOL_HINTS: Dict[str, str] = {
     "CW (Morse)": (
@@ -199,6 +203,8 @@ def auto_protocol(
 
 
 _START_HINT = "press Start (Space)"
+# While a recording is the source, its transport plays it.
+_PLAY_HINT = "press Play (Space)"
 # Shown for a value that isn't there (no message text, no last message).
 _NO_VALUE = "–"
 # Seconds of signal in the decoder's channel without a valid message before
@@ -611,7 +617,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
     if HAS_PYQT6:
         protocol_changed = pyqtSignal(str)
-        # Decode File...: run the selected protocol over a recording
+        # Decode Recording...: run the selected protocol over a recording
         # (the main window's File > Decode Recording).
         decode_file_requested = pyqtSignal()
         # freq_hz, label, demod mode and FM deviation ("" = keep the current
@@ -654,6 +660,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._tuned_hz: Optional[float] = None
         self._tuned_at = -math.inf
         self._receiving: Optional[bool] = None
+        # What the receiver listens to: "device", "demo" (the demo device),
+        # "recording" (a recording plays) or None (unknown, or nothing).
+        self._source: Optional[str] = None
         # The user's Decode choice; the box shows unticked while Off.
         self._decode_wanted = True
         # The live decoder's health (a LiveDecoderStatus; None: no decoder)
@@ -693,7 +702,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
         # Protocol selector and the decode on/off switch, side by side.
         proto_row = QHBoxLayout()
-        proto_row.setSpacing(8)
+        proto_row.setSpacing(6)
         proto_label = QLabel("Protocol:")
         proto_row.addWidget(proto_label)
 
@@ -734,7 +743,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         proto_row.addStretch(0)
         # Decode a recording instead of the live signal (File > Decode
         # Recording).
-        self._decode_file_btn = QPushButton("Decode File...")
+        self._decode_file_btn = QPushButton("Decode Recording...")
+        # Compact: named like the menu item, it still leaves the row (and
+        # the right column) as narrow as before at 1024 px.
+        set_role(self._decode_file_btn, "compact")
         self._decode_file_btn.setAutoDefault(False)
         self._decode_file_btn.setToolTip(
             "Decode a recorded I/Q file with a protocol, much faster than real "
@@ -1211,6 +1223,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         in CW)."""
         if mode != self._mode:
             self._mode = mode
+            if self.protocol() == "CW (Morse)":
+                self._update_state()  # (its "Listen in CW" follows the mode)
             self._update_auto()
 
     def set_sample_rate(self, rate_hz: Optional[float]) -> None:
@@ -1287,6 +1301,18 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             self._receiving = receiving
             self._update_state()
 
+    def set_source(self, source: Optional[str]) -> None:
+        """Tell the panel what the receiver listens to: "device", "demo"
+        (CW's "Tune to" offers the demo's Morse beacon), "recording" (the
+        hints say Play rather than Start) or None."""
+        if source != self._source:
+            self._source = source
+            self._update_state()
+
+    def _start_hint(self) -> str:
+        """How to get samples flowing: Start, or Play for a recording."""
+        return _PLAY_HINT if self._source == "recording" else _START_HINT
+
     def set_decoder_status(self, status: Any) -> None:
         """Show the live decoder's health: a
         :class:`~sdr_module.dsp.live_decoders.LiveDecoderStatus` (its
@@ -1344,16 +1370,45 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             return False
         return any(lo <= freq <= hi for lo, hi in PROTOCOL_BANDS.get(proto, ()))
 
+    def _cw_tune(self) -> Optional[Tuple[float, str, str]]:
+        """CW's "Tune to": ``(freq_hz, button text, tooltip)`` or None. The
+        demo device's beacon while it is the source, else CW mode at the
+        tuned frequency (the decoder reads Morse code in any mode; CW mode
+        makes it heard)."""
+        if self.is_auto():
+            return None  # (Auto follows the mode: it is in CW already)
+        tuned = self._tuned_hz
+        beacon = DEMO_CW_BEACON_HZ
+        if self._source == "demo" and (tuned is None or abs(tuned - beacon) > 250.0):
+            return (
+                beacon,
+                f"Tune to {_format_mhz(beacon)}",
+                "Tune the receiver to the demo device's Morse code beacon, in CW.",
+            )
+        if tuned is not None and self._mode is not None and self._mode != "CW":
+            return (
+                tuned,
+                "Listen in CW",
+                "Switch the receiver to CW mode to hear the Morse code (the "
+                "decoder reads it in any mode).",
+            )
+        return None
+
     def _tune_action(self, proto: str) -> Tuple[Optional[str], str]:
         """Text and tooltip of the empty table's "Tune to ..." button."""
         suggestion = PROTOCOL_TUNE.get(proto)
-        if suggestion is None or self._tuned_for(proto):
+        cw = self._cw_tune() if proto == "CW (Morse)" else None
+        if cw is None and (suggestion is None or self._tuned_for(proto)):
             return None, ""
         # Offered only when something (the main window) acts on it.
         try:
             if self.receivers(self.tune_requested) <= 0:
                 return None, ""
         except (TypeError, RuntimeError):  # pragma: no cover - defensive
+            return None, ""
+        if cw is not None:
+            return cw[1], cw[2]
+        if suggestion is None:  # pragma: no cover - (ruled out above)
             return None, ""
         freq, mode, _dev, what = suggestion
         text = f"Tune to {_format_mhz(freq)}"
@@ -1365,6 +1420,13 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
     def _tune_to_protocol(self) -> None:
         """Emit :attr:`tune_requested` for the selected protocol's channel."""
         proto = self.protocol()
+        cw = self._cw_tune() if proto == "CW (Morse)" else None
+        if cw is not None:
+            freq = cw[0]
+            self.tune_requested.emit(
+                float(freq), f"{proto} ({_format_mhz(freq)})", "CW", ""
+            )
+            return
         suggestion = PROTOCOL_TUNE.get(proto or "")
         if proto is None or suggestion is None:
             return
@@ -1389,20 +1451,19 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 return f"Listening for {proto} on {here}\nDecoded messages appear here."
             return (
                 f"Waiting for {proto} messages\n"
-                f"Tuned to {here}: {_START_HINT} to decode."
+                f"Tuned to {here}: {self._start_hint()} to decode."
             )
         hint = PROTOCOL_HINTS.get(proto)
         if hint:
             if self._receiving:
                 return f"Waiting for {proto} messages\n{hint}."
-            return f"Waiting for {proto} messages\n{hint}, then {_START_HINT}."
+            return f"Waiting for {proto} messages\n{hint}, then {self._start_hint()}."
+        start = self._start_hint()
         if not where:
-            return (
-                f"Waiting for {proto} messages\n{_START_HINT.capitalize()} to decode."
-            )
+            return f"Waiting for {proto} messages\n{start.capitalize()} to decode."
         if self._receiving:
             return f"Waiting for {proto} messages\nTune to {where} to decode."
-        return f"Waiting for {proto} messages\nTune to {where}, then {_START_HINT}."
+        return f"Waiting for {proto} messages\nTune to {where}, then {start}."
 
     def _update_state(self, *_args: Any) -> None:
         """Refresh tooltips, enabled states and the empty-table hint."""
@@ -1436,8 +1497,12 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             check.setToolTip("Choose a protocol first")
             empty = (
                 "No decoder selected\n"
-                f"Choose a protocol above, tune to its frequency and "
-                f"{_START_HINT}."
+                + (
+                    "Choose a protocol above and tune to its frequency."
+                    if self._receiving
+                    else "Choose a protocol above, tune to its frequency and "
+                    f"{self._start_hint()}."
+                )
             )
         else:
             what, where = PROTOCOL_INFO.get(proto, ("", ""))
@@ -1531,6 +1596,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         if problem:
             return problem, "warning", problem
         if not self._receiving:
+            if self._source == "recording":
+                return f"Not playing: {_PLAY_HINT} to decode", "muted", ""
             return f"Stopped: {_START_HINT} to decode", "muted", ""
         here = _format_mhz(self._tuned_hz) if self._tuned_hz else ""
         # One count with the status-bar chip: the protocol's messages since

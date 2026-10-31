@@ -531,5 +531,96 @@ class TestPreviewIdPlaysOnThePreferredOutput(_WindowTestCase):
         self.assertNotIn("Playing preview", panel._status_label.text())
 
 
+class TestSecondReceiverSpectrum(_WindowTestCase):
+    """HAM-E2E-8: the second receiver's spectrum started with Peak hold on
+    and a fixed range, while the main window's defaults are Peak hold off
+    and Range Auto."""
+
+    demo = True
+
+    def open_second(self):
+        rx = self.win._second_rx.show()
+        rx._status_timer.stop()
+        self.addCleanup(rx.shutdown)
+        settle()
+        return rx
+
+    def test_same_defaults_as_the_main_window(self):
+        main = self.win._spectrum.display_settings()
+        self.assertFalse(main["peak_hold"])
+        self.assertTrue(main["range_auto"])
+        rx = self.open_second()
+        self.assertFalse(rx._spectrum.peak_hold())
+        self.assertTrue(rx._spectrum.display_settings()["range_auto"])
+
+    def test_its_display_choices_are_kept(self):
+        rx = self.open_second()
+        rx._spectrum._peak_check.setChecked(True)  # as a click does
+        rx.shutdown()
+        rx.close()
+        settle()
+        from sdr_module.gui.second_receiver import SecondReceiverWindow
+
+        again = SecondReceiverWindow(self.win)
+        self.addCleanup(again.shutdown)
+        self.assertTrue(again._spectrum.peak_hold())
+        self.assertTrue(again._spectrum.display_settings()["range_auto"])
+        # (The main window's own choice is its own.)
+        self.assertFalse(self.win._spectrum.peak_hold())
+
+
+class TestSecondReceiverTxLine(_TxCase):
+    """HAM-E2E-9: the second receiver's Transmit line named the engine's
+    job class, "On air: RTTY ... on 14.080 MHz (DATA).", where the main
+    window says how it is sent ("45.45 Bd, 170 Hz shift")."""
+
+    license = "general"
+
+    def setUp(self):
+        super().setUp()
+        self.rx = self.win._second_rx.show()
+        self.rx._status_timer.stop()
+        self.addCleanup(self.rx.shutdown)
+
+    def text_job(self, summary="45.45 Bd, 170 Hz shift"):
+        from sdr_module.gui.transmitter import ArraySource, TxJob
+
+        rate = 2e6
+        tone = np.exp(2j * np.pi * 1000.0 * np.arange(int(5 * rate)) / rate)
+        return TxJob(
+            ArraySource(tone.astype(np.complex64)),
+            rate,
+            14.080e6,
+            "DATA",
+            250.0,
+            "RTTY “TEST DE W1AW”",
+            summary,
+            identify=False,
+        )
+
+    def test_rtty_on_air(self):
+        self.hackrf(pace=True, freq=14.080e6)
+        self.assertTrue(self.station.transmit(self.text_job(), confirm=False))
+        self.rx._update_tx_group()
+        text = self.rx._tx_label.text()
+        self.assertIn(
+            "On air: RTTY “TEST DE W1AW” on 14.080 MHz (45.45 Bd, 170 Hz shift).",
+            text,
+        )
+        self.assertNotIn("DATA", text)
+        self.station.stop()
+        self.wait_done(5)
+
+    def test_a_job_without_a_summary_reads_in_words(self):
+        self.hackrf(pace=True, freq=14.080e6)
+        self.assertTrue(self.station.transmit(self.text_job(""), confirm=False))
+        self.rx._update_tx_group()
+        text = self.rx._tx_label.text()
+        self.assertIn("on 14.080 MHz (data on the carrier).", text)
+        self.assertNotIn("DATA", text)
+        self.station.stop()
+        self.wait_done(5)
+
+
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

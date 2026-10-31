@@ -411,17 +411,31 @@ class TestAircraftList(_PanelCase):
         self.heard("400002", 38000, "HIGH1")
         self.heard("400003", 12000, "MID1")
         self.assertEqual(self.names(), ["LOW1", "HIGH1", "MID1"])  # as heard
+        widths = [self.table.columnWidth(c) for c in range(self.table.columnCount())]
         self.click_header(decoder_views.AC_ALTITUDE)
         self.assertEqual(self.names(), ["LOW1", "MID1", "HIGH1"])
+        title = self.table.horizontalHeaderItem(decoder_views.AC_ALTITUDE)
+        self.assertEqual(title.text(), "Altitude ▲")
+        # (Qt's arrow is hidden: it took room in every title, and then two
+        # columns fewer fitted.)
+        self.assertFalse(self.table.horizontalHeader().isSortIndicatorShown())
+        self.assertEqual(
+            self.table.columnWidth(decoder_views.AC_SPEED),
+            widths[decoder_views.AC_SPEED],
+        )
         self.click_header(decoder_views.AC_ALTITUDE)
         self.assertEqual(self.names(), ["HIGH1", "MID1", "LOW1"])
+        self.assertEqual(title.text(), "Altitude ▼")
+        # A new aircraft goes to its place.
+        self.heard("400004", 20000, "NEW1")
+        self.assertEqual(self.names(), ["HIGH1", "NEW1", "MID1", "LOW1"])
         # An update moves its row; picking and copying still find it.
         self.view.select("400003")
         self.view.update_message(
             _adsb(icao_address="400003", downlink_format=17, type_code=11,
                   altitude=41000, latitude=50.5, longitude=4.5)
         )  # fmt: skip
-        self.assertEqual(self.names(), ["MID1", "HIGH1", "LOW1"])
+        self.assertEqual(self.names(), ["MID1", "HIGH1", "NEW1", "LOW1"])
         self.assertEqual(self.view.selected_icao(), "400003")
         self.assertEqual(self.panel.address_filter(), "400003")
         self.assertIn("MID1 (400003)", self.view.detail.text())

@@ -329,8 +329,12 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         header.setStretchLastSection(True)
         # A click on a title sorts by it (numbers as numbers; again: the
         # other way); until then the aircraft are listed as first heard.
+        # Qt's sort arrow takes room in every title (a column fewer would
+        # fit): the sorted column's title shows the direction instead.
         header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
         self.table.setSortingEnabled(True)
+        header.setSortIndicatorShown(False)
+        header.sortIndicatorChanged.connect(self._on_sort_changed)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.table.setToolTip(
             "One row per aircraft heard, with its latest information. Click an "
@@ -472,11 +476,15 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         """A new, empty row for an aircraft at the bottom (a sorted list
         moves it to its place as its values are filled in)."""
         table = self.table
-        sorting = table.isSortingEnabled()
-        table.setSortingEnabled(False)  # (else setItem may move the row)
         row = table.rowCount()
         table.insertRow(row)
-        for col in range(len(_AC_HEADERS)):
+        # The sorted column's cell last: setting it may move the row, and
+        # the others go to this row first.
+        sorted_col = table.horizontalHeader().sortIndicatorSection()
+        cols = [c for c in range(len(_AC_HEADERS)) if c != sorted_col]
+        if 0 <= sorted_col < len(_AC_HEADERS):
+            cols.append(sorted_col)
+        for col in cols:
             item = _AircraftItem()
             if col in _AC_NUMBERS:
                 item.setTextAlignment(
@@ -486,7 +494,17 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
                 item.setData(_ICAO_ROLE, icao)
                 self._items[icao] = item
             table.setItem(row, col, item)
-        table.setSortingEnabled(sorting)
+
+    def _on_sort_changed(self, section: int, order: Any) -> None:
+        """The sorted column's title shows the direction (Qt's own arrow
+        is hidden: it takes room in every title)."""
+        arrow = " ▲" if order == Qt.SortOrder.AscendingOrder else " ▼"
+        for col, (title, _tip) in enumerate(_AC_HEADERS):
+            item = self.table.horizontalHeaderItem(col)
+            text = title + (arrow if col == section else "")
+            if item is not None and item.text() != text:
+                item.setText(text)
+        self._fit_columns()
 
     def _outgrows(self, col: int, text: str) -> bool:
         """Note a new text in column ``col``: whether it is wider than any
@@ -545,8 +563,6 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         blocked = self.table.blockSignals(True)
         self.table.setUpdatesEnabled(False)
         held, self._fitting_held = self._fitting_held, True  # once, at the end
-        sorting = self.table.isSortingEnabled()
-        self.table.setSortingEnabled(False)  # (sorted once, at the end)
         try:
             self.table.setRowCount(0)
             self._items.clear()
@@ -555,12 +571,9 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
             for aircraft in self.tracker.aircraft():
                 self._add_row(aircraft.icao)
                 self._fill(aircraft)
-            self.table.setSortingEnabled(sorting)
             if selected in self._items:
                 self.select(selected)
         finally:
-            if self.table.isSortingEnabled() != sorting:  # (an error above)
-                self.table.setSortingEnabled(sorting)
             self._fitting_held = held
             self._fit_columns()
             self.table.setUpdatesEnabled(True)

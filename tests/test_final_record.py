@@ -798,3 +798,40 @@ class TestRefusalsAreNotErrors(_FilesCase):
         ):
             self.win._show_recording_info()
         self.assertIn("it is audio, not I/Q", warn.call_args[0][2])
+
+
+class TestPlaybackStripAt1024(_FilesCase):
+    """REC-E2E-15: at 1024x640 the playback strip squeezed the file's name
+    to 'ap…ta' in 40 px and the position slider to 100 px."""
+
+    def test_the_slider_gets_the_room_of_a_name_too_short_to_read(self):
+        from PyQt6.QtWidgets import QApplication
+
+        from sdr_module.gui import themes
+
+        path = _save_sigmf(self.path("aprs2m.sigmf-data"), 144.39e6, seconds=1.0)
+        with self.open_dialog(path):
+            self.assertTrue(self.win._open_recording())
+        bar = self.win._playback_bar
+        qapp = QApplication.instance()
+        old_sheet, old_palette = qapp.styleSheet(), qapp.palette()
+        old_theme = themes.current_theme()
+        try:
+            themes.apply_theme(qapp, "dark")
+            self.win.resize(1024, 640)
+            self.settle(3)
+            # (The status bar names the file.)
+            self.assertTrue(bar._file.isHidden())
+            self.assertTrue(bar._caption.isHidden())
+            self.assertGreater(bar._slider.width(), 170)
+            self.win.resize(1366, 768)
+            self.settle(3)
+            self.assertFalse(bar._file.isHidden())
+            self.assertFalse(bar._caption.isHidden())
+            self.assertGreaterEqual(bar._file.width(), 120)
+            self.assertGreaterEqual(bar._slider.width(), 200)
+        finally:
+            qapp.setStyleSheet(old_sheet)
+            qapp.setPalette(old_palette)
+            themes.apply_theme(None, old_theme)
+            self.win._playback.close()

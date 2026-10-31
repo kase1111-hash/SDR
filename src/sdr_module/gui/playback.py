@@ -58,6 +58,11 @@ logger = logging.getLogger(__name__)
 SPEEDS = (0.5, 1.0, 2.0, 4.0)
 #: Seconds over which the speed a recording really plays at is measured.
 _SPEED_CHECK_S = 3.0
+#: The playback strip leaves out its caption where the position slider
+#: would get less than _MIN_SLIDER px, and the file's name where that would
+#: get less than _MIN_FILE_LABEL px.
+_MIN_SLIDER = 200
+_MIN_FILE_LABEL = 120
 
 
 def format_clock(seconds: float, total: float = 0.0) -> str:
@@ -447,6 +452,52 @@ if HAS_PYQT6:
             self._close.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             self._close.clicked.connect(lambda _c=False: self.close_clicked.emit())
             row.addWidget(self._close)
+
+        def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
+            super().resizeEvent(event)
+            self._fit_row()
+
+        def _fit_row(self) -> None:
+            """Give the position slider room to seek with on a narrow strip
+            (at 1024 px it got 100 px, and the file's name 40 px: "ap…ta").
+            The PLAYBACK caption goes first, where the slider would get
+            less than ``_MIN_SLIDER`` px; the file's name, where it would
+            get less than ``_MIN_FILE_LABEL`` px (it shares the room with
+            the slider 2:3). The status bar names the file, as Close's
+            tooltip does."""
+            row = self.layout()
+            spacing = max(0, row.spacing())
+            margins = row.contentsMargins()
+            fixed = [
+                w
+                for w in (
+                    self._play_button,
+                    self._elapsed,
+                    self._total,
+                    self._loop,
+                    self._speed,
+                    self._find,
+                    self._close,
+                )
+                if not w.isHidden()
+            ]
+            free = (
+                self.width()
+                - margins.left()
+                - margins.right()
+                - sum(w.sizeHint().width() + spacing for w in fixed)
+            )
+            caption = self._caption.sizeHint().width() + spacing
+            show_caption = free - caption >= _MIN_SLIDER
+            if show_caption:
+                free -= caption
+            show_file = 0.4 * (free - spacing) >= _MIN_FILE_LABEL
+            for widget, show in (
+                (self._caption, show_caption),
+                (self._file, show_file),
+            ):
+                if show == widget.isHidden():
+                    widget.setHidden(not show)
 
         # -- what is shown --------------------------------------------------
 

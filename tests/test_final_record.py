@@ -3,8 +3,18 @@
 * REC-E2E-01, DEC-E2E-20: quiet little-endian cs16 (and 8-bit samples
   widened to 16 bits) was guessed to be cs8; Import Options offered "Use
   cs8" and called that reading right.
+* REC-E2E-02/03: a recording plays the way its band is heard; Close goes
+  back to the listening from before.
+* REC-E2E-04: Import Options fits its rows.
+* REC-E2E-05/06: demo takes keep every sample while frames can't keep up;
+  skips are reported, once; playback says when it can't keep a speed.
+* REC-E2E-07: status messages follow the state.
 * REC-E2E-08: the sample check said "peak 0.00 of full scale" for quiet
   recordings.
+* REC-E2E-09 to 16: one size unit, take metadata, the second receiver's
+  stop, the Recording group, format names, refusals, the playback strip at
+  1024 px, quiet 8-bit saves.
+* Leftovers 20, 21, 24, 30 and the flaky input/playback tests.
 """
 
 import os
@@ -899,14 +909,8 @@ class TestQuietEightBitSaves(_FilesCase):
         self.boxes.clear()
         with self.save_dialog(self.path("fm.cu8")):
             self.assertTrue(self.win._save_recording())
-        self.assertEqual(
-            [
-                b
-                for b in self.boxes
-                if getattr(b, "windowTitle", str)() == "Quiet Recording"
-            ],
-            [],
-        )
+        titles = [b.windowTitle() for b in self.boxes if hasattr(b, "windowTitle")]
+        self.assertNotIn("Quiet Recording", titles)
 
 
 class TestNonFiniteMetadataIsMissing:

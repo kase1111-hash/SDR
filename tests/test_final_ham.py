@@ -203,6 +203,11 @@ class TestStartNowOnAuto(_PanelCase):
         )
         self.assertNotEqual(status.property("tone"), "warning")
         self.assertFalse(self.panel._decoder.is_receiving())
+        # The syncs end (no image under way any more): the line goes.
+        self.feed(hiss[: int(3 * FS)])
+        self.panel._update_status()
+        self.assertEqual(status.text(), "")
+        self.assertTrue(status.isHidden())
 
     def test_stop_decoder_cancels_the_wait(self):
         self.panel._start_now_btn.click()

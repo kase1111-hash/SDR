@@ -575,9 +575,10 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         # False from Start Now until audio arrives (a Start Now with no
         # audio at all is said so, not "the audio stopped").
         self._start_now_heard = True
-        # True while the status says the mode couldn't be told (replaced
-        # once line syncs that tell it are heard).
-        self._mode_unknown_shown = False
+        # What the status says after a Start Now on Auto that couldn't tell
+        # the mode: "no_mode" (replaced once line syncs that tell it are
+        # heard), "syncs" (cleared once they are gone), or None.
+        self._start_now_hint: Optional[str] = None
 
         self._setup_ui()
 
@@ -890,7 +891,8 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         wanted = switch_to if switch_to in ("USB", "LSB") else "FM"
         self._switch_to = wanted
         callout = self._fm_callout
-        before = (callout.isVisible(), self._fm_label.text())
+        # (isHidden, not isVisible: the SSTV tab need not be on screen.)
+        before = (not callout.isHidden(), self._fm_label.text())
         if mode:
             if wanted == "FM":
                 text = (
@@ -1186,7 +1188,7 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
 
     def _set_status(self, text: str, tone: Optional[str] = None) -> None:
         """Show an activity message above the image (hidden when empty)."""
-        self._mode_unknown_shown = False
+        self._start_now_hint = None
         self._status_label.setText(text)
         self._status_label.setVisible(bool(text))
         _theme().set_tone(self._status_label, tone)
@@ -1344,7 +1346,7 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         if self._start_now_wait >= START_NOW_AUTO_WAIT_S:
             self._start_now_wait = None
             self._set_status(START_NOW_NO_MODE_TEXT, "warning")
-            self._mode_unknown_shown = True
+            self._start_now_hint = "no_mode"
 
     def _start_now_without_audio(self) -> None:
         """Start Now was pressed and no audio has come since: there is
@@ -1796,13 +1798,16 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         self._tone_meter.set_reading(tone["tone_hz"], active=True)
         self._tone_label.setText(tone["text"])
         guess = tone.get("mode_guess")
-        if self._mode_unknown_shown and guess is not None:
+        if self._start_now_hint == "no_mode" and guess is not None:
             # Start Now couldn't tell the mode; now the syncs do.
             self._set_status(
                 f"{guess.name} line syncs heard: press Start Now to decode the "
                 "image under way.",
                 "info",
             )
+            self._start_now_hint = "syncs"
+        elif self._start_now_hint == "syncs" and guess is None:
+            self._set_status("")  # (the syncs are gone: nothing under way)
 
     def _refresh_history_ui(self) -> None:
         """Sync the list, counter, empty state and navigation buttons."""

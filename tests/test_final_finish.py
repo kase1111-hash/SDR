@@ -57,7 +57,9 @@ class TestIdentifyHearsVoiceAtItsDeviation(unittest.TestCase):
         over = total = 0.0
         block = int(self.RATE / 30)
         for start in range(0, len(x) - block + 1, block):
-            audio = chain.demodulate(chain.channelize(x[start : start + block]), deviation_hz)
+            audio = chain.demodulate(
+                chain.channelize(x[start : start + block]), deviation_hz
+            )
             over += chain.last_clip_fraction * len(audio)
             total += len(audio)
         return over / max(total, 1.0)
@@ -226,7 +228,76 @@ class TestPlaybackAudioHintGivesAdviceThatApplies(_playback_case()):
         self.assertFalse(self.win._playback.active)
         self.win._demo_mode = False
         self.win._pacer.overloaded = True
-        self.assertIn("A lower sample rate (Receiver > Sample rate) helps.", self.win._realtime_hint())
+        self.assertIn(
+            "A lower sample rate (Receiver > Sample rate) helps.",
+            self.win._realtime_hint(),
+        )
+
+
+def _window_case():
+    from tests.test_gui_chrome import _WindowTestCase
+
+    return _WindowTestCase
+
+
+class TestSecondReceiverWaterfallSettingDamaged(_window_case()):
+    """N-03: a damaged settings file gives each setting its default and is
+    logged at WARNING (Tools > Error History), as the main window's plots
+    and the second receiver's spectrum (e493f13) are. The second
+    receiver's saved waterfall choices were dropped with a debug line when
+    unreadable, and silently when not a set of choices at all."""
+
+    demo = True
+
+    def open_with(self, key, raw):
+        from sdr_module.gui import second_receiver
+
+        self.store.values[getattr(second_receiver, key)] = raw
+        with self.assertLogs("sdr_module", "WARNING") as logs:
+            rx = self.win._second_rx.show()
+            self.addCleanup(rx.shutdown)
+            rx._status_timer.stop()
+        return rx, [r.getMessage() for r in logs.records]
+
+    def test_unreadable_waterfall_settings(self):
+        rx, said = self.open_with("WATERFALL_KEY", "{not json")
+        self.assertEqual(
+            said,
+            [
+                "Ignoring the second receiver's unreadable waterfall settings: '{not json'"
+            ],
+        )
+        # (The main window's defaults, as with no saved choice.)
+        shown = rx._waterfall.display_settings()
+        self.assertTrue(shown["auto_levels"])
+        self.assertEqual(shown["history_s"], 60.0)
+
+    def test_saved_choices_that_are_not_choices(self):
+        rx, said = self.open_with("WATERFALL_KEY", "[1, 2]")
+        self.assertEqual(
+            said,
+            ["Ignoring the second receiver's unreadable waterfall settings: '[1, 2]'"],
+        )
+
+    def test_the_spectrums_too(self):
+        rx, said = self.open_with("SPECTRUM_KEY", "7")
+        self.assertEqual(
+            said, ["Ignoring the second receiver's unreadable spectrum settings: '7'"]
+        )
+
+    def test_one_line_per_damaged_value(self):
+        raw = '{"floor_db": "abc", "colormap": "nope", "history_s": 300}'
+        rx, said = self.open_with("WATERFALL_KEY", raw)
+        self.assertEqual(
+            sorted(said),
+            [
+                "Ignoring the damaged waterfall setting colormap='nope': using "
+                "'turbo' instead.",
+                "Ignoring the damaged waterfall setting floor_db='abc': using "
+                "-100.0 instead.",
+            ],
+        )
+        self.assertEqual(rx._waterfall.display_settings()["history_s"], 300.0)
 
 
 if __name__ == "__main__":

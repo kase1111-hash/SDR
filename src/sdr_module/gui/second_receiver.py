@@ -301,6 +301,23 @@ def _number(value: Any) -> float:
     return number if math.isfinite(number) else 0.0
 
 
+def _saved_choices(raw: str, plot: str) -> Optional[Dict[str, Any]]:
+    """A plot's saved display choices (JSON, as the widget gives them), or
+    None when ``raw`` can't be read as them: logged, as the main window's
+    own are (a damaged settings file is listed in Tools > Error History),
+    and the plot keeps the main window's defaults."""
+    try:
+        saved = json.loads(raw)
+    except ValueError:
+        saved = None
+    if not isinstance(saved, dict):
+        logger.warning(
+            f"Ignoring the second receiver's unreadable {plot} settings: {raw!r}"
+        )
+        return None
+    return saved
+
+
 def _step_index(steps: Tuple[int, ...], value: Any, default: int) -> int:
     """Index of the step nearest ``value`` (``default``'s when it isn't a
     finite number)."""
@@ -3481,17 +3498,8 @@ if HAS_PYQT6:
             raw = self._settings.get_str(SPECTRUM_KEY, "")
             if not raw:
                 return
-            try:
-                saved = json.loads(raw)
-            except ValueError:
-                # (Logged, as the main window's own are: a damaged settings
-                # file is listed in Tools > Error History.)
-                logger.warning(
-                    f"Ignoring the second receiver's unreadable spectrum "
-                    f"settings: {raw!r}"
-                )
-                return
-            if not isinstance(saved, dict):
+            saved = _saved_choices(raw, "spectrum")
+            if saved is None:
                 return
             kept = {key: saved[key] for key in _SPECTRUM_KEPT if key in saved}
             try:
@@ -3513,13 +3521,16 @@ if HAS_PYQT6:
             raw = self._settings.get_str(WATERFALL_KEY, "")
             if not raw:
                 return
-            try:
-                saved = json.loads(raw)
-            except ValueError:
-                logger.debug(f"Ignoring unreadable waterfall settings: {raw!r}")
+            saved = _saved_choices(raw, "waterfall")
+            if saved is None:
                 return
-            if isinstance(saved, dict):
+            try:
+                # (A damaged value gives the one in use, logged.)
                 self._waterfall.apply_display_settings(saved)
+            except Exception as e:  # (a damaged setting must not stop it)
+                logger.warning(
+                    f"Ignoring the second receiver's waterfall settings: {e}"
+                )
 
         def _restore_geometry(self) -> None:
             restored = False

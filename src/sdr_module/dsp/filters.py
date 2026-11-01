@@ -1438,8 +1438,9 @@ class SquelchMode(Enum):
     CARRIER = "carrier"  # Signal amplitude based
     NOISE = "noise"  # Noise level based (opens on low noise)
     CTCSS = "ctcss"  # Continuous Tone-Coded Squelch System
-    # Digital-Coded Squelch: not implemented (no 134.4 bit/s Golay decoder);
-    # Squelch refuses it rather than acting as a carrier squelch.
+    # Digital-Coded Squelch: not implemented by Squelch, which refuses it
+    # rather than acting as a carrier squelch (the 134.4 bit/s Golay
+    # decoder is sdr_module.dsp.dcs.DcsDetector).
     DCS = "dcs"
     VOX = "vox"  # Voice-operated (audio activity)
 
@@ -1530,8 +1531,8 @@ class Squelch:
     def _check_mode(config: SquelchConfig) -> None:
         if config.mode == SquelchMode.DCS:
             raise NotImplementedError(
-                "DCS (digital-coded squelch) is not implemented; use CTCSS or "
-                "a carrier squelch"
+                "DCS (digital-coded squelch) is not implemented by Squelch; "
+                "use sdr_module.dsp.dcs.DcsDetector, CTCSS or a carrier squelch"
             )
 
     def _update_coefficients(self) -> None:

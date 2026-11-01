@@ -100,6 +100,7 @@ except ImportError:
 
 from .. import __version__
 from ..devices.base import SDRDevice
+from ..dsp.dcs import dcs_label, format_dcs, parse_dcs
 from ..dsp.frame_spectrum import (
     DEFAULT_FFT_SIZE,
     WINDOW_LABELS,
@@ -118,6 +119,7 @@ from .audio_chain import (
     DEFAULT_CW_PITCH_HZ,
     DEFAULT_NOTCH_HZ,
     NOTCH_CHOICES,
+    SUBAUDIBLE_CUT_HZ,
     AudioAgc,
     AudioJoin,
     AudioOptions,
@@ -133,6 +135,7 @@ from .audio_chain import (
 )
 from .audio_recording import AudioTake, audio_file_name
 from .audio_sink import AudioSink
+from .bookmark_editor import bookmark_dcs
 from .bookmarks_panel import BookmarksPanel, default_bookmark_name
 from .bookmarks_panel import listening as bookmark_listening
 from .control_panel import (
@@ -1011,6 +1014,9 @@ class _ReceiverChain:
         # the audio before noise reduction (for the SSTV decoder).
         self.last_clip_fraction = 0.0
         self.pre_nr_audio = np.empty(0, dtype=np.float32)
+        # FM: the audio before the DC blocker, for the DCS detector (a
+        # high-pass droops its long runs of equal bits).
+        self.fm_raw_audio = np.empty(0, dtype=np.float32)
         self._unclipped = np.empty(0, dtype=np.float32)  # (see clip_swing)
         # The AM detector's averaging (half of it), dip and fade lengths, in
         # samples at the channel rate (see _am_detect).
@@ -1269,6 +1275,7 @@ class _ReceiverChain:
             # No audio from this block: what the last one saw (its audio for
             # the SSTV decoder and the tone squelch) isn't this one's.
             self.pre_nr_audio = np.empty(0, dtype=np.float32)
+            self.fm_raw_audio = np.empty(0, dtype=np.float32)
             self.last_clip_fraction = 0.0
             self._unclipped = np.empty(0, dtype=np.float32)
             return np.empty(0, dtype=np.float32)
@@ -1295,6 +1302,7 @@ class _ReceiverChain:
             detected = np.angle(channel * np.conj(prior)).astype(np.float32)
             gain = self.channel_rate / (2.0 * np.pi * max(float(fm_deviation), 1.0))
             audio = self._to_audio_rate(detected * np.float32(gain))
+            self.fm_raw_audio = audio
             # A tuning error is a constant frequency offset: DC, removed.
             audio = self._dc_blocker.process(audio)
             if audio.size:
@@ -1343,8 +1351,18 @@ class _ReceiverChain:
 
     def _listen(self, audio: np.ndarray) -> np.ndarray:
         """The audio notch, in the modes it applies to (not broadcast FM,
-        whose audio is kept as it is), over the audio this mode hears."""
+        whose audio is kept as it is), over the audio this mode hears; and
+        narrow FM with a tone squelch set heard without the tone or the DCS
+        bits under it (a high-pass at SUBAUDIBLE_CUT_HZ)."""
         broadcast = self.mode == "FM" and self._deemphasis
+        options = self._options()
+        low_cut: Optional[float] = None
+        if (
+            self.mode == "FM"
+            and not broadcast
+            and getattr(options, "tone_squelch", False)
+        ):
+            low_cut = SUBAUDIBLE_CUT_HZ
         pitch: Optional[float] = None
         if self.mode in ("USB", "LSB"):
             band = (_SSB_LOW_HZ, _SSB_LOW_HZ + self.bandwidth)
@@ -1356,7 +1374,7 @@ class _ReceiverChain:
         else:
             band = (0.0, self._audio_cutoff)
         return self._listening.process(
-            audio, self._options(), not broadcast, band, pitch
+            audio, options, not broadcast, band, pitch, low_cut
         )
 
     def _am_detect(self, channel: np.ndarray, speed: str) -> np.ndarray:
@@ -3367,8 +3385,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             audio_menu,
             "&Tone Squelch...",
             lambda: self._show_panel_control(panel._tone_combo, mode="FM"),
-            tip="Choose the CTCSS tone a repeater or PMR radio sends, to hear "
-            "only it (FM; the Audio group in the control panel)",
+            tip="Choose the CTCSS tone or DCS code a repeater or PMR radio "
+            "sends, to hear only it (FM; the Audio group in the control panel)",
         )
         self._add_action(
             audio_menu,
@@ -6789,6 +6807,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         panel.noise_reduction_changed.connect(self._on_noise_reduction_changed)
         panel.audio_agc_changed.connect(self._on_audio_agc_changed)
         panel.tone_squelch_changed.connect(self._on_tone_squelch_changed)
+        panel.dcs_squelch_changed.connect(self._on_dcs_squelch_changed)
         panel.notch_changed.connect(self._on_notch_changed)
         panel.iq_options_changed.connect(self._on_iq_options_changed)
 
@@ -6815,11 +6834,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _on_tone_squelch_changed(self, hz: float) -> None:
         self._tone_squelch.tone_hz = float(hz) if hz else None
+        self._audio_options.tone_squelch = self._tone_squelch.active
         self._save_setting("audio/tone_squelch", float(hz))
+        if hz:
+            self._say_tone_squelch_unused()
+
+    def _on_dcs_squelch_changed(self, code: str) -> None:
+        """A DCS code chosen in the Tone squelch list ("D023N"), or none."""
+        self._tone_squelch.dcs = parse_dcs(code) if code else None
+        self._audio_options.tone_squelch = self._tone_squelch.active
+        self._save_setting("audio/dcs_squelch", str(code or ""))
+        if code:
+            self._say_tone_squelch_unused()
+
+    def _say_tone_squelch_unused(self) -> None:
+        """A tone or code chosen at a broadcast deviation: say it isn't
+        used there."""
         panel = self._control_panel
         if (
-            hz
-            and not self._restoring
+            not self._restoring
             and panel.get_demod_mode() == "FM"
             and not self._tones_checked(panel.get_fm_deviation())
         ):
@@ -6925,6 +6958,21 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             ),
         )
 
+        def dcs_squelch() -> None:
+            raw = settings.get_str("audio/dcs_squelch", "")
+            if not raw:
+                return
+            code = parse_dcs(raw)
+            if code is None:
+                logger.warning(
+                    f"Ignoring the damaged setting audio/dcs_squelch={raw!r}: no "
+                    "DCS code squelch."
+                )
+                return
+            panel.set_dcs_squelch(*code)
+
+        restore("audio/dcs_squelch", dcs_squelch)
+
         def notch_hz() -> None:
             hz = settings.get_int("audio/notch_hz", DEFAULT_NOTCH_HZ)
             panel.set_notch_hz(hz)
@@ -6960,6 +7008,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         hz = panel.tone_squelch_hz()
         self._tone_squelch.tone_hz = hz if hz else None
+        self._tone_squelch.dcs = panel.dcs_squelch()
+        self._audio_options.tone_squelch = self._tone_squelch.active
         self._audio_options.notch = panel.notch_mode()
         self._audio_options.notch_hz = float(panel.notch_hz())
         remove_dc, balance_iq = panel.iq_options()
@@ -6976,6 +7026,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         settings.set("audio/noise_reduction", panel.noise_reduction())
         settings.set("audio/agc_speed", panel.audio_agc_speed())
         settings.set("audio/tone_squelch", panel.tone_squelch_hz())
+        dcs = panel.dcs_squelch()
+        settings.set("audio/dcs_squelch", format_dcs(*dcs) if dcs else "")
         settings.set("audio/notch", panel.notch_mode())
         settings.set("audio/notch_hz", panel.notch_hz())
         remove_dc, balance_iq = panel.iq_options()
@@ -7003,6 +7055,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return "Not used (no audio in this mode)", "muted"
         tone_hz = self._tone_squelch.tone_hz if mode == "FM" else None
         tone = f", tone {tone_hz:.1f} Hz" if tone_hz else ""
+        dcs = self._tone_squelch.dcs if mode == "FM" else None
+        if dcs is not None:
+            tone = f", {dcs_label(*dcs)}"
         if not gate.enabled:
             return f"Off (everything plays){tone}", None
         threshold = gate.last_threshold_db
@@ -9197,7 +9252,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # So does the TONE state (the level meter's lamp, the Info tab, a
         # range scan): a signal without the chosen tone reads TONE whether
         # the speaker plays or not.
-        tone_check = mode == "FM" and gate.is_open and bool(self._tone_squelch.tone_hz)
+        tone_check = mode == "FM" and gate.is_open and self._tone_squelch.active
         # The block after the speaker stopped is still demodulated: it
         # fades out instead of breaking off.
         fading_out = self._audio_join.playing and not speaker
@@ -9252,11 +9307,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 tones.reset()
             self._tone_blocked = False
             if self._tones_checked(deviation):
+                tones.feed_dcs(chain.fm_raw_audio)  # (DCS: before DC blocking)
                 if not tones.process(chain.pre_nr_audio):
                     tone_ok = False
                     self._tone_blocked = True
                     speaker = False
-            elif tones.detected_hz is not None:
+            elif tones.detected_hz is not None or tones.detected_dcs is not None:
                 tones.reset()
             snr = None if noise_db is None else level_db - noise_db
             self._check_fm_clipping(chain, seconds, snr)
@@ -9372,7 +9428,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # repeater sends no tone".)
             checked = self._tones_checked(self._control_panel.get_fm_deviation())
             self._control_panel.set_detected_tone(
-                self._tone_squelch.detected_hz, checked
+                self._tone_squelch.detected_hz,
+                checked,
+                dcs=self._tone_squelch.detected_dcs,
             )
 
     def _check_fm_clipping(
@@ -11170,7 +11228,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _on_bookmark_tuned(self, bookmark: Dict[str, Any]) -> None:
         """After a bookmark's ``tune_requested``: its own filter width and
-        CTCSS tone squelch (FM: its tone, or none)."""
+        tone squelch (FM: its CTCSS tone or DCS code, or none)."""
         try:
             freq = float(bookmark.get("freq_hz") or 0.0)
         except (TypeError, ValueError):
@@ -11184,9 +11242,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._set_demod_mode(demod, deviation or None, width)
         if demod == "FM":
             self._control_panel.set_tone_squelch_hz(tone)
-            if tone:
+            dcs = None if tone else bookmark_dcs(bookmark)
+            if dcs is not None:
+                self._control_panel.set_dcs_squelch(*dcs)
+            if tone or dcs is not None:
                 label = str(bookmark.get("label") or format_frequency(freq))
-                text = f"Tuned to {label} (FM, tone squelch {tone:.1f} Hz)"
+                squelch = dcs_label(*dcs) if dcs else f"tone squelch {tone:.1f} Hz"
+                text = f"Tuned to {label} (FM, {squelch})"
                 # (It replaces the tune's own "Tuned to ...": led as that
                 # was, by a decoder's "off" note, P-07.)
                 said, lead = self._bookmark_said
@@ -11730,10 +11792,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # another signal right-clicked on the waterfall.
         tuned = abs(freq - self._current_frequency()) < 0.5
         tone = self._control_panel.tone_squelch_hz() if mode == "FM" and tuned else 0.0
+        dcs = self._control_panel.dcs_squelch() if mode == "FM" and tuned else None
         if tone:
             panel.set_tone(index, tone)
+        elif dcs is not None:
+            panel.set_dcs(index, *dcs)
         # (The tone squelch saved with it is said, as tuning a bookmark does.)
         tone_text = f", tone squelch {tone:.1f} Hz" if tone else ""
+        if dcs is not None:
+            tone_text = f", {dcs_label(*dcs)}"
         self._show_status_message(
             f"Bookmarked {label} ({self._mode_text(mode)}{tone_text}). Rename it "
             "with F2 in the Bookmarks tab.",

@@ -1153,11 +1153,11 @@ class TestChirpFiles(unittest.TestCase):
             self.assertEqual(
                 bookmark_tone_hz(dict(marks["CROSS"], cross_mode=mode)), 123.0, mode
             )
-        # Receiving with a DCS code isn't supported: no tone squelch, and the
-        # tooltip says so.
+        # Receiving with a DCS code: no CTCSS tone, but its code (K-A3: DCS
+        # is supported now), which the tooltip names.
         self.assertEqual(bookmark_tone_hz(marks["TO DCS"]), 0.0)
         tip = bookmarks_panel._tooltip(marks["TO DCS"])
-        self.assertIn("not supported here", tip)
+        self.assertIn("Cross (Tone->DTCS): receives DCS 023 N", tip)
         self.assertIn("123 Hz", bookmarks_panel._tooltip(marks["CROSS"]))
 
     def test_scan_18_empty_memory_slots_are_not_unreadable_rows(self):

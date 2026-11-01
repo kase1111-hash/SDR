@@ -649,3 +649,80 @@ class AudioNotch:
             self._recent = x[-self._warm :].astype(np.float64)
         else:
             self._recent = np.concatenate((self._recent, x))[-self._warm :]
+
+
+# --------------------------------------------------------------------------- #
+# The low cut
+# --------------------------------------------------------------------------- #
+class LowCut:
+    """A high-pass of the audio (:func:`highpass_sos`) at a corner chosen
+    on every block, or none: :meth:`process` ``(audio, corner_hz)``.
+
+    A new corner (or switching it on or off) crossfades from the audio as
+    it was to the new over ``FADE_S``, the new filter having first run
+    over the last ``WARM_S`` of audio (in step with it): no click.
+    Without a corner the audio passes untouched.
+    """
+
+    FADE_S = 0.01
+    WARM_S = 0.05
+
+    def __init__(self, rate: float) -> None:
+        self.rate = float(rate)
+        self._fade = max(1, int(round(self.FADE_S * self.rate)))
+        self._warm = max(1, int(round(self.WARM_S * self.rate)))
+        self.reset()
+
+    @property
+    def corner_hz(self) -> Optional[float]:
+        """The corner in effect (Hz), or None."""
+        return self._corner
+
+    def reset(self) -> None:
+        """Back to rest (a new stream; the corner stays)."""
+        self._recent = np.zeros(0, dtype=np.float64)
+        corner = getattr(self, "_corner", None)
+        self._corner: Optional[float] = None
+        self._filter: Optional[SosFilter] = None
+        if corner is not None:
+            self._corner = corner
+            self._filter = SosFilter(highpass_sos(corner, self.rate))
+
+    def process(self, audio: np.ndarray, corner_hz: Optional[float]) -> np.ndarray:
+        """``audio`` high-passed at ``corner_hz`` (None or 0: as it is)."""
+        x = np.asarray(audio, dtype=np.float32).ravel()
+        if x.size == 0:
+            return x
+        corner: Optional[float] = None
+        if corner_hz is not None and math.isfinite(corner_hz) and corner_hz > 0:
+            corner = float(corner_hz)
+        if corner != self._corner:
+            old = (
+                x.astype(np.float64)
+                if self._filter is None
+                else self._filter.process(x)
+            )
+            self._filter = None
+            if corner is not None:
+                self._filter = SosFilter(highpass_sos(corner, self.rate))
+                if self._recent.size:
+                    self._filter.process(self._recent)  # in step with the audio
+            new = (
+                x.astype(np.float64)
+                if self._filter is None
+                else self._filter.process(x)
+            )
+            m = min(x.size, self._fade)
+            ramp = 0.5 - 0.5 * np.cos(np.pi * (np.arange(m) + 0.5) / m)
+            new[:m] = old[:m] + ramp * (new[:m] - old[:m])
+            self._corner = corner
+            out = new.astype(np.float32)
+        elif self._filter is None:
+            out = x
+        else:
+            out = self._filter.process(x).astype(np.float32)
+        if x.size >= self._warm:
+            self._recent = x[-self._warm :].astype(np.float64)
+        else:
+            self._recent = np.concatenate((self._recent, x))[-self._warm :]
+        return out

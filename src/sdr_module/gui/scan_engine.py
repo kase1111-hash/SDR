@@ -98,7 +98,11 @@ class ScanHost:
         self, freq_hz: float, listening: Listening, tone_hz: float = 0.0
     ) -> bool:
         """Tune to ``freq_hz`` (inside the span if it fits) and listen to it
-        with ``listening`` (and a CTCSS tone squelch, 0 for none)."""
+        with ``listening`` (and a CTCSS tone squelch, 0 for none).
+
+        A bookmark with a DCS code squelch is tuned with the code as the
+        keyword ``dcs`` too (``"D023N"``); a host that takes none is tuned
+        as before."""
         raise NotImplementedError
 
     def scan_lo_moved(self) -> bool:
@@ -169,6 +173,7 @@ class Found:
     label: str = ""  # a bookmark's name
     heard: bool = False  # the scan stopped on it and the squelch opened
     tone_hz: float = 0.0  # a bookmark's CTCSS tone squelch (0: none)
+    dcs: str = ""  # a bookmark's DCS code squelch ("D023N"; "": none)
 
     @property
     def snr_db(self) -> float:
@@ -622,6 +627,7 @@ class ScanEngine:
                 str(b.get("bandwidth") or ""),
             )
             tone = float(b.get("tone_hz") or 0.0)
+            dcs = str(b.get("dcs") or "")
             freq = float(b.get("freq_hz") or 0.0)
             self.current = Found(
                 freq,
@@ -631,9 +637,14 @@ class ScanEngine:
                 listening,
                 label=str(b.get("label") or ""),
                 tone_hz=tone,
+                dcs=dcs,
             )
             self.host.scan_set_muted(True)
-            if self.host.scan_tune_channel(freq, listening, tone):
+            if dcs:
+                tuned = self.host.scan_tune_channel(freq, listening, tone, dcs=dcs)
+            else:
+                tuned = self.host.scan_tune_channel(freq, listening, tone)
+            if tuned:
                 self._settle_after_tune(DWELL, self.host.scan_lo_moved())
                 if self.state == SETTLE and not self._skip_frames:
                     self._begin_dwell()

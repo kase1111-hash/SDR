@@ -56,6 +56,7 @@ from ..core.frequency_manager import (
     LicenseClass,
     get_frequency_manager,
 )
+from ..dsp.dcs import DCS_CODES, dcs_label, dcs_same_signal, format_dcs, parse_dcs
 from ..dsp.filters import CTCSS_FREQUENCIES, ctcss_label
 from ..utils.tooltips import get_short_tip
 from .audio_chain import (
@@ -895,6 +896,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         noise_reduction_changed = pyqtSignal(str)  # off / light / strong
         audio_agc_changed = pyqtSignal(str)  # off / fast / medium / slow
         tone_squelch_changed = pyqtSignal(float)  # Hz, 0 = off
+        # A DCS code chosen in the Tone squelch list ("D023N"), "" for none.
+        dcs_squelch_changed = pyqtSignal(str)
         # The audio notch: off / auto / manual, and Manual's frequency (Hz).
         notch_changed = pyqtSignal(str, int)
         iq_options_changed = pyqtSignal(bool, bool)  # remove DC, balance I/Q
@@ -1491,6 +1494,20 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._tone_combo.add_value("off", "Off", "Plays whatever is on the channel")
         for freq in CTCSS_FREQUENCIES:
             self._tone_combo.add_value(f"{freq:.1f}", ctcss_label(freq))
+        # DCS codes (K-A3), normal then inverted, after the CTCSS tones.
+        for inverted in (False, True):
+            self._tone_combo.insertSeparator(self._tone_combo.count())
+            polarity = (
+                "inverted polarity (also written I or R)"
+                if inverted
+                else "normal polarity"
+            )
+            for code in DCS_CODES:
+                self._tone_combo.add_value(
+                    format_dcs(code, inverted),
+                    dcs_label(code, inverted),
+                    f"DCS code {code:03d}, {polarity}",
+                )
         self._tone_combo.setAccessibleName("Tone squelch")
         self._tone_combo.currentIndexChanged.connect(self._on_tone_changed)
         self._add_row(form, "Tone squelch:", self._tone_combo)
@@ -2163,9 +2180,10 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._tone_combo.setEnabled(is_fm)
         self._audio_form.setRowVisible(self._tone_heard, is_fm)
         self._tone_combo.setToolTip(
-            "CTCSS tone squelch: only play stations that send this "
-            "sub-audible tone (repeaters, PMR). Tone heard shows the one on "
-            "the channel."
+            "Tone squelch: only play stations that send this sub-audible "
+            "CTCSS tone or DCS code (repeaters, PMR); the tone or the code's "
+            "bits are filtered out of what you hear. Tone heard shows the "
+            "one on the channel."
             if is_fm
             else "Only used in FM mode"
         )
@@ -2295,9 +2313,12 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
     def _on_tone_changed(self, _index: int) -> None:
         self.tone_squelch_changed.emit(self.tone_squelch_hz())
+        code = self.dcs_squelch()
+        self.dcs_squelch_changed.emit(format_dcs(*code) if code else "")
 
     def tone_squelch_hz(self) -> float:
-        """The tone squelch's tone (Hz), 0 when it is off."""
+        """The tone squelch's CTCSS tone (Hz), 0 when it is off (or a DCS
+        code is chosen)."""
         value = self._tone_combo.currentText()
         try:
             return float(value)
@@ -2309,10 +2330,42 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         index = self._tone_combo.findText(f"{float(freq):.1f}") if freq else -1
         self._tone_combo.setCurrentIndex(max(index, 0))
 
-    def set_detected_tone(self, freq: Optional[float], checked: bool = True) -> None:
-        """Show the sub-audible tone heard on the channel (None: none;
-        ``checked`` False: tones aren't looked for, at a broadcast FM
-        deviation without a tone squelch)."""
+    def dcs_squelch(self) -> Optional[Tuple[int, bool]]:
+        """The tone squelch's DCS code, ``(code, inverted)``, or None."""
+        return parse_dcs(self._tone_combo.currentText())
+
+    def set_dcs_squelch(self, code: Optional[int], inverted: bool = False) -> None:
+        """Choose a DCS code for the tone squelch (None or a code not in
+        the standard list: off)."""
+        index = -1
+        if code is not None and parse_dcs(code) is not None:
+            index = self._tone_combo.findData(format_dcs(int(code), bool(inverted)))
+        self._tone_combo.setCurrentIndex(max(index, 0))
+
+    def set_detected_tone(
+        self,
+        freq: Optional[float],
+        checked: bool = True,
+        dcs: Optional[Tuple[int, bool]] = None,
+    ) -> None:
+        """Show the sub-audible tone (or DCS code, ``(code, inverted)``)
+        heard on the channel (None: none; ``checked`` False: tones aren't
+        looked for, at a broadcast FM deviation without a tone squelch)."""
+        if checked and dcs is not None:
+            code, inverted = dcs
+            text = dcs_label(code, inverted)
+            tip = (
+                f"The station sends DCS code {code:03d} "
+                f"({'inverted' if inverted else 'normal'} polarity)"
+            )
+            twin = dcs_same_signal(code, inverted)
+            if twin is not None:
+                tip += f": the same signal as {dcs_label(*twin)}"
+            if self._tone_heard.text() != text or self._tone_heard.toolTip() != tip:
+                self._tone_heard.setText(text)
+                self._tone_heard.setToolTip(tip)
+                set_tone(self._tone_heard, "success")
+            return
         if not checked:
             text = "Not checked"
             tip = (
@@ -2323,9 +2376,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         elif freq is None:
             text = "None"
             tip = (
-                "No sub-audible (CTCSS) tone heard on the channel. Repeaters "
-                "and PMR radios often send one; set the tone squelch to it to "
-                "hear only them."
+                "No sub-audible tone (CTCSS) or code (DCS) heard on the "
+                "channel. Repeaters and PMR radios often send one; set the tone "
+                "squelch to it to hear only them."
             )
         else:
             text = ctcss_label(freq)

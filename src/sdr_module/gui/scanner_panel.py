@@ -62,6 +62,7 @@ except ImportError:
     HAS_PYQT6 = False
 
 from ..core.band_plan import KHZ_BELOW_HZ, band_for, listening_for, short_khz
+from ..dsp.dcs import dcs_label, format_dcs, parse_dcs
 from ..dsp.sweep import (
     AUTO_MARGIN_DB,
     WIDE_SIGNAL_HZ,
@@ -167,6 +168,7 @@ class ScanHit:
     last_seen: float = 0.0
     count: int = 1
     tone_hz: float = 0.0  # a bookmark's CTCSS tone squelch (0: none)
+    dcs: str = ""  # a bookmark's DCS code squelch ("D023N"; "": none)
 
     @property
     def listening(self) -> Listening:
@@ -200,6 +202,9 @@ class ScanHit:
         hit.last_seen = _valid_time(hit.last_seen)
         if not (math.isfinite(hit.tone_hz) and hit.tone_hz > 0):
             hit.tone_hz = 0.0
+        raw = data.get("dcs")
+        code = parse_dcs(raw) if isinstance(raw, str) else None
+        hit.dcs = format_dcs(*code) if code else ""
         return hit
 
 
@@ -1686,6 +1691,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 now,
                 1,
                 float(getattr(found, "tone_hz", 0.0) or 0.0),
+                str(getattr(found, "dcs", "") or ""),
             )
         )
         index = len(self._hits) - 1
@@ -1701,6 +1707,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         scan the same bookmark (two on one frequency, a repeater's users
         with different tones, are two results)."""
         tone = float(getattr(found, "tone_hz", 0.0) or 0.0)
+        dcs = str(getattr(found, "dcs", "") or "")
         bookmarks = self._engine.mode == "bookmarks"
         freq = found.frequency_hz
         if bookmarks:
@@ -1722,6 +1729,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                     and hit.label == found.label
                     and hit.listening == tuple(found.listening)
                     and hit.tone_hz == tone
+                    and hit.dcs == dcs
                 )
             else:
                 same = same_signal(hit.frequency_hz, hit.width_hz, freq, step)
@@ -1918,6 +1926,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 if hit.tone_hz and hit.mode == "FM"
                 else ""
             )
+            code = parse_dcs(hit.dcs) if hit.mode == "FM" else None
+            if code is not None:
+                tone = f", {dcs_label(*code)}"
             lines.append(f"Listen: {mode}{width}{tone}")
         if hit.first_seen:
             first = datetime.fromtimestamp(hit.first_seen).strftime("%H:%M:%S")

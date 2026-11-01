@@ -104,5 +104,63 @@ class TestTuneToADSBSaysOnceWhatItSet(_WindowTestCase):
         self.assertTrue(self.history()[0].startswith("None (I/Q): "), self.history())
 
 
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
+class TestTheDecoderChipGivesWayAt1024Px(_WindowTestCase):
+    """The status bar keeps 220 px for messages at 1024 px with every chip
+    (F-window, DEV-E2E-07; its test shows REC, AUDIO, AFC and the decoder
+    chip "ADS-B · 6 msgs"). The Decoder's chip says more: the station's
+    name, the Morse speed, counts in the thousands. It never gave way, so
+    with "CW (Morse) · 15 WPM · 12,345 msgs" the window's minimum width
+    became 1,079 px: wider than the screen it was made to fit."""
+
+    demo = True
+    LONG = (
+        "AX.25/APRS · 12,345 msgs",
+        "RDS · SDR DEMO · 1,234 msgs",
+        "CW (Morse) · 15 WPM · 12,345 msgs",
+    )
+
+    def test_its_long_texts_leave_the_window_at_1024_px(self):
+        from tests.test_gui_coherent_window import _ThemedSizes
+
+        _ThemedSizes.each_theme(self, self.check_room)
+
+    def check_room(self, theme):
+        from PyQt6.QtWidgets import QLabel
+
+        from sdr_module.gui.themes import set_role
+
+        win = self.win
+        win.resize(1024, 640)
+        win._recording_label.setText("REC 00:12")
+        win._recording_label.setVisible(True)
+        win._recording_info_label.setText("26.7 MB · 17.7 GB free")
+        win._recording_info_label.setVisible(True)
+        win._audio_rec_label.setText("AUDIO 00:05")
+        win._audio_rec_label.setVisible(True)
+        afc = QLabel("AFC +2.2 kHz")  # (as Track Signal shows it)
+        set_role(afc, "badge", "info")
+        win.statusBar().addPermanentWidget(afc)
+        self.addCleanup(afc.deleteLater)
+        chip = win._decoder_chip
+        for text in self.LONG:
+            chip.setText(text)
+            chip.setVisible(True)
+            self.settle(10)
+            where = (theme, text)
+            self.assertLessEqual(win.minimumSizeHint().width(), 1024, where)
+            self.assertEqual(win.width(), 1024, where)
+            self.assertGreaterEqual(win._message_label.width(), 220, where)
+            self.assertEqual(chip.text(), text)  # (whole: only drawn short)
+            self.assertGreater(chip.width(), 40, where)  # (its protocol shows)
+        win.statusBar().removeWidget(afc)
+        # With room, the chip shows its whole text.
+        win._recording_label.setVisible(False)
+        win._recording_info_label.setVisible(False)
+        win._audio_rec_label.setVisible(False)
+        self.settle(10)
+        self.assertGreaterEqual(chip.width(), chip.sizeHint().width(), theme)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5446,8 +5446,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _setup_decoder_chip(self) -> None:
         """A status-bar chip while a decoder runs ("ADS-B · 37 msgs");
-        clicking it opens the Decoder tab."""
-        chip = QPushButton("")
+        clicking it opens the Decoder tab. Short of room (REC, AUDIO, AFC
+        and the scan chip at 1024 px) it is cut, not the window widened."""
+        from .decoder_panel import DecoderChip
+
+        chip = DecoderChip("")
         set_role(chip, "compact")
         chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         chip.setAccessibleName("Decoder activity")

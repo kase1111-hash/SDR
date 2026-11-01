@@ -48,12 +48,16 @@ try:
         QPushButton,
         QScrollArea,
         QSizePolicy,
+        QStyle,
         QStyledItemDelegate,
+        QStyleOptionButton,
+        QStylePainter,
         QTabBar,
         QTableWidget,
         QTableWidgetItem,
         QTabWidget,
         QTextEdit,
+        QToolTip,
         QVBoxLayout,
         QWidget,
     )
@@ -2244,3 +2248,72 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             int(self._valid_per_protocol.get(name, 0))
             - int(self._chosen_counts.get(name, 0)),
         )
+
+
+class DecoderChip(QPushButton if HAS_PYQT6 else object):
+    """The status bar's decoder chip ("RDS · SDR DEMO · 3 msgs"; a click
+    opens the Decoder tab). It shows its whole text while the status bar
+    has room, and gives way when the bar is short of it (REC, AUDIO and AFC
+    shown at 1024 px): cut to its first part ("CW (Morse) · …") before the
+    messages lose their 220 px or the window grows past its minimum width.
+    ``text()`` stays whole; while cut, the tooltip starts with it."""
+
+    _SEPARATOR = " · "
+
+    def __init__(self, text: str = "", parent: Any = None):
+        super().__init__(text, parent)
+        # (Its hint is the whole text; it may shrink to minimumSizeHint.)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt naming
+        super().setText(text)
+        self.updateGeometry()  # (another length asks for other room)
+
+    def _padding(self) -> int:
+        """Width of the chip around its text (the style's padding)."""
+        return super().sizeHint().width() - self.fontMetrics().horizontalAdvance(
+            self._shown(self.text())
+        )
+
+    @staticmethod
+    def _shown(text: str) -> str:
+        """The text as drawn ("&&" is one "&": no mnemonics here)."""
+        return text.replace("&&", "&")
+
+    def minimumSizeHint(self) -> Any:  # noqa: N802 - Qt naming
+        hint = super().minimumSizeHint()
+        whole = self._shown(self.text())
+        first, separator, _rest = whole.partition(self._SEPARATOR)
+        if not separator:
+            return hint
+        least = self._padding() + self.fontMetrics().horizontalAdvance(
+            first + separator + "…"
+        )
+        hint.setWidth(min(super().sizeHint().width(), least))
+        return hint
+
+    def _cut(self) -> bool:
+        return self.width() < super().sizeHint().width()
+
+    def paintEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
+        if not self._cut():
+            super().paintEvent(event)
+            return
+        option = QStyleOptionButton()
+        self.initStyleOption(option)
+        room = max(0, self.width() - self._padding())
+        shown = self.fontMetrics().elidedText(
+            self._shown(self.text()), Qt.TextElideMode.ElideRight, room
+        )
+        option.text = shown.replace("&", "&&")
+        QStylePainter(self).drawControl(QStyle.ControlElement.CE_PushButton, option)
+
+    def event(self, event: Any) -> bool:
+        if event.type() == QEvent.Type.ToolTip and self._cut():
+            tip = self.toolTip()
+            whole = self._shown(self.text())
+            QToolTip.showText(
+                event.globalPos(), f"{whole}\n{tip}" if tip else whole, self
+            )
+            return True
+        return super().event(event)

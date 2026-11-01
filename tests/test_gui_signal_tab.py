@@ -182,11 +182,21 @@ class TestIdentify(_SignalCase):
         self.assertEqual(ident.kind, "ook")
         self.assertIsNotNone(ident.pulses)
         self.assertIn("{25}a1c5e38", self.panel.pulses_label.text())
+        # PLOTS-E2E-8: the bits come first (what it sent; the card is
+        # taller than the page at 1366x768), and Copy sits by Apply Mode,
+        # in view whatever the card's length, and says it copied.
+        self.assertTrue(self.panel.pulses_label.text().startswith("Bits: {25}a1c5e38"))
         self.assertTrue(self.panel.copy_pulses_btn.isVisible())
+        self.assertFalse(self.panel._card.isAncestorOf(self.panel.copy_pulses_btn))
+        copy, apply = self.panel.copy_pulses_btn, self.panel.apply_btn
+        self.assertLessEqual(
+            abs(copy.geometry().center().y() - apply.geometry().center().y()), 2
+        )
         self.panel.copy_pulses_btn.click()
         text = QApplication.clipboard().text()
         self.assertIn("Guessing modulation: Pulse width modulation", text)
         self.assertIn("-X 'n=name,m=OOK_PWM", text)
+        self.assertIn("Copied the pulse analysis", self.win._message_label.text())
         # The long card scrolls in its page; it doesn't make the other pages
         # taller than the column (their buttons fell out of view at 768 px).
         self.assertIs(self.panel.tabs.widget(0), self.panel.identify_area)

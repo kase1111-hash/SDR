@@ -160,6 +160,9 @@ if HAS_PYQT6:
             panel.export_bursts_btn.clicked.connect(
                 lambda _c=False: self.export_bursts()
             )
+            panel.message.connect(
+                lambda text, tone: win._show_status_message(text, tone or None, 3000)
+            )
             for plot in (win._spectrum, win._waterfall):
                 add = getattr(plot, "add_context_action", None)
                 if callable(add):

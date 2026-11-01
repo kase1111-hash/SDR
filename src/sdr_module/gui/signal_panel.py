@@ -53,6 +53,8 @@ try:
         QPushButton,
         QScrollArea,
         QSizePolicy,
+        QSplitter,
+        QStackedWidget,
         QTableWidget,
         QTableWidgetItem,
         QTabWidget,
@@ -419,6 +421,45 @@ if HAS_PYQT6:
                 text,
             )
 
+    class _ElidedLabel(QLabel):
+        """A one-line label that shortens its text with "…" in the middle
+        when it doesn't fit (:meth:`text` is still the whole text; the
+        tooltip should say it all)."""
+
+        def __init__(
+            self,
+            text: str = "",
+            parent: Any = None,
+            mode: Any = Qt.TextElideMode.ElideMiddle,
+        ):
+            super().__init__(parent)
+            self._full = ""
+            self._mode = mode
+            self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+            self.setText(text)
+
+        def setText(self, text: str) -> None:  # noqa: N802 - Qt override
+            self._full = str(text)
+            self._elide()
+
+        def text(self) -> str:
+            return self._full
+
+        def displayed_text(self) -> str:
+            """What fits, as shown."""
+            return super().text()
+
+        def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt override
+            super().resizeEvent(event)
+            self._elide()
+
+        def _elide(self) -> None:
+            shown = self.fontMetrics().elidedText(
+                self._full, self._mode, max(0, self.width())
+            )
+            if super().text() != shown:
+                super().setText(shown)
+
     def _short_number(value: float) -> str:
         a = abs(value)
         if a >= 100:
@@ -483,6 +524,8 @@ if HAS_PYQT6:
         live_requested = pyqtSignal()
         page_changed = pyqtSignal(str)
         scope_changed = pyqtSignal()
+        #: A short note for the status bar (text, tone), e.g. "Copied ...".
+        message = pyqtSignal(str, str)
 
         def __init__(self, parent: Any = None):
             super().__init__(parent)
@@ -580,6 +623,15 @@ if HAS_PYQT6:
             self.apply_btn.setEnabled(False)
             self.apply_btn.clicked.connect(lambda _c=False: self.apply_requested.emit())
             row.addWidget(self.apply_btn)
+            # (Next to Apply Mode: in view however long the card is.)
+            self.copy_pulses_btn = QPushButton("Copy Pulse Analysis")
+            set_role(self.copy_pulses_btn, "compact")
+            self.copy_pulses_btn.setToolTip(
+                "Copy the pulse analysis (laid out like rtl_433 -A, with a flex "
+                "decoder line) to the clipboard"
+            )
+            self.copy_pulses_btn.clicked.connect(lambda _c=False: self._copy_pulses())
+            row.addWidget(self.copy_pulses_btn)
             row.addStretch(1)
             layout.addLayout(row)
             self.identify_status = QLabel(
@@ -629,14 +681,6 @@ if HAS_PYQT6:
                 Qt.TextInteractionFlag.TextSelectableByMouse
             )
             card_layout.addWidget(self.pulses_label)
-            self.copy_pulses_btn = QPushButton("Copy Pulse Analysis")
-            set_role(self.copy_pulses_btn, "compact")
-            self.copy_pulses_btn.setToolTip(
-                "Copy the pulse analysis (laid out like rtl_433 -A, with a flex "
-                "decoder line) to the clipboard"
-            )
-            self.copy_pulses_btn.clicked.connect(lambda _c=False: self._copy_pulses())
-            card_layout.addWidget(self.copy_pulses_btn, 0, Qt.AlignmentFlag.AlignLeft)
             layout.addWidget(card)
             layout.addStretch(1)
             self._card = card
@@ -673,6 +717,7 @@ if HAS_PYQT6:
             if not has:
                 self.apply_btn.setEnabled(False)
                 self._pulse_text = ""
+                self.copy_pulses_btn.setVisible(False)
                 return
             from ..dsp.signal_id import confidence_words
 
@@ -713,12 +758,22 @@ if HAS_PYQT6:
             clipboard = QGuiApplication.clipboard()
             if clipboard is not None and self._pulse_text:
                 clipboard.setText(self._pulse_text)
+                self.message.emit(
+                    "Copied the pulse analysis (as rtl_433 -A lays it out)",
+                    "success",
+                )
 
         # -- Signals -------------------------------------------------------------------
 
         def _build_signals(self) -> None:
             page, layout = self._page()
-            row = QHBoxLayout()
+            # One line on top: the live list's options, or (after Find
+            # Signals in Recording) the recording's name and Back to Live,
+            # so the buttons under the list stay in view.
+            self.signals_top = QStackedWidget()
+            live = QWidget()
+            row = QHBoxLayout(live)
+            row.setContentsMargins(0, 0, 0, 0)
             self.markers_check = QCheckBox("Mark on spectrum")
             self.markers_check.setToolTip(
                 "Label the signals in view on the spectrum (numbered as in this list)"
@@ -741,21 +796,24 @@ if HAS_PYQT6:
             snr_label.setBuddy(self.min_snr)
             self.min_snr.valueChanged.connect(self.min_snr_changed.emit)
             row.addWidget(self.min_snr)
-            layout.addLayout(row)
+            self.signals_top.addWidget(live)
             self.recording_row = QWidget()
             rec = QHBoxLayout(self.recording_row)
             rec.setContentsMargins(0, 0, 0, 0)
-            self.recording_label = QLabel("")
+            self.recording_label = _ElidedLabel()
             set_role(self.recording_label, "value")
-            self.recording_label.setWordWrap(True)
             rec.addWidget(self.recording_label, 1)
             self.live_btn = QPushButton("Back to Live")
             set_role(self.live_btn, "compact")
             self.live_btn.setToolTip("List the signals the receiver hears now again")
             self.live_btn.clicked.connect(lambda _c=False: self._back_to_live())
             rec.addWidget(self.live_btn)
-            self.recording_row.setVisible(False)
-            layout.addWidget(self.recording_row)
+            self.signals_top.addWidget(self.recording_row)
+            # (As tall as one line: the label elides rather than wraps.)
+            self.signals_top.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+            )
+            layout.addWidget(self.signals_top)
             self.signals_table = self._table(
                 ["MHz", "dBFS", "SNR", "Width", "Heard"],
                 [
@@ -909,7 +967,7 @@ if HAS_PYQT6:
                 "Double-click one to play the recording from just before it, "
                 "tuned to it."
             )
-            self.recording_row.setVisible(True)
+            self.signals_top.setCurrentWidget(self.recording_row)
             self.markers_check.setEnabled(False)
             table = self.signals_table
             table.setSortingEnabled(False)
@@ -945,7 +1003,7 @@ if HAS_PYQT6:
 
         def _back_to_live(self) -> None:
             self._recording = None
-            self.recording_row.setVisible(False)
+            self.signals_top.setCurrentIndex(0)
             self.markers_check.setEnabled(True)
             self.set_signals_empty("Listing the signals in view…")
             self.live_requested.emit()
@@ -1115,11 +1173,21 @@ if HAS_PYQT6:
             self.bursts_table.itemDoubleClicked.connect(
                 lambda _item: self._tune_selected_burst()
             )
-            layout.addWidget(self.bursts_table, 1)
+            # The list is the page: at least three rows show, and the
+            # details of the selected burst share the room under it (drag
+            # the line between them); there are none until one is selected.
+            table = self.bursts_table
+            table.setMinimumHeight(
+                table.horizontalHeader().sizeHint().height()
+                + 3 * table.verticalHeader().defaultSectionSize()
+                + 2 * table.frameWidth()
+            )
+            self.bursts_split = QSplitter(Qt.Orientation.Vertical)
+            self.bursts_split.setChildrenCollapsible(False)
+            self.bursts_split.addWidget(table)
             self.bursts_empty = ViewPlaceholder(self.bursts_table)
             self.burst_details = QPlainTextEdit()
             self.burst_details.setReadOnly(True)
-            self.burst_details.setMaximumHeight(150)
             self.burst_details.setMinimumHeight(40)
             mono = QFont("monospace")
             mono.setStyleHint(QFont.StyleHint.Monospace)
@@ -1128,7 +1196,17 @@ if HAS_PYQT6:
                 "Select a burst to see its pulses (as rtl_433 -A lays them out)"
             )
             self.burst_details.setAccessibleName("Burst details")
-            layout.addWidget(self.burst_details)
+            self.bursts_split.addWidget(self.burst_details)
+            self.bursts_split.setStretchFactor(0, 3)
+            self.bursts_split.setStretchFactor(1, 2)
+            self.burst_details.setVisible(False)
+            layout.addWidget(self.bursts_split, 1)
+            hint = "Select a burst to see its pulses; double-click one to tune to it."
+            self.bursts_hint = _ElidedLabel(hint, mode=Qt.TextElideMode.ElideRight)
+            self.bursts_hint.setToolTip(hint)
+            set_role(self.bursts_hint, "hint")
+            self.bursts_hint.setVisible(False)
+            layout.addWidget(self.bursts_hint)
             self.set_bursts_empty(BURSTS_EMPTY)
             index = self.tabs.addTab(page, _PAGE_TITLES["bursts"])
             self.tabs.setTabToolTip(
@@ -1182,11 +1260,12 @@ if HAS_PYQT6:
             while table.rowCount() > 500:
                 table.removeRow(table.rowCount() - 1)
             self.bursts_empty.set_visible(False)
+            self.bursts_hint.setVisible(self.burst_details.isHidden())
 
         def clear_bursts(self) -> None:
             self._bursts = []
             self.bursts_table.setRowCount(0)
-            self.burst_details.setPlainText("")
+            self._show_burst_details()
             self.set_bursts_empty("List cleared\nNew bursts in the span show up here.")
 
         def selected_burst(self) -> Any:
@@ -1200,8 +1279,22 @@ if HAS_PYQT6:
             report = self.selected_burst()
             if report is None:
                 self.burst_details.setPlainText("")
+                self.burst_details.setVisible(False)
+                self.bursts_hint.setVisible(bool(self._bursts))
                 return
             self.burst_details.setPlainText(burst_details_text(report))
+            if self.burst_details.isHidden():
+                self.bursts_hint.setVisible(False)
+                self.burst_details.setVisible(True)
+                # The table keeps three rows or three fifths, whichever is
+                # more; the selected burst stays in view.
+                split = self.bursts_split
+                total = sum(split.sizes()) or split.height()
+                keep = max(self.bursts_table.minimumHeight(), int(0.6 * total))
+                split.setSizes([keep, max(1, total - keep)])
+                rows = self.bursts_table.selectionModel().selectedRows()
+                if rows:
+                    self.bursts_table.scrollTo(rows[0])
 
         def _tune_selected_burst(self) -> None:
             report = self.selected_burst()
@@ -1272,21 +1365,23 @@ def burst_kind_text(report: Any) -> str:
 
 
 def pulse_lines(analysis: Any) -> str:
-    """A few lines about a pulse analysis for the Identify card."""
+    """A few lines about a pulse analysis for the Identify card: the bits
+    first (what it sent), then how it sends them."""
     from ..dsp.bursts import bits_to_hex
 
-    lines = [f"{analysis.description}"]
+    lines = []
+    rows = analysis.distinct_rows()
+    if rows:
+        bits, count = rows[0]
+        repeat = f" (×{count})" if count > 1 else ""
+        lines.append(f"Bits: {{{len(bits)}}}{bits_to_hex(bits)}{repeat}")
+    lines.append(f"{analysis.description}")
     widths = ", ".join(f"{w:.0f}" for w, _c in analysis.pulse_widths[:4])
     if widths:
         lines.append(f"Pulses: {widths} µs")
     gaps = ", ".join(f"{w:.0f}" for w, _c in analysis.gap_widths[:4])
     if gaps:
         lines.append(f"Gaps: {gaps} µs")
-    rows = analysis.distinct_rows()
-    if rows:
-        bits, count = rows[0]
-        repeat = f" (×{count})" if count > 1 else ""
-        lines.append(f"Bits: {{{len(bits)}}}{bits_to_hex(bits)}{repeat}")
     return "\n".join(lines)
 
 

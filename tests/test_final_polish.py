@@ -411,3 +411,48 @@ class TestTheAppsOwnJobIsNamedNotTheDevice(_hardware_case()):
         self.assertTrue(
             self.win._realtime_hint().startswith("The demo device can't keep up")
         )
+
+
+def _tx_case():
+    from tests.test_gui_station_tx import _TxCase
+
+    return _TxCase
+
+
+class TestOnAirComesBackAfterANotice(_tx_case()):
+    """P-06: "On air: ... Stop ends it." was posted once at the start of a
+    transmission. A notice that replaced it (Space refused, Open Recording
+    refused while transmitting) left the status bar empty once it expired,
+    for the rest of the transmission. It comes back."""
+
+    def test_the_on_air_text_comes_back(self):
+        from PyQt6.QtWidgets import QApplication
+
+        win = self.win
+        self.hackrf(pace=True)
+        self.panel.set_callsign("W1AW")
+        self.panel._wpm_spin.setValue(5)  # (a long ID: about 10 s)
+        self.station.send_station_id()
+        self.assertTrue(self.station.busy)
+        QApplication.processEvents()
+        on_air = win._message_label.text()
+        self.assertTrue(on_air.startswith("On air: "), on_air)
+        win._start_acquisition()  # refused: a notice replaces it
+        self.assertIn("Can't receive while transmitting", win._message_label.text())
+        # The notice expires (its timer's slot)...
+        win._message_timer.stop()
+        win._clear_status_message()
+        self.assertEqual(win._message_label.text(), "")
+        # ...and with the transmission's next progress, "On air" is back.
+        self.assertTrue(self.pump(2.0, until=lambda: win._message_label.text()))
+        self.assertEqual(self.status(), (on_air, "danger"))
+        history = [e.text for e in win._status_history.entries()]
+        self.assertEqual(history.count(on_air), 1, history)  # (said once)
+        # A notice still shown is left alone.
+        win._show_status_message("Something to read", "info", 60000)
+        self.pump(0.5)
+        self.assertEqual(win._message_label.text(), "Something to read")
+        self.station.stop()
+        self.wait_done(5)
+        QApplication.processEvents()
+        self.assertFalse(win._message_label.text().startswith("On air"))

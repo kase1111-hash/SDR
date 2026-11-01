@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -1253,6 +1254,82 @@ class TestNoticesStayOutOfTheErrorHistory(_DeviceCase):
     def test_problems_are_still_listed(self):
         with self.assertLogs("sdr_module.gui.main_window", level="WARNING"):
             self.win._show_status_message("Couldn't open the folder: X", "warning")
+
+
+# --------------------------------------------------------------------------- #
+# Leftover 8: the window's words (American English, the same names)
+# --------------------------------------------------------------------------- #
+_BRITISH = re.compile(
+    r"\b(centre\w*|centred|labell(ed|ing)|favourite\w*|colour\w*|behaviour\w*"
+    r"|analys(e|ed|ing)|organis\w*|recognis\w*|initialis\w*|normalis\w*"
+    r"|optimis\w*|licence\w*)\b",
+    re.IGNORECASE,
+)
+
+
+class TestTheWindowsWords(_WindowTestCase):
+    demo = True
+
+    def shown_texts(self):
+        from PyQt6.QtGui import QAction
+        from PyQt6.QtWidgets import QComboBox, QTableWidget, QTabWidget, QWidget
+
+        win = self.win
+        for widget in win.findChildren(QWidget):
+            for name in ("toolTip", "statusTip", "text", "title", "placeholderText"):
+                getter = getattr(widget, name, None)
+                if callable(getter):
+                    try:
+                        value = getter()
+                    except TypeError:
+                        continue
+                    if isinstance(value, str):
+                        yield value
+            if isinstance(widget, QComboBox):
+                for i in range(widget.count()):
+                    yield widget.itemText(i)
+            if isinstance(widget, QTabWidget):
+                for i in range(widget.count()):
+                    yield widget.tabText(i)
+                    yield widget.tabToolTip(i)
+            if isinstance(widget, QTableWidget):
+                for col in range(widget.columnCount()):
+                    item = widget.horizontalHeaderItem(col)
+                    if item is not None:
+                        yield item.text()
+                        yield item.toolTip()
+        for action in win.findChildren(QAction):
+            yield action.text()
+            yield action.toolTip()
+            yield action.statusTip()
+
+    def test_american_spelling_throughout(self):
+        found = sorted(
+            {text for text in self.shown_texts() if text and _BRITISH.search(text)}
+        )
+        self.assertEqual(found, [])
+
+    def test_the_presets_and_the_signal_tab_say_what_the_controls_say(self):
+        from sdr_module.gui import presets
+
+        self.assertEqual(presets.FAVOURITES_CATEGORY, "Favorites")
+        combo = self.win._control_panel._category_combo
+        self.assertEqual(combo.itemText(0), "Favorites")
+        # The receiver's control is "Filter", not "Bandwidth".
+        tip = self.win._signal_panel.apply_btn.toolTip()
+        self.assertIn("Filter", tip)
+        self.assertNotIn("Bandwidth", tip)
+
+    def test_save_recording_asks_in_american_english_too(self):
+        from PyQt6.QtWidgets import QLabel
+
+        from sdr_module.gui.iq_files import RecordingDetailsDialog
+
+        dialog = RecordingDetailsDialog(0.0, 0.0, 2.4e6, 100e6, self.win)
+        self.addCleanup(dialog.deleteLater)
+        texts = [label.text() for label in dialog.findChildren(QLabel)]
+        self.assertTrue(any("labeled right" in t for t in texts), texts)
+        self.assertFalse([t for t in texts if _BRITISH.search(t)])
 
 
 if __name__ == "__main__":

@@ -1941,7 +1941,7 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
                     "Center (LO)",
                     get_short_tip("center_frequency")
                     + " The middle of the spectrum and waterfall; recordings "
-                    "are labelled with it.",
+                    "are labeled with it.",
                 ),
                 ("sample_rate", "Sample rate", get_short_tip("sample_rate")),
                 (
@@ -3207,7 +3207,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             radio_menu,
             "Track Si&gnal (AFC)",
             lambda on: self._signal_tools.set_tracking(on),
-            tip="Keep a drifting signal centred: the tuned frequency follows it "
+            tip="Keep a drifting signal centered: the tuned frequency follows it "
             "(narrow FM, AM and CW; the receiver retunes only at the span's "
             "edges). The status bar shows how far it moved",
             checkable=True,
@@ -7523,7 +7523,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 else "Retuned while recording"
             )
             self._show_status_message(
-                f"{changed}: the saved file will be labelled "
+                f"{changed}: the saved file will be labeled "
                 f"{format_frequency(freq or 0)} at {format_rate(rate or 0)}, "
                 "where the recording started. Stop and record again for a "
                 "clean capture.",

@@ -8,7 +8,7 @@ uses it, under the same names:
 
 * Radio > Band Presets: the :data:`FAVOURITES` on top, then a submenu per
   category with every preset;
-* the control panel's Presets group (a "Favourites" category first);
+* the control panel's Presets group (a "Favorites" category first);
 * the welcome screen's starting bands (each favourite's band, tuning the
   favourite);
 * the Scanner tab's bands (each favourite's band with a range to sweep).
@@ -31,7 +31,7 @@ from ..core.band_plan import Band, band_for, preset_listening
 from ..core.frequency_manager import FrequencyPreset, get_frequency_manager
 
 #: The Presets group's (and the menu's) first category.
-FAVOURITES_CATEGORY = "Favourites"
+FAVOURITES_CATEGORY = "Favorites"
 
 
 class Favourite(NamedTuple):

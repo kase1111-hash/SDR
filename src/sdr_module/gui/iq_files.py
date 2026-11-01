@@ -1110,7 +1110,7 @@ if HAS_PYQT6:
             ]
             intro = QLabel(
                 f"This recording doesn't say its {' or '.join(missing)}. Enter "
-                "what you know so the saved file is labelled right, or leave a "
+                "what you know so the saved file is labeled right, or leave a "
                 "field blank to save it as unknown."
             )
             intro.setWordWrap(True)

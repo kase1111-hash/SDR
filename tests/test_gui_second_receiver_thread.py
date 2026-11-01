@@ -357,6 +357,59 @@ class TestWhatItStillDoes(_ThreadCase):
         self.assertEqual(heard, fed)
 
 
+class TestTheHoverReadsTheWorkersAverage(_ThreadCase):
+    """The plot spectrum the worker makes reaches the waterfall whole: its
+    strongest FFTs for the colors and its averaged spectrum (``mean_db``)
+    for the hover's honest reading (K-L2), as in the main window. (K-P2
+    rewrote this feed and the merge added mean_db to it: without it the
+    hover reads each frame's strongest FFT.)"""
+
+    def test_each_row_gets_the_frames_averaged_spectrum(self):
+        rx = self.rx
+        made, rows = [], []
+        real_process = rx._frame_spectrum.process
+
+        def process(samples):
+            spectrum = real_process(samples)
+            made.append(spectrum)
+            return spectrum
+
+        rx._frame_spectrum.process = process  # (on the worker)
+        real_add = rx._waterfall.add_line
+
+        def add_line(power_db, *args, **kwargs):
+            rows.append((power_db, kwargs.get("mean_db")))
+            return real_add(power_db, *args, **kwargs)
+
+        rx._waterfall.add_line = add_line
+        self.run_frames(4)
+        rx.stop()  # (the frame in flight is painted first)
+        self.assertEqual(len(rows), 4)
+        for (peak, mean), spectrum in zip(rows, made, strict=True):
+            np.testing.assert_array_equal(peak, spectrum.max_db)
+            self.assertIsNotNone(mean)
+            np.testing.assert_array_equal(mean, spectrum.mean_db)
+
+    def test_plain_noise_reads_as_noise_at_its_average(self):
+        rx = self.rx
+        self.run_frames(6)
+        rx.stop()
+        waterfall, spectrum = rx._waterfall, rx._spectrum
+        plot, trace = waterfall._plot_rect(), spectrum.plot_rect()
+        # (The demo's 2 m span: noise 300 kHz below the tuned frequency.)
+        freq = rx._tuned_hz - 300e3
+        x = waterfall._freq_to_x(freq, plot)
+        reading = waterfall.reading_at(x, plot.top() + 2)
+        self.assertIsNotNone(reading)
+        self.assertTrue(reading.is_noise, reading.text())
+        self.assertFalse(reading.peak, reading.text())
+        # (The spectrum, fed the same frame's average, reads the same; from
+        # the strongest FFTs alone the waterfall read 1.5 dB off here.)
+        level = spectrum._reading_at(spectrum._freq_x(freq, trace))
+        self.assertIsNotNone(level)
+        self.assertAlmostEqual(reading.level_db, level.level_db, delta=0.5)
+
+
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestDirectFramesStayOnThisThread(_SecondCase):
     def test_process_is_one_frame_start_to_finish(self):

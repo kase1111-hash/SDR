@@ -474,10 +474,14 @@ class TestDamagedSettingsInTheWindow(_IniSettings):
         self.assertEqual(shown["fft_size"], 2048)
         self.assertEqual(shown["window"], "hann")
         self.assertEqual(shown["zoom"], 1)
-        # (A huge size: the nearest the app offers, said too.)
-        with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
-            self.window(spectrum_display=json.dumps({"fft_size": 1e300}))
-        self.assertIn("fft_size=1e+300", "\n".join(logs.output))
+        # A huge size gives the default too, not the nearest the app offers
+        # (32768 points, the costliest).
+        for size in (1e300, 5000):
+            with self.subTest(size=size):
+                with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+                    win = self.window(spectrum_display=json.dumps({"fft_size": size}))
+                self.assertIn(f"fft_size={size!r}", "\n".join(logs.output))
+                self.assertEqual(win._spectrum.display_settings()["fft_size"], 2048)
 
     def test_a_damaged_window_layout_is_logged(self):
         # (Checker: the default size and split were used with nothing said.)

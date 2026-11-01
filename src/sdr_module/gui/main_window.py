@@ -2530,10 +2530,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # replace it keeps, once (see _keeping_release_note).
     _released_decoder: Optional[Tuple[str, str]] = None
     # Status messages shown so far, and how many there were at the last
-    # tune: those after it are the tune's own (a scan it stops adds to
-    # them, see _scan_frame).
+    # tune and when it was done (back in the event loop, or at the next
+    # frame at the latest): those in between are the tune's own (a scan it
+    # stops adds to them, see _scan_frame), not those of something else
+    # since (N-08).
     _status_count = 0
     _tune_status_count = 0
+    _tune_status_end: Optional[int] = None
     # Why the last tune was refused (the status line says so until a tune
     # goes through).
     _tuning_refusal: Optional[str] = None
@@ -5779,8 +5782,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         station starts over (its RDS name, the S-meter peak, the tuner's
         seek and STEREO lamp, Identify and Track Signal themselves).
         """
-        # (Messages from here on are this tune's own: see _scan_frame.)
+        # (Messages from here on are this tune's own, until it is done: see
+        # _scan_frame.)
         self._tune_status_count = self._status_count
+        self._tune_status_end = None
+        QTimer.singleShot(0, self._tune_said)
         # The readout, and the channel marked on the plots (their axes follow
         # the LO, see _retune_lo)
         self._freq_label.setText(format_frequency(freq_hz))
@@ -8485,8 +8491,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "lower sample rate (Receiver > Sample rate) helps."
         )
 
+    def _tune_said(self) -> None:
+        """The last tune is done: what it said is said (the messages after
+        this aren't its own, see _scan_frame)."""
+        if self._tune_status_end is None:
+            self._tune_status_end = self._status_count
+
     def _process_block(self, samples: np.ndarray) -> None:
         """Plots, level, audio, recording, S-meter and decoder for one frame."""
+        self._tune_said()  # (a frame comes after the tune, whatever it said)
         # Remove DC spike / Balance I/Q (Receiver group), when switched on;
         # a recording keeps the raw samples.
         raw = samples
@@ -10928,8 +10941,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if host.expected_hz is not None and abs(tuned - host.expected_hz) > 1.0:
             label = self._message_label
             # What the tune said itself (a preset's message, the band plan's
-            # line, "Tuned to ..."), if anything.
-            own = label.text() if self._status_count > self._tune_status_count else ""
+            # line, "Tuned to ..."), if anything: not a message something
+            # else posted since (N-08).
+            end = self._tune_status_end
+            said = self._status_count > self._tune_status_count
+            said = said and (end is None or self._status_count <= end)
+            own = label.text() if said else ""
             tone = label.property("tone")
             panel.stop_scan(
                 f"Scan stopped: you tuned to {format_frequency(tuned)}.",

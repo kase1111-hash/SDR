@@ -645,5 +645,63 @@ class TestWaterfallBrightnessThroughALongOverload(_window_case()):
         self.assertLess(drop, -5.0)
 
 
+def _scan_window_case():
+    from tests.test_gui_scanner import _ScanWindowCase
+
+    return _ScanWindowCase
+
+
+class TestOnlyTheTunesOwnMessageJoinsTheScanStop(_scan_window_case()):
+    """N-08: a tune from another tab during a scan says its own message and
+    the scan's stop in one ("Scan stopped · ADS-B: 1090.000 MHz ...",
+    P-08). Any message posted after the tune counted as the tune's: one
+    from something else before the next frame (or during it) was joined to
+    the stop as if the tune had said it."""
+
+    def setUp(self):
+        super().setUp()
+        win, panel = self.win, self.win._scanner_panel
+        panel._confirm_long_scan = lambda *_args: True
+        panel._preset.setCurrentIndex(1)
+        panel.set_scan_mode("continuous")
+        self.assertTrue(panel.start_scan())
+        win._show_panel("info")  # (the Scanner tab out of sight)
+        self.frames(0.2)
+        self.assertTrue(panel.engine.active)
+
+    STOPPED = "Scan stopped: you tuned to 1090.000 MHz."
+
+    def test_a_message_from_something_else_before_the_next_frame(self):
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ADS-B"))
+        self.settle()  # (back in the event loop: the tune has said its own)
+        win._show_status_message("Saved the recording.", "success", 5000)
+        self.frames(0.1)
+        self.assertFalse(win._scanner_panel.engine.active)
+        self.assertEqual(win._message_label.text(), self.STOPPED)
+
+    def test_a_message_from_the_next_frame_itself(self):
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ADS-B"))
+        run = win._run_decoder
+
+        def says_something(*args, **kw):
+            win._show_status_message("Something else.", "info", 5000)
+            return run(*args, **kw)
+
+        win._run_decoder = says_something  # (before the scan sees the frame)
+        engine = win._scanner_panel.engine
+        self.assertTrue(self.frames(0.2, until=lambda: not engine.active))
+        self.assertEqual(win._message_label.text(), self.STOPPED)
+
+    def test_the_tunes_own_message_still_joins_it(self):
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ADS-B"))
+        said = win._message_label.text()
+        self.settle()
+        self.frames(0.1)
+        self.assertEqual(win._message_label.text(), f"Scan stopped · {said}")
+
+
 if __name__ == "__main__":
     unittest.main()

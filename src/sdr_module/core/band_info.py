@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Iterable, List, Optional, Set, Tuple
 
-from .band_plan import band_for
+from .band_plan import KHZ_BELOW_HZ, band_for, short_khz
 from .frequency_manager import (
     AMATEUR_BAND_PRIVILEGES,
     LICENSE_FREE_BANDS,
@@ -57,6 +57,9 @@ def _mhz(freq_hz: float) -> str:
 
 
 def _range(low: float, high: float) -> str:
+    """``"87.5–108 MHz"``; below 2 MHz in kHz (``"525–1705 kHz"``)."""
+    if high < KHZ_BELOW_HZ:
+        return f"{short_khz(low)}–{short_khz(high)} kHz"
     return f"{_mhz(low)}–{_mhz(high)} MHz"
 
 

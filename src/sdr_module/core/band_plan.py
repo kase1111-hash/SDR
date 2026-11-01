@@ -7,7 +7,10 @@ custom range, a frequency typed into the Bookmarks panel).
 
 The bands are the common receive bands of an RTL-SDR or HackRF, with the
 mode and channel width each is usually heard in. Narrower bands inside
-wider ones (PMR446 inside 70 cm, ISM 433 inside 70 cm) take precedence.
+wider ones (ISM 433 inside 70 cm) take precedence. Within the amateur SSB
+bands the CW/data segments are heard in CW and the digital-mode channels
+(FT8, FT4) in USB (see :func:`segment_listening`). Like the frequency
+manager's segments and license-free channels, the bands are the US ones.
 
 Pure Python (no Qt, no NumPy), so the CLI can use it too.
 """
@@ -15,9 +18,9 @@ Pure Python (no Qt, no NumPy), so the CLI can use it too.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, NamedTuple, Optional, Tuple
 
-from .frequency_manager import RX_PRESETS, FrequencyPreset
+from .frequency_manager import AMATEUR_BAND_PRIVILEGES, RX_PRESETS, FrequencyPreset
 
 
 @dataclass(frozen=True)
@@ -73,17 +76,50 @@ BANDS: Tuple[Band, ...] = (
     Band("Airband", 108.0e6, 137.0e6, "AM", "", "10 kHz"),
     Band("Weather Satellites", 137.0e6, 138.0e6, "FM", "25 kHz", "50 kHz"),
     Band("2m Ham", 144.0e6, 148.0e6, "FM", "5 kHz", "25 kHz"),
+    # MURS: channels 1-3 narrow (11.25 kHz), 4-5 wide (20 kHz).
+    Band("MURS", 151.82e6, 151.94e6, "FM", "2.5 kHz", "12.5 kHz"),
+    Band("MURS", 154.57e6, 154.6e6, "FM", "5 kHz", "25 kHz"),
     Band("Marine VHF", 156.0e6, 162.025e6, "FM", "5 kHz", "25 kHz"),
     Band("NOAA Weather", 162.4e6, 162.55e6, "FM", "5 kHz", "25 kHz"),
     Band("1.25m Ham", 222.0e6, 225.0e6, "FM", "5 kHz", "25 kHz"),
     Band("70cm Ham", 420.0e6, 450.0e6, "FM", "5 kHz", "25 kHz"),
     Band("ISM 433", 433.05e6, 434.79e6, _IQ, "", "500 kHz"),
-    Band("PMR446", 446.0e6, 446.2e6, "FM", "2.5 kHz", "12.5 kHz"),
+    # FRS (12.5 kHz channels) shares these with GMRS.
+    Band("FRS/GMRS", 462.55e6, 462.725e6, "FM", "2.5 kHz", "12.5 kHz"),
+    Band("FRS/GMRS", 467.55e6, 467.725e6, "FM", "2.5 kHz", "12.5 kHz"),
     Band("ISM 868", 863.0e6, 870.0e6, _IQ, "", "500 kHz"),
     Band("ISM 915", 902.0e6, 928.0e6, _IQ, "", "2 MHz"),
     Band("Pagers", 929.0e6, 932.0e6, "FM", "5 kHz", "25 kHz"),
     Band("ADS-B", 1089.0e6, 1091.0e6, _IQ, "", "2.4 MHz"),
 )
+
+#: Digital-mode channels: the dial frequency (USB) of FT8 and FT4 on the HF
+#: bands and 6 m. Their signals lie up to 3 kHz above it.
+DATA_CHANNELS: Tuple[Tuple[str, float], ...] = (
+    ("FT8 160m", 1.840e6),
+    ("FT8 80m", 3.573e6),
+    ("FT4 80m", 3.575e6),
+    ("FT4 40m", 7.0475e6),
+    ("FT8 40m", 7.074e6),
+    ("FT8 30m", 10.136e6),
+    ("FT4 30m", 10.140e6),
+    ("FT8 20m", 14.074e6),
+    ("FT4 20m", 14.080e6),
+    ("FT8 17m", 18.100e6),
+    ("FT4 17m", 18.104e6),
+    ("FT8 15m", 21.074e6),
+    ("FT4 15m", 21.140e6),
+    ("FT8 12m", 24.915e6),
+    ("FT4 12m", 24.919e6),
+    ("FT8 10m", 28.074e6),
+    ("FT4 10m", 28.180e6),
+    ("FT8 6m", 50.313e6),
+    ("FT4 6m", 50.318e6),
+)
+_DATA_LISTENING = ("USB", "", "3.0 kHz")
+_CW_LISTENING = ("CW", "", "500 Hz")
+#: Voice modes in the frequency manager's amateur segments.
+_PHONE_MODES = frozenset(("SSB", "USB", "LSB", "AM", "FM"))
 
 #: Built-in presets that stand for a whole band rather than one channel:
 #: a bookmark there is named after the band and its frequency instead.
@@ -123,6 +159,18 @@ def preset_for(
     return None
 
 
+#: Below this, frequencies are named in kHz ("AM Broadcast 880 kHz", as
+#: long- and medium-wave stations are known); from it up, in MHz.
+KHZ_BELOW_HZ = 2e6
+
+
+def short_khz(freq_hz: float) -> str:
+    """kHz without trailing zeros: ``880e3`` -> ``"880"``, ``1260.5e3`` ->
+    ``"1260.5"``, ``-300e3`` -> ``"-300"``."""
+    text = f"{float(freq_hz) / 1e3:.3f}".rstrip("0").rstrip(".")
+    return "0" if text == "-0" else text
+
+
 def short_mhz(freq_hz: float) -> str:
     """MHz without trailing zeros, keeping one decimal: ``100.1e6`` ->
     ``"100.1"``, ``146.52e6`` -> ``"146.52"``, ``125e6`` -> ``"125.0"``."""
@@ -135,28 +183,79 @@ def default_name(freq_hz: float) -> str:
 
     The built-in channel preset's name when there is one ("2m Calling",
     "NOAA Weather 1"); otherwise the band and the frequency ("FM
-    Broadcast 100.1", "Airband 118.1"); otherwise the frequency ("7.074
-    MHz" style is left to the caller: this returns "" then).
+    Broadcast 100.1", "Airband 118.1"; below 2 MHz in kHz: "AM Broadcast
+    880 kHz"); otherwise the frequency ("7.074 MHz" style is left to the
+    caller: this returns "" then).
     """
     preset = preset_for(freq_hz)
     if preset is not None:
         return str(preset.name)
     band = band_for(freq_hz)
-    if band is not None:
-        return f"{band.name} {short_mhz(freq_hz)}"
-    return ""
+    if band is None:
+        return ""
+    if abs(freq_hz) < KHZ_BELOW_HZ:
+        return f"{band.name} {short_khz(freq_hz)} kHz"
+    return f"{band.name} {short_mhz(freq_hz)}"
 
 
 def listening_for(freq_hz: float) -> Optional[Tuple[str, str, str]]:
     """``(mode, fm_deviation, bandwidth)`` a frequency is usually heard
-    with: its preset's or its band's, or None when neither says."""
+    with: its preset's, its amateur band segment's (see
+    :func:`segment_listening`) or its band's, or None when none says."""
     preset = preset_for(freq_hz)
     if preset is not None:
         listening = preset_listening(preset)
         if listening is not None:
             return listening
+    segment = segment_listening(freq_hz)
+    if segment is not None:
+        return segment.listening
     band = band_for(freq_hz)
     return band.listening if band is not None else None
+
+
+class SegmentListening(NamedTuple):
+    """How a part of an amateur band is usually heard, where that differs
+    from the band's own mode."""
+
+    name: str  # "FT8 40m", "40m Ham, CW/data segment"
+    listening: Tuple[str, str, str]  # (mode, fm_deviation, bandwidth)
+    channel: bool  # a channel (FT8, FT4), not a stretch of the band
+
+
+def segment_listening(freq_hz: float) -> Optional[SegmentListening]:
+    """How the part of an amateur band at ``freq_hz`` is usually heard,
+    where that differs from the band's own mode: a digital-mode channel of
+    :data:`DATA_CHANNELS` (from 500 Hz below its dial frequency to 3 kHz
+    above) in USB with a 3 kHz filter, and the CW/data segment of an SSB
+    band (40 m below 7.125 MHz: no voice there) in CW with a 500 Hz
+    filter. None elsewhere."""
+    try:
+        freq = float(freq_hz)
+    except (TypeError, ValueError):
+        return None
+    band = band_for(freq)
+    if band is None or band.mode not in ("USB", "LSB", "CW"):
+        return None
+    near = [
+        (abs(freq - dial), name)
+        for name, dial in DATA_CHANNELS
+        if dial - 500.0 <= freq <= dial + 3000.0
+    ]
+    if near:
+        return SegmentListening(min(near)[1], _DATA_LISTENING, True)
+    if band.mode != "CW" and _cw_data_only(freq):
+        return SegmentListening(f"{band.name}, CW/data segment", _CW_LISTENING, False)
+    return None
+
+
+def _cw_data_only(freq_hz: float) -> bool:
+    """Whether every amateur segment at ``freq_hz`` is for CW and data only
+    (no voice; at an edge shared with a phone segment, it is voice)."""
+    segments = [s for s in AMATEUR_BAND_PRIVILEGES if s.start_hz <= freq_hz <= s.end_hz]
+    return bool(segments) and all(
+        s.modes and not {m.upper() for m in s.modes} & _PHONE_MODES for s in segments
+    )
 
 
 def preset_listening(preset: FrequencyPreset) -> Optional[Tuple[str, str, str]]:
@@ -187,11 +286,16 @@ def _width_text(width_hz: float) -> str:
 
 __all__ = [
     "BANDS",
+    "DATA_CHANNELS",
+    "KHZ_BELOW_HZ",
     "Band",
+    "SegmentListening",
     "band_for",
     "default_name",
     "listening_for",
     "preset_for",
     "preset_listening",
+    "segment_listening",
+    "short_khz",
     "short_mhz",
 ]

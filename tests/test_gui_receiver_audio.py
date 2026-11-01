@@ -94,6 +94,59 @@ class TestFmAudioIsCentred(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestNarrowFmVoiceBand(unittest.TestCase):
+    """LISTEN-07: narrow FM (2.5 and 5 kHz deviation) is voice: its audio
+    is low-passed near 3 kHz, as on scanners and ham radios. It passed up
+    to half the filter (12.5 kHz with a 25 kHz filter), so a weak 2 m or
+    NOAA station played broadband hiss."""
+
+    def setUp(self):
+        require_pyqt6(self)
+        self.mw = _mw()
+
+    def _weak_station(self, deviation, width=25e3, seconds=1.0):
+        """A weak station (a 1 kHz tone at 60 % of ``deviation``, about
+        10 dB above the noise in the channel), as heard."""
+        rng = np.random.default_rng(3)
+        n = int(seconds * RATE)
+        t = np.arange(n) / RATE
+        iq = _fm(0.6 * np.sin(2 * np.pi * 1e3 * t), RATE, deviation)
+        noise = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+        iq = iq + noise * np.sqrt(0.1 * RATE / width / 2)
+        chain = self.mw._ReceiverChain(RATE, "FM", width)
+        return _receive(chain, iq.astype(np.complex64), deviation)[4800:]
+
+    @staticmethod
+    def _share_above(audio, freq):
+        spectrum = np.abs(np.fft.rfft(audio * np.hanning(len(audio)))) ** 2
+        freqs = np.fft.rfftfreq(len(audio), 1 / AUDIO_RATE)
+        return float(spectrum[freqs > freq].sum() / spectrum.sum())
+
+    def test_narrow_fm_hiss_stays_in_the_voice_band(self):
+        for deviation in (2.5e3, 5e3):
+            audio = self._weak_station(deviation)
+            # (Was 23-48 % of the audio, all hiss, above 4.5 kHz.)
+            self.assertLess(self._share_above(audio, 4.5e3), 0.01, deviation)
+
+    def test_wide_voice_and_apt_keep_their_audio(self):
+        t = np.arange(int(0.5 * RATE)) / RATE
+        tone = 0.5 * np.sin(2 * np.pi * 6e3 * t)
+        for deviation in (12.5e3, 25e3):
+            chain = self.mw._ReceiverChain(RATE, "FM", 50e3)
+            audio = _receive(chain, _fm(tone, RATE, deviation), deviation)
+            level = _tone_level(audio[int(0.2 * AUDIO_RATE) :], 6e3)
+            self.assertAlmostEqual(level, 0.5, delta=0.03, msg=deviation)
+
+    def test_voice_tones_are_untouched(self):
+        t = np.arange(int(0.5 * RATE)) / RATE
+        for freq in (300.0, 1e3, 3e3):
+            chain = self.mw._ReceiverChain(RATE, "FM", 25e3)
+            audio = _receive(chain, _fm(0.5 * np.sin(2 * np.pi * freq * t), RATE, 5e3))
+            level = _tone_level(audio[int(0.2 * AUDIO_RATE) :], freq)
+            self.assertAlmostEqual(level, 0.5, delta=0.03, msg=freq)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestSidebandWidths(unittest.TestCase):
     """RX-11, UX-B10, G-09: the Bandwidth control sets the SSB/CW filter."""
 
@@ -303,6 +356,148 @@ class TestAudioAgcSpeed(unittest.TestCase):
             levels.append(_tone_level(audio, 800))
         for level in levels:
             self.assertAlmostEqual(level, 0.5, delta=0.05)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestAmKeyUpAndKeyDown(unittest.TestCase):
+    """LISTEN-01: a keyed AM transmission (airband) starts and ends at
+    programme level. The carrier level came from the mean of each whole
+    33 ms block, so the block a transmission started in (from a reset
+    level, half of it noise) was divided by a level far too low: a clipped
+    pop at every key-up. At key-down the vanished carrier left a full-scale
+    negative pulse, then hiss that swelled as the level decayed through the
+    squelch's hang time."""
+
+    KEY_UP_S = 0.45  # inside a 33 ms block (as the demo's stations key)
+    KEY_DOWN_S = 1.71
+    END_S = 2.1  # the squelch's 0.3 s hang after it, and a little more
+
+    def setUp(self):
+        require_pyqt6(self)
+        self.mw = _mw()
+
+    def _transmission(self, seed=3, end_s=None):
+        """An airband-like AM transmission (600 and 1700 Hz at 35 and 20 %,
+        about 0.285 RMS once detected) with noise 30 dB below the carrier."""
+        rng = np.random.default_rng(seed)
+        n = int((end_s or self.END_S) * RATE)
+        t = np.arange(n) / RATE
+        on = (t >= self.KEY_UP_S) & (t < self.KEY_DOWN_S)
+        envelope = 1.0 + 0.35 * np.sin(2 * np.pi * 600 * t)
+        envelope += 0.2 * np.sin(2 * np.pi * 1700 * t)
+        iq = 1e-3 * envelope * on
+        noise = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+        return (iq + 1e-3 * 10 ** (-30 / 20) / np.sqrt(2) * noise).astype(np.complex64)
+
+    def _chain(self, speed):
+        from sdr_module.gui.audio_chain import AudioOptions
+
+        options = AudioOptions()
+        options.agc_speed = speed
+        chain = self.mw._ReceiverChain(RATE, "AM", 10e3)
+        chain.options = options
+        return chain
+
+    def _listen(self, speed, end_s=None):
+        """The audio from the block the squelch opens on (the key-up's; the
+        demodulator was reset while it was closed) to the end."""
+        chain = self._chain(speed)
+        first = int(self.KEY_UP_S * RATE) // 80000 * 80000
+        audio = _receive(chain, self._transmission(end_s=end_s)[first:])
+        return audio, first / RATE
+
+    def test_key_up_starts_at_programme_level(self):
+        for speed in ("fast", "medium", "slow"):
+            with self.subTest(speed=speed):
+                audio, start_s = self._listen(speed)
+                up = int((self.KEY_UP_S - start_s) * AUDIO_RATE)
+                head = audio[up : up + int(0.25 * AUDIO_RATE)]
+                steady = audio[int((0.9 - start_s) * AUDIO_RATE) :][
+                    : int(0.5 * AUDIO_RATE)
+                ]
+                programme = float(np.sqrt(np.mean(steady**2)))
+                self.assertAlmostEqual(programme, 0.285, delta=0.02)
+                # No clipped pop (was 300-600 samples at full scale, the
+                # first 5 ms 8-10 dB above the programme).
+                self.assertEqual(int(np.sum(np.abs(head) >= 0.999)), 0)
+                w = int(0.005 * AUDIO_RATE)
+                pieces = head[: len(head) // w * w].reshape(-1, w)
+                rms5 = np.sqrt(np.mean(pieces**2, axis=1))
+                self.assertLess(float(rms5.max()), 1.3 * programme)
+
+    def test_key_down_ends_without_a_thump_or_hiss(self):
+        for speed in ("fast", "medium", "slow"):
+            with self.subTest(speed=speed):
+                audio, start_s = self._listen(speed)
+                down = int((self.KEY_DOWN_S - start_s) * AUDIO_RATE)
+                w = int(0.01 * AUDIO_RATE)
+                # No negative pulse: the programme averages to nothing over
+                # any 10 ms (wherever it ends), the old detector's thump to
+                # -0.4.
+                tail = audio[down - w : down + int(0.3 * AUDIO_RATE)]
+                means = tail[: len(tail) // w * w].reshape(-1, w).mean(axis=1)
+                self.assertGreater(float(means.min()), -0.05)
+                # Silence once it ended (the detector may play the programme
+                # up to ~15 ms late): no full-scale peak...
+                after = audio[down + 2 * w :]
+                self.assertLess(float(np.max(np.abs(after))), 0.1)
+                # ...and no hiss rising through the hang (was 0.02 -> 0.08
+                # RMS at Medium, 0.04 -> 0.39 at Fast).
+                hang = after[3 * w : 28 * w].reshape(-1, w)
+                self.assertLess(float(np.sqrt(np.mean(hang**2, axis=1)).max()), 0.005)
+
+    def test_programme_is_not_delayed_much(self):
+        # The detector looks a few ms ahead to fade out before a carrier
+        # ends: the delay that costs stays small.
+        audio, start_s = self._listen("medium")
+        heard = np.flatnonzero(np.abs(audio) > 0.05)
+        last = heard[-1] / AUDIO_RATE + start_s
+        self.assertLess(last - self.KEY_DOWN_S, 0.02)
+
+    @staticmethod
+    def _windows(audio, seconds=0.01):
+        w = int(seconds * AUDIO_RATE)
+        return audio[: len(audio) // w * w].reshape(-1, w)
+
+    def test_with_the_squelch_off_the_hiss_comes_back_in_one_go(self):
+        """Nothing resets the detector with the squelch off: once a squelch
+        would have closed, the hiss left behind the transmission plays at
+        its own level. (A level still falling from the carrier's let it
+        back up to 2.5 s later at Slow, in bursts with a thump each: 10 ms
+        means of +-0.2.)"""
+        for speed in ("fast", "medium", "slow"):
+            with self.subTest(speed=speed):
+                audio, start_s = self._listen(speed, end_s=4.5)
+                down = int((self.KEY_DOWN_S - start_s) * AUDIO_RATE)
+                tail = self._windows(audio[down - int(0.01 * AUDIO_RATE) :])
+                self.assertLess(float(np.abs(tail.mean(axis=1)).max()), 0.12)
+                back = self._windows(audio[down + int(0.5 * AUDIO_RATE) :])
+                rms = np.sqrt(np.mean(back**2, axis=1))
+                self.assertGreater(float(rms.min()), 0.1)  # (hiss, ~0.4 RMS)
+
+    def test_a_weaker_station_left_behind_plays_again(self):
+        """Two stations on one channel: when the stronger unkeys, the weaker
+        one under it plays again soon after the hang time, at its programme
+        level and without a thump (it came back late, chopped, with a
+        thump, and at Slow well below its level)."""
+        rng = np.random.default_rng(9)
+        n = int(3.0 * RATE)
+        t = np.arange(n) / RATE
+        weak = 1e-3 * (1.0 + 0.5 * np.sin(2 * np.pi * 400 * t))
+        strong = 5e-3 * (1.0 + 0.35 * np.sin(2 * np.pi * 600 * t)) * (t < 1.2)
+        noise = rng.standard_normal(n) + 1j * rng.standard_normal(n)
+        iq = weak + strong * np.exp(2j * np.pi * 300 * t)
+        iq = (iq + 1e-5 / np.sqrt(2) * noise).astype(np.complex64)
+        for speed in ("fast", "medium", "slow"):
+            with self.subTest(speed=speed):
+                audio = _receive(self._chain(speed), iq)
+                left = audio[int(1.2 * AUDIO_RATE) :]
+                means = self._windows(left).mean(axis=1)
+                self.assertLess(float(np.abs(means).max()), 0.05)
+                again = audio[int(1.75 * AUDIO_RATE) :]
+                self.assertAlmostEqual(_tone_level(again, 400), 0.5, delta=0.03)
+                rms = np.sqrt(np.mean(self._windows(again) ** 2, axis=1))
+                self.assertGreater(float(rms.min()), 0.3)  # (0.354 steady)
 
 
 class TestAudioHelpers(unittest.TestCase):

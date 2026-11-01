@@ -137,7 +137,9 @@ class FrequencyDigits(QObject if HAS_PYQT6 else object):
     def digit_at(self, x: float) -> Optional[Tuple[int, float]]:
         """``(character index, Hz per unit)`` of the digit at ``x``."""
         text = self._label.text()
-        number = text.split(" ", 1)[0]
+        number, _, unit = text.partition(" ")
+        # (Long and medium wave read in kHz: "880 kHz".)
+        scale = 1e3 if unit.strip() == "kHz" else 1e6
         point = number.find(".")
         if point < 0:
             point = len(number)
@@ -146,7 +148,7 @@ class FrequencyDigits(QObject if HAS_PYQT6 else object):
                 break
             if x0 <= x < x1 and number[i].isdigit():
                 exponent = point - 1 - i if i < point else point - i
-                return i, (10.0**exponent) * 1e6
+                return i, (10.0**exponent) * scale
         return None
 
     # -- events -------------------------------------------------------------

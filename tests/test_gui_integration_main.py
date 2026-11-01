@@ -443,7 +443,8 @@ class TestAudioOutput(_WindowTestCase):
             self.win._mute_action.setChecked(True)
             self.win._mute_action.setChecked(False)
         self.assertFalse(self.win._audio_enabled)
-        self.assertTrue(self.win._mute_action.isChecked())
+        # (Mute isn't checked: nothing can play, it wasn't muted by you.)
+        self.assertFalse(self.win._mute_action.isChecked())
         self.assertFalse(self.win._audio_button.isChecked())
         # The button says there is no output (not "Muted", as if by you).
         self.assertEqual(self.win._audio_button.text().strip(), "No output")

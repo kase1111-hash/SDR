@@ -372,6 +372,35 @@ class TestFreqReadout(_WindowTestCase):
         self.settle()
         self.assertTrue(self.win._frequency_field().hasFocus())
 
+    def test_the_wheel_over_a_kilohertz_digit_tunes_kilohertz(self):
+        """Long and medium wave read in kHz ("880 kHz"): a digit there is
+        worth kHz. (It was taken for MHz: the wheel over the "8" of
+        "880 kHz" tuned 100 MHz up, to 100.88 MHz.)"""
+        self.win.resize(1366, 768)
+        self.win.show()
+        self.settle(10)
+        label = self.win._freq_label
+        digits = self.win._freq_digits
+
+        def center(i):
+            x0, x1 = digits.char_spans()[i]
+            return QPointF((x0 + x1) / 2, label.height() / 2)
+
+        self.win.set_frequency(1260.5e3)
+        self.assertEqual(label.text(), "1260.5 kHz")
+        self.assertEqual(digits.digit_at(center(0).x()), (0, 1e6))
+        self.assertEqual(digits.digit_at(center(3).x()), (3, 1e3))
+        self.assertEqual(digits.digit_at(center(5).x()), (5, 100.0))
+        self.assertIsNone(digits.digit_at(center(7).x()))  # "kHz"
+        self.win.set_frequency(880e3)
+        self.assertEqual(label.text(), "880 kHz")
+        self.assertEqual(digits.digit_at(center(0).x()), (0, 100e3))
+        _wheel(label, 1, pos=center(0))  # +100 kHz
+        self.assertEqual(self.freq(), 980e3)
+        self.assertEqual(label.text(), "980 kHz")
+        _wheel(label, -2, pos=center(2))  # -2 kHz
+        self.assertEqual(self.freq(), 978e3)
+
     def test_scrolling_keeps_its_digit_when_the_text_shifts(self):
         self.win.resize(1366, 768)
         self.win.show()

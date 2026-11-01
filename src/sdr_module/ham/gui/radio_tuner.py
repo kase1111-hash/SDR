@@ -1121,8 +1121,19 @@ class RadioTunerWidget(QDialog if HAS_PYQT6 else object):
         if emit and not self._seek_stepping:
             self.stop_seek()  # tuning by hand ends a seek
         lo, hi = band_range(self._band)
+        before = self._frequency
         self._frequency = max(lo, min(float(freq_hz), hi))
         self._band_frequency[self._band] = self._frequency
+        if (
+            abs(self._frequency - before) >= 1.0
+            and not self.is_seeking()
+            and self._hint_timer.isActive()
+        ):
+            # Feedback about the station before ("Found a station on
+            # 101.1 MHz.") is stale on another one (a Shift+click step, the
+            # dial, a retune in the main window).
+            self._hint_timer.stop()
+            self._reset_hint()
         self._leave_off_band()
         self._tuning_dial.set_frequency(self._frequency)
         self._freq_display.set_frequency(self._frequency, self._band)

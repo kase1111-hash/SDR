@@ -374,11 +374,22 @@ logger = logging.getLogger(__name__)
 
 
 def format_frequency(freq_hz: float) -> str:
-    """Format a frequency in MHz with 3 to 6 decimals.
+    """Format a frequency in MHz with 3 to 6 decimals; below 2 MHz in kHz
+    with up to 3 (as long- and medium-wave stations are known).
 
-    ``100e6 -> "100.000 MHz"``, ``146.5125e6 -> "146.5125 MHz"``.
+    ``100e6 -> "100.000 MHz"``, ``146.5125e6 -> "146.5125 MHz"``,
+    ``880e3 -> "880 kHz"``; a frequency below 0 Hz (refused) keeps its
+    sign: ``-300e3 -> "-300 kHz"``.
     """
-    text = f"{max(0.0, float(freq_hz)) / 1e6:.6f}".rstrip("0")
+    from ..core.band_plan import KHZ_BELOW_HZ, short_khz
+
+    freq = float(freq_hz)
+    if not math.isfinite(freq):
+        # (A recording's damaged metadata: "nan MHz", as format_mhz_range.)
+        return f"{freq / 1e6:g} MHz"
+    if abs(freq) < KHZ_BELOW_HZ:
+        return f"{short_khz(freq)} kHz"
+    text = f"{freq / 1e6:.6f}".rstrip("0")
     whole, _, frac = text.partition(".")
     return f"{whole}.{frac.ljust(3, '0')} MHz"
 
@@ -443,6 +454,27 @@ _DEFAULT_AUDIO_OPTIONS = AudioOptions()
 # gaps between characters must not chop it.
 _SQUELCH_HANG_S = 0.3
 _CW_SQUELCH_HANG_S = 0.5
+# The AM detector (_ReceiverChain._am_detect) tells where the carrier is
+# from the envelope averaged over _AM_WINDOW_S (centred): it is gone where
+# that stays below _AM_GONE of its level (-10.5 dB) for _AM_DIP_S or more
+# (shorter dips are deep, low-pitched modulation). The audio fades in over
+# _AM_FADE_S after a carrier appears and out over the same time before it
+# goes, so it looks that far ahead: AM audio comes 13 ms late. A carrier's
+# level is taken from the carrier itself when one appears (after a reset,
+# _AM_JUMP times the level, or _AM_NEW times the floor of the gap the last
+# one left) and held for _AM_HOLD_S once it has gone (the squelch's hang
+# time), so the hiss behind a transmission isn't turned up. Gone for
+# _AM_LEFT_S (a squelch has closed by then: it is off, or a weaker station
+# is left), what is left is taken up like a new carrier: its own level,
+# faded in.
+_AM_WINDOW_S = 0.004
+_AM_GONE = 0.3
+_AM_DIP_S = 0.006
+_AM_FADE_S = 0.005
+_AM_JUMP = 2.0
+_AM_NEW = 4.0
+_AM_HOLD_S = _SQUELCH_HANG_S
+_AM_LEFT_S = _AM_HOLD_S + 0.1
 # FM audio clipping warning: more than this fraction of the samples beyond
 # full scale for this long (the deviation is set too small), at most this
 # often.
@@ -450,6 +482,13 @@ _CLIP_FRACTION = 0.05
 _CLIP_MIN_SNR_DB = 15.0  # (noise clips whatever the deviation)
 _CLIP_WARN_AFTER_S = 0.5
 _CLIP_WARN_EVERY_S = 30.0
+# Noise reduction leaves an FM or AM channel this far above its noise alone.
+_NR_CLEAN_SNR_DB = 30.0
+# The radio tuner's FM seek stops on a broadcast station: one filling at
+# least this much of the channel this far above the noise (or sending the
+# stereo pilot), not a narrow carrier near the channel's middle.
+_SEEK_FM_STATION_HZ = 60e3
+_SEEK_ABOVE_NOISE_DB = 10.0
 # Highest audio frequency kept after AM/FM detection (broadcast FM is 15 kHz),
 # and where the audio low-pass stops: below broadcast FM's 19 kHz stereo
 # pilot tone, which would otherwise come through as a faint whistle.
@@ -461,6 +500,13 @@ _MAX_TAPS = 2047
 # which the receiver undoes with the matching de-emphasis.
 _BROADCAST_DEVIATION_HZ = 50e3
 _DEEMPHASIS_S = 75e-6
+# Narrow FM (a deviation of at most this much: 2.5 and 5 kHz) is voice: its
+# audio is low-passed for voice, as on scanners and ham radios (above
+# 3 kHz a weak station has only hiss). Wide voice (12.5 kHz) and
+# satellite APT (25 kHz) keep the wider audio.
+_FM_VOICE_DEVIATION_HZ = 5e3
+_VOICE_AUDIO_HZ = 3.2e3
+_VOICE_STOP_HZ = 4.5e3
 # The de-emphasis runs at no less than this rate, where its FIR matches the
 # analog response to within 0.1 dB up to 15 kHz.
 _MIN_DEEMPHASIS_RATE = 192e3
@@ -776,6 +822,23 @@ def _channel_centroid_hz(power_db: np.ndarray, chain: Any) -> Optional[float]:
     return float(np.dot(weights, freqs) / total) if total > 0 else 0.0
 
 
+def _channel_occupied_hz(power_db: np.ndarray, chain: Any, floor_db: float) -> float:
+    """How much of the tuned channel (Hz) the spectrum ``power_db`` (dB per
+    bin, the LO in the middle) shows above ``floor_db``."""
+    n = len(power_db)
+    if n == 0:
+        return 0.0
+    bin_hz = chain.rate / n
+    low, high = chain.band_edges()
+    offset = float(getattr(chain, "offset_hz", 0.0))
+    center = n // 2
+    first = max(0, center + int(np.floor((offset + low) / bin_hz + 0.5)))
+    last = min(n - 1, center + int(np.ceil((offset + high) / bin_hz - 0.5)))
+    if last < first:
+        return 0.0
+    return float(np.count_nonzero(power_db[first : last + 1] >= floor_db)) * bin_hz
+
+
 def _noise_per_bin(power_db: np.ndarray) -> float:
     """Mean noise power per bin (dB) of spectrum bins that are mostly noise.
 
@@ -875,11 +938,12 @@ class _ReceiverChain:
         self._audio_factor = total // first
         self._audio_cutoff = min(half, _MAX_AUDIO_HZ, 0.45 * self.intermediate_rate)
         self._deemphasis = False  # set by demodulate() for broadcast FM
+        self._voice = False  # set by demodulate() for narrow FM (voice)
         self._design_demodulator()
         # Stream objects are built once and only reset after a gap: muted or
         # squelched frames reset the demodulator every frame, and rebuilding
         # the resampler table and filter designs each time cost ~0.6 ms.
-        self._audio_cache: Dict[bool, List[_FirDecimator]] = {}
+        self._audio_cache: Dict[Tuple[bool, bool], List[_FirDecimator]] = {}
         self._sideband: Optional[_FirDecimator] = None  # (now in the channel)
         self._resampler: Optional[_Resampler] = None
         if abs(self.intermediate_rate - self.audio_rate) > 1e-6 * self.audio_rate:
@@ -892,6 +956,11 @@ class _ReceiverChain:
         # the audio before noise reduction (for the SSTV decoder).
         self.last_clip_fraction = 0.0
         self.pre_nr_audio = np.empty(0, dtype=np.float32)
+        # The AM detector's averaging (half of it), dip and fade lengths, in
+        # samples at the channel rate (see _am_detect).
+        self._am_half = max(1, int(round(_AM_WINDOW_S / 2.0 * self.channel_rate)))
+        self._am_dip = max(1, int(round(_AM_DIP_S * self.channel_rate)))
+        self._am_fade = max(1, int(round(_AM_FADE_S * self.channel_rate)))
         self.reset_demodulator()
 
     def _options(self) -> AudioOptions:
@@ -1054,13 +1123,15 @@ class _ReceiverChain:
         self._audio_taps = _lowpass_taps(cutoff, stop, fine_rate)
 
     def _audio_stages(self) -> List[_FirDecimator]:
-        """The audio filters (with de-emphasis for broadcast FM) and the
-        decimation to the intermediate rate, reset to a fresh stream.
+        """The audio filters (with de-emphasis for broadcast FM, for voice
+        in narrow FM) and the decimation to the intermediate rate, reset to
+        a fresh stream.
 
-        Built once per de-emphasis setting and reused."""
-        cached = self._audio_cache.get(self._deemphasis)
+        Built once per de-emphasis and voice setting and reused."""
+        key = (self._deemphasis, self._voice)
+        cached = self._audio_cache.get(key)
         if cached is None:
-            cached = self._audio_cache[self._deemphasis] = self._build_audio_stages()
+            cached = self._audio_cache[key] = self._build_audio_stages()
         for stage in cached:
             stage.reset()
         return cached
@@ -1070,6 +1141,10 @@ class _ReceiverChain:
         if self._audio_coarse_factor > 1:
             stages.append(_FirDecimator(self._audio_coarse, self._audio_coarse_factor))
         taps = self._audio_taps
+        if self._voice:
+            # (Narrower than the audio filter, so it keeps the decimation
+            # free of aliases too.)
+            taps = _lowpass_taps(_VOICE_AUDIO_HZ, _VOICE_STOP_HZ, self._audio_rate_in)
         if self._deemphasis:
             deemphasis = _deemphasis_taps(self._audio_rate_in)
             taps = (
@@ -1086,6 +1161,20 @@ class _ReceiverChain:
         """Forget the audio state (after a gap); the channel filter keeps its."""
         self._prev: Optional[complex] = None
         self._level = 0.0  # AM carrier level
+        # AM: the envelope already played (history) and the look-ahead not
+        # played yet (silence after a reset), the lowest average since the
+        # carrier went (inf while it is there), how long it has been gone,
+        # the level before a recent jump (and for how long it counts), and
+        # the last sample played and its gain.
+        span = self._am_half + self._am_dip + self._am_fade
+        self._am_past = np.zeros(0, dtype=np.float32)
+        self._am_ahead = np.zeros(span, dtype=np.float32)
+        self._am_floor = math.inf
+        self._am_gone_s = 0.0
+        self._am_before = 0.0
+        self._am_before_s = 0.0
+        self._am_last = 0.0
+        self._am_last_gain = 0.0
         self._bfo_phase = 0.0
         self._audio = self._audio_stages()
         if self._sideband is not None:
@@ -1116,14 +1205,17 @@ class _ReceiverChain:
             return np.empty(0, dtype=np.float32)
         if self.mode == "FM":
             broadcast = float(fm_deviation) >= _BROADCAST_DEVIATION_HZ
-            if broadcast != self._deemphasis:
-                self._deemphasis = broadcast
+            voice = float(fm_deviation) <= _FM_VOICE_DEVIATION_HZ
+            if (broadcast, voice) != (self._deemphasis, self._voice):
+                changed = broadcast != self._deemphasis
+                self._deemphasis, self._voice = broadcast, voice
                 self._audio = self._audio_stages()
-                # Broadcast keeps its deepest bass (a 2 Hz corner still
-                # removes a tuning offset within a few tenths of a second).
-                self._dc_blocker = self._make_dc_blocker(
-                    _FM_BROADCAST_DC_CORNER_HZ if broadcast else _FM_DC_CORNER_HZ
-                )
+                if changed:
+                    # Broadcast keeps its deepest bass (a 2 Hz corner still
+                    # removes a tuning offset within a few tenths of a second).
+                    self._dc_blocker = self._make_dc_blocker(
+                        _FM_BROADCAST_DC_CORNER_HZ if broadcast else _FM_DC_CORNER_HZ
+                    )
             # Discriminator; the previous block's last sample keeps the phase
             # difference continuous. Scaled so +/- the deviation is full scale.
             if self._prev is not None:
@@ -1175,31 +1267,181 @@ class _ReceiverChain:
     def _am_detect(self, channel: np.ndarray, speed: str) -> np.ndarray:
         """AM envelope relative to the carrier (at the channel rate).
 
-        The carrier level is tracked with the AGC speed's time constant and
-        interpolated across the block (no steps between blocks), and the
-        envelope is divided by it: the loudness follows the modulation
-        depth, not the signal strength. With the AGC off it isn't divided,
-        so the loudness follows the signal."""
+        The envelope is divided by the carrier level, so the loudness
+        follows the modulation depth, not the signal strength (with the AGC
+        off it isn't divided: the loudness follows the signal). The level
+        follows the carrier with the AGC speed's time constant (a rising
+        one within 10 ms) and is interpolated across the block.
+
+        Keyed transmissions start and end at programme level. Where the
+        carrier is comes from the envelope averaged over 4 ms, a little
+        ahead of what is played (see _AM_GONE: the audio comes 13 ms late).
+        A carrier that appears (after a reset, or far above the level or
+        the gap before it) sets the level from its own samples and fades
+        in; one that goes fades out before it ends, and its level is held
+        for the squelch's hang time. What is left after that (the squelch
+        is off, or a weaker station is under it) is taken up as a new
+        carrier would be. (The level of a whole block, half of it noise,
+        made every key-up a clipped pop; dividing a vanished carrier by a
+        falling level made every key-down a full-scale thump followed by
+        swelling hiss.)
+        """
         envelope = np.abs(channel).astype(np.float32)
-        carrier = float(np.mean(envelope))
-        seconds = len(channel) / max(self.channel_rate, 1.0)
-        if carrier > self._level:
-            tau = _AM_ATTACK_S  # a rising carrier is followed at once
-        else:
-            tau = _AM_CARRIER_TIME_S.get(speed, _AM_CARRIER_TIME_S["medium"])
-        if self._level <= 0.0:
+        n = len(envelope)
+        half, dip, fade = self._am_half, self._am_dip, self._am_fade
+        buf = np.concatenate((self._am_past, self._am_ahead, envelope))
+        total = len(buf)
+        first = len(self._am_past)  # buf[first:last] is played now
+        last = first + n
+        known = total - half  # averaged over the whole window before this
+        sums = np.concatenate(([0.0], np.cumsum(buf, dtype=np.float64)))
+        index = np.arange(total)
+        lo = np.maximum(index - half, 0)
+        hi = np.minimum(index + half + 1, total)
+        average = (sums[hi] - sums[lo]) / (hi - lo)
+        level = self._level
+        ahead = average[first:known]  # never empty: the look-ahead
+        newest = float(ahead[-1])
+        seconds = n / max(self.channel_rate, 1.0)
+        # A carrier sets the level from its own samples when one appears:
+        # after a reset, far above the level, far above the gap the last
+        # one left (a weaker one too), or when the carrier from before a
+        # jump in the level (a crash of static) is still there once the
+        # jump has passed.
+        gap = self._am_floor < math.inf
+        before = self._am_before
+        restore = (
+            before > 0.0
+            and float(ahead.max()) < _AM_JUMP * before
+            and newest >= _AM_GONE * before
+        )
+        seed = (
+            restore
+            or level <= 0.0
+            or newest > _AM_JUMP * level
+            or (gap and _AM_NEW * self._am_floor < newest < _AM_GONE * level)
+        )
+        ref = carrier = level
+        if seed:
+            # Its level from the samples well inside it (half its strongest
+            # average or more: not the edge), once 4 ms of them are seen.
+            # Until then it is only in the look-ahead, not in what is
+            # played: that keeps the level it had (silence after a reset).
+            ref = float(average[first:].max())
+            inside = average[first:known] >= 0.5 * ref
+            if np.count_nonzero(inside) >= 2 * half:
+                carrier = float(np.mean(buf[first:known][inside]))
+            elif level > 0.0:
+                seed = restore = False
+                ref = level
+            else:
+                self._am_past = buf[max(last - (half + dip + fade), 0) : last].copy()
+                self._am_ahead = buf[last:].copy()
+                self._am_last = self._am_last_gain = 0.0
+                return np.zeros(n, dtype=np.float32)
+        gone = self._am_gone(average[:known], ref)
+        gone = np.concatenate((gone, np.zeros(total - known, dtype=bool)))
+        played = buf[first:last]
+        there = ~gone[first:last]
+        release = _AM_CARRIER_TIME_S.get(speed, _AM_CARRIER_TIME_S["medium"])
+        if seed:
             start = end = carrier
+            self._am_gone_s = 0.0
+        elif there.any():
+            carrier = float(np.mean(played[there]))
+            tau = _AM_ATTACK_S if carrier > level else release
+            held = np.count_nonzero(there) / max(self.channel_rate, 1.0)
+            start = level
+            end = level + (1.0 - math.exp(-held / tau)) * (carrier - level)
+            self._am_gone_s = 0.0
         else:
-            start = self._level
-            end = start + (1.0 - np.exp(-seconds / tau)) * (carrier - start)
+            # Gone: the level holds through the squelch's hang time (no
+            # hiss turned up behind a transmission).
+            start = end = level
+            self._am_gone_s += seconds
         self._level = float(end)
-        if len(channel) > 1 and start != end:
-            level = np.linspace(start, end, len(channel), dtype=np.float32)
+        if self._am_gone_s >= _AM_LEFT_S:
+            # Gone for longer than a squelch hangs on: it is off, or a
+            # weaker station is left. That is the next block's carrier (as
+            # after a reset: its own level, faded in). A level falling from
+            # the carrier's let it back up to 2.5 s later, in bursts with a
+            # thump each, as it crossed _AM_GONE of that level.
+            self._level = 0.0
+        # The level before a jump counts for the hang time after it.
+        if before > 0.0:
+            self._am_before_s += seconds
+            if restore or self._am_before_s > _AM_HOLD_S:
+                self._am_before = 0.0
+        if self._am_before <= 0.0 and 0.0 < _AM_JUMP * level < end and not restore:
+            self._am_before, self._am_before_s = level, 0.0
+        if n > 1 and start != end:
+            divisor = np.linspace(start, end, n, dtype=np.float32)
         else:
-            level = np.float32(end)
+            divisor = np.float32(end)
         if speed not in AGC_SPEEDS:  # AGC off
-            return (envelope - level) * np.float32(_AM_FIXED_GAIN)
-        return (envelope - level) / np.maximum(level, np.float32(1e-9))
+            audio = (played - divisor) * np.float32(_AM_FIXED_GAIN)
+        else:
+            audio = (played - divisor) / np.maximum(divisor, np.float32(1e-9))
+        # Fades: in over `fade` after the carrier appears, out over `fade`
+        # before it goes (raised cosine), silence while it is gone.
+        gain: Optional[np.ndarray] = None
+        near = slice(max(first - fade, 0), min(last + fade, total))
+        if gone[near].any():
+            where = index[near]
+            marks = np.where(gone[near], where, where[0] - fade)
+            since = where - np.maximum.accumulate(marks)
+            marks = np.where(gone[near], where, where[-1] + fade)
+            until = np.minimum.accumulate(marks[::-1])[::-1] - where
+            distance = np.minimum(since, until)[first - near.start : last - near.start]
+            gain = np.minimum(distance, fade).astype(np.float64)
+        if self._am_last_gain <= 0.0 and there[0]:
+            # The last block ended in silence and this one starts with the
+            # carrier (a decision only the new samples could make): fade in.
+            ramp = np.minimum(np.arange(1.0, n + 1.0), fade)
+            gain = ramp if gain is None else np.minimum(gain, ramp)
+        if gain is not None:
+            gain = 0.5 - 0.5 * np.cos(np.pi * gain / fade)
+            audio = np.where(there, audio * gain.astype(np.float32), np.float32(0.0))
+            if gone[first] and self._am_last != 0.0:
+                # It went just as the last block ended (seen only now): a
+                # short decay from the last sample played, not a step.
+                count = min(fade, n)
+                back = np.flatnonzero(there[:count])
+                count = int(back[0]) if back.size else count
+                ramp = 0.5 + 0.5 * np.cos(np.pi * (np.arange(count) + 1.0) / count)
+                audio[:count] += np.float32(self._am_last) * ramp.astype(np.float32)
+        self._am_last = float(audio[-1])
+        self._am_last_gain = 1.0 if gain is None else float(gain[-1]) * there[-1]
+        # The floor of the gap a carrier left (to tell the next one from it).
+        if gone[last - 1]:
+            kept = np.flatnonzero(there)
+            begin = int(kept[-1]) + 1 if kept.size else 0
+            floor = float(average[first + begin : last].min())
+            self._am_floor = min(self._am_floor, floor) if begin == 0 else floor
+        else:
+            self._am_floor = math.inf
+        keep = half + dip + fade
+        self._am_past = buf[max(last - keep, 0) : last].copy()
+        self._am_ahead = buf[last:].copy()
+        return audio.astype(np.float32, copy=False)
+
+    def _am_gone(self, average: np.ndarray, level: float) -> np.ndarray:
+        """Where the carrier of ``level`` is gone, from the envelope's 4 ms
+        averages: runs below _AM_GONE of it, but not the short dips deep,
+        low-pitched modulation makes (shorter than _AM_DIP_S, with the
+        carrier on both sides)."""
+        low = average < _AM_GONE * level
+        gone = np.zeros(len(average), dtype=bool)
+        if not low.any():
+            return gone
+        edges = np.diff(np.concatenate(([0], low.view(np.int8), [0])))
+        starts = np.flatnonzero(edges == 1)
+        ends = np.flatnonzero(edges == -1)
+        for start, end in zip(starts, ends, strict=True):
+            if 0 < start and end < len(low) and end - start < self._am_dip:
+                continue
+            gone[start:end] = True
+        return gone
 
     def _reduce_noise(self, audio: np.ndarray) -> np.ndarray:
         nr = self._options().noise_reduction
@@ -2135,6 +2377,21 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # How F1 names the arrow keys' steps (by modifier prefix): they follow
     # the tuning step.
     _TUNE_STEP_WORDS = {"": "one tuning step", "Shift+": "ten tuning steps"}
+    # The last Choose Mode From Band Plan message and the band (and part of
+    # it) it was about; a mode changed by something that says so itself
+    # (the band plan) isn't announced on its own as well.
+    _band_plan_note: Optional[Tuple[str, Tuple[str, str]]] = None
+    _quiet_mode_change = False
+    # The decoder a preset turned on (decoder, preset, its frequency, where
+    # it is heard), and the note that it went off for the next preset's
+    # message.
+    _preset_decoder: Optional[
+        Tuple[str, str, float, Tuple[Tuple[float, float], ...]]
+    ] = None
+    _preset_decoder_note = ""
+    # Why the last tune was refused (the status line says so until a tune
+    # goes through).
+    _tuning_refusal: Optional[str] = None
 
     @property
     def _TUNE_STEPS_HZ(self) -> Dict[Any, float]:  # noqa: N802 - existing name
@@ -2919,7 +3176,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._mute_action = self._add_action(
             audio_menu,
             "&Mute",
-            lambda muted: self._set_audio_enabled(not muted),
+            self._on_mute_action,
             "Ctrl+M",
             "Silence the speaker, or play the tuned signal (AM, FM, SSB or CW) "
             "again while it is above squelch (also M with the plots focused, "
@@ -3766,6 +4023,24 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if key in (Qt.Key.Key_Left, Qt.Key.Key_Right):
             owners += (QAbstractButton,)
         return isinstance(focus, owners)
+
+    def event(self, event):  # noqa: N802 - Qt naming
+        """Ctrl+Up / Ctrl+Down are Radio > Audio > Volume Up / Down, except
+        in a focused number field (the Frequency field: ten steps) or list
+        (it moves its current row), which keep them: the window takes the
+        shortcut override they pass up, so the key goes to them."""
+        if event.type() == QEvent.Type.ShortcutOverride:
+            mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+            if (
+                event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down)
+                and mods == Qt.KeyboardModifier.ControlModifier
+                and isinstance(
+                    QApplication.focusWidget(), (QAbstractSpinBox, QAbstractItemView)
+                )
+            ):
+                event.accept()
+                return True
+        return super().event(event)
 
     def keyPressEvent(self, event):
         """Space starts/stops receiving; Left/Right tune; [ and ] change the
@@ -4979,11 +5254,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # Control panel handlers
     # ------------------------------------------------------------------
 
-    def _on_frequency_changed(self, freq_hz: float):
+    def _on_frequency_changed(self, freq_hz: float, same_signal: bool = False):
         """The tuned frequency is now ``freq_hz``: show it everywhere.
 
         Tuning itself (the LO, the device) is :meth:`_tune_to`'s; this
-        updates what shows the tuned frequency.
+        updates what shows the tuned frequency. ``same_signal``: Track
+        Signal followed the signal there, so nothing that belongs to a new
+        station starts over (its RDS name, the S-meter peak, the tuner's
+        seek and STEREO lamp, Identify and Track Signal themselves).
         """
         # The readout, and the channel marked on the plots (their axes follow
         # the LO, see _retune_lo)
@@ -4998,9 +5276,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tuner = self._radio_tuner
         if tuner is not None and tuner.isVisible():
             tuner.set_frequency(freq_hz)  # does not emit frequency_changed
-        # Another station: its RDS name is not known yet.
-        self._show_rds_station(None)
-        self._reset_signal_meter_peak()
+        if not same_signal:
+            # Another station: its RDS name is not known yet.
+            self._show_rds_station(None)
+            self._reset_signal_meter_peak()
         # Ham ID: where Send ID Now would transmit, and whether it may; QRP:
         # the legal limit here.
         if HAS_HAM_RADIO:
@@ -5008,16 +5287,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # SSTV's mode hint: FM on VHF/UHF, USB or LSB on HF.
             self._show_sstv_mode_needed(self._control_panel._demod_combo.currentText())
         self._tx_station.refresh()
-        self._tuner_retuned()
-        # Identify listens afresh; Track Signal starts over from here (T10).
-        signal_tools = self._own("_signal_tools")
-        if signal_tools is not None:
-            signal_tools.frequency_changed(freq_hz)
+        if not same_signal:
+            self._tuner_retuned()
+            # Identify listens afresh; Track Signal starts over from here
+            # (T10).
+            signal_tools = self._own("_signal_tools")
+            if signal_tools is not None:
+                signal_tools.frequency_changed(freq_hz)
         # The taskbar says where it is tuned; the Info tab (and FREQ's
         # tooltip) the band plan here; the Presets group the preset here.
         self._update_window_title()
         self._update_band_plan(freq_hz)
         self._control_panel.show_preset_for(freq_hz)
+        self._release_preset_decoder(freq_hz)
         self._shown_freq_hz = float(freq_hz)
 
         logger.debug(f"Frequency changed to {freq_hz/1e6:.3f} MHz")
@@ -5070,27 +5352,46 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         profile, listen that way (the mode, filter and FM deviation of the
         preset channel there, else of the band) and say so. Radio > Choose
         Mode From Band Plan turns this off. True when it changed."""
+        from ..core.band_plan import (
+            band_for,
+            preset_for,
+            preset_listening,
+            segment_listening,
+        )
+
+        zone = self._band_plan_zone(freq_hz)
+        # The message about the band you came from no longer applies
+        # (LISTEN-13: "2m Ham: listening in FM ..." stayed at 446.1 MHz).
+        note = self._band_plan_note
+        if note is not None and note[1] != zone:
+            self._band_plan_note = None
+            if self._message_label.text() == note[0]:
+                self._clear_status_message()
         action = self._own("_band_plan_action")
         if action is not None and not action.isChecked():
             return False
-        from ..core.band_plan import band_for, preset_for, preset_listening
-
         band = band_for(freq_hz)
         # A preset channel is heard the preset's way (7.030 MHz, QRP 40m
-        # CW: in CW, though 40 m is an LSB band; 446.000 MHz, 70cm Calling:
-        # not as the narrower PMR446 band it borders), else as its band is.
+        # CW: in CW, though 40 m is an LSB band; 446.000 MHz, 70cm
+        # Calling), a digital-mode channel (FT8: USB) or the CW/data
+        # segment of an SSB band (CW) as it is used, else as its band is.
         preset = preset_for(freq_hz)
+        segment = segment_listening(freq_hz)
         heard = preset_listening(preset) if preset is not None else None
         if heard is not None and heard[0]:
-            name, where = str(preset.name), "this channel"
+            kind, name, where = "preset", str(preset.name), "this channel"
+        elif segment is not None:
+            heard, name = segment.listening, segment.name
+            kind = "data" if segment.channel else "segment"
+            where = "this channel" if segment.channel else "this part of the band"
         elif band is not None and band.mode:
             heard, name, where = band.listening, band.name, "the band"
+            kind = "band"
         else:
             return False
         target, target_deviation, target_width = heard
-        before = band_for(before_hz)
-        if band is not None and before is not None and before.name == band.name:
-            return False  # the same band: the mode you chose there stays
+        if band is not None and self._band_plan_zone(before_hz) == zone:
+            return False  # the same band (and segment): your mode stays
         mode, deviation = self._listening_mode()
         broadcast = _BROADCAST_FM_DEVIATION
         if mode == target:
@@ -5098,28 +5399,46 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 target_deviation == broadcast
             ):
                 return False  # already listening that way
-        elif mode == "USB" and target == "LSB":
-            # USB stays: the digital modes (FT8...) are USB on every band,
-            # 40 m too. (LSB in a USB band does switch: voice above 10 MHz
-            # and data are USB.)
+        elif mode == "USB" and (
+            target == "LSB" or (target == "CW" and kind != "preset")
+        ):
+            # USB stays: the digital modes (FT8, RTTY...) are USB on every
+            # band, 40 m too, and in the CW/data segments. (LSB in a USB band
+            # does switch: voice above 10 MHz and data are USB.)
             return False
-        elif mode == "CW" and self._segment_allows_cw(freq_hz):
-            return False  # Morse code in a CW segment stays CW
-        self._set_demod_mode(target, target_deviation or None, target_width or None)
+        elif mode == "CW" and kind != "data" and self._segment_allows_cw(freq_hz):
+            return False  # Morse code in a CW segment stays CW (not on FT8)
+        self._quiet_mode_change = True  # (this says how instead)
+        try:
+            self._set_demod_mode(target, target_deviation or None, target_width or None)
+        finally:
+            self._quiet_mode_change = False
         how = self._mode_text(target)
         if target == "FM":
-            kind = "broadcast" if target_deviation == broadcast else "narrow"
-            how = (
-                f"FM ({kind}, {self._control_panel.get_fm_deviation_text()} deviation)"
-            )
-        self._show_status_message(
+            fm = "broadcast" if target_deviation == broadcast else "narrow"
+            how = f"FM ({fm}, {self._control_panel.get_fm_deviation_text()} deviation)"
+        text = (
             f"{name}: listening in {how} with a "
             f"{self._control_panel._bw_combo.currentText()} filter, as {where} is "
-            "usually heard (Radio > Choose Mode From Band Plan)",
-            "info",
-            6000,
+            "usually heard (Radio > Choose Mode From Band Plan)"
         )
+        self._show_status_message(text, "info", 6000)
+        self._band_plan_note = (text, zone)
         return True
+
+    @staticmethod
+    def _band_plan_zone(freq_hz: float) -> Tuple[str, str]:
+        """The band and, in an amateur band, the part of it (an FT8
+        channel, the CW/data segment) ``freq_hz`` is in: a mode chosen
+        there stays while you tune within it."""
+        from ..core.band_plan import band_for, segment_listening
+
+        band = band_for(freq_hz)
+        segment = segment_listening(freq_hz)
+        return (
+            band.name if band is not None else "",
+            segment.name if segment is not None else "",
+        )
 
     @staticmethod
     def _segment_allows_cw(freq_hz: float) -> bool:
@@ -5175,6 +5494,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         half = 0.5 * _USABLE_SPAN_FRACTION * rate
         return -half <= offset_hz + low and offset_hz + high <= half
+
+    def _lo_for(self, freq_hz: float) -> float:
+        """Where the LO goes to bring ``freq_hz`` into the span: on it, but
+        below half the span no lower than keeps the span above 0 Hz (or, at
+        the lowest frequencies, as high as the channel stays inside the
+        usable span): a 660 kHz station is seen from 0 Hz up, not from
+        -0.54 MHz."""
+        rate = self._device_sample_rate()
+        floor = 0.5 * rate
+        if freq_hz >= floor:
+            return freq_hz
+        low, _high = _channel_edges(
+            self._control_panel._demod_combo.currentText(),
+            self._channel_bandwidth(),
+            rate,
+        )
+        reach = freq_hz + 0.5 * _USABLE_SPAN_FRACTION * rate + low
+        lo = min(floor, math.floor(reach / 1e3) * 1e3, self._tuning_limits()[1])
+        return max(lo, freq_hz)
 
     def _device_model_name(self) -> str:
         """``"RTL-SDR"``, ``"HackRF One"`` or the device's name, for messages."""
@@ -5295,7 +5633,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _tune_to(self, freq_hz: float, recenter: bool = False) -> bool:
         """Tune to ``freq_hz`` by the rules of :meth:`set_frequency`.
 
-        ``recenter`` puts the LO on the tuned frequency whatever the span.
+        ``recenter`` puts the LO on the tuned frequency whatever the span,
+        near 0 Hz too (the Scanner plans its steps around it; the HackRF
+        transmits at it). Otherwise a LO that has to move goes where
+        :meth:`_lo_for` says (near 0 Hz, the span starts at 0 Hz).
         True when tuned; otherwise the reason is in the status bar and
         everything stays on the frequency tuned.
         """
@@ -5339,8 +5680,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     f"{covered}."
                 )
             lo = center
-        elif recenter or self._keep_centered() or not self._channel_fits(freq - lo):
+        elif recenter:
             lo = freq
+        elif self._keep_centered() or not self._channel_fits(freq - lo):
+            lo = self._lo_for(freq)
         if (
             abs(lo - self._lo_hz) >= 0.5
             and self._recording
@@ -5383,6 +5726,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         (after a moment on it) the tuning history."""
         self._tuned_hz = float(freq_hz)
         self._control_panel.set_frequency(freq_hz)  # no signal
+        refusal, self._tuning_refusal = self._tuning_refusal, None
+        if refusal is not None and self._message_label.text() == refusal:
+            # (Why the last frequency was refused no longer applies here.)
+            self._message_timer.stop()
+            self._clear_status_message()
         self._on_frequency_changed(self._current_frequency())
         self._note_tuned()
 
@@ -5399,6 +5747,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._show_status_error(reason)
         else:
             self._show_status_message(reason, "danger", 6000)
+        self._tuning_refusal = reason
         return False
 
     def _ensure_vfo_fits(self) -> None:
@@ -5410,8 +5759,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         offset = self._vfo_offset_hz()
         if abs(offset) < 0.5:
             return
+        if abs(self._lo_for(self._current_frequency()) - self._lo_hz) < 0.5:
+            # As centred as 0 Hz allows (see _lo_for): retuning there again
+            # would only start the station over.
+            return
         if self._keep_centered() or not self._channel_fits(offset):
-            self._tune_to(self._current_frequency(), recenter=True)
+            # (Where _lo_for puts it: not recenter, which is exact.)
+            self._tune_to(self._current_frequency())
 
     def _lock_lo(self, center_hz: float, span_hz: float, why: str) -> None:
         """Fix the LO at ``center_hz`` with a ``span_hz`` span (e.g. while a
@@ -5453,7 +5807,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 or self._keep_centered()
                 or not self._channel_fits(wanted - lo)
             ):
-                lo = wanted
+                lo = self._lo_for(wanted)
             if self._retune_lo(lo):
                 self._finish_tune(wanted)
                 return ""
@@ -5836,6 +6190,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _on_tone_squelch_changed(self, hz: float) -> None:
         self._tone_squelch.tone_hz = float(hz) if hz else None
         self._save_setting("audio/tone_squelch", float(hz))
+        panel = self._control_panel
+        if (
+            hz
+            and not self._restoring
+            and panel.get_demod_mode() == "FM"
+            and not self._tones_checked(panel.get_fm_deviation())
+        ):
+            self._show_status_message(
+                "Tone squelch works on narrow FM (repeaters, PMR): it isn't "
+                f"used at {panel.get_fm_deviation_text()} deviation, so this "
+                "station plays as before.",
+                "info",
+                6000,
+            )
 
     def _on_iq_options_changed(self, remove_dc: bool, balance_iq: bool) -> None:
         conditioner = self._iq_conditioner
@@ -5975,8 +6343,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._note_tuned()
         self._update_window_title()
         self._sync_audio_ui()  # (no audio in I/Q mode)
-        if not self._restoring and mode in _AUDIBLE_MODES:
+        # (A preset or the band plan says what it set, filter included: the
+        # mode alone, with the width it had, would come first and differ.)
+        quiet = (
+            self._restoring
+            or self._quiet_mode_change
+            or self._control_panel._applying_preset
+        )
+        if not quiet and mode in _AUDIBLE_MODES:
             self._show_status_message(f"{mode}: {self._filter_summary()}", None, 3000)
+        elif not quiet:
+            # LISTEN-13: I/Q kept the last mode's "CW: 500 Hz filter ...".
+            width = self._control_panel._bw_combo.currentText()
+            self._show_status_message(f"{mode}: {width} filter, no audio", None, 3000)
         if mode not in _SSTV_MODES and self._sstv_listening():
             self._hint_sstv_needs_fm()
         if HAS_HAM_RADIO:
@@ -7932,6 +8311,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if recording:
                 self._record_audio_block(None, False, seconds, False)
             return
+        self._guard_noise_reduction(mode, level_db, noise_db)
         deviation = self._control_panel.get_fm_deviation()
         try:
             audio = chain.demodulate(channel, deviation)
@@ -8012,6 +8392,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("SSTV decoder failed: %s", exc)
 
+    def _guard_noise_reduction(
+        self, mode: str, level_db: float, noise_db: Optional[float]
+    ) -> None:
+        """LISTEN-08: noise reduction leaves a clean FM or AM signal alone
+        (its noise estimate takes chords held a few seconds for noise and
+        took 2-3 dB off a clean music station). Clean: the channel at least
+        _NR_CLEAN_SNR_DB above its noise (until 6 dB less). SSB and CW come
+        and go with the voice or the keying: their level can't tell."""
+        nr = self._audio_options.noise_reduction
+        if nr is None or not hasattr(nr, "clean"):
+            return
+        snr = None if noise_db is None else level_db - noise_db
+        if mode not in ("FM", "AM") or snr is None:
+            nr.clean = False
+        elif snr >= _NR_CLEAN_SNR_DB:
+            nr.clean = True
+        elif snr < _NR_CLEAN_SNR_DB - 6.0:
+            nr.clean = False
+
     def _track_noise_floor(self, power: np.ndarray, count: int) -> None:
         """The spectrum's noise floor (for Auto squelch and the SNR)."""
         rate = self._device_sample_rate()
@@ -8047,10 +8446,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
 
     def _tones_checked(self, deviation: float) -> bool:
-        """Whether FM audio is searched for a CTCSS tone: with a tone
-        squelch set, or at a narrow deviation (broadcast stations send
-        none, so they aren't searched unless asked)."""
-        return bool(self._tone_squelch.tone_hz) or deviation < _BROADCAST_DEVIATION_HZ
+        """Whether FM audio is searched for a CTCSS tone: below a broadcast
+        deviation. Broadcast stations send none, and their bass notes pass
+        for tones: a tone squelch left set from a repeater chopped a
+        broadcast station into fragments (LISTEN-09), so it doesn't apply
+        there."""
+        return deviation < _BROADCAST_DEVIATION_HZ
 
     def _show_detected_tone(self) -> None:
         if self._tone_squelch is not None:
@@ -9851,7 +10252,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # channel's power is centered, within half a channel step.
         centroid = None if power is None else _channel_centroid_hz(power, chain)
         step = band_step(tuner.get_band())
-        self._tuner_centered = centroid is None or abs(centroid) <= 0.5 * step
+        centered = centroid is None or abs(centroid) <= 0.5 * step
         stereo = False
         broadcast = (
             chain.mode == "FM"
@@ -9865,6 +10266,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             stereo = pilot.process(channel)
         elif self._pilot is not None:
             self._pilot.reset()
+        noise_bin = self._noise_floor.bin_db
+        if broadcast and centered and not stereo and power is not None and noise_bin:
+            # A broadcast station fills most of the channel (or sends the
+            # stereo pilot): a narrow carrier near its middle is none (seek
+            # stopped on 100.7 MHz for the demo's 100.715 MHz carrier).
+            floor = noise_bin + _SEEK_ABOVE_NOISE_DB
+            centered = _channel_occupied_hz(power, chain, floor) >= _SEEK_FM_STATION_HZ
+        self._tuner_centered = centered
         tuner.set_stereo(stereo)
 
     def _tuner_probe(self) -> Optional[str]:
@@ -10014,19 +10423,29 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         panel = self._control_panel
         decoder = preset_table.decoder_for(preset)
-        note = ""
+        # The last preset's decoder, turned off as the tuning left it, or
+        # now unless this preset uses it too (one close by, where it is
+        # still heard: ISS APRS and ISS SSTV/Voice are 25 kHz apart).
+        note = self._preset_decoder_note
+        self._preset_decoder_note = ""
+        owned = self._preset_decoder
+        if owned is not None and owned[0] != decoder:
+            off = self._preset_decoder_off()
+            note += f" · {off}" if off else ""
         if decoder == "SSTV":
             if HAS_HAM_RADIO:
                 self._show_panel("sstv")
                 if self._device is not None and self._is_running:
                     self._sstv_panel.start_listening()
-                    note = " · SSTV decoder listening"
+                    note += " · SSTV decoder listening"
+                    self._own_preset_decoder(decoder, preset)
                 else:
-                    note = " · SSTV tab (press Start Decoder once receiving)"
+                    note += " · SSTV tab (press Start Decoder once receiving)"
         elif decoder:
             if self._select_decoder(decoder):
                 self._show_panel("decoder")
-                note = f" · {decoder} decoder on"
+                note += f" · {decoder} decoder on"
+                self._own_preset_decoder(decoder, preset)
         mode = self._mode_text(panel.get_demod_mode())
         prefix = str(self.__dict__.get("_preset_message_prefix", "") or "")
         self._show_status_message(
@@ -10035,6 +10454,63 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "info",
             8000 if prefix else 4000,
         )
+
+    def _own_preset_decoder(self, decoder: str, preset: Any) -> None:
+        """Remember that ``preset`` turned ``decoder`` on, and where it is
+        heard: the protocol's bands and the preset's own channel (Doppler
+        and fine tuning included). Tuned away from them, it goes off."""
+        from .decoder_panel import PROTOCOL_BANDS
+
+        freq = float(preset.frequency_hz)
+        bands = PROTOCOL_BANDS.get(decoder, ()) + ((freq - 25e3, freq + 25e3),)
+        self._preset_decoder = (decoder, str(preset.name), freq, bands)
+
+    def _release_preset_decoder(self, freq_hz: float) -> None:
+        """LISTEN-05: the receiver is tuned to ``freq_hz``; once that is
+        away from where the decoder a preset turned on is heard, turn it off
+        (unless you changed it since: another protocol, or off already) and
+        say so (the next preset's message, while one is being applied)."""
+        owned = self._preset_decoder
+        if owned is None:
+            return
+        _decoder, name, freq, bands = owned
+        if any(low <= freq_hz <= high for low, high in bands):
+            return
+        note = self._preset_decoder_off()
+        if not note:
+            return
+        if self._control_panel._applying_preset:
+            self._preset_decoder_note = f" · {note}"
+            return
+        self._show_status_message(
+            f"{note}: tuned away from the {name} preset ({format_frequency(freq)}), "
+            "which had turned it on.",
+            "info",
+            5000,
+        )
+
+    def _preset_decoder_off(self) -> str:
+        """Turn off the decoder a preset turned on (unless you changed it
+        since: another protocol, or off already) and forget it. What was
+        done ("ADS-B decoder off"), or "" for nothing."""
+        owned, self._preset_decoder = self._preset_decoder, None
+        if owned is None:
+            return ""
+        decoder = owned[0]
+        if decoder == "SSTV":
+            if not self._sstv_listening():
+                return ""
+            self._sstv_panel._on_stop_clicked()  # (as its Stop button does)
+            return "SSTV decoder stopped"
+        panel = self._decoder_panel
+        if (
+            panel._proto_combo.currentText() != decoder
+            or not panel._enabled_check.isChecked()
+        ):
+            return ""
+        panel._enabled_check.setChecked(False)
+        self._update_decoder_chip()  # ("ADS-B · paused")
+        return f"{decoder} decoder off"
 
     def _select_decoder(self, protocol: str) -> bool:
         """Choose ``protocol`` in the Decoder panel and tick Decode (a
@@ -10186,6 +10662,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 2000,
             )
 
+    def _on_mute_action(self, muted: bool) -> None:
+        """Radio > Audio > Mute (Ctrl+M, M with the plots focused)."""
+        if self._audio_state() == "no_output":
+            # Nothing plays (no output device), so Mute isn't checked: like
+            # the Audio button there, it tries the output again.
+            self._set_audio_enabled(True)
+            self._sync_audio_ui()
+            return
+        self._set_audio_enabled(not muted)
+
     def _audio_state(self) -> str:
         """What the Audio button shows: ``"on"``, ``"muted"`` (by you),
         ``"no_output"`` (no audio output device, or no QtMultimedia) or
@@ -10285,7 +10771,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         _audio_state) and Radio > Audio > Mute."""
         state = self._audio_state()
         on = bool(self._audio_enabled and self._audio.available)
-        controls = ((self._mute_action, not on), (self._audio_button, on))
+        # Mute is checked when you muted it, not when nothing can play
+        # ("No output").
+        muted = not on and state != "no_output"
+        controls = ((self._mute_action, muted), (self._audio_button, on))
         for control, checked in controls:
             if control.isChecked() != checked:
                 control.blockSignals(True)

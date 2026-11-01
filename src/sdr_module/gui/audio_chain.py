@@ -551,9 +551,39 @@ NOISE_REDUCTION_LEVELS: Tuple[Tuple[str, str, str], ...] = (
 )
 
 
+class GuardedNoiseReduction(NoiseReduction):
+    """The listening noise reduction, which leaves a clean signal alone.
+
+    Its noise estimate (minimum statistics) can't tell a chord held for
+    a few seconds from noise: on a clean music station Strong took 2-3 dB
+    off the programme (6 dB at 200-500 Hz). The receiver knows better from
+    the channel's SNR: while ``clean`` is True the gain eases to 1 (over
+    ``EASE_S``, through the same STFT, so the audio doesn't jump) and back
+    when the signal is noisy again. The noise estimate keeps learning.
+    """
+
+    EASE_S = 0.3
+
+    def __init__(self, sample_rate: float, config: NoiseReductionConfig) -> None:
+        super().__init__(sample_rate, config)
+        self.clean = False
+        self._bypass = 0.0
+
+    def _frame_gain(self, power: np.ndarray, noise: np.ndarray) -> np.ndarray:
+        gain = super()._frame_gain(power, noise)
+        step = self._hop_size / max(self._sample_rate * self.EASE_S, 1e-9)
+        target = 1.0 if self.clean else 0.0
+        self._bypass += max(-step, min(step, target - self._bypass))
+        if self._bypass <= 0.0:
+            return gain
+        return gain + self._bypass * (1.0 - gain)
+
+
 def make_noise_reduction(level: str, rate: float) -> Optional[NoiseReduction]:
     """A streaming noise reduction for 48 kHz audio at ``level``
-    (``"light"`` or ``"strong"``), or None for ``"off"``."""
+    (``"light"`` or ``"strong"``), or None for ``"off"`` (a
+    :class:`GuardedNoiseReduction`: the receiver tells it when the signal
+    is clean)."""
     if level == "light":
         config = NoiseReductionConfig(
             method=NoiseReductionMethod.WIENER,
@@ -571,7 +601,7 @@ def make_noise_reduction(level: str, rate: float) -> Optional[NoiseReduction]:
         )
     else:
         return None
-    return NoiseReduction(rate, config)
+    return GuardedNoiseReduction(rate, config)
 
 
 class ToneSquelch:

@@ -620,13 +620,15 @@ class AudioNotch:
             )
             self._tune(want, fresh)
         n = x.size
-        if self._mix <= 0.0 and target <= 0.0:
+        if self._filter is None or (self._mix <= 0.0 and target <= 0.0):
             # Silent: the audio as it was (the filter rests until needed).
+            # (No filter yet: a gap meant the notch to engage at once, but
+            # nothing is wanted now. The audio fades in after a gap anyway.)
             self._filter = None
             self._freq = None
+            self._mix = 0.0
             self._remember(x)
             return x
-        assert self._filter is not None
         notched = self._filter.process(x)
         if target == self._mix:
             mix: np.ndarray = np.full(n, self._mix)

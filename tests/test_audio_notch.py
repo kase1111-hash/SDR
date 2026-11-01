@@ -296,6 +296,42 @@ class TestAudioNotch(unittest.TestCase):
         notch.reset()  # (another channel, another mode)
         self.assertIsNone(notch.frequency_hz)
 
+    def test_nothing_to_notch_after_a_gap_passes_the_audio(self):
+        """After a gap (reset_stream: the squelch closed, or the speaker
+        was off) the notch engages at once when the audio comes back. If by
+        then nothing is to be notched (turned Off, Manual changed to Auto
+        with no whistle yet, another station tuned in Auto) the audio passes
+        as it is: it used to trip an assertion, and the window dropped the
+        block it was demodulating."""
+        voice = pitched_voice(3.0, RATE, seed=9)
+        x = voice + tone(len(voice), 1500.0, 0.2)
+        block = x[:FRAME].astype(np.float32)
+
+        def manual_then(change):
+            notch = self.notch("manual", 1500.0)
+            _run(notch.process, x[: 10 * FRAME], [FRAME])
+            notch.reset_stream()
+            change(notch)
+            return notch
+
+        def auto_then_search_anew():
+            notch = self.notch("auto")
+            _run(notch.process, x, [FRAME])
+            self.assertIsNotNone(notch.frequency_hz)
+            notch.reset_stream()
+            notch.search_anew()
+            return notch
+
+        cases = {
+            "off": manual_then(lambda n: setattr(n, "mode", "off")),
+            "auto": manual_then(lambda n: setattr(n, "mode", "auto")),
+            "search_anew": auto_then_search_anew(),
+        }
+        for name, notch in cases.items():
+            out = notch.process(block)
+            self.assertTrue(np.array_equal(out, block), name)
+            self.assertIsNone(notch.frequency_hz, name)
+
     def test_another_station_lets_the_tone_go_without_a_click(self):
         """search_anew (another station tuned, the audio carrying on): Auto
         forgets its tone and searches again; the notch fades out (and in

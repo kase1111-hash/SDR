@@ -243,6 +243,26 @@ class TestNotchInTheReceiver(_WindowTestCase):
         self.win._reset_demodulator()
         return Frames(self, iq).run().played()
 
+    def test_turned_off_while_muted_the_first_block_plays(self):
+        """Manual notch, the speaker off for a moment (Mute; a squelch that
+        closes does the same), the notch turned Off meanwhile: the first
+        block once the speaker is on again is played. (The notch was to
+        engage at once and tripped an assertion: the window dropped that
+        block, and did the same tuning to another station in Auto.)"""
+        self.win.set_frequency(14.2e6)
+        self.win._set_demod_mode("USB")
+        self.panel.set_notch_mode("manual")
+        self.panel.set_notch_hz(1300)
+        self.win._reset_demodulator()
+        frames = Frames(self, usb_with_a_whistle(1.0))
+        frames.run(5)
+        self.win._set_audio_enabled(False)
+        frames.run(2)  # (the block that fades out, then the demodulator reset)
+        self.panel.set_notch_mode("off")
+        self.win._set_audio_enabled(True)
+        frames.run(1)
+        self.assertGreater(len(frames.audio[-1]), 0)
+
     def test_auto_removes_a_whistle_from_ssb_and_shows_it(self):
         self.win.set_frequency(14.2e6)
         self.win._set_demod_mode("USB")

@@ -103,17 +103,17 @@ sdr-scan --help
 
 ### Core (`core/`)
 - `band_info.py` - The band plan line at a frequency (Info tab, FREQ tooltip)
-- `band_plan.py` - Which band a frequency is in and how it is usually listened to
+- `band_plan.py` - Which band a frequency is in and how it is usually listened to (CW in the CW/data segments of the amateur SSB bands, USB on the FT8/FT4 channels); `KHZ_BELOW_HZ`: frequencies below 2 MHz are named in kHz
 - `chirp_csv.py` - CHIRP-compatible CSV import/export for saved channels
 - `config.py` - Configuration management with validation
 - `device_manager.py` - Device enumeration and lifecycle management
 - `dual_sdr.py` - Dual-SDR controller (modes: see Hardware Support)
-- `frequency_manager.py` - TX lockouts, license profiles, band privileges, RX presets (`RX_PRESETS`; a preset can name the decoder it turns on)
+- `frequency_manager.py` - TX lockouts, license profiles, band privileges, RX presets (`RX_PRESETS`; a preset can name the decoder it turns on, and the window turns that decoder off again once you tune away from where it is heard: `_release_preset_decoder`)
 - `sample_buffer.py` - Thread-safe circular sample buffers
 
 ### DSP (`dsp/`)
 - `spectrum.py` - FFT-based spectrum analyzer
-- `frame_spectrum.py` - Spectrum of a whole display frame (mean for the spectrum, max for the waterfall), FFT sizes and windows
+- `frame_spectrum.py` - Spectrum of a whole display frame (mean for the spectrum, max for the waterfall; a frame longer than `max_samples` in evenly spread segments), FFT sizes and windows
 - `demodulators.py` - AM, FM, SSB, CW, OOK, FSK, PSK, GFSK, MSK, QAM
 - `filters.py` - FIR filters, resamplers, AGC, squelch, CTCSS detection, noise reduction
 - `nco.py`, `channelizer.py` - Streaming frequency shift and decimation: a channel out of the span
@@ -155,7 +155,7 @@ Window and receiver:
   - tuning: `set_frequency` / `_tune_to`, `_retune_lo`, `_lock_lo` (see Important Notes)
   - the display loop: `_update_display` -> `_read_block` (paced by `_Pacer`) -> `_process_block`
   - `_ReceiverChain` (channel filter, demodulators, 48 kHz audio; the second receiver reuses it), `_SampleStore` (the I/Q recording buffer, a temporary file), `InfoPanel` (Info tab)
-- `control_panel.py` - Right column: Frequency, Presets, Receiver, Demodulation, Audio and Recording groups (its License Profile group moves to Ham > Ham ID)
+- `control_panel.py` - Right column, listening first: Frequency, Demodulation, Audio, Presets, Receiver and Recording groups (its License Profile group moves to Ham > Ham ID); `SAVE_FORMATS`, the one table of recording formats (Recording group, File > Save Recording)
 - `receiver_bar.py` - Second toolbar row (MODE, FILTER, STEP) and the FREQ readout's digit tuning
 - `level_meter.py` - Toolbar LEVEL meter with the draggable squelch threshold
 - `tuning.py` - Steps, typed-frequency parsing, click-to-tune snapping, back/forward history
@@ -172,7 +172,7 @@ Plots:
 Tool tabs (Decoder, Bookmarks, Ham, Scanner, Signal, Info):
 - `decoder_panel.py`, `decoder_views.py` - Decoder tab: messages, detail card, stats, Auto, Aircraft view (ADS-B), Text view (Morse)
 - `bookmarks_panel.py`, `bookmark_editor.py` - Bookmarks tab: groups, filter, Edit Bookmark, CHIRP CSV
-- `scanner_panel.py` - Scanner tab; `scan_engine.py` its engine, fed by the display loop; `scanner_host.py` the window as its host; `scanner_dialog.py` scan band presets and table helpers (no dialog any more)
+- `scanner_panel.py` - Scanner tab, and the status-bar chip of a running scan (Stop Scan, Skip, Hold, Show Scanner); `scan_engine.py` its engine, fed by the display loop; `scanner_host.py` the window as its host; `scanner_dialog.py` scan band presets and table helpers (no dialog any more)
 - `signal_panel.py` - Signal tab (Identify, Signals, Scope, Bursts); `signal_tools.py` its window side, Track Signal (AFC) and Find Signals in Recording
 
 Devices:
@@ -182,7 +182,7 @@ Devices:
 
 Recordings and files:
 - `playback.py` - File > Open Recording: `FilePlaybackDevice`, the playback strip, `PlaybackController`
-- `iq_files.py` - What a file holds; Import Options (headerless files), Recording Info and decode dialogs
+- `iq_files.py` - What a file holds; Import Options (headerless files), Recording Info and decode dialogs; `format_size`, how sizes are shown (decimal kB, MB, GB; Tools > Preferences has its own `format_bytes`, also decimal)
 - `file_jobs.py` - `run_job` (worker thread, progress, Cancel) and the load, write and decode jobs
 - `file_dialogs.py` - File dialogs that remember a folder per kind of file; the recordings folder
 - `audio_recording.py` - Radio > Record Audio (48 kHz WAV of what you hear)
@@ -198,12 +198,12 @@ Presets, help and settings:
 - `help_dialog.py` - F1 Keyboard Shortcuts: `SHORTCUTS` (the window's keys, checked against its real bindings), `PLOT_KEYS`, `PANEL_KEYS` (keys a list, field or window handles itself) and `MOUSE_ACTIONS`
 - `first_run_wizard.py`, `version_info.py` - Welcome and Quick Start; About, Copy Version Info, Report a Problem
 - `error_log_dialog.py`, `preferences_dialog.py` - Tools > Error History; Tools > Preferences
-- `settings_store.py` - `GuiSettings`, a typed QSettings wrapper
+- `settings_store.py` - `GuiSettings`, a typed QSettings wrapper whose getters give the default for a damaged value (see Important Notes); `usable_bookmarks`
 - `themes.py` - Dark and light palettes, stylesheet roles and tones
 
 ## Testing
 
-Tests use pytest (about 120 modules): DSP, drivers against fake backends, the CLI, and GUI tests that build the real main window. The suite is large; run the modules for the code you change.
+Tests use pytest (about 130 modules): DSP, drivers against fake backends, the CLI, and GUI tests that build the real main window. The suite is large; run the modules for the code you change.
 
 ```bash
 # GUI tests need no display (CI sets this for every run; some
@@ -227,6 +227,12 @@ pytest packages/sdr-antenna-array/tests
 
 - **`tests/conftest.py`**: an exception raised in a Qt slot or event handler would make PyQt abort the whole run ("Fatal Python error: Aborted", output lost); the conftest records it instead, and the test it happened in fails with the traceback (`tests/test_qt_callback_errors.py` checks this). It also runs pending `deleteLater()` deletions after each test, closes windows a module leaves open, restores the theme, and points the file dialogs' Documents and Pictures folders at temporary ones.
 - **Window tests** mostly build on `_WindowTestCase` (`tests/test_gui_chrome.py`): a real `SDRMainWindow` with in-memory settings (`_FakeSettings` in place of `GuiSettings`) and its timers stopped, so a test runs frames by calling `_update_display()`; `demo = True` starts the demo device. Code that creates `GuiSettings()` itself uses the real settings file (`~/.config/SDR Module Team/SDR Module.conf` on Linux); set `XDG_CONFIG_HOME` to a scratch folder to keep a run away from your own.
+- **`tests/test_final_*.py`**: the last fixes, found by using the finished app end to end, a module per area (`decode`, `ham`, `listen`, `perf`, `plots`, `record`, `scan`, `window`); `test_final_scan_check.py` holds what the check of the scan fixes found, `test_final_integration.py` what needs two areas' fixes together. Each regression test failed before its fix (a few guard tests pin what must not change); run the area's module when you change its code.
+- **Timing-sensitive tests are made deterministic**, not given wider margins (they must pass on a busy computer):
+  - run the display loop on a fake clock: `_FakeClock` (`tests/test_gui_round3_main.py`) patched in as the module's `time` (`mock.patch.object(main_window, "time", clock)`; `second_receiver` too) and advanced between `_update_display()` calls, as the playback and second-receiver Listen tests do
+  - read every demo sample: patch `device_dialog._MAX_LAG_S` to `1e9`, or the demo device skips ahead to the wall clock on a slow run and its timed signals move (`_SignalCase` in `tests/test_gui_signal_tab.py`); fix a frame's size by replacing `win._pacer.demo_request`, and seed the demo's noise with `win._device._rng = np.random.default_rng(n)`
+  - count work instead of timing it (`tests/test_final_perf.py` counts the outputs a filter computes and the samples the plots analyze); bring about the state a test needs (a progress dialog shown, a transfer in flight queued) instead of sleeping; stop a panel's own refresh timer when the test plants a reading
+- **Damaged settings**: `_IniSettings` (`tests/test_final_window.py`) runs the real `GuiSettings` on an INI file in a temporary folder, written as a damaged settings file would be. A damaged value is logged once: per key for a `GuiSettings` instance, but once per process for a bad recordings folder (`file_dialogs._BAD_FOLDERS_LOGGED`), so a test that asserts that warning patches the set empty.
 - **Fake hardware backends** (no hardware or driver packages needed):
   - `tests/test_rtlsdr_driver.py` - `FakeRtlSdr`, installed as the `rtlsdr` module; it has only pyrtlsdr's real methods, so a wrong driver call fails. `tests/test_gui_device_settings.py` has one with tuner gain tables and front-end calls for window tests.
   - `tests/test_hackrf_driver.py` - `FakeHackRFDevice`, installed as `python_hackrf`; answers only to real python_hackrf method names.
@@ -257,44 +263,50 @@ Dual-SDR operation modes (`core/dual_sdr.py`; `OperationMode.implemented`, `Dual
 ### The display loop
 - A 33 ms timer calls `SDRMainWindow._update_display`: `_read_block` takes what arrived since the last frame, and `_process_block` hands that one block to everything that works on the signal (plots, level and squelch, receiver chain and audio, RDS, radio tuner, `SignalTools`, the I/Q recording, S-meter, live decoder, scanner)
 - Hardware is polled without waiting (`read_samples(..., timeout=0.0)`); the demo device and a recording playing back are paced to real time by `_Pacer` (a recording never runs ahead)
-- `_Pacer.measured` times each frame against the signal time it covers. When the computer can't keep up, frames drop to one block (audio muted with a hint) and a full frame is tried once a second to recover; an I/Q recording still gets every hardware transfer
-- New per-frame work goes in `_process_block`, does nothing while its view is hidden or its feature is off, and stays small (a live decoder takes about 1-2 ms of the 33 ms at 2.4 MS/s, and a HackRF delivers up to 20 MS/s). Count time in samples where you can, as `scan_engine.py` does, so tests can drive it block by block
+- `_Pacer.measured` times each frame against the signal time it covers. When the computer can't keep up (`_pacer.overloaded`), frames drop to one block and a full frame is tried once a second to recover; meanwhile the Audio button reads Paused (the status bar says why, at most every 30 s), a running live decoder says it misses part of the signal, and the Bursts page stops logging and says why. An I/Q recording still gets every sample (every queued hardware transfer, and the demo's backlog through `_read_demo`), and what a source skipped (`dropped_samples`) is reported as lost
+- New per-frame work goes in `_process_block`, does nothing while its view is hidden or its feature is off, and stays small (a live decoder takes about 0.3-2.5 ms of the 33 ms at 2.4 MS/s, and a HackRF delivers up to 20 MS/s). Count time in samples where you can, as `scan_engine.py` does, so tests can drive it block by block
+- At 20 MS/s a frame holds about 670,000 samples, so keep each part's cost bounded: filter down to the channel first and compute only the outputs kept (the receiver's `_FirDecimator` takes one dot product per kept output wherever that is cheaper than filtering every sample by FFT); reuse the receiver's channel rather than filtering the full-rate block again (the Decoder's RDS takes it through `RDSLiveDecoder.process_channel`); cap a long frame's work (the plots analyze at most `_PLOT_MAX_SAMPLES`, in evenly spread segments); go through a large block in cache-sized pieces (Remove DC spike and Balance I/Q). `tests/test_final_perf.py` pins these by counting the work
 - Nothing else takes samples from the main window's device: the scanner, decoders and signal tools get the loop's blocks (the scanner's host only discards transfers queued before a retune, as `_retune_lo` does)
 - Measurements don't depend on the plots' FFT size, window or zoom: LEVEL and the squelch use the channel's own power, the noise floor (Auto squelch, the S-meter's SNR) a fixed 2048-point spectrum (`_power_spectrum_dbfs`)
 
 ### Tuning: the VFO inside the span
 - The LO (`_lo_hz`, the device's center frequency) is the middle of the plots; the tuned frequency (the VFO) can sit anywhere in the span. The receiver chain, decoders and S-meter work at `_vfo_offset_hz()`
-- Tune through `set_frequency` / `_tune_to`, never the device's `set_frequency`. They move only the VFO while the channel fits the inner 80% of the span (`_USABLE_SPAN_FRACTION`) and retune the LO otherwise (always, with Radio > Keep Tuned Frequency Centered)
-- A frequency out of the device's range, outside a recording that is playing (`_lock_lo`) or asked for while transmitting is refused, with the reason in the status bar and everything left on the frequency tuned
-- After a hardware retune, `_retune_lo` drops the samples taken on the old frequency. Recordings are labelled with the LO, not the tuned frequency
+- Tune through `set_frequency` / `_tune_to`, never the device's `set_frequency`. They move only the VFO while the channel fits the inner 80% of the span (`_USABLE_SPAN_FRACTION`) and retune the LO otherwise (always, with Radio > Keep Tuned Frequency Centered), to where `_lo_for` puts it: on the tuned frequency, except below half the sample rate, where it goes to half the sample rate so the span starts at 0 Hz (below about a tenth of the rate, only as high as keeps the channel in the usable span, so the span starts a little below 0 Hz). `_tune_to(recenter=True)` puts the LO exactly on the frequency (the Scanner's steps and the transmit path rely on it)
+- A frequency out of the device's range, outside a recording that is playing (`_lock_lo`), asked for while transmitting, or outside the usable span while an I/Q recording has samples is refused, with the reason in the status bar and everything left on the frequency tuned. A take holds one center frequency, as it holds one sample rate and one device: while it has samples, tuning inside the span moves only the VFO (Keep Tuned Frequency Centered too), and Device > Connect..., Disconnect and Use Demo Device ask before they end it (`confirm_stop_recordings` in `device_controls.py`)
+- After a hardware retune, `_retune_lo` drops the samples taken on the old frequency. Recordings are labeled with the LO (their center frequency), not the tuned frequency; a SigMF take's description names the tuned frequency and mode (`_take_details`)
 
 ### Never block the GUI thread
-- Long jobs run in workers with progress and Cancel: `file_jobs.run_job(parent, title, label, work)` runs `work(report)` in a `QThread`, shows a progress dialog after 400 ms, holds keyboard and mouse input meanwhile (the spectrum keeps running) and returns a `JobResult`. Convert, save and decode recordings, Find Signals in Recording and Transmit Text > Save use it; a cancelled or failed write leaves no partial file
-- The transmitter streams from its own thread, polled by a timer; Identify and burst analysis run in a thread pool
+- Long jobs run in workers with progress and Cancel: `file_jobs.run_job(parent, title, label, work)` runs `work(report)` in a `QThread`, shows a progress dialog after 400 ms, holds all keyboard and mouse input except the dialog's own (Cancel) meanwhile (the spectrum keeps running) and returns a `JobResult`. Convert, save and decode recordings, Find Signals in Recording and Transmit Text > Save use it; a cancelled or failed write leaves no partial file
+- The transmitter streams from its own thread, polled by a timer; Identify and burst analysis run in a thread pool, and the bursts worker spends at most a quarter of the signal's time taking bursts apart (`ANALYSIS_SHARE`, timed in its own processor time; beyond it, a burst is listed without its analysis)
+- Don't make the display loop wait for a thread that may not get a processor on a busy computer: the plots hand half of a large frame's FFTs to a helper thread, and the loop does that half itself when the helper hasn't started on it
 - Widgets are touched only from the GUI thread
 
 ### Settings survive damaged values
-- `GuiSettings` getters take a default, but a stored value can still be NaN, infinite, out of range or JSON of the wrong shape (a hand edit, another version)
-- Check what you read (finite, in range, the expected type), fall back to the default and log it: a damaged setting must never stop the app from starting or a window from opening
+- A settings file can hold anything (a hand edit, another version). `GuiSettings` getters give the default, logged once per key, for a value of the wrong type, a NaN or infinite float or an integer beyond 32 bits; saved bookmarks come back through `usable_bookmarks` (an entry that isn't a bookmark is skipped, one without a usable frequency is listed at 0 Hz)
+- The getters can't know a key's range, its choices or the shape of JSON stored in it: check those where you read it and fall back to the default, or to the nearest valid value where that is harmless (the end of the tuning range; never the costliest FFT size or a squelch that never opens), and log it. Restore each value on its own (`restore()` in `_restore_audio_settings`): a damaged setting must never stop the others, the app from starting or a window from opening
 - Safety settings fall back to the safe side: an unreadable `tx/confirm` asks before transmitting
 
 ### Both themes
 - Every color comes from the `Palette` in `themes.py` (Catppuccin Mocha dark, Latte light). Tag widgets with `set_role` / `set_tone`; in `paintEvent` read `get_palette()` and drop cached pixmaps on `theme_notifier().theme_changed`. Never hard-code a color
-- Check new UI in both themes (View > Theme) and at the minimum window size, 1024x640
+- Check new UI in both themes (View > Theme), at the minimum window size, 1024x640, and at 1366x768 (a laptop screen)
 
 ### Transmit only through the transmitter
 - Everything the GUI sends goes through `StationTx.transmit(TxJob)` -> `Transmitter`, the only GUI code that calls the HackRF's `start_tx`. Send ID Now and Radio > Send Station ID reach it through `StationTx.send_station_id`; Transmit Text and any other job through `SDRMainWindow._transmit_job(TxJob)`
-- That path checks the device can transmit (the demo device and RTL-SDR refuse, with the reason), the license class, band segment and protected frequencies for the emission's own mode and occupied bandwidth, a callsign for amateur transmissions, and the power limits. It asks the first time (`tx/confirm`), adds the automatic station IDs, shows ON AIR, pauses receiving (half duplex), puts the HackRF back afterwards and ends with the outcome in the status bar
+- That path checks the device can transmit (the demo device and RTL-SDR refuse, with the reason), the license class, band segment and protected frequencies for the emission's own mode and occupied bandwidth (CW is allowed in every segment the class holds, FCC 97.305(a)), a callsign for amateur transmissions, and the power limits. It asks before each transmission until "Don't ask again" is ticked (`tx/confirm`; Ask before transmitting in Tools > Preferences turns the question back on), adds the automatic station IDs, shows ON AIR, pauses receiving (half duplex), puts the HackRF back afterwards and ends with the outcome in the status bar
+- While on the air the transmit state wins: `_show_tx_state(True)` (called by `StationTx` when a transmission starts, and by `_refresh_state_ui` while `_tx_busy()`) turns Start and Radio > Start Receiving off and dims the plots with "Transmitting - receiving resumes when it ends", or "Transmitting - press Space to receive once it ends" when the receiver was stopped before (it stays stopped: `_tx_resumes_rx()`); `_refresh_state_ui` turns them back on afterwards. Update Start and the plots' state through `_refresh_state_ui`, so a transmission always shows
 - A `TxJob`'s source can make its samples as they are read (`read(n)`, `total_samples`), so a long transmission never has to sit in memory
 - Don't call `start_tx` / `write_samples` from GUI code, and don't loosen a check to make a test pass: use the fake HackRF backends
 
 ### Keys, menus and messages
-- `_add_action` makes a menu action the only owner of its shortcut; `tests/test_gui_coherent_window.py` fails on a key bound twice
-- Keys that must leave a focused slider, list or text field alone (Space, Left/Right, `[` `]`, P, M, Home, Page Up/Down) are handled in `keyPressEvent`, not bound as shortcuts; a menu item shows such a key after a tab (`"&Start Receiving\tSpace"`)
+- `_add_action` makes a menu action the only owner of its shortcut; `tests/test_gui_coherent_window.py` fails on a key bound twice, and `tests/test_final_window.py` on an access letter (`&`) used twice in one menu
+- Keys that must leave a focused slider, list or text field alone (Space, Left/Right, `[` `]`, P, M, Home, Page Up/Down) are handled in `keyPressEvent`, not bound as shortcuts; a menu item shows such a key after a tab (`"&Start Receiving\tSpace"`). A window shortcut that a focused widget should keep is handed to it in `SDRMainWindow.event`, which accepts its `ShortcutOverride` (Ctrl+Up/Ctrl+Down: Volume Up/Down, but ten steps in a number field and a row up or down in a list)
+- A menu item that changes a control panel setting follows its control: checked as it is, and disabled while it is (`follow()` in `_add_listening_menus`: Radio > Mode, Radio > Squelch, and Radio > Audio's Noise Reduction and Audio AGC)
 - List every new key in `help_dialog.py`: a window key in `SHORTCUTS` (F1 checks the table against the real bindings), a key a focused plot handles in `PLOT_KEYS`, and a key a list, field or window handles itself in `PANEL_KEYS` with an id. `tests/test_gui_help_keys.py` presses each `PANEL_KEYS` row on its real widget in a `test_key_<id>` test and fails when a row has none
-- A refusal says what and why ("2400.000 MHz is out of range: RTL-SDR tunes 0.5–1766 MHz."). Use `_show_status_message(text, tone, ms)` / `_show_status_error`; warnings and errors also go to Tools > Error History, once (`log=False` when you logged already). A long action ends with its outcome in the status bar, never a stale "Preparing..."
+- A refusal says what and why ("2400.000 MHz is out of range: RTL-SDR tunes 0.5–1766 MHz."). Use `_show_status_message(text, tone, ms)` / `_show_status_error`. Tools > Error History lists problems only: warnings and errors go there once, so pass `log=False` when you logged already and for a notice that is no problem ("Recording paused", "Recording armed...", what to do first). A long action ends with its outcome in the status bar, never a stale "Preparing...", and a message that stops being true is replaced or cleared (a refusal by the next good tune, "Recording armed..." once samples arrive)
+- Show frequencies with `format_frequency` (`main_window.py`: kHz below 2 MHz, MHz with 3 to 6 decimals above) and sizes with `iq_files.format_size`; use American spelling (`TestTheWindowsWords` in `tests/test_final_window.py` checks every text the main window shows) and the controls' own names ("Filter", not "Bandwidth")
 
 ### General
 - Hardware drivers are optional; graceful degradation if missing
+- Closing the window releases and closes the device, discards the temporary recording file and stops the plots' FFT helper one step at a time (`quietly()` in `SDRMainWindow.closeEvent`): a step that fails is logged and the next still runs, so the device is closed. The parts' `shutdown()` calls before those steps are not wrapped: a part with background workers must stop them there without raising, and ignore frames after it (`SignalTools.shutdown`)
 - mypy ignores errors in `sdr_module.gui.*` and `sdr_module.ham.gui.*`; the rest is type-checked in CI
 - Use demo mode for development without physical SDR devices (`--demo`, or Device > Use Demo Device)

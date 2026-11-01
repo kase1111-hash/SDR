@@ -11165,7 +11165,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             or not panel._enabled_check.isChecked()
         ):
             return ""
-        panel._enabled_check.setChecked(False)
+        # (Not as your own untick: a protocol you choose next decodes.)
+        panel.pause_decoding()
         self._update_decoder_chip()  # ("ADS-B · paused")
         return f"{decoder} decoder off"
 

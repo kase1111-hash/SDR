@@ -2266,15 +2266,23 @@ class _ShrinkingLabel(_ElidedLabel):
 
     def sizeHint(self) -> Any:  # noqa: N802 - Qt naming
         # QLabel's own hint (padding included) for the text shown, widened
-        # to the full text.
+        # to the full text, both measured as QLabel measures its text: the
+        # hint is then the full text's wherever it is cut. (Measured by
+        # advance, it was a pixel more or less depending on the cut, and
+        # at 1024 px the status bar moved a pixel and back at every
+        # message.)
         hint = super().sizeHint()
-        metrics = self.fontMetrics()
         shown = QLabel.text(self)
-        extra = metrics.horizontalAdvance(self._full_text) - metrics.horizontalAdvance(
-            shown
-        )
-        hint.setWidth(hint.width() + max(0, extra))
+        if shown != self._full_text:
+            extra = self._text_width(self._full_text) - self._text_width(shown)
+            hint.setWidth(hint.width() + max(0, extra))
         return hint
+
+    def _text_width(self, text: str) -> int:
+        """``text``'s width as QLabel sizes a one-line plain text."""
+        centered = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter
+        flags = self.alignment().value & ~centered.value
+        return self.fontMetrics().boundingRect(0, 0, 2000, 2000, flags, text).width()
 
     def minimumSizeHint(self) -> Any:  # noqa: N802 - Qt naming
         hint = super().minimumSizeHint()

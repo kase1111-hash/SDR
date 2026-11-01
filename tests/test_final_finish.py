@@ -446,6 +446,7 @@ class TestTransmitTextsSaveNamedInTheHints(_tx_text_case()):
     the hints as a command."""
 
     def test_the_hint_names_the_save(self):
+        import shutil
         import tempfile
         from unittest import mock
 
@@ -453,8 +454,9 @@ class TestTransmitTextsSaveNamedInTheHints(_tx_text_case()):
 
         from sdr_module.gui import file_jobs, main_window
 
-        path = os.path.join(tempfile.mkdtemp(prefix="n06_"), "cq.wav")
-        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        folder = tempfile.mkdtemp(prefix="n06_")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "cq.wav")
         self.patch.setattr(
             QFileDialog,
             "getSaveFileName",
@@ -604,6 +606,8 @@ class TestWaterfallBrightnessThroughALongOverload(_window_case()):
         return float(np.median(codes / 8.0 - 200.0))
 
     def frames(self, count, overloaded):
+        """``count`` frames, as a computer that can't keep up reads them
+        (one block each) or as usual; the noise of each row as drawn."""
         win = self.win
         rate = win._device_sample_rate()
         shown = []
@@ -611,7 +615,7 @@ class TestWaterfallBrightnessThroughALongOverload(_window_case()):
             win._pacer.reset()
             win._pacer.overloaded = overloaded
             size = 2048 if overloaded else int(rate * self.FRAME_S)
-            win._process_block(win._device.read_samples(size))  # (one block)
+            win._process_block(win._device.read_samples(size))
             shown.append(self.shown_db())
         return np.array(shown)
 
@@ -638,8 +642,8 @@ class TestWaterfallBrightnessThroughALongOverload(_window_case()):
         self.assertLess(abs(float(last - first)), 0.5, (first, last))
         self.assertLess(float(np.ptp(behind)), 2.0, behind)
         self.assertLess(float(np.max(np.abs(after - usual))), 0.5, after[:5])
-        # (The frames were one block each: their rows' own levels read
-        # several dB lower.)
+        # (The frames behind were one block each: their rows' own levels,
+        # unlike their colours, read several dB lower.)
         history = win._waterfall._history
         drop = float(np.median(history[-200]) - np.median(history[-1]))
         self.assertLess(drop, -5.0)

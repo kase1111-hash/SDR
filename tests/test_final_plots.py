@@ -7,6 +7,7 @@ on the demo device (or the panel on its own where that is enough).
 
 import os
 import unittest
+from itertools import combinations
 
 import numpy as np
 
@@ -448,6 +449,75 @@ class TestHoverReadsOnePoint(unittest.TestCase):
             lambda x, y: widget.landing_frequency(x, y),
             lambda plot: plot.top() + 3,
         )
+
+
+class TestTimeAxisAfterAPause(unittest.TestCase):
+    """PLOTS-E2E-14: after Stop and Start the waterfall's time axis read
+    0s, 1s and the pause's age, then nothing for the older rows below it
+    (most of the plot): only the newest run had regular ticks. Each run
+    now has its own, counting on from its pause's age."""
+
+    def setUp(self):
+        from tests.test_gui_chrome import require_pyqt6
+
+        require_pyqt6(self)
+
+    def layout(self, times, history_size=300):
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        wf = WaterfallWidget(history_size=history_size)
+        self.addCleanup(wf.deleteLater)
+        wf.set_frequency_range(100e6, 2.4e6)
+        wf.resize(940, 372)
+        wf.show()
+        self.addCleanup(wf.close)
+        wf._times.clear()
+        wf._times.extend(times)
+        plot = wf.plot_rect()
+        separators, labels = wf._time_axis_layout(plot)
+        return wf, plot, separators, labels
+
+    def check_ages(self, wf, plot, separators, labels):
+        """Every regular label's text is the age of the row its tick marks
+        (a pause's label sits on its separator, between two rows)."""
+        from sdr_module.gui.waterfall_widget import format_elapsed
+
+        ages = wf._row_ages()
+        rows_px = plot.height() / wf._rows_shown()
+        for tick_y, _y, text in labels:
+            if tick_y in separators:
+                continue
+            row = (tick_y - plot.top()) / rows_px - 0.5
+            age = float(np.interp(row, np.arange(len(ages)), ages))
+            if text.endswith("m"):
+                self.assertAlmostEqual(float(text[:-1]) * 60, age, delta=30, msg=text)
+            else:
+                self.assertIn(text, (f"{age:.0f}s", f"{age:.1f}s", format_elapsed(age)))
+
+    def test_older_rows_keep_their_ages(self):
+        # 5.5 s of lines, Stop for about 2.3 s, then 1.5 s after Start.
+        times = [1000 + i / 30 for i in range(165)]
+        times += [1007.8 + i / 30 for i in range(45)]
+        wf, plot, separators, labels = self.layout(times)
+        self.assertEqual(len(separators), 1)
+        below = [label for label in labels if label[0] > separators[0] + 1]
+        self.assertGreaterEqual(len(below), 3, labels)
+        self.check_ages(wf, plot, separators, labels)
+        fh = wf._fm.height()
+        for (_t1, y1, s1), (_t2, y2, s2) in combinations(labels, 2):
+            self.assertGreaterEqual(abs(y1 - y2), fh + 2, (s1, s2))
+
+    def test_an_hour_old_run_reads_in_minutes(self):
+        # A run from an hour ago keeps labels that fit the margin, and the
+        # newest run keeps its fine ticks.
+        times = [1000 + i / 30 for i in range(165)]
+        times += [4600 + i / 30 for i in range(135)]
+        wf, plot, separators, labels = self.layout(times)
+        self.assertEqual(len(separators), 1)
+        self.assertTrue(all(len(text) <= 4 for _t, _y, text in labels), labels)
+        above = [label for label in labels if label[0] < separators[0]]
+        self.assertGreaterEqual(len(above), 3, labels)
+        self.check_ages(wf, plot, separators, labels)
 
 
 class TestCompactCheckedButtons(unittest.TestCase):

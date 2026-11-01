@@ -172,8 +172,9 @@ def time_step(raw: float, max_age: Optional[float] = None) -> float:
         if step < raw:
             continue
         if max_age is not None:
-            ticks = nice_ticks(0.0, max_age, step)
-            if ticks and len(format_age(ticks[-1], step)) > 4:
+            # (The oldest tick's label, also past nice_ticks' 1000 ticks.)
+            last = math.floor(max_age / step + 1e-9) * step
+            if len(format_age(last, step)) > 4:
                 continue
         return float(step)
     return float(_TIME_STEPS[-1])
@@ -2563,7 +2564,8 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         checks use ``label_y``, where the text really is, so no two labels
         come closer than a line height. The newest line's ``0s`` always
         shows; then each pause's label (the older lines' age), then regular
-        ticks within the newest continuous run, wherever they fit.
+        ticks within each continuous run (the newest first; an older run's
+        count on from its pause's age), wherever they fit.
         """
         spr = self._seconds_per_row()
         ages = self._row_ages()
@@ -2578,36 +2580,47 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
 
         def place(tick_y: float, text: str) -> None:
             label_y = min(max(tick_y, y_min), y_max)
+            if any(text == other for _t, _y, other in labels):
+                return  # (an hour-old run's "60m" tick under its pause's)
             if all(abs(label_y - other) >= min_sep for _t, other, _s in labels):
                 labels.append((tick_y, label_y, text))
 
         gaps = self._gap_rows(ages, spr, self._row_steps_newest_first())
         separators = [round(plot.top() + row * rows_px) + 0.5 for row in gaps.tolist()]
 
-        # Regular ticks within the newest continuous run of lines.
-        run = ages[: int(gaps[0])] if gaps.size else ages
-        step = time_step(
-            spr * self._rows_shown() * max(28.0, fh * 2.2) / plot.height(),
-            max_age=float(run[-1]),
-        )
+        # Regular ticks within each continuous run of lines, newest first
+        # (an older run's from the age at its pause on), each at a step
+        # whose labels fit the margin at that run's ages.
+        raw_step = spr * self._rows_shown() * max(28.0, fh * 2.2) / plot.height()
+        bounds = [0, *gaps.tolist(), len(ages)]
         ticks: List[Tuple[float, str]] = []
-        for age in nice_ticks(0.0, float(run[-1]) + 1e-9, step):
-            # Fractional row between the two lines that bracket this age (the
-            # run has no pauses, so the pair is always close together).
-            i = min(int(np.searchsorted(run, age)), len(run) - 1)
-            if i == 0:
-                row = 0.0
-            else:
-                a0, a1 = float(run[i - 1]), float(run[i])
-                row = i - 1 + ((age - a0) / (a1 - a0) if a1 > a0 else 1.0)
-            ticks.append((plot.top() + (row + 0.5) * rows_px, format_age(age, step)))
+        steps: List[float] = []
+        for start, end in zip(bounds[:-1], bounds[1:], strict=True):
+            run = ages[start:end]
+            step = time_step(raw_step, max_age=float(run[-1]))
+            steps.append(step)
+            for age in nice_ticks(float(run[0]), float(run[-1]) + 1e-9, step):
+                # Fractional row between the two lines that bracket this age
+                # (a run has no pauses, so the pair is always close together).
+                i = min(int(np.searchsorted(run, age)), len(run) - 1)
+                if i == 0:
+                    row = 0.0
+                else:
+                    a0, a1 = float(run[i - 1]), float(run[i])
+                    row = i - 1 + ((age - a0) / (a1 - a0) if a1 > a0 else 1.0)
+                tick_y = plot.top() + (start + row + 0.5) * rows_px
+                ticks.append((tick_y, format_age(age, step)))
 
         # "0s" first: right after Stop -> Start the newest rows sit just above
         # a pause, and their label must not be the older lines' age.
         if ticks:
             place(*ticks[0])
-        for row, y in zip(gaps.tolist(), separators, strict=True):
-            place(y, format_elapsed(float(ages[row])))
+        for row, y, step in zip(gaps.tolist(), separators, steps[1:], strict=True):
+            age = float(ages[row])
+            text = format_elapsed(age)
+            if step < 60 and not text.endswith("s") and age < 999.5:
+                text = f"{age:.0f}s"  # in the unit of the run's ticks below
+            place(y, text)
         for tick in ticks[1:]:
             place(*tick)
         return separators, labels

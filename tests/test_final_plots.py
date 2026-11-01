@@ -384,3 +384,125 @@ class TestCompactCheckedButtons(unittest.TestCase):
             self.assertTrue(button.hasFocus())
             self.assertGreaterEqual(content_width(button), text, theme)
             panel.close()
+
+
+class TestSignalPanelDetails(unittest.TestCase):
+    """The Signal tab's small things: the scope's axis (PLOTS-E2E-10), the
+    Identify card's filter (-11), the bursts' bits, CSV and tuning (-17)
+    and one EVM (-18)."""
+
+    def setUp(self):
+        from tests.test_gui_chrome import require_pyqt6
+
+        require_pyqt6(self)
+        from sdr_module.gui.signal_panel import SignalPanel
+
+        self.panel = SignalPanel()
+        self.addCleanup(self.panel.deleteLater)
+
+    def test_the_scope_axis_tells_small_levels_apart(self):
+        """PLOTS-E2E-10: the magnitude axis read '0.00 ... 0.00' for the
+        remote (2.5e-3), the CW beacon (4.6e-4) and an airband station."""
+        from sdr_module.gui.signal_panel import _short_number
+
+        assert _short_number(1.1 * 2.5e-3) == "2.8m"
+        assert _short_number(4.6e-4 * 1.1) == "506µ"
+        assert _short_number(-2.5e-3) == "-2.5m"
+        assert _short_number(3.1e-8) == "31n"
+        assert _short_number(0.15) == "0.15"
+        assert _short_number(0.0) == "0.00"
+        assert _short_number(3.14159) == "3.1"
+        assert _short_number(150.0) == "150"
+        for value in (2.5e-3, 4.6e-4, 3.1e-4, 7e-6, -9.9e-3):
+            assert len(_short_number(value)) <= 5, value
+            assert _short_number(1.1 * value) != _short_number(0.0)
+
+    def test_the_card_names_the_filter_apply_mode_sets(self):
+        """PLOTS-E2E-11: the card said '61.3 kHz filter' for the 434.10 MHz
+        FSK burst, and Apply Mode set 100 kHz (the Filter list's choice)."""
+        from sdr_module.dsp.classifiers import ClassificationResult, SignalType
+        from sdr_module.dsp.signal_id import Identification
+
+        result = ClassificationResult(
+            SignalType.DIGITAL, None, 0.8, 51e3, 0.0, 25.0, {}, kind="fsk"
+        )
+        ident = Identification(
+            result, 434.1e6, "FSK data", "FM", "25 kHz", 61.3e3, ["Occupies 51 kHz"]
+        )
+        self.panel.show_identification(ident)
+        text = self.panel.listen_label.text()
+        self.assertIn("FM · 25 kHz deviation · 100 kHz filter", text)
+        self.assertNotIn("61.3", text)
+
+    def report(self, bits, kind="ook", label_mod="OOK PWM", count=8):
+        from sdr_module.dsp.bursts import Burst, BurstReport, PulseAnalysis
+        from sdr_module.dsp.classifiers import ClassificationResult, SignalType
+
+        analysis = PulseAnalysis(label_mod, "", [350.0] * 10, [], [], [])
+        analysis.rows = [bits] * count
+        result = ClassificationResult(
+            SignalType.DIGITAL, None, 0.9, 50e3, 0.0, 30.0, {}, kind=kind
+        )
+        burst = Burst(1.0, 1.4, 434.100256870e6, 53.9e3, -56.0, 22.0)
+        return BurstReport(burst, analysis=analysis, classification=result)
+
+    def test_long_bits_are_cut_with_an_ellipsis(self):
+        """PLOTS-E2E-17: 'FSK PCM {136}c60bc73fd91824c57fe5df4f': cut at 24
+        hex digits without saying so, the tooltip as cut."""
+        bits = "1100" * 34  # {136}cccc... (34 hex digits)
+        self.panel.add_burst(self.report(bits, "fsk", "FSK PCM", 1))
+        item = self.panel.bursts_table.item(0, 4)
+        self.assertEqual(item.text(), "FSK PCM {136}" + "c" * 24 + "…")
+        self.assertEqual(item.toolTip(), "FSK PCM {136}" + "c" * 34)
+        short = "1010" * 6
+        self.panel.add_burst(self.report(short))
+        self.assertEqual(
+            self.panel.bursts_table.item(0, 4).text(), "OOK PWM {24}aaaaaa ×8"
+        )
+
+    def test_the_csv_type_is_what_it_is(self):
+        """PLOTS-E2E-17: Type repeated Modulation ('OOK PWM','OOK PWM')."""
+        import csv
+        import shutil
+        import tempfile
+
+        self.panel.add_burst(self.report("1010" * 6))
+        folder = tempfile.mkdtemp(prefix="bursts-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        path = os.path.join(folder, "b.csv")
+        self.panel.export_bursts(path)
+        with open(path, encoding="utf-8") as handle:
+            rows = list(csv.DictReader(handle))
+        self.assertEqual(rows[0]["Type"], "OOK data bursts")
+        self.assertEqual(rows[0]["Modulation"], "OOK PWM")
+
+    def test_double_click_tunes_to_a_round_frequency(self):
+        """PLOTS-E2E-17: the 434.1 MHz FSK burst tuned to 434.100256870 MHz
+        (now 434.1003, to 100 Hz as the Signals list does)."""
+        self.panel.add_burst(self.report("1010" * 6, "fsk", "FSK PCM"))
+        tuned = []
+        self.panel.tune_requested.connect(tuned.append)
+        self.panel.bursts_table.selectRow(0)
+        self.panel._tune_selected_burst()
+        self.assertEqual(tuned, [434.1003e6])
+
+    def test_one_evm(self):
+        """PLOTS-E2E-18: the plot said 'EVM 43.6 %' and the line under it
+        44.2 %: one was measured when painting, the other read the paint
+        before. Both are measured once per set of samples."""
+        from sdr_module.ui.constellation import ModulationOverlay
+
+        scope = self.panel.scope
+        scope.set_view("constellation")
+        scope.set_overlay(ModulationOverlay.QPSK)
+        rng = np.random.default_rng(1)
+        symbols = np.exp(1j * (np.pi / 4 + np.pi / 2 * rng.integers(0, 4, 4096)))
+        noise = 0.3 * (rng.standard_normal(4096) + 1j * rng.standard_normal(4096))
+        scope.set_samples((symbols + noise).astype(np.complex64), 48e3)
+        evm = scope.evm_percent
+        self.assertIsNotNone(evm)
+        scope.resize(300, 200)
+        scope.grab()  # (painting doesn't measure it again)
+        self.assertEqual(scope.evm_percent, evm)
+        scope.set_overlay(ModulationOverlay.NONE)
+        self.assertIsNone(scope.evm_percent)

@@ -163,14 +163,19 @@ def tune_frequency(signal: Any) -> float:
     return round(float(signal.frequency_hz) / step) * step
 
 
-def listening_text(mode: str, deviation: str, filter_hz: float) -> str:
-    """``"FM · 5 kHz deviation · 12.5 kHz filter"``."""
+def listening_text(
+    mode: str, deviation: str, filter_hz: float, filter_text: str = ""
+) -> str:
+    """``"FM · 5 kHz deviation · 12.5 kHz filter"``; ``filter_text``: the
+    Bandwidth choice to name instead of ``filter_hz`` ("100 kHz")."""
     if not mode:
         return ""
     parts = [mode]
     if deviation:
         parts.append(f"{deviation} deviation")
-    if filter_hz > 0:
+    if filter_text:
+        parts.append(f"{filter_text} filter")
+    elif filter_hz > 0:
         parts.append(f"{format_width(filter_hz)} filter")
     return " · ".join(parts)
 
@@ -201,6 +206,10 @@ if HAS_PYQT6:
             self._rate = 0.0
             self._constellation = ConstellationDisplay(max_points=2048)
             self.evm_percent: Optional[float] = None
+            # The constellation's points of the samples held (measured once
+            # per set of samples, with the EVM: the plot and the line under
+            # it say the same).
+            self._points: Optional[Tuple[np.ndarray, np.ndarray]] = None
             self._font = QFont(self.font())
             self._font.setPointSizeF(max(7.0, self._font.pointSizeF() * 0.85))
             # A bound method: disconnected when the widget is deleted (a
@@ -217,10 +226,12 @@ if HAS_PYQT6:
 
         def set_view(self, view: str) -> None:
             self.view = view
+            self._measure()
             self.update()
 
         def set_overlay(self, overlay: Any) -> None:
             self._constellation.overlay = overlay
+            self._measure()
             self.update()
 
         @property
@@ -237,7 +248,7 @@ if HAS_PYQT6:
 
         def clear(self) -> None:
             self._samples = np.zeros(0, dtype=np.complex64)
-            self.evm_percent = None
+            self._measure()
             self.update()
 
         def wanted(self) -> int:
@@ -262,7 +273,22 @@ if HAS_PYQT6:
             else:
                 joined = np.concatenate((self._samples, x.astype(np.complex64)))
                 self._samples = joined[-want:]
+            self._measure()
             self.update()
+
+        def _measure(self) -> None:
+            """The constellation of the samples held and its EVM against the
+            overlay (None without one, or in the time views)."""
+            self._points = None
+            self.evm_percent = None
+            if self.view != "constellation" or not len(self._samples):
+                return
+            x = _derotate(self._samples, self._constellation.overlay)
+            result = self._constellation.process(x)
+            self._constellation.clear()
+            self._points = (result.i_data, result.q_data)
+            if self._constellation.overlay != ModulationOverlay.NONE:
+                self.evm_percent = result.stats.evm_percent
 
         def samples(self) -> np.ndarray:
             return self._samples
@@ -271,7 +297,7 @@ if HAS_PYQT6:
 
         def _plot_rect(self) -> QRectF:
             fm = QFontMetrics(self._font)
-            left = fm.horizontalAdvance("-0.00") + 8
+            left = max(fm.horizontalAdvance(t) for t in ("-0.00", "-8.8m")) + 8
             return QRectF(
                 left, 6, self.width() - left - 8, self.height() - fm.height() - 14
             )
@@ -374,16 +400,10 @@ if HAS_PYQT6:
             box = QRectF(
                 plot.center().x() - side / 2, plot.center().y() - side / 2, side, side
             )
-            x = _derotate(self._samples, self._constellation.overlay)
-            result = self._constellation.process(x)
-            self._constellation.clear()
+            if self._points is None:
+                self._measure()
             ref = 1.6
-            pts = result.i_data, result.q_data
-            self.evm_percent = (
-                result.stats.evm_percent
-                if self._constellation.overlay != ModulationOverlay.NONE
-                else None
-            )
+            pts = self._points or (np.zeros(0), np.zeros(0))
             grid = QPen(p.qcolor("plot_grid"), 1)
             painter.setPen(grid)
             painter.drawRect(box)
@@ -486,12 +506,22 @@ if HAS_PYQT6:
                 super().setText(shown)
 
     def _short_number(value: float) -> str:
+        """An axis label in at most five characters: ``"150"``, ``"3.1"``,
+        ``"0.15"``, small levels with an SI prefix (``"2.5m"``, ``"460µ"``,
+        the scope's magnitudes) rather than all reading ``"0.00"``."""
         a = abs(value)
         if a >= 100:
             return f"{value:.0f}"
         if a >= 1:
             return f"{value:.1f}"
-        return f"{value:.2f}"
+        if a >= 0.1 or a == 0:
+            return f"{value:.2f}"
+        for scale, prefix in ((1e-3, "m"), (1e-6, "µ"), (1e-9, "n")):
+            if a >= scale or prefix == "n":
+                scaled = value / scale
+                digits = 0 if abs(scaled) >= 10 else 1
+                return f"{scaled:.{digits}f}{prefix}"
+        return f"{value:.2f}"  # pragma: no cover - (the loop always returns)
 
     def _decimate(curve: np.ndarray, cols: int) -> Tuple[np.ndarray, np.ndarray]:
         """x (0-1) and y of a curve with at most ``2 * cols`` points: the
@@ -755,7 +785,18 @@ if HAS_PYQT6:
             if ident.confidence < 0.3:
                 tone = "warning"
             set_tone(self.confidence_label, tone)
-            listen = listening_text(ident.mode, ident.fm_deviation, ident.filter_hz)
+            # The Bandwidth choice Apply Mode sets, not the width measured
+            # (that is among the details).
+            from .control_panel import bandwidth_options, closest_bandwidth
+
+            choice = (
+                closest_bandwidth(bandwidth_options(ident.mode), ident.filter_hz)
+                if ident.mode and ident.filter_hz > 0
+                else ""
+            )
+            listen = listening_text(
+                ident.mode, ident.fm_deviation, ident.filter_hz, choice
+            )
             snr = ident.result.snr_db
             lines = []
             if listen:
@@ -1261,7 +1302,7 @@ if HAS_PYQT6:
             table = self.bursts_table
             paused = _pause_fit(table)
             table.insertRow(0)
-            data = ""
+            data = full = ""
             analysis = report.analysis
             if analysis is not None:
                 rows = analysis.distinct_rows()
@@ -1269,15 +1310,21 @@ if HAS_PYQT6:
                     from ..dsp.bursts import bits_to_hex
 
                     bits, count = rows[0]
-                    data = f"{{{len(bits)}}}{bits_to_hex(bits)[:24]}"
+                    hex_text = bits_to_hex(bits)
+                    full = f"{{{len(bits)}}}{hex_text}"
+                    # (A long row is cut, and says so; the tooltip has it.)
+                    if len(hex_text) > 24:
+                        hex_text = hex_text[:24] + "…"
+                    data = f"{{{len(bits)}}}{hex_text}"
                     if count > 1:
                         data += f" ×{count}"
+                        full += f" ×{count}"
             kind = burst_kind_text(report)
             what = f"{kind} {data}".strip()
             freq_item = _NumericItem(f"{burst.center_hz / 1e6:.3f}", burst.center_hz)
             freq_item.setToolTip(format_mhz(burst.center_hz))
             what_item = QTableWidgetItem(what)
-            what_item.setToolTip(what)
+            what_item.setToolTip(f"{kind} {full}".strip())
             items = [
                 QTableWidgetItem(stamp),
                 freq_item,
@@ -1330,7 +1377,13 @@ if HAS_PYQT6:
         def _tune_selected_burst(self) -> None:
             report = self.selected_burst()
             if report is not None:
-                self.tune_requested.emit(float(report.burst.center_hz))
+                # To 100 Hz (10 Hz for a narrow one), as the Signals list.
+                burst = report.burst
+                self.tune_requested.emit(
+                    tune_frequency(
+                        _Tunable(float(burst.center_hz), float(burst.width_hz))
+                    )
+                )
 
         def export_bursts(self, path: str) -> int:
             """Write the list to ``path`` as CSV; returns the rows written."""
@@ -1365,7 +1418,7 @@ if HAS_PYQT6:
                             f"{b.duration_s * 1e3:.0f}",
                             f"{b.peak_dbfs:.1f}",
                             f"{b.snr_db:.1f}",
-                            burst_kind_text(report),
+                            burst_type_text(report),
                             a.modulation if a is not None else "",
                             len(bits) if bits else "",
                             bits_to_hex(bits) if bits else "",
@@ -1393,6 +1446,25 @@ def burst_kind_text(report: Any) -> str:
     if analysis is not None and analysis.pulses_us:
         return analysis.modulation
     return "Burst"
+
+
+def burst_type_text(report: Any) -> str:
+    """What a burst is for the CSV's Type column (its Modulation column has
+    the pulse analysis's): the classifier's label ("OOK data bursts",
+    "Narrow FM (voice or data)"), else :func:`burst_kind_text`."""
+    result = getattr(report, "classification", None)
+    kind = str(getattr(result, "kind", "") or "")
+    if result is not None and kind not in ("", "unknown", "noise"):
+        return str(getattr(result, "label", kind))
+    return burst_kind_text(report)
+
+
+class _Tunable:
+    """A frequency and width, as :func:`tune_frequency` takes them."""
+
+    def __init__(self, frequency_hz: float, width_hz: float):
+        self.frequency_hz = frequency_hz
+        self.width_hz = width_hz
 
 
 def pulse_lines(analysis: Any) -> str:

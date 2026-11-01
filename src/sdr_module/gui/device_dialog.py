@@ -1413,6 +1413,20 @@ def _fm_phase(deviation_hz: np.ndarray, loop_rate: float) -> np.ndarray:
     return phase - np.mean(phase)
 
 
+def _half_sample_ahead(values: np.ndarray) -> np.ndarray:
+    """One loop of ``values`` half a loop sample early (exactly: by FFT,
+    around the loop). The program's FM phase (:func:`_fm_phase`, a running
+    sum) holds each frequency sample over the interval before it once read
+    back by linear interpolation: half a sample early. An amplitude loop
+    read the same way (the stereo difference signal) is on time, so it is
+    moved as far, or left and right blur into each other (14 degrees apart
+    at 3.7 kHz: the right channel kept a tone 18 dB down instead of none)."""
+    values = np.asarray(values, dtype=float)
+    spectrum = np.fft.rfft(values)
+    spectrum *= np.exp(1j * np.pi * np.fft.rfftfreq(len(values)))
+    return np.fft.irfft(spectrum, len(values))
+
+
 def _midi_hz(note: int) -> float:
     return 440.0 * 2.0 ** ((note - 69) / 12.0)
 
@@ -1534,15 +1548,26 @@ def _build_loops(kind: str, variant: Any, rate: float):
             mono = (left + right) * (_PROGRAM_SHARE / 2)
             diff = (left - right) * (_PROGRAM_SHARE / 2)
         else:
-            # Three tones for the program and a 2.5 kHz L-R tone.
+            # Three tones for the program; the 3.7 kHz one is on the left
+            # only (L-R carries it as L+R does: twice it on the left, none
+            # on the right), so stereo is heard (and tested) here too.
             factor, loop_rate, t = _loop_timebase(rate, _TONE_LOOP_S)
             twist = variant * 2.1
             mono = 0.30 * _swept_tone(1.5e3, 400.0, t, twist)
-            mono += 0.18 * _tone(3.7e3, t, twist)
+            left_only = 0.18 * _tone(3.7e3, t, twist)
+            mono += left_only
             mono += 0.12 * _swept_tone(6.9e3, -1e3, t, twist)
-            diff = 0.16 * _tone(2.5e3, t)
-        # L-R rides on 2 x pilot: its phase is S(t) sin(2 theta) * dev / 38k.
-        diff *= _WFM_DEVIATION_HZ / (2 * _PILOT_HZ)
+            diff = left_only
+        # L-R rides on the pilot's second harmonic (K-S1). Its phase term is
+        # S(t) cos(2 theta) * dev / 38k (theta: the pilot's phase term's
+        # angle, see _stereo_terms), so its frequency is -S(t) sin(2 theta)
+        # * dev (plus a quadrature remainder from S's own slope, which a
+        # receiver's synchronous detector ignores): with the pilot's
+        # frequency cos(theta) = sin(phi), phi = theta + 90 degrees, that is
+        # S(t) sin(2 phi), as the standard sends it (both crossing zero
+        # upward together). Sent as sin(2 theta), L-R was in quadrature with
+        # that carrier and a stereo decoder heard none of it.
+        diff = _half_sample_ahead(diff) * (_WFM_DEVIATION_HZ / (2 * _PILOT_HZ))
         return (
             _Loop(_fm_phase(_WFM_DEVIATION_HZ * mono.astype(float), loop_rate), factor),
             _Loop(diff, factor),
@@ -2325,8 +2350,9 @@ class MockDevice:
     def _add_signal(self, out, kind, offset, amp, seed, rate, pos, stereo) -> None:
         """Add one signal to ``out`` (starting at stream position ``pos``).
 
-        ``stereo`` gives the broadcast FM pilot's phase term, sin(2 theta)
-        and sin(3 theta) (theta: the pilot's phase) for the same samples.
+        ``stereo`` gives the broadcast FM pilot's phase term, cos(2 theta)
+        (the L-R subcarrier's) and sin(3 theta) (RDS's), theta the pilot's
+        phase, for the same samples (see _stereo_terms).
         """
         n = len(out)
         if kind == "sstv":
@@ -2370,11 +2396,11 @@ class MockDevice:
         phase = self._phase(offset, rate, pos, n)
         if kind == "wfm":
             program, subcarrier = loops
-            pilot, sin2, sin3 = stereo
+            pilot, cos2, sin3 = stereo
             phase += program.read(pos, n)
             phase += pilot
             diff = subcarrier.read(pos, n)
-            diff *= sin2
+            diff *= cos2
             phase += diff
             if seed == _MUSIC_SEED:
                 # (T6) RDS on the 57 kHz subcarrier, locked to the pilot.
@@ -2412,21 +2438,23 @@ class MockDevice:
             done += count
 
     def _stereo_terms(self, rate: float, pos: int, n: int):
-        """Broadcast FM pilot phase, sin(2 theta) and sin(3 theta), theta
+        """Broadcast FM pilot phase, cos(2 theta) and sin(3 theta), theta
         the pilot's phase, shared by every FM station (they are locked to
-        the stream). The RDS station's data rides on sin(3 theta)."""
+        the stream). L-R rides on cos(2 theta) (see _build_loops), the RDS
+        station's data on sin(3 theta)."""
         theta = self._phase(_PILOT_HZ, rate, pos, n)
         sin1 = np.sin(theta)
-        sin2 = np.cos(theta)
-        sin2 *= sin1
-        sin2 *= 2.0
-        # sin(3 theta) = sin(theta) * (3 - 4 sin^2(theta))
-        sin3 = sin1 * sin1
-        sin3 *= -4.0
-        sin3 += 3.0
+        # cos(2 theta) = 1 - 2 sin^2(theta)
+        cos2 = sin1 * sin1
+        cos2 *= -2.0
+        cos2 += 1.0
+        # sin(3 theta) = sin(theta) * (3 - 4 sin^2(theta)) = sin(theta) *
+        # (1 + 2 cos(2 theta))
+        sin3 = cos2 * 2.0
+        sin3 += 1.0
         sin3 *= sin1
         sin1 *= _PILOT_SHARE * _WFM_DEVIATION_HZ / _PILOT_HZ
-        return sin1, sin2, sin3
+        return sin1, cos2, sin3
 
     def _noise(self, n: int, sigma: float) -> np.ndarray:
         """``n`` samples of the noise floor (complex64)."""

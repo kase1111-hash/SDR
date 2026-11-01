@@ -155,6 +155,27 @@ class TestMeasure:
         readings, _noise, _thr = measure_page(_spectrum(x), lo, RATE, chans, 25e3)
         assert readings == []
 
+    def test_a_bump_in_a_stronger_signals_skirt_is_not_another_signal(self):
+        # A broadcast station's skirt has bumps (its modulation's sidebands):
+        # one that is the highest bin of the next channel's slice, a local
+        # peak there, measures as the station itself (its 12 dB region runs
+        # into the station, whose centroid it then takes) and was listed a
+        # second time at the station's frequency (the demo's 100.1 MHz
+        # station once its stereo followed the standard, K-S1).
+        n = FFT_SIZE
+        lo = 100.05e6
+        bin_hz = RATE / n
+        offsets = (np.arange(n) - n // 2) * bin_hz
+        away = np.abs(lo + offsets - 100.1e6)
+        power = np.maximum(-31.0 - np.maximum(away - 50e3, 0.0) * 0.8e-3, -87.0)
+        power = power + np.where(np.arange(n) % 2, 0.2, -0.2)  # (noise)
+        first = n // 2 + int(np.ceil((100.3e6 - lo - 100e3) / bin_hz - 1e-9))
+        power[first] = power[first - 1] + 1.0  # (the bump)
+        readings, _noise, _thr = measure_page(
+            power, lo, RATE, [100.1e6, 100.3e6], 200e3
+        )
+        assert [r.frequency_hz for r in readings] == [100.1e6]
+
     def test_threshold_and_minimum_width(self):
         # The threshold is a peak level per bin, as the spectrum shows it: a
         # wide signal spreads its power (-30 dBFS peaks near -42 dBFS/bin).

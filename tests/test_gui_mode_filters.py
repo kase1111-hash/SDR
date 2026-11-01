@@ -288,16 +288,24 @@ class TestNoClickOnChanges(_WindowTestCase):
         self.win._reset_demodulator()
         written = []
         self.win._audio.write = lambda a: written.append(np.array(a, copy=True))
+
+        def sides(blocks):
+            # (K-S1: broadcast FM plays in stereo: each side must join on
+            # its own; a mono block plays on both.)
+            return np.concatenate(
+                [b if b.ndim == 2 else np.stack((b, b), axis=1) for b in blocks]
+            )
+
         for _ in range(6):
             self.win._process_block(device.read_samples(FRAME))
-        before = np.concatenate(written)
+        before = sides(written)
         change(panel)
         written.clear()
         self.win._process_block(device.read_samples(FRAME))
-        after = np.concatenate(written)
-        steps = np.abs(np.diff(before[2400:]))
-        seam = np.abs(np.diff(np.concatenate((before[-5:], after[:300]))))
-        return float(before[-1]), float(after[0]), float(seam.max()), steps
+        after = sides(written)
+        steps = np.abs(np.diff(before[2400:], axis=0))
+        seam = np.abs(np.diff(np.concatenate((before[-5:], after[:300])), axis=0))
+        return before[-1], after[0], float(seam.max()), steps
 
     def test_new_chains_join_the_old_audio(self):
         cases = (
@@ -341,5 +349,6 @@ class TestNoClickOnChanges(_WindowTestCase):
             last, first, seam, steps = self._seam(
                 freq, mode, deviation, bandwidth, change
             )
-            self.assertAlmostEqual(first, last, delta=0.02, msg=mode)  # was 0.506 -> 0
+            # (Each side: was 0.506 -> 0.)
+            self.assertLess(float(np.max(np.abs(first - last))), 0.02, msg=mode)
             self.assertLessEqual(seam, max(1.5 * np.percentile(steps, 99), 0.05), mode)

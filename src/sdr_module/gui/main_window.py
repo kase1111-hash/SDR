@@ -11390,6 +11390,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "info",
                 6000,
             )
+        elif self._audio_enabled and self._audio_state() == "second":
+            # (On, as the button says "Muted (2nd RX)": not a bare "Audio on".)
+            self._show_status_message(
+                "Audio on, but Listen in the Second Receiver window plays only "
+                "that receiver: choose Main window or Both there to hear this one.",
+                "info",
+                6000,
+            )
         else:
             self._show_status_message(
                 "Audio on" if self._audio_enabled else "Muted (Ctrl+M unmutes)",

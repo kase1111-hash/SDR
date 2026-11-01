@@ -13,6 +13,9 @@ import os
 import shutil
 import tempfile
 import unittest
+from unittest import mock
+
+import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -206,6 +209,73 @@ class TestRightColumnOnWideWindows(_WindowTestCase):
         self.settle(5)
         plots, right = self.at(1920, 1080)
         self.assertAlmostEqual(right / (plots + right), 0.3, delta=0.01)
+
+
+# --------------------------------------------------------------------------- #
+# The Audio button's "Muted (2nd RX)" (F-window) and unmuting: "Audio on"
+# while nothing played here.
+# --------------------------------------------------------------------------- #
+class TestUnmuteWhileTheSecondReceiverListens(_SecondCase):
+    demo = True
+
+    def test_unmuting_says_listen_still_plays_the_other_receiver(self):
+        win, rx = self.win, self.rx
+        win._audio = _FakeSink()
+        win._audio.open = True
+        win._audio_enabled = True
+        win._audio_problem = None
+        output = mock.patch.object(type(win), "_audio_output_problem", lambda _s: None)
+        output.start()  # (as with speakers plugged in)
+        self.addCleanup(output.stop)
+        rx.start()
+        rx.set_listen("second")
+        win._set_audio_enabled(False)
+        self.assertEqual(win._audio_state(), "muted")
+        win._set_audio_enabled(True)
+        self.assertEqual(win._audio_state(), "second")
+        message = win._message_label.text()
+        self.assertNotEqual(message, "Audio on")
+        self.assertIn("Listen in the Second Receiver window", message)
+        rx.set_listen("both")
+        win._set_audio_enabled(False)
+        win._set_audio_enabled(True)
+        self.assertEqual(win._message_label.text(), "Audio on")
+
+
+# --------------------------------------------------------------------------- #
+# Leftover 9 (only problems in Tools > Error History) and Radio > Track
+# Signal: a mode it can't follow is a notice, not a problem.
+# --------------------------------------------------------------------------- #
+class TestTrackSignalNoticesStayOutOfTheErrorHistory(_WindowTestCase):
+    demo = True
+
+    def test_a_mode_it_cant_follow(self):
+        win = self.win
+        panel = win._control_panel
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")  # (broadcast FM)
+        self.settle()
+        self.assertGreaterEqual(panel.get_fm_deviation(), 75e3)
+        tools = win._signal_tools
+        with self.assertNoLogs("sdr_module.gui.main_window", level="WARNING"):
+            self.assertFalse(tools.set_tracking(True))
+        self.assertIn("Track Signal follows", win._message_label.text())
+        self.assertEqual(win._message_label.property("tone"), "warning")
+
+    def test_switching_to_such_a_mode_while_tracking(self):
+        win = self.win
+        panel = win._control_panel
+        self.assertTrue(win.set_frequency(145.29e6))
+        win._set_demod_mode("FM", "5 kHz", "12.5 kHz")
+        self.settle()
+        tools = win._signal_tools
+        self.assertTrue(tools.set_tracking(True))
+        panel._demod_combo.setCurrentText("USB")
+        self.settle()
+        with self.assertNoLogs("sdr_module.gui.main_window", level="WARNING"):
+            tools._afc_frame(np.zeros(4096, np.complex64), 1 / 30, None)
+        self.assertFalse(tools.tracking)
+        self.assertIn("Track Signal turned off", win._message_label.text())
+        self.assertEqual(win._message_label.property("tone"), "warning")
 
 
 if __name__ == "__main__":

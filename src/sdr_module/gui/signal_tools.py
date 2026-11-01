@@ -936,7 +936,9 @@ if HAS_PYQT6:
                         action.blockSignals(True)
                         action.setChecked(False)
                         action.blockSignals(False)
-                    win._show_status_message(problem, "warning", 6000)
+                    # (A mode it can't follow: a notice, not a problem for
+                    # Tools > Error History.)
+                    win._show_status_message(problem, "warning", 6000, log=False)
                     self._tracking = False
                     self._set_badge(None)
                     return False
@@ -962,16 +964,17 @@ if HAS_PYQT6:
         def tracking(self) -> bool:
             return self._tracking
 
-        def _stop_tracking(self, message: str) -> None:
+        def _stop_tracking(self, message: str, log: bool = True) -> None:
             """Track Signal turns itself off, its menu item and status-bar
-            badge too, saying why."""
+            badge too, saying why (``log=False``: a notice, not a problem
+            for Tools > Error History)."""
             self.set_tracking(False)
             action = getattr(self._win, "_track_action", None)
             if action is not None and action.isChecked():
                 action.blockSignals(True)
                 action.setChecked(False)
                 action.blockSignals(False)
-            self._win._show_status_message(message, "warning", 6000)
+            self._win._show_status_message(message, "warning", 6000, log=log)
 
         def _set_paused_badge(self) -> None:
             self._set_badge(
@@ -996,7 +999,7 @@ if HAS_PYQT6:
             )
             problem = self._tracking_problem()
             if problem is not None:
-                self._stop_tracking("Track Signal turned off: " + problem)
+                self._stop_tracking("Track Signal turned off: " + problem, log=False)
                 return
             if self._tracker is None or key != self._tracker_key:
                 self._tracker = SignalTracker(

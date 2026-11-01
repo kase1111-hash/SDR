@@ -197,6 +197,7 @@ class TestNothingChangesUnderTheWorker(_ThreadCase):
         gate, running = self.hold_next_job(rx._dsp, "process")
         resets = self.overlaps(rx._dsp, "reset", running)
         self.run_frames(1)
+        self.assertTrue(running.wait(HOLD_S))  # (the worker has the frame)
         threading.Timer(0.05, gate.set).start()
         rx.stop()
         self.assertTrue(resets)
@@ -207,6 +208,7 @@ class TestNothingChangesUnderTheWorker(_ThreadCase):
         gate, running = self.hold_next_job(rx._frame_spectrum, "process")
         configures = self.overlaps(rx._frame_spectrum, "configure", running)
         self.run_frames(1)
+        self.assertTrue(running.wait(HOLD_S))  # (the worker has the frame)
         threading.Timer(0.05, gate.set).start()
         rx._apply_plot_resolution(8192, "hann")
         self.assertEqual(configures, [False])
@@ -219,6 +221,7 @@ class TestNothingChangesUnderTheWorker(_ThreadCase):
         gate, running = self.hold_next_job(rx._dsp, "process")
         resets = self.overlaps(rx._dsp, "reset", running)
         self.run_frames(1)
+        self.assertTrue(running.wait(HOLD_S))  # (the worker has the frame)
         threading.Timer(0.05, gate.set).start()
         index = rx._rate_combo.findText("3.2 MS/s")
         self.assertGreaterEqual(index, 0)
@@ -227,6 +230,29 @@ class TestNothingChangesUnderTheWorker(_ThreadCase):
         self.assertEqual(rx._rate(), 3.2e6)
         self.assertTrue(resets)
         self.assertNotIn(True, resets)
+
+    def test_closing_the_audio_waits_for_the_frame_in_flight(self):
+        # Listen moves to the main window: the frame on the worker plays
+        # first, then the audio fades out (its fade isn't made while the
+        # worker still adds to the same audio).
+        rx = self.rx
+        sink = self.sink()
+        rx.set_listen("second")
+        rx.tune(145.29e6, recenter=True)  # (the demo repeater: audio)
+        rx._sync_audio_output()
+        self.assertTrue(sink.open)
+        self.run_frames(3)
+        gate, running = self.hold_next_job(rx._dsp, "process")
+        releases = self.overlaps(rx._dsp, "release", running)
+        self.run_frames(1)
+        self.assertTrue(running.wait(HOLD_S))  # (the worker has the frame)
+        threading.Timer(0.05, gate.set).start()
+        rx.set_listen("main")
+        self.assertFalse(sink.open)
+        self.assertTrue(releases)
+        self.assertNotIn(True, releases)
+        self.assertFalse(rx._pipeline.pending)
+        rx.stop()
 
     def test_a_retune_paints_the_frame_in_flight_on_its_own_span(self):
         rx = self.rx

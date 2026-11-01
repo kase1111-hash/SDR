@@ -472,6 +472,25 @@ class TestSecondReceiverRecordsThroughTheWriter(_FilesCase):
         self.assertIn("No space left on device", text)
         self.assertFalse(rx._record_button.isChecked())
 
+    def test_a_write_failing_after_the_last_frame_is_still_reported(self):
+        # No frame records after the write that failed (the device delivers
+        # nothing for now): the status timer stops the recording, saying why.
+        rx = self.rx
+        self.assertTrue(rx._set_recording(True))
+        self.fail = OSError(errno.ENOSPC, "No space left on device")
+        self.frames(1)
+        rx._record_writer.flush()
+        self.assertIsNotNone(rx._recorder)  # (no frame since)
+        rx._update_status()  # (the status timer)
+        self.assertIsNone(rx._recorder)
+        text = rx.message()
+        self.assertTrue(
+            text.startswith("Recording stopped: the file can't be written ("), text
+        )
+        self.assertIn("No space left on device", text)
+        self.assertFalse(rx._record_button.isChecked())
+        self.assertEqual(_writer_threads(), [])
+
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestTheTakesStore(unittest.TestCase):

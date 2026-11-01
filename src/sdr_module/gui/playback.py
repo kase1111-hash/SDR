@@ -874,9 +874,11 @@ if HAS_PYQT6:
             self._speed_mark = None
             self._slow_said = False
             if speed != 1.0:
-                win._show_status_message(
-                    f"Playing at {speed:g}x: audio plays at 1x only.", "info", 4000
-                )
+                # The paused audio's own hint, said here (with the audio off
+                # too) and so not again when the audio pauses: one message.
+                win._realtime_hint_shown = True
+                win._realtime_hint_text = win._realtime_hint()
+                win._show_status_message(win._realtime_hint_text, "info", 6000)
             elif win._message_label.text().startswith("Playing at "):
                 # (The note on another speed no longer applies. Any other
                 # message stays: a file opened after one played at 2x goes

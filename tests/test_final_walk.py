@@ -520,5 +520,64 @@ class TestOpeningARecordingInAnotherBandNamesIt(_files_case()):
         )
 
 
+# --------------------------------------------------------------------------- #
+# W-09: another playback speed is said once
+# --------------------------------------------------------------------------- #
+
+
+def _playback_case():
+    from tests.test_gui_playback import _PlaybackCase
+
+    return _PlaybackCase
+
+
+class TestAnotherPlaybackSpeedIsSaidOnce(_playback_case()):
+    """W-09: choosing 4x said "Playing at 4x: audio plays at 1x only." and,
+    10 ms later, the paused audio's own "Playing at 4x: audio plays at 1x
+    only (the spectrum, decoders and recordings keep working).": two
+    entries in the status history (a click on the message area) for one
+    choice. One message says it."""
+
+    SAID = (
+        "Playing at {}x: audio plays at 1x only (the spectrum, decoders and "
+        "recordings keep working)."
+    )
+
+    def speed_messages(self):
+        return [
+            entry.text
+            for entry in self.win._status_history.entries()
+            if entry.text.startswith("Playing at ")
+        ]
+
+    def run_frames(self, count=20):
+        for _ in range(count):
+            self.win._update_display()
+            self.settle()
+
+    def test_with_the_speaker_on(self):
+        win = self.win
+        self.play()
+        win._audio_enabled = True  # (no sound card here switched it off)
+        win._control_panel.set_squelch_db(-120)
+        win._playback_bar.set_speed(4.0)
+        self.run_frames()
+        self.assertFalse(win._realtime())  # (the audio is paused)
+        self.assertEqual(self.message(), self.SAID.format(4))
+        self.assertEqual(self.speed_messages(), [self.SAID.format(4)])
+        # Back at 1x, as before.
+        win._playback_bar.set_speed(1.0)
+        self.run_frames()
+        self.assertEqual(self.message(), "Playing at 1x.")
+
+    def test_with_the_speaker_off(self):
+        """Said all the same (the audio, off, says nothing)."""
+        win = self.win
+        self.play()
+        win._playback_bar.set_speed(2.0)
+        self.run_frames()
+        self.assertEqual(self.speed_messages(), [self.SAID.format(2)])
+
+
 if __name__ == "__main__":
     unittest.main()

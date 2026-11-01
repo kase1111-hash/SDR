@@ -2752,6 +2752,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder_protocol: Any = None
         self._decoder_rate = 0.0  # sample rate the live decoder was built for
         self._decoder_recording = False  # ... and whether a recording played
+        # The decoder and rate a problem was logged for, and for which of a
+        # recording (True) or the device (False): the same again isn't
+        # logged again (N-05).
+        self._decoder_logged: Tuple[Any, set] = (None, set())
         # Messages decoded while the Decoder tab was out of sight (its title
         # counts them), the background RDS of the tuned broadcast station
         # (Radio > RDS Station Names) and what its badge shows.
@@ -5342,6 +5346,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # "Off" (or unknown): no live decoder.
             self._decoder = None
             self._decoder_protocol = None
+            self._decoder_logged = (None, set())  # (one chosen again: said)
             self._decoder_panel.set_decoder_status(None)
             self._update_decoder_chip()
             return
@@ -5355,6 +5360,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # can't be changed in Receiver > Sample rate.)
         playback = self._own("_playback")
         self._decoder_recording = bool(playback is not None and playback.active)
+        # Its problem is logged once per decoder and rate, for a recording
+        # and for the device: a recording starting or stopping at the same
+        # rate rebuilds it (to word it for that), and the same situation
+        # again added another entry each time (N-05).
+        if self._decoder_logged[0] != (text, rate):
+            self._decoder_logged = ((text, rate), set())
+        logged = self._decoder_logged[1]
+        first = self._decoder_recording not in logged
         if live_decoder_class(text) is None:
             # Listed, but without a live decoder (yet).
             self._decoder = None
@@ -5380,7 +5393,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 LiveDecoderStatus(name=text, problem=problem)
             )
             self._update_decoder_chip()  # (no decoder runs: no chip)
-            self._show_status_error(problem)  # (also logged)
+            self._show_status_error(problem, log=first)  # (also logged)
+            logged.add(self._decoder_recording)
             return
         self._decoder_error_logged = False
         status = self._decoder.status
@@ -5390,7 +5404,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # E.g. ADS-B at 1.8 MS/s: say so instead of "listening" forever.
             # (Paused, as tuning away from the preset that turned it on
             # leaves it, nothing decodes: the Decoder panel's line says it.)
-            logger.warning("%s decoder: %s", text, status.problem)
+            if first:
+                logger.warning("%s decoder: %s", text, status.problem)
+                logged.add(self._decoder_recording)
             remedy = f" {status.remedy}" if status.remedy else ""
             self._show_status_message(  # (logged just above: listed once)
                 f"{status.problem}.{remedy}", "warning", 10000, log=False

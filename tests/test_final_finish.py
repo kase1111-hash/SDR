@@ -308,6 +308,93 @@ class TestBurstsLoggedWhileARecordingPlaysSlowly(_SlowPlaybackCase):
         self.assertIn("can't keep up", win._signal_panel.bursts_empty.text())
 
 
+def _files_case():
+    from tests.test_gui_recording_files import _FilesCase
+
+    return _FilesCase
+
+
+class TestADecoderThatCantDecodeIsLoggedOncePerSituation(_files_case()):
+    """N-05: since P-05 the decoder is rebuilt when a recording starts or
+    stops playing at the same rate (to word its problem for the recording
+    or the device). Each rebuild logged another "ADS-B decoder: ..."
+    warning to Tools > Error History: every playback start and stop added
+    one. One is logged per real change (the decoder, the rate, a recording
+    or the device); the same situation again adds none."""
+
+    def open_file(self):
+        from tests.test_final_polish import _save_sigmf
+
+        path = _save_sigmf(self.path("same.sigmf-data"), 1090e6, 1e6)
+        with self.open_dialog(path):
+            self.assertTrue(self.win._open_recording())
+        self.settle(2)
+
+    def logged(self, action):
+        """The "ADS-B decoder: ..." warnings ``action`` logs."""
+        import logging
+
+        records = []
+        handler = logging.Handler(logging.WARNING)
+        handler.emit = records.append
+        log = logging.getLogger("sdr_module")
+        log.addHandler(handler)
+        try:
+            action()
+        finally:
+            log.removeHandler(handler)
+        return [
+            r.getMessage()
+            for r in records
+            if r.getMessage().startswith("ADS-B decoder:")
+        ]
+
+    def close_file(self):
+        self.win._playback.close()
+        self.settle(2)
+
+    def test_playback_started_and_stopped_again(self):
+        win = self.win
+        self.assertTrue(win.set_sample_rate(1e6))
+
+        def choose():
+            win._decoder_panel._proto_combo.setCurrentText("ADS-B")  # by hand
+            self.settle(2)
+
+        device = self.logged(choose)
+        self.assertEqual(len(device), 1)
+        self.assertIn("the device runs at 1 MS/s", device[0])
+        recording = self.logged(self.open_file)  # (a real change: logged)
+        self.assertEqual(len(recording), 1)
+        self.assertIn("this recording is 1 MS/s", recording[0])
+        for _ in range(2):  # (the same two situations again: nothing new)
+            self.assertEqual(self.logged(self.close_file), [])
+            self.assertIn("the device runs at 1 MS/s", win._decoder_chip.toolTip())
+            self.assertEqual(self.logged(self.open_file), [])
+            self.assertIn("this recording is 1 MS/s", win._decoder_chip.toolTip())
+        self.close_file()
+
+    def test_a_real_change_is_logged_again(self):
+        win = self.win
+        self.assertTrue(win.set_sample_rate(1e6))
+        panel = win._decoder_panel
+
+        def choose(name):
+            def action():
+                panel._proto_combo.setCurrentText(name)
+                self.settle(2)
+
+            return action
+
+        self.assertEqual(len(self.logged(choose("ADS-B"))), 1)
+        # Another rate and back: the rate changed, said again.
+        self.assertEqual(self.logged(lambda: win.set_sample_rate(2.4e6)), [])
+        self.assertEqual(len(self.logged(lambda: win.set_sample_rate(1e6))), 1)
+        # Another decoder and back: so is the decoder.
+        self.logged(choose("POCSAG"))
+        self.assertEqual(len(self.logged(choose("ADS-B"))), 1)
+
+
 def _window_case():
     from tests.test_gui_chrome import _WindowTestCase
 

@@ -1273,6 +1273,8 @@ if HAS_PYQT6:
             self.burst_details.setVisible(False)
             layout.addWidget(self.bursts_split, 1)
             hint = "Select a burst to see its pulses; double-click one to tune to it."
+            self._bursts_hint_text = hint
+            self._bursts_note = ""  # (why bursts aren't logged now)
             self.bursts_hint = _ElidedLabel(hint, mode=Qt.TextElideMode.ElideRight)
             self.bursts_hint.setToolTip(hint)
             set_role(self.bursts_hint, "hint")
@@ -1289,6 +1291,26 @@ if HAS_PYQT6:
                 return
             self.bursts_empty.set_text(text)
             self.bursts_empty.set_visible(True)
+
+        def set_bursts_paused(self, text: str) -> None:
+            """Bursts are not logged for now (``text`` says why), or are
+            again (""): said over the empty list, and on the line under a
+            list that has some."""
+            self._bursts_note = text
+            self.set_bursts_empty(text or BURSTS_EMPTY)
+            self._sync_bursts_hint()
+
+        def _sync_bursts_hint(self) -> None:
+            """The line under the list (while it has bursts and none is
+            selected): why bursts aren't logged now, else how to use it."""
+            note = " ".join(self._bursts_note.split())
+            text = note or self._bursts_hint_text
+            self.bursts_hint.setText(text)
+            self.bursts_hint.setToolTip(text)
+            set_tone(self.bursts_hint, "warning" if note else None)
+            self.bursts_hint.setVisible(
+                bool(self._bursts) and self.burst_details.isHidden()
+            )
 
         def bursts(self) -> List[Any]:
             return list(self._bursts)
@@ -1339,13 +1361,16 @@ if HAS_PYQT6:
                 table.removeRow(table.rowCount() - 1)
             _resume_fit(table, paused)
             self.bursts_empty.set_visible(False)
-            self.bursts_hint.setVisible(self.burst_details.isHidden())
+            self._sync_bursts_hint()
 
         def clear_bursts(self) -> None:
             self._bursts = []
             self.bursts_table.setRowCount(0)
             self._show_burst_details()
-            self.set_bursts_empty("List cleared\nNew bursts in the span show up here.")
+            self.set_bursts_empty(
+                self._bursts_note
+                or "List cleared\nNew bursts in the span show up here."
+            )
 
         def selected_burst(self) -> Any:
             rows = self.bursts_table.selectionModel().selectedRows()
@@ -1360,7 +1385,7 @@ if HAS_PYQT6:
             if report is None:
                 self.burst_details.setPlainText("")
                 self.burst_details.setVisible(False)
-                self.bursts_hint.setVisible(bool(self._bursts))
+                self._sync_bursts_hint()
                 return
             self.burst_details.setPlainText(burst_details_text(report))
             if self.burst_details.isHidden():

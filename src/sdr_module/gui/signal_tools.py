@@ -95,7 +95,7 @@ def _format_offset(hz: float) -> str:
 
 if HAS_PYQT6:
 
-    from .signal_panel import BURSTS_EMPTY, tune_frequency
+    from .signal_panel import tune_frequency
     from .themes import set_role, set_tone
 
     class SignalTools(QObject):
@@ -747,14 +747,14 @@ if HAS_PYQT6:
                     self._bursts_paused = True
                     self._queue_bursts(self._watcher.flush())
                     self._watcher.reset()
-                    self.panel.set_bursts_empty(
+                    self.panel.set_bursts_paused(
                         "Paused: this computer can't keep up right now\nBursts "
                         "are logged again as soon as it catches up."
                     )
                 return
             if self._bursts_paused:
                 self._bursts_paused = False
-                self.panel.set_bursts_empty(BURSTS_EMPTY)
+                self.panel.set_bursts_paused("")
             reports = self._watcher.feed(samples, float(win._lo_frequency()), rate)
             clock = getattr(win, "_plot_clock", None)  # (this frame's row)
             if isinstance(clock, float):

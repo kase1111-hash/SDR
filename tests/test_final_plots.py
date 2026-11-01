@@ -170,10 +170,6 @@ class TestFindSignalsLayout(_PlotsCase):
         self.assertTrue(self.in_view(panel.live_btn))
 
 
-if __name__ == "__main__":  # pragma: no cover
-    unittest.main()
-
-
 class TestSignalsListCost(_PlotsCase):
     """ROB-05: refreshing the Signals list cost rows squared on the GUI
     thread (each item set made the 'resize to contents' headers measure
@@ -439,6 +435,34 @@ class TestSignalsList(_SignalCase):
         self.assertIn(up, (100.1e6, 101.1e6))  # (101.1 MHz: about 30 dB)
         self.panel.min_snr.setValue(10.0)
         self.assertEqual(self.freqs(), list(self.STATIONS))
+
+
+class TestBurstsPausedWithRows(_SignalCase):
+    """While the display loop is behind, bursts are not logged (ROB-03):
+    only an empty list said so; with bursts in it, it just stopped growing
+    without a word. The line under the list says why, until it catches
+    up."""
+
+    def test_the_line_under_the_list_says_why(self):
+        win, panel = self.win, self.panel
+        self.listen(433.92e6, ("None (I/Q)", None, None))
+        win._show_signal_page("bursts")
+        self.assertTrue(self.frames(6.0, until=lambda: bool(panel.bursts())))
+        self.bursts_done()
+        hint = panel.bursts_hint
+        normal = hint.text()
+        self.assertTrue(hint.isVisible())
+        for _ in range(int(1.0 / FRAME_S)):  # (one block a frame)
+            win._pacer.reset()
+            win._pacer.overloaded = True
+            win._process_block(win._device.read_samples(2048))
+        self.assertTrue(hint.isVisible())
+        self.assertIn("can't keep up", hint.text())
+        self.assertIn("can't keep up", hint.toolTip())
+        self.assertEqual(hint.property("tone"), "warning")
+        self.frames(0.5)
+        self.assertEqual(hint.text(), normal)
+        self.assertFalse(hint.property("tone"))
 
 
 class TestBurstOnTheWaterfall(_SignalCase):
@@ -828,3 +852,7 @@ class TestSignalPanelDetails(unittest.TestCase):
         self.assertEqual(scope.evm_percent, evm)
         scope.set_overlay(ModulationOverlay.NONE)
         self.assertIsNone(scope.evm_percent)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

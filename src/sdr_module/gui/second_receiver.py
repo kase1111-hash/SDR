@@ -850,6 +850,11 @@ if HAS_PYQT6:
             self._restoring = False
             self._shut_down = False
             self._main_gone = False  # (the main window was deleted)
+            # The main window's Scanner tab sweeping with this receiver
+            # ("Use both receivers", see set_scan_feed): who takes each
+            # block read, and whether the speaker is muted meanwhile.
+            self._scan_feed: Optional[Callable[[np.ndarray], None]] = None
+            self._scan_muted = False
             self._setup_ui()
             self._setup_actions()
             self._restore()
@@ -1560,6 +1565,27 @@ if HAS_PYQT6:
 
         def mode(self) -> str:
             return self._mode_combo.currentText()
+
+        def sample_rate(self) -> float:
+            """The rate it receives at (Hz)."""
+            return self._rate()
+
+        def tuning_range(self) -> Tuple[float, float]:
+            """What its device tunes, (low, high) in Hz."""
+            return self._tuning_limits()
+
+        def is_recording(self) -> bool:
+            return self._recorder is not None
+
+        def set_scan_feed(self, feed: Optional[Callable[[np.ndarray], None]]) -> None:
+            """Hand every block this receiver reads to ``feed`` too, after
+            its own frame (the main window's Scanner tab sweeping with it:
+            "Use both receivers"); None ends that."""
+            self._scan_feed = feed
+
+        def set_scan_muted(self, muted: bool) -> None:
+            """Mute this receiver while a scan sweeps with it."""
+            self._scan_muted = bool(muted)
 
         def _rate(self) -> float:
             dev = self._device
@@ -2780,6 +2806,9 @@ if HAS_PYQT6:
             self._pacer.measured(
                 len(samples), self._rate(), time.perf_counter() - started
             )
+            feed = self._scan_feed
+            if feed is not None:
+                feed(samples)  # (it may retune this receiver for its next step)
 
         def _feed(self, samples: np.ndarray) -> None:
             """A display frame's samples: the DSP worker filters,
@@ -2813,7 +2842,7 @@ if HAS_PYQT6:
             while history and now - history[0][0] > _REALTIME_WINDOW_S:
                 history.popleft()
             self._dsp.rate = self._rate()
-            play = self._audio_open and self._plays_here()
+            play = self._audio_open and self._plays_here() and not self._scan_muted
             realtime = self._realtime()
             if play and not realtime and not self._realtime_hint:
                 self._realtime_hint = True

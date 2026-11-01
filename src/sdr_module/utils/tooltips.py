@@ -156,9 +156,9 @@ allow proper signal analysis. Use a directional coupler for best results.""",
 tunes (above 1.766 GHz only the HackRF), then they meet in the middle
 of what both tune, the faster one (a HackRF at a high sample rate)
 taking more of it. The signals found are merged in frequency order.
-Use `sdr-scan scan --dual`, or DualSDRController.start_wideband_scan()
-in a script; the GUI's Scanner tab sweeps with the main window's
-receiver only.""",
+Use `sdr-scan scan --dual`, DualSDRController.start_wideband_scan()
+in a script, or in the GUI the Scanner tab's "Use both receivers" while
+Device > Second Receiver... runs (Sweep once or continuously).""",
     ),
     "clock_sync": Tooltip(
         title="Clock Synchronization",

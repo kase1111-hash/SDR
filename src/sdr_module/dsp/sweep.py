@@ -622,6 +622,11 @@ class SharedSweep:
         """How long a pass takes when each receiver spends
         ``seconds_per_page`` (one value per receiver) on a page: the pages
         are claimed as they would be, on a copy of this plan."""
+        return self.estimate(seconds_per_page)[0]
+
+    def estimate(self, seconds_per_page: Sequence[float]) -> Tuple[float, List[int]]:
+        """``(seconds, pages)``: :meth:`estimate_seconds`, and the pages
+        each receiver measures in that pass."""
         times = [max(0.0, float(s)) for s in seconds_per_page]
         if len(times) != len(self.receivers):
             raise ValueError("Give one time per receiver.")
@@ -633,6 +638,7 @@ class SharedSweep:
             self.usable_fraction,
         )
         busy_until = [0.0 for _ in times]
+        pages = [0 for _ in times]
         working = set(range(len(times)))
         while working:
             receiver = min(working, key=lambda i: (busy_until[i], i))
@@ -642,7 +648,8 @@ class SharedSweep:
                 continue
             trial.done(receiver, page)
             busy_until[receiver] += times[receiver]
-        return max(busy_until)
+            pages[receiver] += 1
+        return max(busy_until), pages
 
 
 def noise_floor_db(

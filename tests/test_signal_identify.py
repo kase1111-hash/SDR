@@ -401,6 +401,17 @@ class TestDeviationThatHoldsThePeak:
         assert ident.label == "Narrow FM (voice or data)"
         assert (ident.fm_deviation, ident.filter_hz) == ("5 kHz", 25e3)
 
+    def test_the_card_names_the_peak_the_deviation_holds(self):
+        """The card's "the frequency swings about ±1.8 kHz" is the rms
+        swing: next to "Listen with: FM · 5 kHz deviation" it read as if
+        2.5 kHz would do. It also names the peak the deviation holds."""
+        ident = listening_for(self.result(3.28e3, 8.9e3, rms_hz=1.77e3), 100.715e6)
+        assert ident.fm_deviation == "5 kHz"
+        assert "The swing peaks at about ±3.3 kHz" in ident.details
+        # (Estimated from the rms swing, not measured: not said.)
+        ident = listening_for(self.result(0.0, 8.9e3, rms_hz=1.77e3), 300e6)
+        assert not [d for d in ident.details if "peaks" in d]
+
 
 # --------------------------------------------------------------------------- #
 # The demo device's signals, identified as the window does

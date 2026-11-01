@@ -155,9 +155,12 @@ def listening_for(result: ClassificationResult, freq_hz: float) -> Identificatio
     mode, deviation, filter_hz = "", "", 0.0
     details: List[str] = []
     if kind == "fm":
-        peak = float(f.get("freq_peak_hz", 0.0)) or _PEAK_PER_RMS * float(
-            f.get("freq_dev_hz", 0.0)
-        )
+        measured = float(f.get("freq_peak_hz", 0.0))
+        peak = measured or _PEAK_PER_RMS * float(f.get("freq_dev_hz", 0.0))
+        if measured > 0:
+            # (The classifier's "swings about" is the rms swing; the
+            # deviation suggested holds the peak.)
+            details.append(f"The swing peaks at about ±{_format_hz(measured)}")
         deviation = _deviation_for(peak)
         plan = _band_listening(freq_hz)
         planned = _khz(plan[1]) if plan and plan[0] == "FM" else 0.0

@@ -177,7 +177,13 @@ from .preferences_dialog import (
     PreferencesDialog,
     preferred_capture_folder,
 )
-from .rds_station import RdsListener, badge_text, badge_tooltip, tuner_text
+from .rds_station import (
+    MIN_CHANNEL_RATE,
+    RdsListener,
+    badge_text,
+    badge_tooltip,
+    tuner_text,
+)
 from .receiver_bar import FrequencyDigits, ReceiverBar
 from .scanner_host import WindowScannerHost
 from .scanner_panel import ScannerPanel
@@ -304,6 +310,11 @@ _PROBE_READ_S = 0.05
 # second), so catching up after a stall in bigger frames looked like a
 # computer that can't keep up, again and again.
 _MAX_READ_SAMPLES = 1 << 21
+# The plots analyse at most about this many samples of a frame (evenly
+# spread FFT segments of a longer one: see FrameSpectrumAnalyzer): every
+# sample up to 15 MS/s, half of them at 20 MS/s, and a catch-up frame
+# after a stall costs no more than a usual one (it cost up to 0.3 s).
+_PLOT_MAX_SAMPLES = 1 << 19
 # The most queued transfers one frame takes while an I/Q recording reads
 # them all (a driver queues 100 at most; this only guards against a source
 # that never runs dry).
@@ -316,6 +327,9 @@ _MAX_DRAIN = 1000
 _OVERLOAD_RATIO = 0.8
 _RECOVER_RATIO = 0.7
 _TIMED_FRAME = 8 * DISPLAY_BLOCK
+# A live decoder that got only part of the signal says so until frames have
+# kept up for this long (they come and go while the computer is busy).
+_SKIP_HINT_HOLD_S = 3.0
 # While frames can't keep up, one frame this often reads (and times) a full
 # frame's worth again, to find out when the computer keeps up once more:
 # full frames resume after this many probes in a row below _RECOVER_RATIO,
@@ -520,12 +534,19 @@ def _next_pow2(n: int) -> int:
     return 1 << max(0, int(n) - 1).bit_length()
 
 
-def _polyphase_is_cheaper(groups: int, factor: int) -> bool:
-    """Whether a decimating FIR of ``groups`` x ``factor`` taps costs less
-    computed per kept output (one row-by-row dot product per group) than
-    by FFT overlap-save. Measured per input sample: about 0.7 + 7 / factor
-    units per group against 25 for the FFT."""
-    return groups * (0.7 + 7.0 / max(1, factor)) <= 25.0
+def _polyphase_is_cheaper(taps: int, factor: int) -> bool:
+    """Whether a decimating FIR of ``taps`` taps costs less computed per
+    kept output (one dot product each, see :meth:`_FirDecimator._polyphase`)
+    than by FFT overlap-save of every sample. Measured per input sample
+    (ns, on a 4-core computer): about 1.5 + (28 + 0.2 x taps) / factor for
+    the dot products (a fixed cost per kept output, then per tap), against
+    14 + 0.06 x min(taps, 300) for the FFT. So it is several times cheaper
+    whenever the filter decimates by 3 or more, except for very long
+    filters with small factors."""
+    if factor < 2:
+        return False
+    dots = 1.5 + (28.0 + 0.2 * taps) / factor
+    return dots <= 14.0 + 0.06 * min(taps, 300)
 
 
 _VECDOT = getattr(np, "vecdot", None)  # numpy 2.0+
@@ -602,12 +623,11 @@ class _FirDecimator:
     so a stream split into blocks gives exactly the output of one long
     block.
 
-    A decimating filter with few taps per kept sample only computes the
-    samples it keeps (polyphase: the block, viewed as rows of ``factor``
-    samples, dotted with the taps one group of ``factor`` taps at a time),
+    A decimating filter only computes the samples it keeps (polyphase: one
+    dot product of the taps with the input ending at each kept sample),
     several times cheaper than filtering every sample by FFT and discarding
-    most. Longer filters, and filters that don't decimate, use FFT
-    overlap-save.
+    most (see :func:`_polyphase_is_cheaper`). Very long filters with small
+    factors, and filters that don't decimate, use FFT overlap-save.
     """
 
     def __init__(self, taps: Optional[np.ndarray], factor: int = 1):
@@ -616,14 +636,14 @@ class _FirDecimator:
         self._history: Optional[np.ndarray] = None
         self._phase = 0  # index, in the next block, of the next kept sample
         self._spectra: Dict[Tuple[int, bool], np.ndarray] = {}
-        # Polyphase: the reversed taps (zero-padded to whole groups) as
-        # (groups, factor) rows, by sample dtype.
+        # Polyphase (nonzero: computed per kept output): the input rows of
+        # ``factor`` samples each output spans; the reversed taps, by
+        # sample dtype.
         self._groups = 0
         self._weights: Dict[Any, np.ndarray] = {}
         if self._taps is not None and self._factor > 1:
-            groups = -(-len(self._taps) // self._factor)
-            if _polyphase_is_cheaper(groups, self._factor):
-                self._groups = groups
+            if _polyphase_is_cheaper(len(self._taps), self._factor):
+                self._groups = -(-len(self._taps) // self._factor)
 
     def reset(self) -> None:
         """Forget the stream (history and decimation phase); keep the design."""
@@ -641,9 +661,19 @@ class _FirDecimator:
         return out
 
     def _polyphase(self, x: np.ndarray) -> np.ndarray:
-        """The kept outputs of the filter, computed directly."""
-        factor, groups = self._factor, self._groups
-        length = groups * factor  # taps, padded with zeros
+        """The kept outputs of the filter, computed directly.
+
+        Output j is the input window of ``len(taps)`` samples ending at its
+        sample, dotted with the reversed taps: all of them in one call, over
+        rows of an overlapping view of the input (``factor`` samples
+        apart), so each kept output costs one dot product. (Splitting the
+        taps into groups of ``factor`` dotted with rows of ``factor``
+        samples cost several times as much for small factors: most of the
+        time went into the per-row overhead of the short rows.)"""
+        factor = self._factor
+        taps = self._taps
+        assert taps is not None  # (polyphase stages have taps)
+        length = len(taps)
         dtype = np.result_type(x.dtype, np.float32)
         if self._history is None or self._history.dtype != dtype:
             self._history = np.zeros(length - 1, dtype=dtype)
@@ -653,20 +683,20 @@ class _FirDecimator:
         count = -(-(len(x) - phase) // factor) if len(x) > phase else 0
         if count <= 0:
             return np.empty(0, dtype=dtype)
-        # Output j is padded[phase + j*factor : ... + length] . reversed taps,
-        # i.e. the sum over groups g of row (j + g) times that group's taps.
-        rows = count + groups - 1
-        view = padded[phase : phase + rows * factor].reshape(rows, factor)
         weights = self._weights.get(dtype)
         if weights is None:
-            padded_taps = np.zeros(length, dtype=np.float32)
-            padded_taps[: len(self._taps)] = self._taps
-            weights = padded_taps[::-1].reshape(groups, factor).astype(dtype)
+            weights = np.ascontiguousarray(taps[::-1]).astype(dtype)
             self._weights[dtype] = weights
-        out = _row_dot(view[0:count], weights[0])
-        for g in range(1, groups):
-            out += _row_dot(view[g : g + count], weights[g])
-        return out
+        # Row j is padded[phase + j*factor : ... + length] (the last ends at
+        # the last sample: phase + (count - 1) * factor < len(x)).
+        step = padded.strides[0]
+        rows = np.lib.stride_tricks.as_strided(
+            padded[phase:],
+            shape=(count, length),
+            strides=(factor * step, step),
+            writeable=False,
+        )
+        return _row_dot(rows, weights)
 
     def _filter(self, x: np.ndarray) -> np.ndarray:
         taps = self._taps
@@ -2585,10 +2615,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # display settings.
         self._spectrum_window: Optional[np.ndarray] = None
         self._spectrum_window_gain = 1.0
-        # What the plots show: every sample of each frame, at the FFT size
+        # What the plots show: every sample of each frame (of a longer
+        # frame than _PLOT_MAX_SAMPLES, spread segments), at the FFT size
         # and window chosen in the spectrum's menu, and the (LO, rate) the
         # samples carried over between frames belong to.
-        self._frame_spectrum = FrameSpectrumAnalyzer()
+        self._frame_spectrum = FrameSpectrumAnalyzer(max_samples=_PLOT_MAX_SAMPLES)
         self._frame_axis: Optional[Tuple[float, float]] = None
         # After a hardware retune the plots skip these samples and until
         # then (they were taken on the old frequency; see _retune_lo).
@@ -2627,6 +2658,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._rx_history: Deque[Tuple[float, int]] = deque()
         self._realtime_hint_shown = False
         self._realtime_hint_text = ""
+        # A live decoder that gets only part of the signal says so (until
+        # this monotonic time; see _sync_decoder_skipping), and the status
+        # bar says it once.
+        self._skip_hint_until = 0.0
+        self._skip_hinted = False
+        self._skip_hint_shown = ""  # (the status bar's text, while shown)
+        # When frames last couldn't keep up (monotonic), and whether the
+        # skipping the hint is about came from that (or from the device).
+        self._overloaded_at = -math.inf
+        self._skip_by_computer = False
         self._pacer = _Pacer()  # how much each display frame reads
         self._entry_returns_focus = False  # Ctrl+L: Enter goes back to the plots
         self._restoring = False  # True while _restore_state applies settings
@@ -5258,8 +5299,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Recreate the live decoder for the current device's sample rate."""
         self._on_decoder_protocol_changed(self._decoder_panel.protocol() or "Off")
 
-    def _run_decoder(self, samples: np.ndarray) -> None:
-        """Feed a raw block to the live decoder and show what it decoded."""
+    def _run_decoder(
+        self,
+        samples: np.ndarray,
+        channel: Optional[np.ndarray] = None,
+        chain: Optional["_ReceiverChain"] = None,
+    ) -> None:
+        """Feed a raw block to the live decoder and show what it decoded.
+
+        Given the receiver's ``channel`` (by ``chain``), a decoder that can
+        decode it gets that instead (see :meth:`_decoder_takes_channel`)."""
         decoder = self._decoder
         if decoder is None or self._decoder_protocol is None:
             return
@@ -5273,7 +5322,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # decodes") says nothing about this one.
             decoder.channel_changed()
         try:
-            messages = decoder.process(samples)
+            if self._decoder_takes_channel(decoder, channel, chain):
+                assert channel is not None and chain is not None
+                messages = decoder.process_channel(channel, chain.channel_rate)
+            else:
+                messages = decoder.process(samples)
         except Exception as exc:  # pragma: no cover - defensive
             if not getattr(self, "_decoder_error_logged", False):
                 self._decoder_error_logged = True
@@ -5287,6 +5340,27 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # The Decoder's own RDS names the station (the background
             # listener rests meanwhile).
             self._show_rds_station(decoder.station)
+
+    def _decoder_takes_channel(
+        self,
+        decoder: Any,
+        channel: Optional[np.ndarray],
+        chain: Optional["_ReceiverChain"],
+    ) -> bool:
+        """Whether the live decoder decodes the receiver's own channel: the
+        Decoder's RDS while broadcast FM is received through a filter as
+        wide as its own (the same station, already at 0 Hz; picking it out
+        of the raw block again cost 8-14 ms of each frame at 20 MS/s)."""
+        if channel is None or chain is None:
+            return False
+        if not callable(getattr(decoder, "process_channel", None)):
+            return False
+        return (
+            chain.mode == "FM"
+            and self._control_panel.get_fm_deviation() >= _BROADCAST_DEVIATION_HZ
+            and chain.channel_rate >= MIN_CHANNEL_RATE
+            and chain.bandwidth >= 2.0 * float(getattr(decoder, "PASS_HZ", 0.0))
+        )
 
     def _push_decoded_message(
         self,
@@ -7124,6 +7198,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # What a device dropped (or the demo skipped) while stopped is no
         # gap in a take: it resumes as a capture of its own (REC WAITING).
         self._drop_mark = None
+        self._skip_hint_until = 0.0  # (found out anew, as the pacer)
+        self._overloaded_at = -math.inf
         self._refresh_state_ui()
         logger.info("Acquisition started")
 
@@ -8152,6 +8228,73 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._pacer.measured(
             len(samples), self._pacing_rate(), time.perf_counter() - started
         )
+        self._sync_decoder_skipping()
+
+    def _samples_skipped(self) -> bool:
+        """Whether part of the signal is skipped: frames read one block each
+        (this computer can't keep up), or the device delivers less than its
+        sample rate. (A recording played faster or slower than real time
+        skips nothing unless frames can't keep up.)"""
+        if self._pacer.overloaded:
+            return True
+        if self._playback.active:
+            return False
+        return not self._realtime()
+
+    def _sync_decoder_skipping(self) -> None:
+        """While a live decoder runs and part of the signal is skipped, the
+        Decoder's status line says so (and the status bar, once): its
+        counts alone looked healthy while it heard a fraction of the signal
+        (with no speaker, as for ADS-B in None (I/Q), nothing else said
+        so). It says so until frames have kept up for _SKIP_HINT_HOLD_S."""
+        panel = self._own("_decoder_panel")
+        if panel is None:
+            return
+        decoding = (
+            self._decoder is not None
+            and self._decoder_protocol is not None
+            and panel._enabled_check.isChecked()
+        )
+        now = time.monotonic()
+        if self._pacer.overloaded:
+            self._overloaded_at = now
+        if decoding and self._samples_skipped():
+            self._skip_hint_until = now + _SKIP_HINT_HOLD_S
+            # (The seconds real time is judged by still hold the short
+            # frames for a while after this computer catches up again:
+            # those were skipped here, not by the device.)
+            self._skip_by_computer = now - self._overloaded_at <= _REALTIME_WINDOW_S
+        skipping = decoding and now < self._skip_hint_until
+        text = self._skip_hint_text() if skipping else None
+        panel.set_skipping(text)
+        if text is None:
+            shown, self._skip_hint_shown = self._skip_hint_shown, ""
+            if shown and self._message_label.text() == shown:
+                self._clear_status_message()  # (keeping up again)
+            self._skip_hinted = False
+        elif not self._skip_hinted:
+            self._skip_hinted = True
+            audio_hint = self._realtime_hint_shown and (
+                self._message_label.text() == self._realtime_hint_text
+            )
+            if not audio_hint:  # (not over it: the Decoder's line says it)
+                self._skip_hint_shown = text
+                self._show_status_message(text, "info", 10000)
+
+    def _skip_hint_text(self) -> str:
+        """The Decoder's line while it gets only part of the signal."""
+        name = str(getattr(self._decoder, "name", "") or "live")
+        rate = format_rate(self._device_sample_rate())
+        if self._demo_mode:
+            cause = "The demo device can't keep up in real time right now"
+        elif self._skip_by_computer:
+            cause = f"This computer can't process {rate} in real time right now"
+        else:
+            cause = f"The device isn't delivering {rate} in real time"
+        return (
+            f"{cause}, so the {name} decoder misses part of the signal. A "
+            "lower sample rate (Receiver > Sample rate) helps."
+        )
 
     def _process_block(self, samples: np.ndarray) -> None:
         """Plots, level, audio, recording, S-meter and decoder for one frame."""
@@ -8165,7 +8308,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         display = samples[-DISPLAY_BLOCK:] if len(samples) > DISPLAY_BLOCK else samples
         power = self._power_spectrum_dbfs(display)
 
-        # The plots: every sample of the frame, at the chosen FFT size and
+        # The plots: every sample of the frame (evenly spread segments of
+        # one longer than _PLOT_MAX_SAMPLES), at the chosen FFT size and
         # window (the mean power per bin for the spectrum, the strongest
         # for the waterfall row, so a short burst anywhere shows).
         self._plot_frame(samples)
@@ -8207,7 +8351,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 logger.debug("S-meter update failed: %s", exc)
 
         # Feed the live protocol decoder (if the Decoder panel selected one).
-        self._run_decoder(samples)
+        self._run_decoder(samples, channel, chain)
 
         # The Scanner tab's scan runs on the same blocks.
         self._scan_frame(samples)

@@ -147,6 +147,7 @@ from .main_window import (
     _DEVICE_MODELS,
     _FREE_SPACE_CHECK_S,
     _MIN_FREE_BYTES,
+    _PLOT_MAX_SAMPLES,
     _REALTIME_FRACTION,
     _REALTIME_WINDOW_S,
     _RETUNE_MAX_DROPPED,
@@ -860,7 +861,7 @@ if HAS_PYQT6:
             # span (zoom), and every sample of a frame at the FFT size and
             # window chosen in the spectrum's menu (see _plot_frame).
             self._plot_view = PlotView()
-            self._frame_spectrum = FrameSpectrumAnalyzer()
+            self._frame_spectrum = FrameSpectrumAnalyzer(max_samples=_PLOT_MAX_SAMPLES)
             self._frame_axis: Optional[Tuple[float, float]] = None
             # After a hardware retune the plots skip these samples and until
             # then (see _drop_stale_samples).
@@ -2719,6 +2720,12 @@ if HAS_PYQT6:
             if self._plot_skip_samples > 0 or time.monotonic() < self._plot_skip_until:
                 # Taken (partly) before the last retune (_drop_stale_samples).
                 self._plot_skip_samples = max(0, self._plot_skip_samples - len(samples))
+                return
+            if self.isMinimized() or not self.isVisible():
+                # Nobody sees them (the receiver still plays): no plots, and
+                # the first frame shown again starts afresh. (Both windows
+                # share one thread: this was a quarter of this one's frame.)
+                self._frame_axis = None
                 return
             axis = (float(self._lo_hz), float(self._rate()))
             if axis != self._frame_axis:

@@ -203,7 +203,10 @@ class LiveDecoder:
         if not len(iq):
             return []
         self._stream_s += len(iq) / self.sample_rate
-        messages = list(self._decode(iq))
+        return self._tally(list(self._decode(iq)))
+
+    def _tally(self, messages: List[DecodedMessage]) -> List[DecodedMessage]:
+        """Count the valid ones among ``messages`` (decoded just now)."""
         valid = sum(1 for m in messages if getattr(m, "valid", True))
         if valid:
             self._valid += valid
@@ -672,7 +675,8 @@ class RDSLiveDecoder(LiveDecoder):
     where there is one) and :class:`~sdr_module.dsp.protocols.RDSDecoder`
     finds the groups. With ``channel_ready`` the input already is the
     station's channel at 0 Hz (e.g. the receiver's own broadcast FM
-    channel, at 192 kS/s or more), so none is picked out.
+    channel, at 192 kS/s or more), so none is picked out; so is the input
+    of :meth:`process_channel`, for a decoder fed raw blocks otherwise.
 
     Messages are the changes (an :class:`~sdr_module.dsp.protocols.RDSData`
     with ``update`` set): a whole new station name or RadioText, the
@@ -715,6 +719,8 @@ class RDSLiveDecoder(LiveDecoder):
                 self.TARGET_RATE,
             )
             self.channel_rate = self._channelizer.output_rate
+        # Whether the last block was a channel handed in (process_channel).
+        self._external = False
         self._group_time: Optional[float] = None
         self._pilot_s = 0.0  # seconds of pilot without RDS sync
         self._build()
@@ -724,6 +730,21 @@ class RDSLiveDecoder(LiveDecoder):
         self._demod = RDSDemodulator(self.channel_rate)
         self._decoder = RDSDecoder(self._demod.work_rate)
         self._held: List[RDSData] = []  # updates waiting for the PI or PS
+
+    def _own_rate(self) -> float:
+        """The rate of the channel this decoder picks out (or is given, with
+        ``channel_ready``) from the blocks :meth:`process` takes."""
+        if self._channelizer is not None:
+            return self._channelizer.output_rate
+        return self.sample_rate
+
+    def _use_rate(self, rate: float) -> None:
+        """Demodulate a channel at ``rate`` from now on: the demodulator
+        starts afresh there; the station and the counts stay."""
+        if rate != self.channel_rate:
+            self.channel_rate = rate
+            self._fm = FMDiscriminator(rate)
+            self._demod = RDSDemodulator(rate)
 
     def _decoders(self) -> List[ProtocolDecoder]:
         return [self._decoder]
@@ -750,6 +771,8 @@ class RDSLiveDecoder(LiveDecoder):
             self._channelizer.reset()
         self._group_time = None
         self._pilot_s = 0.0
+        self._external = False
+        self.channel_rate = self._own_rate()
         self._build()
 
     @property
@@ -766,11 +789,42 @@ class RDSLiveDecoder(LiveDecoder):
         """Whether the station sends a 19 kHz stereo pilot."""
         return self._demod.pilot
 
+    def process_channel(
+        self, channel: np.ndarray, channel_rate: float
+    ) -> List[DecodedMessage]:
+        """Decode a block of the station's channel itself: at 0 Hz, at
+        ``channel_rate`` (192 kS/s or more), such as the receiver's own
+        broadcast FM channel, so the station isn't picked out of the raw
+        I/Q a second time (at 20 MS/s that was most of this decoder's
+        cost). Raw blocks (:meth:`process`) and channel blocks may follow
+        each other; at each switch the demodulator starts afresh (the
+        station stays known)."""
+        channel = np.asarray(channel, dtype=np.complex64).ravel()
+        if not len(channel):
+            return []
+        rate = float(channel_rate)
+        self._external = True
+        self._use_rate(rate)
+        self._stream_s += len(channel) / rate
+        return self._tally(self._from_channel(channel))
+
     def _decode(self, iq: np.ndarray) -> List[DecodedMessage]:
+        if self._external:
+            # Raw blocks again (after process_channel): the channel is
+            # picked out afresh, at its own rate.
+            self._external = False
+            if self._channelizer is not None:
+                self._channelizer.reset()
+            self._use_rate(self._own_rate())
         if self._channelizer is not None:
             channel = self._channelizer.process(iq)
         else:
             channel = np.asarray(iq, dtype=np.complex64)
+        return self._from_channel(channel)
+
+    def _from_channel(self, channel: np.ndarray) -> List[DecodedMessage]:
+        """The messages in a block of the station's channel (at 0 Hz, at
+        ``channel_rate``)."""
         if not len(channel):
             return []
         groups = self._decoder.frames_seen - self._decoder.frames_failed

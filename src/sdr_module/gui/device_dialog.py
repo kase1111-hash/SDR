@@ -1103,6 +1103,11 @@ _AM_BROADCAST = (
 )
 _AM_BROADCAST_DEPTH = 0.8  # modulation depth of the music peaks
 _AM_MUSIC: Dict[Tuple[float, int], np.ndarray] = {}  # mono tune per loop
+# The demo tune as broadcast, per (loop rate, length): see _music_broadcast.
+_MUSIC_CACHE: Dict[
+    Tuple[float, int], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+] = {}
+_MUSIC_CACHE_SIZE = 2
 _DEMO_SIGNALS = _DEMO_SIGNALS + tuple(
     (freq, "amb", level, None) for freq, level in _AM_BROADCAST
 )
@@ -1290,14 +1295,44 @@ class _Loop:
 
 
 def _loop_timebase(
-    rate: float, seconds: float, loop_hz: float = _LOOP_RATE_HZ
+    rate: float,
+    seconds: float,
+    loop_hz: float = _LOOP_RATE_HZ,
+    fft_friendly: bool = False,
 ) -> Tuple[int, float, np.ndarray]:
     """``(factor, loop rate, sample times)`` for a loop of about ``seconds``
-    at about ``loop_hz``."""
+    at about ``loop_hz``; ``fft_friendly``: as long as the nearest length
+    with no prime factor above 7 (for a loop filtered by FFT around it)."""
     factor = max(1, int(round(rate / loop_hz)))
     loop_rate = rate / factor
     size = max(2, int(round(seconds * loop_rate)))
+    if fft_friendly:
+        size = _fft_friendly_size(size)
     return factor, loop_rate, np.arange(size) / loop_rate
+
+
+def _fft_friendly_size(n: int) -> int:
+    """The length nearest ``n`` with no prime factor above 7: an FFT of it
+    is quick, where one of a length with a large prime factor (382,090 =
+    2 x 5 x 19 x 2011, the demo tune's loop at 3.2 MS/s) took ten times as
+    long and stalled the first frame at a new sample rate."""
+    best = 1
+    limit = 2 * max(1, int(n))
+    p7 = 1
+    while p7 <= limit:
+        p5 = p7
+        while p5 <= limit:
+            p3 = p5
+            while p3 <= limit:
+                p2 = p3
+                while p2 <= limit:
+                    if abs(p2 - n) < abs(best - n):
+                        best = p2
+                    p2 *= 2
+                p3 *= 3
+            p5 *= 5
+        p7 *= 7
+    return max(2, best)
 
 
 def _whole_cycles(freq: float, period: float) -> float:
@@ -1360,12 +1395,22 @@ def _music_broadcast(
     deviation); ``left``/``right`` are the same channels as a listener hears
     them after the receiver's de-emphasis.
     """
-    left, right = _music_tune(loop_rate, size)
-    left_pre = _pre_emphasis(left, loop_rate)
-    right_pre = _pre_emphasis(right, loop_rate)
-    peak = max(float(np.max(np.abs(left_pre))), float(np.max(np.abs(right_pre))))
-    scale = 1.0 / max(peak, 1e-9)
-    return left * scale, right * scale, left_pre * scale, right_pre * scale
+    key = (float(loop_rate), int(size))
+    cached = _MUSIC_CACHE.get(key)
+    if cached is None:
+        # (Once per loop: the FM station and the AM stations share it.)
+        left, right = _music_tune(loop_rate, size)
+        left_pre = _pre_emphasis(left, loop_rate)
+        right_pre = _pre_emphasis(right, loop_rate)
+        peak = max(float(np.max(np.abs(left_pre))), float(np.max(np.abs(right_pre))))
+        scale = 1.0 / max(peak, 1e-9)
+        cached = (left * scale, right * scale, left_pre * scale, right_pre * scale)
+        for channel in cached:
+            channel.flags.writeable = False  # (shared: never changed)
+        while len(_MUSIC_CACHE) >= _MUSIC_CACHE_SIZE:
+            _MUSIC_CACHE.pop(next(iter(_MUSIC_CACHE)))
+        _MUSIC_CACHE[key] = cached
+    return cached
 
 
 def _music_channels(loop_rate: float, size: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -1438,7 +1483,7 @@ def _build_loops(kind: str, variant: Any, rate: float):
             # The tune as broadcast: 75 us pre-emphasized, like the
             # receiver's broadcast FM de-emphasis expects.
             factor, loop_rate, t = _loop_timebase(
-                rate, _MUSIC_STEP_S * 8 * len(_MUSIC_BARS)
+                rate, _MUSIC_STEP_S * 8 * len(_MUSIC_BARS), fft_friendly=True
             )
             *_heard, left, right = _music_broadcast(loop_rate, len(t))
             mono = (left + right) * (_PROGRAM_SHARE / 2)
@@ -1477,7 +1522,7 @@ def _build_loops(kind: str, variant: Any, rate: float):
         # (T7) AM broadcast: the demo tune (mono, as heard) as the envelope,
         # each station starting at another point of the loop.
         factor, loop_rate, t = _loop_timebase(
-            rate, _MUSIC_STEP_S * 8 * len(_MUSIC_BARS)
+            rate, _MUSIC_STEP_S * 8 * len(_MUSIC_BARS), fft_friendly=True
         )
         key = (loop_rate, len(t))
         mono = _AM_MUSIC.get(key)

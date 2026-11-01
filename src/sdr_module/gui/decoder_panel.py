@@ -698,6 +698,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # and the clock its last_time is measured with.
         self._decoder_status: Any = None
         self._clock = time.monotonic
+        # Why the decoder gets only part of the signal now (the receiver
+        # can't keep up), or None (see set_skipping).
+        self._skipping: Optional[str] = None
         # The decoder's (frames, valid, failed) at the last Clear: the
         # status line and Stats count from there.
         self._count_base = (0, 0, 0)
@@ -1376,6 +1379,16 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 bool(getattr(status, "signal_present", False)),
             )
 
+    def set_skipping(self, reason: Optional[str]) -> None:
+        """While the receiver skips part of the signal (this computer can't
+        keep up with the sample rate), the status line says so in
+        ``reason``, with a warning tone, instead of the decoder's counts,
+        which look healthy while the decoder hears only a fraction of the
+        signal. None: back to the counts."""
+        if reason != self._skipping:
+            self._skipping = reason
+            self._update_status_line()
+
     def _decoder_counts(self) -> Tuple[int, int, int]:
         """The decoder's (frames, valid, failed) since the last Clear."""
         status = self._decoder_status
@@ -1635,6 +1648,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             if self._source == "recording":
                 return f"Not playing: {_PLAY_HINT} to decode", "muted", ""
             return f"Stopped: {_START_HINT} to decode", "muted", ""
+        if self._skipping:
+            return self._skipping, "warning", self._skipping
         here = _format_mhz(self._tuned_hz) if self._tuned_hz else ""
         # One count with the status-bar chip: the protocol's messages since
         # it was chosen (or Clear). A decoder counting something else (RDS

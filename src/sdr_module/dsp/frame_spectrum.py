@@ -17,6 +17,12 @@ with the next frame, so every sample counts once. A frame too short for one
 FFT (a large FFT, a slow recording) is completed with the newest samples of
 the frames before it.
 
+With ``max_samples`` set, a frame longer than that (every frame at 20 MS/s,
+or a catch-up frame after a stall, several times longer) is analysed in
+evenly spread segments, the newest included, about ``max_samples`` of
+them: the cost per frame stays bounded. The mean reads the same; a burst
+shows in the maximum unless it is shorter than the gap between segments.
+
 Levels are dBFS: a full-scale complex tone peaks at 0 dB whatever the FFT
 size and window (the window's coherent gain is divided out). The noise level
 per bin falls 3 dB per doubling of the FFT size (each bin is half as wide)
@@ -25,7 +31,9 @@ and depends on the window's equivalent noise bandwidth (:func:`enbw_bins`);
 
 Large frames are transformed by two threads (NumPy's FFT releases the GIL),
 in buffers reused from frame to frame: about 0.6 ms a frame at 2.4 MS/s and
-4 ms at 20 MS/s on a laptop.
+4 ms at 20 MS/s on a laptop. The caller does the helper's half itself when
+the helper hasn't started on it, so a busy computer (where the helper may
+wait a while for a processor) never keeps it waiting.
 """
 
 from __future__ import annotations
@@ -178,6 +186,20 @@ class FrameSpectrum:
         return float(np.median(values)) - 10.0 * math.log10(ratio)
 
 
+class _Claim:
+    """A piece of work that exactly one of two threads does: the first to
+    :meth:`take` it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._taken = False
+
+    def take(self) -> bool:
+        with self._lock:
+            taken, self._taken = self._taken, True
+        return not taken
+
+
 class FrameSpectrumAnalyzer:
     """Spectrum of every sample of each display frame (see the module).
 
@@ -189,10 +211,13 @@ class FrameSpectrumAnalyzer:
         size: int = DEFAULT_FFT_SIZE,
         window: str = DEFAULT_WINDOW,
         threads: int = 2,
+        max_samples: Optional[int] = None,
     ):
         self._size = normalize_fft_size(size)
         self._window_name = normalize_window(window)
         self._threads = max(1, int(threads))
+        self._max_samples: Optional[int] = None
+        self.max_samples = max_samples
         self._fft_out = _fft_takes_out()
         self._pool: Optional[ThreadPoolExecutor] = None
         self._pool_lock = threading.Lock()
@@ -218,6 +243,16 @@ class FrameSpectrumAnalyzer:
     @property
     def window(self) -> str:
         return self._window_name
+
+    @property
+    def max_samples(self) -> Optional[int]:
+        """About the most samples one frame is analysed in (evenly spread
+        FFT segments of a longer frame); None: every sample."""
+        return self._max_samples
+
+    @max_samples.setter
+    def max_samples(self, value: Optional[int]) -> None:
+        self._max_samples = None if value is None else max(1, int(value))
 
     def configure(
         self, size: Optional[int] = None, window: Optional[str] = None
@@ -281,6 +316,11 @@ class FrameSpectrumAnalyzer:
             used = count * size
             self._carry = np.array(data[used:], dtype=np.complex64, copy=True)
             segments = data[:used].reshape(count, size)
+            limit = self._max_samples
+            if limit is not None and used > limit:
+                # Evenly spread segments, the newest one included.
+                step = -(-count // max(1, limit // size))
+                segments = segments[(count - 1) % step :: step]
         power = self._power_rows(segments)
         mean = power.mean(axis=0) if len(power) > 1 else power[0]
         peak = power.max(axis=0) if len(power) > 1 else power[0]
@@ -313,18 +353,24 @@ class FrameSpectrumAnalyzer:
             self._threads > 1 and rows >= 2 and rows * self._size >= _THREAD_MIN_SAMPLES
         )
         if split:
+            # The helper takes the first half, unless this thread gets to it
+            # first: on a busy computer the helper may not run for a while,
+            # and waiting for it cost more than doing the half here.
             half = rows // 2
-            future = self._submit(segments, 0, half)
+            claim = _Claim()
+            future = self._submit(segments, 0, half, claim)
             self._transform(segments, half, rows)
-            if future is not None:
-                future.result()
-            else:  # pragma: no cover - no helper thread could start
+            if claim.take():
                 self._transform(segments, 0, half)
+            elif future is not None:
+                future.result()
         else:
             self._transform(segments, 0, rows)
         return self._power[:rows]
 
-    def _submit(self, segments: np.ndarray, start: int, stop: int) -> Optional[Future]:
+    def _submit(
+        self, segments: np.ndarray, start: int, stop: int, claim: "_Claim"
+    ) -> Optional[Future]:
         with self._pool_lock:
             if self._pool is None:
                 try:
@@ -335,9 +381,16 @@ class FrameSpectrumAnalyzer:
                     return None
             pool = self._pool
         try:
-            return pool.submit(self._transform, segments, start, stop)
+            return pool.submit(self._transform_claimed, segments, start, stop, claim)
         except RuntimeError:  # pragma: no cover - pool shut down meanwhile
             return None
+
+    def _transform_claimed(
+        self, segments: np.ndarray, start: int, stop: int, claim: "_Claim"
+    ) -> None:
+        """The helper's part, unless the caller took it over meanwhile."""
+        if claim.take():
+            self._transform(segments, start, stop)
 
     def _transform(self, segments: np.ndarray, start: int, stop: int) -> None:
         if stop <= start:

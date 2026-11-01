@@ -13,7 +13,9 @@ Decoder     Chain
 ==========  =============================================================
 POCSAG      channel (+/-8 kHz, ~48 kHz) -> FM discriminator -> DC removal
             -> 512, 1200 and 2400 baud slicers -> POCSAGDecoder
-FLEX        as POCSAG -> 1600 baud slicer -> FLEXDecoder
+FLEX        channel (+/-8 kHz, ~48 kHz) -> FM discriminator -> FLEXDecoder
+            (DC followed between frames, held through each; 1600 and
+            3200 symbols/s slicers)
 AX.25/APRS  channel -> FM discriminator (audio) -> 1200/2200 Hz mark and
             space detectors over one bit -> slicer -> NRZI/HDLC -> AX.25
 ACARS       channel (+/-5 kHz) -> AM envelope -> 1800 Hz complex mix and
@@ -432,9 +434,11 @@ class POCSAGLiveDecoder(ChannelDecoder):
 
 
 class FLEXLiveDecoder(ChannelDecoder):
-    """FLEX pages (1600 bps, 2-level FSK) on an NBFM channel.
+    """FLEX pages on an NBFM channel: 1600 bps 2-level FSK, 3200 bps 2- and
+    4-level and 6400 bps 4-level, every phase.
 
-    Frames sent at a speed it can't decode yet (3200 or 6400 bps) are a
+    Frames sent at a speed the decoder can't read at the channel's rate
+    (see ``FLEXDecoder``; the channel's 48 kS/s reads them all) are a
     status problem while they are heard: until ``_OTHER_SPEED_S`` (about
     three frames) after the last one, and only while no page has decoded
     since the channel changed.
@@ -442,13 +446,13 @@ class FLEXLiveDecoder(ChannelDecoder):
 
     name = "FLEX"
     unit = "page"
-    _DC_S = 0.25
     _OTHER_SPEED_S = 6.0
 
     def _build(self) -> None:
         rate = self.channel_rate
         self._fm = FMDiscriminator(rate)
-        self._dc = _DCBlocker(int(self._DC_S * rate))
+        # (No DC blocker: the decoder follows the DC between frames and
+        # holds it through each one, see FLEXDecoder.)
         self._decoder = FLEXDecoder(rate, 1600)
         self._other_speed_s: Optional[float] = None  # stream time last heard
         self._valid_before = self._valid  # pages decoded before this channel
@@ -473,7 +477,7 @@ class FLEXLiveDecoder(ChannelDecoder):
 
     def _demodulate(self, channel: np.ndarray) -> List[DecodedMessage]:
         before = self._decoder.unsupported_frames
-        baseband = self._dc.process(self._fm.process(channel))
+        baseband = self._fm.process(channel)
         messages: List[DecodedMessage] = list(self._decoder.decode(baseband))
         if self._decoder.unsupported_frames > before:
             self._other_speed_s = self._stream_s
@@ -491,8 +495,8 @@ class FLEXLiveDecoder(ChannelDecoder):
             return replace(
                 base,
                 problem=(
-                    f"This channel sends FLEX at {decoder.last_unsupported}; "
-                    "only 1600 bps 2-level FLEX decodes yet"
+                    f"This channel sends FLEX at {decoder.last_unsupported}, "
+                    "which the decoder can't read at this sample rate"
                 ),
             )
         return base

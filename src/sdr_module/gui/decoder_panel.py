@@ -125,7 +125,7 @@ PROTOCOL_INFO: Dict[str, Tuple[str, str]] = {
         "Pager messages (512/1200/2400 baud)",
         "152–159 MHz or 929–932 MHz",
     ),
-    "FLEX": ("Motorola FLEX pager messages (1600 bps)", "929–932 MHz"),
+    "FLEX": ("Motorola FLEX pager messages (1600, 3200 or 6400 bps)", "929–932 MHz"),
     "AX.25/APRS": (
         "Packet radio and APRS position reports",
         "144.390 MHz (N. America) or 144.800 MHz (Europe)",

@@ -2537,6 +2537,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     _status_count = 0
     _tune_status_count = 0
     _tune_status_end: Optional[int] = None
+    # The decoder and rate a decoder's problem was logged for, and for which
+    # of a recording (True) or the device (False): the same again isn't
+    # logged again (N-05). (A set of its own for each decoder and rate, see
+    # _on_decoder_protocol_changed.)
+    _decoder_logged: Tuple[Any, Any] = (None, frozenset())
     # Why the last tune was refused (the status line says so until a tune
     # goes through).
     _tuning_refusal: Optional[str] = None
@@ -2755,10 +2760,6 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder_protocol: Any = None
         self._decoder_rate = 0.0  # sample rate the live decoder was built for
         self._decoder_recording = False  # ... and whether a recording played
-        # The decoder and rate a problem was logged for, and for which of a
-        # recording (True) or the device (False): the same again isn't
-        # logged again (N-05).
-        self._decoder_logged: Tuple[Any, set] = (None, set())
         # Messages decoded while the Decoder tab was out of sight (its title
         # counts them), the background RDS of the tuned broadcast station
         # (Radio > RDS Station Names) and what its badge shows.
@@ -5349,7 +5350,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # "Off" (or unknown): no live decoder.
             self._decoder = None
             self._decoder_protocol = None
-            self._decoder_logged = (None, set())  # (one chosen again: said)
+            self._decoder_logged = (None, frozenset())  # (chosen again: said)
             self._decoder_panel.set_decoder_status(None)
             self._update_decoder_chip()
             return

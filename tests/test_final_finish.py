@@ -395,6 +395,86 @@ class TestADecoderThatCantDecodeIsLoggedOncePerSituation(_files_case()):
         self.assertEqual(len(self.logged(choose("ADS-B"))), 1)
 
 
+class TestEveryJobTitleReadsInTheHints(unittest.TestCase):
+    """N-06: while one of this app's jobs keeps the computer busy, the hints
+    name it: "<title> keeps this computer busy, so audio is paused
+    meanwhile." (and "... so the ADS-B decoder misses part of the signal
+    meanwhile."). Transmit Text's save was titled "Saving": "Saving keeps
+    this computer busy, ...". Each job is titled with the name of the
+    command that runs it, as File > Decode Recording's is."""
+
+    def titles(self):
+        """The title of every job the app runs (run_job's second argument)."""
+        import ast
+
+        src = Path(__file__).resolve().parent.parent / "src" / "sdr_module"
+        found = {}
+        for path in sorted(src.rglob("*.py")):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                func = getattr(node, "func", None)
+                if isinstance(node, ast.Call) and getattr(func, "id", "") == "run_job":
+                    title = node.args[1]
+                    self.assertIsInstance(title, ast.Constant, path.name)
+                    found[title.value] = path.name
+        return found
+
+    def test_each_title_is_a_command_name(self):
+        import re
+
+        titles = self.titles()
+        self.assertIn("Decode Recording", titles)
+        self.assertGreaterEqual(len(titles), 5, titles)
+        for title in titles:
+            words = title.split()
+            # (A command: "Save Text Signal", not "Saving".)
+            self.assertRegex(title, re.compile(r"^[A-Z][a-z]+( [A-Z][a-z]+)+$"))
+            self.assertFalse(words[0].endswith("ing"), title)
+
+    def test_transmit_texts_save(self):
+        """Titled as its file dialog is: "Save Text Signal"."""
+        self.assertEqual(self.titles().get("Save Text Signal"), "transmit_text.py")
+
+
+def _tx_text_case():
+    from tests.test_gui_transmit_text import _TextCase
+
+    return _TextCase
+
+
+class TestTransmitTextsSaveNamedInTheHints(_tx_text_case()):
+    """N-06, in the window: the job Transmit Text's Save runs is named in
+    the hints as a command."""
+
+    def test_the_hint_names_the_save(self):
+        import tempfile
+        from unittest import mock
+
+        from PyQt6.QtWidgets import QFileDialog
+
+        from sdr_module.gui import file_jobs, main_window
+
+        path = os.path.join(tempfile.mkdtemp(prefix="n06_"), "cq.wav")
+        self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
+        self.patch.setattr(
+            QFileDialog,
+            "getSaveFileName",
+            staticmethod(lambda *a: (path, "WAV audio (*.wav)")),
+        )
+        self.dlg.set_mode("CW")
+        self.dlg.set_text("CQ")
+        with mock.patch.object(file_jobs, "run_job", wraps=file_jobs.run_job) as job:
+            self.dlg._save_button.click()
+        title = job.call_args.args[1]
+        self.assertEqual(title, "Save Text Signal")
+        self.assertTrue(os.path.exists(path))
+        with mock.patch.object(main_window, "busy_with", return_value=title):
+            self.assertEqual(
+                self.win._realtime_hint(),
+                "Save Text Signal keeps this computer busy, so audio is paused "
+                "meanwhile.",
+            )
+
+
 def _window_case():
     from tests.test_gui_chrome import _WindowTestCase
 

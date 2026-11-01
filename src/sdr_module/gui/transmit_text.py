@@ -1427,7 +1427,12 @@ if HAS_PYQT6:
                     path, source, kind, freq, description, report=report
                 )
 
-            result = run_job(self, "Saving", f"Saving {os.path.basename(path)}…", work)
+            # (Titled as the command, as File > Save Recording's is: while
+            # it keeps this computer busy the hints name it, "Save Text
+            # Signal keeps this computer busy, so audio is paused ...")
+            result = run_job(
+                self, "Save Text Signal", f"Saving {os.path.basename(path)}…", work
+            )
             shown = file_dialogs.display_path(path)
             if result.cancelled:
                 self._set_outcome("Not saved: cancelled.", None)

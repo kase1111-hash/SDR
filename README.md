@@ -431,8 +431,9 @@ is the full UI reference.
 The **Signal** tab (`Ctrl+9`, or Tools → Signal):
 
 - **Identify** (`Ctrl+I`) says what the tuned signal probably is, how sure
-  it is and how to listen to it (Apply Mode sets that mode and filter), and
-  takes on/off keyed data apart as rtl_433's pulse analyzer does.
+  it is and how to listen to it (Apply Mode sets that mode and filter, and
+  for FM a deviation that doesn't clip the station), and takes on/off keyed
+  data apart as rtl_433's pulse analyzer does.
 - **Signals** lists the signals in view (`Home`, `Page Up`, `Page Down` tune
   to the strongest and the next ones), **Scope** shows the channel against
   time or as a constellation, and **Bursts** logs the transmissions that

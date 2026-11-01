@@ -20,10 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   number in Hz and says why it can't use what you typed; `Esc` cancels.
 - Scrolling over a digit of FREQ tunes that digit. Below 2 MHz, frequencies
   read in kHz ("880 kHz", "AM Broadcast 880 kHz") in FREQ, the window title,
-  messages (not the Signal and Scanner tabs', which say "0.880 MHz"), Recent
-  Frequencies, the band plan row, the Presets group and bookmark names; the
-  Frequency field keeps the unit chosen beside it (MHz unless you pick
-  another), and the Bookmarks Add field stays in MHz.
+  messages (the Signal and Scanner tabs' too: "Listening to 880 kHz…",
+  "Bookmarked 660 kHz."), Recent Frequencies, the band plan row, the Presets
+  group and bookmark names; the Frequency field keeps the unit chosen beside
+  it (MHz unless you pick another), and the Bookmarks Add field, the
+  frequency columns of the Signal and Scanner tabs' lists, the Decoder tab's
+  status line ("listening on 1.810 MHz") and transmit messages stay in MHz.
 - Click-to-tune snaps to the signal's peak or center; the hover readout gives
   the frequency and level under the pointer and, when a click would snap
   elsewhere, where it tunes ("Click to tune to 99.500 MHz"); `Alt`+click
@@ -149,7 +151,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sample rate, or the device doesn't deliver it in real time), the status
   line says in amber that the decoder misses part of the signal and that a
   lower sample rate (Receiver → Sample rate) helps, and the status bar says it
-  once; both clear once the receiver has kept up for 3 s.
+  once; both clear once the receiver has kept up for 3 s. While the app's own
+  Decode Recording, Convert Recording, Save Recording or Find Signals keeps
+  the computer busy, they (and the Audio button's Paused) name that job as
+  the cause instead.
 - The Decoder tab counts unread messages ("Decoder (12)"), and a status-bar
   chip ("ADS-B · 37 msgs"; "paused" with Decode unticked; "can't decode" in
   amber, the reason in its tooltip) opens it. The chip and the status line
@@ -510,8 +515,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   yes/no saved as text reads as what it says ("off" read as on).
   `gui.DecoderPanel.pause_decoding()` unticks Decode without making it the
   user's choice for the next protocol, and `gui.decoder_panel.DecoderChip` is
-  a status-bar chip that shortens its text, at most to its first part, when
-  short of room.
+  a status-bar chip that, short of room, is shortened to fit, keeping at
+  least its first part, with the whole text in its tooltip.
 
 ### Added — GUI
 - **Passband display** — a shaded band on the spectrum marks the channel
@@ -593,11 +598,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sample rate (3.2 or 1.024 MS/s).
 - `Ctrl+T` switches the theme in about 0.2 s instead of a second, and no
   longer says afterwards that the demo device can't keep up.
-- At 1024 px the status bar keeps 220 px for its message with REC, AUDIO,
-  Track Signal's AFC and the decoder chip shown: the device name, the
-  recording's size and the decoder chip (shortened, at most to
-  "CW (Morse) · …") give way first, whole in their tooltips. (The scan chip
-  doesn't give way yet.)
+- At 1024 px the status bar keeps 220 px for its message with REC (or a
+  scan's chip), AUDIO, Track Signal's AFC and the decoder chip shown: the
+  device name, the recording's size and the decoder and scan chips
+  (shortened to fit, keeping at least their first part, such as
+  "CW (Morse) · …" or "Scanning · …") give way first, whole in their
+  tooltips.
 - The split between the control panel and the tool tabs stays in a gap
   between groups when the window gets smaller or opens at another size, and
   comes back when it grows again; selecting a decoded message no longer
@@ -661,6 +667,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Tune to …" or the Signal tab's Apply Mode gives one message saying what it
   set (not the mode on its own first, with its last filter), and None (I/Q)
   says it has no audio.
+- A tune that turns off the decoder a preset turned on, and has a message of
+  its own (the band plan's line, also on opening a recording, or a
+  bookmark's "Tuned to ..."), starts that message with the decoder's note
+  ("ACARS decoder off · FM Broadcast: listening in FM ...") instead of
+  replacing the note at once; the tune after it says only its own.
 - Radio → Choose Mode From Band Plan also changes the FM deviation when a
   frequency typed in another FM band is heard at another deviation: a 2 m
   repeater typed after an FRS channel or MURS channels 1–3 is heard at 5 kHz
@@ -701,7 +712,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clears the peak hold.
 - Waterfall noise keeps one brightness whatever a row covers: rows after a
   stall, rows of a 1 or 5 min history and a busy computer's rows no longer
-  look like a change in the band.
+  look like a change in the band, and the rows after a moment when the
+  display fell behind no longer form a darker band.
 - After Stop and Start, the waterfall's time axis labels the older rows too.
 - The waterfall's Color Levels menu checks the preset in use.
 - The Signal tab's Signals list lists stations, not pieces of them: it is
@@ -737,6 +749,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filter it said "Unknown signal").
 - The Identify card shows the bits first, with Copy Pulse Analysis next to
   Apply Mode (it says when it copied).
+- Identify suggests an FM deviation that doesn't clip the station, so Apply
+  Mode no longer leads straight to "FM audio is clipping" (it offered too
+  small a deviation for the demo's narrow FM calls and its pager); the card
+  also says how far the station's swing peaks.
 - The Scope shows one EVM (the plot and the line under it disagreed), reads
   small levels on its axis ("2.8m", "506u" instead of "0.00"), and its Freeze
   button reads "Freeze" while frozen.
@@ -804,6 +820,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signal (a recording is read in full, however slowly it plays) or points to
   Receiver → Sample rate, which can't change then; the playback's speed note
   is the one message.
+- A recording whose sample rate is too low for the decoder chosen is named as
+  the reason, as Decode Recording does: the Decoder tab, its chip's tooltip
+  and the status bar say "ADS-B needs at least 2 MS/s; this recording is
+  1 MS/s", not that the device runs at 1 MS/s and to change Receiver →
+  Sample rate, which can't change while a recording plays.
 
 ### Fixed — Recordings
 - I/Q recordings no longer lose most of the signal when the computer falls
@@ -935,6 +956,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tuner tuned with no receiver, SSTV asking for FM audio, Send ID Now without
   a callsign, a transmission started while another is on the air, and
   Transmit Text's notes on its macros and on text that didn't fit.
+- While on the air, the status bar's "On air: ... Stop ends it." comes back
+  once a notice that took its place (Space or Open Recording refused) has
+  gone, instead of leaving the bar empty for the rest of the transmission.
 
 ### Fixed — Scanner, bookmarks and CHIRP files
 - CHIRP channels keep an 88.5 Hz TSQL tone when imported, and editing one no
@@ -972,6 +996,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer listed in Tools → Error History; a scan that breaks is listed as it
   is with the tab in view (not once more), and a receiver that returns no
   samples during a scan is listed whichever tab is shown.
+- A preset or bookmark tuned from another tab during a scan keeps its own
+  message, after "Scan stopped · " ("Scan stopped · ADS-B: 1090.000 MHz, I/Q,
+  2.4 MHz filter · ADS-B decoder on"), instead of the next frame replacing it
+  with "Scan stopped: you tuned to ..."; a tune that says nothing of its own
+  still gets that.
 - A range scan starting below 1.2 MHz (at 2.4 MS/s) measures each step where
   it planned it (its first step missed 150–235 kHz).
 - The Bookmarks tab's Add row keeps a name typed for a channel already

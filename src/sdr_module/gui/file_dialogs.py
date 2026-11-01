@@ -65,6 +65,7 @@ KIND_DEFAULTS: Dict[str, str] = {
     "screenshot": "pictures",
     "channels": "documents",
     "error_log": "documents",  # Tools > Error History > Export (T12)
+    "scan_results": "documents",  # the Scanner's Export Results (CSV)
 }
 
 

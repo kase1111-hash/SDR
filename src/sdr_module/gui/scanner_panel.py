@@ -33,7 +33,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
-    from PyQt6.QtCore import QEvent, Qt, QTimer
+    from PyQt6.QtCore import QEvent, QSize, Qt, QTimer
     from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWidgets import (
         QAbstractItemView,
@@ -86,6 +86,7 @@ from .scan_engine import (
 from .scanner_dialog import _CUSTOM, SCAN_PRESETS, _format_freq, _NumericItem
 
 if HAS_PYQT6:
+    from . import file_dialogs
     from .decoder_panel import ViewPlaceholder
     from .themes import set_role, set_tone
 
@@ -97,12 +98,19 @@ _HIT_ROLE = Qt.ItemDataRole.UserRole + 1 if HAS_PYQT6 else 0
 
 #: A scan whose pass takes longer than this asks before it starts.
 CONFIRM_SECONDS = 120.0
+#: Bookmark All of more results than this asks first, and files them in a
+#: group of their own (removed together with the group's Remove Group).
+CONFIRM_BOOKMARKS = 20
 #: A running scan that gets no blocks for this long stops (and says why).
 NO_BLOCKS_S = 3.0
 #: Display frames per second (the window's display timer).
 _FRAME_S = 1.0 / 30.0
 #: How many results are kept between sessions.
 _SAVED_RESULTS = 500
+#: A column clicked during a scan keeps the results sorted (re-sorted by
+#: the tab's refresh) up to this many rows; longer lists are sorted once
+#: per click, and again when the scan ends (a sort of 2000 takes ~50 ms).
+_LIVE_SORT_ROWS = 1000
 #: The fields' ranges.
 _FREQ_RANGE_MHZ = (0.1, 6000.0)
 _STEP_RANGE_KHZ = (1.0, 10000.0)
@@ -158,6 +166,7 @@ class ScanHit:
     first_seen: float = 0.0
     last_seen: float = 0.0
     count: int = 1
+    tone_hz: float = 0.0  # a bookmark's CTCSS tone squelch (0: none)
 
     @property
     def listening(self) -> Listening:
@@ -181,6 +190,7 @@ class ScanHit:
                 first_seen=float(data.get("first_seen", 0.0)),
                 last_seen=float(data.get("last_seen", 0.0)),
                 count=int(data.get("count", 1)),
+                tone_hz=float(data.get("tone_hz", 0.0) or 0.0),
             )
         except (KeyError, TypeError, ValueError, OverflowError):
             return None
@@ -188,7 +198,14 @@ class ScanHit:
             return None
         hit.first_seen = _valid_time(hit.first_seen)
         hit.last_seen = _valid_time(hit.last_seen)
+        if not (math.isfinite(hit.tone_hz) and hit.tone_hz > 0):
+            hit.tone_hz = 0.0
         return hit
+
+
+def _band_name(label: str) -> str:
+    """``"NOAA Weather"`` for ``"NOAA Weather (162.4–162.55 MHz)"``."""
+    return label.split(" (", 1)[0]
 
 
 def _valid_time(timestamp: float) -> float:
@@ -259,13 +276,21 @@ class ScannerHost(ScanHost):
         """Tune to a result in its mode (Listen)."""
         return False
 
-    def scan_add_bookmarks(self, hits: List[ScanHit]) -> Tuple[int, List[str]]:
-        """Bookmark results: ``(added, names already bookmarked)``."""
+    def scan_add_bookmarks(
+        self, hits: List[ScanHit], group: str = ""
+    ) -> Tuple[int, List[str]]:
+        """Bookmark results (in ``group``, when given): ``(added, names
+        already bookmarked)``."""
         return 0, []
 
     def scan_bookmark_list(self, group: str = "") -> List[Dict[str, Any]]:
         """The bookmarks a bookmark scan visits (see
         :func:`~sdr_module.gui.scan_engine.bookmark_scan_list`)."""
+        return []
+
+    def scan_bookmark_order(self) -> List[int]:
+        """Every bookmark's index in the order the list shows them (the
+        order a bookmark scan visits them); [] when it is the stored one."""
         return []
 
     def scan_bookmark_groups(self) -> List[str]:
@@ -283,6 +308,20 @@ class ScannerHost(ScanHost):
 
     def scan_message(self, text: str, tone: Optional[str] = None) -> None:
         """Show a status-bar message."""
+
+    def scan_show_panel(self) -> None:
+        """Bring up the Scanner tab."""
+
+
+class _ResultsTable(QTableWidget if HAS_PYQT6 else object):
+    """The results list: it takes the height the tab has left (scrolling
+    its rows) instead of asking for a table's usual 192 px, which in the
+    short tab of a 1366x768 window pushed the buttons under it out of
+    view."""
+
+    def sizeHint(self):  # noqa: N802 (Qt API)
+        hint = super().sizeHint()
+        return QSize(hint.width(), self.minimumHeight())
 
 
 class ScannerPanel(QWidget if HAS_PYQT6 else object):
@@ -309,7 +348,27 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._blocker: Tuple[str, str] = ("", "")
         self._stay = False  # end the scan on the channel listened to
         self._restarting = False  # a new scan replaces the one running
+        self._status_tone: Optional[str] = None
+        # During a scan the table doesn't sort itself on each new result:
+        # whether a column was clicked (then the refresh re-sorts), and
+        # whether results came since the last sort.
+        self._sort_live = False
+        self._unsorted = False
+        # Scan Bookmarks from Here: the tab's own (mode, group) to show
+        # again when it ends (they are not saved meanwhile).
+        self._mode_before_from_here: Optional[Tuple[str, str]] = None
+        # The bookmark visits and counts of the group chosen, as the host
+        # last gave them (refreshed when the bookmarks change).
+        self._visits_cache: Optional[
+            Tuple[str, List[Dict[str, Any]], Tuple[int, int]]
+        ] = None
         self._setup_ui()
+        # (See _show_results_buttons: after the layout's next pass.)
+        self._buttons_timer = QTimer(self)
+        self._buttons_timer.setSingleShot(True)
+        self._buttons_timer.setInterval(0)
+        self._buttons_timer.timeout.connect(self._ensure_buttons_visible)
+        self._setup_chip()
         self._restore_settings()
         self._timer = QTimer(self)
         self._timer.setInterval(500)
@@ -323,6 +382,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
     def set_host(self, host: ScannerHost) -> None:
         """Connect the panel to the window."""
         self._host = host
+        self._visits_cache = None
         self._engine = ScanEngine(host, self._guess)
         self._connect_engine()
         # The groups are the window's bookmarks': now the saved one can be
@@ -358,14 +418,20 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._preset = QComboBox()
         self._preset.addItem(_CUSTOM)
         for preset in SCAN_PRESETS:
-            self._preset.addItem(preset.label)
+            # The band's name: "NOAA Weather (162.4–162.55 MHz)" didn't fit
+            # the column. Its range is in the tooltip (and Start / End);
+            # the full label is what is saved, as before.
+            self._preset.addItem(_band_name(preset.label), preset.label)
+            self._preset.setItemData(
+                self._preset.count() - 1, preset.label, Qt.ItemDataRole.ToolTipRole
+            )
         self._preset.setToolTip(
             "Band: fills in the range and step for a common band; signals found "
             "there are listened to in the band's mode (airband: AM)"
         )
         self._preset.setAccessibleName("Band")
         self._preset.currentIndexChanged.connect(self._on_preset_changed)
-        top.addWidget(self._preset, 3)
+        top.addWidget(self._preset, 1)
 
         self._mode = QComboBox()
         for key, text in SCAN_MODES:
@@ -399,7 +465,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         )
         self._mode.setAccessibleName("Scan mode")
         self._mode.currentIndexChanged.connect(self._on_mode_changed)
-        top.addWidget(self._mode, 2)
+        top.addWidget(self._mode, 1)
         for combo in (self._preset, self._mode):
             combo.setSizeAdjustPolicy(
                 QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
@@ -556,7 +622,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         layout.addWidget(self._listen_row)
 
         # Results
-        self._table = QTableWidget(0, 5)
+        self._table = _ResultsTable(0, 5)
         self._table.setHorizontalHeaderLabels(
             ["Frequency", "Level", "SNR", "Mode", "Heard"]
         )
@@ -568,9 +634,11 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         header.setMinimumSectionSize(30)
         self._table.setWordWrap(False)
         header.setSortIndicator(COL_FREQ, Qt.SortOrder.AscendingOrder)
+        header.sortIndicatorChanged.connect(self._on_sort_changed)
         header_tips = (
             "Signal center frequency, to the nearest kHz (a broadcast FM "
-            "station: its 100 kHz channel)",
+            "station: its 100 kHz channel); a bookmark scan's results also "
+            "name the bookmark",
             "Strongest FFT bin, in dB relative to full scale (same scale as "
             "the spectrum)",
             get_short_tip("snr"),
@@ -648,6 +716,74 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             btn.setAutoDefault(False)
         layout.addLayout(buttons)
 
+    def _setup_chip(self) -> None:
+        """The chip the window shows in its status bar while a scan runs
+        (see :meth:`status_chip`): what the scan is doing, and a menu to
+        stop, skip or hold it, or show this tab, from any tab."""
+        chip = QPushButton("")
+        set_role(chip, "compact")
+        chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        chip.setAccessibleName("Scan in progress")
+        menu = QMenu(chip)
+        menu.setToolTipsVisible(True)
+        stop = menu.addAction("Stop Scan")
+        stop.setToolTip("Stop the scan")
+        stop.triggered.connect(lambda _c=False: self.stop_scan())
+        self._chip_skip = menu.addAction("Skip")
+        self._chip_skip.setToolTip(self._skip_btn.toolTip())
+        self._chip_skip.triggered.connect(lambda _c=False: self._engine.skip())
+        self._chip_hold = menu.addAction("Hold")
+        self._chip_hold.setCheckable(True)
+        self._chip_hold.setToolTip(self._hold_btn.toolTip())
+        self._chip_hold.triggered.connect(
+            lambda on=False: self._hold_btn.setChecked(bool(on))
+        )
+        menu.addSeparator()
+        show = menu.addAction("Show Scanner")
+        show.setToolTip("Bring up the Scanner tab (Ctrl+F)")
+        show.triggered.connect(lambda _c=False: self._host.scan_show_panel())
+        chip.setMenu(menu)
+        chip.hide()
+        self._chip = chip
+
+    def status_chip(self) -> "QPushButton":
+        """The status-bar chip (the window adds it to its status bar)."""
+        return self._chip
+
+    def _update_chip(self) -> None:
+        engine = self._engine
+        chip = self._chip
+        if not engine.active:
+            if not chip.isHidden():
+                chip.hide()
+            return
+        current = engine.current
+        on_channel = engine.state in (DWELL, LISTEN) and current is not None
+        if on_channel:
+            where = current.label or _format_freq(current.frequency_hz)
+            if len(where) > 24:
+                where = where[:23] + "…"
+            text = f"Scanning · {where}" + (" · held" if engine.held else "")
+        else:
+            count = len(self._hits)
+            verb = "heard" if engine.mode in ("stop", "bookmarks") else "found"
+            text = f"Scanning · {count:,} {verb}"
+        text = text.replace("&", "&&")  # (a name's "&" is no mnemonic)
+        if chip.text() != text:
+            chip.setText(text)
+        tip = (
+            f"{self._scanning_text()}. Click for Stop, Skip and Hold, or to "
+            "show the Scanner tab (Ctrl+F)."
+        )
+        if chip.toolTip() != tip:
+            chip.setToolTip(tip)
+        can_skip = on_channel and engine.mode in ("stop", "bookmarks")
+        self._chip_skip.setEnabled(can_skip)
+        self._chip_hold.setEnabled(can_skip)
+        self._chip_hold.setChecked(engine.held)
+        if chip.isHidden():
+            chip.show()
+
     def _size_columns(self) -> None:
         """Level, SNR, Mode and Heard as wide as their widest text."""
         cells = self._table.fontMetrics()
@@ -698,6 +834,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._status.setText(text)
         self._status.setToolTip(text)
         set_tone(self._status, tone)
+        self._status_tone = tone
 
     def eventFilter(self, obj, event):  # noqa: N802 (Qt API)
         """Enter in the results listens to the selected signal."""
@@ -761,7 +898,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                     spin.setValue(value)
                     spin.blockSignals(False)
             preset = self._setting("get_str", "preset", SCAN_PRESETS[0].label)
-            index = self._preset.findText(preset)
+            index = self._preset.findData(preset)
+            if index < 0:
+                index = self._preset.findText(preset)
             self._preset.blockSignals(True)
             self._preset.setCurrentIndex(index if index >= 0 else 0)
             self._preset.blockSignals(False)
@@ -804,7 +943,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._save("start_mhz", self._start.value())
         self._save("end_mhz", self._end.value())
         self._save("step_khz", self._step.value())
-        self._save("preset", self._preset.currentText())
+        label = self._preset.currentData()
+        self._save(
+            "preset", label if isinstance(label, str) else self._preset.currentText()
+        )
 
     def _save_results(self) -> None:
         recent = sorted(self._hits, key=lambda h: -h.last_seen)[:_SAVED_RESULTS]
@@ -879,7 +1021,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             wanted = getattr(self, "_saved_group", "")
         self._group.blockSignals(True)
         self._group.clear()
-        self._group.addItem("All bookmarks", "")
+        # ("All": "All bookmarks" didn't fit the column; "Group: All".)
+        self._group.addItem("All", "")
+        self._group.setItemData(0, "All bookmarks", Qt.ItemDataRole.ToolTipRole)
         for group in self._host.scan_bookmark_groups():
             self._group.addItem(group, group)
         index = self._group.findData(wanted)
@@ -888,9 +1032,29 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
 
     def bookmarks_changed(self) -> None:
         """The bookmarks changed (the window calls this)."""
+        self._visits_cache = None
         self._refresh_groups()
         self._update_steps_hint()
         self._update_controls()
+
+    def _bookmark_visits(self) -> List[Dict[str, Any]]:
+        """The bookmarks a bookmark scan of the chosen group visits. Kept
+        until the bookmarks change: the tab's 500 ms refresh built the
+        list twice over every bookmark (66 ms with 10,000)."""
+        group = self._group_choice()
+        cache = self._visits_cache
+        if cache is None or cache[0] != group:
+            cache = (
+                group,
+                self._host.scan_bookmark_list(group),
+                self._host.scan_bookmark_counts(),
+            )
+            self._visits_cache = cache
+        return cache[1]
+
+    def _bookmark_counts(self) -> Tuple[int, int]:
+        self._bookmark_visits()
+        return self._visits_cache[2] if self._visits_cache else (0, 0)
 
     def _range_valid(self) -> bool:
         return self._end.value() > self._start.value()
@@ -960,8 +1124,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
     def _update_steps_hint(self) -> None:
         mode = self.scan_mode()
         if mode == "bookmarks":
-            total, skipped = self._host.scan_bookmark_counts()
-            visits = len(self._host.scan_bookmark_list(self._group_choice()))
+            total, skipped = self._bookmark_counts()
+            visits = len(self._bookmark_visits())
             if not total:
                 text = (
                     "No bookmarks yet: add some in the Bookmarks tab (Ctrl+B "
@@ -975,7 +1139,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                     "stops on the active ones (the squelch opens)."
                 )
                 if skipped:
-                    text += f" {skipped} marked Skip are passed by."
+                    verb = "is" if skipped == 1 else "are"
+                    text += f" {skipped} marked Skip {verb} passed by."
                 tone = None if visits else "warning"
             self._hint.setText(text)
             set_tone(self._hint, tone)
@@ -1062,6 +1227,13 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 self._set_status(reason, "warning")
         if not engine.active and self._auto.isChecked():
             self._update_steps_hint()
+        if (
+            engine.active
+            and self._sort_live
+            and self._unsorted
+            and self._table.rowCount() <= _LIVE_SORT_ROWS
+        ):
+            self._resort()
         self._update_controls()
 
     def _update_controls(self) -> None:
@@ -1072,6 +1244,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         for w in (self._preset, self._start, self._end, self._step):
             w.setEnabled(not scanning and sweep_mode)
         self._mode.setEnabled(not scanning)
+        self._group.setEnabled(not scanning)
         self._auto.setEnabled(not scanning and sweep_mode)
         self._threshold.setEnabled(
             not scanning and sweep_mode and not self._auto.isChecked()
@@ -1106,7 +1279,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 self._set_status(reason, "warning")
 
         listening = scanning and engine.state in (DWELL, LISTEN)
-        self._listen_row.setVisible(listening and engine.mode in ("stop", "bookmarks"))
+        show_row = listening and engine.mode in ("stop", "bookmarks")
+        if show_row and self._listen_row.isHidden():
+            self._show_results_buttons()  # (the row pushes them down)
+        self._listen_row.setVisible(show_row)
 
         has_rows = self._table.rowCount() > 0
         has_selection = bool(self._table.selectionModel().selectedRows())
@@ -1132,12 +1308,13 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._export_action.setEnabled(has_rows)
         self._clear_action.setEnabled(has_rows and not scanning)
         self._update_empty_state()
+        self._update_chip()
 
     def _cannot_start(self) -> str:
         """Why Start Scan is disabled ("" when it isn't)."""
         if self.scan_mode() == "bookmarks":
-            if not self._host.scan_bookmark_list(self._group_choice()):
-                total, _skipped = self._host.scan_bookmark_counts()
+            if not self._bookmark_visits():
+                total, _skipped = self._bookmark_counts()
                 if not total:
                     return "No bookmarks to scan: add some in the Bookmarks tab"
                 return "Every bookmark (of this group) is marked Skip"
@@ -1174,9 +1351,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         else:
             self.start_scan()
 
-    def start_scan(self, start_index: int = 0) -> bool:
+    def start_scan(self, start_index: Optional[int] = None) -> bool:
         """Start a scan with the panel's settings (``start_index``: the
-        bookmark a bookmark scan starts at). False if it can't.
+        bookmark a bookmark scan starts at, else the first one the list
+        shows). False if it can't.
 
         A scan running (Scan Bookmarks from Here during a sweep) is
         replaced: the receiver stays where it is meanwhile, and goes back
@@ -1195,10 +1373,11 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             self._host.scan_end(stay=False)  # back where the first began
         return False
 
-    def _launch(self, start_index: int, begin: bool) -> bool:
+    def _launch(self, start_index: Optional[int], begin: bool) -> bool:
         """:meth:`start_scan`'s work; ``begin``: the host remembers where
         the receiver is now (else where the scan replaced began)."""
         host = self._host
+        self._visits_cache = None  # (a scan starts from the bookmarks now)
         kind, reason = host.scan_blocker()
         self._blocker = (kind, reason)
         if kind:
@@ -1213,12 +1392,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         mode = self.scan_mode()
         settings = ScanSettings(mode=mode, resume_s=self._resume.value())
         if mode == "bookmarks":
-            visits = host.scan_bookmark_list(self._group_choice())
+            visits = [dict(visit) for visit in self._bookmark_visits()]
             settings.bookmarks = visits
-            settings.start_index = next(
-                (i for i, v in enumerate(visits) if v.get("index", -1) >= start_index),
-                0,
-            )
+            if start_index is not None:  # (else the first one listed)
+                settings.start_index = self._first_visit(visits, start_index)
         else:
             sweep, note = self._planned_sweep()
             if sweep is None:  # (checked above)
@@ -1260,6 +1437,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._hits = []
         self._rebuild_table()
         self._table.setSortingEnabled(False)
+        self._sort_live = self._unsorted = False
         self._empty_reason = "scanning"
         self._progress.setValue(0)
         self._timer.start()
@@ -1267,25 +1445,92 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._reveal_results()
         return True
 
-    def _reveal_results(self) -> None:
-        """In a short tab (1366x768), scroll so the status, the progress and
-        the results are in view rather than the settings."""
+    def _first_visit(self, visits: List[Dict[str, Any]], index: int) -> int:
+        """Where in ``visits`` (in the list's order) a scan from bookmark
+        ``index`` begins: on it, or, when it is marked Skip, on the next
+        one the list shows after it (the first one past the end)."""
+        for i, visit in enumerate(visits):
+            if visit.get("index", -1) == index:
+                return i
+        # (A host without the list's order: as stored.)
+        order = getattr(self._host, "scan_bookmark_order", lambda: [])() or []
+        listed = {stored: place for place, stored in enumerate(order)}
+        start = listed.get(index, index)
+        return next(
+            (
+                i
+                for i, visit in enumerate(visits)
+                if listed.get(visit.get("index", -1), visit.get("index", -1)) >= start
+            ),
+            0,
+        )
+
+    def _scroll_area(self) -> Optional["QScrollArea"]:
         area = self.parentWidget()
         while area is not None and not isinstance(area, QScrollArea):
             area = area.parentWidget()
+        return area
+
+    def _reveal_results(self) -> None:
+        """In a short tab (1366x768), scroll so the status, the progress and
+        the results are in view rather than the settings."""
+        area = self._scroll_area()
         if area is None:
             return
         bar = area.verticalScrollBar()
         if bar is not None and bar.maximum() > 0:
             bar.setValue(min(bar.maximum(), self._run_row.y() - 6))
+        self._show_results_buttons()
+
+    def _show_results_buttons(self) -> None:
+        """Bring the buttons under the results into view, once the layout
+        has settled (the listen row or a longer status may push them
+        down)."""
+        self._buttons_timer.start()
+
+    def _ensure_buttons_visible(self) -> None:
+        area = self._scroll_area()
+        if area is None or not self.isVisible():
+            return
+        # The layouts first, from the status row up (a status that wrapped,
+        # the listen row shown), then the tab's height and scroll range, so
+        # the buttons are measured where they now are.
+        for widget in (self._run_row, self):
+            layout = widget.layout()
+            if layout is not None:
+                layout.activate()
+        QGuiApplication.sendEvent(area, QEvent(QEvent.Type.LayoutRequest))
+        area.ensureWidgetVisible(self._results_btn, 0, 6)
 
     def scan_bookmarks_from(self, index: int) -> bool:
         """Scan all the bookmarks, starting at bookmark ``index`` (the
         Bookmarks tab's Scan Bookmarks from Here; it replaces a scan
-        running, see :meth:`start_scan`)."""
-        self.set_scan_mode("bookmarks")
-        self._group.setCurrentIndex(0)  # all bookmarks
-        return self.start_scan(start_index=index)
+        running, see :meth:`start_scan`). The tab shows Scan bookmarks of
+        all groups meanwhile; its own mode and group (and the saved ones)
+        come back when the scan ends."""
+        before = self._mode_before_from_here or (
+            self.scan_mode(),
+            self._group_choice(),
+        )
+        self._show_mode_quietly("bookmarks", "")
+        if self.start_scan(start_index=index):
+            self._mode_before_from_here = before
+            return True
+        self._mode_before_from_here = None
+        self._show_mode_quietly(*before)
+        return False
+
+    def _show_mode_quietly(self, mode: str, group: str) -> None:
+        """Show ``mode`` and ``group`` without saving them."""
+        restoring = self._restoring
+        self._restoring = True
+        try:
+            self.set_scan_mode(mode)
+            self._refresh_groups(prefer=group)
+            self._update_steps_hint()
+            self._update_controls()
+        finally:
+            self._restoring = restoring
 
     def _confirm_long_scan(self, steps: int, seconds: float) -> bool:
         box = QMessageBox(self)
@@ -1408,6 +1653,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 now,
                 now,
                 1,
+                float(getattr(found, "tone_hz", 0.0) or 0.0),
             )
         )
         index = len(self._hits) - 1
@@ -1422,6 +1668,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         -1: in a sweep the same signal (see ``same_signal``); in a bookmark
         scan the same bookmark (two on one frequency, a repeater's users
         with different tones, are two results)."""
+        tone = float(getattr(found, "tone_hz", 0.0) or 0.0)
         bookmarks = self._engine.mode == "bookmarks"
         freq = found.frequency_hz
         if bookmarks:
@@ -1442,6 +1689,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                     abs(hit.frequency_hz - freq) < 10.0
                     and hit.label == found.label
                     and hit.listening == tuple(found.listening)
+                    and hit.tone_hz == tone
                 )
             else:
                 same = same_signal(hit.frequency_hz, hit.width_hz, freq, step)
@@ -1472,10 +1720,18 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._hold_btn.setChecked(False)
         self._hold_btn.blockSignals(False)
         self._table.setSortingEnabled(True)
+        self._sort_live = self._unsorted = False
+        if self._mode_before_from_here is not None and not self._restarting:
+            # (Scan Bookmarks from Here ended: the tab's own mode again.)
+            before, self._mode_before_from_here = self._mode_before_from_here, None
+            self._show_mode_quietly(*before)
         count = len(self._hits)
         noun = "signal" if count == 1 else "signals"
         text, tone = getattr(self, "_stop_text", (None, "muted"))
         self._stop_text = (None, "muted")
+        # A full bar for a pass that ran to its end (below), else an empty
+        # one: a part-filled bar under a stopped scan looks like one going on.
+        self._progress.setValue(0)
         if reason == "complete":
             noise = engine.noise_db
             floor = f" Noise floor {noise:.0f} dBFS." if noise is not None else ""
@@ -1524,8 +1780,17 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             logger.warning("Frequency scan stopped: %s", message)
         if not self.isVisible():
             self._timer.stop()
+            # (From another tab the status-bar chip just went: say why;
+            # unless what stopped it (a transmission, a recording, the
+            # device gone) has the status bar already.)
+            if self._status.text() and not self._host.scan_blocker()[0]:
+                tone = self._status_tone
+                self._host.scan_message(
+                    self._status.text(), None if tone == "muted" else tone
+                )
         self._save_results()
         self._update_controls()
+        self._show_results_buttons()
 
     # ------------------------------------------------------------------ #
     # Results
@@ -1552,15 +1817,41 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         cell = self._cells.get(index)
         return self._table.row(cell) if cell is not None else -1
 
+    def _on_sort_changed(self, _column: int, _order: Any) -> None:
+        """A column header clicked: during a scan (when the table doesn't
+        sort itself) sort now, and keep it sorted (see refresh)."""
+        if self._engine.active and not self._table.isSortingEnabled():
+            self._sort_live = True
+            self._resort()
+
+    def _resort(self) -> None:
+        header = self._table.horizontalHeader()
+        self._table.sortItems(
+            header.sortIndicatorSection(), header.sortIndicatorOrder()
+        )
+        self._unsorted = False
+
     def _render_hit(self, index: int) -> None:
         hit = self._hits[index]
         row = self._row_of(index)
+        self._unsorted = True
         sorting = self._table.isSortingEnabled()
         self._table.setSortingEnabled(False)
         if row < 0:
             row = self._table.rowCount()
             self._table.insertRow(row)
-        freq = _NumericItem(_format_freq(hit.frequency_hz), hit.frequency_hz)
+        if hit.label:
+            # A bookmark scan's result says which bookmark (two on one
+            # repeater, with different tones, are told apart): its name
+            # first, so a narrow column cuts the frequency's end (it is in
+            # the tooltip), not the name. It still sorts by frequency.
+            freq = _NumericItem(
+                f"{hit.label} · {_format_freq(hit.frequency_hz)}",
+                hit.frequency_hz,
+                align_right=False,
+            )
+        else:
+            freq = _NumericItem(_format_freq(hit.frequency_hz), hit.frequency_hz)
         freq.setData(_HIT_ROLE, index)
         # Whole dB in the narrow column (the tooltip has tenths).
         level = _NumericItem(f"{hit.peak_db:.0f} dBFS", hit.peak_db)
@@ -1592,7 +1883,12 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         mode = mode_text(hit.mode, hit.fm_deviation)
         if mode:
             width = f", {hit.bandwidth} filter" if hit.bandwidth else ""
-            lines.append(f"Listen: {mode}{width}")
+            tone = (
+                f", tone squelch {hit.tone_hz:.1f} Hz"
+                if hit.tone_hz and hit.mode == "FM"
+                else ""
+            )
+            lines.append(f"Listen: {mode}{width}{tone}")
         if hit.first_seen:
             first = datetime.fromtimestamp(hit.first_seen).strftime("%H:%M:%S")
             times = "once" if hit.count == 1 else f"{hit.count} times"
@@ -1636,11 +1932,43 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             self._bookmark([hit])
 
     def bookmark_all(self) -> None:
-        if self._hits:
-            self._bookmark(sorted(self._hits, key=lambda h: h.frequency_hz))
+        """Bookmark every result. More than :data:`CONFIRM_BOOKMARKS` ask
+        first and go in a group of their own ("Scan 2026-10-31 22:00"), so
+        they can be removed together."""
+        if not self._hits:
+            return
+        hits = sorted(self._hits, key=lambda h: h.frequency_hz)
+        group = ""
+        if len(hits) > CONFIRM_BOOKMARKS:
+            group = datetime.now().strftime("Scan %Y-%m-%d %H:%M")
+            if not self._confirm_bookmark_all(len(hits), group):
+                return
+        self._bookmark(hits, group)
 
-    def _bookmark(self, hits: List[ScanHit]) -> None:
-        added, existing = self._host.scan_add_bookmarks(hits)
+    def _confirm_bookmark_all(self, count: int, group: str) -> bool:
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Bookmark All")
+        box.setText(f"Bookmark all {count:,} signals?")
+        box.setInformativeText(
+            f"They go in the group “{group}” of the Bookmarks tab (those "
+            "already bookmarked are skipped). To remove them all, right-click "
+            "the group there and choose Remove Group."
+        )
+        add = box.addButton("Bookmark All", QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(add)
+        box.setEscapeButton(cancel)
+        box.exec()
+        ok = box.clickedButton() is add
+        box.deleteLater()
+        return ok
+
+    def _bookmark(self, hits: List[ScanHit], group: str = "") -> None:
+        # (A group only for Bookmark All's many: hosts written before it
+        # take the results alone.)
+        extra = {"group": group} if group else {}
+        added, existing = self._host.scan_add_bookmarks(hits, **extra)
         if len(hits) == 1:
             if added:
                 text = f"Bookmarked {_format_freq(hits[0].frequency_hz)}."
@@ -1648,6 +1976,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 text = f"Already bookmarked: {existing[0] if existing else ''}"
         else:
             text = f"Bookmarked {added} of {len(hits)} signals"
+            if added and group:
+                text += f" in the group “{group}”"
             text += f" ({len(existing)} already bookmarked)." if existing else "."
         tone = "success" if added else "info"
         self._set_status(text, tone)
@@ -1670,9 +2000,22 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             return 0
         if not path:
             stamp = datetime.now().strftime("%Y%m%d-%H%M")
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Export Results (CSV)", f"scan-{stamp}.csv", "CSV (*.csv)"
-            )
+            name = f"scan-{stamp}.csv"
+            if self._settings is not None:
+                # In Documents, then the folder used last (not the folder
+                # the app was started from), as the other exports.
+                path, _ = file_dialogs.save_file(
+                    self,
+                    self._settings,
+                    "scan_results",
+                    "Export Results (CSV)",
+                    name,
+                    "CSV (*.csv)",
+                )
+            else:
+                path, _ = QFileDialog.getSaveFileName(
+                    self, "Export Results (CSV)", name, "CSV (*.csv)"
+                )
         if not path:
             return 0
         if not path.lower().endswith(".csv"):
@@ -1748,6 +2091,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         if clipboard is not None:
             clipboard.setText(text)
         self._set_status(f"Copied {text}.", "info")
+        # (In the status bar too, as the Bookmarks tab and the plots say it.)
+        self._host.scan_message(f"Copied {text}", "info")
 
 
 def _iso(timestamp: float) -> str:

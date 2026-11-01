@@ -33,7 +33,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
@@ -126,6 +126,12 @@ class ScanHost:
         """The blocks dropped after a retune are over (they may have held
         the last channel): what is heard is decided afresh from here."""
 
+    def scan_refusal_reason(self) -> str:
+        """What the receiver said when it last refused a tune (a driver's
+        error), for the scan's one line about the steps it skipped (see
+        :meth:`ScanEngine._tell_refused`); "" when it just said no."""
+        return ""
+
 
 @dataclass
 class ScanSettings:
@@ -162,6 +168,7 @@ class Found:
     listening: Listening
     label: str = ""  # a bookmark's name
     heard: bool = False  # the scan stopped on it and the squelch opened
+    tone_hz: float = 0.0  # a bookmark's CTCSS tone squelch (0: none)
 
     @property
     def snr_db(self) -> float:
@@ -202,6 +209,10 @@ class ScanEngine:
         self.found_count = 0
         self.steps_refused = 0
         self.steps_measured = 0
+        # What the receiver refused to tune in this pass (told once, at its
+        # end) and what was told last.
+        self._refused_hz: List[float] = []
+        self._refused_told: Set[float] = set()
         # The channel being dwelt on / listened to, and its bookmark index.
         self.current: Optional[Found] = None
         self.bookmark_index = -1
@@ -245,6 +256,8 @@ class ScanEngine:
         self.found_count = 0
         self.steps_refused = 0
         self.steps_measured = 0
+        self._refused_hz = []
+        self._refused_told = set()
         self.noise_db = None
         self.threshold_db = None
         self.current = None
@@ -503,6 +516,7 @@ class ScanEngine:
     # Moving on
     # ------------------------------------------------------------------ #
     def _finish(self, reason: str) -> None:
+        self._tell_refused()
         self.state = IDLE
         self._candidates = []
         self.host.scan_set_muted(False)
@@ -511,6 +525,36 @@ class ScanEngine:
             return
         self.on_state()
         self.on_finished(reason)
+
+    def _tell_refused(self) -> None:
+        """One line in Tools > Error History for what the receiver refused
+        to tune in this pass, not one a step (the window holds those back,
+        see ``WindowScannerHost``); none when a continuous scan meets the
+        ones it told already."""
+        refused, self._refused_hz = self._refused_hz, []
+        if not refused:
+            self._refused_told = set()  # (it tunes them again)
+            return
+        # (A host written before this hook may not have it.)
+        reason = str(getattr(self.host, "scan_refusal_reason", lambda: "")() or "")
+        if set(refused) <= self._refused_told:
+            return
+        self._refused_told = set(refused)
+        count = len(refused)
+        noun = "bookmark" if self.settings.mode == "bookmarks" else "step"
+        shown = ", ".join(f"{freq / 1e6:.3f}" for freq in refused[:3])
+        more = f" and {count - 3} more" if count > 3 else ""
+        said = f" The receiver said: {reason.rstrip('.')}." if reason else ""
+        logger.warning(
+            "Scan: %d %s%s the receiver couldn't tune %s skipped: %s MHz%s.%s",
+            count,
+            noun,
+            "" if count == 1 else "s",
+            "was" if count == 1 else "were",
+            shown,
+            more,
+            said,
+        )
 
     def _settle_after_tune(self, then: str, retuned: bool = True) -> None:
         """Drop the blocks that may predate a tune, then ``then``."""
@@ -528,6 +572,7 @@ class ScanEngine:
                     # (Still starting: every step was refused.)
                     self._finish(NO_STEP_TUNED if self._starting else "complete")
                     return
+                self._tell_refused()
                 self.pass_number += 1
                 self.page_index = 0
             page = self.pages[self.page_index]
@@ -541,6 +586,7 @@ class ScanEngine:
             # Out of what the receiver tunes (the range is planned inside
             # it, so this is rare): on to the next one.
             self.steps_refused += 1
+            self._refused_hz.append(page.lo_hz)
         self._finish(NO_STEP_TUNED)
 
     def _next_candidate(self) -> None:
@@ -554,6 +600,7 @@ class ScanEngine:
                 else:
                     self.on_state()
                 return
+            self._refused_hz.append(item.frequency_hz)
         self.current = None
         self._next_page()
 
@@ -561,6 +608,7 @@ class ScanEngine:
         bookmarks = self.settings.bookmarks
         for _attempt in range(len(bookmarks)):
             if self._bookmarks_left <= 0:
+                self._tell_refused()
                 self.pass_number += 1
                 self._bookmarks_left = len(bookmarks)
             self._bookmarks_left -= 1
@@ -582,6 +630,7 @@ class ScanEngine:
                 float(b.get("width_hz") or 10e3),
                 listening,
                 label=str(b.get("label") or ""),
+                tone_hz=tone,
             )
             self.host.scan_set_muted(True)
             if self.host.scan_tune_channel(freq, listening, tone):
@@ -592,6 +641,7 @@ class ScanEngine:
                     self.on_state()
                 return
             self.steps_refused += 1
+            self._refused_hz.append(freq)
         if len(self._skipped_visits) >= len(bookmarks):
             self._finish(ALL_SKIPPED)
             return
@@ -631,12 +681,17 @@ def bookmark_scan_list(
     bookmarks: Sequence[Dict[str, Any]],
     listening_of: Callable[[Dict[str, Any]], Tuple[str, str, str, float]],
     group: str = "",
+    order: Optional[Sequence[int]] = None,
 ) -> List[Dict[str, Any]]:
-    """The bookmarks a bookmark scan visits, in order: those not marked
-    Skip ("S"), of ``group`` when given, each with its ``index`` in the
-    list, its listening settings and its CTCSS ``tone_hz``."""
+    """The bookmarks a bookmark scan visits, in order (``order``: their
+    indices in the order to visit, e.g. as the Bookmarks list shows them;
+    else as stored): those not marked Skip ("S"), of ``group`` when given,
+    each with its ``index`` in the list, its listening settings and its
+    CTCSS ``tone_hz``."""
     visits = []
-    for index, b in enumerate(bookmarks):
+    indices = range(len(bookmarks)) if order is None else order
+    for index in indices:
+        b = bookmarks[index]
         if str(b.get("skip") or "") == "S":
             continue
         if group and str(b.get("group") or "") != group:

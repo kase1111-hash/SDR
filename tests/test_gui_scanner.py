@@ -600,7 +600,9 @@ class TestScannerTab(_PanelCase):
         from sdr_module.gui.scanner_dialog import SCAN_PRESETS
 
         panel = self.panel()
-        self.assertEqual(panel._preset.currentText(), SCAN_PRESETS[0].label)
+        # (The combo shows the band's name; its data is the full label.)
+        self.assertEqual(panel._preset.currentData(), SCAN_PRESETS[0].label)
+        self.assertTrue(SCAN_PRESETS[0].label.startswith(panel._preset.currentText()))
         panel._preset.setCurrentIndex(5)  # Airband AM
         air = SCAN_PRESETS[4]
         self.assertEqual(
@@ -1388,6 +1390,9 @@ class TestScannerInTheWindow(_ScanWindowCase):
             saves.append(len(items)),
             real_save(items),
         )
+        # (So many ask first, and go in a group: see test_final_scan.)
+        groups = []
+        panel._confirm_bookmark_all = lambda count, group: groups.append(group) or True
         with mock.patch.object(
             bookmarks, "_refresh_list", wraps=bookmarks._refresh_list
         ) as refresh:
@@ -1397,7 +1402,8 @@ class TestScannerInTheWindow(_ScanWindowCase):
         self.assertEqual(bookmarks.bookmark_count(), 300)
         self.assertEqual(
             panel._status.text(),
-            "Bookmarked 299 of 301 signals (2 already bookmarked).",
+            f"Bookmarked 299 of 301 signals in the group “{groups[0]}” "
+            "(2 already bookmarked).",
         )
         added = bookmarks.bookmark(1)
         self.assertEqual(

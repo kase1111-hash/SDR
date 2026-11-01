@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any, Dict, List
 
 try:
@@ -73,10 +74,11 @@ class GuiSettings:
         raw = self._s.value("bookmarks", "[]")
         try:
             data = json.loads(raw if isinstance(raw, str) else "[]")
-            return data if isinstance(data, list) else []
         except (ValueError, TypeError):
             logger.warning("Corrupt bookmarks in settings; resetting")
             return []
+        # (One damaged entry must not stop the app starting.)
+        return usable_bookmarks(data)
 
     def set_bookmarks(self, bookmarks: List[Dict[str, Any]]) -> None:
         self._s.setValue("bookmarks", json.dumps(bookmarks))
@@ -94,3 +96,73 @@ class GuiSettings:
 
     def load_geometry(self, name: str):
         return self._s.value(f"geom/{name}")
+
+
+def _usable_frequency(value: Any) -> bool:
+    """A frequency a bookmark can have: a finite number, not below zero
+    (one below zero also broke Export and ``sdr-scan channels``)."""
+    try:
+        freq = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(freq) and freq >= 0
+
+
+def _examples(entries: List[Any]) -> str:
+    """``"null, 1, ..."``: the first entries, short, for the log."""
+    shown = []
+    for entry in entries[:3]:
+        try:
+            text = json.dumps(entry)
+        except (TypeError, ValueError):
+            text = repr(entry)
+        shown.append(text if len(text) <= 60 else text[:57] + "...")
+    return ", ".join(shown) + (", ..." if len(entries) > 3 else "")
+
+
+def usable_bookmarks(data: Any) -> List[Dict[str, Any]]:
+    """The bookmarks of a saved list, safe to list, tune and scan.
+
+    A damaged settings file can hold anything, and one bad entry stopped the
+    app starting. An entry that isn't a bookmark (null, a number, a text) is
+    skipped; a bookmark whose frequency isn't a number (missing, "abc", NaN,
+    too big for a float) or is below zero stays in the list at 0 Hz, to be
+    edited or removed. Each kind of damage is logged once (Tools > Error
+    History).
+    """
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        logger.warning(
+            "Ignored the saved bookmarks: not a list (%s).", _examples([data])
+        )
+        return []
+    kept: List[Dict[str, Any]] = []
+    dropped: List[Any] = []
+    repaired: List[Dict[str, Any]] = []
+    for entry in data:
+        if not isinstance(entry, dict):
+            dropped.append(entry)
+            continue
+        if not _usable_frequency(entry.get("freq_hz")):
+            repaired.append(dict(entry))
+            entry["freq_hz"] = 0.0
+        kept.append(entry)
+    if dropped:
+        noun = "entry" if len(dropped) == 1 else "entries"
+        logger.warning(
+            "Ignored %d damaged %s of the saved bookmarks (%s): not a bookmark.",
+            len(dropped),
+            noun,
+            _examples(dropped),
+        )
+    if repaired:
+        noun = "bookmark has" if len(repaired) == 1 else "bookmarks have"
+        logger.warning(
+            "%d saved %s no usable frequency (%s): listed at 0 Hz, to be "
+            "edited or removed.",
+            len(repaired),
+            noun,
+            _examples(repaired),
+        )
+    return kept

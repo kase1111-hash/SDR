@@ -23,6 +23,9 @@ from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from ..core.band_plan import band_for, preset_for
+from ..core.frequency_manager import RX_PRESETS
+
 #: FFT length of every level measurement (the main display's).
 FFT_SIZE = 2048
 #: The part of the span a page uses (the edges roll off).
@@ -38,6 +41,29 @@ FINE_RASTER_HZ = 1e3
 WIDE_RASTER_HZ = 100e3
 WIDE_STEP_HZ = 100e3  # steps at least this big are broadcast-channel scans
 WIDE_SIGNAL_HZ = 60e3  # occupied width (20 dB down) of a wide signal
+# A sweep in steps of at most CHANNEL_STEP_HZ looks for channels (2 m,
+# NOAA, 70 cm, airband), and a data signal's centroid (SSTV, AFSK) sits a
+# kHz or two off its channel: a reading within PRESET_SNAP_HZ of a built-in
+# channel (ISS 145.800, APRS 144.390) is that channel and, in an FM band,
+# one within RASTER_SNAP_HZ of a CHANNEL_RASTER_HZ channel is on it (FM
+# channels are on 5 kHz; the 12.5 kHz ones between, 2.5 kHz from them,
+# are measured well within a kHz, so they keep their own frequency).
+CHANNEL_STEP_HZ = 25e3
+PRESET_SNAP_HZ = 2.5e3
+CHANNEL_RASTER_HZ = 5e3
+RASTER_SNAP_HZ = 1.5e3
+# PMR446 and other 6.25 kHz plans put channels 1.25 kHz from a 5 kHz one
+# (446.00625 MHz): a reading much nearer such a channel than the 5 kHz one
+# isn't moved onto the 5 kHz raster (446.005 was 1.25 kHz off the channel).
+OFFSET_RASTER_HZ = 6.25e3
+#: The built-in channels a reading snaps to: not a band's own preset (FM
+#: broadcast, ISM), nor a narrower channel's (SSB, CW), whose signal lies
+#: beside its dial frequency, or must be tuned to the hertz.
+_PRESET_CHANNELS: Tuple[float, ...] = tuple(
+    float(p.frequency_hz)
+    for p in RX_PRESETS
+    if p.bandwidth_hz >= 10e3 and preset_for(p.frequency_hz) is not None
+)
 #: Bins either side of the LO left out of the search: most receivers show a
 #: DC spike there, which would otherwise be a "signal" on every page.
 DC_GUARD_BINS = 2
@@ -254,12 +280,34 @@ def report_frequency(
 ) -> float:
     """The frequency to list and tune to for a signal measured at
     ``freq_hz`` with occupied width ``width_hz`` in a sweep of ``step_hz``
-    (``None`` outside a sweep): see :data:`WIDE_RASTER_HZ`."""
+    (``None`` outside a sweep): see :data:`WIDE_RASTER_HZ` and
+    :data:`CHANNEL_STEP_HZ`."""
     if step_hz and step_hz >= WIDE_STEP_HZ and width_hz >= WIDE_SIGNAL_HZ:
         raster = WIDE_RASTER_HZ
     else:
+        if step_hz and step_hz <= CHANNEL_STEP_HZ:
+            channel = _channel_at(freq_hz)
+            if channel is not None:
+                return channel
         raster = FINE_RASTER_HZ
     return float(round(freq_hz / raster) * raster)
+
+
+def _channel_at(freq_hz: float) -> Optional[float]:
+    """The channel a channel scan's reading at ``freq_hz`` is on, when it
+    is clearly one (see :data:`CHANNEL_STEP_HZ`); else None."""
+    freq = float(freq_hz)
+    near = [f for f in _PRESET_CHANNELS if abs(f - freq) <= PRESET_SNAP_HZ]
+    if near:
+        return min(near, key=lambda f: abs(f - freq))
+    band = band_for(freq)
+    if band is not None and band.mode == "FM":
+        channel = round(freq / CHANNEL_RASTER_HZ) * CHANNEL_RASTER_HZ
+        off = round(freq / OFFSET_RASTER_HZ) * OFFSET_RASTER_HZ
+        nearer_off = abs(off - freq) < abs(channel - freq) / 2
+        if abs(channel - freq) < RASTER_SNAP_HZ and not nearer_off:
+            return float(channel)
+    return None
 
 
 def _contiguous(above: np.ndarray, k: int) -> Tuple[int, int]:

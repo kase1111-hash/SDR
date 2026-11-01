@@ -369,7 +369,7 @@ class TestBookmarksPanelFixes(unittest.TestCase):
         chirp = {"label": "x", "freq_hz": 146.52e6, "location": 1}
         self.assertEqual(tune_mode(chirp), ("FM", "5 kHz"))  # CHIRP default FM
         cases = {
-            "NFM": ("FM", "5 kHz"),
+            "NFM": ("FM", "2.5 kHz"),  # (CHIRP's narrow FM: 12.5 kHz channels)
             "WFM": ("FM", "75 kHz"),
             "AM": ("AM", ""),
             "USB": ("USB", ""),

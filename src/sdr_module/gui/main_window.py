@@ -9924,9 +9924,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         bookmarks."""
         count = self._bookmarks_panel.import_csv()
         if count:
+            # (The Bookmarks panel says how many were imported.)
             self._show_panel("bookmarks")
-            noun = "bookmark" if count == 1 else "bookmarks"
-            self._show_status_message(f"Imported {count} {noun}", "success")
 
     def _export_channels_csv(self) -> None:
         """Export the saved channels to a CHIRP-compatible CSV file.
@@ -10035,6 +10034,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._scanner_panel.set_host(self._scanner_host)
         bookmarks.bookmarks_changed.connect(self._scanner_panel.bookmarks_changed)
         bookmarks.scan_requested.connect(self._scan_bookmarks_from)
+        # (Keys only: textEdited isn't emitted when a tune rewrites it.)
+        line = self._frequency_field().lineEdit()
+        if line is not None:
+            line.textEdited.connect(self._on_frequency_typed)
+        # "Scanning · ..." while a scan runs, with Stop, Skip and Hold.
+        self.statusBar().addPermanentWidget(self._scanner_panel.status_chip())
+
+    def _on_frequency_typed(self, _text: str) -> None:
+        """A key typed in the Frequency field stops a scan, as tuning does:
+        each scan step would retune under the typing. Enter then tunes what
+        was typed."""
+        panel = self._scanner_panel
+        if panel.engine.active:
+            panel.stop_scan("Scan stopped: you are typing a frequency.", "info")
 
     def _scan_frame(self, samples: np.ndarray) -> None:
         """Hand a block to a running scan (after everything else saw it).
@@ -10583,9 +10596,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tone = self._control_panel.tone_squelch_hz() if mode == "FM" and tuned else 0.0
         if tone:
             panel.set_tone(index, tone)
+        # (The tone squelch saved with it is said, as tuning a bookmark does.)
+        tone_text = f", tone squelch {tone:.1f} Hz" if tone else ""
         self._show_status_message(
-            f"Bookmarked {label} ({self._mode_text(mode)}). Rename it with F2 "
-            "in the Bookmarks tab.",
+            f"Bookmarked {label} ({self._mode_text(mode)}{tone_text}). Rename it "
+            "with F2 in the Bookmarks tab.",
             "success",
             3000,
         )

@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..devices.base import SDRDevice
 from .bookmarks_panel import default_bookmark_name, listening
+from .error_log_dialog import install_history_handler
 from .scan_engine import Listening, bookmark_scan_list
 from .scanner_panel import ScanHit, ScannerHost
 
@@ -41,6 +43,28 @@ def _parse_hz(text: str) -> Optional[float]:
         return None
 
 
+class _HeldBack(logging.Filter):
+    """Keeps from a handler what this thread logs, in ``records``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._thread = threading.get_ident()
+        self.records: List[logging.LogRecord] = []
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.thread != self._thread:
+            return True  # (another thread's, while the step tunes)
+        self.records.append(record)
+        return False
+
+
+def _text(record: logging.LogRecord) -> str:
+    try:
+        return record.getMessage()
+    except Exception:  # (a malformed record: its bare message)
+        return str(record.msg)
+
+
 class WindowScannerHost(ScannerHost):
     """Adapts the main window (``SDRMainWindow``) to the scanner."""
 
@@ -53,6 +77,8 @@ class WindowScannerHost(ScannerHost):
         #: The frequency the scan tuned last (None outside a scan): any
         #: other means the user tuned elsewhere.
         self.expected_hz: Optional[float] = None
+        # What the driver said when the receiver last refused a step.
+        self._refusal = ""
 
     # ---- tuning ----------------------------------------------------------- #
     def _quietly(self, tune) -> bool:
@@ -67,6 +93,32 @@ class WindowScannerHost(ScannerHost):
             return bool(tune())
         finally:
             win._restoring, panel.remember_filters = restoring, remembering
+
+    def _tune_step(self, tune) -> bool:
+        """Tune a step of the scan (quietly, see :meth:`_quietly`). What a
+        refused step logs (the window's "didn't tune", the driver's error)
+        stays out of Tools > Error History: the scan tells the steps it
+        skipped in one line a pass (see ``ScanEngine._tell_refused``), not
+        one or two a step. A step that tunes, or breaks, logs as usual."""
+        history = install_history_handler()  # (installed at startup)
+        held = _HeldBack()
+        history.addFilter(held)
+        ok: Optional[bool] = None
+        try:
+            ok = self._quietly(tune)
+        finally:
+            history.removeFilter(held)
+            if ok is False:
+                errors = [_text(r) for r in held.records if r.levelno >= logging.ERROR]
+                self._refusal = errors[0] if errors else ""
+            else:
+                for record in held.records:
+                    history.handle(record)
+        return bool(ok)
+
+    def scan_refusal_reason(self) -> str:
+        reason, self._refusal = self._refusal, ""
+        return reason
 
     def _after_tune(self) -> None:
         win = self._win
@@ -137,7 +189,7 @@ class WindowScannerHost(ScannerHost):
                     win._tune_to(vfo_hz)  # inside the span: only the VFO moves
             return True
 
-        ok = self._quietly(tune)
+        ok = self._tune_step(tune)
         self._lo_moved = abs(win._lo_frequency() - before) >= 0.5
         if ok:
             self._after_tune()
@@ -164,7 +216,7 @@ class WindowScannerHost(ScannerHost):
             self._apply_listening(listening, tone_hz)
             return True
 
-        ok = self._quietly(tune)
+        ok = self._tune_step(tune)
         self._lo_moved = abs(win._lo_frequency() - before) >= 0.5
         if ok:
             self._after_tune()
@@ -330,8 +382,9 @@ class WindowScannerHost(ScannerHost):
 
     # ---- results ---------------------------------------------------------- #
     def scan_listen(self, hit: ScanHit) -> bool:
-        """Tune to a result in its mode, filter and (no) tone squelch, and
-        start the receiver if it is stopped, so it is heard."""
+        """Tune to a result in its mode, filter and tone squelch (a
+        bookmark's own, else none), and start the receiver if it is
+        stopped, so it is heard."""
         win = self._win
         label = hit.label or default_bookmark_name(hit.frequency_hz)
         win._on_bookmark_tune(hit.frequency_hz, label, hit.mode, hit.fm_deviation)
@@ -340,12 +393,20 @@ class WindowScannerHost(ScannerHost):
         if hit.mode and hit.bandwidth:
             win._set_demod_mode(hit.mode, hit.fm_deviation or None, hit.bandwidth)
         if hit.mode == "FM":
-            win._control_panel.set_tone_squelch_hz(0.0)
+            tone = float(hit.tone_hz or 0.0)
+            win._control_panel.set_tone_squelch_hz(tone)
+            if tone:
+                # (As tuning the bookmark says.)
+                win._show_status_message(
+                    f"Tuned to {label} (FM, tone squelch {tone:.1f} Hz)", "info", 3000
+                )
         if win._device is not None and not win._is_running:
             win._start_acquisition()
         return True
 
-    def scan_add_bookmarks(self, hits: List[ScanHit]) -> Tuple[int, List[str]]:
+    def scan_add_bookmarks(
+        self, hits: List[ScanHit], group: str = ""
+    ) -> Tuple[int, List[str]]:
         panel = self._win._bookmarks_panel
         names = [hit.label or default_bookmark_name(hit.frequency_hz) for hit in hits]
         # All at once: saved and listed once (Bookmark All of 500 results
@@ -354,7 +415,8 @@ class WindowScannerHost(ScannerHost):
             [
                 (name, hit.frequency_hz, hit.mode, hit.fm_deviation, hit.bandwidth)
                 for name, hit in zip(names, hits, strict=True)
-            ]
+            ],
+            group=group,
         )
         added, existing = 0, []
         for name, (index, new) in zip(names, results, strict=True):
@@ -366,13 +428,18 @@ class WindowScannerHost(ScannerHost):
         return added, existing
 
     def scan_bookmark_list(self, group: str = "") -> List[Dict[str, Any]]:
+        panel = self._win._bookmarks_panel
+        # In the order the Bookmarks list shows them (each group first).
         visits = bookmark_scan_list(
-            self._win._bookmarks_panel.bookmarks(), listening, group
+            panel.bookmarks(), listening, group, order=panel.list_order()
         )
         for visit in visits:
             width = _parse_hz(visit.get("bandwidth") or "")
             visit["width_hz"] = width or 10e3
         return visits
+
+    def scan_bookmark_order(self) -> List[int]:
+        return self._win._bookmarks_panel.list_order()
 
     def scan_bookmark_groups(self) -> List[str]:
         return self._win._bookmarks_panel.groups()
@@ -390,3 +457,6 @@ class WindowScannerHost(ScannerHost):
 
     def scan_message(self, text: str, tone: Optional[str] = None) -> None:
         self._win._show_status_message(text, tone, 4000)
+
+    def scan_show_panel(self) -> None:
+        self._win._show_panel("scanner", focus=True)

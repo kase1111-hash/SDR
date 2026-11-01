@@ -542,6 +542,18 @@ class TestStereoLamp(_StereoWindowCase):
             self.assertEqual(self.win._stereo_badge.text(), "STEREO")
             self.assertFalse(self.tuner._stereo)
 
+    def test_no_lamp_while_nobody_hears_the_receiver(self):
+        # The audio paused (a recording playing at 2x or 4x): no stereo is
+        # decoded, so the lamp doesn't say STEREO (it stayed lit).
+        self.tune()
+        self.frames(12)
+        self.assertTrue(self.tuner._stereo)
+        with mock.patch.object(self.win, "_realtime", return_value=False):
+            self.frames(3)
+            self.assertFalse(self.tuner._stereo)
+        self.frames(12)
+        self.assertTrue(self.tuner._stereo)
+
 
 class TestRecordAudioInStereo(_StereoWindowCase):
     def setUp(self):
@@ -654,6 +666,124 @@ class TestStereoWork(_StereoWindowCase):
         self.frames(2)
         self.assertTrue(self.win._rx_chain.stereo)
         self.assertFalse(_ReceiverChain(2.4e6, "FM", 200e3).stereo)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestStereoNobodyHears(_StereoWindowCase):
+    """While nobody can hear the main receiver (a recording playing at 2x
+    or 4x, a computer that can't keep up, the Second Receiver's Listen
+    playing only that receiver), its stereo isn't decoded unless Record
+    Audio records it: the STEREO badge then says nothing. It went on
+    decoding mono and stereo for the badge, about 1 ms per 33 ms of
+    signal (4 ms a frame at 4x), and said STEREO next to "Paused"."""
+
+    def setUp(self):
+        super().setUp()
+        self.calls = []
+        real = StereoDecoder.process
+
+        def counted(decoder, mpx):
+            self.calls.append(len(mpx))
+            return real(decoder, mpx)
+
+        patcher = mock.patch.object(StereoDecoder, "process", counted)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def assert_says_nothing(self):
+        self.assertFalse(self.win._stereo_badge_action.isVisible())
+        self.assertFalse(self.win._stereo_lit)
+
+    def assert_back_in_stereo(self):
+        self.calls.clear()
+        self.written.clear()
+        self.frames(12)
+        self.assertTrue(self.calls)
+        self.assertTrue(self.stereo_blocks())
+        self.assertTrue(self.win._stereo_badge_action.isVisible())
+        self.assertEqual(self.win._stereo_badge.text(), "STEREO")
+
+    def test_not_while_the_audio_is_paused(self):
+        # At 2x or 4x, or on a computer that can't keep up, the audio is
+        # paused, the speaker on or off.
+        for speaker in (True, False):
+            with self.subTest(speaker=speaker):
+                self.win._audio_enabled = speaker
+                self.tune()
+                self.frames(12)
+                self.assertEqual(self.win._stereo_badge.text(), "STEREO")
+                with mock.patch.object(self.win, "_realtime", return_value=False):
+                    self.frames(2)  # (what played fades out)
+                    self.calls.clear()
+                    self.written.clear()
+                    self.frames(4)
+                    self.assertEqual(self.calls, [])
+                    self.assertEqual(self.written, [])
+                    self.assert_says_nothing()
+                self.win._audio_enabled = True
+                self.assert_back_in_stereo()
+
+    def test_not_while_the_second_receiver_plays_alone(self):
+        self.tune()
+        self.frames(12)
+        host = self.win._second_rx
+        with mock.patch.object(host, "mutes_main", return_value=True):
+            self.written.clear()
+            self.frames(1)
+            # What played fades out, in stereo, down to silence: no click.
+            self.assertEqual(len(self.written), 1)
+            last = self.written[-1]
+            self.assertEqual(np.ndim(last), 2)
+            self.assertLess(float(np.max(np.abs(last[-1]))), 1e-3)
+            self.assert_says_nothing()
+            self.calls.clear()
+            self.written.clear()
+            self.frames(4)
+            self.assertEqual(self.calls, [])
+            self.assertEqual(self.written, [])
+            self.assert_says_nothing()
+        self.assert_back_in_stereo()
+
+    def test_record_audio_still_records_stereo(self):
+        # "The spectrum, decoders and recordings keep working" at 2x and 4x:
+        # a stereo take still gets left and right, and the badge says so.
+        folder = tempfile.mkdtemp(prefix="stereo-rec-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.store.values["recording/folder"] = folder
+        self.tune()
+        self.assertTrue(self.win._start_audio_recording())
+        self.frames(12)
+        with mock.patch.object(self.win, "_realtime", return_value=False):
+            self.calls.clear()
+            self.frames(12)
+            self.assertEqual(len(self.calls), 12)
+            self.assertEqual(self.win._stereo_badge.text(), "STEREO")
+            path = self.win._stop_audio_recording()
+        with wave.open(path, "rb") as wav:
+            self.assertEqual(wav.getnchannels(), 2)
+            data = np.frombuffer(wav.readframes(wav.getnframes()), dtype=np.int16)
+        tail = data.reshape(-1, 2)[-48000 // 4 :].astype(float)
+        self.assertGreater(np.max(np.abs(tail[:, 0] - tail[:, 1])), 300)
+
+    def test_a_mono_take_needs_no_stereo(self):
+        # Started with Stereo off, the take is mono: while nobody hears the
+        # receiver, its stereo is decoded for nothing.
+        folder = tempfile.mkdtemp(prefix="stereo-rec-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.store.values["recording/folder"] = folder
+        self.win._stereo_action.setChecked(False)
+        self.tune()
+        self.assertTrue(self.win._start_audio_recording())
+        self.win._stereo_action.setChecked(True)
+        self.frames(6)
+        with mock.patch.object(self.win, "_realtime", return_value=False):
+            self.frames(3)  # (the difference fades out within a frame or two)
+            self.calls.clear()
+            self.frames(4)
+            self.assertEqual(self.calls, [])
+            self.assert_says_nothing()
+        self.assertEqual(self.win._audio_take.channels, 1)
+        self.win._stop_audio_recording()
 
 
 if __name__ == "__main__":

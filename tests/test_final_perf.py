@@ -399,11 +399,13 @@ class TestDecoderSaysWhenSignalIsSkipped(_hardware_case()):
         self.assertIn("Sample rate", line)
         self.assertEqual(panel._status_label.property("tone"), "warning")
         self.assertIn("misses part of the signal", self.win._message_label.text())
-        # The computer keeps up again: the line is the decoder's own.
+        # The computer keeps up again: the line is the decoder's own, and
+        # the status bar no longer says it can't keep up.
         self.LOAD = 0.3
         self.run_frames(300)
         self.assertFalse(self.win._pacer.overloaded)
         self.assertNotIn("misses", panel.decoder_status_text())
+        self.assertNotIn("misses", self.win._message_label.text())
 
     def test_no_decoder_or_decoding_paused_says_nothing_of_it(self):
         self._decode("ADS-B")

@@ -2319,6 +2319,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # bar says it once.
         self._skip_hint_until = 0.0
         self._skip_hinted = False
+        self._skip_hint_shown = ""  # (the status bar's text, while shown)
         self._pacer = _Pacer()  # how much each display frame reads
         self._entry_returns_focus = False  # Ctrl+L: Enter goes back to the plots
         self._restoring = False  # True while _restore_state applies settings
@@ -7191,6 +7192,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         text = self._skip_hint_text() if skipping else None
         panel.set_skipping(text)
         if text is None:
+            shown, self._skip_hint_shown = self._skip_hint_shown, ""
+            if shown and self._message_label.text() == shown:
+                self._clear_status_message()  # (keeping up again)
             self._skip_hinted = False
         elif not self._skip_hinted:
             self._skip_hinted = True
@@ -7198,6 +7202,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._message_label.text() == self._realtime_hint_text
             )
             if not audio_hint:  # (not over it: the Decoder's line says it)
+                self._skip_hint_shown = text
                 self._show_status_message(text, "info", 10000)
 
     def _skip_hint_text(self) -> str:

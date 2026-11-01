@@ -362,3 +362,53 @@ class TestDecoderRdsInTheWindow(_WindowTestCase):
         self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
         self.win._process_block(self.win._device.read_samples(80000))
         self.assertEqual(own.call_count, 1)
+
+
+# ---------------------------------------------------------------------------
+# DEC-E2E-03: a decoder that gets only part of the signal says so
+# ---------------------------------------------------------------------------
+
+
+def _hardware_case():
+    from tests.test_review_mainloop import _HardwareCase
+
+    return _HardwareCase
+
+
+class TestDecoderSaysWhenSignalIsSkipped(_hardware_case()):
+    """A HackRF at 20 MS/s on a computer whose frames take 1.5x real time
+    (the pacer reads one transfer a frame; the driver drops the rest)."""
+
+    def _decode(self, protocol):
+        self.win._set_demod_mode("None (I/Q)", bandwidth="2 MHz")
+        self.win._decoder_panel._proto_combo.setCurrentText(protocol)
+        self.settle(1)
+        self.win._decoder_panel.set_receiving(True)
+
+    def test_the_decoder_status_says_it_misses_part_of_the_signal(self):
+        # ADS-B's Tune to puts the receiver in None (I/Q): no speaker, so
+        # the "can't keep up" hint never came, and the status line stayed
+        # green while 72 % of the samples were dropped.
+        self._decode("ADS-B")
+        self.run_frames(40)
+        self.assertTrue(self.win._pacer.overloaded)
+        panel = self.win._decoder_panel
+        line = panel.decoder_status_text()
+        self.assertIn("misses part of the signal", line)
+        self.assertIn("20 MS/s", line)
+        self.assertIn("Sample rate", line)
+        self.assertEqual(panel._status_label.property("tone"), "warning")
+        self.assertIn("misses part of the signal", self.win._message_label.text())
+        # The computer keeps up again: the line is the decoder's own.
+        self.LOAD = 0.3
+        self.run_frames(300)
+        self.assertFalse(self.win._pacer.overloaded)
+        self.assertNotIn("misses", panel.decoder_status_text())
+
+    def test_no_decoder_or_decoding_paused_says_nothing_of_it(self):
+        self._decode("ADS-B")
+        self.win._decoder_panel._enabled_check.setChecked(False)
+        self.run_frames(40)
+        self.assertTrue(self.win._pacer.overloaded)
+        self.assertNotIn("misses", self.win._decoder_panel.decoder_status_text())
+        self.assertNotIn("misses", self.win._message_label.text())

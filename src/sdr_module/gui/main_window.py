@@ -315,6 +315,9 @@ _MAX_DRAIN = 1000
 _OVERLOAD_RATIO = 0.8
 _RECOVER_RATIO = 0.7
 _TIMED_FRAME = 8 * DISPLAY_BLOCK
+# A live decoder that got only part of the signal says so until frames have
+# kept up for this long (they come and go while the computer is busy).
+_SKIP_HINT_HOLD_S = 3.0
 # While frames can't keep up, one frame this often reads (and times) a full
 # frame's worth again, to find out when the computer keeps up once more:
 # full frames resume after this many probes in a row below _RECOVER_RATIO,
@@ -2311,6 +2314,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._rx_history: Deque[Tuple[float, int]] = deque()
         self._realtime_hint_shown = False
         self._realtime_hint_text = ""
+        # A live decoder that gets only part of the signal says so (until
+        # this monotonic time; see _sync_decoder_skipping), and the status
+        # bar says it once.
+        self._skip_hint_until = 0.0
+        self._skip_hinted = False
         self._pacer = _Pacer()  # how much each display frame reads
         self._entry_returns_focus = False  # Ctrl+L: Enter goes back to the plots
         self._restoring = False  # True while _restore_state applies settings
@@ -7147,6 +7155,63 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # How long the frame took against the time its samples cover.
         self._pacer.measured(
             len(samples), self._pacing_rate(), time.perf_counter() - started
+        )
+        self._sync_decoder_skipping()
+
+    def _samples_skipped(self) -> bool:
+        """Whether part of the signal is skipped: frames read one block each
+        (this computer can't keep up), or the device delivers less than its
+        sample rate. (A recording played faster or slower than real time
+        skips nothing unless frames can't keep up.)"""
+        if self._pacer.overloaded:
+            return True
+        if self._playback.active:
+            return False
+        return not self._realtime()
+
+    def _sync_decoder_skipping(self) -> None:
+        """While a live decoder runs and part of the signal is skipped, the
+        Decoder's status line says so (and the status bar, once): its
+        counts alone looked healthy while it heard a fraction of the signal
+        (with no speaker, as for ADS-B in None (I/Q), nothing else said
+        so). It says so until frames have kept up for _SKIP_HINT_HOLD_S."""
+        panel = self._own("_decoder_panel")
+        if panel is None:
+            return
+        decoding = (
+            self._decoder is not None
+            and self._decoder_protocol is not None
+            and panel._enabled_check.isChecked()
+        )
+        now = time.monotonic()
+        if decoding and self._samples_skipped():
+            self._skip_hint_until = now + _SKIP_HINT_HOLD_S
+        skipping = decoding and now < self._skip_hint_until
+        text = self._skip_hint_text() if skipping else None
+        panel.set_skipping(text)
+        if text is None:
+            self._skip_hinted = False
+        elif not self._skip_hinted:
+            self._skip_hinted = True
+            audio_hint = self._realtime_hint_shown and (
+                self._message_label.text() == self._realtime_hint_text
+            )
+            if not audio_hint:  # (not over it: the Decoder's line says it)
+                self._show_status_message(text, "info", 10000)
+
+    def _skip_hint_text(self) -> str:
+        """The Decoder's line while it gets only part of the signal."""
+        name = str(getattr(self._decoder, "name", "") or "live")
+        rate = format_rate(self._device_sample_rate())
+        if self._demo_mode:
+            cause = "The demo device can't keep up in real time right now"
+        elif self._pacer.overloaded:
+            cause = f"This computer can't process {rate} in real time right now"
+        else:
+            cause = f"The device isn't delivering {rate} in real time"
+        return (
+            f"{cause}, so the {name} decoder misses part of the signal. A "
+            "lower sample rate (Receiver > Sample rate) helps."
         )
 
     def _process_block(self, samples: np.ndarray) -> None:

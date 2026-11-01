@@ -18,7 +18,7 @@ import unittest
 
 import numpy as np
 
-from tests.voice_synth import pitched_voice
+from tests.voice_synth import CLOSE_VOWEL, pitched_voice
 
 RATE = 48000.0
 BIT_RATE = 134.4
@@ -192,6 +192,19 @@ def _subaudible_voice(seconds, seed=1):
     return SosFilter(highpass_sos(300.0, RATE)).process(voice)
 
 
+def _close_vowels_as_radios_send_them(seconds, seed, f0):
+    """Close vowels (ee, oo: a first formant near 300 Hz) through the
+    gentle 300 Hz voice high-pass of a radio (fourth-order Butterworth,
+    applied in the frequency domain), peak 0.6: much of the voice lies just
+    above the DCS band."""
+    voice = pitched_voice(seconds, RATE, seed=seed, f0=f0, formants=CLOSE_VOWEL)
+    spectrum = np.fft.rfft(voice)
+    f = np.fft.rfftfreq(len(voice), 1.0 / RATE)
+    spectrum /= np.sqrt(1.0 + (300.0 / np.maximum(f, 1e-9)) ** 8)
+    sent = np.fft.irfft(spectrum, len(voice))
+    return 0.6 * sent / np.max(np.abs(sent))
+
+
 class TestDetector(unittest.TestCase):
     """The detector on FM discriminator audio (full scale = the deviation):
     DCS at 15 % of it, as radios send it."""
@@ -257,6 +270,27 @@ class TestDetector(unittest.TestCase):
 
                 expected = dcs_same_signal(code, inverted) or expected
             self.assertTrue(all(f == expected for f in late), (code, late))
+
+    def test_voice_just_above_the_dcs_band_never_drops_the_code(self):
+        """A man's and a woman's close vowels, as a radio sends them, over
+        DCS 023: once the code is heard the squelch holds until the end.
+        (The DCS band was filtered only from 400 Hz up: the bit timing
+        followed the voice and the squelch dropped out for most of each
+        transmission, chopping what was said.)"""
+        frame = 1600
+        for f0 in (110.0, 220.0):
+            for seed in (0, 1):
+                x = _close_vowels_as_radios_send_them(8.0, seed, f0)
+                x = x + self.signal(23, seconds=8.0)
+                detector = self.detector()
+                present = []
+                for pos in range(0, len(x), frame):
+                    detector.process(x[pos : pos + frame])
+                    present.append(detector.is_present(23, False))
+                self.assertIn(True, present[:15], (f0, seed))  # (within 0.5 s)
+                opened = present.index(True)
+                dropped = present[opened:].count(False)
+                self.assertEqual(dropped, 0, (f0, seed))
 
     def test_a_transmitter_a_little_fast_or_slow(self):
         for bit_rate in (134.0, 134.8):

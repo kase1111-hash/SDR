@@ -12,15 +12,26 @@ from __future__ import annotations
 
 import numpy as np
 
+#: The vowel the voice speaks: formants (Hz, half-width Hz, weight).
+OPEN_VOWEL = ((700.0, 250.0, 1.0), (1700.0, 300.0, 0.6), (2600.0, 400.0, 0.25))
+#: Close vowels (ee, oo): a first formant near 300 Hz, so much of the
+#: voice lies just above a radio's 300 Hz voice high-pass.
+CLOSE_VOWEL = ((300.0, 100.0, 1.0), (2300.0, 200.0, 0.5))
+
 
 def pitched_voice(
-    seconds: float, rate: float = 48000.0, seed: int = 0, f0: float = 120.0
+    seconds: float,
+    rate: float = 48000.0,
+    seed: int = 0,
+    f0: float = 120.0,
+    formants=OPEN_VOWEL,
 ) -> np.ndarray:
     """``seconds`` of voice-like audio at ``rate``, peak 0.6.
 
     Syllables last 0.12-0.35 s with 0.04-0.25 s gaps; each starts at
     0.8-1.35 times ``f0`` and glides by up to a quarter; harmonics up to
-    4 kHz fall off at 6 dB per octave; formants at 700, 1700 and 2600 Hz.
+    4 kHz fall off at 6 dB per octave; ``formants`` shape them (by
+    default at 700, 1700 and 2600 Hz).
     """
     rng = np.random.default_rng(seed)
     n = int(round(seconds * rate))
@@ -48,11 +59,9 @@ def pitched_voice(
         source += np.where(h * pitch < 4000.0, np.sin(h * phase) / h, 0.0)
     spectrum = np.fft.rfft(source)
     f = np.fft.rfftfreq(n, 1.0 / rate)
-    shape = (
-        1.0 / (1.0 + ((f - 700.0) / 250.0) ** 2)
-        + 0.6 / (1.0 + ((f - 1700.0) / 300.0) ** 2)
-        + 0.25 / (1.0 + ((f - 2600.0) / 400.0) ** 2)
-    )
+    shape = np.zeros(f.size)
+    for centre, half_width, weight in formants:
+        shape += weight / (1.0 + ((f - centre) / half_width) ** 2)
     low = f < 150.0
     shape[low] *= (f[low] / 150.0) ** 2
     voice = np.fft.irfft(spectrum * shape, n) * envelope

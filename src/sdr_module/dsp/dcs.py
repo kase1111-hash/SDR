@@ -191,8 +191,10 @@ class DcsDetector:
 
     The input is the discriminator's audio *before* any DC blocking (a
     high-pass droops the long runs of equal bits), at ``sample_rate``.
-    It is low-passed to the DCS band (flat to 250 Hz, voice above 300 Hz
-    out) at about 2.4 kHz. Every ``UPDATE_S`` the last two or three words
+    It is low-passed to the bits' own band at about 2.4 kHz (``PASS_HZ``,
+    nothing from ``STOP_HZ`` up: a radio's 300 Hz voice high-pass leaves
+    much of a close vowel just above 300 Hz, which would move the bit
+    timing). Every ``UPDATE_S`` the last two or three words
     are read: the level halfway between the bits' two levels (a tuning
     offset moves it), the bit timing from where the signal crosses that
     level (crossings fall on bit boundaries: they must line up to at
@@ -215,6 +217,10 @@ class DcsDetector:
     HOLD_S = 0.25
     MIN_ALIGN = 0.6
     MAX_ERRORS = 2.0
+    #: The DCS band: flat to PASS_HZ, 60 dB down from STOP_HZ (the bits'
+    #: main lobe ends at 134.4 Hz).
+    PASS_HZ = 150.0
+    STOP_HZ = 250.0
     _TARGET_RATE = 2400.0
 
     def __init__(self, sample_rate: float) -> None:
@@ -225,7 +231,8 @@ class DcsDetector:
         stop = max(self._out_rate - 300.0, 400.0)
         # (Reversed: applied as dot products with the newest sample last.)
         self._taps1 = _kaiser_lowpass(300.0, stop, self._rate)[::-1].copy()
-        self._taps2 = _kaiser_lowpass(250.0, 400.0, self._out_rate)[::-1].copy()
+        band = _kaiser_lowpass(self.PASS_HZ, self.STOP_HZ, self._out_rate)
+        self._taps2 = band[::-1].copy()
         self._keep = int(math.ceil((3 * _BITS + 2) * self._spb))
         self._update_n = max(1, int(round(self.UPDATE_S * self._out_rate)))
         self._hold_n = int(round(self.HOLD_S * self._out_rate))

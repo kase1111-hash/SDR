@@ -272,6 +272,7 @@ class KeyingDetector:
         x = np.nan_to_num(x.astype(np.float64, copy=False))
         n = len(x)
         if n == 0:
+            self._steady = np.zeros(0, dtype=bool)
             return np.zeros(0, dtype=bool)
         if self._peak is None:
             # Start the smoothing from the first level, not from silence

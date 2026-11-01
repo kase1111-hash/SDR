@@ -121,3 +121,17 @@ def test_the_cw_demodulator_reads_them_too():
     other = CWDemodulator(RATE, wpm=20)
     keying = other.detect_keying(np.abs(x)).copy()
     assert (other.decode_morse(keying) + other.flush()).strip() == MESSAGE + " TU"
+
+
+def test_an_empty_block_has_no_steadiness_left_over():
+    # The steadiness is per sample of the last block, an empty one too
+    # (decode_morse of an empty keying raised: one value per decision).
+    from sdr_module.dsp.demodulators import CWDemodulator
+    from sdr_module.dsp.morse import KeyingDetector
+
+    keyer = KeyingDetector(RATE)
+    keyer.process(np.ones(500))
+    assert len(keyer.process(np.zeros(0))) == len(keyer.steady) == 0
+    demod = CWDemodulator(RATE)
+    demod.decode_morse(demod.detect_keying(np.ones(500)))
+    assert demod.decode_morse(demod.detect_keying(np.zeros(0))) == ""

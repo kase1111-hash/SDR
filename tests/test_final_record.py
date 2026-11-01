@@ -1316,3 +1316,54 @@ class TestATakeThatStartsBehind(_DemoTakeCase):
         win._toggle_recording(False)
         self.assertNotIn("lost", win._take_summary()[0])
         self.assertNotIn("The recording has gaps", self.message())
+
+
+class TestTrackSignalAtTheEdgeOfATake(_FilesCase):
+    """(Leftover 24's refusal) Track Signal during an I/Q take: once the
+    tracked channel reached the edge of the span, every frame's nudge was
+    refused again (about 30 status messages a second) while tracking stayed
+    on."""
+
+    def test_tracking_stops_with_the_reason(self):
+        from unittest import mock
+
+        from sdr_module.dsp import afc
+
+        win = self.win
+        self.assertTrue(win.set_frequency(100.1e6))
+        win._set_demod_mode("FM", "5 kHz", "12.5 kHz")
+        lo = win._lo_frequency()
+        edge = lo + 0.4 * win._device_sample_rate() - 8e3
+        self.assertTrue(win.set_frequency(edge))
+        win._toggle_recording(True)
+        win._update_display()
+        self.assertFalse(win._capture_pending)
+        process = afc.SignalTracker.process
+
+        def drifting(tracker, samples, dt):  # (the signal drifts up)
+            status = process(tracker, samples, dt)
+            status.nudge_hz = 2e3
+            return status
+
+        refusals = []
+        refuse = win._refuse_tuning
+
+        def counted(reason, *args, **kwargs):
+            refusals.append(reason)
+            return refuse(reason, *args, **kwargs)
+
+        win._track_action.trigger()
+        self.assertTrue(win._signal_tools.tracking)
+        with (
+            mock.patch.object(afc.SignalTracker, "process", drifting),
+            mock.patch.object(win, "_refuse_tuning", counted),
+        ):
+            for _ in range(10):
+                win._update_display()
+        self.assertFalse(win._signal_tools.tracking)
+        self.assertFalse(win._track_action.isChecked())
+        self.assertEqual(len(refusals), 1, refusals)
+        self.assertIn("Track Signal stopped", self.message())
+        self.assertIn("I/Q recording", self.message())
+        self.assertEqual(win._lo_frequency(), lo)
+        win._toggle_recording(False)

@@ -119,6 +119,17 @@ class TestNotchControls(_WindowTestCase):
         p.set_notch_mode("auto")
         self.assertFalse(p._notch_spin.isVisible() and spin.isEnabled())
 
+    def test_auto_says_it_is_not_for_music(self):
+        """Auto takes a note held in music for a whistle: on the demo's AM
+        stations it notched the tune's held notes almost all the time. The
+        list and its Auto entry say so (Off for music)."""
+        combo = self.panel._notch_combo
+        self.win._set_demod_mode("AM")
+        auto = combo.itemData(combo.findData("auto"), 3)  # (ToolTipRole)
+        for tip in (auto, combo.toolTip()):
+            self.assertIn("music", tip)
+            self.assertIn("Off", tip)
+
     def test_it_takes_no_width_from_the_right_column(self):
         """At 1024 px the right column is 400 px wide: the frequency box
         beside the Notch choice made the control panel 404 px. The row

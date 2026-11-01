@@ -2435,8 +2435,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             why
             or "Removes a whistle (a heterodyne) from the audio. Auto finds the "
             "strongest steady one and follows it as it drifts, leaving voice "
-            "alone; Manual removes the frequency you set (AM, SSB, CW and "
-            "narrow FM)."
+            "alone (for music use Off: a held note counts as a whistle); Manual "
+            "removes the frequency you set (AM, SSB, CW and narrow FM)."
         )
 
     def _on_notch_changed(self, *_args) -> None:

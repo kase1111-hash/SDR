@@ -369,7 +369,8 @@ NOTCH_CHOICES: Tuple[Tuple[str, str, str], ...] = (
         "auto",
         "Auto",
         "Finds the strongest steady whistle (a heterodyne) and removes it, "
-        "following it as it drifts; voice is left alone",
+        "following it as it drifts; voice is left alone. Not for music (use "
+        "Off): a note held for half a second counts as a whistle",
     ),
     ("manual", "Manual", "Removes the frequency set in the box next to it"),
 )

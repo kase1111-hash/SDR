@@ -9355,6 +9355,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         received = sum(count for _t, count in list(history)[1:])
         return received >= _REALTIME_FRACTION * self._device_sample_rate() * span
 
+    def _audio_held(self) -> bool:
+        """Whether nobody can hear the receiver now, whatever the Audio
+        button's switch: the Second Receiver's Listen plays only that
+        receiver, or the audio is paused (a recording playing faster than
+        real time, a computer that can't keep up). With the speaker on,
+        the Audio button says which (see _audio_state)."""
+        second = getattr(self, "_second_rx", None)
+        if second is not None and second.mutes_main():
+            return True
+        return not self._realtime()
+
     def _power_spectrum_dbfs(self, samples: np.ndarray) -> np.ndarray:
         """Windowed power spectrum in dBFS (full-scale sinusoid -> 0 dB).
 
@@ -9609,7 +9620,6 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """
         chain = self._receiver_chain()
         chain.options = self._audio_options
-        chain.stereo = self._stereo_enabled
         mode = chain.mode
         audible = mode in _AUDIBLE_MODES
         seconds = len(channel) / max(chain.channel_rate, 1.0)
@@ -9682,7 +9692,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             and not self._scan_muted
             and self._control_panel.get_fm_deviation() >= _BROADCAST_DEVIATION_HZ
         )
+        # Not while nobody can hear this receiver (its audio paused, or the
+        # Second Receiver's Listen playing only that one), unless Record
+        # Audio records it in stereo: the badge and lamp then say nothing,
+        # as while the Scanner moves between channels.
+        stereo_take = recording and getattr(take, "channels", 1) == 2
+        if received and not stereo_take and self._audio_held():
+            received = False
         stereo_watch = received and self._stereo_enabled and StereoPath.usable(chain)
+        # Stereo is decoded for what plays (or fades out), a stereo take and
+        # the badge: not for SSTV, a tone check or a mono take alone.
+        chain.stereo = self._stereo_enabled and (
+            speaker or fading_out or stereo_take or stereo_watch
+        )
         demodulate = (
             speaker
             or sstv
@@ -9829,7 +9851,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """The receiver bar's STEREO / MONO badge and the radio tuner's
         STEREO lamp (K-S1): whether the broadcast FM station received (a
         station above squelch: ``received``) plays in stereo, and why not;
-        speaker on or off, as a radio's lamp does. Hidden otherwise.
+        speaker on or off, as a radio's lamp does. Hidden otherwise, and
+        while nobody can hear the receiver (_audio_held) unless Record
+        Audio records its stereo: no stereo is decoded then.
         STEREO lights at half the stereo difference or more (about 10 dB
         of separation) and goes out below a third of it."""
         text, tone, tip = "", None, ""

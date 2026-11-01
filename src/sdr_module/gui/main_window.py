@@ -8628,6 +8628,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "Demodulation > Mode.",
             "warning",
             8000,
+            log=False,  # (what to do first: not a problem)
         )
 
     def _show_sstv_mode_needed(self, mode: str) -> None:
@@ -10863,6 +10864,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "Device > Use Demo Device or Connect... to listen.",
                 "warning",
                 6000,
+                log=False,  # (what to do first, as for Tune to ISS)
             )
         elif tuner is None or not tuner.is_seeking():  # (seek says it itself)
             self._show_status_message(

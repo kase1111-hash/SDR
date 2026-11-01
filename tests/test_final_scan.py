@@ -517,5 +517,68 @@ class TestResultsButtonsInView(_ScanWindowCase):
         panel.stop_scan()
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-03: a running scan shows (and can be stopped) from any tab
+# --------------------------------------------------------------------------- #
+class TestScanChipInTheStatusBar(_ScanWindowCase):
+    demo = True
+
+    def _chip(self):
+        chip = self.win._scanner_panel.status_chip()
+        self.assertIn(chip, self.win.statusBar().findChildren(type(chip)))
+        return chip
+
+    def _action(self, chip, text):
+        return next(
+            a for a in chip.menu().actions() if a.text().replace("&", "") == text
+        )
+
+    def test_the_chip_shows_while_scanning_and_stops_the_scan(self):
+        win, panel = self.win, self.win._scanner_panel
+        chip = self._chip()
+        self.assertTrue(chip.isHidden())
+        panel._preset.setCurrentIndex(1)
+        panel.set_scan_mode("continuous")
+        self.assertTrue(panel.start_scan())
+        win._show_panel("bookmarks")  # (elsewhere)
+        self.frames(0.5)
+        self.assertFalse(chip.isHidden())
+        self.assertTrue(chip.text().startswith("Scanning"))
+        self.assertIn("Stop", chip.toolTip())
+        self.assertFalse(self._action(chip, "Skip").isEnabled())  # (sweeping)
+        self._action(chip, "Show Scanner").trigger()
+        self.assertEqual(win._current_panel_key(), "scanner")
+        win._show_panel("bookmarks")
+        self._action(chip, "Stop Scan").trigger()
+        self.assertFalse(panel.engine.active)
+        self.assertTrue(chip.isHidden())
+        # (Stopped from another tab: the status bar says so.)
+        self.assertIn("Scan stopped", win._message_label.text())
+
+    def test_skip_and_hold_from_the_chip(self):
+        from sdr_module.gui.scan_engine import LISTEN
+
+        panel = self.win._scanner_panel
+        chip = self._chip()
+        panel._preset.setCurrentIndex(1)
+        panel.set_scan_mode("stop")
+        self.assertTrue(panel.start_scan())
+        self.assertTrue(self.frames(15.0, until=lambda: panel.engine.state == LISTEN))
+        self.assertIn("88.500 MHz", chip.text())
+        hold = self._action(chip, "Hold")
+        self.assertTrue(hold.isEnabled())
+        hold.trigger()
+        self.assertTrue(panel.engine.held)
+        self.assertTrue(panel._hold_btn.isChecked())
+        self.assertIn("held", chip.text())
+        heard = panel.engine.current.frequency_hz
+        self._action(chip, "Skip").trigger()
+        self.assertFalse(panel.engine.held)
+        self.frames(0.5)
+        self.assertNotEqual(getattr(panel.engine.current, "frequency_hz", 0), heard)
+        panel.stop_scan()
+        self.assertTrue(chip.isHidden())
+
+
 if __name__ == "__main__":
     unittest.main()

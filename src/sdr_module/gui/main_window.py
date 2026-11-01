@@ -9248,6 +9248,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         line = self._frequency_field().lineEdit()
         if line is not None:
             line.textEdited.connect(self._on_frequency_typed)
+        # "Scanning · ..." while a scan runs, with Stop, Skip and Hold.
+        self.statusBar().addPermanentWidget(self._scanner_panel.status_chip())
 
     def _on_frequency_typed(self, _text: str) -> None:
         """A key typed in the Frequency field stops a scan, as tuning does:

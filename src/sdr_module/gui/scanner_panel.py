@@ -294,6 +294,9 @@ class ScannerHost(ScanHost):
     def scan_message(self, text: str, tone: Optional[str] = None) -> None:
         """Show a status-bar message."""
 
+    def scan_show_panel(self) -> None:
+        """Bring up the Scanner tab."""
+
 
 class _ResultsTable(QTableWidget if HAS_PYQT6 else object):
     """The results list: it takes the height the tab has left (scrolling
@@ -330,12 +333,14 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._blocker: Tuple[str, str] = ("", "")
         self._stay = False  # end the scan on the channel listened to
         self._restarting = False  # a new scan replaces the one running
+        self._status_tone: Optional[str] = None
         self._setup_ui()
         # (See _show_results_buttons: after the layout's next pass.)
         self._buttons_timer = QTimer(self)
         self._buttons_timer.setSingleShot(True)
         self._buttons_timer.setInterval(0)
         self._buttons_timer.timeout.connect(self._ensure_buttons_visible)
+        self._setup_chip()
         self._restore_settings()
         self._timer = QTimer(self)
         self._timer.setInterval(500)
@@ -674,6 +679,74 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             btn.setAutoDefault(False)
         layout.addLayout(buttons)
 
+    def _setup_chip(self) -> None:
+        """The chip the window shows in its status bar while a scan runs
+        (see :meth:`status_chip`): what the scan is doing, and a menu to
+        stop, skip or hold it, or show this tab, from any tab."""
+        chip = QPushButton("")
+        set_role(chip, "compact")
+        chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        chip.setAccessibleName("Scan in progress")
+        menu = QMenu(chip)
+        menu.setToolTipsVisible(True)
+        stop = menu.addAction("Stop Scan")
+        stop.setToolTip("Stop the scan")
+        stop.triggered.connect(lambda _c=False: self.stop_scan())
+        self._chip_skip = menu.addAction("Skip")
+        self._chip_skip.setToolTip(self._skip_btn.toolTip())
+        self._chip_skip.triggered.connect(lambda _c=False: self._engine.skip())
+        self._chip_hold = menu.addAction("Hold")
+        self._chip_hold.setCheckable(True)
+        self._chip_hold.setToolTip(self._hold_btn.toolTip())
+        self._chip_hold.triggered.connect(
+            lambda on=False: self._hold_btn.setChecked(bool(on))
+        )
+        menu.addSeparator()
+        show = menu.addAction("Show Scanner")
+        show.setToolTip("Bring up the Scanner tab (Ctrl+F)")
+        show.triggered.connect(lambda _c=False: self._host.scan_show_panel())
+        chip.setMenu(menu)
+        chip.hide()
+        self._chip = chip
+
+    def status_chip(self) -> "QPushButton":
+        """The status-bar chip (the window adds it to its status bar)."""
+        return self._chip
+
+    def _update_chip(self) -> None:
+        engine = self._engine
+        chip = self._chip
+        if not engine.active:
+            if not chip.isHidden():
+                chip.hide()
+            return
+        current = engine.current
+        on_channel = engine.state in (DWELL, LISTEN) and current is not None
+        if on_channel:
+            where = current.label or _format_freq(current.frequency_hz)
+            if len(where) > 24:
+                where = where[:23] + "…"
+            text = f"Scanning · {where}" + (" · held" if engine.held else "")
+        else:
+            count = len(self._hits)
+            verb = "heard" if engine.mode in ("stop", "bookmarks") else "found"
+            text = f"Scanning · {count:,} {verb}"
+        text = text.replace("&", "&&")  # (a name's "&" is no mnemonic)
+        if chip.text() != text:
+            chip.setText(text)
+        tip = (
+            f"{self._scanning_text()}. Click for Stop, Skip and Hold, or to "
+            "show the Scanner tab (Ctrl+F)."
+        )
+        if chip.toolTip() != tip:
+            chip.setToolTip(tip)
+        can_skip = on_channel and engine.mode in ("stop", "bookmarks")
+        self._chip_skip.setEnabled(can_skip)
+        self._chip_hold.setEnabled(can_skip)
+        self._chip_hold.setChecked(engine.held)
+        if chip.isHidden():
+            chip.show()
+
     def _size_columns(self) -> None:
         """Level, SNR, Mode and Heard as wide as their widest text."""
         cells = self._table.fontMetrics()
@@ -724,6 +797,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._status.setText(text)
         self._status.setToolTip(text)
         set_tone(self._status, tone)
+        self._status_tone = tone
 
     def eventFilter(self, obj, event):  # noqa: N802 (Qt API)
         """Enter in the results listens to the selected signal."""
@@ -1161,6 +1235,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._export_action.setEnabled(has_rows)
         self._clear_action.setEnabled(has_rows and not scanning)
         self._update_empty_state()
+        self._update_chip()
 
     def _cannot_start(self) -> str:
         """Why Start Scan is disabled ("" when it isn't)."""
@@ -1581,6 +1656,14 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             logger.warning("Frequency scan stopped: %s", message)
         if not self.isVisible():
             self._timer.stop()
+            # (From another tab the status-bar chip just went: say why;
+            # unless what stopped it (a transmission, a recording, the
+            # device gone) has the status bar already.)
+            if self._status.text() and not self._host.scan_blocker()[0]:
+                tone = self._status_tone
+                self._host.scan_message(
+                    self._status.text(), None if tone == "muted" else tone
+                )
         self._save_results()
         self._update_controls()
         self._show_results_buttons()

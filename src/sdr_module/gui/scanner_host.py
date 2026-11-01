@@ -400,3 +400,6 @@ class WindowScannerHost(ScannerHost):
 
     def scan_message(self, text: str, tone: Optional[str] = None) -> None:
         self._win._show_status_message(text, tone, 4000)
+
+    def scan_show_panel(self) -> None:
+        self._win._show_panel("scanner", focus=True)

@@ -63,10 +63,12 @@ class _Receiver:
         self.range = tunes
         self.refuse_above = refuse_above
         self.tunes = []
+        self.refused = []
         self.muted = []
 
     def scan_tune_lo(self, center, vfo=None):
         if self.refuse_above is not None and center > self.refuse_above:
+            self.refused.append(center)
             return False
         self.dev.set_frequency(center)
         self.lo = center
@@ -220,12 +222,31 @@ class TestSharedSweep(unittest.TestCase):
         partner = _Receiver(_demo(2.4e6), refuse_above=100e6)
         engine = self.engine(main)
         engine.start(self.fm_band(), 2.4e6, 0.0, partner=partner)
-        _run(engine, main, partner)
+        with self.assertNoLogs("sdr_module.gui.scan_engine", "WARNING"):
+            _run(engine, main, partner)
         self.assertEqual(self.finished, ["complete"])
-        self.assertGreater(engine.steps_refused, 0)
+        self.assertTrue(partner.refused)
         self.assertEqual({f.frequency_hz for f in self.found}, _fm_stations())
         self.assertTrue(all(lo <= 100e6 for lo in partner.tunes))
         self.assertGreater(max(main.tunes), 100e6)
+        # (Swept by the main receiver: none skipped.)
+        self.assertEqual(engine.steps_refused, 0)
+
+    def test_a_refused_step_no_one_else_tunes_is_skipped_and_said(self):
+        main = _Receiver(_demo(2.4e6), tunes=(24e6, 99e6))
+        partner = _Receiver(_demo(2.4e6), refuse_above=104e6)
+        engine = self.engine(main)
+        engine.start(self.fm_band(), 2.4e6, 0.0, partner=partner)
+        with self.assertLogs("sdr_module.gui.scan_engine", "WARNING") as logs:
+            _run(engine, main, partner)
+        self.assertEqual(self.finished, ["complete"])
+        self.assertTrue(partner.refused)
+        self.assertEqual(engine.steps_refused, len(set(partner.refused)))
+        self.assertIn("couldn't tune", logs.output[-1])
+        found = {f.frequency_hz for f in self.found}
+        self.assertTrue(found <= _fm_stations())
+        self.assertNotIn(107.5e6, found)  # (only the partner tunes it: refused)
+        self.assertIn(103.5e6, found)
 
     def test_each_receiver_stays_inside_what_it_tunes(self):
         main = _Receiver(_demo(2.4e6), tunes=(24e6, 99e6))

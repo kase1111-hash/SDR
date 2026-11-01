@@ -310,6 +310,9 @@ class ScanEngine:
         self.partner: Optional[Any] = None
         self._shared: Optional[SharedSweep] = None
         self._shares: List[_Share] = []
+        # Steps of this pass a receiver couldn't tune (the other may still
+        # measure them: see _count_refused).
+        self._shared_refused: List[SweepPage] = []
 
     # ------------------------------------------------------------------ #
     # Control
@@ -354,6 +357,7 @@ class ScanEngine:
         self.partner = None
         self._shared = None
         self._shares = []
+        self._shared_refused = []
         if self.rate <= 0:
             return "The receiver's sample rate is unknown."
         if settings.mode == "bookmarks":
@@ -996,8 +1000,23 @@ class ScanEngine:
                 return
             # (The other receiver measures it, if it tunes it.)
             shared.release(share.index, page)
-            self.steps_refused += 1
-            self._refused_hz.append(page.lo_hz)
+            self._shared_refused.append(page)
+
+    def _count_refused(self) -> None:
+        """The steps refused in this pass that no receiver measured are the
+        ones skipped (told at the pass's end, see _tell_refused); a step
+        one receiver refused and the other measured is not."""
+        shared = self._shared
+        refused, self._shared_refused = self._shared_refused, []
+        if shared is None or not refused:
+            return
+        missed = shared.missed()
+        step = self.settings.step_hz
+        for page in refused:
+            low, high = page.first_hz - step / 2, page.last_hz + step / 2
+            if any(first <= high and low <= last for first, last in missed):
+                self.steps_refused += 1
+                self._refused_hz.append(page.lo_hz)
 
     def _end_shared_pass(self) -> None:
         """Neither receiver has a page left: the pass is over. A sweep
@@ -1007,6 +1026,7 @@ class ScanEngine:
         shared = self._shared
         if shared is None:
             return
+        self._count_refused()
         measured = any(share.steps for share in self._shares)
         if self.settings.mode == "once" or not measured:
             self._finish("complete" if measured else NO_STEP_TUNED)

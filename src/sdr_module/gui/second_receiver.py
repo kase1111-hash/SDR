@@ -30,7 +30,11 @@ counted as lost and said).
 The signal path is the main window's: :class:`~.main_window._ReceiverChain`
 (channel filter and demodulators), the squelch, level and noise-floor
 helpers of :mod:`.audio_chain`, and the main window's display loop pacing
-(:class:`~.main_window._Pacer`), in :class:`ReceiverDsp` (no Qt).
+(:class:`~.main_window._Pacer`), in :class:`ReceiverDsp` (no Qt). Both
+windows share the GUI thread, so each display frame's heavy part (the
+signal path and the plots' spectrum, :class:`FrameWork`) runs on a worker
+thread a frame behind the window (:class:`~.frame_pipeline.FramePipeline`):
+the GUI thread reads, records, paints and plays.
 
 Settings: ``device/second_receiver/*`` (device, sample rate per kind of
 device, frequency, mode, filter, step per mode, squelch, Listen, volume,
@@ -40,6 +44,7 @@ geometry, splitters and the waterfall's look).
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
@@ -48,7 +53,7 @@ import shutil
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -139,6 +144,7 @@ from .device_settings import (
     gain_model_for_kind,
     load_front_end,
 )
+from .frame_pipeline import FramePipeline
 from .iq_files import format_size
 from .level_meter import LevelMeter
 
@@ -648,6 +654,46 @@ class ReceiverDsp:
         return self._join.release()
 
 
+@dataclass
+class FrameResult:
+    """What :class:`FrameWork` made of one frame's samples."""
+
+    frame: Frame  # the signal path's: level, squelch, audio
+    spectrum: Any  # the plots' spectrum (a FrameSpectrum), or None
+    axis: Tuple[float, float]  # the (LO, rate) the samples were taken at
+
+
+class FrameWork:
+    """One frame's heavy work, as the second receiver's DSP worker thread
+    does it (no Qt): the signal path (:class:`ReceiverDsp`: channel filter,
+    level, squelch, demodulation) and, when the plots want the frame, their
+    whole-frame spectrum. While a frame runs, the DSP, the analyzer and
+    :attr:`axis` are the worker's: the window waits for it before it
+    changes them (see :class:`~.frame_pipeline.FramePipeline`)."""
+
+    def __init__(self, dsp: ReceiverDsp, analyzer: FrameSpectrumAnalyzer) -> None:
+        self.dsp = dsp
+        self.analyzer = analyzer
+        #: The (LO, rate) the analyzer's samples kept from the last frame
+        #: belong to (None: the next frame starts afresh).
+        self.axis: Optional[Tuple[float, float]] = None
+
+    def __call__(
+        self, samples: np.ndarray, play: bool, plots: bool, axis: Tuple[float, float]
+    ) -> FrameResult:
+        frame = self.dsp.process(samples, play)
+        spectrum = None
+        if plots:
+            if axis != self.axis:
+                # Samples kept from the last frame belong to another span.
+                self.analyzer.reset()
+                self.axis = axis
+            spectrum = self.analyzer.process(samples)
+        else:
+            self.axis = None  # (the first frame plotted again starts afresh)
+        return FrameResult(frame, spectrum, axis)
+
+
 # ---------------------------------------------------------------------------
 # Window
 # ---------------------------------------------------------------------------
@@ -894,10 +940,12 @@ if HAS_PYQT6:
             # As in the main window: both plots show the same part of the
             # span (zoom), and every sample of a frame (evenly spread
             # segments of one longer than _PLOT_MAX_SAMPLES) at the FFT size
-            # and window chosen in the spectrum's menu (see _plot_frame).
+            # and window chosen in the spectrum's menu (see FrameWork).
             self._plot_view = PlotView()
             self._frame_spectrum = FrameSpectrumAnalyzer(max_samples=_PLOT_MAX_SAMPLES)
-            self._frame_axis: Optional[Tuple[float, float]] = None
+            # Each frame's heavy work runs on a worker thread (see _feed).
+            self._work = FrameWork(self._dsp, self._frame_spectrum)
+            self._pipeline = FramePipeline("Second receiver DSP")
             # After a hardware retune the plots skip these samples and until
             # then (see _drop_stale_samples).
             self._plot_skip_samples = 0
@@ -1454,6 +1502,7 @@ if HAS_PYQT6:
             self._main_gone = True
             self._frame_timer.stop()
             self._status_timer.stop()
+            self._pipeline.close()  # (the frame in flight is dropped)
             self._running = False
             if self._recorder is not None:
                 writer, self._record_writer = self._record_writer, None
@@ -1630,6 +1679,7 @@ if HAS_PYQT6:
                 self._save(f"{KEY}sample_rate/{kind}", rate)
                 self._refresh_state()
                 return
+            self._settle_frames()  # (the frame in flight is the old span's)
             dev = self._device
             # Hardware takes the new rate between two streams, and what it
             # queued at the old rate is dropped (it would be taken for the
@@ -1883,7 +1933,10 @@ if HAS_PYQT6:
 
         def stop(self, quiet: bool = False) -> None:
             """Stop receiving and close the device (so the main window can
-            use it), ending a recording first."""
+            use it), ending a recording first. The frame the DSP worker has
+            is played first (then the audio fades out)."""
+            self._settle_frames()
+            self._pipeline.close()
             was_running = self._running
             # (Where a recording that ends here was saved is said too.)
             self._recording_said = None
@@ -1949,6 +2002,7 @@ if HAS_PYQT6:
             return -half <= offset_hz + low and offset_hz + high <= half
 
         def _retune_lo(self, lo_hz: float) -> bool:
+            self._settle_frames()  # (shown on the span it was taken on)
             dev = self._device
             if dev is not None:
                 try:
@@ -2605,6 +2659,7 @@ if HAS_PYQT6:
                     else:
                         self._audio_failed = False
             elif not want and self._audio_open:
+                self._settle_frames()  # (its audio first, then the fade out)
                 self._audio.write(self._dsp.release())
                 self._audio.stop()
                 self._audio_open = False
@@ -2701,7 +2756,8 @@ if HAS_PYQT6:
             return dev.read_samples(count)
 
         def _frame(self) -> None:
-            """One display frame: read, plot, measure, squelch, play, record."""
+            """One display frame: read, then hand the samples to the DSP
+            worker and paint and play the last frame's result (_feed)."""
             if not self._running or self._device is None:
                 return
             started = time.perf_counter()
@@ -2711,14 +2767,41 @@ if HAS_PYQT6:
                 self._stream_failed(str(e))
                 return
             if samples is None or len(samples) == 0:
+                if self._pipeline.ready():  # (what the worker made: shown now)
+                    self._present(self._pipeline.collect())
                 self._check_stream()
                 return
-            self._process(samples)
+            self._feed(samples)
             self._pacer.measured(
                 len(samples), self._rate(), time.perf_counter() - started
             )
 
+        def _feed(self, samples: np.ndarray) -> None:
+            """A display frame's samples: the DSP worker filters,
+            demodulates and analyzes them (FrameWork) while this thread
+            paints and plays the last frame's result, a frame behind. Only
+            this thread touches Qt, and the worker is never more than a
+            frame behind: collecting waits while its frame still runs (the
+            pacer then sees slow frames)."""
+            job = self._frame_job(samples)
+            try:
+                previous = self._pipeline.collect()
+            finally:
+                self._pipeline.submit(job)
+            if previous is not None:
+                self._present(previous)
+
         def _process(self, samples: np.ndarray) -> None:
+            """One frame start to finish on this thread (a frame the DSP
+            worker still has goes first). The display loop pipelines its
+            frames through the worker instead (_feed)."""
+            self._settle_frames()
+            self._present(self._frame_job(samples)())
+
+        def _frame_job(self, samples: np.ndarray) -> Callable[[], FrameResult]:
+            """This thread's part of a frame (what was received, the audio's
+            real-time hint, the recording, whether the plots want the frame)
+            and the DSP's part, to run (FrameWork)."""
             now = time.monotonic()
             history = self._rx_history
             history.append((now, len(samples)))
@@ -2727,7 +2810,6 @@ if HAS_PYQT6:
             self._dsp.rate = self._rate()
             play = self._audio_open and self._plays_here()
             realtime = self._realtime()
-            frame = self._dsp.process(samples, play and realtime)
             if play and not realtime and not self._realtime_hint:
                 self._realtime_hint = True
                 self._show_message(
@@ -2739,7 +2821,47 @@ if HAS_PYQT6:
                 )
             elif realtime:
                 self._realtime_hint = False
-            self._plot_frame(samples)
+            plots = self._plots_want(samples)
+            axis = (float(self._lo_hz), float(self._rate()))
+            if self._recorder is not None:
+                self._record(samples)
+            return functools.partial(
+                self._work, samples, play and realtime, plots, axis
+            )
+
+        def _plots_want(self, samples: np.ndarray) -> bool:
+            """Whether the plots take this frame, as in the main window:
+            every sample of it (of a frame longer than _PLOT_MAX_SAMPLES,
+            about half a million, evenly spread FFT segments: every frame
+            above 15 MS/s) at the FFT size and window chosen in the
+            spectrum's menu (the mean power per bin for the spectrum, the
+            strongest for the waterfall row, so a burst anywhere shows
+            unless it is shorter than the gap between segments). Not the
+            samples taken (partly) before the last retune
+            (_drop_stale_samples), nor while nobody sees them (the receiver
+            still plays; the first frame shown again starts afresh)."""
+            if self._plot_skip_samples > 0 or time.monotonic() < self._plot_skip_until:
+                self._plot_skip_samples = max(0, self._plot_skip_samples - len(samples))
+                return False
+            return not (self.isMinimized() or not self.isVisible())
+
+        def _present(self, result: FrameResult) -> None:
+            """Paint and play what the DSP made of a frame (this thread)."""
+            frame, spectrum = result.frame, result.spectrum
+            # (A frame from before a retune or a new rate is not painted on
+            # the new span; one shorter than an FFT has no spectrum yet.)
+            if spectrum is not None and result.axis == (
+                float(self._lo_hz),
+                float(self._rate()),
+            ):
+                self._spectrum.update_spectrum(spectrum.mean_db)
+                # (As in the main window: while frames can't keep up their
+                # length isn't the usual one, N-07.)
+                self._waterfall.add_line(
+                    spectrum.max_db,
+                    noise_db=spectrum.noise_floor_db,
+                    usual=not self._pacer.overloaded,
+                )
             gate = self._dsp.squelch
             self._level_meter.set_reading(
                 frame.level_db,
@@ -2752,47 +2874,24 @@ if HAS_PYQT6:
                 self._show_auto_threshold(gate.last_threshold_db)
             if frame.audio is not None and len(frame.audio) and self._audio_open:
                 self._audio.write(frame.audio)
-            if self._recorder is not None:
-                self._record(samples)
 
-        def _plot_frame(self, samples: np.ndarray) -> None:
-            """The plots, as in the main window: every sample of the frame
-            (of a frame longer than _PLOT_MAX_SAMPLES, about half a million,
-            evenly spread FFT segments: every frame above 15 MS/s) at the
-            FFT size and window chosen in the spectrum's menu (the mean
-            power per bin for the spectrum, the strongest for the waterfall
-            row, so a burst anywhere shows unless it is shorter than the
-            gap between segments)."""
-            if self._plot_skip_samples > 0 or time.monotonic() < self._plot_skip_until:
-                # Taken (partly) before the last retune (_drop_stale_samples).
-                self._plot_skip_samples = max(0, self._plot_skip_samples - len(samples))
+        def _settle_frames(self) -> None:
+            """Paint and play the frame the DSP worker has (waiting for it),
+            so none is in flight: before anything changes what the worker
+            uses (a reset, a new rate or FFT size, a retune, Stop)."""
+            if not self._pipeline.pending:
                 return
-            if self.isMinimized() or not self.isVisible():
-                # Nobody sees them (the receiver still plays): no plots, and
-                # the first frame shown again starts afresh. (Both windows
-                # share one thread: this was a quarter of this one's frame.)
-                self._frame_axis = None
+            try:
+                result = self._pipeline.collect()
+            except Exception:  # (the frame is lost; what comes next isn't)
+                logger.exception("Second receiver: a frame's processing failed")
                 return
-            axis = (float(self._lo_hz), float(self._rate()))
-            if axis != self._frame_axis:
-                # Samples kept from the last frame belong to another span.
-                self._frame_spectrum.reset()
-                self._frame_axis = axis
-            frame = self._frame_spectrum.process(samples)
-            if frame is None:
-                return  # less than one FFT of samples yet (a large FFT size)
-            self._spectrum.update_spectrum(frame.mean_db)
-            # (As in the main window: while frames can't keep up their
-            # length isn't the usual one, N-07.)
-            self._waterfall.add_line(
-                frame.max_db,
-                noise_db=frame.noise_floor_db,
-                usual=not self._pacer.overloaded,
-            )
+            self._present(result)
 
         def _apply_plot_resolution(self, size: int, window: str) -> None:
             """The spectrum's FFT Size or Window menu: both plots use it."""
             size, window = normalize_fft_size(size), normalize_window(window)
+            self._settle_frames()  # (the analyzer is the worker's meanwhile)
             if not self._frame_spectrum.configure(size, window):
                 return
             self._spectrum.set_fft_size(size)
@@ -3681,7 +3780,7 @@ if HAS_PYQT6:
             stop the timers: the window is closing, or the app is."""
             if self._shut_down or self._main_gone:
                 return
-            self.stop(quiet=True)
+            self.stop(quiet=True)  # (the DSP worker ends there)
             self.persist()
             self._status_timer.stop()
             self._frame_timer.stop()

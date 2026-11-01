@@ -475,10 +475,15 @@ class TestDemoLoopsAreQuickToBuild(unittest.TestCase):
         # to build the same tune again.)
         from sdr_module.gui import device_dialog as dd
 
-        rate = 1.5e6  # (a rate no other test builds loops at)
-        dd._loops("wfm", dd._MUSIC_SEED, rate)
-        with mock.patch.object(dd, "_music_tune", wraps=dd._music_tune) as tune:
-            dd._loops("amb", 1, rate)
+        rate = 1.5e6
+        with (
+            mock.patch.dict(dd._LOOP_CACHE, clear=True),
+            mock.patch.dict(dd._AM_MUSIC, clear=True),
+            mock.patch.dict(dd._MUSIC_CACHE, clear=True),
+        ):
+            dd._loops("wfm", dd._MUSIC_SEED, rate)
+            with mock.patch.object(dd, "_music_tune", wraps=dd._music_tune) as tune:
+                dd._loops("amb", 1, rate)
         self.assertEqual(tune.call_count, 0)
 
 

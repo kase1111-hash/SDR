@@ -5,9 +5,10 @@ decoder dropped it next to words of several letters and in a line of
 nothing else: "TU E E" (a sign-off) read "TU" and "T T T" read nothing.
 Now such a word shows when the speed is established by the code around it
 (the recent marks are dits and dashes of one speed), its mark is a dit or
-a dash at that speed, and the gaps on both sides are a word gap at that
-speed or a pause, with no flicker of noise in them, as an operator keys
-it. The crash models are those of tests/test_morse_decoder.py.
+a dash at that speed and a steady carrier (the envelope of a crash of
+static is not), and a word gap at that speed separates it from the code
+before or after it, as an operator keys it. The crash models are those of
+tests/test_morse_decoder.py.
 """
 
 import numpy as np

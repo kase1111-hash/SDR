@@ -376,6 +376,9 @@ def format_frequency(freq_hz: float) -> str:
     from ..core.band_plan import KHZ_BELOW_HZ, short_khz
 
     freq = float(freq_hz)
+    if not math.isfinite(freq):
+        # (A recording's damaged metadata: "nan MHz", as format_mhz_range.)
+        return f"{freq / 1e6:g} MHz"
     if abs(freq) < KHZ_BELOW_HZ:
         return f"{short_khz(freq)} kHz"
     text = f"{freq / 1e6:.6f}".rstrip("0")

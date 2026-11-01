@@ -606,6 +606,9 @@ class TestKilohertzBelowTwoMegahertz(unittest.TestCase):
         self.assertEqual(format_frequency(-2.5e6), "-2.500 MHz")
         self.assertEqual(format_frequency(0.0), "0 kHz")
         self.assertEqual(format_frequency(-0.0), "0 kHz")
+        # (Damaged recording metadata.)
+        self.assertEqual(format_frequency(float("nan")), "nan MHz")
+        self.assertEqual(format_frequency(float("-inf")), "-inf MHz")
 
     def test_bookmark_names(self):
         from sdr_module.core.band_plan import default_name

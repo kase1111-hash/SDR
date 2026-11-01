@@ -975,10 +975,4 @@ def _width_text(hz: float) -> str:
     return f"{hz:.0f} Hz"
 
 
-def _format_frequency(window: Any, freq: float) -> str:
-    from .main_window import format_frequency
-
-    return format_frequency(freq)
-
-
 __all__ = ["SignalTools", "LIST_EVERY_S", "FORGET_S"]

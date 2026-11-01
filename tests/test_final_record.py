@@ -15,6 +15,9 @@
   stop, the Recording group, format names, refusals, the playback strip at
   1024 px, quiet 8-bit saves.
 * Leftovers 20, 21, 24, 30 and the flaky input/playback tests.
+* On the merged build: the Unsaved question keeps "880 kHz" whole, Close
+  Recording keeps what going back said, and a decoder a preset left paused
+  doesn't warn about a recording's sample rate.
 """
 
 import os
@@ -1576,3 +1579,35 @@ class TestCloseKeepsWhatGoingBackSaid(_FilesCase):
         self.assertTrue(shown.startswith("Closed acars.sigmf-data. Back to "), shown)
         self.assertIn("ACARS decoder off", shown)
 
+
+class TestOpeningAfterAPresetsDecoder(_FilesCase):
+    """Open Recording after the ADS-B preset: the tune into the file turns
+    the preset's decoder off (LISTEN-05: Decode unticked, ADS-B still
+    chosen), but the decoder rebuilt for the file's 1 MS/s still warned
+    "ADS-B needs at least 2 MS/s; the device runs at 1 MS/s. Choose 2.4 MS/s
+    or more in Receiver > Sample rate" (a rate a recording playing can't
+    change) over the band plan's line, and listed it in Tools > Error
+    History, although nothing was decoding."""
+
+    def open_aprs(self):
+        path = _save_sigmf(self.path("aprs2m.sigmf-data"), 144.39e6)  # 1 MS/s
+        with self.open_dialog(path):
+            self.assertTrue(self.win._open_recording())
+
+    def test_a_paused_decoder_says_nothing(self):
+        import logging
+
+        self.assertTrue(self.win._apply_preset_named("ADS-B"))
+        with self.assertNoLogs(level=logging.WARNING):
+            self.open_aprs()
+        self.assertFalse(self.win._decoder_panel.is_decoding())
+        self.assertIn("APRS: listening in FM (narrow", self.message())
+
+    def test_a_decoder_still_decoding_says_why_it_cannot(self):
+        import logging
+
+        self.win._decoder_panel._proto_combo.setCurrentText("ADS-B")  # by hand
+        with self.assertLogs(level=logging.WARNING):
+            self.open_aprs()
+        self.assertTrue(self.win._decoder_panel.is_decoding())
+        self.assertIn("ADS-B needs at least 2 MS/s", self.message())

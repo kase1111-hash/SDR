@@ -2522,8 +2522,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     ] = None
     _preset_decoder_note = ""
     # What the last tune away from it said ("ACARS decoder off: tuned away
-    # ...") and its point ("ACARS decoder off"), which the same tune's next
-    # message keeps (see _keeping_release_note).
+    # ...") and its point ("ACARS decoder off"), which the next message to
+    # replace it keeps, once (see _keeping_release_note).
     _released_decoder: Optional[Tuple[str, str]] = None
     # Status messages shown so far, and how many there were at the last
     # tune: those after it are the tune's own (a scan it stops adds to
@@ -11338,16 +11338,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """``text``, a message the tune that turned a preset's decoder off
         posts next (the band plan's line, "Tuned to ..."), led by that point
         ("ACARS decoder off · ...") while it is what the message replaces:
-        both facts stay in view (P-07). (First: a long line is cut short at
-        its end.)"""
-        released = self._released_decoder
+        both facts stay in view (P-07). Once: a message after that says only
+        its own. (First: a long line is cut short at its end.)"""
+        released, self._released_decoder = self._released_decoder, None
         if released is None:
             return text
         message, note = released
-        shown = self._message_label.text()
-        if shown != message and not shown.startswith(f"{note} · "):
-            self._released_decoder = None  # (replaced, or gone)
-            return text
+        if self._message_label.text() != message:
+            return text  # (replaced, or gone)
         return f"{note} · {text}"
 
     def _preset_decoder_off(self) -> str:

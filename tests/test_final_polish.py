@@ -485,9 +485,11 @@ class TestThePresetsDecoderNoteStays(_FilesCase):
             text.startswith("ACARS decoder off · FM Broadcast: listening in FM"), text
         )
         # Its band's line is still the one cleared when you leave the band
-        # (LISTEN-13), note and all.
+        # (LISTEN-13), note and all; the next tune says only its own.
         self.type_frequency("146.52")
-        self.assertNotIn("FM Broadcast", self.message())
+        text = self.message()
+        self.assertNotIn("FM Broadcast", text)
+        self.assertTrue(text.startswith("2m Calling: listening in FM"), text)
 
     def test_a_bookmark_without_a_mode(self):
         win = self.win
@@ -503,6 +505,9 @@ class TestThePresetsDecoderNoteStays(_FilesCase):
         self.assertTrue(win._apply_preset_named("ADS-B"))
         win._on_bookmark_tune(146.52e6, "2m Calling", "FM", "5 kHz")
         self.assertEqual(self.message(), "ADS-B decoder off · Tuned to 2m Calling (FM)")
+        # Once: the next tune went nowhere near the decoder, and says so.
+        win._on_bookmark_tune(162.55e6, "NOAA Weather", "FM", "5 kHz")
+        self.assertEqual(self.message(), "Tuned to NOAA Weather (FM)")
 
     def test_opening_a_recording(self):
         win = self.win

@@ -2180,12 +2180,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     _START_TEXT = "▶  Start"
     _STOP_TEXT = "■  Stop"
     _RECORD_TEXT = "●  Record"
-    # The Audio button's states (see _audio_state). (A leading space:
+    # The Audio button's four states (see _audio_state). (A leading space:
     # Qt leaves almost no gap after a button's icon.)
     _AUDIO_ON_TEXT = " Audio"
     _AUDIO_OFF_TEXT = " Muted"  # muted by you
     _AUDIO_NO_OUTPUT_TEXT = " No output"  # no audio output device
     _AUDIO_SILENT_TEXT = " No audio"  # on, but None (I/Q) mode has no audio
+    # (Two more: on, but silent for now.)
     _AUDIO_SECOND_TEXT = " Muted (2nd RX)"  # the second receiver's Listen
     _AUDIO_PAUSED_TEXT = " Paused"  # on, but the signal isn't real time
     _AUDIO_TEXTS = (
@@ -10323,7 +10324,6 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Show the audio state on the Audio button (see _audio_state) and
         Radio > Audio > Mute."""
         state = self._audio_state()
-        self._audio_shown = state
         on = bool(self._audio_enabled and self._audio.available)
         controls = ((self._mute_action, not on), (self._audio_button, on))
         for control, checked in controls:
@@ -10388,6 +10388,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         button.setAccessibleName(name)
         button.setIcon(self._speaker_icon(state))
         set_tone(button, "warning" if state in ("no_output", "paused") else None)
+        self._audio_shown = state
         available = self._audio.available
         self._volume_slider.setEnabled(available)
         if available:

@@ -256,7 +256,12 @@ class TestLongAndMediumWaveInKilohertz(_SignalCase):
         # (The results column is numeric, headed MHz.)
         self.assertEqual(panel._table.item(0, sp.COL_FREQ).text(), "0.660 MHz")
         panel.bookmark_selected()
-        self.assertEqual(panel._status.text(), "Bookmarked 660 kHz.")
+        # (Named as Ctrl+B names it, W-04: in kHz too.)
+        self.assertEqual(
+            panel._status.text(),
+            "Bookmarked AM Broadcast 660 kHz (AM). Rename it with F2 in the "
+            "Bookmarks tab.",
+        )
         panel.listen_selected()
         self.assertEqual(panel._status.text(), "Listening to 660 kHz (AM).")
         self.assertEqual(win._current_frequency(), 660e3)

@@ -241,5 +241,71 @@ class TestTheClippingWarningNamesADeviationThatHolds(_window_case()):
         )
 
 
+# --------------------------------------------------------------------------- #
+# W-04: one wording for a new bookmark
+# --------------------------------------------------------------------------- #
+
+
+class TestTheScannersBookmarkSaysWhatCtrlBSays(_window_case()):
+    """W-04: Ctrl+B and the Signals list's Bookmark said "Bookmarked AM
+    Broadcast 660 kHz (AM). Rename it with F2 in the Bookmarks tab.", the
+    Scanner's Bookmark only "Bookmarked 660 kHz." for the same bookmark."""
+
+    demo = True
+
+    def bookmark_result(self, hit):
+        panel = self.win._scanner_panel
+        panel._hits = [hit]
+        panel._rebuild_table()
+        panel._table.selectRow(0)
+        panel.bookmark_selected()
+        return panel._status.text()
+
+    def test_a_result(self):
+        from sdr_module.gui import scanner_panel as sp
+
+        said = self.bookmark_result(
+            sp.ScanHit(660e3, -40.0, 40.0, 9e3, "AM", "", "10 kHz")
+        )
+        want = "Bookmarked AM Broadcast 660 kHz (AM). Rename it with F2 in the Bookmarks tab."
+        self.assertEqual(said, want)
+        self.assertEqual(self.win._message_label.text(), want)
+        names = [b.get("label") for b in self.win._bookmarks_panel.bookmarks()]
+        self.assertIn("AM Broadcast 660 kHz", names)
+
+    def test_as_ctrl_b_says_it(self):
+        from sdr_module.gui import scanner_panel as sp
+
+        win = self.win
+        win._set_demod_mode("AM", None, "10 kHz")
+        self.assertTrue(win.set_frequency(880e3))
+        win._bookmark_current_frequency()
+        by_key = win._message_label.text()
+        said = self.bookmark_result(
+            sp.ScanHit(1260e3, -40.0, 40.0, 9e3, "AM", "", "10 kHz")
+        )
+        self.assertEqual(by_key.replace("880", "1260"), said)
+
+    def test_a_bookmarks_own_name_and_iq(self):
+        from sdr_module.gui import scanner_panel as sp
+
+        said = self.bookmark_result(
+            sp.ScanHit(
+                433.92e6,
+                -40.0,
+                30.0,
+                20e3,
+                "None (I/Q)",
+                "",
+                "500 kHz",
+                label="Garage door",
+            )
+        )
+        self.assertEqual(
+            said,
+            "Bookmarked Garage door (I/Q). Rename it with F2 in the Bookmarks tab.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

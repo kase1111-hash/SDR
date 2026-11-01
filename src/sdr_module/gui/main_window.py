@@ -6323,16 +6323,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         text = self._missing_output_text()
         said = getattr(self, "_missing_output_said", "")
         if text and text != said:
-            # (After the "Audio on" of the switch that started it.)
-            QTimer.singleShot(
-                0,
-                lambda: self._show_status_message(
-                    f"{text}. Tools > Preferences chooses another output.",
-                    "info",
-                    8000,
-                ),
-            )
+            # (After the "Audio on" of the switch that started it; a bound
+            # method, so nothing is said by a window already closed.)
+            QTimer.singleShot(0, self._say_missing_output)
         self._missing_output_said = text
+
+    def _say_missing_output(self) -> None:
+        text = self._missing_output_text()
+        if text:  # (still gone)
+            self._show_status_message(
+                f"{text}. Tools > Preferences chooses another output.", "info", 8000
+            )
 
     def _audio_output_problem(self) -> Optional[str]:
         """Why audio can't play right now, or None if it can."""

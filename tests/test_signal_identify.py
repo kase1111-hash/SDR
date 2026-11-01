@@ -444,6 +444,15 @@ class TestDeviationThatHoldsThePeak:
         assert ident.fm_deviation == "5 kHz"
         assert "The swing peaks at about ±4.4 kHz" in ident.details
 
+    def test_the_bands_choice_needs_no_explaining(self):
+        """2 m's 5 kHz for voice peaking at 2.4 kHz: the band plan's choice,
+        not because 2.5 kHz would clip (off any band it is suggested)."""
+        result = self.result(2.4e3, 10e3, p95_hz=1.6e3)
+        ident = listening_for(result, 146.52e6)
+        assert ident.fm_deviation == "5 kHz"
+        assert "The swing peaks at about ±2.4 kHz" in ident.details
+        assert listening_for(result, 300e6).fm_deviation == "2.5 kHz"
+
     def test_voice_beyond_a_choice(self):
         """Voice peaking beyond 5 kHz isn't held by it: 12.5 kHz, and the
         card says why when the peak reads close to 5 kHz."""

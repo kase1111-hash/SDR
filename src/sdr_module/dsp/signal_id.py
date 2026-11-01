@@ -203,7 +203,7 @@ def listening_for(result: ClassificationResult, freq_hz: float) -> Identificatio
             # (The classifier's "swings about" is the rms swing; the
             # deviation suggested holds the peak.)
             dwells = often is not None and need > measured
-            details.append(_peak_detail(measured, deviation, dwells))
+            details.append(_peak_detail(measured, need, deviation, dwells))
     elif kind == "am":
         mode, filter_hz = "AM", min(max(1.1 * width, 5e3), 15e3)
     elif kind == "ssb":
@@ -259,16 +259,18 @@ def listening_for(result: ClassificationResult, freq_hz: float) -> Identificatio
     return ident
 
 
-def _peak_detail(peak_hz: float, deviation: str, dwells: bool) -> str:
+def _peak_detail(peak_hz: float, need_hz: float, deviation: str, dwells: bool) -> str:
     """The card's line on the FM swing's measured peak ``peak_hz``. Next
     to the suggested ``deviation`` it says why the choice below it isn't
-    suggested when the peak is near that choice: it could clip (``dwells``:
-    the swing stays near its peak, as a tone's does)."""
+    suggested when that one doesn't hold the swing ``need_hz`` it must
+    (see :func:`_swing_to_hold`) and the peak is near it: it could clip
+    (``dwells``: the swing stays near its peak, as a tone's does)."""
     line = f"The swing peaks at about ±{_format_hz(peak_hz)}"
     below = [(hz, text) for hz, text in _DEVIATIONS if hz < _khz(deviation)]
     if below:
         hz, text = below[-1]
-        if hz / _DEVIATION_MARGIN <= peak_hz <= _DEVIATION_MARGIN * hz:
+        near = hz / _DEVIATION_MARGIN <= peak_hz <= _DEVIATION_MARGIN * hz
+        if near and need_hz > hz:  # (not the band plan's choice: it clips)
             line += f"{' and stays near it' if dwells else ''}: {text} could clip"
     return line
 

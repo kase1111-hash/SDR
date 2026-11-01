@@ -748,6 +748,26 @@ class TestBelowZeroHertz(_WindowTestCase):
         self.type_frequency("7.2")
         self.assertEqual(win._lo_hz, 7.2e6)
 
+    def test_a_scan_step_and_a_transmission_put_the_lo_where_asked(self):
+        """recenter (the Scanner's steps; a transmission, which the HackRF
+        sends at its LO) still puts the LO exactly on the frequency near
+        0 Hz: a range scan's page is planned around it. It went to half
+        the sample rate instead, so a scan from 150 kHz measured its first
+        page around 1.2 MHz, not the 1.11 MHz planned, and never looked at
+        150-240 kHz (on a HackRF at 20 MS/s: 1-2 MHz, the 160 m band)."""
+        from sdr_module.dsp.sweep import USABLE_FRACTION, plan_sweep
+
+        win = self.win
+        rate = win._device_sample_rate()
+        page = plan_sweep(150e3, 2e6, 10e3, rate)[0]
+        host = win._scanner_host
+        self.assertTrue(host.scan_tune_lo(page.lo_hz, page.nearest_channel(page.lo_hz)))
+        lo = host.scan_lo_hz()
+        self.assertEqual(lo, page.lo_hz)
+        self.assertGreaterEqual(page.first_hz, lo - 0.5 * USABLE_FRACTION * rate)
+        self.assertTrue(win._tune_to(0.9e6, recenter=True))
+        self.assertEqual(win._lo_hz, 0.9e6)
+
     def test_keep_centered_near_0_hz_leaves_the_station_be(self):
         """With Keep Tuned Frequency Centered the LO of a 660 kHz station
         is as near it as 0 Hz allows (not on it): that is where it belongs,

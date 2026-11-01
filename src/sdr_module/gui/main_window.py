@@ -5508,8 +5508,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _tune_to(self, freq_hz: float, recenter: bool = False) -> bool:
         """Tune to ``freq_hz`` by the rules of :meth:`set_frequency`.
 
-        ``recenter`` puts the LO on the tuned frequency whatever the span
-        (near 0 Hz: see :meth:`_lo_for`).
+        ``recenter`` puts the LO on the tuned frequency whatever the span,
+        near 0 Hz too (the Scanner plans its steps around it; the HackRF
+        transmits at it). Otherwise a LO that has to move goes where
+        :meth:`_lo_for` says (near 0 Hz, the span starts at 0 Hz).
         True when tuned; otherwise the reason is in the status bar and
         everything stays on the frequency tuned.
         """
@@ -5553,7 +5555,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     f"{covered}."
                 )
             lo = center
-        elif recenter or self._keep_centered() or not self._channel_fits(freq - lo):
+        elif recenter:
+            lo = freq
+        elif self._keep_centered() or not self._channel_fits(freq - lo):
             lo = self._lo_for(freq)
         if abs(lo - self._lo_hz) >= 0.5 and not self._retune_lo(lo):
             return self._refuse_tuning(
@@ -5609,7 +5613,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # would only start the station over.
             return
         if self._keep_centered() or not self._channel_fits(offset):
-            self._tune_to(self._current_frequency(), recenter=True)
+            # (Where _lo_for puts it: not recenter, which is exact.)
+            self._tune_to(self._current_frequency())
 
     def _lock_lo(self, center_hz: float, span_hz: float, why: str) -> None:
         """Fix the LO at ``center_hz`` with a ``span_hz`` span (e.g. while a

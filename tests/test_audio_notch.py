@@ -296,6 +296,25 @@ class TestAudioNotch(unittest.TestCase):
         notch.reset()  # (another channel, another mode)
         self.assertIsNone(notch.frequency_hz)
 
+    def test_another_station_lets_the_tone_go_without_a_click(self):
+        """search_anew (another station tuned, the audio carrying on): Auto
+        forgets its tone and searches again; the notch fades out (and in
+        again once the tone is found anew), never stepping."""
+        n = int(4.0 * RATE) // FRAME * FRAME
+        x = tone(n, 1000.0, 0.5)
+        notch = self.notch("auto")
+        half = n // 2 // FRAME * FRAME
+        first = _run(notch.process, x[:half], [FRAME])
+        self.assertAlmostEqual(notch.frequency_hz, 1000.0, delta=0.3)
+        notch.search_anew()
+        self.assertIsNone(notch.frequency_hz)
+        second = _run(notch.process, x[half:], [FRAME])
+        self.assertAlmostEqual(notch.frequency_hz, 1000.0, delta=0.3)
+        out = np.concatenate((first, second))
+        self.assertLess(np.max(np.abs(np.diff(out))), 0.08)
+        # (Heard again while it is searched for.)
+        self.assertGreater(tone_level(second[: int(0.3 * RATE)], 1000.0), 0.4)
+
 
 if __name__ == "__main__":
     unittest.main()

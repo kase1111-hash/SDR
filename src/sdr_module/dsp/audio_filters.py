@@ -557,6 +557,11 @@ class AudioNotch:
         self._finding = False
         self.reset_stream()
 
+    def search_anew(self) -> None:
+        """Another station tuned: Auto forgets the tone it found (the notch
+        fades out, as when a tone ends) and searches afresh."""
+        self.finder.reset()
+
     def reset_stream(self) -> None:
         """A new stream of the same channel (the squelch closed and opened
         again): the filter starts from rest, Auto keeps the tone it found."""

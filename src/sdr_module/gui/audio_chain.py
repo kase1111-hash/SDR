@@ -464,6 +464,11 @@ class ListeningFilters:
         self._notch.reset_stream()
         self._low_cut.reset()
 
+    def retuned(self) -> None:
+        """Another station tuned (the audio carries on): Auto forgets the
+        whistle it found, fading the notch out, and searches anew."""
+        self._notch.search_anew()
+
     @property
     def low_cut_hz(self) -> Optional[float]:
         """The low cut's corner in effect (Hz), or None."""

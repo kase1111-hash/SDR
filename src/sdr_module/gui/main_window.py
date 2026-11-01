@@ -1350,6 +1350,10 @@ class _ReceiverChain:
         whistle Auto found), None when it removes none."""
         return self._listening.notch_frequency_hz
 
+    def retuned(self) -> None:
+        """Another station tuned: the notch's Auto searches anew."""
+        self._listening.retuned()
+
     def _listen(self, audio: np.ndarray) -> np.ndarray:
         """The audio notch, in the modes it applies to (not broadcast FM,
         whose audio is kept as it is), over the audio this mode hears; the
@@ -5913,6 +5917,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # Another station: its RDS name is not known yet.
             self._show_rds_station(None)
             self._reset_signal_meter_peak()
+            if self._rx_chain is not None:
+                self._rx_chain.retuned()  # (Auto's whistle was the last one's)
         # Ham ID: where Send ID Now would transmit, and whether it may; QRP:
         # the legal limit here.
         if HAS_HAM_RADIO:

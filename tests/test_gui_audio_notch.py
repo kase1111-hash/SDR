@@ -220,6 +220,22 @@ class TestNotchInTheReceiver(_WindowTestCase):
         notched = self.win._receiver_chain().notch_frequency_hz
         self.assertAlmostEqual(notched, 1300.0, delta=0.5)
 
+    def test_another_station_is_searched_anew(self):
+        """Tuning elsewhere forgets the whistle Auto found (it was the last
+        station's: it used to stay notched, and shown, for another second);
+        Track Signal following the same signal keeps it."""
+        self.win.set_frequency(14.2e6)
+        self.win._set_demod_mode("USB")
+        self.panel.set_notch_mode("auto")
+        self.listen(usb_with_a_whistle(2.0))
+        chain = self.win._receiver_chain()
+        self.assertAlmostEqual(chain.notch_frequency_hz, 1300.0, delta=0.5)
+        self.win._on_frequency_changed(14.2e6, same_signal=True)
+        self.assertAlmostEqual(chain.notch_frequency_hz, 1300.0, delta=0.5)
+        self.win.set_frequency(14.205e6)
+        self.assertIs(self.win._receiver_chain(), chain)  # (only retuned)
+        self.assertIsNone(chain.notch_frequency_hz)
+
     def test_by_hand_it_removes_an_am_heterodyne(self):
         self.win.set_frequency(6.0e6)  # (shortwave: the LO is on it)
         self.win._set_demod_mode("AM")

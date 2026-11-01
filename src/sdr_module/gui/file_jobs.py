@@ -220,7 +220,8 @@ def write_recording(
     written = 0
     opened = complete = False
     try:
-        recorder.start(filename)
+        # (Its size known: a WAV file that fits is a classic one.)
+        recorder.start(filename, expected_samples=total)
         opened = True
         # (start() stamps the time of writing: the samples' own time
         # replaces it, and an unknown one is left out, never invented.)

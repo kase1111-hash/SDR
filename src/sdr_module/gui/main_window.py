@@ -1877,8 +1877,8 @@ class _ElidedLabel(QLabel if HAS_PYQT6 else object):
 class _ShrinkingLabel(_ElidedLabel):
     """A status bar label that takes its full text's width while there is
     room, and gives it up (ending in "…") down to ``minimum`` px when the
-    status bar is short of it, before the messages do (DEV-E2E-07). With
-    ``tip`` its tooltip is the full text over ``tip``."""
+    status bar is short of it, before the messages do (DEV-E2E-07). Its
+    tooltip is the full text over ``tip`` (or the tooltip set later)."""
 
     def __init__(self, text: str = "", minimum: int = 60, tip: str = "", parent=None):
         self._tip = tip
@@ -1888,9 +1888,17 @@ class _ShrinkingLabel(_ElidedLabel):
 
     def setText(self, text: str) -> None:  # noqa: N802 - Qt naming
         super().setText(text)
-        if self._tip:
-            self.setToolTip(f"{self._full_text}\n{self._tip}".strip())
+        self._show_tip()
         self.updateGeometry()  # (a longer text asks for more room)
+
+    def setToolTip(self, tip: str) -> None:  # noqa: N802 - Qt naming
+        # (Under the full text: the label may show it cut short.)
+        self._tip = str(tip or "")
+        self._show_tip()
+
+    def _show_tip(self) -> None:
+        if self._tip:
+            QLabel.setToolTip(self, f"{self._full_text}\n{self._tip}".strip())
 
     def sizeHint(self) -> Any:  # noqa: N802 - Qt naming
         # QLabel's own hint (padding included) for the text shown, widened

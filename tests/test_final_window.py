@@ -1060,6 +1060,19 @@ class TestStatusBarRoom(_WindowTestCase):
         self.assertIn("17.7 GB free", win._recording_info_label.toolTip())
         self.assertEqual(win._recording_info_label.text(), "26.7 MB · 17.7 GB free")
 
+    def test_a_shortened_device_name_is_whole_in_its_tooltip(self):
+        # (Checker: the device's name gives way first, cut short to "Demo
+        # Device (simulated si…"; its tooltip only said "Current device".)
+        win = self.win
+        win._refresh_state_ui()
+        name = win._device_display_name()
+        tip = win._device_label.toolTip()
+        self.assertTrue(tip.startswith(name), tip)
+        self.assertIn("Click to change it", tip)
+        win._release_device()
+        win._refresh_state_ui()
+        self.assertIn("Click to connect", win._device_label.toolTip())
+
 
 # --------------------------------------------------------------------------- #
 # An unplugged output says so once (DEV-E2E-14)

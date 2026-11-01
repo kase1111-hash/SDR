@@ -1303,7 +1303,11 @@ if HAS_PYQT6:
         def _sync_bursts_hint(self) -> None:
             """The line under the list (while it has bursts and none is
             selected): why bursts aren't logged now, else how to use it."""
-            note = " ".join(self._bursts_note.split())
+            # (The empty list's title and line, as one sentence after another.)
+            parts = [line.strip() for line in self._bursts_note.split("\n")]
+            note = " ".join(
+                part if part[-1] in ".!?" else part + "." for part in parts if part
+            )
             text = note or self._bursts_hint_text
             self.bursts_hint.setText(text)
             self.bursts_hint.setToolTip(text)

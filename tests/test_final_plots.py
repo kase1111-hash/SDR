@@ -492,8 +492,8 @@ class TestBurstsPausedWithRows(_SignalCase):
             win._pacer.overloaded = True
             win._process_block(win._device.read_samples(2048))
         self.assertTrue(hint.isVisible())
-        self.assertIn("can't keep up", hint.text())
-        self.assertIn("can't keep up", hint.toolTip())
+        self.assertIn("can't keep up right now. Bursts are logged", hint.text())
+        self.assertEqual(hint.toolTip(), hint.text())
         self.assertEqual(hint.property("tone"), "warning")
         self.frames(0.5)
         self.assertEqual(hint.text(), normal)

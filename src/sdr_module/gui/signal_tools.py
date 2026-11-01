@@ -758,10 +758,15 @@ if HAS_PYQT6:
                     self._queue_bursts(self._watcher.flush())
                 return
             win = self._win
-            if getattr(getattr(win, "_pacer", None), "overloaded", False):
-                # One block a frame, a few per cent of the signal: bursts
-                # would be cut up or missed, and their times wrong. Paused
-                # until the display loop keeps up, then watched afresh.
+            behind = getattr(getattr(win, "_pacer", None), "overloaded", False)
+            playing = getattr(getattr(win, "_playback", None), "active", False)
+            if behind and not playing:
+                # A device's frames are then one block each, a few per cent
+                # of the signal (the rest is skipped): bursts would be cut
+                # up or missed, and their times wrong. Paused until the
+                # display loop keeps up, then watched afresh. (A recording
+                # is read in full however slowly it plays: each frame takes
+                # what follows on, so its bursts are logged as they are.)
                 if not self._bursts_paused:
                     self._bursts_paused = True
                     self._queue_bursts(self._watcher.flush())

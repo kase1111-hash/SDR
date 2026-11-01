@@ -120,24 +120,25 @@ def _playback_case():
     return _PlaybackCase
 
 
-class TestPlaybackAudioHintGivesAdviceThatApplies(_playback_case()):
-    """N-02: a recording playing at 1x on a computer that can't keep up in
-    real time paused its audio with "This computer can't process 1 MS/s in
-    real time right now, so audio is paused until it catches up. A lower
-    sample rate (Receiver > Sample rate) helps.", but the rate is refused
-    while a file plays. Here processing costs ``load`` times the time its
-    samples cover at 1x (a fake clock, as in test_final_perf)."""
+class _SlowPlaybackCase(_playback_case()):
+    """A 1 MS/s recording (looped) on a fake clock; processing a frame costs
+    ``load`` times the time its samples cover at 1x (as in test_final_perf's
+    TestPlaybackWhileOverloaded)."""
 
     PLAY_RATE = 1e6
+
+    def recording(self):
+        from tests.test_gui_playback import _fm_tone
+
+        return _fm_tone(1.0, rate=self.PLAY_RATE)
 
     def setUp(self):
         super().setUp()
         from unittest import mock
 
         from tests.test_final_perf import _Clock
-        from tests.test_gui_playback import _fm_tone
 
-        x = _fm_tone(1.0, rate=self.PLAY_RATE)
+        x = self.recording()
         self.play(self.make_file(x, name="p.sigmf-data", rate=self.PLAY_RATE))
         self.win._playback_bar.set_loop(True)
         self.assertTrue(self.win._playback.active)
@@ -163,6 +164,14 @@ class TestPlaybackAudioHintGivesAdviceThatApplies(_playback_case()):
             tick = self.clock.now
             win._update_display()
             self.clock.now = max(self.clock.now, tick + 0.033)
+
+
+class TestPlaybackAudioHintGivesAdviceThatApplies(_SlowPlaybackCase):
+    """N-02: a recording playing at 1x on a computer that can't keep up in
+    real time paused its audio with "This computer can't process 1 MS/s in
+    real time right now, so audio is paused until it catches up. A lower
+    sample rate (Receiver > Sample rate) helps.", but the rate is refused
+    while a file plays."""
 
     def hints(self):
         """What the window says about the paused audio: the hint (the
@@ -232,6 +241,71 @@ class TestPlaybackAudioHintGivesAdviceThatApplies(_playback_case()):
             "A lower sample rate (Receiver > Sample rate) helps.",
             self.win._realtime_hint(),
         )
+
+
+class TestBurstsLoggedWhileARecordingPlaysSlowly(_SlowPlaybackCase):
+    """N-04: the Bursts page paused ("Paused: this computer can't keep up
+    right now") whenever the display loop was behind, as if each frame read
+    one block of the signal and skipped the rest, which a device does. A
+    recording is read in full however slowly it plays (each frame takes
+    what follows on, 7433741): its bursts are logged whole."""
+
+    BURSTS_S = (0.30, 0.95, 1.60)
+    BURST_LEN_S = 0.04
+
+    def recording(self):
+        """Noise with on/off keyed bursts 120 kHz off the centre."""
+        rate = self.PLAY_RATE
+        n = int(2.0 * rate)
+        rng = np.random.default_rng(5)
+        x = 0.003 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+        t = np.arange(n) / rate
+        tone = 0.3 * np.exp(2j * np.pi * 120e3 * t)
+        for start in self.BURSTS_S:
+            on = slice(int(start * rate), int((start + self.BURST_LEN_S) * rate))
+            x[on] += tone[on]
+        return x.astype(np.complex64)
+
+    def test_bursts_are_logged_whole(self):
+        win = self.win
+        panel = win._signal_panel
+        tools = win._signal_tools
+        win._set_demod_mode("None (I/Q)", bandwidth="200 kHz")
+        win._show_signal_page("bursts")
+        self.load = 3.0  # (a third of real time)
+        self.run_frames(4.0)
+        self.assertTrue(win._pacer.overloaded)
+        for job, _report, _when in list(tools._burst_jobs):
+            job.result(timeout=30)
+        tools._collect_bursts()
+        self.assertFalse(tools._bursts_paused)
+        self.assertNotIn("can't keep up", panel.bursts_empty.text())
+        # Each burst played is listed once, whole: as long as it is, give
+        # or take the frames it was seen in (up to 50 ms of signal each).
+        device = win._device
+        self.assertEqual(device.loops, 0)
+        played_s = device.position / self.PLAY_RATE
+        played = [t for t in self.BURSTS_S if t + self.BURST_LEN_S < played_s]
+        self.assertTrue(played)
+        listed = [report.burst for _shown, report in panel.bursts()]
+        self.assertEqual(len(listed), len(played), (played_s, listed))
+        for burst in listed:
+            self.assertAlmostEqual(
+                burst.center_hz - win._lo_frequency(), 120e3, delta=5e3
+            )
+            self.assertGreaterEqual(burst.duration_s, self.BURST_LEN_S - 0.005)
+            self.assertLessEqual(burst.duration_s, self.BURST_LEN_S + 0.1)
+
+    def test_a_device_still_pauses_them(self):
+        """...whereas a device's frames skip what they can't take."""
+        win = self.win
+        win._playback.close()
+        self.assertTrue(win._demo_mode)
+        win._show_signal_page("bursts")
+        win._pacer.overloaded = True
+        win._process_block(win._device.read_samples(2048))
+        self.assertTrue(win._signal_tools._bursts_paused)
+        self.assertIn("can't keep up", win._signal_panel.bursts_empty.text())
 
 
 def _window_case():

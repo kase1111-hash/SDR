@@ -773,7 +773,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says "Nothing at the tuned frequency; the nearest signal is …" (that
   station), and a call keying up during a take is no longer called CW or
   OOK. A mere trace is "Only a trace of a signal, too weak to judge", not an
-  unmodulated carrier.
+  unmodulated carrier. A steady carrier in a band heard in AM (AM
+  broadcast, airband), most likely a weak AM station whose sidebands are
+  lost in the noise, is listened to in AM with the band's filter, not in CW.
 - Identify suggests an FM deviation that doesn't clip the station, so Apply
   Mode no longer leads straight to "FM audio is clipping" (it offered too
   small a deviation for the demo's narrow FM calls and its pager), and,

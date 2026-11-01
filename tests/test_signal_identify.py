@@ -311,6 +311,27 @@ class TestListening:
         assert ident.pulses is None
         assert not any("remote controls" in d for d in ident.details)
 
+    @pytest.mark.parametrize("freq", [660e3, 1.2e6, 118.1e6, 125e6])
+    def test_a_carrier_in_an_am_band_is_heard_in_am(self, freq):
+        """A weak AM station's sidebands sink into the noise before its
+        carrier does, so Identify can call it an unmodulated carrier. In a
+        band heard in AM (broadcast, airband) Apply Mode then listens the
+        band's way, not in CW with a 500 Hz filter that cuts the voice."""
+        x, _ = S.add_noise(S.carrier(N, FS, 150.0), FS, 30, 50.0)
+        r = classify(x, FS)
+        assert r.kind == "carrier"
+        ident = listening_for(r, freq)
+        assert (ident.mode, ident.filter_hz) == ("AM", 10e3)
+
+    @pytest.mark.parametrize("freq", [7.03e6, 99.82e6, 146.52e6, 433.92e6])
+    def test_a_carrier_elsewhere_is_heard_in_cw(self, freq):
+        """Outside the AM bands a steady carrier is listened to in CW, as
+        before: a key held down (the demo's 99.82 MHz beacon), a tuning
+        carrier, or a band whose own mode a carrier says nothing about."""
+        x, _ = S.add_noise(S.carrier(N, FS, 150.0), FS, 30, 50.0)
+        ident = listening_for(classify(x, FS), freq)
+        assert (ident.mode, ident.filter_hz) == ("CW", 500.0)
+
     def test_confidence_words(self):
         assert confidence_words(0.9) == "confident"
         assert confidence_words(0.6) == "probably"

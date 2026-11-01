@@ -213,6 +213,15 @@ def listening_for(result: ClassificationResult, freq_hz: float) -> Identificatio
             f"{mode}: the usual sideband {'above' if mode == 'USB' else 'below'} "
             "10 MHz; tune so the voice sounds natural"
         )
+    elif kind == "carrier" and _am_band(freq_hz):
+        # A weak AM station's sidebands sink into the noise before its
+        # carrier does: in a band heard in AM (broadcast, airband) a steady
+        # carrier is most likely one, so listen the band's way (CW's 500 Hz
+        # would cut its voice).
+        plan = _band_listening(freq_hz)
+        mode = "AM"
+        filter_hz = _khz(plan[2]) if plan else 10e3
+        details.append("In this band a carrier is most likely an AM station")
     elif kind in ("cw", "carrier"):
         mode, filter_hz = "CW", 500.0
     elif kind == "fsk":
@@ -291,6 +300,13 @@ def _band_listening(freq_hz: float) -> Optional[Tuple[str, str, str]]:
         return listening_for(freq_hz)
     except Exception:  # pragma: no cover - the plan is a hint only
         return None
+
+
+def _am_band(freq_hz: float) -> bool:
+    """Whether the band plan hears ``freq_hz`` in AM (AM broadcast,
+    airband...)."""
+    plan = _band_listening(freq_hz)
+    return plan is not None and plan[0] == "AM" and _khz(plan[2]) > 0
 
 
 def _khz(text: str) -> float:

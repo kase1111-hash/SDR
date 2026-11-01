@@ -742,7 +742,8 @@ class TestExportFolder(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# DEC-E2E-06: only the newest messages are kept, and it says so
+# DEC-E2E-06: only the newest messages are shown, and it says so (K-D3:
+# Export saves them all now, see tests/test_gui_decoder_spool.py)
 # --------------------------------------------------------------------------- #
 
 
@@ -766,20 +767,20 @@ class TestOnlyTheNewestAreKept(_PanelCase):
         self.assertIn("newest 5 of 8 messages", p._table.toolTip())
         self.assertEqual(p._msg_count_label.text(), "8")
         self.assertEqual(p._kept_label.text(), "5 (the newest)")
-        self.assertIn("newest 5 of the 8", p._export_btn.toolTip())
-        # ... and so does Export.
+        # ... and that Export saves them all (it saved the newest 5 before).
+        self.assertIn("Export saves all 8", p._table.toolTip())
+        self.assertIn("Save all 8 decoded messages", p._export_btn.toolTip())
         with (
             tempfile.TemporaryDirectory() as tmp,
             mock.patch.object(self.mod.QMessageBox, "information") as box,
         ):
             path = os.path.join(tmp, "out.csv")
-            self.assertEqual(p._export_messages(path), 5)
+            self.assertEqual(p._export_messages(path), 8)
             with open(path, newline="", encoding="utf-8") as handle:
                 rows = list(csv.reader(handle))
-        self.assertEqual(len(rows), 6)  # the header and the newest 5
+        self.assertEqual(len(rows), 9)  # the header and all 8
         text = box.call_args[0][2]
-        self.assertIn("Exported the newest 5 of 8 messages", text)
-        self.assertIn("older ones", text)
+        self.assertIn("Exported 8 messages", text)
         p.clear()
         self.assertEqual(p._table.toolTip(), base_tip)
         self.assertEqual(p._kept_label.text(), "0")
@@ -1069,11 +1070,16 @@ class TestAdsbRateTips(_WindowTestCase):
     demo = True
 
     def test_the_tips_say_2_4_ms_s_or_more(self):
-        # They said "at least 2 MS/s", but 2.0-2.1 MS/s decode poorly.
+        # They said "at least 2 MS/s", but 2.0-2.1 MS/s decoded poorly. Now
+        # (K-D1) 2 MS/s decodes strong replies as well, weak ones less
+        # often: 2 MS/s is needed, 2.4 MS/s or more is best.
         from sdr_module.dsp.live_decoders import create_live_decoder
         from sdr_module.gui.device_settings import ADSB_RATE_TIP
 
-        self.assertIn("needs 2.4 MS/s or more", ADSB_RATE_TIP)
+        self.assertIn("needs 2 MS/s or more", ADSB_RATE_TIP)
+        self.assertIn(
+            "2.4 MS/s or more hears weak, distant aircraft best", ADSB_RATE_TIP
+        )
         remedy = create_live_decoder("ADS-B", 1.8e6).status.remedy
         self.assertIn("Choose 2.4 MS/s or more", remedy)
 
@@ -1086,7 +1092,7 @@ class TestAdsbRateTips(_WindowTestCase):
             "ADS-B decodes best at 2.4 MS/s or more", win._message_label.text()
         )
         self.assertTrue(win._device_controls.choose_rate(1.8e6))
-        self.assertIn("ADS-B needs 2.4 MS/s or more", win._message_label.text())
+        self.assertIn("ADS-B needs 2 MS/s or more", win._message_label.text())
         self.assertTrue(win._device_controls.choose_rate(2.4e6))
         self.assertNotIn("ADS-B", win._message_label.text())
 

@@ -536,7 +536,7 @@ class TestDeviceDialogRates(unittest.TestCase):
                 low = rate < 2e6
                 self.assertEqual(combo.itemText(i).endswith("(too low for ADS-B)"), low)
                 tip = combo.itemData(i, Qt.ItemDataRole.ToolTipRole) or ""
-                self.assertEqual("needs 2.4 MS/s or more" in tip, low)
+                self.assertEqual("needs 2 MS/s or more" in tip, low)
             self.assertTrue(any(combo.itemData(i) < 2e6 for i in range(combo.count())))
         finally:
             dialog.close()

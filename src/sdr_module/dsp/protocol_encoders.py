@@ -17,7 +17,7 @@ transmissions with them. NumPy only; no Qt.
 
 from __future__ import annotations
 
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -34,7 +34,11 @@ __all__ = [
     "flex_codeword_bits",
     "flex_frame_bits",
     "flex_words_bits",
+    "flex_phase_values",
+    "flex_frame_levels",
     "flex_baseband",
+    "flex_frequency",
+    "FLEX_SPEEDS",
     "ax25_frame",
     "hdlc_bits",
     "afsk_audio",
@@ -198,11 +202,24 @@ def pocsag_baseband(
 
 
 # --------------------------------------------------------------------------- #
-# FLEX (1600 bps, 2-level FSK)
+# FLEX (1600, 3200 and 6400 bps; 2- and 4-level FSK)
 # --------------------------------------------------------------------------- #
 
 _FLEX_IDLE = 0x1FFFFF
 _FLEX_CODE_1600_2 = 0x870C
+#: (bits/s, FSK levels) -> (sync code, symbols/s, the phases it carries).
+#: At 1600 symbols/s a 4-level symbol carries a bit of phases A and B; at
+#: 3200 symbols/s phases A (and B) go on even symbols and C (and D) on
+#: odd ones (the ARIB STD-43A layout, as multimon-ng reads FLEX).
+FLEX_SPEEDS = {
+    (1600, 2): (0x870C, 1600, "A"),
+    (3200, 2): (0x7B18, 3200, "AC"),
+    (3200, 4): (0xB068, 1600, "AB"),
+    (6400, 4): (0xDEA0, 3200, "ABCD"),
+}
+#: A 4-level symbol's (phase A bit, phase B bit) -> its level in units of
+#: 1600 Hz: Gray coded, the B bit set on the inner levels.
+_FLEX_LEVELS = {(1, 0): 3, (1, 1): 1, (0, 1): -1, (0, 0): -3}
 
 
 def flex_codeword_bits(value: int) -> List[int]:
@@ -255,6 +272,13 @@ def flex_frame_bits(
     The sync pattern is sent with the opposite polarity to the data, as
     multimon-ng reads FLEX (see FLEXDecoder).
     """
+    return flex_words_bits(flex_phase_values(pages), cycle, frame, bit_sync_bits)
+
+
+def flex_phase_values(pages: Sequence[Tuple[int, str]]) -> List[int]:
+    """The 88 21-bit codeword values of one FLEX phase (block information
+    word first) carrying alphanumeric ``pages``, each ``(capcode, text)``
+    with a short address (capcode 1-1933312); no pages: an idle phase."""
     count = len(pages)
     first_vector = 1 + count
     values = [_FLEX_IDLE] * 88
@@ -272,7 +296,7 @@ def flex_frame_bits(
         )
         values[position : position + len(words)] = words
         position += len(words)
-    return flex_words_bits(values, cycle, frame, bit_sync_bits)
+    return values
 
 
 def flex_words_bits(
@@ -284,15 +308,31 @@ def flex_words_bits(
     """One FLEX frame (1600 bps, 2-level) whose phase holds the 88 21-bit
     codeword ``values`` as given (block information word first): the
     header, then the 11 interleaved blocks."""
-    values = list(values)[:88] + [_FLEX_IDLE] * max(0, 88 - len(values))
-    sync = (_FLEX_CODE_1600_2 << 48) | (0xA6C6AAAA << 16) | (_FLEX_CODE_1600_2 ^ 0xFFFF)
+    bits = _flex_header_bits(_FLEX_CODE_1600_2, cycle, frame, bit_sync_bits)
+    bits += [1 - (i & 1) for i in range(40)]  # second sync (25 ms)
+    return bits + _flex_phase_bits(values)
+
+
+def _flex_header_bits(
+    code: int, cycle: int, frame: int, bit_sync_bits: int
+) -> List[int]:
+    """A frame's 1600 bps, 2-level header as sent: bit sync, the sync
+    pattern naming the speed (opposite polarity to the data), 16 bits and
+    the frame information word."""
+    sync = (code << 48) | (0xA6C6AAAA << 16) | (code ^ 0xFFFF)
     bits = [1 - (i & 1) for i in range(bit_sync_bits)]
     bits += [((sync >> (63 - i)) & 1) ^ 1 for i in range(64)]
     bits += [((0x5939 >> (15 - i)) & 1) ^ 1 for i in range(16)]
     fiw = _flex_checksum(((cycle & 0xF) << 4) | ((frame & 0x7F) << 8))
-    bits += flex_codeword_bits(fiw)
-    bits += [1 - (i & 1) for i in range(40)]  # second sync (25 ms)
+    return bits + flex_codeword_bits(fiw)
+
+
+def _flex_phase_bits(values: Sequence[int]) -> List[int]:
+    """One phase's 2816 data bits as sent: 11 blocks of 8 codewords, a bit
+    of each codeword in turn."""
+    values = list(values)[:88] + [_FLEX_IDLE] * max(0, 88 - len(values))
     codewords = [flex_codeword_bits(v) for v in values]
+    bits = []
     for block in range(11):
         for i in range(32):
             for j in range(8):
@@ -300,17 +340,90 @@ def flex_words_bits(
     return bits
 
 
+def flex_frame_levels(
+    phases: Any,
+    cycle: int = 0,
+    frame: int = 0,
+    speed: Tuple[int, int] = (1600, 2),
+    bit_sync_bits: int = 32,
+) -> Tuple[List[int], np.ndarray, int]:
+    """One FLEX frame at ``speed`` (bits/s, FSK levels; see FLEX_SPEEDS).
+
+    ``phases``: the alphanumeric pages (``(capcode, text)``) of phase A, or
+    a dict of phase letter -> pages, or -> the 88 codeword values of that
+    phase (a phase not given is idle; one the speed doesn't carry is an
+    error).
+
+    Returns ``(header bits, data levels, symbols/s)``: the 1600 bps,
+    2-level header as sent (1: the higher frequency) and the second sync
+    and data as levels -3, -1, +1, +3 (units of 1600 Hz) at the speed's
+    symbol rate.
+    """
+    code, baud, carried = FLEX_SPEEDS[tuple(speed)]  # type: ignore[index]
+    given = phases if isinstance(phases, dict) else {"A": phases}
+    unknown = set(given) - set(carried)
+    if unknown:
+        raise ValueError(f"{speed[0]} bps {speed[1]}-level FLEX has no phase {unknown}")
+    bits = {}
+    for letter in carried:
+        content = given.get(letter, ())
+        if content and isinstance(content[0], (int, np.integer)):
+            values = list(content)
+        else:
+            values = flex_phase_values(content)
+        bits[letter] = _flex_phase_bits(values)
+    levels: List[int] = [3 - 6 * (i & 1) for i in range(baud * 25 // 1000)]
+    for k in range(len(bits["A"])):
+        if speed[1] == 2:
+            group = [(bits[p][k],) for p in carried]  # A (and C) in turn
+            levels += [3 if b[0] else -3 for b in group]
+        else:
+            pairs = [(bits["A"][k], bits["B"][k])]
+            if baud == 3200:
+                pairs.append((bits["C"][k], bits["D"][k]))
+            levels += [_FLEX_LEVELS[pair] for pair in pairs]
+    header = _flex_header_bits(code, cycle, frame, bit_sync_bits)
+    return header, np.asarray(levels, dtype=np.int8), baud
+
+
 def flex_baseband(
-    pages: Sequence[Tuple[int, str]],
+    pages: Any,
     rate: float,
     cycle: int = 0,
     frame: int = 0,
     deviation_hz: float = FLEX_DEVIATION_HZ,
     bit_sync_bits: int = 32,
+    speed: Tuple[int, int] = (1600, 2),
 ) -> np.ndarray:
-    """A FLEX frame as FM baseband (complex64): a 1 is the higher frequency."""
-    bits = flex_frame_bits(pages, cycle, frame, bit_sync_bits)
-    return fm_modulate(deviation_hz * bit_levels(bits, rate, 1600), rate)
+    """A FLEX frame as FM baseband (complex64): a 1 is the higher frequency
+    (``deviation_hz``, the outer level of a 4-level frame; the inner ones
+    are a third of it). ``pages`` and ``speed``: see flex_frame_levels."""
+    return fm_modulate(
+        flex_frequency(pages, rate, cycle, frame, deviation_hz, bit_sync_bits, speed),
+        rate,
+    )
+
+
+def flex_frequency(
+    pages: Any,
+    rate: float,
+    cycle: int = 0,
+    frame: int = 0,
+    deviation_hz: float = FLEX_DEVIATION_HZ,
+    bit_sync_bits: int = 32,
+    speed: Tuple[int, int] = (1600, 2),
+) -> np.ndarray:
+    """The instantaneous frequency (Hz, per sample at ``rate``) of a FLEX
+    frame (see flex_baseband)."""
+    header, levels, baud = flex_frame_levels(pages, cycle, frame, speed, bit_sync_bits)
+    head = deviation_hz * bit_levels(header, rate, 1600)
+    # The data starts where the header ends, at its own symbol rate.
+    start = len(header) * float(rate) / 1600.0
+    count = int(np.ceil(start + len(levels) * float(rate) / baud)) - len(head)
+    t = len(head) + np.arange(count) - start
+    index = np.clip((t * (baud / float(rate))).astype(np.int64), 0, len(levels) - 1)
+    data = (deviation_hz / 3.0) * levels[index].astype(np.float64)
+    return np.concatenate((head, data))
 
 
 # --------------------------------------------------------------------------- #

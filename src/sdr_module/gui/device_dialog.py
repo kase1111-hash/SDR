@@ -857,7 +857,8 @@ _DATA_SCHEDULE: Dict[str, Tuple[float, Tuple[Tuple[float, Any], ...]]] = {
             ),
         ),
     ),
-    # FLEX 1600 frames: (frame number, ((capcode, text), ...)).
+    # FLEX frames: (frame number, ((capcode, text), ...)) at 1600 bps
+    # 2-level, or (frame number, {phase: pages}, (bits/s, FSK levels)).
     "flex": (
         22.0,
         (
@@ -865,7 +866,31 @@ _DATA_SCHEDULE: Dict[str, Tuple[float, Tuple[Tuple[float, Any], ...]]] = {
                 5.0,
                 (10, ((1234567, "SDR Module demo: FLEX 1600 page on 931.9375 MHz"),)),
             ),
+            (
+                9.0,
+                (
+                    12,
+                    {
+                        "A": ((1234567, "FLEX 3200 bps page, phase A"),),
+                        "C": ((1000456, "Phase C at 3200 bps: parking lot closed"),),
+                    },
+                    (3200, 2),
+                ),
+            ),
             (16.0, (16, ((1000123, "Second FLEX page: meeting moved to 3 PM"),))),
+            (
+                19.5,
+                (
+                    18,
+                    {
+                        "A": ((1234567, "FLEX 6400 bps page, phase A"),),
+                        "B": ((1000789, "Phase B: call the office"),),
+                        "C": ((1000456, "Phase C: the shipment arrived"),),
+                        "D": ((1000999, "Phase D: 4-level FSK at 3200 baud"),),
+                    },
+                    (6400, 4),
+                ),
+            ),
         ),
     ),
     # ACARS downlinks: (label, message number, text).
@@ -901,10 +926,12 @@ def _data_transmission(
         phase = enc.fm_phase(-enc.POCSAG_DEVIATION_HZ * levels, loop_rate)
         envelope = np.ones(len(phase))
     elif kind == "flex":
-        frame, pages = sent
-        bits = enc.flex_frame_bits(pages, 0, frame, bit_sync_bits=96)
-        levels = enc.bit_levels(bits, loop_rate, 1600)
-        phase = enc.fm_phase(enc.FLEX_DEVIATION_HZ * levels, loop_rate)
+        frame, pages, *more = sent
+        speed = more[0] if more else (1600, 2)
+        hz = enc.flex_frequency(
+            pages, loop_rate, 0, frame, bit_sync_bits=96, speed=speed
+        )
+        phase = enc.fm_phase(hz, loop_rate)
         envelope = np.ones(len(phase))
     else:  # acars
         label, number, text = sent
@@ -2031,7 +2058,8 @@ class MockDevice:
     aircraft that it drops. The Decoder panel's other protocols have real
     traffic too (see _DATA_SCHEDULE), every 8 to 13 s: APRS AFSK1200
     position reports on 144.390 MHz, POCSAG 1200 pages on 152.240 MHz, FLEX
-    1600 pages on 931.9375 MHz and ACARS messages on 131.550 MHz.
+    pages on 931.9375 MHz (at 1600, 3200 and 6400 bps) and ACARS messages on
+    131.550 MHz.
 
     For the Signal tab, a remote control on 433.920 MHz (the EV1527 kind:
     on/off keyed, pulse width modulated) sends its code eight times every

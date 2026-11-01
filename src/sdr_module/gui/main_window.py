@@ -4153,8 +4153,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._message_label.setMinimumWidth(_MESSAGE_MIN_WIDTH)
         statusbar.addWidget(self._message_label, 1)
         # The whole of a message the status bar cuts short, above it while
-        # the message lasts; nothing moves (K-W1).
+        # the message lasts; nothing moves (K-W1). Not over the playback
+        # strip: its Pause, speed and Close stay in reach.
         self._message_overflow = MessageOverflow(self, self._message_label)
+        self._message_overflow.keep_clear_of(self._playback_bar)
         self._message_timer = QTimer(self)
         self._message_timer.setSingleShot(True)
         self._message_timer.timeout.connect(self._clear_status_message)

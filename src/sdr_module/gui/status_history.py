@@ -20,7 +20,7 @@ from collections import deque
 from typing import Any, Callable, Deque, List, NamedTuple, Optional
 
 try:
-    from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer
+    from PyQt6.QtCore import QEvent, QPoint, QRect, Qt, QTimer
     from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWidgets import (
         QApplication,
@@ -272,7 +272,10 @@ class MessageOverflow(QLabel if HAS_PYQT6 else object):
     ``anchor`` is the status bar's message label: its ``text()`` is the
     whole message and its ``is_elided()`` says whether it is drawn cut
     short. The panel follows it as the window, the status bar and its
-    chips change size.
+    chips change size. It goes above a widget given to
+    :meth:`keep_clear_of` that would be beneath it (the playback strip
+    right above the status bar while a recording plays: its buttons stay
+    in reach).
     """
 
     def __init__(self, window: Any, anchor: Any):
@@ -280,6 +283,7 @@ class MessageOverflow(QLabel if HAS_PYQT6 else object):
         self._anchor = anchor
         self._message = ""
         self._dismissed = False
+        self._clear_of: List[Any] = []  # (see keep_clear_of)
         self.setObjectName("statusMessageOverflow")
         set_role(self, "status-overflow")
         self.setTextFormat(Qt.TextFormat.PlainText)
@@ -308,6 +312,13 @@ class MessageOverflow(QLabel if HAS_PYQT6 else object):
         bar = anchor.parentWidget()
         if bar is not None and bar is not window:
             bar.installEventFilter(self)  # (the window's height moves it)
+
+    def keep_clear_of(self, widget: Any) -> None:
+        """Never over ``widget`` (a part of the window just above the status
+        bar, as the playback strip): while it shows, the panel goes just
+        above it should it be in the way."""
+        self._clear_of.append(widget)
+        widget.installEventFilter(self)  # (it comes and goes)
 
     def message(self) -> str:
         """The message shown (or held back), "" when none."""
@@ -366,9 +377,10 @@ class MessageOverflow(QLabel if HAS_PYQT6 else object):
         self.raise_()
 
     def _place(self) -> None:
-        """Just above the status bar, its text starting where the
-        message's text starts: as wide as the message (at least the message
-        area), wrapped to what the window has room for from there."""
+        """Just above the status bar (and above what it keeps clear of, in
+        the way), its text starting where the message's text starts: as
+        wide as the message (at least the message area), wrapped to what
+        the window has room for from there."""
         window = self.parentWidget()
         anchor = self._anchor
         bar = anchor.parentWidget() or anchor
@@ -398,7 +410,14 @@ class MessageOverflow(QLabel if HAS_PYQT6 else object):
         height = self.heightForWidth(width)
         if height <= 0:  # pragma: no cover - a word-wrapped label has one
             height = self.sizeHint().height()
-        self.setGeometry(left, bar_top - _OVERFLOW_GAP - height, width, height)
+        bottom = bar_top - _OVERFLOW_GAP
+        for widget in self._clear_of:
+            if not widget.isVisible():
+                continue
+            box = QRect(widget.mapTo(window, QPoint(0, 0)), widget.size())
+            if box.intersects(QRect(left, bottom - height, width, height)):
+                bottom = box.top() - _OVERFLOW_GAP
+        self.setGeometry(left, bottom - height, width, height)
 
     def _fitting_text(self, width: int, metrics: Any) -> str:
         """The message, or as much of it as _OVERFLOW_MAX_LINES lines of

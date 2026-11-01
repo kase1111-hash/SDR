@@ -12,6 +12,8 @@ bar's chips a pixel and back), and a message that fits shows as before.
 """
 
 import os
+import shutil
+import tempfile
 import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -513,6 +515,95 @@ class TestThePanelGoesWithItsMessage(_StatusCase):
         self.settle(10)
         self.assert_shows_in_full(REFUSAL, "shown again")
         win._clear_status_message()
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
+class TestThePlaybackStripStaysInReach(_StatusCase):
+    """While a recording plays, its strip (Pause, the position, Loop, the
+    speed, Signals... and Close) is right above the status bar, and the
+    panel went over it: for the 8 s of what Open Recording says ("Playing
+    ... · 2m Calling: listening in FM ...") a click on the speed or on
+    Close only hid the panel. The panel now sits just above the strip."""
+
+    def setUp(self):
+        super().setUp()
+        import numpy as np
+
+        from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
+
+        folder = tempfile.mkdtemp(prefix="sdr-status-overflow-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.path = os.path.join(folder, "a_take_from_the_two_metre_band.sigmf-data")
+        rate = 2.4e6
+        t = np.arange(int(rate * 0.5)) / rate
+        samples = (0.5 * np.exp(2j * np.pi * 50e3 * t)).astype(np.complex64)
+        save_iq_file(
+            self.path, samples, rate, 146.52e6, SampleFormat.FLOAT32, FileFormat.SIGMF
+        )
+
+    def assert_strip_in_reach(self, where):
+        """The panel is just above the strip, and each of the strip's
+        controls is what a click on its middle reaches."""
+        from PyQt6.QtWidgets import QAbstractButton, QAbstractSlider, QComboBox
+
+        win, panel = self.win, self.panel()
+        strip = self.in_window(win._playback_bar)
+        box = panel.geometry()
+        self.assertFalse(box.intersects(strip), where)
+        self.assertLess(box.bottom(), strip.top(), where)
+        self.assertGreaterEqual(box.bottom(), strip.top() - 8, where)
+        controls = [
+            widget
+            for widget in win._playback_bar.findChildren(QAbstractButton)
+            + win._playback_bar.findChildren(QAbstractSlider)
+            + win._playback_bar.findChildren(QComboBox)
+            if widget.isVisible()
+        ]
+        self.assertGreaterEqual(len(controls), 4, where)  # (Pause ... Close)
+        for control in controls:
+            hit = win.childAt(control.mapTo(win, control.rect().center()))
+            self.assertTrue(
+                hit is control or control.isAncestorOf(hit),
+                (where, control.accessibleName() or control.objectName(), hit),
+            )
+
+    def test_the_strip_stays_in_reach(self):
+        _themes(self, self.check_strip)
+
+    def check_strip(self, theme):
+        win, panel = self.win, self.panel()
+        for width, height in ((1024, 640), (1366, 768)):
+            where = (theme, width)
+            win.resize(width, height)
+            self.settle(10)
+            self.assertTrue(win._open_recording(self.path), where)
+            self.settle(10)
+            self.assertTrue(win._playback_bar.isVisible(), where)
+            # What Open Recording says (cut at 1024 px), then a long warning.
+            opened = win._message_label.text()
+            self.assertTrue(opened.startswith("Playing a_take"), opened)
+            if width == 1024:
+                self.assertTrue(panel.isVisible(), where)
+                self.assertEqual(panel.text(), opened, where)
+                self.assert_strip_in_reach((where, "opened"))
+            win._show_status_message(GAPS, "warning", 8000, log=False)
+            self.settle(5)
+            self.assertTrue(panel.isVisible(), where)
+            self.assertEqual(panel.text(), GAPS, where)
+            self.assert_strip_in_reach((where, "gaps"))
+            # Without the strip, just above the status bar again (should
+            # the status bar, with the device's name back, cut it).
+            win._playback.close()
+            self.settle(10)
+            self.assertFalse(win._playback_bar.isVisible(), where)
+            win._show_status_message(GAPS, "warning", 8000, log=False)
+            self.settle(5)
+            cut = self.shown_text() != GAPS
+            self.assertEqual(panel.isVisible(), cut, where)
+            self.assertTrue(cut or width > 1024, where)
+            if cut:
+                self.assert_shows_in_full(GAPS, where)
+            win._clear_status_message()
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 required")

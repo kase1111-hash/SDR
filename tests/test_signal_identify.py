@@ -323,6 +323,96 @@ class TestListening:
         assert width == 2.4e6 and reach == 25e3
 
 
+class TestDeviationThatHoldsThePeak:
+    """P-01: Identify suggested "2.5 kHz" for any FM swing under 3.5 kHz
+    (the demo's 100.715 MHz call swings +/-3.4 kHz), the band's own
+    deviation for swings up to 1.6 times it, and "5 kHz" for FSK data up
+    to +/-6 kHz. Half a second after Apply Mode the window warned "FM
+    audio is clipping: this station deviates more than 2.5 kHz". The
+    suggestion is the smallest offered deviation that holds the measured
+    peak with a margin; the band's only when it holds it too."""
+
+    @staticmethod
+    def result(peak_hz, width_hz, kind="fm", rms_hz=0.0):
+        from sdr_module.dsp.classifiers import ClassificationResult
+
+        features = {"freq_peak_hz": peak_hz, "freq_dev_hz": rms_hz}
+        return ClassificationResult(
+            SignalType.ANALOG, None, 0.9, width_hz, 0.0, 30.0, features, kind=kind
+        )
+
+    @pytest.mark.parametrize(
+        "peak,want",
+        [
+            (1.5e3, "2.5 kHz"),
+            (2.2e3, "2.5 kHz"),
+            (2.4e3, "5 kHz"),
+            (3.28e3, "5 kHz"),  # the demo's 100.715 MHz call, as measured
+            (4.5e3, "5 kHz"),
+            (4.7e3, "12.5 kHz"),
+            (11e3, "12.5 kHz"),
+            (12e3, "25 kHz"),
+            (22e3, "25 kHz"),
+            (24e3, "75 kHz"),
+        ],
+    )
+    def test_the_smallest_choice_that_holds_the_peak(self, peak, want):
+        # (300 MHz: no band plan there.)
+        ident = listening_for(self.result(peak, 2.0 * peak + 6e3), 300e6)
+        assert ident.mode == "FM"
+        assert ident.fm_deviation == want
+
+    @pytest.mark.parametrize(
+        "freq,peak,want",
+        [
+            (462.6e6, 2.0e3, "2.5 kHz"),  # FRS: its 2.5 kHz holds it
+            (462.6e6, 3.2e3, "5 kHz"),  # swings wider than FRS's 2.5 kHz
+            (146.0e6, 1.5e3, "5 kHz"),  # 2 m: the band's 5 kHz holds it
+            (146.0e6, 6.0e3, "12.5 kHz"),  # 2 m, but beyond its 5 kHz
+            (100.715e6, 3.28e3, "5 kHz"),  # a narrow call in the FM band
+        ],
+    )
+    def test_the_bands_deviation_only_when_it_holds_the_peak(self, freq, peak, want):
+        ident = listening_for(self.result(peak, 2.0 * peak + 6e3), freq)
+        assert ident.fm_deviation == want
+
+    def test_fsk_data(self):
+        """The demo's POCSAG pager (+/-4.5 kHz FSK; its rms swing reads
+        4.4 kHz) was suggested 5 kHz, which clipped a fifth of its audio."""
+        ident = listening_for(self.result(0.0, 12e3, "fsk", rms_hz=4.42e3), 152.24e6)
+        assert (ident.mode, ident.fm_deviation) == ("FM", "12.5 kHz")
+        ident = listening_for(self.result(0.0, 6e3, "fsk", rms_hz=1.4e3), 152.24e6)
+        assert ident.fm_deviation == "2.5 kHz"
+
+    def test_the_label_still_says_what_it_is(self):
+        """Wide FM stays wide FM (heard at 75 kHz, which holds its swing);
+        broadcast FM is still told by its width or a broadcast swing."""
+        ident = listening_for(self.result(30e3, 66e3), 300e6)
+        assert (ident.label, ident.fm_deviation) == ("Wide FM", "75 kHz")
+        ident = listening_for(self.result(45e3, 90e3), 300e6)
+        assert (ident.label, ident.fm_deviation, ident.filter_hz) == (
+            "Broadcast FM",
+            "75 kHz",
+            200e3,
+        )
+        ident = listening_for(self.result(20e3, 60e3), 100.1e6)
+        assert (ident.label, ident.fm_deviation) == ("Broadcast FM", "75 kHz")
+        ident = listening_for(self.result(3.28e3, 8.9e3), 100.715e6)
+        assert ident.label == "Narrow FM (voice or data)"
+        assert (ident.fm_deviation, ident.filter_hz) == ("5 kHz", 25e3)
+
+    def test_the_card_names_the_peak_the_deviation_holds(self):
+        """The card's "the frequency swings about ±1.8 kHz" is the rms
+        swing: next to "Listen with: FM · 5 kHz deviation" it read as if
+        2.5 kHz would do. It also names the peak the deviation holds."""
+        ident = listening_for(self.result(3.28e3, 8.9e3, rms_hz=1.77e3), 100.715e6)
+        assert ident.fm_deviation == "5 kHz"
+        assert "The swing peaks at about ±3.3 kHz" in ident.details
+        # (Estimated from the rms swing, not measured: not said.)
+        ident = listening_for(self.result(0.0, 8.9e3, rms_hz=1.77e3), 300e6)
+        assert not [d for d in ident.details if "peaks" in d]
+
+
 # --------------------------------------------------------------------------- #
 # The demo device's signals, identified as the window does
 # --------------------------------------------------------------------------- #
@@ -408,6 +498,14 @@ def test_demo_ook_remote_is_taken_apart():
     # 0x5E3A1C sent, short pulse = 1: inverted, plus the sync pulse.
     assert bits[:24] == format(0x5E3A1C ^ 0xFFFFFF, "024b")
     assert count >= 2
+
+
+def test_demo_narrow_fm_call_is_heard_at_5_khz():
+    """P-01: the demo's 100.715 MHz call swings +/-3.4 kHz: Identify said
+    2.5 kHz, and Apply Mode led straight into "FM audio is clipping"."""
+    ident = identify_demo(100.715e6, 100.715e6, "FM", 12.5e3)
+    assert ident.kind == "fm", ident.summary()
+    assert (ident.mode, ident.fm_deviation) == ("FM", "5 kHz")
 
 
 # --------------------------------------------------------------------------- #

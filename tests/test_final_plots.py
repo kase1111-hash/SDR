@@ -343,6 +343,58 @@ class TestWaterfallNoiseBrightness(unittest.TestCase):
         self.assertAlmostEqual(self.shown_db(wf), single, delta=0.6)
         self.assertLessEqual(len(wf._history), rows + 2)
 
+    def test_a_stretch_behind_leaves_the_next_rows_as_bright(self):
+        """P-10: one-block frames for a second (the display loop behind)
+        moved the noise reference (a slow average): the next normal rows
+        were drawn 1.1 dB darker and took 65 rows (2 s) to come within 0.5
+        dB, a visible band."""
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        rng = np.random.default_rng(1)
+        wf = WaterfallWidget()
+        self.addCleanup(wf.deleteLater)
+        wf.set_frequency_range(100e6, 2.4e6)
+        wf.set_history_seconds(0.0)  # (a row per line)
+        t = 0.0
+        normal = []
+        for ffts, count in ((39, 300), (1, 30), (39, 60)):
+            shown = []
+            for _ in range(count):
+                t += 1 / 30
+                wf.add_line(self.line(ffts, rng), timestamp=t, noise_db=-80.0)
+                shown.append(self.shown_db(wf))
+            normal = normal or shown
+            if ffts == 1:  # (drawn as bright as the others meanwhile)
+                self.assertAlmostEqual(np.median(shown), np.median(normal), delta=0.5)
+        after = np.array(shown) - np.median(normal)
+        self.assertLess(float(np.max(np.abs(after[:10]))), 0.5, after[:10])
+
+    def test_after_a_retune_the_reference_is_found_at_once(self):
+        """...without being slower to follow a retune that starts on an
+        outlier frame (the stall of the retune itself): within a few rows
+        (the slow average took some 200 to forget that first frame)."""
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        rng = np.random.default_rng(2)
+        wf = WaterfallWidget()
+        self.addCleanup(wf.deleteLater)
+        wf.set_frequency_range(100e6, 2.4e6)
+        wf.set_history_seconds(0.0)
+        t = 0.0
+        for _ in range(60):
+            t += 1 / 30
+            wf.add_line(self.line(39, rng), timestamp=t, noise_db=-80.0)
+        normal = self.shown_db(wf)
+        wf.set_frequency_range(144e6, 2.4e6)  # a retune
+        t += 1 / 30
+        wf.add_line(self.line(290, rng), timestamp=t, noise_db=-80.0)  # (a stall)
+        shown = []
+        for _ in range(10):
+            t += 1 / 30
+            wf.add_line(self.line(39, rng), timestamp=t, noise_db=-80.0)
+            shown.append(self.shown_db(wf))
+        self.assertLess(float(np.max(np.abs(np.array(shown[2:]) - normal))), 0.5, shown)
+
 
 class TestSignalsList(_SignalCase):
     """Leftovers 1 and 17, PLOTS-E2E-20: the Signals list was measured
@@ -439,15 +491,49 @@ class TestSignalsList(_SignalCase):
         self.assertEqual(self.freqs(), list(self.STATIONS))
 
 
+class _RunAtOnce:
+    """Runs Identify's jobs as they are handed over (the window runs them on
+    a worker thread): which takes are judged then doesn't depend on how busy
+    the computer is."""
+
+    def submit(self, fn, *args, **kwargs):
+        from concurrent.futures import Future
+
+        future = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except Exception as exc:  # pragma: no cover - as the worker would
+            future.set_exception(exc)
+        return future
+
+    def shutdown(self, *args, **kwargs):
+        pass
+
+
 class TestIdentifyThroughDrops(_SignalCase):
     """PLOTS-E2E-2: when the receiver drops samples every second or so, the
     half seconds left whole may hear only noise (the remote's packets fell
     in the gaps), and Identify said "Nothing identifiable ... Tune onto a
     signal and try again", as if nothing were there, though seconds of the
-    signal had been lost."""
+    signal had been lost.
+
+    P-09: deterministic. It failed now and then in long runs: 430.5 MHz has
+    the demo's weak background NFM carrier 70 kHz off (430.43 MHz, inside
+    the 200 kHz Identify looks at), which a half-second take between drops
+    sometimes called a carrier ("can't tell", about 0 dB SNR) with the
+    demo's unseeded noise; which takes were judged also depended on the
+    worker thread's timing. Now the noise is the same every run (seed 34
+    made 430.5 MHz fail), every take is judged at once, and the frequency
+    has nothing within 150 kHz."""
+
+    EMPTY_HZ = 431.0e6
 
     def run_with_drops(self, freq, drop_s):
+        real_pool = self.tools._pool
+        self.tools._pool = _RunAtOnce()
+        self.addCleanup(real_pool.shutdown, wait=False)
         self.listen(freq, ("None (I/Q)", None, "200 kHz"))
+        self.win._device._rng = np.random.default_rng(34)
         self.assertTrue(self.tools.identify())
         dev = self.win._device
         rate = self.win._device_sample_rate()
@@ -465,12 +551,12 @@ class TestIdentifyThroughDrops(_SignalCase):
         return self.panel.identify_status.text()
 
     def test_nothing_heard_says_samples_were_lost(self):
-        status = self.run_with_drops(430.5e6, 0.5)  # (nothing there)
+        status = self.run_with_drops(self.EMPTY_HZ, 0.5)  # (nothing there)
         self.assertIn("dropped", status)
         self.assertNotIn("Tune onto a signal", status)
 
     def test_nothing_there_says_so(self):
-        status = self.run_with_drops(430.5e6, 0.0)
+        status = self.run_with_drops(self.EMPTY_HZ, 0.0)
         self.assertIn("Tune onto a signal", status)
 
 

@@ -686,12 +686,12 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         self._on_air_total = max(job.duration_s, self.engine.seconds_total())
         self._show_on_air(0.0)
 
-    def _show_on_air(self, done_s: float) -> None:
+    def _show_on_air(self, done_s: float, history: bool = True) -> None:
         """Show "On air: ..." until the transmission's end (and a little
         after, when the outcome replaces it)."""
         left = max(0.0, self._on_air_total - done_s)
         self._win._show_status_message(
-            self._on_air_text, "danger", int((left + 10.0) * 1000)
+            self._on_air_text, "danger", int((left + 10.0) * 1000), history=history
         )
 
     def _on_progress(self, done_s: float, total_s: float) -> None:
@@ -699,6 +699,11 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             # An interval ID made it longer: keep "On air" up to its end.
             self._on_air_total = total_s
             self._show_on_air(done_s)
+        elif self.busy and self._on_air_text and not self._win._message_label.text():
+            # A notice took its place (Space or Open Recording refused) and
+            # has gone: "On air" comes back, not an empty bar (P-06). (Said
+            # once in the status history.)
+            self._show_on_air(done_s, history=False)
         panel = self._panel()
         if panel is None:
             return

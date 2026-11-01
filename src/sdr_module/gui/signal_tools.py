@@ -1233,7 +1233,11 @@ def _timed_analysis(report: BurstReport) -> float:
 
 
 def _mhz(freq_hz: float) -> str:
-    return f"{float(freq_hz) / 1e6:.3f} MHz"
+    """The frequency as the window names it: ``"146.5125 MHz"``, below 2
+    MHz in kHz (``"880 kHz"``, as FREQ shows it)."""
+    from .signal_panel import format_mhz
+
+    return format_mhz(freq_hz)
 
 
 def _parse_width(text: str) -> float:

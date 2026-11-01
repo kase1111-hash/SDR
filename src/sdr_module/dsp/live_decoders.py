@@ -891,6 +891,10 @@ class ADSBLiveDecoder(LiveDecoder):
     reports that as its status problem and decodes nothing. The envelope
     does not depend on where the signal is in the span, so the VFO offset
     is not used.
+
+    ``recording``: the samples come from a recording playing, whose rate
+    can't be changed (the problem names the recording's rate, with no
+    advice to change the sample rate), not from the device.
     """
 
     name = "ADS-B"
@@ -902,10 +906,13 @@ class ADSBLiveDecoder(LiveDecoder):
         sample_rate: float,
         offset_hz: float = 0.0,
         clock: Callable[[], float] = time.monotonic,
+        recording: bool = False,
     ):
         super().__init__(sample_rate, offset_hz, clock)
         self._decoder: Optional[ADSBDecoder] = None
-        if self.sample_rate < self.MIN_SAMPLE_RATE:
+        if self.sample_rate < self.MIN_SAMPLE_RATE and recording:
+            self._problem = _too_slow(self.name, self.MIN_SAMPLE_RATE, self.sample_rate)
+        elif self.sample_rate < self.MIN_SAMPLE_RATE:
             self._problem = (
                 f"ADS-B needs at least {format_rate(self.MIN_SAMPLE_RATE)}; "
                 f"the device runs at {format_rate(self.sample_rate)}"
@@ -966,12 +973,21 @@ def live_decoder_class(name: str) -> Optional[Type[LiveDecoder]]:
     return cls
 
 
+def _too_slow(name: str, low: float, rate: float) -> str:
+    """Why a recording at ``rate`` can't be decoded by ``name`` (as the
+    Decode Recording dialog says it)."""
+    needs = format_rate(low)
+    return f"{name} needs at least {needs}; this recording is {format_rate(rate)}"
+
+
 def create_live_decoder(
-    name: str, sample_rate: float, offset_hz: float = 0.0
+    name: str, sample_rate: float, offset_hz: float = 0.0, recording: bool = False
 ) -> LiveDecoder:
     """A live decoder for protocol ``name`` (a Decoder panel name such as
     "AX.25/APRS", or an alias such as "aprs") at ``sample_rate``, its
-    channel ``offset_hz`` from the centre of the samples.
+    channel ``offset_hz`` from the centre of the samples. ``recording``:
+    the samples come from a recording playing (a rate too low for the
+    protocol is worded for it: its rate can't be changed).
 
     Raises:
         ValueError: unknown protocol, or a sample rate too low for it
@@ -983,7 +999,11 @@ def create_live_decoder(
     rate = float(sample_rate)
     if not rate > 0:
         raise ValueError(f"sample rate must be positive, got {rate:g}")
-    if cls is not ADSBLiveDecoder and rate < cls.MIN_SAMPLE_RATE:
+    if cls is ADSBLiveDecoder:
+        return ADSBLiveDecoder(rate, offset_hz, recording=recording)
+    if rate < cls.MIN_SAMPLE_RATE and recording:
+        raise ValueError(_too_slow(cls.name, cls.MIN_SAMPLE_RATE, rate))
+    if rate < cls.MIN_SAMPLE_RATE:
         raise ValueError(
             f"The sample rate is too low for {cls.name}: it needs at least "
             f"{format_rate(cls.MIN_SAMPLE_RATE)}, got {format_rate(rate)}"

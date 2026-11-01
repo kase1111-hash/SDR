@@ -148,6 +148,7 @@ from .device_controls import (
     confirm_switch_to_demo,
 )
 from .file_jobs import (
+    busy_with,
     decode_recording,
     load_recording,
     run_job,
@@ -346,6 +347,10 @@ _SKIP_HINT_HOLD_S = 3.0
 # its buffers anew, which costs more than the load).
 _OVERLOAD_PROBE_S = 1.0
 _RECOVER_PROBES = 2
+# What the display loop skips is still this app's own job's doing (Decode
+# Recording...) for this long after it: frames are found to keep up again
+# only at the next probe, and real time is judged over the seconds after.
+_JOB_SKIP_S = _OVERLOAD_PROBE_S + _REALTIME_WINDOW_S
 # Timed frames after Start (or a new device or sample rate) that aren't
 # judged: the first frames design filters and plan FFTs.
 _WARM_UP_FRAMES = 2
@@ -2520,6 +2525,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Tuple[str, str, float, Tuple[Tuple[float, float], ...]]
     ] = None
     _preset_decoder_note = ""
+    # What the last tune away from it said ("ACARS decoder off: tuned away
+    # ...") and its point ("ACARS decoder off"), which the next message to
+    # replace it keeps, once (see _keeping_release_note).
+    _released_decoder: Optional[Tuple[str, str]] = None
+    # Status messages shown so far, and how many there were at the last
+    # tune: those after it are the tune's own (a scan it stops adds to
+    # them, see _scan_frame).
+    _status_count = 0
+    _tune_status_count = 0
     # Why the last tune was refused (the status line says so until a tune
     # goes through).
     _tuning_refusal: Optional[str] = None
@@ -2717,6 +2731,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # skipping the hint is about came from that (or from the device).
         self._overloaded_at = -math.inf
         self._skip_by_computer = False
+        # This app's own job that kept the computer busy (Decode Recording,
+        # Convert Recording...: see file_jobs.busy_with) and when it last
+        # did (monotonic), and whether the skipping came from it (P-04).
+        self._busy_job = ""
+        self._busy_job_at = -math.inf
+        self._skip_by_job = ""
         self._pacer = _Pacer()  # how much each display frame reads
         self._entry_returns_focus = False  # Ctrl+L: Enter goes back to the plots
         self._restoring = False  # True while _restore_state applies settings
@@ -2731,6 +2751,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder: Any = None
         self._decoder_protocol: Any = None
         self._decoder_rate = 0.0  # sample rate the live decoder was built for
+        self._decoder_recording = False  # ... and whether a recording played
         # Messages decoded while the Decoder tab was out of sight (its title
         # counts them), the background RDS of the tuned broadcast station
         # (Radio > RDS Station Names) and what its badge shows.
@@ -4496,6 +4517,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 a notice that is no problem ("Recording paused", "Recording
                 armed...", what to do first): only problems are listed there.
         """
+        self._status_count += 1
         self._message_label.setText(message)
         self._message_label.setToolTip(
             f"{message}\n\nClick for the last {STATUS_HISTORY_SIZE} messages."
@@ -4686,8 +4708,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         # A live decoder is built for one sample rate; rebuild it when the
         # device (and so the rate) changes, also after a build that failed
-        # (e.g. one that needs a higher rate).
-        if self._decoder_panel.protocol() is not None and self._decoder_rate != rate:
+        # (e.g. one that needs a higher rate). One that can't decode at this
+        # rate words it for a recording or the device: rebuilt when a
+        # recording starts or stops playing, even at the same rate.
+        decoder = self._own("_decoder")
+        cannot = decoder is None or bool(decoder.status.problem)
+        switched = self._playback.active != self._decoder_recording
+        if self._decoder_panel.protocol() is not None and (
+            self._decoder_rate != rate or (cannot and switched)
+        ):
             self._rebuild_decoder()
 
         # The Decoder panel's hint says whether it is listening (and Play
@@ -5322,6 +5351,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Remember the rate even if there is no decoder or its build fails,
         # so a later rate change retries it (and an unchanged rate doesn't).
         self._decoder_rate = rate
+        # (A rate too low for it is worded for a recording, P-05: its rate
+        # can't be changed in Receiver > Sample rate.)
+        playback = self._own("_playback")
+        self._decoder_recording = bool(playback is not None and playback.active)
         if live_decoder_class(text) is None:
             # Listed, but without a live decoder (yet).
             self._decoder = None
@@ -5331,7 +5364,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         try:
             self._decoder = create_live_decoder(
-                text, float(rate), self._decoder_offset_hz()
+                text,
+                float(rate),
+                self._decoder_offset_hz(),
+                recording=self._decoder_recording,
             )
             self._decoder_protocol = ProtocolType(proto_value)
         except Exception as exc:
@@ -5727,6 +5763,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         station starts over (its RDS name, the S-meter peak, the tuner's
         seek and STEREO lamp, Identify and Track Signal themselves).
         """
+        # (Messages from here on are this tune's own: see _scan_frame.)
+        self._tune_status_count = self._status_count
         # The readout, and the channel marked on the plots (their axes follow
         # the LO, see _retune_lo)
         self._freq_label.setText(format_frequency(freq_hz))
@@ -5886,6 +5924,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             f"{self._control_panel._bw_combo.currentText()} filter, as {where} is "
             "usually heard (Radio > Choose Mode From Band Plan)"
         )
+        text = self._keeping_release_note(text)
         self._show_status_message(text, "info", 6000)
         self._band_plan_note = (text, zone)
         return True
@@ -7173,7 +7212,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if not mode:
             # No mode of its own: the band plan's, in another band.
             if not self._listen_by_band_plan(before, self._current_frequency()):
-                self._show_status_message(f"Tuned to {label}", "info", 2500)
+                text = self._keeping_release_note(f"Tuned to {label}")
+                self._show_status_message(text, "info", 2500)
             return
         # (Quiet: the mode alone said its last filter first, "AM: 6 kHz",
         # before this one's was set; "Tuned to ..." says what was set.)
@@ -7191,7 +7231,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             text = f"Tuned to {label[:-1]}, {mode})"
         else:
             text = f"Tuned to {label} ({mode})"
-        self._show_status_message(text, "info", 2500)
+        self._show_status_message(self._keeping_release_note(text), "info", 2500)
 
     # ------------------------------------------------------------------
     # Acquisition
@@ -8371,12 +8411,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         now = time.monotonic()
         if self._pacer.overloaded:
             self._overloaded_at = now
+        job = self._busy_job_now()
         if decoding and self._samples_skipped():
             self._skip_hint_until = now + _SKIP_HINT_HOLD_S
             # (The seconds real time is judged by still hold the short
             # frames for a while after this computer catches up again:
             # those were skipped here, not by the device.)
             self._skip_by_computer = now - self._overloaded_at <= _REALTIME_WINDOW_S
+            self._skip_by_job = job
         skipping = decoding and now < self._skip_hint_until
         text = self._skip_hint_text() if skipping else None
         panel.set_skipping(text)
@@ -8394,10 +8436,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._skip_hint_shown = text
                 self._show_status_message(text, "info", 10000)
 
+    def _busy_job_now(self) -> str:
+        """This app's own job (Decode Recording, Convert Recording...) that
+        keeps the computer busy now, or did within _JOB_SKIP_S: then what
+        the display loop skips is the job's doing, not the device's (P-04).
+        "" when none."""
+        now = time.monotonic()
+        job = busy_with()
+        if job:
+            self._busy_job, self._busy_job_at = job, now
+            return job
+        return self._busy_job if now - self._busy_job_at <= _JOB_SKIP_S else ""
+
     def _skip_hint_text(self) -> str:
         """The Decoder's line while it gets only part of the signal."""
         name = str(getattr(self._decoder, "name", "") or "live")
         rate = format_rate(self._device_sample_rate())
+        if self._skip_by_job:
+            # (Its own job: a lower sample rate isn't the answer.)
+            return (
+                f"{self._skip_by_job} keeps this computer busy, so the {name} "
+                "decoder misses part of the signal meanwhile."
+            )
         if self._demo_mode:
             cause = "The demo device can't keep up in real time right now"
         elif self._skip_by_computer:
@@ -9170,6 +9230,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 f"Playing at {self._playback.speed:g}x: audio plays at 1x only "
                 "(the spectrum, decoders and recordings keep working)."
             )
+        job = self._busy_job_now()
+        if job:  # (this app's own job, not the device: P-04)
+            return f"{job} keeps this computer busy, so audio is paused meanwhile."
         if self._demo_mode:
             return (
                 "The demo device can't keep up in real time right now, so "
@@ -10833,11 +10896,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         tuned = self._current_frequency()
         if host.expected_hz is not None and abs(tuned - host.expected_hz) > 1.0:
+            label = self._message_label
+            # What the tune said itself (a preset's message, the band plan's
+            # line, "Tuned to ..."), if anything.
+            own = label.text() if self._status_count > self._tune_status_count else ""
+            tone = label.property("tone")
             panel.stop_scan(
                 f"Scan stopped: you tuned to {format_frequency(tuned)}.",
                 "info",
                 stay=True,
             )
+            if own and label.text() != own:
+                # The scan's message (from another tab) replaced it on the
+                # next frame: one message says both (P-08). (Each is in the
+                # status history as it was said.)
+                both = f"Scan stopped · {own}"
+                self._show_status_message(both, tone, 6000, history=False, log=False)
+                note = self._band_plan_note
+                if note is not None and note[0] == own:
+                    self._band_plan_note = (both, note[1])  # (cleared as it was)
             return
         if self._recording:
             panel.stop_scan(
@@ -11254,12 +11331,26 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._control_panel._applying_preset:
             self._preset_decoder_note = f" · {note}"
             return
-        self._show_status_message(
+        message = (
             f"{note}: tuned away from the {name} preset ({format_frequency(freq)}), "
-            "which had turned it on.",
-            "info",
-            5000,
+            "which had turned it on."
         )
+        self._show_status_message(message, "info", 5000)
+        self._released_decoder = (message, note)
+
+    def _keeping_release_note(self, text: str) -> str:
+        """``text``, a message the tune that turned a preset's decoder off
+        posts next (the band plan's line, "Tuned to ..."), led by that point
+        ("ACARS decoder off · ...") while it is what the message replaces:
+        both facts stay in view (P-07). Once: a message after that says only
+        its own. (First: a long line is cut short at its end.)"""
+        released, self._released_decoder = self._released_decoder, None
+        if released is None:
+            return text
+        message, note = released
+        if self._message_label.text() != message:
+            return text  # (replaced, or gone)
+        return f"{note} · {text}"
 
     def _preset_decoder_off(self) -> str:
         """Turn off the decoder a preset turned on (unless you changed it

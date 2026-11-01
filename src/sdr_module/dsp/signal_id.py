@@ -21,7 +21,6 @@ window runs :func:`identify` off its GUI thread.
 
 from __future__ import annotations
 
-import math
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Deque, List, Optional, Tuple
@@ -58,16 +57,31 @@ KEEP_MAX_SAMPLES = 1 << 21
 MIN_S = 0.5
 WAIT_S = 4.0
 
-# FM deviation choices (Hz) and their peak frequency swing: the measured
-# rms swing times about 2.2 (voice; a tone is 1.4) estimates the peak.
+# FM deviation choices (Hz), as Demodulation > FM deviation offers them.
+# A station swinging beyond the deviation set clips its audio (the window
+# warns "FM audio is clipping"), so the one suggested holds the measured
+# peak swing with _DEVIATION_MARGIN to spare (the peak reads up to about
+# 10 % low on tones). The measured rms swing times about 2.2 (voice; a
+# tone is 1.4) estimates the peak when it wasn't measured.
 _DEVIATIONS: Tuple[Tuple[float, str], ...] = (
-    (3.5e3, "2.5 kHz"),
-    (8e3, "5 kHz"),
-    (15e3, "12.5 kHz"),
-    (40e3, "25 kHz"),
-    (math.inf, "75 kHz"),
+    (2.5e3, "2.5 kHz"),
+    (5e3, "5 kHz"),
+    (12.5e3, "12.5 kHz"),
+    (25e3, "25 kHz"),
+    (75e3, "75 kHz"),
 )
+_DEVIATION_MARGIN = 1.1
 _PEAK_PER_RMS = 2.2
+# A peak swing this wide is a broadcast station's.
+_BROADCAST_PEAK_HZ = 40e3
+
+
+def _deviation_for(peak_hz: float) -> str:
+    """The smallest FM deviation choice that holds a peak swing of
+    ``peak_hz`` (with :data:`_DEVIATION_MARGIN` to spare), else the
+    widest: the audio doesn't clip."""
+    need = _DEVIATION_MARGIN * float(peak_hz)
+    return next((text for hz, text in _DEVIATIONS if need <= hz), _DEVIATIONS[-1][1])
 
 
 @dataclass
@@ -144,15 +158,19 @@ def listening_for(result: ClassificationResult, freq_hz: float) -> Identificatio
         peak = float(f.get("freq_peak_hz", 0.0)) or _PEAK_PER_RMS * float(
             f.get("freq_dev_hz", 0.0)
         )
-        deviation = next(text for limit, text in _DEVIATIONS if peak < limit)
+        deviation = _deviation_for(peak)
         plan = _band_listening(freq_hz)
         planned = _khz(plan[1]) if plan and plan[0] == "FM" else 0.0
-        if planned and 0.25 * planned <= peak <= 1.6 * planned:
-            # What the band uses, when the swing measured agrees.
+        agrees = bool(planned) and 0.25 * planned <= peak
+        agrees = agrees and _DEVIATION_MARGIN * peak <= planned
+        if agrees:
+            # What the band uses, when the swing measured agrees (and the
+            # band's deviation holds it).
             deviation = plan[1] if plan else deviation
-        if width >= 100e3 or deviation == "75 kHz":
+        broadcast = peak >= _BROADCAST_PEAK_HZ or (agrees and planned >= 75e3)
+        if width >= 100e3 or broadcast:
             label, deviation, filter_hz = "Broadcast FM", "75 kHz", 200e3
-        elif width >= 30e3 or deviation == "25 kHz":
+        elif width >= 30e3 or _khz(deviation) >= 25e3:
             label, filter_hz = "Wide FM", max(1.2 * width, 50e3)
         else:
             label = "Narrow FM (voice or data)"
@@ -172,7 +190,7 @@ def listening_for(result: ClassificationResult, freq_hz: float) -> Identificatio
         mode, filter_hz = "CW", 500.0
     elif kind == "fsk":
         peak = 1.3 * float(f.get("freq_dev_hz", 0.0))
-        deviation = next(text for limit, text in _DEVIATIONS if peak < limit)
+        deviation = _deviation_for(peak)
         mode, filter_hz = "FM", max(1.2 * width, 12.5e3)
         details.append("Data: the Decoder tab decodes POCSAG, FLEX and similar")
     elif kind == "ook" and _mode_s_band(freq_hz):

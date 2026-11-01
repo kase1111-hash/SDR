@@ -283,6 +283,54 @@ class TestBurstDetector:
         starts = [round(b.start_s, 1) for b in ended]
         assert starts and max(starts) < BurstDetector.ALWAYS_S + 1.0, starts
 
+    @pytest.mark.parametrize("spur_db", [10.0, 16.0])
+    def test_a_remote_over_a_steady_carrier_is_found(self, spur_db):
+        """A remote whose 30 kHz band holds a steady narrow carrier (a
+        receiver's spur, a carrier left on) is still found on every packet:
+        its bursts stand far above that 'station' (the occupancy rule hid
+        them all once the carrier stood some 10 dB over the noise)."""
+        rng = np.random.default_rng(4)
+        det = BurstDetector()
+        ended, sent, was_on = [], 0, False
+        for i in range(30 * 30):
+            t = i / 30
+            row = self._top_row(rng)
+            spur = 10.0 ** ((-73.0 + spur_db) / 10.0)
+            row[300] = 10.0 * np.log10(10.0 ** (row[300] / 10.0) + spur)
+            on = t >= 1.0 and (t - 1.0) % 2.5 < 0.4  # (0.4 s every 2.5 s)
+            if on:
+                row[294:307] = np.maximum(row[294:307], -40.0)
+            sent += on and not was_on
+            was_on = on
+            ended += det.process(row, 433.92e6, self.SPAN, t)
+        ended += det.flush()
+        assert sent == 12
+        assert len(ended) == sent, [round(b.start_s, 1) for b in ended]
+
+    def test_calls_beside_a_steady_carrier_are_each_a_burst(self):
+        """Calls that come and go (5 s every 8 s) a few kHz from a weak
+        carrier that never stops (the demo's 124.35 MHz airband channel
+        beside a carrier on 124.36 MHz) are each a burst: the floor that
+        rises under the calls and runs into the carrier's is not that
+        station's (the occupancy rule missed every one)."""
+        rng = np.random.default_rng(9)
+        det = BurstDetector()
+        ended, calls, was_on = [], 0, False
+        carrier = 10.0 ** (-63.0 / 10.0)  # (10 dB over the noise)
+        for i in range(60 * 30):
+            t = i / 30
+            row = self._top_row(rng)
+            row[306] = 10.0 * np.log10(10.0 ** (row[306] / 10.0) + carrier)
+            on = t >= 1.0 and (t - 1.0) % 8.0 < 5.0
+            if on:
+                row[298:303] = np.maximum(row[298:303], -45.0)
+            calls += on and not was_on
+            was_on = on
+            ended += det.process(row, 124.35e6, self.SPAN, t)
+        ended += det.flush()
+        assert calls == 8
+        assert len(ended) == calls, [round(b.start_s, 1) for b in ended]
+
 
 def test_frame_rows_show_a_short_burst_anywhere_in_the_block():
     rate = 2.4e6

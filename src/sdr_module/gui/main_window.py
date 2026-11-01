@@ -148,6 +148,7 @@ from .device_controls import (
     confirm_switch_to_demo,
 )
 from .file_jobs import (
+    busy_with,
     decode_recording,
     load_recording,
     run_job,
@@ -2717,6 +2718,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # skipping the hint is about came from that (or from the device).
         self._overloaded_at = -math.inf
         self._skip_by_computer = False
+        # This app's own job that kept the computer busy (Decode Recording,
+        # Convert Recording...: see file_jobs.busy_with) and when it last
+        # did (monotonic), and whether the skipping came from it (P-04).
+        self._busy_job = ""
+        self._busy_job_at = -math.inf
+        self._skip_by_job = ""
         self._pacer = _Pacer()  # how much each display frame reads
         self._entry_returns_focus = False  # Ctrl+L: Enter goes back to the plots
         self._restoring = False  # True while _restore_state applies settings
@@ -8386,12 +8393,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         now = time.monotonic()
         if self._pacer.overloaded:
             self._overloaded_at = now
+        job = self._busy_job_now()
         if decoding and self._samples_skipped():
             self._skip_hint_until = now + _SKIP_HINT_HOLD_S
             # (The seconds real time is judged by still hold the short
             # frames for a while after this computer catches up again:
             # those were skipped here, not by the device.)
             self._skip_by_computer = now - self._overloaded_at <= _REALTIME_WINDOW_S
+            self._skip_by_job = job
         skipping = decoding and now < self._skip_hint_until
         text = self._skip_hint_text() if skipping else None
         panel.set_skipping(text)
@@ -8409,10 +8418,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._skip_hint_shown = text
                 self._show_status_message(text, "info", 10000)
 
+    def _busy_job_now(self) -> str:
+        """This app's own job (Decode Recording, Convert Recording...) that
+        keeps the computer busy now, or did within the seconds real time is
+        judged by: then what the display loop skips is the job's doing, not
+        the device's (P-04). "" when none."""
+        now = time.monotonic()
+        job = busy_with()
+        if job:
+            self._busy_job, self._busy_job_at = job, now
+            return job
+        return self._busy_job if now - self._busy_job_at <= _REALTIME_WINDOW_S else ""
+
     def _skip_hint_text(self) -> str:
         """The Decoder's line while it gets only part of the signal."""
         name = str(getattr(self._decoder, "name", "") or "live")
         rate = format_rate(self._device_sample_rate())
+        if self._skip_by_job:
+            # (Its own job: a lower sample rate isn't the answer.)
+            return (
+                f"{self._skip_by_job} keeps this computer busy, so the {name} "
+                "decoder misses part of the signal meanwhile."
+            )
         if self._demo_mode:
             cause = "The demo device can't keep up in real time right now"
         elif self._skip_by_computer:
@@ -9185,6 +9212,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 f"Playing at {self._playback.speed:g}x: audio plays at 1x only "
                 "(the spectrum, decoders and recordings keep working)."
             )
+        job = self._busy_job_now()
+        if job:  # (this app's own job, not the device: P-04)
+            return f"{job} keeps this computer busy, so audio is paused meanwhile."
         if self._demo_mode:
             return (
                 "The demo device can't keep up in real time right now, so "

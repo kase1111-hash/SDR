@@ -322,3 +322,92 @@ class TestTheScanChipGivesWayAt1024Px(_SignalCase):
         self.assertGreaterEqual(scan.width(), scan.sizeHint().width(), theme)
         scan.setVisible(False)
         win._audio_rec_label.setVisible(False)
+
+
+def _hardware_case():
+    from tests.test_review_mainloop import _HardwareCase
+
+    return _HardwareCase
+
+
+class TestTheAppsOwnJobIsNamedNotTheDevice(_hardware_case()):
+    """P-04: during a busy Decode Recording (and for a few seconds after
+    it) the Decoder's line and the status bar said "The demo device can't
+    keep up in real time right now, so the ADS-B decoder misses part of
+    the signal...": the effect is true, the cause it named is not. The
+    display loop runs on during the job (here 1.5 times real time); the
+    hints name the job instead."""
+
+    JOB = (
+        "Decode Recording keeps this computer busy, so the ADS-B decoder "
+        "misses part of the signal meanwhile."
+    )
+
+    def setUp(self):
+        super().setUp()
+        self.win._demo_mode = True  # (the demo device's wording)
+        self.win._set_demod_mode("None (I/Q)", bandwidth="2 MHz")
+        self.win._decoder_panel._proto_combo.setCurrentText("ADS-B")
+        self.settle(1)
+        self.win._decoder_panel.set_receiving(True)
+
+    def line(self):
+        return self.win._decoder_panel.decoder_status_text()
+
+    def during_a_job(self, frames):
+        """Run ``frames`` display frames while Decode Recording's job runs
+        (run_job's own event loop), and what was said meanwhile."""
+        import threading
+
+        from PyQt6.QtCore import QTimer
+
+        from sdr_module.gui.file_jobs import run_job
+
+        done = threading.Event()
+        said = {}
+
+        def frames_meanwhile():
+            try:
+                self.run_frames(frames)
+                said["line"] = self.line()
+                said["bar"] = self.win._message_label.text()
+                said["audio"] = self.win._realtime_hint()
+            finally:
+                done.set()
+
+        QTimer.singleShot(0, frames_meanwhile)
+        result = run_job(
+            self.win, "Decode Recording", "Decoding…", lambda report: done.wait(20)
+        )
+        self.assertTrue(result.ok, result.error)
+        return said
+
+    def test_the_hints_name_the_job(self):
+        said = self.during_a_job(40)
+        self.assertTrue(self.win._pacer.overloaded)
+        self.assertEqual(said["line"], self.JOB)
+        self.assertEqual(said["bar"], self.JOB)  # (the status bar says it once)
+        self.assertEqual(
+            said["audio"],
+            "Decode Recording keeps this computer busy, so audio is paused meanwhile.",
+        )
+        # Done: the computer keeps up again. What it skipped until then
+        # was still the job's doing (never the device's), then nothing.
+        self.LOAD = 0.3
+        lines = []
+        for _ in range(300):
+            self.run_frames(1)
+            if not lines or lines[-1] != self.line():
+                lines.append(self.line())
+        self.assertFalse(self.win._pacer.overloaded)
+        for line in lines:
+            self.assertNotIn("device", line)
+        self.assertIn(self.JOB, lines)
+        self.assertNotIn("misses", lines[-1])
+
+    def test_without_a_job_the_device_is_still_named(self):
+        self.run_frames(40)
+        self.assertTrue(self.line().startswith("The demo device can't keep up"))
+        self.assertTrue(
+            self.win._realtime_hint().startswith("The demo device can't keep up")
+        )

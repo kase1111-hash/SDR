@@ -20,10 +20,11 @@ file at once:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -54,6 +55,28 @@ WAV_MAX_DATA_BYTES = 0xFFFFFFFF - 36
 #: ``report(fraction)`` (0..1): raises :class:`Cancelled` once Cancel was
 #: pressed, so the work stops at its next report.
 Report = Callable[[float], None]
+
+
+#: The titles of the jobs :func:`run_job` runs now (see :func:`busy_with`).
+_RUNNING: List[str] = []
+
+
+def busy_with() -> str:
+    """The title of the job :func:`run_job` runs now ("Decode Recording"),
+    "" when none runs. While one runs it keeps this computer busy: the
+    window's hints then name it, not the device, as what makes the display
+    loop skip part of the signal (P-04)."""
+    return _RUNNING[-1] if _RUNNING else ""
+
+
+@contextlib.contextmanager
+def running(title: str) -> Iterator[None]:
+    """Note the job ``title`` as running meanwhile (see :func:`busy_with`)."""
+    _RUNNING.append(title)
+    try:
+        yield
+    finally:
+        _RUNNING.remove(title)
 
 
 class Cancelled(Exception):
@@ -408,11 +431,12 @@ if HAS_PYQT6:
         if app is not None:
             app.installEventFilter(hold)
         try:
-            worker.start()
-            loop.exec()
-            worker.wait()
-            # Deliver what the worker queued just before it finished.
-            loop.processEvents()
+            with running(title):
+                worker.start()
+                loop.exec()
+                worker.wait()
+                # Deliver what the worker queued just before it finished.
+                loop.processEvents()
         finally:
             if app is not None:
                 app.removeEventFilter(hold)

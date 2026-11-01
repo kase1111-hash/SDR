@@ -10238,8 +10238,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # The mode (its choices), then its saved deviation and width.
             self._set_demod_mode(demod, deviation or None, bandwidth or None)
             combo = self._control_panel._format_combo
-            if rec_format and combo.findText(rec_format) >= 0:
-                combo.setCurrentText(rec_format)
+            index = combo.findText(rec_format) if rec_format else -1
+            if index < 0 and rec_format:
+                # (Saved by the names before they matched Save Recording's,
+                # "Complex Int16 I/Q (.cs16)": its extension says which.)
+                sigmf = rec_format.startswith("SigMF")
+                for i in range(combo.count()):
+                    ext = str(combo.itemData(i) or "")
+                    if rec_format.endswith(f"({ext})") or (
+                        sigmf and ext == ".sigmf-data"
+                    ):
+                        index = i
+                        break
+            if index >= 0:
+                combo.setCurrentIndex(index)
             self._control_panel.set_record_kind(
                 self._settings.get_str("recording/kind", "iq")
             )

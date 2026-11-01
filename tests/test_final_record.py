@@ -1469,3 +1469,39 @@ class TestImportOptionsGrowsWithItsCheck(_FilesCase):
             row = edit.parentWidget()
             self.assertGreaterEqual(row.height(), edit.y() + edit.height())
         dialog.hide()
+
+
+class TestASavedFormatChoiceSurvivesTheNewNames(_FilesCase):
+    """REC-E2E-13 renamed the Recording group's formats, and the choice is
+    saved by its name: one saved by the earlier names ("Complex Int16 I/Q
+    (.cs16)") wasn't found at the next launch, and SigMF came back."""
+
+    def reopen(self):
+        win = self.mw.SDRMainWindow(demo_mode=True)
+        self.addCleanup(win.deleteLater)
+        self.addCleanup(win.close)
+        for timer in (win._display_timer, win._status_timer, win._hotplug_timer):
+            timer.stop()
+        win._confirm_discard_recording = lambda *_a: True
+        return win
+
+    def test_the_earlier_names_are_still_read(self):
+        for saved, ext in (
+            ("Complex Int16 I/Q (.cs16)", ".cs16"),
+            ("Complex Float32 I/Q (.cf32)", ".cf32"),
+            ("Raw Float32 I/Q (.raw)", ".raw"),
+            ("WAV, 16-bit I/Q (.wav)", ".wav"),
+            ("SigMF, keeps frequency & rate", ".sigmf-data"),
+            ("Complex Int16 (.cs16)", ".cs16"),  # (today's name)
+        ):
+            with self.subTest(saved=saved):
+                self.store.values["recording_format"] = saved
+                win = self.reopen()
+                self.assertEqual(
+                    win._control_panel.get_recording_extension(), ext, saved
+                )
+
+    def test_an_unknown_name_gives_sigmf(self):
+        self.store.values["recording_format"] = "Something else (.xyz)"
+        win = self.reopen()
+        self.assertEqual(win._control_panel.get_recording_extension(), ".sigmf-data")

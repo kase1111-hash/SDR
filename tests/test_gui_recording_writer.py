@@ -266,6 +266,61 @@ class TestNothingIsLostSilently(_WriterCase):
         store = win._samples_buffer
         self.assertEqual(os.path.getsize(store.path), store.sample_count * 8)
 
+    def test_a_write_failing_as_a_block_is_queued_is_said_once(self):
+        # The writer fails after the frame looked for a failed write and
+        # before it queued its own block: the recording stops, said once,
+        # and the take is what the file holds.
+        win = self.win
+        self.start()
+        self.frames(1)
+        _settle_writes(win)
+        store = win._samples_buffer
+        self.disk.room = int(1.5 * FRAME * 8)
+        self.disk.gate.clear()
+        self.frames(1)  # (its write waits at the gate, then fails)
+        self.assertTrue(self.disk.waiting.wait(HOLD_S))
+        real = store._raise_failure
+
+        def fail_meanwhile():
+            if not self.disk.failed.is_set():
+                self.disk.gate.set()
+                self.assertTrue(self.disk.failed.wait(HOLD_S))
+                store._writer.flush()
+            return real()
+
+        store._raise_failure = fail_meanwhile
+        with self.assertLogs("sdr_module.gui.main_window", level="WARNING") as logs:
+            self.frames(1)
+        said = [line for line in logs.output if "Recording stopped" in line]
+        self.assertEqual(len(said), 1, said)
+        self.assertFalse(win._recording)
+        self.assertEqual(store.sample_count, int(1.5 * FRAME))
+        self.assertEqual(os.path.getsize(store.path), store.sample_count * 8)
+
+    def test_a_write_failing_as_stop_writes_the_queue_is_said(self):
+        # The disk fills up while Stop writes out what the writer still
+        # holds: the recording stops saying why, as in a frame, and the take
+        # is what the file holds (not "Recorded ... samples").
+        win = self.win
+        self.start()
+        self.frames(1)
+        _settle_writes(win)
+        self.disk.room = int(1.5 * FRAME * 8)
+        self.disk.gate.clear()
+        self.frames(1)  # (its write waits at the gate, then fails)
+        threading.Timer(0.05, self.disk.gate.set).start()
+        self.stop()
+        self.assertFalse(win._recording)
+        text = self.message()
+        self.assertTrue(
+            text.startswith("Recording stopped: the recording file can't be written ("),
+            text,
+        )
+        store = win._samples_buffer
+        self.assertEqual(store.sample_count, int(1.5 * FRAME))
+        self.assertEqual(os.path.getsize(store.path), store.sample_count * 8)
+        self.assertEqual(self.disk.timeouts, 0)
+
 
 class TestStopWritesEverythingFirst(_WriterCase):
     def test_the_take_is_whole_when_it_is_offered_for_saving(self):
@@ -495,6 +550,33 @@ class TestTheTakesStore(unittest.TestCase):
         self.assertEqual(len(store), 2)
         np.testing.assert_array_equal(store[0], blocks[0])
         np.testing.assert_array_equal(store[1], blocks[1][:500])
+        self.assertEqual(os.path.getsize(store.path), 1500 * 8)
+
+    def test_a_write_failing_as_a_block_is_queued_is_raised_once(self):
+        # (It failed after queue() looked for a failure, before its put.)
+        store = self.store()
+        blocks = self.blocks()
+        self.disk.room = int(1.5 * 1000 * 8)
+        self.assertTrue(store.queue(blocks[0]))
+        store.flush()
+        self.disk.gate.clear()
+        self.assertTrue(store.queue(blocks[1]))  # (waits at the gate, fails)
+        self.assertTrue(self.disk.waiting.wait(HOLD_S))
+        real = store._raise_failure
+
+        def fail_meanwhile():
+            if not self.disk.failed.is_set():
+                self.disk.gate.set()
+                self.assertTrue(self.disk.failed.wait(HOLD_S))
+                store._writer.flush()
+            return real()
+
+        store._raise_failure = fail_meanwhile
+        with self.assertRaises(OSError):
+            store.queue(blocks[2])
+        store.check()  # (raised once: nothing more to say)
+        store.finish()
+        self.assertEqual(store.sample_count, 1500)
         self.assertEqual(os.path.getsize(store.path), 1500 * 8)
 
     def test_an_imported_recording_takes_no_more(self):

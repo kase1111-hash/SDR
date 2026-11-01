@@ -2096,10 +2096,17 @@ class _SampleStore:
         if self._file is None:
             self._create_file()
         assert self._writer is not None
-        if data.dtype == _CF32:
-            queued = self._writer.put(data)  # (a copy)
-        else:
-            queued = self._writer.put(data.astype(_CF32), copy=False)
+        try:
+            if data.dtype == _CF32:
+                queued = self._writer.put(data)  # (a copy)
+            else:
+                queued = self._writer.put(data.astype(_CF32), copy=False)
+        except Exception:
+            # A write failed since the look above: raised as there, once
+            # (taken from the writer), the take cut back to the file.
+            self._settle(wait=False)
+            self._raise_failure()
+            raise
         if not queued:
             return False
         self._map = None

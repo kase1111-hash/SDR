@@ -858,8 +858,9 @@ if HAS_PYQT6:
                 dict(getattr(self._win, "_WATERFALL_DEFAULTS", {"auto_levels": True}))
             )
             # As in the main window: both plots show the same part of the
-            # span (zoom), and every sample of a frame at the FFT size and
-            # window chosen in the spectrum's menu (see _plot_frame).
+            # span (zoom), and every sample of a frame (evenly spread
+            # segments of one longer than _PLOT_MAX_SAMPLES) at the FFT size
+            # and window chosen in the spectrum's menu (see _plot_frame).
             self._plot_view = PlotView()
             self._frame_spectrum = FrameSpectrumAnalyzer(max_samples=_PLOT_MAX_SAMPLES)
             self._frame_axis: Optional[Tuple[float, float]] = None
@@ -2714,9 +2715,12 @@ if HAS_PYQT6:
 
         def _plot_frame(self, samples: np.ndarray) -> None:
             """The plots, as in the main window: every sample of the frame
-            at the FFT size and window chosen in the spectrum's menu (the
-            mean power per bin for the spectrum, the strongest for the
-            waterfall row, so a short burst anywhere shows)."""
+            (of a frame longer than _PLOT_MAX_SAMPLES, about half a million,
+            evenly spread FFT segments: every frame above 15 MS/s) at the
+            FFT size and window chosen in the spectrum's menu (the mean
+            power per bin for the spectrum, the strongest for the waterfall
+            row, so a burst anywhere shows unless it is shorter than the
+            gap between segments)."""
             if self._plot_skip_samples > 0 or time.monotonic() < self._plot_skip_until:
                 # Taken (partly) before the last retune (_drop_stale_samples).
                 self._plot_skip_samples = max(0, self._plot_skip_samples - len(samples))

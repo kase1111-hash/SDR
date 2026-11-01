@@ -201,7 +201,8 @@ class _Claim:
 
 
 class FrameSpectrumAnalyzer:
-    """Spectrum of every sample of each display frame (see the module).
+    """Spectrum of every sample of each display frame, or of evenly spread
+    segments of a frame longer than ``max_samples`` (see the module).
 
     Not thread-safe: one caller (the display loop) at a time.
     """

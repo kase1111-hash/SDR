@@ -590,3 +590,72 @@ class TestTraceDrawing(_WindowTestCase):
             self.assertEqual(poly.count(), n)
             for i in range(n):
                 self.assertEqual(poly.at(i), QPointF(float(xs[i]), float(ys[i])))
+
+
+# ---------------------------------------------------------------------------
+# LISTEN-06: Remove DC spike and Balance I/Q at 20 MS/s
+# ---------------------------------------------------------------------------
+
+
+def _iq_reference(x, rate, conditioner_state, remove_dc, balance):
+    """What the conditioner computed before (whole-block temporaries)."""
+    from sdr_module.gui.audio_chain import correct_iq
+
+    start, end, gain, phase = conditioner_state
+    n = len(x)
+    y = x
+    if remove_dc:
+        ramp = np.linspace(0.0, 1.0, n, dtype=np.float32)
+        y = y - (np.complex64(start) + np.complex64(end - start) * ramp)
+    if balance:
+        y = correct_iq(y, gain, phase)
+    return y
+
+
+class TestIqConditionerAtHighRates(unittest.TestCase):
+    @staticmethod
+    def _blocks(count):
+        for block in range(count):
+            x = _noise(FRAME, seed=block) + np.complex64(0.02 - 0.01j * block)
+            q = 1.05 * (x.imag * np.cos(0.03) + x.real * np.sin(0.03))
+            yield (x.real + 1j * q).astype(np.complex64)
+
+    def test_the_same_samples_as_before(self):
+        from sdr_module.gui.audio_chain import IqConditioner
+
+        for remove_dc, balance in ((True, True), (True, False), (False, True)):
+            conditioner = IqConditioner()
+            conditioner.remove_dc, conditioner.balance_iq = remove_dc, balance
+            for block, x in enumerate(self._blocks(3)):
+                dc_before = conditioner._dc
+                got = conditioner.process(x, RATE)
+                gain, phase = conditioner.imbalance
+                start = dc_before if dc_before is not None else conditioner._dc
+                want = _iq_reference(
+                    x, RATE, (start, conditioner._dc, gain, phase), remove_dc, balance
+                )
+                self.assertEqual(got.dtype, np.complex64)
+                np.testing.assert_allclose(
+                    got, want, atol=1e-6, err_msg=str((remove_dc, balance, block))
+                )
+
+    def test_no_temporaries_the_size_of_the_block(self):
+        # With Remove DC spike and Balance I/Q on, the conditioner made half
+        # a dozen temporaries the size of the block (666,667 samples at 20
+        # MS/s), the largest part of a frame with both on. It now works in
+        # pieces that stay in the processor's cache.
+        import tracemalloc
+
+        from sdr_module.gui.audio_chain import IqConditioner
+
+        conditioner = IqConditioner()
+        conditioner.remove_dc = conditioner.balance_iq = True
+        first, second = self._blocks(2)
+        conditioner.process(first, RATE)  # (the estimates start)
+        tracemalloc.start()
+        try:
+            out = conditioner.process(second, RATE)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        self.assertLess(peak, 1.5 * out.nbytes)

@@ -664,6 +664,9 @@ class IqConditioner:
         n = x.size
         if n == 0:
             return x
+        # The DC to subtract, a straight line from ``start`` to ``end``
+        # across the block (no step between blocks); None: none.
+        dc: Optional[Tuple[complex, complex]] = None
         if self.remove_dc:
             mean = complex(np.mean(x))
             if self._dc is None:
@@ -673,11 +676,8 @@ class IqConditioner:
                 start = self._dc
                 end = self._dc + alpha * (mean - self._dc)
             self._dc = end
-            if n > 1 and start != end:
-                ramp = np.linspace(0.0, 1.0, n, dtype=np.float32)
-                x = x - (np.complex64(start) + np.complex64(end - start) * ramp)
-            else:
-                x = x - np.complex64(end)
+            dc = (start, end) if n > 1 and start != end else (end, end)
+        balance: Optional[Tuple[float, float]] = None
         if self.balance_iq and n >= 64:
             # The statistics are averaged over seconds: a contiguous slice
             # of each block is plenty, and keeps this cheap at 20 MS/s.
@@ -691,8 +691,10 @@ class IqConditioner:
             # difference leaves both out (it is zero at DC and 40 dB down
             # within 5 kHz of it) and keeps the imbalance, which every real
             # filter of I and Q alike preserves.
-            slope = np.diff(x[: self.IQ_SLICE])
-            estimate = self._estimate(slope)
+            head = x[: self.IQ_SLICE]
+            if dc is not None:
+                head = self._remove_dc(head, 0, n, dc)
+            estimate = self._estimate(np.diff(head))
             if estimate is not None:
                 gain, phase = estimate
                 if self._gain is None or self._phase is None:
@@ -702,8 +704,46 @@ class IqConditioner:
                     self._gain += alpha * (gain - self._gain)
                     self._phase += alpha * (phase - self._phase)
             if self._gain is not None and self._phase is not None:
-                x = correct_iq(x, self._gain, self._phase)
-        return x
+                balance = (self._gain, self._phase)
+        if dc is None and balance is None:
+            return x
+        # In pieces that stay in the processor's cache: at 20 MS/s whole-
+        # block temporaries (a dozen passes over 5 MB) made this the
+        # largest part of a frame with both on.
+        out = np.empty_like(x)
+        for first in range(0, n, self._PIECE):
+            piece = out[first : first + self._PIECE]
+            source = x[first : first + self._PIECE]
+            if dc is not None:
+                self._remove_dc(source, first, n, dc, piece)
+            else:
+                piece[...] = source
+            if balance is not None:
+                _correct_iq_into(piece, *balance)
+        return out
+
+    #: Samples conditioned at a time (see :meth:`process`).
+    _PIECE = 1 << 15
+
+    @staticmethod
+    def _remove_dc(
+        x: np.ndarray,
+        first: int,
+        n: int,
+        dc: Tuple[complex, complex],
+        out: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
+        """``x`` (samples ``first``... of a block of ``n``) minus the DC
+        line ``dc`` = (start, end) across the block."""
+        start, end = dc
+        if start == end:
+            return np.subtract(x, np.complex64(end), out=out)
+        ramp = np.arange(first, first + len(x), dtype=np.float32)
+        ramp *= np.float32(1.0 / (n - 1))
+        y = np.multiply(ramp, np.complex64(start - end), out=out)
+        y += x
+        y -= np.complex64(start)
+        return y
 
     def _estimate(self, slope: np.ndarray) -> Optional[Tuple[float, float]]:
         """(gain, phase) error of a slice's first difference, within the
@@ -720,6 +760,19 @@ class IqConditioner:
             return None
         limit_g, limit_p = self.IQ_MAX_GAIN, self.IQ_MAX_PHASE
         return min(max(gain, -limit_g), limit_g), min(max(phase, -limit_p), limit_p)
+
+
+def _correct_iq_into(x: np.ndarray, gain: float, phase: float) -> None:
+    """:func:`correct_iq` in place (``x`` is complex64)."""
+    gain, phase = float(gain), float(phase)
+    if not (math.isfinite(gain) and math.isfinite(phase)) or 1.0 + gain <= 1e-3:
+        return
+    scale = 1.0 / (1.0 + gain)
+    b = np.float32(math.sin(phase) * scale)
+    c = np.float32(math.cos(phase) * scale)
+    real, imag = x.real, x.imag
+    real -= b * imag
+    imag *= c
 
 
 def correct_iq(samples: np.ndarray, gain: float, phase: float) -> np.ndarray:

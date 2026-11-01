@@ -6230,6 +6230,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._is_running = True
         self._rx_history.clear()
         self._pacer.restart()
+        self._skip_hint_until = 0.0  # (found out anew, as the pacer)
         self._refresh_state_ui()
         logger.info("Acquisition started")
 

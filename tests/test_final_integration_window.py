@@ -16,7 +16,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
+from tests.test_gui_chrome import HAS_PYQT6, _WindowTestCase  # noqa: E402
 from tests.test_gui_second_receiver import _FakeSink, _SecondCase  # noqa: E402
 
 if HAS_PYQT6:
@@ -106,6 +106,106 @@ class TestSecondReceiverAtItsMinimumWidth(_SecondCase):
             self.assertEqual(rx._message_label.property("tone"), "success")
 
         _in_each_theme(check)
+
+
+# --------------------------------------------------------------------------- #
+# The right column on wide windows: it stayed 440 px at most, so the
+# Decoder's Aircraft list scrolled sideways at every window size.
+# --------------------------------------------------------------------------- #
+class TestRightColumnOnWideWindows(_WindowTestCase):
+    demo = True
+
+    def at(self, width, height, default=False):
+        win = self.win
+        win.resize(width, height)
+        self.settle(5)
+        if default:
+            win._apply_default_splitter_sizes()
+            self.settle(5)
+        return win._main_splitter.sizes()
+
+    def test_laptop_sizes_keep_their_column(self):
+        # (The plots there keep every pixel they had.)
+        self.assertAlmostEqual(self.at(1366, 768, default=True)[1], 406, delta=2)
+        self.assertAlmostEqual(self.at(1024, 640, default=True)[1], 400, delta=2)
+
+    def test_a_wide_window_gives_the_column_its_share(self):
+        self.at(1366, 768, default=True)
+        plots, right = self.at(1920, 1080)
+        self.assertAlmostEqual(right / (plots + right), 0.3, delta=0.01)
+        self.assertGreaterEqual(plots, 1300)
+        # Back to the laptop size: the column as it was.
+        self.assertAlmostEqual(self.at(1366, 768)[1], 406, delta=2)
+        # On a very wide window it stops at what the Aircraft list needs.
+        plots, right = self.at(2560, 1440)
+        self.assertLessEqual(right, 660)
+        self.assertGreaterEqual(right, 640)
+
+    def test_the_aircraft_list_fits_a_wide_window(self):
+        from tests.test_gui_decoder_views import _adsb
+
+        self.at(2560, 1440, default=True)
+        win = self.win
+        win._show_panel("decoder")
+        panel = win._decoder_panel
+        view = panel._aircraft_view
+        panel._tabs.setCurrentWidget(view)
+        for msg in (
+            _adsb(
+                icao_address="4840D6", downlink_format=17, type_code=4,
+                callsign="KLM1023",
+            ),
+            _adsb(
+                icao_address="4840D6", downlink_format=17, type_code=11,
+                altitude=38000, latitude=-33.8688, longitude=151.2093,
+            ),
+            _adsb(
+                icao_address="4840D6", downlink_format=17, type_code=19,
+                velocity=450.0, heading=265.0, vertical_rate=-1500,
+            ),
+            _adsb(icao_address="4840D6", downlink_format=5, squawk="7421"),
+        ):  # fmt: skip
+            view.update_message(msg)
+        self.settle(5)
+        table = view.table
+        last = table.columnCount() - 1
+        need = sum(table.columnWidth(c) for c in range(last)) + max(
+            table.sizeHintForColumn(last),
+            table.horizontalHeader().sectionSizeHint(last),
+        )
+        self.assertGreaterEqual(table.viewport().width(), need)
+
+    def test_a_saved_layout_keeps_its_share_on_another_screen(self):
+        # QSplitter restores the column's width in pixels: a layout saved at
+        # 1920 px (a 572-px column) took 572 of 1366 px, leaving the plots
+        # 778. It is the share that comes back.
+        self.at(1920, 1080, default=True)
+        self.win._persist_state()
+        second = self.mw.SDRMainWindow(demo_mode=True)
+        self.addCleanup(second.deleteLater)
+        self.addCleanup(second.close)
+        for timer in (second._display_timer, second._status_timer):
+            timer.stop()
+        second.resize(1366, 768)
+        second.show()
+        self.settle(10)
+        self.assertTrue(second._splitters_restored)
+        self.assertAlmostEqual(second._main_splitter.sizes()[1], 406, delta=2)
+
+    def test_a_dragged_column_keeps_its_share(self):
+        win = self.win
+        self.at(1366, 768, default=True)
+        splitter = win._main_splitter
+        total = sum(splitter.sizes())
+        splitter.setSizes([total - 480, 480])
+        splitter.splitterMoved.emit(total - 480, 1)  # (as a drag does)
+        plots, right = self.at(1600, 900)
+        self.assertAlmostEqual(right / (plots + right), 480 / total, delta=0.01)
+        # Layout reset gives the default share back.
+        win._reset_layout()
+        self.settle(5)
+        plots, right = self.at(1920, 1080)
+        self.assertAlmostEqual(right / (plots + right), 0.3, delta=0.01)
 
 
 if __name__ == "__main__":

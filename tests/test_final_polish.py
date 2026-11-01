@@ -194,10 +194,6 @@ class TestARecordingTooSlowForTheDecoder(_FilesCase):
         self.assertIn("the device runs at 1 MS/s", win._decoder_chip.toolTip())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestLongAndMediumWaveInKilohertz(_SignalCase):
     """P-02: below 2 MHz the window names a frequency in kHz (FREQ "880
     kHz", LISTEN-12), but Identify said "0.880 MHz: AM · confident · SNR
@@ -583,3 +579,7 @@ class TestATuneDuringAScanSaysBoth(_scan_window_case()):
         self.assertEqual(
             win._message_label.text(), "Scan stopped: you tuned to 144.390 MHz."
         )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -145,6 +145,27 @@ class TestEditBookmarkOffersCodes(unittest.TestCase):
         for key in ("tone_mode", "cross_mode", "dtcs", "rx_dtcs", "dtcs_polarity"):
             self.assertEqual(kept.get(key), split.get(key), key)
 
+    def test_none_on_a_cross_channel_stops_its_receive_squelch(self):
+        """A Cross channel keeps what it sends, and receives without a tone
+        or code (choosing None used to change nothing: tuning it still
+        set the tone squelch, and the dialog showed it again)."""
+        from sdr_module.gui.bookmark_editor import bookmark_dcs, bookmark_tone_hz
+
+        marks = _imported()
+        for name, cross in (("SPLIT", "DTCS->"), ("TO DCS", "Tone->")):
+            dialog = self.dialog(marks[name])
+            dialog._tone.setCurrentIndex(0)
+            edited = dialog.bookmark()
+            self.assertEqual(
+                (edited["tone_mode"], edited["cross_mode"]), ("Cross", cross)
+            )
+            self.assertIsNone(bookmark_dcs(edited))
+            self.assertEqual(bookmark_tone_hz(edited), 0.0)
+        tone_only = dict(marks["TO DCS"], cross_mode="->Tone")
+        dialog = self.dialog(tone_only)
+        dialog._tone.setCurrentIndex(0)
+        self.assertNotIn("tone_mode", dialog.bookmark())
+
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestDcsBookmarksInTheWindow(_WindowTestCase):

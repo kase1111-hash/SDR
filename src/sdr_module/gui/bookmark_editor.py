@@ -425,6 +425,15 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
                 elif tone_mode == "DTCS":
                     for key in ("tone_mode", "dtcs", "dtcs_polarity"):
                         b.pop(key, None)
+                elif tone_mode == "Cross":
+                    # Heard without a tone or code; it still sends its own
+                    # (CHIRP's "Tone->" and "DTCS->"), or nothing at all.
+                    cross = str(b.get("cross_mode") or "").replace(" ", "")
+                    sends = cross.split("->")[0] if "->" in cross else ""
+                    if sends in ("Tone", "DTCS"):
+                        b["cross_mode"] = sends + "->"
+                    else:
+                        b.pop("tone_mode", None)
         group = self._group.currentText().strip()
         if group:
             b["group"] = group

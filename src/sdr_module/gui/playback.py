@@ -761,15 +761,25 @@ if HAS_PYQT6:
             win._rx_history.clear()
             win._realtime_hint_shown = False
             win._apply_tuning_range()
+            shown = win._message_label.text()
             if prev is not None:
                 # Back where the receiver was before the recording, and
-                # listening as it was there.
+                # listening as it was there (quietly: "Back to ..." says so).
                 if not win._retune_lo(prev.lo_hz):
                     win._lo_hz = float(prev.lo_hz)
                 win._finish_tune(prev.tuned_hz)
                 mode, deviation, width = prev.listening
                 if mode:
-                    win._set_demod_mode(mode, deviation or None, width or None)
+                    win._quiet_mode_change = True
+                    try:
+                        win._set_demod_mode(mode, deviation or None, width or None)
+                    finally:
+                        win._quiet_mode_change = False
+            # What going back said (the decoder a preset turned on while the
+            # file played is off again) goes with the message below, which
+            # would replace it at once.
+            said = win._message_label.text()
+            note = said if said and said != shown else ""
             win._unlock_lo()  # the LO follows tuning again
             win._reset_demodulator()
             self._bar.setVisible(False)
@@ -781,10 +791,13 @@ if HAS_PYQT6:
             if not quiet:
                 back = f"Back to {prev.name}." if restore and prev and prev.name else ""
                 ended = f" Stopped {' and '.join(stopped)} of it." if stopped else ""
+                text = " ".join(
+                    part for part in (f"Closed {name}.{ended}", back, note) if part
+                )
                 win._show_status_message(
-                    f"Closed {name}.{ended} {back}".strip(),
-                    "info" if stopped else None,
-                    8000 if stopped else 4000,
+                    text,
+                    "info" if stopped or note else None,
+                    8000 if stopped or note else 4000,
                 )
             logger.info(f"Playback of {name} closed")
 

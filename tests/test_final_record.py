@@ -15,6 +15,9 @@
   stop, the Recording group, format names, refusals, the playback strip at
   1024 px, quiet 8-bit saves.
 * Leftovers 20, 21, 24, 30 and the flaky input/playback tests.
+* On the merged build: the Unsaved question keeps "880 kHz" whole, Close
+  Recording keeps what going back said, and a decoder a preset left paused
+  doesn't warn about a recording's sample rate.
 """
 
 import os
@@ -1505,3 +1508,106 @@ class TestASavedFormatChoiceSurvivesTheNewNames(_FilesCase):
         self.store.values["recording_format"] = "Something else (.xyz)"
         win = self.reopen()
         self.assertEqual(win._control_panel.get_recording_extension(), ".sigmf-data")
+
+
+class TestUnsavedRecordingKeepsTheFrequencyWhole(_FilesCase):
+    """The Unsaved Recording question joins the take's frequency to its unit
+    with a non-breaking space, so a wrap never leaves the unit alone on the
+    next line. It did so only for " MHz", and format_frequency now writes
+    kHz below 2 MHz ("880 kHz", an AM broadcast take)."""
+
+    def ask(self, center_hz):
+        win = self.win
+        win._record_button.click()
+        for _ in range(2):
+            win._update_display()
+        win._record_button.click()
+        self.assertTrue(win._buffer_unsaved)
+        win._buffer_meta = (center_hz, win._buffer_meta[1])
+        self.answer("Cancel")
+        ask = self.mw.SDRMainWindow._confirm_discard_recording
+        self.assertFalse(ask(win, "closing"))
+        return self.boxes[-1].informativeText()
+
+    def test_every_unit_stays_with_its_number(self):
+        for center, shown in (
+            (880e3, "880\u00a0kHz"),
+            (1.2e6, "1200\u00a0kHz"),
+            (100.1e6, "100.100\u00a0MHz"),
+        ):
+            with self.subTest(center=center):
+                text = self.ask(center)
+                self.assertIn(f"recorded at {shown} ", text)
+
+
+class TestCloseKeepsWhatGoingBackSaid(_FilesCase):
+    """Close Recording's "Closed <file>. Back to <device>." came right over
+    what going back said itself: that the decoder a preset turned on while
+    the file played is off again (LISTEN-05, "tuned away from the APRS
+    preset"). That note was gone at once (only the status history had it)."""
+
+    def play_and_close(self, preset="", name="aprs2m.sigmf-data", center=144.39e6):
+        win = self.win
+        self.assertTrue(win.set_frequency(100.1e6))
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        path = _save_sigmf(self.path(name), center)
+        with self.open_dialog(path):
+            self.assertTrue(win._open_recording())
+        if preset:
+            self.assertTrue(win._apply_preset_named(preset))
+        win._playback.close(restore=True)
+        self.assertEqual(win._current_frequency(), 100.1e6)
+        return self.message()
+
+    def test_the_decoder_note_is_in_the_close_message(self):
+        panel = self.win._decoder_panel
+        shown = self.play_and_close("APRS")
+        self.assertFalse(panel._enabled_check.isChecked())  # (off again)
+        self.assertTrue(shown.startswith("Closed aprs2m.sigmf-data. Back to "), shown)
+        self.assertIn("AX.25/APRS decoder off", shown)
+
+    def test_with_nothing_to_add_it_reads_as_before(self):
+        shown = self.play_and_close()
+        device = self.win._device_display_name()
+        self.assertEqual(shown, f"Closed aprs2m.sigmf-data. Back to {device}.")
+
+    def test_back_in_another_mode_too(self):
+        # An airband file (AM): going back to broadcast FM changes the mode
+        # as well, which said "FM: ..." over the decoder note.
+        shown = self.play_and_close("ACARS", "acars.sigmf-data", 131.55e6)
+        self.assertEqual(self.win._listening_mode(), ("FM", "75 kHz"))
+        self.assertTrue(shown.startswith("Closed acars.sigmf-data. Back to "), shown)
+        self.assertIn("ACARS decoder off", shown)
+
+
+class TestOpeningAfterAPresetsDecoder(_FilesCase):
+    """Open Recording after the ADS-B preset: the tune into the file turns
+    the preset's decoder off (LISTEN-05: Decode unticked, ADS-B still
+    chosen), but the decoder rebuilt for the file's 1 MS/s still warned
+    "ADS-B needs at least 2 MS/s; the device runs at 1 MS/s. Choose 2.4 MS/s
+    or more in Receiver > Sample rate" (a rate a recording playing can't
+    change) over the band plan's line, and listed it in Tools > Error
+    History, although nothing was decoding."""
+
+    def open_aprs(self):
+        path = _save_sigmf(self.path("aprs2m.sigmf-data"), 144.39e6)  # 1 MS/s
+        with self.open_dialog(path):
+            self.assertTrue(self.win._open_recording())
+
+    def test_a_paused_decoder_says_nothing(self):
+        import logging
+
+        self.assertTrue(self.win._apply_preset_named("ADS-B"))
+        with self.assertNoLogs(level=logging.WARNING):
+            self.open_aprs()
+        self.assertFalse(self.win._decoder_panel.is_decoding())
+        self.assertIn("APRS: listening in FM (narrow", self.message())
+
+    def test_a_decoder_still_decoding_says_why_it_cannot(self):
+        import logging
+
+        self.win._decoder_panel._proto_combo.setCurrentText("ADS-B")  # by hand
+        with self.assertLogs(level=logging.WARNING):
+            self.open_aprs()
+        self.assertTrue(self.win._decoder_panel.is_decoding())
+        self.assertIn("ADS-B needs at least 2 MS/s", self.message())

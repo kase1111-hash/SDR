@@ -5277,8 +5277,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         status = self._decoder.status
         self._decoder_panel.set_decoder_status(status)
         self._update_decoder_chip()
-        if status.problem:
+        if status.problem and self._decoder_panel.is_decoding():
             # E.g. ADS-B at 1.8 MS/s: say so instead of "listening" forever.
+            # (Paused, as tuning away from the preset that turned it on
+            # leaves it, nothing decodes: the Decoder panel's line says it.)
             logger.warning("%s decoder: %s", text, status.problem)
             remedy = f" {status.remedy}" if status.remedy else ""
             self._show_status_message(  # (logged just above: listed once)
@@ -7518,10 +7520,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             live = False
         count = self._buffer_sample_count()
         freq, _rate = self._buffer_meta
-        # (A non-breaking space keeps "100.000 MHz" on one line.)
-        where = (
-            f" at {format_frequency(freq)}".replace(" MHz", "\u00a0MHz") if freq else ""
-        )
+        # (A non-breaking space keeps "100.000 MHz", or "880 kHz" below 2
+        # MHz, on one line.)
+        shown = format_frequency(freq).replace(" ", "\u00a0") if freq else ""
+        where = f" at {shown}" if shown else ""
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("Unsaved Recording")

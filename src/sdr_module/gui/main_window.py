@@ -7243,7 +7243,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         display = samples[-DISPLAY_BLOCK:] if len(samples) > DISPLAY_BLOCK else samples
         power = self._power_spectrum_dbfs(display)
 
-        # The plots: every sample of the frame, at the chosen FFT size and
+        # The plots: every sample of the frame (evenly spread segments of
+        # one longer than _PLOT_MAX_SAMPLES), at the chosen FFT size and
         # window (the mean power per bin for the spectrum, the strongest
         # for the waterfall row, so a short burst anywhere shows).
         self._plot_frame(samples)

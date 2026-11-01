@@ -42,6 +42,8 @@ import numpy as np
 from ..dsp.afc import TRACK_METHODS, SignalTracker
 from ..dsp.bursts import BurstReport, BurstWatcher, analyze_report
 from ..dsp.signal_id import (
+    ANALYSIS_MAX_HZ,
+    CAPTURE_MAX_RATE,
     WAIT_S,
     Identification,
     SignalIdentifier,
@@ -93,6 +95,42 @@ def _format_offset(hz: float) -> str:
     return f"{hz:+.0f} Hz"
 
 
+def receiver_channel_band(chain: Any, rate: float, width: float) -> float:
+    """How far (+/- Hz) the receiver's channel (``chain``: the window's
+    ``_ReceiverChain``) is flat, when that channel is the band Identify
+    analyzes and Identify would otherwise filter and decimate it out of
+    the raw block itself; else 0 (Identify takes the raw block).
+
+    That is the case in None (I/Q) at a high sample rate: Identify analyzes
+    the receiver's filter width (:func:`~sdr_module.dsp.signal_id.
+    analysis_band`), which the receiver filters out of every block already,
+    and filtering it again cost 9.5 ms of a 20 MS/s display frame. Not up
+    to CAPTURE_MAX_RATE (an RTL-SDR's or the demo's rates: filtering again
+    costs little there, and Identify keeps its own capture), nor in other
+    modes (Identify looks a few channels wide)."""
+    if chain is None:
+        return 0.0
+    try:
+        chain_rate = float(chain.rate)
+        channel_rate = float(chain.channel_rate)
+        low, high = chain.band_edges()
+        mode = str(chain.mode)
+    except (AttributeError, TypeError, ValueError):
+        return 0.0
+    rate = float(rate)
+    wanted = min(float(width), rate, ANALYSIS_MAX_HZ)
+    if rate <= CAPTURE_MAX_RATE or wanted >= 0.75 * rate:
+        return 0.0  # (little to spare)
+    if mode in ("USB", "LSB", "CW") or chain_rate != rate or channel_rate >= rate:
+        return 0.0  # (a sideband filter, another rate, or not decimated)
+    half = 0.5 * (high - low)
+    if abs(low + high) > 1.0 or abs(2.0 * half - wanted) > 1e-3 * wanted:
+        return 0.0  # (not the band asked for)
+    if half > 0.45 * channel_rate:
+        return 0.0  # (not flat to its edges)
+    return half
+
+
 if HAS_PYQT6:
 
     from .signal_panel import tune_frequency
@@ -118,6 +156,11 @@ if HAS_PYQT6:
             self._ident_takes = 0
             self._ident_kinds: List[str] = []  # what each take found
             self._ident_lost_s = 0.0  # signal dropped while listening
+            # The band Identify analyzes, and the receiver chain whose
+            # channel it listens to when that is the band (None: it filters
+            # its band out of the raw blocks itself; see _new_identifier).
+            self._ident_width = 0.0
+            self._ident_chain: Any = None
             # The device and its count of dropped samples at the last frame:
             # a capture must not span samples lost in between.
             self._drops: Optional[Tuple[int, int]] = None
@@ -237,7 +280,7 @@ if HAS_PYQT6:
                 dt = len(samples) / rate
             self._last_frame_t = now
             try:
-                self._identify_frame(samples, self._samples_lost(rate))
+                self._identify_frame(samples, self._samples_lost(rate), channel, chain)
                 self._signals_frame(power, now)
                 self._scope_frame(channel, chain)
                 self._bursts_frame(samples, rate)
@@ -322,9 +365,11 @@ if HAS_PYQT6:
             width, reach = analysis_band(
                 mode, win._channel_bandwidth(), rate, self._ident_freq
             )
-            self._identifier = SignalIdentifier(rate, win._vfo_offset_hz(), width)
+            chain_of = getattr(win, "_receiver_chain", None)
+            chain = chain_of() if callable(chain_of) else None
+            self._ident_width = width
+            self._identifier = self._new_identifier(rate, chain)
             self._ident_reach = reach
-            self._ident_band = self._identifier.passband_hz
             self._ident_best = None
             self._ident_takes = 0
             self._ident_kinds = []
@@ -334,6 +379,24 @@ if HAS_PYQT6:
                 f"Listening to {_mhz(self._ident_freq)}…", None
             )
             return True
+
+        def _new_identifier(self, rate: float, chain: Any) -> SignalIdentifier:
+            """An identifier for the band Identify analyzes: listening to the
+            receiver's own channel when that is the band (see
+            receiver_channel_band), else filtering it out of the raw blocks."""
+            offset = self._win._vfo_offset_hz()
+            width = self._ident_width
+            half = receiver_channel_band(chain, rate, width)
+            if half > 0:
+                ident = SignalIdentifier(
+                    chain.channel_rate, offset, width, channel_pass_hz=half
+                )
+                self._ident_chain = chain
+            else:
+                ident = SignalIdentifier(rate, offset, width)
+                self._ident_chain = None
+            self._ident_band = ident.passband_hz
+            return ident
 
         def _samples_lost(self, rate: float) -> float:
             """Seconds of signal the device dropped since the last frame (its
@@ -349,7 +412,13 @@ if HAS_PYQT6:
                 return 0.0
             return (dropped - before[1]) / rate if rate > 0 else 0.0
 
-        def _identify_frame(self, samples: np.ndarray, lost_s: float = 0.0) -> None:
+        def _identify_frame(
+            self,
+            samples: np.ndarray,
+            lost_s: float = 0.0,
+            channel: Optional[np.ndarray] = None,
+            chain: Any = None,
+        ) -> None:
             ident = self._identifier
             job = self._ident_job
             if job is not None and job.done():
@@ -368,12 +437,19 @@ if HAS_PYQT6:
             ident = self._identifier
             if ident is None:
                 return
+            if self._ident_chain is not None and (
+                chain is not self._ident_chain or channel is None
+            ):
+                # The receiver's channel changed (its mode, filter or rate):
+                # listen afresh (to it again, if it still is the band).
+                rate = float(self._win._device_sample_rate())
+                ident = self._identifier = self._new_identifier(rate, chain)
             if abs(ident.offset_hz - self._win._vfo_offset_hz()) > 0.5:
                 ident.set_offset(self._win._vfo_offset_hz())
             if lost_s > 0:
                 ident.gap()  # (no capture spans the samples lost)
                 self._ident_lost_s += lost_s
-            ident.feed(samples)
+            ident.feed(channel if self._ident_chain is not None else samples)
             seconds = ident.seconds
             if self._ident_job is None and ident.ready():
                 capture = ident.take()

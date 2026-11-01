@@ -45,10 +45,13 @@ __all__ = [
     "confidence_words",
     "takes_needed",
     "CAPTURE_MAX_RATE",
+    "ANALYSIS_MAX_HZ",
 ]
 
 #: Above this sample rate the capture is decimated (to about 2.4 MS/s).
 CAPTURE_MAX_RATE = 3.2e6
+#: The widest band (Hz) a capture keeps around the tuned frequency.
+ANALYSIS_MAX_HZ = 2.4e6
 #: How much the identifier keeps (seconds) and the most samples it holds.
 KEEP_S = 1.0
 KEEP_MAX_SAMPLES = 1 << 21
@@ -420,6 +423,10 @@ class SignalIdentifier:
     the caller keeps listening for a signal that hasn't shown up yet).
     The capture is the channel at the VFO mixed to 0 Hz at the device's
     rate (decimated to about 2.4 MS/s when the device is faster).
+
+    Fed the receiver's own channel instead (``channel_pass_hz``, when that
+    channel is the band analyzed), it keeps it as it is: filtering the raw
+    block again doubled that work (9.5 ms of a 20 MS/s display frame).
     """
 
     def __init__(
@@ -427,18 +434,31 @@ class SignalIdentifier:
         sample_rate: float,
         offset_hz: float = 0.0,
         analysis_hz: Optional[float] = None,
+        *,
+        channel_pass_hz: Optional[float] = None,
     ):
         """``analysis_hz``: how wide a band around the tuned frequency is
         kept (default: the whole span, at most about 2.4 MHz); see
-        :func:`analysis_band`."""
+        :func:`analysis_band`. ``channel_pass_hz``: the blocks fed are a
+        receiver's channel already, at ``sample_rate``, centered on the
+        tuned frequency (``offset_hz`` from the LO) and flat to +/- this:
+        they are kept as they are (no mixing or filtering here)."""
         self.rate_in = float(sample_rate)
         self.offset_hz = float(offset_hz)
         wanted = float(analysis_hz) if analysis_hz else self.rate_in
-        wanted = min(wanted, self.rate_in, 2.4e6)
+        wanted = min(wanted, self.rate_in, ANALYSIS_MAX_HZ)
         self.analysis_hz = wanted
-        if wanted < 0.75 * self.rate_in:
+        self._channel: Optional[Channelizer] = None
+        self._nco: Optional[Nco] = None
+        if channel_pass_hz is not None:
+            # The receiver's own channel: nothing to mix or filter.
+            half = float(channel_pass_hz)
+            self.analysis_hz = 2.0 * half
+            self.rate = self.rate_in
+            self.passband_hz = (-0.95 * half, 0.95 * half)
+        elif wanted < 0.75 * self.rate_in:
             half = 0.5 * wanted
-            self._channel: Optional[Channelizer] = Channelizer(
+            self._channel = Channelizer(
                 self.rate_in,
                 self.offset_hz,
                 pass_hz=half,
@@ -446,11 +466,9 @@ class SignalIdentifier:
                 target_rate=1.25 * wanted,
             )
             self.rate = self._channel.output_rate
-            self._nco: Optional[Nco] = None
             #: The flat part of the capture's band (around 0 Hz).
             self.passband_hz = (-0.95 * half, 0.95 * half)
         else:
-            self._channel = None
             self._nco = Nco(self.rate_in, self.offset_hz)
             self.rate = self.rate_in
             # (A receiver's own filter rolls off near the span's edges.)
@@ -498,15 +516,17 @@ class SignalIdentifier:
         self._next_take = self.received + int(MIN_S * self.rate)
 
     def feed(self, block: np.ndarray) -> None:
-        """Add a raw block from the receiver (at ``rate_in``)."""
+        """Add a block from the receiver (at ``rate_in``): a raw block, or
+        its channel (see ``channel_pass_hz``)."""
         x = np.asarray(block)
         if not len(x):
             return
         if self._channel is not None:
             y = self._channel.process(x)
-        else:
-            assert self._nco is not None
+        elif self._nco is not None:
             y = self._nco.mix(x.astype(np.complex64, copy=False))
+        else:
+            y = x  # (the receiver's channel already: see channel_pass_hz)
         if not len(y):
             return
         y = np.asarray(y, dtype=np.complex64)

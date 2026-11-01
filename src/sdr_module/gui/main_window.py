@@ -10612,6 +10612,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 restored = bool(self.restoreGeometry(geom))
             except Exception as e:
                 logger.debug(f"Could not restore window geometry: {e}")
+            if not restored:  # (a damaged settings file: said once)
+                logger.warning("Ignoring the saved window size: it can't be read.")
         if not restored:
             self._apply_default_geometry()
 
@@ -10625,6 +10627,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     ok = bool(splitter.restoreState(state))
                 except Exception as e:
                     logger.debug(f"Could not restore {name}: {e}")
+                if not ok:
+                    logger.warning(
+                        f"Ignoring the saved {name} layout: it can't be read."
+                    )
             if ok and min(splitter.sizes() or [0]) < 40:
                 ok = False
             restored_all = restored_all and ok

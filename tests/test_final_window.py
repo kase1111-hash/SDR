@@ -479,6 +479,19 @@ class TestDamagedSettingsInTheWindow(_IniSettings):
             self.window(spectrum_display=json.dumps({"fft_size": 1e300}))
         self.assertIn("fft_size=1e+300", "\n".join(logs.output))
 
+    def test_a_damaged_window_layout_is_logged(self):
+        # (Checker: the default size and split were used with nothing said.)
+        from PyQt6.QtCore import QByteArray
+
+        for value in ("garbage", QByteArray(b"garbage")):
+            with self.subTest(value=value):
+                with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+                    win = self.window(geom__main=value, geom__right_splitter=value)
+                text = "\n".join(logs.output)
+                self.assertIn("saved window size", text)
+                self.assertIn("right_splitter", text)
+                self.assertFalse(win._splitters_restored)
+
     def test_the_apps_own_spectrum_settings_say_nothing(self):
         import logging
 

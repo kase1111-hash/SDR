@@ -7,6 +7,7 @@ on the demo device.
 
 import os
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -80,6 +81,65 @@ class TestTheDecoderOffNoteHoldsOnlyWhileItIsOff(_FilesCase):
         self.assertEqual(
             win._message_label.text(), "ACARS decoder off · Tuned to NOAA Weather (FM)"
         )
+
+
+class TestTheAudioTipNamesTheJobOnlyWhileItCounts(_FilesCase):
+    """P-04 names this app's own job as the reason audio is paused ("Decode
+    Recording keeps this computer busy, so audio is paused meanwhile."),
+    for a few seconds after it too. The Audio button's tooltip took that
+    reason when the pause began and kept it while the pause lasted: on a
+    computer still too slow once the job was done, it went on naming the
+    job long after it had ended."""
+
+    def setUp(self):
+        super().setUp()
+        from tests.test_final_perf import _Clock
+
+        self.clock = _Clock()
+        patcher = mock.patch.object(self.mw, "time", self.clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        # (No sound card here: the button's state is that of a computer
+        # with one, whose audio is paused.)
+        patcher = mock.patch.object(
+            type(self.win), "_audio_state", return_value="paused"
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def tip(self):
+        return self.win._audio_button.toolTip()
+
+    def test_the_tip_follows_the_reason(self):
+        from sdr_module.gui import file_jobs
+
+        win = self.win
+        with file_jobs.running("Decode Recording"):
+            win._update_status()  # (the status bar's timer)
+        self.assertTrue(
+            self.tip().startswith(
+                "Decode Recording keeps this computer busy, so audio is paused"
+            ),
+            self.tip(),
+        )
+        # Done with it, the computer is still too slow: once what the job
+        # skipped no longer counts, the tip says why the audio is paused now.
+        for _ in range(20):
+            self.clock.advance(0.2)
+            win._update_status()
+        self.assertNotIn("Decode Recording", self.tip())
+        self.assertTrue(self.tip().startswith(win._realtime_hint()), self.tip())
+
+    def test_the_same_reason_is_not_redrawn(self):
+        """(Each tick of the status timer while nothing changed leaves the
+        button alone.)"""
+        win = self.win
+        win._update_status()
+        with mock.patch.object(win, "_sync_audio_ui") as sync:
+            for _ in range(5):
+                self.clock.advance(0.2)
+                win._update_status()
+        sync.assert_not_called()
 
 
 if __name__ == "__main__":

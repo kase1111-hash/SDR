@@ -31,7 +31,9 @@ and depends on the window's equivalent noise bandwidth (:func:`enbw_bins`);
 
 Large frames are transformed by two threads (NumPy's FFT releases the GIL),
 in buffers reused from frame to frame: about 0.6 ms a frame at 2.4 MS/s and
-4 ms at 20 MS/s on a laptop.
+4 ms at 20 MS/s on a laptop. The caller does the helper's half itself when
+the helper hasn't started on it, so a busy computer (where the helper may
+wait a while for a processor) never keeps it waiting.
 """
 
 from __future__ import annotations
@@ -182,6 +184,20 @@ class FrameSpectrum:
         # of a gamma(k) distribution.
         ratio = math.log(2.0) if k == 1 else 1.0 - 1.0 / (3 * k) + 8.0 / (405 * k * k)
         return float(np.median(values)) - 10.0 * math.log10(ratio)
+
+
+class _Claim:
+    """A piece of work that exactly one of two threads does: the first to
+    :meth:`take` it."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._taken = False
+
+    def take(self) -> bool:
+        with self._lock:
+            taken, self._taken = self._taken, True
+        return not taken
 
 
 class FrameSpectrumAnalyzer:
@@ -337,18 +353,24 @@ class FrameSpectrumAnalyzer:
             self._threads > 1 and rows >= 2 and rows * self._size >= _THREAD_MIN_SAMPLES
         )
         if split:
+            # The helper takes the first half, unless this thread gets to it
+            # first: on a busy computer the helper may not run for a while,
+            # and waiting for it cost more than doing the half here.
             half = rows // 2
-            future = self._submit(segments, 0, half)
+            claim = _Claim()
+            future = self._submit(segments, 0, half, claim)
             self._transform(segments, half, rows)
-            if future is not None:
-                future.result()
-            else:  # pragma: no cover - no helper thread could start
+            if claim.take():
                 self._transform(segments, 0, half)
+            elif future is not None:
+                future.result()
         else:
             self._transform(segments, 0, rows)
         return self._power[:rows]
 
-    def _submit(self, segments: np.ndarray, start: int, stop: int) -> Optional[Future]:
+    def _submit(
+        self, segments: np.ndarray, start: int, stop: int, claim: "_Claim"
+    ) -> Optional[Future]:
         with self._pool_lock:
             if self._pool is None:
                 try:
@@ -359,9 +381,16 @@ class FrameSpectrumAnalyzer:
                     return None
             pool = self._pool
         try:
-            return pool.submit(self._transform, segments, start, stop)
+            return pool.submit(self._transform_claimed, segments, start, stop, claim)
         except RuntimeError:  # pragma: no cover - pool shut down meanwhile
             return None
+
+    def _transform_claimed(
+        self, segments: np.ndarray, start: int, stop: int, claim: "_Claim"
+    ) -> None:
+        """The helper's part, unless the caller took it over meanwhile."""
+        if claim.take():
+            self._transform(segments, start, stop)
 
     def _transform(self, segments: np.ndarray, start: int, stop: int) -> None:
         if stop <= start:

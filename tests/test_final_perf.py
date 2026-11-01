@@ -412,3 +412,31 @@ class TestDecoderSaysWhenSignalIsSkipped(_hardware_case()):
         self.assertTrue(self.win._pacer.overloaded)
         self.assertNotIn("misses", self.win._decoder_panel.decoder_status_text())
         self.assertNotIn("misses", self.win._message_label.text())
+
+
+class TestFrameSpectrumNeverWaitsForABusyHelper(unittest.TestCase):
+    def test_the_frame_is_done_while_the_helper_cannot_run(self):
+        # On a busy computer the helper thread may not run for a while; the
+        # frame waited for it (its half of the FFTs), so frames took longer
+        # in wall time than their work and the window judged that it can't
+        # keep up. The caller now does the helper's half itself then.
+        import threading
+
+        from sdr_module.dsp.frame_spectrum import FrameSpectrumAnalyzer
+
+        data = _noise(1 << 18) + _tone(1 << 18, 1e6, RATE, 0.1)
+        want = FrameSpectrumAnalyzer(2048, threads=1).process(data)
+        analyzer = FrameSpectrumAnalyzer(2048, threads=2)
+        analyzer.process(_noise(1 << 18))  # (starts the helper thread)
+        gate = threading.Event()
+        self.addCleanup(analyzer.close)
+        self.addCleanup(gate.set)
+        analyzer._pool.submit(gate.wait, 30)  # the helper is busy elsewhere
+        result = []
+        worker = threading.Thread(target=lambda: result.append(analyzer.process(data)))
+        worker.start()
+        worker.join(10)
+        self.assertFalse(worker.is_alive(), "the frame waited for the helper")
+        np.testing.assert_allclose(result[0].mean_db, want.mean_db, atol=1e-4)
+        np.testing.assert_allclose(result[0].max_db, want.max_db, atol=1e-4)
+        gate.set()

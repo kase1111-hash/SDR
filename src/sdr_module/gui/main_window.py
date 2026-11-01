@@ -2819,7 +2819,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
             combo.currentIndexChanged.connect(sync)
 
-        mode_menu = radio_menu.addMenu("&Mode")
+        # (Letters no other Radio item has: Choose Mode From Band Plan has
+        # M, Recent Frequencies Q.)
+        mode_menu = radio_menu.addMenu("Mod&e")
         mode_menu.setToolTipsVisible(True)
         choices(
             mode_menu,
@@ -2828,7 +2830,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "How the tuned signal is turned into audio (MODE in the receiver "
             "bar, Demodulation in the control panel)",
         )
-        squelch_menu = radio_menu.addMenu("S&quelch")
+        squelch_menu = radio_menu.addMenu("Sque&lch")
         squelch_menu.setToolTipsVisible(True)
         for text, check, tip in (
             (

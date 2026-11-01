@@ -1579,6 +1579,31 @@ class TestListeningMenusFollowTheirControls(_WindowTestCase):
         self.settle()
         self.assertTrue(squelch.isEnabled() and auto.isEnabled() and nr.isEnabled())
 
+    def test_each_menu_letter_opens_one_item(self):
+        # (Checker: "&Mode" and "S&quelch" took the letters of "Choose
+        # &Mode From Band Plan" and "Recent Fre&quencies": Alt+R, M then
+        # only selected one of the two.)
+        found = []
+
+        def walk(menu, path):
+            letters = {}
+            for action in menu.actions():
+                text = action.text().split("\t")[0]
+                match = re.search(r"&(\w)", text)
+                if match:
+                    letters.setdefault(match.group(1).lower(), []).append(text)
+                if action.menu() is not None:
+                    walk(action.menu(), path + [text.replace("&", "")])
+            found.extend(
+                (" > ".join(path), items)
+                for items in letters.values()
+                if len(items) > 1
+            )
+
+        for top in self.win.menuBar().actions():
+            walk(top.menu(), [top.text().replace("&", "")])
+        self.assertEqual(found, [])
+
     def test_tone_squelch_outside_fm_says_where_it_applies(self):
         win, panel = self.win, self.win._control_panel
         panel._demod_combo.setCurrentText("AM")

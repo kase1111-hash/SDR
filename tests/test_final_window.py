@@ -1072,6 +1072,56 @@ class TestMissingOutput(_WindowTestCase):
             self.assertIn("isn't connected", win._message_label.text())
 
 
+class TestPausedAudioHint(_WindowTestCase):
+    """ROB-12: while audio pauses again and again (the receiver can't keep
+    up), the Audio button says Paused each time, and the status bar says
+    why at most every 30 s (it came back ~10 times a minute)."""
+
+    demo = True
+
+    def test_the_hint_comes_back_at_most_every_30_s(self):
+        from sdr_module.gui import main_window as mw
+        from tests.test_gui_round3_main import _FakeClock
+
+        win = self.win
+        clock = _FakeClock()
+        live = [False]
+        win._audio_enabled = True
+        win._control_panel.set_squelch_db(-120)
+        channel = np.full(4096, 0.1, dtype=np.complex64)
+
+        def frame(realtime, seconds=1.0):
+            live[0] = realtime
+            clock.advance(seconds)
+            win._route_audio(channel, -20.0)
+
+        with (
+            mock.patch.object(mw, "time", clock),
+            mock.patch.object(type(win), "_realtime", lambda _s: live[0]),
+        ):
+            frame(False)
+            hint = win._realtime_hint_text
+            self.assertTrue(hint)
+            self.assertEqual(win._message_label.text(), hint)
+            frame(True)
+            self.assertEqual(win._message_label.text(), "Audio resumed")
+            # Paused again 2 s later: the button says so, the status bar
+            # doesn't repeat itself (nor say "Audio resumed" meanwhile).
+            frame(False)
+            self.assertEqual(win._audio_state(), "paused")
+            self.assertEqual(win._message_label.text(), "")
+            frame(True)
+            self.assertEqual(win._message_label.text(), "")
+            frame(False, 30.0)
+            self.assertEqual(win._message_label.text(), hint)
+            # Another sample rate is found out (and said) afresh.
+            frame(True)
+            win._clear_status_message()
+            self.assertTrue(win.set_sample_rate(2.048e6))
+            frame(False)
+            self.assertEqual(win._message_label.text(), win._realtime_hint_text)
+
+
 # --------------------------------------------------------------------------- #
 # F1 and the plot menus use the same names (DEV-E2E-16, PLOTS-E2E-15)
 # --------------------------------------------------------------------------- #

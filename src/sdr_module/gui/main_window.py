@@ -281,6 +281,9 @@ _VOLUME_STEP = 10  # percent: Radio > Audio > Volume Up / Down
 # would come out as a buzz of short bursts.
 _REALTIME_FRACTION = 0.5
 _REALTIME_WINDOW_S = 2.0
+# While audio pauses for that again and again, the status bar says why at
+# most this often (the Audio button says Paused, its tooltip why).
+_REALTIME_HINT_EVERY_S = 30.0
 # The most signal one display frame takes from the device, in seconds (a
 # stalled window catches up in steps), and the most until frames are known
 # to keep up with real time (so finding out stalls a slow computer only
@@ -2194,6 +2197,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         _AUDIO_PAUSED_TEXT,
     )
     _audio_shown = ""  # the state the Audio button shows (_sync_audio_ui)
+    _realtime_hint_at = -math.inf  # when the status bar last said why
 
     def __init__(self, parent=None, demo_mode: bool = False):
         if not HAS_PYQT6:
@@ -7930,7 +7934,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if not self._realtime_hint_shown:
                 self._realtime_hint_shown = True
                 self._realtime_hint_text = self._realtime_hint()
-                self._show_status_message(self._realtime_hint_text, "info", 10000)
+                now = time.monotonic()
+                if now - self._realtime_hint_at >= _REALTIME_HINT_EVERY_S:
+                    self._realtime_hint_at = now
+                    self._show_status_message(self._realtime_hint_text, "info", 10000)
+                elif self._message_label.text() == "Audio resumed":
+                    self._clear_status_message()  # (the button says Paused)
         elif speaker and self._realtime_hint_shown:
             # Keeping up again (e.g. after another program hogged the
             # computer for a moment): say so, and hint again next time.
@@ -8344,6 +8353,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._pacer.reset()
         self._rx_history.clear()
         self._realtime_hint_shown = False
+        self._realtime_hint_at = -math.inf  # (and said at once)
         note = self._apply_controls_to_device()
         name = self._device_display_name()
         logger.info(f"Connected to {name}")
@@ -8439,6 +8449,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._device = None
         self._demo_mode = False
         self._realtime_hint_shown = False
+        self._realtime_hint_at = -math.inf
         self._rx_history.clear()
         self._pacer.reset()
         self._frame_spectrum.reset()
@@ -8720,6 +8731,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Whether frames keep up depends on the rate: find out anew.
         self._pacer.reset()
         self._realtime_hint_shown = False
+        self._realtime_hint_at = -math.inf
         self._rx_history.clear()
         self._refresh_state_ui()
         # A smaller span may no longer hold the tuned channel.

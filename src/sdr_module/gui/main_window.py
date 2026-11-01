@@ -5604,6 +5604,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         offset = self._vfo_offset_hz()
         if abs(offset) < 0.5:
             return
+        if abs(self._lo_for(self._current_frequency()) - self._lo_hz) < 0.5:
+            # As centred as 0 Hz allows (see _lo_for): retuning there again
+            # would only start the station over.
+            return
         if self._keep_centered() or not self._channel_fits(offset):
             self._tune_to(self._current_frequency(), recenter=True)
 

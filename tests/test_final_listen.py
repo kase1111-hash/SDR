@@ -716,6 +716,29 @@ class TestBelowZeroHertz(_WindowTestCase):
         self.type_frequency("7.2")
         self.assertEqual(win._lo_hz, 7.2e6)
 
+    def test_keep_centered_near_0_hz_leaves_the_station_be(self):
+        """With Keep Tuned Frequency Centered the LO of a 660 kHz station
+        is as near it as 0 Hz allows (not on it): that is where it belongs,
+        and a new mode or filter left it there but tuned the station anew
+        each time (the S-meter peak, Track Signal's lock and the tuner's
+        seek started over)."""
+        from unittest import mock
+
+        win = self.win
+        win._keep_centered_action.setChecked(True)
+        win._set_demod_mode("AM")
+        self.assertTrue(win._tune_to(660e3))
+        lo = win._lo_hz
+        self.assertEqual(lo, 0.5 * win._device_sample_rate())
+        with mock.patch.object(win, "_on_frequency_changed") as changed:
+            win._set_demod_mode("AM", None, "6 kHz")
+            win._set_demod_mode("USB")
+        changed.assert_not_called()
+        self.assertEqual(win._lo_hz, lo)
+        # (Away from 0 Hz it still centres as before.)
+        self.assertTrue(win._tune_to(7.2e6))
+        self.assertEqual(win._lo_hz, 7.2e6)
+
 
 # --------------------------------------------------------------------------- #
 # Track Signal (AFC)

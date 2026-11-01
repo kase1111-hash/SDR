@@ -9,6 +9,7 @@ import os
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -16,6 +17,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_chrome import require_pyqt6  # noqa: E402
 from tests.test_gui_recording_files import _FilesCase  # noqa: E402
+from tests.test_gui_signal_tab import _SignalCase  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import signal_synth as S  # noqa: E402
@@ -194,3 +196,72 @@ class TestARecordingTooSlowForTheDecoder(_FilesCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLongAndMediumWaveInKilohertz(_SignalCase):
+    """P-02: below 2 MHz the window names a frequency in kHz (FREQ "880
+    kHz", LISTEN-12), but Identify said "0.880 MHz: AM · confident · SNR
+    58 dB" and "at 0.8800 MHz", and the Scanner "Bookmarked 0.660 MHz.".
+    Sentences and cards name it as the window does; the Signals and
+    results columns (headed MHz, sorted by number) stay in MHz."""
+
+    def said(self):
+        texts = []
+        show = self.win._show_status_message
+
+        def record(text, *args, **kwargs):
+            texts.append(text)
+            return show(text, *args, **kwargs)
+
+        patcher = mock.patch.object(self.win, "_show_status_message", record)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return texts
+
+    def test_identify_names_880_khz(self):
+        said = self.said()
+        self.listen(880e3, ("AM", None, "10 kHz"))
+        self.assertTrue(self.tools.identify())
+        self.assertEqual(self.panel.identify_status.text(), "Listening to 880 kHz…")
+        ident = self.identified()
+        self.assertEqual(ident.kind, "am", ident.summary())
+        status = self.panel.identify_status.text()
+        self.assertTrue(status.startswith("880 kHz at "), status)
+        self.assertIn("· at 880 kHz", self.panel.listen_label.text())
+        self.assertTrue(said[-1].startswith("880 kHz: AM · "), said)
+        self.panel.apply_btn.click()
+        self.assertTrue(said[-1].startswith("Listening to 880 kHz in AM"), said)
+        texts = said + [status, self.panel.listen_label.text()]
+        self.assertFalse([t for t in texts if "0.880" in t], texts)
+
+    def test_formatters(self):
+        from sdr_module.gui.signal_panel import format_mhz, format_signal_mhz
+
+        self.assertEqual(format_mhz(880e3), "880 kHz")
+        self.assertEqual(format_mhz(1260.5e3), "1260.5 kHz")
+        self.assertEqual(format_mhz(433.92e6), "433.920 MHz")
+        self.assertEqual(format_mhz(146.5125e6), "146.5125 MHz")
+        # A wide signal to the kHz, a narrow one to 100 Hz, as above 2 MHz.
+        self.assertEqual(format_signal_mhz(880.2e3, 9e3), "880 kHz")
+        self.assertEqual(format_signal_mhz(350.43e3, 500.0), "350.4 kHz")
+        self.assertEqual(format_signal_mhz(880.02e3, 4e3), "880 kHz")
+        self.assertEqual(format_signal_mhz(99.82e6, 500.0), "99.8200 MHz")
+        # The Signals list's column is headed MHz.
+        self.assertEqual(format_signal_mhz(880e3, 9e3, unit=False), "0.880")
+
+    def test_the_scanner_says_660_khz(self):
+        from sdr_module.gui import scanner_panel as sp
+
+        win = self.win
+        panel = win._scanner_panel
+        panel._hits = [sp.ScanHit(660e3, -40.0, 40.0, 9e3, "AM", "", "10 kHz")]
+        panel._rebuild_table()
+        panel._table.selectRow(0)
+        # (The results column is numeric, headed MHz.)
+        self.assertEqual(panel._table.item(0, sp.COL_FREQ).text(), "0.660 MHz")
+        panel.bookmark_selected()
+        self.assertEqual(panel._status.text(), "Bookmarked 660 kHz.")
+        panel.listen_selected()
+        self.assertEqual(panel._status.text(), "Listening to 660 kHz (AM).")
+        self.assertEqual(win._current_frequency(), 660e3)
+        self.assertIn("660 kHz (AM Broadcast)", panel._hit_tooltip(panel._hits[0]))

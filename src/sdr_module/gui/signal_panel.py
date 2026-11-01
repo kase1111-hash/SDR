@@ -110,7 +110,12 @@ BURSTS_EMPTY = (
 
 
 def format_mhz(freq_hz: float) -> str:
-    """``"433.920 MHz"`` (6 decimals when needed)."""
+    """``"433.920 MHz"`` (6 decimals when needed); below 2 MHz in kHz, as
+    the window names it: ``880e3 -> "880 kHz"``."""
+    from ..core.band_plan import KHZ_BELOW_HZ, short_khz
+
+    if abs(float(freq_hz)) < KHZ_BELOW_HZ:
+        return f"{short_khz(freq_hz)} kHz"
     mhz = float(freq_hz) / 1e6
     text = f"{mhz:.6f}".rstrip("0")
     whole, _, frac = text.partition(".")
@@ -133,8 +138,14 @@ def format_width(hz: float) -> str:
 def format_signal_mhz(freq_hz: float, width_hz: float, unit: bool = True) -> str:
     """A signal's frequency: to the kHz for a wide one, to 100 Hz for a
     narrow one (CW, a carrier); ``unit=False`` leaves out " MHz" (a column
-    headed MHz)."""
+    headed MHz). With its unit, below 2 MHz in kHz, as the window names it
+    (``"880 kHz"``)."""
+    from ..core.band_plan import KHZ_BELOW_HZ, short_khz
+
     decimals = 4 if 0 < float(width_hz) < 5e3 else 3
+    if unit and abs(float(freq_hz)) < KHZ_BELOW_HZ:
+        step = 100.0 if decimals == 4 else 1e3
+        return f"{short_khz(round(float(freq_hz) / step) * step)} kHz"
     text = f"{float(freq_hz) / 1e6:.{decimals}f}"
     return f"{text} MHz" if unit else text
 

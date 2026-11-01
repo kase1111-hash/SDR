@@ -61,7 +61,7 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
-from ..core.band_plan import band_for, listening_for
+from ..core.band_plan import KHZ_BELOW_HZ, band_for, listening_for, short_khz
 from ..dsp.sweep import (
     AUTO_MARGIN_DB,
     WIDE_SIGNAL_HZ,
@@ -206,6 +206,17 @@ class ScanHit:
 def _band_name(label: str) -> str:
     """``"NOAA Weather"`` for ``"NOAA Weather (162.4–162.55 MHz)"``."""
     return label.split(" (", 1)[0]
+
+
+def _say_freq(freq_hz: float) -> str:
+    """A frequency in a sentence, as the window names it: ``"146.5125
+    MHz"``; below 2 MHz in kHz (``"660 kHz"``, as FREQ shows it). The
+    results column and the range fields stay in MHz (:func:`_format_freq`)."""
+    if abs(float(freq_hz)) < KHZ_BELOW_HZ:
+        return f"{short_khz(freq_hz)} kHz"
+    text = f"{float(freq_hz) / 1e6:.6f}".rstrip("0")
+    whole, _, frac = text.partition(".")
+    return f"{whole}.{frac.ljust(3, '0')} MHz"
 
 
 def _valid_time(timestamp: float) -> float:
@@ -760,7 +771,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         current = engine.current
         on_channel = engine.state in (DWELL, LISTEN) and current is not None
         if on_channel:
-            where = current.label or _format_freq(current.frequency_hz)
+            where = current.label or _say_freq(current.frequency_hz)
             if len(where) > 24:
                 where = where[:23] + "…"
             text = f"Scanning · {where}" + (" · held" if engine.held else "")
@@ -1070,14 +1081,14 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         low, high = limits
         if end_hz < low or start_hz > high:
             return None, (
-                f"This device tunes {_format_freq(low)} to {_format_freq(high)}. "
+                f"This device tunes {_say_freq(low)} to {_say_freq(high)}. "
                 "Choose a range inside it."
             )
         if start_hz < low or end_hz > high:
             start_hz, end_hz = max(start_hz, low), min(end_hz, high)
             return (start_hz, end_hz), (
-                f"Limited to the device's range, {_format_freq(start_hz)} to "
-                f"{_format_freq(end_hz)}."
+                f"Limited to the device's range, {_say_freq(start_hz)} to "
+                f"{_say_freq(end_hz)}."
             )
         return (start_hz, end_hz), ""
 
@@ -1591,7 +1602,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         if engine.state in (DWELL, LISTEN) and current is not None:
             name = f"{current.label} · " if current.label else ""
             listening = mode_text(current.listening[0], current.listening[1])
-            freq = _format_freq(current.frequency_hz)
+            freq = _say_freq(current.frequency_hz)
             if engine.state == LISTEN:
                 self._listen_label.setText(
                     f"Listening: {name}{freq}"
@@ -1621,7 +1632,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         page = engine.current_page()
         where = ""
         if page is not None and page.count:
-            where = f"{_format_freq(page.first_hz)} – {_format_freq(page.last_hz)} · "
+            where = f"{_say_freq(page.first_hz)} – {_say_freq(page.last_hz)} · "
         found = "found" if engine.mode != "stop" else "heard"
         return f"{pass_text}{where}{count} {noun} {found}"
 
@@ -1880,9 +1891,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         if hit.label:
             lines.append(hit.label)
         band = band_for(hit.frequency_hz)
-        lines.append(
-            _format_freq(hit.frequency_hz) + (f" ({band.name})" if band else "")
-        )
+        lines.append(_say_freq(hit.frequency_hz) + (f" ({band.name})" if band else ""))
         lines.append(f"Peak {hit.peak_db:.1f} dBFS, SNR {hit.snr_db:.1f} dB")
         if hit.width_hz > 0:
             lines.append(f"Occupied width about {hit.width_hz / 1e3:.0f} kHz")
@@ -1927,7 +1936,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         if self._host.scan_listen(hit):
             mode = mode_text(hit.mode, hit.fm_deviation)
             self._set_status(
-                f"Listening to {_format_freq(hit.frequency_hz)}"
+                f"Listening to {_say_freq(hit.frequency_hz)}"
                 + (f" ({mode})." if mode else "."),
                 "success",
             )
@@ -1977,7 +1986,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         added, existing = self._host.scan_add_bookmarks(hits, **extra)
         if len(hits) == 1:
             if added:
-                text = f"Bookmarked {_format_freq(hits[0].frequency_hz)}."
+                text = f"Bookmarked {_say_freq(hits[0].frequency_hz)}."
             else:
                 text = f"Already bookmarked: {existing[0] if existing else ''}"
         else:
@@ -2082,7 +2091,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         if hit is None:
             return
         menu = QMenu(self)
-        freq = _format_freq(hit.frequency_hz)
+        freq = _say_freq(hit.frequency_hz)
         listen = menu.addAction(f"Listen to {freq}")
         listen.triggered.connect(lambda _c=False: self.listen_selected())
         bookmark = menu.addAction("Bookmark")

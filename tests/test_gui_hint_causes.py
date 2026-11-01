@@ -310,6 +310,24 @@ class TestTheAudioHintFollowsItsCause(_HintCase):
         self.assertEqual(runs[runs.index("Audio resumed") - 1], AUDIO_JOB_DONE)
         self.assertFalse(win._realtime_hint_shown)
 
+    def test_no_pause_said_once_it_keeps_up(self):
+        """The squelch closes while the hint shows (the speaker then waits
+        for a signal, so "Audio resumed" isn't said), and the computer
+        catches up once the job is done: a pause that no longer holds is
+        not said ("The demo device can't keep up ..." while it keeps up)."""
+        win = self.win
+        self.load = 1.5
+        self.run_frames(2.5)
+        self.a_busy_job(2.5)
+        self.assertEqual(win._message_label.text(), AUDIO_JOB)
+        win._control_panel.set_squelch_db(0)  # (no signal is that strong)
+        self.load = 0.3
+        self.run_frames(8.0)
+        self.assertTrue(win._realtime())
+        said = self.hints_said()
+        self.assertEqual(said[:2], [AUDIO_DEVICE, AUDIO_JOB])
+        self.assertEqual(said.count(AUDIO_DEVICE), 1, said)
+
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
 class TestACatchingUpComputerIsNotBlamedOnTheDevice(_hardware_case()):

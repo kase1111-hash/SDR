@@ -6,9 +6,9 @@ display loop (``_frame``) hands each frame's samples to a DSP worker
 (``gui/frame_pipeline.FramePipeline``, one frame in flight) and presents
 the last frame's result: the GUI thread reads, records, paints and plays;
 no Qt object is touched by the worker; the audio is the same, in order;
-what the worker uses is never changed under it (a reset, a new FFT size,
-Stop wait for the frame in flight, and a frame read before a retune is
-never painted on the new span).
+what the worker keeps is never reset under it (a reset, a new FFT size or
+sample rate, a retune and Stop wait for the frame in flight), and a frame
+of another span is never painted on the new one.
 
 ``_process`` (one frame start to finish, as tests drive frames) keeps
 working on the GUI thread.
@@ -227,6 +227,41 @@ class TestNothingChangesUnderTheWorker(_ThreadCase):
         self.assertEqual(rx._rate(), 3.2e6)
         self.assertTrue(resets)
         self.assertNotIn(True, resets)
+
+    def test_a_retune_paints_the_frame_in_flight_on_its_own_span(self):
+        rx = self.rx
+        gate, running = self.hold_next_job(rx._frame_spectrum, "process")
+        painted = []
+        real = rx._spectrum.update_spectrum
+
+        def update(*args, **kwargs):
+            painted.append(float(rx._lo_hz))
+            return real(*args, **kwargs)
+
+        rx._spectrum.update_spectrum = update
+        self.run_frames(1)
+        self.assertTrue(running.wait(HOLD_S))
+        lo = float(rx._lo_hz)
+        threading.Timer(0.05, gate.set).start()
+        self.assertTrue(rx.tune(lo + 2 * rx._rate(), recenter=True))
+        self.assertNotEqual(float(rx._lo_hz), lo)  # (a new span)
+        self.assertEqual(painted, [lo])  # (painted before the LO moved)
+        self.assertFalse(rx._pipeline.pending)
+        rx.stop()
+
+    def test_a_frame_of_another_span_is_not_painted(self):
+        rx = self.rx
+        painted, readings = [], []
+        self.watch(rx._spectrum, "update_spectrum", painted)
+        self.watch(rx._level_meter, "set_reading", readings)
+        lo, rate = float(rx._lo_hz), float(rx._rate())
+        samples = rx.device.read_samples(FRAME)
+        rx._present(rx._work(samples, False, True, (lo - 1e6, rate)))
+        self.assertEqual(painted, [])  # (its spectrum belongs elsewhere)
+        self.assertEqual(len(readings), 1)  # (its level still shows)
+        rx._present(rx._work(samples, False, True, (lo, rate)))
+        self.assertEqual(len(painted), 1)
+        rx.stop()
 
 
 class TestWhatItStillDoes(_ThreadCase):

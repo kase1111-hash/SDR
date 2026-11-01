@@ -667,9 +667,14 @@ class FrameWork:
     """One frame's heavy work, as the second receiver's DSP worker thread
     does it (no Qt): the signal path (:class:`ReceiverDsp`: channel filter,
     level, squelch, demodulation) and, when the plots want the frame, their
-    whole-frame spectrum. While a frame runs, the DSP, the analyzer and
-    :attr:`axis` are the worker's: the window waits for it before it
-    changes them (see :class:`~.frame_pipeline.FramePipeline`)."""
+    whole-frame spectrum. While a frame runs, what the DSP and the analyzer
+    keep (filters, squelch and level history, samples for the next FFT)
+    and :attr:`axis` are the worker's: the window waits for the frame
+    before it resets or reconfigures them (see :class:`~.frame_pipeline.
+    FramePipeline`). The settings a user changes (mode, filter, tuning,
+    squelch level) are plain values the window sets at any time: a frame
+    running meanwhile takes them up where it reads them, so a change counts
+    from that frame or the next."""
 
     def __init__(self, dsp: ReceiverDsp, analyzer: FrameSpectrumAnalyzer) -> None:
         self.dsp = dsp
@@ -2877,8 +2882,9 @@ if HAS_PYQT6:
 
         def _settle_frames(self) -> None:
             """Paint and play the frame the DSP worker has (waiting for it),
-            so none is in flight: before anything changes what the worker
-            uses (a reset, a new rate or FFT size, a retune, Stop)."""
+            so none is in flight: before anything resets what the worker
+            keeps (a new rate or FFT size, Stop) or moves the span (a
+            retune)."""
             if not self._pipeline.pending:
                 return
             try:

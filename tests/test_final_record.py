@@ -1438,3 +1438,34 @@ class TestASpeedResetKeepsTheBandPlanLine(_FilesCase):
             self.assertTrue(win._open_recording())
         self.assertIn("APRS: listening in FM (narrow", self.message())
         win._playback.close()
+
+
+class TestImportOptionsGrowsWithItsCheck(_FilesCase):
+    """REC-E2E-04: a check that takes more lines later (a typed value it
+    can't read) grows the dialog instead of squeezing the fields."""
+
+    def test_a_longer_check_grows_the_dialog(self):
+        from PyQt6.QtWidgets import QLineEdit
+
+        from sdr_module.gui.iq_files import ImportOptionsDialog, describe_iq_file
+
+        path = self.path("iss_145.75MHz_1Msps.bin")
+        rng = np.random.default_rng(2)
+        noise = np.round(127.5 + rng.normal(0, 2.2, 400_000))
+        np.clip(noise, 0, 255).astype(np.uint8).tofile(path)
+        options, missing = describe_iq_file(path)
+        dialog = ImportOptionsDialog(options, missing, "play", parent=self.win)
+        self.addCleanup(dialog.deleteLater)
+        dialog.show()
+        self.settle()
+        before = dialog.height()
+        dialog._show_check(" ".join(["A check that takes many lines."] * 12), "danger")
+        self.settle()
+        self.assertGreater(dialog.height(), before)
+        self.assertGreaterEqual(
+            dialog.height(), dialog.layout().totalHeightForWidth(dialog.width())
+        )
+        for edit in dialog.findChildren(QLineEdit):
+            row = edit.parentWidget()
+            self.assertGreaterEqual(row.height(), edit.y() + edit.height())
+        dialog.hide()

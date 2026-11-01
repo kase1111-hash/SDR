@@ -435,6 +435,14 @@ def measure_page(
         if min_width_hz > 0 and width - _WINDOW_SPREAD_BINS * bin_hz < min_width_hz:
             continue
         freq = report_frequency(float(lo_hz) + centre, width, step_hz)
+        # A bump in a stronger signal's skirt, the highest bin of the next
+        # channel's slice, measures as that signal (its region runs into
+        # it): the same signal, listed once.
+        if any(
+            same_signal(r.frequency_hz, r.width_hz, freq, step_hz)
+            for _k, r, _span in readings
+        ):
+            continue
         readings.append(
             (k, ChannelReading(freq, peak, noise, width), (min(lo, wlo), max(hi, whi)))
         )

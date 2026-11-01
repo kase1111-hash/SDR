@@ -673,5 +673,56 @@ class TestTheDecodersLineOnceTheJobIsDone(_demo_take_case()):
         self.assertNotIn("missed", lines[-1])
 
 
+# --------------------------------------------------------------------------- #
+# W-11: "not while transmitting" in one tone
+# --------------------------------------------------------------------------- #
+
+
+def _tx_case():
+    from tests.test_gui_station_tx import _TxCase
+
+    return _TxCase
+
+
+class TestNotWhileTransmittingInOneTone(_tx_case()):
+    """W-11: while the HackRF sent an ID, "Can't tune while transmitting:
+    press Stop (or wait for the transmission to end) first." was red, like
+    an error next to the red On air line, while "Can't receive while
+    transmitting (the HackRF is half duplex): ..." and "Wait until the
+    transmission ends (or press Stop) to play a recording." were amber.
+    Each says what to do first: amber, all of them (and none goes to
+    Tools > Error History)."""
+
+    def test_the_refusals_while_on_the_air(self):
+        win = self.win
+        self.panel.set_callsign("W1AW")
+        self.panel._wpm_spin.setValue(5)
+        self.hackrf(pace=True)
+        self.panel._id_now_btn.click()
+        self.assertTrue(self.station.busy)
+        said = []
+        with self.assertNoLogs("sdr_module.gui.main_window", level="WARNING"):
+            self.assertFalse(win.set_frequency(146.94e6))
+            said.append(self.status())
+            win._start_acquisition()
+            said.append(self.status())
+            self.assertFalse(win._open_recording())
+            said.append(self.status())
+        texts = [text for text, _tone in said]
+        self.assertTrue(texts[0].startswith("Can't tune while transmitting"), texts)
+        self.assertTrue(texts[1].startswith("Can't receive while transmitting"))
+        self.assertTrue(texts[2].startswith("Wait until the transmission ends"))
+        self.assertEqual([tone for _text, tone in said], ["warning"] * 3, texts)
+        self.station.stop()  # (Stop: the button ignores a double click's second)
+        self.wait_done(5)
+
+    def test_other_tuning_refusals_keep_their_tone(self):
+        """(Out of range: still red, as before.)"""
+        self.assertFalse(self.win.set_frequency(9e9))
+        text, tone = self.status()
+        self.assertIn("is out of range", text)
+        self.assertEqual(tone, "danger")
+
+
 if __name__ == "__main__":
     unittest.main()

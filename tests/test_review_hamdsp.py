@@ -60,13 +60,15 @@ class TestTuneToIssRefused(_HamWindowCase):
     ISS SSTV downlink", switched the station being heard to narrow FM and
     started the SSTV decoder while the receiver stayed where it was."""
 
-    def assert_nothing_changed(self, freq_hz: float, mode: str, reason: str):
+    def assert_nothing_changed(
+        self, freq_hz: float, mode: str, reason: str, tone: str = "danger"
+    ):
         win = self.win
         self.assertAlmostEqual(win._current_frequency(), freq_hz)
         self.assertEqual(win._control_panel.get_demod_mode(), mode)
         self.assertFalse(self.sstv.is_receiving(), "the decoder stays off")
         self.assertIn(reason, win._message_label.text())
-        self.assertEqual(win._message_label.property("tone"), "danger")
+        self.assertEqual(win._message_label.property("tone"), tone)
 
     def test_refused_while_transmitting(self):
         win = self.win
@@ -75,7 +77,10 @@ class TestTuneToIssRefused(_HamWindowCase):
         win._tx_busy = lambda: True  # a transmission is on the air
         self.sstv._tune_iss_btn.click()
         settle()
-        self.assert_nothing_changed(14.230e6, "USB", "Can't tune while transmitting")
+        # (Amber, as every "not while transmitting" notice: W-11.)
+        self.assert_nothing_changed(
+            14.230e6, "USB", "Can't tune while transmitting", tone="warning"
+        )
 
     def test_refused_outside_the_recording_from_the_menu(self):
         win = self.win

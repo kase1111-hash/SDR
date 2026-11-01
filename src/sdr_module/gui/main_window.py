@@ -6205,9 +6205,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         if self._tx_busy():
             # The HackRF sends where it is: it can't move mid-transmission.
+            # (Amber, as the other "not while transmitting" notices: what
+            # to do first. W-11)
             return self._refuse_tuning(
                 "Can't tune while transmitting: press Stop (or wait for the "
-                "transmission to end) first."
+                "transmission to end) first.",
+                tone="warning",
             )
         low, high = self._tuning_limits()
         if self._lo_lock is not None:
@@ -6291,9 +6294,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._on_frequency_changed(self._current_frequency())
         self._note_tuned()
 
-    def _refuse_tuning(self, reason: str, device_problem: bool = False) -> bool:
-        """A frequency can't be tuned: say why, and put the Frequency field
-        (and anything that showed the new frequency) back on the one tuned.
+    def _refuse_tuning(
+        self, reason: str, device_problem: bool = False, tone: str = "danger"
+    ) -> bool:
+        """A frequency can't be tuned: say why (in ``tone``), and put the
+        Frequency field (and anything that showed the new frequency) back on
+        the one tuned.
 
         Only a device that said no is logged (Tools > Error History); a
         frequency out of range is just explained.
@@ -6303,7 +6309,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if device_problem:
             self._show_status_error(reason)
         else:
-            self._show_status_message(reason, "danger", 6000)
+            self._show_status_message(reason, tone, 6000, log=False)
         self._tuning_refusal = reason
         return False
 

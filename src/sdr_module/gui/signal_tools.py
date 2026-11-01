@@ -150,7 +150,7 @@ if HAS_PYQT6:
             # frequencies (the selected one is outlined there), from the
             # watcher's time and the waterfall's at the end of each frame.
             self._burst_spans: Dict[int, Tuple[float, float, float, float]] = {}
-            self._frame_times: Deque[Tuple[float, float]] = deque(maxlen=8192)
+            self._frame_times: Deque[Tuple[float, float]] = deque(maxlen=4096)
             self._bursts_shown = False  # (the Bursts page was on screen)
             self._burst_timer = QTimer(self)
             self._burst_timer.setInterval(100)
@@ -767,6 +767,7 @@ if HAS_PYQT6:
             in order as their analyses come back."""
             if self._shut:
                 return  # (the worker is closed: the window is closing)
+            frames: Optional[Tuple[List[float], List[float]]] = None
             for report in reports:
                 burst = report.burst
                 if burst.duration_s < 0.02 and burst.snr_db < 15:
@@ -774,7 +775,12 @@ if HAS_PYQT6:
                 # The list's Time is when it started, not when it was done.
                 ago = max(0.0, self._watcher.time_s - burst.start_s)
                 when = time.time() - ago
-                self._remember_span(report)
+                if frames is None:
+                    frames = (
+                        [watched for watched, _row in self._frame_times],
+                        [row for _watched, row in self._frame_times],
+                    )
+                self._remember_span(report, *frames)
                 job: Optional[Future] = None
                 if report.samples is not None and self._may_analyze():
                     try:
@@ -792,15 +798,16 @@ if HAS_PYQT6:
                 if self._burst_jobs and not self._burst_timer.isActive():
                     self._burst_timer.start()
 
-        def _remember_span(self, report: BurstReport) -> None:
-            """Where ``report``'s burst is on the waterfall: the times of the
-            rows of the frames its start and end were in, and its
+        def _remember_span(
+            self, report: BurstReport, ends: List[float], rows: List[float]
+        ) -> None:
+            """Where ``report``'s burst is on the waterfall: the waterfall
+            times (``rows``) of the frames its start and end were in, from
+            the watcher's time at each frame's end (``ends``), and its
             frequencies."""
-            frames = self._frame_times
-            if not frames:
+            if not ends:
                 return
-            ends = [watched for watched, _clock in frames]
-            last = len(frames) - 1
+            last = len(ends) - 1
             burst = report.burst
             # The frames with its first and its last samples: the first that
             # ends after its start, and the first that ends at its end.
@@ -808,14 +815,17 @@ if HAS_PYQT6:
             final = min(bisect.bisect_left(ends, float(burst.end_s) - 1e-6), last)
             half = 0.5 * float(burst.width_hz)
             self._burst_spans[id(report)] = (
-                frames[first][1],
-                frames[max(first, final)][1],
+                rows[first],
+                rows[max(first, final)],
                 float(burst.center_hz) - half,
                 float(burst.center_hz) + half,
             )
             if len(self._burst_spans) > 2 * MAX_LISTED_BURSTS:
-                listed = {id(r) for _stamp, r in self.panel.bursts()}
-                for key in [k for k in self._burst_spans if k not in listed]:
+                # (Those the list no longer holds; not those waiting for it.)
+                keep = {id(r) for _stamp, r in self.panel.bursts()}
+                keep.update(id(r) for _job, r, _when in self._burst_jobs)
+                keep.add(id(report))
+                for key in [k for k in self._burst_spans if k not in keep]:
                     del self._burst_spans[key]
 
         def _mark_burst(self, report: Any = None) -> None:

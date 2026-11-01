@@ -76,6 +76,9 @@ class TestScan:
         assert controller.rtlsdr.tuned and controller.hackrf.tuned
         state = controller.state
         assert not state.rtlsdr_streaming and not state.hackrf_streaming
+        # Where the scan left them.
+        assert state.rtlsdr_frequency == controller.rtlsdr.tuned[-1]
+        assert state.hackrf_frequency == controller.hackrf.tuned[-1]
         status = controller.get_status()["wideband_scan"]
         assert status == {
             "running": False,
@@ -98,6 +101,10 @@ class TestScan:
         assert not controller.start_full_duplex()
         assert not controller.set_mode(OperationMode.DUAL_RX)
         assert not controller.use_devices(FakeTuner(), FakeTuner())
+        # The scan tunes them: not retuned behind its back.
+        assert not controller.set_rtlsdr_frequency(433.92e6)
+        assert not controller.set_hackrf_frequency(433.92e6)
+        assert 433.92e6 not in slow.tuned
         assert not controller.start_wideband_scan(88e6, 108e6, 100e3)
         assert controller.stop_wideband_scan(10.0)
         assert controller.wideband_scan.reason == CANCELLED

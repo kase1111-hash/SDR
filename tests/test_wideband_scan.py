@@ -99,13 +99,25 @@ class TestTwoDevices:
         b = FakeTuner("B", rate=10e6)
         scan = _scan([a, b], 88e6, 148e6)
         assert scan.rates == (2.4e6, 10e6)
+        pages = {0: [], 1: []}
+        claim = scan.sweep.claim
+
+        def claiming(receiver):
+            page = claim(receiver)
+            if page is not None:
+                pages[receiver].append(page)
+            return page
+
+        scan.sweep.claim = claiming
         hits = scan.run()
         assert _freqs(hits) == sorted(STATIONS)
         # A full page holds 19 channels (1.9 MHz) at 2.4 MS/s and 79 (7.9
-        # MHz) at 10 MS/s (the last page where they meet may hold fewer).
-        assert len(a.tuned) >= 3 and len(b.tuned) >= 3
-        assert np.max(np.diff(a.tuned)) == pytest.approx(1.9e6)
-        assert np.max(-np.diff(b.tuned)) == pytest.approx(7.9e6)
+        # MHz) at 10 MS/s (the page where they meet may hold fewer); each
+        # device tuned its pages' LOs, A going up and B down.
+        assert pages[0][0].count == 19 and max(p.count for p in pages[0]) == 19
+        assert pages[1][0].count == 79 and max(p.count for p in pages[1]) == 79
+        assert a.tuned == [p.lo_hz for p in pages[0]]
+        assert b.tuned == [p.lo_hz for p in pages[1]]
         assert np.all(np.diff(a.tuned) > 0) and np.all(np.diff(b.tuned) < 0)
 
     def test_samples_from_before_a_retune_are_dropped(self):
@@ -150,7 +162,12 @@ class TestProgressAndCancel:
         scan.on_progress = lambda progress: scan.cancel()
         scan.run()
         assert scan.reason == CANCELLED
-        assert len(a.tuned) + len(b.tuned) <= 3  # (each finished its step)
+        # Stopped at once: of the range's 917 steps, each device finished
+        # or dropped the one it was on (a few at most, by the time the
+        # first was told).
+        (report,) = scan.passes
+        assert not report.complete and sum(report.steps) < 50
+        assert len(a.tuned) + len(b.tuned) < 50
         assert (a.stopped, b.stopped) == (1, 1)
         assert _no_scan_threads()
 
@@ -261,6 +278,27 @@ class TestFailures:
         assert _freqs(hits) == sorted(STATIONS)
         assert "did not start" in passes[0].stopped[1]
         assert b.tuned == [] and b.stopped == 0
+
+    def test_a_device_already_streaming_is_left_alone(self):
+        """One someone else is reading (dual receive, a callback) is not
+        read, retuned or stopped by the scan."""
+        a, b = FakeTuner("A"), FakeTuner("B")
+        b.streaming = True
+        passes = []
+        hits = _scan([a, b], on_pass=passes.append).run()
+        assert _freqs(hits) == sorted(STATIONS)
+        assert "already streaming" in passes[0].stopped[1]
+        assert b.tuned == [] and b.stopped == 0 and b.streaming
+
+    def test_nothing_is_left_queued_after_the_scan(self, monkeypatch):
+        from sdr_module.devices.polled import PolledDevice
+        from sdr_module.gui import device_dialog
+        from sdr_module.gui.device_dialog import MockDevice
+
+        monkeypatch.setattr(device_dialog, "_MAX_LAG_S", 1e9)
+        device = PolledDevice(MockDevice(), "Demo")
+        WidebandScan([device], 100e6, 100.4e6, 100e3, settle_s=0.0).run()
+        assert device.read_samples(16, timeout=0.0) is None
 
     def test_a_device_that_raises_is_left_out(self):
         a, b = FakeTuner("A"), FakeTuner("B")

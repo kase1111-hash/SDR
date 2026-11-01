@@ -558,7 +558,10 @@ class WidebandScan:
                 self._finished.set()
 
     def _start_device(self, device: Any) -> str:
-        """Start ``device``'s stream; "" or why it didn't start."""
+        """Start ``device``'s stream; "" or why it didn't start (one that
+        is streaming already belongs to someone else: it is left alone)."""
+        if getattr(getattr(device, "state", None), "is_streaming", False) is True:
+            return "is already streaming (stop it first)"
         try:
             started = device.start_rx()
         except Exception as exc:
@@ -567,10 +570,13 @@ class WidebandScan:
 
     @staticmethod
     def _stop_device(device: Any, name: str) -> None:
+        """Stop ``device``'s stream and drop what it queued, so whoever
+        reads it next doesn't get the scan's last step."""
         try:
             device.stop_rx()
         except Exception as exc:
             logger.warning("%s did not stop streaming cleanly: %s", name, exc)
+        _drain(device)
 
     def _run_pass(
         self, number: int, started: List[int], not_started: List[str]

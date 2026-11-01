@@ -202,7 +202,7 @@ def _open_receivers(args: argparse.Namespace, count: int):
                 "one alone (without --dual)."
             ),
         )
-    opened = []
+    opened: List[Tuple[Any, str]] = []
     for found in detected[:count]:
         name = name_of(found)
         device = manager.open_device(types[found.device_class], found.info.index)
@@ -467,7 +467,7 @@ def _scan_dual(args: argparse.Namespace) -> int:
     faster taking more. The signals are listed as found, and once more in
     frequency order at the end (or at Ctrl+C), each once.
     """
-    from .core.wideband_scan import NO_SAMPLES, WidebandScan, device_range
+    from .core.wideband_scan import CANCELLED, COMPLETE, WidebandScan, device_range
     from .dsp.sweep import AUTO_MARGIN_DB, format_duration
 
     start_hz, end_hz, step_hz = args.start * 1e6, args.end * 1e6, args.step * 1e3
@@ -595,19 +595,23 @@ def _scan_dual(args: argparse.Namespace) -> int:
     if scan is None:
         return 0
     hits = scan.hits
-    if scan.reason == NO_SAMPLES or (not scan.passes and scan.reason):
+    # (Not an error: it swept, or was stopped as asked.)
+    failed = scan.reason not in (COMPLETE, CANCELLED)
+    if hits:
+        print()
+        print(f"{len(hits)} signal(s) in frequency order:")
+        print(
+            f"  {'Frequency':>14}  {'Level':>11}  {'SNR':>7}  "
+            f"{'Receiver':<{width}}  Band"
+        )
+        for hit in hits:
+            print(_hit_line(hit, width))
+    elif not failed:
+        print()
+        print("No signals above the threshold.")
+    if failed:
         print(f"Error: {scan.reason}")
         return 1
-    print()
-    if not hits:
-        print("No signals above the threshold.")
-        return 0
-    print(f"{len(hits)} signal(s) in frequency order:")
-    print(
-        f"  {'Frequency':>14}  {'Level':>11}  {'SNR':>7}  {'Receiver':<{width}}  Band"
-    )
-    for hit in hits:
-        print(_hit_line(hit, width))
     return 0
 
 

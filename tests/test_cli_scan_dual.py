@@ -263,6 +263,29 @@ def test_continuous_until_ctrl_c(monkeypatch, capsys, fast):
     assert (a.stopped, b.stopped, manager.closed) == (1, 1, 1)
 
 
+def test_ctrl_c_before_the_first_sweep_ends(monkeypatch, capsys, fast):
+    """Stopped as asked: no error, and what was found is listed."""
+    a, b = rtl(), hackrf()
+    manager = _use(monkeypatch, DualManager(("rtlsdr", 0, a), ("hackrf", 0, b)))
+    line = cli._hit_line
+    calls = []
+
+    def interrupt(hit, width):
+        calls.append(hit)
+        if len(calls) == 1:  # (Ctrl+C as the first signal is listed)
+            print(line(hit, width))
+            raise KeyboardInterrupt
+        return line(hit, width)
+
+    monkeypatch.setattr(cli, "_hit_line", interrupt)
+    rc = main(["scan", "--start", "88", "--end", "108", "--dual"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "Stopped." in out and "Error" not in out
+    assert "1 signal(s) in frequency order:" in out
+    assert (a.stopped, b.stopped, manager.closed) == (1, 1, 1)
+
+
 def test_through_the_real_drivers(monkeypatch, capsys, fast):
     """An RTL-SDR (fake pyrtlsdr) and a HackRF One (fake python_hackrf),
     each opened and read through its real driver."""

@@ -27,6 +27,7 @@ hardware.
 """
 
 import logging
+import math
 import threading
 from dataclasses import dataclass
 from enum import Enum
@@ -88,6 +89,15 @@ NOT_IMPLEMENTED_MODES: Dict[OperationMode, str] = {
         "Text), which checks the license, mode and power first."
     ),
 }
+
+
+def _tuned(device: Optional[SDRDevice], default: float) -> float:
+    """The frequency ``device`` says it is tuned to, else ``default``."""
+    try:
+        freq = float(device.state.frequency)  # type: ignore[union-attr]
+    except (AttributeError, TypeError, ValueError):
+        return default
+    return freq if math.isfinite(freq) else default
 
 
 @dataclass
@@ -339,7 +349,10 @@ class DualSDRController:
             return True
 
     def set_rtlsdr_frequency(self, freq_hz: float) -> bool:
-        """Set RTL-SDR center frequency."""
+        """Set RTL-SDR center frequency (refused during a wideband scan,
+        which tunes the devices itself)."""
+        if self._refuse_while_scanning():
+            return False
         with self._lock:
             if self._rtlsdr is None:
                 return False
@@ -349,7 +362,10 @@ class DualSDRController:
             return False
 
     def set_hackrf_frequency(self, freq_hz: float) -> bool:
-        """Set HackRF center frequency."""
+        """Set HackRF center frequency (refused during a wideband scan,
+        which tunes the devices itself)."""
+        if self._refuse_while_scanning():
+            return False
         with self._lock:
             if self._hackrf is None:
                 return False
@@ -672,6 +688,13 @@ class DualSDRController:
                     if self._scan is scan:
                         self._state.rtlsdr_streaming = False
                         self._state.hackrf_streaming = False
+                        # (Where the scan left them.)
+                        self._state.rtlsdr_frequency = _tuned(
+                            self._rtlsdr, self._state.rtlsdr_frequency
+                        )
+                        self._state.hackrf_frequency = _tuned(
+                            self._hackrf, self._state.hackrf_frequency
+                        )
                 logger.info(f"Wideband scan ended: {reason}")
                 if on_finished is not None:
                     on_finished(reason)

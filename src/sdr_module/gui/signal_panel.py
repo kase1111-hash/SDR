@@ -1320,11 +1320,6 @@ if HAS_PYQT6:
             the top; at most 500 kept)."""
             burst = report.burst
             stamp = time.strftime("%H:%M:%S", time.localtime(when or time.time()))
-            self._bursts.insert(0, (stamp, report))
-            del self._bursts[500:]
-            table = self.bursts_table
-            paused = _pause_fit(table)
-            table.insertRow(0)
             data = full = ""
             analysis = report.analysis
             if analysis is not None:
@@ -1355,12 +1350,28 @@ if HAS_PYQT6:
                 _NumericItem(f"{burst.peak_dbfs:.0f}", burst.peak_dbfs),
                 what_item,
             ]
-            for col, item in enumerate(items):
-                table.setItem(0, col, item)
-            while table.rowCount() > 500:
-                table.removeRow(table.rowCount() - 1)
-            _resume_fit(table, paused)
+            table = self.bursts_table
+            selected = self.selected_burst()
+            # The selection moves down with its row, but the table says it
+            # changed while that row is still under its old index (now the
+            # new burst's neighbour's): quiet, and the selected one stays
+            # shown (and outlined on the waterfall).
+            table.blockSignals(True)
+            try:
+                self._bursts.insert(0, (stamp, report))
+                del self._bursts[500:]
+                paused = _pause_fit(table)
+                table.insertRow(0)
+                for col, item in enumerate(items):
+                    table.setItem(0, col, item)
+                while table.rowCount() > 500:
+                    table.removeRow(table.rowCount() - 1)
+                _resume_fit(table, paused)
+            finally:
+                table.blockSignals(False)
             self.bursts_empty.set_visible(False)
+            if self.selected_burst() is not selected:
+                self._show_burst_details()  # (the oldest, selected, fell off)
             self._sync_bursts_hint()
 
         def clear_bursts(self) -> None:

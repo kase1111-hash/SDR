@@ -867,6 +867,32 @@ class TestSignalPanelDetails(unittest.TestCase):
         self.panel._tune_selected_burst()
         self.assertEqual(tuned, [434.1003e6])
 
+    def test_a_new_burst_leaves_the_selected_one_shown(self):
+        """A new burst arriving at the top of the list moved the details
+        (and the waterfall's outline, leftover 4) to the burst that took
+        the selected one's place, while the selection stayed on its row."""
+        from sdr_module.dsp.bursts import Burst, BurstReport
+        from sdr_module.gui.signal_panel import burst_details_text
+
+        panel = self.panel
+        reports = [
+            BurstReport(Burst(i, i + 0.3, f, 20e3, -40.0, 30.0))
+            for i, f in enumerate((433.92e6, 433.93e6, 433.94e6))
+        ]
+        for report in reports:
+            panel.add_burst(report)
+        panel.bursts_table.selectRow(1)  # (433.93 MHz)
+        selected = panel.selected_burst()
+        self.assertIs(selected, reports[1])
+        marked = []
+        panel.burst_selected.connect(marked.append)
+        panel.add_burst(BurstReport(Burst(5.0, 5.3, 434.1e6, 50e3, -56.0, 22.0)))
+        self.assertIs(panel.selected_burst(), selected)
+        self.assertEqual(
+            panel.burst_details.toPlainText(), burst_details_text(selected)
+        )
+        self.assertTrue(all(report is selected for report in marked), marked)
+
     def test_one_evm(self):
         """PLOTS-E2E-18: the plot said 'EVM 43.6 %' and the line under it
         44.2 %: one was measured when painting, the other read the paint

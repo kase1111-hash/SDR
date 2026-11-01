@@ -12,12 +12,17 @@ loop reads, and ``sdr-scan scan``, which reads a device itself. Levels are
 on the main display's scale: dBFS per bin of a 2048-point Hann-windowed
 FFT, so a threshold read off the spectrum means the same here.
 
+Two receivers can share one sweep (:class:`SharedSweep`, the dual-SDR
+wideband scan): each takes pages sized for its own sample rate inside
+what it tunes, and they meet where their speeds put them.
+
 No Qt.
 """
 
 from __future__ import annotations
 
 import math
+import threading
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
@@ -260,6 +265,384 @@ def plan_sweep(
             lo += shift
         pages.append(SweepPage(lo, start, step, first, count))
     return pages
+
+
+# --------------------------------------------------------------------------- #
+# One sweep shared by two receivers
+# --------------------------------------------------------------------------- #
+
+#: Channel index intervals ``(first, last)``, inclusive, sorted, disjoint.
+_Spans = List[Tuple[int, int]]
+
+
+def _clip(spans: _Spans, first: int, last: int) -> _Spans:
+    """``spans`` inside ``[first, last]``."""
+    out = []
+    for a, b in spans:
+        a, b = max(a, first), min(b, last)
+        if a <= b:
+            out.append((a, b))
+    return out
+
+
+def _without(spans: _Spans, cuts: _Spans) -> _Spans:
+    """``spans`` less every interval of ``cuts``."""
+    out = list(spans)
+    for c, d in cuts:
+        kept = []
+        for a, b in out:
+            if b < c or a > d:
+                kept.append((a, b))
+                continue
+            if a < c:
+                kept.append((a, c - 1))
+            if b > d:
+                kept.append((d + 1, b))
+        out = kept
+    return out
+
+
+def _joined(*groups: _Spans) -> _Spans:
+    """The union of the intervals of ``groups``, merged."""
+    merged: _Spans = []
+    for a, b in sorted(span for spans in groups for span in spans):
+        if merged and a <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _spans_count(spans: _Spans) -> int:
+    return sum(b - a + 1 for a, b in spans)
+
+
+@dataclass(frozen=True)
+class SweepReceiver:
+    """A receiver taking part in a :class:`SharedSweep`: its sample rate
+    and the frequencies it tunes (Hz; the LO of each of its pages stays
+    inside them)."""
+
+    sample_rate: float
+    low_hz: float = 0.0
+    high_hz: float = math.inf
+
+
+class SharedSweep:
+    """One sweep of a range shared by one or two receivers sweeping at once.
+
+    Every channel of the range that a receiver tunes is measured once, by
+    one of them. Each receiver claims pages sized for its own sample rate
+    (as :func:`plan_sweep` makes them), with their LO and channels inside
+    what it tunes. It first measures the channels only it tunes, then the
+    channels both tune from its own end: the receiver whose range starts
+    lower (receiver 0 when they start together) from the bottom up, the
+    other from the top down, until they meet. So each one's part of what
+    they share is contiguous, the parts are complementary, and the faster
+    receiver (a wider span, or quicker steps) takes more of the range
+    without a timing model: the split falls wherever they meet.
+
+    A page a receiver couldn't measure is :meth:`release`\\ d: the other
+    receiver measures it if it tunes it. :meth:`give_up` takes a receiver
+    out of the rest of the pass (a device that stopped delivering); what
+    only it tunes is then missed. :meth:`reset` starts the next pass.
+
+    Pages are made as they are claimed, so even millions of channels cost
+    nothing to plan. Thread-safe: receivers claim from their own threads.
+
+    Args:
+        start_hz, end_hz, step_hz: The channels, as
+            :func:`channel_frequencies` gives them.
+        receivers: One or two :class:`SweepReceiver`.
+
+    Raises:
+        ValueError: no receiver, more than two, a sample rate that isn't
+            above 0, or a tuning range that isn't one.
+    """
+
+    def __init__(
+        self,
+        start_hz: float,
+        end_hz: float,
+        step_hz: float,
+        receivers: Sequence[SweepReceiver],
+        usable_fraction: float = USABLE_FRACTION,
+    ) -> None:
+        receivers = tuple(receivers)
+        if not 1 <= len(receivers) <= 2:
+            raise ValueError("A shared sweep takes one or two receivers.")
+        for receiver in receivers:
+            rate = float(receiver.sample_rate)
+            if not (math.isfinite(rate) and rate > 0):
+                raise ValueError(
+                    "A receiver's sample rate must be above 0, not "
+                    f"{receiver.sample_rate!r}."
+                )
+            low, high = float(receiver.low_hz), float(receiver.high_hz)
+            if not low <= high:  # (also a NaN)
+                raise ValueError(
+                    f"A receiver tunes from low_hz up to high_hz, not {low!r} "
+                    f"to {high!r}."
+                )
+        self.receivers: Tuple[SweepReceiver, ...] = receivers
+        self.start_hz = float(start_hz)
+        self.end_hz = float(end_hz)
+        self.step_hz = float(step_hz)
+        self.usable_fraction = float(usable_fraction)
+        #: Channels in the range, and those some receiver tunes.
+        self.channel_total = channel_count(start_hz, end_hz, step_hz)
+        self._layout = [
+            _channels_per_page(self.step_hz, r.sample_rate, self.usable_fraction)
+            for r in receivers
+        ]
+        self._ranges = [self._index_range(r) for r in receivers]
+        self._covered = _joined(*self._ranges)
+        self.covered_count = _spans_count(self._covered)
+        self._exclusive = [
+            _without(own, _joined(*(o for j, o in enumerate(self._ranges) if j != i)))
+            for i, own in enumerate(self._ranges)
+        ]
+        self._up = self._directions()
+        self._lock = threading.Lock()
+        self._unclaimed: _Spans = []
+        self._out: _Spans = []
+        self._measured: List[_Spans] = []
+        self._excluded: List[_Spans] = []
+        self._gave_up: List[bool] = []
+        self.reset()
+
+    # -- the plan ---------------------------------------------------------- #
+    def _index_range(self, receiver: SweepReceiver) -> _Spans:
+        """The channels ``receiver`` tunes, as index intervals (one or none)."""
+        last = self.channel_total - 1
+        if last < 0:
+            return []
+        low, high = float(receiver.low_hz), float(receiver.high_hz)
+        first = (
+            0
+            if low <= self.start_hz
+            else math.ceil((low - self.start_hz) / self.step_hz - 1e-9)
+        )
+        top = (
+            last
+            if not math.isfinite(high)
+            else math.floor((high - self.start_hz) / self.step_hz + 1e-9)
+        )
+        first, top = max(0, first), min(last, top)
+        return [(first, top)] if first <= top else []
+
+    def _directions(self) -> List[bool]:
+        """Which receivers sweep up (True) and down: the one whose range
+        starts lower (then ends lower; receiver 0 on a tie) goes up."""
+        if len(self._ranges) == 1:
+            return [True]
+        first, second = self._ranges
+        if not first or not second:
+            return [bool(first) or not second, not first]
+        up = (first[0][0], first[0][1]) <= (second[0][0], second[0][1])
+        return [up, not up]
+
+    def _hz(self, index: int) -> float:
+        return self.start_hz + index * self.step_hz
+
+    def _ranges_hz(self, spans: _Spans) -> List[Tuple[float, float]]:
+        return [(self._hz(a), self._hz(b)) for a, b in spans]
+
+    def sweeps_up(self, receiver: int) -> bool:
+        """Whether ``receiver`` takes the channels both tune from the
+        bottom up (else from the top down)."""
+        return self._up[receiver]
+
+    def only_tuned_by(self, receiver: int) -> List[Tuple[float, float]]:
+        """``(first_hz, last_hz)`` of the channels only ``receiver`` tunes
+        (it measures those first)."""
+        if len(self.receivers) < 2:
+            return []
+        return self._ranges_hz(self._exclusive[receiver])
+
+    def shared(self) -> List[Tuple[float, float]]:
+        """``(first_hz, last_hz)`` of the channels both receivers tune."""
+        if len(self.receivers) < 2:
+            return []
+        first, second = self._ranges
+        if not first or not second:
+            return []
+        return self._ranges_hz(_clip(first, second[0][0], second[0][1]))
+
+    @property
+    def uncovered(self) -> List[Tuple[float, float]]:
+        """``(first_hz, last_hz)`` of the channels no receiver tunes."""
+        if self.channel_total <= 0:
+            return []
+        return self._ranges_hz(_without([(0, self.channel_total - 1)], self._covered))
+
+    def _page(self, receiver: int, first: int, count: int) -> SweepPage:
+        """The page of ``count`` channels from ``first`` for ``receiver``:
+        its LO in the middle, a few bins off a channel centre (towards the
+        middle of what the receiver tunes at the top of its range), as
+        :func:`plan_sweep` puts it."""
+        _per_page, shift = self._layout[receiver]
+        step = self.step_hz
+        lo = self.start_hz + (first + 0.5 * (count - 1)) * step
+        nearest = 0.0 if count % 2 else 0.5 * step
+        if nearest < shift:
+            lo += shift
+            tunes = self.receivers[receiver]
+            if lo > tunes.high_hz:
+                lo = max(lo - 2.0 * shift, float(tunes.low_hz))
+        return SweepPage(lo, self.start_hz, step, first, count)
+
+    # -- claiming ---------------------------------------------------------- #
+    def _available(self, receiver: int) -> _Spans:
+        """What ``receiver`` could claim now (lock held)."""
+        own = self._ranges[receiver]
+        if self._gave_up[receiver] or not own:
+            return []
+        spans = _clip(self._unclaimed, own[0][0], own[0][1])
+        return _without(spans, self._excluded[receiver])
+
+    def claim(self, receiver: int) -> Optional[SweepPage]:
+        """The next page for ``receiver`` to measure (it is then no one
+        else's), or None when nothing is left for it in this pass. Report
+        the page with :meth:`done` or :meth:`release`."""
+        with self._lock:
+            available = self._available(receiver)
+            if not available:
+                return None
+            pool = _without(available, _without(available, self._exclusive[receiver]))
+            pool = pool or available
+            per_page, _shift = self._layout[receiver]
+            if self._up[receiver]:
+                start = pool[0][0]
+                _a, b = next(s for s in available if s[0] <= start <= s[1])
+                first, last = start, min(b, start + per_page - 1)
+            else:
+                start = pool[-1][1]
+                a, _b = next(s for s in available if s[0] <= start <= s[1])
+                first, last = max(a, start - per_page + 1), start
+            self._unclaimed = _without(self._unclaimed, [(first, last)])
+            self._out = _joined(self._out, [(first, last)])
+            return self._page(receiver, first, last - first + 1)
+
+    def _settle(self, page: SweepPage) -> Optional[Tuple[int, int]]:
+        """Take ``page`` off the pages being measured (lock held); None
+        when it isn't one (from an earlier pass)."""
+        span = (page.first_index, page.first_index + page.count - 1)
+        if _without([span], self._out):
+            return None
+        self._out = _without(self._out, [span])
+        return span
+
+    def done(self, receiver: int, page: SweepPage) -> None:
+        """``receiver`` measured ``page``."""
+        with self._lock:
+            span = self._settle(page)
+            if span is not None:
+                self._measured[receiver] = _joined(self._measured[receiver], [span])
+
+    def release(self, receiver: int, page: SweepPage) -> None:
+        """``receiver`` couldn't measure ``page``: the other receiver
+        measures it if it tunes it (``receiver`` isn't given it again in
+        this pass)."""
+        with self._lock:
+            span = self._settle(page)
+            if span is not None:
+                self._unclaimed = _joined(self._unclaimed, [span])
+                self._excluded[receiver] = _joined(self._excluded[receiver], [span])
+
+    def give_up(self, receiver: int) -> None:
+        """``receiver`` takes no more pages in this pass."""
+        with self._lock:
+            self._gave_up[receiver] = True
+
+    def more_may_come(self, receiver: int) -> bool:
+        """Whether ``receiver`` may still get a page in this pass: one is
+        free for it, or the other receiver is measuring a page it could
+        take should that one :meth:`release` it."""
+        with self._lock:
+            own = self._ranges[receiver]
+            if self._gave_up[receiver] or not own:
+                return False
+            if self._available(receiver):
+                return True
+            held = _clip(self._out, own[0][0], own[0][1])
+            return bool(_without(held, self._excluded[receiver]))
+
+    def reset(self) -> None:
+        """Start the next pass: every channel to measure again, by every
+        receiver."""
+        with self._lock:
+            self._unclaimed = list(self._covered)
+            self._out = []
+            self._measured = [[] for _ in self.receivers]
+            self._excluded = [[] for _ in self.receivers]
+            self._gave_up = [False for _ in self.receivers]
+
+    # -- how far ----------------------------------------------------------- #
+    def _missed(self) -> _Spans:
+        """Channels this pass won't measure (lock held): neither measured
+        nor being measured, and no receiver still in the pass can claim
+        them."""
+        unmeasured = _without(self._covered, _joined(self._out, *self._measured))
+        claimable = _joined(*(self._available(i) for i in range(len(self.receivers))))
+        return _without(unmeasured, claimable)
+
+    @property
+    def progress(self) -> float:
+        """How far through this pass (0..1): the channels measured, or
+        that this pass won't measure, of those a receiver tunes."""
+        with self._lock:
+            if self.covered_count <= 0:
+                return 1.0
+            settled = sum(_spans_count(s) for s in self._measured)
+            settled += _spans_count(self._missed())
+            return min(1.0, settled / self.covered_count)
+
+    @property
+    def finished(self) -> bool:
+        """Nothing is being measured and nothing is left to claim."""
+        with self._lock:
+            return not self._out and not any(
+                self._available(i) for i in range(len(self.receivers))
+            )
+
+    def coverage(self, receiver: int) -> List[Tuple[float, float]]:
+        """``(first_hz, last_hz)`` of the channels ``receiver`` measured in
+        this pass."""
+        with self._lock:
+            return self._ranges_hz(self._measured[receiver])
+
+    def missed(self) -> List[Tuple[float, float]]:
+        """``(first_hz, last_hz)`` of the channels a receiver tunes that
+        this pass won't measure (see :meth:`release` and :meth:`give_up`)."""
+        with self._lock:
+            return self._ranges_hz(self._missed())
+
+    def estimate_seconds(self, seconds_per_page: Sequence[float]) -> float:
+        """How long a pass takes when each receiver spends
+        ``seconds_per_page`` (one value per receiver) on a page: the pages
+        are claimed as they would be, on a copy of this plan."""
+        times = [max(0.0, float(s)) for s in seconds_per_page]
+        if len(times) != len(self.receivers):
+            raise ValueError("Give one time per receiver.")
+        trial = SharedSweep(
+            self.start_hz,
+            self.end_hz,
+            self.step_hz,
+            self.receivers,
+            self.usable_fraction,
+        )
+        busy_until = [0.0 for _ in times]
+        working = set(range(len(times)))
+        while working:
+            receiver = min(working, key=lambda i: (busy_until[i], i))
+            page = trial.claim(receiver)
+            if page is None:
+                working.discard(receiver)
+                continue
+            trial.done(receiver, page)
+            busy_until[receiver] += times[receiver]
+        return max(busy_until)
 
 
 def noise_floor_db(

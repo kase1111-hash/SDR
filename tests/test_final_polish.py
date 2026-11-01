@@ -265,3 +265,60 @@ class TestLongAndMediumWaveInKilohertz(_SignalCase):
         self.assertEqual(panel._status.text(), "Listening to 660 kHz (AM).")
         self.assertEqual(win._current_frequency(), 660e3)
         self.assertIn("660 kHz (AM Broadcast)", panel._hit_tooltip(panel._hits[0]))
+
+
+class TestTheScanChipGivesWayAt1024Px(_SignalCase):
+    """P-03: the decoder chip gives way at 1024 px (I-decode), the scan
+    chip didn't: a held bookmark scan with a long name ("Scanning · NOAA
+    Weather Radio 162.… · held") with AUDIO and Track Signal's AFC needed
+    1,042-1,071 px. It is cut as the decoder chip is (whole in its
+    tooltip), not the window widened. (A scan is refused while I/Q
+    records: no REC here.)"""
+
+    HELD = "Scanning · NOAA Weather Radio 162.… · held"
+    DECODER = (
+        "ADS-B · 6 msgs",
+        "AX.25/APRS · 12,345 msgs",
+        "CW (Morse) · 15 WPM · 12,345 msgs",
+    )
+
+    def test_the_window_keeps_1024_px(self):
+        from tests.test_gui_coherent_window import _ThemedSizes
+
+        _ThemedSizes.each_theme(self, self.check_room)
+
+    def check_room(self, theme):
+        from PyQt6.QtWidgets import QLabel
+
+        from sdr_module.gui.themes import set_role
+
+        win = self.win
+        win.resize(1024, 640)
+        win._audio_rec_label.setText("AUDIO 00:05")
+        win._audio_rec_label.setVisible(True)
+        afc = QLabel("AFC +2.2 kHz")  # (as Track Signal shows it)
+        set_role(afc, "badge", "info")
+        win.statusBar().addPermanentWidget(afc)
+        self.addCleanup(afc.deleteLater)
+        scan = win._scanner_panel.status_chip()
+        scan.setText(self.HELD)
+        scan.setVisible(True)
+        chip = win._decoder_chip
+        for text in self.DECODER:
+            chip.setText(text)
+            chip.setVisible(True)
+            self.settle(10)
+            where = (theme, text)
+            self.assertLessEqual(win.minimumSizeHint().width(), 1024, where)
+            self.assertEqual(win.width(), 1024, where)
+            self.assertGreaterEqual(win._message_label.width(), 220, where)
+            self.assertEqual(scan.text(), self.HELD)  # (whole: only drawn short)
+            self.assertGreater(scan.width(), 60, where)  # ("Scanning · …")
+        win.statusBar().removeWidget(afc)
+        # With room, the scan chip shows its whole text.
+        chip.setVisible(False)
+        win.resize(1366, 768)
+        self.settle(10)
+        self.assertGreaterEqual(scan.width(), scan.sizeHint().width(), theme)
+        scan.setVisible(False)
+        win._audio_rec_label.setVisible(False)

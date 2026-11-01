@@ -87,7 +87,7 @@ from .scanner_dialog import _CUSTOM, SCAN_PRESETS, _format_freq, _NumericItem
 
 if HAS_PYQT6:
     from . import file_dialogs
-    from .decoder_panel import ViewPlaceholder
+    from .decoder_panel import DecoderChip, ViewPlaceholder
     from .themes import set_role, set_tone
 
 logger = logging.getLogger(__name__)
@@ -730,8 +730,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
     def _setup_chip(self) -> None:
         """The chip the window shows in its status bar while a scan runs
         (see :meth:`status_chip`): what the scan is doing, and a menu to
-        stop, skip or hold it, or show this tab, from any tab."""
-        chip = QPushButton("")
+        stop, skip or hold it, or show this tab, from any tab. Short of
+        room (AUDIO, AFC and the decoder chip at 1024 px) it is cut, as the
+        decoder chip is, not the window widened (P-03)."""
+        chip = DecoderChip("")
         set_role(chip, "compact")
         chip.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         chip.setAccessibleName("Scan in progress")

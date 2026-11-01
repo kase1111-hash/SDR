@@ -8,6 +8,7 @@ on the demo device (or the panel on its own where that is enough).
 import os
 import unittest
 from itertools import combinations
+from unittest import mock
 
 import numpy as np
 
@@ -913,6 +914,48 @@ class TestSignalPanelDetails(unittest.TestCase):
         self.assertEqual(scope.evm_percent, evm)
         scope.set_overlay(ModulationOverlay.NONE)
         self.assertIsNone(scope.evm_percent)
+
+
+class TestApplyModeSaysItOnce(_SignalCase):
+    """Merged with the listening fixes: the band plan and the presets set
+    the mode without its own "FM: 200 kHz, 75 kHz (broadcast) deviation"
+    (the mode's last width and deviation, before theirs are set), since
+    they say what they set. Apply Mode said that stale line first, then
+    "Listening to ... 2.5 kHz deviation, 12.5 kHz filter" (both in the
+    status history)."""
+
+    def test_one_message(self):
+        from sdr_module.dsp.classifiers import ClassificationResult, SignalType
+        from sdr_module.dsp.signal_id import Identification
+
+        win = self.win
+        win.set_frequency(100.715e6)
+        win._set_demod_mode("AM", None, "10 kHz")
+        result = ClassificationResult(
+            SignalType.ANALOG, None, 0.9, 10.5e3, 0.0, 23.0, {}, kind="fm"
+        )
+        ident = Identification(
+            result, 100.715e6, "Narrow FM (voice or data)", "FM", "2.5 kHz", 12.5e3
+        )
+        self.panel.show_identification(ident)
+        said = []
+        show = win._show_status_message
+
+        def record(text, *args, **kwargs):
+            said.append(text)
+            return show(text, *args, **kwargs)
+
+        with mock.patch.object(win, "_show_status_message", record):
+            self.panel.apply_btn.click()
+        self.assertEqual(win._listening_mode(), ("FM", "2.5 kHz"))
+        self.assertEqual(win._control_panel._bw_combo.currentText(), "12.5 kHz")
+        self.assertEqual(
+            said,
+            ["Listening to 100.715 MHz in FM, 2.5 kHz deviation, 12.5 kHz filter"],
+        )
+        # A mode chosen otherwise still says what it listens with.
+        win._set_demod_mode("AM", None, "10 kHz")
+        self.assertTrue(win._message_label.text().startswith("AM: "))
 
 
 if __name__ == "__main__":  # pragma: no cover

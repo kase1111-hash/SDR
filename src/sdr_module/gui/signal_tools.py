@@ -469,7 +469,15 @@ if HAS_PYQT6:
             from .control_panel import bandwidth_options, closest_bandwidth
 
             width = closest_bandwidth(bandwidth_options(ident.mode), ident.filter_hz)
-            win._set_demod_mode(ident.mode, ident.fm_deviation or None, width)
+            # The mode change alone would say the mode's last width and
+            # deviation first ("FM: 200 kHz, 75 kHz (broadcast) deviation"),
+            # before these are set; this says what it set, as the band plan
+            # and the presets do.
+            win._quiet_mode_change = True
+            try:
+                win._set_demod_mode(ident.mode, ident.fm_deviation or None, width)
+            finally:
+                win._quiet_mode_change = False
             target = self._listen_frequency(ident)
             if abs(target - win._current_frequency()) >= 1.0:
                 win.set_frequency(target)

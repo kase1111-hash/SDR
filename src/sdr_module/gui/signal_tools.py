@@ -383,17 +383,24 @@ if HAS_PYQT6:
         def _new_identifier(self, rate: float, chain: Any) -> SignalIdentifier:
             """An identifier for the band Identify analyzes: listening to the
             receiver's own channel when that is the band (see
-            receiver_channel_band), else filtering it out of the raw blocks."""
+            receiver_channel_band), else filtering it out of the raw blocks.
+            Either way its captures are judged at the rate its own filter
+            gives (the receiver's channel may come faster: a narrow signal
+            then looked wider, CW less like CW)."""
             offset = self._win._vfo_offset_hz()
             width = self._ident_width
             half = receiver_channel_band(chain, rate, width)
+            ident = SignalIdentifier(rate, offset, width)
             if half > 0:
                 ident = SignalIdentifier(
-                    chain.channel_rate, offset, width, channel_pass_hz=half
+                    chain.channel_rate,
+                    offset,
+                    width,
+                    channel_pass_hz=half,
+                    analysis_rate=ident.rate,
                 )
                 self._ident_chain = chain
             else:
-                ident = SignalIdentifier(rate, offset, width)
                 self._ident_chain = None
             self._ident_band = ident.passband_hz
             return ident
@@ -462,7 +469,14 @@ if HAS_PYQT6:
                     self._ident_band,
                 )
                 self._ident_job = self._pool.submit(
-                    identify, capture, rate, freq, reach, None, band
+                    identify,
+                    capture,
+                    rate,
+                    freq,
+                    reach,
+                    None,
+                    band,
+                    analysis_rate=ident.analysis_rate,
                 )
             if self._ident_best is None or not self._ident_best.is_signal:
                 self.panel.set_identify_status(

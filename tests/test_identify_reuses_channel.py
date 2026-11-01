@@ -39,6 +39,15 @@ def _fm(n, rate, start=0, deviation=5e3, tone_hz=1e3, level=0.3, noise=2e-3):
     return x.astype(np.complex64)
 
 
+def _cw(n, rate, start=0, element_s=0.06, level=0.3, noise=2e-3):
+    """A keyed carrier at 0 Hz (two elements on, one off), plus noise."""
+    t = (start + np.arange(n)) / rate
+    key = (np.floor(t / element_s) % 3) != 2
+    rng = np.random.default_rng(start // max(n, 1) + 7)
+    x = level * key + noise * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    return x.astype(np.complex64)
+
+
 class TestAnIdentifierForTheReceiversChannel(unittest.TestCase):
     def test_the_channel_is_kept_as_it_is(self):
         ident = SignalIdentifier(4e6, 1.3e6, 2.4e6, channel_pass_hz=1.2e6)
@@ -58,6 +67,29 @@ class TestAnIdentifierForTheReceiversChannel(unittest.TestCase):
         ident.set_offset(250e3)  # (the receiver's channel follows the VFO)
         self.assertEqual(ident.received, 0)
         self.assertEqual(ident.offset_hz, 250e3)
+
+    def test_a_capture_is_judged_at_the_rate_asked(self):
+        # A keyed carrier taken at 4 MS/s, judged at 2.67 MS/s (the rate
+        # Identify's own filter gives a 2.4 MHz band at 8 MS/s): as if it
+        # had been taken at that rate. (Judged at 4 MS/s, its line looks
+        # twice as wide as it is and CW was "maybe".)
+        from sdr_module.dsp.signal_id import identify
+
+        band = (-0.95 * 1.2e6, 0.95 * 1.2e6)
+        slow, fast = 8e6 / 3, 4e6
+        own = identify(_cw(int(0.3 * slow), slow), slow, 145.5e6, 25e3, None, band)
+        taken = _cw(int(0.3 * fast), fast)
+        judged = identify(taken, fast, 145.5e6, 25e3, None, band, analysis_rate=slow)
+        self.assertEqual(judged.kind, "cw")
+        self.assertAlmostEqual(judged.confidence, own.confidence, delta=0.05)
+        self.assertAlmostEqual(judged.seconds, 0.3, places=3)
+        ident = SignalIdentifier(fast, 0.0, 2.4e6, channel_pass_hz=1.2e6)
+        self.assertEqual(ident.analysis_rate, fast)  # (as it is, by default)
+        ident = SignalIdentifier(
+            fast, 0.0, 2.4e6, channel_pass_hz=1.2e6, analysis_rate=slow
+        )
+        self.assertEqual(ident.analysis_rate, slow)
+        self.assertEqual(ident.rate, fast)  # (what it keeps)
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
@@ -80,6 +112,7 @@ class _HighRateCase(_WindowTestCase):
         self.tools = win._signal_tools
         self.tools._pool = _RunAtOnce()
         self.sent = 0
+        self.signal = _fm  # (what is on the air)
 
     def tearDown(self):
         if HAS_PYQT6:
@@ -90,8 +123,8 @@ class _HighRateCase(_WindowTestCase):
     def frames(self, seconds, until=None):
         win = self.win
         n = int(RATE * FRAME_S)
-        for _ in range(int(seconds / FRAME_S)):
-            win._process_block(_fm(n, RATE, self.sent))
+        for _ in range(max(1, int(round(seconds / FRAME_S)))):
+            win._process_block(self.signal(n, RATE, self.sent))
             self.sent += n
             if until is not None and until():
                 return True
@@ -145,14 +178,48 @@ class TestIdentifyTakesTheReceiversChannel(_HighRateCase):
             )
             self.assertLess(abs(reused.signal_hz - own.signal_hz), 2e3, width)
 
+    def test_a_keyed_carrier_is_judged_as_its_own_filter_judges_it(self):
+        # The receiver's 2.4 MHz channel comes at 4 MS/s, Identify's own
+        # filter at 2.67 MS/s: judged at 4 MS/s, Morse's narrow line looked
+        # half again as wide, and the verdict was "CW ... maybe" (0.49)
+        # where its own filter says "confident" (0.86), and took three
+        # takes. The same signal now gets the same verdict either way.
+        from sdr_module.dsp.signal_id import confidence_words
+        from sdr_module.gui import signal_tools
+
+        self.signal = _cw
+        reused = self.identify()
+        self.assertIsNotNone(self.tools._ident_chain)
+        self.sent = 0
+        with mock.patch.object(
+            signal_tools, "receiver_channel_band", lambda *args: 0.0
+        ):
+            own = self.identify()
+        self.assertEqual((reused.kind, own.kind), ("cw", "cw"))
+        self.assertEqual(
+            confidence_words(reused.confidence), confidence_words(own.confidence)
+        )
+        self.assertAlmostEqual(reused.confidence, own.confidence, delta=0.05)
+
     def test_a_new_filter_while_listening_is_followed(self):
         tools = self.tools
+        win = self.win
         self.assertTrue(tools.identify())
         self.frames(0.2)
-        self.win._set_demod_mode("None (I/Q)", "", "1 MHz")  # (a new channel)
+        win._set_demod_mode("None (I/Q)", "", "1 MHz")  # (a new channel)
+        self.frames(FRAME_S)
+        # Listening to the new channel at its rate, or to the raw blocks
+        # (never to a channel at a rate it doesn't expect).
+        ident = tools._identifier
+        chain = win._receiver_chain()
+        if tools._ident_chain is not None:
+            self.assertIs(tools._ident_chain, chain)
+            self.assertEqual(ident.rate_in, chain.channel_rate)
+        else:
+            self.assertEqual(ident.rate_in, RATE)
         done = self.frames(3.0, until=lambda: tools._identifier is None)
-        self.assertTrue(done, self.win._signal_panel.identify_status.text())
-        self.assertTrue(self.win._signal_panel.identification().is_signal)
+        self.assertTrue(done, win._signal_panel.identify_status.text())
+        self.assertTrue(win._signal_panel.identification().is_signal)
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")

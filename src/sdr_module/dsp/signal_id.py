@@ -361,6 +361,23 @@ def analysis_band(
     return width, reach
 
 
+def _slower(x: np.ndarray, rate: float, new_rate: float) -> Tuple[np.ndarray, float]:
+    """``x`` (complex baseband at ``rate``) at about ``new_rate`` (lower), by
+    keeping the middle of its spectrum: what lies beyond +/- ``new_rate`` / 2
+    is dropped, so the band of interest must fit inside it. Returns
+    ``(samples, their rate)``; amplitudes are kept."""
+    data = np.asarray(x)
+    n = len(data)
+    m = int(round(n * float(new_rate) / float(rate)))
+    if m >= n or m < 64:
+        return data, float(rate)
+    spectrum = np.fft.fft(data.astype(np.complex64, copy=False))
+    low = (m + 1) // 2  # 0 Hz and above
+    kept = np.concatenate((spectrum[:low], spectrum[n - (m - low) :]))
+    out = np.fft.ifft(kept) * (m / n)
+    return out.astype(np.complex64), float(rate) * m / n
+
+
 def identify(
     samples: np.ndarray,
     rate: float,
@@ -368,6 +385,8 @@ def identify(
     search_hz: Optional[float] = None,
     noise_psd: Optional[float] = None,
     band_hz: Optional[Tuple[float, float]] = None,
+    *,
+    analysis_rate: Optional[float] = None,
 ) -> Identification:
     """Identify the signal at 0 Hz of ``samples`` (complex baseband at
     ``rate``, the tuned frequency ``tuned_hz`` at 0 Hz).
@@ -376,8 +395,14 @@ def identify(
     and still count (default: 5 % of the rate, at least 12.5 kHz);
     ``band_hz``: the flat part of the capture's band (e.g. a
     :class:`SignalIdentifier`'s ``passband_hz``), where the noise is
-    measured."""
+    measured. ``analysis_rate`` (lower than ``rate``): judge the samples at
+    that rate, brought down to it first (``band_hz`` must fit), e.g. a
+    :class:`SignalIdentifier`'s ``analysis_rate``: the analysis resolves
+    frequency in steps of a fixed share of the rate, so a narrow signal
+    taken faster looks wider (CW less like CW)."""
     rate = float(rate)
+    if analysis_rate is not None and 0 < float(analysis_rate) < rate:
+        samples, rate = _slower(samples, rate, float(analysis_rate))
     if search_hz is None:
         search_hz = max(12.5e3, 0.05 * rate)
     result = SignalClassifier(rate).classify(
@@ -426,7 +451,10 @@ class SignalIdentifier:
 
     Fed the receiver's own channel instead (``channel_pass_hz``, when that
     channel is the band analyzed), it keeps it as it is: filtering the raw
-    block again doubled that work (9.5 ms of a 20 MS/s display frame).
+    block again doubled that work (9.5 ms of a 20 MS/s display frame). That
+    channel may come faster than its own filter would make it; the capture
+    is then judged at that slower rate (:attr:`analysis_rate`, brought down
+    by :func:`identify` off the display loop), so it gets the same verdict.
     """
 
     def __init__(
@@ -436,13 +464,18 @@ class SignalIdentifier:
         analysis_hz: Optional[float] = None,
         *,
         channel_pass_hz: Optional[float] = None,
+        analysis_rate: Optional[float] = None,
     ):
         """``analysis_hz``: how wide a band around the tuned frequency is
         kept (default: the whole span, at most about 2.4 MHz); see
         :func:`analysis_band`. ``channel_pass_hz``: the blocks fed are a
         receiver's channel already, at ``sample_rate``, centered on the
         tuned frequency (``offset_hz`` from the LO) and flat to +/- this:
-        they are kept as they are (no mixing or filtering here)."""
+        they are kept as they are (no mixing or filtering here).
+        ``analysis_rate`` (with ``channel_pass_hz``): the rate to judge the
+        captures at, e.g. what this identifier's own filter would bring the
+        raw blocks to (``SignalIdentifier(raw rate, offset, analysis_hz)
+        .rate``)."""
         self.rate_in = float(sample_rate)
         self.offset_hz = float(offset_hz)
         wanted = float(analysis_hz) if analysis_hz else self.rate_in
@@ -473,8 +506,15 @@ class SignalIdentifier:
             self.rate = self.rate_in
             # (A receiver's own filter rolls off near the span's edges.)
             self.passband_hz = (-0.4 * self.rate, 0.4 * self.rate)
+        #: The rate :func:`identify` judges a capture at (its own, unless
+        #: the receiver's channel comes faster than ``analysis_rate``).
+        self.analysis_rate = self.rate
+        if channel_pass_hz is not None and analysis_rate:
+            # (Never so slow that the band doesn't fit.)
+            fits = 2.2 * float(channel_pass_hz)
+            self.analysis_rate = min(self.rate, max(float(analysis_rate), fits))
         self._keep = int(min(KEEP_MAX_SAMPLES, KEEP_S * self.rate))
-        if self.rate > CAPTURE_MAX_RATE / 2:
+        if self.analysis_rate > CAPTURE_MAX_RATE / 2:
             # The full span: 0.3 s (the analysis costs more).
             self._keep = int(min(self._keep, 0.3 * self.rate))
         self._blocks: Deque[np.ndarray] = deque()

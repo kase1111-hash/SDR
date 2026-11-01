@@ -73,5 +73,36 @@ class TestAPresetsPauseIsNotTheUsersChoice(_WindowTestCase):
         self.assertEqual(self.decoding(), ("RDS", False))
 
 
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
+class TestTuneToADSBSaysOnceWhatItSet(_WindowTestCase):
+    """The Decoder's ADS-B "Tune to" from broadcast FM left "None (I/Q):
+    200 kHz filter, no audio" (LISTEN-13's note for I/Q) in the status
+    history under "Tuned to ADS-B (1090.000 MHz, I/Q)", while the tune set
+    the ADS-B preset's 2.4 MHz filter right after (DEC-E2E-14). (ACARS
+    and bookmarks: test_final_listen's TestBookmarkAndDecoderTunesSayOnce.)"""
+
+    demo = True
+
+    def history(self):
+        return [entry.text for entry in self.win._status_history.entries()]
+
+    def test_ads_b_from_broadcast_fm(self):
+        win, panel = self.win, self.win._decoder_panel
+        self.assertTrue(win.set_frequency(100.1e6))
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        win._status_history.clear()
+        panel._proto_combo.setCurrentText("ADS-B")
+        panel._tune_to_protocol()  # (the Aircraft view's "Tune to")
+        self.assertEqual(win._control_panel._bw_combo.currentText(), "2.4 MHz")
+        self.assertEqual(self.history(), ["Tuned to ADS-B (1090.000 MHz, I/Q)"])
+
+    def test_choosing_i_q_by_hand_still_says_what_it_listens_with(self):
+        win = self.win
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        win._status_history.clear()
+        win._set_demod_mode("None (I/Q)")
+        self.assertTrue(self.history()[0].startswith("None (I/Q): "), self.history())
+
+
 if __name__ == "__main__":
     unittest.main()

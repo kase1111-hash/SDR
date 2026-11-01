@@ -7078,11 +7078,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if not self._listen_by_band_plan(before, self._current_frequency()):
                 self._show_status_message(f"Tuned to {label}", "info", 2500)
             return
-        self._set_demod_mode(
-            mode,
-            deviation or None,
-            bandwidth or self._bandwidth_for_mode(mode, deviation),
-        )
+        # (Quiet: the mode alone said its last filter first, "AM: 6 kHz",
+        # before this one's was set; "Tuned to ..." says what was set.)
+        self._quiet_mode_change = True
+        try:
+            self._set_demod_mode(
+                mode,
+                deviation or None,
+                bandwidth or self._bandwidth_for_mode(mode, deviation),
+            )
+        finally:
+            self._quiet_mode_change = False
         mode = self._mode_text(mode)
         if label.endswith(")"):  # "ACARS (131.550 MHz)" -> "(131.550 MHz, AM)"
             text = f"Tuned to {label[:-1]}, {mode})"

@@ -8261,12 +8261,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _samples_skipped(self) -> bool:
         """Whether part of the signal is skipped: frames read one block each
         (this computer can't keep up), or the device delivers less than its
-        sample rate. (A recording played faster or slower than real time
-        skips nothing unless frames can't keep up.)"""
-        if self._pacer.overloaded:
-            return True
+        sample rate. (A recording skips nothing: it is read in full, however
+        slowly it plays, and the playback says when it can't keep its
+        speed.)"""
         if self._playback.active:
             return False
+        if self._pacer.overloaded:
+            return True
         return not self._realtime()
 
     def _sync_decoder_skipping(self) -> None:

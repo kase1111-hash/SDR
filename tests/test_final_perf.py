@@ -847,3 +847,20 @@ class TestPlaybackWhileOverloaded(_playback_case()):
         speed = self.run_frames(4.0)
         self.assertFalse(self.win._pacer.overloaded)
         self.assertGreater(speed, 0.9)
+
+    def test_the_decoder_doesnt_say_a_recording_is_missed(self):
+        # A recording is read in full however slowly it plays: the decoder
+        # hears all of it. Its line said it "misses part of the signal" and
+        # sent the user to Receiver > Sample rate, refused while a file
+        # plays, under the status bar's "Playing at about 0.3x, not 4x".
+        win = self.win
+        win._decoder_panel._proto_combo.setCurrentText("POCSAG")
+        self.settle(1)
+        win._playback_bar.set_speed(4.0)
+        self.load = 0.3
+        self.run_frames(3.0)
+        self.assertTrue(win._pacer.overloaded)
+        panel = win._decoder_panel
+        self.assertTrue(panel.decoder_status_text())
+        self.assertNotIn("misses part of the signal", panel.decoder_status_text())
+        self.assertNotIn("misses part of the signal", win._message_label.text())

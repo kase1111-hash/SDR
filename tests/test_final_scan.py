@@ -580,5 +580,51 @@ class TestScanChipInTheStatusBar(_ScanWindowCase):
         self.assertTrue(chip.isHidden())
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-04: bookmark-scan results show the bookmark's name
+# --------------------------------------------------------------------------- #
+class TestBookmarkResultsShowTheirNames(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_the_frequency_cell_names_the_bookmark_and_sorts_by_frequency(self):
+        from sdr_module.gui.scan_engine import Found
+        from sdr_module.gui.scanner_panel import COL_FREQ, ScannerPanel
+        from tests.test_gui_scanner import FakeWindow
+
+        panel = ScannerPanel(settings=_FakeSettings())
+        panel.set_host(FakeWindow())
+        try:
+            panel.engine.settings.mode = "bookmarks"
+            fm = ("FM", "5 kHz", "")
+            for freq, name, tone in (
+                (162.4e6, "NOAA 1", 0.0),
+                (145.29e6, "Rpt 100", 100.0),
+                (145.29e6, "Rpt 88.5", 88.5),
+                (125.0e6, "Tower", 0.0),
+            ):
+                found = Found(freq, -50.0, -90.0, 10e3, fm, name, tone_hz=tone)
+                panel._on_found(found)
+            table = panel._table
+            table.sortItems(COL_FREQ)
+            texts = [table.item(r, COL_FREQ).text() for r in range(table.rowCount())]
+            # (Sorted by frequency, whatever the names.)
+            self.assertEqual(texts[0], "Tower · 125.000 MHz")
+            self.assertEqual(texts[-1], "NOAA 1 · 162.400 MHz")
+            self.assertEqual(
+                sorted(texts[1:3]), ["Rpt 100 · 145.290 MHz", "Rpt 88.5 · 145.290 MHz"]
+            )
+            # A sweep's results are just the frequency, as before.
+            panel.engine.settings.mode = "once"
+            panel._hits = []
+            panel._rebuild_table()
+            panel._on_found(Found(100.1e6, -40.0, -90.0, 150e3, fm))
+            self.assertEqual(table.item(0, COL_FREQ).text(), "100.100 MHz")
+        finally:
+            panel.engine.stop()
+            panel.deleteLater()
+            _settle()
+
+
 if __name__ == "__main__":
     unittest.main()

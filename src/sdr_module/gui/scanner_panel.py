@@ -601,7 +601,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         header.setSortIndicator(COL_FREQ, Qt.SortOrder.AscendingOrder)
         header_tips = (
             "Signal center frequency, to the nearest kHz (a broadcast FM "
-            "station: its 100 kHz channel)",
+            "station: its 100 kHz channel); a bookmark scan's results also "
+            "name the bookmark",
             "Strongest FFT bin, in dB relative to full scale (same scale as "
             "the spectrum)",
             get_short_tip("snr"),
@@ -1701,7 +1702,18 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         if row < 0:
             row = self._table.rowCount()
             self._table.insertRow(row)
-        freq = _NumericItem(_format_freq(hit.frequency_hz), hit.frequency_hz)
+        if hit.label:
+            # A bookmark scan's result says which bookmark (two on one
+            # repeater, with different tones, are told apart): its name
+            # first, so a narrow column cuts the frequency's end (it is in
+            # the tooltip), not the name. It still sorts by frequency.
+            freq = _NumericItem(
+                f"{hit.label} · {_format_freq(hit.frequency_hz)}",
+                hit.frequency_hz,
+                align_right=False,
+            )
+        else:
+            freq = _NumericItem(_format_freq(hit.frequency_hz), hit.frequency_hz)
         freq.setData(_HIT_ROLE, index)
         # Whole dB in the narrow column (the tooltip has tenths).
         level = _NumericItem(f"{hit.peak_db:.0f} dBFS", hit.peak_db)

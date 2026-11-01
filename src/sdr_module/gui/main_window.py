@@ -6285,7 +6285,38 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if problem is None and not self._audio.start(int(_AUDIO_RATE)):
             problem = "The audio output could not be opened"
         self._audio_problem = problem
+        if problem is None:
+            self._announce_missing_output()
         return problem is None
+
+    def _missing_output_text(self) -> str:
+        """``"Fake USB Headset isn't connected: playing through Fake
+        Speakers"`` while the output chosen in Tools > Preferences isn't
+        there (the sink plays through the default), else ""."""
+        if not getattr(self._audio, "output_missing", False):
+            return ""
+        from .audio_sink import default_output_name
+
+        chosen = self._settings.get_str(KEY_AUDIO_OUTPUT_NAME, "")
+        default = default_output_name() or "the default output"
+        return f"{chosen or 'The chosen output'} isn't connected: playing through {default}"
+
+    def _announce_missing_output(self) -> None:
+        """(DEV-E2E-14) Say once, when audio starts on the default because
+        the chosen output is gone (until it is back)."""
+        text = self._missing_output_text()
+        said = getattr(self, "_missing_output_said", "")
+        if text and text != said:
+            # (After the "Audio on" of the switch that started it.)
+            QTimer.singleShot(
+                0,
+                lambda: self._show_status_message(
+                    f"{text}. Tools > Preferences chooses another output.",
+                    "info",
+                    8000,
+                ),
+            )
+        self._missing_output_said = text
 
     def _audio_output_problem(self) -> Optional[str]:
         """Why audio can't play right now, or None if it can."""
@@ -10231,6 +10262,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 return "On (the signal isn't real time)", "warning"
             if self._control_panel.get_demod_mode() not in _AUDIBLE_MODES:
                 return "On (no audio in I/Q mode)", "muted"
+            missing = self._missing_output_text()
+            if missing:
+                return f"On ({missing})", "warning"
             return "On", None
         problem = self._audio_problem
         if problem is not None:

@@ -1023,5 +1023,53 @@ class TestStatusBarRoom(_WindowTestCase):
         self.assertEqual(win._recording_info_label.text(), "26.7 MB · 17.7 GB free")
 
 
+# --------------------------------------------------------------------------- #
+# An unplugged output says so once (DEV-E2E-14)
+# --------------------------------------------------------------------------- #
+class TestMissingOutput(_WindowTestCase):
+    demo = True
+
+    def test_falling_back_to_the_default_output_is_said_once(self):
+        from sdr_module.gui import audio_sink
+        from sdr_module.gui.preferences_dialog import KEY_AUDIO_OUTPUT_NAME
+
+        win = self.win
+        sink = _FakeSink()
+        sink.output_missing = True
+        win._audio = sink
+        self.store.values[KEY_AUDIO_OUTPUT_NAME] = "Fake USB Headset"
+        with (
+            mock.patch.object(type(win), "_audio_output_problem", lambda _s: None),
+            mock.patch.object(
+                audio_sink, "default_output_name", lambda: "Fake Speakers"
+            ),
+        ):
+            win._audio_enabled = False
+            win._set_audio_enabled(True)
+            self.settle()
+            text = win._message_label.text()
+            self.assertIn(
+                "Fake USB Headset isn't connected: playing through Fake Speakers",
+                text,
+            )
+            self.assertIn("Tools > Preferences", text)
+            self.assertEqual(win._audio_status()[0][:3], "On ")
+            self.assertIn("isn't connected", win._audio_status()[0])
+            # Once: turning audio off and on again doesn't repeat it.
+            win._clear_status_message()
+            win._set_audio_enabled(False)
+            win._set_audio_enabled(True)
+            self.settle()
+            self.assertNotIn("isn't connected", win._message_label.text())
+            # Back again: said again the next time it is gone.
+            sink.output_missing = False
+            win._refresh_audio_output(announce=False)
+            self.assertEqual(win._audio_status()[0], "On")
+            sink.output_missing = True
+            win._refresh_audio_output(announce=False)
+            self.settle()
+            self.assertIn("isn't connected", win._message_label.text())
+
+
 if __name__ == "__main__":
     unittest.main()

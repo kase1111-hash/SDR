@@ -1419,3 +1419,22 @@ class TestTheOtherKindWaitsForTheReceiver(_FilesCase):
         self.assertIn("(Ctrl+Shift+A stops it)", text)
         self.assertEqual(panel._record_status.property("tone"), "warning")
         win._record_audio_action.trigger()
+
+
+class TestASpeedResetKeepsTheBandPlanLine(_FilesCase):
+    """REC-E2E-07's "Playing at 1x." also came when a file opened after one
+    played at another speed (the strip goes back to 1x): it replaced the
+    band plan's line saying how the new file is heard."""
+
+    def test_the_second_file_s_band_plan_line_stays(self):
+        win = self.win
+        self.assertTrue(win.set_frequency(100.1e6))
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        with self.open_dialog(_save_sigmf(self.path("fm.sigmf-data"), 100.1e6)):
+            self.assertTrue(win._open_recording())
+        win._playback_bar.set_speed(2.0)
+        self.assertIn("Playing at 2x", self.message())
+        with self.open_dialog(_save_sigmf(self.path("aprs2m.sigmf-data"), 144.39e6)):
+            self.assertTrue(win._open_recording())
+        self.assertIn("APRS: listening in FM (narrow", self.message())
+        win._playback.close()

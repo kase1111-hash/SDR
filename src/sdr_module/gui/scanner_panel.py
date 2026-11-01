@@ -1208,7 +1208,13 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                     "Scan stopped: the receiver was stopped.", "warning", stay=False
                 )
             elif time.monotonic() - engine.last_block_at > NO_BLOCKS_S:
-                # Running, but nothing arrives (a device that stalled).
+                # Running, but nothing arrives (a device that stalled): a
+                # problem, listed in Tools > Error History.
+                logger.warning(
+                    "Frequency scan stopped: the receiver returned no samples "
+                    "for %.0f s.",
+                    NO_BLOCKS_S,
+                )
                 self.stop_scan(
                     "Scan stopped: the receiver returned no samples. Check that "
                     "it is plugged in and not used by another program.",

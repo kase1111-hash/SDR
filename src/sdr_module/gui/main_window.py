@@ -254,6 +254,11 @@ _BROADCAST_FM_DEVIATION = "75 kHz"
 _BROADCAST_FM_BANDWIDTH = "200 kHz"
 _BROADCAST_AM_BANDWIDTH = "10 kHz"
 _FM_BROADCAST_BAND = (87.5e6, 108e6)
+# How the radio tuner listens to each band: (mode, FM deviation, filter).
+_TUNER_LISTENING: Dict[str, Tuple[str, Optional[str], str]] = {
+    "FM": ("FM", _BROADCAST_FM_DEVIATION, _BROADCAST_FM_BANDWIDTH),
+    "AM": ("AM", None, _BROADCAST_AM_BANDWIDTH),
+}
 
 
 def _plain(label: str) -> str:
@@ -2155,6 +2160,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     _START_TEXT = "▶  Start"
     _STOP_TEXT = "■  Stop"
     _RECORD_TEXT = "●  Record"
+    # What the dimmed plots say while transmitting: receiving resumes when it
+    # ends, or (not receiving before it) the receiver stays off after it.
+    _ON_AIR_PLOT_TEXT = "Transmitting - receiving resumes when it ends"
+    _ON_AIR_IDLE_PLOT_TEXT = "Transmitting - press Space to receive once it ends"
     # The Audio button's four states (see _audio_state). (A leading space:
     # Qt leaves almost no gap after a button's icon.)
     _AUDIO_ON_TEXT = " Audio"
@@ -2560,7 +2569,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "ham_id",
                 self._callsign_panel,
                 "Ham ID",
-                "Station identification with your callsign (CW ID, HackRF only)",
+                "Your callsign and license class, how your station ID is sent "
+                "(CW or FM tone), TX power and automatic ID (transmitting needs "
+                "a HackRF One)",
             )
 
             self._sstv_panel = SSTVPanel()
@@ -3956,9 +3967,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         has_device = self._device is not None
         running = self._is_running and has_device
 
-        # Toolbar Start/Stop
+        # Toolbar Start/Stop (off while transmitting: _show_tx_state, below)
         button = self._start_button
         button.setText(self._STOP_TEXT if running else self._START_TEXT)
+        button.setEnabled(True)
+        self._start_action.setEnabled(True)
         role = "" if running else "primary"
         if (button.property("role") or "") != role:
             set_role(button, role or None)
@@ -5096,17 +5109,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
         self._show_status_message(text, None, 4000)
 
-    def _channel_fits(self, offset_hz: float, rate: Optional[float] = None) -> bool:
+    def _channel_fits(
+        self,
+        offset_hz: float,
+        rate: Optional[float] = None,
+        mode: Optional[str] = None,
+        bandwidth_hz: Optional[float] = None,
+    ) -> bool:
         """Whether the tuned channel, ``offset_hz`` from the LO, lies inside
         the usable inner part (``_USABLE_SPAN_FRACTION``) of a span of
         ``rate`` Hz (the device's). At the LO itself it always does (a
-        channel wider than that is best centered)."""
+        channel wider than that is best centered). ``mode`` and
+        ``bandwidth_hz``: a channel in that mode and width instead of the
+        one tuned."""
         if abs(offset_hz) < 0.5:
             return True
         rate = float(rate or self._device_sample_rate())
         low, high = _channel_edges(
-            self._control_panel._demod_combo.currentText(),
-            self._channel_bandwidth(),
+            mode or self._control_panel._demod_combo.currentText(),
+            bandwidth_hz or self._channel_bandwidth(),
             rate,
         )
         half = 0.5 * _USABLE_SPAN_FRACTION * rate
@@ -6219,9 +6240,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._is_running:
             return
         if self._tx_busy():
+            after = (
+                "receiving resumes when the transmission ends."
+                if self._tx_resumes_rx()
+                else "start receiving once the transmission ends (Space)."
+            )
             self._show_status_message(
-                "Can't receive while transmitting (the HackRF is half duplex): "
-                "receiving resumes when the transmission ends.",
+                f"Can't receive while transmitting (the HackRF is half duplex): "
+                f"{after}",
                 "warning",
             )
             return
@@ -6270,13 +6296,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             except Exception as e:  # pragma: no cover - defensive
                 logger.debug(f"stop_rx failed: {e}")
 
+        # A recording played to its end: an SSTV image ending with it
+        # completes (its last line would wait for audio that never comes).
+        if (
+            HAS_HAM_RADIO
+            and self._playback.active
+            and getattr(self._device, "finished", False)
+        ):
+            self._sstv_panel.finish_input()
+
         self._refresh_state_ui()
         logger.info("Acquisition stopped")
 
     def _on_callsign_id_requested(self):
         """Ham ID > Send ID Now (or Radio > Send Station ID): the station ID
         on the tuned frequency, through the transmit engine (checked, asked
-        the first time, sent without blocking the window)."""
+        about first unless "Don't ask again" is ticked, sent without blocking
+        the window)."""
         self._tx_station.send_station_id()
 
     def _tx_busy(self) -> bool:
@@ -6284,22 +6320,50 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         station = getattr(self, "_tx_station", None)
         return bool(station is not None and station.busy)
 
+    def _tx_resumes_rx(self) -> bool:
+        """While transmitting: whether receiving resumes when it ends (the
+        receiver was running before; otherwise it stays off after it)."""
+        station = getattr(self, "_tx_station", None)
+        return bool(station is not None and station.resumes_receiving)
+
     def _show_tx_state(self, on_air: bool) -> None:
-        """The status bar's state badge says ON AIR while transmitting (the
-        state comes back with the next _refresh_state_ui)."""
+        """While transmitting, the status bar's state badge says ON AIR, the
+        plots say whether receiving resumes when it ends, and Start is off
+        (the HackRF is half duplex: Start or Space would only be refused).
+        All of it comes back with the next _refresh_state_ui."""
         if on_air:
+            resumes = self._tx_resumes_rx()
             self._state_badge.setText("ON AIR")
             set_tone(self._state_badge, "danger")
             self._state_badge.setToolTip(
-                "Transmitting; receiving resumes when the transmission ends. "
-                "Click to stop transmitting."
+                (
+                    "Transmitting; receiving resumes when the transmission ends. "
+                    if resumes
+                    else "Transmitting. "
+                )
+                + "Click to stop transmitting."
             )
             self._state_badge.setCursor(Qt.CursorShape.PointingHandCursor)
+            button = self._start_button
+            button.setText(self._START_TEXT)
+            if button.property("role"):
+                set_role(button, None)
+            button.setToolTip(
+                ("Receiving resumes when" if resumes else "Start receiving once")
+                + " the transmission ends (the ON AIR badge stops it)"
+            )
+            button.setEnabled(False)
+            self._start_action.setText("&Start Receiving\tSpace")
+            self._start_action.setEnabled(False)
+            text = self._ON_AIR_PLOT_TEXT if resumes else self._ON_AIR_IDLE_PLOT_TEXT
+            for plot in (self._spectrum, self._waterfall):
+                plot.set_stale(text)
 
     def _transmit_job(self, job: "TxJob", confirm: bool = True) -> bool:
         """Transmit ``job`` (see :class:`~.transmitter.TxJob`) on the HackRF:
-        checked (license, mode, bandwidth, power), asked the first time,
-        with the Ham ID panel's automatic IDs, without blocking the window.
+        checked (license, mode, bandwidth, power), asked about before each
+        transmission (until "Don't ask again"), with the Ham ID panel's
+        automatic IDs, without blocking the window.
         False (the status bar says why) when it isn't sent. Transmit Text
         and any other transmission come through here."""
         return self._tx_station.transmit(job, confirm=confirm)
@@ -6369,7 +6433,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._rec_since = None
         self._update_rec_clock()
         self._sync_record_ui(True)
-        if not self._is_running:
+        if self._tx_busy():  # (Space is refused until it ends)
+            self._show_status_message(
+                "Recording armed: samples are captured "
+                + (
+                    "when receiving resumes after the transmission"
+                    if self._tx_resumes_rx()
+                    else "once you start receiving after the transmission (Space)"
+                ),
+                "warning",
+                6000,
+            )
+        elif not self._is_running:
             self._show_status_message(
                 "Recording armed: samples are captured once receiving starts "
                 "(Space)",
@@ -6899,7 +6974,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._audio_take = take
         self._sync_audio_record_ui()
         note = ""
-        if not (self._is_running and self._device is not None):
+        if self._tx_busy():  # (Space is refused until it ends)
+            note = (
+                " It starts when receiving resumes after the transmission."
+                if self._tx_resumes_rx()
+                else " It starts with the receiver after the transmission (Space)."
+            )
+        elif not (self._is_running and self._device is not None):
             note = " It starts with the receiver (Space)."
         elif not self._audio_enabled:
             note = " (The speaker is off; the recording still gets the audio.)"
@@ -7509,12 +7590,34 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _show_sstv_mode_needed(self, mode: str) -> None:
         """The SSTV panel's callout, while it listens in a mode whose audio
-        can't carry SSTV, offering the mode SSTV is sent in here."""
-        if mode in _SSTV_MODES or not self._sstv_listening():
+        can't carry SSTV, offering the mode SSTV is sent in here; or, in a
+        ham band where SSTV is sent in SSB (160 m to 6 m), in the sideband
+        it isn't usually sent in there (USB kept from 20 m to 40 m, for FT8,
+        can't hear LSB SSTV)."""
+        if not self._sstv_listening():
             self._sstv_panel.show_fm_needed(None)
             return
-        wanted = self._sstv_mode_for(self._current_frequency())
-        self._sstv_panel.show_fm_needed(self._mode_text(mode), wanted)
+        freq = self._current_frequency()
+        if mode not in _SSTV_MODES:
+            wanted = self._sstv_mode_for(freq)
+            self._sstv_panel.show_fm_needed(self._mode_text(mode), wanted)
+            return
+        from ..core.band_plan import band_for
+
+        band = band_for(freq)
+        if (
+            band is not None
+            and band.name.endswith(" Ham")
+            and band.mode in ("USB", "LSB")
+            and mode in ("USB", "LSB")
+            and mode != band.mode
+        ):
+            short = band.name[: -len(" Ham")]  # "40m" (or "70cm")
+            unit = "cm" if short.endswith("cm") else "m"
+            name = f"{short[: -len(unit)]} {unit}"  # "40 m"
+            self._sstv_panel.show_fm_needed(mode, band.mode, band=name)
+            return
+        self._sstv_panel.show_fm_needed(None)
 
     def _on_sstv_start_requested(self) -> None:
         """Tell the user what the SSTV decoder still needs to get audio."""
@@ -9560,15 +9663,26 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # panel, toolbar readout and plot axes together. A frequency the
         # device can't tune is refused (the status bar says why) and the
         # tuner shows the frequency still tuned (its seek then stops).
+        listening = _TUNER_LISTENING.get(band)
+        early = listening is not None and self._fits_only_in_band_mode(freq_hz, band)
+        if early:
+            # (A recording plays: the station fits its span in the band's
+            # mode, not in the wider one in use. Switch first.)
+            self._set_demod_mode(*listening)
         self._tuner_refused = not self.set_frequency(freq_hz)
         if self._tuner_refused:
             return
-        if band == "FM":
-            self._set_demod_mode("FM", _BROADCAST_FM_DEVIATION, _BROADCAST_FM_BANDWIDTH)
-        elif band == "AM":
-            self._set_demod_mode("AM", bandwidth=_BROADCAST_AM_BANDWIDTH)
+        if listening is not None and not early:
+            self._set_demod_mode(*listening)
         tuner = self._radio_tuner
-        if tuner is None or not tuner.is_seeking():  # (seek says it itself)
+        if self._device is None:  # (tuned, but nothing can play)
+            self._show_status_message(
+                f"Tuned to {format_frequency(freq_hz)} ({band}). No receiver: "
+                "Device > Use Demo Device or Connect... to listen.",
+                "warning",
+                6000,
+            )
+        elif tuner is None or not tuner.is_seeking():  # (seek says it itself)
             self._show_status_message(
                 f"Tuned to {format_frequency(freq_hz)} ({band})", "info", 2500
             )
@@ -9609,6 +9723,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tuner.set_device_range(
             low if has_range else None, high if has_range else None, name
         )
+        tuner.set_receiver_available(self._device is not None)
         if not (self._is_running and self._device is not None):
             tuner.set_stereo(False)
             if self._pilot is not None:
@@ -9689,15 +9804,34 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _tuner_can_tune(self, freq_hz: float) -> bool:
         """For the tuner's seek: whether ``freq_hz`` can be tuned now (inside
         the device's range and, while a recording plays back, inside its
-        span), by the rules :meth:`_tune_to` refuses with."""
+        span, in the band's mode the tuner switches to), by the rules
+        :meth:`_tune_to` refuses with."""
         low, high = self._tuning_limits()
         if not low <= freq_hz <= high:
             return False
         lock = self._lo_lock
         if lock is not None:
             center, span, _why = lock
-            return self._channel_fits(freq_hz - center, rate=span)
+            mode, _deviation, width = _TUNER_LISTENING["AM" if freq_hz < 30e6 else "FM"]
+            return self._channel_fits(
+                freq_hz - center, rate=span, mode=mode, bandwidth_hz=_parse_hz(width)
+            )
         return True
+
+    def _fits_only_in_band_mode(self, freq_hz: float, band: str) -> bool:
+        """While a recording plays: whether a channel at ``freq_hz`` fits the
+        recording's span in ``band``'s mode (the tuner's) but not in the
+        mode in use (a wider one, e.g. I/Q at 1 MHz)."""
+        lock = self._lo_lock
+        listening = _TUNER_LISTENING.get(band)
+        if lock is None or listening is None:
+            return False
+        center, span, _why = lock
+        mode, _deviation, width = listening
+        offset = freq_hz - center
+        return not self._channel_fits(offset, rate=span) and self._channel_fits(
+            offset, rate=span, mode=mode, bandwidth_hz=_parse_hz(width)
+        )
 
     def _show_decoder_config(self):
         """Bring the Decoder panel to the front."""
@@ -10462,7 +10596,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if running:
             text = None
         elif self._tx_busy():
-            text = "Transmitting - receiving resumes when it ends"
+            text = (
+                self._ON_AIR_PLOT_TEXT
+                if self._tx_resumes_rx()
+                else self._ON_AIR_IDLE_PLOT_TEXT
+            )
         elif not has_device:
             text = "No device - press Space to connect one"
         elif playback is not None and getattr(playback, "finished", False):

@@ -268,10 +268,13 @@ class TestControlPanelFixes(unittest.TestCase):
         license_text = self.panel._license_info.text()
         self.assertNotIn("headroom", license_text)
         self.assertNotIn("%", license_text)
-        # Sub-watt limits are not rounded down to "0 W".
-        tip = _power_limit_tip(0.5, None)
+        # Sub-watt limits are not rounded down to "0 W". The app refuses to
+        # transmit above the limit itself, not above 150% of it (leftover
+        # 31: the tip said 0.75 W here).
+        tip = _power_limit_tip(0.5)
         self.assertIn("0.5 W", tip)
-        self.assertIn("0.75 W", tip)
+        self.assertNotIn("0.75 W", tip)
+        self.assertNotIn("150%", tip)
 
     def test_demod_settings_getters(self):
         self.panel._demod_combo.setCurrentText("FM")

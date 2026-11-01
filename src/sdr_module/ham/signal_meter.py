@@ -680,19 +680,27 @@ class SignalMeter:
         return f"RST: {rst} | {reading.s_meter} | {reading.power_dbm:.0f} dBm"
 
     def get_log_report(
-        self, frequency_hz: Optional[float] = None, when: Optional[float] = None
+        self,
+        frequency_hz: Optional[float] = None,
+        when: Optional[float] = None,
+        s_text: Optional[str] = None,
     ) -> str:
         """One-line report to paste into a log or chat.
+
+        ``s_text``: the S reading to give, e.g. the "S9+23" a display shows
+        at 1 dB resolution (default: the reading's own, in 10 dB steps
+        above S9).
 
         Returns:
             "RST 59 · S9+20 · 14.250 MHz · 12:34 UTC" (frequency optional);
             "No signal above the noise (S4) · ..." on an empty channel.
         """
         reading = self.get_reading()
+        s_meter = s_text or reading.s_meter
         if reading.signal_present:
-            parts = [f"RST {self.get_rst()}", reading.s_meter]
+            parts = [f"RST {self.get_rst()}", s_meter]
         else:
-            parts = [f"No signal above the noise ({reading.s_meter})"]
+            parts = [f"No signal above the noise ({s_meter})"]
         if frequency_hz:
             parts.append(f"{float(frequency_hz) / 1e6:.3f} MHz")
         stamp = time.gmtime(when if when is not None else time.time())

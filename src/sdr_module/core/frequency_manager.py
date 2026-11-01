@@ -47,6 +47,14 @@ TX_POWER_WARNING = (
 )
 
 
+def _mhz(freq_hz: float) -> str:
+    """``5.3305e6 -> "5.3305"``: the frequency in MHz with 3 to 6 decimals,
+    as many as it needs (a 60 m channel's half kHz is not rounded away)."""
+    text = f"{float(freq_hz) / 1e6:.6f}".rstrip("0")
+    whole, _, frac = text.partition(".")
+    return f"{whole}.{frac.ljust(3, '0')}"
+
+
 class LockoutReason(Enum):
     """Reason for frequency lockout."""
 
@@ -1287,6 +1295,11 @@ class FrequencyManager:
             if band.start_hz <= frequency_hz <= band.end_hz
         ]
         usable = [band for band in segments if band.is_allowed(license_class, mode)]
+        if not usable and str(mode).strip().upper() == "CW":
+            # FCC 97.305(a): CW may be sent on any frequency the operator may
+            # transmit on, the phone segments too (whose modes list the band
+            # plan's use; an automatic CW ID goes out there).
+            usable = [band for band in segments if band.is_granted_to(license_class)]
         if usable:
             # The segment listed for the operator's own class sets the power
             # limit; otherwise the most restrictive of the inherited ones.
@@ -1312,14 +1325,14 @@ class FrequencyManager:
         if segments:
             return (
                 False,
-                f"Frequency {frequency_hz/1e6:.3f} MHz requires higher license class",
+                f"Frequency {_mhz(frequency_hz)} MHz requires higher license class",
                 None,
             )
 
         # Frequency not in any amateur or license-free band
         return (
             False,
-            f"Frequency {frequency_hz/1e6:.3f} MHz is not in any amateur or license-free band",
+            f"Frequency {_mhz(frequency_hz)} MHz is not in any amateur or license-free band",
             None,
         )
 
@@ -1397,7 +1410,7 @@ class FrequencyManager:
                 if band.lockout_reason == LockoutReason.GPS:
                     reason += " [GPS SPOOFING IS DANGEROUS AND ILLEGAL]"
                 logger.warning(
-                    f"TX blocked at {frequency_hz/1e6:.3f} MHz (BW={bandwidth_hz/1e3:.1f} kHz): {band.name}"
+                    f"TX blocked at {_mhz(frequency_hz)} MHz (BW={bandwidth_hz/1e3:.1f} kHz): {band.name}"
                 )
                 return False, reason
 
@@ -1411,7 +1424,7 @@ class FrequencyManager:
             allowed, license_reason, _ = self._check_license_privilege(freq, mode)
             if not allowed:
                 reason_str = license_reason or "Unknown restriction"
-                logger.warning(f"TX blocked at {freq/1e6:.3f} MHz: {reason_str}")
+                logger.warning(f"TX blocked at {_mhz(freq)} MHz: {reason_str}")
                 return False, f"LICENSE: {reason_str}"
 
         return True, None

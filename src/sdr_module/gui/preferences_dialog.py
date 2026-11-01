@@ -9,7 +9,7 @@ Tools > Preferences (Ctrl+,): the few settings that aren't part of receiving.
   records, until it is saved, with the space free there (a recording takes
   over a gigabyte a minute at 2.4 MS/s).
 - **Transmitting**: ask before transmitting (the transmit engine's
-  first-use confirmation, ``tx/confirm``).
+  confirmation before each transmission, ``tx/confirm``).
 
 The dialog only reads the settings; :meth:`PreferencesDialog.apply` writes
 them when the user presses OK, and the main window then applies them.
@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 KEY_AUDIO_OUTPUT = "prefs/audio_output"
 KEY_AUDIO_OUTPUT_NAME = "prefs/audio_output_name"
 KEY_CAPTURE_FOLDER = "prefs/capture_folder"
-KEY_TX_CONFIRM = KEY_CONFIRM  # the transmitter's first-use confirmation
+KEY_TX_CONFIRM = KEY_CONFIRM  # the confirmation before each transmission
 
 #: Bytes one I/Q sample takes while recording (complex64).
 _BYTES_PER_SAMPLE = 8

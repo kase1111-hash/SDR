@@ -51,7 +51,6 @@ except ImportError:
 from ..core import frequency_manager as _frequency_manager_module
 from ..core.frequency_manager import (
     AMATEUR_BAND_PRIVILEGES,
-    POWER_HEADROOM_FACTOR,
     TX_POWER_WARNING,
     LicenseClass,
     get_frequency_manager,
@@ -384,14 +383,15 @@ def _format_bandwidth(bw_hz: float) -> str:
 _LISTEN_OK = "Listen ✓"
 
 
-def _power_limit_tip(legal: float, effective: Optional[float]) -> str:
-    """Tooltip explaining the legal power limit and the app's TX guard."""
-    pct = int(round(POWER_HEADROOM_FACTOR * 100))
-    effective = effective or legal * POWER_HEADROOM_FACTOR
+def _power_limit_tip(legal: float) -> str:
+    """Tooltip explaining the legal power limit and the app's TX guard: it
+    won't transmit when the output calculated on the QRP tab is above the
+    limit (tx_station.power_problem)."""
     return (
-        f"Legal limit: {legal:g} W at your transmitter output. The app only "
-        f"blocks power above {pct}% of it ({effective:g} W) to allow for "
-        "cable loss; stay within the legal limit itself."
+        f"Legal limit: {legal:g} W at your transmitter output. The app "
+        "won't transmit when the output calculated on the QRP tab (the "
+        "HackRF's TX power through any amplifiers there) is above it. Measure "
+        "your real output: cables and amplifiers vary."
     )
 
 
@@ -2672,11 +2672,10 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         tip = reason
         if allowed:
             legal = fm.get_power_limit(preset.frequency_hz, preset.mode)
-            effective = fm.get_effective_power_limit(preset.frequency_hz, preset.mode)
             text = f"{_LISTEN_OK} · Transmit ✓ with your license"
             if legal:
                 text = f"{_LISTEN_OK} · Transmit ✓ (legal limit {legal:g} W)"
-                tip = _power_limit_tip(legal, effective)
+                tip = _power_limit_tip(legal)
             tone = "success"
         elif reason.startswith("LICENSE:"):
             # Not covered by the selected license class: informational, since

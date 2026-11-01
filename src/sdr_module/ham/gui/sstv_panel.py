@@ -44,6 +44,7 @@ try:
         QPolygonF,
     )
     from PyQt6.QtWidgets import (
+        QApplication,
         QCheckBox,
         QComboBox,
         QFileDialog,
@@ -90,6 +91,19 @@ NO_AUDIO_TEXT = (
 # An image in progress ends (kept as a partial image) when the audio stops
 # for this long: its line timing can't be trusted afterwards.
 AUDIO_GAP_S = 1.5
+# Start Now with Mode "Auto (VIS)" listens this many seconds of audio for
+# the line syncs that tell the mode (four syncs of the slowest mode, Scottie
+# DX at 1.05 s a line, and some to spare).
+START_NOW_AUTO_WAIT_S = 5.0
+START_NOW_WAIT_TEXT = "Listening for line syncs to tell the mode…"
+START_NOW_NO_MODE_TEXT = (
+    "Can't tell the mode: no line syncs were heard. Choose the mode in the "
+    "Mode list, then press Start Now."
+)
+START_NOW_NO_AUDIO_TEXT = (
+    "Start Now heard no audio to decode. Start the receiver, tuned to the "
+    "SSTV signal, then press Start Now."
+)
 # Rows the Received Images list grows to before it scrolls.
 _HISTORY_MAX_ROWS = 5
 # Saved images listed again after a restart (newest first).
@@ -555,6 +569,16 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         self._watched: Optional[QWidget] = None
         # The mode the hint's Switch button asks for (see show_fm_needed).
         self._switch_to = "FM"
+        # Start Now on Auto (VIS) waiting for the line syncs to tell the
+        # mode: the seconds of audio heard since (None: not waiting).
+        self._start_now_wait: Optional[float] = None
+        # False from Start Now until audio arrives (a Start Now with no
+        # audio at all is said so, not "the audio stopped").
+        self._start_now_heard = True
+        # What the status says after a Start Now on Auto that couldn't tell
+        # the mode: "no_mode" (replaced once line syncs that tell it are
+        # heard), "syncs" (cleared once they are gone), or None.
+        self._start_now_hint: Optional[str] = None
 
         self._setup_ui()
 
@@ -633,7 +657,8 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         self._start_now_btn.setToolTip(
             "Decode the transmission that is already under way (the start "
             "tone was missed), from its line syncs. Uses the mode above, or "
-            "with Auto the mode the sync pulses fit."
+            "with Auto the mode the sync pulses fit (it listens a few seconds "
+            "for them)."
         )
         self._start_now_btn.clicked.connect(self._on_start_now_clicked)
         mode_row.addWidget(self._start_now_btn)
@@ -641,7 +666,8 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         layout.addLayout(mode_row)
 
         # Shown when the receiver is in a mode whose audio can't carry SSTV
-        # (AM, CW, I/Q): SSTV is FM on VHF/UHF, USB or LSB on HF.
+        # (AM, CW, I/Q): SSTV is FM on VHF/UHF, USB or LSB on HF. (Or in the
+        # other sideband than the band's.)
         self._fm_callout = QFrame()
         t.set_role(self._fm_callout, "callout", "warning")
         fm_row = QHBoxLayout(self._fm_callout)
@@ -656,6 +682,9 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
             "Set Demodulation > Mode to FM with 5 kHz deviation (narrowband)"
         )
         self._switch_fm_btn.clicked.connect(self._on_switch_fm_clicked)
+        # A click leaves the keyboard focus where it was (Space stays the
+        # window's Start/Stop); the button hides once it has done its job.
+        self._switch_fm_btn.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         fm_row.addWidget(self._switch_fm_btn)
         self._fm_callout.setVisible(False)
         layout.addWidget(self._fm_callout)
@@ -841,12 +870,29 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         listening. Returns the status note (None if nothing was kept)."""
         return self._end_image_early(why)
 
-    def show_fm_needed(self, mode: Optional[str], switch_to: str = "FM") -> None:
+    def finish_input(self) -> None:
+        """The audio has ended for good (a recording played to its end): an
+        image coming in completes when only its last line is missing (that
+        line waits for no more audio), else it is kept as a partial image
+        (SSTVDecoder.finish)."""
+        decoder = self._decoder
+        if self._is_receiving and decoder is not None and decoder.is_receiving():
+            decoder.finish()
+            self._update_action_buttons()
+
+    def show_fm_needed(
+        self, mode: Optional[str], switch_to: str = "FM", band: str = ""
+    ) -> None:
         """Say in the panel that the receiver's ``mode`` (AM, CW, I/Q) can't
         carry SSTV, offering to switch to ``switch_to``: "FM" (VHF/UHF, e.g.
-        the ISS) or "USB"/"LSB" (HF). None hides the hint."""
+        the ISS) or "USB"/"LSB" (HF). With ``band`` ("40 m"), ``mode`` is
+        the other sideband than the one SSTV is usually sent in there. None
+        hides the hint. A hint that appears is scrolled into view."""
         wanted = switch_to if switch_to in ("USB", "LSB") else "FM"
         self._switch_to = wanted
+        callout = self._fm_callout
+        # (isHidden, not isVisible: the SSTV tab need not be on screen.)
+        before = (not callout.isHidden(), self._fm_label.text())
         if mode:
             if wanted == "FM":
                 text = (
@@ -854,13 +900,36 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
                     f"the receiver is in {mode}."
                 )
                 tip = "Set Demodulation > Mode to FM with 5 kHz deviation (narrowband)"
+            elif band:
+                text = (
+                    f"SSTV on {band} is usually sent in {wanted}; the receiver "
+                    f"is in {mode}."
+                )
+                tip = f"Set Demodulation > Mode to {wanted} (2.7 kHz filter)"
             else:
                 text = f"SSTV on HF is sent in {wanted}; the receiver is in {mode}."
                 tip = f"Set Demodulation > Mode to {wanted} (2.7 kHz filter)"
             self._fm_label.setText(text)
             self._switch_fm_btn.setText(f"Switch to {wanted}")
             self._switch_fm_btn.setToolTip(tip)
-        self._fm_callout.setVisible(bool(mode))
+        elif callout.isVisible():
+            focus = QApplication.focusWidget()
+            if focus is not None and callout.isAncestorOf(focus):
+                # (Hidden with the focus, it would pass on to the next
+                # control, Auto-save at the bottom, scrolling the tab there.)
+                self._start_btn.setFocus(Qt.FocusReason.OtherFocusReason)
+        callout.setVisible(bool(mode))
+        if mode and before != (True, self._fm_label.text()):
+            QTimer.singleShot(0, self._reveal_callout)
+
+    def _reveal_callout(self) -> None:
+        """Scroll the tab so the mode hint is in view."""
+        area = self.parentWidget()
+        while area is not None and not isinstance(area, QScrollArea):
+            area = area.parentWidget()
+        if area is None or area.widget() is not self or self._fm_callout.isHidden():
+            return
+        area.ensureWidgetVisible(self._fm_callout, 0, 8)
 
     def switch_mode(self) -> str:
         """The mode the hint's Switch button asks for: "FM", "USB" or "LSB"."""
@@ -887,9 +956,12 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
             if not self._no_audio_label.isHidden():
                 self._no_audio_label.setVisible(False)
             decoder = self._decoder
-            if gap > AUDIO_GAP_S and decoder is not None and decoder.is_receiving():
+            if gap > AUDIO_GAP_S and not self._start_now_heard:
+                self._start_now_without_audio()
+            elif gap > AUDIO_GAP_S and decoder is not None and decoder.is_receiving():
                 # After a pause the line timing is gone: keep what came in.
                 self._end_image_early("the audio stopped for a while")
+            self._start_now_heard = True
         if sample_rate and (
             self._decoder is None
             or abs(float(self._decoder.sample_rate) - float(sample_rate)) > 1.0
@@ -897,6 +969,9 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
             self.create_decoder(float(sample_rate))
         if self._decoder:
             self._decoder.process_audio(samples)
+            if self._start_now_wait is not None and samples is not None:
+                self._start_now_wait += len(samples) / float(self._decoder.sample_rate)
+                self._try_pending_start_now()
 
     # ------------------------------------------------------------------
     # Save location and history
@@ -982,7 +1057,26 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         else:
             self._viewer.current_index = len(self._viewer.images) - 1
         self._rebuild_history_list()
+        self._show_newest_listed()
         return len(entries)
+
+    def _show_newest_listed(self) -> None:
+        """With nothing in the viewer (just started, say), show the image
+        selected in Received Images (the newest), as if just received, not
+        "No image yet" over a list of them. Quietly does nothing if its
+        file can't be read."""
+        if self._image_display.has_image() or self._decoder_busy():
+            return
+        if not 0 <= self._viewer.current_index < self._viewer.get_image_count():
+            return
+        image = self._current_entry_image()
+        if image is None:
+            return
+        self._image_display.set_image(image)
+        self._showing_complete = True
+        self._update_image_info()
+        self._refresh_history_ui()
+        self._update_action_buttons()
 
     def _rebuild_history_list(self) -> None:
         self._history_list.blockSignals(True)
@@ -1094,6 +1188,7 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
 
     def _set_status(self, text: str, tone: Optional[str] = None) -> None:
         """Show an activity message above the image (hidden when empty)."""
+        self._start_now_hint = None
         self._status_label.setText(text)
         self._status_label.setVisible(bool(text))
         _theme().set_tone(self._status_label, tone)
@@ -1182,6 +1277,8 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         self._decoder.set_forced_mode(self.selected_mode())
         self._is_receiving = True
         self._last_audio_time = time.monotonic()
+        self._start_now_wait = None
+        self._start_now_heard = True
         self._update_timer.start()
         self._set_listening_ui(True)
         self._tone_label.setText("Listening…")
@@ -1196,6 +1293,8 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         """Handle stop button click."""
         kept = self._end_image_early(None)
         self._is_receiving = False
+        self._start_now_wait = None
+        self._start_now_heard = True
         self._update_timer.stop()
         self._set_listening_ui(False)
         self.show_fm_needed(None)
@@ -1215,16 +1314,51 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         mode = self.selected_mode()
         if decoder.is_receiving():
             self._end_image_early("Start Now began a new one")
+        self._start_now_heard = False  # (until audio arrives)
+        self._start_now_wait = None
         if not decoder.start_now(mode):
-            self._set_status(
-                "Can't tell the mode yet: no line syncs heard. Choose the mode "
-                "in the Mode list, then press Start Now.",
-                "warning",
-            )
+            # Auto (VIS), and no line syncs heard yet (the decoder may only
+            # have started listening): listen a few seconds for them.
+            self._start_now_wait = 0.0
+            self._set_status(START_NOW_WAIT_TEXT, "info")
             return
-        spec = decoder.get_mode()
+        self._say_starting()
+
+    def _say_starting(self) -> None:
+        spec = self._decoder.get_mode() if self._decoder is not None else None
         name = spec.name if spec else "SSTV"
         self._set_status(f"Starting {name} from the next line sync…", "success")
+
+    def _try_pending_start_now(self) -> None:
+        """Start Now on Auto (VIS) is waiting for the line syncs to tell the
+        mode: start as soon as they do, or give up after
+        START_NOW_AUTO_WAIT_S seconds of audio."""
+        decoder = self._decoder
+        if decoder is None or self._start_now_wait is None:
+            return
+        if decoder.is_receiving():  # (a VIS started an image meanwhile)
+            self._start_now_wait = None
+            return
+        if decoder.start_now(self.selected_mode()):
+            self._start_now_wait = None
+            self._say_starting()
+            return
+        if self._start_now_wait >= START_NOW_AUTO_WAIT_S:
+            self._start_now_wait = None
+            self._set_status(START_NOW_NO_MODE_TEXT, "warning")
+            self._start_now_hint = "no_mode"
+
+    def _start_now_without_audio(self) -> None:
+        """Start Now was pressed and no audio has come since: there is
+        nothing to decode (not "the audio stopped for a while")."""
+        self._start_now_heard = True
+        self._start_now_wait = None
+        decoder = self._decoder
+        if decoder is not None and decoder.is_receiving():
+            decoder.stop()  # (no audio, so no lines to keep)
+            self._show_listening_viewer()
+        self._set_status(START_NOW_NO_AUDIO_TEXT, "warning")
+        self._update_action_buttons()
 
     def _on_tune_iss_clicked(self) -> None:
         self.tune_iss_requested.emit()
@@ -1388,6 +1522,7 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
 
     def _on_mode_detected(self, mode: SSTVModeSpec) -> None:
         """Callback when SSTV mode is detected."""
+        self._start_now_wait = None  # (an image began: no Start Now waits)
         self._mode_label.setText(mode.name)
         self._resolution_label.setText(f"{mode.width} × {mode.height}")
         self._progress_bar.setValue(0)
@@ -1526,6 +1661,11 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
                 "Check the Mode, or wait for the next image's start tone.",
                 "warning",
             )
+        elif reason == "the audio ended":  # (finish_input: no more audio)
+            self._set_status(
+                f"The audio ended before the image did. {note or ''}".strip(),
+                "warning",
+            )
         elif note is None:
             self._set_status(
                 "The signal faded before the image got going. Listening for the "
@@ -1629,7 +1769,11 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         decoder = self._decoder
         if decoder is None:
             return
-        if silent > AUDIO_GAP_S and decoder.is_receiving():
+        waiting = decoder.is_receiving() or self._start_now_wait is not None
+        if silent > AUDIO_GAP_S and waiting and not self._start_now_heard:
+            # Start Now, and no audio has come since.
+            self._start_now_without_audio()
+        elif silent > AUDIO_GAP_S and decoder.is_receiving():
             # The audio stopped (the receiver stopped, or left the SSTV
             # modes): keep what came in now, not when audio comes back.
             self._end_image_early("the audio stopped for a while")
@@ -1653,6 +1797,17 @@ class SSTVPanel(QWidget if HAS_PYQT6 else object):
         tone = decoder.get_tone()
         self._tone_meter.set_reading(tone["tone_hz"], active=True)
         self._tone_label.setText(tone["text"])
+        guess = tone.get("mode_guess")
+        if self._start_now_hint == "no_mode" and guess is not None:
+            # Start Now couldn't tell the mode; now the syncs do.
+            self._set_status(
+                f"{guess.name} line syncs heard: press Start Now to decode the "
+                "image under way.",
+                "info",
+            )
+            self._start_now_hint = "syncs"
+        elif self._start_now_hint == "syncs" and guess is None:
+            self._set_status("")  # (the syncs are gone: nothing under way)
 
     def _refresh_history_ui(self) -> None:
         """Sync the list, counter, empty state and navigation buttons."""

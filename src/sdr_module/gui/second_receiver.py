@@ -195,6 +195,19 @@ SPLITTER_KEY = "layout/second_receiver/splitter"
 PLOTS_KEY = "layout/second_receiver/plots"
 #: The waterfall's colors, history and levels (JSON, as the widget gives it).
 WATERFALL_KEY = "layout/second_receiver/waterfall"
+#: The spectrum's display choices (Peak hold, averaging, range; JSON).
+SPECTRUM_KEY = "layout/second_receiver/spectrum"
+#: The spectrum settings kept: not its FFT size, window or zoom (the
+#: frame analyzer's and the plot view's, set from the spectrum's menu).
+_SPECTRUM_KEPT = (
+    "avg",
+    "peak_hold",
+    "min_hold",
+    "range_auto",
+    "range_floor",
+    "range_top",
+    "bookmark_labels",
+)
 
 #: The sample rate a device starts at (every device offers it: RTL-SDR
 #: 0.9-2.56 MS/s, HackRF 2-20 MS/s, the demo device 1-3.2 MS/s).
@@ -257,6 +270,8 @@ _TX_MODES = {
 }
 #: Data transmissions up to this wide are sent on the carrier (heard in CW).
 _CW_DATA_HZ = 1e3
+#: A transmission's mode in words, when its job doesn't say how it is sent.
+_TX_MODE_WORDS = {"DATA": "data on the carrier", "SSB": "SSB"}
 #: FM deviation for a transmission's occupied width: (up to width, value).
 _FM_BY_WIDTH = (
     (10e3, "2.5 kHz"),  # the FM tone ID (2.5 kHz, 700 Hz tone: 6.4 kHz)
@@ -831,6 +846,11 @@ if HAS_PYQT6:
             self._plots = QSplitter(Qt.Orientation.Vertical)
             self._plots.setChildrenCollapsible(False)
             self._spectrum = SpectrumWidget()
+            # The main window's spectrum defaults: one trace (Peak hold is a
+            # click away) and a range that follows the signals.
+            self._spectrum.apply_display_settings(
+                dict(getattr(self._win, "_SPECTRUM_DEFAULTS", {}))
+            )
             self._waterfall = WaterfallWidget()
             # The waterfall fills at once (a row per frame) with levels that
             # follow the noise floor.
@@ -857,6 +877,9 @@ if HAS_PYQT6:
             self._plots.setStretchFactor(0, 2)
             self._plots.setStretchFactor(1, 3)
             self._spectrum.resolution_changed.connect(self._apply_plot_resolution)
+            self._spectrum.display_settings_changed.connect(
+                self._save_spectrum_settings
+            )
             self._waterfall.display_settings_changed.connect(
                 self._save_waterfall_settings
             )
@@ -3165,7 +3188,12 @@ if HAS_PYQT6:
                 freq, mode, _width, what = target
                 where = format_frequency(freq)
                 if on_air:
-                    text = f"On air: {what} on {where} ({mode})."
+                    # How it is sent, in the main window's words ("45.45
+                    # Bd, 170 Hz shift"), not the engine's job class.
+                    job = getattr(engine, "job", None)
+                    how = str(getattr(job, "summary", "") or "")
+                    how = how or _TX_MODE_WORDS.get(mode.upper(), mode)
+                    text = f"On air: {what} on {where} ({how})."
                     tone = "danger"
                 else:
                     text = (
@@ -3398,7 +3426,35 @@ if HAS_PYQT6:
             self._on_tuned()
             self._apply_dsp_settings()
             self._restore_waterfall_settings()
+            self._restore_spectrum_settings()
             self._restore_geometry()
+
+        def _save_spectrum_settings(self) -> None:
+            if self._restoring:
+                return
+            shown = self._spectrum.display_settings()
+            kept = {key: shown[key] for key in _SPECTRUM_KEPT if key in shown}
+            try:
+                self._save(SPECTRUM_KEY, json.dumps(kept))
+            except (TypeError, ValueError) as e:  # pragma: no cover - defensive
+                logger.debug(f"Could not save the spectrum settings: {e}")
+
+        def _restore_spectrum_settings(self) -> None:
+            raw = self._settings.get_str(SPECTRUM_KEY, "")
+            if not raw:
+                return
+            try:
+                saved = json.loads(raw)
+            except ValueError:
+                logger.debug(f"Ignoring unreadable spectrum settings: {raw!r}")
+                return
+            if not isinstance(saved, dict):
+                return
+            kept = {key: saved[key] for key in _SPECTRUM_KEPT if key in saved}
+            try:
+                self._spectrum.apply_display_settings(kept)
+            except Exception as e:  # (a damaged setting must not stop it)
+                logger.warning(f"Ignoring the second receiver's spectrum settings: {e}")
 
         def _save_waterfall_settings(self) -> None:
             if self._restoring:

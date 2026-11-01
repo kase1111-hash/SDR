@@ -1320,10 +1320,15 @@ class QRPPanel(QWidget if HAS_PYQT6 else object):
             self._legal_label.setVisible(False)
             return
         from ...core import frequency_manager
-        from ...gui.transmitter import describe_refusal, license_name, quiet_checks
+        from ...gui.transmitter import (
+            describe_refusal,
+            format_mhz,
+            license_name,
+            quiet_checks,
+        )
 
         freq = self._freq_hz
-        where = f"{freq / 1e6:.3f} MHz"
+        where = format_mhz(freq)  # (3-6 decimals, as FREQ: 5.3305 MHz)
         lic = license_name()
         head = f"At {where} ({lic}, {self.mode()})"
         # The first mode name permitted here (or, if none is, the first).

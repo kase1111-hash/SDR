@@ -167,6 +167,9 @@ def describe_refusal(reason: Optional[str], freq_hz: float, mode: str = "") -> s
         if match:
             edge = float(match.group(1)) * 1e6
             where = _edge_words(edge, freq_hz)
+            band = _band_outside_license(edge)
+            if band:  # (no part of the band: "doesn't include 60 m")
+                return f"your license ({lic}) doesn't include {band} ({where})"
             return f"your license ({lic}) doesn't include {where}"
         match = re.match(
             r"Frequency ([\d.]+) MHz is not in any amateur or license-free band", body
@@ -183,10 +186,29 @@ def describe_refusal(reason: Optional[str], freq_hz: float, mode: str = "") -> s
 
 def _edge_words(edge_hz: float, center_hz: float) -> str:
     """``"146.520 MHz"``, or for a signal edge ``"the signal's edge at
-    143.997 MHz"`` (the frequency manager names the edge that failed)."""
-    if abs(edge_hz - center_hz) < 500.0:
+    143.997 MHz"`` (the frequency manager names the frequency that failed,
+    to the hertz: a 60 m channel's 5.3305 MHz is no edge)."""
+    if abs(edge_hz - center_hz) < 1.0:
         return format_mhz(center_hz)
     return f"the signal's edge at {format_mhz(edge_hz)}"
+
+
+def _band_outside_license(freq_hz: float) -> str:
+    """``"60 m"`` when ``freq_hz`` is in an amateur band of which the
+    license class set has no part, else ""."""
+    from ..core.band_plan import band_for
+
+    band = band_for(float(freq_hz))
+    if band is None or not band.name.endswith(" Ham"):
+        return ""
+    license_class = frequency_manager.get_license_class()
+    for segment in frequency_manager.AMATEUR_BAND_PRIVILEGES:
+        overlaps = segment.start_hz < band.end_hz and segment.end_hz > band.start_hz
+        if overlaps and segment.is_granted_to(license_class):
+            return ""
+    short = band.name[: -len(" Ham")]  # "60m" (or "70cm")
+    unit = "cm" if short.endswith("cm") else "m"
+    return f"{short[: -len(unit)]} {unit}"  # "60 m"
 
 
 # --------------------------------------------------------------------------- #

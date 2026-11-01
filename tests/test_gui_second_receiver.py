@@ -1540,7 +1540,10 @@ class TestTxMonitorOnAir(_TxCase):
         self.assertEqual(rx._deviation_value(), "2.5 kHz")
         self.assertEqual(rx._filter_combo.currentText(), "12.5 kHz")
         rx._update_tx_group()
-        self.assertIn("On air: DE W1AW on 146.520 MHz (FM)", rx._tx_label.text())
+        # (How it is sent, as the main window says it: HAM-E2E-9.)
+        self.assertIn(
+            "On air: DE W1AW on 146.520 MHz (FM tone, 20 WPM).", rx._tx_label.text()
+        )
         # (A hint colored by its tone: its role never changes.)
         self.assertEqual(rx._tx_label.property("role"), "hint")
         self.assertEqual(rx._tx_label.property("tone"), "danger")

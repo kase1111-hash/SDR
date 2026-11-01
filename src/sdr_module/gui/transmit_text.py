@@ -15,9 +15,10 @@ in view while it is open):
   (SigMF or cf32, centered on the tuned frequency), and **Transmit** sends it
   on a HackRF One through the window's transmit engine
   (:meth:`~sdr_module.gui.main_window.SDRMainWindow._transmit_job`): the
-  legality check, the first-use confirmation, your automatic station IDs,
-  the ON AIR badge and Stop all apply. A line above the buttons says what
-  Transmit would do now, or why it can't.
+  legality check, the confirmation before each transmission (until "Don't
+  ask again"), your automatic station IDs, the ON AIR badge and Stop all
+  apply. A line above the buttons says what Transmit would do now, or why
+  it can't.
 
 The text is turned into a signal by :mod:`sdr_module.protocols.text_modes`
 (no Qt), the same code as the library encoders and ``sdr-scan encode``.
@@ -249,6 +250,22 @@ def snippet(text: str, limit: int = 24) -> str:
     if len(line) > limit:
         line = line[: limit - 1].rstrip() + "…"
     return f"“{line}”"
+
+
+def use_preferred_output(settings: Any, sink: Any) -> None:
+    """Point ``sink`` (an AudioSink) at the audio output chosen in Tools >
+    Preferences, as the receiver plays (when the sink can choose one; the
+    default output otherwise). For the previews."""
+    choose = getattr(sink, "set_output_device", None)
+    if not callable(choose):
+        return
+    try:
+        device = settings.get_str("prefs/audio_output", "")
+        name = settings.get_str("prefs/audio_output_name", "")
+        if device:
+            choose(device, name)
+    except Exception as e:  # pragma: no cover - backend-dependent
+        logger.debug(f"Preview plays on the default output: {e}")
 
 
 if HAS_PYQT6:
@@ -1286,7 +1303,9 @@ if HAS_PYQT6:
             self._transmit_button.setEnabled(bool(can))
             self._transmit_button.setToolTip(
                 "Transmit the text on the tuned frequency (HackRF One): checked, "
-                "with your automatic station ID; the first time asks first"
+                "with your automatic station ID; asks before each transmission "
+                "until you tick Don't ask again (Tools > Preferences turns it "
+                "back on)"
                 if can
                 else ready
             )
@@ -1337,16 +1356,7 @@ if HAS_PYQT6:
         def _configure_sink(self, sink: AudioSink) -> None:
             """Play on the audio output chosen in Tools > Preferences, as the
             receiver does (when the sink can choose one; else the default)."""
-            choose = getattr(sink, "set_output_device", None)
-            if not callable(choose):
-                return
-            try:
-                device = self._settings.get_str("prefs/audio_output", "")
-                name = self._settings.get_str("prefs/audio_output_name", "")
-                if device:
-                    choose(device, name)
-            except Exception as e:  # pragma: no cover - backend-dependent
-                logger.debug(f"Preview plays on the default output: {e}")
+            use_preferred_output(self._settings, sink)
 
         def _on_preview_playing(self, playing: bool) -> None:
             self._preview_button.setText("Stop &Preview" if playing else "&Preview")
@@ -1612,6 +1622,7 @@ __all__ = [
     "format_seconds",
     "resolve_emission",
     "snippet",
+    "use_preferred_output",
 ]
 if HAS_PYQT6:
     __all__ += ["TextPreview", "TransmitTextDialog"]

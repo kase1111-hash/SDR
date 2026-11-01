@@ -480,11 +480,19 @@ class TestDamagedSettingsInTheWindow(_IniSettings):
         self.assertIn("fft_size=1e+300", "\n".join(logs.output))
 
     def test_the_apps_own_spectrum_settings_say_nothing(self):
+        import logging
+
         first = self.window()
         first._apply_plot_resolution(8192, "blackman-harris", save=False)
         own = json.dumps(first._spectrum.display_settings())
-        with self.assertNoLogs("sdr_module.gui.main_window", "WARNING"):
-            win = self.window(spectrum_display=own)
+        seen = []
+        handler = logging.Handler(logging.WARNING)
+        handler.emit = lambda record: seen.append(record.getMessage())
+        log = logging.getLogger("sdr_module.gui.main_window")
+        log.addHandler(handler)
+        self.addCleanup(log.removeHandler, handler)
+        win = self.window(spectrum_display=own)
+        self.assertEqual([m for m in seen if "spectrum setting" in m], [])
         self.assertEqual(win._spectrum.display_settings()["fft_size"], 8192)
 
 

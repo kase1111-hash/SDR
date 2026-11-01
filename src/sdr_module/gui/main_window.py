@@ -193,7 +193,12 @@ from .signal_panel import SignalPanel
 from .signal_tools import SignalTools
 from .spectrum_widget import SpectrumWidget, format_hz
 from .status_history import CAPACITY as STATUS_HISTORY_SIZE
-from .status_history import StatusHistory, StatusHistoryPopup
+from .status_history import (
+    HintFollower,
+    MessageOverflow,
+    StatusHistory,
+    StatusHistoryPopup,
+)
 from .themes import (
     apply_theme,
     current_theme,
@@ -2218,6 +2223,10 @@ class _ElidedLabel(QLabel if HAS_PYQT6 else object):
     def text(self) -> str:
         return self._full_text
 
+    def is_elided(self) -> bool:
+        """Whether the text is drawn cut short (ending in "…")."""
+        return QLabel.text(self) != self._full_text
+
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().resizeEvent(event)
         self._elide()
@@ -2266,15 +2275,23 @@ class _ShrinkingLabel(_ElidedLabel):
 
     def sizeHint(self) -> Any:  # noqa: N802 - Qt naming
         # QLabel's own hint (padding included) for the text shown, widened
-        # to the full text.
+        # to the full text, both measured as QLabel measures its text: the
+        # hint is then the full text's wherever it is cut. (Measured by
+        # advance, it was a pixel more or less depending on the cut, and
+        # at 1024 px the status bar moved a pixel and back at every
+        # message.)
         hint = super().sizeHint()
-        metrics = self.fontMetrics()
         shown = QLabel.text(self)
-        extra = metrics.horizontalAdvance(self._full_text) - metrics.horizontalAdvance(
-            shown
-        )
-        hint.setWidth(hint.width() + max(0, extra))
+        if shown != self._full_text:
+            extra = self._text_width(self._full_text) - self._text_width(shown)
+            hint.setWidth(hint.width() + max(0, extra))
         return hint
+
+    def _text_width(self, text: str) -> int:
+        """``text``'s width as QLabel sizes a one-line plain text."""
+        centered = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignHCenter
+        flags = self.alignment().value & ~centered.value
+        return self.fontMetrics().boundingRect(0, 0, 2000, 2000, flags, text).width()
 
     def minimumSizeHint(self) -> Any:  # noqa: N802 - Qt naming
         hint = super().minimumSizeHint()
@@ -2767,6 +2784,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._busy_job = ""
         self._busy_job_at = -math.inf
         self._skip_by_job = ""
+        # The skip and pause hints said once per episode are said again
+        # when their cause changes while the status bar shows them (K-W2).
+        self._skip_follow = HintFollower()
+        self._audio_follow = HintFollower()
         self._pacer = _Pacer()  # how much each display frame reads
         self._entry_returns_focus = False  # Ctrl+L: Enter goes back to the plots
         self._restoring = False  # True while _restore_state applies settings
@@ -4115,8 +4136,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         # Transient messages (neutral, success or error), auto-clearing. A
         # long message ends in "…" instead of raising the window's minimum
-        # width; the full text is also in the tooltip. A click lists the
-        # last messages (they vanish after a few seconds).
+        # width; the whole of it shows just above the status bar meanwhile
+        # (_message_overflow) and is in the tooltip. A click lists the last
+        # messages (they vanish after a few seconds).
         self._status_history = StatusHistory()
         self._status_popup: Optional[StatusHistoryPopup] = None
         self._message_label = _ElidedLabel("")
@@ -4130,6 +4152,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # the name and the size chip shrink first.
         self._message_label.setMinimumWidth(_MESSAGE_MIN_WIDTH)
         statusbar.addWidget(self._message_label, 1)
+        # The whole of a message the status bar cuts short, above it while
+        # the message lasts; nothing moves (K-W1). Not over the playback
+        # strip: its Pause, speed and Close stay in reach.
+        self._message_overflow = MessageOverflow(self, self._message_label)
+        self._message_overflow.keep_clear_of(self._playback_bar)
         self._message_timer = QTimer(self)
         self._message_timer.setSingleShot(True)
         self._message_timer.timeout.connect(self._clear_status_message)
@@ -4429,7 +4456,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def keyPressEvent(self, event):
         """Space starts/stops receiving; Left/Right tune; [ and ] change the
         tuning step; Esc cancels typing in the Frequency field and returns
-        the focus to the plots.
+        the focus to the plots (and hides the whole of a long status
+        message shown above the status bar).
 
         These are handled here instead of as window-wide shortcuts, so they
         only act when the focused widget does not use the key itself: a
@@ -4442,6 +4470,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         key = event.key()
         mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
         if key == Qt.Key.Key_Escape and mods == Qt.KeyboardModifier.NoModifier:
+            overflow = self._own("_message_overflow")
+            if overflow is not None:
+                overflow.dismiss()
             if self._frequency_field().hasFocus():
                 # Esc cancels the edit (moving the focus would commit it).
                 self._control_panel._freq_input.cancel_edit()
@@ -4552,7 +4583,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._message_label.setToolTip(
             f"{message}\n\nClick for the last {STATUS_HISTORY_SIZE} messages."
         )
+        self._message_label.setAccessibleDescription(message)  # (screen readers)
         set_tone(self._message_label, tone)
+        overflow = self._own("_message_overflow")
+        if overflow is not None:  # (whole, should the status bar cut it)
+            overflow.show_message(message, tone)
         self._message_timer.start(max(500, int(duration_ms)))
         if history:
             self._status_history.add(message, tone)
@@ -4574,10 +4609,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._message_label.setToolTip(
             f"Click for the last {STATUS_HISTORY_SIZE} status messages."
         )
+        self._message_label.setAccessibleDescription("")
         set_tone(self._message_label, None)
+        overflow = self._own("_message_overflow")
+        if overflow is not None:
+            overflow.clear()
 
     def _show_status_history(self) -> None:
-        """A click on the message area: the last messages, newest first."""
+        """A click on the message area: the last messages, newest first
+        (over where the whole message showed: that goes)."""
+        overflow = self._own("_message_overflow")
+        if overflow is not None:
+            overflow.dismiss()
         popup = StatusHistoryPopup(
             self._status_history, self, open_error_history=self._show_error_history
         )
@@ -8465,9 +8508,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         counts alone looked healthy while it heard a fraction of the signal
         (with no speaker, as for ADS-B in None (I/Q), nothing else said
         so). It says so until frames have kept up for _SKIP_HINT_HOLD_S.
-        Not while a Scanner scan runs: it moves the receiver, the decoder is
-        off its channel then (its line says "Not tuned to ..."), and no
-        device or sample rate is to blame for what it misses."""
+        Should the cause change while the status bar still shows the hint
+        (the device, then Decode Recording's job, then the job done), the
+        status bar says it again with the current cause, once that has
+        held (_skip_follow). Not while a Scanner scan runs: it moves the
+        receiver, the decoder is off its channel then (its line says "Not
+        tuned to ..."), and no device or sample rate is to blame for what
+        it misses."""
         panel = self._own("_decoder_panel")
         if panel is None:
             return
@@ -8487,7 +8534,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # (The seconds real time is judged by still hold the short
             # frames for a while after this computer catches up again:
             # those were skipped here, not by the device.)
-            self._skip_by_computer = now - self._overloaded_at <= _REALTIME_WINDOW_S
+            self._skip_by_computer = self._computer_behind()
             self._skip_by_job = job
         skipping = decoding and now < self._skip_hint_until
         text = self._skip_hint_text() if skipping else None
@@ -8499,12 +8546,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._skip_hinted = False
         elif not self._skip_hinted:
             self._skip_hinted = True
+            self._skip_follow.reset()
             audio_hint = self._realtime_hint_shown and (
                 self._message_label.text() == self._realtime_hint_text
             )
             if not audio_hint:  # (not over it: the Decoder's line says it)
                 self._skip_hint_shown = text
                 self._show_status_message(text, "info", 10000)
+        else:
+            # Its cause changed while the status bar still says the first
+            # one: said again, once (K-W2).
+            again = self._skip_follow.follow(
+                text, self._skip_hint_shown, self._message_label.text(), now
+            )
+            if again:
+                self._skip_hint_shown = again
+                self._show_status_message(again, "info", 10000)
 
     def _busy_job_now(self) -> str:
         """This app's own job (Decode Recording, Convert Recording...) that
@@ -9094,6 +9151,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._realtime_hint_shown = False
             if self._message_label.text() == self._realtime_hint_text:
                 self._show_status_message("Audio resumed", "success", 2500)
+        if self._realtime_hint_shown:
+            self._follow_realtime_hint()
         # SSTV is FM (VHF/UHF) or USB/LSB (HF); it gets every block (no
         # squelch) so its line timing stays intact, and it listens even with
         # the speaker off.
@@ -9337,6 +9396,37 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         holds = _deviation_for(float(peak), float(often))
         return holds if holds in larger else larger[0]
 
+    def _follow_realtime_hint(self) -> None:
+        """While audio stays paused and the status bar still says why, it
+        says why again once the cause has changed and held (K-W2): the
+        demo device, then Decode Recording keeping this computer busy, then
+        the job done, then the device again. ("Audio resumed" replaces the
+        text said last.)"""
+        said = self._realtime_hint_text
+        shown = self._message_label.text()
+        if not said or shown != said or self._realtime():
+            self._audio_follow.reset()
+            return
+        now = time.monotonic()
+        again = self._audio_follow.follow(self._realtime_hint(), said, shown, now)
+        if again:
+            self._realtime_hint_text = again
+            self._realtime_hint_at = now
+            self._show_status_message(again, "info", 10000)
+
+    def _computer_behind(self) -> bool:
+        """Whether this computer can't keep up, or couldn't within the
+        seconds real time is judged over (_rx_history, _REALTIME_WINDOW_S):
+        what the display loop skipped then still counts, and it was this
+        computer's doing, not the device's (the Decoder's line judges it
+        so too, _skip_by_computer). An overload from before those seconds
+        started again (a new sample rate, device or recording) is not: what
+        is missing since is the device's (or the recording's)."""
+        if self._pacer.overloaded:
+            return True
+        history = self._rx_history
+        return bool(history) and self._overloaded_at >= history[0][0]
+
     def _realtime_hint(self) -> str:
         if self._playback.active and self._playback.speed != 1.0:
             return (
@@ -9354,7 +9444,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._playback.active:
             # (A recording's rate can't be changed while it plays: no advice
             # to lower it. N-02)
-            if self._pacer.overloaded:
+            if self._computer_behind():
                 return (
                     "This computer can't process the recording's "
                     f"{format_rate(self._device_sample_rate())} in real time "
@@ -9372,7 +9462,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "catches up (a lower sample rate in Receiver > Sample rate "
                 "helps)."
             )
-        if self._pacer.overloaded:
+        if self._computer_behind():  # (also while it catches up again)
             return (
                 "This computer can't process "
                 f"{format_rate(self._device_sample_rate())} in real time right "

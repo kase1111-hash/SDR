@@ -36,6 +36,7 @@ re-maps pixels; it never re-processes the history.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from collections import deque
@@ -60,11 +61,14 @@ from .spectrum_widget import (
     draw_stale,
     format_mhz,
     freq_ticks,
+    log_damaged_setting,
     nice_ticks,
     normalize_passband,
     passband_px,
     plot_side_margins,
     readout_decimals,
+    saved_flag,
+    saved_number,
     snap_step_hz,
     tuned_mhz_text,
     visible_bins,
@@ -102,6 +106,8 @@ try:
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
+
+logger = logging.getLogger(__name__)
 
 
 # Manual dynamic-range presets (dB below 0 dBFS), offered in the menus.
@@ -1559,32 +1565,64 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             "ceiling_db": ceiling,
         }
 
-    def apply_display_settings(self, settings: Dict[str, Any]) -> None:
-        """Restore :meth:`display_settings` output (unknown keys ignored)."""
+    def apply_display_settings(
+        self, settings: Dict[str, Any], defaults: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Restore :meth:`display_settings` output (unknown keys ignored).
+
+        A damaged value (a damaged or hand-edited settings file) is logged
+        and gives its value in ``defaults`` (else the one in use); a history
+        length the menu doesn't offer gives the nearest one."""
         if not isinstance(settings, dict):
             return
+        defaults = defaults if isinstance(defaults, dict) else {}
         blocked = self.blockSignals(True)
         try:
-            name = settings.get("colormap")
-            if isinstance(name, str) and name in self.COLORMAPS:
+            if "colormap" in settings:
+                name = settings.get("colormap")
+                if not (isinstance(name, str) and name in self.COLORMAPS):
+                    default = defaults.get("colormap")
+                    used = (
+                        default
+                        if isinstance(default, str) and default in self.COLORMAPS
+                        else self._colormap_name
+                    )
+                    self._damaged_setting("colormap", name, used)
+                    name = used
                 self._on_colormap_changed(name)
-            try:
-                self.set_history_seconds(
-                    float(settings.get("history_s", self._history_s))
-                )
-            except (TypeError, ValueError, OverflowError):
-                pass
-            try:
-                floor = float(settings.get("floor_db", self._db_range[0]))
-                ceiling = float(settings.get("ceiling_db", self._db_range[1]))
-                if math.isfinite(floor) and math.isfinite(ceiling):
-                    self._set_levels(floor, ceiling)
-            except (TypeError, ValueError, OverflowError):
-                pass
+            raw = settings.get("history_s", self._history_s)
+            seconds = saved_number(raw)
+            if seconds is None:
+                seconds = saved_number(defaults.get("history_s"))
+            self.set_history_seconds(self._history_s if seconds is None else seconds)
+            if saved_number(raw) != self._history_s:  # (damaged, or not offered)
+                self._damaged_setting("history_s", raw, self._history_s)
+            levels = []
+            for key, level in zip(
+                ("floor_db", "ceiling_db"), self._db_range, strict=True
+            ):
+                raw = settings.get(key, level)
+                number = saved_number(raw)
+                if number is None:
+                    self._damaged_setting(key, raw, float(level))
+                    number = float(level)
+                levels.append(number)
+            self._set_levels(*levels)
             if "auto_levels" in settings:
-                self.set_auto_levels(bool(settings.get("auto_levels")))
+                raw = settings.get("auto_levels")
+                flag = saved_flag(raw)
+                if flag is None:
+                    flag = saved_flag(defaults.get("auto_levels"))
+                    if flag is None:
+                        flag = self._auto_levels
+                    self._damaged_setting("auto_levels", raw, flag)
+                self.set_auto_levels(flag)
         finally:
             self.blockSignals(blocked)
+
+    @staticmethod
+    def _damaged_setting(key: str, value: Any, used: Any) -> None:
+        log_damaged_setting("waterfall", key, value, used, logger)
 
     def measurement(self) -> Optional[Dict[str, float]]:
         """The measured region: ``f_low``/``f_high`` (Hz), ``bandwidth`` (Hz),

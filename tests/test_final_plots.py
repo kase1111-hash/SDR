@@ -5,9 +5,11 @@ Each test names the problem it covers; they run the real window offscreen
 on the demo device (or the panel on its own where that is enough).
 """
 
+import json
 import os
 import unittest
 from itertools import combinations
+from unittest import mock
 
 import numpy as np
 
@@ -913,6 +915,198 @@ class TestSignalPanelDetails(unittest.TestCase):
         self.assertEqual(scope.evm_percent, evm)
         scope.set_overlay(ModulationOverlay.NONE)
         self.assertIsNone(scope.evm_percent)
+
+
+class TestApplyModeSaysItOnce(_SignalCase):
+    """Merged with the listening fixes: the band plan and the presets set
+    the mode without its own "FM: 200 kHz, 75 kHz (broadcast) deviation"
+    (the mode's last width and deviation, before theirs are set), since
+    they say what they set. Apply Mode said that stale line first, then
+    "Listening to ... 2.5 kHz deviation, 12.5 kHz filter" (both in the
+    status history)."""
+
+    def test_one_message(self):
+        from sdr_module.dsp.classifiers import ClassificationResult, SignalType
+        from sdr_module.dsp.signal_id import Identification
+
+        win = self.win
+        win.set_frequency(100.715e6)
+        win._set_demod_mode("AM", None, "10 kHz")
+        result = ClassificationResult(
+            SignalType.ANALOG, None, 0.9, 10.5e3, 0.0, 23.0, {}, kind="fm"
+        )
+        ident = Identification(
+            result, 100.715e6, "Narrow FM (voice or data)", "FM", "2.5 kHz", 12.5e3
+        )
+        self.panel.show_identification(ident)
+        said = []
+        show = win._show_status_message
+
+        def record(text, *args, **kwargs):
+            said.append(text)
+            return show(text, *args, **kwargs)
+
+        with mock.patch.object(win, "_show_status_message", record):
+            self.panel.apply_btn.click()
+        self.assertEqual(win._listening_mode(), ("FM", "2.5 kHz"))
+        self.assertEqual(win._control_panel._bw_combo.currentText(), "12.5 kHz")
+        self.assertEqual(
+            said,
+            ["Listening to 100.715 MHz in FM, 2.5 kHz deviation, 12.5 kHz filter"],
+        )
+        # A mode chosen otherwise still says what it listens with.
+        win._set_demod_mode("AM", None, "10 kHz")
+        self.assertTrue(win._message_label.text().startswith("AM: "))
+
+
+class TestDamagedDisplaySettingsAreLogged(unittest.TestCase):
+    """ROB-07 (the part in the plots' files): a damaged averaging, hold,
+    range, palette or history value inside readable spectrum or waterfall
+    settings fell back without a log line, and a damaged yes/no was read
+    as Python reads it ("no" turned Peak hold on). Each is logged, as
+    GuiSettings does for its getters, and a damaged yes/no gives the
+    default."""
+
+    def setUp(self):
+        from tests.test_gui_chrome import require_pyqt6
+
+        require_pyqt6(self)
+        from sdr_module.gui import spectrum_widget, waterfall_widget
+
+        self.swm, self.wfm = spectrum_widget, waterfall_widget
+        self.sp = spectrum_widget.SpectrumWidget()
+        self.wf = waterfall_widget.WaterfallWidget()
+        self.addCleanup(self.sp.deleteLater)
+        self.addCleanup(self.wf.deleteLater)
+
+    def logged(self, logger, plot, settings, defaults=None):
+        """Apply ``settings`` (all damaged): one line each, saying what is
+        used instead."""
+        with self.assertLogs(logger, "WARNING") as logs:
+            plot.apply_display_settings(settings, defaults=defaults)
+        for key in settings:
+            lines = [line for line in logs.output if f" setting {key}=" in line]
+            self.assertEqual(len(lines), 1, (key, logs.output))
+            self.assertIn(": using ", lines[0])
+        self.assertEqual(len(logs.output), len(settings), logs.output)
+        return logs.output
+
+    def test_spectrum(self):
+        sp = self.sp
+        before = sp.db_range()
+        output = self.logged(
+            self.swm.logger,
+            sp,
+            {
+                "avg": "lots",
+                "peak_hold": "maybe",
+                "min_hold": [1],
+                "range_auto": None,
+                "range_floor": "low",
+                "range_top": float("nan"),
+                "bookmark_labels": {"on": 1},
+            },
+            defaults={"range_auto": True, "peak_hold": False},
+        )
+        self.assertIn(
+            "spectrum setting peak_hold='maybe': using False instead", "\n".join(output)
+        )
+        self.assertEqual(sp.average_frames(), 0)
+        self.assertFalse(sp.peak_hold())  # (the default; "maybe" read as yes)
+        self.assertFalse(sp.min_hold())
+        self.assertTrue(sp.auto_range())
+        self.assertTrue(sp.bookmark_labels_visible())
+        self.assertEqual(sp.db_range(), before)
+        # A value the menu doesn't offer: the nearest one, said so.
+        output = self.logged(self.swm.logger, sp, {"avg": 5})
+        self.assertIn("using 4 instead", output[0])
+        self.assertEqual(sp.average_frames(), 4)
+
+    def test_waterfall(self):
+        wf = self.wf
+        before = wf.levels()
+        self.logged(
+            self.wfm.logger,
+            wf,
+            {
+                "colormap": "rainbow",
+                "history_s": "an hour",
+                "auto_levels": "please",
+                "floor_db": None,
+                "ceiling_db": float("inf"),
+            },
+            defaults={"auto_levels": True, "history_s": 60.0},
+        )
+        self.assertEqual(wf.colormap_name(), "turbo")
+        self.assertEqual(wf.history_seconds(), 60.0)
+        self.assertTrue(wf.auto_levels())
+        self.assertEqual(wf.levels(), before)
+        output = self.logged(self.wfm.logger, wf, {"history_s": 100})
+        self.assertIn("using 60.0 instead", output[0])
+
+    def test_saved_settings_apply_without_a_word(self):
+        """What the app saves (and a yes/no as GuiSettings reads one)."""
+        sp, wf = self.sp, self.wf
+        sp.set_peak_hold(False)
+        sp.set_average_frames(8)
+        sp.set_db_range(-110.0, -20.0)
+        wf.set_colormap("viridis")
+        wf.set_history_seconds(300)
+        saved_sp, saved_wf = sp.display_settings(), wf.display_settings()
+        other_sp = self.swm.SpectrumWidget()
+        other_wf = self.wfm.WaterfallWidget()
+        self.addCleanup(other_sp.deleteLater)
+        self.addCleanup(other_wf.deleteLater)
+        with self.assertNoLogs(self.swm.logger, "WARNING"):
+            other_sp.apply_display_settings(json.loads(json.dumps(saved_sp)))
+            self.assertEqual(other_sp.db_range(), (-110.0, -20.0))
+            other_sp.apply_display_settings({"peak_hold": "true", "min_hold": 0})
+        with self.assertNoLogs(self.wfm.logger, "WARNING"):
+            other_wf.apply_display_settings(json.loads(json.dumps(saved_wf)))
+        self.assertEqual(other_wf.display_settings(), saved_wf)
+        self.assertTrue(other_sp.peak_hold())
+        self.assertFalse(other_sp.min_hold())
+        self.assertEqual(other_sp.average_frames(), 8)
+
+
+class TestDamagedDisplaySettingsInTheWindow(unittest.TestCase):
+    """The window starts with its defaults for damaged values in its saved
+    plot settings, and says which (once each)."""
+
+    def test_defaults_and_a_line_each(self):
+        from tests.test_gui_chrome import _FakeSettings, require_pyqt6
+
+        require_pyqt6(self)
+        from sdr_module.gui import (
+            bookmarks_panel,
+            main_window,
+            spectrum_widget,
+            waterfall_widget,
+        )
+
+        store = _FakeSettings()
+        store.values["spectrum_display"] = json.dumps({"peak_hold": "nope", "avg": "x"})
+        store.values["waterfall_display"] = json.dumps(
+            {"auto_levels": "off!", "history_s": []}
+        )
+        for module in (main_window, bookmarks_panel):
+            patcher = mock.patch.object(module, "GuiSettings", lambda: store)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        with self.assertLogs(spectrum_widget.logger, "WARNING") as sp_logs:
+            with self.assertLogs(waterfall_widget.logger, "WARNING") as wf_logs:
+                win = main_window.SDRMainWindow(demo_mode=False)
+        for timer in (win._display_timer, win._status_timer, win._hotplug_timer):
+            timer.stop()
+        self.addCleanup(win.deleteLater)
+        self.addCleanup(win.close)
+        self.assertFalse(win._spectrum.peak_hold())
+        self.assertTrue(win._spectrum.auto_range())
+        self.assertEqual(win._spectrum.average_frames(), 0)
+        self.assertTrue(win._waterfall.auto_levels())
+        self.assertEqual(win._waterfall.history_seconds(), 60.0)
+        self.assertEqual(len(sp_logs.output), 2, sp_logs.output)
+        self.assertEqual(len(wf_logs.output), 2, wf_logs.output)
 
 
 if __name__ == "__main__":  # pragma: no cover

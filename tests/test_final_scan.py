@@ -1355,6 +1355,25 @@ class TestRefusedStepsInTheWindow(_ScanWindowCase):
         self.assertEqual(len(entries), 1, entries)
         self.assertIn("PLL not locked", entries[0])
 
+    def test_what_a_step_that_breaks_logs_is_kept(self):
+        win = self.win
+        tune = win._tune_to
+
+        def broken(freq_hz, recenter=False):
+            if freq_hz >= 100e6:
+                logging.getLogger("sdr_module.gui.main_window").warning(
+                    "The tuner said something odd"
+                )
+                raise RuntimeError("tuner gone")
+            return tune(freq_hz, recenter)
+
+        win._tune_to = broken
+        panel = self.sweep("once", 10.0)
+        self.assertFalse(panel.engine.active)
+        texts = self.entries()
+        self.assertIn("The tuner said something odd", texts)
+        self.assertTrue(any("tuner gone" in text for text in texts), texts)
+
     def test_a_refused_tune_outside_a_scan_is_still_logged(self):
         self.assertFalse(self.win._tune_to(104.0e6, recenter=True))
         entries = self.entries()

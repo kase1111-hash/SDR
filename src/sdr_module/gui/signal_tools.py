@@ -47,6 +47,7 @@ from ..dsp.signal_id import (
     analysis_band,
     better,
     identify,
+    takes_needed,
 )
 from ..dsp.signal_list import SignalPeak, SignalSurvey, find_signals
 
@@ -107,6 +108,11 @@ if HAS_PYQT6:
             self._ident_reach = 0.0
             self._ident_band: Tuple[float, float] = (0.0, 0.0)
             self._ident_takes = 0
+            self._ident_kinds: List[str] = []  # what each take found
+            self._ident_lost_s = 0.0  # signal dropped while listening
+            # The device and its count of dropped samples at the last frame:
+            # a capture must not span samples lost in between.
+            self._drops: Optional[Tuple[int, int]] = None
             # Signals in view.
             self._acc: Optional[np.ndarray] = None
             self._acc_frames = 0
@@ -211,7 +217,7 @@ if HAS_PYQT6:
                 dt = len(samples) / rate
             self._last_frame_t = now
             try:
-                self._identify_frame(samples)
+                self._identify_frame(samples, self._samples_lost(rate))
                 self._signals_frame(power, now)
                 self._scope_frame(channel, chain)
                 self._bursts_frame(samples, rate)
@@ -260,6 +266,8 @@ if HAS_PYQT6:
                     self._identifier.set_offset(offset)
                     self._ident_best = None
                     self._ident_takes = 0
+                    self._ident_kinds = []
+                    self._ident_lost_s = 0.0
             if self._tracker is not None:
                 self._tracker.retuned(float(self._win._vfo_offset_hz()))
                 if self._win._is_running:
@@ -292,20 +300,38 @@ if HAS_PYQT6:
             panel = win._control_panel
             mode = panel._demod_combo.currentText()
             rate = float(win._device_sample_rate())
-            width, reach = analysis_band(mode, win._channel_bandwidth(), rate)
-            self._identifier = SignalIdentifier(rate, win._vfo_offset_hz(), width)
             self._ident_freq = float(win._current_frequency())
+            width, reach = analysis_band(
+                mode, win._channel_bandwidth(), rate, self._ident_freq
+            )
+            self._identifier = SignalIdentifier(rate, win._vfo_offset_hz(), width)
             self._ident_reach = reach
             self._ident_band = self._identifier.passband_hz
             self._ident_best = None
             self._ident_takes = 0
+            self._ident_kinds = []
+            self._ident_lost_s = 0.0
             self.panel.set_identify_busy(True)
             self.panel.set_identify_status(
                 f"Listening to {_mhz(self._ident_freq)}…", None
             )
             return True
 
-        def _identify_frame(self, samples: np.ndarray) -> None:
+        def _samples_lost(self, rate: float) -> float:
+            """Seconds of signal the device dropped since the last frame (its
+            queue overflowed, or the demo skipped ahead to catch up)."""
+            device = self._win._device
+            try:
+                dropped = int(device.dropped_samples)
+            except (AttributeError, TypeError, ValueError):
+                self._drops = None
+                return 0.0
+            before, self._drops = self._drops, (id(device), dropped)
+            if before is None or before[0] != id(device) or dropped <= before[1]:
+                return 0.0
+            return (dropped - before[1]) / rate if rate > 0 else 0.0
+
+        def _identify_frame(self, samples: np.ndarray, lost_s: float = 0.0) -> None:
             ident = self._identifier
             job = self._ident_job
             if job is not None and job.done():
@@ -318,6 +344,7 @@ if HAS_PYQT6:
                 if result is not None and ident is not None:
                     if abs(result.tuned_hz - self._ident_freq) < 0.5:
                         self._ident_takes += 1
+                        self._ident_kinds.append(result.kind)
                         self._ident_best = better(self._ident_best, result)
                         self._maybe_finish()
             ident = self._identifier
@@ -325,6 +352,9 @@ if HAS_PYQT6:
                 return
             if abs(ident.offset_hz - self._win._vfo_offset_hz()) > 0.5:
                 ident.set_offset(self._win._vfo_offset_hz())
+            if lost_s > 0:
+                ident.gap()  # (no capture spans the samples lost)
+                self._ident_lost_s += lost_s
             ident.feed(samples)
             seconds = ident.seconds
             if self._ident_job is None and ident.ready():
@@ -344,16 +374,40 @@ if HAS_PYQT6:
                     + ("" if seconds < 1.0 else " (waiting for a signal)"),
                     None,
                 )
+            if (
+                self._ident_job is None
+                and seconds + self._ident_lost_s >= WAIT_S
+                and not ident.ready()
+            ):
+                # No unbroken half second to judge in all that time (the
+                # receiver keeps dropping samples): what was heard, if any.
+                self._maybe_finish(give_up=True)
 
-        def _maybe_finish(self) -> None:
+        def _maybe_finish(self, give_up: bool = False) -> None:
             best = self._ident_best
             ident = self._identifier
-            if best is None or ident is None:
+            if ident is None:
                 return
+            if best is None:
+                if give_up:
+                    self._identifier = None
+                    self.panel.set_identify_busy(False)
+                    self.panel.set_identify_status(
+                        f"Couldn't listen to {_mhz(self._ident_freq)} for half a "
+                        "second without a break: the receiver keeps dropping "
+                        "samples (this computer can't keep up). A lower sample "
+                        "rate helps.",
+                        "warning",
+                    )
+                return
+            # Steady carriers and short pulses wait for more takes that
+            # agree (keying, or the whole packet, may yet show).
+            agree = self._ident_kinds.count(best.kind)
             enough = best.is_signal and (
-                best.confidence >= 0.6 or self._ident_takes >= 3
+                (best.confidence >= 0.6 and agree >= takes_needed(best))
+                or self._ident_takes >= 3
             )
-            if not enough and ident.seconds < WAIT_S:
+            if not enough and ident.seconds < WAIT_S and not give_up:
                 return
             self._identifier = None
             self.panel.set_identify_busy(False)

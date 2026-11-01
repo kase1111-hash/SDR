@@ -44,6 +44,7 @@ __all__ = [
     "identify",
     "listening_for",
     "confidence_words",
+    "takes_needed",
     "CAPTURE_MAX_RATE",
 ]
 
@@ -257,13 +258,20 @@ def _details(ident: Identification) -> List[str]:
     return lines
 
 
-def analysis_band(mode: str, channel_hz: float, rate: float) -> Tuple[float, float]:
+def analysis_band(
+    mode: str, channel_hz: float, rate: float, freq_hz: Optional[float] = None
+) -> Tuple[float, float]:
     """``(analysis width, search reach)`` in Hz for identifying the signal
     at the tuned frequency while listening in ``mode`` with a channel (or
     filter) ``channel_hz`` wide: a band a few channels wide around it (the
     whole span for a wide I/Q channel, to see pulses as they are), and how
-    far from the tuned frequency the signal may reach and still count."""
+    far from the tuned frequency the signal may reach and still count.
+    On 1090 MHz (``freq_hz``) at least 2 MHz whatever the mode: the radar
+    replies' 0.5 us pulses show only that wide."""
     channel = max(float(channel_hz), 100.0)
+    if freq_hz is not None and _mode_s_band(freq_hz):
+        channel = max(channel, 2e6)
+        mode = "None (I/Q)"
     if mode.startswith("None"):
         width = min(float(rate), max(channel, 100e3))
         reach = min(max(0.5 * channel, 5e3), 25e3)
@@ -402,6 +410,16 @@ class SignalIdentifier:
         self.received = 0
         self._next_take = int(MIN_S * self.rate)
 
+    def gap(self) -> None:
+        """Samples were lost before the next block (the receiver dropped
+        some, or skipped ahead): what is held is no longer one stretch of
+        signal, so it is dropped and the next capture is due once
+        :data:`MIN_S` of unbroken signal has come (how long it has listened
+        in all still counts, for the wait)."""
+        self._blocks.clear()
+        self._held = 0
+        self._next_take = self.received + int(MIN_S * self.rate)
+
     def feed(self, block: np.ndarray) -> None:
         """Add a raw block from the receiver (at ``rate_in``)."""
         x = np.asarray(block)
@@ -439,12 +457,31 @@ class SignalIdentifier:
 
 def better(old: Optional[Identification], new: Identification) -> Identification:
     """Of two identifications of the same frequency, the more telling one:
-    a signal over no signal, else the more confident."""
+    a signal over no signal; keying seen over what it looks like between
+    or across its keys (CW over the steady carrier of a key held down, on/off
+    keyed data over the short pulses a broken capture of it shows); else
+    the more confident."""
     if old is None:
         return new
     if new.is_signal != old.is_signal:
         return new if new.is_signal else old
+    for keyed, plain in (("cw", "carrier"), ("ook", "pulsed")):
+        if {old.kind, new.kind} == {keyed, plain}:
+            return old if old.kind == keyed else new
     return new if new.confidence >= old.confidence else old
+
+
+def takes_needed(ident: Identification) -> int:
+    """How many takes (half a second apart) Identify hears before it may
+    stop on ``ident``: three for a steady carrier (a CW station holds its
+    key down between its words: keying may still show), two for short
+    pulses away from 1090 MHz (on/off keyed data broken by a gap in the
+    stream looks like them), else one."""
+    if ident.kind == "carrier":
+        return 3
+    if ident.kind == "pulsed" and not _mode_s_band(ident.tuned_hz):
+        return 2
+    return 1
 
 
 # Re-exported for the window's wording of the cap.

@@ -1911,6 +1911,10 @@ class MockDevice:
         self._stream_pos = 0
         self._stream_rate = 0.0
         self._stream_epoch: Optional[float] = None
+        #: Samples skipped to catch up with the clock (read too slowly), as
+        #: the drivers count those their queue dropped: an I/Q recording
+        #: says it has gaps.
+        self.dropped_samples = 0
         self._visible_key: Optional[Tuple[float, float]] = None
         self._visible: List[tuple] = []
         self._tables: Dict[Tuple[float, float], Tuple[np.ndarray, np.ndarray]] = {}
@@ -2059,6 +2063,7 @@ class MockDevice:
         behind = (now - self._stream_epoch) * rate - (self._stream_pos + n)
         if behind > _MAX_LAG_S * rate:
             self._stream_pos += int(behind)
+            self.dropped_samples += int(behind)
         pos = self._stream_pos
         self._stream_pos += n
         return pos

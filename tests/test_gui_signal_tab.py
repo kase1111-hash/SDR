@@ -260,6 +260,68 @@ class TestIdentify(_SignalCase):
         self.assertIn("Stopped", self.panel.identify_status.text())
         self.assertTrue(self.panel.identify_btn.isEnabled())
 
+    def test_a_capture_never_spans_samples_the_receiver_dropped(self):
+        """PLOTS-E2E-2: on the ISM 433 preset (I/Q, 500 kHz) Identify said
+        'Short pulses' for the remote on a busy computer: the demo skipped
+        ahead after a stall and the capture spanned the gap, cutting the
+        packets. After samples are dropped the capture starts afresh: the
+        first take is half a second of signal from after the gap."""
+        from sdr_module.dsp.signal_id import SignalIdentifier
+
+        self.listen(433.92e6, ("None (I/Q)", None, "500 kHz"))
+        takes = []
+        real_take = SignalIdentifier.take
+
+        def take(ident):
+            capture = real_take(ident)
+            takes.append((ident.received, len(capture)))
+            return capture
+
+        dev = self.win._device
+        rate = self.win._device_sample_rate()
+        with mock.patch.object(SignalIdentifier, "take", take):
+            self.assertTrue(self.tools.identify())
+            ident = self.tools._identifier
+            self.frames(0.3)
+            # The window fell behind: the demo skips 0.3 s and counts it.
+            dev._stream_pos += int(0.3 * rate)
+            dev.dropped_samples += int(0.3 * rate)
+            before = ident.received  # (all before the gap)
+            result = self.identified()
+        received, length = takes[0]
+        self.assertGreaterEqual(received - before, 0.5 * ident.rate - 1)
+        self.assertLessEqual(length, received - before)
+        self.assertEqual(result.kind, "ook", result.summary())
+
+    def test_gives_up_when_the_receiver_keeps_dropping_samples(self):
+        """No unbroken half second to judge for a long while (a computer
+        that can't keep up): it says so instead of listening forever."""
+        from sdr_module.dsp.signal_id import WAIT_S
+
+        self.listen(433.92e6, ("None (I/Q)", None, "500 kHz"))
+        self.assertTrue(self.tools.identify())
+        dev = self.win._device
+        rate = self.win._device_sample_rate()
+        for _ in range(int(WAIT_S / 0.4) + 1):
+            # One block a frame, the demo skipping 0.4 s ahead each time.
+            dev._stream_pos += int(0.4 * rate)
+            dev.dropped_samples += int(0.4 * rate)
+            self.win._pacer.reset()
+            self.win._process_block(dev.read_samples(2048))
+        self.assertIsNone(self.tools._identifier)
+        self.assertTrue(self.panel.identify_btn.isEnabled())
+        self.assertIn("dropping samples", self.panel.identify_status.text())
+
+    def test_mode_s_in_fm_with_a_wide_filter(self):
+        """PLOTS-E2E-4: at 1090 MHz in FM with a 100 kHz filter the capture
+        was 400 kHz wide (each reply one burst): 'Unknown signal' after
+        4.4 s of work, now and then. It is analysed 2 MHz wide."""
+        self.listen(1090e6, ("FM", "25 kHz", "100 kHz"))
+        self.assertTrue(self.tools.identify())
+        self.assertGreaterEqual(self.tools._identifier.analysis_hz, 2e6)
+        ident = self.identified()
+        self.assertEqual(ident.label, "Mode S / ADS-B replies", ident.summary())
+
 
 class TestSignalsInView(_SignalCase):
     def setUp(self):

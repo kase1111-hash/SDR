@@ -16,15 +16,19 @@ How it decides:
   The stopband of a channel filter is never taken for noise: that gave
   50-150 dB "SNRs" and a confidence of 1.0 for anything, noise included.
   What stands above it is judged against how much the noise's spectrum
-  actually varies (measured, not assumed from the averaging).
+  actually varies (measured, not assumed from the averaging). A carrier's
+  faint sidebands are judged with the spectrum mirrored about it (they
+  are the same either side, the noise isn't), and FSK's two tones are
+  taken as one signal when their power lies symmetric about the tuned
+  frequency.
 * **Keying** (CW, OOK, pulses, a transmission starting) is found from the
   power envelope: two clearly separated levels, the low one at the noise.
   The modulation of what is keyed is then judged on the "on" samples only.
 * **Modulation** features: how much the envelope varies (from the power
-  moments, beyond what the noise explains), how far the instantaneous
-  frequency swings (beyond the noise), whether it dwells on two values
-  (FSK), the share of power in a carrier line, M-th power spectral lines
-  (PSK) and the occupied width.
+  moments, beyond what the noise explains; over all of a carrier's
+  sidebands), how far the instantaneous frequency swings (beyond the
+  noise), whether it dwells on two values (FSK), the share of power in a
+  carrier line, M-th power spectral lines (PSK) and the occupied width.
 * Every candidate kind gets a score from these features; the best one
   wins, and the confidence falls when the runner-up is close (the features
   disagree) or the SNR is low. It is a heuristic, not a calibrated
@@ -104,6 +108,10 @@ _HANN_ENBW = 1.5
 #: The lower quartile of exponentially distributed power (noise), over its
 #: mean: -ln(0.75).
 _Q25_EXP = -math.log(0.75)
+#: Keyed bursts whose mean level is at least this many times the keying
+#: threshold (which noise alone passes about once in a thousand samples)
+#: stand far out of any noise.
+_STRONG_BURSTS = 4.0
 
 
 @dataclass
@@ -451,18 +459,24 @@ def _moving_mean(values: np.ndarray, width: int) -> np.ndarray:
 
 
 def _narrow(
-    x: np.ndarray, rate: float, centre_hz: float, half_hz: float
+    x: np.ndarray,
+    rate: float,
+    centre_hz: float,
+    half_hz: float,
+    spectrum: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, float]:
     """The part of ``x`` within ``half_hz`` of ``centre_hz``, moved to 0 Hz
     and decimated (in the frequency domain) to about four times
     ``half_hz``. Returns ``(samples, new rate)``; amplitudes are kept.
+    ``spectrum``: ``np.fft.fft(x)``, when the caller has it already.
 
     The band's edges are raised-cosine tapers from 0.8 to 1.2 times
     ``half_hz`` (half way down at ``half_hz``, about the same noise
     bandwidth as a brick wall): a brick wall rings for a long time after a
     strong signal is keyed off, which fills the gaps of Morse code."""
     n = len(x)
-    spectrum = np.fft.fft(np.asarray(x, dtype=np.complex64))
+    if spectrum is None or len(spectrum) != n:
+        spectrum = np.fft.fft(np.asarray(x, dtype=np.complex64))
     bin_hz = rate / n
     shift = int(round(centre_hz / bin_hz))
     spectrum = np.roll(spectrum, -shift)
@@ -597,6 +611,124 @@ def _spread(ratio: np.ndarray, averages: float) -> float:
     low, mid = np.percentile(ratio, (5.0, 30.0))
     # (5th to 30th percentile of a normal spread: 1.12 standard deviations.)
     return max(floor, float(mid - low) / 1.1205)
+
+
+def _tone_pair(
+    centre: int,
+    powers: np.ndarray,
+    lo_core: np.ndarray,
+    hi_core: np.ndarray,
+    clear: np.ndarray,
+    holds: np.ndarray,
+    gap: int,
+) -> Optional[Tuple[int, int]]:
+    """Two groups of bins of about the same power (indices into the
+    groups) to take as one signal because the tuned frequency (bin
+    ``centre``) lies between them, about as far from their inner edges
+    (cores ``lo_core``..``hi_core``), and no group ``holds`` it:
+    ``(below, above)``, or None."""
+    below = np.flatnonzero((hi_core < centre) & clear)
+    above = np.flatnonzero((lo_core > centre) & clear)
+    if np.any(holds) or not len(below) or not len(above):
+        return None
+    b = int(below[np.argmax(hi_core[below])])
+    a = int(above[np.argmin(lo_core[above])])
+    d_lo = centre - hi_core[b]
+    d_hi = lo_core[a] - centre
+    similar = 0.25 <= powers[b] / max(powers[a], 1e-30) <= 4.0
+    if similar and max(d_lo, d_hi) <= 2.0 * max(min(d_lo, d_hi), gap):
+        return b, a
+    return None
+
+
+def _symmetric_pair(
+    starts: np.ndarray,
+    lengths: np.ndarray,
+    excess: np.ndarray,
+    powers: np.ndarray,
+    lo_core: np.ndarray,
+    hi_core: np.ndarray,
+    clear: np.ndarray,
+    reach_bins: float,
+    gap: int,
+) -> Optional[Tuple[int, int]]:
+    """The two tones of FSK, by their own symmetry about the tuned frequency
+    (the middle bin): two groups of bins of about the same power, whose
+    power is centred about as far below it as above it, within
+    ``reach_bins``, while no group is centred on it. ``(below, above)``
+    (indices into the groups), or None.
+
+    Their inner edges say little: the noise in the dip between the tones
+    joins a few bins to one tone's group or the other's, so one can reach
+    up to the tuned frequency, or past it, while the other stops short."""
+    centre = len(excess) // 2
+    count = len(starts)
+    if count < 2:
+        return None
+    cents = np.empty(count)
+    for i, (s, n) in enumerate(zip(starts.tolist(), lengths.tolist(), strict=True)):
+        part = excess[s : s + n]
+        total = float(np.sum(part))
+        cents[i] = (
+            float(np.sum(part * np.arange(s, s + n))) / total
+            if total > 0
+            else s + 0.5 * (n - 1)
+        )
+    # A group is centred on the tuned frequency when its power is centred
+    # in the middle half of its core around it (or within ``gap`` of it).
+    half_core = 0.5 * (hi_core - lo_core + 1)
+    centred = clear & (np.abs(cents - centre) <= np.maximum(0.5 * half_core, gap))
+    if np.any(centred):
+        return None
+    below = np.flatnonzero(clear & (cents < centre))
+    above = np.flatnonzero(clear & (cents > centre))
+    if not len(below) or not len(above):
+        return None
+    b = int(below[np.argmax(cents[below])])
+    a = int(above[np.argmin(cents[above])])
+    d_lo = centre - cents[b]
+    d_hi = cents[a] - centre
+    similar = 0.25 <= powers[b] / max(powers[a], 1e-30) <= 4.0
+    even = abs(d_hi - d_lo) <= 0.25 * (d_lo + d_hi)
+    if similar and even and max(d_lo, d_hi) <= reach_bins:
+        return b, a
+    return None
+
+
+def _sideband_reach(
+    ratio: np.ndarray, band: np.ndarray, peak: int, averages: float, gap: int
+) -> int:
+    """How far (bins) from a carrier line at bin ``peak`` its sidebands
+    stand out of the noise: the last bin of what stands out, contiguous
+    (breaks of at most ``gap`` bins) from the line's main lobe outwards
+    (0: nothing does).
+
+    ``ratio`` is the averaged spectrum over the noise density. A carrier's
+    modulation (AM's voice, FM's swing, keying) puts the same power either
+    side of it, so each bin is averaged with its mirror image about the
+    carrier: the sidebands keep their level and the noise, independent on
+    the two sides, varies less. What stands out is judged against the
+    spread this mirrored spectrum is measured to have (smoothed over 9 and
+    33 bins, as single bins are judged), so weak sidebands count without
+    taking the noise's ripple for signal. A strong signal elsewhere is
+    mirrored too, but only what joins the carrier counts."""
+    n = len(ratio)
+    d = np.arange(3, min(peak, n - 1 - peak) + 1)  # past the Hann main lobe
+    d = d[band[peak + d] & band[peak - d]]
+    if len(d) < 32:
+        return 0
+    mirrored = 0.5 * (ratio[peak + d] + ratio[peak - d])
+    reach = 0
+    for width in (9, 33):
+        smooth = _smooth(mirrored, width)
+        z = (smooth - 1.0) / _spread(smooth, 2.0 * width * averages)
+        hits = np.flatnonzero(z > 3.5)
+        if not len(hits) or d[hits[0]] > 3 + gap:
+            continue
+        breaks = np.flatnonzero(np.diff(d[hits]) > gap)
+        last = hits[breaks[0]] if len(breaks) else hits[-1]
+        reach = max(reach, int(d[last]))
+    return reach
 
 
 def _power_span(excess: np.ndarray, offset: int) -> Tuple[int, int]:
@@ -805,10 +937,13 @@ class SignalClassifier:
             half = max(0.75 * width, 3.0 * bin_hz, 60.0)
             # Not past the band's edges (the channel filter's stopband).
             half = min(half, max(hi_edge - centre, centre - lo_edge, 3.0 * bin_hz))
-            xs, rate_n = _narrow(x, rate, centre, half)
+            # (The capture's spectrum, kept for a second cut-out.)
+            spectrum = np.fft.fft(x)
+            xs, rate_n = _narrow(x, rate, centre, half, spectrum)
             noise_power = noise * 2.0 * half
             features["narrowed_hz"] = 2.0 * half
         else:
+            spectrum = None
             xs, rate_n = x, rate
             centre = 0.0
             half = 0.5 * band_width
@@ -853,8 +988,19 @@ class SignalClassifier:
         on_power = power[steady_on] if steady_on is not None else power
         n_eff = 2.0 * half * len(on_power) / rate_n
         env = self._envelope_features(on_power, noise_power, n_eff)
-        features.update(env)
         rho = float(env["signal_power"]) / max(noise_power, 1e-30)
+        if on is None and features["narrowed_hz"] > 0.0:
+            # A carrier can hold nearly all of the power and have sidebands
+            # far wider than 99 % of it (AM's voice): its envelope is judged
+            # over all of them (keying, frequency and phase where most of
+            # its power is, as cut out above).
+            limit = max(hi_edge - centre, centre - lo_edge, 3.0 * bin_hz)
+            over_sidebands = self._sideband_envelope(
+                x, rate, features, centre, half, limit, spectrum
+            )
+            if over_sidebands is not None:
+                env = over_sidebands
+        features.update(env)
         features["band_snr_db"] = 10.0 * math.log10(max(rho, 1e-30))
         snr_db = 10.0 * math.log10(max(env["signal_power"], 1e-30) / (noise * width))
         features.update(
@@ -876,6 +1022,12 @@ class SignalClassifier:
             # A line: as narrow as the analysis resolves, its SNR in that.
             width = float(features["bandwidth_hz"])
             snr_db = float(features.get("line_snr_db", snr_db))
+        elif kind == "am" and float(features["bandwidth_hz"]) > width:
+            # (Its sidebands' width, see _decide.)
+            width = float(features["bandwidth_hz"])
+            snr_db = 10.0 * math.log10(
+                max(env["signal_power"], 1e-30) / (noise * width)
+            )
         return self._result(
             kind,
             conf,
@@ -1049,7 +1201,13 @@ class SignalClassifier:
         if span == 1:
             expected = n * math.exp(-high_ratio)
             above = int(np.count_nonzero(power > high))
-            enough = above >= 10.0 * expected + 20.0
+            # Far more samples above ``high`` than noise alone gives: a weak
+            # signal that is always there crosses it now and then too, so
+            # ten times as many. Bursts standing far above it (four times:
+            # noise alone never gets there) need fewer: a capture of a few
+            # Mode S replies, cut narrow, holds some 60 such samples.
+            strong = on_level >= _STRONG_BURSTS * high
+            enough = above >= (4.0 if strong else 10.0) * expected + 20.0
         else:
             # Averaged: the gaps must be real gaps too (not the troughs of
             # a modulated signal), long and at the noise.
@@ -1187,34 +1345,40 @@ class SignalClassifier:
         clear_ = peaks >= 6.0
         if not np.any(clear_):
             clear_ = np.ones(len(peaks), dtype=bool)
-        holds = (lo_core <= centre_bin + gap) & (hi_core >= centre_bin - gap) & clear_
-        below = np.flatnonzero((hi_core < centre_bin) & clear_)
-        above = np.flatnonzero((lo_core > centre_bin) & clear_)
-        if not np.any(holds) and len(below) and len(above):
-            # Tuned between two humps of about the same power, about as far
-            # either side (the two tones of FSK): one signal.
-            b = int(below[np.argmax(hi_core[below])])
-            a = int(above[np.argmin(lo_core[above])])
-            d_lo = centre_bin - hi_core[b]
-            d_hi = lo_core[a] - centre_bin
-            similar = 0.25 <= powers[b] / max(powers[a], 1e-30) <= 4.0
-            if similar and max(d_lo, d_hi) <= 2.0 * max(min(d_lo, d_hi), gap):
-                starts = np.append(starts, starts[b])
-                lengths = np.append(lengths, starts[a] + lengths[a] - starts[b])
-                powers = np.append(powers, powers[a] + powers[b])
-                lo_core = np.append(lo_core, lo_core[b])
-                hi_core = np.append(hi_core, hi_core[a])
-                holds = np.append(np.zeros(len(holds), dtype=bool), True)
-                clear_ = np.append(clear_, True)
-        dist = np.where(
-            holds,
-            0,
-            np.minimum(np.abs(lo_core - centre_bin), np.abs(hi_core - centre_bin)),
-        )
         reach = (
             float(search_hz)
             if search_hz is not None
             else 0.25 * float(np.count_nonzero(band)) * bin_hz
+        )
+        holds = (lo_core <= centre_bin + gap) & (hi_core >= centre_bin - gap) & clear_
+        pair = _tone_pair(centre_bin, powers, lo_core, hi_core, clear_, holds, gap)
+        if pair is None:
+            pair = _symmetric_pair(
+                starts,
+                lengths,
+                excess,
+                powers,
+                lo_core,
+                hi_core,
+                clear_,
+                max(reach / bin_hz, float(gap)),
+                gap,
+            )
+        if pair is not None:
+            # Tuned between two humps of about the same power either side
+            # (the two tones of FSK): one signal.
+            b, a = pair
+            starts = np.append(starts, starts[b])
+            lengths = np.append(lengths, starts[a] + lengths[a] - starts[b])
+            powers = np.append(powers, powers[a] + powers[b])
+            lo_core = np.append(lo_core, lo_core[b])
+            hi_core = np.append(hi_core, hi_core[a])
+            holds = np.append(np.zeros(len(holds), dtype=bool), True)
+            clear_ = np.append(clear_, True)
+        dist = np.where(
+            holds,
+            0,
+            np.minimum(np.abs(lo_core - centre_bin), np.abs(hi_core - centre_bin)),
         )
         near = (dist * bin_hz <= max(reach, gap * bin_hz)) & clear_
         if np.any(holds):
@@ -1268,6 +1432,11 @@ class SignalClassifier:
         line = max(float(np.sum(excess[a:b])) - (b - a) * floor, 0.0) * bin_hz
         whole = float(np.sum(excess[a0:a1])) * bin_hz
         out["carrier_fraction"] = float(min(1.0, line / max(whole, 1e-30)))
+        if out["carrier_fraction"] >= 0.25:
+            # A carrier: how far its sidebands reach, however faint (AM's
+            # voice can hold a few per cent of the power, spread wide).
+            reach_bins = _sideband_reach(psd / noise, band, peak, k, gap)
+            out["sideband_hz"] = float(reach_bins * bin_hz)
         out["snr_db"] = 10.0 * math.log10(signal / (noise * width))
         # The strongest line's SNR in the resolution bandwidth (a carrier's
         # own width; its 99 % width above is mostly the noise's bins).
@@ -1276,6 +1445,35 @@ class SignalClassifier:
             max(line, 1e-30) / (noise * _HANN_ENBW * bin_hz)
         )
         return out
+
+    def _sideband_envelope(
+        self,
+        x: np.ndarray,
+        rate: float,
+        features: Dict[str, Any],
+        centre: float,
+        half: float,
+        limit: float,
+        spectrum: Optional[np.ndarray] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """:meth:`_envelope_features` over a carrier's sidebands
+        (``features["sideband_hz"]`` either side of its line), when they
+        reach past ``half`` of the cut-out at ``centre``; None otherwise.
+        Never past ``limit`` from ``centre`` (the band's edges).
+        ``spectrum``: the FFT of ``x``, when it was taken already."""
+        sidebands = float(features.get("sideband_hz", 0.0))
+        if sidebands <= 0.0:
+            return None
+        line_at = abs(float(features.get("peak_offset_hz", centre)) - centre)
+        wide_half = min(line_at + sidebands, limit)
+        if wide_half <= half:
+            return None
+        xs, rate_w = _narrow(x, rate, centre, wide_half, spectrum)
+        power = np.abs(xs).astype(np.float64) ** 2
+        noise_power = float(features["noise_psd"]) * 2.0 * wide_half
+        features["sideband_cut_hz"] = 2.0 * wide_half
+        n_eff = 2.0 * wide_half * len(power) / rate_w
+        return self._envelope_features(power, noise_power, n_eff)
 
     @staticmethod
     def _envelope_features(
@@ -1556,6 +1754,13 @@ class SignalClassifier:
             # A line: its width is the resolution's, its SNR in that.
             snr_db = max(snr_db, float(f.get("line_snr_db", snr_db)))
             f["bandwidth_hz"] = float(f.get("line_width_hz", f["bandwidth_hz"]))
+        elif kind == "am":
+            # Its voice reaches as far as its sidebands do (the carrier
+            # holds nearly all of its power, so 99 % of it is narrower).
+            wide = 2.0 * float(f.get("sideband_hz", 0.0))
+            if wide > float(f["bandwidth_hz"]) > 0.0:
+                snr_db -= 10.0 * math.log10(wide / float(f["bandwidth_hz"]))
+                f["bandwidth_hz"] = wide
         snr_quality = 0.3 + 0.7 * _ramp(min(snr_db, band_snr + 10.0), 3.0, 18.0)
         conf = float(min(MAX_CONFIDENCE, best * margin * snr_quality))
         if kind == "carrier":

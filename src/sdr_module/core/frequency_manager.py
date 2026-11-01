@@ -47,6 +47,14 @@ TX_POWER_WARNING = (
 )
 
 
+def _mhz(freq_hz: float) -> str:
+    """``5.3305e6 -> "5.3305"``: the frequency in MHz with 3 to 6 decimals,
+    as many as it needs (a 60 m channel's half kHz is not rounded away)."""
+    text = f"{float(freq_hz) / 1e6:.6f}".rstrip("0")
+    whole, _, frac = text.partition(".")
+    return f"{whole}.{frac.ljust(3, '0')}"
+
+
 class LockoutReason(Enum):
     """Reason for frequency lockout."""
 
@@ -180,6 +188,14 @@ class FrequencyPreset:
     mode: str = "FM"  # Demodulation mode
     description: str = ""
     category: str = "General"
+    #: The live decoder that reads it ("ADS-B", "AX.25/APRS", "POCSAG", ...,
+    #: the Decoder panel's names; "SSTV" for the SSTV decoder; "" for none):
+    #: applying the preset turns it on.
+    decoder: str = ""
+    #: The FM deviation it is heard with ("12.5 kHz"), where its channel
+    #: width doesn't say ("" for that: 5 kHz in a narrow channel, 25 kHz in
+    #: a wide one, 75 kHz for broadcast FM).
+    fm_deviation: str = ""
 
 
 # =============================================================================
@@ -758,16 +774,28 @@ AMATEUR_BAND_PRIVILEGES: List[BandPrivilege] = [
         licenses=GENERAL_EXTRA,
     ),
     # =========================================================================
-    # 6 Meters (50-54 MHz) - All licenses full privileges
+    # 6 Meters (50-54 MHz) - All licenses full privileges; 50.0-50.1 MHz is
+    # CW only (97.305(c) lists no other emission there)
     # =========================================================================
     BandPrivilege(
-        name="6m", start_hz=50.000e6, end_hz=54.000e6, modes=set(), licenses=ALL_HAM
+        name="6m CW", start_hz=50.000e6, end_hz=50.100e6, modes={"CW"}, licenses=ALL_HAM
+    ),
+    BandPrivilege(
+        name="6m", start_hz=50.100e6, end_hz=54.000e6, modes=set(), licenses=ALL_HAM
     ),
     # =========================================================================
-    # 2 Meters (144-148 MHz) - All licenses full privileges
+    # 2 Meters (144-148 MHz) - All licenses full privileges; 144.0-144.1 MHz
+    # is CW only (97.305(c))
     # =========================================================================
     BandPrivilege(
-        name="2m", start_hz=144.000e6, end_hz=148.000e6, modes=set(), licenses=ALL_HAM
+        name="2m CW",
+        start_hz=144.000e6,
+        end_hz=144.100e6,
+        modes={"CW"},
+        licenses=ALL_HAM,
+    ),
+    BandPrivilege(
+        name="2m", start_hz=144.100e6, end_hz=148.000e6, modes=set(), licenses=ALL_HAM
     ),
     # =========================================================================
     # 1.25 Meters (222-225 MHz) - All licenses full privileges
@@ -858,8 +886,9 @@ RX_PRESETS: List[FrequencyPreset] = [
         frequency_hz=1090e6,
         bandwidth_hz=2.4e6,
         mode="RAW",
-        description="Aircraft transponders: choose ADS-B in the Decoder tab",
+        description="Aircraft transponders: turns on the ADS-B decoder (Decoder tab)",
         category="Aviation",
+        decoder="ADS-B",
     ),
     FrequencyPreset(
         name="ACARS",
@@ -868,6 +897,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         mode="AM",
         description="Aircraft communications",
         category="Aviation",
+        decoder="ACARS",
     ),
     FrequencyPreset(
         name="Aviation Emergency",
@@ -959,6 +989,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         mode="FM",
         description="APRS packet radio (North America)",
         category="Amateur",
+        decoder="AX.25/APRS",
     ),
     # ISM Bands
     FrequencyPreset(
@@ -977,7 +1008,8 @@ RX_PRESETS: List[FrequencyPreset] = [
         description="ISM band - LoRa, sensors (Americas)",
         category="ISM",
     ),
-    # Paging
+    # Paging. Pagers send FSK at +/-4.5 kHz (POCSAG) or +/-4.8 kHz (FLEX):
+    # at a 5 kHz deviation its audio clips, 12.5 kHz holds it.
     FrequencyPreset(
         name="POCSAG/FLEX",
         frequency_hz=929.6e6,
@@ -985,6 +1017,28 @@ RX_PRESETS: List[FrequencyPreset] = [
         mode="FM",
         description="Paging frequencies",
         category="Paging",
+        decoder="FLEX",
+        fm_deviation="12.5 kHz",
+    ),
+    FrequencyPreset(
+        name="POCSAG",
+        frequency_hz=152.24e6,
+        bandwidth_hz=25e3,
+        mode="FM",
+        description="A common VHF pager channel (POCSAG pagers use 152-159 MHz)",
+        category="Paging",
+        decoder="POCSAG",
+        fm_deviation="12.5 kHz",
+    ),
+    FrequencyPreset(
+        name="FLEX",
+        frequency_hz=931.9375e6,
+        bandwidth_hz=25e3,
+        mode="FM",
+        description="A common 900 MHz pager channel (FLEX pagers use 929-932 MHz)",
+        category="Paging",
+        decoder="FLEX",
+        fm_deviation="12.5 kHz",
     ),
     # Marine
     FrequencyPreset(
@@ -1003,6 +1057,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         mode="FM",
         description="ISS Slow Scan TV images & voice - use SSTV decoder",
         category="Space",
+        decoder="SSTV",
     ),
     FrequencyPreset(
         name="ISS APRS",
@@ -1011,6 +1066,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         mode="FM",
         description="ISS packet radio / APRS digipeater",
         category="Space",
+        decoder="AX.25/APRS",
     ),
     FrequencyPreset(
         name="ISS Packet (UHF)",
@@ -1247,6 +1303,11 @@ class FrequencyManager:
             if band.start_hz <= frequency_hz <= band.end_hz
         ]
         usable = [band for band in segments if band.is_allowed(license_class, mode)]
+        if not usable and str(mode).strip().upper() == "CW":
+            # FCC 97.305(a): CW may be sent on any frequency the operator may
+            # transmit on, the phone segments too (whose modes list the band
+            # plan's use; an automatic CW ID goes out there).
+            usable = [band for band in segments if band.is_granted_to(license_class)]
         if usable:
             # The segment listed for the operator's own class sets the power
             # limit; otherwise the most restrictive of the inherited ones.
@@ -1272,14 +1333,14 @@ class FrequencyManager:
         if segments:
             return (
                 False,
-                f"Frequency {frequency_hz/1e6:.3f} MHz requires higher license class",
+                f"Frequency {_mhz(frequency_hz)} MHz requires higher license class",
                 None,
             )
 
         # Frequency not in any amateur or license-free band
         return (
             False,
-            f"Frequency {frequency_hz/1e6:.3f} MHz is not in any amateur or license-free band",
+            f"Frequency {_mhz(frequency_hz)} MHz is not in any amateur or license-free band",
             None,
         )
 
@@ -1357,7 +1418,7 @@ class FrequencyManager:
                 if band.lockout_reason == LockoutReason.GPS:
                     reason += " [GPS SPOOFING IS DANGEROUS AND ILLEGAL]"
                 logger.warning(
-                    f"TX blocked at {frequency_hz/1e6:.3f} MHz (BW={bandwidth_hz/1e3:.1f} kHz): {band.name}"
+                    f"TX blocked at {_mhz(frequency_hz)} MHz (BW={bandwidth_hz/1e3:.1f} kHz): {band.name}"
                 )
                 return False, reason
 
@@ -1371,7 +1432,7 @@ class FrequencyManager:
             allowed, license_reason, _ = self._check_license_privilege(freq, mode)
             if not allowed:
                 reason_str = license_reason or "Unknown restriction"
-                logger.warning(f"TX blocked at {freq/1e6:.3f} MHz: {reason_str}")
+                logger.warning(f"TX blocked at {_mhz(freq)} MHz: {reason_str}")
                 return False, f"LICENSE: {reason_str}"
 
         return True, None

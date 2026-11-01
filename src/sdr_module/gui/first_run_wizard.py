@@ -20,6 +20,7 @@ try:
         QFormLayout,
         QGridLayout,
         QGroupBox,
+        QHBoxLayout,
         QLabel,
         QPushButton,
         QVBoxLayout,
@@ -29,25 +30,19 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
+from .presets import describe, welcome_bands
 from .settings_store import DEFAULT_FREQUENCY_HZ
 
 if HAS_PYQT6:
     from .themes import set_role
 
 
-# Starting bands: the same presets, in the same order and under the same
-# names, as the main window's Radio > Band Presets (main_window.BAND_PRESETS,
-# not imported here: main_window imports this module), each with its band.
-BAND_PRESETS = {
-    "FM Broadcast (88–108 MHz)": DEFAULT_FREQUENCY_HZ,
-    "NOAA Weather (162 MHz)": 162.55e6,
-    "2m Ham (144–148 MHz)": 146.52e6,
-    "70cm Ham (420–450 MHz)": 446.0e6,
-    "Airband AM (118–137 MHz)": 125.0e6,
-    "ADS-B (1090 MHz)": 1090e6,
-    "ISM 433 (433.05–434.79 MHz)": 433.92e6,
-    "ISM 915 (902–928 MHz)": 915e6,
-}
+# Starting bands: the bands of the favourite presets (gui/presets.py, the
+# one preset table: the same as Radio > Band Presets' favourites and the
+# Scanner tab's bands, in the same order), each tuning its favourite: band
+# label -> frequency, and band label -> the preset's name.
+BAND_PRESETS = {label: preset.frequency_hz for label, preset in welcome_bands()}
+BAND_PRESET_NAMES = {label: preset.name for label, preset in welcome_bands()}
 
 # Glyphs that lead the status callout, as in the app's other callouts.
 _OK_GLYPH = "\u2713"  # check mark
@@ -57,10 +52,14 @@ _INFO_GLYPH = "\u24d8"  # circled i
 # main window installs (see help_dialog.SHORTCUTS).
 _TIPS = (
     ("Click", "Tune to a signal on the spectrum or waterfall."),
-    ("← / →", "Tune in 10 kHz steps. Add Shift for 100 kHz, Ctrl for 1 MHz."),
+    ("← / →", "Tune by the step (Shift: ten steps, Ctrl: 1 MHz)."),
     ("Space", "Start or stop the receiver."),
+    ("Ctrl+I", "What is this signal? (the Signal tab: identify, list, scope)."),
+    ("Ctrl+Shift+N", "A second receiver: another frequency at the same time."),
     ("F1", "Show all keyboard shortcuts."),
 )
+# (Six, one line each: the welcome screen fits a 1024x640 screen. The Info
+# tab's quick tips have more: M, Ctrl+F, Ctrl+1…9...)
 
 
 class FirstRunWizard(QDialog if HAS_PYQT6 else object):
@@ -87,6 +86,7 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
         hardware_found: bool = False,
         device_name: str = "",
         missing_drivers: Optional[Sequence[Tuple[str, str]]] = None,
+        demo_running: bool = False,
     ):
         if not HAS_PYQT6:
             raise ImportError("PyQt6 is required")
@@ -95,7 +95,11 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
         self.setMinimumWidth(540)
 
         self._selected_freq = DEFAULT_FREQUENCY_HZ
+        self._selected_name = ""
         self._hardware_found = bool(hardware_found)
+        # Reopened (Help > Welcome) while the demo device runs: say so, and
+        # don't offer to start it again.
+        self._demo_running = bool(demo_running) and not self._hardware_found
         self._device_name = str(device_name or "").strip()
         # Reopened (Help > Welcome) while real hardware is already open.
         self._connected = self._hardware_found and self._parent_has_hardware()
@@ -140,14 +144,18 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
         )
         self._band = QComboBox()
         self._band.addItems(list(BAND_PRESETS.keys()))
-        self._band.setToolTip("The receiver tunes here when you click Get Started")
+        self._band.setToolTip(
+            "The receiver tunes to this band's preset when you click Get "
+            "Started (the same presets as Radio > Band Presets)"
+        )
         self._band.currentTextChanged.connect(self._update_band_hint)
         form.addRow("&Band:", self._band)
         self._band_hint = QLabel()
+        self._band_hint.setWordWrap(True)
         set_role(self._band_hint, "hint")
         form.addRow("", self._band_hint)
         self._demo_check = QCheckBox("Start &Demo Mode (simulated signals)")
-        self._demo_check.setChecked(not self._hardware_found)
+        self._demo_check.setChecked(not self._hardware_found and not self._demo_running)
         self._demo_check.setToolTip(
             "Start receiving from the built-in demo device right away, no "
             "hardware needed. Switch to real hardware later with Device > "
@@ -164,10 +172,10 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
         self._connect_check.setChecked(self._hardware_found and not self._connected)
         self._connect_check.toggled.connect(self._update_status)
         # One of the two, whichever fits what was found (neither when the
-        # hardware is already connected).
-        if not self._hardware_found:
+        # hardware is already connected, or the demo device already runs).
+        if not self._hardware_found and not self._demo_running:
             form.addRow("", self._demo_check)
-        elif not self._connected:
+        elif self._hardware_found and not self._connected:
             form.addRow("", self._connect_check)
         for check in (self._demo_check, self._connect_check):
             if check.parent() is None:
@@ -181,7 +189,7 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
         tips_group = QGroupBox("Quick Tips")
         tips = QGridLayout(tips_group)
         tips.setHorizontalSpacing(12)
-        tips.setVerticalSpacing(6)
+        tips.setVerticalSpacing(4)
         tips.setColumnStretch(1, 1)
         top_left = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
         keycaps = []
@@ -200,11 +208,13 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
             key_label.setFixedWidth(width)
         layout.addWidget(tips_group)
 
+        # The footer shares the buttons' row (the dialog fits 640 px).
         footer = QLabel("Your settings are remembered for next time.")
         set_role(footer, "hint")
-        layout.addWidget(footer)
-
-        layout.addSpacing(4)
+        footer.setWordWrap(True)
+        bottom = QHBoxLayout()
+        bottom.setSpacing(12)
+        bottom.addWidget(footer, 1)
 
         btns = QDialogButtonBox()
         self._skip_btn = btns.addButton("&Skip", QDialogButtonBox.ButtonRole.RejectRole)
@@ -215,7 +225,8 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
         btns.addButton(self._start_btn, QDialogButtonBox.ButtonRole.AcceptRole)
         btns.accepted.connect(self._on_accept)
         btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
+        bottom.addWidget(btns)
+        layout.addLayout(bottom)
 
         self._start_btn.setFocus()
 
@@ -233,6 +244,11 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
         name = self._device_label()
         if self._connected:
             return f"{_OK_GLYPH} Connected to {name}."
+        if self._demo_running:
+            return (
+                f"{_OK_GLYPH} Demo Mode is running (simulated signals). Device "
+                "> Connect... opens an RTL-SDR or HackRF One when you have one."
+            )
         if self._hardware_found:
             if self._connect_check.isChecked():
                 return (
@@ -263,14 +279,16 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
         self._status.setText(self._status_text())
 
     def _update_band_hint(self, name: str) -> None:
-        freq = BAND_PRESETS.get(name)
-        if freq is None:
+        preset = next((p for label, p in welcome_bands() if label == name), None)
+        if preset is None:
             self._band_hint.setText("")
             return
-        self._band_hint.setText(f"Tunes to {freq / 1e6:.3f} MHz.")
+        self._band_hint.setText(f"Tunes to {preset.name}: {describe(preset)}.")
 
     def _on_accept(self):
-        self._selected_freq = BAND_PRESETS[self._band.currentText()]
+        label = self._band.currentText()
+        self._selected_freq = BAND_PRESETS[label]
+        self._selected_name = BAND_PRESET_NAMES.get(label, "")
         if self.wants_demo_mode():
             self._request_demo_mode()
         self.accept()
@@ -297,8 +315,13 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
                 start()
 
     def wants_demo_mode(self) -> bool:
-        """True when the user ticked "Start Demo Mode"."""
-        return not self._hardware_found and self._demo_check.isChecked()
+        """True when the user ticked "Start Demo Mode" (not offered while
+        the demo device already runs)."""
+        return (
+            not self._hardware_found
+            and not self._demo_running
+            and self._demo_check.isChecked()
+        )
 
     def wants_connect(self) -> bool:
         """True when the user ticked "Connect ... and start receiving"."""
@@ -310,3 +333,7 @@ class FirstRunWizard(QDialog if HAS_PYQT6 else object):
 
     def selected_frequency(self) -> float:
         return self._selected_freq
+
+    def selected_preset(self) -> str:
+        """The name of the preset the chosen band tunes ("2m Calling")."""
+        return self._selected_name

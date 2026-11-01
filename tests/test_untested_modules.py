@@ -287,33 +287,50 @@ class TestSignalClassifierModulationTypes:
         assert r.signal_type == SignalType.ANALOG
         assert r.modulation == ModulationType.FM
 
+    # Digital signals hold each symbol for many samples, as a receiver sees
+    # them. (These tests used one sample per symbol: spectrally white, as
+    # noise is, so the classifier, which now measures the noise honestly,
+    # can't tell them from noise by their spectrum.)
+    BAUD = 2500.0
+
+    def _symbols(self, rng, alphabet):
+        per = int(self.FS / self.BAUD)
+        count = self.N // per + 1
+        return np.repeat(rng.integers(0, alphabet, count), per)[: self.N]
+
+    def _noisy(self, s, seed, snr_db=30.0):
+        rng = np.random.default_rng(seed + 100)
+        power = float(np.mean(np.abs(s) ** 2)) / 10 ** (snr_db / 10)
+        n = rng.standard_normal(self.N) + 1j * rng.standard_normal(self.N)
+        return s + n * np.sqrt(power / 2)
+
     def test_bpsk_is_digital_bpsk(self):
         rng = np.random.default_rng(1)
-        s = np.exp(1j * rng.integers(0, 2, self.N) * np.pi)
-        r = self._classify(s)
+        s = np.exp(1j * self._symbols(rng, 2) * np.pi)
+        r = self._classify(self._noisy(s, 1))
         assert r.signal_type == SignalType.DIGITAL
         assert r.modulation == ModulationType.BPSK
 
     def test_qpsk_is_digital_qpsk(self):
         rng = np.random.default_rng(2)
-        s = np.exp(1j * rng.integers(0, 4, self.N) * (np.pi / 2))
-        r = self._classify(s)
+        s = np.exp(1j * (self._symbols(rng, 4) * (np.pi / 2) + np.pi / 4))
+        r = self._classify(self._noisy(s, 2))
         assert r.signal_type == SignalType.DIGITAL
         assert r.modulation == ModulationType.QPSK
 
     def test_fsk_is_digital_fsk(self):
         rng = np.random.default_rng(3)
-        bits = rng.integers(0, 2, self.N)
+        bits = self._symbols(rng, 2)
         freq = np.where(bits > 0, 3000, -3000).astype(float)
         s = np.exp(2j * np.pi * np.cumsum(freq) / self.FS)
-        r = self._classify(s)
+        r = self._classify(self._noisy(s, 3))
         assert r.signal_type == SignalType.DIGITAL
         assert r.modulation == ModulationType.FSK
 
     def test_ook_is_digital_ook(self):
         rng = np.random.default_rng(4)
-        s = rng.integers(0, 2, self.N).astype(complex)
-        r = self._classify(s)
+        s = self._symbols(rng, 2).astype(complex)
+        r = self._classify(self._noisy(s, 4))
         assert r.signal_type == SignalType.DIGITAL
         assert r.modulation == ModulationType.OOK
 

@@ -95,10 +95,20 @@ class TestScanOffline:
         assert rc == 1
         assert "sample rate unknown" in capsys.readouterr().out
 
-    def test_live_mode_without_input_is_informative(self, capsys):
-        rc = main(["scan", "--start", "88", "--end", "108"])
-        assert rc == 0
-        assert "--input" in capsys.readouterr().out
+    def test_live_mode_without_a_device_fails_and_says_why(self, capsys):
+        # A live scan sweeps a connected SDR (tests/test_cli_scan.py); with
+        # none it is an error that says what to do instead.
+        from unittest import mock
+
+        with mock.patch(
+            "sdr_module.core.device_manager.DeviceManager.scan_devices",
+            return_value=[],
+        ):
+            rc = main(["scan", "--start", "88", "--end", "108"])
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "No SDR device is connected" in out
+        assert "--input" in out
 
 
 def _pocsag_iq_capture(path, fs=38400.0, baud=1200.0, deviation=2400.0):
@@ -121,7 +131,11 @@ def _pocsag_iq_capture(path, fs=38400.0, baud=1200.0, deviation=2400.0):
     bits = [1, 0] * 288 + w2b(POCSAGDecoder.SYNC_WORD)
     words = [POCSAGDecoder.IDLE_WORD] * 16
     words[0] = enc(0, (0x100 << 2) | 0)  # numeric address, function 0
-    words[1] = enc(1, (1 << 16) | (2 << 12) | (3 << 8) | (4 << 4) | 5)  # "12345"
+    # "12345": each digit least significant bit first (ITU-R M.584).
+    digits = 0
+    for digit in (1, 2, 3, 4, 5):
+        digits = (digits << 4) | int(f"{digit:04b}"[::-1], 2)
+    words[1] = enc(1, digits)
     for word in words:
         bits += w2b(word)
     bits += [1, 0] * 32  # trailing data so the final batch completes
@@ -173,13 +187,61 @@ class TestDecode:
         assert "Decoded 1 POCSAG message(s)" in out
         assert "12345" in out
 
-    def test_rds_reports_unsupported(self, capsys, iq_capture):
-        """RDS from raw broadcast I/Q is reported as unsupported, not silent."""
-        path, fs, _ = iq_capture
-        rc = main(["decode", "rds", "--input", str(path), "--sample-rate", str(fs)])
+    def test_rds_decodes_the_station(self, capsys, tmp_path):
+        """RDS from raw broadcast I/Q decodes (it used to be reported as not
+        supported: nothing recovered the 57 kHz subcarrier)."""
+        from sdr_module.dsp import protocol_encoders as enc
+
+        fs, offset = 1.2e6, 200e3
+        groups = enc.rds_ps_groups(0x1234, "TEST FM") + enc.rds_radiotext_groups(
+            0x1234, "Hello"
+        )
+        multiplex = enc.fm_broadcast_composite(fs, 2.5, enc.rds_bits(groups))
+        t = np.arange(len(multiplex)) / fs
+        phase = 2 * np.pi * (np.cumsum(multiplex) / fs + offset * t)
+        path = tmp_path / "fm.cf32"
+        save_iq_file(
+            path,
+            np.exp(1j * phase).astype(np.complex64),
+            sample_rate=fs,
+            center_frequency=100e6,
+            sample_format=SampleFormat.FLOAT32,
+            file_format=FileFormat.RAW,
+        )
+        rc = main(
+            [
+                "decode",
+                "rds",
+                "--input",
+                str(path),
+                "--sample-rate",
+                str(fs),
+                "--offset",
+                str(offset),
+            ]
+        )
         out = capsys.readouterr().out
-        assert rc == 2
-        assert "not supported" in out.lower()
+        assert rc == 0
+        assert "PI 1234  Station name: TEST FM" in out
+        assert "Radio text: Hello" in out
+
+    def test_cw_decodes_text(self, capsys, tmp_path):
+        from sdr_module.dsp import protocol_encoders as enc
+
+        fs = 96e3
+        path = tmp_path / "cw.cf32"
+        save_iq_file(
+            path,
+            enc.cw_baseband("CQ DE N0CALL", fs, 20, offset_hz=0.0),
+            sample_rate=fs,
+            center_frequency=7.03e6,
+            sample_format=SampleFormat.FLOAT32,
+            file_format=FileFormat.RAW,
+        )
+        rc = main(["decode", "cw", "--input", str(path), "--sample-rate", str(fs)])
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "20 WPM  CQ DE N0CALL" in out  # the line ends with the file
 
     def test_missing_file(self, capsys, tmp_path):
         rc = main(

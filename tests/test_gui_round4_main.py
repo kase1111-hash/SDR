@@ -114,7 +114,8 @@ class TestPacerRecovers(unittest.TestCase):
         self.pacer = self.mw._Pacer()
 
     def _overload(self, rate):
-        for _ in range(3):
+        # (The first frames after Start aren't judged.)
+        for _ in range(self.mw._WARM_UP_FRAMES + 3):
             self.pacer.measured(80000, rate, 0.045 * 80000 / (rate * 0.033))
         self.assertTrue(self.pacer.overloaded)
 
@@ -475,21 +476,34 @@ class TestRecordingOnDisk(_RecordingCase):
         self.assertEqual(len(second), 1)
         self.assertNotEqual(first, second)
 
-    def test_import_still_loads_into_memory(self):
+    def test_converted_files_stream_to_disk_too(self):
+        # Converting (the old Import) reads the file a chunk at a time into a
+        # temporary file, like a recording, instead of all of it into memory
+        # (mc:MC-02, rx:RX-08).
         from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
+        from sdr_module.gui import iq_files
 
         samples = (np.arange(5000) * (1 + 1j) / 5000).astype(np.complex64)
         path = os.path.join(self.folder, "import.cs16")
         save_iq_file(path, samples, 1e6, 433.92e6, SampleFormat.INT16, FileFormat.RAW)
-        with (
-            mock.patch.object(
-                self.mw.QFileDialog, "getOpenFileName", return_value=(path, "")
-            ),
-            mock.patch.object(self.mw.QMessageBox, "information"),
+
+        def answer(dialog):
+            if isinstance(dialog, iq_files.ImportOptionsDialog):
+                dialog._rate_edit.setText("1M")
+                dialog._center_edit.setText("433.92")
+                dialog._on_accept()
+                return dialog.result()
+            dialog.buttons()[-1].click()  # the summary: Close
+            return 0
+
+        self.win._exec_dialog = answer
+        with mock.patch.object(
+            self.mw.QFileDialog, "getOpenFileName", return_value=(path, "")
         ):
-            self.win._open_recording()
+            self.win._convert_recording()
         store = self.win._samples_buffer
-        self.assertIsNone(store.path)
+        self.assertIsNotNone(store.path)
+        self.assertEqual(os.path.dirname(store.path), self.folder)
         self.assertEqual(store.sample_count, len(samples))
         target = os.path.join(self.folder, "converted.cf32")
         with mock.patch.object(
@@ -505,7 +519,7 @@ class TestLowDiskSpace(_RecordingCase):
     Usage = namedtuple("Usage", "total used free")
 
     def _free(self, megabytes):
-        usage = self.Usage(10**12, 0, int(megabytes * 1024**2))
+        usage = self.Usage(10**12, 0, int(megabytes * 10**6))
         return mock.patch.object(self.mw.shutil, "disk_usage", return_value=usage)
 
     def test_recording_stops_with_a_warning_when_the_disk_fills(self):
@@ -545,7 +559,7 @@ class TestLowDiskSpace(_RecordingCase):
 
     def test_status_shows_the_space_on_the_recording_drive(self):
         self.win._record_button.click()
-        with self._free(2.5 * 1024) as usage:
+        with self._free(2500) as usage:
             self.win._update_status()
         usage.assert_called_with(self.folder)
         self.assertIn("2.5 GB free", self.win._recording_info_label.text())
@@ -605,22 +619,25 @@ class TestTuningBandwidth(_WindowTestCase):
         self.assertEqual(self.bandwidth(), "25 kHz")
         self.assertEqual(self.win._control_panel.get_fm_deviation_text(), "5 kHz")
         decoder.tune_requested.emit(131.55e6, "ACARS (131.550 MHz)", "AM", "")
-        self.assertEqual(self.bandwidth(), "10 kHz")
+        # (15 kHz: as the ACARS band preset is heard, DEC-E2E-14.)
+        self.assertEqual(self.bandwidth(), "15 kHz")
         self.assertEqual(self.win._control_panel.get_demod_mode(), "AM")
 
     def test_bookmark_modes(self):
+        # The Bandwidth choices depend on the mode (RX-11, UX-B02): FM's
+        # start at 12.5 kHz, and SSB and CW keep their own filter (the
+        # width last used with them, here their defaults).
         cases = (
             ("FM", "75 kHz", "200 kHz"),
             ("FM", "25 kHz", "50 kHz"),
             ("FM", "12.5 kHz", "25 kHz"),
-            ("FM", "2.5 kHz", "10 kHz"),
+            ("FM", "2.5 kHz", "12.5 kHz"),
             ("AM", "", "10 kHz"),
-            ("USB", "", "10 kHz"),
-            ("LSB", "", "10 kHz"),
-            ("CW", "", "10 kHz"),
+            ("USB", "", "2.7 kHz"),
+            ("LSB", "", "2.7 kHz"),
+            ("CW", "", "500 Hz"),
         )
         for mode, deviation, expected in cases:
-            self.win._control_panel._bw_combo.setCurrentText("2 MHz")
             self.win._on_bookmark_tune(146.52e6, "Test", mode, deviation)
             self.assertEqual(self.bandwidth(), expected, (mode, deviation))
 
@@ -630,7 +647,9 @@ class TestTuningBandwidth(_WindowTestCase):
         self.assertEqual(self.bandwidth(), "200 kHz")
 
     def test_no_mode_or_iq_keeps_the_bandwidth(self):
-        self.win._control_panel._bw_combo.setCurrentText("2 MHz")
+        # (2 MHz is one of I/Q mode's choices; the others have their own.)
+        self.win._set_demod_mode("None (I/Q)", bandwidth="2 MHz")
+        self.assertEqual(self.bandwidth(), "2 MHz")
         self.win._on_bookmark_tune(433.92e6, "Old bookmark", "", "")
         self.assertEqual(self.bandwidth(), "2 MHz")
         self.win._on_bookmark_tune(1090e6, "ADS-B", "None (I/Q)", "")
@@ -746,9 +765,10 @@ class TestPassbandOnBothPlots(_WindowTestCase):
         self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
         self.assertEqual(self.win._spectrum._passband, (-12500.0, 12500.0))
         self.assertEqual(self.win._waterfall._passband, (-12500.0, 12500.0))
+        # USB's default 2.7 kHz filter keeps 200-2900 Hz (RX-11, RX-12).
         self.win._set_demod_mode("USB")
-        self.assertEqual(self.win._waterfall._passband, (0.0, 2800.0))
-        self.assertEqual(self.win._spectrum._passband, (0.0, 2800.0))
+        self.assertEqual(self.win._waterfall._passband, (200.0, 2900.0))
+        self.assertEqual(self.win._spectrum._passband, (200.0, 2900.0))
 
 
 # ---------------------------------------------------------------------------

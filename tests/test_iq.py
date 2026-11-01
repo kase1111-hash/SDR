@@ -362,8 +362,9 @@ class TestEstimateIQImbalance:
 
         gain, phase = estimate_iq_imbalance(samples)
 
-        # Should detect ~0.43 gain imbalance (sqrt(1/0.49) - 1)
-        assert gain > 0.3
+        # Q's gain relative to I, minus 1: about -0.3 (sqrt(0.49) - 1), the
+        # convention apply_iq_imbalance_correction takes (FG-B09).
+        assert gain == pytest.approx(-0.3, abs=0.01)
 
     def test_returns_floats(self):
         """Test returns float values."""

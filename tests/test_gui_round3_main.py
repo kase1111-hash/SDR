@@ -259,8 +259,9 @@ class TestHardwareDrain(_WindowTestCase):
         return dev
 
     def _keeps_up(self, rate):
-        """Tell the pacer that frames take well under real time."""
-        for _ in range(3):
+        """Tell the pacer that frames take well under real time (after the
+        first frames, which aren't judged)."""
+        for _ in range(self.mw._WARM_UP_FRAMES + 3):
             self.win._pacer.measured(int(rate), rate, 0.1)
 
     def tearDown(self):
@@ -307,11 +308,13 @@ class TestHardwareDrain(_WindowTestCase):
         got = self.win._read_block()
         self.assertGreaterEqual(len(got), mw._PROBE_READ_S * rate)
         self.assertLess(len(got), mw._PROBE_READ_S * rate + transfer)
-        # ...then at most a quarter second; the rest waits for the next one.
+        # ...then at most a quarter second (and at most _MAX_READ_SAMPLES:
+        # 0.21 s at 10 MS/s); the rest waits for the next one.
         self._keeps_up(rate)
         got = self.win._read_block()
-        self.assertGreaterEqual(len(got), mw._MAX_READ_S * rate)
-        self.assertLess(len(got), mw._MAX_READ_S * rate + transfer)
+        most = min(mw._MAX_READ_S * rate, mw._MAX_READ_SAMPLES)
+        self.assertGreaterEqual(len(got), most)
+        self.assertLess(len(got), most + transfer)
         self.assertGreater(60 - len(dev.timeouts), 0)
 
     def test_fast_device_counts_as_real_time(self):
@@ -392,6 +395,8 @@ class TestPacer(unittest.TestCase):
         # Unknown speed: a long gap is capped at the probe length...
         probe = int(rate * mw._PROBE_READ_S)
         self.assertEqual(pacer.demo_request(rate, 12.0), probe)
+        for _ in range(mw._WARM_UP_FRAMES):  # (not judged, after Start)
+            pacer.measured(80000, rate, 0.004)
         pacer.measured(80000, rate, 0.004)
         self.assertEqual(pacer.demo_request(rate, 14.0), probe)
         # ...once frames are known to keep up, at a quarter second.
@@ -407,17 +412,26 @@ class TestPacer(unittest.TestCase):
         rate = 2.4e6
         pacer.measured(1024, rate, 1.0)  # too short to judge
         self.assertFalse(pacer.overloaded)
-        for _ in range(3):
+        for _ in range(mw._WARM_UP_FRAMES + 3):
             pacer.measured(80000, rate, 0.045)  # 45 ms for 33 ms of signal
         self.assertTrue(pacer.overloaded)
         self.assertEqual(pacer.read_limit(rate), 0.0)
         pacer.demo_request(rate, 1.0)
         self.assertEqual(pacer.demo_request(rate, 1.5), mw.DISPLAY_BLOCK)
-        for _ in range(2):
-            pacer.measured(80000, rate, 0.02)  # 0.6: in between
+        # Only probe frames (one a second) are judged now: probes in
+        # between (0.75 of real time) don't end it...
+        now = 2.5  # (a second after the first one-block frame)
+        for _ in range(4):
+            count = pacer.demo_request(rate, now)
+            self.assertGreaterEqual(count, mw._TIMED_FRAME)
+            pacer.measured(count, rate, 0.75 * count / rate)
+            now += 1.0
         self.assertTrue(pacer.overloaded)
+        # ...probes that keep up do.
         for _ in range(3):
-            pacer.measured(80000, rate, 0.005)
+            count = pacer.demo_request(rate, now)
+            pacer.measured(count, rate, 0.2 * count / rate)
+            now += 0.033
         self.assertFalse(pacer.overloaded)
         pacer.reset()
         self.assertEqual(pacer.read_limit(rate), rate * mw._PROBE_READ_S)
@@ -556,17 +570,28 @@ class TestCopy(_WindowTestCase):
         state_tip = self.win._info_panel._values["state"].toolTip()
         self.assertEqual(state_tip, "Whether the receiver is running.")
 
-    def test_rds_is_not_advertised(self):
+    def test_decoders_advertised_are_the_ones_that_work(self):
+        # RDS was left out while it could not decode; it does now, and so
+        # does Morse code.
         tabs = self.win._right_tabs
         index = tabs.indexOf(self.win._panel_pages["decoder"])
-        self.assertNotIn("RDS", tabs.tabToolTip(index))
+        self.assertIn("RDS", tabs.tabToolTip(index))
+        # (Help > About is a dialog of its own now, with Copy Version Info:
+        # mc:MC-G12.)
+        from PyQt6.QtWidgets import QLabel
+
+        from sdr_module.gui.version_info import AboutDialog
+
         shown = []
-        with mock.patch.object(
-            QMessageBox, "about", side_effect=lambda *a: shown.append(a[2])
-        ):
+
+        def fake_exec(dialog):
+            shown.append(" ".join(lb.text() for lb in dialog.findChildren(QLabel)))
+            return 0
+
+        with mock.patch.object(AboutDialog, "exec", fake_exec):
             self.win._show_about()
-        self.assertNotIn("RDS", shown[0])
-        self.assertIn("AX.25/APRS", shown[0])
+        for name in ("AX.25/APRS", "RDS", "Morse code"):
+            self.assertIn(name, shown[0])
 
     def test_quick_tips_use_keycaps_and_the_wizard_wording(self):
         from sdr_module.gui import first_run_wizard
@@ -816,7 +841,9 @@ class TestAudioFailureInTheWindow(_WindowTestCase):
             mock.patch.object(self.win._audio, "start", return_value=False),
         ):
             self.win._set_demod_mode("FM")
-            self.win._audio_action.setChecked(True)
+            # Radio > Audio > Mute off: audio on.
+            self.win._mute_action.setChecked(True)
+            self.win._mute_action.setChecked(False)
         self.assertFalse(self.win._audio_enabled)
         self.assertIn("could not be opened", self.win._message_label.text())
 
@@ -828,7 +855,9 @@ class TestAudioFailureInTheWindow(_WindowTestCase):
             mock.patch.object(self.win._audio, "start", return_value=True),
         ):
             self.win._set_demod_mode("FM")
-            self.win._audio_action.setChecked(True)
+            # Radio > Audio > Mute off: audio on.
+            self.win._mute_action.setChecked(True)
+            self.win._mute_action.setChecked(False)
         self.assertTrue(self.win._audio_enabled)
 
 

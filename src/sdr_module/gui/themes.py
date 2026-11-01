@@ -472,6 +472,8 @@ QPushButton[role="danger"]:checked, QToolButton[role="danger"]:checked {{
 QPushButton[role="danger"]:disabled, QToolButton[role="danger"]:disabled {{
     background-color: {p.mantle}; color: {p.disabled};
     border-color: {p.surface0}; }}
+QPushButton[tone="warning"] {{ background-color: {p.warning_bg}; color: {p.warning};
+    border-color: {p.warning}; }}
 QPushButton[role="compact"] {{ padding: 3px 6px; font-size: 11px; }}
 QWidget[role="header-strip"] QPushButton[role="compact"],
 QFrame[role="header-strip"] QPushButton[role="compact"] {{ min-height: 20px;
@@ -586,6 +588,12 @@ QTabBar::tab:selected {{ background-color: {p.base}; color: {p.accent};
 QTabBar::tab:hover:!selected {{ background-color: {p.surface0}; color: {p.text}; }}
 QTabBar::tab:disabled {{ color: {p.disabled}; }}
 QTabBar QToolButton {{ padding: 2px; }}
+QTabBar#toolTabs::tab {{ padding: 5px 6px; margin-right: 1px; }}
+QToolButton#toolTabsMaximize {{ padding: 2px 3px; border: none;
+    background-color: transparent; }}
+QToolButton#toolTabsMaximize:hover {{ background-color: {p.surface0}; }}
+QToolButton#toolTabsMaximize:checked {{ background-color: {p.surface0};
+    color: {p.text}; }}
 QTabBar[documentMode="true"]::tab {{ background-color: transparent; border: none;
     border-bottom: 2px solid transparent; border-radius: 0; padding: 4px 8px;
     margin-right: 4px; color: {p.subtext}; }}
@@ -606,6 +614,8 @@ QListView::item:hover, QTreeView::item:hover, QTableView::item:hover {{
     background-color: {p.surface0}; }}
 QListView::item:selected, QTreeView::item:selected, QTableView::item:selected {{
     background-color: {p.surface1}; color: {p.text}; }}
+QListView::item:disabled, QTreeView::item:disabled, QTableView::item:disabled {{
+    color: {p.disabled}; }}
 QHeaderView {{ background-color: {p.mantle}; }}
 QHeaderView::section {{ background-color: {p.mantle}; color: {p.subtext}; border: none;
     border-bottom: 1px solid {p.surface1}; border-right: 1px solid {p.surface0};
@@ -717,6 +727,10 @@ QFrame[role="header-strip"] QPushButton[role="compact"]:focus {{ padding: 2px 7p
 QPushButton[role="primary"]:focus, QToolButton[role="primary"]:focus,
 QPushButton:checked:focus, QToolButton:checked:focus {{
     border: 3px double {p.on_accent}; padding: 3px 12px; }}
+QPushButton[role="compact"]:checked:focus {{ padding: 1px 4px; }}
+QWidget[role="header-strip"] QPushButton[role="compact"]:checked:focus,
+QFrame[role="header-strip"] QPushButton[role="compact"]:checked:focus {{
+    padding: 1px 6px; }}
 QPushButton[role="danger"]:focus, QToolButton[role="danger"]:focus {{
     border: 2px solid {p.text}; padding: 4px 13px; }}
 QCheckBox::indicator:focus, QRadioButton::indicator:focus {{
@@ -827,6 +841,11 @@ def apply_theme(app: Any, theme: str) -> str:
     if app is None:
         return name
     app.setPalette(build_qpalette(name))
+    # Clear the old stylesheet first: Qt restyles every widget about five
+    # times faster from none than from another one (the same result; a
+    # switch took about a second, stalling the receiver and its audio).
+    if app.styleSheet():
+        app.setStyleSheet("")
     app.setStyleSheet(get_stylesheet(name))
     try:
         for widget in app.allWidgets():

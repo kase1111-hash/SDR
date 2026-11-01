@@ -16,13 +16,14 @@ import logging
 import math
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
     from PyQt6.QtCore import Qt
     from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWidgets import (
         QAbstractItemView,
+        QCheckBox,
         QComboBox,
         QDialog,
         QDialogButtonBox,
@@ -32,7 +33,6 @@ try:
         QLabel,
         QMessageBox,
         QPushButton,
-        QSpinBox,
         QTableWidget,
         QTableWidgetItem,
         QVBoxLayout,
@@ -45,34 +45,42 @@ except ImportError:
 import numpy as np
 
 from ..utils.tooltips import get_short_tip
+from . import device_settings
 from .settings_store import DEFAULT_FREQUENCY_HZ
 
 if HAS_PYQT6:
+    from .control_panel import SignedSpinBox
     from .themes import set_role, set_tone
 
 logger = logging.getLogger(__name__)
 
 # Sample rates offered in the dialog. Each device type only shows the ones
-# inside its supported range (see _RATE_LIMITS).
-_SAMPLE_RATES = (1.0e6, 1.4e6, 1.8e6, 2.0e6, 2.4e6, 2.56e6, 3.2e6, 4e6, 8e6, 10e6, 20e6)
-_DEFAULT_RATE = 2.4e6
+# inside its supported range (see _RATE_LIMITS). The same table gives the
+# Receiver group's and the status bar's choices (gui/device_settings.py).
+_SAMPLE_RATES = device_settings.SAMPLE_RATES
+_DEFAULT_RATE = device_settings.DEFAULT_RATE
 
 # (min, max) sample rate per device type, in samples/second.
-_RATE_LIMITS: Dict[str, Tuple[float, float]] = {
-    "rtlsdr": (0.9e6, 2.56e6),
-    "hackrf": (2.0e6, 20e6),
-    "demo": (1.0e6, 3.2e6),
-}
+_RATE_LIMITS: Dict[str, Tuple[float, float]] = device_settings.RATE_LIMITS
 
-# Python packages that provide each hardware driver, and how to install them.
+# Python packages that provide each hardware driver, and how to install them
+# (the one text Device > Connect..., Device > Scan for Devices and the
+# welcome screen show).
 _DRIVERS = {
-    "rtlsdr": ("rtlsdr", "RTL-SDR", 'pip install "sdr-module[rtlsdr]"'),
+    "rtlsdr": ("rtlsdr", "RTL-SDR", 'python -m pip install "sdr-module[rtlsdr]"'),
     "hackrf": (
         "python_hackrf",
         "HackRF",
-        'pip install "sdr-module[hackrf]" (needs the libhackrf system library)',
+        'python -m pip install "sdr-module[hackrf]" (needs the libhackrf system '
+        "library)",
     ),
 }
+
+
+def install_command(kind: str) -> str:
+    """How to install the driver for ``kind`` ("rtlsdr" or "hackrf")."""
+    entry = _DRIVERS.get(kind)
+    return entry[2] if entry else ""
 
 
 def _driver_installed(module_name: str) -> bool:
@@ -95,7 +103,23 @@ def missing_drivers() -> List[Tuple[str, str]]:
 
 def _format_rate(rate: float) -> str:
     """``2400000.0`` -> ``"2.4 MS/s"``."""
-    return f"{rate / 1e6:g} MS/s"
+    return device_settings.format_rate(rate)
+
+
+class ConnectRefused(Exception):
+    """Raised by the dialog's ``_open_device`` (as the main window wraps it)
+    to stop a connect that is no failure: the device is in use elsewhere,
+    or a question before connecting was cancelled. The dialog stays open,
+    shows the reason in an information box (none when the message is
+    empty) and logs no error."""
+
+
+#: ``busy(entry)``: why a listed device can't be connected, as ``(status,
+#: reason)`` (e.g. ``("In use by the second receiver", "...")``), or None.
+BusyCheck = Callable[[Dict[str, Any]], Optional[Tuple[str, str]]]
+#: ``before_connect(entry, name)``: asked right before the device chosen
+#: is opened (e.g. to stop a recording first); False keeps the dialog open.
+BeforeConnect = Callable[[Dict[str, Any], str], bool]
 
 
 class DeviceDialog(QDialog if HAS_PYQT6 else object):
@@ -114,6 +138,15 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         self._selected_device = None
         self._devices: List[dict] = []
         self._missing_drivers: List[Tuple[str, str]] = []
+        # Per device type: the sample rate to preselect and the front end
+        # to show (set_preferences; edits are kept while switching rows),
+        # and the type whose settings are shown.
+        self._rates: Dict[str, float] = {}
+        self._fronts: Dict[str, device_settings.FrontEnd] = {}
+        self._shown_kind = ""
+        # The window's checks (set_busy_check, set_before_connect).
+        self._busy_check: Optional[BusyCheck] = None
+        self._before_connect: Optional[BeforeConnect] = None
 
         self.setWindowTitle("Connect SDR Device")
         self.setMinimumSize(540, 480)
@@ -193,20 +226,39 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         form.setVerticalSpacing(8)
 
         self._rate_combo = QComboBox()
-        self._rate_combo.setToolTip(get_short_tip("sample_rate"))
+        self._rate_combo.setToolTip(
+            get_short_tip("sample_rate")
+            + " It can be changed later without reconnecting (Receiver > "
+            "Sample rate)."
+        )
+        self._rate_combo.activated.connect(self._on_rate_chosen)
         self._populate_rates("demo")
         form.addRow("&Sample rate:", self._rate_combo)
 
-        self._ppm_spin = QSpinBox()
-        self._ppm_spin.setRange(-100, 100)
+        # The device's front end (shown for the devices that have each; the
+        # Receiver group changes them later without reconnecting).
+        self._ppm_spin = SignedSpinBox()
+        self._ppm_spin.setRange(*device_settings.PPM_RANGE)
         self._ppm_spin.setValue(0)
         self._ppm_spin.setSuffix(" ppm")
         self._ppm_spin.setAlignment(Qt.AlignmentFlag.AlignRight)
         form.addRow("&Frequency correction:", self._ppm_spin)
 
         self._direct_combo = QComboBox()
-        self._direct_combo.addItems(["Off", "I-ADC", "Q-ADC"])
+        for value, label, tip in device_settings.DIRECT_SAMPLING_CHOICES:
+            self._direct_combo.addItem(label, value)
+            self._direct_combo.setItemData(
+                self._direct_combo.count() - 1, tip, Qt.ItemDataRole.ToolTipRole
+            )
         form.addRow("&Direct sampling:", self._direct_combo)
+
+        self._bias_check = QCheckBox(device_settings.BIAS_TEE_TEXT)
+        self._bias_check.toggled.connect(lambda _on: self._show_bias_warning())
+        form.addRow(self._bias_check)
+        self._bias_warning = QLabel(device_settings.BIAS_TEE_WARNING)
+        self._bias_warning.setWordWrap(True)
+        set_role(self._bias_warning, "hint", "warning")
+        form.addRow(self._bias_warning)
 
         layout.addWidget(settings_group)
 
@@ -237,14 +289,29 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         self._update_setting_controls(None)
 
     def _populate_rates(self, dev_kind: str) -> None:
-        """Fill the sample-rate combo with the rates ``dev_kind`` supports."""
-        current = self._rate_combo.currentData() or _DEFAULT_RATE
+        """Fill the sample-rate combo with the rates ``dev_kind`` supports
+        (the one it had last, from set_preferences, chosen)."""
+        current = (
+            getattr(self, "_rates", {}).get(dev_kind)
+            or self._rate_combo.currentData()
+            or _DEFAULT_RATE
+        )
         low, high = _RATE_LIMITS.get(dev_kind, _RATE_LIMITS["demo"])
         rates = [r for r in _SAMPLE_RATES if low <= r <= high] or [_DEFAULT_RATE]
         self._rate_combo.blockSignals(True)
         self._rate_combo.clear()
         for rate in rates:
-            self._rate_combo.addItem(_format_rate(rate), rate)
+            label = _format_rate(rate)
+            if rate < _ADSB_MIN_RATE:
+                # TOOLS-03: say so before ADS-B silently decodes nothing.
+                label += " (too low for ADS-B)"
+            self._rate_combo.addItem(label, rate)
+            if rate < _ADSB_MIN_RATE:
+                self._rate_combo.setItemData(
+                    self._rate_combo.count() - 1,
+                    device_settings.ADSB_RATE_TIP,
+                    Qt.ItemDataRole.ToolTipRole,
+                )
         # Keep the previous choice when it is still valid, else the closest.
         best = min(range(len(rates)), key=lambda i: abs(rates[i] - float(current)))
         self._rate_combo.setCurrentIndex(best)
@@ -276,9 +343,17 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         # table row needs a matching entry in self._devices: _on_accept
         # rejects a selected row whose index has no entry.
         self._add_device("Demo", "Demo Device", "—", "Simulated signals")
+        demo_row = self._device_table.rowCount() - 1
+        for col in range(self._device_table.columnCount()):
+            item = self._device_table.item(demo_row, col)
+            if item is not None:
+                item.setToolTip(
+                    "Simulated signals, no hardware needed: the same as Device > "
+                    "Use Demo Device"
+                )
         self._devices.append({"type": "demo", "index": 0, "info": {}})
 
-        self._device_table.selectRow(0)
+        self._mark_busy_rows()
         self._update_status(hardware_count)
 
     def _enumerate_rtlsdr(self):
@@ -306,7 +381,62 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
             serial = getattr(info, "serial", None) or "Unknown"
             index = getattr(info, "index", i)
             self._add_device(label, name, serial, "Available")
-            self._devices.append({"type": dev_type, "index": index, "info": info})
+            self._devices.append(
+                {"type": dev_type, "index": index, "info": info, "name": name}
+            )
+
+    def set_busy_check(self, busy: Optional[BusyCheck]) -> None:
+        """``busy(entry)`` says why a listed device can't be connected (the
+        main window: the second receiver has it). Such a row says so in its
+        Status (the reason in its tooltip) and Connect is off while it is
+        selected; checked now and on every Refresh."""
+        self._busy_check = busy
+        self._mark_busy_rows()
+
+    def set_before_connect(self, before: Optional[BeforeConnect]) -> None:
+        """``before(entry, name)`` is asked right before the device chosen
+        is opened (the main window: stop a recording first); False keeps
+        the dialog open with nothing changed."""
+        self._before_connect = before
+
+    def _busy_reason(self, dev: Optional[dict]) -> str:
+        return str((dev or {}).get("busy", "") or "")
+
+    def _mark_busy_rows(self) -> None:
+        """Mark the rows of devices in use elsewhere, and select the first
+        row that can be connected."""
+        check = self._busy_check
+        first_free = None
+        for row, entry in enumerate(self._devices):
+            found = None
+            if check is not None and entry.get("type") != "demo":
+                try:
+                    found = check(entry)
+                except Exception as e:  # pragma: no cover - defensive
+                    logger.debug(f"Device busy check failed: {e}")
+            status, reason = found if found else ("Available", "")
+            entry["busy"] = reason
+            if entry.get("type") != "demo":
+                status_item = self._device_table.item(row, 3)
+                if status_item is not None:
+                    status_item.setText(status)
+                for col in range(self._device_table.columnCount()):
+                    item = self._device_table.item(row, col)
+                    if item is None:
+                        continue
+                    if col == 2 and not reason and len(item.text()) > 12:
+                        item.setToolTip(f"Serial number {item.text()}")
+                    elif col != 2 or reason:
+                        item.setToolTip(reason)
+                    # Greyed out, as the second receiver lists the main
+                    # window's device (the tooltip still says why).
+                    flags = item.flags()
+                    enabled = Qt.ItemFlag.ItemIsEnabled
+                    item.setFlags(flags & ~enabled if reason else flags | enabled)
+            if first_free is None and not reason:
+                first_free = row
+        self._device_table.selectRow(first_free if first_free is not None else 0)
+        self._update_setting_controls(self._selected_entry())
 
     def _add_device(self, dev_type: str, name: str, serial: str, status: str):
         """Add device to table."""
@@ -360,59 +490,101 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         """Handle selection change."""
         self._update_setting_controls(self._selected_entry())
 
-    def _update_setting_controls(self, dev: Optional[dict]) -> None:
-        """Enable only the settings the selected device's driver can apply."""
-        self._connect_btn.setEnabled(dev is not None)
-        self._connect_btn.setToolTip(
-            "" if dev is not None else "Select a device in the list first"
-        )
+    @staticmethod
+    def _kind_of(dev: Optional[dict]) -> str:
         dev_type = (dev or {}).get("type", "")
         kind = "rtlsdr" if "rtlsdr" in dev_type else dev_type
-        if kind not in _RATE_LIMITS:
-            kind = "demo"
+        return kind if kind in _RATE_LIMITS else "demo"
+
+    def _update_setting_controls(self, dev: Optional[dict]) -> None:
+        """Show only the settings the selected device has (an RTL-SDR:
+        frequency correction, direct sampling and bias tee; a HackRF One:
+        bias tee; the demo device: the sample rate alone), with what that
+        type used last."""
+        busy = self._busy_reason(dev)
+        self._connect_btn.setEnabled(dev is not None and not busy)
+        self._connect_btn.setToolTip(
+            busy
+            if busy
+            else "" if dev is not None else "Select a device in the list first"
+        )
+        kind = self._kind_of(dev)
+        if self._shown_kind and self._shown_kind != kind:
+            # Keep what was set for the type shown before.
+            self._fronts[self._shown_kind] = self._front_end_shown()
+        self._shown_kind = kind
         self._populate_rates(kind)
 
-        device_class = self._device_class(dev_type)
-        name = {"rtlsdr": "RTL-SDR", "hackrf": "HackRF"}.get(kind, "")
-        unsupported = (
-            f"Not supported by the {name} driver yet."
-            if name
-            else "Not needed for the Demo Device."
-        )
+        features = device_settings.front_end_features(kind)
+        front = self._fronts.get(kind) or device_settings.FrontEnd()
+        self._ppm_spin.setValue(int(front.ppm))
+        index = self._direct_combo.findData(front.direct_sampling)
+        self._direct_combo.setCurrentIndex(max(0, index))
+        self._bias_check.setChecked(bool(front.bias_tee) and "bias_tee" in features)
 
-        ppm_ok = device_class is not None and hasattr(
-            device_class, "set_freq_correction"
+        name = {"rtlsdr": "RTL-SDR", "hackrf": "HackRF One"}.get(kind, "Demo Device")
+        rows = (
+            (self._ppm_spin, "ppm", device_settings.PPM_TIP),
+            (
+                self._direct_combo,
+                "direct",
+                device_settings.DIRECT_SAMPLING_TIP
+                + " Above 24 MHz the tuner is always used.",
+            ),
+            (
+                self._bias_check,
+                "bias_tee",
+                device_settings.BIAS_TEE_TIPS.get(kind, ""),
+            ),
         )
-        self._ppm_spin.setEnabled(ppm_ok)
-        self._ppm_spin.setToolTip(
-            "Corrects the tuner's crystal error, in parts per million."
-            if ppm_ok
-            else unsupported
-        )
-
-        direct_ok = (
-            kind == "rtlsdr"
-            and device_class is not None
-            and hasattr(device_class, "set_direct_sampling")
-        )
-        self._direct_combo.setEnabled(direct_ok)
-        if not direct_ok:
-            self._direct_combo.setCurrentIndex(0)
-        self._direct_combo.setToolTip(
-            get_short_tip("direct_sampling")
-            if direct_ok
-            else (
-                unsupported
-                if kind == "rtlsdr"
-                else "RTL-SDR only. " + get_short_tip("direct_sampling")
-            )
-        )
-        # Dim each label with its field so unavailable settings read as such.
-        for field in (self._ppm_spin, self._direct_combo):
+        for field, feature, tip in rows:
+            has = feature in features
+            field.setEnabled(has)
+            field.setToolTip(tip if has else f"The {name} doesn't have this setting.")
+            self._settings_form.setRowVisible(field, has)
+            # Dim each label with its field so unavailable settings read as such.
             label = self._settings_form.labelForField(field)
             if label is not None:
-                label.setEnabled(field.isEnabled())
+                label.setEnabled(has)
                 label.setToolTip(field.toolTip())
+        self._show_bias_warning()
+
+    def _show_bias_warning(self) -> None:
+        """The bias tee's warning while it is ticked (and offered)."""
+        show = self._bias_check.isEnabled() and self._bias_check.isChecked()
+        self._settings_form.setRowVisible(self._bias_warning, show)
+
+    def _front_end_shown(self) -> "device_settings.FrontEnd":
+        return device_settings.FrontEnd(
+            ppm=int(self._ppm_spin.value()),
+            direct_sampling=str(self._direct_combo.currentData() or "q"),
+            bias_tee=bool(self._bias_check.isChecked()),
+        )
+
+    def _on_rate_chosen(self, _index: int) -> None:
+        rate = self._rate_combo.currentData()
+        if rate and self._shown_kind:
+            self._rates[self._shown_kind] = float(rate)
+
+    def set_preferences(
+        self,
+        rates: Dict[str, float],
+        fronts: Dict[str, "device_settings.FrontEnd"],
+    ) -> None:
+        """Per device type: the sample rate to preselect and the front end
+        to show (what it had last; the main window passes them)."""
+        self._rates = {kind: float(rate) for kind, rate in rates.items() if rate}
+        self._fronts = dict(fronts)
+        self._shown_kind = ""
+        self._update_setting_controls(self._selected_entry())
+
+    def front_end_choice(self) -> Tuple[str, Optional["device_settings.FrontEnd"]]:
+        """``(device type, front end)`` set for the device opened (None for
+        a type without front-end settings)."""
+        kind = self._shown_kind
+        if not device_settings.front_end_features(kind):
+            return kind, None
+        return kind, self._front_end_shown()
 
     @staticmethod
     def _device_class(dev_type: str) -> Any:
@@ -455,11 +627,26 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         dev = self._devices[row]
         name_item = self._device_table.item(row, 1)
         name = name_item.text() if name_item is not None else "the device"
+        busy = self._busy_reason(dev)
+        if busy:
+            # (Double-click or Enter on a row in use elsewhere.)
+            QMessageBox.information(self, "Device in Use", busy)
+            return
+        before = self._before_connect
+        if before is not None and not before(dev, name):
+            return  # (asked first, and cancelled: nothing changed)
 
         # Try to open device
         QGuiApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
             self._selected_device = self._open_device(dev)
+        except ConnectRefused as e:
+            # No failure: in use elsewhere (or a question was cancelled).
+            self._selected_device = None
+            QGuiApplication.restoreOverrideCursor()
+            if str(e):
+                QMessageBox.information(self, "Device in Use", str(e))
+            return
         except Exception as e:
             self._selected_device = None
             QGuiApplication.restoreOverrideCursor()
@@ -510,19 +697,25 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
         return device
 
     def _apply_optional_settings(self, device) -> None:
-        """Apply PPM / direct sampling when the driver supports them."""
-        ppm = self._ppm_spin.value()
-        if ppm and self._ppm_spin.isEnabled():
+        """Apply the front end shown (direct sampling, frequency correction,
+        bias tee) where the device has it."""
+        features = device_settings.front_end_features(
+            device_settings.device_kind(device)
+        )
+        front = self._front_end_shown()
+        steps = (
+            ("direct", "set_direct_sampling", front.direct_sampling, True),
+            ("ppm", "set_freq_correction", front.ppm, bool(front.ppm)),
+            ("bias_tee", "set_bias_tee", True, front.bias_tee),
+        )
+        for feature, method, value, wanted in steps:
+            if feature not in features or not wanted:
+                continue
             try:
-                device.set_freq_correction(ppm)
+                if getattr(device, method)(value) is False:
+                    logger.warning(f"The device refused {method}({value!r})")
             except Exception as e:
-                logger.warning(f"Could not apply {ppm} ppm correction: {e}")
-        mode = self._direct_combo.currentIndex()
-        if mode and self._direct_combo.isEnabled():
-            try:
-                device.set_direct_sampling(mode)
-            except Exception as e:
-                logger.warning(f"Could not enable direct sampling: {e}")
+                logger.warning(f"Could not apply {method}({value!r}): {e}")
 
     def get_selected_device(self):
         """Get the selected and opened device."""
@@ -574,8 +767,8 @@ _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ..
     (124.35e6, "am", -50.0, (8.0, 5.0)),
     (125.0e6, "am", -44.0, None),
     (127.85e6, "am", -48.0, (13.0, 6.0)),
-    # 2 m amateur band
-    (144.39e6, "burst", -50.0, (4.0, 0.4)),
+    # 2 m amateur band (APRS: see _DATA_SCHEDULE)
+    (144.39e6, "aprs", -50.0, None),
     (146.52e6, "nfm", -46.0, (12.0, 6.0)),
     (146.94e6, "nfm", -38.0, (10.0, 7.0)),
     (147.105e6, "nfm", -54.0, (15.0, 5.0)),
@@ -584,14 +777,402 @@ _DEMO_SIGNALS: Tuple[Tuple[float, str, float, Optional[Tuple[float, float]]], ..
     (162.475e6, "nfm", -62.0, None),
     (162.55e6, "nfm", -44.0, None),
     # ISM 433 MHz and 70 cm
-    (433.92e6, "burst", -40.0, (2.5, 0.3)),
+    (433.92e6, "ook", -40.0, None),  # T10: an OOK remote (see _OOK_*)
     (434.1e6, "burst", -56.0, (6.0, 0.5)),
     (446.0e6, "nfm", -48.0, (14.0, 6.0)),
     (446.1e6, "nfm", -58.0, (9.0, 3.0)),
     # ISM 915 MHz and ADS-B
     (915.0e6, "burst", -50.0, (1.5, 0.2)),
     (1090.0e6, "modes", -26.0, None),
+    # Decodable data (see _DATA_SCHEDULE; timed by their own schedules, so
+    # no duty cycle here): ACARS, POCSAG and FLEX. Appended, so the signals
+    # above keep their index (their seed).
+    (131.55e6, "acars", -52.0, None),
+    (152.24e6, "pocsag", -48.0, None),
+    (931.9375e6, "flex", -50.0, None),
 )
+
+# The ADS-B decoder's lowest usable rate (its 0.5 us pulses need 2 MS/s).
+_ADSB_MIN_RATE = device_settings.ADSB_MIN_RATE
+
+# --------------------------------------------------------------------------- #
+# Decodable data: APRS, POCSAG, FLEX and ACARS transmissions
+# --------------------------------------------------------------------------- #
+# Real frames for the Decoder panel: its "Tune to ..." buttons land on these
+# transmitters and decode what they send. Each repeats a schedule of
+# transmissions every period (the carrier is off in between). They are
+# built once per sample rate with the protocol encoders, as FM phase (or,
+# for ACARS, the AM envelope) at about 48 kHz, and stored sparsely, so a
+# read costs nothing extra between transmissions.
+_DATA_KINDS = ("aprs", "pocsag", "flex", "acars")
+_DATA_RAMP_S = 0.002  # carrier rise and fall
+_ACARS_DEMO_FLIGHT = ("N601SD", "SD0601")  # registration, flight ID
+
+# kind -> (period s, ((start s, what is sent), ...)).
+_DATA_SCHEDULE: Dict[str, Tuple[float, Tuple[Tuple[float, Any], ...]]] = {
+    # APRS position reports: (source, destination, info, digipeater path).
+    "aprs": (
+        24.0,
+        (
+            (
+                1.0,
+                (
+                    "N0CALL-9",
+                    "APZ001",
+                    "!4903.50N/07201.75W>Demo mobile on 144.390 MHz",
+                    ("WIDE1-1",),
+                ),
+            ),
+            (
+                9.0,
+                (
+                    "N0CALL-1",
+                    "APZ001",
+                    "!4915.20N/07145.10W#Demo digipeater",
+                    ("WIDE2-1",),
+                ),
+            ),
+            (
+                17.0,
+                (
+                    "N0CALL-7",
+                    "APZ001",
+                    "=4850.00N/07230.00W-Demo home station: SDR Module APRS",
+                    (),
+                ),
+            ),
+        ),
+    ),
+    # POCSAG 1200 pages: (address, function, text); function 0 is numeric.
+    "pocsag": (
+        20.0,
+        (
+            (3.0, ((1234567, 3, "SDR Module demo: POCSAG 1200 page on 152.240 MHz"),)),
+            (
+                13.0,
+                (
+                    (1100004, 0, "555-0123"),
+                    (1234567, 3, "Second demo page: the pager network is up"),
+                ),
+            ),
+        ),
+    ),
+    # FLEX 1600 frames: (frame number, ((capcode, text), ...)).
+    "flex": (
+        22.0,
+        (
+            (
+                5.0,
+                (10, ((1234567, "SDR Module demo: FLEX 1600 page on 931.9375 MHz"),)),
+            ),
+            (16.0, (16, ((1000123, "Second FLEX page: meeting moved to 3 PM"),))),
+        ),
+    ),
+    # ACARS downlinks: (label, message number, text).
+    "acars": (
+        26.0,
+        (
+            (7.0, ("H1", "M01A", "DEMO MESSAGE FROM SDR MODULE - ETA 1435Z")),
+            (20.0, ("5Z", "M02A", "OS DEMO /GATE B12 ARRIVED")),
+        ),
+    ),
+}
+
+
+def _data_transmission(
+    kind: str, sent: Any, loop_rate: float
+) -> Tuple[Optional[np.ndarray], np.ndarray]:
+    """``(FM phase or None, envelope)`` of one transmission at
+    ``loop_rate``; the envelope keys the carrier (and is the AM envelope,
+    with no phase, for ACARS)."""
+    from ..dsp import protocol_encoders as enc
+
+    if kind == "ook":  # T10
+        return _ook_transmission(sent, loop_rate)
+    phase: Optional[np.ndarray] = None
+    if kind == "aprs":
+        source, destination, info, path = sent
+        line = enc.hdlc_bits(enc.ax25_frame(source, destination, info, path))
+        audio = enc.afsk_audio(line, loop_rate)
+        phase = enc.fm_phase(enc.APRS_DEVIATION_HZ * audio, loop_rate)
+        envelope = np.ones(len(phase))
+    elif kind == "pocsag":
+        levels = enc.bit_levels(enc.pocsag_bits(sent), loop_rate, 1200)
+        phase = enc.fm_phase(-enc.POCSAG_DEVIATION_HZ * levels, loop_rate)
+        envelope = np.ones(len(phase))
+    elif kind == "flex":
+        frame, pages = sent
+        bits = enc.flex_frame_bits(pages, 0, frame, bit_sync_bits=96)
+        levels = enc.bit_levels(bits, loop_rate, 1600)
+        phase = enc.fm_phase(enc.FLEX_DEVIATION_HZ * levels, loop_rate)
+        envelope = np.ones(len(phase))
+    else:  # acars
+        label, number, text = sent
+        registration, flight = _ACARS_DEMO_FLIGHT
+        block = enc.acars_block(
+            registration, label, text, message_number=number, flight_id=flight
+        )
+        audio = enc.msk_audio(enc.acars_bits(block), loop_rate)
+        envelope = 1.0 + enc.ACARS_MODULATION_DEPTH * audio
+    ramp = max(1, int(_DATA_RAMP_S * loop_rate))
+    edge = 0.5 - 0.5 * np.cos(np.pi * np.arange(ramp) / ramp)
+    envelope = np.concatenate((envelope, [0.0]))  # ends keyed off
+    envelope[:ramp] *= edge
+    envelope[-ramp - 1 : -1] *= edge[::-1]
+    if phase is not None:
+        phase = np.concatenate((phase, phase[-1:]))
+        phase = phase.astype(np.float32)
+    return phase, envelope.astype(np.float32)
+
+
+def _segment(values: np.ndarray, factor: int, start: int, count: int) -> np.ndarray:
+    """``count`` device-rate samples of a loop-rate array from device sample
+    ``start``, linearly interpolated (past its end, its last value)."""
+    first, skip = divmod(start, factor)
+    num = (skip + count - 1) // factor + 2
+    seg = values[first : first + num]
+    if len(seg) < num:
+        fill = seg[-1] if len(seg) else np.float32(0.0)
+        seg = np.concatenate((seg, np.full(num - len(seg), fill, dtype=np.float32)))
+    if factor == 1:
+        return seg[:count].copy()
+    out = np.repeat(np.diff(seg), factor)[skip : skip + count]
+    out *= _ramp(factor, skip + count)[skip : skip + count]
+    out += np.repeat(seg[:-1], factor)[skip : skip + count]
+    return out
+
+
+class _DataTransmitter:
+    """A transmitter's schedule at one sample rate: each transmission's
+    start (device samples into a period of ``period`` samples), FM phase
+    (None for AM) and envelope at 1/``factor`` of the rate."""
+
+    def __init__(self, period: int, factor: int, items: List[tuple]):
+        self.period = int(period)
+        self.factor = int(factor)
+        self.items = items  # (start, length, phase, envelope)
+
+    def spans(self, pos: int, n: int) -> List[tuple]:
+        """``(a, b, phase or None, envelope)`` of the transmissions on air
+        in the ``n`` samples from stream position ``pos``."""
+        out = []
+        end = pos + n
+        base = (pos // self.period) * self.period
+        while base < end:
+            for start, length, phase, envelope in self.items:
+                a = max(base + start, pos)
+                b = min(base + start + length, end)
+                if b > a:
+                    at = a - (base + start)
+                    out.append(
+                        (
+                            a - pos,
+                            b - pos,
+                            (
+                                None
+                                if phase is None
+                                else _segment(phase, self.factor, at, b - a)
+                            ),
+                            _segment(envelope, self.factor, at, b - a),
+                        )
+                    )
+            base += self.period
+        return out
+
+
+def _data_transmitter(kind: str, rate: float) -> _DataTransmitter:
+    """The ``kind`` transmitter's schedule, built for ``rate``."""
+    period_s, schedule = _DATA_SCHEDULE[kind]
+    factor, loop_rate, _t = _loop_timebase(rate, 1.0)
+    items = []
+    for start_s, sent in schedule:
+        phase, envelope = _data_transmission(kind, sent, loop_rate)
+        start = int(round(start_s * rate))
+        items.append((start, len(envelope) * factor, phase, envelope))
+    return _DataTransmitter(int(round(period_s * rate)), factor, items)
+
+
+# --- T4: a repeater with a CTCSS tone (Audio > Tone squelch, Tone heard) ---
+# A 2 m repeater output sending voice-like narrow FM with a 100.0 Hz (1Z)
+# sub-audible tone, 8 s on in every 12. Appended, so the other stations keep
+# their seeds.
+_DEMO_CTCSS_HZ = 100.0
+_DEMO_CTCSS_DEVIATION_HZ = 600.0  # 12 % of 5 kHz, as repeaters send it
+_DEMO_SIGNALS += ((145.29e6, "rpt", -44.0, (12.0, 8.0)),)
+# --- end T4 ---
+
+# --- SSTV demo (T3): a test card on the ISS SSTV downlink ------------------ #
+# Robot 36 on 145.800 MHz NBFM, every _SSTV_PERIOD_S seconds (the signal
+# times itself, see MockDevice._add_sstv). Appended, so the signals above
+# keep their seeds.
+_SSTV_HZ = 145.8e6
+_SSTV_MODE = "Robot 36"
+_SSTV_LEVEL_DB = -46.0
+_SSTV_PERIOD_S = 75.0  # one image (about 37 s) every 75 s
+_SSTV_FIRST_S = 8.0  # the first one starts this far into the demo
+_SSTV_DEVIATION_HZ = 3.0e3  # peak FM deviation of the SSTV audio
+_SSTV_LOOP_HZ = 24e3  # FM phase of the transmission, stored at about this rate
+_SSTV_TAIL_S = 0.2  # carrier after the last line
+_SSTV_CACHE: Dict[float, Tuple[Any, int]] = {}
+_DEMO_SIGNALS = _DEMO_SIGNALS + ((_SSTV_HZ, "sstv", _SSTV_LEVEL_DB, None),)
+# --- end SSTV demo ----------------------------------------------------------- #
+
+# --- T6: RDS on the 100.1 MHz music station ---------------------------------- #
+# The music station sends real RDS on its 57 kHz subcarrier, locked to its
+# pilot (the subcarrier is sin(3 theta), theta the pilot's phase, and its
+# bit clock is 57 kHz / 48): the station name, a RadioText, the program type
+# (Top 40) and the extended country code (USA). The data signal (biphase,
+# shaped, before the subcarrier) is precomputed as a seamless loop of
+# _RDS_LOOP_GROUPS groups, about 5 s, stored at about 48 kHz (see _rds_loop),
+# and multiplied by the subcarrier as the station is read.
+_RDS_PI = 0xC0DE
+_RDS_PS = "SDR DEMO"
+_RDS_PTY = 9  # "Top 40" (RBDS program types, as the country code says)
+_RDS_TEXT = "Now playing: the SDR Module demo tune (I-vi-IV-V in C)"
+_RDS_ECC = 0xA0  # USA
+_RDS_LOOP_GROUPS = 57  # 4.992 s: whole samples at any rate a multiple of 125 Hz
+
+
+def _rds_groups() -> List[Tuple[int, int, int, int]]:
+    """The demo station's RDS groups, one loop: a whole station name, then
+    four RadioText segments, seven times over, and the country code. The
+    loop has an even number of ones, so its differential coding repeats."""
+    from ..dsp import protocol_encoders as enc
+
+    ps = enc.rds_ps_groups(_RDS_PI, _RDS_PS, pty=_RDS_PTY)
+    text = enc.rds_radiotext_groups(_RDS_PI, _RDS_TEXT, pty=_RDS_PTY)
+    groups: List[Tuple[int, int, int, int]] = []
+    segment = 0
+    while len(groups) < _RDS_LOOP_GROUPS - 1:
+        groups += ps
+        for _ in range(4):
+            groups.append(text[segment % len(text)])
+            segment += 1
+    pi, b, c, _d = enc.rds_ecc_group(_RDS_PI, _RDS_ECC, _RDS_PTY)
+    # Block D of group 1A is the program item number; any value whose
+    # bits make the loop's count of ones even (0 = none sent).
+    for pin in range(64):
+        last = (pi, b, c, pin)
+        if sum(enc.rds_bits(groups + [last])) % 2 == 0:
+            break
+    return groups + [last]
+
+
+def _rds_loop(rate: float) -> "_Loop":
+    """The demo station's RDS data signal as a phase term (the subcarrier
+    multiplies it as it is read), one loop at about 48 kHz.
+
+    The loop rate divides the loop's length in device samples exactly, so
+    the bit timing has no seam (falling back to the nearest rate when the
+    device rate has no such divisor)."""
+    from ..dsp import protocol_encoders as enc
+
+    bits = enc.rds_bits(_rds_groups())
+    total = rate * len(bits) / enc.RDS_BAUD  # device samples per loop
+    ideal = max(1, int(round(rate / _LOOP_RATE_HZ)))
+    factor = ideal
+    if abs(total - round(total)) < 1e-6:
+        candidates = [
+            f
+            for f in range(max(1, ideal // 2), 2 * ideal + 1)
+            if int(round(total)) % f == 0
+        ]
+        if candidates:
+            factor = min(candidates, key=lambda f: abs(f - ideal))
+    data = enc.rds_baseband(bits, rate / factor, periodic=True)
+    # Phase of a deviation of _RDS_SHARE of 75 kHz on a 57 kHz carrier.
+    scale = _RDS_SHARE * _WFM_DEVIATION_HZ / enc.RDS_CARRIER_HZ
+    return _Loop(scale * data, factor)
+
+
+# --- end T6 ------------------------------------------------------------------ #
+
+# --- T7: AM broadcast stations on the radio tuner's AM presets ------------- #
+# Medium-wave stations on the six AM presets of Tools > AM/FM Radio Tuner
+# (660-1260 kHz), so the AM band (and the tuner's seek) has something to
+# find in demo mode. Each plays the demo tune ("amb": the music as 80 % AM,
+# each station from another point of the loop). Appended, so the signals
+# above keep their seeds.
+_AM_BROADCAST = (
+    (660e3, -40.0),
+    (770e3, -46.0),
+    (880e3, -32.0),
+    (1010e3, -36.0),
+    (1050e3, -50.0),
+    (1260e3, -42.0),
+)
+_AM_BROADCAST_DEPTH = 0.8  # modulation depth of the music peaks
+_AM_MUSIC: Dict[Tuple[float, int], np.ndarray] = {}  # mono tune per loop
+# The demo tune as broadcast, per (loop rate, length): see _music_broadcast.
+_MUSIC_CACHE: Dict[
+    Tuple[float, int], Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+] = {}
+_MUSIC_CACHE_SIZE = 2
+_DEMO_SIGNALS = _DEMO_SIGNALS + tuple(
+    (freq, "amb", level, None) for freq, level in _AM_BROADCAST
+)
+# --- end T7 ------------------------------------------------------------------ #
+
+# --- T10: an OOK remote control and a drifting transmitter ------------------- #
+# The Signal tab's Bursts list takes on/off keyed devices apart the way
+# rtl_433's analyzer does, and Radio > Track Signal (AFC) keeps a drifting
+# signal centred. So the demo has both:
+#
+# * 433.92 MHz: a remote control (doorbell, gate) of the common EV1527 kind,
+#   pulse width modulated: 24 bits (a 20-bit ID and 4 button bits), a 1 a
+#   long pulse and a short gap, a 0 a short pulse and a long gap (350 and
+#   1050 us), then a sync (a short pulse and a 31-unit gap); the frame sent
+#   _OOK_REPEATS times, every _OOK_PERIOD_S seconds. (It replaces the random
+#   FSK burst there; 434.10 MHz keeps one.)
+# * 438.500 MHz: narrow FM voice from a cheap 70 cm handheld whose
+#   frequency drifts +/- _DRIFT_HZ over _DRIFT_PERIOD_S seconds (away from
+#   the 2 m channels the tests use as empty ones, such as 145.500 MHz).
+_OOK_CODE = 0x5E3A1C  # ID 0x5E3A1, button 0xC
+_OOK_UNIT_S = 350e-6
+_OOK_REPEATS = 8
+_OOK_PERIOD_S = 2.5
+_DATA_KINDS = _DATA_KINDS + ("ook",)
+_DATA_SCHEDULE["ook"] = (_OOK_PERIOD_S, ((0.4, _OOK_CODE),))
+
+_DRIFT_HZ = 2.5e3
+_DRIFT_PERIOD_S = 40.0  # a whole number of _TONE_LOOP_S
+_DEMO_SIGNALS = _DEMO_SIGNALS + ((438.5e6, "drift", -50.0, None),)
+
+
+def _ook_units(code: int, bits: int = 24) -> List[Tuple[int, int]]:
+    """(on units, off units) of one EV1527 frame."""
+    out = [(3, 1) if (code >> i) & 1 else (1, 3) for i in range(bits - 1, -1, -1)]
+    out.append((1, 31))  # sync
+    return out
+
+
+def _ook_transmission(code: int, loop_rate: float) -> Tuple[None, np.ndarray]:
+    """``(None, envelope)`` of an OOK remote's transmission: the frame
+    repeated, keyed with edges of about 20 us (one loop sample)."""
+    unit = _OOK_UNIT_S * loop_rate
+    levels: List[float] = []
+    for _ in range(_OOK_REPEATS):
+        for on, off in _ook_units(code):
+            levels += [1.0] * int(round(on * unit)) + [0.0] * int(round(off * unit))
+    envelope = np.asarray(levels + [0.0], dtype=np.float32)
+    return None, envelope
+
+
+def _drift_loop(rate: float, variant: Any) -> "_Loop":
+    """Voice-like narrow FM whose carrier drifts slowly up and down."""
+    factor, loop_rate, t = _loop_timebase(rate, _DRIFT_PERIOD_S)
+    twist = float(variant) * 2.1
+    voice_t = t % _TONE_LOOP_S  # the voice repeats every 4 s
+    deviation = 2.2e3 * _swept_tone(
+        820.0, 200.0, voice_t[: int(round(_TONE_LOOP_S * loop_rate))], twist
+    )
+    deviation = np.resize(deviation, len(t))
+    deviation += 1.2e3 * _tone(1650.0, t, twist)
+    deviation += _DRIFT_HZ * np.sin(2 * np.pi * t / _DRIFT_PERIOD_S)
+    return _Loop(_fm_phase(deviation, loop_rate), factor)
+
+
+# --- end T10 ----------------------------------------------------------------- #
 
 # Morse keying for the CW beacon ("VVV DE SDR"): 1 = key down, one dit each.
 _MORSE = {"V": "...-", "D": "-..", "E": ".", "S": "...", "R": ".-."}
@@ -631,8 +1212,9 @@ _MUSIC_BARS: Tuple[Tuple[Tuple[int, ...], int, Tuple[int, ...]], ...] = (
 _MUSIC_STEP_S = 0.25  # one arpeggio note (120 BPM eighth notes)
 
 # Broadcast FM composite, as fractions of the 75 kHz peak deviation: the
-# 19 kHz stereo pilot and the 57 kHz RDS subcarrier; program audio (L+R)
-# and the L-R subcarrier at 38 kHz share the rest.
+# 19 kHz stereo pilot and the 57 kHz RDS subcarrier (only the 100.1 MHz
+# station sends RDS); program audio (L+R) and the L-R subcarrier at 38 kHz
+# share the rest.
 _WFM_DEVIATION_HZ = 75e3
 _PILOT_HZ = 19e3
 _PILOT_SHARE = 0.09
@@ -713,14 +1295,44 @@ class _Loop:
 
 
 def _loop_timebase(
-    rate: float, seconds: float, loop_hz: float = _LOOP_RATE_HZ
+    rate: float,
+    seconds: float,
+    loop_hz: float = _LOOP_RATE_HZ,
+    fft_friendly: bool = False,
 ) -> Tuple[int, float, np.ndarray]:
     """``(factor, loop rate, sample times)`` for a loop of about ``seconds``
-    at about ``loop_hz``."""
+    at about ``loop_hz``; ``fft_friendly``: as long as the nearest length
+    with no prime factor above 7 (for a loop filtered by FFT around it)."""
     factor = max(1, int(round(rate / loop_hz)))
     loop_rate = rate / factor
     size = max(2, int(round(seconds * loop_rate)))
+    if fft_friendly:
+        size = _fft_friendly_size(size)
     return factor, loop_rate, np.arange(size) / loop_rate
+
+
+def _fft_friendly_size(n: int) -> int:
+    """The length nearest ``n`` with no prime factor above 7: an FFT of it
+    is quick, where one of a length with a large prime factor (382,090 =
+    2 x 5 x 19 x 2011, the demo tune's loop at 3.2 MS/s) took ten times as
+    long and stalled the first frame at a new sample rate."""
+    best = 1
+    limit = 2 * max(1, int(n))
+    p7 = 1
+    while p7 <= limit:
+        p5 = p7
+        while p5 <= limit:
+            p3 = p5
+            while p3 <= limit:
+                p2 = p3
+                while p2 <= limit:
+                    if abs(p2 - n) < abs(best - n):
+                        best = p2
+                    p2 *= 2
+                p3 *= 3
+            p5 *= 5
+        p7 *= 7
+    return max(2, best)
 
 
 def _whole_cycles(freq: float, period: float) -> float:
@@ -783,12 +1395,22 @@ def _music_broadcast(
     deviation); ``left``/``right`` are the same channels as a listener hears
     them after the receiver's de-emphasis.
     """
-    left, right = _music_tune(loop_rate, size)
-    left_pre = _pre_emphasis(left, loop_rate)
-    right_pre = _pre_emphasis(right, loop_rate)
-    peak = max(float(np.max(np.abs(left_pre))), float(np.max(np.abs(right_pre))))
-    scale = 1.0 / max(peak, 1e-9)
-    return left * scale, right * scale, left_pre * scale, right_pre * scale
+    key = (float(loop_rate), int(size))
+    cached = _MUSIC_CACHE.get(key)
+    if cached is None:
+        # (Once per loop: the FM station and the AM stations share it.)
+        left, right = _music_tune(loop_rate, size)
+        left_pre = _pre_emphasis(left, loop_rate)
+        right_pre = _pre_emphasis(right, loop_rate)
+        peak = max(float(np.max(np.abs(left_pre))), float(np.max(np.abs(right_pre))))
+        scale = 1.0 / max(peak, 1e-9)
+        cached = (left * scale, right * scale, left_pre * scale, right_pre * scale)
+        for channel in cached:
+            channel.flags.writeable = False  # (shared: never changed)
+        while len(_MUSIC_CACHE) >= _MUSIC_CACHE_SIZE:
+            _MUSIC_CACHE.pop(next(iter(_MUSIC_CACHE)))
+        _MUSIC_CACHE[key] = cached
+    return cached
 
 
 def _music_channels(loop_rate: float, size: int) -> Tuple[np.ndarray, np.ndarray]:
@@ -861,7 +1483,7 @@ def _build_loops(kind: str, variant: Any, rate: float):
             # The tune as broadcast: 75 us pre-emphasized, like the
             # receiver's broadcast FM de-emphasis expects.
             factor, loop_rate, t = _loop_timebase(
-                rate, _MUSIC_STEP_S * 8 * len(_MUSIC_BARS)
+                rate, _MUSIC_STEP_S * 8 * len(_MUSIC_BARS), fft_friendly=True
             )
             *_heard, left, right = _music_broadcast(loop_rate, len(t))
             mono = (left + right) * (_PROGRAM_SHARE / 2)
@@ -887,6 +1509,29 @@ def _build_loops(kind: str, variant: Any, rate: float):
         deviation = 2.2e3 * _swept_tone(820.0, 200.0, t, twist)
         deviation += 1.2e3 * _swept_tone(1650.0, -250.0, t, twist)
         return _Loop(_fm_phase(deviation, loop_rate), factor)
+    if kind == "rpt":
+        # (T4) The same voice-like FM plus a CTCSS tone (whole cycles per
+        # loop, so the loop stays seamless).
+        factor, loop_rate, t = _loop_timebase(rate, _TONE_LOOP_S)
+        twist = variant * 2.1
+        deviation = 2.2e3 * _swept_tone(820.0, 200.0, t, twist)
+        deviation += 1.2e3 * _swept_tone(1650.0, -250.0, t, twist)
+        deviation += _DEMO_CTCSS_DEVIATION_HZ * _tone(_DEMO_CTCSS_HZ, t)
+        return _Loop(_fm_phase(deviation, loop_rate), factor)
+    if kind == "amb":
+        # (T7) AM broadcast: the demo tune (mono, as heard) as the envelope,
+        # each station starting at another point of the loop.
+        factor, loop_rate, t = _loop_timebase(
+            rate, _MUSIC_STEP_S * 8 * len(_MUSIC_BARS), fft_friendly=True
+        )
+        key = (loop_rate, len(t))
+        mono = _AM_MUSIC.get(key)
+        if mono is None:
+            left, right = _music_channels(loop_rate, len(t))
+            mono = _AM_MUSIC[key] = (left + right) / 2.0
+        mono = np.roll(mono, int(variant) * len(mono) // 3)
+        peak = float(np.max(np.abs(mono))) or 1.0
+        return _Loop(1.0 + _AM_BROADCAST_DEPTH * mono / peak, factor)
     if kind == "am":
         factor, loop_rate, t = _loop_timebase(rate, _TONE_LOOP_S)
         envelope = 1.0 + 0.35 * _swept_tone(600.0, 150.0, t, variant * 2.1)
@@ -916,6 +1561,12 @@ def _build_loops(kind: str, variant: Any, rate: float):
         return _Loop(keyed, factor)
     if kind == "modes":
         return _other_replies(rate)
+    if kind == "rds":
+        return _rds_loop(rate)  # T6
+    if kind in _DATA_KINDS:
+        return _data_transmitter(kind, rate)
+    if kind == "drift":  # T10
+        return _drift_loop(rate, variant)
     return None
 
 
@@ -923,7 +1574,7 @@ def _loops(kind: str, seed: int, rate: float):
     """Cached modulation loop(s) of a demo signal at ``rate``."""
     if kind == "wfm" and seed == _MUSIC_SEED:
         variant: Any = "music"
-    elif kind in ("cw", "modes"):
+    elif kind in ("cw", "modes") or kind in _DATA_KINDS:
         variant = 0
     else:
         variant = seed % 3
@@ -937,6 +1588,39 @@ def _loops(kind: str, seed: int, rate: float):
                 _LOOP_CACHE.pop(next(iter(_LOOP_CACHE)))
             _LOOP_CACHE[key] = loops
     return loops
+
+
+def _sstv_transmission(rate: float) -> Tuple[Any, int]:
+    """``(FM phase loop, length in samples)`` of one SSTV demo transmission
+    at the device ``rate`` (built once per rate: about 0.1 s and 3.6 MB).
+
+    The test card is encoded at the loop rate (an exact fraction of the
+    device rate, so its timing is exact) with its VIS header, and its FM
+    phase is stored like the other demo loops. Built outside the lock the
+    other loops share (the scanner reads from its own thread).
+    """
+    key = float(rate)
+    with _LOOP_LOCK:
+        cached = _SSTV_CACHE.get(key)
+    if cached is not None:
+        return cached
+    from ..ham.sstv import find_mode
+    from ..ham.sstv_encoder import encode_sstv, sstv_test_card
+
+    factor = max(1, int(round(rate / _SSTV_LOOP_HZ)))
+    loop_rate = rate / factor
+    spec = find_mode(_SSTV_MODE)
+    card = sstv_test_card(spec.width, spec.height, "SDR MODULE")
+    audio = encode_sstv(card, spec, loop_rate).astype(np.float64)
+    tail = int(_SSTV_TAIL_S * loop_rate)
+    audio = np.concatenate((audio, np.zeros(tail)))
+    phase = (2 * np.pi * _SSTV_DEVIATION_HZ / loop_rate) * np.cumsum(audio)
+    length = (len(audio) - tail // 2) * factor
+    cached = (_Loop(phase, factor), length)
+    with _LOOP_LOCK:
+        _SSTV_CACHE.clear()  # one device rate at a time
+        _SSTV_CACHE[key] = cached
+    return cached
 
 
 # --------------------------------------------------------------------------- #
@@ -1293,22 +1977,40 @@ class MockDevice:
 
     Generates a band of plausible signals at fixed frequencies (FM broadcast
     stations, airband AM, 2 m and 70 cm FM, NOAA weather, ISM bursts, a CW
-    beacon, Mode S and Mode A/C replies on 1090 MHz and a few weak carriers
-    everywhere else) on top of a realistic noise floor. Signals move across
+    beacon, Mode S and Mode A/C replies on 1090 MHz, decodable APRS, pager
+    and ACARS transmissions, and a few weak carriers everywhere else) on top
+    of a realistic noise floor. Signals move across
     the display as you tune, so click-to-tune and the frequency scanner
-    behave as they would with real hardware. Raising the gain lifts signals and noise together and, as on a
+    behave as they would with real hardware. A 2 m repeater on 145.290 MHz
+    sends a 100.0 Hz CTCSS tone (Audio > Tone squelch shows it). The AM
+    band has a broadcast station on each of the radio tuner's six AM presets
+    (660, 770, 880, 1010, 1050 and 1260 kHz) playing the demo tune.
+    Raising the gain lifts signals and noise together and, as on a
     real receiver, too much gain clips the ADC. With automatic gain
     (``set_gain_mode(True)``) the device picks the gain itself, keeping the
     signals in the passband clear of clipping.
 
     The strongest station, 100.1 MHz, broadcasts a looping tune in stereo
     FM with the usual 75 us pre-emphasis, so listening to it in FM mode
-    (with the receiver's matching de-emphasis) plays music; the others carry
-    tones, voice-like modulation, keyed CW or data bursts. On 1090 MHz an
+    (with the receiver's matching de-emphasis) plays music, and sends RDS
+    (station name "SDR DEMO", a RadioText, program type Top 40) on its
+    57 kHz subcarrier, locked to its pilot; the others carry
+    tones, voice-like modulation, keyed CW or data bursts. On 145.800 MHz
+    (the ISS SSTV downlink) a Robot 36 test card is sent in NBFM every 75
+    seconds, the first 8 seconds into the demo, for the SSTV decoder. On
+    1090 MHz an
     airliner's transponder sends real ADS-B frames a few times a second
     (KLM1023, ICAO 4840D6: identification, position, velocity and a squawk
     reply) that the ADS-B decoder decodes, among weaker replies from other
-    aircraft that it drops.
+    aircraft that it drops. The Decoder panel's other protocols have real
+    traffic too (see _DATA_SCHEDULE), every 8 to 13 s: APRS AFSK1200
+    position reports on 144.390 MHz, POCSAG 1200 pages on 152.240 MHz, FLEX
+    1600 pages on 931.9375 MHz and ACARS messages on 131.550 MHz.
+
+    For the Signal tab, a remote control on 433.920 MHz (the EV1527 kind:
+    on/off keyed, pulse width modulated) sends its code eight times every
+    2.5 s, and a cheap 70 cm handheld on 438.500 MHz drifts +/- 2.5 kHz
+    over 40 s, for Radio > Track Signal (AFC).
 
     The samples form one continuous stream: each read carries on where the
     last one ended, so demodulated audio has no clicks between reads, and
@@ -1345,6 +2047,10 @@ class MockDevice:
         self._stream_pos = 0
         self._stream_rate = 0.0
         self._stream_epoch: Optional[float] = None
+        #: Samples skipped to catch up with the clock (read too slowly), as
+        #: the drivers count those their queue dropped: an I/Q recording
+        #: says it has gaps.
+        self.dropped_samples = 0
         self._visible_key: Optional[Tuple[float, float]] = None
         self._visible: List[tuple] = []
         self._tables: Dict[Tuple[float, float], Tuple[np.ndarray, np.ndarray]] = {}
@@ -1493,6 +2199,7 @@ class MockDevice:
         behind = (now - self._stream_epoch) * rate - (self._stream_pos + n)
         if behind > _MAX_LAG_S * rate:
             self._stream_pos += int(behind)
+            self.dropped_samples += int(behind)
         pos = self._stream_pos
         self._stream_pos += n
         return pos
@@ -1533,18 +2240,36 @@ class MockDevice:
     def _add_signal(self, out, kind, offset, amp, seed, rate, pos, stereo) -> None:
         """Add one signal to ``out`` (starting at stream position ``pos``).
 
-        ``stereo`` gives the broadcast FM pilot/RDS phase and sin(2 theta)
-        for the same samples.
+        ``stereo`` gives the broadcast FM pilot's phase term, sin(2 theta)
+        and sin(3 theta) (theta: the pilot's phase) for the same samples.
         """
         n = len(out)
+        if kind == "sstv":
+            self._add_sstv(out, offset, amp, rate, pos)
+            return
         if kind == "cw_steady":
             out += self._carrier(offset, amp, rate, pos, n)
             return
-        if kind in ("am", "cw"):
+        if kind in ("am", "cw", "amb"):
             envelope = _loops(kind, seed, rate).read(pos, n)
             wave = self._carrier(offset, amp, rate, pos, n)
             wave *= envelope
             out += wave
+            return
+        if kind in _DATA_KINDS:
+            # Transmissions on their schedule: only the samples they cover.
+            for a, b, phase, envelope in _loops(kind, seed, rate).spans(pos, n):
+                if phase is None:  # AM
+                    wave = self._carrier(offset, amp, rate, pos + a, b - a)
+                    wave *= envelope
+                    out[a:b] += wave
+                    continue
+                angle = self._phase(offset, rate, pos + a, b - a)
+                angle += phase
+                envelope *= amp
+                part = out[a:b]
+                part.real += np.cos(angle) * envelope
+                part.imag += np.sin(angle) * envelope
             return
         if kind == "modes":
             # Short pulsed replies: only the samples they cover.
@@ -1560,12 +2285,17 @@ class MockDevice:
         phase = self._phase(offset, rate, pos, n)
         if kind == "wfm":
             program, subcarrier = loops
-            pilot_rds, sin2 = stereo
+            pilot, sin2, sin3 = stereo
             phase += program.read(pos, n)
-            phase += pilot_rds
+            phase += pilot
             diff = subcarrier.read(pos, n)
             diff *= sin2
             phase += diff
+            if seed == _MUSIC_SEED:
+                # (T6) RDS on the 57 kHz subcarrier, locked to the pilot.
+                rds = _loops("rds", 0, rate).read(pos, n)
+                rds *= sin3
+                phase += rds
         else:
             phase += loops.read(pos, n)
         part = np.cos(phase)
@@ -1575,9 +2305,31 @@ class MockDevice:
         phase *= amp
         out.imag += phase
 
+    def _add_sstv(self, out, offset, amp, rate, pos) -> None:
+        """The SSTV demo: one transmission every _SSTV_PERIOD_S seconds,
+        from _SSTV_FIRST_S into the stream (silent in between)."""
+        loop, length = _sstv_transmission(rate)
+        period = int(round(_SSTV_PERIOD_S * rate))
+        first = int(round(_SSTV_FIRST_S * rate))
+        n = len(out)
+        done = 0
+        while done < n:
+            into = (pos + done - first) % period
+            if into >= length:  # between transmissions
+                done += min(n - done, period - into)
+                continue
+            count = min(n - done, length - into)
+            phase = self._phase(offset, rate, pos + done, count)
+            phase += loop.read(into, count)
+            part = out[done : done + count]
+            part.real += amp * np.cos(phase)
+            part.imag += amp * np.sin(phase)
+            done += count
+
     def _stereo_terms(self, rate: float, pos: int, n: int):
-        """Broadcast FM pilot + RDS phase and sin(2 theta), theta the pilot's
-        phase, shared by every FM station (they are locked to the stream)."""
+        """Broadcast FM pilot phase, sin(2 theta) and sin(3 theta), theta
+        the pilot's phase, shared by every FM station (they are locked to
+        the stream). The RDS station's data rides on sin(3 theta)."""
         theta = self._phase(_PILOT_HZ, rate, pos, n)
         sin1 = np.sin(theta)
         sin2 = np.cos(theta)
@@ -1588,10 +2340,8 @@ class MockDevice:
         sin3 *= -4.0
         sin3 += 3.0
         sin3 *= sin1
-        sin3 *= _RDS_SHARE * _WFM_DEVIATION_HZ / (3 * _PILOT_HZ)
         sin1 *= _PILOT_SHARE * _WFM_DEVIATION_HZ / _PILOT_HZ
-        sin1 += sin3
-        return sin1, sin2
+        return sin1, sin2, sin3
 
     def _noise(self, n: int, sigma: float) -> np.ndarray:
         """``n`` samples of the noise floor (complex64)."""
@@ -1631,7 +2381,7 @@ class MockDevice:
             for a, b in _on_ranges(duty, seed, t0, n, rate):
                 if kind == "wfm" and stereo is None:
                     stereo = self._stereo_terms(rate, pos, n)
-                terms = None if stereo is None else (stereo[0][a:b], stereo[1][a:b])
+                terms = None if stereo is None else tuple(t[a:b] for t in stereo)
                 self._add_signal(
                     samples[a:b],
                     kind,

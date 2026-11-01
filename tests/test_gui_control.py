@@ -138,8 +138,11 @@ class TestLayout(_PanelTestCase):
             titles,
             [
                 "Frequency",
-                "Presets",
+                # (F-window, LISTEN-02: how you listen, right under the
+                # frequency; Presets after them, also in Radio > Band Presets)
                 "Demodulation",
+                "Audio",  # noise reduction, audio AGC, tone squelch
+                "Presets",
                 "Receiver",
                 "Recording",
                 "License Profile",
@@ -340,7 +343,9 @@ class TestRecording(_PanelTestCase):
         self.panel._record_btn.setChecked(True)
         self.assertEqual(self.panel._record_status.property("tone"), "danger")
         self.assertTrue(self.panel._pause_btn.isEnabled())
-        self.assertFalse(self.panel._format_combo.isEnabled())
+        # The format only picks how the take is saved: it can still change
+        # (rx:UX-06).
+        self.assertTrue(self.panel._format_combo.isEnabled())
 
         self.panel._pause_btn.click()
         self.assertEqual(paused, [True])
@@ -364,7 +369,8 @@ class TestPresets(_PanelTestCase):
 
     def test_apply_picks_the_narrowest_bandwidth_that_fits(self):
         cases = {
-            ("QRP", "QRP 20m SSB"): ("10 kHz", "USB"),  # was 25 kHz
+            # SSB picks from the SSB filter widths (the preset is 2.7 kHz).
+            ("QRP", "QRP 20m SSB"): ("2.7 kHz", "USB"),  # was 10, then 25 kHz
             ("ISM", "ISM 915 MHz"): ("2 MHz", "None (I/Q)"),  # was unchanged
             ("Amateur", "2m Calling"): ("25 kHz", "FM"),
             ("Broadcast", "FM Broadcast"): ("200 kHz", "FM"),

@@ -316,6 +316,10 @@ class TestRecordingProtection(_WindowTestCase):
     def test_save_uses_the_capture_frequency_and_rate(self):
         from sdr_module.dsp.recording import load_iq_file
 
+        # The file is labelled with the LO the samples were captured at (the
+        # VFO only moves within them): with every tune retuning the LO,
+        # 100 MHz is the capture's center.
+        self.win._keep_centered_action.setChecked(True)
         self.win.set_frequency(100e6)
         self._record()
         self.win.set_frequency(433.92e6)  # retuned after recording
@@ -331,26 +335,30 @@ class TestRecordingProtection(_WindowTestCase):
             side_effect=fake_save,
         ):
             self.win._save_recording()
-        self.assertTrue(seen["suggested"].startswith("iq_100.000MHz_"))
+        self.assertTrue(
+            os.path.basename(seen["suggested"]).startswith("iq_100.000MHz_")
+        )
         _samples, meta = load_iq_file(os.path.join(folder, "take.sigmf-data"))
         self.assertAlmostEqual(meta.center_frequency, 100e6)
 
-        # An imported file keeps its own sample rate when converted.
-        with (
-            mock.patch(
-                "sdr_module.gui.main_window.QFileDialog.getOpenFileName",
-                return_value=(os.path.join(folder, "take.sigmf-data"), ""),
-            ),
-            mock.patch.object(QMessageBox, "information"),
-            mock.patch(
-                "sdr_module.dsp.recording.load_iq_file",
-                return_value=(
-                    np.zeros(100, np.complex64),
-                    mock.Mock(sample_rate=2.0e6, center_frequency=145.8e6),
-                ),
-            ),
+        # A converted file keeps its own sample rate and frequency.
+        from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
+
+        other = os.path.join(folder, "other.sigmf-data")
+        save_iq_file(
+            other,
+            np.zeros(100, np.complex64),
+            2.0e6,
+            145.8e6,
+            SampleFormat.FLOAT32,
+            FileFormat.SIGMF,
+        )
+        self.win._exec_dialog = lambda box: box.buttons()[-1].click()  # Close
+        with mock.patch(
+            "sdr_module.gui.main_window.QFileDialog.getOpenFileName",
+            return_value=(other, ""),
         ):
-            self.win._open_recording()
+            self.win._convert_recording()
         self.assertFalse(self.win._buffer_unsaved)
         self.win.set_sample_rate(2.4e6)
         with mock.patch(
@@ -363,12 +371,18 @@ class TestRecordingProtection(_WindowTestCase):
         self.assertAlmostEqual(meta.center_frequency, 145.8e6)
 
     def test_retuning_while_recording_warns(self):
+        # (A take holds one center frequency: a tune that would retune the
+        # receiver is refused while it records, saying why; it used to
+        # retune and warn that the file would be labelled wrongly.)
         self.win._record_button.click()
         self.win._update_display()
-        self.win.set_frequency(101e6)
+        lo = self.win._lo_frequency()
+        self.assertFalse(self.win.set_frequency(101e6))
         self.win._update_display()
-        self.assertIn("Retuned while recording", self.win._message_label.text())
-        self.assertEqual(self.win._message_label.property("tone"), "warning")
+        self.assertIn("stop recording to retune", self.win._message_label.text())
+        self.assertEqual(self.win._message_label.property("tone"), "danger")
+        self.assertEqual(self.win._lo_frequency(), lo)
+        self.assertEqual(self.win._buffer_meta[0], lo)
         self.win._record_button.click()
 
 
@@ -425,10 +439,16 @@ class TestAudioOutput(_WindowTestCase):
             "_audio_output_problem",
             return_value="No audio output device",
         ):
-            self.win._audio_action.setChecked(True)
+            # Radio > Audio > Mute off: audio on (it was off: no device).
+            self.win._mute_action.setChecked(True)
+            self.win._mute_action.setChecked(False)
         self.assertFalse(self.win._audio_enabled)
-        self.assertFalse(self.win._audio_action.isChecked())
+        # (Mute isn't checked: nothing can play, it wasn't muted by you.)
+        self.assertFalse(self.win._mute_action.isChecked())
         self.assertFalse(self.win._audio_button.isChecked())
+        # The button says there is no output (not "Muted", as if by you).
+        self.assertEqual(self.win._audio_button.text().strip(), "No output")
+        self.assertEqual(self.win._audio_button.property("tone"), "warning")
         self.assertIn("No audio output device", self.win._message_label.text())
         self.assertEqual(self.win._message_label.property("tone"), "warning")
         self.assertNotEqual(self.store.values.get("audio_enabled"), False)
@@ -447,9 +467,9 @@ class TestAudioOutput(_WindowTestCase):
             self.win._set_demod_mode("FM")
             self.win._audio_button.click()  # on
             self.assertTrue(self.win._audio_enabled)
-            self.assertTrue(self.win._audio_action.isChecked())
+            self.assertFalse(self.win._mute_action.isChecked())
             self.assertEqual(self.win._audio_button.text().strip(), "Audio")
-            self.win._audio_action.trigger()  # off from the menu
+            self.win._mute_action.trigger()  # Radio > Audio > Mute
         self.assertFalse(self.win._audio_enabled)
         self.assertFalse(self.win._audio_button.isChecked())
         self.assertEqual(self.win._audio_button.text().strip(), "Muted")
@@ -476,7 +496,8 @@ class TestPresetsAndDefaults(_WindowTestCase):
             self.assertEqual(panel._bw_combo.currentText(), preset.bandwidth)
             if preset.fm_deviation:
                 self.assertEqual(panel._fm_dev_combo.currentText(), preset.fm_deviation)
-            self.assertIn("bandwidth", self.win._message_label.text())
+            # (The control panel calls it the Filter now: ux:UX-U13.)
+            self.assertIn("filter", self.win._message_label.text())
             self.assertNotIn("&", self.win._message_label.text())
         # ISM matches the Control Panel presets: raw I/Q.
         ism = [p for p in BAND_PRESETS if "ISM" in p.label]
@@ -488,7 +509,11 @@ class TestPresetsAndDefaults(_WindowTestCase):
             for a in self.win.findChildren(QAction)
             if a.menu() is not None and a.text() == "Band &Presets"
         )
-        labels = [a.text().split("\t")[0] for a in menu.actions()]
+        # The favourites, a separator, then a submenu per category: every
+        # item with its own mnemonic.
+        labels = [
+            a.text().split("\t")[0] for a in menu.actions() if not a.isSeparator()
+        ]
         keys = [label[label.index("&") + 1].lower() for label in labels]
         self.assertEqual(len(keys), len(set(keys)))
         self.assertFalse(any("(" in label for label in labels))
@@ -589,18 +614,39 @@ class TestSmallFixes(_WindowTestCase):
         self.assertTrue(self.win._is_running)
         self.assertNotIn("Press Start", self.win._message_label.text())
 
-    def test_no_device_prompt_recommends_connect(self):
+    def _prompt_buttons(self, hardware):
         seen = {}
 
         def fake_exec(box):
             seen.update(
                 {b.text().replace("&", ""): b.property("role") for b in box.buttons()}
             )
+            seen["default"] = box.defaultButton().text().replace("&", "")
+            seen["text"] = box.text()
             return 0
 
-        with mock.patch.object(QMessageBox, "exec", fake_exec):
-            self.win._prompt_no_device()
+        with (
+            mock.patch.object(QMessageBox, "exec", fake_exec),
+            mock.patch.object(self.win, "_scan_hardware", return_value=hardware),
+        ):
+            self.assertEqual(self.win._prompt_no_device(), "cancel")
+        return seen
+
+    def test_no_device_prompt_recommends_connect(self):
+        # With an SDR plugged in (not opened yet), Connect... opens it.
+        seen = self._prompt_buttons([("RtlSdrDevice:0001#1", "Generic RTL2832U")])
         self.assertEqual(seen["Connect..."], "primary")
+        self.assertEqual(seen["default"], "Connect...")
+        self.assertIn("Generic RTL2832U", seen["text"])
+
+    def test_no_device_prompt_recommends_demo_without_hardware(self):
+        # mc:MC-U02: with nothing found, Connect... led to a dialog whose only
+        # row was the demo device: Demo Mode is the default then.
+        seen = self._prompt_buttons([])
+        self.assertEqual(seen["Demo Mode"], "primary")
+        self.assertNotEqual(seen["Connect..."], "primary")
+        self.assertEqual(seen["default"], "Demo Mode")
+        self.assertEqual(seen["text"], "No SDR hardware detected.")
 
     def test_info_quick_tips_are_keycap_rows(self):
         from sdr_module.gui.main_window import InfoPanel

@@ -9,10 +9,11 @@ import time
 from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional
 
 import numpy as np
 
+from ..dsp.bursts import Burst, BurstDetector, frame_rows
 from ..dsp.classifiers import ClassificationResult, SignalClassifier, SignalType
 from ..dsp.spectrum import SpectrumAnalyzer
 from ..protocols.detector import ProtocolDetector
@@ -66,7 +67,20 @@ class PacketHighlighter:
     Analyzes spectrum data in real-time to detect signal bursts
     and highlights them on the waterfall display with protocol-
     specific colors.
+
+    Detection (ADAPTIVE, the default) uses
+    :class:`~sdr_module.dsp.bursts.BurstDetector`: the noise floor is taken
+    from the first line and adapted quickly at first, so packets are found
+    from the second line on (it used to start at -100 dB and rise 0.1 dB a
+    line: nothing for about 12 s, then a flood of noise "packets"), and a
+    packet must stand ``snr_threshold_db`` above the floor over a few
+    neighbouring bins and be ``min_bandwidth_hz`` to ``max_bandwidth_hz``
+    wide. Feed it dBFS lines (as :class:`LivePacketDisplay` does).
+    THRESHOLD compares against ``threshold_db`` instead.
     """
+
+    #: Samples of each line kept per packet for classification.
+    KEEP_SAMPLES = 4096
 
     def __init__(
         self,
@@ -85,11 +99,11 @@ class PacketHighlighter:
         self._waterfall = waterfall
         self._sample_rate = sample_rate
         self._config = config or DetectionConfig()
-
-        # Detection state
-        self._noise_floor = np.full(waterfall.width, -100.0)
-        self._active_signals: Dict[int, Dict] = {}  # bin -> signal info
+        self._detector = self._make_detector()
         self._lock = Lock()
+        # Samples of the packets in progress (detector burst id -> blocks).
+        self._samples: Dict[int, List[np.ndarray]] = {}
+        self._lines = 0
 
         # Classifiers and detectors
         self._classifier = SignalClassifier(sample_rate)
@@ -106,6 +120,17 @@ class PacketHighlighter:
         self._total_packets = 0
         self._packets_by_protocol: Dict[str, int] = {}
 
+    def _make_detector(self) -> BurstDetector:
+        cfg = self._config
+        return BurstDetector(
+            snr_db=cfg.snr_threshold_db,
+            min_width_hz=cfg.min_bandwidth_hz,
+            max_width_hz=cfg.max_bandwidth_hz,
+            gap_rows=cfg.merge_gap_lines,
+            merge_hz=cfg.merge_gap_hz,
+            max_duration_s=1e9,
+        )
+
     @property
     def config(self) -> DetectionConfig:
         return self._config
@@ -113,6 +138,7 @@ class PacketHighlighter:
     @config.setter
     def config(self, config: DetectionConfig) -> None:
         self._config = config
+        self._detector = self._make_detector()
 
     @property
     def detected_packets(self) -> List[DetectedPacket]:
@@ -123,8 +149,13 @@ class PacketHighlighter:
         return {
             "total_packets": self._total_packets,
             "by_protocol": self._packets_by_protocol.copy(),
-            "active_signals": len(self._active_signals),
+            "active_signals": len(self._detector.active),
         }
+
+    @property
+    def noise_floor_db(self) -> Optional[np.ndarray]:
+        """The per-bin noise floor (dB), once a line has been seen."""
+        return self._detector.noise_floor_db()
 
     def set_protocol_detector(self, detector: ProtocolDetector) -> None:
         """Set protocol detector for advanced detection."""
@@ -146,172 +177,76 @@ class PacketHighlighter:
         Process spectrum line and detect/highlight packets.
 
         Args:
-            power_db: Power spectrum in dB
+            power_db: Power spectrum in dB (dBFS, 0 Hz in the middle)
             samples: Optional I/Q samples for classification
             timestamp: Optional timestamp
 
         Returns:
             List of new highlights created
         """
-        timestamp = timestamp or time.time()
+        timestamp = time.time() if timestamp is None else float(timestamp)
         new_highlights = []
-
+        power = np.asarray(power_db, dtype=np.float64)
         with self._lock:
-            # Update noise floor (adaptive)
-            if self._config.mode == DetectionMode.ADAPTIVE:
-                self._update_noise_floor(power_db)
-
-            # Detect signals above threshold
-            signals = self._detect_signals(power_db)
-
-            # Track signal continuity
-            for signal in signals:
-                bin_start, bin_end, peak_power = signal
-                center_bin = (bin_start + bin_end) // 2
-
-                # Check if continuing existing signal
-                matched = False
-                for active_bin, info in list(self._active_signals.items()):
-                    if abs(active_bin - center_bin) < 5:  # Allow some drift
-                        # Continue existing signal
-                        info["duration"] += 1
-                        info["peak_power"] = max(info["peak_power"], peak_power)
-                        info["bin_end"] = max(info["bin_end"], bin_end)
-                        info["bin_start"] = min(info["bin_start"], bin_start)
-                        matched = True
-                        break
-
-                if not matched:
-                    # New signal
-                    self._active_signals[center_bin] = {
-                        "bin_start": bin_start,
-                        "bin_end": bin_end,
-                        "start_time": timestamp,
-                        "duration": 1,
-                        "peak_power": peak_power,
-                        "samples": [] if samples is not None else None,
-                    }
-
-            # Collect samples for active signals
-            if samples is not None:
-                for info in self._active_signals.values():
-                    if info["samples"] is not None:
-                        # Store subset of samples for classification
-                        info["samples"].append(samples[:1024].copy())
-
-            # Check for ended signals
-            ended_signals = []
-            for active_bin in list(self._active_signals.keys()):
-                signal_found = False
-                for signal in signals:
-                    bin_start, bin_end, _ = signal
-                    center_bin = (bin_start + bin_end) // 2
-                    if abs(active_bin - center_bin) < 5:
-                        signal_found = True
-                        break
-
-                if not signal_found:
-                    info = self._active_signals[active_bin]
-                    info["gap"] = info.get("gap", 0) + 1
-
-                    if info["gap"] > self._config.merge_gap_lines:
-                        ended_signals.append((active_bin, info))
-                        del self._active_signals[active_bin]
-
-            # Process ended signals
-            for _active_bin, info in ended_signals:
-                if info["duration"] >= self._config.min_duration_lines:
-                    highlight = self._finalize_packet(info, samples, timestamp)
-                    if highlight:
-                        new_highlights.append(highlight)
-
+            self._lines += 1
+            detector = self._detector
+            if self._config.mode == DetectionMode.THRESHOLD:
+                ended = self._threshold_line(power, timestamp)
+            else:
+                ended = detector.process(
+                    power, self._waterfall_centre(), self._sample_rate, timestamp
+                )
+            if samples is not None and self._config.mode in (
+                DetectionMode.CLASSIFIER,
+                DetectionMode.PROTOCOL,
+            ):
+                for burst in detector.active:
+                    kept = self._samples.setdefault(burst.ident, [])
+                    if sum(len(k) for k in kept) < 16 * self.KEEP_SAMPLES:
+                        kept.append(np.asarray(samples[: self.KEEP_SAMPLES]).copy())
+            for burst in ended:
+                kept = self._samples.pop(burst.ident, [])
+                if burst.rows < self._config.min_duration_lines:
+                    continue
+                highlight = self._finalize_packet(burst, kept, timestamp)
+                if highlight:
+                    new_highlights.append(highlight)
         return new_highlights
 
-    def _update_noise_floor(self, power_db: np.ndarray) -> None:
-        """Update adaptive noise floor estimate."""
-        # Use minimum of current and exponential average
-        alpha = self._config.noise_floor_alpha
-        self._noise_floor = (
-            alpha * np.minimum(power_db, self._noise_floor + 10)
-            + (1 - alpha) * self._noise_floor
+    def _waterfall_centre(self) -> float:
+        # The waterfall's frequency axis: its first bin is centre - rate/2.
+        return float(self._waterfall.get_frequency_at_bin(self._waterfall.width // 2))
+
+    def _threshold_line(self, power: np.ndarray, timestamp: float) -> List[Burst]:
+        """THRESHOLD mode: a fixed floor ``snr_threshold_db`` below
+        ``threshold_db``, so bins above ``threshold_db`` are packets."""
+        detector = self._detector
+        floor = self._config.threshold_db - self._config.snr_threshold_db
+        level = np.full(len(power), 10.0 ** (floor / 10.0))
+        detector._floor = level.copy()
+        detector._rows = max(detector._rows, detector.settle_rows + 1)
+        ended = detector.process(
+            power, self._waterfall_centre(), self._sample_rate, timestamp
         )
-
-    def _detect_signals(self, power_db: np.ndarray) -> List[Tuple[int, int, float]]:
-        """
-        Detect signals in spectrum.
-
-        Returns:
-            List of (bin_start, bin_end, peak_power) tuples
-        """
-        # Calculate threshold
-        if self._config.mode == DetectionMode.ADAPTIVE:
-            threshold = self._noise_floor + self._config.snr_threshold_db
-        else:
-            threshold = np.full_like(power_db, self._config.threshold_db)
-
-        # Find bins above threshold
-        above = power_db > threshold
-
-        # Find contiguous regions
-        signals: List[Tuple[int, int, float]] = []
-        in_signal = False
-        signal_start = 0
-        peak_power: float = -200.0
-
-        for i in range(len(above)):
-            if above[i] and not in_signal:
-                # Signal start
-                in_signal = True
-                signal_start = i
-                peak_power = power_db[i]
-            elif above[i] and in_signal:
-                # Continue signal
-                peak_power = max(peak_power, power_db[i])
-            elif not above[i] and in_signal:
-                # Signal end
-                in_signal = False
-                bandwidth_bins = i - signal_start
-                bandwidth_hz = bandwidth_bins * self._sample_rate / len(power_db)
-
-                if (
-                    self._config.min_bandwidth_hz
-                    <= bandwidth_hz
-                    <= self._config.max_bandwidth_hz
-                ):
-                    signals.append((signal_start, i - 1, peak_power))
-
-        # Handle signal at end
-        if in_signal:
-            bandwidth_bins = len(above) - signal_start
-            bandwidth_hz = bandwidth_bins * self._sample_rate / len(power_db)
-            if (
-                self._config.min_bandwidth_hz
-                <= bandwidth_hz
-                <= self._config.max_bandwidth_hz
-            ):
-                signals.append((signal_start, len(above) - 1, peak_power))
-
-        return signals
+        detector._floor = level
+        return ended
 
     def _finalize_packet(
-        self, info: Dict, samples: Optional[np.ndarray], end_time: float
+        self, burst: Burst, kept: List[np.ndarray], end_time: float
     ) -> Optional[PacketHighlight]:
         """
         Finalize a detected packet and create highlight.
 
         Args:
-            info: Signal tracking info
-            samples: Optional samples for classification
+            burst: The burst the detector followed
+            kept: Samples collected while it lasted (for classification)
             end_time: End timestamp
 
         Returns:
             PacketHighlight or None
         """
-        # Calculate frequencies
-        center_bin = (info["bin_start"] + info["bin_end"]) // 2
-        center_freq = self._waterfall.get_frequency_at_bin(center_bin)
-        freq_start = self._waterfall.get_frequency_at_bin(info["bin_start"])
-        freq_end = self._waterfall.get_frequency_at_bin(info["bin_end"])
+        freq_start = burst.center_hz - burst.offset_hz + burst.lo_hz
+        freq_end = burst.center_hz - burst.offset_hz + burst.hi_hz
         bandwidth = freq_end - freq_start
 
         # Classify signal
@@ -319,16 +254,21 @@ class PacketHighlighter:
         classification = None
 
         if self._config.mode in (DetectionMode.CLASSIFIER, DetectionMode.PROTOCOL):
-            if info.get("samples") and len(info["samples"]) > 0:
-                # Concatenate collected samples
-                all_samples = np.concatenate(info["samples"])
-
-                # Classify
-                classification = self._classifier.classify(all_samples)
+            if kept:
+                all_samples = np.concatenate(kept)
+                # The packet to 0 Hz (it is somewhere in the span).
+                t = np.arange(len(all_samples)) / self._sample_rate
+                mixed = all_samples * np.exp(-2j * np.pi * burst.offset_hz * t)
+                classification = self._classifier.classify(
+                    mixed, search_hz=0.5 * bandwidth + 5e3
+                )
 
                 if classification.signal_type == SignalType.ANALOG:
                     protocol = "analog"
-                elif classification.signal_type == SignalType.DIGITAL:
+                elif classification.signal_type in (
+                    SignalType.DIGITAL,
+                    SignalType.PULSED,
+                ):
                     if classification.modulation:
                         protocol = classification.modulation.value
                     else:
@@ -345,22 +285,19 @@ class PacketHighlighter:
                     if matches:
                         protocol = matches[0].protocol_info.name.lower()
 
-        # Estimate SNR
-        snr_db = info["peak_power"] - np.mean(
-            self._noise_floor[info["bin_start"] : info["bin_end"] + 1]
-        )
+        snr_db = float(burst.snr_db)
 
         # Create detected packet record
         packet = DetectedPacket(
-            start_time=info["start_time"],
+            start_time=burst.start_s,
             end_time=end_time,
-            center_freq_hz=center_freq,
+            center_freq_hz=burst.center_hz,
             bandwidth_hz=bandwidth,
-            peak_power_db=info["peak_power"],
+            peak_power_db=burst.peak_dbfs,
             snr_db=snr_db,
             protocol=protocol,
             classification=classification,
-            waterfall_lines=info["duration"],
+            waterfall_lines=burst.rows,
         )
 
         self._detected_packets.append(packet)
@@ -380,12 +317,12 @@ class PacketHighlighter:
         highlight = self._waterfall.add_packet_highlight(
             freq_start_hz=freq_start,
             freq_end_hz=freq_end,
-            duration_lines=info["duration"],
+            duration_lines=burst.rows,
             protocol=protocol,
             label=f"{protocol.upper()} {snr_db:.1f}dB",
             confidence=min(1.0, snr_db / 30),
             metadata={
-                "peak_power_db": info["peak_power"],
+                "peak_power_db": burst.peak_dbfs,
                 "snr_db": snr_db,
                 "bandwidth_hz": bandwidth,
             },
@@ -396,8 +333,8 @@ class PacketHighlighter:
     def reset(self) -> None:
         """Reset detector state."""
         with self._lock:
-            self._noise_floor.fill(-100)
-            self._active_signals.clear()
+            self._detector.reset()
+            self._samples.clear()
 
     def clear_history(self) -> None:
         """Clear packet history."""
@@ -437,8 +374,10 @@ class LivePacketDisplay:
         self.waterfall.set_frequency_range(center_freq, sample_rate)
 
         self.highlighter = PacketHighlighter(self.waterfall, sample_rate)
-
+        # (Kept for callers that read it; the lines are frame_rows' now.)
         self.spectrum = SpectrumAnalyzer(fft_size=width)
+
+        self._width = width
         self._sample_rate = sample_rate
         self._center_freq = center_freq
 
@@ -452,16 +391,15 @@ class LivePacketDisplay:
         Returns:
             RGBA image as numpy array
         """
-        # Compute spectrum
-        result = self.spectrum.compute_spectrum(
-            samples, self._center_freq, self._sample_rate
-        )
+        # dBFS per bin over the whole frame: the strongest of its FFTs, so
+        # a short packet anywhere in it shows.
+        line, _mean = frame_rows(samples, self._width)
 
         # Add to waterfall
-        self.waterfall.add_spectrum_line(result.power_db)
+        self.waterfall.add_spectrum_line(line)
 
         # Detect and highlight packets
-        self.highlighter.process_spectrum(result.power_db, samples)
+        self.highlighter.process_spectrum(line, samples)
 
         return self.waterfall.image
 

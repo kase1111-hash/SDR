@@ -12,6 +12,9 @@ from typing import Tuple
 
 import numpy as np
 
+from .morse import MORSE_CODE as _MORSE_CODE
+from .morse import KeyingDetector, MorseDecoder
+
 
 class ModulationType(Enum):
     """Modulation types."""
@@ -1229,64 +1232,9 @@ class QAMDemodulator(Demodulator):
         self._evm_history.clear()
 
 
-# Morse code lookup table
-MORSE_CODE = {
-    ".-": "A",
-    "-...": "B",
-    "-.-.": "C",
-    "-..": "D",
-    ".": "E",
-    "..-.": "F",
-    "--.": "G",
-    "....": "H",
-    "..": "I",
-    ".---": "J",
-    "-.-": "K",
-    ".-..": "L",
-    "--": "M",
-    "-.": "N",
-    "---": "O",
-    ".--.": "P",
-    "--.-": "Q",
-    ".-.": "R",
-    "...": "S",
-    "-": "T",
-    "..-": "U",
-    "...-": "V",
-    ".--": "W",
-    "-..-": "X",
-    "-.--": "Y",
-    "--..": "Z",
-    "-----": "0",
-    ".----": "1",
-    "..---": "2",
-    "...--": "3",
-    "....-": "4",
-    ".....": "5",
-    "-....": "6",
-    "--...": "7",
-    "---..": "8",
-    "----.": "9",
-    ".-.-.-": ".",
-    "--..--": ",",
-    "..--..": "?",
-    ".----.": "'",
-    "-.-.--": "!",
-    "-..-.": "/",
-    "-.--.": "(",
-    "-.--.-": ")",
-    ".-...": "&",
-    "---...": ":",
-    "-.-.-.": ";",
-    "-...-": "=",
-    ".-.-.": "+",
-    "-....-": "-",
-    "..--.-": "_",
-    ".-..-.": '"',
-    "...-..-": "$",
-    ".--.-.": "@",
-    "...---...": "SOS",
-}
+# Morse code lookup table (code -> character); the streaming decoder lives
+# in sdr_module.dsp.morse.
+MORSE_CODE = _MORSE_CODE
 
 
 class CWDemodulator(Demodulator):
@@ -1303,6 +1251,13 @@ class CWDemodulator(Demodulator):
     - On/off keying detection
     - Timing analysis for dots/dashes
     - Morse code to text decoding
+
+    :meth:`detect_keying` and :meth:`decode_morse` stream: the envelope
+    levels, the key state, the element being timed and the letter being
+    received carry over from one call to the next (see
+    :mod:`sdr_module.dsp.morse`), so a signal fed in blocks of any size
+    decodes to the same text as the whole buffer at once. The speed is
+    measured from the marks (``wpm`` is only the starting guess).
     """
 
     def __init__(
@@ -1353,12 +1308,10 @@ class CWDemodulator(Demodulator):
         self._letter_gap = self._unit_time * 3
         self._word_gap = self._unit_time * 7
 
-        # Morse decoder state
-        self._current_element = ""
-        self._current_letter = ""
+        # Streaming keying detector and Morse decoder (sdr_module.dsp.morse)
+        self._keyer = KeyingDetector(sample_rate)
+        self._morse = MorseDecoder(sample_rate, wpm=wpm)
         self._decoded_text = ""
-        self._last_key_time = 0.0
-        self._sample_count = 0
 
     @property
     def bfo_frequency(self) -> float:
@@ -1385,6 +1338,12 @@ class CWDemodulator(Demodulator):
         self._element_gap = self._unit_time
         self._letter_gap = self._unit_time * 3
         self._word_gap = self._unit_time * 7
+        self._morse.set_wpm(wpm)
+
+    @property
+    def _current_letter(self) -> str:
+        """Elements (dots and dashes) of the letter being received."""
+        return str(self._morse._letter)
 
     @property
     def decoded_text(self) -> str:
@@ -1437,46 +1396,18 @@ class CWDemodulator(Demodulator):
         """
         Detect on/off keying from samples.
 
+        The envelope's peak and noise floor are tracked across calls and
+        the key decided with hysteresis between them (see
+        :class:`~sdr_module.dsp.morse.KeyingDetector`), so the decisions do
+        not depend on how the signal is split into blocks.
+
         Args:
             samples: Complex I/Q samples or audio
 
         Returns:
             Binary keying signal (1 = key down, 0 = key up)
         """
-        # Get envelope
-        if np.iscomplexobj(samples):
-            envelope = np.abs(samples)
-        else:
-            # Audio - use absolute value with smoothing
-            envelope = np.abs(samples)
-
-        # Smooth envelope
-        smoothed = np.zeros_like(envelope)
-        avg = self._envelope_avg
-        for i, s in enumerate(envelope):
-            avg = self._envelope_alpha * s + (1 - self._envelope_alpha) * avg
-            smoothed[i] = avg
-        self._envelope_avg = avg
-
-        # Auto-threshold
-        env_max: float = float(np.max(smoothed))
-        env_min: float = float(np.min(smoothed))
-        threshold = (env_max + env_min) / 2
-
-        # Apply hysteresis
-        keying = np.zeros(len(samples), dtype=np.float32)
-        for i, s in enumerate(smoothed):
-            if self._key_state:
-                # Key is down - go up when below threshold * 0.7
-                if s < threshold * 0.7:
-                    self._key_state = False
-            else:
-                # Key is up - go down when above threshold * 1.3
-                if s > threshold * 1.3:
-                    self._key_state = True
-            keying[i] = 1.0 if self._key_state else 0.0
-
-        return keying
+        return self._keyer.process(np.asarray(samples)).astype(np.float32)
 
     def analyze_timing(self, keying: np.ndarray) -> list:
         """
@@ -1513,60 +1444,37 @@ class CWDemodulator(Demodulator):
         """
         Decode Morse code from keying signal.
 
+        The element or gap in progress at the end of one call continues
+        in the next (the decoder counts samples across calls), and the
+        dit length is learned from the marks: the first letters wait
+        until the speed is known, or until a pause of a word or more ends
+        the transmission. Call :meth:`flush` at the end of a capture that
+        stops sooner after its last letter.
+
         Args:
             keying: Binary keying signal
 
         Returns:
-            Decoded text
+            Text decoded in this call (words separated by spaces, a
+            newline after a line ends on a long pause or carrier)
         """
-        self._sample_count += len(keying)
-        current_time = self._sample_count / self._sample_rate
+        before = len(self._morse.text)
+        self._morse.process(np.asarray(keying))
+        decoded = self._morse.text[before:]
+        self._decoded_text += decoded
+        return decoded
 
-        # Find transitions
-        diff = np.diff(np.concatenate([[0], keying, [0]]))
-        key_down = np.where(diff > 0)[0]
-        key_up = np.where(diff < 0)[0]
+    def flush(self) -> str:
+        """End the stream (e.g. a complete capture): decode the elements
+        still waiting for the speed and the letter in progress.
 
-        decoded = ""
-
-        for i, (start, end) in enumerate(zip(key_down, key_up, strict=True)):
-            # Check gap before this element
-            if i == 0 and self._last_key_time > 0:
-                gap = float(
-                    start / self._sample_rate
-                    + (current_time - len(keying) / self._sample_rate)
-                    - self._last_key_time
-                )
-            elif i > 0:
-                gap = float((start - key_up[i - 1]) / self._sample_rate)
-            else:
-                gap = 0.0
-
-            # Handle gaps
-            if gap > self._word_gap * 0.6:
-                # Word gap - decode current letter and add space
-                if self._current_letter:
-                    char = MORSE_CODE.get(self._current_letter, "?")
-                    decoded += char + " "
-                    self._current_letter = ""
-            elif gap > self._letter_gap * 0.6:
-                # Letter gap - decode current letter
-                if self._current_letter:
-                    char = MORSE_CODE.get(self._current_letter, "?")
-                    decoded += char
-                    self._current_letter = ""
-
-            # Classify element
-            duration_samples = end - start
-            duration_sec = duration_samples / self._sample_rate
-
-            if duration_sec < self._dash_time * 0.6:
-                self._current_letter += "."
-            else:
-                self._current_letter += "-"
-
-            self._last_key_time = current_time - (len(keying) - end) / self._sample_rate
-
+        Returns:
+            The text this adds (also added to :attr:`decoded_text`), its
+            line ended with a newline
+        """
+        before = len(self._morse.text)
+        self._morse.flush()
+        decoded = self._morse.text[before:]
         self._decoded_text += decoded
         return decoded
 
@@ -1574,12 +1482,19 @@ class CWDemodulator(Demodulator):
         """
         Estimate WPM from keying signal.
 
+        Once :meth:`decode_morse` has measured the speed this is that
+        measurement (from the recent dits and dashes); before, it is
+        estimated from ``keying`` alone.
+
         Args:
             keying: Binary keying signal
 
         Returns:
             Estimated words per minute
         """
+        if self._morse.calibrated:
+            return float(self._morse.wpm)
+
         elements = self.analyze_timing(keying)
 
         if len(elements) < 3:
@@ -1602,10 +1517,9 @@ class CWDemodulator(Demodulator):
         self._agc_gain = 1.0
         self._envelope_avg = 0.0
         self._key_state = False
-        self._current_letter = ""
+        self._keyer.reset()
+        self._morse.reset()
         self._decoded_text = ""
-        self._last_key_time = 0.0
-        self._sample_count = 0
 
     def clear_decoded(self) -> None:
         """Clear decoded text buffer."""

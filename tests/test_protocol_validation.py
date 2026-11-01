@@ -258,8 +258,12 @@ class TestPOCSAGDecoder:
         decoder = self._make_decoder()
         frame = 0
         idle = POCSAGDecoder.IDLE_WORD
-        # Numeric payload: digits 1,2,3,4,5 as 4-bit symbols, MSB first.
-        data_20 = (1 << 16) | (2 << 12) | (3 << 8) | (4 << 4) | 5
+        # Numeric payload: digits 1,2,3,4,5 as 4-bit symbols; POCSAG sends
+        # each digit least significant bit first (ITU-R M.584), so in the
+        # MSB-first data field every nibble appears bit-reversed.
+        data_20 = 0
+        for digit in (1, 2, 3, 4, 5):
+            data_20 = (data_20 << 4) | int(f"{digit:04b}"[::-1], 2)
         words = [idle] * 16
         words[2 * frame] = self._encode_codeword(0, (0x100 << 2) | 0)  # function 0
         words[2 * frame + 1] = self._encode_codeword(1, data_20)
@@ -1331,10 +1335,12 @@ class TestProtocolType:
         assert ProtocolType.RDS.value == "rds"
         assert ProtocolType.ADSB.value == "adsb"
         assert ProtocolType.ACARS.value == "acars"
+        assert ProtocolType.CW.value == "cw"
 
     def test_enum_count(self):
-        """ProtocolType has the expected number of members."""
-        assert len(ProtocolType) == 7
+        """ProtocolType has the expected number of members (CW, Morse code,
+        joined the decoded protocols with the streaming Morse decoder)."""
+        assert len(ProtocolType) == 8
 
     def test_enum_uniqueness(self):
         """All enum values are unique."""

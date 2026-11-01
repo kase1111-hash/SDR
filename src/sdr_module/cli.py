@@ -7,9 +7,10 @@ Provides access to scanning, encoding, and signal analysis tools.
 """
 
 import argparse
+import math
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, List, Optional, Tuple
 
 from . import __version__
 
@@ -54,37 +55,286 @@ def cmd_info(args: argparse.Namespace) -> int:
     print("Features:")
     print("  - Frequency scanning and signal detection (live or from a recording)")
     print("  - Spectrum analysis and visualization")
-    print("  - Protocol decoding (POCSAG, FLEX, AX.25/APRS, RDS, ADS-B, ACARS)")
+    print("  - Protocol decoding (POCSAG, FLEX, AX.25/APRS, RDS, ADS-B, ACARS, CW)")
     print("  - Text encoding (RTTY, Morse, PSK31, ASCII)")
     print("  - I/Q recording and playback")
     return 0
+
+
+#: ``--threshold`` not given: auto for a live scan, -60 dBFS for --input.
+_DEFAULT_THRESHOLD: Any = object()
+_FILE_THRESHOLD_DB = -60.0
+
+
+def _threshold_arg(text: str) -> Optional[float]:
+    """``--threshold``: a level in dBFS, or "auto" (None)."""
+    if str(text).strip().lower() == "auto":
+        return None
+    try:
+        return float(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"expected a level in dBFS or 'auto', not {text!r}"
+        ) from exc
+
+
+# Live sweep timing: after each retune, queued samples are thrown away and
+# the tuner gets this long to settle (an RTL-SDR's transfer in flight, 0.11 s
+# at 2.4 MS/s, still holds the old frequency); then at least this many
+# samples are averaged, waiting at most this long for them.
+_LIVE_SETTLE_S = 0.12
+_LIVE_MEASURE_SAMPLES = 65536
+_LIVE_READ_TIMEOUT_S = 1.0
 
 
 def cmd_scan(args: argparse.Namespace) -> int:
     """Scan a frequency range (live) or analyze a recorded I/Q file (offline)."""
     if args.input:
         return _scan_file(args)
+    return _scan_live(args)
 
-    # Live sweep: requires hardware. Validate the config so bad ranges are
-    # caught even without a device attached.
-    from .dsp.scanner import FrequencyScanner, ScanConfig, ScanMode
 
-    config = ScanConfig(
-        start_freq_hz=args.start * 1e6,
-        end_freq_hz=args.end * 1e6,
-        step_hz=args.step * 1e3,
-        threshold_db=args.threshold,
-        mode=ScanMode.SINGLE if args.single else ScanMode.CONTINUOUS,
+def _applied_rate(device, requested: float) -> float:
+    """The sample rate a device runs at after ``set_sample_rate`` (a driver
+    clamps a rate it can't do into its range), else ``requested``."""
+    import math
+
+    state = getattr(device, "state", None)
+    for value in (
+        getattr(state, "sample_rate", None),
+        getattr(device, "sample_rate", None),
+    ):
+        if isinstance(value, (int, float)) and math.isfinite(value) and value > 0:
+            return float(value)
+    return float(requested)
+
+
+def _drain(device) -> None:
+    """Throw away the samples a device has queued."""
+    for _ in range(1000):
+        try:
+            block = device.read_samples(4096, timeout=0.0)
+        except Exception:  # pragma: no cover - driver specific
+            return
+        if block is None or len(block) == 0:
+            return
+
+
+def _open_first_receiver(args: argparse.Namespace):
+    """``(manager, device, name)`` for the first SDR found (of
+    ``--device``'s type), or ``(manager, None, error message)``."""
+    from .core.device_manager import DeviceManager
+
+    manager = DeviceManager()
+    detected = list(manager.scan_devices())
+    types = {cls: key for key, cls in manager.DEVICE_TYPES.items()}
+    if args.device:
+        detected = [d for d in detected if types.get(d.device_class) == args.device]
+    detected = [d for d in detected if d.is_available and d.device_class in types]
+    if not detected:
+        which = {"rtlsdr": "RTL-SDR", "hackrf": "HackRF One"}.get(
+            args.device or "", "SDR device"
+        )
+        return (
+            manager,
+            None,
+            (
+                f"No {which} is connected, so there is nothing to scan with. Plug "
+                "one in ('sdr-scan devices' lists what is found), or analyze a "
+                "recording instead with --input FILE."
+            ),
+        )
+    found = detected[0]
+    name = str(getattr(found.info, "name", "") or types[found.device_class])
+    device = manager.open_device(types[found.device_class], found.info.index)
+    if device is None:
+        return (
+            manager,
+            None,
+            (f"Could not open {name}. Check that no other program is using it."),
+        )
+    return manager, device, name
+
+
+def _scan_live(args: argparse.Namespace) -> int:
+    """Sweep a connected receiver across the range and list the signals.
+
+    The receiver steps by about 80 % of its sample rate; at each step the
+    queued samples are dropped, the tuner settles, about 64k samples are
+    averaged into a spectrum and every channel of that step is checked
+    (see :mod:`sdr_module.dsp.sweep`). It sweeps once with ``--single``,
+    else until Ctrl+C.
+    """
+    import time
+
+    import numpy as np
+
+    from .core.band_plan import band_for
+    from .dsp.sweep import (
+        AUTO_MARGIN_DB,
+        SpectrumAverager,
+        format_duration,
+        measure_page,
+        plan_sweep,
+        same_signal,
     )
 
-    FrequencyScanner(config)
+    start_hz, end_hz, step_hz = args.start * 1e6, args.end * 1e6, args.step * 1e3
+    if step_hz <= 0 or end_hz <= start_hz:
+        print("Error: --end must be above --start, and --step above 0.")
+        return 1
 
-    print(f"Scanning {args.start:.3f} - {args.end:.3f} MHz")
-    print(f"Step: {args.step} kHz, Threshold: {args.threshold} dB")
-    print()
-    print("Note: A live sweep requires connected SDR hardware.")
-    print("To analyze a recorded capture offline, pass --input FILE.")
+    manager, device, name = _open_first_receiver(args)
+    if device is None:
+        print(f"Error: {name}")
+        return 1
 
+    hits: List[Any] = []
+    try:
+        requested = float(args.rate)
+        if device.set_sample_rate(requested) is False:
+            print(f"Error: {name} can't run at {requested / 1e6:g} MS/s (--rate).")
+            return 1
+        # Planned and measured at the rate it runs at: the steps and the
+        # frequencies found depend on it.
+        rate = _applied_rate(device, requested)
+        if abs(rate - requested) >= 1.0:
+            print(
+                f"Note: {name} can't run at {requested / 1e6:g} MS/s (--rate); "
+                f"scanning at {rate / 1e6:g} MS/s, the nearest rate it can."
+            )
+        if args.gain is None:
+            device.set_gain_mode(True)
+        else:
+            device.set_gain_mode(False)
+            device.set_gain(float(args.gain))
+        spec = getattr(device, "spec", None)
+        low = float(getattr(spec, "freq_min", 0.0) or 0.0)
+        high = float(getattr(spec, "freq_max", 0.0) or 0.0)
+        if high > low:
+            if end_hz < low or start_hz > high:
+                print(
+                    f"Error: {name} tunes {low / 1e6:.3f} - {high / 1e6:.3f} MHz; "
+                    "choose a range inside it."
+                )
+                return 1
+            if start_hz < low or end_hz > high:
+                start_hz, end_hz = max(start_hz, low), min(end_hz, high)
+                print(
+                    f"Note: limited to {name}'s range, {start_hz / 1e6:.3f} - "
+                    f"{end_hz / 1e6:.3f} MHz."
+                )
+        pages = plan_sweep(start_hz, end_hz, step_hz, rate)
+        per_page = _LIVE_SETTLE_S + _LIVE_MEASURE_SAMPLES / rate + 0.02
+        channels = sum(p.count for p in pages)
+        threshold = None if args.threshold is _DEFAULT_THRESHOLD else args.threshold
+        print(
+            f"Scanning {start_hz / 1e6:.3f} - {end_hz / 1e6:.3f} MHz with {name} "
+            f"({rate / 1e6:g} MS/s): {channels:,} channels of {args.step:g} kHz "
+            f"in {len(pages):,} steps, {format_duration(len(pages) * per_page)} "
+            "per sweep."
+        )
+        print(
+            "Threshold: "
+            + (
+                f"auto (the noise floor + {AUTO_MARGIN_DB:.0f} dB)"
+                if threshold is None
+                else f"{threshold:.1f} dBFS"
+            )
+            + (". Press Ctrl+C to stop." if not args.single else ".")
+        )
+        if device.start_rx() is False:
+            print(f"Error: {name} did not start streaming.")
+            return 1
+        print()
+        print(f"  {'Frequency':>14}  {'Level':>11}  {'SNR':>7}  Band")
+        sweep = 0
+        while True:
+            sweep += 1
+            began = time.monotonic()
+            new = 0
+            measured = 0  # steps of this sweep that delivered samples
+            for page in pages:
+                if device.set_frequency(page.lo_hz) is False:
+                    continue
+                _drain(device)
+                time.sleep(_LIVE_SETTLE_S)
+                _drain(device)
+                averager = SpectrumAverager(max_segments=64)
+                taken = 0
+                deadline = time.monotonic() + _LIVE_READ_TIMEOUT_S
+                while taken < _LIVE_MEASURE_SAMPLES and time.monotonic() < deadline:
+                    block = device.read_samples(
+                        _LIVE_MEASURE_SAMPLES, timeout=_LIVE_READ_TIMEOUT_S
+                    )
+                    if block is None or len(block) == 0:
+                        continue
+                    averager.add(np.asarray(block))
+                    taken += len(block)
+                power = averager.power_db()
+                if power is None:
+                    continue
+                measured += 1
+                readings, _noise, _thr = measure_page(
+                    power, page.lo_hz, rate, page.channels, step_hz, threshold
+                )
+                for reading in readings:
+                    if not (
+                        start_hz - step_hz / 2
+                        <= reading.frequency_hz
+                        <= end_hz + step_hz / 2
+                    ):
+                        continue
+                    known = next(
+                        (
+                            h
+                            for h in hits
+                            if same_signal(
+                                h.frequency_hz,
+                                h.width_hz,
+                                reading.frequency_hz,
+                                step_hz,
+                            )
+                        ),
+                        None,
+                    )
+                    if known is not None:
+                        if reading.peak_db > known.peak_db:
+                            hits[hits.index(known)] = reading
+                        continue
+                    hits.append(reading)
+                    new += 1
+                    band = band_for(reading.frequency_hz)
+                    print(
+                        f"  {reading.frequency_hz / 1e6:10.4f} MHz  "
+                        f"{reading.peak_db:6.1f} dBFS  {reading.snr_db:4.0f} dB  "
+                        f"{band.name if band else ''}".rstrip(),
+                        flush=True,
+                    )
+            if not measured:
+                print(
+                    f"Error: {name} returned no samples. Check that it is plugged "
+                    "in and not used by another program."
+                )
+                return 1
+            print(
+                f"Sweep {sweep} done in {time.monotonic() - began:.1f} s: "
+                f"{len(hits)} signal(s), {new} new.",
+                flush=True,
+            )
+            if args.single:
+                break
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        try:
+            device.stop_rx()
+        except Exception as exc:  # pragma: no cover - driver specific
+            print(f"Note: {name} did not stop cleanly: {exc}")
+        manager.close_all()
+
+    if not hits:
+        print("No signals above the threshold.")
     return 0
 
 
@@ -121,8 +371,15 @@ def _scan_file(args: argparse.Namespace) -> int:
     result = analyzer.compute_spectrum(
         samples, center_freq=center_freq, sample_rate=sample_rate
     )
+    threshold = args.threshold
+    if threshold is _DEFAULT_THRESHOLD:
+        threshold = _FILE_THRESHOLD_DB
+    elif threshold is None:  # auto: the noise floor plus the usual margin
+        from .dsp.sweep import AUTO_MARGIN_DB, noise_floor_db
+
+        threshold = round(noise_floor_db(result.power_db) + AUTO_MARGIN_DB, 1)
     peaks = analyzer.find_peaks(
-        result, threshold_db=args.threshold, min_distance_hz=args.step * 1e3
+        result, threshold_db=threshold, min_distance_hz=args.step * 1e3
     )
 
     print(
@@ -131,7 +388,7 @@ def _scan_file(args: argparse.Namespace) -> int:
     )
     print(
         f"Center: {center_freq / 1e6:.4f} MHz, "
-        f"RBW: {result.rbw:.1f} Hz, Threshold: {args.threshold} dB"
+        f"RBW: {result.rbw:.1f} Hz, Threshold: {threshold} dB"
     )
     print()
 
@@ -151,16 +408,22 @@ def _scan_file(args: argparse.Namespace) -> int:
 
 
 def cmd_decode(args: argparse.Namespace) -> int:
-    """Decode a protocol from a recorded I/Q file."""
-    from .dsp.protocols import (
-        ProtocolType,
-        create_protocol_decoder,
-        demodulate_for_protocol,
+    """Decode a protocol from a recorded I/Q file.
+
+    Uses the same streaming live decoders as the window's Decoder panel:
+    the channel at ``--offset`` from the recording's centre is picked out,
+    demodulated and decoded in one-second blocks. Only messages that pass
+    their checks are counted; ``--show-invalid`` lists the others too.
+    """
+    from .dsp.live_decoders import (
+        create_live_decoder,
+        describe_message,
+        format_rate,
+        live_decoder_class,
     )
     from .dsp.recording import SampleFormat, load_iq_file
 
-    protocol = ProtocolType(args.protocol)
-
+    name = args.protocol.upper()
     input_path = Path(args.input).expanduser()
     if not input_path.exists():
         print(f"Error: file not found: {input_path}")
@@ -181,26 +444,68 @@ def cmd_decode(args: argparse.Namespace) -> int:
         f"({len(samples) / sample_rate:.3f}s at {sample_rate / 1e6:.3f} Msps)"
     )
 
+    decoder_class = live_decoder_class(args.protocol)
+    if decoder_class is None:
+        print(
+            f"Error: decoding {name} from a raw I/Q capture is not supported "
+            "yet (it needs subcarrier recovery)."
+        )
+        return 2
+    if sample_rate < decoder_class.MIN_SAMPLE_RATE:
+        print(
+            f"Error: the sample rate is too low for {decoder_class.name}: it "
+            f"needs at least {format_rate(decoder_class.MIN_SAMPLE_RATE)}, the "
+            f"recording is {format_rate(sample_rate)}."
+        )
+        return 1
     try:
-        decoder = create_protocol_decoder(protocol, sample_rate=sample_rate)
+        decoder = create_live_decoder(args.protocol, sample_rate, args.offset)
     except ValueError as exc:
         print(f"Error: {exc}")
         return 1
+    if decoder.status.problem:
+        print(f"Error: {decoder.status.problem}")
+        return 1
 
-    baseband = demodulate_for_protocol(samples, protocol)
-    if baseband is None:
-        print(
-            f"Error: decoding {protocol.value.upper()} from a raw I/Q capture "
-            "is not supported yet (it needs subcarrier recovery)."
-        )
-        return 2
-    messages = decoder.decode(baseband)
+    messages = []
+    block = max(1, int(sample_rate))
+    for start in range(0, len(samples), block):
+        messages += decoder.process(samples[start : start + block])
+    messages += decoder.flush()  # e.g. the last line of Morse code
+    valid = [m for m in messages if getattr(m, "valid", True)]
+    invalid = [m for m in messages if not getattr(m, "valid", True)]
 
-    print(f"Decoded {len(messages)} {args.protocol.upper()} message(s)")
-    for i, msg in enumerate(messages):
-        print(f"  [{i}] {msg}")
+    summary = f"Decoded {len(valid)} {name} message(s)"
+    if invalid:
+        summary += f" ({len(invalid)} failed their checks"
+        summary += ")" if args.show_invalid else "; --show-invalid lists them)"
 
+    def describe(msg: Any) -> Tuple[str, str]:
+        # One message that can't be read must not end the listing.
+        try:
+            return describe_message(msg)
+        except Exception as exc:
+            return "", f"(could not be read: {exc})"
+
+    print(summary)
+    for i, msg in enumerate(valid):
+        address, content = describe(msg)
+        print(f"  [{i}] {'  '.join(p for p in (address, content) if p)}")
+    if args.show_invalid:
+        for msg in invalid:
+            address, content = describe(msg)
+            error = getattr(msg, "error_message", "") or "failed its checks"
+            text = "  ".join(p for p in (address, content) if p)
+            print(
+                f"  [invalid] {text}  ({error})" if text else f"  [invalid] ({error})"
+            )
     return 0
+
+
+#: ``sdr-scan encode`` defaults per protocol: (baud, shift in Hz). RTTY is
+#: the amateur standard; ASCII keeps the library's 1 kHz shift.
+_ENCODE_FSK_DEFAULTS = {"rtty": (45.45, 170.0), "ascii": (300.0, 1000.0)}
+_ENCODE_NAMES = {"rtty": "RTTY", "morse": "Morse", "ascii": "ASCII", "psk31": "PSK31"}
 
 
 def cmd_encode(args: argparse.Namespace) -> int:
@@ -212,6 +517,12 @@ def cmd_encode(args: argparse.Namespace) -> int:
         PSK31Encoder,
         RTTYEncoder,
     )
+    from .protocols.text_modes import (
+        BAUD_RANGE,
+        SHIFT_RANGE,
+        WPM_RANGE,
+        format_number,
+    )
 
     encoders = {
         "rtty": RTTYEncoder,
@@ -220,25 +531,104 @@ def cmd_encode(args: argparse.Namespace) -> int:
         "psk31": PSK31Encoder,
     }
 
-    if args.protocol not in encoders:
-        print(f"Unknown protocol: {args.protocol}")
+    protocol = args.protocol
+    if protocol not in encoders:
+        print(f"Unknown protocol: {protocol}")
         print(f"Available: {', '.join(encoders.keys())}")
         return 1
+    name = _ENCODE_NAMES[protocol]
+    if not args.sample_rate > 0:
+        print("Error: --sample-rate must be positive")
+        return 1
+
+    # Each protocol its own configuration: one shared config used to make
+    # every protocol 300 Bd with a 1 kHz shift, so RTTY wasn't RTTY.
+    baud = getattr(args, "baud", None)
+    shift = getattr(args, "shift", None)
+    if protocol in _ENCODE_FSK_DEFAULTS:
+        default_baud, default_shift = _ENCODE_FSK_DEFAULTS[protocol]
+        baud = default_baud if baud is None else float(baud)
+        shift = default_shift if shift is None else float(shift)
+        if not BAUD_RANGE[0] <= baud <= BAUD_RANGE[1]:
+            print(
+                f"Error: --baud must be {format_number(BAUD_RANGE[0])} to "
+                f"{format_number(BAUD_RANGE[1])}"
+            )
+            return 1
+        if not SHIFT_RANGE[0] <= shift <= SHIFT_RANGE[1]:
+            print(
+                f"Error: --shift must be {format_number(SHIFT_RANGE[0])} to "
+                f"{format_number(SHIFT_RANGE[1])} Hz"
+            )
+            return 1
+        details = f"{format_number(baud)} Bd, {format_number(shift)} Hz shift"
+        modulation = ModulationType.FSK
+    else:
+        if baud is not None:
+            print(
+                "Error: PSK31 always runs at 31.25 Bd; --baud is for rtty and ascii."
+                if protocol == "psk31"
+                else "Error: Morse speed is set with --wpm; --baud is for rtty "
+                "and ascii."
+            )
+            return 1
+        if shift is not None:
+            print(
+                f"Error: {name} has no frequency shift; --shift is for rtty and ascii."
+            )
+            return 1
+        if protocol == "morse":
+            if not WPM_RANGE[0] <= args.wpm <= WPM_RANGE[1]:
+                print(
+                    f"Error: --wpm must be {format_number(WPM_RANGE[0])} to "
+                    f"{format_number(WPM_RANGE[1])}"
+                )
+                return 1
+            details = f"{args.wpm} WPM"
+            modulation = ModulationType.OOK
+        else:
+            details = "31.25 Bd"
+            modulation = ModulationType.PSK
 
     config = EncoderConfig(
         sample_rate=args.sample_rate,
         carrier_freq=args.carrier,
-        baud_rate=300,
-        modulation=ModulationType.FSK,
+        baud_rate=baud or 0,
+        modulation=modulation,
         amplitude=0.8,
-        frequency_shift=1000,
+        frequency_shift=shift,
     )
 
-    encoder_class = encoders[args.protocol]
-    if args.protocol == "morse":
+    encoder_class = encoders[protocol]
+    if protocol == "morse":
         encoder = encoder_class(config, wpm=args.wpm)
     else:
         encoder = encoder_class(config)
+
+    # The signal must stay inside +-sample_rate/2, or it aliases (mark and
+    # space swap, a carrier lands on 0 Hz). The output is I/Q: a negative
+    # carrier is fine. Its edges (of its 99% power bandwidth) may reach
+    # +-sample_rate/2, so what the error suggests is accepted.
+    width = round(encoder.text_signal("").occupied_bandwidth_hz())
+    half_rate = args.sample_rate / 2.0
+    reach = abs(args.carrier) + width / 2.0
+    if reach > half_rate + 1e-6:
+        # (Rounded inwards to the 0.01 Hz shown, so each suggestion fits.)
+        room = math.floor((half_rate - width / 2.0) * 100.0) / 100.0
+        least = math.ceil(2.0 * reach * 100.0) / 100.0
+        carriers = (
+            f"a --carrier from {format_number(-room)} to {format_number(room)} Hz, or "
+            if room > 0
+            else ""
+        )
+        print(
+            f"Error: the {name} signal ({format_number(width)} Hz wide) at "
+            f"--carrier {format_number(args.carrier)} Hz reaches "
+            f"{format_number(reach)} Hz, more than --sample-rate "
+            f"{format_number(args.sample_rate)} can hold (±{format_number(half_rate)}"
+            f" Hz): use {carriers}a --sample-rate of at least {format_number(least)}."
+        )
+        return 1
 
     text = args.text or sys.stdin.read().strip()
     if not text:
@@ -246,8 +636,21 @@ def cmd_encode(args: argparse.Namespace) -> int:
         return 1
 
     samples = encoder.encode_text(text)
+    check = encoder.last_check
+    if check is not None and check.unsupported:
+        count = check.skipped
+        print(
+            f"Skipped {count} character{'' if count == 1 else 's'} {name} can't "
+            f"send: {check.describe_unsupported()}"
+        )
+    if not len(samples) or check is None:
+        print(f"Error: nothing to send: {name} can't send any of these characters.")
+        return 1
 
-    print(f"Encoded {len(text)} characters using {args.protocol.upper()}")
+    print(
+        f"Encoded {check.characters} characters using {protocol.upper()} "
+        f"({details})"
+    )
     print(f"Generated {len(samples)} samples ({len(samples)/args.sample_rate:.3f}s)")
 
     if args.output:
@@ -281,7 +684,7 @@ def _load_saved_channels():
         Tuple of (channels, error_message). `error_message` is set when the
         store cannot be read (PyQt6 missing), in which case channels is empty.
     """
-    from .core.chirp_csv import bookmarks_to_channels
+    from .core.chirp_csv import bookmarks_to_channels, list_order
 
     try:
         from .gui.settings_store import GuiSettings
@@ -295,7 +698,10 @@ def _load_saved_channels():
             "PyQt6 is required to read saved channels.\n"
             'Install it with: python -m pip install "sdr-module[gui]"'
         )
-    return bookmarks_to_channels(settings.get_bookmarks()), None
+    # In the order the Bookmarks tab lists them (each group, then the rest),
+    # as its export writes them.
+    bookmarks = settings.get_bookmarks()
+    return bookmarks_to_channels([bookmarks[i] for i in list_order(bookmarks)]), None
 
 
 def _print_channels(channels) -> None:
@@ -450,7 +856,15 @@ def create_parser() -> argparse.ArgumentParser:
     devices_parser.set_defaults(func=cmd_devices)
 
     # Scan command
-    scan_parser = subparsers.add_parser("scan", help="Scan frequency range")
+    scan_parser = subparsers.add_parser(
+        "scan",
+        help="Scan a frequency range with a connected SDR, or a recording",
+        description=(
+            "Sweep a connected RTL-SDR or HackRF One across a range and list "
+            "the signals found (continuously until Ctrl+C, or once with "
+            "--single), or find the signals in a recorded I/Q file with --input."
+        ),
+    )
     scan_parser.add_argument(
         "--start",
         type=float,
@@ -461,16 +875,38 @@ def create_parser() -> argparse.ArgumentParser:
         "--end", type=float, default=108.0, help="End frequency in MHz (default: 108.0)"
     )
     scan_parser.add_argument(
-        "--step", type=float, default=100.0, help="Step size in kHz (default: 100.0)"
+        "--step",
+        type=float,
+        default=100.0,
+        help="Channel spacing in kHz: each channel reports the strongest "
+        "signal within half a step (default: 100.0)",
     )
     scan_parser.add_argument(
         "--threshold",
-        type=float,
-        default=-60.0,
-        help="Detection threshold in dB (default: -60.0)",
+        type=_threshold_arg,
+        default=_DEFAULT_THRESHOLD,
+        help="Detection threshold in dBFS, or 'auto' for the noise floor + 12 dB "
+        "(default: auto for a live scan, -60 for --input)",
     )
     scan_parser.add_argument(
         "--single", action="store_true", help="Single scan (default: continuous)"
+    )
+    scan_parser.add_argument(
+        "--device",
+        choices=["rtlsdr", "hackrf"],
+        help="Live scan: which kind of SDR to use (default: the first found)",
+    )
+    scan_parser.add_argument(
+        "--rate",
+        type=float,
+        default=2.4e6,
+        help="Live scan: sample rate in Hz (default: 2.4e6)",
+    )
+    scan_parser.add_argument(
+        "--gain",
+        type=float,
+        default=None,
+        help="Live scan: RF gain in dB (default: automatic gain)",
     )
     scan_parser.add_argument(
         "--input",
@@ -515,7 +951,7 @@ def create_parser() -> argparse.ArgumentParser:
     )
     decode_parser.add_argument(
         "protocol",
-        choices=["pocsag", "flex", "ax25", "aprs", "rds", "adsb", "acars"],
+        choices=["pocsag", "flex", "ax25", "aprs", "rds", "adsb", "acars", "cw"],
         help="Protocol to decode",
     )
     decode_parser.add_argument(
@@ -537,6 +973,18 @@ def create_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Maximum samples to read (default: all)",
+    )
+    decode_parser.add_argument(
+        "--offset",
+        type=float,
+        default=0.0,
+        help="Where the signal is, in Hz from the centre of the recording "
+        "(default: 0, the centre)",
+    )
+    decode_parser.add_argument(
+        "--show-invalid",
+        action="store_true",
+        help="Also list messages that failed their checks (CRC, BCH, parity)",
     )
     decode_parser.set_defaults(func=cmd_decode)
 
@@ -564,10 +1012,25 @@ def create_parser() -> argparse.ArgumentParser:
         "--carrier",
         type=float,
         default=1000,
-        help="Carrier frequency in Hz (default: 1000)",
+        help="Where the signal sits in Hz: the tone, or the center between the "
+        "FSK tones (default: 1000)",
     )
     encode_parser.add_argument(
         "--wpm", type=int, default=20, help="Words per minute for Morse (default: 20)"
+    )
+    encode_parser.add_argument(
+        "--baud",
+        type=float,
+        default=None,
+        help="Symbol rate for rtty and ascii (default: 45.45 for rtty, the "
+        "amateur standard; 300 for ascii)",
+    )
+    encode_parser.add_argument(
+        "--shift",
+        type=float,
+        default=None,
+        help="Frequency shift between mark and space in Hz, for rtty and ascii "
+        "(default: 170 for rtty; 1000 for ascii)",
     )
     encode_parser.set_defaults(func=cmd_encode)
 

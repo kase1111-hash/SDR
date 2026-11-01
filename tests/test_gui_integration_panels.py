@@ -141,10 +141,13 @@ class TestControlPanelFixes(unittest.TestCase):
         names = [combo.itemText(i) for i in range(combo.count())]
         self.assertEqual(names, list(RECORDING_FORMATS))
         self.assertTrue(all("IQ" not in n.replace("I/Q", "") for n in names))
-        # The main window maps the label to a file type by these tests.
-        self.assertIn(".cf32", names[0])
-        self.assertTrue(names[1].lower().startswith("wav"))
-        self.assertIn("sigmf", names[2].lower())
+        # All five save formats, SigMF first (it keeps the frequency and
+        # rate, rx:UX-06); the window maps each label to its file type by the
+        # extension in parentheses.
+        self.assertEqual(len(names), 5)
+        self.assertEqual(names[0], "SigMF, keeps frequency and rate")
+        extensions = [combo.itemData(i) for i in range(combo.count())]
+        self.assertEqual(extensions, [".sigmf-data", ".cf32", ".cs16", ".wav", ".raw"])
         self.assertIn("not audio", combo.toolTip())
 
     # -- Frequency ------------------------------------------------------
@@ -212,11 +215,14 @@ class TestControlPanelFixes(unittest.TestCase):
 
     # -- Presets and license -------------------------------------------
 
-    def test_presets_sit_directly_under_the_frequency(self):
+    def test_listening_controls_sit_directly_under_the_frequency(self):
+        # (F-window, LISTEN-02: Mode, Filter, Squelch and the Audio options
+        # in view on a laptop; Presets after them, also in Radio > Band
+        # Presets.)
         from PyQt6.QtWidgets import QGroupBox
 
         titles = [g.title() for g in self.panel.findChildren(QGroupBox)]
-        self.assertEqual(titles[:3], ["Frequency", "Presets", "Demodulation"])
+        self.assertEqual(titles[:4], ["Frequency", "Demodulation", "Audio", "Presets"])
 
     def test_preset_details_use_the_mode_list_names(self):
         self.select("Broadcast", "FM Broadcast")
@@ -265,10 +271,13 @@ class TestControlPanelFixes(unittest.TestCase):
         license_text = self.panel._license_info.text()
         self.assertNotIn("headroom", license_text)
         self.assertNotIn("%", license_text)
-        # Sub-watt limits are not rounded down to "0 W".
-        tip = _power_limit_tip(0.5, None)
+        # Sub-watt limits are not rounded down to "0 W". The app refuses to
+        # transmit above the limit itself, not above 150% of it (leftover
+        # 31: the tip said 0.75 W here).
+        tip = _power_limit_tip(0.5)
         self.assertIn("0.5 W", tip)
-        self.assertIn("0.75 W", tip)
+        self.assertNotIn("0.75 W", tip)
+        self.assertNotIn("150%", tip)
 
     def test_demod_settings_getters(self):
         self.panel._demod_combo.setCurrentText("FM")
@@ -303,7 +312,12 @@ class TestBookmarksPanelFixes(unittest.TestCase):
         texts = [a.text() for a in self.panel._csv_menu.actions()]
         self.assertEqual(
             texts,
-            ["Import Channels (CHIRP CSV)...", "Export Channels (CHIRP CSV)..."],
+            [
+                "Import Bookmarks (CHIRP CSV)...",
+                "Export Bookmarks (CHIRP CSV)...",
+                "",  # separator
+                "Export Built-in Presets (CHIRP CSV)...",  # FG-G28
+            ],
         )
 
     def test_add_field_covers_the_whole_tuning_range(self):
@@ -358,7 +372,7 @@ class TestBookmarksPanelFixes(unittest.TestCase):
         chirp = {"label": "x", "freq_hz": 146.52e6, "location": 1}
         self.assertEqual(tune_mode(chirp), ("FM", "5 kHz"))  # CHIRP default FM
         cases = {
-            "NFM": ("FM", "5 kHz"),
+            "NFM": ("FM", "2.5 kHz"),  # (CHIRP's narrow FM: 12.5 kHz channels)
             "WFM": ("FM", "75 kHz"),
             "AM": ("AM", ""),
             "USB": ("USB", ""),
@@ -385,10 +399,14 @@ class TestBookmarksPanelFixes(unittest.TestCase):
         self.panel.set_current_frequency(14.2e6)
         self.panel._add_btn.click()
         self.assertEqual(self.store.bookmarks[-1]["demod"], "USB")
-        # A typed-in frequency: how it is listened to is unknown.
-        self.panel._freq_input.setValue(7.1)
+        # A typed-in frequency is saved in its band's usual mode, which the
+        # Add row's Mode shows (TOOLS-14, UX-07: it used to be saved without
+        # one, and turned into FM after a CHIRP round trip).
+        # (7.2 MHz: 40 m's phone segment; its CW/data segment is CW.)
+        self.panel._freq_input.setValue(7.2)
+        self.assertEqual(self.panel._mode_input.currentData(), "LSB")
         self.panel._add_btn.click()
-        self.assertNotIn("demod", self.store.bookmarks[-1])
+        self.assertEqual(self.store.bookmarks[-1]["demod"], "LSB")
 
     def test_exported_bookmark_keeps_its_mode(self):
         self.panel.add_bookmark("Tower", 118.3e6, "AM")
@@ -497,23 +515,35 @@ class TestDecoderPanelFixes(unittest.TestCase):
         tuned = self.connect_tuning()
         p = self.panel
         p._proto_combo.setCurrentText("ADS-B")
-        button = p._empty.button
+        # ADS-B opens on its Aircraft view, whose empty state offers the
+        # channel too (as the message table behind it does).
         self.assertEqual(p._empty.action_text(), "Tune to 1090.000 MHz")
+        empty = p._aircraft_view.placeholder()
+        button = empty.button
+        self.assertEqual(empty.action_text(), "Tune to 1090.000 MHz")
         self.assertTrue(button.isVisible())
         # Laid out under the message, inside the table.
         self.assertGreaterEqual(
-            button.geometry().top(), p._empty.label.geometry().bottom()
+            button.geometry().top(), empty.label.geometry().bottom()
         )
-        self.assertTrue(p._table.viewport().rect().contains(button.geometry()))
+        self.assertTrue(
+            p._aircraft_view.table.viewport().rect().contains(button.geometry())
+        )
         QTest.mouseClick(button, Qt.MouseButton.LeftButton)
-        self.assertEqual(tuned, [(1090e6, "ADS-B (1090.000 MHz)", "", "")])
+        # ADS-B selects I/Q: no audio from the pulse bursts (UX-B11).
+        self.assertEqual(tuned, [(1090e6, "ADS-B (1090.000 MHz)", "None (I/Q)", "")])
         p._proto_combo.setCurrentText("AX.25/APRS")
         p._empty.button.click()
         self.assertEqual(tuned[-1][0], 144.39e6)
         self.assertEqual(tuned[-1][2:], ("FM", "5 kHz"))
-        # Pagers use many channels, so there is no single one to offer.
+        # Pagers use many channels; a common one (the demo's) is offered,
+        # in narrowband FM at 12.5 kHz (their FSK swings beyond 5 kHz: W-01).
         p._proto_combo.setCurrentText("POCSAG")
-        self.assertEqual(p._empty.action_text(), "")
+        self.assertEqual(p._empty.action_text(), "Tune to 152.240 MHz")
+        p._empty.button.click()
+        self.assertEqual(
+            tuned[-1], (152.24e6, "POCSAG (152.240 MHz)", "FM", "12.5 kHz")
+        )
 
     def test_hint_follows_the_receiver(self):
         self.connect_tuning()
@@ -531,20 +561,30 @@ class TestDecoderPanelFixes(unittest.TestCase):
         self.assertEqual(p._empty.action_text(), "Tune to 1090.000 MHz")
         p.set_current_frequency(float("nan"))
         self.assertEqual(p._tuned_hz, 100e6)
-        # The button disappears with the empty state.
+        # The button disappears with the empty state. (ADS-B shows its
+        # Aircraft view in front, with the same hint and button.)
+        self.assertEqual(
+            p._aircraft_view.placeholder().action_text(), "Tune to 1090.000 MHz"
+        )
+        self.assertTrue(p._aircraft_view.placeholder().button.isVisible())
         p.add_message("ADS-B", "ABC123", "hello")
         self.assertTrue(p._empty.button.isHidden())
         p.clear()
+        self.assertFalse(p._empty.button.isHidden())
+        p._tabs.setCurrentWidget(p._messages_page)
         self.assertTrue(p._empty.button.isVisible())
 
-    def test_rds_is_listed_but_not_selectable(self):
+    def test_rds_and_morse_are_selectable(self):
+        # RDS used to be listed disabled ("isn't available yet"): it decodes
+        # now, and Morse code (CW) joined the list.
         combo = self.panel._proto_combo
-        index = combo.findText("RDS")
-        self.assertGreater(index, 0)
-        self.assertFalse(combo.model().item(index).isEnabled())
-        self.assertIn(
-            "isn't available", combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
-        )
+        for name in ("RDS", "CW (Morse)"):
+            index = combo.findText(name)
+            self.assertGreater(index, 0, name)
+            self.assertTrue(combo.model().item(index).isEnabled(), name)
+            tip = combo.itemData(index, Qt.ItemDataRole.ToolTipRole)
+            self.assertNotIn("isn't available", tip)
+        self.assertIn("Station name", combo.itemData(combo.findText("RDS"), 3))
 
     def test_tab_leaves_the_message_table(self):
         p = self.panel

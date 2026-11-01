@@ -28,6 +28,7 @@ _ALLOWED_DEVICE_METHODS = {
     "pyhackrf_set_vga_gain",
     "pyhackrf_set_txvga_gain",
     "pyhackrf_set_amp_enable",
+    "pyhackrf_set_antenna_enable",
     "pyhackrf_is_streaming",
     "set_rx_callback",
     "set_tx_callback",
@@ -62,6 +63,7 @@ class FakeHackRFDevice:
         self.vga = None
         self.txvga = None
         self.amp = None
+        self.antenna = None
         # When True, pyhackrf_start_tx immediately drives the TX callback,
         # mimicking libhackrf's USB thread pulling samples synchronously.
         self.auto_pump = False
@@ -100,6 +102,10 @@ class FakeHackRFDevice:
 
     def pyhackrf_set_amp_enable(self, on):
         self.amp = on
+
+    def pyhackrf_set_antenna_enable(self, on):
+        self.calls.append(("set_antenna", bool(on)))
+        self.antenna = bool(on)
 
     def set_rx_callback(self, fn):
         self._rx_cb = fn

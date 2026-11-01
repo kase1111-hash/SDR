@@ -24,6 +24,8 @@ class DeviceCapability(Enum):
     BIAS_TEE = auto()  # Bias tee for active antennas
     EXT_CLOCK = auto()  # External clock reference
     DIRECT_SAMPLE = auto()  # Direct sampling mode (HF)
+    AGC = auto()  # Automatic gain in the hardware (set_gain_mode(True))
+    FREQ_CORRECTION = auto()  # Crystal error correction (set_freq_correction)
 
 
 @dataclass
@@ -95,6 +97,16 @@ class SDRDevice(ABC):
         self._rx_thread: Optional[Thread] = None
         self._stop_event: Event = Event()
         self._sample_queue: "queue.Queue[np.ndarray]" = queue.Queue(maxsize=100)
+        # Samples received but dropped because the queue was full.
+        self._dropped_samples: int = 0
+
+    @property
+    def dropped_samples(self) -> int:
+        """Samples the device delivered that were lost because nobody read
+        the queue :meth:`read_samples` takes from in time (it holds 100
+        transfers). Only ever grows: compare two readings to find out
+        whether samples went missing in between."""
+        return self._dropped_samples
 
     @property
     def info(self) -> Optional[DeviceInfo]:
@@ -250,6 +262,17 @@ class SDRDevice(ABC):
             return self._sample_queue.get(timeout=timeout)
         except queue.Empty:
             return None
+
+    def discard_queued_samples(self) -> int:
+        """Drop the sample blocks waiting for :meth:`read_samples` (e.g.
+        taken at a sample rate no longer in use). Returns how many."""
+        dropped = 0
+        while True:
+            try:
+                self._sample_queue.get_nowait()
+            except queue.Empty:
+                return dropped
+            dropped += 1
 
     def has_capability(self, cap: DeviceCapability) -> bool:
         """Check if device has a specific capability."""

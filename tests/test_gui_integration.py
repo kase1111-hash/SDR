@@ -250,7 +250,11 @@ class TestSSTVAudio(_WindowTestCase):
         self.win._set_demod_mode("FM")
         self.panel._start_btn.click()
         self.win._clear_status_message()
+        # USB and LSB carry HF SSTV (HAMDSP-3): no hint for them...
         self.win._set_demod_mode("USB")
+        self.assertNotIn("SSTV", self.win._message_label.text())
+        # ... but a mode whose audio can't carry SSTV hints.
+        self.win._set_demod_mode("CW")
         self.assertIn("SSTV", self.win._message_label.text())
 
     def test_start_while_stopped_says_to_start_receiving(self):
@@ -275,20 +279,39 @@ class TestHamId(_WindowTestCase):
             self.skipTest("ham radio panels not installed")
 
     def test_send_id_needs_a_hackrf(self):
+        """Send ID Now is available only where it can work, and the panel's
+        TX line says why not (the device, then the license at the tuned
+        frequency)."""
+        from sdr_module.core.frequency_manager import LicenseClass
         from sdr_module.devices.hackrf import HackRFDevice
 
         panel = self.win._callsign_panel
         self.assertIs(panel._tx_available, False)
         self.assertEqual(
-            panel._tx_unavailable_reason, "Connect a HackRF One to transmit an ID."
+            panel._tx_unavailable_reason,
+            "Can't send: no device is connected. Connect a HackRF One "
+            "(Device > Connect...).",
         )
         self.win._start_demo_mode()
         self.assertIs(panel._tx_available, False)
+        self.assertIn("the demo device can't transmit", panel._tx_unavailable_reason)
         self.win._release_device()
 
+        self.win.set_frequency(146.52e6)
         self.win._device = HackRFDevice()  # not opened; no hardware touched
+        self.win._control_panel.set_license_class(LicenseClass.TECHNICIAN)
         self.win._refresh_state_ui()
         self.assertIs(panel._tx_available, True)
+        self.assertTrue(
+            panel.tx_status_text().startswith(
+                "With a callsign, Send ID Now sends on 146.520 MHz"
+            )
+        )
+        panel.set_callsign("W1AW")
+        self.assertTrue(panel.tx_status_text().startswith("Will send on 146.520 MHz"))
+        self.win._control_panel.set_license_class(LicenseClass.NONE)
+        self.assertIs(panel._tx_available, False)
+        self.assertIn("your license (None) allows CB/MURS/FRS", panel.tx_status_text())
         self.win._device = None
         self.win._refresh_state_ui()
         self.assertIs(panel._tx_available, False)
@@ -296,16 +319,16 @@ class TestHamId(_WindowTestCase):
     def test_settings_are_saved_and_restored(self):
         panel = self.win._callsign_panel
         panel.set_callsign("w1aw")
-        panel._wpm_spin.setValue(25)
+        panel._wpm_spin.setValue(15)  # (at most 20: an automatic CW ID)
         saved = json.loads(self.store.values["ham_id"])
         self.assertEqual(saved["callsign"], "W1AW")
-        self.assertEqual(saved["cw_wpm"], 25)
+        self.assertEqual(saved["cw_wpm"], 15)
 
         other = self.mw.SDRMainWindow()
         try:
             restored = other._callsign_panel
             self.assertEqual(restored.get_callsign(), "W1AW")
-            self.assertEqual(restored._wpm_spin.value(), 25)
+            self.assertEqual(restored._wpm_spin.value(), 15)
             # Restoring doesn't rewrite the saved settings half-applied.
             self.assertEqual(json.loads(self.store.values["ham_id"]), saved)
         finally:
@@ -471,15 +494,17 @@ class TestFirstRunWizard(_WindowTestCase):
     def test_airband_with_demo_mode(self):
         from sdr_module.gui.first_run_wizard import FirstRunWizard
 
-        self._run("Airband AM (118–137 MHz)", demo=True)
+        # (The welcome screen's bands tune the band's favourite preset:
+        # Air Traffic Control, on a demo AM station.)
+        self._run("Airband (118–137 MHz)", demo=True)
         self.assertTrue(self.win._demo_mode)
         self.assertTrue(self.win._is_running)
-        self.assertAlmostEqual(self.freq(), 125e6)
+        self.assertAlmostEqual(self.freq(), 127.85e6)
         self.assertEqual(self.win._control_panel._demod_combo.currentText(), "AM")
         self.assertEqual(self.win.findChildren(FirstRunWizard), [])
 
     def test_noaa_selects_narrowband_fm(self):
-        self._run("NOAA Weather (162 MHz)", demo=False)
+        self._run("NOAA Weather (162.4–162.55 MHz)", demo=False)
         self.assertIsNone(self.win._device)
         self.assertAlmostEqual(self.freq(), 162.55e6)
         panel = self.win._control_panel
@@ -645,53 +670,52 @@ class TestHotplug(_WindowTestCase):
     def test_scan_menu_lists_names_and_missing_drivers(self):
         from sdr_module.gui import main_window
 
+        # (T11, mc:MC-U12) The box is a dialog with Use Demo Device and
+        # Connect... buttons and the commands in a selectable block, run
+        # through _exec_dialog like the window's other dialogs.
         shown = []
-        with (
-            mock.patch.object(main_window, "_driver_importable", return_value=False),
-            mock.patch.object(
-                main_window.QMessageBox,
-                "information",
-                side_effect=lambda *a: shown.append(a),
-            ),
-        ):
+        self.win._exec_dialog = lambda box: shown.append(box) or 0
+        with mock.patch.object(main_window, "_driver_importable", return_value=False):
             self.win._refresh_devices()
-        self.assertEqual(shown[0][1], "No Devices Found")
-        self.assertIn('sdr-module[rtlsdr]"', shown[0][2])
-        self.assertIn('sdr-module[hackrf]"', shown[0][2])
+        self.assertEqual(shown[0].windowTitle(), "No Devices Found")
+        self.assertIn('sdr-module[rtlsdr]"', shown[0].commands_text())
+        self.assertIn('sdr-module[hackrf]"', shown[0].commands_text())
 
 
 class TestScanner(_WindowTestCase):
+    """Tools > Frequency Scanner shows the non-modal Scanner tab; the scan
+    runs in the display loop, which is never paused (it used to stop while
+    a modal dialog was open, freezing plots and audio)."""
+
     demo = True
 
     def _run(self, display_active):
-        from sdr_module.gui.scanner_dialog import ScannerDialog
-
-        seen = {}
         if display_active:
             self.win._display_timer.start()
-
-        def fake_exec(dialog):
-            seen["display_active"] = self.win._display_timer.isActive()
-            dialog.frequency_selected.emit(433.92e6)
-            return 0
-
-        with mock.patch.object(ScannerDialog, "exec", fake_exec):
-            self.win._show_scanner()
+        self.win._show_scanner()
         _flush_deletes()
-        self.assertEqual(self.win.findChildren(ScannerDialog), [])
+        seen = {"display_active": self.win._display_timer.isActive()}
+        self.assertEqual(self.win._current_panel_key(), "scanner")
+        self.assertIsNone(QApplication.activeModalWidget())
         return seen
 
     def test_display_pauses_and_tuning_a_result_tunes_the_receiver(self):
+        from sdr_module.gui.scanner_panel import ScanHit
+
         seen = self._run(display_active=True)
-        self.assertFalse(seen["display_active"])
-        self.assertTrue(self.win._display_timer.isActive())
+        self.assertTrue(seen["display_active"])  # no longer paused
         self.assertEqual(self.win._display_timer.interval(), 33)
+        # Listening to a result tunes the receiver, in the result's mode.
+        hit = ScanHit(433.92e6, -40.0, 40.0, 5e3, "None (I/Q)", "", "500 kHz")
+        self.assertTrue(self.win._scanner_host.scan_listen(hit))
         self.assertAlmostEqual(self.freq(), 433.92e6)
         self.assertAlmostEqual(self.win._device.frequency, 433.92e6)
+        self.assertEqual(self.win._control_panel.get_demod_mode(), "None (I/Q)")
         self.win._display_timer.stop()
 
     def test_a_stopped_display_stays_stopped(self):
-        self._run(display_active=False)
+        seen = self._run(display_active=False)
+        self.assertFalse(seen["display_active"])
         self.assertFalse(self.win._display_timer.isActive())
 
 
@@ -850,6 +874,10 @@ class TestEveryMenuActionAndThemeSwitching(unittest.TestCase):
         for timer in (win._display_timer, win._status_timer, win._hotplug_timer):
             timer.stop()
         win._persist_state = lambda: None
+        # Record I/Q arms a recording and later actions start the receiver
+        # (e.g. Tools > SSTV: Tune to ISS), so the window may hold samples:
+        # closing it must not stop at the Unsaved Recording prompt.
+        win._confirm_discard_recording = lambda *_args: True
         win.resize(1280, 720)
         win.show()
 
@@ -882,23 +910,32 @@ class TestEveryMenuActionAndThemeSwitching(unittest.TestCase):
                 if win._radio_tuner is not None and win._radio_tuner.isVisible():
                     opened.append("RadioTunerWidget")
                     win._radio_tuner.close()
+                text_tx = getattr(win, "_transmit_text", None)
+                if text_tx is not None and text_tx.isVisible():
+                    opened.append("TransmitTextDialog")
+                    text_tx.close()
         closer.stop()
         _flush_deletes()
 
         self.assertGreater(triggered, 30)
+        # Tools > Frequency Scanner shows the Scanner tab: no modal dialog.
+        self.assertNotIn("ScannerDialog", opened)
         for expected in (
             "DeviceDialog",
-            "ScannerDialog",
             "HelpDialog",
             "ErrorLogDialog",
             "RadioTunerWidget",
+            "TransmitTextDialog",
         ):
-            if expected == "RadioTunerWidget" and not _ham_radio():
+            if expected in ("RadioTunerWidget", "TransmitTextDialog") and not (
+                _ham_radio()
+            ):
                 continue
             self.assertIn(expected, opened)
-        # Only the reusable radio tuner window is kept.
+        # Only the reusable tool windows (the radio tuner and Transmit
+        # Text, non-modal and kept for their state) are kept.
         leftovers = {type(d).__name__ for d in win.findChildren(QDialog)}
-        self.assertLessEqual(leftovers, {"RadioTunerWidget"})
+        self.assertLessEqual(leftovers, {"RadioTunerWidget", "TransmitTextDialog"})
 
         for i in range(4):
             self.themes.apply_theme(qapp, "light" if i % 2 == 0 else "dark")

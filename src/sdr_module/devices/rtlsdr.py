@@ -52,6 +52,51 @@ def _device_serials() -> List[str]:
     return list(RtlSdr.get_device_serial_addresses())
 
 
+# Direct sampling: which ADC input HF goes to (pyrtlsdr's
+# ``set_direct_sampling`` values). Below DIRECT_SAMPLING_BELOW_HZ the tuner
+# (R820T/R828D) can't receive, so the antenna is fed straight to the ADC.
+DIRECT_SAMPLING_OFF = 0  # never: an RTL-SDR Blog V4 or an upconverter tunes HF
+DIRECT_SAMPLING_I = 1  # the I input (dongles modified for HF on I)
+DIRECT_SAMPLING_Q = 2  # the Q input (RTL-SDR Blog V3)
+DIRECT_SAMPLING_BELOW_HZ = 24e6
+_DIRECT_SAMPLING_NAMES = {
+    DIRECT_SAMPLING_OFF: "off",
+    DIRECT_SAMPLING_I: "I branch",
+    DIRECT_SAMPLING_Q: "Q branch",
+}
+
+# Frequency correction (ppm) the driver accepts; cheap dongles are within
+# about +/-100 ppm, TCXO ones within 1-2 ppm.
+PPM_LIMIT = 500
+
+_CAPABILITIES = [
+    DeviceCapability.RX,
+    DeviceCapability.BIAS_TEE,
+    DeviceCapability.DIRECT_SAMPLE,
+    DeviceCapability.AGC,
+    DeviceCapability.FREQ_CORRECTION,
+]
+
+
+def direct_sampling_mode(value) -> int:
+    """``0``/``False``/``"off"``, ``1``/``"i"``, ``2``/``"q"`` -> 0, 1 or 2
+    (pyrtlsdr's spelling). Raises ValueError for anything else."""
+    if isinstance(value, str):
+        text = value.strip().lower()
+        for mode, name in (
+            (DIRECT_SAMPLING_OFF, "off"),
+            (DIRECT_SAMPLING_I, "i"),
+            (DIRECT_SAMPLING_Q, "q"),
+        ):
+            if text in (name, str(mode)):
+                return mode
+        raise ValueError(f"unknown direct sampling mode {value!r}")
+    mode = int(value or 0)
+    if mode not in _DIRECT_SAMPLING_NAMES:
+        raise ValueError(f"unknown direct sampling mode {value!r}")
+    return mode
+
+
 # RTL-SDR specifications from spec sheet
 RTLSDR_SPEC = DeviceSpec(
     freq_min=500e3,  # 500 kHz (direct sampling)
@@ -110,10 +155,18 @@ class RTLSDRDevice(SDRDevice):
         super().__init__()
         self._device = None
         self._spec = RTLSDR_SPEC
+        # Whether direct sampling is in use now, and the ADC input used for
+        # it below 24 MHz (DIRECT_SAMPLING_OFF: never).
         self._direct_sampling = False
+        self._direct_mode = DIRECT_SAMPLING_OFF  # what the hardware is set to
+        self._direct_branch = DIRECT_SAMPLING_Q
         self._rx_error: Optional[str] = None
         # Tuner IF bandwidth set with set_bandwidth(); 0 = automatic.
         self._if_bandwidth = 0.0
+        # Frequency correction applied to the open handle (ppm).
+        self._ppm = 0
+        # The tuner's gain steps (dB): the open device's own table.
+        self._gains: List[float] = list(self.VALID_GAINS)
 
     @staticmethod
     def get_device_count() -> int:
@@ -155,11 +208,7 @@ class RTLSDRDevice(SDRDevice):
                         manufacturer="RTL-SDR Blog",
                         product="RTL2832U",
                         index=i,
-                        capabilities=[
-                            DeviceCapability.RX,
-                            DeviceCapability.BIAS_TEE,
-                            DeviceCapability.DIRECT_SAMPLE,
-                        ],
+                        capabilities=list(_CAPABILITIES),
                     )
                 )
         except ImportError:
@@ -183,6 +232,11 @@ class RTLSDRDevice(SDRDevice):
         try:
             self._device = RtlSdr(device_index=index)
             self._if_bandwidth = 0.0  # a fresh handle starts automatic
+            # A fresh handle starts uncorrected, without direct sampling.
+            self._ppm = 0
+            self._direct_mode = DIRECT_SAMPLING_OFF
+            self._direct_sampling = False
+            self._gains = self._read_gain_table()
 
             # Get device info (best-effort; enumeration may not expose a serial).
             serial = self.get_device_serial(index) or f"rtlsdr_{index}"
@@ -192,11 +246,7 @@ class RTLSDRDevice(SDRDevice):
                 manufacturer="RTL-SDR Blog",
                 product="RTL2832U",
                 index=index,
-                capabilities=[
-                    DeviceCapability.RX,
-                    DeviceCapability.BIAS_TEE,
-                    DeviceCapability.DIRECT_SAMPLE,
-                ],
+                capabilities=list(_CAPABILITIES),
             )
 
             # Set defaults
@@ -229,9 +279,13 @@ class RTLSDRDevice(SDRDevice):
             return False
 
     def close(self) -> None:
-        """Close RTL-SDR device."""
+        """Close RTL-SDR device (switching its bias tee off first)."""
         if self._state.is_streaming:
             self.stop_rx()
+
+        if self._device is not None and self._state.bias_tee_enabled:
+            # Don't leave the antenna port powered after the app is done.
+            self.set_bias_tee(False)
 
         if self._device is not None:
             try:
@@ -256,13 +310,8 @@ class RTLSDRDevice(SDRDevice):
             )
             return False
 
-        # Check if we need direct sampling for HF
-        if freq_hz < 24e6:
-            if not self._direct_sampling:
-                self._enable_direct_sampling(True)
-        else:
-            if self._direct_sampling:
-                self._enable_direct_sampling(False)
+        # HF (below 24 MHz) through direct sampling, on the chosen input.
+        self._apply_direct_sampling(freq_hz)
 
         try:
             self._device.center_freq = freq_hz
@@ -347,13 +396,13 @@ class RTLSDRDevice(SDRDevice):
         if not self._is_open or self._device is None:
             return False
 
-        # Find nearest valid gain
-        nearest_gain = min(self.VALID_GAINS, key=lambda x: abs(x - gain_db))
-
-        # Warn if requested gain was significantly different from nearest valid
+        # The nearest step of the tuner's own gain table (the GUI offers
+        # only those, so a far-off request is a programming slip: debug).
+        nearest_gain = min(self._gains, key=lambda x: abs(x - gain_db))
         if abs(nearest_gain - gain_db) > 0.5:
-            logger.warning(
-                f"Requested gain {gain_db:.1f} dB clamped to nearest valid: {nearest_gain} dB"
+            logger.debug(
+                f"Requested gain {gain_db:.1f} dB set to the nearest step: "
+                f"{nearest_gain} dB"
             )
 
         try:
@@ -411,7 +460,8 @@ class RTLSDRDevice(SDRDevice):
                         try:
                             self._sample_queue.put_nowait(samples)
                         except queue.Full:
-                            pass  # Queue full, drop samples
+                            # Queue full, drop samples (counted).
+                            self._dropped_samples += len(samples)
             except Exception as e:
                 if not self._stop_event.is_set():
                     # The stream died on its own (USB unplug, read error, or a
@@ -451,10 +501,12 @@ class RTLSDRDevice(SDRDevice):
         return True
 
     def set_bias_tee(self, enabled: bool) -> bool:
-        """Enable/disable bias tee (V3+ only)."""
+        """Power the antenna socket (4.5 V, RTL-SDR Blog V3 and later) for
+        an LNA or an active antenna, or switch that power off."""
         if not self._is_open or self._device is None:
             return False
 
+        enabled = bool(enabled)
         try:
             self._device.set_bias_tee(enabled)
             self._state.bias_tee_enabled = enabled
@@ -467,27 +519,160 @@ class RTLSDRDevice(SDRDevice):
             logger.error(f"Failed to set bias tee: {e}")
             return False
 
-    def _enable_direct_sampling(self, enabled: bool) -> bool:
-        """Enable/disable direct sampling mode for HF."""
+    # ------------------------------------------------------------------ #
+    # Direct sampling (HF)
+    # ------------------------------------------------------------------ #
+    def set_direct_sampling(self, mode) -> bool:
+        """Choose how HF (below 24 MHz) is received: through the ADC's Q
+        input (``2`` / ``"q"``, the RTL-SDR Blog V3 and the default), its I
+        input (``1`` / ``"i"``) or not at all (``0`` / ``"off"``: an RTL-SDR
+        Blog V4 or an upconverter tunes HF through the tuner).
+
+        Direct sampling is switched on only while tuned below 24 MHz (the
+        tuner can't go lower); above that the tuner is always used. A change
+        takes effect at once when tuned there. Returns False for an unknown
+        mode, or when the device refused it.
+        """
+        try:
+            branch = direct_sampling_mode(mode)
+        except (TypeError, ValueError) as e:
+            logger.error(f"Direct sampling: {e}")
+            return False
+        self._direct_branch = branch
+        if not self._is_open or self._device is None:
+            return True  # applied when the device opens and tunes
+        return self._apply_direct_sampling(self._state.frequency)
+
+    @property
+    def direct_sampling_branch(self) -> int:
+        """The ADC input used below 24 MHz (0 = direct sampling off)."""
+        return self._direct_branch
+
+    @property
+    def direct_sampling(self) -> bool:
+        """Whether direct sampling is in use right now."""
+        return self._direct_sampling
+
+    def _apply_direct_sampling(self, freq_hz: float) -> bool:
+        """Set the hardware's direct sampling for ``freq_hz``."""
+        want = self._direct_branch if 0 < freq_hz < DIRECT_SAMPLING_BELOW_HZ else 0
+        if want == self._direct_mode:
+            return True
+        return self._set_direct_mode(want)
+
+    def _set_direct_mode(self, mode: int) -> bool:
         if not self._is_open or self._device is None:
             return False
-
         try:
-            # 0 = disabled, 1 = I-branch, 2 = Q-branch
-            mode = 2 if enabled else 0  # Q-branch for RTL-SDR Blog
             self._device.set_direct_sampling(mode)
-            self._direct_sampling = enabled
-            logger.info(
-                f"Direct sampling {'enabled (Q-branch)' if enabled else 'disabled'}"
-            )
-            return True
         except Exception as e:
             logger.error(f"Failed to set direct sampling: {e}")
             return False
+        self._direct_mode = mode
+        self._direct_sampling = mode != DIRECT_SAMPLING_OFF
+        if mode:
+            logger.info(f"Direct sampling enabled ({_DIRECT_SAMPLING_NAMES[mode]})")
+        else:
+            logger.info("Direct sampling disabled")
+            self._restore_tuner()
+        return True
+
+    def _restore_tuner(self) -> None:
+        """Set the tuner's gain and IF filter again. Switching direct
+        sampling off makes librtlsdr initialise the tuner afresh
+        (``tuner->init``): an R820T is then back on automatic gain with its
+        default IF filter, whatever the gain shown says."""
+        device = self._device
+        if device is None:
+            return
+        try:
+            if self._state.gain_mode == "auto":
+                device.gain = "auto"
+            else:
+                device.gain = self._state.gain
+        except Exception as e:
+            logger.error(f"Could not set the tuner gain again: {e}")
+        setter = getattr(device, "set_bandwidth", None)
+        if not callable(setter):
+            return  # (an old pyrtlsdr: the filter is automatic anyway)
+        try:
+            setter(int(self._if_bandwidth))  # 0: it follows the sample rate
+        except AttributeError:
+            pass  # (a librtlsdr without rtlsdr_set_tuner_bandwidth)
+        except Exception as e:
+            logger.warning(f"Could not set the tuner bandwidth again: {e}")
+
+    def _enable_direct_sampling(self, enabled: bool) -> bool:
+        """Switch direct sampling on (on the chosen input, the Q input when
+        none is) or off."""
+        branch = self._direct_branch or DIRECT_SAMPLING_Q
+        return self._set_direct_mode(branch if enabled else DIRECT_SAMPLING_OFF)
+
+    # ------------------------------------------------------------------ #
+    # Frequency correction
+    # ------------------------------------------------------------------ #
+    def set_freq_correction(self, ppm: float) -> bool:
+        """Correct the dongle's crystal error, in parts per million.
+
+        librtlsdr's convention: a positive value means the crystal runs
+        fast, which makes stations show up below (left of) their true
+        frequency. Cheap dongles are often 20-100 ppm off (50 ppm is 22 kHz
+        at 433 MHz); ones with a TCXO within 1-2 ppm. Returns False when the
+        device isn't open or refused the value.
+        """
+        if not self._is_open or self._device is None:
+            return False
+        try:
+            value = int(round(float(ppm)))
+        except (TypeError, ValueError):
+            logger.error(f"Invalid frequency correction: {ppm!r}")
+            return False
+        if abs(value) > PPM_LIMIT:
+            logger.error(
+                f"Frequency correction {value} ppm is out of range "
+                f"(+/-{PPM_LIMIT} ppm)"
+            )
+            return False
+        if value == self._ppm:
+            # librtlsdr refuses to set the value it already has (-2), and
+            # pyrtlsdr then closes the device: never ask for it again.
+            return True
+        try:
+            self._device.set_freq_correction(value)
+        except AttributeError:
+            logger.warning(
+                "This rtlsdr library can't set the frequency correction (ppm)"
+            )
+            return False
+        except Exception as e:
+            logger.error(f"Failed to set the frequency correction: {e}")
+            return False
+        self._ppm = value
+        logger.info(f"Frequency correction set to {value:+d} ppm")
+        return True
+
+    @property
+    def freq_correction(self) -> int:
+        """The frequency correction in use (ppm)."""
+        return int(self._ppm)
+
+    # ------------------------------------------------------------------ #
+    # Gain table
+    # ------------------------------------------------------------------ #
+    def _read_gain_table(self) -> List[float]:
+        """The open tuner's gain steps (pyrtlsdr's ``valid_gains_db``: an
+        R820T/R828D has 29 from 0 to 49.6 dB, an E4000 14 from -1 to 42
+        dB), else the R820T2 table."""
+        try:
+            table = getattr(self._device, "valid_gains_db", None)
+            gains = sorted({round(float(g), 1) for g in (table or [])})
+        except (TypeError, ValueError):
+            gains = []
+        return gains or list(self.VALID_GAINS)
 
     def get_tuner_gains(self) -> List[float]:
-        """Get list of valid tuner gain values."""
-        return self.VALID_GAINS.copy()
+        """The tuner's gain steps in dB (the open device's own table)."""
+        return list(self._gains)
 
     @property
     def rx_error(self) -> Optional[str]:

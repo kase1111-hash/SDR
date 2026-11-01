@@ -52,8 +52,10 @@ that is the Bandwidth setting.""",
         short="Amplification applied to received signals (in dB).",
         detailed="""Gain amplifies weak signals but also amplifies noise. Too little
 gain = weak signals buried in noise. Too much gain = distortion and
-intermodulation from strong signals. Start with AGC or ~30dB, then
-adjust based on signal quality. RTL-SDR: 0-49.6dB, HackRF: 0-62dB.""",
+intermodulation from strong signals. Start with Tuner AGC or ~30dB,
+then adjust based on signal quality. RTL-SDR: 0-49.6dB in its tuner's
+steps. HackRF One: LNA 0-40dB and VGA 0-62dB (up to 102dB), plus a
++14dB RF amp; it has no AGC.""",
         warning="Excessive gain causes signal clipping and spurious signals.",
     ),
     "bandwidth": Tooltip(
@@ -149,11 +151,14 @@ allow proper signal analysis. Use a directional coupler for best results.""",
     ),
     "wideband_scan": Tooltip(
         title="Wideband Scan Mode",
-        short="Cover more spectrum by scanning different ranges with each SDR.",
-        detailed="""Split the spectrum between devices for faster scanning. RTL-SDR
-handles 0-1.7 GHz while HackRF covers 1.7-6 GHz. Coordinate scanning
-to avoid overlap and maximize coverage. Useful for spectrum surveys
-and signal hunting across wide frequency ranges.""",
+        short=(
+            "Not implemented yet: scan each SDR's range with the Scanner tab "
+            "instead."
+        ),
+        detailed="""Not implemented yet. The plan: split the spectrum between devices
+for faster scanning, the RTL-SDR covering 0-1.7 GHz while the HackRF
+covers 1.7-6 GHz. Until then, scan each device's range with the Scanner
+tab (Tools > Frequency Scanner) or `sdr-scan scan --device ...`.""",
     ),
     "clock_sync": Tooltip(
         title="Clock Synchronization",

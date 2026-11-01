@@ -114,6 +114,10 @@ class TestQRPPanelConsistency(unittest.TestCase):
     def test_one_watt_and_dbm_format_everywhere(self):
         p = self.panel
         calc = p._amp_calc
+        # (The chain starts as the SDR alone; this one adds a 20 dB driver
+        # and a 10 dB PA.)
+        calc._driver_check.setChecked(True)
+        calc._pa_check.setChecked(True)
         self.assertEqual(p._power_display._watts_label.text(), "1 W")
         self.assertEqual(p._power_display._dbm_label.text(), "+30 dBm")
         self.assertEqual(calc._pa_out.text(), "1 W")
@@ -254,7 +258,10 @@ class TestSignalMeterShortTab(unittest.TestCase):
 
     def test_gauge_shrinks_but_keeps_a_wide_scale(self):
         meter = self.panel._analog_meter
-        self.assertLess(meter.height(), 100)
+        # The compact layout (short tab) leaves the gauge more room than the
+        # full report did, but it is still below its preferred height.
+        self.assertTrue(self.panel.is_compact())
+        self.assertLess(meter.height(), meter.sizeHint().height())
         fm = QFontMetricsF(meter._label_font())
         _cx, _cy, radius = meter._geometry(fm)
         self.assertGreaterEqual(
@@ -481,9 +488,14 @@ class TestRadioTunerOffBand(unittest.TestCase):
         self.assertEqual(self.spy[-1][1], "AM")
 
     def test_feedback_returns_to_the_off_band_hint(self):
+        # Storing while the receiver is outside the broadcast bands is
+        # refused (it used to store the tuner's hidden station), with a hint.
         t = self.tuner
+        before = t._preset_buttons[5].get_preset()
         t.store_preset(5)
-        self.assertIn("Stored", t._hint_label.text())
+        self.assertIn("Tune to an AM or FM station first", t._hint_label.text())
+        self.assertEqual(t._hint_label.property("tone"), "warning")
+        self.assertIs(t._preset_buttons[5].get_preset(), before)
         self.assertFalse(t._preset_buttons[5].isChecked())
         t._reset_hint()  # what the hint timer does
         self.assertIn("146.520 MHz", t._hint_label.text())

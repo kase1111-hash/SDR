@@ -16,6 +16,19 @@ Provides signal strength measurement in formats familiar to amateur radio operat
 
 When you say "You're five-nine" or "twenty over" - any old HAM knows exactly what you mean.
 
+Levels: the samples are measured in dBFS (relative to the SDR's full scale).
+Until the meter is calibrated (:meth:`SignalMeter.set_calibration`) dBm is
+only a rough guess (0 dBFS taken as -30 dBm), so S-units are relative too.
+Signal-to-noise and the readability digit need a noise reference: pass the
+channel's noise power to :meth:`SignalMeter.update` (the GUI measures it
+from the spectrum around the channel), set one with
+:meth:`SignalMeter.set_noise_floor` (it stays until cleared), or the meter
+estimates it from the samples themselves: from their spectrum's median bin,
+which needs the signal to fill less than half of the samples' band, or from
+their envelope for a constant-envelope signal (FM, CW, FSK, PSK) that fills
+it. An AM or SSB signal that fills the samples' band reads too little SNR
+without a reference: measure a wider span, or pass the noise.
+
 Usage:
     meter = SignalMeter()
     meter.update(samples)
@@ -29,10 +42,11 @@ Usage:
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -71,6 +85,16 @@ class SignalReading:
     timestamp: float
     peak_hold_dbm: float  # Peak hold value
 
+    # Noise reference and calibration
+    noise_dbm: Optional[float] = None  # channel noise power (None: unknown)
+    calibrated: bool = False  # dBm calibrated (else dBFS - 30, a guess)
+    signal_present: bool = True  # more than ~3 dB above the noise
+
+    @property
+    def peak_hold_dbfs(self) -> float:
+        """Peak hold on the dBFS scale of ``power_dbfs``."""
+        return self.peak_hold_dbm - (self.power_dbm - self.power_dbfs)
+
 
 # S-Meter reference levels (IARU Region 1 standard for HF)
 # Each S-unit = 6 dB, S9 = -73 dBm (50 ohm reference)
@@ -88,6 +112,20 @@ S_METER_REFERENCE = {
 
 S9_DBM = -73.0  # S9 reference level
 DB_PER_S_UNIT = 6.0  # 6 dB per S-unit
+
+# Uncalibrated, 0 dBFS is taken as this many dBm.
+UNCALIBRATED_DBFS_TO_DBM = -30.0
+# Below this SNR (dB) the channel holds no usable signal: R1, no report.
+SIGNAL_PRESENT_SNR_DB = 3.0
+# Peak hold: held this long (s), then falls at this rate (dB/s).
+PEAK_HOLD_S = 2.0
+PEAK_DECAY_DB_PER_S = 20.0
+# The external noise reference counts as current for this long (s).
+_NOISE_STALE_S = 2.0
+# After a reset (retune) the first blocks can still hold the old channel
+# (filter history, queued USB transfers): the peak follows the reading
+# instead of holding for this long (s).
+_PEAK_SETTLE_S = 0.5
 
 
 class SignalMeter:
@@ -136,13 +174,29 @@ class SignalMeter:
         # Mode for RST
         self._mode = SignalMode.PHONE
 
-        # Calibration offset (for real hardware)
+        # Calibration: dB added to the uncalibrated estimate (dBFS - 30), at
+        # the RF gain it was made at (None: not gain-compensated).
         self._cal_offset_db = 0.0
+        self._calibrated = False
+        self._cal_gain_db: Optional[float] = None
+        self._gain_db: Optional[float] = None
 
-        # Peak hold duration
-        self._peak_hold_duration = 2.0  # seconds
+        # Peak hold duration and decay
+        self._peak_hold_duration = PEAK_HOLD_S
+        self._peak_decay_db_per_s = PEAK_DECAY_DB_PER_S
 
-        # Noise floor estimate
+        # Noise floor in the channel, in dBFS: given with each update (from
+        # the spectrum around the channel), else the floor set with
+        # set_noise_floor (dBm, kept until cleared), else estimated from the
+        # samples themselves. None until known.
+        self._noise_dbfs: Optional[float] = None
+        self._noise_external_time = 0.0
+        self._noise_set_dbm: Optional[float] = None
+        self._settle_until = 0.0
+        # The first block after a reset starts with the old channel (the
+        # channel filter's memory): only its second half is measured.
+        self._trim_next = False
+        # Kept for compatibility: the noise floor in dBm.
         self._noise_floor_dbm = -120.0
 
         logger.info(f"SignalMeter initialized, sample_rate={sample_rate}")
@@ -151,57 +205,269 @@ class SignalMeter:
         """Set signal mode for RST reporting."""
         self._mode = mode
 
-    def set_calibration(self, offset_db: float) -> None:
-        """Set calibration offset in dB."""
-        self._cal_offset_db = offset_db
+    def get_mode(self) -> SignalMode:
+        """The RST reporting mode."""
+        return self._mode
+
+    def set_calibration(
+        self, offset_db: float, reference_gain_db: Optional[float] = None
+    ) -> None:
+        """Calibrate: add ``offset_db`` to the uncalibrated estimate.
+
+        Args:
+            offset_db: Correction in dB (dBm = dBFS - 30 + offset).
+            reference_gain_db: RF gain the calibration was made at. When
+                given, and the current gain is known (:meth:`set_gain`), a
+                gain change moves the dBFS reading but not the dBm one.
+        """
+        self._cal_offset_db = float(offset_db)
+        self._cal_gain_db = (
+            None if reference_gain_db is None else float(reference_gain_db)
+        )
+        self._calibrated = True
+        self._avg_window.clear()
         logger.info(f"Calibration offset set to {offset_db} dB")
 
-    def set_noise_floor(self, noise_dbm: float) -> None:
-        """Set noise floor estimate for SNR calculation."""
-        self._noise_floor_dbm = noise_dbm
+    def clear_calibration(self) -> None:
+        """Back to the uncalibrated estimate (dBm = dBFS - 30)."""
+        self._cal_offset_db = 0.0
+        self._cal_gain_db = None
+        self._calibrated = False
+        self._avg_window.clear()
 
-    def update(self, samples: np.ndarray) -> SignalReading:
+    @property
+    def is_calibrated(self) -> bool:
+        return self._calibrated
+
+    @property
+    def calibration_offset_db(self) -> float:
+        return self._cal_offset_db
+
+    @property
+    def calibration_gain_db(self) -> Optional[float]:
+        return self._cal_gain_db
+
+    def set_gain(self, gain_db: Optional[float]) -> None:
+        """The receiver's current RF gain (None: unknown, e.g. hardware AGC)."""
+        self._gain_db = None if gain_db is None else float(gain_db)
+
+    def _dbfs_to_dbm_offset(self) -> float:
+        """dB to add to a dBFS level to get (calibrated or estimated) dBm."""
+        offset = UNCALIBRATED_DBFS_TO_DBM
+        if self._calibrated:
+            offset += self._cal_offset_db
+            if self._cal_gain_db is not None and self._gain_db is not None:
+                offset -= self._gain_db - self._cal_gain_db
+        return offset
+
+    def offset_for_level(self, dbm: float) -> float:
+        """Calibration offset that makes the current reading ``dbm``."""
+        dbfs = self._power_dbm - self._dbfs_to_dbm_offset()
+        return float(dbm) - (dbfs + UNCALIBRATED_DBFS_TO_DBM)
+
+    def set_noise_floor(self, noise_dbm: float) -> None:
+        """Set noise floor estimate for SNR calculation (channel noise, dBm).
+
+        It stays the reference until :meth:`clear_noise_floor` (a retune's
+        :meth:`reset_peak` keeps it); a ``noise_dbfs`` given to
+        :meth:`update` is used instead while it keeps coming.
+        """
+        self._noise_set_dbm = float(noise_dbm)
+        self._noise_floor_dbm = float(noise_dbm)
+        self._noise_dbfs = float(noise_dbm) - self._dbfs_to_dbm_offset()
+
+    def clear_noise_floor(self) -> None:
+        """Forget the floor set with :meth:`set_noise_floor`: the noise comes
+        from :meth:`update` again (its ``noise_dbfs``, else an estimate from
+        the samples)."""
+        self._noise_set_dbm = None
+        self._noise_dbfs = None
+
+    @property
+    def settling(self) -> bool:
+        """True just after a reset, while old samples may still arrive."""
+        return time.time() < self._settle_until
+
+    @property
+    def has_noise_floor(self) -> bool:
+        """True once a noise reference exists (SNR and R are meaningful)."""
+        return self._noise_dbfs is not None
+
+    def reset_peak(self) -> None:
+        """Forget the peak hold, the averaging and the noise estimate (after
+        a retune, a mode change, or Stop): the next reading starts afresh.
+        A floor set with :meth:`set_noise_floor` is kept."""
+        self._avg_window.clear()
+        self._peak_hold_dbm = -130.0
+        self._peak_hold_time = 0.0
+        self._noise_dbfs = self._set_noise_dbfs()
+        self._noise_external_time = 0.0
+        self._settle_until = time.time() + _PEAK_SETTLE_S
+        self._trim_next = True
+
+    def update(
+        self, samples: np.ndarray, noise_dbfs: Optional[float] = None
+    ) -> SignalReading:
         """
         Update meter with new samples.
 
         Args:
             samples: Complex I/Q samples
+            noise_dbfs: Noise power in the same channel, in dBFS (as the
+                samples' power would read with no signal). Without it the
+                noise is estimated from the samples' spectrum.
 
         Returns:
             SignalReading with current measurements
         """
         now = time.time()
+        previous = self._last_update
         self._last_update = now
 
         # Calculate power
-        power_watts = np.mean(np.abs(samples) ** 2)
+        samples = np.asarray(samples)
+        if self._trim_next and len(samples):
+            # Just after a reset (retune): the start of this block can still
+            # be the old channel, ringing out of the channel filter.
+            self._trim_next = False
+            if len(samples) >= 64:
+                samples = samples[len(samples) // 2 :]
+        power_watts = float(np.mean(np.abs(samples) ** 2)) if len(samples) else 0.0
         power_dbfs = 10 * np.log10(power_watts + 1e-20)
 
-        # Convert to dBm (assuming 0 dBFS = some reference)
-        # For SDR, we estimate based on typical ADC full scale
-        # This is approximate - real calibration needed for accuracy
-        power_dbm = power_dbfs + self._cal_offset_db - 30  # Rough estimate
+        # dBm: calibrated, or the rough guess 0 dBFS = -30 dBm.
+        to_dbm = self._dbfs_to_dbm_offset()
+        power_dbm = power_dbfs + to_dbm
 
-        # Apply averaging
+        # Apply averaging. The first reading after a reset's settling time
+        # starts afresh: what came before may be the old channel's samples.
+        settled = bool(self._settle_until) and now >= self._settle_until
+        if settled:
+            self._settle_until = 0.0
+            self._avg_window.clear()
+        elif now < self._settle_until:
+            # Settling: each block stands alone, so old-channel samples
+            # can't linger in the average (as a signal on an empty channel).
+            self._avg_window.clear()
         self._avg_window.append(power_dbm)
         if len(self._avg_window) > self._avg_size:
             self._avg_window.pop(0)
 
         self._power_dbm = float(np.mean(self._avg_window))
 
-        # Calculate SNR
-        self._snr_db = self._power_dbm - self._noise_floor_dbm
+        # Noise reference: the caller's, else the floor set with
+        # set_noise_floor, else the samples' own estimate.
+        if noise_dbfs is not None and math.isfinite(noise_dbfs):
+            self._track_noise(float(noise_dbfs))
+            self._noise_external_time = now
+        elif now - self._noise_external_time > _NOISE_STALE_S:
+            floor = self._set_noise_dbfs()
+            if floor is not None:
+                self._noise_dbfs = floor
+            else:
+                estimate = self._blind_noise_dbfs(samples)
+                if estimate is not None:
+                    self._track_noise(estimate)
+        if self._noise_dbfs is not None:
+            self._noise_floor_dbm = self._noise_dbfs + to_dbm
 
-        # Peak hold
-        if self._power_dbm > self._peak_hold_dbm:
+        # Calculate SNR: signal power above the noise, from total power.
+        self._snr_db = self._compute_snr()
+
+        # Peak hold: held for a while, then falls at a steady rate (and only
+        # follows the reading while a reset settles).
+        if settled or now < self._settle_until:
+            self._peak_hold_dbm = self._power_dbm
+            self._peak_hold_time = now
+        elif self._power_dbm >= self._peak_hold_dbm:
             self._peak_hold_dbm = self._power_dbm
             self._peak_hold_time = now
         elif now - self._peak_hold_time > self._peak_hold_duration:
-            # Decay peak hold
-            self._peak_hold_dbm = max(self._power_dbm, self._peak_hold_dbm - 1.0)
-            self._peak_hold_time = now
+            # Falling since the hold ran out (or the last update after that).
+            since = max(previous, self._peak_hold_time + self._peak_hold_duration)
+            elapsed = max(0.0, now - since)
+            self._peak_hold_dbm = max(
+                self._power_dbm,
+                self._peak_hold_dbm - self._peak_decay_db_per_s * elapsed,
+            )
 
         return self.get_reading()
+
+    def _track_noise(self, noise_dbfs: float) -> None:
+        """Smooth the noise reference (it changes slowly)."""
+        if self._noise_dbfs is None:
+            self._noise_dbfs = noise_dbfs
+        else:
+            self._noise_dbfs += 0.2 * (noise_dbfs - self._noise_dbfs)
+
+    def _set_noise_dbfs(self) -> Optional[float]:
+        """The floor set with :meth:`set_noise_floor`, in dBFS (None: none)."""
+        if self._noise_set_dbm is None:
+            return None
+        return self._noise_set_dbm - self._dbfs_to_dbm_offset()
+
+    @classmethod
+    def _blind_noise_dbfs(cls, samples: np.ndarray) -> Optional[float]:
+        """Noise power of ``samples`` from the samples alone: the spectral
+        estimate, or the envelope's when that is lower (a constant-envelope
+        signal that fills the band leaves no bins of noise alone)."""
+        estimates = [
+            value
+            for value in (
+                cls._spectral_noise_dbfs(samples),
+                cls._envelope_noise_dbfs(samples),
+            )
+            if value is not None
+        ]
+        return min(estimates) if estimates else None
+
+    @staticmethod
+    def _envelope_noise_dbfs(samples: np.ndarray) -> Optional[float]:
+        """Noise power of complex ``samples`` from their envelope, for a
+        constant-envelope signal (FM, CW, FSK, PSK) in Gaussian noise.
+
+        With signal power S and noise power N, mean |x|^2 = S + N and mean
+        |x|^4 = S^2 + 4SN + 2N^2, so S = sqrt(2 M2^2 - M4) (the M2M4
+        estimate). None for real samples and short blocks (whose M4 / M2^2
+        strays too far), and unless the envelope is nearly constant
+        (M4 / M2^2 below 1.5, about 4 dB SNR; noise alone gives 2).
+        """
+        x = np.asarray(samples)
+        if len(x) < 512 or not np.iscomplexobj(x):
+            return None
+        x = x[-65536:].astype(np.complex128, copy=False)
+        power = x.real * x.real + x.imag * x.imag
+        m2 = float(np.mean(power))
+        m4 = float(np.mean(power * power))
+        if not (m2 > 0.0 and math.isfinite(m4)) or m4 >= 1.5 * m2 * m2:
+            return None
+        noise = m2 - math.sqrt(max(2.0 * m2 * m2 - m4, 0.0))
+        return 10.0 * math.log10(max(noise, 0.0) + 1e-20)
+
+    @staticmethod
+    def _spectral_noise_dbfs(samples: np.ndarray) -> Optional[float]:
+        """Noise power of ``samples`` from their spectrum's median bin.
+
+        For white noise each (Hann-windowed) bin holds total power * 1.5/N;
+        the median of exponentially distributed bins is ln 2 of their mean.
+        A narrow signal occupies few bins, so it barely moves the median.
+        """
+        n = min(len(samples), 4096)
+        if n < 64:
+            return None
+        x = np.asarray(samples[-n:], dtype=np.complex128)
+        window = np.hanning(n)
+        bins = np.abs(np.fft.fft(x * window)) ** 2 / (np.sum(window) ** 2)
+        median = float(np.median(bins))
+        noise = median / math.log(2.0) * n / 1.5
+        return 10.0 * math.log10(noise + 1e-20)
+
+    def _compute_snr(self) -> float:
+        if self._noise_dbfs is None:
+            return 0.0
+        signal = self._power_dbm - self._dbfs_to_dbm_offset()
+        ratio = 10.0 ** ((signal - self._noise_dbfs) / 10.0) - 1.0
+        return 10.0 * math.log10(max(ratio, 1e-2))
 
     def get_reading(self) -> SignalReading:
         """Get current signal reading."""
@@ -224,10 +490,12 @@ class SignalMeter:
         readability = self._calculate_readability()
         strength = s_value
         tone = self._calculate_tone()
+        to_dbm = self._dbfs_to_dbm_offset()
+        noise_dbm = None if self._noise_dbfs is None else self._noise_dbfs + to_dbm
 
         return SignalReading(
             power_dbm=self._power_dbm,
-            power_dbfs=self._power_dbm + 30 - self._cal_offset_db,
+            power_dbfs=self._power_dbm - to_dbm,
             snr_db=self._snr_db,
             s_units=s_units,
             s_meter=s_meter,
@@ -238,6 +506,11 @@ class SignalMeter:
             tone=tone,
             timestamp=self._last_update,
             peak_hold_dbm=self._peak_hold_dbm,
+            noise_dbm=noise_dbm,
+            calibrated=self._calibrated,
+            signal_present=(
+                self._noise_dbfs is None or self._snr_db >= SIGNAL_PRESENT_SNR_DB
+            ),
         )
 
     def _dbm_to_s_units(self, dbm: float) -> float:
@@ -406,6 +679,34 @@ class SignalMeter:
 
         return f"RST: {rst} | {reading.s_meter} | {reading.power_dbm:.0f} dBm"
 
+    def get_log_report(
+        self,
+        frequency_hz: Optional[float] = None,
+        when: Optional[float] = None,
+        s_text: Optional[str] = None,
+    ) -> str:
+        """One-line report to paste into a log or chat.
+
+        ``s_text``: the S reading to give, e.g. the "S9+23" a display shows
+        at 1 dB resolution (default: the reading's own, in 10 dB steps
+        above S9).
+
+        Returns:
+            "RST 59 · S9+20 · 14.250 MHz · 12:34 UTC" (frequency optional);
+            "No signal above the noise (S4) · ..." on an empty channel.
+        """
+        reading = self.get_reading()
+        s_meter = s_text or reading.s_meter
+        if reading.signal_present:
+            parts = [f"RST {self.get_rst()}", s_meter]
+        else:
+            parts = [f"No signal above the noise ({s_meter})"]
+        if frequency_hz:
+            parts.append(f"{float(frequency_hz) / 1e6:.3f} MHz")
+        stamp = time.gmtime(when if when is not None else time.time())
+        parts.append(time.strftime("%H:%M UTC", stamp))
+        return " · ".join(parts)
+
     def get_contest_report(self) -> str:
         """
         Get contest-style report (always 59 or 599).
@@ -537,6 +838,10 @@ class SignalHistory:
 
 
 __all__ = [
+    "PEAK_DECAY_DB_PER_S",
+    "PEAK_HOLD_S",
+    "SIGNAL_PRESENT_SNR_DB",
+    "UNCALIBRATED_DBFS_TO_DBM",
     "SignalMode",
     "SignalReading",
     "SignalMeter",

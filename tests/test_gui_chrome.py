@@ -169,12 +169,36 @@ class TestLayout(_WindowTestCase):
         self.assertLessEqual(width, 480)
 
     def test_top_level_tabs_fit_without_hiding(self):
+        from sdr_module.gui import themes
+
         tabs = self.win._right_tabs
         titles = [tabs.tabText(i) for i in range(tabs.count())]
         self.assertIn("Decoder", titles)
         self.assertIn("Info", titles)
-        total = sum(tabs.tabBar().tabRect(i).width() for i in range(tabs.count()))
-        self.assertLessEqual(total, 360)
+        # Every tab shows (no scroll arrows) in the right column at the
+        # smallest window size, 1024x640, where the default layout gives the
+        # column 380 px. (It was 360 px of tabs before the Scanner tab.)
+        # Measured in the themes the app always runs with (app.py applies
+        # one at start-up): they give this bar tighter tabs than the bare
+        # Fusion style does, so the Signal tab (T10) fits as well.
+        qapp = QApplication.instance()
+        old_sheet, old_palette = qapp.styleSheet(), qapp.palette()
+        old_theme = themes.current_theme()
+        try:
+            for theme in themes.THEMES:
+                themes.apply_theme(qapp, theme)
+                self.win.resize(1024, 640)
+                self.settle()
+                self.win._apply_default_splitter_sizes()
+                self.settle()
+                bar = tabs.tabBar()
+                total = sum(bar.tabRect(i).width() for i in range(tabs.count()))
+                self.assertLessEqual(total, 376, theme)
+                self.assertLessEqual(total, tabs.width() - 4, theme)
+        finally:
+            qapp.setStyleSheet(old_sheet)
+            qapp.setPalette(old_palette)
+            themes.apply_theme(None, old_theme)
         for i in range(tabs.count()):
             self.assertTrue(tabs.tabToolTip(i))
 
@@ -227,6 +251,9 @@ class TestShortcuts(_WindowTestCase):
         self.assertEqual(len(self.store.bookmarks), before + 1)
 
     def test_arrows_tune_when_plot_has_focus(self):
+        # Left/Right tune by the tuning step (per mode; 100 kHz for broadcast
+        # FM): pick 10 kHz, so Shift is 100 kHz and Ctrl stays 1 MHz.
+        self.win._set_step(10e3)
         self.win._spectrum.setFocus()
         self.settle()
         start = self.freq()

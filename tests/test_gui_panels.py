@@ -89,11 +89,15 @@ class TestDecoderPanel(unittest.TestCase):
         self.assertIn("paused", p._empty.text())
 
     def test_protocol_names_match_main_window_mapping(self):
+        from sdr_module.gui.decoder_panel import PROTOCOL_AUTO, PROTOCOL_OFF
         from sdr_module.gui.main_window import SDRMainWindow
 
+        # Every entry but Off and Auto (which picks one of the others) is a
+        # protocol the window builds a decoder for.
         names = [
             self.panel._proto_combo.itemText(i)
-            for i in range(1, self.panel._proto_combo.count())
+            for i in range(self.panel._proto_combo.count())
+            if self.panel._proto_combo.itemText(i) not in (PROTOCOL_OFF, PROTOCOL_AUTO)
         ]
         self.assertEqual(sorted(names), sorted(SDRMainWindow._DECODER_PROTOCOLS))
 
@@ -300,10 +304,19 @@ class TestBookmarksPanel(unittest.TestCase):
         self.assertEqual(panel._selected_index(), 0)
 
     def test_blank_name_uses_frequency(self):
+        # A blank name is the band and frequency (UX-U16: "FM Broadcast
+        # 100.1" rather than repeating the frequency), or the preset's name.
         panel = self.make()
         panel._freq_input.setValue(145.8125)
         panel._add_btn.click()
-        self.assertEqual(self.store.bookmarks[-1]["label"], "145.8125 MHz")
+        self.assertEqual(self.store.bookmarks[-1]["label"], "2m Ham 145.8125")
+        panel._freq_input.setValue(162.55)
+        panel._add_btn.click()
+        self.assertEqual(self.store.bookmarks[-1]["label"], "NOAA Weather 1")
+        # Outside every band: the frequency.
+        panel._freq_input.setValue(2500.0)
+        panel._add_btn.click()
+        self.assertEqual(self.store.bookmarks[-1]["label"], "2500.000 MHz")
 
     def test_double_click_and_enter_tune(self):
         panel = self.make(self.SAMPLE)
@@ -425,6 +438,10 @@ class TestDecoderReadability(unittest.TestCase):
 
     def test_long_message_is_cut_to_a_few_lines_without_widening_panel(self):
         p = self.panel
+        # (The protocol row sets the panel's narrowest; the message must
+        # not widen it.)
+        narrowest = p.minimumSizeHint().width()
+        width = p.width()
         p.add_message("ACARS", ".N12345", self.LONG, valid=False)
         p._table.selectRow(0)
         _settle(10)
@@ -433,8 +450,8 @@ class TestDecoderReadability(unittest.TestCase):
         self.assertTrue(body.endswith("…"))
         self.assertEqual(p._detail.body.toolTip(), self.LONG)
         self.assertEqual(p._detail.meta.property("tone"), "danger")
-        self.assertLessEqual(p.minimumSizeHint().width(), 360)
-        self.assertEqual(p.width(), 360)
+        self.assertLessEqual(p.minimumSizeHint().width(), narrowest)
+        self.assertEqual(p.width(), width)
 
     def test_multi_selection_summarises_and_clear_hides(self):
         p = self.panel
@@ -504,7 +521,11 @@ class TestBookmarksReview(unittest.TestCase):
         self.assertAlmostEqual(spin.value(), 1090.000001, places=6)
 
     def test_name_field_says_it_is_optional(self):
-        self.assertIn("optional", self.make()._label_input.placeholderText())
+        # (In its tooltip: "Name (optional)" as the placeholder was cut to
+        # "Name (op..." in the tab; the placeholder is "Name".)
+        field = self.make()._label_input
+        self.assertIn("optional", field.toolTip())
+        self.assertEqual(field.placeholderText(), "Name")
 
     def test_imported_channel_with_default_mode_shows_fm(self):
         panel = self.make(

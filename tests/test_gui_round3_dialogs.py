@@ -63,8 +63,13 @@ class TestShortcutTable(unittest.TestCase):
         from sdr_module.gui.help_dialog import SHORTCUTS
 
         table = {keys: (cat, desc) for cat, keys, desc in SHORTCUTS}
+        # Ctrl+O plays a recording now; converting is Ctrl+Shift+O (fg:FG-U01).
         self.assertEqual(
-            table[("Ctrl+O",)], ("File", "Import a recording to convert its format")
+            table[("Ctrl+O",)], ("File", "Open a recording and play it back")
+        )
+        self.assertEqual(
+            table[("Ctrl+Shift+O",)],
+            ("File", "Convert a recording to another format"),
         )
         self.assertEqual(
             table[("F6",)], ("View", "Put the keyboard focus on the spectrum")
@@ -99,15 +104,35 @@ class TestShortcutsMatchTheMainWindow(_WindowTestCase):
     and every menu shortcut has a written description."""
 
     def test_table_matches_the_menus(self):
-        from sdr_module.gui.help_dialog import SHORTCUTS, HelpDialog, collect_bindings
+        from sdr_module.gui.help_dialog import (
+            SHORTCUTS,
+            HelpDialog,
+            collect_bindings,
+            tuning_entries,
+            tuning_steps,
+            tuning_words,
+        )
 
         bindings = collect_bindings(self.win)
         entries = HelpDialog(self.win).shortcut_entries()
         listed = {keys: (cat, desc) for cat, keys, desc in entries}
+        # The arrow keys tune by the tuning step, which depends on the mode:
+        # they are listed with the window's steps of the moment.
+        live = {
+            keys: (cat, desc)
+            for cat, keys, desc in tuning_entries(
+                tuning_steps(self.win), tuning_words(self.win)
+            )
+        }
         for category, keys, description in SHORTCUTS:
-            if keys == ("Ctrl+R",) and not self.mw.HAS_HAM_RADIO:
+            # (The radio tuner and Transmit Text come with the ham panels.)
+            ham = (("Ctrl+R",), ("Ctrl+Shift+T",))
+            if keys in ham and not self.mw.HAS_HAM_RADIO:
                 continue
             self.assertIn(keys, listed, f"{keys} is not bound by the window")
+            if category == "Tuning":
+                self.assertEqual(listed[keys], live[keys])
+                continue
             self.assertEqual(listed[keys], (category, description))
             # Arrow keys are handled by the window itself, not a menu.
             menu = bindings.get(keys[0], ("",))[0]
@@ -138,15 +163,19 @@ class TestBandPresetOrder(unittest.TestCase):
         require_pyqt6(self)
 
     def test_welcome_bands_follow_the_band_presets_menu(self):
-        from sdr_module.gui import main_window
+        # One table (gui/presets.py, mc:MC-U06 / ux:UX-U07): the welcome
+        # screen offers each favourite's band ("2m Ham (144–148 MHz)") and
+        # tunes the favourite the menu lists ("2m Calling"), in its order.
+        from sdr_module.gui import main_window, presets
         from sdr_module.gui.first_run_wizard import BAND_PRESETS
 
         menu = main_window.BAND_PRESETS
         self.assertEqual(list(BAND_PRESETS.values()), [p.frequency_hz for p in menu])
-        for name, preset in zip(BAND_PRESETS, menu, strict=True):
-            self.assertTrue(
-                name.startswith(main_window._plain(preset.label) + " ("), name
-            )
+        for name, favourite in zip(BAND_PRESETS, presets.FAVOURITES, strict=True):
+            self.assertEqual(name, presets.band_label(favourite))
+            self.assertTrue(name.startswith(favourite.band + " ("), name)
+        for preset, favourite in zip(menu, presets.FAVOURITES, strict=True):
+            self.assertEqual(main_window._plain(preset.label), favourite.preset)
 
     def test_scanner_bands_keep_the_same_order_and_names(self):
         from sdr_module.gui.first_run_wizard import BAND_PRESETS
@@ -303,13 +332,25 @@ class TestDemoMusic(unittest.TestCase):
         self.assertGreater(best, 30.0)  # clean: no clicks, no distortion
 
     def test_scanner_finds_the_music_station_on_its_channel(self):
-        from sdr_module.gui.scanner_dialog import _ScanWorker
+        from sdr_module.dsp.sweep import SpectrumAverager, measure_page, plan_sweep
+        from sdr_module.gui.scan_engine import MEASURE_S
 
         dev = _demo(100.1e6)
-        worker = _ScanWorker(dev, 100.1e6, 100.1e6, 200e3, -60.0)
+        (page,) = plan_sweep(100.1e6, 100.1e6, 200e3, dev.sample_rate)
+        dev.set_frequency(page.lo_hz)
         reports = set()
         for _ in range(24):  # all through the tune's loop
-            reports.add(worker._measure(100.1e6, 200e3)[0])
+            averager = SpectrumAverager()
+            averager.add(dev.read_samples(int(dev.sample_rate * MEASURE_S) + 2048))
+            readings, _noise, _thr = measure_page(
+                averager.power_db(),
+                page.lo_hz,
+                dev.sample_rate,
+                page.channels,
+                200e3,
+                -60.0,
+            )
+            reports.update(r.frequency_hz for r in readings)
             dev.read_samples(int(dev.sample_rate * 0.3))
         self.assertEqual(reports, {100.1e6})
 

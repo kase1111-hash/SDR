@@ -1,0 +1,1623 @@
+"""Final fixes to the window chrome, the devices and the saved settings
+(F-window): the problems the end-to-end journeys found (DEV-E2E-*, ROB-*,
+LISTEN-02, DEC-E2E-12, PLOTS-E2E-15) and the leftovers of the earlier
+rounds. Each test failed before its fix.
+
+Run offscreen: ``QT_QPA_PLATFORM=offscreen python -m pytest
+tests/test_final_window.py``
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import tempfile
+import unittest
+from unittest import mock
+
+import numpy as np
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from tests.test_gui_chrome import (  # noqa: E402
+    HAS_PYQT6,
+    _WindowTestCase,
+    require_pyqt6,
+)
+from tests.test_gui_device_settings import FakeRtlSdr, _DeviceCase  # noqa: E402
+from tests.test_gui_second_receiver import _FakeSink, _SecondCase  # noqa: E402
+
+if HAS_PYQT6:
+    from PyQt6.QtCore import QPoint, QSettings, Qt
+    from PyQt6.QtWidgets import QApplication, QGroupBox, QMessageBox, QPushButton
+
+
+def _block(n=4096, seed=1):
+    """A block of quiet noise, as a device delivers it."""
+    rng = np.random.default_rng(seed)
+    noise = 0.01 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    return noise.astype(np.complex64)
+
+
+class _Answers:
+    """Stands in for the window's ``_exec_dialog``: answers each question
+    box with the button named, and runs Device > Connect... choosing a row
+    (by its name) through the dialog's own Connect."""
+
+    def __init__(self, win, answer="Cancel", row=None, rows=()):
+        self.win = win
+        self.answer = answer
+        self.row = row
+        self.rows = list(rows)
+        self.boxes = []
+        self.dialogs = []
+
+    def __call__(self, box):
+        from sdr_module.gui.device_dialog import DeviceDialog
+
+        if isinstance(box, QMessageBox):
+            self.boxes.append(box.text())
+            for button in box.buttons():
+                if button.text().replace("&", "") == self.answer:
+                    button.click()
+                    break
+            return 0
+        if isinstance(box, DeviceDialog):
+            self.dialogs.append(box)
+            for label, name, kind, index in self.rows:
+                box._add_device(label, name, "0001", "Available")
+                box._devices.append(
+                    {"type": kind, "index": index, "info": {}, "name": name}
+                )
+            getattr(box, "_mark_busy_rows", lambda: None)()
+            for row in range(box._device_table.rowCount()):
+                if box._device_table.item(row, 1).text() == self.row:
+                    box._device_table.selectRow(row)
+                    break
+            else:
+                raise AssertionError(f"no row {self.row!r}")
+            box._on_accept()
+            return box.result()
+        return box.exec()
+
+
+class TestDeviceSwitchWhileRecording(_DeviceCase):
+    """DEV-E2E-01: Device > Connect... and Disconnect ask before a recording
+    taking its samples from the device is ended; the next device never adds
+    its samples to the same take (one take holds one device and rate)."""
+
+    def recording_on_rtl(self):
+        dev = self.rtl()
+        win = self.win
+        win._start_acquisition()
+        win._toggle_recording(True)
+        win._process_block(_block())
+        self.assertTrue(win._recording)
+        self.assertFalse(win._capture_pending)
+        return dev, win._buffer_sample_count()
+
+    def test_connect_asks_and_cancel_keeps_the_device_and_the_take(self):
+        dev, count = self.recording_on_rtl()
+        win = self.win
+        answers = _Answers(win, "Cancel", row="Demo Device")
+        win._exec_dialog = answers
+        self.assertFalse(win._show_device_dialog())
+        self.assertEqual(
+            answers.boxes,
+            ["Stop recording and switch from RTL-SDR #0 to the demo device?"],
+        )
+        # Nothing changed: the dialog stayed open (not accepted), the device
+        # and the take are as they were.
+        self.assertIs(win._device, dev)
+        self.assertTrue(dev.is_open)
+        self.assertTrue(win._is_running)
+        self.assertTrue(win._recording)
+        self.assertEqual(win._buffer_sample_count(), count)
+
+    def test_stop_and_switch_ends_the_take_before_the_next_device(self):
+        dev, count = self.recording_on_rtl()
+        win = self.win
+        win._exec_dialog = _Answers(win, "Stop and Switch", row="Demo Device")
+        self.assertTrue(win._show_device_dialog())
+        self.assertTrue(win._demo_mode)
+        self.assertFalse(dev.is_open)
+        self.assertFalse(win._recording)
+        # The demo device's samples don't join the RTL-SDR's take.
+        win._process_block(_block(seed=2))
+        self.assertEqual(win._buffer_sample_count(), count)
+        self.assertTrue(win._buffer_unsaved)  # (kept, to save)
+
+    def test_the_same_dongle_at_another_rate_asks_before_it_is_closed(self):
+        dev, count = self.recording_on_rtl()
+        win = self.win
+        answers = _Answers(
+            win,
+            "Cancel",
+            row="RTL-SDR #0",
+            rows=[("RTL-SDR", "RTL-SDR #0", "rtlsdr", 0)],
+        )
+        win._exec_dialog = answers
+        self.assertFalse(win._show_device_dialog())
+        self.assertEqual(answers.boxes, ["Stop recording and reconnect RTL-SDR #0?"])
+        # Asked before the dongle was released to be opened again.
+        self.assertIs(win._device, dev)
+        self.assertTrue(dev.is_open)
+        self.assertTrue(win._recording)
+
+    def test_disconnect_asks_and_ends_the_take(self):
+        dev, count = self.recording_on_rtl()
+        win = self.win
+        answers = _Answers(win, "Cancel")
+        win._exec_dialog = answers
+        win._disconnect_device()
+        self.assertEqual(answers.boxes, ["Stop recording and disconnect RTL-SDR #0?"])
+        self.assertIs(win._device, dev)
+        self.assertTrue(win._recording)
+        answers.answer = "Stop and Disconnect"
+        win._disconnect_device()
+        self.assertIsNone(win._device)
+        # Ended, not waiting for the next device (no REC WAITING).
+        self.assertFalse(win._recording)
+        self.assertNotIn("WAITING", win._recording_label.text())
+        self.assertEqual(win._buffer_sample_count(), count)
+        # The demo device now starts a take of its own (none is armed).
+        win._exec_dialog = _Answers(win, "Stop and Switch")
+        win._use_demo_device()
+        win._process_block(_block(seed=3))
+        self.assertEqual(win._buffer_sample_count(), count)
+
+    def test_releasing_the_device_ends_a_take_that_has_samples(self):
+        _dev, count = self.recording_on_rtl()
+        win = self.win
+        win._release_device()
+        self.assertFalse(win._recording)
+        self.assertEqual(win._buffer_sample_count(), count)
+
+    def test_an_armed_recording_waits_for_the_device_connected(self):
+        # Record pressed before receiving: Connect... starts it on the
+        # device chosen, without a question.
+        dev = self.rtl()
+        win = self.win
+        win._toggle_recording(True)
+        self.assertTrue(win._capture_pending)
+        answers = _Answers(win, "Cancel", row="Demo Device")
+        win._exec_dialog = answers
+        self.assertTrue(win._show_device_dialog(start_after=True))
+        self.assertEqual(answers.boxes, [])
+        self.assertTrue(win._recording)
+        self.assertFalse(dev.is_open)
+        win._process_block(_block())
+        self.assertFalse(win._capture_pending)
+        self.assertGreater(win._buffer_sample_count(), 0)
+
+    def test_a_rate_change_is_not_called_a_retune(self):
+        _dev, _count = self.recording_on_rtl()
+        win = self.win
+        win._buffer_meta = (win._lo_frequency(), 1.8e6)
+        win._process_block(_block(seed=4))
+        text = win._message_label.text()
+        self.assertIn("The sample rate changed while recording", text)
+        self.assertNotIn("Retuned", text)
+
+
+class TestConnectDialogBusyDevice(_DeviceCase):
+    """DEV-E2E-03: a device the second receiver has is listed as in use and
+    can't be connected; an expected refusal is no error."""
+
+    def dialog(self, busy_index=1):
+        from sdr_module.gui.device_dialog import DeviceDialog
+
+        dialog = DeviceDialog(self.win)
+        self.addCleanup(dialog.deleteLater)
+        dialog._device_table.setRowCount(0)
+        dialog._devices.clear()
+        for index in (0, 1):
+            dialog._add_device("RTL-SDR", f"RTL-SDR #{index}", "0001", "Available")
+            dialog._devices.append(
+                {"type": "rtlsdr", "index": index, "info": {}, "name": f"RTL #{index}"}
+            )
+        reason = "RTL-SDR #1 is in use by the second receiver. Stop it there."
+
+        def busy(entry):
+            if entry.get("index") == busy_index:
+                return ("In use by the second receiver", reason)
+            return None
+
+        dialog.set_busy_check(busy)
+        return dialog, reason
+
+    def test_the_row_says_in_use_and_connect_is_off(self):
+        dialog, reason = self.dialog()
+        table = dialog._device_table
+        self.assertEqual(table.item(1, 3).text(), "In use by the second receiver")
+        self.assertEqual(table.item(1, 1).toolTip(), reason)
+        self.assertEqual(table.item(0, 3).text(), "Available")
+        # Greyed out: it can't be selected (the tooltip says why).
+        self.assertFalse(table.item(1, 1).flags() & Qt.ItemFlag.ItemIsEnabled)
+        table.selectRow(1)
+        self.assertIsNone(dialog._selected_entry())
+        dialog._update_setting_controls(dialog._devices[1])
+        self.assertFalse(dialog._connect_btn.isEnabled())
+        self.assertEqual(dialog._connect_btn.toolTip(), reason)
+        dialog._update_setting_controls(dialog._devices[0])
+        self.assertTrue(dialog._connect_btn.isEnabled())
+
+    def test_the_first_free_row_is_selected(self):
+        dialog, _reason = self.dialog(busy_index=0)
+        self.assertEqual(dialog._selected_entry()["index"], 1)
+        self.assertTrue(dialog._connect_btn.isEnabled())
+
+    def test_a_refusal_is_information_not_an_error(self):
+        from sdr_module.gui import device_dialog
+
+        dialog, reason = self.dialog()
+        opened = []
+        dialog._open_device = lambda entry: opened.append(entry)
+        with (
+            mock.patch.object(device_dialog.QMessageBox, "information") as info,
+            mock.patch.object(device_dialog.QMessageBox, "critical") as critical,
+            self.assertNoLogs("sdr_module.gui.device_dialog", "ERROR"),
+        ):
+            # A row marked busy while selected (Enter or a double-click).
+            dialog._device_table.selectRow(0)
+            dialog._devices[0]["busy"] = reason
+            dialog._on_accept()
+            # Taken after the list was made: the window's open refuses.
+            raised = device_dialog.ConnectRefused("in use elsewhere")
+
+            def refuse(entry):
+                raise raised
+
+            dialog._open_device = refuse
+            dialog._devices[0]["busy"] = ""
+            dialog._on_accept()
+        self.assertEqual(opened, [])
+        self.assertEqual(info.call_count, 2)
+        self.assertEqual(info.call_args_list[0].args[2], reason)
+        self.assertEqual(info.call_args_list[1].args[2], "in use elsewhere")
+        critical.assert_not_called()
+        self.assertNotEqual(dialog.result(), 1)  # (still open)
+
+
+# --------------------------------------------------------------------------- #
+# Saved settings read back at startup (ROB-02, ROB-07, ROB-08, ROB-09, ROB-13)
+# --------------------------------------------------------------------------- #
+class _IniSettings(unittest.TestCase):
+    """Real GuiSettings on a QSettings INI file in a temporary folder,
+    holding what a damaged or hand-edited settings file can hold."""
+
+    def setUp(self):
+        require_pyqt6(self)
+        from sdr_module.gui import settings_store
+
+        folder = tempfile.mkdtemp(prefix="fw-settings-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.path = os.path.join(folder, "settings.ini")
+        path = self.path
+        patcher = mock.patch.object(
+            settings_store,
+            "QSettings",
+            lambda *_args: QSettings(path, QSettings.Format.IniFormat),
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write(self, **values):
+        """Store ``values`` as QSettings writes them (text, or a list)."""
+        raw = QSettings(self.path, QSettings.Format.IniFormat)
+        for key, value in values.items():
+            raw.setValue(key.replace("__", "/"), value)
+        raw.sync()
+
+    def settings(self):
+        from sdr_module.gui.settings_store import GuiSettings
+
+        return GuiSettings()
+
+
+class TestDamagedValuesGiveTheDefault(_IniSettings):
+    """ROB-07 / ROB-02: a value that isn't of the key's type gives the
+    key's default (not False, not True, not an overflow), logged once."""
+
+    def test_booleans(self):
+        self.write(
+            audio_enabled="garbage",
+            squelch__enabled="nope",
+            tuning__keep_centered=["a", "b"],
+            audio__balance_iq=["y"],
+            ok_true="true",
+            ok_off="off",
+        )
+        s = self.settings()
+        with self.assertLogs("sdr_module.gui.settings_store", "WARNING") as logs:
+            self.assertTrue(s.get_bool("audio_enabled", True))
+            self.assertTrue(s.get_bool("squelch/enabled", True))
+            self.assertFalse(s.get_bool("tuning/keep_centered", False))
+            self.assertFalse(s.get_bool("audio/balance_iq", False))
+            s.get_bool("audio_enabled", True)  # (said once per key)
+        self.assertEqual(len(logs.records), 4)
+        self.assertIn("audio_enabled", logs.output[0])
+        self.assertTrue(s.get_bool("ok_true", False))
+        self.assertFalse(s.get_bool("ok_off", True))
+        self.assertTrue(s.get_bool("missing", True))
+
+    def test_numbers(self):
+        self.write(
+            audio__cw_pitch="2147483648",
+            big="99999999999999999999",
+            small="-99999999999999999999",
+            gain_db="nan",
+            squelch_db="inf",
+            fine="-7",
+        )
+        s = self.settings()
+        with self.assertLogs("sdr_module.gui.settings_store", "WARNING"):
+            self.assertEqual(s.get_int("audio/cw_pitch", 700), 700)
+            self.assertEqual(s.get_int("big", 5), 5)
+            self.assertEqual(s.get_int("small", 5), 5)
+            self.assertEqual(s.get_float("gain_db", 20.0), 20.0)
+            self.assertEqual(s.get_float("squelch_db", -80.0), -80.0)
+        self.assertEqual(s.get_int("fine", 0), -7)
+        self.assertEqual(s.get_float("fine", 0.0), -7.0)
+
+    def test_a_list_is_no_text(self):
+        self.write(recording__folder=["a", "b"])
+        with self.assertLogs("sdr_module.gui.settings_store", "WARNING"):
+            self.assertEqual(self.settings().get_str("recording/folder", ""), "")
+
+    def test_a_damaged_first_run_flag_is_not_a_first_run(self):
+        self.assertTrue(self.settings().is_first_run())  # (nothing saved)
+        self.write(first_run_done="garbage")
+        with self.assertLogs("sdr_module.gui.settings_store", "WARNING"):
+            self.assertFalse(self.settings().is_first_run())
+
+
+class TestDamagedSettingsInTheWindow(_IniSettings):
+    """The window starts with each damaged value at its default (ROB-02:
+    the app couldn't start at all with a 64-bit CW pitch)."""
+
+    def window(self, **values):
+        from sdr_module.gui import bookmarks_panel, main_window
+        from sdr_module.gui.settings_store import GuiSettings
+
+        self.write(first_run_done="true", **values)
+        for module in (main_window, bookmarks_panel):
+            patcher = mock.patch.object(module, "GuiSettings", GuiSettings)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        win = main_window.SDRMainWindow(demo_mode=False)
+        for timer in (win._display_timer, win._status_timer, win._hotplug_timer):
+            timer.stop()
+        win._confirm_discard_recording = lambda *_a: True
+
+        def close():
+            win.close()
+            win.deleteLater()
+            QApplication.processEvents()
+
+        self.addCleanup(close)
+        return win
+
+    def test_a_cw_pitch_beyond_32_bits_starts_at_the_default(self):
+        for raw in ("2147483648", "99999999999999999999", "-99999999999999999999"):
+            with self.subTest(raw=raw):
+                win = self.window(audio__cw_pitch=raw)
+                self.assertEqual(win._control_panel.cw_pitch(), 700)
+        # In range but beyond the spin box: its nearest end, as before.
+        win = self.window(audio__cw_pitch="100000")
+        self.assertEqual(win._control_panel.cw_pitch(), 1000)
+
+    def test_set_cw_pitch_takes_anything(self):
+        panel = self.window()._control_panel
+        for value, pitch in ((2**40, 1000), (-(2**40), 400), (float("nan"), 700)):
+            panel.set_cw_pitch(value)
+            self.assertEqual(panel.cw_pitch(), pitch)
+
+    def test_damaged_switches_keep_their_defaults(self):
+        win = self.window(
+            audio_enabled="garbage",
+            squelch__enabled="garbage",
+            tuning__band_plan_mode="garbage",
+            decoder__rds_auto="garbage",
+            layout__spectrum_visible="garbage",
+            tuning__keep_centered=["a", "b"],
+            audio__balance_iq=["y"],
+        )
+        # (audio_enabled: no output here to tell; see test_booleans.)
+        self.assertTrue(win._control_panel.is_squelch_enabled())
+        self.assertTrue(win._band_plan_action.isChecked())
+        self.assertTrue(win._rds_auto_action.isChecked())
+        self.assertTrue(win._spectrum_action.isChecked())
+        self.assertFalse(win._keep_centered_action.isChecked())
+        self.assertFalse(win._control_panel.iq_options()[1])
+
+    def test_a_huge_squelch_threshold_is_the_default(self):
+        # ROB-08: 0 dBFS (the slider's end) kept the squelch shut for good.
+        for raw in ("1e12", "50", "nan"):
+            with self.subTest(raw=raw):
+                with self.assertLogs(level="WARNING") as logs:
+                    win = self.window(squelch_db=raw, squelch__auto="false")
+                self.assertEqual(win._control_panel.get_squelch_db(), -80.0)
+                self.assertTrue(any("squelch_db" in line for line in logs.output))
+
+    def test_a_nan_gain_is_the_default(self):
+        win = self.window(gain_db="nan")
+        self.assertAlmostEqual(win._control_panel.gain_db(), 20.0, delta=1.0)
+
+    def test_unknown_choices_are_logged(self):
+        with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+            win = self.window(audio__noise_reduction="loud", audio__agc_speed="x")
+        self.assertEqual(win._control_panel.noise_reduction(), "off")
+        self.assertEqual(win._control_panel.audio_agc_speed(), "medium")
+        self.assertTrue(any("audio/noise_reduction" in m for m in logs.output))
+
+    def test_unreadable_display_settings_are_logged(self):
+        with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+            self.window(spectrum_display="garbage{", waterfall_display="[[[")
+        text = "\n".join(logs.output)
+        self.assertIn("unreadable spectrum settings", text)
+        self.assertIn("unreadable waterfall settings", text)
+
+    def test_a_damaged_fft_size_window_or_zoom_is_logged(self):
+        # (Checker, ROB-07: the values the window applies itself fell back
+        # to their defaults with nothing said.)
+        saved = {"fft_size": "abc", "window": "banana", "zoom": "x", "avg": 4}
+        with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+            win = self.window(spectrum_display=json.dumps(saved))
+        text = "\n".join(logs.output)
+        for key in ("fft_size", "window", "zoom"):
+            self.assertIn(f"spectrum setting {key}=", text)
+        self.assertNotIn("avg", text)
+        shown = win._spectrum.display_settings()
+        self.assertEqual(shown["fft_size"], 2048)
+        self.assertEqual(shown["window"], "hann")
+        self.assertEqual(shown["zoom"], 1)
+        # A huge size gives the default too, not the nearest the app offers
+        # (32768 points, the costliest).
+        for size in (1e300, 5000):
+            with self.subTest(size=size):
+                with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+                    win = self.window(spectrum_display=json.dumps({"fft_size": size}))
+                self.assertIn(f"fft_size={size!r}", "\n".join(logs.output))
+                self.assertEqual(win._spectrum.display_settings()["fft_size"], 2048)
+
+    def test_a_damaged_window_layout_is_logged(self):
+        # (Checker: the default size and split were used with nothing said.)
+        from PyQt6.QtCore import QByteArray
+
+        for value in ("garbage", QByteArray(b"garbage")):
+            with self.subTest(value=value):
+                with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+                    win = self.window(geom__main=value, geom__right_splitter=value)
+                text = "\n".join(logs.output)
+                self.assertIn("saved window size", text)
+                self.assertIn("right_splitter", text)
+                self.assertFalse(win._splitters_restored)
+
+    def test_the_apps_own_spectrum_settings_say_nothing(self):
+        import logging
+
+        first = self.window()
+        first._apply_plot_resolution(8192, "blackman-harris", save=False)
+        own = json.dumps(first._spectrum.display_settings())
+        seen = []
+        handler = logging.Handler(logging.WARNING)
+        handler.emit = lambda record: seen.append(record.getMessage())
+        log = logging.getLogger("sdr_module.gui.main_window")
+        log.addHandler(handler)
+        self.addCleanup(log.removeHandler, handler)
+        win = self.window(spectrum_display=own)
+        self.assertEqual([m for m in seen if "spectrum setting" in m], [])
+        self.assertEqual(win._spectrum.display_settings()["fft_size"], 8192)
+
+
+class TestSavedDeviceGain(_DeviceCase):
+    """ROB-08: a damaged saved gain ({"db": NaN, "agc": "x"}) keeps the
+    defaults instead of 0 dB with Tuner AGC on."""
+
+    def test_nan_gain_and_a_non_bool_agc(self):
+        panel = self.panel
+        self.win._release_device()
+        self.store.values["device/demo/gain"] = '{"db": NaN, "agc": "x"}'
+        before = panel.gain_db()
+        with self.assertLogs("sdr_module.gui.device_controls", "WARNING"):
+            self.win._start_demo_mode()
+        self.assertEqual(panel.gain_db(), before)
+        self.assertFalse(panel.is_agc_enabled())
+
+
+class TestRecordingsFolder(unittest.TestCase):
+    """ROB-09: only a full path is a recordings folder; anything else is
+    the default (recordings never land where the app was started)."""
+
+    def folder(self, value):
+        from sdr_module.gui import file_dialogs
+
+        class Store:
+            def get_str(self, key, default):
+                return value
+
+        return file_dialogs.recordings_folder(Store())
+
+    def test_relative_and_damaged_values(self):
+        from sdr_module.gui import file_dialogs
+
+        default = file_dialogs.default_recordings_folder()
+        # (A fresh "logged once" memory: whatever ran before in this process.)
+        patcher = mock.patch.object(file_dialogs, "_BAD_FOLDERS_LOGGED", set())
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for bad in ("garbage", "['a', 'b']", "rec/sub"):
+            with self.subTest(bad=bad):
+                with self.assertLogs("sdr_module.gui.file_dialogs", "WARNING"):
+                    self.assertEqual(self.folder(bad), default)
+                with self.assertNoLogs("sdr_module.gui.file_dialogs", "WARNING"):
+                    self.assertEqual(self.folder(bad), default)  # (said once)
+        self.assertEqual(self.folder("/data/rec"), "/data/rec")
+        self.assertEqual(self.folder("~/rec"), os.path.expanduser("~/rec"))
+        self.assertEqual(self.folder(""), default)
+
+
+class TestRecentFrequencies(unittest.TestCase):
+    """ROB-13: saved recent frequencies outside 1 kHz-300 GHz are dropped,
+    an unknown mode or FM deviation is left out of the entry; logged."""
+
+    def test_damaged_entries(self):
+        from sdr_module.gui.tuning import TunedEntry, TuningHistory
+
+        raw = json.dumps(
+            [
+                {"freq_hz": 1e30, "mode": "AM"},
+                {"freq_hz": 145290000, "mode": "XYZ"},
+                {"freq_hz": 145290001, "mode": "FM", "deviation": "banana"},
+                {"freq_hz": 7000e6, "mode": "FM", "deviation": "5 kHz"},
+                {"freq_hz": 7.074e6, "mode": "USB"},
+            ]
+        )
+        with self.assertLogs("sdr_module.gui.tuning", "WARNING"):
+            entries = TuningHistory.entries_from_json(raw)
+        self.assertEqual(
+            entries,
+            [
+                TunedEntry(145290000.0, "", ""),
+                TunedEntry(145290001.0, "FM", ""),
+                TunedEntry(7000e6, "FM", "5 kHz"),
+                TunedEntry(7.074e6, "USB", ""),
+            ],
+        )
+
+    def test_the_names_agree_with_the_control_panel(self):
+        require_pyqt6(self)
+        from sdr_module.gui.control_panel import DEMOD_MODES, FM_DEVIATIONS
+        from sdr_module.gui.tuning import ENTRY_DEVIATIONS, ENTRY_MODES
+
+        self.assertEqual(ENTRY_MODES, tuple(name for name, _tip in DEMOD_MODES))
+        self.assertEqual(ENTRY_DEVIATIONS, tuple(v for v, _t, _tip in FM_DEVIATIONS))
+
+
+# --------------------------------------------------------------------------- #
+# The Audio button says what is really going on (DEV-E2E-02, ROB-12)
+# --------------------------------------------------------------------------- #
+class TestAudioButtonStates(_SecondCase):
+    demo = True
+
+    def setUp(self):
+        super().setUp()
+        win = self.win
+        win._audio = _FakeSink()
+        win._audio.open = True
+        win._audio_enabled = True
+        win._audio_problem = None  # (as with an output device)
+        win._sync_audio_ui()
+
+    def shown(self):
+        button = self.win._audio_button
+        return button.text(), button.toolTip(), button.accessibleName()
+
+    def test_listen_this_receiver_mutes_the_main_window_and_says_so(self):
+        win, rx = self.win, self.rx
+        rx.start()
+        rx.set_listen("second")
+        self.assertEqual(win._audio_state(), "second")
+        text, tip, name = self.shown()
+        self.assertEqual(text, " Muted (2nd RX)")
+        self.assertIn("Listen in the Second Receiver window", tip)
+        self.assertEqual(name, "Audio muted by the second receiver")
+        self.assertFalse(win._mute_action.isChecked())  # (not muted by you)
+        self.assertEqual(
+            win._audio_status()[0],
+            "Muted by the Second Receiver (Listen: This receiver)",
+        )
+        rx.set_listen("both")
+        self.assertEqual(win._audio_state(), "on")
+        self.assertEqual(self.shown()[0], " Audio")
+        rx.set_listen("second")
+        rx.close()  # (closing the window gives the main window its audio)
+        self.settle()
+        win._update_status()
+        self.assertEqual(self.shown()[0], " Audio")
+
+    def test_paused_while_the_signal_isnt_real_time(self):
+        # ROB-12: "Audio" while nothing played (the receiver couldn't keep
+        # up), and the hint gone from the status bar after 10 s. (Checker:
+        # paused while the signal received isn't real time, as _route_audio
+        # judges it.)
+        win = self.win
+        if not win._is_running:
+            win._start_acquisition()
+        live = [False]
+        with mock.patch.object(type(win), "_realtime", lambda _s: live[0]):
+            win._update_status()  # (the status timer)
+            self.assertEqual(win._audio_state(), "paused")
+            text, tip, name = self.shown()
+            self.assertEqual(text, " Paused")
+            self.assertIn("can't keep up", tip)
+            self.assertEqual(win._audio_button.property("tone"), "warning")
+            live[0] = True
+            win._update_status()
+            self.assertEqual(self.shown()[0], " Audio")
+            self.assertFalse(win._audio_button.property("tone"))
+
+    def test_the_new_texts_fit_the_button(self):
+        button = self.win._audio_button
+        for text in (" Muted (2nd RX)", " Paused"):
+            self.assertGreaterEqual(
+                button.minimumWidth(), button.fontMetrics().horizontalAdvance(text)
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Second receiver: Auto gain, rates and plot defaults (DEV-E2E-09, -10)
+# --------------------------------------------------------------------------- #
+class TestSecondReceiverDevices(_SecondCase):
+    def test_auto_gain_reads_auto(self):
+        rx = self.rx
+        rx.start()  # (the demo device)
+        rx._gain_auto.setChecked(True)
+        rx._apply_gain()
+        rx._show_gain()
+        self.assertTrue(rx._gain_label.text().startswith("Auto"))
+        rx._gain_auto.setChecked(False)
+        self.assertTrue(rx._gain_label.text().endswith("dB"))
+        self.assertFalse(rx._gain_label.text().startswith("Auto"))
+
+    def test_the_main_windows_rates(self):
+        from sdr_module.gui import device_settings
+        from sdr_module.gui.second_receiver import SAMPLE_RATES
+
+        for kind in ("demo", "rtlsdr", "hackrf"):
+            self.assertEqual(SAMPLE_RATES[kind], device_settings.sample_rates_for(kind))
+        self.assertIn(2.56e6, SAMPLE_RATES["hackrf"])
+        self.assertIn(3.2e6, SAMPLE_RATES["hackrf"])
+
+    def test_the_waterfall_starts_as_the_main_windows(self):
+        shown = self.rx._waterfall.display_settings()
+        self.assertEqual(shown.get("history_s"), 60.0)
+        self.assertTrue(shown.get("auto_levels"))
+
+
+# --------------------------------------------------------------------------- #
+# The right column's split (DEC-E2E-12, DEV-E2E-06, leftover 10)
+# --------------------------------------------------------------------------- #
+class TestRightColumnSplit(_WindowTestCase):
+    def test_selecting_a_message_doesnt_move_the_split(self):
+        # DEC-E2E-12: the card under the table raised the tool tabs'
+        # minimum height and the splitter cut the Presets group.
+        win = self.win
+        win.resize(1366, 768)
+        self.settle(10)
+        win._show_panel("decoder")
+        panel = win._decoder_panel
+        for n in range(3):
+            panel.add_message(
+                "APRS",
+                f"N0CALL-{n}",
+                "Hello from a long APRS message " * 3,
+                details=["Path: WIDE1-1,WIDE2-1", "APRS: position", "Sent: now"],
+            )
+        self.settle(10)
+        before = win._right_splitter.sizes()
+        tabs_min = win._right_tabs.minimumSizeHint().height()
+        panel._table.selectRow(0)
+        self.settle(10)
+        self.assertTrue(panel._detail.isVisible())
+        self.assertLessEqual(win._right_tabs.minimumSizeHint().height(), tabs_min)
+        self.assertEqual(win._right_splitter.sizes(), before)
+        panel._table.clearSelection()
+        self.settle(10)
+        self.assertEqual(win._right_splitter.sizes(), before)
+
+    @staticmethod
+    def cut_groups(win):
+        """(split, the control panel sections the split cuts in half)."""
+        pane = win._right_splitter.widget(0)
+        split = win._right_splitter.sizes()[0]
+        cut = []
+        for group in win._control_panel.findChildren(QGroupBox):
+            if not group.isVisibleTo(win._control_panel):
+                continue
+            top = group.mapTo(pane, QPoint(0, 0)).y()
+            if top < split < top + group.height():
+                cut.append(group.title())
+        return split, cut
+
+    def test_shrinking_the_window_keeps_the_split_between_groups(self):
+        # Leftover 10: QSplitter scales the pane in proportion, into a group.
+        win = self.win
+        win._layout_initialized = False
+        win._splitters_restored = False
+        win.resize(1920, 1080)
+        self.settle(10)
+        win._apply_default_splitter_sizes()
+        self.settle(5)
+        for size in ((1366, 768), (1024, 640), (1280, 720), (1100, 700)):
+            with self.subTest(size=size):
+                win.resize(*size)
+                self.settle(10)
+                split, cut = self.cut_groups(win)
+                self.assertEqual(cut, [], f"split at {split} px cuts {cut}")
+
+    def test_a_split_saved_at_another_height_lands_between_groups(self):
+        # DEV-E2E-06: the same settings opened in a smaller window.
+        from sdr_module.gui import main_window
+
+        for saved, opened in (((1366, 768), (1024, 640)), ((1920, 1080), (1366, 768))):
+            with self.subTest(saved=saved, opened=opened):
+                first = main_window.SDRMainWindow(demo_mode=False)
+                first._confirm_discard_recording = lambda *_a: True
+                first.resize(*saved)
+                first.show()
+                self.settle(10)
+                first.close()  # (saves the window's layout)
+                first.deleteLater()
+                self.settle(5)
+                win = main_window.SDRMainWindow(demo_mode=False)
+                win._confirm_discard_recording = lambda *_a: True
+                self.addCleanup(win.deleteLater)
+                self.addCleanup(win.close)
+                self.assertTrue(win._splitters_restored)
+                win.resize(*opened)
+                win.show()
+                self.settle(10)
+                split, cut = self.cut_groups(win)
+                self.assertEqual(cut, [], f"split at {split} px cuts {cut}")
+                win.close()
+                self.settle(5)
+
+
+# --------------------------------------------------------------------------- #
+# How you listen, in view and one click away (LISTEN-02, L5, DEV-E2E-13)
+# --------------------------------------------------------------------------- #
+def _menu(win, *path):
+    """The menu (or action) at ``path`` of menu titles, '&' ignored."""
+    actions = win.menuBar().actions()
+    found = None
+    for title in path:
+        found = next(
+            a for a in actions if a.text().replace("&", "").split("\t")[0] == title
+        )
+        actions = found.menu().actions() if found.menu() is not None else []
+    return found
+
+
+class TestListeningControls(_WindowTestCase):
+    def test_how_you_listen_comes_first_and_filter_is_under_mode(self):
+        panel = self.win._control_panel
+        titles = [g.title() for g in panel.findChildren(QGroupBox)]
+        self.assertLess(titles.index("Demodulation"), titles.index("Presets"))
+        self.assertLess(titles.index("Audio"), titles.index("Presets"))
+        # DEV-E2E-13: Filter is the row after Mode, in Demodulation.
+        form = panel._demod_form
+        row_of = {
+            form.itemAt(r, form.ItemRole.FieldRole).widget(): r
+            for r in range(form.rowCount())
+            if form.itemAt(r, form.ItemRole.FieldRole) is not None
+        }
+        self.assertEqual(row_of[panel._bw_combo], row_of[panel._demod_combo] + 1)
+        self.assertNotIn(
+            panel._bw_combo,
+            [
+                panel._receiver_form.itemAt(
+                    r, panel._receiver_form.ItemRole.FieldRole
+                ).widget()
+                for r in range(panel._receiver_form.rowCount())
+                if panel._receiver_form.itemAt(
+                    r, panel._receiver_form.ItemRole.FieldRole
+                )
+                is not None
+            ],
+        )
+
+    def test_mode_squelch_and_filter_are_in_view_on_a_laptop(self):
+        win = self.win
+        win._layout_initialized = False
+        win._splitters_restored = False
+        win.resize(1366, 768)
+        self.settle(10)
+        win._apply_default_splitter_sizes()
+        self.settle(5)
+        panel = win._control_panel
+        pane = win._right_splitter.widget(0)
+        visible = win._right_splitter.sizes()[0]
+        for widget in (panel._demod_combo, panel._bw_combo, panel._squelch_check):
+            bottom = widget.mapTo(pane, QPoint(0, widget.height())).y()
+            self.assertLessEqual(bottom, visible, widget.accessibleName())
+
+    def test_radio_mode_menu(self):
+        win, panel = self.win, self.win._control_panel
+        menu = _menu(win, "Radio", "Mode").menu()
+        texts = [a.text() for a in menu.actions()]
+        self.assertEqual(texts, ["None (I/Q)", "AM", "FM", "USB", "LSB", "CW"])
+        _menu(win, "Radio", "Mode", "USB").trigger()
+        self.assertEqual(panel.get_demod_mode(), "USB")
+        panel._demod_combo.setCurrentText("CW")
+        self.assertTrue(_menu(win, "Radio", "Mode", "CW").isChecked())
+        self.assertFalse(_menu(win, "Radio", "Mode", "USB").isChecked())
+
+    def test_radio_squelch_menu(self):
+        win, panel = self.win, self.win._control_panel
+        on = _menu(win, "Radio", "Squelch", "Squelch On")
+        auto = _menu(win, "Radio", "Squelch", "Auto Threshold")
+        self.assertEqual(on.isChecked(), panel.is_squelch_enabled())
+        on.trigger()
+        self.assertEqual(panel.is_squelch_enabled(), on.isChecked())
+        panel.set_squelch_auto(not panel.is_squelch_auto())
+        self.assertEqual(auto.isChecked(), panel.is_squelch_auto())
+
+    def test_radio_audio_choices(self):
+        win, panel = self.win, self.win._control_panel
+        _menu(win, "Radio", "Audio", "Noise Reduction", "Strong").trigger()
+        self.assertEqual(panel.noise_reduction(), "strong")
+        _menu(win, "Radio", "Audio", "Audio AGC", "Slow").trigger()
+        self.assertEqual(panel.audio_agc_speed(), "slow")
+        panel.set_noise_reduction("light")
+        self.assertTrue(
+            _menu(win, "Radio", "Audio", "Noise Reduction", "Light").isChecked()
+        )
+
+    def test_tone_squelch_and_cw_pitch_go_to_their_controls(self):
+        win, panel = self.win, self.win._control_panel
+        win.activateWindow()
+        _menu(win, "Radio", "Audio", "Tone Squelch...").trigger()
+        self.settle(5)
+        self.assertIs(QApplication.focusWidget(), panel._tone_combo)
+        panel._demod_combo.setCurrentText("FM")
+        _menu(win, "Radio", "Audio", "CW Pitch...").trigger()
+        self.assertIn("choose CW in Radio > Mode", win._message_label.text())
+        panel._demod_combo.setCurrentText("CW")
+        self.settle(5)
+        _menu(win, "Radio", "Audio", "CW Pitch...").trigger()
+        self.settle(5)
+        self.assertIs(QApplication.focusWidget(), panel._cw_pitch_spin)
+
+
+# --------------------------------------------------------------------------- #
+# A theme switch doesn't stall the receiver (DEV-E2E-05, ROB-10)
+# --------------------------------------------------------------------------- #
+class TestThemeSwitch(_WindowTestCase):
+    demo = True
+
+    def test_the_old_stylesheet_is_cleared_before_the_new_one(self):
+        # Replacing one stylesheet with another made Qt restyle all ~1150
+        # widgets the slow way (about 0.9 s); from none it is ~5x faster.
+        from sdr_module.gui import themes
+
+        class App:
+            def __init__(self):
+                self.sheet = "QWidget { color: red; }"
+                self.calls = []
+
+            def styleSheet(self):  # noqa: N802 (Qt API)
+                return self.sheet
+
+            def setStyleSheet(self, sheet):  # noqa: N802 (Qt API)
+                self.calls.append(sheet)
+                self.sheet = sheet
+
+            def setPalette(self, palette):  # noqa: N802 (Qt API)
+                pass
+
+            def allWidgets(self):  # noqa: N802 (Qt API)
+                return []
+
+        app = App()
+        old = themes.current_theme()
+        self.addCleanup(themes.apply_theme, None, old)
+        themes.apply_theme(app, "light")
+        self.assertEqual(app.calls, ["", themes.get_stylesheet("light")])
+
+    def test_the_switch_isnt_taken_for_an_overload(self):
+        # ROB-10: "The demo device can't keep up ..." after every switch.
+        win = self.win
+        now = 1000.0
+        win._rx_history.extend([(now, 0), (now + 1.5, 1000)])  # (a stall)
+        self.assertFalse(win._realtime())
+        win._on_theme_changed("light")
+        self.assertTrue(win._realtime())
+
+
+# --------------------------------------------------------------------------- #
+# Tune Back right after typing a frequency (DEV-E2E-08)
+# --------------------------------------------------------------------------- #
+class TestTuneBackAtOnce(_WindowTestCase):
+    demo = True
+
+    def test_alt_left_goes_back_within_the_dwell(self):
+        win = self.win
+        win._commit_pending_history()
+        self.assertTrue(win.set_frequency(145.29e6))
+        self.assertTrue(win._history_timer.isActive())  # (not committed yet)
+        back = win._back_action
+        self.assertTrue(back.isEnabled())
+        self.assertIn("100.100 MHz", back.toolTip())
+        self.assertFalse(win._forward_action.isEnabled())
+        back.trigger()
+        self.assertAlmostEqual(win._current_frequency(), 100.1e6)
+        # And forward again to the frequency typed.
+        self.assertTrue(win._forward_action.isEnabled())
+        win._forward_action.trigger()
+        self.assertAlmostEqual(win._current_frequency(), 145.29e6)
+
+
+# --------------------------------------------------------------------------- #
+# Find Connected Devices and the no-device question (DEV-E2E-11, -17)
+# --------------------------------------------------------------------------- #
+class TestFindDevicesWording(_DeviceCase):
+    def scan(self, devices=()):
+        from sdr_module.gui import main_window
+
+        boxes = []
+
+        def run(box):
+            boxes.append(box)
+            return 0
+
+        self.win._exec_dialog = run
+        with (
+            mock.patch.object(main_window, "_driver_importable", return_value=False),
+            mock.patch.object(
+                type(self.win), "_scan_hardware", return_value=list(devices)
+            ),
+        ):
+            self.win._hardware_classes = []
+            self.win._refresh_devices()
+        return boxes[0]
+
+    def buttons(self, box):
+        # (Shown first: QDialog picks its default button when it shows.)
+        if not box.isVisible():
+            box.show()
+            self.addCleanup(box.close)
+            self.settle()
+        return [b for b in box.findChildren(QPushButton) if b.isVisibleTo(box)]
+
+    def test_while_the_demo_runs_it_isnt_offered_again(self):
+        self.assertTrue(self.win._demo_mode)
+        box = self.scan()
+        texts = [b.text().replace("&", "") for b in self.buttons(box)]
+        self.assertNotIn("Use Demo Device", texts)
+        self.assertIn("the demo device is running", box._summary.text())
+        self.assertIn("Device > Find Connected Devices... again", box._summary.text())
+        self.assertNotIn("scan again", box._summary.text())
+        default = [
+            b.text().replace("&", "") for b in self.buttons(box) if b.isDefault()
+        ]
+        self.assertEqual(default, ["Close"])
+
+    def test_enter_presses_the_primary_button(self):
+        self.win._release_device()
+        box = self.scan()
+        default = [b for b in self.buttons(box) if b.isDefault()]
+        self.assertEqual(
+            [b.text().replace("&", "") for b in default], ["Use Demo Device"]
+        )
+        self.assertEqual(default[0].property("role"), "primary")
+        box = self.scan([("k1", "RTL-SDR #0")])
+        default = [b for b in self.buttons(box) if b.isDefault()]
+        self.assertEqual([b.text().replace("&", "") for b in default], ["Connect..."])
+
+    def test_no_device_names_the_devices_found(self):
+        win = self.win
+        win._release_device()
+        seen = []
+
+        def run(box):
+            seen.append((box.text(), box.informativeText()))
+            return 0
+
+        win._exec_dialog = run
+        for found, text, how in (
+            (["RTL-SDR #0"], "Found RTL-SDR #0, not opened yet.", "opens it"),
+            (
+                ["RTL-SDR #0", "HackRF One"],
+                "Found RTL-SDR #0 and HackRF One, not opened yet.",
+                "opens one of them",
+            ),
+        ):
+            with mock.patch.object(
+                type(win),
+                "_scan_hardware",
+                return_value=[(f"k{i}", n) for i, n in enumerate(found)],
+            ):
+                win._prompt_no_device()
+            self.assertEqual(seen[-1][0], text)
+            self.assertIn(how, seen[-1][1])
+
+
+# --------------------------------------------------------------------------- #
+# The status bar keeps room for its messages at 1024 px (DEV-E2E-07)
+# --------------------------------------------------------------------------- #
+class TestStatusBarRoom(_WindowTestCase):
+    demo = True
+
+    def test_messages_keep_room_with_every_chip_at_1024_px(self):
+        from tests.test_gui_coherent_window import _ThemedSizes
+
+        _ThemedSizes.each_theme(self, self.check_room)
+
+    def check_room(self, theme):
+        from PyQt6.QtWidgets import QLabel
+
+        from sdr_module.gui.themes import set_role
+
+        win = self.win
+        win.resize(1024, 640)
+        win._recording_label.setText("REC 00:12")
+        win._recording_label.setVisible(True)
+        win._recording_info_label.setText("26.7 MB · 17.7 GB free")
+        win._recording_info_label.setVisible(True)
+        win._audio_rec_label.setText("AUDIO 00:05")
+        win._audio_rec_label.setVisible(True)
+        win._decoder_chip.setText("ADS-B · 6 msgs")
+        win._decoder_chip.setVisible(True)
+        afc = QLabel("AFC +2.2 kHz")  # (as Track Signal shows it)
+        set_role(afc, "badge", "info")
+        win.statusBar().addPermanentWidget(afc)
+        self.addCleanup(afc.deleteLater)
+        self.settle(10)
+        self.assertGreaterEqual(win._message_label.width(), 220, theme)
+        self.assertLessEqual(win.minimumSizeHint().width(), 1024, theme)
+        self.assertEqual(win.width(), 1024, theme)
+        win.statusBar().removeWidget(afc)
+        # The free space gave way first; it is in the tooltip.
+        self.assertIn("17.7 GB free", win._recording_info_label.toolTip())
+        self.assertEqual(win._recording_info_label.text(), "26.7 MB · 17.7 GB free")
+
+    def test_a_shortened_device_name_is_whole_in_its_tooltip(self):
+        # (Checker: the device's name gives way first, cut short to "Demo
+        # Device (simulated si…"; its tooltip only said "Current device".)
+        win = self.win
+        win._refresh_state_ui()
+        name = win._device_display_name()
+        tip = win._device_label.toolTip()
+        self.assertTrue(tip.startswith(name), tip)
+        self.assertIn("Click to change it", tip)
+        win._release_device()
+        win._refresh_state_ui()
+        self.assertIn("Click to connect", win._device_label.toolTip())
+
+
+# --------------------------------------------------------------------------- #
+# An unplugged output says so once (DEV-E2E-14)
+# --------------------------------------------------------------------------- #
+class TestMissingOutput(_WindowTestCase):
+    demo = True
+
+    def test_falling_back_to_the_default_output_is_said_once(self):
+        from sdr_module.gui import audio_sink
+        from sdr_module.gui.preferences_dialog import KEY_AUDIO_OUTPUT_NAME
+
+        win = self.win
+        sink = _FakeSink()
+        sink.output_missing = True
+        win._audio = sink
+        self.store.values[KEY_AUDIO_OUTPUT_NAME] = "Fake USB Headset"
+        with (
+            mock.patch.object(type(win), "_audio_output_problem", lambda _s: None),
+            mock.patch.object(
+                audio_sink, "default_output_name", lambda: "Fake Speakers"
+            ),
+        ):
+            win._audio_enabled = False
+            win._set_audio_enabled(True)
+            self.settle()
+            text = win._message_label.text()
+            self.assertIn(
+                "Fake USB Headset isn't connected: playing through Fake Speakers",
+                text,
+            )
+            self.assertIn("Tools > Preferences", text)
+            self.assertEqual(win._audio_status()[0][:3], "On ")
+            self.assertIn("isn't connected", win._audio_status()[0])
+            # Once: turning audio off and on again doesn't repeat it.
+            win._clear_status_message()
+            win._set_audio_enabled(False)
+            win._set_audio_enabled(True)
+            self.settle()
+            self.assertNotIn("isn't connected", win._message_label.text())
+            # Back again: said again the next time it is gone.
+            sink.output_missing = False
+            win._refresh_audio_output(announce=False)
+            self.assertEqual(win._audio_status()[0], "On")
+            sink.output_missing = True
+            win._refresh_audio_output(announce=False)
+            self.settle()
+            self.assertIn("isn't connected", win._message_label.text())
+
+
+class TestPausedAudioHint(_WindowTestCase):
+    """ROB-12: while audio pauses again and again (the receiver can't keep
+    up), the Audio button says Paused each time, and the status bar says
+    why at most every 30 s (it came back ~10 times a minute)."""
+
+    demo = True
+
+    def test_the_hint_comes_back_at_most_every_30_s(self):
+        from sdr_module.gui import main_window as mw
+        from tests.test_gui_round3_main import _FakeClock
+
+        win = self.win
+        clock = _FakeClock()
+        live = [False]
+        win._audio_enabled = True
+        win._control_panel.set_squelch_db(-120)
+        channel = np.full(4096, 0.1, dtype=np.complex64)
+
+        def frame(realtime, seconds=1.0):
+            live[0] = realtime
+            clock.advance(seconds)
+            win._route_audio(channel, -20.0)
+
+        with (
+            mock.patch.object(mw, "time", clock),
+            mock.patch.object(type(win), "_realtime", lambda _s: live[0]),
+        ):
+            frame(False)
+            hint = win._realtime_hint_text
+            self.assertTrue(hint)
+            self.assertEqual(win._message_label.text(), hint)
+            frame(True)
+            self.assertEqual(win._message_label.text(), "Audio resumed")
+            # Paused again 2 s later: the button says so, the status bar
+            # doesn't repeat itself (nor say "Audio resumed" meanwhile).
+            frame(False)
+            self.assertEqual(win._audio_state(), "paused")
+            self.assertEqual(win._message_label.text(), "")
+            frame(True)
+            self.assertEqual(win._message_label.text(), "")
+            frame(False, 30.0)
+            self.assertEqual(win._message_label.text(), hint)
+            # Another sample rate is found out (and said) afresh.
+            frame(True)
+            win._clear_status_message()
+            self.assertTrue(win.set_sample_rate(2.048e6))
+            frame(False)
+            self.assertEqual(win._message_label.text(), win._realtime_hint_text)
+
+
+# --------------------------------------------------------------------------- #
+# F1 and the plot menus use the same names (DEV-E2E-16, PLOTS-E2E-15)
+# --------------------------------------------------------------------------- #
+class TestHelpUsesTheMenusNames(_WindowTestCase):
+    def found(self, text):
+        from sdr_module.gui.help_dialog import HelpDialog
+
+        dialog = HelpDialog(self.win)
+        self.addCleanup(dialog.deleteLater)
+        dialog._filter.setText(text)
+        return [search for row, search, _sec in dialog._rows if not row.isHidden()]
+
+    def test_wheel_finds_the_scroll_gestures(self):
+        # The app's own tips say "Ctrl+wheel"; F1 says "Ctrl+Scroll".
+        for text in ("wheel", "Wheel", "mouse wheel"):
+            found = self.found(text)
+            self.assertTrue(any("ctrl+scroll" in s for s in found), (text, found))
+            self.assertTrue(any("tune by the step" in s for s in found), found)
+        zoom = self.found("ctrl+wheel")
+        self.assertEqual(len(zoom), 1, zoom)
+        self.assertIn("zoom the spectrum and waterfall around the pointer", zoom[0])
+        self.assertEqual(self.found("Ctrl+Scroll"), zoom)
+        # "scroll" still finds every scroll gesture.
+        self.assertGreaterEqual(len(self.found("scroll")), len(self.found("wheel")))
+
+    def test_the_plot_rows_use_the_menus_words(self):
+        # The spectrum's menu says Range: so does F1.
+        ranges = [s for s in self.found("range") if "spectrum's range" in s]
+        self.assertGreaterEqual(len(ranges), 3, ranges)
+        self.assertFalse([s for s in self.found("db scale") if "db scale" in s])
+        # Shift+scroll over the dB labels (10 dB a notch) is listed.
+        shift = self.found("shift+scroll")
+        self.assertTrue(any("10 db" in s and "range" in s for s in shift), shift)
+        # "zoom" lists Full Span (Ctrl+0) with the other zoom keys.
+        zoom = self.found("zoom")
+        self.assertTrue(any("ctrl+0" in s for s in zoom), zoom)
+        self.assertTrue(any("full span" in s for s in zoom), zoom)
+        # The waterfall's level menu is named after the levels F1 talks about.
+        levels = self.found("color levels")
+        self.assertTrue(any("waterfall" in s for s in levels), levels)
+
+    def test_waterfall_level_presets_show_which_is_on(self):
+        from PyQt6.QtWidgets import QMenu
+
+        waterfall = self.win._waterfall
+
+        def level_actions():
+            menu = QMenu()
+            self.addCleanup(menu.deleteLater)
+            waterfall._display_menu(menu)
+            sub = next(
+                a.menu()
+                for a in menu.actions()
+                if a.menu() is not None and a.text().replace("&", "") == "Color Levels"
+            )
+            # The palette keeps its own menu.
+            self.assertTrue(
+                any(a.text().replace("&", "") == "Colors" for a in menu.actions())
+            )
+            return [a for a in sub.actions() if not a.isSeparator()]
+
+        def checked():
+            return [a.text().replace("&", "") for a in level_actions() if a.isChecked()]
+
+        waterfall.set_db_range(-80.0, 0.0)
+        presets = [a for a in level_actions() if a.text().endswith("full scale")]
+        self.assertEqual(len(presets), 4)
+        self.assertTrue(all(a.isCheckable() for a in presets))
+        self.assertEqual(checked(), ["80 dB below full scale"])
+        # Picking another preset moves the check mark.
+        next(a for a in level_actions() if a.text().startswith("120 dB")).trigger()
+        self.assertEqual(waterfall.levels(), (-120.0, 0.0))
+        self.assertEqual(checked(), ["120 dB below full scale"])
+        # Auto: only Auto is checked; unchecking it keeps fixed levels.
+        waterfall.set_auto_levels(True)
+        self.assertEqual(checked(), ["Auto (follow noise and signals)"])
+        next(a for a in level_actions() if a.text().startswith("&Auto")).trigger()
+        self.assertFalse(waterfall.auto_levels())
+        # Levels of your own (not a preset): nothing is checked.
+        waterfall.set_db_range(-73.0, -10.0)
+        self.assertEqual(checked(), [])
+
+    def test_identify_is_on_tools_signal(self):
+        win = self.win
+        action = _menu(win, "Tools", "Signal", "Identify")
+        calls = []
+        with mock.patch.object(
+            win._signal_tools, "identify", lambda *a: calls.append(a) or True
+        ):
+            action.trigger()
+        self.assertEqual(calls, [()])
+        # Ctrl+I stays on Tools > Identify Signal (one action has the key).
+        identify = _menu(win, "Tools", "Identify Signal")
+        self.assertEqual(identify.shortcut().toString(), "Ctrl+I")
+        self.assertTrue(action.shortcut().isEmpty())
+
+
+# --------------------------------------------------------------------------- #
+# Leftover 9: notices are not problems (Tools > Error History)
+# --------------------------------------------------------------------------- #
+class TestNoticesStayOutOfTheErrorHistory(_DeviceCase):
+    """An amber notice in the status bar (the app doing what was asked, or
+    saying what to do first) is not written to Tools > Error History, nor
+    printed to the console: only real problems are."""
+
+    def quietly(self, action, shown):
+        with self.assertNoLogs("sdr_module.gui.main_window", level="WARNING"):
+            action()
+        self.assertIn(shown, self.message())
+        self.assertEqual(self.tone(), "warning")
+
+    def test_recording_notices(self):
+        win = self.win
+        win._stop_acquisition()
+        self.quietly(lambda: win._toggle_recording(True), "Recording armed")
+        self.quietly(lambda: win._on_panel_record_paused(True), "Recording paused")
+        win._on_panel_record_paused(False)
+        self.quietly(lambda: win._toggle_recording(False), "Nothing was captured")
+
+    def test_audio_recording_notices(self):
+        from sdr_module.gui import file_dialogs
+
+        win = self.win
+        folder = tempfile.mkdtemp(prefix="fw-notices-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        file_dialogs.set_recordings_folder(self.store, folder)
+        win._set_demod_mode("None (I/Q)", "", "")
+        self.quietly(win._start_audio_recording, "has no audio to record")
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        win._stop_acquisition()
+        win._control_panel.set_record_kind("audio")
+        self.assertTrue(win._start_audio_recording())
+        self.quietly(
+            lambda: win._on_panel_record_paused(True), "Audio recording paused"
+        )
+        win._on_panel_record_paused(False)
+        self.quietly(win._stop_audio_recording, "nothing was received")
+
+    def test_what_to_do_first(self):
+        win = self.win
+        # A sample rate refused (like a frequency out of range).
+        self.quietly(lambda: win.set_sample_rate(10e6), "The demo device runs at")
+        win._toggle_recording(True)
+        self.quietly(lambda: win.set_sample_rate(1.024e6), "Stop recording to change")
+        win._toggle_recording(False)
+        with mock.patch.object(type(win), "_tx_busy", lambda _s: True):
+            self.quietly(
+                lambda: win._open_recording("/no/such/file.cu8"),
+                "Wait until the transmission ends",
+            )
+        win._release_device()
+        self.quietly(
+            lambda: win._save_signal_meter_calibration(2.0, None),
+            "Connect a device to save the S-meter calibration",
+        )
+        if hasattr(win, "_sstv_panel"):
+            self.quietly(win._on_sstv_tune_iss, "No receiver")
+
+    def test_disconnected_after_a_failed_connect_is_listed_once(self):
+        from sdr_module.gui import device_dialog
+
+        self.rtl()
+        win = self.win
+        win._exec_dialog = _Answers(
+            win, row="RTL-SDR #0", rows=[("RTL-SDR", "RTL-SDR #0", "rtlsdr", 0)]
+        )
+
+        def unplugged(_self, device_index=0):
+            raise OSError("usb_open error -4")
+
+        self.patch.setattr(FakeRtlSdr, "__init__", unplugged)
+        with (
+            mock.patch.object(device_dialog.QMessageBox, "warning"),
+            mock.patch.object(device_dialog.QMessageBox, "critical"),
+            self.assertNoLogs("sdr_module.gui.main_window", level="WARNING"),
+        ):
+            self.assertFalse(win._show_device_dialog())
+        self.assertIn("Disconnected from RTL-SDR #0", self.message())
+
+    def test_problems_are_still_listed(self):
+        with self.assertLogs("sdr_module.gui.main_window", level="WARNING"):
+            self.win._show_status_message("Couldn't open the folder: X", "warning")
+
+
+# --------------------------------------------------------------------------- #
+# Leftover 8: the window's words (American English, the same names)
+# --------------------------------------------------------------------------- #
+_BRITISH = re.compile(
+    r"\b(centre\w*|centred|labell(ed|ing)|favourite\w*|colour\w*|behaviour\w*"
+    r"|analys(e|ed|ing)|organis\w*|recognis\w*|initialis\w*|normalis\w*"
+    r"|optimis\w*|licence\w*)\b",
+    re.IGNORECASE,
+)
+
+
+class TestTheWindowsWords(_WindowTestCase):
+    demo = True
+
+    def shown_texts(self):
+        from PyQt6.QtGui import QAction
+        from PyQt6.QtWidgets import QComboBox, QTableWidget, QTabWidget, QWidget
+
+        win = self.win
+        for widget in win.findChildren(QWidget):
+            for name in ("toolTip", "statusTip", "text", "title", "placeholderText"):
+                getter = getattr(widget, name, None)
+                if callable(getter):
+                    try:
+                        value = getter()
+                    except TypeError:
+                        continue
+                    if isinstance(value, str):
+                        yield value
+            if isinstance(widget, QComboBox):
+                for i in range(widget.count()):
+                    yield widget.itemText(i)
+            if isinstance(widget, QTabWidget):
+                for i in range(widget.count()):
+                    yield widget.tabText(i)
+                    yield widget.tabToolTip(i)
+            if isinstance(widget, QTableWidget):
+                for col in range(widget.columnCount()):
+                    item = widget.horizontalHeaderItem(col)
+                    if item is not None:
+                        yield item.text()
+                        yield item.toolTip()
+        for action in win.findChildren(QAction):
+            yield action.text()
+            yield action.toolTip()
+            yield action.statusTip()
+
+    def test_american_spelling_throughout(self):
+        found = sorted(
+            {text for text in self.shown_texts() if text and _BRITISH.search(text)}
+        )
+        self.assertEqual(found, [])
+
+    def test_the_presets_and_the_signal_tab_say_what_the_controls_say(self):
+        from sdr_module.gui import presets
+
+        self.assertEqual(presets.FAVOURITES_CATEGORY, "Favorites")
+        combo = self.win._control_panel._category_combo
+        self.assertEqual(combo.itemText(0), "Favorites")
+        # The receiver's control is "Filter", not "Bandwidth".
+        tip = self.win._signal_panel.apply_btn.toolTip()
+        self.assertIn("Filter", tip)
+        self.assertNotIn("Bandwidth", tip)
+
+    def test_save_recording_asks_in_american_english_too(self):
+        from PyQt6.QtWidgets import QLabel
+
+        from sdr_module.gui.iq_files import RecordingDetailsDialog
+
+        dialog = RecordingDetailsDialog(0.0, 0.0, 2.4e6, 100e6, self.win)
+        self.addCleanup(dialog.deleteLater)
+        texts = [label.text() for label in dialog.findChildren(QLabel)]
+        self.assertTrue(any("labeled right" in t for t in texts), texts)
+        self.assertFalse([t for t in texts if _BRITISH.search(t)])
+
+
+# --------------------------------------------------------------------------- #
+# The checker's follow-ups: the split comes back after a shrink, Paused only
+# while it is so, the listening menus follow their controls
+# --------------------------------------------------------------------------- #
+class TestTheSplitComesBack(_WindowTestCase):
+    """The right column's split, snapped between groups for a small window,
+    goes back where it was when the window grows again (it stayed on the
+    Frequency group: Mode, Filter and Squelch out of view at 1366x768)."""
+
+    def default_split(self, size):
+        win = self.win
+        win.resize(*size)
+        self.settle(10)
+        win._apply_default_splitter_sizes()
+        self.settle(5)
+        return win._right_splitter.sizes()
+
+    def shrink_and_grow(self, size, before):
+        win = self.win
+        for smaller in ((1024, 640), (1100, 700), size):
+            win.resize(*smaller)
+            self.settle(10)
+            split, cut = TestRightColumnSplit.cut_groups(win)
+            self.assertEqual(cut, [], f"{smaller}: split at {split} px cuts {cut}")
+        self.assertEqual(win._right_splitter.sizes(), before)
+
+    def test_growing_back_restores_the_split(self):
+        from tests.test_gui_coherent_window import _ThemedSizes
+
+        def check(_theme):
+            for size in ((1366, 768), (1920, 1080)):
+                with self.subTest(theme=_theme, size=size):
+                    self.shrink_and_grow(size, self.default_split(size))
+
+        _ThemedSizes.each_theme(self, check)
+
+    def test_a_split_moved_by_hand_comes_back_too(self):
+        win = self.win
+        self.default_split((1920, 1080))
+        splitter = win._right_splitter
+        # The handle dragged up to the gap after the Demodulation group (the
+        # second one: Frequency, then how to listen).
+        second = sorted(end for _start, end in win._section_spans())[1]
+        splitter.moveSplitter(second + 3, 1)
+        self.settle(5)
+        moved = splitter.sizes()
+        self.assertEqual(moved[0], second + 3)
+        self.shrink_and_grow((1920, 1080), moved)
+
+
+class TestPausedOnlyWhileSo(_SecondCase):
+    """ROB-12's Paused says what is going on now: not after Stop, nor once
+    the signal is real time again while the squelch is closed (the button
+    stayed Paused, with the "can't keep up" tip, until a signal came)."""
+
+    demo = True
+    shown = TestAudioButtonStates.shown
+
+    def setUp(self):
+        super().setUp()
+        win = self.win
+        win._audio = _FakeSink()
+        win._audio.open = True
+        win._audio_enabled = True
+        win._audio_problem = None  # (as with an output device)
+        win._sync_audio_ui()
+
+    def test_paused_follows_real_time_while_receiving(self):
+        win = self.win
+        if not win._is_running:
+            win._start_acquisition()
+        live = [False]
+        with mock.patch.object(type(win), "_realtime", lambda _s: live[0]):
+            win._update_status()
+            self.assertEqual(win._audio_state(), "paused")
+            self.assertEqual(self.shown()[0], " Paused")
+            self.assertIn("real time", self.shown()[1])
+            # Real time again, nothing played yet (the squelch closed): the
+            # flag the status bar's hint goes by is still set.
+            live[0] = True
+            win._realtime_hint_shown = True
+            win._update_status()
+            self.assertEqual(win._audio_state(), "on")
+            self.assertEqual(self.shown()[0], " Audio")
+            # Stopped: nothing is paused.
+            live[0] = False
+            win._stop_acquisition()
+            win._update_status()
+            self.assertFalse(win._is_running)
+            self.assertEqual(win._audio_state(), "on")
+            self.assertEqual(self.shown()[0], " Audio")
+
+
+class TestListeningMenusFollowTheirControls(_WindowTestCase):
+    """Radio > Squelch and Radio > Audio offer what the control panel
+    offers: a control that is off in this mode (or without the squelch)
+    is off in the menu too, instead of changing it unseen."""
+
+    def test_menu_items_follow_their_controls(self):
+        win, panel = self.win, self.win._control_panel
+        squelch = _menu(win, "Radio", "Squelch", "Squelch On")
+        auto = _menu(win, "Radio", "Squelch", "Auto Threshold")
+        nr = _menu(win, "Radio", "Audio", "Noise Reduction")
+        agc = _menu(win, "Radio", "Audio", "Audio AGC")
+        panel._demod_combo.setCurrentText("FM")
+        panel.set_squelch_enabled(True)
+        self.settle()
+        self.assertTrue(squelch.isEnabled() and auto.isEnabled() and nr.isEnabled())
+        self.assertFalse(agc.isEnabled())  # (FM audio is steady)
+        panel.set_squelch_enabled(False)
+        self.settle()
+        self.assertFalse(auto.isEnabled())
+        was = panel.is_squelch_auto()
+        auto.trigger()  # (a disabled action does nothing)
+        self.assertEqual(panel.is_squelch_auto(), was)
+        panel.set_squelch_enabled(True)
+        panel._demod_combo.setCurrentText("AM")
+        self.settle()
+        self.assertTrue(agc.isEnabled() and auto.isEnabled())
+        panel._demod_combo.setCurrentText("None (I/Q)")
+        self.settle()
+        self.assertFalse(squelch.isEnabled() or auto.isEnabled() or nr.isEnabled())
+        panel._demod_combo.setCurrentText("FM")
+        self.settle()
+        self.assertTrue(squelch.isEnabled() and auto.isEnabled() and nr.isEnabled())
+
+    def test_each_menu_letter_opens_one_item(self):
+        # (Checker: "&Mode" and "S&quelch" took the letters of "Choose
+        # &Mode From Band Plan" and "Recent Fre&quencies": Alt+R, M then
+        # only selected one of the two.)
+        found = []
+
+        def walk(menu, path):
+            letters = {}
+            for action in menu.actions():
+                text = action.text().split("\t")[0]
+                match = re.search(r"&(\w)", text)
+                if match:
+                    letters.setdefault(match.group(1).lower(), []).append(text)
+                if action.menu() is not None:
+                    walk(action.menu(), path + [text.replace("&", "")])
+            found.extend(
+                (" > ".join(path), items)
+                for items in letters.values()
+                if len(items) > 1
+            )
+
+        for top in self.win.menuBar().actions():
+            walk(top.menu(), [top.text().replace("&", "")])
+        self.assertEqual(found, [])
+
+    def test_tone_squelch_outside_fm_says_where_it_applies(self):
+        win, panel = self.win, self.win._control_panel
+        panel._demod_combo.setCurrentText("AM")
+        self.settle()
+        _menu(win, "Radio", "Audio", "Tone Squelch...").trigger()
+        self.assertIn("choose FM in Radio > Mode", win._message_label.text())
+        self.assertIn("tone squelch", win._message_label.text())
+        _menu(win, "Radio", "Audio", "CW Pitch...").trigger()
+        self.assertIn("The CW pitch is used in CW", win._message_label.text())
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -24,6 +24,7 @@ try:
         QLabel,
         QPlainTextEdit,
         QPushButton,
+        QSizePolicy,
         QSplitter,
         QTableWidget,
         QTableWidgetItem,
@@ -166,6 +167,37 @@ class _ViewportResizeWatcher(QObject if HAS_PYQT6 else object):
         return False
 
 
+class _MiddleElidedLabel(QLabel if HAS_PYQT6 else object):
+    """A one-line label that shortens a long text in the middle ("Saved to
+    ~/Documents/…/sdr-error-history.txt"); the full text is its tooltip."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._full = ""
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt naming
+        self._full = str(text or "")
+        self.setToolTip(self._full)
+        self._elide()
+
+    def text(self) -> str:
+        return self._full
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        width = self.contentsRect().width()
+        shown = self._full
+        if width > 0 and self.fontMetrics().horizontalAdvance(shown) > width:
+            shown = self.fontMetrics().elidedText(
+                shown, Qt.TextElideMode.ElideMiddle, width
+            )
+        super().setText(shown)
+
+
 class ErrorLogDialog(QDialog if HAS_PYQT6 else object):
     """Viewer for recent warning/error messages."""
 
@@ -243,7 +275,9 @@ class ErrorLogDialog(QDialog if HAS_PYQT6 else object):
             self._table.viewport(), self._empty
         )
 
-        self._summary = QLabel()
+        # (Never cut off at the dialog's edge: a long path is shortened in
+        # the middle, the whole of it in the tooltip.)
+        self._summary = _MiddleElidedLabel()
         set_role(self._summary, "hint")
         layout.addWidget(self._summary)
 
@@ -263,12 +297,27 @@ class ErrorLogDialog(QDialog if HAS_PYQT6 else object):
         self._export_btn.clicked.connect(self._export)
         btns.addButton(self._export_btn, QDialogButtonBox.ButtonRole.ActionRole)
 
+        self._version_btn = QPushButton("Copy &Version Info")
+        self._version_btn.setAutoDefault(False)
+        self._version_btn.setToolTip(
+            "Copy the versions, the system and the device in use, to paste "
+            "into a bug report with these messages (Help > Report a Problem)"
+        )
+        self._version_btn.clicked.connect(self._copy_version_info)
+        btns.addButton(self._version_btn, QDialogButtonBox.ButtonRole.ActionRole)
+
         self._clear_btn = QPushButton("C&lear")
         self._clear_btn.setAutoDefault(False)
         self._clear_btn.setToolTip("Forget all captured warnings and errors")
         self._clear_btn.clicked.connect(self._clear)
         btns.addButton(self._clear_btn, QDialogButtonBox.ButtonRole.ResetRole)
         layout.addWidget(btns)
+        # Never narrower than the buttons (Copy Version Info made the row
+        # longer than the old 520 px minimum).
+        margins = layout.contentsMargins()
+        self.setMinimumWidth(
+            max(520, btns.sizeHint().width() + margins.left() + margins.right())
+        )
 
         # Pick up new records while the dialog is open.
         self._poll = QTimer(self)
@@ -410,16 +459,29 @@ class ErrorLogDialog(QDialog if HAS_PYQT6 else object):
         QGuiApplication.clipboard().setText(self._all_text())
         self._flash(f"Copied {len(self._groups)} entries to the clipboard.")
 
+    def _copy_version_info(self) -> None:
+        from .version_info import copy_version_info
+
+        copy_version_info(self.parent())
+        self._flash("Version info copied to the clipboard.")
+
     def _export(self) -> None:
         if not self._groups:
             return
+        from . import file_dialogs
+
         default = f"sdr-error-history-{datetime.now():%Y%m%d-%H%M%S}.txt"
-        path, _filter = QFileDialog.getSaveFileName(
-            self,
-            "Export Error History",
-            default,
-            "Text files (*.txt);;Log files (*.log);;All files (*)",
-        )
+        filters = "Text files (*.txt);;Log files (*.log);;All files (*)"
+        settings = getattr(self.parent(), "_settings", None)
+        if settings is not None:
+            # (The folder is remembered, like every other file dialog's.)
+            path, _filter = file_dialogs.save_file(
+                self, settings, "error_log", "Export Error History", default, filters
+            )
+        else:
+            path, _filter = QFileDialog.getSaveFileName(
+                self, "Export Error History", default, filters
+            )
         if not path:
             return
         try:
@@ -428,7 +490,7 @@ class ErrorLogDialog(QDialog if HAS_PYQT6 else object):
         except OSError as e:
             self._flash(f"Could not save: {e}", "danger")
             return
-        self._flash(f"Saved to {path}")
+        self._flash(f"Saved to {file_dialogs.display_path(path)}")
 
     def _clear(self):
         _HISTORY.clear_history()

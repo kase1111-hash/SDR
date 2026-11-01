@@ -14,7 +14,7 @@ window's shortcuts change (and on platforms without, say, a Quit key).
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:
     from PyQt6.QtCore import QEvent, QObject, Qt
@@ -45,23 +45,46 @@ if HAS_PYQT6:
 # Categories use the main window's menu names, so the static fallback groups
 # entries the same way as the live list (which groups by the real menus).
 SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
-    ("Radio", ("Space",), "Start or stop the receiver"),
-    ("Radio", ("Ctrl+Shift+R",), "Start or stop recording"),
-    ("Radio", ("Ctrl+L",), "Type a new center frequency"),
+    ("Radio", ("Space",), "Start or stop the receiver (play or pause a recording)"),
+    ("Radio", ("Ctrl+Shift+R",), "Start or stop recording I/Q samples"),
+    ("Radio", ("Ctrl+Shift+A",), "Start or stop recording the audio you hear"),
+    ("Radio", ("Ctrl+L",), "Type a frequency to tune to"),
     ("Radio", ("Ctrl+B",), "Bookmark the current frequency"),
-    ("Tuning", ("Left", "Right"), "Tune down / up by 10 kHz"),
-    ("Tuning", ("Shift+Left", "Shift+Right"), "Tune down / up by 100 kHz"),
+    (
+        "Radio",
+        ("Alt+Left", "Alt+Right"),
+        "Go back / forward through the frequencies you tuned",
+    ),
+    ("Radio", ("[", "]"), "Smaller / larger tuning step (with the plots focused)"),
+    ("Radio", ("Ctrl+M",), "Mute or unmute the audio (M with the plots focused)"),
+    ("Radio", ("Ctrl+Up", "Ctrl+Down"), "Volume up / down by 10%"),
+    ("Tuning", ("Left", "Right"), "Tune down / up by one tuning step"),
+    ("Tuning", ("Shift+Left", "Shift+Right"), "Tune down / up by ten tuning steps"),
     ("Tuning", ("Ctrl+Left", "Ctrl+Right"), "Tune down / up by 1 MHz"),
-    ("File", ("Ctrl+O",), "Import a recording to convert its format"),
+    ("File", ("Ctrl+O",), "Open a recording and play it back"),
+    ("File", ("Ctrl+Shift+O",), "Convert a recording to another format"),
     ("File", ("Ctrl+S",), "Save the recording"),
     ("File", ("Ctrl+P",), "Save a screenshot"),
     ("File", ("Ctrl+Q",), "Exit SDR Module"),
+    ("Device", ("Ctrl+Shift+N",), "Open the second receiver window"),
     ("Tools", ("Ctrl+F",), "Open the frequency scanner"),
     ("Tools", ("Ctrl+R",), "Open the AM/FM radio tuner"),
+    ("Tools", ("Ctrl+Shift+T",), "Send text in CW, RTTY, PSK31 or ASCII FSK"),
     ("Tools", ("Ctrl+E",), "Show the error history"),
+    ("Tools", ("Ctrl+,",), "Open the preferences (audio output, folders)"),
+    ("Tools", ("Ctrl+I",), "Identify the signal at the tuned frequency (Signal tab)"),
+    ("Tools", ("Home",), "Tune to the strongest signal in view (plots focused)"),
+    ("Tools", ("PgUp", "PgDown"), "Tune to the next signal up / down (plots focused)"),
     ("View", ("F6",), "Put the keyboard focus on the spectrum"),
     ("View", ("Esc",), "Return the keyboard focus to the spectrum"),
     ("View", ("Ctrl+T",), "Switch between the light and dark themes"),
+    (
+        "View",
+        ("Ctrl+=", "Ctrl++"),
+        "Zoom the spectrum and waterfall in around the tuned frequency",
+    ),
+    ("View", ("Ctrl+-",), "Zoom the spectrum and waterfall out"),
+    ("View", ("Ctrl+0",), "Zoom out to the full span"),
     ("Help", ("F1",), "Show this list of keyboard shortcuts"),
 )
 
@@ -79,17 +102,127 @@ Entry = Tuple[str, Tuple[str, ...], str]
 # Keys a plot handles while it has the keyboard focus (click it, or F6):
 # always listed, since they belong to the plot rather than the window.
 PLOT_KEYS: Tuple[Entry, ...] = (
-    ("Waterfall", ("P",), "Pause or resume the waterfall"),
-    ("Waterfall", ("Esc",), "Clear the waterfall measurement, if one is shown"),
+    ("Plots", ("P",), "Pause or resume the waterfall (either plot focused)"),
+    ("Plots", ("M",), "Mute or unmute the audio (like Ctrl+M)"),
+    ("Plots", ("Esc",), "Clear the waterfall measurement, if one is shown"),
+)
+
+# Keys a list, field or window handles itself (not a menu shortcut):
+# (id, section, keys, description). The id names the check in
+# tests/test_gui_help_keys.py that presses the key on the real widget, so
+# the list can't drift from what the widgets do.
+PanelKey = Tuple[str, str, Tuple[str, ...], str]
+PANEL_KEYS: Tuple[PanelKey, ...] = (
+    ("freq_step", "Frequency field", ("Up", "Down"), "Up / down by one tuning step"),
+    (
+        "freq_page",
+        "Frequency field",
+        ("PgUp", "PgDown"),
+        "Up / down by ten tuning steps",
+    ),
+    ("freq_enter", "Frequency field", ("Return",), "Tune to the frequency typed"),
+    ("freq_esc", "Frequency field", ("Esc",), "Cancel typing, back to the plots"),
+    ("bm_enter", "Bookmarks list", ("Return",), "Tune to the selected bookmark"),
+    ("bm_f2", "Bookmarks list", ("F2",), "Rename the selected bookmark"),
+    (
+        "bm_delete",
+        "Bookmarks list",
+        ("Del", "Backspace"),
+        "Remove the selected bookmark",
+    ),
+    ("bm_filter", "Bookmarks list", ("Esc",), "Clear the filter (in the filter box)"),
+    ("dec_copy", "Decoder messages", ("Ctrl+C",), "Copy the selected messages"),
+    ("dec_esc", "Decoder messages", ("Esc",), "Clear the selection"),
+    (
+        "air_enter",
+        "Decoder messages",
+        ("Return",),
+        "Aircraft tab: show the selected aircraft's messages (or double-click it)",
+    ),
+    (
+        "air_copy",
+        "Decoder messages",
+        ("Ctrl+C",),
+        "Aircraft tab: copy the selected aircraft's line",
+    ),
+    ("scan_enter", "Scanner results", ("Return",), "Listen to the selected signal"),
+    ("wf_auto", "Waterfall COLORS scale", ("Home",), "Auto levels (also double-click)"),
+    (
+        "wf_floor",
+        "Waterfall COLORS scale",
+        ("Left", "Right"),
+        "Move the floor down / up by 1 dB (Shift: 5 dB)",
+    ),
+    (
+        "wf_ceiling",
+        "Waterfall COLORS scale",
+        ("Down", "Up"),
+        "Move the ceiling down / up by 1 dB (Shift: 5 dB)",
+    ),
+    (
+        "pb_space",
+        "Playing a recording",
+        ("Space",),
+        "Play / pause (plots focused; the toolbar's Play)",
+    ),
+    (
+        "pb_skip",
+        "Playing a recording",
+        ("Left", "Right"),
+        "Back / ahead 5 s (position slider focused)",
+    ),
+    (
+        "pb_page",
+        "Playing a recording",
+        ("PgDown", "PgUp"),
+        "Back / ahead 30 s (position slider focused)",
+    ),
+    ("rx2_space", "Second receiver window", ("Space",), "Start or stop it"),
+    (
+        "rx2_tune",
+        "Second receiver window",
+        ("Left", "Right"),
+        "Tune by its step (Shift: ten steps, Ctrl: 1 MHz)",
+    ),
+    ("rx2_step", "Second receiver window", ("[", "]"), "Smaller / larger step"),
+    ("rx2_freq", "Second receiver window", ("Ctrl+L",), "Type a frequency"),
+    (
+        "rx2_bookmark",
+        "Second receiver window",
+        ("Ctrl+B",),
+        "Bookmark its frequency (in the main window's Bookmarks)",
+    ),
+    ("rx2_record", "Second receiver window", ("Ctrl+Shift+R",), "Record its I/Q"),
+    ("rx2_close", "Second receiver window", ("Ctrl+W",), "Close it"),
 )
 
 # Mouse gestures: (gesture shown as a keycap, description).
 MOUSE_ACTIONS: Tuple[Tuple[str, str], ...] = (
-    ("Click", "Tune to the clicked frequency on the spectrum or waterfall"),
+    ("Click", "Tune to the signal clicked on the spectrum or waterfall"),
+    ("Alt+Click", "Tune exactly where you click, without snapping to a signal"),
+    ("Scroll", "Tune by the step over the spectrum or waterfall (Shift: ten steps)"),
+    ("Scroll", "Tune one digit over a digit of the FREQ readout"),
     ("Drag", "Measure a signal's bandwidth, duration and peak on the waterfall"),
-    ("Right-click", "Tune, bookmark or copy a waterfall frequency; display options"),
-    ("Scroll", "Shift the waterfall's color levels (over its LEVELS scale)"),
+    ("Ctrl+Scroll", "Zoom the spectrum and waterfall around the pointer"),
+    (
+        "Right-click",
+        "Tune, bookmark, copy or zoom at a frequency on either plot; options",
+    ),
+    # (The spectrum menu's Range: "range" finds these.)
+    ("Drag", "Move the spectrum's range (over its dB labels; double-click: Auto)"),
+    ("Scroll", "Move the spectrum's range by 5 dB (over its dB labels)"),
+    (
+        "Shift+Scroll",
+        "Make the spectrum's range 10 dB shallower / deeper (over its dB labels)",
+    ),
+    ("Click", "Tune a bookmark from its label along the top of the spectrum"),
+    ("Scroll", "Shift the waterfall's color levels (over its COLORS scale)"),
+    ("Double-click", "Give the tool tabs the whole column (on a tab) and back"),
 )
+
+# Words the app uses for the same thing: the filter finds a row by either
+# (the tooltips' "Ctrl+wheel" is the Mouse section's "Ctrl+Scroll").
+_SYNONYMS: Tuple[Tuple[str, str], ...] = (("scroll", "wheel"),)
 
 _ARROWS = {"Left": "←", "Right": "→", "Up": "↑", "Down": "↓"}
 
@@ -148,16 +281,33 @@ def tuning_steps(window) -> Optional[List[Tuple[str, float]]]:
     return sorted(steps, key=lambda item: item[1]) or None
 
 
-def tuning_entries(steps: Sequence[Tuple[str, float]]) -> List[Entry]:
-    """Shortcut entries for arrow-key tuning steps."""
-    return [
-        (
-            "Tuning",
-            (f"{prefix}Left", f"{prefix}Right"),
-            f"Tune down / up by {_format_step(step)}",
+def tuning_words(window) -> Dict[str, str]:
+    """How ``window._TUNE_STEP_WORDS`` names its arrow-key steps, by
+    modifier prefix (``{"": "one tuning step"}``); empty without one."""
+    words = getattr(window, "_TUNE_STEP_WORDS", None) if window is not None else None
+    return dict(words) if isinstance(words, dict) else {}
+
+
+def tuning_entries(
+    steps: Sequence[Tuple[str, float]], words: Optional[Dict[str, str]] = None
+) -> List[Entry]:
+    """Shortcut entries for arrow-key tuning steps: ``"Tune down / up by
+    10 kHz"``, or with ``words`` for the step, ``"... by one tuning step
+    (10 kHz)"``."""
+    words = words or {}
+    entries: List[Entry] = []
+    for prefix, step in steps:
+        amount = _format_step(step)
+        if words.get(prefix):
+            amount = f"{words[prefix]} ({amount})"
+        entries.append(
+            (
+                "Tuning",
+                (f"{prefix}Left", f"{prefix}Right"),
+                f"Tune down / up by {amount}",
+            )
         )
-        for prefix, step in steps
-    ]
+    return entries
 
 
 def _menu_path(action) -> List[str]:
@@ -227,15 +377,17 @@ def build_entries(
     bindings: Optional[Dict[str, Tuple[str, str]]],
     table: Sequence[Entry] = SHORTCUTS,
     steps: Optional[Sequence[Tuple[str, float]]] = None,
+    words: Optional[Dict[str, str]] = None,
 ) -> List[Entry]:
     """The shortcut entries to show, given the window's live ``bindings``.
 
     ``steps`` (see :func:`tuning_steps`) replaces the table's tuning rows
-    with the window's real arrow-key steps. With no bindings to check
-    against, the whole table is returned.
+    with the window's real arrow-key steps, named with ``words`` (see
+    :func:`tuning_words`). With no bindings to check against, the whole
+    table is returned.
     """
     if steps:
-        generated = tuning_entries(steps)
+        generated = tuning_entries(steps, words)
         merged: List[Entry] = []
         for entry in table:
             if entry[0] != "Tuning":
@@ -343,6 +495,85 @@ def _keycap_tokens(keys: Sequence[str], literal: bool = False) -> List[str]:
     return tokens
 
 
+# Key names a filter can be ("f2", "home", "esc"): matched as a key.
+_KEY_NAMES = {
+    "esc",
+    "escape",
+    "space",
+    "home",
+    "end",
+    "del",
+    "delete",
+    "backspace",
+    "return",
+    "enter",
+    "tab",
+    "pgup",
+    "pgdown",
+    "left",
+    "right",
+    "up",
+    "down",
+}
+
+
+def _key_needle(text: str) -> str:
+    """The filter text as a key ("ctrl+s", "f2", "home"), or "" when it
+    reads as words (it contains "+", or is a key name, F1-F12 or one
+    character; "Enter" is Qt's "Return")."""
+    raw = text.strip()
+    lowered = raw.lower()
+    if not raw:
+        return ""
+    if lowered in ("enter", "return"):
+        return "return"
+    if lowered in ("delete",):
+        return "del"
+    if lowered in ("escape",):
+        return "esc"
+    is_function = lowered[:1] == "f" and lowered[1:].isdigit()
+    if "+" in raw or lowered in _KEY_NAMES or is_function or len(raw) == 1:
+        return _portable(raw).lower() or lowered
+    return ""
+
+
+def _with_synonyms(search: str) -> str:
+    """``search`` (lowercase) and, on lines of their own, its text with each
+    word of :data:`_SYNONYMS` swapped for the other, so that a filter typed
+    either way finds the row ("ctrl+wheel" finds "Ctrl+Scroll")."""
+    lines = [search]
+    for one, other in _SYNONYMS:
+        for word, swap in ((one, other), (other, one)):
+            if word in search:
+                lines.append(search.replace(word, swap))
+    return "\n".join(lines)
+
+
+def _text_matches(needle: str, search: str) -> bool:
+    """Whether every word of the filter ``needle`` (lowercase) is in the
+    row's ``search`` text, in any order ("mouse wheel", "waterfall
+    levels"), all on one of its lines."""
+    words = needle.split()
+    return any(all(word in line for word in words) for line in search.split("\n"))
+
+
+def _key_matches(needle: str, keys: Iterable[str]) -> bool:
+    """Whether a row bound to ``keys`` (portable text, lowercase) answers
+    the key filter ``needle``: the whole key ("ctrl+s" is not
+    "ctrl+shift+r"); a single key also as the last of a combination ("m":
+    M and Ctrl+M); modifiers still being typed ("ctrl+") every key with
+    them."""
+    for key in keys:
+        if key == needle:
+            return True
+        if needle.endswith("+") and len(needle) > 1:
+            if f"+{needle}" in f"+{key}":
+                return True
+        elif "+" not in needle and key.endswith(f"+{needle}"):
+            return True
+    return False
+
+
 class _SwallowEnter(QObject if HAS_PYQT6 else object):
     """Keys for the filter box: Enter doesn't close the dialog, and Page Up /
     Page Down scroll the list (which takes no keyboard focus itself)."""
@@ -378,10 +609,14 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
 
         window = parent.window() if parent is not None else None
         self._entries = build_entries(
-            collect_bindings(window), steps=tuning_steps(window)
+            collect_bindings(window),
+            steps=tuning_steps(window),
+            words=tuning_words(window),
         )
-        # (row widget, lowercase search text, category section)
+        # (row widget, lowercase search text, category section), and each
+        # row's keys (portable text, lowercase) for a filter typed as a key.
         self._rows: List[Tuple[QWidget, str, QWidget]] = []
+        self._keys: List[set] = []
         self._sections: List[QWidget] = []
         self._caps: List[QWidget] = []  # keycap column of every row
 
@@ -451,6 +686,8 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
             items.append((category, list(keys), description, "keys"))
         for category, keys, description in PLOT_KEYS:
             items.append((category, list(keys), description, "keys"))
+        for _id, section, keys, description in PANEL_KEYS:
+            items.append((section, list(keys), description, "keys"))
         for gesture, description in MOUSE_ACTIONS:
             items.append(("Mouse", [gesture], description, "mouse"))
 
@@ -468,8 +705,10 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
             section, box = sections[category]
             row = self._make_row(keys, description, kind)
             box.addWidget(row)
-            search = " ".join([category, description] + keys).lower()
+            search = _with_synonyms(" ".join([category, description] + keys).lower())
+            tokens = {_portable(k).lower() for k in keys} if kind == "keys" else set()
             self._rows.append((row, search, section))
+            self._keys.append(tokens)
 
         for category in order:
             section = sections[category][0]
@@ -519,9 +758,19 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
 
     def _apply_filter(self, text: str) -> None:
         needle = text.strip().lower()
+        key = _key_needle(text)
+        if key and not any(_key_matches(key, keys) for keys in self._keys):
+            # No key like that (e.g. the first letter of a word, the "t" of
+            # "tune"): look for the text instead of showing nothing.
+            key = ""
         visible_sections = set()
-        for row, search, section in self._rows:
-            show = not needle or needle in search
+        for (row, search, section), keys in zip(self._rows, self._keys, strict=True):
+            if key:
+                # "Ctrl+S" finds Ctrl+S, not Ctrl+Shift+R; "f2" finds F2;
+                # "m" finds M and Ctrl+M.
+                show = _key_matches(key, keys)
+            else:
+                show = not needle or _text_matches(needle, search)
             row.setVisible(show)
             if show:
                 visible_sections.add(id(section))

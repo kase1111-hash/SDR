@@ -145,15 +145,22 @@ class TestSignalMeterPanel(unittest.TestCase):
         self.panel._update_display()
         self.assertTrue(self.panel._s_meter_label.text().startswith("S9+"))
         self.assertIn(self.panel._s_meter_label.property("tone"), ("warning", "danger"))
-        self.assertTrue(self.panel._dbm_label.text().endswith("dBm"))
+        # Uncalibrated, power reads dBFS (dBm would only be a guess) ...
+        self.assertTrue(self.panel._dbm_label.text().endswith("dBFS"))
         self.assertTrue(self.panel._peak_label.text().startswith("S"))
         self.assertEqual(self.panel._verbal_label.property("role"), "muted")
+        # ... and dBm once calibrated.
+        self.panel.set_calibration(0.0)
+        self.panel.update_samples(_tone(0.5))
+        self.panel._update_display()
+        self.assertTrue(self.panel._dbm_label.text().endswith("dBm"))
 
     def test_cw_mode_gives_three_digit_rst(self):
         self.panel.update_samples(_tone(0.05))
         self.panel._update_display()
         self.assertEqual(len(self.panel._rst_label.text()), 2)
-        self.panel._mode_combo.setCurrentIndex(1)  # CW
+        combo = self.panel._mode_combo
+        combo.setCurrentIndex(combo.findText("CW"))  # after "Auto (follow ...)"
         self.assertEqual(len(self.panel._rst_label.text()), 3)
 
     def test_stale_reading_returns_to_empty_state(self):

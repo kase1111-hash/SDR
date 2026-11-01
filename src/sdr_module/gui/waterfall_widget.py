@@ -139,6 +139,13 @@ _Q_PER_DB = 8
 _Q_MIN_DB = -200.0
 _Q_CODES = 2048
 _Q_MAX_DB = _Q_MIN_DB + (_Q_CODES - 1) / _Q_PER_DB
+# The rows' averaged spectra (what the hover reads) in finer codes over the
+# same range: 1/256 dB, 1..65535. A row merging many frames (a history of
+# 5 min or more) has noise spreading a few tenths of a dB or less, which
+# 1/8 dB steps made look like no spread at all (plain noise then read
+# "SNR -17 dB"); its spread gives how far noise reaches (see plot_readout).
+_MEAN_PER_DB = 256
+_MEAN_CODES = 65536
 
 #: dBFS extent of the level bar (the handles move within it).
 _LEVEL_SCALE_DB = (-140.0, 0.0)
@@ -293,6 +300,22 @@ def quantize_db(values: Any) -> np.ndarray:
     np.rint(v, out=v)
     np.clip(v, 1, _Q_CODES - 1, out=v)
     return v.astype(np.uint16)
+
+
+def _mean_codes(values: Any) -> np.ndarray:
+    """An averaged spectrum (dB) as uint16 codes of 1/256 dB (never 0)."""
+    v = np.array(values, dtype=np.float32)
+    np.nan_to_num(v, copy=False, nan=_Q_MIN_DB, posinf=_Q_MAX_DB, neginf=_Q_MIN_DB)
+    v -= np.float32(_Q_MIN_DB)
+    v *= np.float32(_MEAN_PER_DB)
+    np.rint(v, out=v)
+    np.clip(v, 1, _MEAN_CODES - 1, out=v)
+    return v.astype(np.uint16)
+
+
+def _mean_levels(codes: np.ndarray) -> np.ndarray:
+    """:func:`_mean_codes` back to dB."""
+    return _Q_MIN_DB + np.asarray(codes, dtype=np.float64) / _MEAN_PER_DB
 
 
 def auto_level_targets(noise_db: float, peak_db: float) -> Tuple[float, float]:
@@ -741,7 +764,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         # change only moves codes (found by the line's identity).
         self._row_codes: deque = deque(maxlen=history_size)
         # Each row's averaged spectrum (the mean of its frames' FFTs, as
-        # level codes on the row's own bins; None when add_line wasn't
+        # fine level codes on the row's own bins; None when add_line wasn't
         # given one), the noise floor it came with (or None) and how many
         # lines it merges: what the hover reads (see reading_at).
         self._row_means: deque = deque(maxlen=history_size)
@@ -1293,7 +1316,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         """A new row: keep its averaged spectrum and noise floor."""
         mean = self._mean_line(mean_db)
         self._open_mean = mean
-        self._row_means.append(None if mean is None else quantize_db(mean))
+        self._row_means.append(None if mean is None else _mean_codes(mean))
         self._row_floors.append(self._finite_db(noise_db))
         self._row_lines.append(1)
 
@@ -1313,7 +1336,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             total += np.power(10.0, mean / 10.0, dtype=np.float32)
             np.maximum(total, 1e-30, out=total)
             self._open_mean = (10.0 * np.log10(total / (count + 1))).astype(np.float32)
-            self._row_means[-1] = quantize_db(self._open_mean)
+            self._row_means[-1] = _mean_codes(self._open_mean)
         floor, new = self._row_floors[-1], self._finite_db(noise_db)
         if floor is not None and new is not None:
             self._row_floors[-1] = (count * floor + new) / (count + 1)
@@ -1631,7 +1654,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         model, rise_db, means = noise
         steady: Optional[Reading] = None
         if means is not None:
-            levels = _Q_MIN_DB + means[lo:hi].astype(np.float64) / _Q_PER_DB
+            levels = _mean_levels(means[lo:hi])
             steady = read_levels(levels, model, self._row_fill_limit(h, hi - lo))
         if rise_db is not None:
             peak = float(np.max(line[lo:hi]))
@@ -1656,9 +1679,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         if cached is not None and cached[0] is line and cached[1] is means:
             return cached[2]
         if means is not None:
-            covered = means[means > 0]
-            levels = _Q_MIN_DB + covered.astype(np.float64) / _Q_PER_DB
-            model = noise_model(levels, floor)
+            model = noise_model(_mean_levels(means[means > 0]), floor)
         elif floor is not None:
             model = NoiseModel(floor, 1.0)  # (only bursts can be told)
         else:
@@ -1684,8 +1705,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         cached = self._readout_cache.get(key)
         if cached is not None and cached[0] is means:
             return cached[1]
-        covered = means[means > 0]
-        limit = mean_limit(_Q_MIN_DB + covered.astype(np.float64) / _Q_PER_DB, bins)
+        limit = mean_limit(_mean_levels(means[means > 0]), bins)
         self._readout_cache[key] = (means, limit)
         return limit
 
@@ -1847,7 +1867,8 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
 
     def measurement(self) -> Optional[Dict[str, float]]:
         """The measured region: ``f_low``/``f_high`` (Hz), ``bandwidth`` (Hz),
-        ``center`` (Hz), ``duration`` (s) and ``peak_db`` (dBFS, or NaN), or
+        ``center`` (Hz), ``duration`` (s), ``peak_db`` (dBFS, or NaN) and
+        ``readings`` (how many row bins the peak is the strongest of), or
         None when nothing is measured."""
         if self._measure is None:
             return None

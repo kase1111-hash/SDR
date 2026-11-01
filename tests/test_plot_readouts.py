@@ -18,6 +18,7 @@ import numpy as np
 
 from sdr_module.dsp.frame_spectrum import FrameSpectrumAnalyzer
 from sdr_module.gui import plot_readout as R
+from tests.test_gui_chrome import _WindowTestCase
 
 try:
     from PyQt6.QtCore import QPointF, QRectF
@@ -68,8 +69,8 @@ def frames(size, count=80_000, n=8, carriers=(), wide=None, seed=7, burst=None):
             f = np.fft.fftfreq(count)
             spec[(f < lo) | (f > hi)] = 0
             w = np.fft.ifft(spec)
+            w /= math.sqrt(np.mean(np.abs(w) ** 2))  # (unit power, then dB)
             w *= math.sqrt(noise_bin * 10 ** (snr / 10) * size * (hi - lo) / 1.5)
-            w /= math.sqrt(np.mean(np.abs(w) ** 2) / ((hi - lo) * size / 1.5))
             x = x + w
         if burst is not None and i == burst[0]:
             pulse = np.zeros(count)
@@ -187,6 +188,21 @@ class TestReadLevels(unittest.TestCase):
         self.assertTrue(all(not r.is_noise for r in readings))
         self.assertAlmostEqual(float(np.median(levels)), float(density), delta=1.0)
 
+    def test_a_wide_signal_weaker_per_bin_than_the_noise_is_found(self):
+        """A station no stronger per bin than the noise (0 dB), at 32768
+        points: none of a pixel's 33 bins stands out of the noise, their
+        power average does (a signal filling the pixel; without that test
+        it read "noise" at 4 of 5 of its pixels)."""
+        frame = frames(32768, n=3, wide=(0.1, 0.2, 0.0), seed=3)[-1]
+        size = len(frame.mean_db)
+        readings, model = self.readings(frame, int(0.62 * size), int(0.68 * size))
+        found = [r for r in readings if not r.is_noise]
+        self.assertGreaterEqual(len(found), 0.7 * len(readings), readings)
+        # (Its power per bin, the noise's and its own: about 3 dB over the
+        # noise, an SNR near 0 dB.)
+        over = np.median([r.level_db for r in found]) - model.floor_db
+        self.assertAlmostEqual(float(over), 3.0, delta=1.5)
+
 
 # --------------------------------------------------------------------------- #
 # The waterfall's hover and measurement
@@ -201,8 +217,8 @@ class TestWaterfallReadings(unittest.TestCase):
 
         self.wfm = wfm
 
-    def waterfall(self, size, history_s=0.0):
-        wf = self.wfm.WaterfallWidget(history_size=100)
+    def waterfall(self, size, history_s=0.0, rows=100):
+        wf = self.wfm.WaterfallWidget(history_size=rows)
         self.addCleanup(wf.deleteLater)
         self.addCleanup(wf.close)
         wf.set_frequency_range(CENTER, RATE)
@@ -315,6 +331,62 @@ class TestWaterfallReadings(unittest.TestCase):
         self.assertLessEqual(sum("SNR" in line for line in lines), 1, lines)
         carrier = self.hover(wf, [CENTER + 500 * RATE / size])[0]
         self.assertAlmostEqual(snr_of(carrier), 12.0, delta=2.0, msg=carrier)
+
+    def fill_then_merge(self, wf, size, history_s, merged, rows):
+        """The history full of rows (each one frame), then ``merged``
+        frames 30 a second: they merge into rows of history_s / rows."""
+        step = history_s / rows
+        pool = frames(size, n=4, seed=size + 1)
+        for i in range(rows):
+            frame = pool[i % len(pool)]
+            wf.add_line(
+                frame.max_db,
+                timestamp=i * step,
+                noise_db=frame.noise_floor_db,
+                mean_db=frame.mean_db,
+            )
+        for i, frame in enumerate(merged):
+            wf.add_line(
+                frame.max_db,
+                timestamp=rows * step + i / 30,
+                noise_db=frame.noise_floor_db,
+                mean_db=frame.mean_db,
+            )
+
+    def test_a_row_merging_frames_reads_their_power_average(self):
+        """A carrier 20 dB over the noise in the last 9 of a row's 18
+        frames (a transmission starting): the row reads its power average,
+        17 dB, not the first frame's noise (nor a burst)."""
+        size, rows, history_s = 2048, 100, 60.0  # (18 frames a row)
+        wf = self.waterfall(size, history_s=history_s, rows=rows)
+        quiet = frames(size, n=9, seed=31)
+        on = frames(size, n=9, carriers=((300, 20.0),), seed=32)
+        self.fill_then_merge(wf, size, history_s, quiet + on, rows)
+        self.assertEqual(wf._row_lines[-1], 18)
+        line = self.hover(wf, [CENTER + 300 * RATE / size])[0]
+        self.assertFalse(line.startswith("Peak"), line)
+        self.assertAlmostEqual(snr_of(line), 17.0, delta=1.5, msg=line)
+
+    def test_noise_reads_noise_on_rows_merging_many_frames(self):
+        """With a 5 or 15 min history a row merges 18 or 54 frames: its
+        averaged spectrum's noise spreads a few tenths of a dB, which its
+        1/8 dB level codes made look like no spread at all, so plain noise
+        read "SNR -17 dB" at 147 of 249 places (1024 points, 15 min) and
+        "SNR -11 dB" at 28 (2048 points, 5 min)."""
+        for size, history_s in ((1024, 900.0), (2048, 300.0)):
+            with self.subTest(size=size, history_s=history_s):
+                wf = self.waterfall(size, history_s=history_s, rows=500)
+                per_row = int(round(history_s / 500 * 30))
+                merged = frames(size, n=2 * per_row + 2, seed=size)
+                self.fill_then_merge(wf, size, history_s, merged, 500)
+                self.assertGreaterEqual(wf._row_lines[-2], per_row - 1)
+                plot = wf.plot_rect()
+                rows_px = plot.height() / wf._rows_shown()
+                lines = []
+                for row in (1, 2):
+                    y = plot.top() + (row + 0.5) * rows_px
+                    lines += self.hover(wf, self.noise_spots(wf), y)
+                self.assertLessEqual(sum("SNR" in line for line in lines), 2, lines)
 
     def test_the_measurement_over_plain_noise_says_noise(self):
         """A box dragged over noise at 32768 points read "Peak -92 dBFS ·
@@ -500,15 +572,9 @@ class TestSpectrumReadings(unittest.TestCase):
         self.assertFalse(self.sp.auto_range())
 
 
-if __name__ == "__main__":  # pragma: no cover
-    unittest.main()
-
-
 # --------------------------------------------------------------------------- #
 # The main window feeds both plots what their readouts need
 # --------------------------------------------------------------------------- #
-
-from tests.test_gui_chrome import _WindowTestCase  # noqa: E402
 
 
 @unittest.skipUnless(HAS_QT, "PyQt6 is required")
@@ -576,3 +642,7 @@ class TestTheWindowsPlots(_WindowTestCase):
         self.assertEqual(len(readings), 2 * len(spots))
         with_snr = [line for line in readings if "SNR" in line]
         self.assertLessEqual(len(with_snr), 1, readings)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    unittest.main()

@@ -73,8 +73,8 @@ class WindowScannerHost(ScannerHost):
     def __init__(self, window: Any):
         self._win = window
         # Where the receiver was before the scan: (frequency, LO, mode,
-        # deviation, bandwidth, tone squelch).
-        self._saved: Optional[Tuple[float, float, str, str, str, float]] = None
+        # deviation, bandwidth, CTCSS tone squelch, DCS code squelch).
+        self._saved: Optional[Tuple[float, float, str, str, str, float, str]] = None
         self._lo_moved = False
         #: The frequency the scan tuned last (None outside a scan): any
         #: other means the user tuned elsewhere.

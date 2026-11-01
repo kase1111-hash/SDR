@@ -455,7 +455,10 @@ _CW_SQUELCH_HANG_S = 0.5
 # level is taken from the carrier itself when one appears (after a reset,
 # _AM_JUMP times the level, or _AM_NEW times the floor of the gap the last
 # one left) and held for _AM_HOLD_S once it has gone (the squelch's hang
-# time), so the hiss behind a transmission isn't turned up.
+# time), so the hiss behind a transmission isn't turned up. Gone for
+# _AM_LEFT_S (a squelch has closed by then: it is off, or a weaker station
+# is left), what is left is taken up like a new carrier: its own level,
+# faded in.
 _AM_WINDOW_S = 0.004
 _AM_GONE = 0.3
 _AM_DIP_S = 0.006
@@ -463,6 +466,7 @@ _AM_FADE_S = 0.005
 _AM_JUMP = 2.0
 _AM_NEW = 4.0
 _AM_HOLD_S = _SQUELCH_HANG_S
+_AM_LEFT_S = _AM_HOLD_S + 0.1
 # FM audio clipping warning: more than this fraction of the samples beyond
 # full scale for this long (the deviation is set too small), at most this
 # often.
@@ -1267,10 +1271,12 @@ class _ReceiverChain:
         A carrier that appears (after a reset, or far above the level or
         the gap before it) sets the level from its own samples and fades
         in; one that goes fades out before it ends, and its level is held
-        for the squelch's hang time. (The level of a whole block, half of
-        it noise, made every key-up a clipped pop; dividing a vanished
-        carrier by a falling level made every key-down a full-scale thump
-        followed by swelling hiss.)
+        for the squelch's hang time. What is left after that (the squelch
+        is off, or a weaker station is under it) is taken up as a new
+        carrier would be. (The level of a whole block, half of it noise,
+        made every key-up a clipped pop; dividing a vanished carrier by a
+        falling level made every key-down a full-scale thump followed by
+        swelling hiss.)
         """
         envelope = np.abs(channel).astype(np.float32)
         n = len(envelope)
@@ -1342,15 +1348,17 @@ class _ReceiverChain:
             self._am_gone_s = 0.0
         else:
             # Gone: the level holds through the squelch's hang time (no
-            # hiss turned up behind a transmission), then falls.
+            # hiss turned up behind a transmission).
             start = end = level
             self._am_gone_s += seconds
-            over = min(seconds, self._am_gone_s - _AM_HOLD_S)
-            if over > 0.0:
-                end += (1.0 - math.exp(-over / release)) * (
-                    float(np.mean(played)) - level
-                )
         self._level = float(end)
+        if self._am_gone_s >= _AM_LEFT_S:
+            # Gone for longer than a squelch hangs on: it is off, or a
+            # weaker station is left. That is the next block's carrier (as
+            # after a reset: its own level, faded in). A level falling from
+            # the carrier's let it back up to 2.5 s later, in bursts with a
+            # thump each, as it crossed _AM_GONE of that level.
+            self._level = 0.0
         # The level before a jump counts for the hang time after it.
         if before > 0.0:
             self._am_before_s += seconds

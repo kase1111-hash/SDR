@@ -282,12 +282,15 @@ def _tooltip(bookmark: Dict[str, Any]) -> str:
     if width:
         lines.append(f"Filter: {width}")
     tone_mode = bookmark.get("tone_mode")
+    cross = str(bookmark.get("cross_mode") or "")
     if tone_mode in ("Tone", "TSQL"):
         key = "rtone" if tone_mode == "Tone" else "ctone"
         lines.append(f"{tone_mode}: {_num(bookmark.get(key), 88.5):g} Hz")
     elif tone_mode == "Cross" and bookmark_tone_hz(bookmark):
-        cross = str(bookmark.get("cross_mode") or "")
         lines.append(f"Cross ({cross}): receives {bookmark_tone_hz(bookmark):g} Hz")
+    elif tone_mode == "Cross" and cross.endswith("->"):
+        # (A tone or code sent, none to receive: nothing unsupported.)
+        lines.append(f"Cross ({cross}): no receive squelch")
     elif tone_mode:
         # (DCS, reverse tone squelch...: heard without a squelch here.)
         lines.append(

@@ -438,6 +438,9 @@ class WindowScannerHost(ScannerHost):
             visit["width_hz"] = width or 10e3
         return visits
 
+    def scan_bookmark_order(self) -> List[int]:
+        return self._win._bookmarks_panel.list_order()
+
     def scan_bookmark_groups(self) -> List[str]:
         return self._win._bookmarks_panel.groups()
 

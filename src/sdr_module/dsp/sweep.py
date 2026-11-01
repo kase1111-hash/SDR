@@ -52,6 +52,10 @@ CHANNEL_STEP_HZ = 25e3
 PRESET_SNAP_HZ = 2.5e3
 CHANNEL_RASTER_HZ = 5e3
 RASTER_SNAP_HZ = 1.5e3
+# PMR446 and other 6.25 kHz plans put channels 1.25 kHz from a 5 kHz one
+# (446.00625 MHz): a reading much nearer such a channel than the 5 kHz one
+# isn't moved onto the 5 kHz raster (446.005 was 1.25 kHz off the channel).
+OFFSET_RASTER_HZ = 6.25e3
 #: The built-in channels a reading snaps to: not a band's own preset (FM
 #: broadcast, ISM), nor a narrower channel's (SSB, CW), whose signal lies
 #: beside its dial frequency, or must be tuned to the hertz.
@@ -299,7 +303,9 @@ def _channel_at(freq_hz: float) -> Optional[float]:
     band = band_for(freq)
     if band is not None and band.mode == "FM":
         channel = round(freq / CHANNEL_RASTER_HZ) * CHANNEL_RASTER_HZ
-        if abs(channel - freq) < RASTER_SNAP_HZ:
+        off = round(freq / OFFSET_RASTER_HZ) * OFFSET_RASTER_HZ
+        nearer_off = abs(off - freq) < abs(channel - freq) / 2
+        if abs(channel - freq) < RASTER_SNAP_HZ and not nearer_off:
             return float(channel)
     return None
 

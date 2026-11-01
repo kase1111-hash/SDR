@@ -2,7 +2,8 @@
 """
 What the check of the scan area's final fixes found: damaged saved
 bookmarks that still stopped the app starting or broke ``sdr-scan
-channels``.
+channels``, a bookmark scan that began in the middle of the list, PMR446
+results listed off their channel, and a tooltip that said too much.
 
 Each test failed before its fix.
 
@@ -23,6 +24,7 @@ from tests.test_gui_chrome import (  # noqa: E402
     _WindowTestCase,
     require_pyqt6,
 )
+from tests.test_gui_scanner import _ScanWindowCase  # noqa: E402
 
 if HAS_PYQT6:
     from PyQt6.QtWidgets import QApplication
@@ -209,6 +211,97 @@ class TestDamagedBookmarksStillList(unittest.TestCase):
         self.assertIn("5 channel(s)", out.getvalue())
         names = [c.name for c in read_chirp_csv(path, strict=False).channels]
         self.assertEqual(names, ["text shift", "big shift", "text fields", "ok"])
+
+
+# --------------------------------------------------------------------------- #
+# A bookmark scan begins where the list begins
+# --------------------------------------------------------------------------- #
+class TestBookmarkScanBeginsAtTheTopOfTheList(_ScanWindowCase):
+    demo = True
+
+    def setUp(self):
+        super().setUp()
+        bookmarks = self.win._bookmarks_panel
+        # Stored A, B (Skip), C, D; D is in a group, listed first.
+        for label, freq, group, skip in (
+            ("A", 100.1e6, "", ""),
+            ("B", 125.0e6, "", "S"),
+            ("C", 145.29e6, "", ""),
+            ("D", 162.4e6, "Wx", ""),
+        ):
+            index = bookmarks.add_bookmark(label, freq, "FM", "5 kHz")
+            if group:
+                bookmarks._bookmarks[index]["group"] = group
+            if skip:
+                bookmarks._bookmarks[index]["skip"] = skip
+        bookmarks._save()
+        listed = [bookmarks.bookmark(i)["label"] for i in bookmarks.list_order()]
+        self.assertEqual(listed, ["D", "A", "B", "C"])
+
+    def test_start_scan_begins_on_the_first_bookmark_listed(self):
+        panel = self.win._scanner_panel
+        panel.set_scan_mode("bookmarks")
+        self.assertTrue(panel.start_scan())
+        self.assertEqual(panel.engine.current.label, "D")
+        panel.stop_scan()
+
+    def test_from_here_on_one_marked_skip_begins_on_the_next_listed(self):
+        panel = self.win._scanner_panel
+        self.assertTrue(panel.scan_bookmarks_from(1))  # B, marked Skip
+        self.assertEqual(panel.engine.current.label, "C")
+        panel.stop_scan()
+        # On one that isn't: that one, as before.
+        self.assertTrue(panel.scan_bookmarks_from(0))
+        self.assertEqual(panel.engine.current.label, "A")
+        panel.stop_scan()
+
+
+# --------------------------------------------------------------------------- #
+# PMR446 (6.25 kHz off the 5 kHz raster) keeps its own frequency
+# --------------------------------------------------------------------------- #
+class TestPmr446ResultsStayOnTheirChannel(unittest.TestCase):
+    def test_a_reading_on_a_pmr446_channel_isnt_moved_to_the_5_khz_raster(self):
+        from sdr_module.dsp.sweep import report_frequency
+
+        # Channel 1 (446.00625) and 2 (446.01875) were listed 1.25 kHz off,
+        # at 446.005 and 446.020; to the kHz they are 446.006 and 446.019.
+        self.assertEqual(report_frequency(446.00625e6, 8e3, 12.5e3), 446.006e6)
+        self.assertEqual(report_frequency(446.01875e6, 8e3, 12.5e3), 446.019e6)
+        self.assertEqual(report_frequency(446.0066e6, 8e3, 12.5e3), 446.007e6)
+
+    def test_5_khz_channels_still_snap(self):
+        from sdr_module.dsp.sweep import report_frequency
+
+        self.assertEqual(report_frequency(145.0488e6, 8e3, 12.5e3), 145.05e6)
+        self.assertEqual(report_frequency(146.9389e6, 10e3, 12.5e3), 146.94e6)
+        self.assertEqual(report_frequency(146.5342e6, 10e3, 12.5e3), 146.535e6)
+        self.assertEqual(report_frequency(446.0256e6, 10e3, 12.5e3), 446.025e6)
+
+
+# --------------------------------------------------------------------------- #
+# A Cross channel that sends a tone but receives without one
+# --------------------------------------------------------------------------- #
+class TestCrossToneTooltip(unittest.TestCase):
+    def test_a_cross_channel_without_a_receive_squelch_says_so(self):
+        require_pyqt6(self)
+        from sdr_module.gui import bookmarks_panel
+
+        for cross in ("Tone->", "DTCS->"):
+            tip = bookmarks_panel._tooltip(
+                {
+                    "label": "x",
+                    "freq_hz": 146.94e6,
+                    "tone_mode": "Cross",
+                    "cross_mode": cross,
+                }
+            )
+            self.assertNotIn("not supported", tip, cross)
+            self.assertIn(f"Cross ({cross}): no receive squelch", tip)
+        # One receiving with a DCS code: not supported here, as before.
+        tip = bookmarks_panel._tooltip(
+            {"label": "x", "freq_hz": 1e8, "tone_mode": "Cross", "cross_mode": "->DTCS"}
+        )
+        self.assertIn("not supported here", tip)
 
 
 if __name__ == "__main__":

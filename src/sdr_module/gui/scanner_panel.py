@@ -288,6 +288,11 @@ class ScannerHost(ScanHost):
         :func:`~sdr_module.gui.scan_engine.bookmark_scan_list`)."""
         return []
 
+    def scan_bookmark_order(self) -> List[int]:
+        """Every bookmark's index in the order the list shows them (the
+        order a bookmark scan visits them); [] when it is the stored one."""
+        return []
+
     def scan_bookmark_groups(self) -> List[str]:
         return []
 
@@ -1346,9 +1351,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         else:
             self.start_scan()
 
-    def start_scan(self, start_index: int = 0) -> bool:
+    def start_scan(self, start_index: Optional[int] = None) -> bool:
         """Start a scan with the panel's settings (``start_index``: the
-        bookmark a bookmark scan starts at). False if it can't.
+        bookmark a bookmark scan starts at, else the first one the list
+        shows). False if it can't.
 
         A scan running (Scan Bookmarks from Here during a sweep) is
         replaced: the receiver stays where it is meanwhile, and goes back
@@ -1367,7 +1373,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             self._host.scan_end(stay=False)  # back where the first began
         return False
 
-    def _launch(self, start_index: int, begin: bool) -> bool:
+    def _launch(self, start_index: Optional[int], begin: bool) -> bool:
         """:meth:`start_scan`'s work; ``begin``: the host remembers where
         the receiver is now (else where the scan replaced began)."""
         host = self._host
@@ -1388,19 +1394,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         if mode == "bookmarks":
             visits = [dict(visit) for visit in self._bookmark_visits()]
             settings.bookmarks = visits
-            # (Scan from Here: that bookmark; one marked Skip, the next one
-            # stored after it. The visits are in the list's order.)
-            settings.start_index = next(
-                (i for i, v in enumerate(visits) if v.get("index", -1) == start_index),
-                next(
-                    (
-                        i
-                        for i, v in enumerate(visits)
-                        if v.get("index", -1) >= start_index
-                    ),
-                    0,
-                ),
-            )
+            if start_index is not None:  # (else the first one listed)
+                settings.start_index = self._first_visit(visits, start_index)
         else:
             sweep, note = self._planned_sweep()
             if sweep is None:  # (checked above)
@@ -1449,6 +1444,26 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._on_engine_state()
         self._reveal_results()
         return True
+
+    def _first_visit(self, visits: List[Dict[str, Any]], index: int) -> int:
+        """Where in ``visits`` (in the list's order) a scan from bookmark
+        ``index`` begins: on it, or, when it is marked Skip, on the next
+        one the list shows after it (the first one past the end)."""
+        for i, visit in enumerate(visits):
+            if visit.get("index", -1) == index:
+                return i
+        # (A host without the list's order: as stored.)
+        order = getattr(self._host, "scan_bookmark_order", lambda: [])() or []
+        listed = {stored: place for place, stored in enumerate(order)}
+        start = listed.get(index, index)
+        return next(
+            (
+                i
+                for i, visit in enumerate(visits)
+                if listed.get(visit.get("index", -1), visit.get("index", -1)) >= start
+            ),
+            0,
+        )
 
     def _scroll_area(self) -> Optional["QScrollArea"]:
         area = self.parentWidget()

@@ -520,3 +520,61 @@ class TestThePresetsDecoderNoteStays(_FilesCase):
         self.assertTrue(win._apply_preset_named("ACARS"))
         win.set_frequency(125e6)  # (no band plan line: the note stands)
         self.assertTrue(self.message().startswith("ACARS decoder off: tuned away"))
+
+
+def _scan_window_case():
+    from tests.test_gui_scanner import _ScanWindowCase
+
+    return _ScanWindowCase
+
+
+class TestATuneDuringAScanSaysBoth(_scan_window_case()):
+    """P-08: with the Scanner tab out of sight, a preset or a bookmark tuned
+    from another tab said its message ("ADS-B: 1090.000 MHz ... · ADS-B
+    decoder on", the band plan's line), and the next frame replaced it with
+    "Scan stopped: you tuned to 1090.000 MHz.". One message says both."""
+
+    def setUp(self):
+        super().setUp()
+        win, panel = self.win, self.win._scanner_panel
+        panel._confirm_long_scan = lambda *_args: True
+        panel._preset.setCurrentIndex(1)
+        panel.set_scan_mode("continuous")
+        self.assertTrue(panel.start_scan())
+        win._show_panel("info")  # (the Scanner tab out of sight)
+        self.frames(0.2)
+        self.assertTrue(panel.engine.active)
+
+    def history(self):
+        return [entry.text for entry in self.win._status_history.entries()]
+
+    def test_a_preset(self):
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ADS-B"))
+        said = win._message_label.text()
+        self.assertIn("ADS-B decoder on", said)
+        self.frames(0.1)
+        self.assertFalse(win._scanner_panel.engine.active)
+        self.assertEqual(win._message_label.text(), f"Scan stopped · {said}")
+        # (Each in the status history once, as it was said.)
+        history = self.history()
+        self.assertIn("Scan stopped: you tuned to 1090.000 MHz.", history)
+        self.assertIn(said, history)
+        self.assertNotIn(f"Scan stopped · {said}", history)
+
+    def test_a_bookmark(self):
+        win = self.win
+        win._on_bookmark_tune(100.1e6, "Local FM")
+        said = win._message_label.text()
+        self.assertTrue(said)
+        self.frames(0.1)
+        self.assertFalse(win._scanner_panel.engine.active)
+        self.assertEqual(win._message_label.text(), f"Scan stopped · {said}")
+
+    def test_a_tune_that_says_nothing_says_the_scan_stopped(self):
+        win = self.win
+        win.set_frequency(144.39e6)  # (as a click on the plots: no message)
+        self.frames(0.1)
+        self.assertEqual(
+            win._message_label.text(), "Scan stopped: you tuned to 144.390 MHz."
+        )

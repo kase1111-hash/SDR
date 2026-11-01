@@ -2525,6 +2525,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # ...") and its point ("ACARS decoder off"), which the same tune's next
     # message keeps (see _keeping_release_note).
     _released_decoder: Optional[Tuple[str, str]] = None
+    # Status messages shown so far, and how many there were at the last
+    # tune: those after it are the tune's own (a scan it stops adds to
+    # them, see _scan_frame).
+    _status_count = 0
+    _tune_status_count = 0
     # Why the last tune was refused (the status line says so until a tune
     # goes through).
     _tuning_refusal: Optional[str] = None
@@ -4508,6 +4513,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 a notice that is no problem ("Recording paused", "Recording
                 armed...", what to do first): only problems are listed there.
         """
+        self._status_count += 1
         self._message_label.setText(message)
         self._message_label.setToolTip(
             f"{message}\n\nClick for the last {STATUS_HISTORY_SIZE} messages."
@@ -5753,6 +5759,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         station starts over (its RDS name, the S-meter peak, the tuner's
         seek and STEREO lamp, Identify and Track Signal themselves).
         """
+        # (Messages from here on are this tune's own: see _scan_frame.)
+        self._tune_status_count = self._status_count
         # The readout, and the channel marked on the plots (their axes follow
         # the LO, see _retune_lo)
         self._freq_label.setText(format_frequency(freq_hz))
@@ -10884,11 +10892,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         tuned = self._current_frequency()
         if host.expected_hz is not None and abs(tuned - host.expected_hz) > 1.0:
+            label = self._message_label
+            # What the tune said itself (a preset's message, the band plan's
+            # line, "Tuned to ..."), if anything.
+            own = label.text() if self._status_count > self._tune_status_count else ""
+            tone = label.property("tone")
             panel.stop_scan(
                 f"Scan stopped: you tuned to {format_frequency(tuned)}.",
                 "info",
                 stay=True,
             )
+            if own and label.text() != own:
+                # The scan's message (from another tab) replaced it on the
+                # next frame: one message says both (P-08). (Each is in the
+                # status history as it was said.)
+                both = f"Scan stopped · {own}"
+                self._show_status_message(both, tone, 6000, history=False, log=False)
+                note = self._band_plan_note
+                if note is not None and note[0] == own:
+                    self._band_plan_note = (both, note[1])  # (cleared as it was)
             return
         if self._recording:
             panel.stop_scan(

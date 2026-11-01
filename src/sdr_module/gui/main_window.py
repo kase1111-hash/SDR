@@ -2530,10 +2530,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # replace it keeps, once (see _keeping_release_note).
     _released_decoder: Optional[Tuple[str, str]] = None
     # Status messages shown so far, and how many there were at the last
-    # tune: those after it are the tune's own (a scan it stops adds to
-    # them, see _scan_frame).
+    # tune and when it was done (back in the event loop, or at the next
+    # frame at the latest): those in between are the tune's own (a scan it
+    # stops adds to them, see _scan_frame), not those of something else
+    # since (N-08).
     _status_count = 0
     _tune_status_count = 0
+    _tune_status_end: Optional[int] = None
+    # The decoder and rate a decoder's problem was logged for, and for which
+    # of a recording (True) or the device (False): the same again isn't
+    # logged again (N-05). (A set of its own for each decoder and rate, see
+    # _on_decoder_protocol_changed.)
+    _decoder_logged: Tuple[Any, Any] = (None, frozenset())
     # Why the last tune was refused (the status line says so until a tune
     # goes through).
     _tuning_refusal: Optional[str] = None
@@ -5342,6 +5350,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # "Off" (or unknown): no live decoder.
             self._decoder = None
             self._decoder_protocol = None
+            self._decoder_logged = (None, frozenset())  # (chosen again: said)
             self._decoder_panel.set_decoder_status(None)
             self._update_decoder_chip()
             return
@@ -5355,6 +5364,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # can't be changed in Receiver > Sample rate.)
         playback = self._own("_playback")
         self._decoder_recording = bool(playback is not None and playback.active)
+        # Its problem is logged once per decoder and rate, for a recording
+        # and for the device: a recording starting or stopping at the same
+        # rate rebuilds it (to word it for that), and the same situation
+        # again added another entry each time (N-05).
+        if self._decoder_logged[0] != (text, rate):
+            self._decoder_logged = ((text, rate), set())
+        logged = self._decoder_logged[1]
+        first = self._decoder_recording not in logged
         if live_decoder_class(text) is None:
             # Listed, but without a live decoder (yet).
             self._decoder = None
@@ -5380,7 +5397,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 LiveDecoderStatus(name=text, problem=problem)
             )
             self._update_decoder_chip()  # (no decoder runs: no chip)
-            self._show_status_error(problem)  # (also logged)
+            self._show_status_error(problem, log=first)  # (also logged)
+            logged.add(self._decoder_recording)
             return
         self._decoder_error_logged = False
         status = self._decoder.status
@@ -5390,7 +5408,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # E.g. ADS-B at 1.8 MS/s: say so instead of "listening" forever.
             # (Paused, as tuning away from the preset that turned it on
             # leaves it, nothing decodes: the Decoder panel's line says it.)
-            logger.warning("%s decoder: %s", text, status.problem)
+            if first:
+                logger.warning("%s decoder: %s", text, status.problem)
+                logged.add(self._decoder_recording)
             remedy = f" {status.remedy}" if status.remedy else ""
             self._show_status_message(  # (logged just above: listed once)
                 f"{status.problem}.{remedy}", "warning", 10000, log=False
@@ -5763,8 +5783,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         station starts over (its RDS name, the S-meter peak, the tuner's
         seek and STEREO lamp, Identify and Track Signal themselves).
         """
-        # (Messages from here on are this tune's own: see _scan_frame.)
+        # (Messages from here on are this tune's own, until it is done: see
+        # _scan_frame.)
         self._tune_status_count = self._status_count
+        self._tune_status_end = None
+        QTimer.singleShot(0, self._tune_said)
         # The readout, and the channel marked on the plots (their axes follow
         # the LO, see _retune_lo)
         self._freq_label.setText(format_frequency(freq_hz))
@@ -8469,8 +8492,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "lower sample rate (Receiver > Sample rate) helps."
         )
 
+    def _tune_said(self) -> None:
+        """The last tune is done: what it said is said (the messages after
+        this aren't its own, see _scan_frame)."""
+        if self._tune_status_end is None:
+            self._tune_status_end = self._status_count
+
     def _process_block(self, samples: np.ndarray) -> None:
         """Plots, level, audio, recording, S-meter and decoder for one frame."""
+        self._tune_said()  # (a frame comes after the tune, whatever it said)
         # Remove DC spike / Balance I/Q (Receiver group), when switched on;
         # a recording keeps the raw samples.
         raw = samples
@@ -9233,6 +9263,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         job = self._busy_job_now()
         if job:  # (this app's own job, not the device: P-04)
             return f"{job} keeps this computer busy, so audio is paused meanwhile."
+        if self._playback.active:
+            # (A recording's rate can't be changed while it plays: no advice
+            # to lower it. N-02)
+            if self._pacer.overloaded:
+                return (
+                    "This computer can't process the recording's "
+                    f"{format_rate(self._device_sample_rate())} in real time "
+                    "right now, so audio is paused until it catches up. "
+                    "Closing other programs may help."
+                )
+            return (
+                "The recording isn't playing in real time right now, so audio "
+                "is paused until it catches up."
+            )
         if self._demo_mode:
             return (
                 "The demo device can't keep up in real time right now, so "
@@ -10898,8 +10942,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if host.expected_hz is not None and abs(tuned - host.expected_hz) > 1.0:
             label = self._message_label
             # What the tune said itself (a preset's message, the band plan's
-            # line, "Tuned to ..."), if anything.
-            own = label.text() if self._status_count > self._tune_status_count else ""
+            # line, "Tuned to ..."), if anything: not a message something
+            # else posted since (N-08).
+            end = self._tune_status_end
+            said = self._status_count > self._tune_status_count
+            said = said and (end is None or self._status_count <= end)
+            own = label.text() if said else ""
             tone = label.property("tone")
             panel.stop_scan(
                 f"Scan stopped: you tuned to {format_frequency(tuned)}.",
@@ -12053,8 +12101,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if frame is None:
             return  # less than one FFT of samples yet (a large FFT size)
         self._spectrum.update_spectrum(frame.mean_db)
+        # (While this computer can't keep up, a frame's length isn't the
+        # usual one: its row is coloured like the others, but doesn't set
+        # how bright their noise shows. N-07)
         self._waterfall.add_line(
-            frame.max_db, timestamp=stamp, noise_db=frame.noise_floor_db
+            frame.max_db,
+            timestamp=stamp,
+            noise_db=frame.noise_floor_db,
+            usual=not self._pacer.overloaded,
         )
 
     def _plot_time(self, count: int, rate: float) -> float:

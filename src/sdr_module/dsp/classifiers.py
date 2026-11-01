@@ -1302,6 +1302,7 @@ class SignalClassifier:
             "mean_freq_hz": 0.0,
             "freq_dev_hz": 0.0,
             "freq_peak_hz": 0.0,
+            "freq_p95_hz": 0.0,
             "freq_noise_hz": 0.0,
             "fm_index": 0.0,
             "freq_bimodality": 0.0,
@@ -1348,15 +1349,18 @@ class SignalClassifier:
             wsum = float(np.sum(weight))
         # The peak swing (for the FM deviation to listen with): where 99.5 %
         # of the weight is, on the averaged discriminator (its noise mostly
-        # averaged out; what is left is taken off).
+        # averaged out; what is left is taken off). And the swing exceeded
+        # 5 % of the time: near the peak for a tone, well below it for
+        # voice (what a deviation clips more than 5 % of the time).
         mag = np.abs(step)
         order = np.argsort(mag)
         cum = np.cumsum(weight[order])
         if len(cum) and cum[-1] > 0:
-            at = int(np.searchsorted(cum, 0.995 * cum[-1]))
-            peak = float(mag[order[min(at, len(order) - 1)]])
             left = 3.0 * out["freq_noise_hz"] / max(span, 1)
-            out["freq_peak_hz"] = math.sqrt(max(peak * peak - left * left, 0.0))
+            for key, share in (("freq_peak_hz", 0.995), ("freq_p95_hz", 0.95)):
+                at = int(np.searchsorted(cum, share * cum[-1]))
+                level = float(mag[order[min(at, len(order) - 1)]])
+                out[key] = math.sqrt(max(level * level - left * left, 0.0))
         var_s = float(np.sum(weight * step * step)) / wsum
         if var_s > 1e-12:
             m3 = float(np.sum(weight * step**3)) / wsum

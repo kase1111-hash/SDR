@@ -1367,3 +1367,55 @@ class TestTrackSignalAtTheEdgeOfATake(_FilesCase):
         self.assertIn("I/Q recording", self.message())
         self.assertEqual(win._lo_frequency(), lo)
         win._toggle_recording(False)
+
+
+class TestTheOtherKindWaitsForTheReceiver(_FilesCase):
+    """REC-E2E-12's line for the other kind said "● Recording I/Q 00:00" in
+    red while that recording waited for the receiver (REC WAITING)."""
+
+    def test_an_iq_take_waiting(self):
+        win = self.win
+        panel = win._control_panel
+        win._record_action.trigger()
+        win._update_display()
+        win._stop_acquisition()  # REC WAITING
+        panel.set_record_kind("audio")
+        self.assertEqual(
+            panel._record_status.text(),
+            "◌ I/Q recording waiting (Ctrl+Shift+R stops it)",
+        )
+        self.assertEqual(panel._record_status.property("tone"), "warning")
+        win._start_acquisition()
+        win._update_display()
+        win._update_recording_status()
+        self.assertTrue(panel._record_status.text().startswith("● Recording I/Q"))
+        self.assertEqual(panel._record_status.property("tone"), "danger")
+        panel.set_record_kind("iq")
+        win._record_action.trigger()
+
+    def test_an_armed_iq_take(self):
+        win = self.win
+        panel = win._control_panel
+        win._stop_acquisition()
+        win._record_action.trigger()  # armed
+        panel.set_record_kind("audio")
+        self.assertEqual(
+            panel._record_status.text(),
+            "◌ I/Q recording armed (Ctrl+Shift+R stops it)",
+        )
+        panel.set_record_kind("iq")
+        win._record_action.trigger()
+
+    def test_an_audio_recording_waiting(self):
+        win = self.win
+        panel = win._control_panel
+        self.store.values["recording/folder"] = self.folder
+        win._record_audio_action.trigger()
+        win._update_display()
+        win._stop_acquisition()
+        win._update_audio_recording_status()
+        text = panel._record_status.text()
+        self.assertTrue(text.startswith("◌ Audio recording "), text)
+        self.assertIn("(Ctrl+Shift+A stops it)", text)
+        self.assertEqual(panel._record_status.property("tone"), "warning")
+        win._record_audio_action.trigger()

@@ -4502,14 +4502,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         recording of the other kind is named in its status line, with how
         to stop it (it said "Ready" while audio recorded)."""
         text, tone = "", "danger"
+        # (As the group's own line: paused, armed or waiting for the
+        # receiver in the warning tone; red only while it captures.)
+        receiving = self._is_running and self._device is not None
         if self._record_kind() == "audio":
             if not self._recording:
                 pass
-            elif self._capture_pending:
-                text = "◌ I/Q recording armed (Ctrl+Shift+R stops it)"
-                tone = "warning"
             elif self._recording_paused:
                 text = "❚❚ I/Q recording paused (Ctrl+Shift+R stops it)"
+                tone = "warning"
+            elif not receiving:
+                state = "armed" if self._capture_pending else "waiting"
+                text = f"◌ I/Q recording {state} (Ctrl+Shift+R stops it)"
                 tone = "warning"
             else:
                 text = (
@@ -4518,10 +4522,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 )
         else:
             take = getattr(self, "_audio_take", None)
-            if take is not None and take.paused:
+            if take is None:
+                pass
+            elif take.paused:
                 text = "❚❚ Audio recording paused (Ctrl+Shift+A stops it)"
                 tone = "warning"
-            elif take is not None:
+            elif not receiving:
+                state = "waiting" if take.samples else "armed"
+                text = f"◌ Audio recording {state} (Ctrl+Shift+A stops it)"
+                tone = "warning"
+            else:
                 text = (
                     f"● Recording audio {_clock_text(take.seconds)} "
                     "(Ctrl+Shift+A stops it)"

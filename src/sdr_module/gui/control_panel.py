@@ -1455,12 +1455,14 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         )
         self._add_row(form, "Audio AGC:", self._audio_agc_combo)
 
-        # The notch (K-A1): Off, Auto or Manual, with Manual's frequency
-        # next to it; Auto shows the whistle it removes in the same place.
+        # The notch (K-A1): Off, Auto or Manual; under it, in Auto and
+        # Manual, the whistle: Manual's frequency, or the one Auto removes
+        # (a row of its own: beside the choice it widened the column).
         self._notch_combo = self._shrinkable_combo(_ValueComboBox(), 6)
         for key, text, tip in NOTCH_CHOICES:
             self._notch_combo.add_value(key, text, tip)
         self._notch_combo.setAccessibleName("Notch")
+        self._add_row(form, "Notch:", self._notch_combo)
         self._notch_spin = QSpinBox()
         self._notch_spin.setRange(*NOTCH_RANGE_HZ)
         self._notch_spin.setValue(DEFAULT_NOTCH_HZ)
@@ -1483,12 +1485,12 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         notch_row = QWidget()
         row = QHBoxLayout(notch_row)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(6)
-        row.addWidget(self._notch_combo, 1)
         row.addWidget(self._notch_stack)
-        notch_label = self._add_row(form, "Notch:", notch_row)
-        notch_label.setBuddy(self._notch_combo)
+        row.addStretch(1)
+        whistle_label = self._add_row(form, "Whistle:", notch_row)
+        whistle_label.setBuddy(self._notch_spin)
         self._notch_row = notch_row
+        form.setRowVisible(notch_row, False)  # (Off)
         self._notch_combo.currentIndexChanged.connect(self._on_notch_changed)
         self._notch_spin.valueChanged.connect(self._on_notch_changed)
         self.show_notch_found(None)
@@ -2428,6 +2430,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._notch_stack.setCurrentWidget(
             self._notch_found if mode == "auto" else self._notch_spin
         )
+        self._audio_form.setRowVisible(self._notch_row, mode != "off")
         self._notch_combo.setToolTip(
             why
             or "Removes a whistle (a heterodyne) from the audio. Auto finds the "
@@ -2466,7 +2469,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     def show_notch_found(self, hz: Optional[float]) -> None:
         """Auto's readout: the whistle it removes (Hz), or None."""
         if hz is None:
-            text = "No whistle"
+            text = "None"
             tip = (
                 "Auto hears no steady whistle on the channel: the audio plays "
                 "as it is. It finds one within about half a second."

@@ -119,6 +119,42 @@ class TestNotchControls(_WindowTestCase):
         p.set_notch_mode("auto")
         self.assertFalse(p._notch_spin.isVisible() and spin.isEnabled())
 
+    def test_it_takes_no_width_from_the_right_column(self):
+        """At 1024 px the right column is 400 px wide: the frequency box
+        beside the Notch choice made the control panel 404 px. The row
+        with the whistle (Manual's frequency, or the one Auto removes) is
+        under the choice, about as wide as the Audio group's lists, and
+        shows in Auto and Manual only."""
+        from sdr_module.gui import themes
+
+        p = self.panel
+        form = p._audio_form
+        self.assertFalse(form.isRowVisible(p._notch_row))
+        for mode in ("auto", "manual"):
+            p.set_notch_mode(mode)
+            self.assertTrue(form.isRowVisible(p._notch_row), mode)
+        p.set_notch_mode("off")
+        self.assertFalse(form.isRowVisible(p._notch_row))
+        qapp = QApplication.instance()
+        old_sheet, old_palette = qapp.styleSheet(), qapp.palette()
+        old_theme = themes.current_theme()
+        try:
+            for theme in (None, *themes.THEMES):
+                if theme is not None:
+                    themes.apply_theme(qapp, theme)
+                for mode in ("auto", "manual"):
+                    p.set_notch_mode(mode)
+                    self.settle(3)
+                    widest = p._nr_combo.minimumSizeHint().width()
+                    for field in (p._notch_combo, p._notch_row):
+                        width = field.minimumSizeHint().width()
+                        self.assertLessEqual(width, widest + 6, (theme, mode))
+                    self.assertLessEqual(p.minimumSizeHint().width(), 400, theme)
+        finally:
+            qapp.setStyleSheet(old_sheet)
+            qapp.setPalette(old_palette)
+            themes.apply_theme(None, old_theme)
+
     def test_only_where_it_applies(self):
         p, win = self.panel, self.win
         for mode in ("AM", "USB", "LSB", "CW"):

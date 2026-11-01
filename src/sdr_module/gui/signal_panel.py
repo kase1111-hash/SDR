@@ -100,6 +100,11 @@ OVERLAYS: Tuple[Tuple[str, Any], ...] = (
 )
 #: Time spans of the scope (ms).
 SCOPE_SPANS_MS = (1.0, 5.0, 20.0, 100.0)
+#: The Bursts list's empty state while it watches.
+BURSTS_EMPTY = (
+    "No bursts yet\nTransmissions that start and stop in the span are listed "
+    "here, e.g. at 433.92 MHz."
+)
 
 
 def format_mhz(freq_hz: float) -> str:
@@ -1124,10 +1129,7 @@ if HAS_PYQT6:
             )
             self.burst_details.setAccessibleName("Burst details")
             layout.addWidget(self.burst_details)
-            self.set_bursts_empty(
-                "No bursts yet\nTransmissions that start and stop in the span "
-                "are listed here, e.g. at 433.92 MHz."
-            )
+            self.set_bursts_empty(BURSTS_EMPTY)
             index = self.tabs.addTab(page, _PAGE_TITLES["bursts"])
             self.tabs.setTabToolTip(
                 index, "Transmissions that come and go in the span, taken apart"

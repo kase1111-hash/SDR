@@ -10530,12 +10530,24 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         for timer in (self._display_timer, self._status_timer, self._hotplug_timer):
             timer.stop()
         self._audio.stop()
+
+        def quietly(step: Any) -> None:
+            # Each step runs whatever the one before did: an error is
+            # logged (Error History), never left to skip closing the device.
+            try:
+                step()
+            except Exception:
+                logger.exception("Closing: %s failed", getattr(step, "__name__", ""))
+
         # Stops receiving and closes the device; a failing close() is logged
         # instead of leaving the window impossible to close.
-        self._release_device()
+        quietly(self._release_device)
+        device = self._device
+        if device is not None:  # (it stopped half way: close it all the same)
+            quietly(device.close)
         # Saved or declined by now: delete the temporary recording file.
-        self._samples_buffer.discard()
-        self._frame_spectrum.close()  # (its FFT helper thread)
+        quietly(self._samples_buffer.discard)
+        quietly(self._frame_spectrum.close)  # (its FFT helper thread)
 
         logger.info("Application closing")
         event.accept()

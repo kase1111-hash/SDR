@@ -67,6 +67,12 @@ FORGET_S = 10.0
 #: Bursts waiting for their analysis (a busy band): beyond this many, a
 #: burst is listed without one rather than late.
 MAX_PENDING_BURSTS = 8
+#: The most of the receiver's time the bursts worker may spend taking
+#: bursts apart (over the last few seconds of signal): beyond it, and while
+#: the display loop can't keep up, a burst is listed without its analysis,
+#: so the worker never starves the plots and the audio.
+ANALYSIS_SHARE = 0.25
+_ANALYSIS_WINDOW_S = 4.0
 #: Broadcast FM: wide deviations Track Signal leaves alone.
 _BROADCAST_DEVIATION_HZ = 50e3
 
@@ -80,7 +86,7 @@ def _format_offset(hz: float) -> str:
 
 if HAS_PYQT6:
 
-    from .signal_panel import tune_frequency
+    from .signal_panel import BURSTS_EMPTY, tune_frequency
     from .themes import set_role, set_tone
 
     class SignalTools(QObject):
@@ -118,6 +124,9 @@ if HAS_PYQT6:
                 max_workers=1, thread_name_prefix="bursts"
             )
             self._burst_jobs: Deque[Tuple[Future, BurstReport, float]] = deque()
+            # (signal time, seconds) of the analyses done lately.
+            self._analysis_cost: Deque[Tuple[float, float]] = deque()
+            self._bursts_paused = False  # (the display loop is behind)
             self._burst_timer = QTimer(self)
             self._burst_timer.setInterval(100)
             self._burst_timer.timeout.connect(self._collect_bursts)
@@ -130,6 +139,7 @@ if HAS_PYQT6:
             self._afc_badge: Optional[QLabel] = None
             # A recording's signals (Find Signals in Recording).
             self._survey_options: Any = None
+            self._shut = False  # the window closed: nothing more to do
             self._connect()
 
         # -- wiring ------------------------------------------------------------------
@@ -165,13 +175,17 @@ if HAS_PYQT6:
         def shutdown(self) -> None:
             """The window closes: no more work in the background, and no
             more signals from the panel (its widgets emit some while Qt
-            deletes them, when nothing of theirs may be touched)."""
+            deletes them, when nothing of theirs may be touched). A burst
+            in progress is dropped: the receiver stopping later (the
+            device closing) has nothing left to hand the closed worker."""
+            self._shut = True
             self._identifier = None
             self._tracking = False
             self._pool.shutdown(wait=False, cancel_futures=True)
             self._burst_timer.stop()
             self._burst_jobs.clear()
             self._burst_pool.shutdown(wait=False, cancel_futures=True)
+            self._watcher.reset()
             for obj in [self.panel, *self.panel.findChildren(QObject)]:
                 obj.blockSignals(True)
 
@@ -185,6 +199,8 @@ if HAS_PYQT6:
             chain: Any,
         ) -> None:
             """One block of the receiver (from the window's display loop)."""
+            if self._shut:
+                return
             now = time.monotonic()
             dt = 1.0 / 30.0
             rate = float(self._win._device_sample_rate())
@@ -202,7 +218,7 @@ if HAS_PYQT6:
 
         def sync_state(self, running: bool, has_device: bool) -> None:
             """The receiver started, stopped or the device changed."""
-            if running:
+            if running or self._shut:
                 return
             if self._identifier is not None:
                 self._identifier = None
@@ -598,6 +614,22 @@ if HAS_PYQT6:
                     self._queue_bursts(self._watcher.flush())
                 return
             win = self._win
+            if getattr(getattr(win, "_pacer", None), "overloaded", False):
+                # One block a frame, a few per cent of the signal: bursts
+                # would be cut up or missed, and their times wrong. Paused
+                # until the display loop keeps up, then watched afresh.
+                if not self._bursts_paused:
+                    self._bursts_paused = True
+                    self._queue_bursts(self._watcher.flush())
+                    self._watcher.reset()
+                    self.panel.set_bursts_empty(
+                        "Paused: this computer can't keep up right now\nBursts "
+                        "are logged again as soon as it catches up."
+                    )
+                return
+            if self._bursts_paused:
+                self._bursts_paused = False
+                self.panel.set_bursts_empty(BURSTS_EMPTY)
             reports = self._watcher.feed(samples, float(win._lo_frequency()), rate)
             self._queue_bursts(reports)
 
@@ -605,6 +637,8 @@ if HAS_PYQT6:
             """Take the finished bursts apart on the bursts worker (it takes
             50-200 ms each, too long for the display loop); they are listed
             in order as their analyses come back."""
+            if self._shut:
+                return  # (the worker is closed: the window is closing)
             for report in reports:
                 burst = report.burst
                 if burst.duration_s < 0.02 and burst.snr_db < 15:
@@ -612,26 +646,52 @@ if HAS_PYQT6:
                 # The list's Time is when it started, not when it was done.
                 ago = max(0.0, self._watcher.time_s - burst.start_s)
                 when = time.time() - ago
-                job: Future
-                if len(self._burst_jobs) < MAX_PENDING_BURSTS:
-                    job = self._burst_pool.submit(analyze_report, report)
-                else:
-                    job = Future()  # a busy band: listed now, not taken apart
-                    job.set_result(report)
+                job: Optional[Future] = None
+                if report.samples is not None and self._may_analyze():
+                    try:
+                        job = self._burst_pool.submit(_timed_analysis, report)
+                    except RuntimeError:  # pragma: no cover - (shut down)
+                        job = None
+                if job is None:
+                    # A busy band, or a busy computer: listed now, not taken
+                    # apart.
+                    job = Future()
+                    job.set_result(0.0)
                 self._burst_jobs.append((job, report, when))
             if self._burst_jobs:
                 self._collect_bursts()
                 if self._burst_jobs and not self._burst_timer.isActive():
                     self._burst_timer.start()
 
+        def _may_analyze(self) -> bool:
+            """Whether the next burst may be taken apart (see
+            :data:`ANALYSIS_SHARE`)."""
+            if len(self._burst_jobs) >= MAX_PENDING_BURSTS:
+                return False
+            pacer = getattr(self._win, "_pacer", None)
+            if getattr(pacer, "overloaded", False):
+                return False  # the display loop is behind: no more work
+            now = self._watcher.time_s
+            cost = self._analysis_cost
+            while cost and now - cost[0][0] > _ANALYSIS_WINDOW_S:
+                cost.popleft()
+            spent = sum(seconds for _t, seconds in cost)
+            return spent < ANALYSIS_SHARE * _ANALYSIS_WINDOW_S
+
         def _collect_bursts(self) -> None:
             """List the bursts whose analysis came back, oldest first."""
             while self._burst_jobs and self._burst_jobs[0][0].done():
                 job, report, when = self._burst_jobs.popleft()
                 try:
-                    job.result()
+                    seconds = float(job.result() or 0.0)
                 except Exception as exc:  # pragma: no cover - a bonus only
                     logger.warning("Taking a burst apart failed: %s", exc)
+                    seconds = 0.0
+                if seconds > 0.0:
+                    self._analysis_cost.append((self._watcher.time_s, seconds))
+                # The list keeps what was learned, not the burst's samples
+                # (up to a few MB each).
+                report.samples = None
                 self.panel.add_burst(report, when)
             if not self._burst_jobs:
                 self._burst_timer.stop()
@@ -961,6 +1021,15 @@ if HAS_PYQT6:
                 win._set_demod_mode(mode, None, text)
                 if win._channel_fits(offset_hz, rate=float(options.sample_rate)):
                     return
+
+
+def _timed_analysis(report: BurstReport) -> float:
+    """Take a burst apart (on the bursts worker); returns the processor
+    time it took (s): what it took from the display loop, however busy
+    the computer is."""
+    start = time.thread_time()
+    analyze_report(report)
+    return max(1e-6, time.thread_time() - start)
 
 
 def _mhz(freq_hz: float) -> str:

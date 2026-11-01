@@ -295,6 +295,37 @@ class TestReceiverChainStereo(unittest.TestCase):
         np.testing.assert_array_equal(mono, mono_before)
         np.testing.assert_allclose(both.mean(axis=1), mono, atol=1e-6)
 
+    def test_stereo_back_on_mid_stream_lines_up(self):
+        # Switched off and on again, the difference signal's filters start
+        # afresh beside a mono stream that kept running: they take its
+        # decimation phases and the resampler's time (frames of an odd
+        # size leave them anywhere), or the two come out of step and left
+        # and right only 30-45 dB apart (60-80 dB here).
+        for rate in (1.024e6, 2.4e6):
+            with self.subTest(rate=rate):
+                chain = _chain(rate)
+                iq = self._station(rate, seconds=0.8)
+                block = int(rate / 30) + 777
+                pairs, stopped = [], []
+                for start in range(0, len(iq), block):
+                    chain.stereo = not 0.15 <= start / rate < 0.3
+                    audio = chain.demodulate(
+                        chain.channelize(iq[start : start + block]), 75e3
+                    )
+                    if not chain.stereo:
+                        stopped.append(chain.stereo_decoder is None)
+                    pair = chain.stereo_audio
+                    pairs.append(np.stack((audio, audio), 1) if pair is None else pair)
+                self.assertTrue(any(stopped))  # (so it started over)
+                tail = np.concatenate(pairs)[int(0.5 * AUDIO) :]
+                left, right = tail[:, 0], tail[:, 1]
+                self.assertGreater(
+                    _db(_tone(left, 1000, AUDIO), _tone(right, 1000, AUDIO)), 55
+                )
+                self.assertGreater(
+                    _db(_tone(right, 3000, AUDIO), _tone(left, 3000, AUDIO)), 55
+                )
+
     def test_a_narrow_filter_plays_mono(self):
         # The 100 kHz filter cuts so much of a stereo station's FM spectrum
         # that left and right came out 6-8 dB apart (its distortion read as

@@ -176,6 +176,26 @@ class TestAudioSinkStereo(_StereoSinkCase):
         np.testing.assert_array_equal(np.unique(sound[:, 0]), [8191])
         np.testing.assert_array_equal(np.unique(sound[:, 1]), [-16383])
 
+    def test_a_drop_keeps_the_frame_the_output_has_begun(self):
+        # The output holds half a frame (a left sample of the cushion's
+        # silence) when a burst overfills the queue: the oldest audio is
+        # dropped after the right sample that finishes that frame, so no
+        # frame gets one side of each.
+        sink, output, device = self.make(limit=1002)
+        sink.write(_stereo(1000, 0.25, -0.5))
+        self.assertEqual(len(device.received) % 4, 2)  # (half a frame out)
+        sink.write(_stereo(24000, 0.25, -0.5))  # (a stall's burst)
+        self.assertEqual(sink.overruns, 1)
+        for _ in range(400):
+            self.clock.now += 0.01
+            output.play(4000)
+            sink._feed()
+        frames = self.frames(device.received[: len(device.received) // 4 * 4])
+        sound = frames[np.any(frames != 0, axis=1)]
+        self.assertGreater(len(sound), 20000)
+        np.testing.assert_array_equal(np.unique(sound[:, 0]), [8191])
+        np.testing.assert_array_equal(np.unique(sound[:, 1]), [-16383])
+
     def test_a_sink_is_mono_unless_asked(self):
         # (The second receiver and Transmit Text's preview play mono.)
         self.assertEqual(AudioSink()._wanted_channels, 1)

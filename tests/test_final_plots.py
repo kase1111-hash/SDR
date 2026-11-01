@@ -8,6 +8,8 @@ on the demo device (or the panel on its own where that is enough).
 import os
 import unittest
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_chrome import HAS_PYQT6, _WindowTestCase  # noqa: E402
@@ -271,3 +273,114 @@ class TestWaterfallSaveImage(_PlotsCase):
             wf._save_image_dialog()
             wf._save_image_dialog()
         self.assertEqual(os.path.dirname(offered[1]), other)
+
+
+class TestWaterfallNoiseBrightness(unittest.TestCase):
+    """PLOTS-E2E-13: a waterfall row is the strongest of its frame's FFTs,
+    so its noise read brighter the more there were: rows after a stall
+    (about 1.6 dB) and the rows of a 1 or 5 min history (merging frames)
+    looked brighter, one-block frames (a busy computer) 6.5 dB darker,
+    like a change in the band. Rows are coloured at one noise brightness;
+    their levels (what the readouts say) stay as measured."""
+
+    BINS = 1024
+
+    def setUp(self):
+        from tests.test_gui_chrome import require_pyqt6
+
+        require_pyqt6(self)
+
+    def line(self, ffts, rng, floor_db=-80.0):
+        power = rng.exponential(1.0, (ffts, self.BINS)).max(axis=0)
+        return floor_db + 10.0 * np.log10(power)
+
+    @staticmethod
+    def shown_db(wf):
+        codes = wf._row_codes[-1][1].astype(float)
+        return float(np.median(codes / 8.0 - 200.0))
+
+    def test_rows_of_any_length_show_the_same_noise(self):
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        rng = np.random.default_rng(3)
+        wf = WaterfallWidget()
+        self.addCleanup(wf.deleteLater)
+        wf.set_frequency_range(100e6, 2.4e6)
+        normal = []
+        for i in range(60):
+            wf.add_line(self.line(39, rng), timestamp=i / 30, noise_db=-80.0)
+            normal.append(self.shown_db(wf))
+        for ffts in (290, 1):
+            wf.add_line(self.line(ffts, rng), timestamp=2.1, noise_db=-80.0)
+            raw = float(np.median(wf._history[-1]))
+            self.assertGreater(abs(raw - float(np.median(normal))), 1.2, ffts)
+            self.assertAlmostEqual(self.shown_db(wf), np.median(normal), delta=0.6)
+        # A real change of the noise floor still shows.
+        wf.add_line(self.line(39, rng, -70.0), timestamp=2.2, noise_db=-70.0)
+        self.assertAlmostEqual(self.shown_db(wf) - np.median(normal), 10.0, delta=1.0)
+
+    def test_a_row_merging_frames_is_as_bright(self):
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        rng = np.random.default_rng(4)
+        wf = WaterfallWidget(history_size=50)
+        self.addCleanup(wf.deleteLater)
+        wf.set_frequency_range(100e6, 2.4e6)
+        wf.set_history_seconds(60.0)  # a row every 1.2 s, once full
+        t = 0.0
+        while len(wf._history) < 50:  # (the fast fill: a row per line)
+            wf.add_line(self.line(39, rng), timestamp=t, noise_db=-80.0)
+            t += 1 / 30
+        single = self.shown_db(wf)
+        rows = len(wf._history)
+        for _ in range(30):  # one 1.2 s row, about 30 frames merged
+            t += 1 / 30
+            wf.add_line(self.line(39, rng), timestamp=t, noise_db=-80.0)
+        self.assertGreater(
+            float(np.median(wf._history[-1])) - single, 1.0
+        )  # (its levels: the strongest of 30 frames)
+        self.assertAlmostEqual(self.shown_db(wf), single, delta=0.6)
+        self.assertLessEqual(len(wf._history), rows + 2)
+
+
+class TestCompactCheckedButtons(unittest.TestCase):
+    """PLOTS-E2E-9: the Scope's Freeze button read 'reez' while frozen:
+    a checked, focused button took the wide padding of the theme's double
+    focus ring, whatever its role (compact buttons are narrow)."""
+
+    def setUp(self):
+        from tests.test_gui_chrome import require_pyqt6
+
+        require_pyqt6(self)
+
+    def test_freeze_reads_whole_when_frozen(self):
+        from PyQt6.QtWidgets import QApplication, QStyle, QStyleOptionButton
+
+        from sdr_module.gui.signal_panel import SignalPanel
+        from sdr_module.gui.themes import get_stylesheet
+
+        def content_width(button):
+            option = QStyleOptionButton()
+            button.initStyleOption(option)
+            rect = button.style().subElementRect(
+                QStyle.SubElement.SE_PushButtonContents, option, button
+            )
+            return rect.width()
+
+        for theme in ("dark", "light"):
+            panel = SignalPanel()
+            self.addCleanup(panel.deleteLater)
+            panel.setStyleSheet(get_stylesheet(theme))
+            panel.resize(400, 300)
+            panel.show()
+            panel.show_page("scope")
+            QApplication.processEvents()
+            button = panel.freeze_btn
+            text = button.fontMetrics().horizontalAdvance(button.text())
+            self.assertGreaterEqual(content_width(button), text, theme)
+            button.setChecked(True)
+            button.setFocus()
+            QApplication.processEvents()
+            self.assertTrue(button.hasFocus())
+            self.assertGreaterEqual(content_width(button), text, theme)
+            panel.close()

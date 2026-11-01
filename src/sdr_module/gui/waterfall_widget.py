@@ -247,6 +247,13 @@ def history_label(seconds: float) -> str:
     return format_duration(seconds)
 
 
+def _noise_level(line: np.ndarray) -> float:
+    """A line's median bin (dB): its noise, as the auto levels take it."""
+    values = np.asarray(line, dtype=np.float32)
+    k = len(values) // 2
+    return float(np.partition(values, k)[k])
+
+
 def quantize_db(values: Any) -> np.ndarray:
     """dB values -> uint16 level codes (1/8 dB steps; never 0, the empty code).
 
@@ -785,6 +792,11 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         #: remembered while the app runs.
         self.file_settings: Any = None
         self._session_folders: Dict[str, str] = {}
+        # How far a fresh line's noise reads above the noise floor it comes
+        # with (dB; slowly averaged), the reference each row's colours are
+        # brought to (see _noise_offset), and the span it was measured on.
+        self._noise_rise: Optional[float] = None
+        self._noise_rise_key: Optional[Tuple[float, float, int]] = None
 
         self.setMinimumHeight(200)
         self._setup_ui()
@@ -1130,7 +1142,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             previous = self._history[-1]
             merged = np.fmax(previous, line)
             self._history[-1] = merged
-            codes = quantize_db(merged)
+            codes = quantize_db(merged + self._noise_offset(line, merged, noise_db))
             if self._row_codes and self._row_codes[-1][0] is previous:
                 self._row_codes[-1] = (merged, codes)
             else:
@@ -1149,7 +1161,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             self._times.append(now)
             self._row_steps.append(step)
             self._row_axes.append(axis)
-            codes = quantize_db(line)
+            codes = quantize_db(line + self._noise_offset(line, line, noise_db))
             self._row_codes.append((line, codes))
             self._row_open = True
             self._write_top_row(codes, scroll=True)
@@ -1158,6 +1170,38 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         if not self._clear_action.isEnabled():
             self._update_clear_action()
         self._canvas.update()
+
+    def _noise_offset(
+        self, line: np.ndarray, row: np.ndarray, noise_db: Optional[float]
+    ) -> float:
+        """dB added to a row's colours (not to its levels, which the
+        readouts show) so its noise shows as bright as the other rows'.
+
+        A line is the strongest of the FFTs its frame holds, and its noise
+        reads higher the more of them there are: a long frame after a stall
+        or a row merging several frames (a history of 1 or 5 min) looked
+        brighter, one-block frames (a computer that can't keep up) darker,
+        like a change in the band. The rise is measured against the frame's
+        noise floor (``noise_db``, which doesn't depend on that), so a real
+        change of the floor still shows; rows are brought to the rise fresh
+        lines usually have. 0 without ``noise_db``."""
+        if noise_db is None or not math.isfinite(noise_db) or len(line) < 16:
+            return 0.0
+        key = (float(self._center_freq), float(self._sample_rate), len(line))
+        rise = _noise_level(line) - float(noise_db)
+        if not math.isfinite(rise):
+            return 0.0
+        ref = self._noise_rise
+        if ref is None or key != self._noise_rise_key:
+            ref = rise
+        else:
+            ref += 0.005 * (rise - ref)  # (follows over some 200 lines)
+        self._noise_rise, self._noise_rise_key = ref, key
+        if row is not line:
+            rise = _noise_level(row) - float(noise_db)
+            if not math.isfinite(rise):
+                return 0.0
+        return max(-12.0, min(12.0, ref - rise))
 
     def clear(self):
         """Clear the waterfall."""

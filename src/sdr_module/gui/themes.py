@@ -725,6 +725,10 @@ QFrame[role="header-strip"] QPushButton[role="compact"]:focus {{ padding: 2px 7p
 QPushButton[role="primary"]:focus, QToolButton[role="primary"]:focus,
 QPushButton:checked:focus, QToolButton:checked:focus {{
     border: 3px double {p.on_accent}; padding: 3px 12px; }}
+QPushButton[role="compact"]:checked:focus {{ padding: 1px 4px; }}
+QWidget[role="header-strip"] QPushButton[role="compact"]:checked:focus,
+QFrame[role="header-strip"] QPushButton[role="compact"]:checked:focus {{
+    padding: 1px 6px; }}
 QPushButton[role="danger"]:focus, QToolButton[role="danger"]:focus {{
     border: 2px solid {p.text}; padding: 4px 13px; }}
 QCheckBox::indicator:focus, QRadioButton::indicator:focus {{

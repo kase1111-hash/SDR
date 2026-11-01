@@ -45,6 +45,27 @@ def _freqs(hits):
     return [round(h.frequency_hz) for h in hits]
 
 
+def _most_queued(scan, device):
+    """Run ``scan``; the most transfers ``device`` held queued meanwhile
+    (looked at every 10 ms)."""
+    queued = []
+    done = threading.Event()
+
+    def watch():
+        while not done.wait(0.01):
+            queued.append(device._sample_queue.qsize())
+
+    watcher = threading.Thread(target=watch, daemon=True)
+    watcher.start()
+    try:
+        scan.run()
+    finally:
+        done.set()
+        watcher.join(5.0)
+    assert queued
+    return max(queued)
+
+
 def _no_scan_threads():
     """No device thread of a scan is left (the background scan's own thread
     may still be returning after wait())."""
@@ -143,6 +164,60 @@ class TestTwoDevices:
         assert _freqs(scan.run()) == sorted(STATIONS)
         assert scan.names == ("A",)
 
+    def test_a_device_done_with_its_part_is_not_left_queuing(self, monkeypatch):
+        """A device that has measured its part streams on until the pass
+        ends (here 88-90 MHz is all it tunes; the other has 90.1-140 MHz to
+        itself). What it delivers meanwhile is thrown away as it comes:
+        before, it filled the device's queue (100 transfers, 400 MB from an
+        RTL-SDR, whose pyrtlsdr hands over complex128) and then dropped
+        samples until the other device had finished."""
+        from sdr_module.devices.base import DeviceSpec
+        from sdr_module.devices.polled import PolledDevice
+        from sdr_module.gui import device_dialog
+        from sdr_module.gui.device_dialog import MockDevice
+
+        monkeypatch.setattr(device_dialog, "_MAX_LAG_S", 1e9)
+        demo = MockDevice()
+        demo.spec = DeviceSpec(88e6, 90e6, 1e6, 3.2e6, 3.2e6, 8, 0.0, 50.0, 10.0)
+        quick = PolledDevice(demo, "Quick")  # (10 ms transfers)
+        slow = FakeTuner("Slow", **HACKRF_RANGE)
+        scan = _scan([quick, slow], 88e6, 140e6, settle_s=0.03)
+        most = _most_queued(scan, quick)
+        report = scan.passes[0]
+        # Quick measured its two steps long before Slow was done.
+        assert report.steps[0] == 2 and report.steps[1] >= 27
+        # At most a few transfers (0.2 s) waited at any time.
+        assert most < 20, most
+        assert quick.dropped_samples == 0
+
+    def test_a_device_waiting_for_the_others_last_step_is_not_left_queuing(
+        self, monkeypatch
+    ):
+        """At the end of a pass a device waits while the other measures a
+        step it could still give back: it drops what it delivers meanwhile
+        (before, its queue filled for as long as the other took)."""
+        from sdr_module.devices.polled import PolledDevice
+        from sdr_module.gui import device_dialog
+        from sdr_module.gui.device_dialog import MockDevice
+
+        monkeypatch.setattr(device_dialog, "_MAX_LAG_S", 1e9)
+        quick = PolledDevice(MockDevice(), "Quick")  # (10 ms transfers)
+        slow = FakeTuner("Slow")
+        read = slow.read_samples
+
+        def slow_read(n, timeout=1.0):
+            if timeout:  # (a measurement, not a drain)
+                time.sleep(0.6)
+            return read(n, timeout)
+
+        slow.read_samples = slow_read
+        scan = _scan([quick, slow], 88e6, 92e6)
+        most = _most_queued(scan, quick)
+        # Quick took 88.0-90.1 MHz in two steps, then waited about 0.6 s
+        # for Slow's one step (90.2-92.0 MHz).
+        assert scan.passes[0].steps == (2, 1)
+        assert most < 20, most
+
 
 class TestProgressAndCancel:
     def test_progress_rises_to_one(self):
@@ -232,6 +307,24 @@ class TestProgressAndCancel:
         assert threads and threading.main_thread() not in threads
         with pytest.raises(RuntimeError):
             scan.run()  # (a scan runs once)
+
+    def test_a_background_scan_without_a_thread_has_ended(self, monkeypatch):
+        """start() raises when no thread can be had; the scan then says it
+        isn't running and why, and wait() returns (it waited for ever)."""
+        a = FakeTuner("A")
+        scan = _scan([a])
+
+        def no_thread(self):
+            raise RuntimeError("can't start new thread")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(threading.Thread, "start", no_thread)
+            with pytest.raises(RuntimeError):
+                scan.start()
+        assert not scan.running
+        assert scan.wait(0)
+        assert "can't start new thread" in scan.reason
+        assert a.started == 0
 
 
 class TestFailures:

@@ -290,8 +290,10 @@ class WidebandScan:
 
     The devices must be open and not streaming: the scan starts their
     streams (``start_rx()``, read with ``read_samples(n, timeout)``) and
-    stops them when it ends. Set their sample rate and gain first; each
-    device's rate and tuning range (``spec``) are used as they are.
+    stops them when it ends (a device done with its part of a pass streams
+    on until the pass ends; what it delivers meanwhile is thrown away). Set
+    their sample rate and gain first; each device's rate and tuning range
+    (``spec``) are used as they are.
 
     Args:
         devices: One or two devices.
@@ -477,13 +479,25 @@ class WidebandScan:
         return self.hits
 
     def start(self) -> None:
-        """Scan in a thread of the scan's own (see :meth:`wait`)."""
+        """Scan in a thread of the scan's own (see :meth:`wait`).
+
+        Raises:
+            RuntimeError: no thread could be started; the scan has ended
+                without starting the devices (:attr:`reason` says why).
+        """
         self._claim_run()
         thread = threading.Thread(
             target=self._run_in_background, name="wideband-scan", daemon=True
         )
         self._thread = thread
-        thread.start()
+        try:
+            thread.start()
+        except BaseException as exc:  # (it never ran: wait() mustn't hang)
+            self._thread = None
+            self._reason = f"error: {exc}"
+            self._running = False
+            self._finished.set()
+            raise
 
     def _run_in_background(self) -> None:
         try:
@@ -611,6 +625,14 @@ class WidebandScan:
                 try:
                     event = events.get(timeout=0.05)
                 except queue.Empty:
+                    event = None
+                # A device done with its part of the pass streams on until
+                # the pass ends: drop what it delivers as it comes (left, it
+                # filled the device's queue, 400 MB from an RTL-SDR).
+                for index, thread in zip(started, threads, strict=True):
+                    if not thread.is_alive():
+                        _drain(self.devices[index])
+                if event is None:
                     if any(t.is_alive() for t in threads) or not events.empty():
                         continue
                     break
@@ -684,6 +706,7 @@ class WidebandScan:
                 if page is None:
                     if not self.sweep.more_may_come(index):
                         return
+                    _drain(self.devices[index])  # (it streams on meanwhile)
                     self._cancel.wait(_IDLE_POLL_S)
                     continue
                 try:

@@ -343,6 +343,58 @@ class TestWaterfallNoiseBrightness(unittest.TestCase):
         self.assertAlmostEqual(self.shown_db(wf), single, delta=0.6)
         self.assertLessEqual(len(wf._history), rows + 2)
 
+    def test_a_stretch_behind_leaves_the_next_rows_as_bright(self):
+        """P-10: one-block frames for a second (the display loop behind)
+        moved the noise reference (a slow average): the next normal rows
+        were drawn 1.1 dB darker and took 65 rows (2 s) to come within 0.5
+        dB, a visible band."""
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        rng = np.random.default_rng(1)
+        wf = WaterfallWidget()
+        self.addCleanup(wf.deleteLater)
+        wf.set_frequency_range(100e6, 2.4e6)
+        wf.set_history_seconds(0.0)  # (a row per line)
+        t = 0.0
+        normal = []
+        for ffts, count in ((39, 300), (1, 30), (39, 60)):
+            shown = []
+            for _ in range(count):
+                t += 1 / 30
+                wf.add_line(self.line(ffts, rng), timestamp=t, noise_db=-80.0)
+                shown.append(self.shown_db(wf))
+            normal = normal or shown
+            if ffts == 1:  # (drawn as bright as the others meanwhile)
+                self.assertAlmostEqual(np.median(shown), np.median(normal), delta=0.5)
+        after = np.array(shown) - np.median(normal)
+        self.assertLess(float(np.max(np.abs(after[:10]))), 0.5, after[:10])
+
+    def test_after_a_retune_the_reference_is_found_at_once(self):
+        """...without being slower to follow a retune that starts on an
+        outlier frame (the stall of the retune itself): within a few rows
+        (the slow average took some 200 to forget that first frame)."""
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        rng = np.random.default_rng(2)
+        wf = WaterfallWidget()
+        self.addCleanup(wf.deleteLater)
+        wf.set_frequency_range(100e6, 2.4e6)
+        wf.set_history_seconds(0.0)
+        t = 0.0
+        for _ in range(60):
+            t += 1 / 30
+            wf.add_line(self.line(39, rng), timestamp=t, noise_db=-80.0)
+        normal = self.shown_db(wf)
+        wf.set_frequency_range(144e6, 2.4e6)  # a retune
+        t += 1 / 30
+        wf.add_line(self.line(290, rng), timestamp=t, noise_db=-80.0)  # (a stall)
+        shown = []
+        for _ in range(10):
+            t += 1 / 30
+            wf.add_line(self.line(39, rng), timestamp=t, noise_db=-80.0)
+            shown.append(self.shown_db(wf))
+        self.assertLess(float(np.max(np.abs(np.array(shown[2:]) - normal))), 0.5, shown)
+
 
 class TestSignalsList(_SignalCase):
     """Leftovers 1 and 17, PLOTS-E2E-20: the Signals list was measured

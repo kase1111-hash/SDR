@@ -153,6 +153,14 @@ _AUTO_HYSTERESIS_DB = 3.0
 #: noise floor, and rarely 3 dB above their median. (One-FFT rows: 1 dB.)
 _SNR_ABOVE_ROWS_DB = 3.0
 
+#: The rise a fresh line's noise usually reads above its noise floor (the
+#: reference rows are coloured to, see WaterfallWidget._noise_offset) is the
+#: median of the last this many lines' rises: a stretch of odd frames (one
+#: block each while the display loop is behind, a long one after a stall)
+#: shorter than half of it doesn't move it, a lasting change does, and
+#: after a retune it is the usual rise again within a few lines (P-10).
+_NOISE_RISE_LINES = 301
+
 #: A pause between two lines longer than this many typical line intervals
 #: (and at least _GAP_MIN_S seconds) is drawn as a separator.
 _GAP_FACTOR = 5.0
@@ -807,6 +815,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         # brought to (see _noise_offset), and the span it was measured on.
         self._noise_rise: Optional[float] = None
         self._noise_rise_key: Optional[Tuple[float, float, int]] = None
+        self._noise_rises: "deque[float]" = deque(maxlen=_NOISE_RISE_LINES)
 
         self.setMinimumHeight(200)
         self._setup_ui()
@@ -1194,18 +1203,18 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         like a change in the band. The rise is measured against the frame's
         noise floor (``noise_db``, which doesn't depend on that), so a real
         change of the floor still shows; rows are brought to the rise fresh
-        lines usually have. 0 without ``noise_db``."""
+        lines usually have (the median of the last _NOISE_RISE_LINES). 0
+        without ``noise_db``."""
         if noise_db is None or not math.isfinite(noise_db) or len(line) < 16:
             return 0.0
         key = (float(self._center_freq), float(self._sample_rate), len(line))
         rise = _noise_level(line) - float(noise_db)
         if not math.isfinite(rise):
             return 0.0
-        ref = self._noise_rise
-        if ref is None or key != self._noise_rise_key:
-            ref = rise
-        else:
-            ref += 0.005 * (rise - ref)  # (follows over some 200 lines)
+        if key != self._noise_rise_key:
+            self._noise_rises.clear()
+        self._noise_rises.append(rise)
+        ref = float(np.median(self._noise_rises))
         self._noise_rise, self._noise_rise_key = ref, key
         if row is not line:
             rise = _noise_level(row) - float(noise_db)

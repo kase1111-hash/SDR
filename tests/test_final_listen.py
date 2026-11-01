@@ -813,3 +813,47 @@ class TestMuteWithoutAnOutput(_WindowTestCase):
             win._mute_action.trigger()  # muted by you
         self.assertEqual(win._audio_state(), "muted")
         self.assertTrue(win._mute_action.isChecked())
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestCtrlArrowsInFieldsAndLists(_WindowTestCase):
+    """Leftover 13: Ctrl+Up / Ctrl+Down (the volume) took the keys from the
+    Frequency field (whose Ctrl+arrow steps ten times as far) and from
+    lists (which move the current row with them)."""
+
+    def test_the_frequency_field_keeps_them(self):
+        win = self.win
+        win.set_frequency(100.1e6)
+        win._volume_slider.setValue(60)
+        field = win._frequency_field()
+        field.setFocus()
+        self.settle()
+        before = field.value()
+        QTest.keyClick(field, Qt.Key.Key_Up, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(win._volume_slider.value(), 60)
+        self.assertGreater(field.value(), before)
+
+    def test_a_list_keeps_them(self):
+        win = self.win
+        panel = win._bookmarks_panel
+        panel.add_bookmark("One", 100.1e6)
+        panel.add_bookmark("Two", 101.1e6)
+        win._volume_slider.setValue(60)
+        tree = panel._list
+        win._show_panel("bookmarks")
+        tree.setFocus()
+        tree.setCurrentItem(tree.topLevelItem(0))
+        self.settle()
+        QTest.keyClick(tree, Qt.Key.Key_Down, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(win._volume_slider.value(), 60)
+        self.assertIs(tree.currentItem(), tree.topLevelItem(1))
+
+    def test_elsewhere_they_set_the_volume(self):
+        win = self.win
+        win._volume_slider.setValue(60)
+        win._focus_plots()
+        self.settle()
+        QTest.keyClick(
+            win._spectrum, Qt.Key.Key_Up, Qt.KeyboardModifier.ControlModifier
+        )
+        self.assertEqual(win._volume_slider.value(), 70)

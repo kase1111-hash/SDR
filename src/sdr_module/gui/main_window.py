@@ -3977,6 +3977,24 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             owners += (QAbstractButton,)
         return isinstance(focus, owners)
 
+    def event(self, event):  # noqa: N802 - Qt naming
+        """Ctrl+Up / Ctrl+Down are Radio > Audio > Volume Up / Down, except
+        in a focused number field (the Frequency field: ten steps) or list
+        (it moves its current row), which keep them: the window takes the
+        shortcut override they pass up, so the key goes to them."""
+        if event.type() == QEvent.Type.ShortcutOverride:
+            mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
+            if (
+                event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Down)
+                and mods == Qt.KeyboardModifier.ControlModifier
+                and isinstance(
+                    QApplication.focusWidget(), (QAbstractSpinBox, QAbstractItemView)
+                )
+            ):
+                event.accept()
+                return True
+        return super().event(event)
+
     def keyPressEvent(self, event):
         """Space starts/stops receiving; Left/Right tune; [ and ] change the
         tuning step; Esc cancels typing in the Frequency field and returns

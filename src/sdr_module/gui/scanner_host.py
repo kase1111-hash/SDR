@@ -17,6 +17,8 @@ import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..devices.base import SDRDevice
+from ..dsp.dcs import dcs_label, format_dcs, parse_dcs
+from .bookmark_editor import bookmark_dcs
 from .bookmarks_panel import default_bookmark_name, listening
 from .error_log_dialog import install_history_handler
 from .scan_engine import Listening, bookmark_scan_list
@@ -71,8 +73,8 @@ class WindowScannerHost(ScannerHost):
     def __init__(self, window: Any):
         self._win = window
         # Where the receiver was before the scan: (frequency, LO, mode,
-        # deviation, bandwidth, tone squelch).
-        self._saved: Optional[Tuple[float, float, str, str, str, float]] = None
+        # deviation, bandwidth, CTCSS tone squelch, DCS code squelch).
+        self._saved: Optional[Tuple[float, float, str, str, str, float, str]] = None
         self._lo_moved = False
         #: The frequency the scan tuned last (None outside a scan): any
         #: other means the user tuned elsewhere.
@@ -196,7 +198,11 @@ class WindowScannerHost(ScannerHost):
         return ok
 
     def scan_tune_channel(
-        self, freq_hz: float, listening: Listening, tone_hz: float = 0.0
+        self,
+        freq_hz: float,
+        listening: Listening,
+        tone_hz: float = 0.0,
+        dcs: str = "",
     ) -> bool:
         win = self._win
         before = win._lo_frequency()
@@ -204,16 +210,19 @@ class WindowScannerHost(ScannerHost):
             # "The receiver's mode" (an old bookmark, a signal of a range
             # without a band): the mode, filter and tone squelch the scan
             # began with, not whatever the channel visited last left.
-            _freq, _lo, mode, deviation, width, tone_hz = self._saved
+            _freq, _lo, mode, deviation, width, tone_hz, dcs = self._saved
             listening = (mode, deviation, width)
-        # A bookmark with a tone squelch is judged by its tone, so the
-        # window checks it even with the speaker off (see _route_audio).
-        win._scan_checks_tone = bool(tone_hz and tone_hz > 0)
+        # A bookmark with a tone squelch (a CTCSS tone or a DCS code) is
+        # judged by it, so the window checks it even with the speaker off
+        # (see _route_audio).
+        win._scan_checks_tone = bool(tone_hz and tone_hz > 0) or (
+            parse_dcs(dcs) is not None
+        )
 
         def tune() -> bool:
             if not win._tune_to(freq_hz):
                 return False
-            self._apply_listening(listening, tone_hz)
+            self._apply_listening(listening, tone_hz, dcs)
             return True
 
         ok = self._tune_step(tune)
@@ -222,7 +231,9 @@ class WindowScannerHost(ScannerHost):
             self._after_tune()
         return ok
 
-    def _apply_listening(self, listening: Listening, tone_hz: float) -> None:
+    def _apply_listening(
+        self, listening: Listening, tone_hz: float, dcs: str = ""
+    ) -> None:
         demod, deviation, width = listening
         if not demod:
             return
@@ -230,7 +241,17 @@ class WindowScannerHost(ScannerHost):
         width = width or win._bandwidth_for_mode(demod, deviation) or ""
         win._set_demod_mode(demod, deviation or None, width or None)
         if demod == "FM":
-            win._control_panel.set_tone_squelch_hz(float(tone_hz or 0.0))
+            self._set_squelch(float(tone_hz or 0.0), dcs)
+
+    def _set_squelch(self, tone_hz: float, dcs: str) -> None:
+        """The tone squelch: a DCS code ("D023N"), else a CTCSS tone (0 for
+        none)."""
+        panel = self._win._control_panel
+        code = parse_dcs(dcs) if dcs else None
+        if code is not None:
+            panel.set_dcs_squelch(*code)
+        else:
+            panel.set_tone_squelch_hz(tone_hz)
 
     def scan_lo_moved(self) -> bool:
         return self._lo_moved
@@ -323,6 +344,7 @@ class WindowScannerHost(ScannerHost):
         win = self._win
         panel = win._control_panel
         mode, deviation = win._listening_mode()
+        code = panel.dcs_squelch()
         self._saved = (
             win._current_frequency(),
             win._lo_frequency(),
@@ -330,6 +352,7 @@ class WindowScannerHost(ScannerHost):
             deviation,
             panel._bw_combo.currentText(),
             float(panel.tone_squelch_hz()),
+            format_dcs(*code) if code else "",
         )
         self.expected_hz = win._current_frequency()
 
@@ -348,7 +371,14 @@ class WindowScannerHost(ScannerHost):
         win._note_tuned()
 
     def _go_back(
-        self, freq: float, lo: float, mode: str, deviation: str, width: str, tone: float
+        self,
+        freq: float,
+        lo: float,
+        mode: str,
+        deviation: str,
+        width: str,
+        tone: float,
+        dcs: str = "",
     ) -> None:
         """To where the scan began, in the mode, filter and tone squelch it
         began with. A receiver that can't go back (it refused) stays on the
@@ -375,7 +405,7 @@ class WindowScannerHost(ScannerHost):
             )
         # (Whatever the mode: the scan sets it for the FM channels it visits,
         # and it is kept, and saved, for when FM is next used.)
-        win._control_panel.set_tone_squelch_hz(tone)
+        self._set_squelch(tone, dcs)
         if off_centre and abs(win._lo_frequency() - lo) < 0.5:
             # Then the VFO, in the filter it was tuned with: only it moves.
             self._quietly(lambda: win._tune_to(freq))
@@ -394,11 +424,16 @@ class WindowScannerHost(ScannerHost):
             win._set_demod_mode(hit.mode, hit.fm_deviation or None, hit.bandwidth)
         if hit.mode == "FM":
             tone = float(hit.tone_hz or 0.0)
-            win._control_panel.set_tone_squelch_hz(tone)
-            if tone:
+            code = parse_dcs(hit.dcs) if hit.dcs else None
+            self._set_squelch(tone, hit.dcs)
+            if code is not None:
+                squelch = dcs_label(*code)
+            else:
+                squelch = f"tone squelch {tone:.1f} Hz" if tone else ""
+            if squelch:
                 # (As tuning the bookmark says.)
                 win._show_status_message(
-                    f"Tuned to {label} (FM, tone squelch {tone:.1f} Hz)", "info", 3000
+                    f"Tuned to {label} (FM, {squelch})", "info", 3000
                 )
         if win._device is not None and not win._is_running:
             win._start_acquisition()
@@ -430,12 +465,17 @@ class WindowScannerHost(ScannerHost):
     def scan_bookmark_list(self, group: str = "") -> List[Dict[str, Any]]:
         panel = self._win._bookmarks_panel
         # In the order the Bookmarks list shows them (each group first).
+        bookmarks = panel.bookmarks()
         visits = bookmark_scan_list(
-            panel.bookmarks(), listening, group, order=panel.list_order()
+            bookmarks, listening, group, order=panel.list_order()
         )
         for visit in visits:
             width = _parse_hz(visit.get("bandwidth") or "")
             visit["width_hz"] = width or 10e3
+            # (A DCS code squelch, FM only, as the CTCSS tone is.)
+            code = bookmark_dcs(bookmarks[visit["index"]])
+            if visit.get("demod") == "FM" and code is not None:
+                visit["dcs"] = format_dcs(*code)
         return visits
 
     def scan_bookmark_order(self) -> List[int]:

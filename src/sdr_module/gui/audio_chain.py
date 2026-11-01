@@ -14,13 +14,15 @@ tested without a window and costs little at 30 frames a second:
   at least ~25 ms of signal, opens at the threshold and closes only after
   the level stays below it (with hysteresis) for a hang time.
 * :class:`AudioOptions`: the listening options the receiver chain reads
-  every block (CW pitch, AGC speed, noise reduction).
+  every block (CW pitch, AGC speed, noise reduction, notch);
+  :class:`ListeningFilters` the notch of a chain's audio (Off, Auto or a
+  frequency set by hand; ``dsp/audio_filters.py``).
 * :class:`DcBlocker`, :class:`AudioAgc`: a one-pole DC blocker and a peak
   AGC with selectable speed, for the demodulated audio;
   :func:`make_noise_reduction` the Light and Strong noise reduction.
 * :class:`AudioJoin`: short fades so the audio never steps (squelch opening
   or closing, a new receiver chain after a Bandwidth or Mode change).
-* :class:`ToneSquelch`: CTCSS tone squelch on FM audio.
+* :class:`ToneSquelch`: CTCSS or DCS tone squelch on FM audio.
 * :class:`IqConditioner`: optional DC-spike removal and I/Q balance
   correction of the raw samples.
 """
@@ -32,6 +34,8 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
+from ..dsp.audio_filters import NOTCH_MODES, AudioNotch, LowCut
+from ..dsp.dcs import DcsDetector, dcs_label
 from ..dsp.filters import (
     CTCSSDetector,
     NoiseReduction,
@@ -358,6 +362,35 @@ CW_PITCH_RANGE = (400, 1000)
 DEFAULT_CW_PITCH_HZ = 700
 
 
+#: Audio notch choices: (key, label, tooltip).
+NOTCH_CHOICES: Tuple[Tuple[str, str, str], ...] = (
+    ("off", "Off", "No notch"),
+    (
+        "auto",
+        "Auto",
+        "Finds the strongest steady whistle (a heterodyne) and removes it, "
+        "following it as it drifts; voice is left alone. Not for music (use "
+        "Off): a note held for half a second counts as a whistle",
+    ),
+    ("manual", "Manual", "Removes the frequency set in the box next to it"),
+)
+#: The notch frequency set by hand: range and default (Hz).
+NOTCH_RANGE_HZ = (200, 5000)
+DEFAULT_NOTCH_HZ = 1000
+#: Low cut choices (a high-pass for voice audio: hum and rumble out):
+#: (key, label, tooltip); the key is the corner in Hz, or "off".
+LOW_CUT_CHOICES: Tuple[Tuple[str, str, str], ...] = (
+    ("off", "Off", "Everything the mode hears, down to its lowest notes"),
+    ("100", "100 Hz", "Removes mains hum (50/60 Hz) and rumble"),
+    ("200", "200 Hz", "Also removes the hum's harmonics (100-180 Hz)"),
+    ("300", "300 Hz", "Voice only: as a phone line or a radio's speaker"),
+)
+#: Narrow FM with a tone squelch is heard from here up: the CTCSS tone
+#: (67-254 Hz) or the DCS bits under the voice are filtered out, as a
+#: radio does.
+SUBAUDIBLE_CUT_HZ = 300.0
+
+
 class AudioOptions:
     """Listening options the receiver chain reads on every block.
 
@@ -370,12 +403,124 @@ class AudioOptions:
       and CW; FM has no AGC).
     * ``noise_reduction``: a streaming
       :class:`~sdr_module.dsp.filters.NoiseReduction`, or None.
+    * ``notch``: ``"off"``, ``"auto"`` or ``"manual"`` (at ``notch_hz``),
+      see :class:`ListeningFilters`.
+    * ``tone_squelch``: a CTCSS tone or DCS code is the squelch: narrow FM
+      is heard without its sub-audible band (the tone or the DCS bits).
+    * ``low_cut_hz``: the low cut chosen (Hz, 0 for none), for AM, SSB and
+      narrow FM.
     """
 
     def __init__(self) -> None:
         self.cw_pitch_hz: float = float(DEFAULT_CW_PITCH_HZ)
         self.agc_speed: str = DEFAULT_AGC_SPEED
         self.noise_reduction: Optional[NoiseReduction] = None
+        self.notch: str = "off"
+        self.notch_hz: float = float(DEFAULT_NOTCH_HZ)
+        self.tone_squelch: bool = False
+        self.low_cut_hz: float = 0.0
+
+
+class ListeningFilters:
+    """The notch (a heterodyne whistle) and the low cut of one receiver
+    chain's audio.
+
+    It applies in AM, USB, LSB, CW and narrow FM; broadcast FM (a
+    broadcast deviation) keeps its audio as it is, and I/Q has none. The
+    chain calls :meth:`process` on each block of 48 kHz audio after the
+    demodulator (before the noise reduction and the AGC, so a loud
+    whistle doesn't pump the AGC), with the audio band Auto searches:
+    the passband heard, without the CW note in CW (there the note is the
+    signal, never a whistle to remove).
+
+    :attr:`notch_frequency_hz` is the frequency being notched (Manual's,
+    or the whistle Auto found), None when nothing is.
+
+    The low cut (``low_cut_hz`` of :meth:`process`, None for none) is a
+    high-pass after the notch (see :class:`~sdr_module.dsp.audio_filters.
+    LowCut`): the chain asks for :data:`SUBAUDIBLE_CUT_HZ` in narrow FM
+    with a tone squelch set.
+    """
+
+    #: Auto leaves this much either side of the CW pitch alone.
+    CW_NOTE_HZ = 150.0
+    #: Auto searches from here up (lower than this is hum: the low cut's).
+    AUTO_LOWEST_HZ = 200.0
+    AUTO_HIGHEST_HZ = 4500.0
+
+    def __init__(self, rate: float) -> None:
+        self.rate = float(rate)
+        self._notch = AudioNotch(self.rate)
+        self._low_cut = LowCut(self.rate)
+        self._band: Optional[Tuple[float, float, Optional[Tuple[float, float]]]] = None
+        self._resting = False
+
+    def reset(self) -> None:
+        """Another channel or mode: Auto searches anew."""
+        self._notch.reset()
+        self._low_cut.reset()
+
+    def reset_stream(self) -> None:
+        """A gap in the same channel (the squelch closed): the filter
+        state is dropped, the whistle Auto found is kept."""
+        self._notch.reset_stream()
+        self._low_cut.reset()
+
+    def retuned(self) -> None:
+        """Another station tuned (the audio carries on): Auto forgets the
+        whistle it found, fading the notch out, and searches anew."""
+        self._notch.search_anew()
+
+    def rest(self) -> None:
+        """Nothing applies for now (broadcast FM, whose audio is kept as it
+        is and isn't given to :meth:`process`): the notch and the low cut
+        let go, and start afresh once they apply again."""
+        if not self._resting:
+            self._resting = True
+            self._notch.mode = "off"
+            self._notch.reset()
+            self._low_cut = LowCut(self.rate)
+
+    @property
+    def low_cut_hz(self) -> Optional[float]:
+        """The low cut's corner in effect (Hz), or None."""
+        return self._low_cut.corner_hz
+
+    @property
+    def notch_frequency_hz(self) -> Optional[float]:
+        notch = self._notch
+        if notch.mode == "off":
+            return None
+        return notch.frequency_hz
+
+    def process(
+        self,
+        audio: np.ndarray,
+        options: "AudioOptions",
+        applies: bool,
+        band: Tuple[float, float],
+        cw_pitch: Optional[float] = None,
+        low_cut_hz: Optional[float] = None,
+    ) -> np.ndarray:
+        """``audio`` with the notch of ``options`` (``applies``: the mode
+        takes it; ``band``: the audio heard, low and high Hz), then the low
+        cut at ``low_cut_hz`` (None: none)."""
+        self._resting = False
+        notch = self._notch
+        mode = getattr(options, "notch", "off") if applies else "off"
+        notch.mode = mode if mode in NOTCH_MODES else "off"
+        notch.manual_hz = getattr(options, "notch_hz", DEFAULT_NOTCH_HZ)
+        if notch.mode == "auto":
+            low = max(self.AUTO_LOWEST_HZ, float(band[0]))
+            high = min(self.AUTO_HIGHEST_HZ, float(band[1]))
+            skip = None
+            if cw_pitch is not None:
+                skip = (cw_pitch - self.CW_NOTE_HZ, cw_pitch + self.CW_NOTE_HZ)
+            wanted = (low, high, skip)
+            if wanted != self._band:
+                self._band = wanted
+                notch.finder.set_band(low, high, skip)
+        return self._low_cut.process(notch.process(audio), low_cut_hz)
 
 
 class AudioAgc:
@@ -605,33 +750,65 @@ def make_noise_reduction(level: str, rate: float) -> Optional[NoiseReduction]:
 
 
 class ToneSquelch:
-    """CTCSS tone squelch for FM audio.
+    """CTCSS or DCS tone squelch for FM audio.
 
-    ``tone_hz`` None: off (always open), but the strongest sub-audible tone
-    is still reported in :attr:`detected_hz` for the readout. Otherwise the
-    audio only plays while that tone is present; the adjacent EIA tones
-    are rejected (see :class:`~sdr_module.dsp.filters.CTCSSDetector`).
+    ``tone_hz`` (a CTCSS tone) or ``dcs`` (``(code, inverted)``, a DCS
+    code) set: the audio only plays while that tone or code is present.
+    The adjacent EIA tones are rejected (see
+    :class:`~sdr_module.dsp.filters.CTCSSDetector`), and a DCS code opens
+    only on its own bits (:class:`~sdr_module.dsp.dcs.DcsDetector`). With
+    neither it is off (always open), but what the station sends is still
+    reported (:attr:`detected_hz`, :attr:`detected_dcs`) for the readout.
+
+    The DCS detector needs the discriminator's audio before any DC
+    blocking (:meth:`feed_dcs`, each block before :meth:`process`).
     """
 
     def __init__(self, rate: float):
         self.rate = float(rate)
         self.tone_hz: Optional[float] = None
+        self.dcs: Optional[Tuple[int, bool]] = None
         self._detector = CTCSSDetector(self.rate)
+        self._dcs_detector = DcsDetector(self.rate)
+
+    @property
+    def active(self) -> bool:
+        """Whether a tone or a code is chosen."""
+        return bool(self.tone_hz) or self.dcs is not None
 
     def reset(self) -> None:
         self._detector.reset()
+        self._dcs_detector.reset()
 
     @property
     def detected_hz(self) -> Optional[float]:
+        """The CTCSS tone heard (None while a DCS code is: its bits are no
+        tone)."""
+        if self._dcs_detector.detected is not None:
+            return None
         return self._detector.detected_tone
 
+    @property
+    def detected_dcs(self) -> Optional[Tuple[int, bool]]:
+        """The DCS code heard, ``(code, inverted)``, or None."""
+        return self._dcs_detector.detected
+
     def detected_label(self) -> str:
+        code = self.detected_dcs
+        if code is not None:
+            return dcs_label(*code)
         tone = self.detected_hz
         return ctcss_label(tone) if tone is not None else ""
+
+    def feed_dcs(self, audio: np.ndarray) -> None:
+        """The discriminator's audio before DC blocking (for DCS)."""
+        self._dcs_detector.process(audio)
 
     def process(self, audio: np.ndarray) -> bool:
         """Feed FM audio; True while the speaker may play."""
         self._detector.process(audio)
+        if self.dcs is not None:
+            return self._dcs_detector.is_present(*self.dcs)
         if self.tone_hz is None:
             return True
         return self._detector.is_present(self.tone_hz)

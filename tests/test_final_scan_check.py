@@ -297,9 +297,14 @@ class TestCrossToneTooltip(unittest.TestCase):
             )
             self.assertNotIn("not supported", tip, cross)
             self.assertIn(f"Cross ({cross}): no receive squelch", tip)
-        # One receiving with a DCS code: not supported here, as before.
+        # One receiving with a DCS code: its code (K-A3: DCS is supported
+        # now); reverse DCS still isn't.
         tip = bookmarks_panel._tooltip(
             {"label": "x", "freq_hz": 1e8, "tone_mode": "Cross", "cross_mode": "->DTCS"}
+        )
+        self.assertIn("Cross (->DTCS): receives DCS 023 N", tip)
+        tip = bookmarks_panel._tooltip(
+            {"label": "x", "freq_hz": 1e8, "tone_mode": "DTCS-R"}
         )
         self.assertIn("not supported here", tip)
 

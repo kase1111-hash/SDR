@@ -1165,6 +1165,18 @@ _DRIFT_HZ = 2.5e3
 _DRIFT_PERIOD_S = 40.0  # a whole number of _TONE_LOOP_S
 _DEMO_SIGNALS = _DEMO_SIGNALS + ((438.5e6, "drift", -50.0, None),)
 
+# --- K-A3: a repeater with a DCS code (Audio > Tone squelch, Tone heard) ---
+# A 70 cm repeater output sending the same voice-like narrow FM with DCS
+# code 023 (normal) under it, 8 s on in every 12. Its loop is a whole
+# number of DCS words (28, about 4.8 s), so it joins seamlessly. Appended,
+# so the other stations keep their seeds.
+_DEMO_DCS_HZ = 442.1e6
+_DEMO_DCS_CODE = 23
+_DEMO_DCS_DEVIATION_HZ = 750.0  # 15 % of 5 kHz, as radios send it
+_DEMO_DCS_WORDS = 28
+_DEMO_SIGNALS = _DEMO_SIGNALS + ((_DEMO_DCS_HZ, "dcs", -46.0, (12.0, 8.0)),)
+# --- end K-A3 ---
+
 
 def _ook_units(code: int, bits: int = 24) -> List[Tuple[int, int]]:
     """(on units, off units) of one EV1527 frame."""
@@ -1550,6 +1562,24 @@ def _build_loops(kind: str, variant: Any, rate: float):
         deviation = 2.2e3 * _swept_tone(820.0, 200.0, t, twist)
         deviation += 1.2e3 * _swept_tone(1650.0, -250.0, t, twist)
         deviation += _DEMO_CTCSS_DEVIATION_HZ * _tone(_DEMO_CTCSS_HZ, t)
+        return _Loop(_fm_phase(deviation, loop_rate), factor)
+    if kind == "dcs":
+        # (K-A3) The same voice-like FM plus a DCS code: the loop holds a
+        # whole number of words, at a bit rate within 1e-5 of 134.4 bit/s.
+        from ..dsp.dcs import DCS_BIT_RATE, dcs_waveform
+
+        bits = _DEMO_DCS_WORDS * 23
+        factor, loop_rate, t = _loop_timebase(rate, bits / DCS_BIT_RATE)
+        twist = variant * 2.1
+        deviation = 2.2e3 * _swept_tone(820.0, 200.0, t, twist)
+        deviation += 1.2e3 * _swept_tone(1650.0, -250.0, t, twist)
+        code = dcs_waveform(
+            _DEMO_DCS_CODE,
+            rate=loop_rate,
+            samples=len(t),
+            bit_rate=bits * loop_rate / len(t),
+        )
+        deviation += _DEMO_DCS_DEVIATION_HZ * code
         return _Loop(_fm_phase(deviation, loop_rate), factor)
     if kind == "amb":
         # (T7) AM broadcast: the demo tune (mono, as heard) as the envelope,
@@ -2035,7 +2065,8 @@ class MockDevice:
     of a realistic noise floor. Signals move across
     the display as you tune, so click-to-tune and the frequency scanner
     behave as they would with real hardware. A 2 m repeater on 145.290 MHz
-    sends a 100.0 Hz CTCSS tone (Audio > Tone squelch shows it). The AM
+    sends a 100.0 Hz CTCSS tone (Audio > Tone squelch shows it), and a
+    70 cm repeater on 442.100 MHz DCS code 023 (DCS 023 N). The AM
     band has a broadcast station on each of the radio tuner's six AM presets
     (660, 770, 880, 1010, 1050 and 1260 kHz) playing the demo tune.
     Raising the gain lifts signals and noise together and, as on a

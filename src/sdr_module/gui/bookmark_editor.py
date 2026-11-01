@@ -2,15 +2,15 @@
 Edit Bookmark dialog: everything about one saved channel.
 
 Name, frequency, how it is listened to (mode, FM deviation, filter width,
-CTCSS tone squelch), its group, whether a bookmark scan skips it, and a
-comment. Opened from the Bookmarks panel (Edit..., or the list's right-click
+CTCSS tone or DCS code squelch), its group, whether a bookmark scan skips
+it, and a comment. Opened from the Bookmarks panel (Edit..., or the list's right-click
 menu).
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     from PyQt6.QtCore import Qt
@@ -31,6 +31,7 @@ except ImportError:
     HAS_PYQT6 = False
 
 from ..core.chirp_csv import chirp_mode_for, is_chirp_channel
+from ..dsp.dcs import DCS_CODES, dcs_label, format_dcs, parse_dcs
 from ..dsp.filters import CTCSS_FREQUENCIES, ctcss_label
 from .control_panel import (
     DEMOD_MODES,
@@ -62,11 +63,18 @@ _CHIRP_DEFAULT_TONE_HZ = 88.5
 _CROSS_RECEIVE_TONE = ("Tone->Tone", "->Tone", "DTCS->Tone")
 
 
+#: CHIRP Cross modes that receive with a DCS code: their receive code is
+#: the RxDtcsCode.
+_CROSS_RECEIVE_DCS = ("Tone->DTCS", "->DTCS", "DTCS->DTCS")
+#: CHIRP's default DtcsCode, for a DTCS channel saved without one.
+_CHIRP_DEFAULT_DCS = 23
+
+
 def bookmark_tone_hz(bookmark: Dict[str, Any]) -> float:
     """The CTCSS tone (Hz) a bookmark's tone squelch listens for, 0 for
     none: CHIRP's TSQL tone, or a Cross channel's receive tone (its
-    cToneFreq, 88.5 Hz when not saved). DCS and reverse tone squelch
-    aren't supported: 0."""
+    cToneFreq, 88.5 Hz when not saved). A DCS code is
+    :func:`bookmark_dcs`'s; reverse tone squelch isn't supported: 0."""
     tone_mode = str(bookmark.get("tone_mode") or "")
     cross = str(bookmark.get("cross_mode") or "").replace(" ", "")
     if not (
@@ -79,6 +87,34 @@ def bookmark_tone_hz(bookmark: Dict[str, Any]) -> float:
     except (TypeError, ValueError, OverflowError):  # (a damaged setting)
         return 0.0
     return tone if math.isfinite(tone) and tone > 0 else 0.0
+
+
+def bookmark_dcs(bookmark: Dict[str, Any]) -> Optional[Tuple[int, bool]]:
+    """The DCS code a bookmark's squelch listens for, ``(code,
+    inverted)``, or None: CHIRP's DTCS channel (its DtcsCode), or a Cross
+    channel that receives with a code (its RxDtcsCode), with the receive
+    polarity (the second letter of DtcsPolarity: R is inverted). A code
+    that isn't one of the standard ones (or a damaged value) gives None.
+    Reverse DCS (DTCS-R) isn't supported: None."""
+    tone_mode = str(bookmark.get("tone_mode") or "")
+    cross = str(bookmark.get("cross_mode") or "").replace(" ", "")
+    if tone_mode == "DTCS":
+        raw = bookmark.get("dtcs", _CHIRP_DEFAULT_DCS)
+    elif tone_mode == "Cross" and cross in _CROSS_RECEIVE_DCS:
+        raw = bookmark.get("rx_dtcs", _CHIRP_DEFAULT_DCS)
+    else:
+        return None
+    try:
+        number = float(_CHIRP_DEFAULT_DCS if raw is None else raw)
+    except (TypeError, ValueError, OverflowError):  # (a damaged setting)
+        return None
+    if not math.isfinite(number) or number != int(number):
+        return None
+    polarity = str(bookmark.get("dtcs_polarity") or "NN").strip().upper()
+    found = parse_dcs(int(number))
+    if found is None:
+        return None
+    return found[0], polarity[1:2] == "R"
 
 
 class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
@@ -103,6 +139,10 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         super().__init__(parent)
         self._original = dict(bookmark)
         self._initial_tone = bookmark_tone_hz(bookmark)
+        code = bookmark_dcs(bookmark)
+        # The squelch as the Tone list holds it: a CTCSS tone (Hz, 0 for
+        # none) or a DCS code ("D023N").
+        self._initial_squelch: Any = format_dcs(*code) if code else self._initial_tone
         self.setWindowTitle("Edit Bookmark")
         self.setMinimumWidth(400)
         self._setup_ui(listening, list(groups))
@@ -174,15 +214,21 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         self._tone.addItem(_NO_TONE_TEXT, 0.0)
         for freq in CTCSS_FREQUENCIES:
             self._tone.addItem(ctcss_label(freq), float(freq))
+        for inverted in (False, True):  # (DCS codes after the CTCSS tones)
+            self._tone.insertSeparator(self._tone.count())
+            for code in DCS_CODES:
+                self._tone.addItem(
+                    dcs_label(code, inverted), format_dcs(code, inverted)
+                )
         self._tone.setToolTip(
-            "CTCSS tone squelch (FM): tuning this bookmark only plays stations "
-            "sending this sub-audible tone, as a repeater's users hear it"
+            "Tone squelch (FM): tuning this bookmark only plays stations "
+            "sending this sub-audible CTCSS tone or DCS code, as a repeater's "
+            "users hear it"
         )
-        tone_index = (
-            self._tone.findData(self._initial_tone) if self._initial_tone else 0
-        )
+        initial = self._initial_squelch
+        tone_index = self._tone.findData(initial) if initial else 0
         self._tone.setCurrentIndex(max(tone_index, 0))
-        form.addRow("CTCSS &tone:", self._tone)
+        form.addRow("CTCSS/DCS &tone:", self._tone)
 
         self._group = QComboBox()
         self._group.setEditable(True)
@@ -305,7 +351,7 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         elif fm:
             self._hint.setText(
                 "Tuning this bookmark selects FM with this deviation and "
-                "filter, and sets the tone squelch to its tone (or off)."
+                "filter, and sets the tone squelch to its tone or code (or off)."
             )
         else:
             self._hint.setText(f"Tuning this bookmark selects {demod}.")
@@ -358,15 +404,36 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         # The tone field applies in FM only (greyed out otherwise): in the
         # other modes a channel's tone, e.g. a CHIRP memory's, is kept.
         if demod == "FM":
-            tone = self._tone.currentData()
-            tone = float(tone) if isinstance(tone, float) else 0.0
-            if tone != self._initial_tone:
-                if tone:
+            choice = self._tone.currentData()
+            if not isinstance(choice, (float, str)):
+                choice = 0.0
+            if choice != self._initial_squelch:
+                code = parse_dcs(choice) if isinstance(choice, str) else None
+                tone_mode = str(b.get("tone_mode") or "")
+                if code is not None:
+                    # Sent and heard with the same code (CHIRP's DTCS mode).
+                    letter = "R" if code[1] else "N"
+                    b["tone_mode"] = "DTCS"
+                    b["dtcs"] = code[0]
+                    b["dtcs_polarity"] = letter + letter
+                elif isinstance(choice, float) and choice:
                     b["tone_mode"] = "TSQL"
-                    b["ctone"] = tone
-                elif str(b.get("tone_mode") or "") == "TSQL":
+                    b["ctone"] = choice
+                elif tone_mode == "TSQL":
                     b.pop("tone_mode", None)
                     b.pop("ctone", None)
+                elif tone_mode == "DTCS":
+                    for key in ("tone_mode", "dtcs", "dtcs_polarity"):
+                        b.pop(key, None)
+                elif tone_mode == "Cross":
+                    # Heard without a tone or code; it still sends its own
+                    # (CHIRP's "Tone->" and "DTCS->"), or nothing at all.
+                    cross = str(b.get("cross_mode") or "").replace(" ", "")
+                    sends = cross.split("->")[0] if "->" in cross else ""
+                    if sends in ("Tone", "DTCS"):
+                        b["cross_mode"] = sends + "->"
+                    else:
+                        b.pop("tone_mode", None)
         group = self._group.currentText().strip()
         if group:
             b["group"] = group

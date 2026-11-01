@@ -307,5 +307,74 @@ class TestTheScannersBookmarkSaysWhatCtrlBSays(_window_case()):
         )
 
 
+# --------------------------------------------------------------------------- #
+# W-05: a long channel name in the scan chip and the listen label
+# --------------------------------------------------------------------------- #
+
+
+def _panel_case():
+    from tests.test_gui_scanner import _PanelCase
+
+    return _PanelCase
+
+
+class TestALongNameWhileScanning(_panel_case()):
+    """W-05: held on a bookmark named "NOAA Weather Radio Seattle WX1
+    162.55", the scan chip cut the name to 23 characters itself, so its
+    tooltip (which starts with the chip's whole text when the status bar
+    is short of room) never held it either; the Scanner tab's listen label
+    was clipped at the Skip button without "…", hiding the frequency, the
+    mode and "(held)"."""
+
+    NAME = "NOAA Weather Radio Seattle WX1 162.55"
+
+    def held_on_the_long_name(self):
+        from sdr_module.gui.scan_engine import LISTEN
+        from tests.test_gui_scanner import FRAME_S, FakeWindow
+
+        host = FakeWindow()
+        host.scan_signal_present = lambda: True
+        visit = {"demod": "FM", "fm_deviation": "5 kHz", "bandwidth": ""}
+        host.bookmarks = [
+            dict(visit, index=0, label=self.NAME, freq_hz=162.55e6, tone_hz=0.0)
+        ]
+        panel = self.panel(host)
+        panel.set_scan_mode("bookmarks")
+        self.assertTrue(panel.start_scan())
+        dev = host.dev
+        panel.engine.frame(dev.read_samples(int(dev.sample_rate * FRAME_S)))
+        self.assertEqual(panel.engine.state, LISTEN)
+        panel._hold_btn.click()
+        self.assertTrue(panel.engine.held)
+        return panel
+
+    def test_the_chip_keeps_the_whole_name(self):
+        panel = self.held_on_the_long_name()
+        chip = panel.status_chip()
+        self.assertEqual(chip.text(), f"Scanning · {self.NAME} · held")
+        # (Short of room, it is cut to its first part, and its tooltip then
+        # starts with the whole text: it doesn't ask for more room.)
+        self.assertLess(
+            chip.minimumSizeHint().width(),
+            chip.fontMetrics().horizontalAdvance("Scanning · NOAA Weather"),
+        )
+
+    def test_the_listen_label_ends_in_an_ellipsis(self):
+        from tests.test_gui_scanner import _settle
+
+        panel = self.held_on_the_long_name()
+        label = panel._listen_label
+        whole = f"Listening: {self.NAME} · 162.550 MHz · FM (held)"
+        self.assertEqual(label.text(), whole)
+        self.assertEqual(label.toolTip(), whole)
+        panel.resize(300, 560)
+        _settle()
+        shown = label.displayed_text()
+        self.assertTrue(shown.endswith("…"), shown)
+        self.assertLessEqual(
+            label.fontMetrics().horizontalAdvance(shown), label.width()
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -441,6 +441,9 @@ class TestTempDriveFillsWhileRecording(_ReviewCase):
         with file_size_limit(limit):
             for _ in range(5):
                 win._update_display()
+                # (Written by the take's writer thread, K-P1: the next frame
+                # hears of a write that failed.)
+                win._samples_buffer.flush()
             self.assertFalse(win._recording)  # stopped: the file can't grow
             store = win._samples_buffer
             count = store.sample_count
@@ -1004,6 +1007,7 @@ class TestAFailedSaveSaysWhy(_ReviewCase):
 
     def test_the_save_failed_box_says_why(self):
         self.record(3, stop=False)  # (running: written, not moved)
+        self.win._samples_buffer.flush()  # (the take itself is all on disk)
         target = self.path("take.sigmf-data")
         with (
             self.save_dialog(target),

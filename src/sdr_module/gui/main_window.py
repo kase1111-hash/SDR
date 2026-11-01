@@ -100,6 +100,7 @@ except ImportError:
 
 from .. import __version__
 from ..devices.base import SDRDevice
+from ..dsp.background_writer import BackgroundWriter
 from ..dsp.frame_spectrum import (
     DEFAULT_FFT_SIZE,
     WINDOW_LABELS,
@@ -1760,6 +1761,13 @@ _MIN_FREE_BYTES = 500_000_000
 # about before it is saved as cu8 or cs8 (it would keep a bit or two).
 _QUIET_8BIT_STEPS = 4
 _FREE_SPACE_CHECK_S = 0.5
+# A take's writer thread may fall this far behind (seconds of signal, at
+# most _CAPTURE_QUEUE_MAX_BYTES) before a block it has no room for is
+# counted as lost: a disk's hiccups pass unnoticed, a disk that can't keep
+# up is said (see _SampleStore.queue).
+_CAPTURE_QUEUE_S = 1.0
+_CAPTURE_QUEUE_MAX_BYTES = 200_000_000
+_CAPTURE_WRITER_NAME = "I/Q recording writer"
 _SAVE_CHUNK = 1 << 20  # samples converted and written per step when saving
 _SAVE_OVERHEAD = 1 << 20  # a saved file's header and metadata, to spare
 _cleaned_folders: set = set()
@@ -1860,8 +1868,21 @@ def _same_drive(path: str, target: str) -> bool:
         return False
 
 
-def _close_and_delete(handle: Any, path: str) -> None:
-    """Finalizer of a temporary recording: close and delete its file."""
+def _capture_queue_bytes(rate: float) -> int:
+    """How much of an I/Q recording at ``rate`` its writer thread may hold
+    queued (see _CAPTURE_QUEUE_S)."""
+    seconds = max(0.0, float(rate)) * _CAPTURE_QUEUE_S
+    return int(min(seconds * _CF32.itemsize, _CAPTURE_QUEUE_MAX_BYTES))
+
+
+def _close_and_delete(handle: Any, path: str, writer: Any = None) -> None:
+    """Finalizer of a temporary recording: end its writer thread (dropping
+    what it still holds), close and delete its file."""
+    if writer is not None:
+        try:
+            writer.abort()
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug(f"Could not stop the writer of {path}: {e}")
     try:
         handle.close()
     except Exception as e:  # pragma: no cover - defensive
@@ -1870,6 +1891,37 @@ def _close_and_delete(handle: Any, path: str) -> None:
         os.remove(path)
     except OSError as e:
         logger.debug(f"Could not delete the temporary recording {path}: {e}")
+
+
+class _FileAppender:
+    """Writes blocks (contiguous complex64) at the end of a take's file, all
+    of each (a short write goes on). When that fails, the file is cut back
+    to the samples written in full, so it holds whole samples only
+    (``size`` bytes), and the error is raised. Called by the take's writer
+    thread, or by :meth:`_SampleStore.append` when nothing is queued."""
+
+    def __init__(self, handle: Any) -> None:
+        self.handle = handle
+        self.size = 0  # bytes in the file
+
+    def __call__(self, data: np.ndarray) -> None:
+        view = memoryview(data.view(np.uint8))
+        done = 0
+        try:
+            while done < len(view):
+                wrote = self.handle.write(view[done:])
+                if not wrote:
+                    raise OSError(errno.EIO, "the recording file takes no more data")
+                done += wrote
+        except OSError:
+            self.size += done // _CF32.itemsize * _CF32.itemsize
+            try:
+                os.ftruncate(self.handle.fileno(), self.size)
+                self.handle.seek(self.size)
+            except OSError as e:  # pragma: no cover - the disk is in trouble
+                logger.debug(f"Could not trim the recording to {self.size} bytes: {e}")
+            raise
+        self.size += done
 
 
 class _SampleStore:
@@ -1885,20 +1937,36 @@ class _SampleStore:
     read-only view of the file). :meth:`samples` gives them all and
     :meth:`chunks` a piece at a time.
 
-    Every block is written straight to the file (no buffer), so the file
-    holds exactly the samples counted, even after a write fails (a full
-    disk): what is there can still be saved elsewhere.
+    A live take's blocks are written by a thread of the store's own
+    (:meth:`queue`, a :class:`~sdr_module.dsp.background_writer.
+    BackgroundWriter`): the display loop only copies each block into a
+    bounded queue, so it never waits for the disk (writing a 20 MS/s frame
+    took most of the frame). A block is counted when it is queued (``len()``,
+    the REC size); reading the samples (:meth:`samples`, iterating, saving)
+    first waits until the queue is written, and :meth:`finish` (Stop) also
+    ends the thread. :meth:`append` writes at once (Convert Recording, from
+    its own worker thread). Nothing is buffered beyond the queue, so the
+    file holds exactly the samples counted, even after a write fails (a full
+    disk): the blocks queued after it are dropped, the count goes back to
+    what the file holds, and the error is raised once (:meth:`check`); what
+    is there can still be saved elsewhere.
 
     The temporary file stays open (and locked, on POSIX) until the store is
     discarded, which deletes it; so does the interpreter exiting, and
     :func:`_remove_stale_recordings` removes files a crash left behind.
     """
 
-    def __init__(self, folder: Optional[str] = None):
+    def __init__(self, folder: Optional[str] = None, queue_bytes: int = 0):
         self._folder = folder
         self._path: Optional[str] = None
         self._file: Any = None
         self._finalizer: Any = None
+        # The writer thread of queue() and how much it may hold; a write it
+        # failed, until raised.
+        self._queue_bytes = int(queue_bytes)
+        self._appender: Optional[_FileAppender] = None
+        self._writer: Optional[BackgroundWriter] = None
+        self._failure: Optional[BaseException] = None
         self._memory: Optional[np.ndarray] = None
         # Where each block starts (the first _nblocks entries): a block a
         # display frame, so not a Python object each (a day's recording
@@ -1933,6 +2001,11 @@ class _SampleStore:
     def path(self) -> Optional[str]:
         """The file holding the samples (None in memory or empty)."""
         return self._path
+
+    @property
+    def pending_bytes(self) -> int:
+        """Bytes queued that the writer thread hasn't written yet."""
+        return self._writer.pending_bytes if self._writer is not None else 0
 
     @property
     def folder(self) -> Optional[str]:
@@ -1985,43 +2058,110 @@ class _SampleStore:
         return start, end - start
 
     def append(self, block: np.ndarray) -> None:
-        """Add a block after the others. The file is created with the first
-        one. Raises OSError when it can't be written (e.g. a full disk);
-        the samples written in full before that are kept."""
+        """Add a block after the others, written at once (after what is
+        queued). The file is created with the first one. Raises OSError when
+        it can't be written (e.g. a full disk); the samples written in full
+        before that are kept."""
         data = np.ascontiguousarray(block, dtype=_CF32)
         if len(data) == 0:
             return
         if self._memory is not None:
             raise ValueError("an imported recording can't be added to")
+        self._settle(wait=True)
+        self._raise_failure()
         if self._file is None:
             self._create_file()
         self._map = None
         self._write(data)
         self._add_block(len(data))
 
+    def queue(self, block: np.ndarray) -> bool:
+        """Add a block after the others, written by the store's writer
+        thread: the caller never waits for the disk, and may reuse
+        ``block`` at once (the writer gets a copy). The file is created with
+        the first one.
+
+        False when the writer is too far behind to take it (its queue is
+        full: the disk can't keep up): the block isn't added, and the
+        caller counts it as lost. Raises OSError, once, when a write failed
+        since (a full disk): the samples counted are then those in the
+        file, every one written in full."""
+        if self._memory is not None:
+            raise ValueError("an imported recording can't be added to")
+        self._settle(wait=False)
+        self._raise_failure()
+        data = np.asarray(block)
+        if len(data) == 0:
+            return True
+        if self._file is None:
+            self._create_file()
+        assert self._writer is not None
+        if data.dtype == _CF32:
+            queued = self._writer.put(data)  # (a copy)
+        else:
+            queued = self._writer.put(data.astype(_CF32), copy=False)
+        if not queued:
+            return False
+        self._map = None
+        self._add_block(len(data))
+        return True
+
+    def flush(self) -> None:
+        """Wait until the samples queued are in the file (a write that
+        failed meanwhile is raised by :meth:`check` or :meth:`finish`)."""
+        self._settle(wait=True)
+
+    def check(self) -> None:
+        """Raise, once, the error a write on the writer thread failed with
+        (see :meth:`queue`), without waiting for it."""
+        self._settle(wait=False)
+        self._raise_failure()
+
+    def _settle(self, wait: bool) -> None:
+        """Wait for the writer to write what is queued (``wait``). After a
+        write failed, the take is what the file holds (the blocks queued
+        after it were dropped), and the error waits to be raised."""
+        writer = self._writer
+        if writer is None:
+            return
+        if wait:
+            writer.flush()
+        error = writer.take_error()
+        if error is None:
+            return
+        size = self._appender.size if self._appender is not None else 0
+        self._keep_first(size // _CF32.itemsize)
+        if self._failure is None:
+            self._failure = error
+
+    def _raise_failure(self) -> None:
+        failure, self._failure = self._failure, None
+        if failure is not None:
+            raise failure
+
+    def _keep_first(self, count: int) -> None:
+        """Keep the first ``count`` samples counted (the last block kept is
+        cut there), forgetting the others."""
+        if count >= self._count:
+            return
+        starts = self._starts[: self._nblocks]
+        self._nblocks = int(np.searchsorted(starts, count, side="left"))
+        self._count = max(0, int(count))
+        self._map = None
+
     def _write(self, data: np.ndarray) -> None:
         """Write ``data`` at the end of the file, all of it (a short write
         goes on). When that fails, the samples written in full are kept as
         a block of their own and a partial one is cut off, so the file holds
         exactly the samples counted; then the error is raised."""
-        view = memoryview(data.view(np.uint8))
-        done = 0
+        assert self._appender is not None
+        before = self._appender.size
         try:
-            while done < len(view):
-                wrote = self._file.write(view[done:])
-                if not wrote:
-                    raise OSError(errno.EIO, "the recording file takes no more data")
-                done += wrote
+            self._appender(data)
         except OSError:
-            whole = done // _CF32.itemsize
+            whole = (self._appender.size - before) // _CF32.itemsize
             if whole:
                 self._add_block(whole)
-            end = self._count * _CF32.itemsize
-            try:
-                os.ftruncate(self._file.fileno(), end)
-                self._file.seek(end)
-            except OSError as e:  # pragma: no cover - the disk is in trouble
-                logger.debug(f"Could not trim the recording to {end} bytes: {e}")
             raise
 
     def _create_file(self) -> None:
@@ -2041,11 +2181,24 @@ class _SampleStore:
             except OSError:  # pragma: no cover - e.g. a filesystem without locks
                 pass
         self._folder, self._path, self._file = folder, path, handle
-        self._finalizer = weakref.finalize(self, _close_and_delete, handle, path)
+        self._appender = _FileAppender(handle)
+        # (Its thread starts with the first block queued. Neither holds the
+        # store, so a store dropped unfinished is still collected.)
+        self._writer = BackgroundWriter(
+            self._appender, self._queue_bytes, name=_CAPTURE_WRITER_NAME
+        )
+        self._finalizer = weakref.finalize(
+            self, _close_and_delete, handle, path, self._writer
+        )
 
     def finish(self) -> None:
-        """Nothing more will be added for now. (Every block is in the file
-        already: nothing is buffered.)"""
+        """Nothing more will be added for now: what is queued is written
+        (waiting for the writer thread, which then ends). Raises OSError,
+        once, when a write failed (see :meth:`queue`)."""
+        self._settle(wait=True)
+        if self._writer is not None:
+            self._writer.close()
+        self._raise_failure()
         if self._file is not None:
             self._file.flush()
 
@@ -2053,10 +2206,12 @@ class _SampleStore:
         """Every sample: the loaded array or a read-only map of the file."""
         if self._memory is not None:
             return self._memory
+        self._settle(wait=True)  # (every sample counted is in the file)
         if self._count == 0 or self._path is None:
             return np.empty(0, dtype=_CF32)
         if self._map is None:
-            self.finish()
+            if self._file is not None:
+                self._file.flush()
             self._map = np.memmap(
                 self._path, dtype=_CF32, mode="r", shape=(self._count,)
             )
@@ -2084,6 +2239,9 @@ class _SampleStore:
         then write a copy."""
         if self._path is None or not self.temporary:
             return False
+        self._settle(wait=True)
+        if self._writer is not None:
+            self._writer.close()
         self._map = None
         try:
             os.replace(self._path, filename)
@@ -2095,6 +2253,7 @@ class _SampleStore:
         self._finalizer = None
         self._file.close()
         self._file = None
+        self._writer = self._appender = None
         self._path = os.path.abspath(filename)
         return True
 
@@ -2102,10 +2261,16 @@ class _SampleStore:
         """Forget the samples, deleting the temporary file (not a saved one)."""
         self._map = None
         if self._finalizer is not None:
-            self._finalizer()  # closes and deletes the temporary file
-        elif self._file is not None:
-            self._file.close()
+            # (Ends the writer thread, then closes and deletes the file.)
+            self._finalizer()
+        else:
+            if self._writer is not None:
+                self._writer.abort()
+            if self._file is not None:
+                self._file.close()
         self._finalizer = self._file = self._path = None
+        self._writer = self._appender = None
+        self._failure = None
         self._memory = None
         self._starts = np.zeros(0, dtype=np.int64)
         self._nblocks = 0
@@ -2127,8 +2292,9 @@ class _SampleStore:
             yield data[start : start + length]
 
     def __getitem__(self, index: int) -> np.ndarray:
+        data = self.samples()  # (first: a failed write may shorten the take)
         start, length = self._block(index)
-        return self.samples()[start : start + length]
+        return data[start : start + length]
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, (list, tuple)):
@@ -7596,7 +7762,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return True
 
     def _stop_recording(self):
-        """Stop recording."""
+        """Stop recording. What the take's writer thread still holds is
+        written first, so the take is whole before it is offered for saving
+        (or saved automatically)."""
+        if self._recording and not self._capture_pending:
+            if self._take_write_failed(wait=True):
+                return  # (stopped, saying why)
         was_recording = self._recording
         captured = was_recording and not self._capture_pending
         self._recording = False
@@ -7636,6 +7807,24 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
         self._update_take_panel()
         logger.info("Recording stopped")
+
+    def _take_write_failed(self, wait: bool = False) -> bool:
+        """Whether a write of the take failed on its writer thread (a full
+        disk) since the last frame: then the recording is stopped, saying
+        why, as a write that failed in a frame stopped it, and True.
+        ``wait``: first wait until what is queued is written (Stop)."""
+        store = self._samples_buffer
+        try:
+            if wait:
+                store.finish()
+            else:
+                store.check()
+        except (OSError, ValueError) as e:
+            self._stop_recording_with_warning(
+                f"the recording file can't be written ({e})", elsewhere=True
+            )
+            return True
+        return False
 
     def _buffer_sample_count(self) -> int:
         return self._samples_buffer.sample_count
@@ -7877,6 +8066,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return True
         self._next_space_check = now + _FREE_SPACE_CHECK_S
         free = self._free_recording_space()
+        if free is not None:  # (what the writer thread holds goes there too)
+            free -= self._samples_buffer.pending_bytes
         if free is None or free >= _MIN_FREE_BYTES:
             return True
         self._stop_recording_with_warning(
@@ -8616,7 +8807,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._scan_frame(samples)
 
     def _capture(self, samples: np.ndarray) -> None:
-        """Add a block to the recording (the first one replaces the buffer)."""
+        """Add a block to the recording (the first one replaces the buffer).
+
+        The block (a copy) is queued for the take's writer thread: the
+        display loop never waits for the disk. A block the writer has no
+        room for (the disk can't keep up) is lost, counted and said as
+        samples a driver drops are; a write that failed stops the
+        recording, saying why (see _SampleStore.queue)."""
         if not self._check_recording_space():
             return
         # The samples are centered on the LO (not the tuned frequency).
@@ -8624,7 +8821,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._capture_pending:
             self._capture_pending = False
             self._capture_gap = False
-            self._replace_buffer(_SampleStore(self._capture_folder()))
+            self._replace_buffer(
+                _SampleStore(
+                    self._capture_folder(),
+                    queue_bytes=_capture_queue_bytes(tuned[1]),
+                )
+            )
             self._buffer_meta = tuned
             self._buffer_source = ""
             self._buffer_source_path = ""
@@ -8668,11 +8870,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._capture_gap = False
             self._samples_buffer.start_segment(_utc_stamp())
         try:
-            self._samples_buffer.append(samples)
+            queued = self._samples_buffer.queue(samples)
         except (OSError, ValueError) as e:
             self._stop_recording_with_warning(
                 f"the recording file can't be written ({e})", elsewhere=True
             )
+            return
+        if not queued:
+            # The writer is a second behind: the disk can't keep up. A gap
+            # in the take, said as a driver's dropped samples are.
+            self._lost_unreported += len(samples)
             return
         self._buffer_unsaved = True
         # complex64 = 8 bytes/sample
@@ -9433,6 +9640,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _update_status(self):
         """Update status bar (and the Info tab while it is visible)."""
+        if self._recording and not self._capture_pending:
+            self._take_write_failed()  # (also while no frame captures)
         if self._recording:
             self._update_recording_status()
         if self._audio_take is not None:

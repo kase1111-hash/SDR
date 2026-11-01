@@ -22,7 +22,10 @@ stopped second receiver holds no device at all (Stop closes it).
 It reuses the main window's bookmarks (tune from one, bookmark the frequency
 heard here) and records its I/Q with the library's :class:`~sdr_module.dsp.
 recording.IQRecorder` straight to a SigMF file in the recordings folder (the
-main window's File > Open Recording plays it back).
+main window's File > Open Recording plays it back), written by a thread of
+its own as the main window's take is (:class:`~sdr_module.dsp.
+background_writer.BackgroundWriter`: a block its queue has no room for is
+counted as lost and said).
 
 The signal path is the main window's: :class:`~.main_window._ReceiverChain`
 (channel filter and demodulators), the squelch, level and noise-floor
@@ -81,6 +84,7 @@ except ImportError:  # pragma: no cover - environment
     HAS_PYQT6 = False
 
 from ..devices.base import SDRDevice
+from ..dsp.background_writer import BackgroundWriter
 from ..dsp.frame_spectrum import (
     WINDOW_LABELS,
     FrameSpectrumAnalyzer,
@@ -158,12 +162,14 @@ from .main_window import (
     _USABLE_SPAN_FRACTION,
     DISPLAY_BLOCK,
     SDRMainWindow,
+    _capture_queue_bytes,
     _channel_edges,
     _clock_text,
     _ElidedLabel,
     _Pacer,
     _parse_hz,
     _ReceiverChain,
+    _span_text,
     format_frequency,
     format_rate,
 )
@@ -774,6 +780,9 @@ if HAS_PYQT6:
             # I/Q recording: the recorder and its file, the LO it is
             # labelled with (tuning stays inside its span meanwhile).
             self._recorder: Optional[IQRecorder] = None
+            # Its writer thread, and the samples it had no room for.
+            self._record_writer: Optional[BackgroundWriter] = None
+            self._record_lost = 0
             self._record_path = ""
             # What the last recording's end said (text, tone, ms).
             self._recording_said: Optional[Tuple[str, str, int]] = None
@@ -1447,7 +1456,10 @@ if HAS_PYQT6:
             self._status_timer.stop()
             self._running = False
             if self._recorder is not None:
+                writer, self._record_writer = self._record_writer, None
                 try:
+                    if writer is not None:
+                        writer.close()  # (what it holds is written first)
                     self._recorder.stop()
                 except Exception as e:  # pragma: no cover - disk trouble
                     logger.warning(f"Could not finish {self._record_path}: {e}")
@@ -2909,6 +2921,14 @@ if HAS_PYQT6:
                 self._show_message(f"Can't record to {path}: {e}", "danger", 10000)
                 return False
             self._recorder = recorder
+            # (Written from a thread of its own: the frames never wait for
+            # the disk.)
+            self._record_writer = BackgroundWriter(
+                recorder.write,
+                _capture_queue_bytes(self._rate()),
+                name="Second receiver recording writer",
+            )
+            self._record_lost = 0
             self._record_path = path
             self._record_lo = self._lo_hz
             self._next_space_check = 0.0
@@ -2923,13 +2943,17 @@ if HAS_PYQT6:
             return True
 
         def _record(self, samples: np.ndarray) -> None:
-            recorder = self._recorder
-            if recorder is None:
+            """Queue a copy of the frame's samples for the recording's
+            writer thread (a write that failed meanwhile stops it)."""
+            writer = self._record_writer
+            if self._recorder is None or writer is None:
                 return
             now = time.monotonic()
             if now >= self._next_space_check:
                 self._next_space_check = now + _FREE_SPACE_CHECK_S
                 free = self._free_space(self._record_path)
+                if free is not None:  # (what the writer holds goes there too)
+                    free -= writer.pending_bytes
                 if free is not None and free < _MIN_FREE_BYTES:
                     self._stop_recording(
                         f"only {format_size(free)} of disk space is left"
@@ -2937,9 +2961,37 @@ if HAS_PYQT6:
                     self._sync_record_ui()
                     return
             try:
-                recorder.write(samples)
+                queued = writer.put(samples)
             except (OSError, ValueError, RuntimeError) as e:
                 self._stop_recording(f"the file can't be written ({e})")
+                self._sync_record_ui()
+                return
+            if not queued:
+                self._note_record_lost(len(samples))
+
+        def _note_record_lost(self, count: int) -> None:
+            """The writer had no room for a block (the disk can't keep up):
+            a gap in the file, said once a recording (and when it ends)."""
+            first = not self._record_lost
+            self._record_lost += count
+            if not first:
+                return
+            rate = self._rate()
+            message = (
+                f"The recording has gaps: {_span_text(count / max(rate, 1.0))} "
+                "of signal was lost because this computer's disk couldn't keep "
+                f"up with {format_rate(rate)}. A lower sample rate helps."
+            )
+            logger.warning(f"Second receiver: {message}")
+            self._show_message(message, "warning", 15000)
+
+        def _check_record_writer(self) -> None:
+            """A write that failed on the writer thread stops the recording,
+            also while no frame records (the status timer)."""
+            writer = self._record_writer
+            error = writer.error if writer is not None else None
+            if error is not None:
+                self._stop_recording(f"the file can't be written ({error})")
                 self._sync_record_ui()
 
         @staticmethod
@@ -2954,10 +3006,21 @@ if HAS_PYQT6:
 
         def _stop_recording(self, problem: str = "") -> None:
             recorder, self._recorder = self._recorder, None
+            writer, self._record_writer = self._record_writer, None
+            lost, self._record_lost = self._record_lost, 0
             path, self._record_path = self._record_path, ""
             self._record_lo = None
             if recorder is None:
                 return
+            if writer is not None:
+                # What the writer holds is written first: the file is whole
+                # before it is said to be saved.
+                writer.close()
+                error = writer.take_error()
+                if error is not None and not problem:
+                    problem = f"the file can't be written ({error})"
+            rate = recorder.sample_rate
+            gaps = f", {_span_text(lost / rate)} lost" if lost and rate > 0 else ""
             seconds = recorder.duration_seconds
             size = recorder.file_size_bytes
             name, folder = _file_and_folder(path)
@@ -2972,9 +3035,9 @@ if HAS_PYQT6:
                 )
             else:
                 text = (
-                    f"Saved {name} ({_clock_text(seconds)}, {format_size(size)}) "
-                    f"in {folder}. File > Open Recording in the main window "
-                    "plays it."
+                    f"Saved {name} ({_clock_text(seconds)}, {format_size(size)}"
+                    f"{gaps}) in {folder}. File > Open Recording in the main "
+                    "window plays it."
                 )
             if problem:
                 text = f"Recording stopped: {problem}. {text}"
@@ -3325,6 +3388,7 @@ if HAS_PYQT6:
             if self._main_gone:
                 return
             if self._recorder is not None:
+                self._check_record_writer()
                 self._update_rec_label()
             self._update_tx_group()
             self._update_audio_note()

@@ -12247,7 +12247,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         frame = self._frame_spectrum.process(samples)
         if frame is None:
             return  # less than one FFT of samples yet (a large FFT size)
-        self._spectrum.update_spectrum(frame.mean_db, noise_db=frame.noise_floor_db)
+        self._spectrum.update_spectrum(frame.mean_db)
         # (While this computer can't keep up, a frame's length isn't the
         # usual one: its row is coloured like the others, but doesn't set
         # how bright their noise shows. N-07)

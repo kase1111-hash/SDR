@@ -514,7 +514,8 @@ from tests.test_gui_chrome import _WindowTestCase  # noqa: E402
 @unittest.skipUnless(HAS_QT, "PyQt6 is required")
 class TestTheWindowsPlots(_WindowTestCase):
     """The demo device, as the window shows it: the waterfall's rows carry
-    their averaged spectrum and noise floor, the spectrum its noise floor,
+    their averaged spectrum and noise floor, the spectrum measures its
+    noise from its trace (the window feeds it the trace alone, as before),
     and the hover over the demo's empty band says "noise" at 32768
     points (it read "SNR 5-8 dB" at most places)."""
 
@@ -547,7 +548,8 @@ class TestTheWindowsPlots(_WindowTestCase):
         self.assertEqual(len(wf._row_means), len(wf._history))
         self.assertIsNotNone(wf._row_means[-1])
         self.assertIsNotNone(wf._row_floors[-1])
-        self.assertIsNotNone(sp._trace_floor)
+        model = R.noise_model(sp._main_trace())
+        self.assertAlmostEqual(model.floor_db, wf._row_floors[-1], delta=1.0)
         lines = []
 
         def record(_painter, text, *args, **kwargs):

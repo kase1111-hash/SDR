@@ -1375,7 +1375,7 @@ class _ReceiverChain:
         if self.mode in ("USB", "LSB"):
             band = (_SSB_LOW_HZ, _SSB_LOW_HZ + self.bandwidth)
         elif self.mode == "CW":
-            pitch = min(max(float(self._options().cw_pitch_hz), 200.0), 2000.0)
+            pitch = min(max(float(options.cw_pitch_hz), 200.0), 2000.0)
             band = (pitch - self.bandwidth / 2.0, pitch + self.bandwidth / 2.0)
         elif self.mode == "FM" and self._voice:
             band = (0.0, _VOICE_AUDIO_HZ)
@@ -11274,10 +11274,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if width:
             self._set_demod_mode(demod, deviation or None, width)
         if demod == "FM":
-            self._control_panel.set_tone_squelch_hz(tone)
             dcs = None if tone else bookmark_dcs(bookmark)
             if dcs is not None:
                 self._control_panel.set_dcs_squelch(*dcs)
+            else:
+                self._control_panel.set_tone_squelch_hz(tone)
             if tone or dcs is not None:
                 label = str(bookmark.get("label") or format_frequency(freq))
                 squelch = dcs_label(*dcs) if dcs else f"tone squelch {tone:.1f} Hz"

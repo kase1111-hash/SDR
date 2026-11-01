@@ -667,12 +667,14 @@ class TestScan09CliRateTheDeviceRuns(unittest.TestCase):
         import contextlib
         import io
         import sys
+        import threading
         import types
         from unittest import mock
 
         import numpy as np
 
         from sdr_module import cli
+        from sdr_module.devices.rtlsdr import RTLSDRDevice
 
         carriers = self.CARRIERS
 
@@ -680,6 +682,8 @@ class TestScan09CliRateTheDeviceRuns(unittest.TestCase):
             def __init__(self, device_index=0):
                 self.sample_rate, self.center_freq, self.gain = 2.4e6, 100e6, "auto"
                 self._rng = np.random.default_rng(1)
+                self.reads = 0  # transfers done
+                self.read_done = threading.Condition()
 
             @staticmethod
             def get_device_serial_addresses():
@@ -692,14 +696,18 @@ class TestScan09CliRateTheDeviceRuns(unittest.TestCase):
                 return [0, 100, 200]
 
             def read_samples(self, n):
+                center = self.center_freq  # (a transfer holds where it began)
                 t = np.arange(n) / self.sample_rate
                 x = (
                     self._rng.standard_normal(n) + 1j * self._rng.standard_normal(n)
                 ) * 1e-4
                 for freq in carriers:
-                    offset = freq - self.center_freq
+                    offset = freq - center
                     if abs(offset) < self.sample_rate / 2:
                         x = x + 0.05 * np.exp(2j * np.pi * offset * t)
+                with self.read_done:
+                    self.reads += 1
+                    self.read_done.notify_all()
                 return x.astype(np.complex64)
 
             def close(self):
@@ -710,12 +718,29 @@ class TestScan09CliRateTheDeviceRuns(unittest.TestCase):
             def rtlsdr_get_device_count():
                 return 1
 
+        real_set_frequency = RTLSDRDevice.set_frequency
+
+        def set_frequency(device, freq_hz):
+            # The transfer in flight at a retune holds the old frequency:
+            # wait until the driver has queued it (the transfer after it is
+            # done too), so the CLI's drain drops it. _LIVE_SETTLE_S waits
+            # for that by the clock (0 here, for speed): the test measured
+            # the old step's samples whenever a retune met a transfer.
+            ok = real_set_frequency(device, freq_hz)
+            rtl = device._device
+            if ok and device._state.is_streaming and isinstance(rtl, RtlSdr):
+                with rtl.read_done:
+                    begun = rtl.reads
+                    rtl.read_done.wait_for(lambda: rtl.reads >= begun + 2, 10.0)
+            return ok
+
         fake = types.ModuleType("rtlsdr")
         fake.RtlSdr, fake.librtlsdr = RtlSdr, _Lib
         out = io.StringIO()
         with (
             mock.patch.dict(sys.modules, {"rtlsdr": fake}),
             mock.patch.object(cli, "_LIVE_SETTLE_S", 0.0),
+            mock.patch.object(RTLSDRDevice, "set_frequency", set_frequency),
             mock.patch(
                 "sdr_module.devices.hackrf.HackRFDevice.list_devices", return_value=[]
             ),

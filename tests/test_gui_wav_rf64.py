@@ -21,6 +21,7 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from tests.test_gui_audio_recording import _AudioCase  # noqa: E402
 from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
 from tests.test_gui_recording_files import RATE  # noqa: E402
 from tests.test_review_recordings import _ReviewCase  # noqa: E402
@@ -257,3 +258,46 @@ class TestTheOldRefusalIsGone(unittest.TestCase):
 
         self.assertEqual(wav_problem((1 << 31) + 1, SampleFormat.INT16, 2.4e6), "")
         self.assertIn("sample rate", wav_problem(1000, SampleFormat.INT16, 0.0))
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
+class TestRecordAudioPastTheLimit(_AudioCase):
+    """Radio > Record Audio past 4 GiB (12 hours of mono, 6 of stereo): it
+    stopped ("can't be written ('L' format requires 0 <= number <=
+    4294967295)") and its closing fade-out overwrote the WAV header. Now the
+    file becomes RF64 and the recording goes on."""
+
+    def test_it_keeps_recording_as_rf64_and_says_so(self):
+        from sdr_module.dsp.wav_file import read_wav_header
+
+        win = self.win
+        with _small_limit(48000 * 2 // 10):  # (0.1 s of audio is "4 GiB")
+            win._record_audio_action.trigger()
+            take = win._audio_take
+            self.frames(30)  # 0.3 s of the 100.1 MHz station
+            self.assertIs(win._audio_take, take)  # (still recording)
+            win._record_audio_action.trigger()
+        self.assertIsNone(win._audio_take)
+        names = self.wavs()
+        self.assertEqual(len(names), 1)
+        header = read_wav_header(os.path.join(self.folder, "rec", names[0]))
+        self.assertEqual(header.container, "RF64")
+        self.assertEqual((header.channels, header.frame_rate), (1, 48000))
+        self.assertEqual(header.frames, take.samples)
+        self.assertGreater(take.samples, 48000 // 10)
+        text = win._message_label.text()
+        self.assertTrue(
+            text.startswith(
+                "Saved 00:00 of audio as RF64 (the WAV format for files over 4 GiB) "
+                "to "
+            ),
+            text,
+        )
+
+    def test_a_short_take_says_nothing_of_rf64(self):
+        self.win._record_audio_action.trigger()
+        self.frames(5)
+        self.win._record_audio_action.trigger()
+        self.assertTrue(
+            self.win._message_label.text().startswith("Saved 00:00 of audio to ")
+        )

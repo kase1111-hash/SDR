@@ -1492,7 +1492,7 @@ class AudioRecorder:
         self._normalize = normalize
 
         # Recording state
-        self._wav_file: Optional[wave.Wave_write] = None
+        self._wav_file: Optional[WavWriter] = None
         self._filepath: Optional[Path] = None
         self._recording = False
         self._samples_written = 0
@@ -1615,12 +1615,21 @@ class AudioRecorder:
             else:
                 self._metadata.custom[key] = value
 
-    def start(self, filepath: Union[str, Path]) -> None:
+    def start(
+        self, filepath: Union[str, Path], expected_samples: Optional[int] = None
+    ) -> None:
         """
         Start recording to WAV file.
 
         Args:
             filepath: Output WAV file path
+            expected_samples: How many samples (of each channel) will be
+                written, when known: a file that fits in a classic WAV file
+                (4 GiB) gets its plain 44-byte header. Without it (a
+                recording of unknown length, as Record Audio's), the header
+                keeps room to become RF64 if the recording passes 4 GiB,
+                about 12 hours of 48 kHz mono (see
+                :mod:`sdr_module.dsp.wav_file`).
         """
         if self._recording:
             raise RuntimeError("Already recording")
@@ -1631,18 +1640,24 @@ class AudioRecorder:
         self._start_time = _utc_now()
         self._metadata.start_time = self._start_time.isoformat() + "Z"
 
-        # Open WAV file
-        self._wav_file = wave.open(str(self._filepath), "wb")
-
         # WAV parameters
         sample_width = self._get_sample_width()
         # WAV float32 stores as 16-bit internally for compatibility
         if self._sample_format == AudioSampleFormat.FLOAT32:
             sample_width = 2
 
-        self._wav_file.setnchannels(self._channels)
-        self._wav_file.setsampwidth(sample_width)
-        self._wav_file.setframerate(self._sample_rate)
+        # Open WAV file: classic up to 4 GiB, RF64 past it (the wave module
+        # failed there, with its file position left in the header).
+        expected = None
+        if expected_samples is not None:
+            expected = max(0, int(expected_samples)) * self._channels * sample_width
+        self._wav_file = WavWriter(
+            str(self._filepath),
+            self._channels,
+            sample_width,
+            self._sample_rate,
+            expected_bytes=expected,
+        )
 
         self._recording = True
 
@@ -1977,7 +1992,8 @@ def save_audio_file(
         sample_rate=sample_rate, sample_format=sample_format, channels=1
     )
 
-    recorder.start(filepath)
+    # (Its size known: a file that fits is a classic one.)
+    recorder.start(filepath, expected_samples=np.asarray(samples).size)
     recorder.write(samples)
     return recorder.stop()
 

@@ -8144,8 +8144,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._update_take_panel()
         if not quiet:
             if take.samples:
+                note = rf64_note(take.path)  # (past 4 GiB: RF64)
                 self._show_status_message(
-                    f"Saved {_clock_text(seconds)} of audio to "
+                    f"Saved {_clock_text(seconds)} of audio{note} to "
                     f"{file_dialogs.display_path(take.path)}",
                     "success",
                     8000,

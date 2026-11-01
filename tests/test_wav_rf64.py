@@ -27,6 +27,7 @@ import pytest
 
 from sdr_module.dsp import wav_file
 from sdr_module.dsp.recording import (
+    AudioRecorder,
     FileFormat,
     IQPlayer,
     IQRecorder,
@@ -35,6 +36,7 @@ from sdr_module.dsp.recording import (
     detect_format,
     get_file_info,
     load_iq_file,
+    save_audio_file,
     save_iq_file,
     sidecar_path,
     wav_data_offset,
@@ -676,3 +678,81 @@ class TestRf64Recordings:
         with IQPlayer(path) as player:
             assert player.sample_format is SampleFormat.INT16
             np.testing.assert_allclose(player.read(1000), x, atol=STEP)
+
+
+# ---------------------------------------------------------------------------
+# Record Audio: a WAV recording of unknown length, hours long
+# ---------------------------------------------------------------------------
+
+
+class TestRecordAudioPastTheLimit:
+    """Record Audio (48 kHz 16-bit WAV of what is heard) reaches 4 GiB after
+    about 12 hours of mono or 6 of stereo. It wrote through the wave module,
+    which failed there ("'L' format requires 0 <= number <= 4294967295") with
+    its file position left in the header, where the take's closing fade-out
+    then landed: the hours recorded no longer opened as WAV. Now it becomes
+    RF64 and goes on, as an I/Q recording does."""
+
+    AUDIO_RATE = 48000
+
+    def _blocks(self, n=6, size=1000):
+        rng = np.random.default_rng(3)
+        return [
+            np.clip(0.4 * rng.standard_normal(size), -1, 1).astype(np.float32)
+            for _ in range(n)
+        ]
+
+    @staticmethod
+    def _int16(blocks):
+        """The blocks as AudioRecorder stores them."""
+        return b"".join(
+            (np.clip(b, -1.0, 1.0) * 32767).astype("<i2").tobytes() for b in blocks
+        )
+
+    def test_a_file_of_known_length_is_the_wave_module_s(self, tmp_path):
+        x = (0.5 * np.sin(0.05 * np.arange(4800))).astype(np.float32)
+        ours = tmp_path / "ours.wav"
+        save_audio_file(ours, x, self.AUDIO_RATE)
+        reference = tmp_path / "reference.wav"
+        with wave.open(str(reference), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(2)
+            handle.setframerate(self.AUDIO_RATE)
+            handle.writeframes(self._int16([x]))
+        assert ours.read_bytes() == reference.read_bytes()
+
+    def test_it_becomes_rf64_as_it_grows_past_the_limit(self, tmp_path, small_limit):
+        path = tmp_path / "heard.wav"
+        recorder = AudioRecorder(self.AUDIO_RATE, channels=1, normalize=False)
+        recorder.start(path)
+        blocks = self._blocks()  # (6 x 2000 bytes: past the 4000 a file holds)
+        recorder.write(blocks[0])
+        raw = path.read_bytes()
+        assert raw[:4] == b"RIFF" and raw[12:16] == b"JUNK"
+        for done, block in enumerate(blocks[1:], start=2):
+            recorder.write(block)
+            # (Up to date after every write: a crash keeps what was heard.)
+            assert wav_file.read_wav_header(path).frames == 1000 * done
+        recorder.stop()
+        raw = path.read_bytes()
+        assert raw[:4] == b"RF64" and raw[12:16] == b"ds64"
+        header = wav_file.read_wav_header(path)
+        assert header.container == "RF64"
+        assert (header.channels, header.sample_width) == (1, 2)
+        assert (header.frame_rate, header.frames) == (self.AUDIO_RATE, 6000)
+        assert raw[header.data_offset :] == self._int16(blocks)
+
+    def test_a_stereo_take_too(self, tmp_path, small_limit):
+        """Two channels (Record Audio of broadcast FM in stereo)."""
+        path = tmp_path / "stereo.wav"
+        recorder = AudioRecorder(self.AUDIO_RATE, channels=2, normalize=False)
+        recorder.start(path)
+        blocks = [np.stack([b, -b], axis=1) for b in self._blocks(n=3)]
+        for block in blocks:
+            recorder.write(block)
+        recorder.stop()
+        header = wav_file.read_wav_header(path)
+        assert header.container == "RF64"
+        assert (header.channels, header.frames) == (2, 3000)
+        raw = path.read_bytes()
+        assert raw[header.data_offset :] == self._int16(blocks)

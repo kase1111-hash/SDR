@@ -2521,6 +2521,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Tuple[str, str, float, Tuple[Tuple[float, float], ...]]
     ] = None
     _preset_decoder_note = ""
+    # What the last tune away from it said ("ACARS decoder off: tuned away
+    # ...") and its point ("ACARS decoder off"), which the same tune's next
+    # message keeps (see _keeping_release_note).
+    _released_decoder: Optional[Tuple[str, str]] = None
     # Why the last tune was refused (the status line says so until a tune
     # goes through).
     _tuning_refusal: Optional[str] = None
@@ -5908,6 +5912,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             f"{self._control_panel._bw_combo.currentText()} filter, as {where} is "
             "usually heard (Radio > Choose Mode From Band Plan)"
         )
+        text = self._keeping_release_note(text)
         self._show_status_message(text, "info", 6000)
         self._band_plan_note = (text, zone)
         return True
@@ -7195,7 +7200,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if not mode:
             # No mode of its own: the band plan's, in another band.
             if not self._listen_by_band_plan(before, self._current_frequency()):
-                self._show_status_message(f"Tuned to {label}", "info", 2500)
+                text = self._keeping_release_note(f"Tuned to {label}")
+                self._show_status_message(text, "info", 2500)
             return
         # (Quiet: the mode alone said its last filter first, "AM: 6 kHz",
         # before this one's was set; "Tuned to ..." says what was set.)
@@ -7213,7 +7219,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             text = f"Tuned to {label[:-1]}, {mode})"
         else:
             text = f"Tuned to {label} ({mode})"
-        self._show_status_message(text, "info", 2500)
+        self._show_status_message(self._keeping_release_note(text), "info", 2500)
 
     # ------------------------------------------------------------------
     # Acquisition
@@ -11299,12 +11305,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._control_panel._applying_preset:
             self._preset_decoder_note = f" · {note}"
             return
-        self._show_status_message(
+        message = (
             f"{note}: tuned away from the {name} preset ({format_frequency(freq)}), "
-            "which had turned it on.",
-            "info",
-            5000,
+            "which had turned it on."
         )
+        self._show_status_message(message, "info", 5000)
+        self._released_decoder = (message, note)
+
+    def _keeping_release_note(self, text: str) -> str:
+        """``text``, a message the tune that turned a preset's decoder off
+        posts next (the band plan's line, "Tuned to ..."), led by that point
+        ("ACARS decoder off · ...") while it is what the message replaces:
+        both facts stay in view (P-07). (First: a long line is cut short at
+        its end.)"""
+        released = self._released_decoder
+        if released is None:
+            return text
+        message, note = released
+        shown = self._message_label.text()
+        if shown != message and not shown.startswith(f"{note} · "):
+            self._released_decoder = None  # (replaced, or gone)
+            return text
+        return f"{note} · {text}"
 
     def _preset_decoder_off(self) -> str:
         """Turn off the decoder a preset turned on (unless you changed it

@@ -456,3 +456,67 @@ class TestOnAirComesBackAfterANotice(_tx_case()):
         self.wait_done(5)
         QApplication.processEvents()
         self.assertFalse(win._message_label.text().startswith("On air"))
+
+
+class TestThePresetsDecoderNoteStays(_FilesCase):
+    """P-07: typing a frequency in another band right after a preset turned
+    its decoder on (or opening a recording) said "ACARS decoder off: tuned
+    away from the ACARS preset (131.550 MHz)..." and at once replaced it
+    with the band plan's "FM Broadcast: listening in FM...". The note was
+    left only in the status history. One message says both now."""
+
+    def type_frequency(self, text):
+        from tests.test_final_listen import TestBandPlanListeningSegments
+
+        TestBandPlanListeningSegments.type_frequency(self, text)
+
+    def decoding(self):
+        panel = self.win._decoder_panel
+        return panel._proto_combo.currentText(), panel._enabled_check.isChecked()
+
+    def test_a_typed_tune_into_another_band(self):
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ACARS"))
+        self.assertEqual(self.decoding(), ("ACARS", True))
+        self.type_frequency("100.1")
+        self.assertEqual(self.decoding(), ("ACARS", False))
+        text = self.message()
+        self.assertTrue(
+            text.startswith("ACARS decoder off · FM Broadcast: listening in FM"), text
+        )
+        # Its band's line is still the one cleared when you leave the band
+        # (LISTEN-13), note and all.
+        self.type_frequency("146.52")
+        self.assertNotIn("FM Broadcast", self.message())
+
+    def test_a_bookmark_without_a_mode(self):
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ADS-B"))
+        win._on_bookmark_tune(100.1e6, "Local FM")
+        text = self.message()
+        self.assertTrue(
+            text.startswith("ADS-B decoder off · FM Broadcast: listening in FM"), text
+        )
+
+    def test_a_bookmark_with_its_own_mode(self):
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ADS-B"))
+        win._on_bookmark_tune(146.52e6, "2m Calling", "FM", "5 kHz")
+        self.assertEqual(self.message(), "ADS-B decoder off · Tuned to 2m Calling (FM)")
+
+    def test_opening_a_recording(self):
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ADS-B"))
+        path = _save_sigmf(self.path("aprs2m.sigmf-data"), 144.39e6)
+        with self.open_dialog(path):
+            self.assertTrue(win._open_recording())
+        text = self.message()
+        self.assertTrue(
+            text.startswith("ADS-B decoder off · APRS: listening in FM (narrow"), text
+        )
+
+    def test_a_tune_that_says_nothing_else_keeps_the_note(self):
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ACARS"))
+        win.set_frequency(125e6)  # (no band plan line: the note stands)
+        self.assertTrue(self.message().startswith("ACARS decoder off: tuned away"))

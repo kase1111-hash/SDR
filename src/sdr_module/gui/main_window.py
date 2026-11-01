@@ -2731,6 +2731,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._decoder: Any = None
         self._decoder_protocol: Any = None
         self._decoder_rate = 0.0  # sample rate the live decoder was built for
+        self._decoder_recording = False  # ... and whether a recording played
         # Messages decoded while the Decoder tab was out of sight (its title
         # counts them), the background RDS of the tuned broadcast station
         # (Radio > RDS Station Names) and what its badge shows.
@@ -4686,8 +4687,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         # A live decoder is built for one sample rate; rebuild it when the
         # device (and so the rate) changes, also after a build that failed
-        # (e.g. one that needs a higher rate).
-        if self._decoder_panel.protocol() is not None and self._decoder_rate != rate:
+        # (e.g. one that needs a higher rate). One that can't decode at this
+        # rate words it for a recording or the device: rebuilt when a
+        # recording starts or stops playing, even at the same rate.
+        decoder = self._own("_decoder")
+        cannot = decoder is None or bool(decoder.status.problem)
+        switched = self._playback.active != self._decoder_recording
+        if self._decoder_panel.protocol() is not None and (
+            self._decoder_rate != rate or (cannot and switched)
+        ):
             self._rebuild_decoder()
 
         # The Decoder panel's hint says whether it is listening (and Play
@@ -5322,6 +5330,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Remember the rate even if there is no decoder or its build fails,
         # so a later rate change retries it (and an unchanged rate doesn't).
         self._decoder_rate = rate
+        # (A rate too low for it is worded for a recording, P-05: its rate
+        # can't be changed in Receiver > Sample rate.)
+        playback = self._own("_playback")
+        self._decoder_recording = bool(playback is not None and playback.active)
         if live_decoder_class(text) is None:
             # Listed, but without a live decoder (yet).
             self._decoder = None
@@ -5331,7 +5343,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         try:
             self._decoder = create_live_decoder(
-                text, float(rate), self._decoder_offset_hz()
+                text,
+                float(rate),
+                self._decoder_offset_hz(),
+                recording=self._decoder_recording,
             )
             self._decoder_protocol = ProtocolType(proto_value)
         except Exception as exc:

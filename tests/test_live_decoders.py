@@ -406,6 +406,26 @@ class TestFactory:
         assert decoder.process(np.ones(10000, dtype=np.complex64)) == []
         assert create_live_decoder("ADS-B", 2.4e6).status.problem is None
 
+    def test_a_recording_too_slow_says_so(self):
+        """P-05: a recording playing below ADS-B's rate was worded for the
+        device ("the device runs at 1 MS/s. Choose 2.4 MS/s or more in
+        Receiver > Sample rate"): a recording's rate can't be changed.
+        The device keeps its advice."""
+        status = create_live_decoder("ADS-B", 1e6, recording=True).status
+        assert status.problem == "ADS-B needs at least 2 MS/s; this recording is 1 MS/s"
+        assert status.remedy is None
+        assert ADSBLiveDecoder(1e6, recording=True).status.problem == status.problem
+        device = create_live_decoder("ADS-B", 1e6).status
+        assert (
+            device.problem == "ADS-B needs at least 2 MS/s; the device runs at 1 MS/s"
+        )
+        assert "Receiver > Sample rate" in device.remedy
+        assert (
+            create_live_decoder("ADS-B", 2.4e6, recording=True).status.problem is None
+        )
+        with pytest.raises(ValueError, match="^POCSAG needs at least 16 kS/s; this re"):
+            create_live_decoder("POCSAG", 8000, recording=True)
+
     def test_channel_rate_is_about_48_khz(self):
         for rate in (1.024e6, 1.8e6, 2.048e6, 2.4e6, 3.2e6, 8e6, 20e6):
             decoder = create_live_decoder("POCSAG", rate)

@@ -15,9 +15,28 @@ import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_chrome import require_pyqt6  # noqa: E402
+from tests.test_gui_recording_files import _FilesCase  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import signal_synth as S  # noqa: E402
+
+
+def _save_sigmf(path, center, rate=1e6, seconds=0.2):
+    from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
+
+    rng = np.random.default_rng(7)
+    n = int(rate * seconds)
+    noise = 0.001 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    save_iq_file(
+        path,
+        noise.astype(np.complex64),
+        rate,
+        center,
+        SampleFormat.FLOAT32,
+        FileFormat.SIGMF,
+    )
+    return path
+
 
 _DEVIATIONS_HZ = (2.5e3, 5e3, 12.5e3, 25e3, 75e3)
 
@@ -104,6 +123,73 @@ class TestIdentifiedDeviationDoesNotClip(unittest.TestCase):
         n = int(self.SECONDS * self.RATE)
         signal = S.fsk(n, self.RATE, 1200, 4500)
         self.assertEqual(self.check(signal, 10.2e3, 25e3), "12.5 kHz")
+
+
+class TestARecordingTooSlowForTheDecoder(_FilesCase):
+    """P-05: with ADS-B chosen by hand, opening a 1 MS/s recording said "ADS-B
+    needs at least 2 MS/s; the device runs at 1 MS/s. Choose 2.4 MS/s or
+    more in Receiver > Sample rate (or click the rate in the status bar)",
+    a rate a playing recording can't change. It says the recording's rate
+    is too low, as Decode Recording does; the device keeps its advice."""
+
+    def said(self):
+        """Everywhere the decoder's problem shows: the status bar, the
+        decoder chip's tooltip, the Decoder's status line and empty table."""
+        win = self.win
+        panel = win._decoder_panel
+        return [
+            win._message_label.text(),
+            win._decoder_chip.toolTip(),
+            panel.decoder_status_text(),
+            panel._empty._text,
+        ]
+
+    def choose_ads_b(self):
+        self.win._decoder_panel._proto_combo.setCurrentText("ADS-B")  # by hand
+        self.settle(2)
+
+    def open_file(self, name, rate):
+        path = _save_sigmf(self.path(name), 1090e6, rate)
+        with self.open_dialog(path):
+            self.assertTrue(self.win._open_recording())
+        self.settle(2)
+
+    def test_a_recording_says_its_rate_is_too_low(self):
+        win = self.win
+        self.choose_ads_b()
+        self.open_file("slow.sigmf-data", 1e6)
+        self.assertTrue(win._decoder_panel.is_decoding())
+        self.assertEqual(win._decoder_chip.text(), "ADS-B · can't decode")
+        self.assertIn(
+            "ADS-B needs at least 2 MS/s; this recording is 1 MS/s.",
+            win._message_label.text(),
+        )
+        self.assertIn("this recording is 1 MS/s", win._decoder_chip.toolTip())
+        self.assertIn("this recording is 1 MS/s", win._decoder_panel._empty._text)
+        for text in self.said():
+            self.assertNotIn("Sample rate", text)
+            self.assertNotIn("the device", text)
+        # Closed: the demo device (2.4 MS/s) decodes again.
+        win._playback.close()
+        self.settle(2)
+        self.assertEqual(win._decoder_chip.text(), "ADS-B · 0 msgs")
+
+    def test_the_device_and_a_recording_at_the_same_rate(self):
+        """Each says it its own way, although the rate stays 1 MS/s."""
+        win = self.win
+        self.assertTrue(win.set_sample_rate(1e6))
+        self.choose_ads_b()
+        tip = win._decoder_chip.toolTip()
+        self.assertIn("ADS-B needs at least 2 MS/s; the device runs at 1 MS/s", tip)
+        self.assertIn("Receiver > Sample rate", tip)
+        self.open_file("same.sigmf-data", 1e6)
+        tip = win._decoder_chip.toolTip()
+        self.assertIn("ADS-B needs at least 2 MS/s; this recording is 1 MS/s", tip)
+        self.assertNotIn("Sample rate", tip)
+        win._playback.close()
+        self.settle(2)
+        self.assertEqual(win._device_sample_rate(), 1e6)
+        self.assertIn("the device runs at 1 MS/s", win._decoder_chip.toolTip())
 
 
 if __name__ == "__main__":

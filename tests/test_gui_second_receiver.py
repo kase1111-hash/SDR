@@ -1232,9 +1232,11 @@ class TestRecording(_SecondCase):
         self.assertTrue(rx._rec_label.isVisible())
         recorder = rx._recorder
         self.frames(6)
+        rx._record_button.click()
+        # (Written by the recording's writer thread, K-P1: all of it once
+        # the recording stopped.)
         written = recorder.samples_written
         self.assertGreater(written, 0)
-        rx._record_button.click()
         self.assertIsNone(rx._recorder)
         self.assertFalse(rx._rec_label.isVisible())
         files = sorted(os.listdir(self.folder))

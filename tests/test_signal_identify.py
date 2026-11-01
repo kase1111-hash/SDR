@@ -559,6 +559,88 @@ def test_demo_narrow_fm_call_is_heard_at_5_khz():
     assert (ident.mode, ident.fm_deviation) == ("FM", "5 kHz")
 
 
+def demo_takes(freq, lo, mode, channel_hz, start_s, seconds, rate=2.4e6):
+    """Every take Identify judges in ``seconds`` of the demo from
+    ``start_s`` (as identify_demo, but all of them, and the stream follows
+    the samples read: never skipped ahead to the clock, however slowly
+    this computer runs)."""
+    import time
+
+    from sdr_module.gui.device_dialog import MockDevice
+
+    dev = MockDevice()
+    dev._rng = np.random.default_rng(1)  # (the same noise every run)
+    dev.set_sample_rate(rate)
+    dev.set_frequency(lo)
+    dev.start_rx()
+    dev._stream_epoch = time.monotonic() + 1e9  # (always ahead of the clock)
+    for _ in range(int(round(start_s * rate / 240000))):
+        dev.read_samples(240000)
+    width, reach = analysis_band(mode, channel_hz, rate, freq)
+    ident = SignalIdentifier(rate, freq - lo, width)
+    takes = []
+    while ident.seconds < seconds:
+        ident.feed(dev.read_samples(80000))
+        if ident.ready():
+            takes.append(
+                identify(
+                    ident.take(), ident.rate, freq, reach, band_hz=ident.passband_hz
+                )
+            )
+    return takes
+
+
+class TestTheSignalAtTheTunedFrequency:
+    """W-02: typed into the FM band, 100.715 MHz (the demo's narrow FM
+    call, on 5 s of every 9) is heard as broadcast FM, and Identify looks
+    800 kHz wide with a 150 kHz reach. The noise's own ripple, taken for
+    signal all over that band (its significance was reckoned as if every
+    bin were independent), joined the call to the 101.1 MHz station 385
+    kHz above: most takes with the call on described that as "Unknown
+    signal", 382 kHz wide, "Centred 330.6 kHz above the tuned frequency"
+    (and Identify said "Nothing identifiable"). With the call off, takes
+    described a stretch of noise near the tuned frequency as "Unknown
+    signal" instead of naming the station as the nearest signal."""
+
+    CALL = (100.715e6, 100.1e6, "FM", 200e3)
+
+    def test_the_call_while_it_is_on(self):
+        # (On from 3.7 s to 8.7 s of the demo's stream.)
+        takes = demo_takes(*self.CALL, start_s=4.0, seconds=4.5)
+        assert len(takes) >= 8
+        for ident in takes:
+            assert ident.kind == "fm", (ident.summary(), ident.details)
+            assert abs(ident.result.center_offset_hz) < 5e3, ident.details
+            assert ident.label == "Narrow FM (voice or data)"
+
+    def test_nothing_there_while_it_is_off(self):
+        # (Off from 8.7 s to 12.7 s.)
+        takes = demo_takes(*self.CALL, start_s=8.8, seconds=3.8)
+        assert len(takes) >= 6
+        for ident in takes:
+            assert ident.kind == "noise", (ident.summary(), ident.details)
+            # (The station, cut at the band's edge at 380 kHz: its power
+            # starts about 330 kHz above.)
+            nearest = ident.result.features.get("nearest_signal_hz")
+            assert nearest is not None and 300e3 < nearest < 350e3, ident.details
+            assert ident.details[0].startswith(
+                "Nothing at the tuned frequency; the nearest signal is 3"
+            ), ident.details
+
+    @pytest.mark.parametrize("start_s", [11.9, 12.1])
+    def test_the_call_keying_up(self, start_s):
+        """W-03: Identify pressed just before the call keys up (12.7 s):
+        joined to the noise around it, the call was judged as one signal
+        about 70-150 kHz wide, uncut, and its start read as keying ("CW
+        (Morse code) · maybe ... Occupies about 71.8 kHz", or OOK data
+        bursts of 13 us pulses). It is the call, or nothing yet."""
+        takes = demo_takes(*self.CALL, start_s=start_s, seconds=1.3)
+        assert takes
+        for ident in takes:
+            assert ident.kind in ("fm", "noise"), (ident.summary(), ident.details)
+        assert takes[-1].kind == "fm", takes[-1].summary()
+
+
 # --------------------------------------------------------------------------- #
 # The end-to-end journeys' problems (PLOTS-E2E-2, -3, -4)
 # --------------------------------------------------------------------------- #

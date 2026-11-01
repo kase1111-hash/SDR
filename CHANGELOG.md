@@ -20,9 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   number in Hz and says why it can't use what you typed; `Esc` cancels.
 - Scrolling over a digit of FREQ tunes that digit. Below 2 MHz, frequencies
   read in kHz ("880 kHz", "AM Broadcast 880 kHz") in FREQ, the window title,
-  messages, Recent Frequencies, the band plan row, the Presets group and
-  bookmark names; the Frequency field keeps the unit chosen beside it (MHz
-  unless you pick another), and the Bookmarks Add field stays in MHz.
+  messages (not the Signal and Scanner tabs', which say "0.880 MHz"), Recent
+  Frequencies, the band plan row, the Presets group and bookmark names; the
+  Frequency field keeps the unit chosen beside it (MHz unless you pick
+  another), and the Bookmarks Add field stays in MHz.
 - Click-to-tune snaps to the signal's peak or center; the hover readout gives
   the frequency and level under the pointer and, when a click would snap
   elsewhere, where it tunes ("Click to tune to 99.500 MHz"); `Alt`+click
@@ -99,9 +100,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Both plots use every sample of each frame up to about 15 MS/s (the
   spectrum shows the mean power, the waterfall the peak per bin), so short
   bursts show; a longer frame (at 20 MS/s, or catching up after a stall) is
-  analyzed in evenly spread pieces, about half a million samples in all, so
-  a burst shorter than the gaps between them (0.1 ms at 20 MS/s with the
-  default FFT size) may not show.
+  analyzed in evenly spread pieces, at most about half a million samples in
+  all (at 20 MS/s, half of each frame), so a burst shorter than the gaps
+  between them (0.1 ms at 20 MS/s with the default FFT size) may not show.
 - **Zoom ×2–×16** — View → Zoom: Zoom In (`Ctrl+=`), Zoom Out (`Ctrl+-`),
   Full Span (`Ctrl+0`); `Ctrl`+wheel zooms both plots around the pointer.
 - The spectrum's ⋯ button and right-click menu add FFT Size (1024–32768,
@@ -182,7 +183,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **File → Open Recording...** (`Ctrl+O`) plays SigMF, WAV and raw I/Q captures
   through the receiver with a playback strip: Play/Pause (`Space`), position,
   Loop, 0.5×–4× speed (audio at 1× only; when the computer can't keep up it
-  says so: "Playing at about 0.3x, not 4x") and Close. Recordings centered
+  says so: "Playing at about 1.2x, not 4x") and Close. Recordings centered
   above 6 GHz (such as QO-100) play at their own frequency.
 - A recording is heard the way its band usually is (Radio → Choose Mode From
   Band Plan), and File → Close Recording goes back to the device, frequency,
@@ -502,6 +503,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `RDSDecoder.decode_bits()` and `parse_aprs_info()` are new.
 - `FrequencyPreset.decoder` names the decoder a preset turns on;
   `ham.callsign.MorseIdSource` streams a CW or MCW station ID.
+- `gui.SpectrumWidget.apply_display_settings()` and
+  `gui.WaterfallWidget.apply_display_settings()` take `defaults`: a damaged
+  saved value is logged and replaced by a usable one (from `defaults`, the
+  value in use, or the nearest average or history length offered), and a
+  yes/no saved as text reads as what it says ("off" read as on).
+  `gui.DecoderPanel.pause_decoding()` unticks Decode without making it the
+  user's choice for the next protocol, and `gui.decoder_panel.DecoderChip` is
+  a status-bar chip that shortens its text, at most to its first part, when
+  short of room.
 
 ### Added — GUI
 - **Passband display** — a shaded band on the spectrum marks the channel
@@ -563,35 +573,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the app was started from.
 - Help → Welcome and Quick Start no longer says "Mode set to FM" before an
   I/Q band, or offers Demo Mode while it is running.
-- A HackRF One at 20 MS/s keeps up on a typical 4-core computer (the audio
-  paused with "This computer can't process 20 MS/s in real time"): a frame
-  of broadcast FM takes about 15 ms of its 33 ms (27–37 ms before), None
-  (I/Q) with the 2.4 MHz filter about 21 ms. The channel filter costs a third
-  to a quarter of what it did, the Decoder's RDS decodes the station the
-  receiver already picked out, the live decoders and Identify cost less at
-  every sample rate, Remove DC spike and Balance I/Q are about twice as fast,
-  and the spectrum draws its trace faster.
+- A HackRF One at 20 MS/s keeps up on a typical 4-core computer. With the
+  computer busy with other work, a frame of broadcast FM takes about 15 ms of
+  its 33 ms (27–37 ms before, so the audio paused with "This computer can't
+  process 20 MS/s in real time") and None (I/Q) with the 2.4 MHz filter about
+  21 ms (it never kept up); on an idle computer they take about 10 and 14 ms
+  (broadcast FM took 16 ms). At 20 MS/s the channel filter costs a third to a
+  quarter of what it did for broadcast FM and about half for the 2.4 MHz I/Q
+  filter; the Decoder's RDS decodes the station the receiver already picked
+  out, the live decoders and Identify cost less at every sample rate, Remove
+  DC spike and Balance I/Q are about twice as fast, and the spectrum draws its
+  trace faster.
 - After a busy moment at a high sample rate the window no longer hitches: a
-  catch-up frame took the plots 60–380 ms, and on a busy computer each frame
-  waited for the plots' helper thread.
+  catch-up frame costs the plots at most about half as much again as a usual
+  one (it cost them three times as much on an idle computer, and 60–380 ms on
+  a busy one), and on a busy computer a frame no longer waits for the plots'
+  helper thread.
 - The demo device no longer freezes the window for half a second at a new
   sample rate (3.2 or 1.024 MS/s).
 - `Ctrl+T` switches the theme in about 0.2 s instead of a second, and no
   longer says afterwards that the demo device can't keep up.
-- At 1024 px the status bar keeps 220 px for its message with every chip
-  shown: the device name and the recording's size give way first, whole in
-  their tooltips.
+- At 1024 px the status bar keeps 220 px for its message with REC, AUDIO,
+  Track Signal's AFC and the decoder chip shown: the device name, the
+  recording's size and the decoder chip (shortened, at most to
+  "CW (Morse) · …") give way first, whole in their tooltips. (The scan chip
+  doesn't give way yet.)
 - The split between the control panel and the tool tabs stays in a gap
   between groups when the window gets smaller or opens at another size, and
   comes back when it grows again; selecting a decoded message no longer
   moves it.
+- The right column (the control panel over the tool tabs) keeps 30% of the
+  window's width as the window is resized, from 400 px up to 660 px, enough
+  for all the Decoder's Aircraft list columns (it stopped at 440 px, so that
+  list scrolled sideways at every size); a width you drag it to is kept as a
+  share, also on another screen, and View → Reset Layout goes back to 30%.
 - Second receiver: Auto gain reads "Auto"; a HackRF offers the main window's
   rates (2.56 and 3.2 MS/s too); its spectrum and waterfall start with the
   main window's defaults (Peak hold off, Range Auto, a minute of history) and
   keep its own choices; its Transmit line says how a transmission is sent
-  ("45.45 Bd, 170 Hz shift", not "DATA"); Stop says where its recording was
-  saved; the demo device has one name in both windows; and its plots pause
-  while its window is minimized or hidden (it keeps receiving and playing).
+  ("45.45 Bd, 170 Hz shift", not "DATA"); Record and Stop name the
+  recording's file before its folder ("Stopped. Saved iq_…_rx2.sigmf-data
+  (00:05, 96 MB) in ~/Documents/SDR Recordings."), so the name stays in view
+  at the window's smallest width (860 px), where the Device list now shows
+  the whole "Demo Device (simulated signals)"; the demo device has one name in
+  both windows; and its plots pause while its window is minimized or hidden
+  (it keeps receiving and playing).
 - Device → Connect... shows the second receiver's device as in use, greyed
   out with the reason, instead of listing it as available and then failing
   to connect.
@@ -631,8 +657,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   station: it isn't applied at 75 kHz deviation, and setting one there says
   it works on narrow FM.
 - The status line follows the tuning: a band plan message goes when you tune
-  into another band, a preset or band plan change gives one message (not the
-  mode on its own first), and None (I/Q) says it has no audio.
+  into another band, a preset, a band plan change, a bookmark, the Decoder's
+  "Tune to …" or the Signal tab's Apply Mode gives one message saying what it
+  set (not the mode on its own first, with its last filter), and None (I/Q)
+  says it has no audio.
+- Radio → Choose Mode From Band Plan also changes the FM deviation when a
+  frequency typed in another FM band is heard at another deviation: a 2 m
+  repeater typed after an FRS channel or MURS channels 1–3 is heard at 5 kHz
+  (it stayed at their 2.5 kHz and clipped), and 2 m after a weather
+  satellite's 25 kHz is no longer quiet; a band heard the same way keeps the
+  filter you chose.
+- Radio → Track Signal refused in a mode it can't follow (broadcast FM, SSB,
+  I/Q), or turned off when you switch to one, says so in the status bar
+  without an entry in Tools → Error History.
+- Unmuting while the second receiver's Listen plays only that receiver says
+  so and how to hear this one ("choose Main window or Both there"), as the
+  Audio button's Muted (2nd RX) does, instead of "Audio on".
 - Tuned near 0 Hz, the span starts at 0 Hz (it offered negative frequencies
   to click), so below half the sample rate (1.2 MHz at 2.4 MS/s) Keep Tuned
   Frequency Centered leaves the station left of center, and a mode or filter
@@ -734,7 +774,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and freeze every later launch.
 - Morse: a slow "TTT" (5–12 WPM) reads TTT instead of S or H, 5 WPM dits
   sent a little long stay dits ("SOS", "S", "EEE"), and a whole transmission
-  of A, I, N, M, EE or TT is decoded instead of dropped as static.
+  of only A, I, N, M or EE (5–30 WPM, heard over background noise) or TT (up
+  to 12 WPM; faster, a lone TT reads as I) is decoded instead of dropped as
+  static.
 - RDS's Program type row says Music for a music station (it said Speech).
 - Switching straight between ADS-B and CW (Morse), or Auto doing so, brings
   that protocol's Aircraft or Text view to the front instead of leaving
@@ -744,10 +786,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   protocol's, and the Protocol, Address and Time columns show their text in
   full.
 - Each sample-rate step too low for ADS-B adds one Error History entry, not
-  two.
+  two (none while the decoder is paused).
 - Clear also clears FLEX's "sends FLEX at 3200 bps" note.
 - While receiving, the Decoder's Off hint no longer asks you to press Start;
   with a recording open it says "press Play (Space)".
+- After tuning away from a band preset turned its decoder off, the protocol
+  you choose next in the Decoder tab decodes (it started paused, without its
+  "Tune to …", until Decode was ticked by hand); unticking Decode yourself
+  still carries over to the next protocol.
+- A paused decoder no longer warns that the sample rate is too low for it:
+  opening a 1 MS/s recording after the ADS-B preset said "ADS-B needs at
+  least 2 MS/s …" over the band plan's line and listed it in Tools → Error
+  History. The Decoder tab and its chip still say so once Decode is ticked
+  (and choosing a rate below 2 MS/s still says "ADS-B needs 2.4 MS/s or
+  more." in the status bar).
+- While a recording plays, the Decoder no longer says it misses part of the
+  signal (a recording is read in full, however slowly it plays) or points to
+  Receiver → Sample rate, which can't change then; the playback's speed note
+  is the one message.
 
 ### Fixed — Recordings
 - I/Q recordings no longer lose most of the signal when the computer falls
@@ -819,6 +875,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the end of the write.
 - While Convert Recording, Save or Decode Recording runs, only its progress
   dialog (Cancel) takes clicks and keys, so nothing else can start under it.
+- A recording plays at least in real time on a computer that can't keep up
+  with the speed chosen, or as fast as the computer manages (it crawled at
+  0.1–0.5×, 0.3× with 4× chosen), and a file read for the first time no
+  longer counts as a computer that can't keep up; a 48 kHz recording no
+  longer loses about 30 ms of audio each time the window is busy for a
+  moment.
+- File → Close Recording keeps what going back turned off in its message
+  ("Closed aprs2m.sigmf-data. Back to Demo Device (simulated signals).
+  AX.25/APRS decoder off: tuned away from the APRS preset (144.390 MHz),
+  which had turned it on."); that note was replaced at once.
+- The Unsaved Recording question keeps a frequency below 2 MHz on one line
+  ("recorded at 880 kHz"), as it does MHz.
 
 ### Fixed — Ham tools and transmitting
 - The SSTV decoder never recognised a standard transmission; rewritten, it
@@ -862,6 +930,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (no transmission when the output calculated on the QRP tab is above the
   legal limit; it said only power above 150% of it was blocked), and the Ham
   ID tab's tooltip in View → Panels says what the tab holds.
+- The ham tools' notices stay out of Tools → Error History, as the window's
+  other notices do (they still show in amber in the status bar): the radio
+  tuner tuned with no receiver, SSTV asking for FM audio, Send ID Now without
+  a callsign, a transmission started while another is on the air, and
+  Transmit Text's notes on its macros and on text that didn't fit.
 
 ### Fixed — Scanner, bookmarks and CHIRP files
 - CHIRP channels keep an 88.5 Hz TSQL tone when imported, and editing one no
@@ -894,6 +967,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   receiver couldn't tune were skipped: 101.405, 103.205, 105.005 MHz and 2
   more."), said once by a continuous scan, instead of one entry or two per
   step.
+- A scan stopped by something you did while the Scanner tab is out of sight
+  (Space, Open Recording, a new sample rate) is said in the status bar but no
+  longer listed in Tools → Error History; a scan that breaks is listed as it
+  is with the tab in view (not once more), and a receiver that returns no
+  samples during a scan is listed whichever tab is shown.
 - A range scan starting below 1.2 MHz (at 2.4 MS/s) measures each step where
   it planned it (its first step missed 150–235 kHz).
 - The Bookmarks tab's Add row keeps a name typed for a channel already
@@ -972,12 +1050,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A damaged value in the settings no longer stops the app or a window from
   opening, or turns a feature on or off: a huge CW pitch, an unreadable
   yes/no, a NaN or out-of-range number, a recordings folder that isn't a full
-  path, a damaged FFT size, window or zoom in the spectrum settings, or an
-  unreadable window size or split gives that setting's default (or its
-  nearest allowed value), and a recent frequency out of range is dropped,
-  each logged once. An unreadable transmit-confirmation setting asks again.
-  The plots' other saved display settings aren't checked yet: a damaged Peak
-  hold or Min Hold value there still reads as on.
+  path, a damaged FFT size, window or zoom, or any other damaged display
+  setting of the spectrum or waterfall (Peak hold, Min Hold, averaging,
+  range, colors, history, levels), or an unreadable window size or split
+  gives that setting's default (or its nearest allowed value), and a recent
+  frequency out of range is dropped, each logged once. An unreadable
+  transmit-confirmation setting asks again, and the second receiver's
+  unreadable spectrum settings are listed in Tools → Error History too (its
+  waterfall's are still dropped quietly).
 - Damaged saved bookmarks no longer stop the app starting on every launch:
   an entry that isn't a bookmark is skipped, one whose frequency is unusable
   (not a number, too big, below zero) is listed at 0 Hz to edit or remove,

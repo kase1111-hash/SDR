@@ -7043,13 +7043,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         try:
             saved = json.loads(raw)
         except ValueError:
+            saved = None
+        if not isinstance(saved, dict):
+            # (Valid JSON of another shape is as damaged as unreadable JSON.)
             logger.warning("Ignoring unreadable saved Ham ID settings")
             return
-        if isinstance(saved, dict):
-            try:
-                self._callsign_panel.set_settings(saved)
-            except Exception as e:  # pragma: no cover - defensive
-                logger.debug(f"Could not restore the Ham ID settings: {e}")
+        try:
+            self._callsign_panel.set_settings(saved)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug(f"Could not restore the Ham ID settings: {e}")
 
     # -- QRP panel (T7) ----------------------------------------------------------
 
@@ -7096,14 +7098,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         try:
             saved = json.loads(raw)
         except ValueError:
+            saved = None
+        if not isinstance(saved, dict):
+            # (Valid JSON of another shape is as damaged as unreadable JSON.)
             logger.warning("Ignoring unreadable saved QRP settings")
             return
-        if isinstance(saved, dict):
-            # (A value of another shape must not stop the app from starting.)
-            try:
-                self._qrp_panel.set_state(saved)
-            except Exception as e:
-                logger.warning(f"Ignoring the saved QRP settings that failed: {e}")
+        # (A value of another shape must not stop the app from starting.)
+        try:
+            self._qrp_panel.set_state(saved)
+        except Exception as e:
+            logger.warning(f"Ignoring the saved QRP settings that failed: {e}")
 
     def _start_or_stop_audio(self, mode: str) -> bool:
         """Open the speaker for audible modes, close it otherwise.
@@ -11088,10 +11092,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         try:
             saved = json.loads(raw)
         except ValueError:
+            saved = None
+        if not isinstance(saved, dict):
+            # (Valid JSON of another shape is as damaged as unreadable JSON.)
             logger.warning("Ignoring unreadable saved radio presets")
             return
-        if isinstance(saved, dict):
-            self._radio_tuner.set_presets(saved)
+        self._radio_tuner.set_presets(saved)
 
     def _sync_tuner_device(self) -> None:
         """Tell an open tuner what the device can tune (it explains the AM
@@ -12030,10 +12036,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             try:
                 saved = json.loads(raw)
             except ValueError:
-                logger.warning("Ignoring unreadable waterfall settings: %r", raw)
+                saved = None
+            if isinstance(saved, dict):
+                settings.update(saved)
             else:
-                if isinstance(saved, dict):
-                    settings.update(saved)
+                # (Valid JSON of another shape is as damaged as unreadable.)
+                logger.warning("Ignoring unreadable waterfall settings: %r", raw)
         try:
             # (A damaged value gives its default, logged.)
             self._waterfall.apply_display_settings(
@@ -12270,10 +12278,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             try:
                 saved = json.loads(raw)
             except ValueError:
-                logger.warning("Ignoring unreadable spectrum settings: %r", raw)
+                saved = None
+            if isinstance(saved, dict):
+                settings.update(self._without_damaged_plot_settings(saved))
             else:
-                if isinstance(saved, dict):
-                    settings.update(self._without_damaged_plot_settings(saved))
+                # (Valid JSON of another shape is as damaged as unreadable.)
+                logger.warning("Ignoring unreadable spectrum settings: %r", raw)
         try:
             self._apply_spectrum_settings(settings)
         except Exception as e:

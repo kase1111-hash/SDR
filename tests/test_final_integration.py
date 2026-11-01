@@ -14,11 +14,19 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from tests import test_final_window as _final_window  # noqa: E402
 from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
 from tests.test_gui_station_tx import _TxCase  # noqa: E402
 
 if HAS_PYQT6:
     from PyQt6.QtWidgets import QApplication
+
+
+class _DamagedWindow(_final_window._IniSettings):
+    """A window built on a real settings file holding damaged values (the
+    helper of test_final_window's damaged-settings tests)."""
+
+    window = _final_window.TestDamagedSettingsInTheWindow.window
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
@@ -75,6 +83,31 @@ class TestOnAirNoticesStayOutOfTheErrorHistory(_TxCase):
             self.win._message_label.text(),
         )
         self.assertEqual(self.win._message_label.property("tone"), "warning")
+
+
+class TestSavedChoicesOfAnotherShape(_DamagedWindow):
+    """A saved value that is valid JSON but not the object the window
+    saves (a list, a number, a string) is damaged too: like unreadable
+    JSON, it gives the defaults and is logged (Tools > Error History),
+    as the second receiver's plot choices already are."""
+
+    def test_plot_choices_of_another_shape_are_logged(self):
+        with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+            self.window(spectrum_display="[1, 2]", waterfall_display="42")
+        text = "\n".join(logs.output)
+        self.assertIn("unreadable spectrum settings", text)
+        self.assertIn("unreadable waterfall settings", text)
+
+    def test_ham_choices_of_another_shape_are_logged(self):
+        from sdr_module.gui import main_window
+
+        if not main_window.HAS_HAM_RADIO:
+            self.skipTest("ham radio panels not installed")
+        with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+            self.window(ham_id='"W1AW"', ham__qrp="[]")
+        text = "\n".join(logs.output)
+        self.assertIn("unreadable saved Ham ID settings", text)
+        self.assertIn("unreadable saved QRP settings", text)
 
 
 if __name__ == "__main__":

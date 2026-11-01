@@ -318,6 +318,20 @@ def _mean_levels(codes: np.ndarray) -> np.ndarray:
     return _Q_MIN_DB + np.asarray(codes, dtype=np.float64) / _MEAN_PER_DB
 
 
+def _noise_and_peak(row: Any) -> Optional[Tuple[float, float]]:
+    """A row's noise floor (its median bin) and its strongest signal (about
+    the 99.75th percentile: lone spikes don't count), dBFS; None with fewer
+    than 16 finite bins."""
+    values = np.asarray(row, dtype=np.float32)
+    finite = values[np.isfinite(values)]
+    n = finite.size
+    if n < 16:
+        return None
+    top = n - 1 - n // 400  # ~99.75th percentile: ignores lone spikes
+    part = np.partition(finite, (n // 2, top))
+    return float(part[n // 2]), float(part[top])
+
+
 def auto_level_targets(noise_db: float, peak_db: float) -> Tuple[float, float]:
     """Floor and ceiling (dBFS) that frame the noise and the strongest signal.
 
@@ -785,6 +799,12 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         # The noise the SNR readouts use when add_line is given one (else
         # _noise_db, the rows' median bin).
         self._snr_noise_db: Optional[float] = None
+        # Zoomed, the noise and the strongest signal of the bins in view:
+        # what Auto levels frame then (_noise_db and _peak_db stay the whole
+        # span's, for the readouts). None at x1. (See _level_estimates.)
+        self._view_noise_db: Optional[float] = None
+        self._view_peak_db: Optional[float] = None
+        self._levels_zoom = 1  # (the zoom the levels last followed)
 
         # Color map
         self._colormap_name = "turbo"
@@ -979,8 +999,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._auto_btn.setFocusPolicy(Qt.FocusPolicy.TabFocus)
         self._auto_btn.setToolTip(
             "Auto levels: the floor follows the noise floor and the ceiling "
-            "the strongest signal, so weak signals stand out.\nDragging the "
-            "color scale switches to manual levels."
+            "the strongest signal (of the part in view when zoomed), so weak "
+            "signals stand out.\nDragging the color scale switches to manual "
+            "levels."
         )
         self._auto_btn.toggled.connect(self.set_auto_levels)
         controls.addWidget(self._auto_btn)
@@ -1425,6 +1446,13 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         return self._view
 
     def _on_view_changed(self) -> None:
+        zoom = self._view.zoom
+        if zoom > 1 or zoom != self._levels_zoom:
+            # Auto levels fit what is in view: refit at once to the part
+            # zoomed to, as it moves, and to the whole span back at x1.
+            if self._refit_view_levels() and self._auto_levels:
+                self._retarget_auto_levels(force=True)
+        self._levels_zoom = zoom
         self._canvas.update()
 
     def set_zoom(self, zoom: int) -> None:
@@ -2076,20 +2104,18 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self, row: np.ndarray, noise_db: Optional[float] = None
     ) -> None:
         """Track the noise floor (median bin) and the strongest signal, and
-        the noise the SNR readouts use (``noise_db``, when given)."""
+        the noise the SNR readouts use (``noise_db``, when given); zoomed,
+        also the noise and the strongest signal of the bins in view, which
+        Auto levels frame then (the readouts keep the whole span's)."""
         if noise_db is not None and math.isfinite(noise_db):
             if self._snr_noise_db is None:
                 self._snr_noise_db = float(noise_db)
             else:
                 self._snr_noise_db = 0.9 * self._snr_noise_db + 0.1 * float(noise_db)
-        values = np.asarray(row, dtype=np.float32)
-        finite = values[np.isfinite(values)]
-        n = finite.size
-        if n < 16:
+        found = _noise_and_peak(row)
+        if found is None:
             return
-        top = n - 1 - n // 400  # ~99.75th percentile: ignores lone spikes
-        part = np.partition(finite, (n // 2, top))
-        noise, peak = float(part[n // 2]), float(part[top])
+        noise, peak = found
         if self._noise_db is None:
             self._noise_db = noise
         else:
@@ -2098,13 +2124,64 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             self._peak_db = peak  # a new signal shows at once...
         else:
             self._peak_db = 0.97 * self._peak_db + 0.03 * peak  # ...fades slowly
+        if self._view.zoom > 1:
+            in_view = self._in_view_levels(row)
+            if in_view is not None:
+                noise, peak = in_view
+                if self._view_noise_db is None or self._view_peak_db is None:
+                    self._view_noise_db, self._view_peak_db = noise, peak
+                else:
+                    self._view_noise_db = 0.9 * self._view_noise_db + 0.1 * noise
+                    if peak > self._view_peak_db:
+                        self._view_peak_db = peak
+                    else:
+                        self._view_peak_db = 0.97 * self._view_peak_db + 0.03 * peak
         if self._auto_levels:
             self._retarget_auto_levels()
 
+    def _in_view_levels(self, row: np.ndarray) -> Optional[Tuple[float, float]]:
+        """The noise (median bin) and the strongest signal of ``row``'s bins
+        in view (``row`` on the current span), or None (too few bins)."""
+        first, stop = self._view_bins()
+        if len(row) != self._fft_size or stop - first < 16:
+            return None
+        return _noise_and_peak(row[first:stop])
+
+    def _refit_view_levels(self) -> bool:
+        """The view changed: estimate the noise and the strongest signal in
+        view afresh, from the newest row (at x1 the whole span's estimates
+        apply). False when nothing is in view to estimate from yet: no row,
+        or (after a retune) the newest row is on another frequency until a
+        line arrives."""
+        self._view_noise_db = self._view_peak_db = None
+        if self._view.zoom <= 1:
+            return self._noise_db is not None
+        axis = (float(self._center_freq), float(self._sample_rate))
+        if not self._history or self._newest_axis() != axis:
+            return False
+        found = self._in_view_levels(self._history[-1])
+        if found is None:
+            return False
+        self._view_noise_db, self._view_peak_db = found
+        return True
+
+    def _level_estimates(self) -> Tuple[Optional[float], Optional[float]]:
+        """The noise floor and the strongest signal (dBFS) Auto levels and
+        Fit to Current Signals frame: those of the bins in view when zoomed,
+        the whole span's at x1 (which the readouts use, at any zoom)."""
+        if (
+            self._view.zoom > 1
+            and self._view_noise_db is not None
+            and self._view_peak_db is not None
+        ):
+            return self._view_noise_db, self._view_peak_db
+        return self._noise_db, self._peak_db
+
     def _retarget_auto_levels(self, force: bool = False) -> None:
-        if self._noise_db is None or self._peak_db is None:
+        noise, peak = self._level_estimates()
+        if noise is None or peak is None:
             return
-        floor, ceiling = auto_level_targets(self._noise_db, self._peak_db)
+        floor, ceiling = auto_level_targets(noise, peak)
         cur_floor, cur_ceiling = self._db_range
         if (
             force
@@ -2762,7 +2839,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         if self._noise_db is not None:
             levels.addSeparator()
             snap = levels.addAction("&Fit to Current Signals")
-            snap.setToolTip("Set manual levels once from the current noise and peak")
+            snap.setToolTip(
+                "Set manual levels once from the current noise and peak (of "
+                "the part in view when zoomed)"
+            )
             snap.triggered.connect(self._fit_levels_once)
 
         colors = menu.addMenu("C&olors")
@@ -2783,9 +2863,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         save.triggered.connect(self._save_image_dialog)
 
     def _fit_levels_once(self) -> None:
-        if self._noise_db is None or self._peak_db is None:
+        noise, peak = self._level_estimates()  # (what is in view, zoomed)
+        if noise is None or peak is None:
             return
-        self._user_set_levels(*auto_level_targets(self._noise_db, self._peak_db))
+        self._user_set_levels(*auto_level_targets(noise, peak))
 
     def _show_options_menu(self) -> None:
         menu = QMenu(self)

@@ -2833,9 +2833,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
     def _draw_hover(
         self, painter: "QPainter", plot: "QRectF", p, avoid: Optional["QRectF"] = None
     ) -> None:
-        """Cursor lines and a readout of where a click tunes, the level of
-        the row under the cursor (where that row was received) and its age;
-        kept clear of ``avoid`` (the measurement's readout)."""
+        """Cursor lines and a readout of the frequency and level under the
+        cursor (where that row was received), the row's age and where a
+        click tunes (marked when it snaps away from the cursor); kept clear
+        of ``avoid`` (the measurement's readout)."""
         pos = self._hover
         if pos is None or not plot.contains(pos):
             return
@@ -2860,7 +2861,11 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             draw_landing_mark(painter, plot, landing_x, p)
 
         decimals = readout_decimals(snap_step_hz(self._hz_per_px()))
-        lines = [tuned_mhz_text(freq, decimals)]
+        # The frequency and the level under the cursor belong together; a
+        # click that snaps to a signal or the step says where it tunes.
+        here = self._snapped_frequency_at(x)
+        here_text = tuned_mhz_text(freq if here is None else here, decimals)
+        lines = [here_text]
         row = int((y - plot.top()) / plot.height() * self._rows_shown())
         if 0 <= row < len(self._history):
             # Strongest bin under this pixel, matching the decimated image
@@ -2873,9 +2878,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             lines.append(detail)
             age = self._times[-1] - self._times[len(self._times) - 1 - row]
             lines.append(f"{format_elapsed(age)} ago")
+        landing_text = tuned_mhz_text(freq, decimals)
         lines.append(
-            "Click to tune · drag to measure"
-            if exact or self._snap_step <= 0
-            else "Click to tune (Alt: exact) · drag to measure"
+            "Click to tune here · drag to measure"
+            if landing_text == here_text
+            else f"Click to tune to {landing_text} (Alt: exact) · drag to measure"
         )
         draw_readout(painter, lines, x, plot, self._fm, p, avoid=avoid)

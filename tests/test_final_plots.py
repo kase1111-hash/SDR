@@ -343,6 +343,113 @@ class TestWaterfallNoiseBrightness(unittest.TestCase):
         self.assertLessEqual(len(wf._history), rows + 2)
 
 
+class TestHoverReadsOnePoint(unittest.TestCase):
+    """PLOTS-E2E-19: with the pointer on the edge of a station the hover
+    read the station's frequency (where a click lands) with the level under
+    the pointer, as if they were one point. The first line is now the
+    pointer's own frequency, and the hint says where a click tunes."""
+
+    CENTER = 100.1e6
+    RATE = 2.4e6
+    BINS = 2048
+
+    def setUp(self):
+        from tests.test_gui_chrome import require_pyqt6
+
+        require_pyqt6(self)
+        self.rng = np.random.default_rng(5)
+
+    def line(self):
+        """Noise with a 100 kHz wide station at 100.5 MHz."""
+        offsets = (np.arange(self.BINS) - self.BINS / 2) * self.RATE / self.BINS
+        line = self.rng.normal(-85.0, 1.5, self.BINS)
+        station = np.abs(self.CENTER + offsets - 100.5e6) <= 50e3
+        line[station] = self.rng.normal(-45.0, 1.0, int(station.sum()))
+        return line
+
+    def readout(self, module, widget, x, y):
+        from unittest import mock
+
+        from PyQt6.QtCore import QPointF
+
+        seen = []
+
+        def record(_painter, lines, *_args, **_kwargs):
+            seen.append(list(lines))
+
+        with mock.patch.object(module, "draw_readout", record):
+            widget._set_hover(QPointF(x, y))
+            widget._canvas.grab()
+        widget._set_hover(None)
+        self.assertTrue(seen)
+        return seen[-1]
+
+    def check(self, module, widget, landing_at, y_of):
+        from sdr_module.gui.spectrum_widget import (
+            readout_decimals,
+            snap_step_hz,
+            tuned_mhz_text,
+        )
+
+        widget.resize(900, 360)
+        widget.show()
+        self.addCleanup(widget.close)
+        plot = widget.plot_rect()
+        x = plot.left() + widget._view.fraction_of(100.535e6) * plot.width()
+        y = y_of(plot)
+        decimals = readout_decimals(snap_step_hz(widget._hz_per_px()))
+        here = widget._snapped_frequency_at(x)
+        self.assertAlmostEqual(here, 100.535e6, delta=3e3)
+
+        widget.set_click_snap(100e3, "fm")  # a click snaps to the station
+        landing = landing_at(x, y)
+        self.assertAlmostEqual(landing, 100.5e6, delta=1e3)
+        lines = self.readout(module, widget, x, y)
+        self.assertEqual(lines[0], tuned_mhz_text(here, decimals), lines)
+        self.assertTrue(
+            lines[-1].startswith(
+                f"Click to tune to {tuned_mhz_text(landing, decimals)}"
+            ),
+            lines,
+        )
+        self.assertTrue(any("dBFS" in line for line in lines[1:-1]), lines)
+
+        widget.set_click_snap(0)  # a click tunes where the pointer is
+        lines = self.readout(module, widget, x, y)
+        self.assertEqual(lines[0], tuned_mhz_text(here, decimals), lines)
+        self.assertTrue(lines[-1].startswith("Click to tune here"), lines)
+
+    def test_spectrum(self):
+        import sdr_module.gui.spectrum_widget as module
+
+        widget = module.SpectrumWidget()
+        self.addCleanup(widget.deleteLater)
+        widget.set_frequency_range(self.CENTER, self.RATE)
+        for _ in range(4):
+            widget.update_spectrum(self.line())
+        self.check(
+            module,
+            widget,
+            lambda x, _y: widget.landing_frequency(x),
+            lambda plot: plot.center().y(),
+        )
+
+    def test_waterfall(self):
+        import sdr_module.gui.waterfall_widget as module
+
+        widget = module.WaterfallWidget(history_size=100)
+        self.addCleanup(widget.deleteLater)
+        widget.set_frequency_range(self.CENTER, self.RATE)
+        for i in range(40):
+            widget.add_line(self.line(), timestamp=i / 30, noise_db=-85.0)
+        self.check(
+            module,
+            widget,
+            lambda x, y: widget.landing_frequency(x, y),
+            lambda plot: plot.top() + 3,
+        )
+
+
 class TestCompactCheckedButtons(unittest.TestCase):
     """PLOTS-E2E-9: the Scope's Freeze button read 'reez' while frozen:
     a checked, focused button took the wide padding of the theme's double

@@ -326,6 +326,9 @@ class TestIdentify(_SignalCase):
 class TestSignalsInView(_SignalCase):
     def setUp(self):
         super().setUp()
+        # The same noise every run: what is listed depends on the frames
+        # alone (it is measured every LIST_FRAMES frames, not by the clock).
+        self.win._device._rng = np.random.default_rng(1)
         self.listen(100.3e6, ("FM", "75 kHz", "200 kHz"))
         self.win._show_signal_page("signals")
         self.frames(1.2)

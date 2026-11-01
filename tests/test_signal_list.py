@@ -78,6 +78,40 @@ class TestFindSignals:
         found = find_signals(_db(lin), 99.95e6, SPAN)
         assert [s.frequency_hz for s in found] == [100.1e6]
 
+    def test_a_higher_threshold_never_splits_a_signal(self):
+        """PLOTS-E2E-20: at SNR >= 30 a signal whose top dips was listed as
+        pieces off its centre (and Page Up tuned to one). It is the same
+        signal at any threshold, or none."""
+        lin = _spectrum(4)
+        centre = N // 2
+        lin[centre + 200 : centre + 216] += 10 ** (-55 / 10)  # 35 dB up
+        lin[centre + 216 : centre + 235] += 10 ** (-78 / 10)  # 12 dB up
+        lin[centre + 235 : centre + 251] += 10 ** (-56 / 10)  # 34 dB up
+        at10 = find_signals(_db(lin), 400e6, SPAN, min_snr_db=10.0)
+        at30 = find_signals(_db(lin), 400e6, SPAN, min_snr_db=30.0)
+        assert len(at10) == 1, at10
+        assert len(at30) == 1, at30
+        assert at30[0].frequency_hz == pytest.approx(at10[0].frequency_hz)
+        assert at30[0].width_hz == pytest.approx(at10[0].width_hz)
+        assert at30[0].frequency_hz == pytest.approx(400e6 + 225 * BIN, abs=3 * BIN)
+        assert at30[0].width_hz == pytest.approx(51 * BIN, abs=3 * BIN)
+        assert find_signals(_db(lin), 400e6, SPAN, min_snr_db=37.0) == []
+
+    def test_a_station_s_skirts_are_part_of_it(self):
+        """Leftover 17: the edges of a strong broadcast station rise out of
+        the noise here and there; such a bump was listed as a signal of its
+        own (and kept for 10 s). A weak signal further out still is one."""
+        lin = _spectrum(5)
+        centre = N // 2
+        station = np.arange(centre - 75, centre + 76)  # 177 kHz, 45 dB up
+        lin[station] += 10 ** (-45 / 10)
+        lin[centre + 92 : centre + 97] += 10 ** (-77 / 10)  # 13 dB, +110 kHz
+        lin[centre + 170 : centre + 175] += 10 ** (-77 / 10)  # +201 kHz
+        found = find_signals(_db(lin), 98e6, SPAN)
+        assert len(found) == 2, found
+        assert found[0].frequency_hz == 98e6
+        assert found[1].frequency_hz == pytest.approx(98e6 + 172 * BIN, abs=BIN)
+
 
 def test_the_demo_fm_band():
     """The demo at 100.3 MHz: the stations and the narrow signals in view

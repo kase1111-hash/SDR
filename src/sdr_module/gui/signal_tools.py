@@ -12,10 +12,10 @@ screen or asked for:
   tuned frequency (longer for a signal that comes and goes, up to 4 s) and
   classifies it in a worker thread; **Apply Mode** sets Mode, deviation and
   Bandwidth and centres the tuned frequency on the signal.
-* **Signals in view**: the spectrum averaged over half a second, its
-  signals listed (and marked on the spectrum when asked); Home, Page Up
-  and Page Down (plots focused) tune to the strongest, the next one up
-  and the next one down.
+* **Signals in view**: the spectrum averaged over :data:`LIST_FRAMES`
+  frames (half a second), its signals listed (and marked on the spectrum
+  when asked); Home, Page Up and Page Down (plots focused) tune to the
+  strongest, the next one up and the next one down.
 * **Scope**: the tuned channel, only while the Scope page is on screen.
 * **Bursts**: :class:`~sdr_module.dsp.bursts.BurstWatcher` over the span,
   while the Bursts page is on screen (or always, when asked).
@@ -61,9 +61,14 @@ except ImportError:  # pragma: no cover - the GUI needs PyQt6
 
 logger = logging.getLogger(__name__)
 
-#: How often the signals list is refreshed (s), and how long a signal no
-#: longer heard stays listed.
-LIST_EVERY_S = 0.5
+#: The display frames each refresh of the signals list is measured from
+#: (their mean spectrum). One frame shows a wide FM station only where its
+#: modulation was at that instant, a narrow peak off its centre: a list
+#: from a few frames held such pieces, and the keys tuned to them.
+LIST_FRAMES = 15
+#: How often the signals list is refreshed (s, at the display's 30 frames
+#: a second), and how long a signal no longer heard stays listed.
+LIST_EVERY_S = LIST_FRAMES / 30.0
 FORGET_S = 10.0
 #: Bursts waiting for their analysis (a busy band): beyond this many, a
 #: burst is listed without one rather than late.
@@ -117,11 +122,16 @@ if HAS_PYQT6:
             self._acc: Optional[np.ndarray] = None
             self._acc_frames = 0
             self._acc_key: Optional[Tuple[int, float, float]] = None
-            self._list_due = 0.0
             self._heard: List[Tuple[SignalPeak, float]] = []
             self._markers = False
             self._listing_until = 0.0
-            self._listed_at = -1e9  # when the list was last measured
+            # Whether the list is kept up to date (measured, and every frame
+            # since; not while off screen or stopped), and the last mean
+            # spectrum it was measured from, with its span and time.
+            self._list_current = False
+            self._last_mean: Optional[
+                Tuple[Tuple[int, float, float], np.ndarray, float]
+            ] = None
             # Bursts: each finished one is taken apart off the display loop
             # (50-200 ms each), and listed in order once it is.
             self._watcher = BurstWatcher(defer=True)
@@ -157,7 +167,7 @@ if HAS_PYQT6:
             panel.tune_requested.connect(self._tune)
             panel.bookmark_requested.connect(win._bookmark_frequency)
             panel.markers_changed.connect(self.set_markers)
-            panel.min_snr_changed.connect(lambda _v: self._reset_list())
+            panel.min_snr_changed.connect(lambda _v: self._min_snr_changed())
             panel.step_requested.connect(self.step)
             panel.watch_changed.connect(self._set_watch_always)
             panel.play_requested.connect(self.play_recording_at)
@@ -246,9 +256,7 @@ if HAS_PYQT6:
                     else "No receiver\nUse Device > Use Demo Device or "
                     "Connect... to list the signals in view."
                 )
-            self._heard = []
-            self._acc = None
-            self._listed_at = -1e9
+            self._reset_list()
             self._apply_markers([])
             if self._tracking:
                 self._set_paused_badge()
@@ -492,11 +500,26 @@ if HAS_PYQT6:
         def _reset_list(self) -> None:
             self._acc = None
             self._acc_frames = 0
-            self._list_due = 0.0
             self._heard = []
+            self._list_current = False
+            self._last_mean = None
+
+        @staticmethod
+        def _in_view(freq_hz: float, lo_hz: float, rate: float) -> bool:
+            """Whether a list of the span ``rate`` wide around ``lo_hz``
+            covers ``freq_hz`` (its edges are left out of the list)."""
+            return abs(freq_hz - lo_hz) <= 0.45 * rate
 
         def _signals_frame(self, power: np.ndarray, now: float) -> None:
-            if not self._signals_active() or power is None or not len(power):
+            if not self._signals_active():
+                # Frames go by unmeasured: the list is not kept up to date,
+                # and its next mean starts afresh (not with frames from
+                # before).
+                self._list_current = False
+                self._acc = None
+                self._acc_frames = 0
+                return
+            if power is None or not len(power):
                 return
             win = self._win
             key = (
@@ -505,34 +528,66 @@ if HAS_PYQT6:
                 float(win._device_sample_rate()),
             )
             if key != self._acc_key:
+                # A new span: measured afresh. What was heard where it still
+                # shows stays listed meanwhile (the keys step on across the
+                # retune a step to a signal near the edge makes).
+                kept = [
+                    (s, t)
+                    for s, t in self._heard
+                    if self._in_view(s.frequency_hz, key[1], key[2])
+                ]
+                current = self._list_current and self._acc_key is not None
                 self._acc_key = key
                 self._reset_list()
+                if current and kept:
+                    self._heard = kept
+                    self._list_current = True
             lin = np.power(10.0, np.asarray(power, dtype=np.float64) / 10.0)
             if self._acc is None:
                 self._acc = lin
             else:
                 self._acc = self._acc + lin
             self._acc_frames += 1
-            if now < self._list_due:
+            if self._acc_frames < LIST_FRAMES:
                 return
-            self._list_due = now + LIST_EVERY_S
             avg_db = 10.0 * np.log10(np.maximum(self._acc / self._acc_frames, 1e-30))
             self._acc = None
             self._acc_frames = 0
             found = find_signals(
                 avg_db, key[1], key[2], float(self.panel.min_snr.value())
             )
-            self._listed_at = now
+            self._last_mean = (key, avg_db, now)
+            self._list_current = True
             self._remember(found, now)
-            current = [s for s, t in self._heard if t >= now - 0.01]
-            if not self.panel.showing_recording():
+            self._show_list(now, now)
+
+        def _show_list(self, now: float, heard_at: float) -> None:
+            """The list on the Signals page, and the markers of the signals
+            heard at ``heard_at`` (the last measurement) on the spectrum."""
+            live = not self.panel.showing_recording()
+            if live:
                 self.panel.set_signals(
                     [s for s, _t in self._heard],
-                    float(win._current_frequency()),
+                    float(self._win._current_frequency()),
                     [now - t for _s, t in self._heard],
                 )
-            live = not self.panel.showing_recording()
+            current = [s for s, t in self._heard if t >= heard_at - 0.01]
             self._apply_markers(current if self._markers and live else [])
+
+        def _min_snr_changed(self) -> None:
+            """List again at the new threshold, at once, from the mean the
+            list was last measured from: what was heard only at the old one
+            goes (a fresh, short mean listed pieces of stations)."""
+            last = self._last_mean
+            if last is None or last[0] != self._acc_key:
+                self._reset_list()
+                return
+            key, mean_db, when = last
+            found = find_signals(
+                mean_db, key[1], key[2], float(self.panel.min_snr.value())
+            )
+            self._heard = [(s, when) for s in found]
+            self._show_list(time.monotonic(), when)
 
         def _remember(self, found: List[SignalPeak], now: float) -> None:
             """Merge a fresh list into the signals heard lately (a signal
@@ -556,8 +611,6 @@ if HAS_PYQT6:
             self._markers = bool(on)
             if not on:
                 self._apply_markers([])
-            else:
-                self._list_due = 0.0
 
         def _apply_markers(self, signals: List[SignalPeak]) -> None:
             set_markers = getattr(self._win._spectrum, "set_markers", None)
@@ -581,21 +634,25 @@ if HAS_PYQT6:
             # (Pressing the keys keeps the list measured off the page.)
             self._ensure_listing()
             key = self._acc_key
-            here = (float(win._lo_frequency()), float(win._device_sample_rate()))
+            lo, rate = float(win._lo_frequency()), float(win._device_sample_rate())
+            # What was heard in the span shown now (a step to a signal near
+            # the edge retunes: the signals heard that the span still shows
+            # are stepped to while it is measured).
+            signals = [
+                s for s, _t in self._heard if self._in_view(s.frequency_hz, lo, rate)
+            ]
             if (
                 key is None
-                or (key[1], key[2]) != here
-                or time.monotonic() - self._listed_at > 3.0 * LIST_EVERY_S
+                or not self._list_current
+                or ((key[1], key[2]) != (lo, rate) and not signals)
             ):
-                # Not measured lately in this span (the page wasn't open,
-                # or it was long ago, elsewhere): measure now.
-                self._list_due = 0.0
+                # Not measured (the list wasn't kept up to date off screen,
+                # or it was of another span): measure now.
                 win._show_status_message(
                     "Looking for signals… press it again in a moment.", None, 3000
                 )
                 return False
             tuned = float(win._current_frequency())
-            signals = [s for s, _t in self._heard]
             target: Optional[SignalPeak] = None
             if direction == "strongest":
                 if not signals:
@@ -633,8 +690,6 @@ if HAS_PYQT6:
             return bool(self._win.set_frequency(float(freq)))
 
         def _page_changed(self) -> None:
-            if self.panel.page_visible("signals"):
-                self._list_due = 0.0
             if self.panel.page_visible("bursts") and not self._watch_always:
                 self._watcher.reset()  # its floor is from when it was last shown
 
@@ -1117,4 +1172,4 @@ def _format_frequency(window: Any, freq: float) -> str:
     return format_frequency(freq)
 
 
-__all__ = ["SignalTools", "LIST_EVERY_S", "FORGET_S"]
+__all__ = ["SignalTools", "LIST_FRAMES", "LIST_EVERY_S", "FORGET_S"]

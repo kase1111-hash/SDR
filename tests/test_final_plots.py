@@ -14,9 +14,11 @@ import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_chrome import HAS_PYQT6, _WindowTestCase  # noqa: E402
+from tests.test_gui_signal_tab import FRAME_S, _SignalCase  # noqa: E402
 
 if HAS_PYQT6:
-    from PyQt6.QtCore import QPoint
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtTest import QTest
 
 
 def _burst_report(freq_hz, start_s=1.0):
@@ -342,6 +344,101 @@ class TestWaterfallNoiseBrightness(unittest.TestCase):
         )  # (its levels: the strongest of 30 frames)
         self.assertAlmostEqual(self.shown_db(wf), single, delta=0.6)
         self.assertLessEqual(len(wf._history), rows + 2)
+
+
+class TestSignalsList(_SignalCase):
+    """Leftovers 1 and 17, PLOTS-E2E-20: the Signals list was measured
+    every half second of the wall clock, the first time from a single
+    frame (after a reset or a new SNR threshold), in which a wide FM station
+    shows only where its modulation is at that instant: pieces of stations
+    off their centres were listed (and kept 10 s). Page Up tuned to one,
+    and, when it retuned the receiver, Page Down said "Looking for
+    signals"; on a busy computer the keys also found the list too old."""
+
+    STATIONS = (99.5e6, 99.82e6, 100.1e6, 101.1e6)  # in view (100.715: off)
+
+    def setUp(self):
+        super().setUp()
+        self.win._device._rng = np.random.default_rng(17)  # (its noise)
+        self.listen(100.3e6, ("FM", "75 kHz", "200 kHz"))
+        self.win._show_signal_page("signals")
+
+    def run_frames(self, count):
+        self.frames(count * FRAME_S + 1e-9)
+
+    def freqs(self):
+        """The listed frequencies, to the kHz."""
+        return sorted(round(s.frequency_hz, -3) for s in self.panel.signals())
+
+    def assert_no_pieces(self, stations=STATIONS):
+        for freq in self.freqs():
+            self.assertLess(
+                min(abs(freq - want) for want in stations), 1e3, self.freqs()
+            )
+
+    def key(self, key):
+        QTest.keyClick(self.win._waterfall, key)
+        return self.win._current_frequency()
+
+    def test_a_list_is_measured_from_many_frames(self):
+        self.run_frames(3)
+        self.assertEqual(self.tools._heard, [])  # (not from a frame or two)
+        self.run_frames(40)
+        self.assertEqual(self.freqs(), list(self.STATIONS))
+        widths = {round(s.frequency_hz): s.width_hz for s in self.panel.signals()}
+        self.assertGreater(widths[round(101.1e6)], 90e3)
+
+    def test_the_keys_step_on_across_a_retune(self):
+        self.run_frames(40)
+        self.win._waterfall.setFocus()
+        self.settle()
+        self.assertEqual(self.key(Qt.Key.Key_Home), 100.1e6)
+        lo = self.win._lo_frequency()
+        self.assertEqual(self.key(Qt.Key.Key_PageUp), 101.1e6)
+        self.assertNotEqual(self.win._lo_frequency(), lo)  # (near the edge)
+        self.assertEqual(self.key(Qt.Key.Key_PageDown), 100.1e6)
+        self.assertNotIn("Looking for signals", self.win._message_label.text())
+        self.assertAlmostEqual(self.key(Qt.Key.Key_PageDown), 99.82e6, delta=50)
+        self.run_frames(20)  # (measured again in the new span)
+        self.assertEqual(self.key(Qt.Key.Key_PageDown), 99.5e6)
+
+    def test_a_slow_computer_lists_the_same(self):
+        """(Leftover 1: on a busy machine a frame took longer than the half
+        second the list was measured over.)"""
+        import types
+        from unittest import mock
+
+        from sdr_module.gui import signal_tools
+
+        clock = [1000.0]
+
+        def monotonic():
+            clock[0] += 0.7  # every look at the clock: a slow frame later
+            return clock[0]
+
+        fake = types.SimpleNamespace(monotonic=monotonic)
+        with mock.patch.object(signal_tools, "time", fake):
+            self.run_frames(40)
+            self.assertEqual(self.freqs(), list(self.STATIONS))
+            self.win._waterfall.setFocus()
+            self.settle()
+            self.assertEqual(self.key(Qt.Key.Key_Home), 100.1e6)
+            self.assertEqual(self.key(Qt.Key.Key_PageUp), 101.1e6)
+            self.assertEqual(self.key(Qt.Key.Key_PageDown), 100.1e6)
+
+    def test_a_new_snr_threshold_lists_again_at_once(self):
+        self.run_frames(40)
+        self.panel.min_snr.setValue(30.0)
+        self.assertEqual(self.freqs(), [99.5e6, 100.1e6])
+        self.run_frames(60)
+        self.assert_no_pieces()
+        self.win._waterfall.setFocus()
+        self.settle()
+        self.assertEqual(self.key(Qt.Key.Key_Home), 100.1e6)
+        up = self.key(Qt.Key.Key_PageUp)
+        self.assertIn(up, (100.1e6, 101.1e6))  # (101.1 MHz: about 30 dB)
+        self.panel.min_snr.setValue(10.0)
+        self.assertEqual(self.freqs(), list(self.STATIONS))
 
 
 class TestHoverReadsOnePoint(unittest.TestCase):

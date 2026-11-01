@@ -627,7 +627,10 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             "sure an antenna or a dummy load is connected and that your license "
             "allows this frequency. Stop ends it at any time."
         )
-        check = QCheckBox("Don't ask again")
+        # (The question's own, deleted with it: PyQt's setCheckBox doesn't
+        # take a parentless box over, so it went as this returned while the
+        # question, deleted later, still held it, and a restyle crashed.)
+        check = QCheckBox("Don't ask again", box)
         check.setToolTip("Transmit without asking from now on (the checks still apply)")
         box.setCheckBox(check)
         send = box.addButton("&Transmit", QMessageBox.ButtonRole.AcceptRole)

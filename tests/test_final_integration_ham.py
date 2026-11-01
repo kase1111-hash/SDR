@@ -8,12 +8,16 @@ The ham area's notices follow that rule too, among them the radio tuner's
 new "No receiver" note (HAM-E2E-13), whose SSTV twin ("Tuned to 145.800
 MHz FM. No receiver: ...") F-window had already made a notice.
 
+Also a crash found while using the area on the merged build: a theme change
+while the transmit question was still waiting to be deleted.
+
 A HackRFDevice runs on the threaded fake ``python_hackrf`` backend
 (tests/hackrf_fakes.py) where something is transmitted.
 """
 
 from __future__ import annotations
 
+import gc
 import os
 import unittest
 
@@ -23,7 +27,8 @@ from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
 from tests.test_gui_station_tx import _TxCase  # noqa: E402
 
 if HAS_PYQT6:
-    from PyQt6.QtWidgets import QApplication
+    from PyQt6 import sip
+    from PyQt6.QtWidgets import QApplication, QMessageBox
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
@@ -85,6 +90,38 @@ class TestHamNoticesStayOutOfTheErrorHistory(_TxCase):
             lambda: dialog.set_text("E" * (MAX_TEXT_CHARS + 5)),
             "what didn't fit was left out",
         )
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
+class TestTheTransmitQuestionKeepsItsCheckBox(_TxCase):
+    """The question asked before a transmission is deleted once control
+    returns to the event loop (_exec_dialog). Its "Don't ask again" box was
+    the Python object's (PyQt's setCheckBox doesn't take it over), so it
+    was deleted as confirm() returned while the question still held it: a
+    restyle in between (a theme change, as in a test or a script that runs
+    no event loop) crashed the app."""
+
+    def test_the_box_is_the_questions(self):
+        self.panel.set_callsign("W1AW")
+        self.hackrf()
+        self.store.values["tx/confirm"] = True
+        asked = []
+
+        def cancel(box):
+            asked.append((box, sip.ispyowned(box.checkBox())))
+            button = box.escapeButton()  # (Cancel)
+            box.clickedButton = lambda: button  # what exec() would record
+            return 0
+
+        self.win._exec_dialog = cancel  # (and the question is not deleted)
+        self.assertFalse(self.station.send_station_id())
+        gc.collect()
+        ((box, python_owned),) = asked
+        self.assertFalse(python_owned)
+        # What a theme change does to it before it is deleted.
+        box.setIcon(QMessageBox.Icon.Information)
+        QApplication.processEvents()
+        self.assertEqual(box.checkBox().text(), "Don't ask again")
 
 
 if __name__ == "__main__":

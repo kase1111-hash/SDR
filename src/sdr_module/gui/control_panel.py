@@ -2818,8 +2818,12 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
                 if idx >= 0:
                     self._demod_combo.setCurrentIndex(idx)
 
-            # FM deviation that suits the channel width
-            if preset.mode in ("FM", "WFM"):
+            # FM deviation: the preset's own (pagers' 12.5 kHz, as the band
+            # plan hears it), else one that suits the channel width
+            own_deviation = str(getattr(preset, "fm_deviation", "") or "")
+            if preset.mode == "FM" and own_deviation:
+                self._fm_dev_combo.setCurrentText(own_deviation)
+            elif preset.mode in ("FM", "WFM"):
                 if preset.mode == "WFM" or preset.bandwidth_hz >= 150e3:
                     self._fm_dev_combo.setCurrentText("75 kHz")
                 elif preset.bandwidth_hz >= 40e3:

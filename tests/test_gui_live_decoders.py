@@ -215,12 +215,13 @@ class TestTuneToModes(_WindowTestCase):
         mode, _dev, _bw = self.tune("ADS-B")
         self.assertEqual(mode, "None (I/Q)")  # no audio from the pulses
         self.assertAlmostEqual(self.freq(), 1090e6)
-        for name, freq in (
-            ("AX.25/APRS", 144.39e6),
-            ("POCSAG", 152.24e6),
-            ("FLEX", 931.9375e6),
+        # (Pagers at 12.5 kHz: their FSK swings beyond 5 kHz, W-01.)
+        for name, freq, deviation in (
+            ("AX.25/APRS", 144.39e6, "5 kHz"),
+            ("POCSAG", 152.24e6, "12.5 kHz"),
+            ("FLEX", 931.9375e6, "12.5 kHz"),
         ):
-            self.assertEqual(self.tune(name), ("FM", "5 kHz", "25 kHz"), name)
+            self.assertEqual(self.tune(name), ("FM", deviation, "25 kHz"), name)
             self.assertAlmostEqual(self.freq(), freq)
         # (As the ACARS preset is heard: 15 kHz, DEC-E2E-14.)
         mode, _dev, bandwidth = self.tune("ACARS")

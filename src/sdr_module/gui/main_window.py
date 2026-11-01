@@ -1004,6 +1004,7 @@ class _ReceiverChain:
         # the audio before noise reduction (for the SSTV decoder).
         self.last_clip_fraction = 0.0
         self.pre_nr_audio = np.empty(0, dtype=np.float32)
+        self._unclipped = np.empty(0, dtype=np.float32)  # (see clip_swing)
         # The AM detector's averaging (half of it), dip and fade lengths, in
         # samples at the channel rate (see _am_detect).
         self._am_half = max(1, int(round(_AM_WINDOW_S / 2.0 * self.channel_rate)))
@@ -1235,6 +1236,17 @@ class _ReceiverChain:
         if noise_reduction is not None:
             noise_reduction.reset_stream()
 
+    def clip_swing(self) -> Tuple[float, float]:
+        """How far the last FM block's audio swung, before it was clipped:
+        ``(peak, often)``, the swing exceeded 0.5 % and 5 % of the time, in
+        multiples of the FM deviation it was heard at (over 1: it clipped).
+        ``(0.0, 0.0)`` without one."""
+        audio = self._unclipped
+        if audio.size == 0:
+            return 0.0, 0.0
+        peak, often = np.percentile(np.abs(audio), (99.5, 95.0))
+        return float(peak), float(often)
+
     def channelize(self, samples: np.ndarray) -> np.ndarray:
         """The tuned channel of an I/Q block, at ``channel_rate``."""
         # The VFO's channel to 0 Hz (nothing to do at the LO itself).
@@ -1250,6 +1262,7 @@ class _ReceiverChain:
             # the SSTV decoder and the tone squelch) isn't this one's.
             self.pre_nr_audio = np.empty(0, dtype=np.float32)
             self.last_clip_fraction = 0.0
+            self._unclipped = np.empty(0, dtype=np.float32)
             return np.empty(0, dtype=np.float32)
         if self.mode == "FM":
             broadcast = float(fm_deviation) >= _BROADCAST_DEVIATION_HZ
@@ -1281,6 +1294,7 @@ class _ReceiverChain:
                 self.last_clip_fraction = float(over) / audio.size
             else:
                 self.last_clip_fraction = 0.0
+            self._unclipped = audio
             audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
             self.pre_nr_audio = audio
             return self._reduce_noise(audio)
@@ -2680,6 +2694,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._iq_conditioner = IqConditioner()
         self._clip_s = 0.0
         self._clip_warn_due = 0.0
+        # How far the audio swung, (peak, often) in deviations, in the
+        # frames that clipped lately (the warning names what holds it).
+        self._clip_swings: Deque[Tuple[float, float]] = deque(maxlen=60)
         # The Scanner tab mutes the speaker while it moves between channels,
         # and has a bookmark's CTCSS tone checked even with the speaker off.
         self._scan_muted = False
@@ -9245,10 +9262,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Warn (now and then) while FM audio clips: the station deviates
         more than the FM deviation setting, which distorts it. Only a clear
         signal counts: noise (a squelch tail, an empty channel with the
-        squelch off) clips whatever the setting."""
+        squelch off) clips whatever the setting. The warning names the
+        deviation that holds the swing measured while it clipped."""
         clear = snr_db is not None and snr_db >= _CLIP_MIN_SNR_DB
         if clear and chain.last_clip_fraction > _CLIP_FRACTION:
+            if self._clip_s <= 0.0:
+                self._clip_swings.clear()  # (a new episode)
             self._clip_s += seconds
+            self._clip_swings.append(chain.clip_swing())
         else:
             self._clip_s = max(0.0, self._clip_s - seconds)
             return
@@ -9258,13 +9279,35 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._clip_warn_due = now + _CLIP_WARN_EVERY_S
         self._clip_s = 0.0
         current = self._control_panel.get_fm_deviation_text()
-        self._show_status_message(
-            f"FM audio is clipping: this station deviates more than "
-            f"{current}. Choose a larger FM deviation in Demodulation, such as "
-            "75 kHz (broadcast) for an FM radio station.",
-            "warning",
-            8000,
-        )
+        text = f"FM audio is clipping: this station deviates more than {current}"
+        holds = self._deviation_holding_clip(self._control_panel.get_fm_deviation())
+        if holds == "75 kHz":
+            text += (
+                ". Choose a larger FM deviation in Demodulation, such as 75 kHz "
+                "(broadcast) for an FM radio station."
+            )
+        elif holds:
+            text += f". Choose a larger FM deviation in Demodulation: {holds} holds it."
+        else:
+            text += ", the largest FM deviation offered."
+        self._show_status_message(text, "warning", 8000)
+
+    def _deviation_holding_clip(self, deviation_hz: float) -> str:
+        """The FM deviation choice that holds the swing measured while the
+        audio clipped at ``deviation_hz`` (the rule Identify suggests one
+        by: a pager heard at 5 kHz gets 12.5 kHz, a broadcast station 75
+        kHz), at least the next larger choice; "" when none is larger."""
+        from ..dsp.signal_id import _DEVIATIONS, _deviation_for
+
+        larger = [text for hz, text in _DEVIATIONS if hz > 1.001 * deviation_hz]
+        if not larger:
+            return ""
+        swings = np.asarray(self._clip_swings, dtype=float).reshape(-1, 2)
+        if not len(swings):
+            return larger[0]
+        peak, often = np.median(swings, axis=0) * float(deviation_hz)
+        holds = _deviation_for(float(peak), float(often))
+        return holds if holds in larger else larger[0]
 
     def _realtime_hint(self) -> str:
         if self._playback.active and self._playback.speed != 1.0:

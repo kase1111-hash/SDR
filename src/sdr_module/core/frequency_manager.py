@@ -192,6 +192,10 @@ class FrequencyPreset:
     #: the Decoder panel's names; "SSTV" for the SSTV decoder; "" for none):
     #: applying the preset turns it on.
     decoder: str = ""
+    #: The FM deviation it is heard with ("12.5 kHz"), where its channel
+    #: width doesn't say ("" for that: 5 kHz in a narrow channel, 25 kHz in
+    #: a wide one, 75 kHz for broadcast FM).
+    fm_deviation: str = ""
 
 
 # =============================================================================
@@ -1004,7 +1008,8 @@ RX_PRESETS: List[FrequencyPreset] = [
         description="ISM band - LoRa, sensors (Americas)",
         category="ISM",
     ),
-    # Paging
+    # Paging. Pagers send FSK at +/-4.5 kHz (POCSAG) or +/-4.8 kHz (FLEX):
+    # at a 5 kHz deviation its audio clips, 12.5 kHz holds it.
     FrequencyPreset(
         name="POCSAG/FLEX",
         frequency_hz=929.6e6,
@@ -1013,6 +1018,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         description="Paging frequencies",
         category="Paging",
         decoder="FLEX",
+        fm_deviation="12.5 kHz",
     ),
     FrequencyPreset(
         name="POCSAG",
@@ -1022,6 +1028,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         description="A common VHF pager channel (POCSAG pagers use 152-159 MHz)",
         category="Paging",
         decoder="POCSAG",
+        fm_deviation="12.5 kHz",
     ),
     FrequencyPreset(
         name="FLEX",
@@ -1031,6 +1038,7 @@ RX_PRESETS: List[FrequencyPreset] = [
         description="A common 900 MHz pager channel (FLEX pagers use 929-932 MHz)",
         category="Paging",
         decoder="FLEX",
+        fm_deviation="12.5 kHz",
     ),
     # Marine
     FrequencyPreset(

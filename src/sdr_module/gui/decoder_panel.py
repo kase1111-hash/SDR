@@ -109,21 +109,22 @@ PROTOCOL_INFO: Dict[str, Tuple[str, str]] = {
 #: Protocol name -> (frequency in Hz, demod mode, FM deviation, what it is)
 #: offered as a one-click "Tune to ..." in the empty message table. The
 #: mode is what listening to it sounds best in (the decoder itself picks its
-#: own channel): no audio for ADS-B's pulses, narrowband FM (5 kHz, a 25 kHz
-#: channel) for pagers and packet, AM (10 kHz) for ACARS. Pagers use many
+#: own channel): no audio for ADS-B's pulses, narrowband FM in a 25 kHz
+#: channel for packet (5 kHz) and pagers (12.5 kHz: their FSK swings beyond
+#: 5 kHz, as their presets hear them), AM (10 kHz) for ACARS. Pagers use many
 #: channels across their bands; theirs is a common one (the demo device's).
 PROTOCOL_TUNE: Dict[str, Tuple[float, str, str, str]] = {
     "POCSAG": (
         152.24e6,
         "FM",
-        "5 kHz",
+        "12.5 kHz",
         "a common VHF pager channel (pagers use many channels in 152–159 MHz "
         "and 929–932 MHz)",
     ),
     "FLEX": (
         931.9375e6,
         "FM",
-        "5 kHz",
+        "12.5 kHz",
         "a common 900 MHz pager channel (FLEX pagers use 929–932 MHz)",
     ),
     "ADS-B": (1090e6, "None (I/Q)", "", "the ADS-B frequency used worldwide"),

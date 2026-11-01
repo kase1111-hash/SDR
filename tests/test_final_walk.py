@@ -1,0 +1,245 @@
+"""Final walk: what the release check's real-window walk found (W-01 to
+W-13 of the final pass).
+
+Each test names the problem it covers; most run the real window offscreen
+on the demo device (or the part on its own where that is enough).
+"""
+
+import os
+import unittest
+
+import numpy as np
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from tests.test_gui_chrome import require_pyqt6  # noqa: E402
+
+
+def _window_case():
+    from tests.test_gui_chrome import _WindowTestCase
+
+    return _WindowTestCase
+
+
+# --------------------------------------------------------------------------- #
+# W-01: pagers heard at a deviation that holds them
+# --------------------------------------------------------------------------- #
+
+
+class TestPagersAreHeardAtADeviationThatHoldsThem(unittest.TestCase):
+    """W-01: the POCSAG and FLEX presets, the band plan (152.240 or
+    931.9375 MHz typed) and the Decoder tab's "Tune to" listened in FM at 5
+    kHz deviation. Pagers send FSK at +/-4.5 kHz (POCSAG) and +/-4.8 kHz
+    (FLEX), as the demo's do: at 5 kHz their audio clipped and within
+    seconds the window warned "FM audio is clipping" (and logged it), while
+    Identify said 12.5 kHz. They are heard at 12.5 kHz now."""
+
+    PAGING = ("POCSAG", "FLEX", "POCSAG/FLEX")
+
+    def test_the_presets(self):
+        from sdr_module.core.band_plan import preset_listening
+        from sdr_module.core.frequency_manager import get_frequency_manager
+
+        for name in self.PAGING:
+            preset = get_frequency_manager().get_preset_by_name(name)
+            self.assertEqual(
+                preset_listening(preset), ("FM", "12.5 kHz", "25 kHz"), name
+            )
+
+    def test_the_band_plan(self):
+        from sdr_module.core.band_plan import listening_for
+
+        # The presets' channels, and another channel of the 900 MHz band.
+        for freq in (152.24e6, 931.9375e6, 929.6e6, 930.5125e6):
+            self.assertEqual(listening_for(freq), ("FM", "12.5 kHz", "25 kHz"), freq)
+
+    def test_other_narrow_fm_presets_keep_5_khz(self):
+        from sdr_module.core.band_plan import listening_for
+
+        for freq in (146.52e6, 144.39e6, 162.55e6, 156.8e6, 145.8e6):
+            self.assertEqual(listening_for(freq)[1], "5 kHz", freq)
+
+    def test_the_decoder_tabs_suggestion(self):
+        from sdr_module.gui.decoder_panel import PROTOCOL_TUNE
+
+        self.assertEqual(PROTOCOL_TUNE["POCSAG"][1:3], ("FM", "12.5 kHz"))
+        self.assertEqual(PROTOCOL_TUNE["FLEX"][1:3], ("FM", "12.5 kHz"))
+
+
+class TestTheDemoPagersDontClipAsTheyAreHeard(unittest.TestCase):
+    """W-01: the demo device's pagers through the window's own receiver
+    chain, block by block as the display loop hands them over, counted as
+    the clipping warning counts (a clear signal, more than 5 % of its audio
+    beyond full scale; it warns after half a second of that). At the
+    deviation their preset listens with they don't clip; at 5 kHz they did
+    (the control: the warning came)."""
+
+    RATE = 1.024e6
+
+    def setUp(self):
+        require_pyqt6(self)
+        from sdr_module.gui import main_window
+
+        self.mw = main_window
+
+    def clipping_seconds(self, freq, start_s, seconds, deviation_hz):
+        from sdr_module.gui.device_dialog import MockDevice
+
+        def demo(at_hz, position_s):
+            dev = MockDevice()
+            dev.set_sample_rate(self.RATE)
+            dev.set_frequency(at_hz)
+            dev.start_rx()
+            dev._stream_rate = self.RATE
+            dev._stream_pos = int(position_s * self.RATE)
+            return dev
+
+        block = int(self.RATE / 30)
+        quiet = demo(300e6, 0.0)  # (the noise the channel has without a signal)
+        chain = self.mw._ReceiverChain(self.RATE, "FM", 25e3)
+        noise_db = float(
+            np.median(
+                [
+                    10
+                    * np.log10(
+                        np.mean(
+                            np.abs(chain.channelize(quiet.read_samples(block))) ** 2
+                        )
+                    )
+                    for _ in range(10)
+                ]
+            )
+        )
+        dev = demo(freq, start_s)
+        chain = self.mw._ReceiverChain(self.RATE, "FM", 25e3)
+        clipping = heard = 0.0
+        for _ in range(int(seconds * 30)):
+            channel = chain.channelize(dev.read_samples(block))
+            level_db = 10 * np.log10(np.mean(np.abs(channel) ** 2) + 1e-20)
+            chain.demodulate(channel, deviation_hz)
+            if level_db - noise_db >= self.mw._CLIP_MIN_SNR_DB:
+                heard += 1 / 30
+                if chain.last_clip_fraction > self.mw._CLIP_FRACTION:
+                    clipping += 1 / 30
+        self.assertGreater(heard, 1.0)  # (the page was sent meanwhile)
+        return clipping
+
+    def deviation_hz(self, freq):
+        from sdr_module.core.band_plan import listening_for
+
+        value, unit = listening_for(freq)[1].split()
+        self.assertEqual(unit, "kHz")
+        return float(value) * 1e3
+
+    def test_pocsag(self):
+        # (The demo pages at 3 s and 13 s of every 20.)
+        freq = 152.24e6
+        limit = self.mw._CLIP_WARN_AFTER_S
+        held = self.clipping_seconds(freq, 2.9, 2.0, self.deviation_hz(freq))
+        self.assertLess(held, limit)
+        self.assertGreater(self.clipping_seconds(freq, 2.9, 2.0, 5e3), limit)
+
+    def test_flex(self):
+        # (Its frames at 5 s and 16 s of every 22.)
+        freq = 931.9375e6
+        limit = self.mw._CLIP_WARN_AFTER_S
+        held = self.clipping_seconds(freq, 4.9, 2.2, self.deviation_hz(freq))
+        self.assertLess(held, limit)
+        self.assertGreater(self.clipping_seconds(freq, 4.9, 2.2, 5e3), limit)
+
+
+class TestPagingPresetsInTheWindow(_window_case()):
+    """W-01 in the window: Radio > Band Presets > Paging, a typed pager
+    frequency and the Decoder tab's "Tune to" all listen at 12.5 kHz."""
+
+    demo = True
+
+    def deviation(self):
+        return self.win._control_panel.get_fm_deviation_text()
+
+    def test_the_presets(self):
+        for name in ("POCSAG", "FLEX"):
+            self.assertTrue(self.win._apply_preset_named(name))
+            self.assertEqual(self.deviation(), "12.5 kHz", name)
+            self.assertEqual(self.win._control_panel._bw_combo.currentText(), "25 kHz")
+
+    def test_typed(self):
+        from tests.test_final_listen import TestBandPlanListeningSegments
+
+        win = self.win
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        self.assertTrue(win.set_frequency(100.1e6))
+        for text, freq in (("152.24", 152.24e6), ("931.9375", 931.9375e6)):
+            win._set_demod_mode("FM", "75 kHz", "200 kHz")
+            TestBandPlanListeningSegments.type_frequency(self, text)
+            self.assertEqual(win._current_frequency(), freq)
+            self.assertEqual(self.deviation(), "12.5 kHz", text)
+            self.assertIn("12.5 kHz deviation", win._message_label.text())
+
+    def test_the_decoder_tabs_tune_to(self):
+        win, panel = self.win, self.win._decoder_panel
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        panel._proto_combo.setCurrentText("POCSAG")
+        panel._tune_to_protocol()
+        self.assertEqual(win._current_frequency(), 152.24e6)
+        self.assertEqual(self.deviation(), "12.5 kHz")
+
+
+class TestTheClippingWarningNamesADeviationThatHolds(_window_case()):
+    """W-01: the warning advised "75 kHz (broadcast) for an FM radio
+    station" whatever was clipping, a pager too. It names the deviation
+    that holds what it measured: the next choice for a pager heard at 5
+    kHz, 75 kHz (broadcast) for a broadcast station."""
+
+    demo = True
+
+    def warn(self, freq, deviation, width, start_s, seconds):
+        from sdr_module.gui import main_window
+        from sdr_module.gui.device_dialog import MockDevice
+
+        win = self.win
+        win._set_demod_mode("FM", deviation, width)
+        rate = 1.024e6
+        dev = MockDevice()
+        dev.set_sample_rate(rate)
+        dev.set_frequency(freq)
+        dev.start_rx()
+        dev._stream_rate = rate
+        dev._stream_pos = int(start_s * rate)
+        chain = main_window._ReceiverChain(rate, "FM", float(width.split()[0]) * 1e3)
+        said = []
+        win._show_status_message = lambda text, *a, **k: said.append(text)
+        win._clip_warn_due = 0.0
+        block = int(rate / 30)
+        for _ in range(int(seconds * 30)):
+            channel = chain.channelize(dev.read_samples(block))
+            chain.demodulate(channel, win._control_panel.get_fm_deviation())
+            win._check_fm_clipping(chain, 1 / 30, 30.0)
+            if said:
+                break
+        return said
+
+    def test_a_pager_heard_at_5_khz(self):
+        said = self.warn(152.24e6, "5 kHz", "25 kHz", 2.9, 2.0)
+        self.assertEqual(
+            said,
+            [
+                "FM audio is clipping: this station deviates more than 5 kHz. "
+                "Choose a larger FM deviation in Demodulation: 12.5 kHz holds it."
+            ],
+        )
+
+    def test_a_broadcast_station_heard_narrow(self):
+        said = self.warn(100.1e6, "5 kHz", "200 kHz", 0.0, 1.5)
+        self.assertEqual(
+            said,
+            [
+                "FM audio is clipping: this station deviates more than 5 kHz. "
+                "Choose a larger FM deviation in Demodulation, such as 75 kHz "
+                "(broadcast) for an FM radio station."
+            ],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

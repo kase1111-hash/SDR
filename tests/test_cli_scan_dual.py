@@ -201,6 +201,51 @@ def test_without_two_devices_it_says_what_to_do(monkeypatch, capsys):
     assert "No SDR device is connected" in capsys.readouterr().out
 
 
+def test_with_none_connected_it_says_dual_needs_two(monkeypatch, capsys):
+    """Before, it said "Plug one in", which only led to the next error."""
+    _use(monkeypatch, DualManager())
+    assert main(["scan", "--dual", "--single"]) == 1
+    out = capsys.readouterr().out
+    assert "No SDR device is connected" in out
+    assert "--dual needs two (an RTL-SDR and a HackRF One, or two of a kind)" in out
+    assert "Plug them in" in out and "Plug one in" not in out
+    assert main(["scan", "--dual", "--single", "--device", "hackrf"]) == 1
+    out = capsys.readouterr().out
+    assert "No HackRF One is connected" in out
+    assert "--dual needs two of that kind" in out
+    # (One device's scan says what it said before.)
+    assert main(["scan", "--single"]) == 1
+    assert "Plug one in ('sdr-scan devices'" in capsys.readouterr().out
+
+
+def test_a_receiver_that_tunes_none_of_the_range_says_so(monkeypatch, capsys, fast):
+    """2000-2010 MHz is above the RTL-SDR's range: its line of the plan
+    was empty ("RTL-SDR #0 (2.4 MS/s): ")."""
+    b = hackrf(stations={2005e6: -30.0})
+    _use(monkeypatch, DualManager(("rtlsdr", 0, rtl()), ("hackrf", 0, b)))
+    rc = main(["scan", "--start", "2000", "--end", "2010", "--dual", "--single"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert (
+        "  RTL-SDR #0 (2.4 MS/s): none of this range (it tunes 24.000 - "
+        "1766.000 MHz)\n" in out
+    )
+    assert not any(line.endswith(": ") for line in out.splitlines()), out
+    assert _listed(out) == [2005.0]
+
+
+def test_one_channel_is_named_once(monkeypatch, capsys, fast):
+    """5905-6000 MHz in 10 MHz steps ends with a channel at 6005 MHz, above
+    what either tunes: it was "6005.000 - 6005.000 MHz"."""
+    _use(monkeypatch, DualManager(("rtlsdr", 0, rtl()), ("hackrf", 0, hackrf())))
+    argv = ["scan", "--start", "5905", "--end", "6000", "--step", "10000"]
+    rc = main(argv + ["--dual", "--single"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "Note: neither receiver tunes 6005.000 MHz." in out
+    assert "6005.000 - 6005.000" not in out
+
+
 def test_with_device_both_are_of_that_kind(monkeypatch, capsys, fast):
     manager = _use(
         monkeypatch,

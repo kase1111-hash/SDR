@@ -177,12 +177,21 @@ def _open_receivers(args: argparse.Namespace, count: int):
         args.device or "", "SDR device"
     )
     if not detected:
+        if count < 2:
+            plug = ". Plug one in"
+        elif args.device:
+            plug = ": --dual needs two of that kind. Plug them in"
+        else:
+            plug = (
+                ": --dual needs two (an RTL-SDR and a HackRF One, or two of a "
+                "kind). Plug them in"
+            )
         return (
             manager,
             [],
             (
-                f"No {which} is connected, so there is nothing to scan with. Plug "
-                "one in ('sdr-scan devices' lists what is found), or analyze a "
+                f"No {which} is connected, so there is nothing to scan with{plug} "
+                "('sdr-scan devices' lists what is found), or analyze a "
                 "recording instead with --input FILE."
             ),
         )
@@ -401,7 +410,8 @@ def _scan_live(args: argparse.Namespace) -> int:
 
 
 def _mhz_span(low_hz: float, high_hz: float) -> str:
-    return f"{low_hz / 1e6:.3f} - {high_hz / 1e6:.3f} MHz"
+    low, high = f"{low_hz / 1e6:.3f}", f"{high_hz / 1e6:.3f}"
+    return f"{low} MHz" if low == high else f"{low} - {high} MHz"  # (one channel)
 
 
 def _hit_line(hit: Any, name_width: int) -> str:
@@ -567,6 +577,14 @@ def _scan_dual(args: argparse.Namespace) -> int:
                 up = sweep.sweeps_up(index)
                 edge = shared[0][0] if up else shared[-1][1]
                 plan.append(f"from {edge / 1e6:.3f} MHz {'up' if up else 'down'}")
+            if not plan:  # (it tunes none of the range: the other sweeps alone)
+                own_low, own_high = spans[index]
+                tunes_text = (
+                    _mhz_span(own_low, own_high)
+                    if math.isfinite(own_high)
+                    else f"{own_low / 1e6:.3f} MHz and up"
+                )
+                plan.append(f"none of this range (it tunes {tunes_text})")
             print(f"  {name} ({rate / 1e6:g} MS/s): " + ", then ".join(plan))
         if sweep.shared():
             print("They meet where their speeds put them.")

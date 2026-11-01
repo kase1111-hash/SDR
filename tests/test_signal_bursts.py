@@ -234,6 +234,55 @@ class TestBurstDetector:
             ended += det.process(self._station_row(i, rng), 100.1e6, self.SPAN, i / 30)
         assert ended
 
+    @staticmethod
+    def _top_row(rng, n=1024, segments=78):
+        """Noise as :func:`frame_rows` gives it at 2.4 MS/s: each bin's
+        strongest of a frame's 78 FFTs (steadier than one FFT's)."""
+        return -80.0 + 10 * np.log10(rng.exponential(1.0, (segments, n)).max(axis=0))
+
+    def _keyed(self, on_s, off_s, seconds):
+        """The bursts of a carrier keyed ``on_s`` on, ``off_s`` off (from
+        0.5 s, for ``seconds``), and how many times it was keyed on."""
+        rng = np.random.default_rng(8)
+        det = BurstDetector()
+        ended, overs, was_on = [], 0, False
+        for i in range(int(seconds * 30)):
+            t = i / 30
+            row = self._top_row(rng)
+            on = t >= 0.5 and (t - 0.5) % (on_s + off_s) < on_s
+            if on:
+                row[300:303] = -40.0
+            overs += on and not was_on
+            was_on = on
+            ended += det.process(row, 433.92e6, self.SPAN, t)
+        return ended + det.flush(), overs
+
+    @pytest.mark.parametrize(
+        "on_s, off_s, seconds",
+        [(10.0, 1.5, 60.0), (5.0, 1.0, 60.0), (2.0, 1.0, 30.0), (1.0, 0.8, 60.0)],
+    )
+    def test_overs_with_short_gaps_are_each_a_burst(self, on_s, off_s, seconds):
+        """A repeater's overs a second or so apart are transmissions that
+        start and stop: each one is a burst. The floor rises under them (a
+        decibel a second) and stands a few dB over the noise in the short
+        gaps between, but the level falls back to the noise there: the
+        channel is not occupied (the occupancy rule took them for a station
+        that never stops and missed most of them)."""
+        ended, overs = self._keyed(on_s, off_s, seconds)
+        assert len(ended) == overs, [round(b.start_s, 1) for b in ended]
+
+    def test_keying_that_never_pauses_is_a_station(self):
+        """A carrier keyed on and off without ever falling quiet for
+        :attr:`BurstDetector.REST_S` (Morse code, a beacon keying away) is a
+        station that never stops once it has gone on like that for
+        :attr:`BurstDetector.ALWAYS_S`: its keys are not listed one by one
+        for ever (they were for half a minute, and with its floor a few dB
+        over the noise, for good)."""
+        ended, overs = self._keyed(0.35, 0.45, 60.0)
+        assert overs == 75
+        starts = [round(b.start_s, 1) for b in ended]
+        assert starts and max(starts) < BurstDetector.ALWAYS_S + 1.0, starts
+
 
 def test_frame_rows_show_a_short_burst_anywhere_in_the_block():
     rate = 2.4e6
@@ -371,6 +420,29 @@ class TestDemo:
         # Nothing else but the keyed CW beacon on 99.82 MHz, now and then.
         others = [f for f in on if abs(f - 100.715e6) >= 10e3]
         assert all(abs(f - 99.82e6) < 5e3 for f in others), on
+
+    def test_the_cw_beacon_is_a_station(self):
+        """The 99.82 MHz beacon keys 'VVV DE SDR' and holds its key down,
+        never quiet for long: a station, not a burst every few seconds (it
+        was listed all along, its floor a few dB over the noise). Uneven
+        frames, as a busy display loop reads them."""
+        dev = _demo(100.1e6, self.RATE)
+        dev._rng = np.random.default_rng(2)  # (the same noise every run)
+        sizes = np.random.default_rng(99).uniform(0.5, 1.8, 30 * 60)
+        watcher = BurstWatcher(analyze=False)
+        reports = []
+        for size in sizes:  # about a minute
+            block = dev.read_samples(int(self.FRAME * size))
+            reports += watcher.feed(block, 100.1e6, self.RATE)
+        reports += watcher.flush()
+        beacon = [
+            round(r.burst.start_s, 1)
+            for r in reports
+            if abs(r.burst.center_hz - 99.82e6) < 25e3
+        ]
+        assert all(t < BurstDetector.ALWAYS_S + 1.0 for t in beacon), beacon
+        nfm = [r for r in reports if abs(r.burst.center_hz - 100.715e6) < 10e3]
+        assert len(nfm) >= 6  # (on for 5 s every 9 s: still listed)
 
     def test_the_remote_is_still_found_on_every_packet(self):
         """The occupancy rule leaves the 433.92 MHz remote (a packet every

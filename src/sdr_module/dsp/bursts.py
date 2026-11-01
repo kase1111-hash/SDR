@@ -12,8 +12,9 @@ does.
   (10 dB by default, over a few neighbouring bins), grouped into signals
   and followed from row to row. A burst ends when it has been gone for a
   couple of rows. No warm-up, no flood of noise "bursts", and none where
-  the floor itself stands above the noise (an occupied channel: a
-  station's modulation coming and going there is not a transmission).
+  the floor itself stands above the noise in a channel that never falls
+  quiet (an occupied channel: a station's modulation coming and going, or
+  a beacon's keying, is not a transmission there).
 * :func:`analyze_pulses` takes the I/Q of one burst's channel and measures
   its pulses and gaps, guesses the modulation (pulse width, pulse position,
   PCM / NRZ, Manchester, FSK) and slices the bits, row by row, in hex.
@@ -100,19 +101,33 @@ class BurstDetector:
         absorb_db_per_s: How fast the floor rises under a burst: a signal
             that stays on (a station) becomes the floor, a 30 dB one after
             about 20 s at 1 dB/s.
-        max_duration_s: A burst still on after this long is reported (and
-            a new one starts) so the activity list doesn't wait forever.
+        max_duration_s: A burst still on after this long is reported, so
+            the activity list doesn't wait forever (where its channel never
+            fell quiet, what follows is a station's, not a new burst).
         occupied_db: No burst starts where the floor stands this far above
-            the noise (or in the next bin), nor a weak one whose energy
-            runs into such a place (0: anywhere): that channel is always
-            occupied (a broadcast station), and its modulation rising and
-            falling there is not a transmission. A transmission that comes
-            and goes (a remote, a repeater between overs) leaves the floor
-            at the noise between its bursts.
+            the noise around a station that never stops (or in the next
+            bin), nor a weak one whose energy runs into such a place (0:
+            anywhere): that channel is always occupied (a broadcast
+            station), and its modulation rising and falling there is not a
+            transmission. Nor where a channel has not fallen quiet for
+            :attr:`ALWAYS_S` and its floor stands half that far above the
+            noise (a beacon keying away). A transmission that comes and
+            goes (a remote, a repeater between overs) falls back to the
+            noise between its bursts, even where the floor still stands
+            above it for a while (it rises under them).
     """
 
     #: Rows between two measurements of the noise under the floor.
     OCCUPANCY_EVERY = 8
+    #: Seconds a channel must fall quiet (back near the noise) to count as
+    #: free again: longer than the gaps of Morse keying at 12 WPM or more
+    #: (a word's 7 dits), shorter than a repeater's pause between overs.
+    REST_S = 0.75
+    #: Seconds a channel goes on without falling quiet (for
+    #: :attr:`REST_S`) before it counts as a station with its floor only
+    #: half :attr:`occupied_db` up: Morse code never pauses that long, and
+    #: a beacon keying away raises its floor only a few dB.
+    ALWAYS_S = 10.0
 
     def __init__(
         self,
@@ -145,11 +160,18 @@ class BurstDetector:
         self._key: Optional[Tuple[int, float, float]] = None
         self.active: List[Burst] = []
         self._next_id = 1
-        # Where the floor stands ``occupied_db`` above the noise (that and
-        # the next bin either side, that alone, the noise), and the row it
-        # was measured at.
-        self._occupied: Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]] = None
-        self._occupied_at = 0
+        # Per bin: when its level last stood ``occupied_db`` over the noise,
+        # and when it had last been quiet for REST_S (a station that never
+        # stops never is; a repeater between its overs is); and when the
+        # floor was taken (no channel has been on for longer, as far as
+        # anyone knows).
+        self._last_on: Optional[np.ndarray] = None
+        self._rested_at: Optional[np.ndarray] = None
+        self._floor_t = 0.0
+        # The noise under the floor (linear, per bin), and the row it was
+        # measured at.
+        self._noise: Optional[np.ndarray] = None
+        self._noise_at = 0
 
     def reset(self) -> None:
         """Forget the floor and the bursts in progress (a retune)."""
@@ -158,7 +180,9 @@ class BurstDetector:
         self._last_t = None
         self._key = None
         self.active = []
-        self._occupied = None
+        self._last_on = None
+        self._rested_at = None
+        self._noise = None
 
     @property
     def settled(self) -> bool:
@@ -200,9 +224,12 @@ class BurstDetector:
             # The first row is the floor (averaged over a few bins): what is
             # on now, stations included, is not a burst.
             self._floor = _local_mean(lin, 5)
+            self._last_on = np.full(n, float(t))
+            self._rested_at = np.full(n, -np.inf)
+            self._floor_t = float(t)
             self._rows = 1
             self._last_t = t
-            self._occupied = None
+            self._noise = None
             return ended
         dt = 1.0 / 30.0 if self._last_t is None else max(1e-3, t - self._last_t)
         self._last_t = t
@@ -267,38 +294,70 @@ class BurstDetector:
             floor[busy] = np.maximum(
                 floor[busy], np.minimum(level[busy], floor[busy] * step)
             )
+        self._note_rest(level, t)
         return ended
 
+    def _note_rest(self, level: np.ndarray, t: float) -> None:
+        """Note the bins whose level stands :attr:`occupied_db` over the
+        noise in this row, and those that have been quiet for
+        :attr:`REST_S` (with the noise last measured; none before)."""
+        noise, on_at, rested = self._noise, self._last_on, self._rested_at
+        if noise is None or on_at is None or rested is None:
+            return
+        if not len(noise) == len(on_at) == len(level):
+            return
+        on_at[level > noise * 10.0 ** (self.occupied_db / 10.0)] = t
+        rested[t - on_at >= self.REST_S] = t
+
     def _occupancy(self) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        """``(near, occupied, noise)``: the bins where the floor stands
-        :attr:`occupied_db` above the noise under it with the next bin
-        either side, those bins alone, and the noise (linear) per bin; None
-        when that is off. Measured every :attr:`OCCUPANCY_EVERY` rows (the
-        floor moves slowly)."""
+        """``(near, occupied, noise)``: the bins of a station that never
+        stops (where the floor stands :attr:`occupied_db` above the noise
+        under it, around a bin that hasn't been quiet for :attr:`REST_S`
+        lately; or half that far, around one not quiet for
+        :attr:`ALWAYS_S`), those with the next bin either side, and the
+        noise (linear) per bin; None when that is off. A repeater's channel
+        between its overs keeps a raised floor for a while (it rises under
+        their bursts) but falls quiet: not occupied. The noise is measured
+        every :attr:`OCCUPANCY_EVERY` rows (the floor moves slowly)."""
         floor = self._floor
         if floor is None or self.occupied_db <= 0:
             return None
-        if (
-            self._occupied is not None
-            and len(self._occupied[0]) == len(floor)
-            and self._rows - self._occupied_at < self.OCCUPANCY_EVERY
-        ):
-            return self._occupied
         from .signal_list import DC_GUARD_BINS, local_floor_db
 
-        floor_db = 10.0 * np.log10(np.maximum(floor, 1e-30))
-        noise_db = local_floor_db(floor_db)
-        busy = floor_db > noise_db + self.occupied_db
+        if (
+            self._noise is None
+            or len(self._noise) != len(floor)
+            or self._rows - self._noise_at >= self.OCCUPANCY_EVERY
+        ):
+            floor_db = 10.0 * np.log10(np.maximum(floor, 1e-30))
+            self._noise = _db_to_lin(local_floor_db(floor_db))
+            self._noise_at = self._rows
+        noise = self._noise
+        busy = floor > noise * 10.0 ** (self.occupied_db / 10.0)
+        core = busy
+        rested, now = self._rested_at, self._last_t
+        if rested is not None and len(rested) == len(busy) and now is not None:
+            # A raised floor counts around a channel on lately (a repeater's
+            # falls quiet between its overs; one on when the floor was taken
+            # counts as on); one raised half as far around a channel seen
+            # never quiet for a long while (a beacon keying away).
+            since = now - rested
+            always = now - np.maximum(rested, self._floor_t) > self.ALWAYS_S
+            always &= floor > noise * 10.0 ** (0.5 * self.occupied_db / 10.0)
+            core = (busy & (since > self.REST_S)) | always
+            busy = busy | always
         n = len(busy)
         # (Most receivers' DC spike sits at the centre: not a station.)
-        busy[max(0, n // 2 - DC_GUARD_BINS) : n // 2 + DC_GUARD_BINS + 1] = False
+        dc = slice(max(0, n // 2 - DC_GUARD_BINS), n // 2 + DC_GUARD_BINS + 1)
+        busy[dc] = False
+        core[dc] = False
+        ids, joined = _joined_runs(busy, core)
+        busy = np.isin(ids, joined)
         # (A station's modulation reaching past its edge starts there.)
         near = busy.copy()
         near[1:] |= busy[:-1]
         near[:-1] |= busy[1:]
-        self._occupied = (near, busy, _db_to_lin(noise_db))
-        self._occupied_at = self._rows
-        return self._occupied
+        return near, busy, noise
 
     def _track(
         self,

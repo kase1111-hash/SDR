@@ -147,6 +147,15 @@ class TestCodewords(unittest.TestCase):
             self.assertEqual(parse_dcs(text), parsed, text)
         for bad in ("", "D024N", "D999N", "08", "D023X", "abc", None, 23.5):
             self.assertIsNone(parse_dcs(bad), bad)
+        # Digits other than 0-9 (a damaged setting or scan result) are no
+        # code either; they used to raise ValueError ("²³") or pass ("٠٢٣").
+        for bad in (
+            "D\u00b2\u00b3N",
+            "\u00b2\u00b3",
+            "\u0660\u0662\u0663",
+            "\uff10\uff12\uff13",
+        ):
+            self.assertIsNone(parse_dcs(bad), bad)
 
 
 class TestEncoder(unittest.TestCase):

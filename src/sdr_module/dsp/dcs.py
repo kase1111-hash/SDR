@@ -141,7 +141,7 @@ def parse_dcs(text: object) -> Optional[Code]:
     if s[-1:] in ("N", "I", "R"):
         inverted = s[-1] != "N"
         s = s[:-1]
-    if not s or len(s) > 3 or not s.isdigit():
+    if not s or len(s) > 3 or not (s.isascii() and s.isdigit()):
         return None
     code = int(s)
     return (code, inverted) if code in DCS_CODES else None

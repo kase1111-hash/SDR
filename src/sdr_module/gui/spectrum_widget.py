@@ -25,6 +25,7 @@ frequency axes line up vertically.
 
 from __future__ import annotations
 
+import logging
 import math
 from bisect import bisect_left, bisect_right
 from collections import deque
@@ -89,6 +90,65 @@ try:
     HAS_PYQT6 = True
 except ImportError:
     HAS_PYQT6 = False
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Saved display settings (the waterfall's too)
+# ---------------------------------------------------------------------------
+
+#: How a saved yes/no may read besides true/false (as GuiSettings reads one).
+_YES_TEXT = ("1", "true", "yes", "on")
+_NO_TEXT = ("0", "false", "no", "off")
+
+
+def saved_flag(value: Any) -> Optional[bool]:
+    """A yes/no display setting as saved (JSON true/false; also 1/0 and
+    "yes"/"off"...), or None when it is no yes/no (a damaged file: read as
+    Python reads it, "no" would have been yes)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in _YES_TEXT:
+            return True
+        if text in _NO_TEXT:
+            return False
+    return None
+
+
+def saved_number(value: Any) -> Optional[float]:
+    """A number display setting as saved (finite), or None when it is no
+    number (text, null, a yes/no, NaN, too big for a float)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def log_damaged_setting(
+    plot: str,
+    key: str,
+    value: Any,
+    used: Any,
+    log: Optional[logging.Logger] = None,
+) -> None:
+    """Say (Tools > Error History, through ``log``: this module's logger by
+    default) that the saved ``plot`` setting ``key`` was damaged and what is
+    used instead, as GuiSettings does for its values."""
+    (log or logger).warning(
+        "Ignoring the damaged %s setting %s=%r: using %r instead.",
+        plot,
+        key,
+        value,
+        used,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1504,35 +1564,70 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             "bookmark_labels": self._show_bookmarks,
         }
 
-    def apply_display_settings(self, settings: Dict[str, Any]) -> None:
+    def apply_display_settings(
+        self, settings: Dict[str, Any], defaults: Optional[Dict[str, Any]] = None
+    ) -> None:
         """Restore :meth:`display_settings` output (unknown keys ignored).
         The FFT size, window and zoom are the main window's to apply (they
-        concern the waterfall too); this restores the rest."""
+        concern the waterfall too); this restores the rest.
+
+        A damaged value (a damaged or hand-edited settings file) is logged
+        and gives its value in ``defaults`` (else the one in use); an
+        average the menu doesn't offer gives the nearest one."""
         if not isinstance(settings, dict):
             return
+        defaults = defaults if isinstance(defaults, dict) else {}
         blocked = self.blockSignals(True)
         try:
             if "avg" in settings:
-                self.set_average_frames(settings.get("avg"))
-            if "peak_hold" in settings:
-                self.set_peak_hold(bool(settings.get("peak_hold")))
-            if "min_hold" in settings:
-                self.set_min_hold(bool(settings.get("min_hold")))
-            try:
-                floor = float(settings.get("range_floor", self._db_range[0]))
-                top = float(settings.get("range_top", self._db_range[1]))
-                if math.isfinite(floor) and math.isfinite(top):
-                    self._set_range(floor, top)
-            except (TypeError, ValueError, OverflowError):
-                pass
-            if "range_auto" in settings:
-                self.set_auto_range(bool(settings.get("range_auto")))
-            if "bookmark_labels" in settings:
-                self.set_bookmark_labels_visible(bool(settings.get("bookmark_labels")))
+                raw = settings.get("avg")
+                self.set_average_frames(raw)  # (the nearest choice; junk: Off)
+                if saved_number(raw) not in [f for _t, f in _AVG_CHOICES]:
+                    log_damaged_setting("spectrum", "avg", raw, self.average_frames())
+            self._apply_flag(settings, defaults, "peak_hold", self.set_peak_hold)
+            self._apply_flag(settings, defaults, "min_hold", self.set_min_hold)
+            levels = []
+            for key, level in zip(
+                ("range_floor", "range_top"), self._db_range, strict=True
+            ):
+                raw = settings.get(key, level)
+                number = saved_number(raw)
+                if number is None:
+                    log_damaged_setting("spectrum", key, raw, float(level))
+                    number = float(level)
+                levels.append(number)
+            self._set_range(*levels)
+            self._apply_flag(settings, defaults, "range_auto", self.set_auto_range)
+            self._apply_flag(
+                settings,
+                defaults,
+                "bookmark_labels",
+                self.set_bookmark_labels_visible,
+            )
             if "window" in settings:
                 self.set_window_name(str(settings.get("window")))
         finally:
             self.blockSignals(blocked)
+
+    def _apply_flag(
+        self,
+        settings: Dict[str, Any],
+        defaults: Dict[str, Any],
+        key: str,
+        setter: Callable[[bool], None],
+    ) -> None:
+        """Apply the saved yes/no ``settings[key]`` with ``setter``; a
+        damaged one gives ``defaults[key]`` (else the value in use), logged."""
+        if key not in settings:
+            return
+        raw = settings[key]
+        flag = saved_flag(raw)
+        if flag is None:
+            flag = saved_flag(defaults.get(key))
+            if flag is None:
+                flag = bool(self.display_settings()[key])
+            log_damaged_setting("spectrum", key, raw, flag)
+        setter(flag)
 
     def frequency_at(self, x: float) -> Optional[float]:
         """Frequency (Hz) under canvas x-coordinate ``x``, or None outside."""

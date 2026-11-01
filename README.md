@@ -30,7 +30,7 @@ A dual-SDR framework for simultaneous RTL-SDR + HackRF One operation, with signa
 
 ## Known Limitations
 
-- **Real-time bandwidth**: all signal processing is Python and NumPy. On a typical 4-core computer a HackRF One at 20 MS/s keeps up while you listen (a display frame of broadcast FM takes about 15 ms of its 33 ms, None (I/Q) with the 2.4 MHz filter about 21 ms), but a slower or busier computer can fall behind. Then the audio pauses (the Audio button reads **Paused** and the status bar says why), the spectrum and decoders skip ahead (the Decoder's status line says its decoder misses part of the signal), and an I/Q recording still keeps every sample the device delivers (if samples are lost anyway, the recording says how much). A lower sample rate (Device → Sample Rate) helps. The spectrum and waterfall analyze at most about half a million samples of each frame: every sample up to 15 MS/s, half of them at 20 MS/s, so at that rate a burst shorter than about 0.1 ms (at the default FFT size; 1.6 ms at 32768 points) may not show in the waterfall. For wideband capture, record I/Q to disk and process offline.
+- **Real-time bandwidth**: all signal processing is Python and NumPy. On a typical 4-core computer a HackRF One at 20 MS/s keeps up while you listen (a display frame of broadcast FM takes about 15 ms of its 33 ms, None (I/Q) with the 2.4 MHz filter about 21 ms), but a slower or busier computer can fall behind. Then the audio pauses (the Audio button reads **Paused** and the status bar says why), the spectrum and decoders skip ahead (the Decoder's status line says its decoder misses part of the signal), and an I/Q recording still keeps every sample the device delivers (if samples are lost anyway, the recording says how much). A lower sample rate (Device → Sample Rate) helps. A recording playing back (File → Open Recording) skips nothing: it plays more slowly instead, at least at 1x when the computer manages that, else as fast as it can. The spectrum and waterfall analyze at most about half a million samples of each frame: every sample up to 15 MS/s, half of them at 20 MS/s, so at that rate a burst shorter than about 0.1 ms (at the default FFT size; 1.6 ms at 32768 points) may not show in the waterfall. For wideband capture, record I/Q to disk and process offline.
 - **HackRF half-duplex**: HackRF One cannot TX and RX simultaneously: the main window's receiver pauses while it transmits (the spectrum and waterfall say so and Start is off; receiving resumes when the transmission ends, if it was on before). A second device in Device → Second Receiver... keeps receiving.
 - **Transmitting needs a HackRF One**: the RTL-SDR and the demo device only receive.
 - **US rules**: the transmit checks, license classes and band plan follow the US FCC Part 97 rules. Elsewhere they are only a rough guide, and you remain responsible for what you transmit.
@@ -320,9 +320,10 @@ is the full UI reference.
   receiver retunes only near its edges (Radio → Keep Tuned Frequency
   Centered retunes every time). Below 2 MHz FREQ reads kHz; a station below
   half the sample rate (1.2 MHz at 2.4 MS/s, 10 MHz at 20 MS/s) can't be
-  centered, so it sits left of center with the span starting at (or just
-  below) 0 Hz. Radio → Tune Back / Tune Forward (`Alt+←`/`Alt+→`) and
-  Recent Frequencies return to where you were; `[`/`]` change the step.
+  centered, so it sits left of center with the span starting at 0 Hz (a
+  little below it at the lowest frequencies). Radio → Tune Back / Tune
+  Forward (`Alt+←`/`Alt+→`) and Recent Frequencies return to where you
+  were; `[`/`]` change the step.
 - **MODE** (AM, FM, USB, LSB, CW, None (I/Q); also Radio → Mode) brings a
   filter to suit it, and each mode remembers the FILTER and STEP you choose.
   A frequency typed (or a bookmark without a mode) in another band, or in
@@ -493,12 +494,16 @@ frequency, miles per watt).
   shows the receiver's state and the band plan at the tuned frequency.
 - **Status bar**: click the state badge to start, the device to connect, the
   sample rate to change it, or the message for the last 20; badges show
-  recording, the decoder, a running scan and AFC.
-- **Themes**: dark (default) and light, View → Theme (`Ctrl+T`); View →
-  Reset Layout restores the panel sizes.
+  recording and AFC, chips the decoder and a running scan.
+- **Themes**: dark (default) and light, View → Theme (`Ctrl+T`).
+- **Layout**: the right column takes 30% of the window's width (at least
+  400 px, at most 660 px) and keeps that share, or the one you drag its
+  edge to, as the window is resized; View → Reset Layout restores the
+  panel sizes.
 - **Help**: Keyboard Shortcuts (`F1`), Welcome and Quick Start, Online
   Documentation (this README), Report a Problem... and About. Tools → Error
-  History (`Ctrl+E`) keeps the last 500 warnings and errors.
+  History (`Ctrl+E`) keeps the last 500 problems (warnings and errors); a
+  notice, such as what to do first, shows only in the status bar.
 
 ## Supported Protocols
 

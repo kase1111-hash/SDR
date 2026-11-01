@@ -28,7 +28,7 @@ tested without a window and costs little at 30 frames a second:
 from __future__ import annotations
 
 import math
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -466,21 +466,34 @@ class AudioJoin:
       crossfades into the new audio.
     * :meth:`release` when the audio stops with no block to fade out: a
       short decay from the last sample played.
+
+    A block is mono (1-D) or stereo (``(n, 2)``: left, right). Each side
+    fades on its own; :attr:`last` is the last sample played (a float, or
+    the last pair). A mono block that crossfades from a stereo pair comes
+    out in stereo (each side from its own last sample: one value for both
+    would step), and a stereo block after mono starts from the mono sample
+    on both sides.
     """
 
     def __init__(self, rate: float):
         self.rate = float(rate)
         self._n = max(1, int(round(FADE_S * self.rate)))
         self._ramp = raised_cosine(self._n)
-        self.last = 0.0
+        self.last: Any = 0.0
         self.playing = False
 
     def _ramp_for(self, n: int) -> np.ndarray:
         return self._ramp[:n] if n <= self._n else raised_cosine(n)
 
+    @staticmethod
+    def _shaped(ramp: np.ndarray, audio: np.ndarray) -> np.ndarray:
+        """``ramp`` to multiply ``audio`` with (a column for stereo)."""
+        return ramp[:, None] if audio.ndim == 2 else ramp
+
     def _remember(self, audio: np.ndarray) -> np.ndarray:
-        if audio.size:
-            self.last = float(audio[-1])
+        if len(audio):
+            last = audio[-1]
+            self.last = float(last) if audio.ndim == 1 else np.array(last)
         self.playing = True
         return audio
 
@@ -492,8 +505,8 @@ class AudioJoin:
 
     def fade_in(self, audio: np.ndarray) -> np.ndarray:
         out = np.array(audio, dtype=np.float32, copy=True)
-        m = min(self._n, out.size)
-        out[:m] *= self._ramp[:m]
+        m = min(self._n, len(out))
+        out[:m] *= self._shaped(self._ramp[:m], out)
         return self._remember(out)
 
     def join(self, audio: np.ndarray) -> np.ndarray:
@@ -501,18 +514,22 @@ class AudioJoin:
         if not self.playing:
             return self.fade_in(audio)
         out = np.array(audio, dtype=np.float32, copy=True)
-        m = min(self._n, out.size)
-        ramp = self._ramp[:m]
-        out[:m] = np.float32(self.last) * (1.0 - ramp) + out[:m] * ramp
+        last = np.asarray(self.last, dtype=np.float32)
+        if out.ndim == 1 and last.ndim == 1:
+            # (Mono after stereo: each side crossfades from its own sample.)
+            out = np.repeat(out[:, None], len(last), axis=1)
+        m = min(self._n, len(out))
+        ramp = self._shaped(self._ramp[:m], out)
+        out[:m] = last * (1.0 - ramp) + out[:m] * ramp
         return self._remember(out)
 
     def fade_out(self, audio: np.ndarray) -> np.ndarray:
         """The start of ``audio`` ramped down to silence."""
         out = np.array(audio[: self._n], dtype=np.float32, copy=True)
-        if self.playing and out.size:
+        if self.playing and len(out):
             # Continue from what was playing, then down to zero.
-            ramp = 1.0 - self._ramp_for(out.size)
-            out *= ramp
+            ramp = 1.0 - self._ramp_for(len(out))
+            out *= self._shaped(ramp, out)
         elif not self.playing:
             out = np.zeros(0, dtype=np.float32)
         self.playing = False
@@ -525,7 +542,9 @@ class AudioJoin:
         receiver stopped); empty when nothing was playing."""
         if not self.playing:
             return np.zeros(0, dtype=np.float32)
-        out = (np.float32(self.last) * (1.0 - self._ramp)).astype(np.float32)
+        last = np.asarray(self.last, dtype=np.float32)
+        decay = 1.0 - self._ramp
+        out = (last * decay[:, None] if last.ndim else last * decay).astype(np.float32)
         self.stop()
         return out
 

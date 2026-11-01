@@ -291,6 +291,13 @@ _SSTV_MODES = ("FM", "USB", "LSB")
 _AUDIO_RATE = 48000.0  # target rate of the demodulated audio
 _NO_VALUE = "—"  # em dash for "not available"
 _DEFAULT_VOLUME = 70  # percent
+# Radio > Audio > Stereo (K-S1): broadcast FM in stereo, on by default.
+_STEREO_KEY = "audio/stereo"
+# The STEREO badge and lamp light while at least this much of the stereo
+# difference plays (about 10 dB of separation), and go out below
+# _STEREO_OFF_BLEND (no flicker while the blend hovers).
+_STEREO_ON_BLEND = 0.5
+_STEREO_OFF_BLEND = 0.35
 _VOLUME_STEP = 10  # percent: Radio > Audio > Volume Up / Down
 # Audio is only played while the device delivers at least this fraction of
 # its sample rate: less than that (a device or computer that can't keep up)
@@ -2880,8 +2887,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         # Audio output: on by default, so a signal is heard as soon as the
         # receiver runs. Why it can't play (no output device), if it can't.
-        self._audio = AudioSink()
+        # (Two channels where the output can: broadcast FM plays in stereo.)
+        self._audio = AudioSink(channels=2)
         self._audio_enabled = self._settings.get_bool("audio_enabled", True)
+        # Radio > Audio > Stereo, and what the STEREO badge and the radio
+        # tuner's lamp show: (text, tone, tip) and whether stereo plays.
+        self._stereo_enabled = self._settings.get_bool(_STEREO_KEY, True)
+        self._stereo_shown: Tuple[str, Optional[str], str] = ("", None, "")
+        self._stereo_lit = False
         self._audio_problem: Optional[str] = None
         self._audio.set_volume(self._saved_volume() / 100.0)
         # The output chosen in Tools > Preferences (the default if none).
@@ -3621,6 +3634,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             tip="Choose the speakers, headset or other output the audio plays "
             "through (Tools > Preferences)",
         )
+        self._stereo_action = self._add_action(
+            audio_menu,
+            "&Stereo",
+            self._set_stereo_enabled,
+            tip="Play broadcast FM in stereo where the station sends it (a "
+            "weak or noisy signal blends toward mono by itself, to keep the "
+            "hiss down). Off: always mono.",
+            checkable=True,
+            checked=self._stereo_enabled,
+        )
         self._add_listening_menus(radio_menu, audio_menu)
         radio_menu.addSeparator()
         # The one preset table (gui/presets.py): the favourites, then every
@@ -4127,6 +4150,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._receiver_bar.addSeparator()
         self._receiver_bar.addWidget(self._audio_button)
         self._receiver_bar.addWidget(self._volume_slider)
+        # Broadcast FM: STEREO or MONO, and why (see _show_stereo).
+        self._stereo_badge = QLabel("STEREO")
+        set_role(self._stereo_badge, "badge", "success")
+        self._stereo_badge.setAccessibleName("Stereo indicator")
+        self._stereo_badge_action = self._receiver_bar.addWidget(self._stereo_badge)
+        self._stereo_badge_action.setVisible(False)
 
     def _setup_statusbar(self):
         """Setup status bar."""
@@ -8152,8 +8181,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         path = file_dialogs.unique_path(
             folder, audio_file_name(freq, self._mode_text(mode))
         )
+        # A stereo WAV where stereo can play (broadcast FM with Radio >
+        # Audio > Stereo on); its mono stretches play on both channels.
+        stereo = (
+            mode == "FM"
+            and self._stereo_enabled
+            and self._control_panel.get_fm_deviation() >= _BROADCAST_DEVIATION_HZ
+        )
         try:
-            take = AudioTake(path, freq, mode, int(_AUDIO_RATE))
+            take = AudioTake(path, freq, mode, int(_AUDIO_RATE), 2 if stereo else 1)
         except (OSError, RuntimeError) as e:
             logger.error(f"Could not start an audio recording in {path}: {e}")
             self._show_status_error(
@@ -8175,8 +8211,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             note = " It starts with the receiver (Space)."
         elif not self._audio_enabled:
             note = " (The speaker is off; the recording still gets the audio.)"
+        kind = "stereo audio" if stereo else "audio"
         self._show_status_message(
-            f"Recording audio to {os.path.basename(path)}.{note}", "info", 5000
+            f"Recording {kind} to {os.path.basename(path)}.{note}", "info", 5000
         )
         logger.info(f"Audio recording started: {path}")
         return True
@@ -9108,6 +9145,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """
         chain = self._receiver_chain()
         chain.options = self._audio_options
+        chain.stereo = self._stereo_enabled
         mode = chain.mode
         audible = mode in _AUDIBLE_MODES
         seconds = len(channel) / max(chain.channel_rate, 1.0)
@@ -9168,8 +9206,24 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # The block after the speaker stopped is still demodulated: it
         # fades out instead of breaking off.
         fading_out = self._audio_join.playing and not speaker
+        # A broadcast FM station above squelch: the STEREO badge and the
+        # radio tuner's lamp say whether it is received in stereo, speaker
+        # on or off (with Stereo on, the stereo decoder hears it).
+        received = (
+            mode == "FM"
+            and gate.is_open
+            and not self._scan_muted
+            and self._control_panel.get_fm_deviation() >= _BROADCAST_DEVIATION_HZ
+        )
+        stereo_watch = received and self._stereo_enabled
         demodulate = (
-            speaker or sstv or fading_out or recording or scan_tone or tone_check
+            speaker
+            or sstv
+            or fading_out
+            or recording
+            or scan_tone
+            or tone_check
+            or stereo_watch
         )
         if not demodulate or not audible:
             if self._demod_running:
@@ -9185,6 +9239,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._show_detected_tone()
             if recording:
                 self._record_audio_block(None, False, seconds, False)
+            self._show_stereo(chain, received)  # (Stereo off: MONO)
             return
         self._guard_noise_reduction(mode, level_db, noise_db)
         deviation = self._control_panel.get_fm_deviation()
@@ -9198,8 +9253,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._audio.write(self._audio_join.release())
             if recording:
                 self._record_audio_block(None, False, seconds, False)
+            self._show_stereo(chain, False)
             return
         self._demod_running = True
+        # Broadcast FM in stereo: left and right while there is stereo to
+        # play (the mono audio, (L+R)/2, is what everything else hears).
+        heard = audio if chain.stereo_audio is None else chain.stereo_audio
+        self._show_stereo(chain, received)
         tone_ok = True
         if mode == "FM":
             # CTCSS: what tone the station sends, and the tone squelch
@@ -9245,20 +9305,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
             take.stream_key = (chain, deviation, nr)
             # (Silence, as heard, while the Scanner moves between channels.)
-            heard = gate.is_open and tone_ok and not self._scan_muted
-            self._record_audio_block(audio, heard, seconds, joined)
+            open_ = gate.is_open and tone_ok and not self._scan_muted
+            self._record_audio_block(heard, open_, seconds, joined)
         if speaker:
             if join.playing and new_stream:
-                out = join.join(audio)  # crossfade from the last sample
+                out = join.join(heard)  # crossfade from the last sample
             else:
-                out = join.play(audio)  # fades in after silence
+                out = join.play(heard)  # fades in after silence
             self._join_chain, self._join_deviation = chain, deviation
             self._join_nr = nr
             self._audio.write(out)
         elif join.playing:
             # Stopping: fade this block out, or (if it doesn't continue the
             # last one) decay from the last sample played.
-            self._audio.write(join.release() if new_stream else join.fade_out(audio))
+            self._audio.write(join.release() if new_stream else join.fade_out(heard))
         if sstv:
             try:
                 self._sstv_panel.process_audio(
@@ -9266,6 +9326,97 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("SSTV decoder failed: %s", exc)
+
+    def _set_stereo_enabled(self, on: bool) -> None:
+        """Radio > Audio > Stereo (K-S1): broadcast FM in stereo where the
+        station sends it, or always mono. Saved at once; the next block
+        follows it (the stereo difference fades in or out, no click)."""
+        on = bool(on)
+        action = getattr(self, "_stereo_action", None)
+        if action is not None and action.isChecked() != on:
+            action.blockSignals(True)
+            action.setChecked(on)
+            action.blockSignals(False)
+        if on == self._stereo_enabled:
+            return
+        self._stereo_enabled = on
+        self._settings.set(_STEREO_KEY, on)
+        self._show_status_message(
+            (
+                "Stereo on: broadcast FM plays in stereo where the station sends it."
+                if on
+                else "Stereo off: broadcast FM plays in mono."
+            ),
+            "info",
+            4000,
+            log=False,  # (what was asked: no problem)
+        )
+
+    def _show_stereo(self, chain: Optional["_ReceiverChain"], received: bool) -> None:
+        """The receiver bar's STEREO / MONO badge and the radio tuner's
+        STEREO lamp (K-S1): whether the broadcast FM station received (a
+        station above squelch: ``received``) plays in stereo, and why not;
+        speaker on or off, as a radio's lamp does. Hidden otherwise.
+        STEREO lights at half the stereo difference or more (about 10 dB
+        of separation) and goes out below a third of it."""
+        text, tone, tip = "", None, ""
+        if received and chain is not None:
+            decoder = chain.stereo_decoder
+            text = "MONO"
+            if not self._stereo_enabled:
+                tip = "Mono: Radio > Audio > Stereo is off."
+            elif not StereoPath.usable(chain):
+                tip = (
+                    "Mono: the Filter is too narrow for the stereo signal. "
+                    "Broadcast FM's 200 kHz filter holds it."
+                )
+            elif decoder is None:
+                tip = "Mono: listening for the station's stereo pilot."
+            else:
+                blend = decoder.blend
+                lit = blend >= _STEREO_ON_BLEND or (
+                    self._stereo_lit and blend >= _STEREO_OFF_BLEND
+                )
+                if lit:
+                    text, tone = "STEREO", "success"
+                    tip = (
+                        "Stereo: the station's 19 kHz pilot is locked and left "
+                        "and right are fully apart."
+                        if blend >= 0.95
+                        else "Stereo, blended partly toward mono to keep the hiss "
+                        "down: the signal is a little weak."
+                    ) + " Radio > Audio > Stereo switches stereo off."
+                elif not decoder.pilot:
+                    tip = (
+                        "Mono: this station sends no stereo pilot (it "
+                        "broadcasts in mono), or it is too weak to hear one."
+                    )
+                elif decoder.target >= _STEREO_ON_BLEND:
+                    tip = "Mono for a moment: stereo is coming in."
+                else:
+                    tip = (
+                        "Mono: the signal is too weak for clean stereo, so it "
+                        "plays in mono to keep the hiss down. Stereo comes back "
+                        "as the signal gets stronger."
+                    )
+        self._stereo_lit = text == "STEREO"
+        shown = (text, tone, tip)
+        if shown == self._stereo_shown:
+            return
+        self._stereo_shown = shown
+        badge = getattr(self, "_stereo_badge", None)
+        if badge is None:
+            return
+        if text:
+            badge.setText(text)
+            badge.setToolTip(tip)
+            set_tone(badge, tone)
+        self._stereo_badge_action.setVisible(bool(text))
+        tuner = getattr(self, "_radio_tuner", None)
+        if tuner is not None:
+            # (Not while it shows the receiver off its bands: see
+            # _tuner_block.)
+            tuner.set_stereo(self._stereo_lit and not tuner.is_off_band())
 
     def _guard_noise_reduction(
         self, mode: str, level_db: float, noise_db: Optional[float]
@@ -9456,6 +9607,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._tone_blocked = False
         self._iq_conditioner.reset()
         self._clip_s = 0.0
+        self._show_stereo(None, False)
 
     def _demodulate(
         self, samples: np.ndarray, mode: str
@@ -11329,7 +11481,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             floor = noise_bin + _SEEK_ABOVE_NOISE_DB
             centered = _channel_occupied_hz(power, chain, floor) >= _SEEK_FM_STATION_HZ
         self._tuner_centered = centered
-        tuner.set_stereo(stereo)
+        # STEREO: stereo is decoded (see _show_stereo), not only a pilot.
+        tuner.set_stereo(broadcast and self._stereo_lit)
 
     def _tuner_probe(self) -> Optional[str]:
         """For the tuner's seek: "signal" (the tuned channel opens the

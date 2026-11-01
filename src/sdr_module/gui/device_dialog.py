@@ -1232,9 +1232,15 @@ _EMPHASIS_TAU_S = 75e-6
 # because every loop is periodic.
 _LOOP_RATE_HZ = 48e3
 _TONE_LOOP_S = 4.0  # loops of tones (their pitch sweeps once per loop)
-_LOOP_CACHE_SIZE = 24
+_LOOP_CACHE_SIZE = 64  # (at most: the loops of _LOOP_RATES sample rates)
 _LOOP_CACHE: Dict[tuple, Any] = {}
 _LOOP_LOCK = threading.Lock()
+# Loops (and the SSTV transmission) are kept for the sample rates of this
+# many demo devices running at once, the rates used last: the main
+# window's and a second receiver's, or a wideband scan's two. (One rate
+# needs about 22 loops, 30 MB; two devices at two rates rebuilt them, the
+# SSTV transmission at every read, when one rate's worth was kept.)
+_LOOP_RATES = 2
 _RAMPS: Dict[int, np.ndarray] = {}
 
 # Complex white noise (unit variance per component) that every demo device
@@ -1581,13 +1587,31 @@ def _loops(kind: str, seed: int, rate: float):
     key = (kind, variant, float(rate))
     # The scanner reads from its own thread.
     with _LOOP_LOCK:
-        loops = _LOOP_CACHE.get(key)
+        loops = _LOOP_CACHE.pop(key, None)
         if loops is None:
             loops = _build_loops(kind, variant, rate)
-            while len(_LOOP_CACHE) >= _LOOP_CACHE_SIZE:
-                _LOOP_CACHE.pop(next(iter(_LOOP_CACHE)))
             _LOOP_CACHE[key] = loops
+            _keep_recent_rates(_LOOP_CACHE, lambda cached: cached[2])
+            while len(_LOOP_CACHE) > _LOOP_CACHE_SIZE:
+                _LOOP_CACHE.pop(next(iter(_LOOP_CACHE)))
+        else:
+            _LOOP_CACHE[key] = loops  # (the ones used last go last)
     return loops
+
+
+def _keep_recent_rates(cache: Dict[Any, Any], rate_of: Callable[[Any], float]) -> None:
+    """Drop what ``cache`` holds for sample rates other than the
+    ``_LOOP_RATES`` used last (its entries are in the order they were last
+    used; lock held)."""
+    recent: List[float] = []
+    for key in reversed(list(cache)):
+        rate = rate_of(key)
+        if rate not in recent:
+            recent.append(rate)
+            if len(recent) == _LOOP_RATES:
+                break
+    for key in [k for k in cache if rate_of(k) not in recent]:
+        del cache[key]
 
 
 def _sstv_transmission(rate: float) -> Tuple[Any, int]:
@@ -1601,7 +1625,9 @@ def _sstv_transmission(rate: float) -> Tuple[Any, int]:
     """
     key = float(rate)
     with _LOOP_LOCK:
-        cached = _SSTV_CACHE.get(key)
+        cached = _SSTV_CACHE.pop(key, None)
+        if cached is not None:
+            _SSTV_CACHE[key] = cached  # (the rate used last goes last)
     if cached is not None:
         return cached
     from ..ham.sstv import find_mode
@@ -1618,8 +1644,8 @@ def _sstv_transmission(rate: float) -> Tuple[Any, int]:
     length = (len(audio) - tail // 2) * factor
     cached = (_Loop(phase, factor), length)
     with _LOOP_LOCK:
-        _SSTV_CACHE.clear()  # one device rate at a time
         _SSTV_CACHE[key] = cached
+        _keep_recent_rates(_SSTV_CACHE, float)
     return cached
 
 

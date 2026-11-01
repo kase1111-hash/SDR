@@ -1,6 +1,10 @@
 """A fake ``python_hackrf`` backend whose TX callback runs in its own thread,
 the way libhackrf's USB thread pulls samples, plus helpers that measure what
-went "on air" (shared by the transmit tests; not collected by pytest).
+went "on air" (shared by the transmit tests; not collected by pytest). It
+receives too: its RX callback gets a transfer at a time from a thread of
+its own, paced at the sample rate, holding ``rx_stations`` around the
+frequency tuned (for scans with a real ``HackRFDevice``); without
+``rx_stations`` it receives nothing, as before.
 
 The fake device only answers to the real python_hackrf device method names
 (see ``tests/test_hackrf_driver.py``), so a driver call the real library
@@ -68,11 +72,25 @@ class ThreadedFakeHackRF:
     ``pace``: take each transfer in real time at the sample rate (like the
     hardware) instead of as fast as possible. ``stall``: never pull samples
     (a hung USB link). ``tx_log`` records (what, time, rate, freq, filter).
+    ``rx_stations``: carriers ``{freq: dBFS}`` heard while receiving (each
+    RX transfer is made on the frequency tuned when it is handed over; {}:
+    noise only). None (the default): receiving delivers nothing.
     """
 
-    def __init__(self, pace: bool = False, stall: bool = False):
+    def __init__(
+        self,
+        pace: bool = False,
+        stall: bool = False,
+        rx_stations: Optional[Dict[float, float]] = None,
+    ):
         self.pace = pace
         self.stall = stall
+        self.receives = rx_stations is not None
+        self.rx_stations = dict(rx_stations or {})
+        #: RX transfers handed to the callback.
+        self.rx_transfers = 0
+        self._rx_thread: Optional[threading.Thread] = None
+        self._rx_stop = threading.Event()
         self.freq: Optional[int] = None
         self.sample_rate: Optional[float] = None
         self.bandwidth: Optional[int] = None
@@ -128,10 +146,47 @@ class ThreadedFakeHackRF:
         self._tx_cb = fn
 
     def pyhackrf_start_rx(self):
-        pass
+        if not self.receives:
+            return
+        self._rx_stop.clear()
+        self._rx_thread = threading.Thread(target=self._rx_pump, daemon=True)
+        self._rx_thread.start()
+
+    def _rx_pump(self):
+        """Hand the RX callback a transfer at a time in real time, as
+        libhackrf's USB thread does."""
+        rng = np.random.default_rng(7)
+        count = BUFFER_LENGTH // 2
+        due = time.monotonic()
+        while not self._rx_stop.is_set():
+            rate = float(self.sample_rate or 2e6)
+            due = max(due + count / rate, time.monotonic())
+            if self._rx_stop.wait(max(0.0, due - time.monotonic())):
+                break
+            buf = self._rx_transfer(rng, count, rate)
+            rc = self._rx_cb(self, buf, BUFFER_LENGTH, BUFFER_LENGTH)
+            self.rx_transfers += 1
+            if rc != 0:
+                break
+
+    def _rx_transfer(self, rng, count: int, rate: float) -> np.ndarray:
+        """One transfer of int8 I/Q around the frequency tuned now."""
+        t = np.arange(count) / rate
+        iq = (rng.standard_normal(count) + 1j * rng.standard_normal(count)) * 0.015
+        centre = float(self.freq or 0)
+        for freq, level in self.rx_stations.items():
+            offset = freq - centre
+            if abs(offset) < 0.5 * rate:
+                iq = iq + 10 ** (level / 20) * np.exp(2j * np.pi * offset * t)
+        raw = np.empty(2 * count, dtype=np.float32)
+        raw[0::2], raw[1::2] = iq.real, iq.imag
+        return np.clip(np.round(raw * 127.0), -127, 127).astype(np.int8)
 
     def pyhackrf_stop_rx(self):
-        pass
+        self._rx_stop.set()
+        thread = self._rx_thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(5)
 
     def pyhackrf_start_tx(self):
         self.chunks = []

@@ -78,6 +78,23 @@ def _threshold_arg(text: str) -> Optional[float]:
         ) from exc
 
 
+def _rates_arg(text: str) -> Tuple[float, ...]:
+    """``--rate``: a sample rate in Hz, or two separated by a comma (one
+    for each of --dual's receivers)."""
+    parts = [part.strip() for part in str(text).split(",")]
+    try:
+        rates = tuple(float(part) for part in parts)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"expected a sample rate in Hz, or two separated by a comma, not {text!r}"
+        ) from exc
+    if not 1 <= len(rates) <= 2 or not all(math.isfinite(r) and r > 0 for r in rates):
+        raise argparse.ArgumentTypeError(
+            f"expected a sample rate in Hz, or two separated by a comma, not {text!r}"
+        )
+    return rates
+
+
 # Live sweep timing: after each retune, queued samples are thrown away and
 # the tuner gets this long to settle (an RTL-SDR's transfer in flight, 0.11 s
 # at 2.4 MS/s, still holds the old frequency); then at least this many
@@ -91,7 +108,21 @@ def cmd_scan(args: argparse.Namespace) -> int:
     """Scan a frequency range (live) or analyze a recorded I/Q file (offline)."""
     if args.input:
         return _scan_file(args)
+    if getattr(args, "dual", False):
+        return _scan_dual(args)
+    if len(_rates(args)) > 1:
+        print(
+            "Error: two rates are for --dual's two receivers; give one --rate "
+            "to scan with one."
+        )
+        return 1
     return _scan_live(args)
+
+
+def _rates(args: argparse.Namespace) -> Tuple[float, ...]:
+    """``--rate`` as a tuple (one rate, or one per --dual receiver)."""
+    rate = args.rate
+    return tuple(rate) if isinstance(rate, (tuple, list)) else (float(rate),)
 
 
 def _applied_rate(device, requested: float) -> float:
@@ -123,6 +154,17 @@ def _drain(device) -> None:
 def _open_first_receiver(args: argparse.Namespace):
     """``(manager, device, name)`` for the first SDR found (of
     ``--device``'s type), or ``(manager, None, error message)``."""
+    manager, opened, error = _open_receivers(args, 1)
+    if error:
+        return manager, None, error
+    device, name = opened[0]
+    return manager, device, name
+
+
+def _open_receivers(args: argparse.Namespace, count: int):
+    """``(manager, [(device, name)], "")`` for the first ``count`` SDRs
+    found (of ``--device``'s type), or ``(manager, [], error message)``
+    (none of them left open)."""
     from .core.device_manager import DeviceManager
 
     manager = DeviceManager()
@@ -131,29 +173,58 @@ def _open_first_receiver(args: argparse.Namespace):
     if args.device:
         detected = [d for d in detected if types.get(d.device_class) == args.device]
     detected = [d for d in detected if d.is_available and d.device_class in types]
+    which = {"rtlsdr": "RTL-SDR", "hackrf": "HackRF One"}.get(
+        args.device or "", "SDR device"
+    )
     if not detected:
-        which = {"rtlsdr": "RTL-SDR", "hackrf": "HackRF One"}.get(
-            args.device or "", "SDR device"
-        )
+        if count < 2:
+            plug = ". Plug one in"
+        elif args.device:
+            plug = ": --dual needs two of that kind. Plug them in"
+        else:
+            plug = (
+                ": --dual needs two (an RTL-SDR and a HackRF One, or two of a "
+                "kind). Plug them in"
+            )
         return (
             manager,
-            None,
+            [],
             (
-                f"No {which} is connected, so there is nothing to scan with. Plug "
-                "one in ('sdr-scan devices' lists what is found), or analyze a "
+                f"No {which} is connected, so there is nothing to scan with{plug} "
+                "('sdr-scan devices' lists what is found), or analyze a "
                 "recording instead with --input FILE."
             ),
         )
-    found = detected[0]
-    name = str(getattr(found.info, "name", "") or types[found.device_class])
-    device = manager.open_device(types[found.device_class], found.info.index)
-    if device is None:
+
+    def name_of(found) -> str:
+        return str(getattr(found.info, "name", "") or types[found.device_class])
+
+    if len(detected) < count:
+        kind = f" of that kind ({which})" if args.device else ""
         return (
             manager,
-            None,
-            (f"Could not open {name}. Check that no other program is using it."),
+            [],
+            (
+                f"--dual needs two connected SDRs{kind}, but only "
+                f"{name_of(detected[0])} is connected. Plug in another "
+                "('sdr-scan devices' lists what is found), or scan with this "
+                "one alone (without --dual)."
+            ),
         )
-    return manager, device, name
+    opened: List[Tuple[Any, str]] = []
+    for found in detected[:count]:
+        name = name_of(found)
+        device = manager.open_device(types[found.device_class], found.info.index)
+        if device is None:
+            if opened:
+                manager.close_all()
+            return (
+                manager,
+                [],
+                f"Could not open {name}. Check that no other program is using it.",
+            )
+        opened.append((device, name))
+    return manager, opened, ""
 
 
 def _scan_live(args: argparse.Namespace) -> int:
@@ -191,7 +262,7 @@ def _scan_live(args: argparse.Namespace) -> int:
 
     hits: List[Any] = []
     try:
-        requested = float(args.rate)
+        requested = _rates(args)[0]
         if device.set_sample_rate(requested) is False:
             print(f"Error: {name} can't run at {requested / 1e6:g} MS/s (--rate).")
             return 1
@@ -335,6 +406,232 @@ def _scan_live(args: argparse.Namespace) -> int:
 
     if not hits:
         print("No signals above the threshold.")
+    return 0
+
+
+def _mhz_span(low_hz: float, high_hz: float) -> str:
+    low, high = f"{low_hz / 1e6:.3f}", f"{high_hz / 1e6:.3f}"
+    return f"{low} MHz" if low == high else f"{low} - {high} MHz"  # (one channel)
+
+
+def _hit_line(hit: Any, name_width: int) -> str:
+    """A signal found by ``sdr-scan scan --dual``: frequency, level, SNR,
+    the receiver that measured it and the band."""
+    from .core.band_plan import band_for
+
+    band = band_for(hit.frequency_hz)
+    return (
+        f"  {hit.frequency_hz / 1e6:10.4f} MHz  {hit.peak_db:6.1f} dBFS  "
+        f"{hit.snr_db:4.0f} dB  {hit.receiver_name:<{name_width}}  "
+        f"{band.name if band else ''}"
+    ).rstrip()
+
+
+def _say_dual_pass(report: Any, names: List[str]) -> None:
+    """``sdr-scan scan --dual``: what a sweep found, what each receiver
+    swept, and what it couldn't. (A sweep cut short says nothing, nor one
+    in which neither receiver measured anything: the scan ends with the
+    error.)"""
+    if not report.complete or not any(report.steps):
+        return
+
+    def steps(count: int) -> str:
+        return f"{count} step{'' if count == 1 else 's'}"
+
+    parts = []
+    for index, name in enumerate(names):
+        spans = ", ".join(_mhz_span(low, high) for low, high in report.covered[index])
+        if not spans:
+            parts.append(f"{name} swept nothing")
+            continue
+        verb = "swept " if not parts else ""
+        parts.append(f"{name} {verb}{spans} ({steps(report.steps[index])})")
+    print(
+        f"Sweep {report.number} done in {report.seconds:.1f} s: "
+        f"{report.found} signal(s), {report.new} new. {', '.join(parts)}.",
+        flush=True,
+    )
+    for index, name in enumerate(names):
+        # (The other receiver, when it measured anything in this sweep.)
+        other = " and ".join(
+            n for i, n in enumerate(names) if i != index and report.steps[i]
+        )
+        if report.stopped[index]:
+            tail = f"; {other} swept what it could of its part" if other else ""
+            print(f"Note: {name} {report.stopped[index]}{tail}.", flush=True)
+        elif report.failed and report.failed[index]:
+            tail = f"; {other} measured what it tunes of them" if other else ""
+            print(
+                f"Note: {name} couldn't measure {steps(report.failed[index])}"
+                f"{tail}.",
+                flush=True,
+            )
+    if report.missed:
+        spans = ", ".join(_mhz_span(low, high) for low, high in report.missed)
+        print(f"Not swept: {spans}.", flush=True)
+
+
+def _scan_dual(args: argparse.Namespace) -> int:
+    """Sweep with two connected receivers at once (``--dual``).
+
+    Each sweeps part of the range (see :mod:`sdr_module.core.wideband_scan`):
+    what only it tunes, then the rest from its end until they meet, the
+    faster taking more. The signals are listed as found, and once more in
+    frequency order at the end (or at Ctrl+C), each once.
+    """
+    from .core.wideband_scan import CANCELLED, COMPLETE, WidebandScan, device_range
+    from .dsp.sweep import AUTO_MARGIN_DB, format_duration
+
+    start_hz, end_hz, step_hz = args.start * 1e6, args.end * 1e6, args.step * 1e3
+    if step_hz <= 0 or end_hz <= start_hz:
+        print("Error: --end must be above --start, and --step above 0.")
+        return 1
+    rates = _rates(args)
+    manager, opened, error = _open_receivers(args, 2)
+    if error:
+        print(f"Error: {error}")
+        return 1
+
+    names = [name for _device, name in opened]
+    width = max(len("Receiver"), *(len(name) for name in names))
+    scan: Optional[Any] = None
+    try:
+        devices = []
+        for index, (device, name) in enumerate(opened):
+            requested = rates[min(index, len(rates) - 1)]
+            if device.set_sample_rate(requested) is False:
+                print(f"Error: {name} can't run at {requested / 1e6:g} MS/s (--rate).")
+                return 1
+            rate = _applied_rate(device, requested)
+            if abs(rate - requested) >= 1.0:
+                print(
+                    f"Note: {name} can't run at {requested / 1e6:g} MS/s "
+                    f"(--rate); scanning at {rate / 1e6:g} MS/s, the nearest rate "
+                    "it can."
+                )
+            if args.gain is None:
+                device.set_gain_mode(True)
+            else:
+                device.set_gain_mode(False)
+                device.set_gain(float(args.gain))
+            devices.append(device)
+        spans = [device_range(device) for device in devices]
+        low = min(span[0] for span in spans)
+        high = max(span[1] for span in spans)
+        tunes = ", ".join(
+            (
+                f"{name} tunes {_mhz_span(*span)}"
+                if math.isfinite(span[1])
+                else f"{name} tunes anything"
+            )
+            for name, span in zip(names, spans, strict=True)
+        )
+        if end_hz < low or start_hz > high:
+            print(
+                f"Error: neither receiver tunes {_mhz_span(start_hz, end_hz)} "
+                f"({tunes}); choose a range inside what they tune."
+            )
+            return 1
+        if start_hz < low or end_hz > high:
+            start_hz, end_hz = max(start_hz, low), min(end_hz, high)
+            print(
+                f"Note: limited to what {' and '.join(names)} tune, "
+                f"{_mhz_span(start_hz, end_hz)}."
+            )
+        threshold = None if args.threshold is _DEFAULT_THRESHOLD else args.threshold
+        try:
+            scan = WidebandScan(
+                devices,
+                start_hz,
+                end_hz,
+                step_hz,
+                threshold_db=threshold,
+                continuous=not args.single,
+                settle_s=_LIVE_SETTLE_S,
+                measure_samples=_LIVE_MEASURE_SAMPLES,
+                read_timeout_s=_LIVE_READ_TIMEOUT_S,
+                names=names,
+            )
+        except ValueError as exc:
+            print(f"Error: {exc}")
+            return 1
+        names = list(scan.names)
+        sweep = scan.sweep
+        print(
+            f"Scanning {_mhz_span(start_hz, end_hz)} with "
+            + " and ".join(
+                f"{name} ({rate / 1e6:g} MS/s)"
+                for name, rate in zip(names, scan.rates, strict=True)
+            )
+            + f" at once: {sweep.covered_count:,} channels of {args.step:g} kHz, "
+            f"{format_duration(scan.estimate_seconds())} per sweep."
+        )
+        for index, (name, rate) in enumerate(zip(names, scan.rates, strict=True)):
+            plan = []
+            only = sweep.only_tuned_by(index)
+            if only:
+                spans_text = ", ".join(_mhz_span(a, b) for a, b in only)
+                plan.append(f"{spans_text} (only it tunes those)")
+            shared = sweep.shared()
+            if shared:
+                up = sweep.sweeps_up(index)
+                edge = shared[0][0] if up else shared[-1][1]
+                plan.append(f"from {edge / 1e6:.3f} MHz {'up' if up else 'down'}")
+            if not plan:  # (it tunes none of the range: the other sweeps alone)
+                own_low, own_high = spans[index]
+                tunes_text = (
+                    _mhz_span(own_low, own_high)
+                    if math.isfinite(own_high)
+                    else f"{own_low / 1e6:.3f} MHz and up"
+                )
+                plan.append(f"none of this range (it tunes {tunes_text})")
+            print(f"  {name} ({rate / 1e6:g} MS/s): " + ", then ".join(plan))
+        if sweep.shared():
+            print("They meet where their speeds put them.")
+        for low_hz, high_hz in sweep.uncovered:
+            print(f"Note: neither receiver tunes {_mhz_span(low_hz, high_hz)}.")
+        print(
+            "Threshold: "
+            + (
+                f"auto (the noise floor + {AUTO_MARGIN_DB:.0f} dB)"
+                if threshold is None
+                else f"{threshold:.1f} dBFS"
+            )
+            + (". Press Ctrl+C to stop." if not args.single else ".")
+        )
+        print()
+        print(
+            f"  {'Frequency':>14}  {'Level':>11}  {'SNR':>7}  "
+            f"{'Receiver':<{width}}  Band"
+        )
+        scan.on_found = lambda hit: print(_hit_line(hit, width), flush=True)
+        scan.on_pass = lambda report: _say_dual_pass(report, names)
+        scan.run()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        manager.close_all()
+
+    if scan is None:
+        return 0
+    hits = scan.hits
+    # (Not an error: it swept, or was stopped as asked.)
+    failed = scan.reason not in (COMPLETE, CANCELLED)
+    if hits:
+        print()
+        print(f"{len(hits)} signal(s) in frequency order:")
+        print(
+            f"  {'Frequency':>14}  {'Level':>11}  {'SNR':>7}  "
+            f"{'Receiver':<{width}}  Band"
+        )
+        for hit in hits:
+            print(_hit_line(hit, width))
+    elif not failed:
+        print()
+        print("No signals above the threshold.")
+    if failed:
+        print(f"Error: {scan.reason}")
+        return 1
     return 0
 
 
@@ -862,7 +1159,8 @@ def create_parser() -> argparse.ArgumentParser:
         description=(
             "Sweep a connected RTL-SDR or HackRF One across a range and list "
             "the signals found (continuously until Ctrl+C, or once with "
-            "--single), or find the signals in a recorded I/Q file with --input."
+            "--single), sweep with two at once (--dual), or find the signals "
+            "in a recorded I/Q file with --input."
         ),
     )
     scan_parser.add_argument(
@@ -897,10 +1195,20 @@ def create_parser() -> argparse.ArgumentParser:
         help="Live scan: which kind of SDR to use (default: the first found)",
     )
     scan_parser.add_argument(
+        "--dual",
+        action="store_true",
+        help="Live scan with two connected SDRs at once (an RTL-SDR and a "
+        "HackRF One, or two of a kind; with --device, two of that kind): each "
+        "sweeps part of the range, the faster one more, and the signals they "
+        "find are listed together in frequency order",
+    )
+    scan_parser.add_argument(
         "--rate",
-        type=float,
-        default=2.4e6,
-        help="Live scan: sample rate in Hz (default: 2.4e6)",
+        type=_rates_arg,
+        default=(2.4e6,),
+        help="Live scan: sample rate in Hz (default: 2.4e6); with --dual, one "
+        "for both receivers or one each, separated by a comma (2.4e6,20e6 runs "
+        "the second, a HackRF One, at 20 MS/s)",
     )
     scan_parser.add_argument(
         "--gain",

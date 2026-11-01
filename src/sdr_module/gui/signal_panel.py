@@ -421,6 +421,31 @@ if HAS_PYQT6:
                 text,
             )
 
+    def _pause_fit(table: Any, rows: bool = False) -> List[int]:
+        """Stop ``table``'s columns (and rows) resizing to their contents
+        while it is filled: with that on, every item set made the headers
+        measure every row again, so filling n rows cost n squared (1.3 s
+        for 80). :func:`_resume_fit` has them measure once, after."""
+        header = table.horizontalHeader()
+        fit = QHeaderView.ResizeMode.ResizeToContents
+        paused = [
+            i for i in range(header.count()) if header.sectionResizeMode(i) == fit
+        ]
+        for i in paused:
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.Interactive)
+        if rows:
+            table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        return paused
+
+    def _resume_fit(table: Any, paused: List[int], rows: bool = False) -> None:
+        header = table.horizontalHeader()
+        for i in paused:
+            header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        if rows:
+            table.verticalHeader().setSectionResizeMode(
+                QHeaderView.ResizeMode.ResizeToContents
+            )
+
     class _ElidedLabel(QLabel):
         """A one-line label that shortens its text with "…" in the middle
         when it doesn't fit (:meth:`text` is still the whole text; the
@@ -916,6 +941,7 @@ if HAS_PYQT6:
             selected = self.selected_frequency()
             table = self.signals_table
             table.setUpdatesEnabled(False)
+            paused = _pause_fit(table, rows=True)
             try:
                 table.setSortingEnabled(False)
                 table.setRowCount(len(signals))
@@ -943,6 +969,7 @@ if HAS_PYQT6:
                         table.setItem(row, col, item)
                 self._signals = list(signals)
             finally:
+                _resume_fit(table, paused, rows=True)
                 table.setUpdatesEnabled(True)
             self.signals_empty.set_visible(not signals)
             if not signals:
@@ -970,6 +997,7 @@ if HAS_PYQT6:
             self.signals_top.setCurrentWidget(self.recording_row)
             self.markers_check.setEnabled(False)
             table = self.signals_table
+            paused = _pause_fit(table, rows=True)
             table.setSortingEnabled(False)
             table.setRowCount(len(signals))
             for row, sig in enumerate(signals):
@@ -991,6 +1019,7 @@ if HAS_PYQT6:
                 )
                 for col, item in enumerate(items):
                     table.setItem(row, col, item)
+            _resume_fit(table, paused, rows=True)
             self._signals = list(signals)
             self.signals_empty.set_visible(not signals)
             if not signals:
@@ -1230,6 +1259,7 @@ if HAS_PYQT6:
             self._bursts.insert(0, (stamp, report))
             del self._bursts[500:]
             table = self.bursts_table
+            paused = _pause_fit(table)
             table.insertRow(0)
             data = ""
             analysis = report.analysis
@@ -1259,6 +1289,7 @@ if HAS_PYQT6:
                 table.setItem(0, col, item)
             while table.rowCount() > 500:
                 table.removeRow(table.rowCount() - 1)
+            _resume_fit(table, paused)
             self.bursts_empty.set_visible(False)
             self.bursts_hint.setVisible(self.burst_details.isHidden())
 

@@ -167,3 +167,35 @@ class TestFindSignalsLayout(_PlotsCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TestSignalsListCost(_PlotsCase):
+    """ROB-05: refreshing the Signals list cost rows squared on the GUI
+    thread (each item set made the 'resize to contents' headers measure
+    every row again): 1.3 s for 80 rows, a 100-170 ms stall twice a second
+    with the 22 signals of the FM band at 20 MS/s."""
+
+    def test_eighty_rows_refresh_in_a_few_ms(self):
+        import time
+
+        from sdr_module.dsp.signal_list import SignalPeak
+
+        panel = self.win._signal_panel
+        self.win._show_signal_page("signals")
+        signals = [
+            SignalPeak(88e6 + 0.25e6 * i, -40.0 - i % 7, 20.0 + i % 9, 150e3)
+            for i in range(80)
+        ]
+        ages = [0.5 * (i % 5) for i in range(80)]
+        panel.set_signals(signals, 100e6, ages)  # (the first fill)
+        self.settle()
+        start = time.thread_time()
+        panel.set_signals(signals, 100e6, ages)
+        self.settle(1)
+        spent = time.thread_time() - start
+        self.assertLess(spent, 0.15, f"{spent * 1e3:.0f} ms of processor time")
+        table = panel.signals_table
+        self.assertEqual(table.rowCount(), 80)
+        # Still sized to what they hold.
+        width = table.fontMetrics().horizontalAdvance(table.item(0, 3).text())
+        self.assertGreaterEqual(table.columnWidth(3), width)

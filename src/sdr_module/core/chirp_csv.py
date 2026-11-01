@@ -370,6 +370,17 @@ def _to_int(value: Any, default: int) -> int:
         return default
 
 
+#: A stored bookmark's numeric CHIRP fields, with CHIRP's defaults (see
+#: :meth:`Channel.from_bookmark`).
+_BOOKMARK_FLOATS: Dict[str, float] = {
+    "offset_hz": 0.0,
+    "rtone": 88.5,
+    "ctone": 88.5,
+    "tuning_step_khz": 5.0,
+}
+_BOOKMARK_INTS: Dict[str, int] = {"dtcs": 23, "rx_dtcs": 23}
+
+
 def _choice(value: Any, valid: Sequence[str], default: str, label: str) -> str:
     """Normalise a constrained field, keeping unknown values with a warning."""
     text = str(value or "").strip()
@@ -628,9 +639,20 @@ class Channel:
             key: value for key, value in bookmark.items() if key in known
         }
         kwargs["name"] = str(bookmark.get("label", bookmark.get("name", "")) or "")
-        kwargs["frequency_hz"] = float(
-            bookmark.get("freq_hz", bookmark.get("frequency_hz", 0.0)) or 0.0
-        )
+        # A damaged settings file's text, or a number no float holds, where
+        # a number belongs gets CHIRP's default: one failed Export and
+        # ``sdr-scan channels list``.
+        freq = _to_float(bookmark.get("freq_hz", bookmark.get("frequency_hz")), 0.0)
+        kwargs["frequency_hz"] = max(freq, 0.0)
+        for key, default in _BOOKMARK_FLOATS.items():
+            if key in kwargs:
+                kwargs[key] = _to_float(kwargs[key], default)
+        for key, default in _BOOKMARK_INTS.items():
+            if key in kwargs:
+                kwargs[key] = _to_int(kwargs[key], default)
+        if kwargs.get("location") is not None:
+            location = _to_int(kwargs["location"], -1)
+            kwargs["location"] = location if location >= 0 else None
         demod = str(bookmark.get("demod") or "")
         if demod in APP_DEMODS:
             kwargs["mode"] = chirp_mode_for(

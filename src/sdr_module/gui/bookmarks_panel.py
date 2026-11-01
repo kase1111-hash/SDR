@@ -107,11 +107,14 @@ _ADD_MODE_TEXT = {_IQ_DEMOD: _IQ_MODE_TEXT}
 
 
 def _num(value: Any, default: float = 0.0) -> float:
-    """``float(value)``, or ``default`` for missing or malformed values."""
+    """``float(value)``, or ``default`` for missing or malformed values
+    (a damaged settings file's text, NaN, or a whole number too big for a
+    float: one stopped the app starting)."""
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
         return default
+    return number if math.isfinite(number) else default
 
 
 def _plural(count: int, word: str) -> str:

@@ -76,7 +76,7 @@ def bookmark_tone_hz(bookmark: Dict[str, Any]) -> float:
     raw = bookmark.get("ctone")
     try:
         tone = float(_CHIRP_DEFAULT_TONE_HZ if raw is None else raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # (a damaged setting)
         return 0.0
     return tone if math.isfinite(tone) and tone > 0 else 0.0
 
@@ -230,9 +230,11 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         self._offset.setSuffix(" MHz")
         self._offset.setAlignment(Qt.AlignmentFlag.AlignRight)
         try:
-            self._offset.setValue(abs(float(b.get("offset_hz", 0.0) or 0.0)) / 1e6)
-        except (TypeError, ValueError):
-            pass
+            offset = abs(float(b.get("offset_hz", 0.0) or 0.0))
+        except (TypeError, ValueError, OverflowError):  # (a damaged setting)
+            offset = 0.0
+        if math.isfinite(offset):
+            self._offset.setValue(offset / 1e6)
         self._offset.setToolTip(
             "Repeater shift (CHIRP's Offset), e.g. 0.600 MHz on 2 m"
         )

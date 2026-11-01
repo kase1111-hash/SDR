@@ -98,11 +98,14 @@ class GuiSettings:
         return self._s.value(f"geom/{name}")
 
 
-def _finite_number(value: Any) -> bool:
+def _usable_frequency(value: Any) -> bool:
+    """A frequency a bookmark can have: a finite number, not below zero
+    (one below zero also broke Export and ``sdr-scan channels``)."""
     try:
-        return math.isfinite(float(value))
+        freq = float(value)
     except (TypeError, ValueError, OverflowError):
         return False
+    return math.isfinite(freq) and freq >= 0
 
 
 def _examples(entries: List[Any]) -> str:
@@ -123,8 +126,9 @@ def usable_bookmarks(data: Any) -> List[Dict[str, Any]]:
     A damaged settings file can hold anything, and one bad entry stopped the
     app starting. An entry that isn't a bookmark (null, a number, a text) is
     skipped; a bookmark whose frequency isn't a number (missing, "abc", NaN,
-    too big for a float) stays in the list at 0 Hz, to be edited or
-    removed. Each kind of damage is logged once (Tools > Error History).
+    too big for a float) or is below zero stays in the list at 0 Hz, to be
+    edited or removed. Each kind of damage is logged once (Tools > Error
+    History).
     """
     if data is None:
         return []
@@ -140,7 +144,7 @@ def usable_bookmarks(data: Any) -> List[Dict[str, Any]]:
         if not isinstance(entry, dict):
             dropped.append(entry)
             continue
-        if not _finite_number(entry.get("freq_hz")):
+        if not _usable_frequency(entry.get("freq_hz")):
             repaired.append(dict(entry))
             entry["freq_hz"] = 0.0
         kept.append(entry)

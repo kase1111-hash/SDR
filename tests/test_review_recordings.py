@@ -13,7 +13,8 @@
   empty ``.sigmf-meta`` behind.
 * REC-05: after the temp drive filled up while recording, the take could
   not be saved anywhere (the unwritable buffered tail failed every save).
-* REC-06: a take over 4 GiB failed as WAV only after writing 4 GiB.
+* REC-06: a take over 4 GiB failed as WAV only after writing 4 GiB (since
+  K-R1 it is written as RF64).
 * REC-07: ``.cf32``/``.raw`` saves copied the take on the GUI thread (no
   progress or Cancel) and left a partial file when the copy failed.
 * REC-08 / REC-09: Convert then Save as SigMF stamped the time of saving as
@@ -471,21 +472,29 @@ class TestTempDriveFillsWhileRecording(_ReviewCase):
 
 
 # ---------------------------------------------------------------------------
-# REC-06: WAV files hold 4 GiB at most
+# REC-06: a take over 4 GiB failed as WAV only after writing 4 GiB. It was
+# then refused before writing (and Save automatically saved it as SigMF);
+# since K-R1 it is written as RF64, the WAV format for files over 4 GiB.
 # ---------------------------------------------------------------------------
 
 
 class TestWavSizeLimit(_ReviewCase):
-    def test_too_long_for_wav_is_refused_before_writing(self):
-        from sdr_module.dsp.recording import FileFormat, SampleFormat
+    def test_a_take_past_4_gib_is_written_as_rf64(self):
+        from sdr_module.dsp import wav_file
+        from sdr_module.dsp.recording import FileFormat, IQPlayer, SampleFormat
+        from sdr_module.gui import file_jobs
         from sdr_module.gui.file_jobs import write_recording
 
+        x = (0.5 * np.exp(0.06j * np.arange(3000))).astype(np.complex64)
         path = self.path("long.wav")
-        total = (1 << 30) + 1  # (4 GiB and a bit as 16-bit I/Q)
-        with self.assertRaises(ValueError) as caught:
-            write_recording(
-                iter([]),
-                total,
+        # (Classic WAV files hold 4000 bytes meanwhile: 12000 is "over 4 GiB".)
+        with (
+            mock.patch.object(file_jobs, "WAV_MAX_DATA_BYTES", 4000),
+            mock.patch.object(wav_file, "RIFF_SIZE_LIMIT", 36 + 4000),
+        ):
+            written = write_recording(
+                iter([x[:1000], x[1000:]]),
+                len(x),
                 path,
                 FileFormat.WAV,
                 SampleFormat.INT16,
@@ -493,31 +502,38 @@ class TestWavSizeLimit(_ReviewCase):
                 100e6,
                 lambda _f: None,
             )
-        self.assertIn("4 GiB", str(caught.exception))
-        self.assertIn("about 7 minutes", str(caught.exception))
-        self.assertFalse(os.path.exists(path))
+        self.assertEqual(written, len(x))
+        with open(path, "rb") as handle:
+            self.assertEqual(handle.read(4), b"RF64")
+        with IQPlayer(path) as player:
+            self.assertEqual(player.total_samples, len(x))
+            np.testing.assert_allclose(player.read(len(x)), x, atol=1 / 32767)
 
-    def test_save_refuses_and_auto_save_falls_back_to_sigmf(self):
+    def test_save_and_save_automatically_keep_wav(self):
+        from sdr_module.dsp import wav_file
         from sdr_module.gui import file_jobs
 
         self.record(3)
         count = self.win._buffer_sample_count()
-        small = count * 4 - 1  # (this take is "over 4 GiB")
-        with mock.patch.object(file_jobs, "WAV_MAX_DATA_BYTES", small, create=True):
+        small = count * 4 - 4  # (this take is "over 4 GiB")
+        with (
+            mock.patch.object(file_jobs, "WAV_MAX_DATA_BYTES", small),
+            mock.patch.object(wav_file, "RIFF_SIZE_LIMIT", 36 + small),
+        ):
             target = self.path("take.wav")
             with self.save_dialog(target), self.warnings() as warn:
-                self.assertFalse(self.win._save_recording())
-            self.assertIn("too long for a WAV file", warn.call_args[0][2])
-            self.assertFalse(os.path.exists(target))
+                self.assertTrue(self.win._save_recording())
+            warn.assert_not_called()
             self.set_format(".wav")
             self.win._control_panel.set_auto_save(True)
+            self.win._buffer_unsaved = True  # (saved again, automatically)
             self.assertTrue(self.win._auto_save_take())
         names = _listing(self.recordings_folder())
         self.assertEqual(
             sorted(os.path.splitext(n)[1] for n in names),
-            [".sigmf-data", ".sigmf-meta"],
+            [".sigmf-meta", ".wav"],
         )
-        self.assertIn("as SigMF", self.message())
+        self.assertIn("as RF64", self.message())
 
 
 # ---------------------------------------------------------------------------

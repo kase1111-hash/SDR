@@ -138,9 +138,11 @@ class TestLayout(_PanelTestCase):
             titles,
             [
                 "Frequency",
-                "Presets",
+                # (F-window, LISTEN-02: how you listen, right under the
+                # frequency; Presets after them, also in Radio > Band Presets)
                 "Demodulation",
                 "Audio",  # noise reduction, audio AGC, tone squelch
+                "Presets",
                 "Receiver",
                 "Recording",
                 "License Profile",

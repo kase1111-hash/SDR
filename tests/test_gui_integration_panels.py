@@ -215,11 +215,14 @@ class TestControlPanelFixes(unittest.TestCase):
 
     # -- Presets and license -------------------------------------------
 
-    def test_presets_sit_directly_under_the_frequency(self):
+    def test_listening_controls_sit_directly_under_the_frequency(self):
+        # (F-window, LISTEN-02: Mode, Filter, Squelch and the Audio options
+        # in view on a laptop; Presets after them, also in Radio > Band
+        # Presets.)
         from PyQt6.QtWidgets import QGroupBox
 
         titles = [g.title() for g in self.panel.findChildren(QGroupBox)]
-        self.assertEqual(titles[:3], ["Frequency", "Presets", "Demodulation"])
+        self.assertEqual(titles[:4], ["Frequency", "Demodulation", "Audio", "Presets"])
 
     def test_preset_details_use_the_mode_list_names(self):
         self.select("Broadcast", "FM Broadcast")

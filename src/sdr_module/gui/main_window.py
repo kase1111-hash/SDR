@@ -2466,6 +2466,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._right_splitter.setStretchFactor(0, 1)
         self._right_splitter.setStretchFactor(1, 1)
         self._main_splitter.addWidget(self._right_splitter)
+        # When the column's height changes (the window resized, a split saved
+        # at another height restored), QSplitter scales the control pane:
+        # its lower edge goes back between two groups (_resnap_right_splitter).
+        self._resnap_timer = QTimer(self)
+        self._resnap_timer.setSingleShot(True)
+        self._resnap_timer.setInterval(0)
+        self._resnap_timer.timeout.connect(self._resnap_right_splitter)
+        self._right_splitter.installEventFilter(self)
 
         # Extra window width goes to the displays, not the controls.
         self._main_splitter.setStretchFactor(0, 1)
@@ -2708,6 +2716,126 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         menu.addAction(action)
         return action
 
+    def _add_listening_menus(self, radio_menu: Any, audio_menu: Any) -> None:
+        """How you listen, one click away from anywhere (LISTEN-02, leftover
+        5): Radio > Mode and Radio > Squelch, and Radio > Audio's Noise
+        Reduction, Audio AGC, Tone Squelch... and CW Pitch... (the control
+        panel's Demodulation and Audio groups, kept in step with them)."""
+        from .audio_chain import AGC_SPEED_LABELS, NOISE_REDUCTION_LEVELS
+        from .control_panel import DEMOD_MODES
+
+        panel = self._control_panel
+
+        def choices(menu, combo, items, tip):
+            # One checkable item per choice of ``combo`` (by value), checked
+            # as the combo is.
+            group = QActionGroup(self)
+            actions = {}
+            for value, text in items:
+                action = self._add_action(
+                    menu,
+                    text,
+                    lambda on, v=value: on and combo.setCurrentText(v),
+                    tip=tip,
+                    checkable=True,
+                    checked=combo.currentText() == value,
+                )
+                group.addAction(action)
+                actions[value] = action
+
+            def sync(*_args):
+                action = actions.get(combo.currentText())
+                if action is not None and not action.isChecked():
+                    action.setChecked(True)
+
+            combo.currentIndexChanged.connect(sync)
+
+        mode_menu = radio_menu.addMenu("&Mode")
+        mode_menu.setToolTipsVisible(True)
+        choices(
+            mode_menu,
+            panel._demod_combo,
+            [(name, name) for name, _tip in DEMOD_MODES],
+            "How the tuned signal is turned into audio (MODE in the receiver "
+            "bar, Demodulation in the control panel)",
+        )
+        squelch_menu = radio_menu.addMenu("S&quelch")
+        squelch_menu.setToolTipsVisible(True)
+        for text, check, tip in (
+            (
+                "Squelch &On",
+                panel._squelch_check,
+                "Mute the audio while the tuned channel is quieter than the "
+                "threshold (off: everything plays, noise too)",
+            ),
+            (
+                "&Auto Threshold",
+                panel._squelch_auto,
+                "Keep the threshold a little above the channel's noise (off: "
+                "the threshold set by hand, or by dragging the LEVEL meter)",
+            ),
+        ):
+            action = self._add_action(
+                squelch_menu,
+                text,
+                check.setChecked,
+                tip=tip,
+                checkable=True,
+                checked=check.isChecked(),
+            )
+            check.toggled.connect(
+                lambda on, a=action: a.isChecked() != on and a.setChecked(on)
+            )
+
+        audio_menu.addSeparator()
+        choices(
+            audio_menu.addMenu("&Noise Reduction"),
+            panel._nr_combo,
+            [(value, text) for value, text, _tip in NOISE_REDUCTION_LEVELS],
+            "Reduce steady hiss in the audio (Audio group in the control panel)",
+        )
+        choices(
+            audio_menu.addMenu("Audio &AGC"),
+            panel._audio_agc_combo,
+            [(value, text) for value, text, _tip in AGC_SPEED_LABELS],
+            "How fast the audio level follows the signal (Audio group in the "
+            "control panel)",
+        )
+        self._add_action(
+            audio_menu,
+            "&Tone Squelch...",
+            lambda: self._show_panel_control(panel._tone_combo),
+            tip="Choose the CTCSS tone a repeater or PMR radio sends, to hear "
+            "only it (FM; the Audio group in the control panel)",
+        )
+        self._add_action(
+            audio_menu,
+            "&CW Pitch...",
+            lambda: self._show_panel_control(panel._cw_pitch_spin, mode="CW"),
+            tip="The pitch of the CW tone you hear (the Demodulation group in "
+            "the control panel; shown in CW)",
+        )
+
+    def _show_panel_control(self, widget: Any, mode: str = "") -> None:
+        """Show a control panel control (the tool tabs back to their place,
+        scrolled into view) and give it the focus. ``mode``: the mode it
+        belongs to, said when another one is in use."""
+        panel = self._control_panel
+        if mode and panel.get_demod_mode() != mode:
+            self._show_status_message(
+                f"The {widget.accessibleName() or 'setting'} is used in {mode}: "
+                f"choose {mode} in Radio > Mode first.",
+                None,
+                5000,
+            )
+            return
+        if self._tool_tabs.maximized:
+            self._tool_tabs.set_maximized(False)
+        scroll = getattr(panel, "_scroll", None)
+        if scroll is not None:
+            scroll.ensureWidgetVisible(widget, 0, 40)
+        widget.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def _tool_panel_action(
         self, menu: Any, key: str, text: str, tip: str
     ) -> Optional["QAction"]:
@@ -2925,6 +3053,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             tip="Choose the speakers, headset or other output the audio plays "
             "through (Tools > Preferences)",
         )
+        self._add_listening_menus(radio_menu, audio_menu)
         radio_menu.addSeparator()
         # The one preset table (gui/presets.py): the favourites, then every
         # preset by category, as the Presets group lists them.
@@ -3609,6 +3738,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # ------------------------------------------------------------------
 
     def eventFilter(self, obj, event):  # noqa: N802 - Qt naming
+        if obj is self._own("_right_splitter") and event.type() == QEvent.Type.Resize:
+            self._resnap_timer.start()  # (once QSplitter spread the new height)
         if (
             obj is getattr(self, "_freq_label", None)
             and event.type() == QEvent.Type.MouseButtonRelease
@@ -4292,14 +4423,32 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         group) don't count: then the deepest gap above it is used (at 640 px
         the one after Frequency), or ``limit`` itself.
         """
+        spans = self._section_spans()
+        if spans is None:
+            return top
+        gaps = [bottom + 3 for _top, bottom in spans]  # half the layout spacing
+        if limit is not None:
+            gaps = [g for g in gaps if g <= limit]
+        usable = [g for g in gaps if 0.4 * height <= g <= 0.7 * height]
+        if usable:
+            return min(usable, key=lambda g: abs(g - top))
+        if limit is None:
+            return top
+        if gaps:
+            return max(gaps)  # never through a group, even if lower
+        return max(0, min(top, limit))
+
+    def _section_spans(self) -> Optional[List[Tuple[int, int]]]:
+        """``(top, bottom)`` of each control panel section in the right
+        column's upper pane (as scrolled), or None if it can't be measured."""
         pane = self._right_splitter.widget(0)
         if pane is None:
-            return top
+            return None
+        spans = []
         try:
             if pane.layout() is not None:
                 pane.layout().activate()
             self._control_panel.layout().activate()
-            gaps = []
             for group in self._control_panel.findChildren(QGroupBox):
                 if not group.isVisibleTo(self._control_panel):
                     continue
@@ -4311,21 +4460,42 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     outer = outer.parentWidget()
                 if isinstance(outer, QGroupBox):
                     continue
-                bottom = group.mapTo(pane, QPoint(0, group.height())).y()
-                gaps.append(bottom + 3)  # half the usual layout spacing
+                top = group.mapTo(pane, QPoint(0, 0)).y()
+                spans.append((top, top + group.height()))
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Could not measure control panel sections: %s", exc)
-            return top
-        if limit is not None:
-            gaps = [g for g in gaps if g <= limit]
-        usable = [g for g in gaps if 0.4 * height <= g <= 0.7 * height]
-        if usable:
-            return min(usable, key=lambda g: abs(g - top))
-        if limit is None:
-            return top
-        if gaps:
-            return max(gaps)  # never through a group, even if lower
-        return max(0, min(top, limit))
+            return None
+        return sorted(spans)
+
+    def _resnap_right_splitter(self) -> None:
+        """(L10, DEV-E2E-06) The right column's height changed: QSplitter
+        scaled the control pane, whose lower edge can then cut a group in
+        half above the tool tabs (shrinking the window, or a split saved
+        at another height restored at launch). It moves to the nearest gap
+        between groups that leaves the tool tabs their minimum height. A
+        split already between groups stays where it is."""
+        splitter = self._right_splitter
+        pane = splitter.widget(0)
+        if pane is None or pane.isHidden() or not self.isVisible():
+            return  # (the tool tabs fill the column)
+        sizes = splitter.sizes()
+        if len(sizes) != 2 or min(sizes) <= 0:
+            return
+        top, total = sizes[0], sum(sizes)
+        spans = self._section_spans()
+        if not spans or not any(start < top < end for start, end in spans):
+            return
+        limit = total - self._right_tabs.minimumSizeHint().height()
+        gaps = [end + 3 for _start, end in spans if end + 3 <= limit]
+        above = [g for g in gaps if g <= top]
+        below = [g for g in gaps if g > top]
+        if not (above or below):
+            return
+        if above and (not below or top - max(above) <= min(below) - top):
+            target = max(above)
+        else:
+            target = min(below)
+        splitter.setSizes([target, total - target])
 
     def _set_plot_visible(self, plot: "QWidget", shown: bool) -> None:
         """View > Spectrum / Waterfall. Hiding the plot with the keyboard

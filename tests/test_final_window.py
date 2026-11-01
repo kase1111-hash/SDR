@@ -20,13 +20,17 @@ import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from tests.test_gui_chrome import HAS_PYQT6, require_pyqt6  # noqa: E402
+from tests.test_gui_chrome import (  # noqa: E402
+    HAS_PYQT6,
+    _WindowTestCase,
+    require_pyqt6,
+)
 from tests.test_gui_device_settings import _DeviceCase  # noqa: E402
 from tests.test_gui_second_receiver import _FakeSink, _SecondCase  # noqa: E402
 
 if HAS_PYQT6:
-    from PyQt6.QtCore import QSettings, Qt
-    from PyQt6.QtWidgets import QApplication, QMessageBox
+    from PyQt6.QtCore import QPoint, QSettings, Qt
+    from PyQt6.QtWidgets import QApplication, QGroupBox, QMessageBox
 
 
 def _block(n=4096, seed=1):
@@ -629,6 +633,201 @@ class TestSecondReceiverDevices(_SecondCase):
         shown = self.rx._waterfall.display_settings()
         self.assertEqual(shown.get("history_s"), 60.0)
         self.assertTrue(shown.get("auto_levels"))
+
+
+# --------------------------------------------------------------------------- #
+# The right column's split (DEC-E2E-12, DEV-E2E-06, leftover 10)
+# --------------------------------------------------------------------------- #
+class TestRightColumnSplit(_WindowTestCase):
+    def test_selecting_a_message_doesnt_move_the_split(self):
+        # DEC-E2E-12: the card under the table raised the tool tabs'
+        # minimum height and the splitter cut the Presets group.
+        win = self.win
+        win.resize(1366, 768)
+        self.settle(10)
+        win._show_panel("decoder")
+        panel = win._decoder_panel
+        for n in range(3):
+            panel.add_message(
+                "APRS",
+                f"N0CALL-{n}",
+                "Hello from a long APRS message " * 3,
+                details=["Path: WIDE1-1,WIDE2-1", "APRS: position", "Sent: now"],
+            )
+        self.settle(10)
+        before = win._right_splitter.sizes()
+        tabs_min = win._right_tabs.minimumSizeHint().height()
+        panel._table.selectRow(0)
+        self.settle(10)
+        self.assertTrue(panel._detail.isVisible())
+        self.assertLessEqual(win._right_tabs.minimumSizeHint().height(), tabs_min)
+        self.assertEqual(win._right_splitter.sizes(), before)
+        panel._table.clearSelection()
+        self.settle(10)
+        self.assertEqual(win._right_splitter.sizes(), before)
+
+    @staticmethod
+    def cut_groups(win):
+        """(split, the control panel sections the split cuts in half)."""
+        pane = win._right_splitter.widget(0)
+        split = win._right_splitter.sizes()[0]
+        cut = []
+        for group in win._control_panel.findChildren(QGroupBox):
+            if not group.isVisibleTo(win._control_panel):
+                continue
+            top = group.mapTo(pane, QPoint(0, 0)).y()
+            if top < split < top + group.height():
+                cut.append(group.title())
+        return split, cut
+
+    def test_shrinking_the_window_keeps_the_split_between_groups(self):
+        # Leftover 10: QSplitter scales the pane in proportion, into a group.
+        win = self.win
+        win._layout_initialized = False
+        win._splitters_restored = False
+        win.resize(1920, 1080)
+        self.settle(10)
+        win._apply_default_splitter_sizes()
+        self.settle(5)
+        for size in ((1366, 768), (1024, 640), (1280, 720), (1100, 700)):
+            with self.subTest(size=size):
+                win.resize(*size)
+                self.settle(10)
+                split, cut = self.cut_groups(win)
+                self.assertEqual(cut, [], f"split at {split} px cuts {cut}")
+
+    def test_a_split_saved_at_another_height_lands_between_groups(self):
+        # DEV-E2E-06: the same settings opened in a smaller window.
+        from sdr_module.gui import main_window
+
+        for saved, opened in (((1366, 768), (1024, 640)), ((1920, 1080), (1366, 768))):
+            with self.subTest(saved=saved, opened=opened):
+                first = main_window.SDRMainWindow(demo_mode=False)
+                first._confirm_discard_recording = lambda *_a: True
+                first.resize(*saved)
+                first.show()
+                self.settle(10)
+                first.close()  # (saves the window's layout)
+                first.deleteLater()
+                self.settle(5)
+                win = main_window.SDRMainWindow(demo_mode=False)
+                win._confirm_discard_recording = lambda *_a: True
+                self.addCleanup(win.deleteLater)
+                self.addCleanup(win.close)
+                self.assertTrue(win._splitters_restored)
+                win.resize(*opened)
+                win.show()
+                self.settle(10)
+                split, cut = self.cut_groups(win)
+                self.assertEqual(cut, [], f"split at {split} px cuts {cut}")
+                win.close()
+                self.settle(5)
+
+
+# --------------------------------------------------------------------------- #
+# How you listen, in view and one click away (LISTEN-02, L5, DEV-E2E-13)
+# --------------------------------------------------------------------------- #
+def _menu(win, *path):
+    """The menu (or action) at ``path`` of menu titles, '&' ignored."""
+    actions = win.menuBar().actions()
+    found = None
+    for title in path:
+        found = next(
+            a for a in actions if a.text().replace("&", "").split("\t")[0] == title
+        )
+        actions = found.menu().actions() if found.menu() is not None else []
+    return found
+
+
+class TestListeningControls(_WindowTestCase):
+    def test_how_you_listen_comes_first_and_filter_is_under_mode(self):
+        panel = self.win._control_panel
+        titles = [g.title() for g in panel.findChildren(QGroupBox)]
+        self.assertLess(titles.index("Demodulation"), titles.index("Presets"))
+        self.assertLess(titles.index("Audio"), titles.index("Presets"))
+        # DEV-E2E-13: Filter is the row after Mode, in Demodulation.
+        form = panel._demod_form
+        row_of = {
+            form.itemAt(r, form.ItemRole.FieldRole).widget(): r
+            for r in range(form.rowCount())
+            if form.itemAt(r, form.ItemRole.FieldRole) is not None
+        }
+        self.assertEqual(row_of[panel._bw_combo], row_of[panel._demod_combo] + 1)
+        self.assertNotIn(
+            panel._bw_combo,
+            [
+                panel._receiver_form.itemAt(
+                    r, panel._receiver_form.ItemRole.FieldRole
+                ).widget()
+                for r in range(panel._receiver_form.rowCount())
+                if panel._receiver_form.itemAt(
+                    r, panel._receiver_form.ItemRole.FieldRole
+                )
+                is not None
+            ],
+        )
+
+    def test_mode_squelch_and_filter_are_in_view_on_a_laptop(self):
+        win = self.win
+        win._layout_initialized = False
+        win._splitters_restored = False
+        win.resize(1366, 768)
+        self.settle(10)
+        win._apply_default_splitter_sizes()
+        self.settle(5)
+        panel = win._control_panel
+        pane = win._right_splitter.widget(0)
+        visible = win._right_splitter.sizes()[0]
+        for widget in (panel._demod_combo, panel._bw_combo, panel._squelch_check):
+            bottom = widget.mapTo(pane, QPoint(0, widget.height())).y()
+            self.assertLessEqual(bottom, visible, widget.accessibleName())
+
+    def test_radio_mode_menu(self):
+        win, panel = self.win, self.win._control_panel
+        menu = _menu(win, "Radio", "Mode").menu()
+        texts = [a.text() for a in menu.actions()]
+        self.assertEqual(texts, ["None (I/Q)", "AM", "FM", "USB", "LSB", "CW"])
+        _menu(win, "Radio", "Mode", "USB").trigger()
+        self.assertEqual(panel.get_demod_mode(), "USB")
+        panel._demod_combo.setCurrentText("CW")
+        self.assertTrue(_menu(win, "Radio", "Mode", "CW").isChecked())
+        self.assertFalse(_menu(win, "Radio", "Mode", "USB").isChecked())
+
+    def test_radio_squelch_menu(self):
+        win, panel = self.win, self.win._control_panel
+        on = _menu(win, "Radio", "Squelch", "Squelch On")
+        auto = _menu(win, "Radio", "Squelch", "Auto Threshold")
+        self.assertEqual(on.isChecked(), panel.is_squelch_enabled())
+        on.trigger()
+        self.assertEqual(panel.is_squelch_enabled(), on.isChecked())
+        panel.set_squelch_auto(not panel.is_squelch_auto())
+        self.assertEqual(auto.isChecked(), panel.is_squelch_auto())
+
+    def test_radio_audio_choices(self):
+        win, panel = self.win, self.win._control_panel
+        _menu(win, "Radio", "Audio", "Noise Reduction", "Strong").trigger()
+        self.assertEqual(panel.noise_reduction(), "strong")
+        _menu(win, "Radio", "Audio", "Audio AGC", "Slow").trigger()
+        self.assertEqual(panel.audio_agc_speed(), "slow")
+        panel.set_noise_reduction("light")
+        self.assertTrue(
+            _menu(win, "Radio", "Audio", "Noise Reduction", "Light").isChecked()
+        )
+
+    def test_tone_squelch_and_cw_pitch_go_to_their_controls(self):
+        win, panel = self.win, self.win._control_panel
+        win.activateWindow()
+        _menu(win, "Radio", "Audio", "Tone Squelch...").trigger()
+        self.settle(5)
+        self.assertIs(QApplication.focusWidget(), panel._tone_combo)
+        panel._demod_combo.setCurrentText("FM")
+        _menu(win, "Radio", "Audio", "CW Pitch...").trigger()
+        self.assertIn("choose CW in Radio > Mode", win._message_label.text())
+        panel._demod_combo.setCurrentText("CW")
+        self.settle(5)
+        _menu(win, "Radio", "Audio", "CW Pitch...").trigger()
+        self.settle(5)
+        self.assertIs(QApplication.focusWidget(), panel._cw_pitch_spin)
 
 
 if __name__ == "__main__":

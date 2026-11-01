@@ -153,9 +153,10 @@ class _HintCase(_demo_take_case()):
             self.said.append(self.win._message_label.text())
             self.clock.now = max(self.clock.now, tick + self.FRAME_S)
 
-    def a_busy_job(self, seconds):
+    def a_busy_job(self, seconds, meanwhile=None):
         """Decode Recording's job (run_job's own event loop), with
-        ``seconds`` of display frames meanwhile."""
+        ``seconds`` of display frames meanwhile (or what ``meanwhile()``
+        runs)."""
         from PyQt6.QtCore import QTimer
 
         from sdr_module.gui.file_jobs import run_job
@@ -164,7 +165,10 @@ class _HintCase(_demo_take_case()):
 
         def frames_meanwhile():
             try:
-                self.run_frames(seconds)
+                if meanwhile is not None:
+                    meanwhile()
+                else:
+                    self.run_frames(seconds)
             finally:
                 done.set()
 
@@ -258,6 +262,50 @@ class TestTheDecodersHintFollowsItsCause(_HintCase):
         start = len(self.win._status_history)
         self.run_frames(8.0)
         self.assertEqual(self.history(start), [(SKIP_DEVICE, 1)])
+
+    def test_a_new_episode_waits_for_a_change_to_hold(self):
+        """A change still waiting to hold when an episode ends is forgotten
+        as the next one starts: there too a new cause is said once it has
+        held a second (a cause that comes and goes is never said), not in
+        the frame after the episode's first hint (the bar jumped from
+        "keeps this computer busy" to "kept ..." at once)."""
+        win = self.win
+
+        def caught_up_before_its_end():
+            # Too slow, then keeping up while the job goes on: it ends half
+            # a second before the hint's hold does ("kept ..." can't hold).
+            self.run_frames(1.5)
+            self.load = 0.3
+            for _ in range(200):
+                if not win._samples_skipped():
+                    if self.clock.now >= win._skip_hint_until - 0.5:
+                        break
+                self.run_frames(self.FRAME_S)
+
+        self.load = 1.5
+        self.a_busy_job(0, caught_up_before_its_end)
+        self.run_frames(1.0)  # (the hold is over: so is the hint)
+        self.assertEqual(self.hints_said(), [SKIP_JOB])
+
+        def until_named():
+            for _ in range(200):
+                if win._message_label.text() == SKIP_JOB:
+                    break
+                self.run_frames(self.FRAME_S)
+
+        # Too slow again during another Decode Recording, which ends as soon
+        # as the new hint names it.
+        self.load = 1.5
+        self.a_busy_job(0, until_named)
+        start = len(self.said)
+        history = len(win._status_history) - 1
+        self.run_frames(2.0)
+        after = self.said[start:]
+        self.assertEqual(after[:9], [SKIP_JOB] * 9)  # (0.9 s: not held yet)
+        self.assertIn(SKIP_JOB_DONE, after)
+        said = self.history(history)  # (SKIP_JOB: both episodes, in a row)
+        self.assertEqual([text for text, _n in said], [SKIP_JOB, SKIP_JOB_DONE])
+        self.assertEqual(said[-1][1], 1)
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 required")

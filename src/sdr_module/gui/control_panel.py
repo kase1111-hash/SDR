@@ -321,6 +321,13 @@ _FORMAT_TIP = (
     "it first, and can also write cu8 (rtl_sdr) and cs8 (hackrf_transfer). "
     "These are raw radio samples, not audio."
 )
+# (The WAV choice: past 4 GiB it is RF64, K-R1.)
+_WAV_FORMAT_TIP = (
+    "WAV, 16-bit I/Q (.wav): audio editors and many SDR programs open it. "
+    "Past 4 GiB (about 7 minutes at 2.4 MS/s) it is saved as RF64, the WAV "
+    "format for bigger files, which programs that read only classic WAV "
+    "files can't open."
+)
 
 _APPLY_PRESET_TIP = "Tune to this preset and set its bandwidth and demodulation mode"
 
@@ -1486,6 +1493,11 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             0,
             "SigMF (.sigmf-data and .sigmf-meta): keeps the frequency, sample "
             "rate and time, and SDR programs read it.",
+            Qt.ItemDataRole.ToolTipRole,
+        )
+        self._format_combo.setItemData(
+            self._format_combo.findData(".wav"),
+            _WAV_FORMAT_TIP,
             Qt.ItemDataRole.ToolTipRole,
         )
         self._format_combo.setToolTip(_FORMAT_TIP)

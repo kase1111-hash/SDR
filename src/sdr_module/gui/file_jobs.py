@@ -13,7 +13,7 @@ file at once:
 * :func:`load_recording` streams a file into the recording buffer
   (File > Convert Recording);
 * :func:`write_recording` writes the buffer in another format
-  (File > Save Recording);
+  (File > Save Recording; WAV past 4 GiB as RF64);
 * :func:`decode_recording` runs a live decoder over a whole file, much
   faster than real time (File > Decode Recording).
 """
@@ -29,6 +29,7 @@ from typing import Any, Callable, Iterable, Iterator, List, Optional, Sequence, 
 import numpy as np
 
 from ..dsp.recording import FileFormat, IQRecorder, SampleFormat, Segment
+from ..dsp.wav_file import read_wav_header
 from .iq_files import IqFileOptions
 
 try:
@@ -48,9 +49,15 @@ CHUNK_SAMPLES = 1 << 20
 #: each message is placed in the file to within it.
 DECODE_STEP_S = 0.1
 
-#: The most sample data one WAV file holds: its header counts the file's
-#: size in 32 bits (4 GiB), and Python's wave module refuses more.
+#: The most sample data a classic WAV file holds: its header counts the
+#: file's size in 32 bits (4 GiB). Past it a WAV file is written as RF64,
+#: which has no such limit (see :mod:`sdr_module.dsp.wav_file`).
 WAV_MAX_DATA_BYTES = 0xFFFFFFFF - 36
+
+#: What a save message says of a WAV file written as RF64 ("Saved the
+#: recording as RF64 (...) to <path>": before the path, which a narrow
+#: status bar cuts short).
+RF64_NOTE = " as RF64 (the WAV format for files over 4 GiB)"
 
 #: ``report(fraction)`` (0..1): raises :class:`Cancelled` once Cancel was
 #: pressed, so the work stops at its next report.
@@ -150,38 +157,34 @@ def load_recording(
 
 
 def wav_fits(samples: int, sample_format: SampleFormat = SampleFormat.INT16) -> bool:
-    """Whether ``samples`` I/Q pairs fit in one WAV file (4 GiB at most:
-    7.5 minutes at 2.4 MS/s in 16 bits)."""
+    """Whether ``samples`` I/Q pairs fit in a classic WAV file (4 GiB at
+    most: 7.5 minutes at 2.4 MS/s in 16 bits). More are written as RF64."""
     width = 1 if sample_format in (SampleFormat.UINT8, SampleFormat.INT8) else 2
     return int(samples) * 2 * width <= WAV_MAX_DATA_BYTES
 
 
 def wav_problem(total: int, sample_format: SampleFormat, sample_rate: float) -> str:
-    """Why ``total`` samples can't be saved as one WAV file ("" when they
-    can): its header must hold the sample rate, and it holds 4 GiB at
-    most (writing more would fail only after 4 GiB)."""
+    """Why ``total`` samples can't be saved as a WAV file ("" when they
+    can): its header must hold the sample rate. (Its length is no problem:
+    past 4 GiB it is written as RF64.)"""
     if not sample_rate > 0:
         return (
             "a WAV file needs the sample rate, and this recording doesn't say "
             "it. Save again and enter it, or choose another format (SigMF can "
             "leave it unknown)."
         )
-    if not wav_fits(total, sample_format):
-        return (
-            "it is too long for a WAV file, which holds 4 GiB at most "
-            f"({_wav_limit_text(sample_format, sample_rate)}). Choose SigMF or "
-            "cs16, which have no such limit."
-        )
     return ""
 
 
-def _wav_limit_text(sample_format: SampleFormat, sample_rate: float) -> str:
-    """How long a recording one WAV file holds at ``sample_rate``."""
-    width = 1 if sample_format in (SampleFormat.UINT8, SampleFormat.INT8) else 2
-    seconds = WAV_MAX_DATA_BYTES // (2 * width) / sample_rate
-    if seconds >= 120:
-        return f"about {seconds / 60:.0f} minutes at this sample rate"
-    return f"about {seconds:.0f} seconds at this sample rate"
+def rf64_note(path: str) -> str:
+    """:data:`RF64_NOTE` for a WAV file that was written as RF64 (past
+    4 GiB, which programs reading only classic WAV files can't open), ""
+    for any other file."""
+    try:
+        container = read_wav_header(path).container
+    except (OSError, ValueError):
+        return ""
+    return RF64_NOTE if container == "RF64" else ""
 
 
 def write_recording(
@@ -204,7 +207,8 @@ def write_recording(
     8601) is when the samples were recorded, for SigMF's ``core:datetime``
     (left out when unknown); ``hardware`` and ``description`` are SigMF's
     ``core:hw`` and ``core:description``, and ``segments`` where the
-    recording resumed after a gap (each a capture with its own time).
+    recording resumed after a gap (each a capture with its own time). A
+    WAV file over 4 GiB is RF64 (see :mod:`sdr_module.dsp.wav_file`).
     Returns the samples written."""
     if file_format is FileFormat.WAV:
         problem = wav_problem(total, sample_format, sample_rate)
@@ -220,7 +224,8 @@ def write_recording(
     written = 0
     opened = complete = False
     try:
-        recorder.start(filename)
+        # (Its size known: a WAV file that fits is a classic one.)
+        recorder.start(filename, expected_samples=total)
         opened = True
         # (start() stamps the time of writing: the samples' own time
         # replaces it, and an unknown one is left out, never invented.)

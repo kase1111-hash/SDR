@@ -151,8 +151,8 @@ from .file_jobs import (
     busy_with,
     decode_recording,
     load_recording,
+    rf64_note,
     run_job,
-    wav_fits,
     wav_problem,
     write_recording,
 )
@@ -7932,23 +7932,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
             return False
         ext = self._panel_recording_extension()
-        note = ""
-        if ext == ".wav" and not wav_fits(self._buffer_sample_count()):
-            ext = ".sigmf-data"
-            note = " as SigMF (it is too long for a WAV file, 4 GiB at most)"
         path = file_dialogs.unique_path(folder, self._suggested_iq_name(ext))
         message = self._message_label.text()
         if not self._write_buffer(path, quiet=True):
             return False
+        note = rf64_note(path)  # (a WAV file past 4 GiB: RF64)
         if announce:
             self._show_status_message(
-                f"Saved the recording to {file_dialogs.display_path(path)}{note}",
+                f"Saved the recording{note} to {file_dialogs.display_path(path)}",
                 "success",
                 8000,
             )
         else:  # (a warning is on show: keep it)
             self._show_status_message(
-                f"{message} It was saved to {file_dialogs.display_path(path)}{note}.",
+                f"{message} It was saved{note} to {file_dialogs.display_path(path)}.",
                 "danger",
                 20000,
             )
@@ -8147,8 +8144,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._update_take_panel()
         if not quiet:
             if take.samples:
+                note = rf64_note(take.path)  # (past 4 GiB: RF64)
                 self._show_status_message(
-                    f"Saved {_clock_text(seconds)} of audio to "
+                    f"Saved {_clock_text(seconds)} of audio{note} to "
                     f"{file_dialogs.display_path(take.path)}",
                     "success",
                     8000,
@@ -10669,7 +10667,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         snapshot: Any = None
         try:
             self._check_save_target(filename, fmt)
-            # (What a WAV file can't hold is said before whether it fits.)
+            # (A WAV file needs the rate: said before whether it fits.)
             problem = (
                 wav_problem(count, sample_fmt, rate) if fmt is FileFormat.WAV else ""
             )
@@ -10749,9 +10747,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         self._buffer_unsaved = False
         self._last_saved = filename
-        logger.info(f"Saved {count} samples to {filename}")
+        note = rf64_note(filename) if fmt is FileFormat.WAV else ""
+        logger.info(f"Saved {count} samples{note} to {filename}")
         self._show_status_message(
-            f"Saved {count:,} samples to {file_dialogs.display_path(filename)}",
+            f"Saved {count:,} samples{note} to {file_dialogs.display_path(filename)}",
             "success",
             6000,
         )

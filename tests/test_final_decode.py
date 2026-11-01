@@ -349,6 +349,45 @@ class TestStartOrPlayWording(_PanelCase):
         )
 
 
+class TestProtocolRowFitsTheColumn(_WindowTestCase):
+    def test_the_longer_button_leaves_the_column_as_wide_as_before(self):
+        # "Decode Recording..." (compact) and the status line's "Tune to"
+        # must not make the Decoder wider than the right column the window
+        # gives it at 1024x640 (400 px), in the themes the app runs with.
+        # (test_gui_panels measures the unthemed panel only against its own
+        # narrowest width.)
+        from sdr_module.gui import themes
+
+        win = self.win
+        panel = win._decoder_panel
+        win._show_panel("decoder")
+        panel._proto_combo.setCurrentText("POCSAG")
+        panel.add_message("AX.25/APRS", "N0CALL-9", "a packet")
+        self.assertTrue(win.set_frequency(144.39e6))
+        qapp = QApplication.instance()
+        old_sheet, old_palette = qapp.styleSheet(), qapp.palette()
+        old_theme = themes.current_theme()
+        try:
+            for theme in themes.THEMES:
+                themes.apply_theme(qapp, theme)
+                win.resize(1024, 640)
+                self.settle(5)
+                win._apply_default_splitter_sizes()
+                self.settle(5)
+                self.assertTrue(panel._tune_btn.isVisible(), theme)
+                self.assertLessEqual(win._main_splitter.sizes()[1], 400, theme)
+                self.assertLessEqual(
+                    panel.minimumSizeHint().width(), panel.width(), theme
+                )
+                for button in (panel._decode_file_btn, panel._tune_btn):
+                    right = button.mapTo(panel, button.rect().topRight()).x()
+                    self.assertLess(right, panel.width(), (theme, button.text()))
+        finally:
+            qapp.setStyleSheet(old_sheet)
+            qapp.setPalette(old_palette)
+            themes.apply_theme(None, old_theme)
+
+
 # --------------------------------------------------------------------------- #
 # DEC-E2E-17: a recording's messages are told apart from live ones
 # --------------------------------------------------------------------------- #

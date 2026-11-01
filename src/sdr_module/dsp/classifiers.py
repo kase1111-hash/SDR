@@ -1016,7 +1016,15 @@ class SignalClassifier:
             features["on_runs_long"] = int(np.count_nonzero(held))
             # Long enough for a Morse element (a dit at 80 WPM): keying,
             # not the noise's clicks.
-            features["on_runs_keyed"] = int(np.count_nonzero(on_s >= 0.015))
+            keyed_runs = on_s >= 0.015
+            features["on_runs_keyed"] = int(np.count_nonzero(keyed_runs))
+            # Those whole inside the block: one cut by its start or end may
+            # be the other end's carrier ringing round through the FFT that
+            # cut the channel out (:func:`_narrow`), not a key-down.
+            inside = (on_starts > 0) & (on_starts + on_lengths < n)
+            features["on_runs_keyed_inside"] = int(
+                np.count_nonzero(keyed_runs & inside)
+            )
         enough = True
         if span == 1:
             expected = n * math.exp(-high_ratio)
@@ -1451,11 +1459,12 @@ class SignalClassifier:
                 and (total_on <= 0 or on_max >= 0.7 * total_on)
                 # A narrow carrier switched on more than once at one steady
                 # level is keyed (a Morse element or two before a long
-                # one), not a transmission starting or ending (whose voice
-                # varies the level).
+                # one, one of them whole), not a transmission starting or
+                # ending (whose voice varies the level).
                 and not (
                     narrow > 0.5
                     and int(f.get("on_runs_keyed", 0)) >= 2
+                    and int(f.get("on_runs_keyed_inside", 0)) >= 1
                     and float(f.get("on_level_spread", 1.0)) < 0.12
                 )
             )

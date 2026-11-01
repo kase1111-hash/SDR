@@ -415,13 +415,15 @@ def test_demo_ook_remote_is_taken_apart():
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("start_s", [6.0, 6.2, 6.6, 6.8, 7.0])
+@pytest.mark.parametrize("start_s", [5.0, 5.2, 6.0, 6.2, 6.4])
 def test_demo_cw_beacon_keying_into_its_carrier_is_cw(start_s):
     """PLOTS-E2E-3: the 99.82 MHz beacon keys 'VVV DE SDR', then holds its
-    key down for 2.4 s. Listening across that, Identify said 'Unmodulated
-    carrier', confident 75 % (or AM), in about half the tries: a narrow
-    carrier keyed a time or two before a long one was taken for a
-    transmission starting. Now keying, CW."""
+    key down for 2.4 s. Listening over its last letters, Identify said
+    'Unmodulated carrier', confident 75 % (or AM), in about half the tries:
+    it stopped at the first take, a long element or the key held down. Now
+    keying heard in any take wins, and a carrier needs three takes. (From
+    6.6 s on every take hears only silence and the key held down: a carrier
+    switched on, nothing to tell it from one.)"""
     ident = identify_demo(99.82e6, 100.1e6, "CW", 500.0, start_s=start_s)
     assert ident.kind == "cw", ident.summary()
 
@@ -439,17 +441,39 @@ def test_keyed_into_a_held_key_is_cw_not_a_transmission():
     assert r.kind == "cw", (r.kind, r.features.get("scores"))
 
 
-def test_a_carrier_switched_on_is_never_confident():
-    """A steady carrier keyed up while listening could be a CW station
-    holding its key down: 'probably' at most."""
+def _switched(at, on=True, snr_db=30):
+    """A narrow carrier switched on (or off) ``at`` (a fraction) into one
+    second of signal, classified."""
     n = int(1.0 * FS)
     key = np.zeros(n)
-    key[int(0.4 * n) :] = 1.0
-    x, _ = S.add_noise(S.carrier(n, FS, 80.0) * key, FS, 30, 100.0, on_power=1.0)
-    r = classify(x)
+    if on:
+        key[int(at * n) :] = 1.0
+    else:
+        key[: int(at * n)] = 1.0
+    x, _ = S.add_noise(S.carrier(n, FS, 80.0) * key, FS, snr_db, 100.0, on_power=1.0)
+    return classify(x)
+
+
+@pytest.mark.parametrize("at", [0.1, 0.2, 0.4])
+def test_a_carrier_switched_on_is_never_confident(at):
+    """A steady carrier keyed up while listening could be a CW station
+    holding its key down: 'probably' at most."""
+    r = _switched(at)
     assert r.features["transmission"]
-    if r.kind == "carrier":
-        assert r.confidence <= 0.6
+    assert r.kind == "carrier"
+    assert r.confidence <= 0.6
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["on", "off"])
+@pytest.mark.parametrize("at", [0.2, 0.4, 0.6])
+def test_a_carrier_switched_once_is_not_keying(at, on):
+    """Switched on or off once, a strong carrier is no Morse code: the
+    channel is cut out through an FFT, whose ringing wraps the other end of
+    the block round to this one, and that 'key-down' at the edge (20-30 ms
+    at 40 dB) made it 'CW (Morse code)', confident 95 %. A key-down that
+    counts lies whole inside the block."""
+    r = _switched(at, on, snr_db=40)
+    assert r.kind != "cw", (r.kind, r.confidence, r.features.get("on_runs_keyed"))
 
 
 def test_keying_seen_once_is_kept():

@@ -413,8 +413,9 @@ class TestOnlyFarTunesChooseTheMode(_WindowTestCase):
         self.assertTrue(text.startswith("QRP 40m CW: listening in CW"), text)
 
     def test_a_typed_preset_channel_gets_the_presets_deviation(self):
-        # 446.000 MHz is 70cm Calling (5 kHz deviation), at the edge of the
-        # narrower PMR446 band (2.5 kHz deviation, 12.5 kHz filter).
+        # 446.000 MHz is 70cm Calling (5 kHz deviation): heard the preset's
+        # way, and named after it. (The band plan has no PMR446 band there
+        # any more: it is the US 70 cm FM simplex segment.)
         self.type_frequency("446")
         self.assertEqual(self.listening(), ("FM", "5 kHz", "25 kHz"))
         self.assertIn("70cm Calling", self.win._message_label.text())

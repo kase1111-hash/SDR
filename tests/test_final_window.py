@@ -589,20 +589,24 @@ class TestAudioButtonStates(_SecondCase):
 
     def test_paused_while_the_signal_isnt_real_time(self):
         # ROB-12: "Audio" while nothing played (the receiver couldn't keep
-        # up), and the hint gone from the status bar after 10 s.
+        # up), and the hint gone from the status bar after 10 s. (Checker:
+        # paused while the signal received isn't real time, as _route_audio
+        # judges it.)
         win = self.win
-        win._realtime_hint_shown = True
-        win._realtime_hint_text = "The demo device can't keep up in real time."
-        win._update_status()  # (the status timer)
-        self.assertEqual(win._audio_state(), "paused")
-        text, tip, name = self.shown()
-        self.assertEqual(text, " Paused")
-        self.assertIn("can't keep up", tip)
-        self.assertEqual(win._audio_button.property("tone"), "warning")
-        win._realtime_hint_shown = False
-        win._update_status()
-        self.assertEqual(self.shown()[0], " Audio")
-        self.assertFalse(win._audio_button.property("tone"))
+        if not win._is_running:
+            win._start_acquisition()
+        live = [False]
+        with mock.patch.object(type(win), "_realtime", lambda _s: live[0]):
+            win._update_status()  # (the status timer)
+            self.assertEqual(win._audio_state(), "paused")
+            text, tip, name = self.shown()
+            self.assertEqual(text, " Paused")
+            self.assertIn("can't keep up", tip)
+            self.assertEqual(win._audio_button.property("tone"), "warning")
+            live[0] = True
+            win._update_status()
+            self.assertEqual(self.shown()[0], " Audio")
+            self.assertFalse(win._audio_button.property("tone"))
 
     def test_the_new_texts_fit_the_button(self):
         button = self.win._audio_button
@@ -1386,6 +1390,143 @@ class TestTheWindowsWords(_WindowTestCase):
         texts = [label.text() for label in dialog.findChildren(QLabel)]
         self.assertTrue(any("labeled right" in t for t in texts), texts)
         self.assertFalse([t for t in texts if _BRITISH.search(t)])
+
+
+# --------------------------------------------------------------------------- #
+# The checker's follow-ups: the split comes back after a shrink, Paused only
+# while it is so, the listening menus follow their controls
+# --------------------------------------------------------------------------- #
+class TestTheSplitComesBack(_WindowTestCase):
+    """The right column's split, snapped between groups for a small window,
+    goes back where it was when the window grows again (it stayed on the
+    Frequency group: Mode, Filter and Squelch out of view at 1366x768)."""
+
+    def default_split(self, size):
+        win = self.win
+        win.resize(*size)
+        self.settle(10)
+        win._apply_default_splitter_sizes()
+        self.settle(5)
+        return win._right_splitter.sizes()
+
+    def shrink_and_grow(self, size, before):
+        win = self.win
+        for smaller in ((1024, 640), (1100, 700), size):
+            win.resize(*smaller)
+            self.settle(10)
+            split, cut = TestRightColumnSplit.cut_groups(win)
+            self.assertEqual(cut, [], f"{smaller}: split at {split} px cuts {cut}")
+        self.assertEqual(win._right_splitter.sizes(), before)
+
+    def test_growing_back_restores_the_split(self):
+        from tests.test_gui_coherent_window import _ThemedSizes
+
+        def check(_theme):
+            for size in ((1366, 768), (1920, 1080)):
+                with self.subTest(theme=_theme, size=size):
+                    self.shrink_and_grow(size, self.default_split(size))
+
+        _ThemedSizes.each_theme(self, check)
+
+    def test_a_split_moved_by_hand_comes_back_too(self):
+        win = self.win
+        self.default_split((1920, 1080))
+        splitter = win._right_splitter
+        # The handle dragged up to the gap after the Demodulation group (the
+        # second one: Frequency, then how to listen).
+        second = sorted(end for _start, end in win._section_spans())[1]
+        splitter.moveSplitter(second + 3, 1)
+        self.settle(5)
+        moved = splitter.sizes()
+        self.assertEqual(moved[0], second + 3)
+        self.shrink_and_grow((1920, 1080), moved)
+
+
+class TestPausedOnlyWhileSo(_SecondCase):
+    """ROB-12's Paused says what is going on now: not after Stop, nor once
+    the signal is real time again while the squelch is closed (the button
+    stayed Paused, with the "can't keep up" tip, until a signal came)."""
+
+    demo = True
+    shown = TestAudioButtonStates.shown
+
+    def setUp(self):
+        super().setUp()
+        win = self.win
+        win._audio = _FakeSink()
+        win._audio.open = True
+        win._audio_enabled = True
+        win._audio_problem = None  # (as with an output device)
+        win._sync_audio_ui()
+
+    def test_paused_follows_real_time_while_receiving(self):
+        win = self.win
+        if not win._is_running:
+            win._start_acquisition()
+        live = [False]
+        with mock.patch.object(type(win), "_realtime", lambda _s: live[0]):
+            win._update_status()
+            self.assertEqual(win._audio_state(), "paused")
+            self.assertEqual(self.shown()[0], " Paused")
+            self.assertIn("real time", self.shown()[1])
+            # Real time again, nothing played yet (the squelch closed): the
+            # flag the status bar's hint goes by is still set.
+            live[0] = True
+            win._realtime_hint_shown = True
+            win._update_status()
+            self.assertEqual(win._audio_state(), "on")
+            self.assertEqual(self.shown()[0], " Audio")
+            # Stopped: nothing is paused.
+            live[0] = False
+            win._stop_acquisition()
+            win._update_status()
+            self.assertFalse(win._is_running)
+            self.assertEqual(win._audio_state(), "on")
+            self.assertEqual(self.shown()[0], " Audio")
+
+
+class TestListeningMenusFollowTheirControls(_WindowTestCase):
+    """Radio > Squelch and Radio > Audio offer what the control panel
+    offers: a control that is off in this mode (or without the squelch)
+    is off in the menu too, instead of changing it unseen."""
+
+    def test_menu_items_follow_their_controls(self):
+        win, panel = self.win, self.win._control_panel
+        squelch = _menu(win, "Radio", "Squelch", "Squelch On")
+        auto = _menu(win, "Radio", "Squelch", "Auto Threshold")
+        nr = _menu(win, "Radio", "Audio", "Noise Reduction")
+        agc = _menu(win, "Radio", "Audio", "Audio AGC")
+        panel._demod_combo.setCurrentText("FM")
+        panel.set_squelch_enabled(True)
+        self.settle()
+        self.assertTrue(squelch.isEnabled() and auto.isEnabled() and nr.isEnabled())
+        self.assertFalse(agc.isEnabled())  # (FM audio is steady)
+        panel.set_squelch_enabled(False)
+        self.settle()
+        self.assertFalse(auto.isEnabled())
+        was = panel.is_squelch_auto()
+        auto.trigger()  # (a disabled action does nothing)
+        self.assertEqual(panel.is_squelch_auto(), was)
+        panel.set_squelch_enabled(True)
+        panel._demod_combo.setCurrentText("AM")
+        self.settle()
+        self.assertTrue(agc.isEnabled() and auto.isEnabled())
+        panel._demod_combo.setCurrentText("None (I/Q)")
+        self.settle()
+        self.assertFalse(squelch.isEnabled() or auto.isEnabled() or nr.isEnabled())
+        panel._demod_combo.setCurrentText("FM")
+        self.settle()
+        self.assertTrue(squelch.isEnabled() and auto.isEnabled() and nr.isEnabled())
+
+    def test_tone_squelch_outside_fm_says_where_it_applies(self):
+        win, panel = self.win, self.win._control_panel
+        panel._demod_combo.setCurrentText("AM")
+        self.settle()
+        _menu(win, "Radio", "Audio", "Tone Squelch...").trigger()
+        self.assertIn("choose FM in Radio > Mode", win._message_label.text())
+        self.assertIn("tone squelch", win._message_label.text())
+        _menu(win, "Radio", "Audio", "CW Pitch...").trigger()
+        self.assertIn("The CW pitch is used in CW", win._message_label.text())
 
 
 if __name__ == "__main__":

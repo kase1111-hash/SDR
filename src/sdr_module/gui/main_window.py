@@ -2519,6 +2519,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._resnap_timer.setInterval(0)
         self._resnap_timer.timeout.connect(self._resnap_right_splitter)
         self._right_splitter.installEventFilter(self)
+        # The share of the column the control pane is meant to have (the
+        # default's, or where the handle was dragged): the snap starts from
+        # it, so the pane grows back after the window shrank for a moment.
+        self._right_split_share: Optional[float] = None
+        self._right_splitter.splitterMoved.connect(self._note_right_split)
 
         # Extra window width goes to the displays, not the controls.
         self._main_splitter.setStretchFactor(0, 1)
@@ -2770,10 +2775,21 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         from .control_panel import DEMOD_MODES
 
         panel = self._control_panel
+        # A menu item is usable when its control is (the control panel's
+        # rules: no squelch or noise reduction in I/Q mode, Auto with the
+        # squelch on, the audio AGC in AM, SSB and CW), instead of changing
+        # a setting the panel shows greyed out (see eventFilter).
+        self._menu_followers: Dict[Any, List[Any]] = {}
+
+        def follow(widget, action):
+            self._menu_followers.setdefault(widget, []).append(action)
+            action.setEnabled(widget.isEnabled())
+            widget.installEventFilter(self)
 
         def choices(menu, combo, items, tip):
             # One checkable item per choice of ``combo`` (by value), checked
             # as the combo is.
+            follow(combo, menu.menuAction())
             group = QActionGroup(self)
             actions = {}
             for value, text in items:
@@ -2831,6 +2847,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             check.toggled.connect(
                 lambda on, a=action: a.isChecked() != on and a.setChecked(on)
             )
+            follow(check, action)
 
         audio_menu.addSeparator()
         choices(
@@ -2849,7 +2866,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._add_action(
             audio_menu,
             "&Tone Squelch...",
-            lambda: self._show_panel_control(panel._tone_combo),
+            lambda: self._show_panel_control(panel._tone_combo, mode="FM"),
             tip="Choose the CTCSS tone a repeater or PMR radio sends, to hear "
             "only it (FM; the Audio group in the control panel)",
         )
@@ -2867,9 +2884,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         belongs to, said when another one is in use."""
         panel = self._control_panel
         if mode and panel.get_demod_mode() != mode:
+            name = widget.accessibleName() or "setting"
+            if name[1:2].islower():  # ("Tone squelch", not "CW pitch")
+                name = name[0].lower() + name[1:]
             self._show_status_message(
-                f"The {widget.accessibleName() or 'setting'} is used in {mode}: "
-                f"choose {mode} in Radio > Mode first.",
+                f"The {name} is used in {mode}: choose {mode} in Radio > Mode "
+                "first.",
                 None,
                 5000,
             )
@@ -3800,6 +3820,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def eventFilter(self, obj, event):  # noqa: N802 - Qt naming
         if obj is self._own("_right_splitter") and event.type() == QEvent.Type.Resize:
             self._resnap_timer.start()  # (once QSplitter spread the new height)
+        if event.type() == QEvent.Type.EnabledChange:
+            # A listening menu item follows its control (_add_listening_menus).
+            for action in (self._own("_menu_followers") or {}).get(obj, ()):
+                action.setEnabled(obj.isEnabled())
         if (
             obj is getattr(self, "_freq_label", None)
             and event.type() == QEvent.Type.MouseButtonRelease
@@ -4464,7 +4488,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             - self._right_tabs.minimumSizeHint().height()
         )
         top = self._snap_to_section_gap(int(height * 0.55), height, limit)
-        self._right_splitter.setSizes([top, max(120, height - top)])
+        tabs = max(120, height - top)
+        self._right_splitter.setSizes([top, tabs])
+        self._right_split_share = top / max(1, top + tabs)  # (kept on resizes)
 
         height = self._display_splitter.height()
         if height < 300:
@@ -4529,13 +4555,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return None
         return sorted(spans)
 
+    def _note_right_split(self, _pos: int = 0, _index: int = 0) -> None:
+        """The right splitter's handle was dragged: the pane's new share of
+        the column is the one to keep (see _resnap_right_splitter)."""
+        sizes = self._right_splitter.sizes()
+        if len(sizes) == 2 and sum(sizes) > 0:
+            self._right_split_share = sizes[0] / sum(sizes)
+
     def _resnap_right_splitter(self) -> None:
         """(L10, DEV-E2E-06) The right column's height changed: QSplitter
         scaled the control pane, whose lower edge can then cut a group in
         half above the tool tabs (shrinking the window, or a split saved
-        at another height restored at launch). It moves to the nearest gap
-        between groups that leaves the tool tabs their minimum height. A
-        split already between groups stays where it is."""
+        at another height restored at launch). The pane takes its share of
+        the column (the default's, where the handle was dragged, or a
+        restored split's), and its lower edge moves to the nearest gap
+        between groups that leaves the tool tabs their minimum height. The
+        share is kept: growing the window again gives the pane back the
+        groups a smaller window had no room for."""
         splitter = self._right_splitter
         pane = splitter.widget(0)
         if pane is None or pane.isHidden() or not self.isVisible():
@@ -4544,20 +4580,27 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if len(sizes) != 2 or min(sizes) <= 0:
             return
         top, total = sizes[0], sum(sizes)
+        if self._right_split_share is None:
+            self._right_split_share = top / total
+        want = int(round(self._right_split_share * total))
         spans = self._section_spans()
-        if not spans or not any(start < top < end for start, end in spans):
+        if not spans:
             return
         limit = total - self._right_tabs.minimumSizeHint().height()
-        gaps = [end + 3 for _start, end in spans if end + 3 <= limit]
-        above = [g for g in gaps if g <= top]
-        below = [g for g in gaps if g > top]
-        if not (above or below):
-            return
-        if above and (not below or top - max(above) <= min(below) - top):
-            target = max(above)
+        if want <= limit and not any(start < want < end for start, end in spans):
+            target = want  # (between two groups already)
         else:
-            target = min(below)
-        splitter.setSizes([target, total - target])
+            gaps = [end + 3 for _start, end in spans if end + 3 <= limit]
+            above = [g for g in gaps if g <= want]
+            below = [g for g in gaps if g > want]
+            if not (above or below):
+                return
+            if above and (not below or want - max(above) <= min(below) - want):
+                target = max(above)
+            else:
+                target = min(below)
+        if target != top:
+            splitter.setSizes([target, total - target])
 
     def _set_plot_visible(self, plot: "QWidget", shown: bool) -> None:
         """View > Spectrum / Waterfall. Hiding the plot with the keyboard
@@ -10218,8 +10261,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         ``"no_output"`` (no audio output device, or no QtMultimedia),
         ``"silent"`` (on, but None (I/Q) mode has no audio), ``"second"``
         (on, but Listen in the Second Receiver window plays only that
-        receiver) or ``"paused"`` (on, but the signal isn't real time: the
-        receiver can't keep up, or a recording plays faster or slower)."""
+        receiver) or ``"paused"`` (on, but the signal received isn't real
+        time: the receiver can't keep up, or a recording plays faster or
+        slower). Paused is what holds the audio now, as _route_audio judges
+        it: not after Stop, nor once the signal is real time again while
+        the squelch is closed."""
         if not self._audio.available:
             return "no_output"
         if not self._audio_enabled:
@@ -10229,7 +10275,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         second = getattr(self, "_second_rx", None)
         if second is not None and second.mutes_main():
             return "second"
-        if self._realtime_hint_shown:
+        if self._is_running and not self._realtime():
             return "paused"
         return "on"
 
@@ -10362,11 +10408,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "paused": (
                 self._AUDIO_PAUSED_TEXT,
                 "Audio paused",
-                (
-                    self._realtime_hint_text
-                    or "The signal isn't arriving in real time, so audio is "
-                    "paused until it does."
-                )
+                # (Why now: also when the status bar's hint wasn't said.)
+                (self._realtime_hint() if state == "paused" else "")
                 + " Click to mute (Ctrl+M).",
             ),
             "no_output": (

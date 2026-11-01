@@ -1288,3 +1288,31 @@ class TestImportOptionsKeepsQuietCs8(_FilesCase):
             self.addCleanup(dialog.deleteLater)
             self.assertIs(dialog.sample_format(), prefill, name)
             self.assertFalse(dialog._format_hint_row.isVisibleTo(dialog), name)
+
+
+class TestATakeThatStartsBehind(_DemoTakeCase):
+    """A take started while the demo lagged (frames couldn't keep up just
+    before Record): reading a frame's older samples apart from its newest
+    made the demo count the newest as lag too, and a short stall then
+    skipped half a second ("The recording has gaps: 550 ms ...")."""
+
+    def lag_s(self):
+        dev = self.dev
+        return (self.clock.now - dev._stream_epoch) - dev._stream_pos / self.RATE
+
+    def test_a_short_stall_loses_nothing(self):
+        win = self.win
+        for _ in range(400):  # overloaded: the demo falls behind
+            self.run_frames(0.034)
+            if 0.30 < self.lag_s() < 0.45:
+                break
+        self.assertGreater(self.lag_s(), 0.30)
+        win._toggle_recording(True)
+        self.load = 0.5  # frames keep up again
+        self.run_frames(1.5)
+        self.assertFalse(win._pacer.overloaded)
+        # A 0.3 s freeze: less than the demo's half second of slack.
+        self.run_frames(1.0, stall_at=self.clock.now + 0.1, stall=0.3)
+        win._toggle_recording(False)
+        self.assertNotIn("lost", win._take_summary()[0])
+        self.assertNotIn("The recording has gaps", self.message())

@@ -7053,14 +7053,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Read one block a frame, the demo fell behind and skipped ahead
         (following the clock), and the take had silent gaps. Samples it
         still skips (a long stall) are counted as lost, as a driver's
-        dropped samples are."""
+        dropped samples are.
+
+        Both parts come in one read: the demo skips ahead when what is left
+        to read lags the clock by more than half a second, and read apart,
+        the newest part still to come counted as lag (a take started while
+        the demo lagged skipped at a stall of a third of a second)."""
         capturing = self._recording and not self._recording_paused
         backlog = min(self._pacer.backlog, _MAX_READ_SAMPLES) if capturing else 0
-        if backlog >= DISPLAY_BLOCK:
-            older = dev.read_samples(backlog)
-            if older is not None and len(older):
-                self._capture(older)
-        samples = dev.read_samples(count)
+        samples = dev.read_samples(backlog + count)
+        if backlog and samples is not None and len(samples) > count:
+            self._capture(samples[: len(samples) - count])
+            samples = samples[len(samples) - count :]
         # (A skip in the frame a take starts in came before it; one after
         # it stopped, e.g. on a full disk, isn't its.)
         capturing = capturing and self._recording and not self._recording_paused

@@ -343,6 +343,11 @@ class TestTheAppsOwnJobIsNamedNotTheDevice(_hardware_case()):
         "Decode Recording keeps this computer busy, so the ADS-B decoder "
         "misses part of the signal meanwhile."
     )
+    # (Once it is done: W-10.)
+    DONE = (
+        "Decode Recording kept this computer busy, so the ADS-B decoder "
+        "missed part of the signal meanwhile."
+    )
 
     def setUp(self):
         super().setUp()
@@ -403,8 +408,9 @@ class TestTheAppsOwnJobIsNamedNotTheDevice(_hardware_case()):
         self.assertFalse(self.win._pacer.overloaded)
         for line in lines:
             self.assertNotIn("device", line)
-        self.assertIn(self.JOB, lines)
+        self.assertIn(self.DONE, lines)
         self.assertNotIn("misses", lines[-1])
+        self.assertNotIn("missed", lines[-1])
 
     def test_without_a_job_the_device_is_still_named(self):
         self.run_frames(40)
@@ -434,6 +440,11 @@ class TestTheJobIsNamedUntilTheLoopCatchesUp(_demo_take_case()):
     JOB = (
         "Decode Recording keeps this computer busy, so the POCSAG decoder "
         "misses part of the signal meanwhile."
+    )
+    # (Once it is done: W-10.)
+    DONE = (
+        "Decode Recording kept this computer busy, so the POCSAG decoder "
+        "missed part of the signal meanwhile."
     )
 
     def setUp(self):
@@ -494,10 +505,11 @@ class TestTheJobIsNamedUntilTheLoopCatchesUp(_demo_take_case()):
                 self.run_frames(self.FRAME_S)
                 lines.append(self.line())
             where = (seconds, sorted(set(lines)))
-            self.assertIn(self.JOB, lines, where)
+            self.assertIn(self.DONE, lines, where)
             self.assertFalse([t for t in lines if "device" in t], where)
         self.run_frames(3.0)
         self.assertNotIn("misses", self.line())  # (then nothing)
+        self.assertNotIn("missed", self.line())
 
     def test_a_computer_still_too_slow_afterwards_names_the_device(self):
         """...but not for good: still too slow once the job is done, the

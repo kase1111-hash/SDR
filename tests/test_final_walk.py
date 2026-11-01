@@ -579,5 +579,99 @@ class TestAnotherPlaybackSpeedIsSaidOnce(_playback_case()):
         self.assertEqual(self.speed_messages(), [self.SAID.format(2)])
 
 
+# --------------------------------------------------------------------------- #
+# W-10: the Decoder's line once the job is done
+# --------------------------------------------------------------------------- #
+
+
+def _demo_take_case():
+    from tests.test_final_record import _DemoTakeCase
+
+    return _DemoTakeCase
+
+
+class TestTheDecodersLineOnceTheJobIsDone(_demo_take_case()):
+    """W-10: after a busy Decode Recording the Decoder's line went on saying
+    "Decode Recording keeps this computer busy, so the RDS decoder misses
+    part of the signal meanwhile." for about 4 s after the job had ended:
+    what the job made the display loop skip still counts for a few seconds,
+    so it is still the job that is named, but in the present tense. Once the
+    job is done it is said in the past tense (the demo device, on a fake
+    clock, at ten frames a second: a busy computer)."""
+
+    FRAME_S = 0.1
+    BUSY = (
+        "Decode Recording keeps this computer busy, so the POCSAG decoder "
+        "misses part of the signal meanwhile."
+    )
+    DONE = (
+        "Decode Recording kept this computer busy, so the POCSAG decoder "
+        "missed part of the signal meanwhile."
+    )
+
+    def setUp(self):
+        super().setUp()
+        panel = self.win._decoder_panel
+        panel._proto_combo.setCurrentText("POCSAG")
+        self.run_frames(0.1)
+        panel.set_receiving(True)
+
+    def run_frames(self, seconds):
+        end = self.clock.now + seconds
+        while self.clock.now < end:
+            tick = self.clock.now
+            self.win._update_display()
+            self.clock.now = max(self.clock.now, tick + self.FRAME_S)
+
+    def line(self):
+        return self.win._decoder_panel.decoder_status_text()
+
+    def a_busy_job(self, seconds):
+        """Decode Recording's job (run_job's own event loop) with ``seconds``
+        of display frames meanwhile; the Decoder's line at its end."""
+        import threading
+
+        from PyQt6.QtCore import QTimer
+
+        from sdr_module.gui.file_jobs import run_job
+
+        done = threading.Event()
+        said = []
+
+        def frames_meanwhile():
+            try:
+                self.run_frames(seconds)
+                said.append(self.line())
+            finally:
+                done.set()
+
+        QTimer.singleShot(0, frames_meanwhile)
+        result = run_job(
+            self.win, "Decode Recording", "Decoding…", lambda report: done.wait(20)
+        )
+        self.assertTrue(result.ok, result.error)
+        return said[0]
+
+    def test_said_in_the_past_once_it_is_done(self):
+        self.run_frames(1.0)  # (can't keep up, before and during the job)
+        self.assertEqual(self.a_busy_job(1.5), self.BUSY)
+        self.load = 0.3  # (done: the computer keeps up again)
+        lines = []
+        for _ in range(60):
+            self.run_frames(self.FRAME_S)
+            lines.append(self.line())
+            if len(lines) == 1:
+                # (The audio's hint, the Audio button's tooltip, alike.)
+                self.assertEqual(
+                    self.win._realtime_hint(),
+                    "Decode Recording kept this computer busy, so audio is "
+                    "paused until it catches up.",
+                )
+        self.assertNotIn(self.BUSY, lines)
+        self.assertIn(self.DONE, lines)
+        self.assertNotIn("misses", lines[-1])  # (then nothing)
+        self.assertNotIn("missed", lines[-1])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -8514,7 +8514,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         name = str(getattr(self._decoder, "name", "") or "live")
         rate = format_rate(self._device_sample_rate())
         if self._skip_by_job:
-            # (Its own job: a lower sample rate isn't the answer.)
+            # (Its own job: a lower sample rate isn't the answer. Once it is
+            # done, what it skipped still counts for a few seconds: said in
+            # the past tense then. W-10)
+            if busy_with() != self._skip_by_job:
+                return (
+                    f"{self._skip_by_job} kept this computer busy, so the {name} "
+                    "decoder missed part of the signal meanwhile."
+                )
             return (
                 f"{self._skip_by_job} keeps this computer busy, so the {name} "
                 "decoder misses part of the signal meanwhile."
@@ -9325,6 +9332,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "(the spectrum, decoders and recordings keep working)."
             )
         job = self._busy_job_now()
+        if job and busy_with() != job:  # (done: what it skipped still counts)
+            return (
+                f"{job} kept this computer busy, so audio is paused until it "
+                "catches up."
+            )
         if job:  # (this app's own job, not the device: P-04)
             return f"{job} keeps this computer busy, so audio is paused meanwhile."
         if self._playback.active:

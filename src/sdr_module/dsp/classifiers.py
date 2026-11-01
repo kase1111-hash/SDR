@@ -711,18 +711,29 @@ def _sideband_reach(
     spread this mirrored spectrum is measured to have (smoothed over 9 and
     33 bins, as single bins are judged), so weak sidebands count without
     taking the noise's ripple for signal. A strong signal elsewhere is
-    mirrored too, but only what joins the carrier counts."""
+    mirrored too, but only what joins the carrier counts, and only while
+    the power is on both sides: where one side holds far more than the
+    other (more than noise makes them differ, and the other under a
+    quarter of it), that is another station beside the carrier, and the
+    sidebands end."""
     n = len(ratio)
     d = np.arange(3, min(peak, n - 1 - peak) + 1)  # past the Hann main lobe
     d = d[band[peak + d] & band[peak - d]]
     if len(d) < 32:
         return 0
-    mirrored = 0.5 * (ratio[peak + d] + ratio[peak - d])
+    above, below = ratio[peak + d], ratio[peak - d]
+    mirrored = 0.5 * (above + below)
     reach = 0
     for width in (9, 33):
         smooth = _smooth(mirrored, width)
-        z = (smooth - 1.0) / _spread(smooth, 2.0 * width * averages)
-        hits = np.flatnonzero(z > 3.5)
+        spread = _spread(smooth, 2.0 * width * averages)
+        z = (smooth - 1.0) / spread
+        # (Each side spreads sqrt(2) times as much as their mean, their
+        # difference twice as much: 3.5 of its standard deviations.)
+        up, down = _smooth(above, width) - 1.0, _smooth(below, width) - 1.0
+        stronger, weaker = np.maximum(up, down), np.minimum(up, down)
+        one_sided = (stronger - weaker > 7.0 * spread) & (weaker < 0.25 * stronger)
+        hits = np.flatnonzero((z > 3.5) & ~one_sided)
         if not len(hits) or d[hits[0]] > 3 + gap:
             continue
         breaks = np.flatnonzero(np.diff(d[hits]) > gap)

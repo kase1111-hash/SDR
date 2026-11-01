@@ -94,6 +94,31 @@ class TestWeakAmIsAm:
             assert r.kind == "am"
             assert 8.0e3 <= r.bandwidth_hz <= 10.5e3, r.bandwidth_hz
 
+    @pytest.mark.parametrize("side", [1, -1])
+    def test_a_station_beside_it_is_not_its_sidebands(self, side):
+        """Two AM stations 10 kHz apart, each +/- 4.5 kHz, the one beside
+        the tuned one 10 dB stronger (Identify describes that one: its
+        sidebands reach within the AM reach). Its width is its own, not the
+        two stations': the spectrum mirrored about its carrier held the
+        other station's sidebands too, on one side only, and they counted
+        as its own (29.6 kHz wide, and Apply Mode's AM filter 15 kHz; 11.7
+        kHz and 12.9 kHz before its sidebands were judged mirrored)."""
+        rate = 100e3
+        n = int(0.5 * rate)
+        a = S.voice(n, rate, seed=1, band=(300.0, 4500.0))
+        b = S.voice(n, rate, seed=2, band=(300.0, 4500.0))
+        stronger = 10 ** (10 / 20) * S.am(n, rate, 0.7, b, offset=side * 10e3)
+        sig = S.am(n, rate, 0.7, a) + stronger
+        _width, reach = analysis_band("AM", 10e3, 2.4e6, 1.0e6)
+        for seed in range(3):
+            x, _ = S.add_noise(sig, rate, 30, 9e3, seed=97 * seed + 5)
+            ident = identify(x, rate, 1.0e6, reach, band_hz=(-0.45 * rate, 0.45 * rate))
+            r = ident.result
+            assert ident.kind == "am", (seed, ident.summary())
+            assert r.center_offset_hz * side > 8e3, r.center_offset_hz
+            assert 8e3 <= r.bandwidth_hz <= 12e3, (seed, r.bandwidth_hz)
+            assert ident.filter_hz <= 13e3, (seed, ident.filter_hz)
+
     @pytest.mark.parametrize("snr", [10, 20, 30, 45])
     def test_a_steady_carrier_is_still_a_carrier(self, snr):
         """(Guard) A carrier with nothing on it stays a carrier: judged

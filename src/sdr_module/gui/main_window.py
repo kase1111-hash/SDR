@@ -4040,7 +4040,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             history: Keep it in the last 20 messages (a click on the message
                 area lists them); False for passing flashes ("Volume 60%").
             log: A warning also goes to Tools > Error History; False when
-                the caller logged it already (so it is listed once).
+                the caller logged it already (so it is listed once), and for
+                a notice that is no problem ("Recording paused", "Recording
+                armed...", what to do first): only problems are listed there.
         """
         self._message_label.setText(message)
         self._message_label.setToolTip(
@@ -4646,6 +4648,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "Audio recording paused" if paused else "Audio recording resumed",
                 "warning" if paused else None,
                 2500,
+                log=False,  # (a notice, not a problem)
             )
             return
         paused = bool(paused) and self._recording
@@ -4658,6 +4661,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "Recording paused" if paused else "Recording resumed",
             "warning" if paused else None,
             2500,
+            log=False,
         )
 
     def _on_record_kind_changed(self, kind: str) -> None:
@@ -6620,6 +6624,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "(Space)",
                 "warning",
                 6000,
+                log=False,
             )
         else:
             # Replaces any "Use File > Save Recording" message about the
@@ -6667,6 +6672,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "was not running.",
                 "warning",
                 6000,
+                log=False,
             )
         self._update_take_panel()
         logger.info("Recording stopped")
@@ -7104,6 +7110,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "CW in Demodulation first.",
                 "warning",
                 8000,
+                log=False,
             )
             self._sync_audio_record_ui()
             return False
@@ -7174,6 +7181,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     "was saved.",
                     "warning",
                     6000,
+                    log=False,
                 )
         logger.info(f"Audio recording stopped: {take.path} ({seconds:.1f} s)")
         return take.path
@@ -7777,6 +7785,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "or Connect... to receive.",
                 "warning",
                 10000,
+                log=False,
             )
         elif self._is_running:
             self._show_status_message(
@@ -7856,6 +7865,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "Connect a device to save the S-meter calibration for it.",
                 "warning",
                 6000,
+                log=False,
             )
             return
         value = (
@@ -8302,6 +8312,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     f"Disconnected from {released[0]}. No device is connected.",
                     "warning",
                     8000,
+                    log=False,  # (the failure itself is logged where it happened)
                 )
             elif ended:  # (connecting failed after the file was closed)
                 back = (
@@ -8309,7 +8320,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     if self._device is not None
                     else "No device is connected."
                 )
-                self._show_status_message(f"Closed {ended[0]}. {back}", "warning", 8000)
+                self._show_status_message(
+                    f"Closed {ended[0]}. {back}", "warning", 8000, log=False
+                )
             return False
 
         end_playback()
@@ -8654,12 +8667,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         if self._device is not None:
             blocked = self._device_controls.rate_blocked()
-            if blocked:
-                self._show_status_message(blocked, "warning", 8000)
+            if blocked:  # (what to do first, or a limit: not a problem)
+                self._show_status_message(blocked, "warning", 8000, log=False)
                 return False
         refused = self._device_controls.rate_refused(rate)
         if refused:
-            self._show_status_message(refused, "warning", 8000)
+            self._show_status_message(refused, "warning", 8000, log=False)
             return False
         if self._device is None:
             self._device_controls.requested_rate = rate
@@ -8866,6 +8879,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "recording.",
                 "warning",
                 6000,
+                log=False,
             )
             return False
         path = path or self._choose_recording("Open Recording")

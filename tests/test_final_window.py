@@ -25,7 +25,7 @@ from tests.test_gui_chrome import (  # noqa: E402
     _WindowTestCase,
     require_pyqt6,
 )
-from tests.test_gui_device_settings import _DeviceCase  # noqa: E402
+from tests.test_gui_device_settings import FakeRtlSdr, _DeviceCase  # noqa: E402
 from tests.test_gui_second_receiver import _FakeSink, _SecondCase  # noqa: E402
 
 if HAS_PYQT6:
@@ -1166,6 +1166,93 @@ class TestHelpUsesTheMenusNames(_WindowTestCase):
         identify = _menu(win, "Tools", "Identify Signal")
         self.assertEqual(identify.shortcut().toString(), "Ctrl+I")
         self.assertTrue(action.shortcut().isEmpty())
+
+
+# --------------------------------------------------------------------------- #
+# Leftover 9: notices are not problems (Tools > Error History)
+# --------------------------------------------------------------------------- #
+class TestNoticesStayOutOfTheErrorHistory(_DeviceCase):
+    """An amber notice in the status bar (the app doing what was asked, or
+    saying what to do first) is not written to Tools > Error History, nor
+    printed to the console: only real problems are."""
+
+    def quietly(self, action, shown):
+        with self.assertNoLogs("sdr_module.gui.main_window", level="WARNING"):
+            action()
+        self.assertIn(shown, self.message())
+        self.assertEqual(self.tone(), "warning")
+
+    def test_recording_notices(self):
+        win = self.win
+        win._stop_acquisition()
+        self.quietly(lambda: win._toggle_recording(True), "Recording armed")
+        self.quietly(lambda: win._on_panel_record_paused(True), "Recording paused")
+        win._on_panel_record_paused(False)
+        self.quietly(lambda: win._toggle_recording(False), "Nothing was captured")
+
+    def test_audio_recording_notices(self):
+        from sdr_module.gui import file_dialogs
+
+        win = self.win
+        folder = tempfile.mkdtemp(prefix="fw-notices-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        file_dialogs.set_recordings_folder(self.store, folder)
+        win._set_demod_mode("None (I/Q)", "", "")
+        self.quietly(win._start_audio_recording, "has no audio to record")
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        win._stop_acquisition()
+        win._control_panel.set_record_kind("audio")
+        self.assertTrue(win._start_audio_recording())
+        self.quietly(
+            lambda: win._on_panel_record_paused(True), "Audio recording paused"
+        )
+        win._on_panel_record_paused(False)
+        self.quietly(win._stop_audio_recording, "nothing was received")
+
+    def test_what_to_do_first(self):
+        win = self.win
+        # A sample rate refused (like a frequency out of range).
+        self.quietly(lambda: win.set_sample_rate(10e6), "The demo device runs at")
+        win._toggle_recording(True)
+        self.quietly(lambda: win.set_sample_rate(1.024e6), "Stop recording to change")
+        win._toggle_recording(False)
+        with mock.patch.object(type(win), "_tx_busy", lambda _s: True):
+            self.quietly(
+                lambda: win._open_recording("/no/such/file.cu8"),
+                "Wait until the transmission ends",
+            )
+        win._release_device()
+        self.quietly(
+            lambda: win._save_signal_meter_calibration(2.0, None),
+            "Connect a device to save the S-meter calibration",
+        )
+        if hasattr(win, "_sstv_panel"):
+            self.quietly(win._on_sstv_tune_iss, "No receiver")
+
+    def test_disconnected_after_a_failed_connect_is_listed_once(self):
+        from sdr_module.gui import device_dialog
+
+        self.rtl()
+        win = self.win
+        win._exec_dialog = _Answers(
+            win, row="RTL-SDR #0", rows=[("RTL-SDR", "RTL-SDR #0", "rtlsdr", 0)]
+        )
+
+        def unplugged(_self, device_index=0):
+            raise OSError("usb_open error -4")
+
+        self.patch.setattr(FakeRtlSdr, "__init__", unplugged)
+        with (
+            mock.patch.object(device_dialog.QMessageBox, "warning"),
+            mock.patch.object(device_dialog.QMessageBox, "critical"),
+            self.assertNoLogs("sdr_module.gui.main_window", level="WARNING"),
+        ):
+            self.assertFalse(win._show_device_dialog())
+        self.assertIn("Disconnected from RTL-SDR #0", self.message())
+
+    def test_problems_are_still_listed(self):
+        with self.assertLogs("sdr_module.gui.main_window", level="WARNING"):
+            self.win._show_status_message("Couldn't open the folder: X", "warning")
 
 
 if __name__ == "__main__":

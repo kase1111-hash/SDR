@@ -303,8 +303,12 @@ class TestTheAudioHintFollowsItsCause(_HintCase):
         self.load = 0.3
         self.run_frames(8.0)
         self.assertEqual(self.hints_said(), [AUDIO_DEVICE, AUDIO_JOB, AUDIO_JOB_DONE])
-        self.assertIn("Audio resumed", _runs(self.said))
-        self.assertEqual(win._audio_state() == "paused", False)
+        self.assertTrue(win._realtime())
+        # "Audio resumed" took the place of the hint said last.
+        runs = _runs(self.said)
+        self.assertIn("Audio resumed", runs)
+        self.assertEqual(runs[runs.index("Audio resumed") - 1], AUDIO_JOB_DONE)
+        self.assertFalse(win._realtime_hint_shown)
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 required")

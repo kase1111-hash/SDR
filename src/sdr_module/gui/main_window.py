@@ -9997,9 +9997,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         panel = self._control_panel
         decoder = preset_table.decoder_for(preset)
-        # The last preset's decoder, turned off as the tuning left it.
+        # The last preset's decoder, turned off as the tuning left it, or
+        # now unless this preset uses it too (one close by, where it is
+        # still heard: ISS APRS and ISS SSTV/Voice are 25 kHz apart).
         note = self._preset_decoder_note
         self._preset_decoder_note = ""
+        owned = self._preset_decoder
+        if owned is not None and owned[0] != decoder:
+            off = self._preset_decoder_off()
+            note += f" · {off}" if off else ""
         if decoder == "SSTV":
             if HAS_HAM_RADIO:
                 self._show_panel("sstv")
@@ -10041,25 +10047,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         owned = self._preset_decoder
         if owned is None:
             return
-        decoder, name, freq, bands = owned
+        _decoder, name, freq, bands = owned
         if any(low <= freq_hz <= high for low, high in bands):
             return
-        self._preset_decoder = None
-        if decoder == "SSTV":
-            if not self._sstv_listening():
-                return
-            self._sstv_panel._on_stop_clicked()  # (as its Stop button does)
-            note = "SSTV decoder stopped"
-        else:
-            panel = self._decoder_panel
-            if (
-                panel._proto_combo.currentText() != decoder
-                or not panel._enabled_check.isChecked()
-            ):
-                return
-            panel._enabled_check.setChecked(False)
-            self._update_decoder_chip()  # ("ADS-B · paused")
-            note = f"{decoder} decoder off"
+        note = self._preset_decoder_off()
+        if not note:
+            return
         if self._control_panel._applying_preset:
             self._preset_decoder_note = f" · {note}"
             return
@@ -10069,6 +10062,29 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "info",
             5000,
         )
+
+    def _preset_decoder_off(self) -> str:
+        """Turn off the decoder a preset turned on (unless you changed it
+        since: another protocol, or off already) and forget it. What was
+        done ("ADS-B decoder off"), or "" for nothing."""
+        owned, self._preset_decoder = self._preset_decoder, None
+        if owned is None:
+            return ""
+        decoder = owned[0]
+        if decoder == "SSTV":
+            if not self._sstv_listening():
+                return ""
+            self._sstv_panel._on_stop_clicked()  # (as its Stop button does)
+            return "SSTV decoder stopped"
+        panel = self._decoder_panel
+        if (
+            panel._proto_combo.currentText() != decoder
+            or not panel._enabled_check.isChecked()
+        ):
+            return ""
+        panel._enabled_check.setChecked(False)
+        self._update_decoder_chip()  # ("ADS-B · paused")
+        return f"{decoder} decoder off"
 
     def _select_decoder(self, protocol: str) -> bool:
         """Choose ``protocol`` in the Decoder panel and tick Decode (a

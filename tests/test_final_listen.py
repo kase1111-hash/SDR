@@ -313,6 +313,38 @@ class TestPresetDecoderLifetime(_WindowTestCase):
             self.history(),
         )
 
+    def test_the_next_preset_takes_over_even_close_by(self):
+        """Another preset where the last one's decoder is still heard turns
+        that decoder off unless it uses it too: POCSAG then Marine Ch 16
+        kept POCSAG decoding; ISS APRS then ISS SSTV/Voice (25 kHz apart)
+        left APRS decoding for good (only one decoder was remembered), and
+        the other way round SSTV listened on, warning on every AM tune."""
+        from sdr_module.gui.main_window import HAS_HAM_RADIO
+
+        win = self.win
+        if not win._is_running:
+            win._toggle_acquisition()
+        self.assertTrue(win._apply_preset_named("POCSAG"))
+        self.assertEqual(self.decoding(), ("POCSAG", True))
+        self.assertTrue(win._apply_preset_named("Marine Ch 16"))
+        self.assertEqual(self.decoding(), ("POCSAG", False))
+        self.assertIn("· POCSAG decoder off", win._message_label.text())
+        if not HAS_HAM_RADIO:
+            return
+        self.assertTrue(win._apply_preset_named("ISS APRS"))
+        self.assertEqual(self.decoding(), ("AX.25/APRS", True))
+        self.assertTrue(win._apply_preset_named("ISS SSTV/Voice"))
+        self.assertTrue(win._sstv_listening())
+        self.assertEqual(self.decoding(), ("AX.25/APRS", False))
+        self.assertIn("· AX.25/APRS decoder off", win._message_label.text())
+        self.assertTrue(win._apply_preset_named("ISS APRS"))
+        self.assertFalse(win._sstv_listening())
+        self.assertEqual(self.decoding(), ("AX.25/APRS", True))
+        self.assertIn("· SSTV decoder stopped", win._message_label.text())
+        self.type_frequency("100.1")
+        self.assertEqual(self.decoding(), ("AX.25/APRS", False))
+        self.assertFalse(win._sstv_listening())
+
     def test_a_decoder_you_changed_is_yours(self):
         self.win._apply_preset_named("ADS-B")
         combo = self.win._decoder_panel._proto_combo

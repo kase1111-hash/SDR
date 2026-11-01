@@ -674,12 +674,10 @@ class TestSecondReceiverStopSaysWhereTheRecordingWent(_FilesCase):
             rx._frame()
         rx.stop()
         text = rx.message()
-        self.assertTrue(
-            text.startswith(
-                "Stopped; Demo Device (simulated signals) is closed. Saved "
-            ),
-            text,
-        )
+        # (I-window: where the recording went comes first, so the window's
+        # status bar shows the file's name at 860 px too.)
+        self.assertTrue(text.startswith("Stopped. Saved iq_"), text)
+        self.assertIn("Demo Device (simulated signals) is closed.", text)
         self.assertIn("_rx2.sigmf-data", text)
         self.assertIn("File > Open Recording", text)
         self.assertEqual(rx._message_label.property("tone"), "success")

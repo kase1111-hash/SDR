@@ -298,6 +298,15 @@ _REALTIME_WINDOW_S = 2.0
 # While audio pauses for that again and again, the status bar says why at
 # most this often (the Audio button says Paused, its tooltip why).
 _REALTIME_HINT_EVERY_S = 30.0
+# The right column (controls over the tool tabs) takes this share of the
+# window's width as it is resized, the plots the rest: never narrower than
+# _RIGHT_COLUMN_MIN_PX (every tool tab in view at 1024 px), nor wider than
+# _RIGHT_COLUMN_MAX_PX (the Decoder's Aircraft list, its ten columns side
+# by side). 406 px at 1366 px as before; 572 px at 1920 px (it stopped at
+# 440, and the Aircraft list scrolled sideways at every window size).
+_RIGHT_COLUMN_SHARE = 0.3
+_RIGHT_COLUMN_MIN_PX = 400
+_RIGHT_COLUMN_MAX_PX = 660
 # The most signal one display frame takes from the device, in seconds (a
 # stalled window catches up in steps), and the most until frames are known
 # to keep up with real time (so finding out stalls a slow computer only
@@ -2139,6 +2148,27 @@ def _span_text(seconds: float) -> str:
     return f"{seconds:.1f} s"
 
 
+def _splitter_state_sizes(state: Any) -> List[int]:
+    """The pane sizes a QSplitter state was saved with (its pixels then:
+    ``QSplitter.sizes()`` only reports them once the window is laid out),
+    or ``[]`` when they can't be read."""
+    from PyQt6.QtCore import QByteArray, QDataStream, QIODevice
+
+    try:
+        data = QByteArray(state)  # (kept: the stream reads from it)
+        stream = QDataStream(data, QIODevice.OpenModeFlag.ReadOnly)
+        if stream.readInt32() != 0xFF:  # (QSplitter's marker)
+            return []
+        stream.readInt32()  # (its version)
+        count = stream.readUInt32()
+        if count > 16:
+            return []
+        sizes = [stream.readInt32() for _ in range(count)]
+    except Exception:  # pragma: no cover - defensive
+        return []
+    return sizes if stream.status() == QDataStream.Status.Ok else []
+
+
 # ---------------------------------------------------------------------------
 # Status bar message label
 # ---------------------------------------------------------------------------
@@ -2878,9 +2908,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._right_split_share: Optional[float] = None
         self._right_splitter.splitterMoved.connect(self._note_right_split)
 
-        # Extra window width goes to the displays, not the controls.
+        # QSplitter gives a change of the window's width to the displays;
+        # the right column then takes its share back (_RIGHT_COLUMN_SHARE,
+        # or where its handle was dragged), so a wide window widens it too
+        # (_keep_right_column_share).
         self._main_splitter.setStretchFactor(0, 1)
         self._main_splitter.setStretchFactor(1, 0)
+        self._right_column_share: Optional[float] = None
+        self._right_column_timer = QTimer(self)
+        self._right_column_timer.setSingleShot(True)
+        self._right_column_timer.setInterval(0)
+        self._right_column_timer.timeout.connect(self._keep_right_column_share)
+        self._main_splitter.installEventFilter(self)
+        self._main_splitter.splitterMoved.connect(self._note_right_column_share)
 
     @staticmethod
     def _text_width(button: "QPushButton", *texts: str) -> int:
@@ -4183,6 +4223,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def eventFilter(self, obj, event):  # noqa: N802 - Qt naming
         if obj is self._own("_right_splitter") and event.type() == QEvent.Type.Resize:
             self._resnap_timer.start()  # (once QSplitter spread the new height)
+        if obj is self._own("_main_splitter") and event.type() == QEvent.Type.Resize:
+            self._right_column_timer.start()  # (once QSplitter spread the width)
         if event.type() == QEvent.Type.EnabledChange:
             # A listening menu item follows its control (_add_listening_menus).
             for action in (self._own("_menu_followers") or {}).get(obj, ()):
@@ -4858,14 +4900,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._apply_default_splitter_sizes()
 
     def _apply_default_splitter_sizes(self) -> None:
-        """Default proportions: controls ~30% (400-440 px) wide, the control
+        """Default proportions: controls 30% (400-660 px) wide, the control
         panel over ~55% of the right column, spectrum over 40% of the plots."""
         width = self._main_splitter.width()
         if width < 400:
             width = self.width() - 12
-        # (At least 400 px: the tool-tab bar shows every tab, with the
-        # maximize arrows and the Decoder's count, at 1024 px too.)
-        right = int(min(440, max(400, width * 0.3)))
+        self._right_column_share = _RIGHT_COLUMN_SHARE  # (kept on resizes)
+        right = self._right_column_width(width)
         self._main_splitter.setSizes([max(200, width - right), right])
 
         height = self._right_splitter.height()
@@ -4952,6 +4993,38 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         sizes = self._right_splitter.sizes()
         if len(sizes) == 2 and sum(sizes) > 0:
             self._right_split_share = sizes[0] / sum(sizes)
+
+    def _right_column_width(self, width: int) -> int:
+        """The right column's width in a main splitter ``width`` px wide:
+        its share, at least _RIGHT_COLUMN_MIN_PX and at most
+        _RIGHT_COLUMN_MAX_PX."""
+        share = self._right_column_share or _RIGHT_COLUMN_SHARE
+        wanted = int(round(width * share))
+        return min(_RIGHT_COLUMN_MAX_PX, max(_RIGHT_COLUMN_MIN_PX, wanted))
+
+    def _note_right_column_share(self, _pos: int = 0, _index: int = 0) -> None:
+        """The handle between the plots and the right column was dragged:
+        the column's new share of the width is the one to keep."""
+        sizes = self._main_splitter.sizes()
+        if len(sizes) == 2 and sum(sizes) > 0:
+            self._right_column_share = sizes[1] / sum(sizes)
+
+    def _keep_right_column_share(self) -> None:
+        """The window's width changed and QSplitter gave all of it to the
+        plots: the right column takes its share again (a wide window widens
+        it too, so the Decoder's Aircraft list shows its columns side by
+        side), and a narrower window gives it back."""
+        splitter = self._main_splitter
+        sizes = splitter.sizes()
+        if len(sizes) != 2 or min(sizes) <= 0 or not self.isVisible():
+            return
+        total = sum(sizes)
+        if self._right_column_share is None:
+            # (A split restored from the settings: the share it has here.)
+            self._right_column_share = sizes[1] / total
+        right = self._right_column_width(total)
+        if abs(right - sizes[1]) > 1:
+            splitter.setSizes([total - right, right])
 
     def _resnap_right_splitter(self) -> None:
         """(L10, DEV-E2E-06) The right column's height changed: QSplitter
@@ -11360,6 +11433,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "info",
                 6000,
             )
+        elif self._audio_enabled and self._audio_state() == "second":
+            # (On, as the button says "Muted (2nd RX)": not a bare "Audio on".)
+            self._show_status_message(
+                "Audio on, but Listen in the Second Receiver window plays only "
+                "that receiver: choose Main window or Both there to hear this one.",
+                "info",
+                6000,
+            )
         else:
             self._show_status_message(
                 "Audio on" if self._audio_enabled else "Muted (Ctrl+M unmutes)",
@@ -11762,6 +11843,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if ok and min(splitter.sizes() or [0]) < 40:
                 ok = False
             restored_all = restored_all and ok
+            if ok and splitter is self._main_splitter:
+                # QSplitter gives the right column its saved width in pixels:
+                # saved on a wider window, it would take more of this one.
+                # Its share of the width is what is kept.
+                saved = _splitter_state_sizes(state)
+                if len(saved) == 2 and min(saved) > 0:
+                    self._right_column_share = saved[1] / sum(saved)
         self._splitters_restored = restored_all
         # The plots shown, the Frequency field's unit and the tool tabs
         # filling the right column, as they were left (after the splitters,

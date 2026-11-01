@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import shutil
 import time
 from collections import deque
@@ -327,6 +328,13 @@ def _device_call(device: Any, name: str, *args: Any) -> bool:
 
 def _model_name(kind: str) -> str:
     return {"rtlsdr": "RTL-SDR", "hackrf": "HackRF One"}.get(kind, "Device")
+
+
+def _file_and_folder(path: str) -> Tuple[str, str]:
+    """A recording's file name and its folder, as messages say them: the
+    name first, so that the window's status bar shows it at 860 px too
+    (the folder was the start of a path that left no room for it)."""
+    return os.path.basename(path), file_dialogs.display_path(os.path.dirname(path))
 
 
 def device_kind(obj: Any) -> str:
@@ -983,9 +991,11 @@ if HAS_PYQT6:
                 "without hardware. The list is refreshed every time it opens."
             )
             self._source_combo.activated.connect(self._on_source_activated)
-            label = QLabel("Device:")
-            label.setBuddy(self._source_combo)
-            form.addRow(label, self._source_combo)
+            # The whole width of the group (titled Device): the demo device's
+            # name, "Demo Device (simulated signals)", fits at the window's
+            # minimum width (860 px) too, which a label beside it didn't
+            # leave room for.
+            form.addRow(self._source_combo)
 
             self._rate_combo = self._combo(8)
             self._rate_combo.setAccessibleName("Second receiver's sample rate")
@@ -1865,9 +1875,12 @@ if HAS_PYQT6:
             if was_running:
                 self.running_changed.emit(False)
                 if not quiet and said is not None:
+                    # Where the recording went first: at the window's
+                    # minimum width the end of the line is cut off.
                     text, tone, duration = said
+                    lead = "Stopped. " if tone == "success" else ""
                     self._show_message(
-                        f"Stopped; {name} is closed. {text}", tone, duration
+                        f"{lead}{text} {name} is closed.", tone, duration
                     )
                 elif not quiet:
                     self._show_message(f"Stopped; {name} is closed.", None, 4000)
@@ -2876,9 +2889,10 @@ if HAS_PYQT6:
             self._record_path = path
             self._record_lo = self._lo_hz
             self._next_space_check = 0.0
+            name, folder = _file_and_folder(path)
             self._show_message(
-                f"Recording to {file_dialogs.display_path(path)}; tuning stays "
-                "inside the span while it records.",
+                f"Recording to {name} in {folder}; tuning stays inside the span "
+                "while it records.",
                 "info",
                 6000,
             )
@@ -2923,21 +2937,21 @@ if HAS_PYQT6:
                 return
             seconds = recorder.duration_seconds
             size = recorder.file_size_bytes
-            where = file_dialogs.display_path(path)
+            name, folder = _file_and_folder(path)
             try:
                 recorder.stop()
             except Exception as e:  # pragma: no cover - disk trouble
                 logger.warning(f"Could not finish the recording {path}: {e}")
                 problem = problem or f"its metadata couldn't be written ({e})"
                 text = (
-                    f"{where} holds {_clock_text(seconds)} of samples, but "
-                    "without its frequency and rate."
+                    f"{name} in {folder} holds {_clock_text(seconds)} of "
+                    "samples, but without its frequency and rate."
                 )
             else:
                 text = (
-                    f"Saved {where} ({_clock_text(seconds)}, "
-                    f"{format_size(size)}). File > Open Recording in "
-                    "the main window plays it."
+                    f"Saved {name} ({_clock_text(seconds)}, {format_size(size)}) "
+                    f"in {folder}. File > Open Recording in the main window "
+                    "plays it."
                 )
             if problem:
                 text = f"Recording stopped: {problem}. {text}"

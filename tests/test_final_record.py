@@ -1234,3 +1234,57 @@ class TestInputWaitsWithTheProgressDialogUp(_FilesCase):
         QTimer.singleShot(150, cancel)
         result = run_job(win, "Test", "Working…", work, show_after_ms=0)
         self.assertTrue(result.cancelled)
+
+
+# ---------------------------------------------------------------------------
+# From the check of these fixes (each failed before its fix).
+
+
+def _quiet_cs8_from_the_demo(n=N):
+    """The demo's 1090 MHz band as hackrf_transfer writes it at a low gain:
+    cs8 that is almost all zeros (the noise is a fraction of a step)."""
+    from sdr_module.gui.device_dialog import MockDevice
+
+    device = MockDevice()
+    device.set_frequency(1090e6)
+    device.set_sample_rate(2.4e6)
+    device.start_rx()
+    parts = device.read_samples(n).view(np.float32)
+    return np.clip(np.round(parts * 127.0), -128, 127).astype(np.int8).tobytes()
+
+
+class TestNearlySilentCs8IsNotTakenFor16Bit:
+    """A cs8 capture that is almost all zeros has a few nonzero I values more
+    than Q ones: the 'low byte spreads wider than the high byte' rule read
+    that as 16-bit, sure of it (Import Options offered "Use cs16")."""
+
+    def test_the_demo_s_adsb_band_as_quiet_cs8(self):
+        data = _quiet_cs8_from_the_demo()
+        assert guess_sample_format(data) is SampleFormat.INT8
+        assert confident_sample_format(data) is not SampleFormat.INT16
+
+    @pytest.mark.parametrize("seed", range(6))
+    def test_a_few_nonzero_values(self, seed):
+        rng = np.random.default_rng(seed)
+        x = np.zeros(2 * N, np.int8)
+        x[0::2][rng.choice(N, 40, replace=False)] = rng.choice([-1, 1, 2], 40)
+        x[1::2][rng.choice(N, 3, replace=False)] = 1
+        assert guess_sample_format(x.tobytes()) is SampleFormat.INT8
+
+
+class TestImportOptionsKeepsQuietCs8(_FilesCase):
+    def test_no_use_cs16_for_a_quiet_cs8_capture(self):
+        from sdr_module.gui.iq_files import ImportOptionsDialog, describe_iq_file
+
+        for name, prefill in (
+            ("adsb_1090MHz_2.4Msps.cs8", SampleFormat.INT8),
+            ("adsb_1090MHz_2.4Msps.iq", SampleFormat.INT8),
+        ):
+            path = self.path(name)
+            with open(path, "wb") as handle:
+                handle.write(_quiet_cs8_from_the_demo(8 * N))
+            options, missing = describe_iq_file(path)
+            dialog = ImportOptionsDialog(options, missing, "play")
+            self.addCleanup(dialog.deleteLater)
+            self.assertIs(dialog.sample_format(), prefill, name)
+            self.assertFalse(dialog._format_hint_row.isVisibleTo(dialog), name)

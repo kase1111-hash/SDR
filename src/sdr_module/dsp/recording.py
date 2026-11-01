@@ -3204,10 +3204,11 @@ def _guess_sample_format(data: bytes) -> Tuple[SampleFormat, bool]:
         return SampleFormat.INT16, True
     # 8-bit I and Q spread alike; a 16-bit sample's low byte spreads far
     # wider than its high byte (also when a strong burst fills part of
-    # the data).
+    # the data). Less than a step says nothing: in cs8 that is almost all
+    # zeros, a few more I values than Q ones aren't zero.
     spread_low = float(np.var(low.view(np.int8).astype(np.float32)))
     spread_high = float(np.var(high.view(np.int8).astype(np.float32)))
-    if spread_high > 0 and spread_low > 10.0 * spread_high:
+    if spread_high > 0 and spread_low > max(10.0 * spread_high, 1.0):
         return SampleFormat.INT16, True
     zero_low, zero_high = near_zero(low), near_zero(high)
     if zero_high > 0.5 and zero_low < 0.4:

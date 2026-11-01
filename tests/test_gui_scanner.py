@@ -600,7 +600,9 @@ class TestScannerTab(_PanelCase):
         from sdr_module.gui.scanner_dialog import SCAN_PRESETS
 
         panel = self.panel()
-        self.assertEqual(panel._preset.currentText(), SCAN_PRESETS[0].label)
+        # (The combo shows the band's name; its data is the full label.)
+        self.assertEqual(panel._preset.currentData(), SCAN_PRESETS[0].label)
+        self.assertTrue(SCAN_PRESETS[0].label.startswith(panel._preset.currentText()))
         panel._preset.setCurrentIndex(5)  # Airband AM
         air = SCAN_PRESETS[4]
         self.assertEqual(

@@ -667,5 +667,237 @@ class TestExportResultsFolder(unittest.TestCase):
             _settle()
 
 
+# --------------------------------------------------------------------------- #
+# The Scanner tab's smaller problems (SCAN-12, 13, 14, 19, 21, 24, 26)
+# --------------------------------------------------------------------------- #
+class _ScanPanelCase(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+        from tests.test_gui_scanner import FakeWindow
+
+        self.store = _FakeSettings()
+        self.host = FakeWindow()
+        self._panels = []
+
+    def tearDown(self):
+        for panel in self._panels:
+            panel.engine.stop()
+            panel.close()
+            panel.deleteLater()
+        _settle()
+
+    def panel(self, width=394):
+        from sdr_module.gui.scanner_panel import ScannerPanel
+
+        panel = ScannerPanel(settings=self.store)
+        panel.set_host(self.host)
+        panel.resize(width, 560)
+        panel.show()
+        _settle()
+        self._panels.append(panel)
+        return panel
+
+    def run_scan(self, panel, seconds=10.0):
+        dev = self.host.dev
+        for _ in range(int(seconds / FRAME_S)):
+            if not panel.engine.active:
+                break
+            panel.engine.frame(dev.read_samples(int(dev.sample_rate * FRAME_S)))
+
+
+class TestScannerTabDetails(_ScanPanelCase):
+    def test_scan_13_one_bookmark_marked_skip_is_passed_by(self):
+        self.host.bookmarks = [
+            {"index": 0, "label": "A", "freq_hz": 145.29e6, "demod": "FM"},
+        ]
+        self.host.scan_bookmark_counts = lambda: (2, 1)
+        panel = self.panel()
+        panel.set_scan_mode("bookmarks")
+        self.assertIn("1 marked Skip is passed by.", panel._hint.text())
+        self.host.scan_bookmark_counts = lambda: (3, 2)
+        panel.bookmarks_changed()
+        self.assertIn("2 marked Skip are passed by.", panel._hint.text())
+
+    def test_scan_14_copy_frequency_says_so_in_the_status_bar(self):
+        from sdr_module.gui.scanner_panel import ScanHit
+
+        panel = self.panel()
+        panel._hits = [ScanHit(104.3e6, -40.0, 40.0, 150e3, "FM", "75 kHz")]
+        panel._rebuild_table()
+        panel._copy("104.300 MHz")
+        self.assertEqual(self.host.messages[-1], ("Copied 104.300 MHz", "info"))
+        self.assertEqual(QApplication.clipboard().text(), "104.300 MHz")
+
+    def test_scan_19_the_progress_bar_empties_when_a_scan_stops(self):
+        panel = self.panel()
+        panel._preset.setCurrentIndex(1)  # FM broadcast
+        panel.set_scan_mode("continuous")
+        self.assertTrue(panel.start_scan())
+        self.run_scan(panel, 0.6)
+        self.assertGreater(panel._progress.value(), 0)
+        panel.stop_scan()
+        self.assertEqual(panel._progress.value(), 0)
+        # A sweep that ran to its end shows a full bar, as before.
+        panel.set_scan_mode("once")
+        self.assertTrue(panel.start_scan())
+        self.run_scan(panel)
+        self.assertEqual(panel._progress.value(), 1000)
+
+    def test_scan_24_a_header_click_during_a_scan_sorts_the_results(self):
+        from PyQt6.QtCore import QPoint
+
+        from sdr_module.gui.scanner_panel import COL_LEVEL
+
+        panel = self.panel()
+        panel._preset.setCurrentIndex(1)
+        panel.set_scan_mode("continuous")
+        self.assertTrue(panel.start_scan())
+        self.run_scan(panel, 0.35)
+        table = panel._table
+        self.assertGreater(table.rowCount(), 2)
+        self.assertLess(table.rowCount(), 18)  # (more to come)
+        header = table.horizontalHeader()
+
+        def levels():
+            return [
+                float(table.item(r, COL_LEVEL).data(Qt.ItemDataRole.UserRole))
+                for r in range(table.rowCount())
+            ]
+
+        x = header.sectionViewportPosition(COL_LEVEL) + 5
+        QTest.mouseClick(header.viewport(), Qt.MouseButton.LeftButton, pos=QPoint(x, 5))
+        self.assertEqual(header.sortIndicatorSection(), COL_LEVEL)
+        order = header.sortIndicatorOrder()
+        expected = sorted(levels(), reverse=order == Qt.SortOrder.DescendingOrder)
+        self.assertEqual(levels(), expected)
+        # New results join in order (the tab's refresh keeps it sorted).
+        count = table.rowCount()
+        self.run_scan(panel, 1.5)
+        panel.refresh()
+        self.assertGreater(table.rowCount(), count)
+        expected = sorted(levels(), reverse=order == Qt.SortOrder.DescendingOrder)
+        self.assertEqual(levels(), expected)
+        self.assertTrue(panel.engine.active)
+
+    def test_scan_26_scan_from_here_leaves_the_tabs_own_mode_and_group(self):
+        self.host.groups = ["Wx"]
+        self.host.bookmarks = [
+            {
+                "index": 0,
+                "label": "NOAA 1",
+                "freq_hz": 162.4e6,
+                "demod": "FM",
+                "group": "Wx",
+            },
+            {
+                "index": 1,
+                "label": "NOAA 2",
+                "freq_hz": 162.55e6,
+                "demod": "FM",
+                "group": "Wx",
+            },
+        ]
+        panel = self.panel()
+        panel.set_scan_mode("continuous")
+        panel.set_scan_mode("bookmarks")
+        panel._group.setCurrentIndex(panel._group.findData("Wx"))
+        panel.set_scan_mode("continuous")
+        self.assertEqual(self.store.values["scanner/bookmark_group"], "Wx")
+        self.assertEqual(self.store.values["scanner/mode"], "continuous")
+        self.assertTrue(panel.scan_bookmarks_from(1))
+        self.assertEqual(panel.engine.mode, "bookmarks")
+        self.assertEqual(panel.scan_mode(), "bookmarks")  # (what runs, shown)
+        self.assertFalse(panel._group.isEnabled())
+        panel.stop_scan()
+        # Back as the user left them, and never saved otherwise.
+        self.assertEqual(panel.scan_mode(), "continuous")
+        self.assertEqual(self.store.values["scanner/mode"], "continuous")
+        self.assertEqual(self.store.values["scanner/bookmark_group"], "Wx")
+        panel.set_scan_mode("bookmarks")
+        self.assertEqual(panel._group.currentData(), "Wx")
+
+
+class TestScannerCombosFit(_ScanPanelCase):
+    def _fits(self, combo):
+        from PyQt6.QtWidgets import QStyle, QStyleOptionComboBox
+
+        option = QStyleOptionComboBox()
+        combo.initStyleOption(option)
+        field = combo.style().subControlRect(
+            QStyle.ComplexControl.CC_ComboBox,
+            option,
+            QStyle.SubControl.SC_ComboBoxEditField,
+            combo,
+        )
+        metrics = combo.fontMetrics()
+        return {
+            combo.itemText(i): metrics.horizontalAdvance(combo.itemText(i))
+            <= field.width()
+            for i in range(combo.count())
+        }
+
+    def test_scan_12_band_mode_and_group_texts_fit_a_390_px_column(self):
+        from sdr_module.gui.scanner_dialog import SCAN_PRESETS
+
+        self.host.groups = []
+        panel = self.panel(width=390)
+        self.assertTrue(
+            all(self._fits(panel._preset).values()), self._fits(panel._preset)
+        )
+        self.assertTrue(all(self._fits(panel._mode).values()), self._fits(panel._mode))
+        panel.set_scan_mode("bookmarks")
+        _settle()
+        self.assertTrue(
+            all(self._fits(panel._group).values()), self._fits(panel._group)
+        )
+        # The band's range is in its tooltip; the setting keeps the full name.
+        noaa = next(p for p in SCAN_PRESETS if p.label.startswith("NOAA"))
+        index = panel._preset.findData(noaa.label)
+        self.assertEqual(panel._preset.itemText(index), "NOAA Weather")
+        self.assertIn(
+            "162.4", panel._preset.itemData(index, Qt.ItemDataRole.ToolTipRole)
+        )
+        panel._preset.setCurrentIndex(index)
+        self.assertEqual(self.store.values["scanner/preset"], noaa.label)
+
+    def test_a_band_saved_by_name_or_full_label_is_restored(self):
+        from sdr_module.gui.scanner_dialog import SCAN_PRESETS
+
+        airband = next(p for p in SCAN_PRESETS if p.label.startswith("Airband"))
+        self.store.values["scanner/preset"] = airband.label  # (as saved before)
+        panel = self.panel()
+        self.assertEqual(panel.preset(), airband)
+
+
+class TestBookmarkVisitsAreCached(_ScanPanelCase):
+    def test_scan_21_refresh_doesnt_rebuild_the_visit_list(self):
+        calls = []
+        real = self.host.scan_bookmark_list
+
+        def counting(group=""):
+            calls.append(group)
+            return real(group)
+
+        self.host.scan_bookmark_list = counting
+        self.host.bookmarks = [
+            {"index": i, "label": f"B{i}", "freq_hz": 146e6 + i * 25e3, "demod": "FM"}
+            for i in range(50)
+        ]
+        panel = self.panel()
+        panel.set_scan_mode("bookmarks")
+        calls.clear()
+        for _ in range(5):
+            panel.refresh()  # (the tab's 500 ms timer)
+        self.assertLessEqual(len(calls), 1)
+        # Changed bookmarks are seen at once.
+        self.host.bookmarks = self.host.bookmarks[:10]
+        panel.bookmarks_changed()
+        self.assertIn("Visits 10 bookmarks", panel._hint.text())
+        # A scan starts from the bookmarks as they are now.
+        self.host.bookmarks = self.host.bookmarks[:3]
+        self.assertTrue(panel.start_scan())
+        self.assertEqual(len(panel.engine.settings.bookmarks), 3)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1362,5 +1362,56 @@ class TestRefusedStepsInTheWindow(_ScanWindowCase):
         self.assertIn("104.000 MHz", entries[0])
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-20: narrow signals are listed on their channel, not beside it
+# --------------------------------------------------------------------------- #
+class TestNarrowSignalsAreListedOnTheirChannel(unittest.TestCase):
+    def test_a_reading_near_a_known_channel_is_that_channel(self):
+        from sdr_module.dsp.sweep import report_frequency
+
+        # SSTV and AFSK: the power centroid sits a kHz or two off.
+        self.assertEqual(report_frequency(145.7990e6, 8e3, 12.5e3), 145.8e6)
+        self.assertEqual(report_frequency(144.3880e6, 8e3, 12.5e3), 144.39e6)
+        self.assertEqual(report_frequency(162.5522e6, 10e3, 25e3), 162.55e6)
+        # An FM channel that isn't a preset: the 5 kHz channel it is on.
+        self.assertEqual(report_frequency(145.0488e6, 8e3, 12.5e3), 145.05e6)
+        self.assertEqual(report_frequency(146.9389e6, 10e3, 12.5e3), 146.94e6)
+
+    def test_what_isnt_clearly_a_channel_keeps_its_own_frequency(self):
+        from sdr_module.dsp.sweep import report_frequency
+
+        # 12.5 kHz channels between the 5 kHz ones (FRS, Europe's 2 m).
+        self.assertEqual(report_frequency(462.5627e6, 10e3, 12.5e3), 462.563e6)
+        self.assertEqual(report_frequency(145.2124e6, 10e3, 12.5e3), 145.212e6)
+        # CW and SSB are tuned to the hertz: no channel, even beside a
+        # preset (QRP 40m CW, 7.030 MHz).
+        self.assertEqual(report_frequency(7.0312e6, 300, 1e3), 7.031e6)
+        self.assertEqual(report_frequency(14.2862e6, 2.5e3, 5e3), 14.286e6)
+        # An AM airband channel isn't put on a 5 kHz raster (8.33 kHz).
+        self.assertEqual(report_frequency(118.0083e6, 6e3, 25e3), 118.008e6)
+        # Outside a channel scan, as before.
+        self.assertEqual(report_frequency(145.7990e6, 8e3, None), 145.799e6)
+        self.assertEqual(report_frequency(145.7990e6, 8e3, 200e3), 145.799e6)
+
+    def test_a_2m_sweep_lists_the_iss_and_aprs_on_their_channels(self):
+        from sdr_module.gui.scan_engine import ScanEngine, ScanSettings
+        from tests.test_gui_scanner import _demo, _DemoHost, _run
+
+        dev = _demo(144.0e6)
+        host = _DemoHost(dev)
+        engine = ScanEngine(host)
+        found = []
+        engine.on_found = found.append
+        settings = ScanSettings("continuous", 144e6, 148e6, 12.5e3)
+        self.assertEqual(engine.start(settings, dev.sample_rate, 0.0), "")
+        _run(engine, dev, seconds=20.0)
+        engine.stop()
+        for channel in (144.39e6, 145.8e6):
+            near = {
+                f.frequency_hz for f in found if abs(f.frequency_hz - channel) < 4e3
+            }
+            self.assertEqual(near, {channel})
+
+
 if __name__ == "__main__":
     unittest.main()

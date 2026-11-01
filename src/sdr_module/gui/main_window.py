@@ -5762,9 +5762,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         mode, deviation = self._listening_mode()
         broadcast = _BROADCAST_FM_DEVIATION
         if mode == target:
-            if mode != "FM" or (deviation == broadcast) == (
-                target_deviation == broadcast
-            ):
+            # FM at another deviation is not: FRS's 2.5 kHz clipped a 2 m
+            # repeater (5 kHz), and a satellite's 25 kHz left it quiet.
+            if mode != "FM" or deviation == target_deviation:
                 return False  # already listening that way
         elif mode == "USB" and (
             target == "LSB" or (target == "CW" and kind != "preset")

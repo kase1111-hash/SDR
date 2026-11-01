@@ -439,15 +439,49 @@ class TestSignalsList(_SignalCase):
         self.assertEqual(self.freqs(), list(self.STATIONS))
 
 
+class _RunAtOnce:
+    """Runs Identify's jobs as they are handed over (the window runs them on
+    a worker thread): which takes are judged then doesn't depend on how busy
+    the computer is."""
+
+    def submit(self, fn, *args, **kwargs):
+        from concurrent.futures import Future
+
+        future = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except Exception as exc:  # pragma: no cover - as the worker would
+            future.set_exception(exc)
+        return future
+
+    def shutdown(self, *args, **kwargs):
+        pass
+
+
 class TestIdentifyThroughDrops(_SignalCase):
     """PLOTS-E2E-2: when the receiver drops samples every second or so, the
     half seconds left whole may hear only noise (the remote's packets fell
     in the gaps), and Identify said "Nothing identifiable ... Tune onto a
     signal and try again", as if nothing were there, though seconds of the
-    signal had been lost."""
+    signal had been lost.
+
+    P-09: deterministic. It failed now and then in long runs: 430.5 MHz has
+    the demo's weak background NFM carrier 70 kHz off (430.43 MHz, inside
+    the 200 kHz Identify looks at), which a half-second take between drops
+    sometimes called a carrier ("can't tell", about 0 dB SNR) with the
+    demo's unseeded noise; which takes were judged also depended on the
+    worker thread's timing. Now the noise is the same every run (seed 34
+    made 430.5 MHz fail), every take is judged at once, and the frequency
+    has nothing within 150 kHz."""
+
+    EMPTY_HZ = 431.0e6
 
     def run_with_drops(self, freq, drop_s):
+        real_pool = self.tools._pool
+        self.tools._pool = _RunAtOnce()
+        self.addCleanup(real_pool.shutdown, wait=False)
         self.listen(freq, ("None (I/Q)", None, "200 kHz"))
+        self.win._device._rng = np.random.default_rng(34)
         self.assertTrue(self.tools.identify())
         dev = self.win._device
         rate = self.win._device_sample_rate()
@@ -465,12 +499,12 @@ class TestIdentifyThroughDrops(_SignalCase):
         return self.panel.identify_status.text()
 
     def test_nothing_heard_says_samples_were_lost(self):
-        status = self.run_with_drops(430.5e6, 0.5)  # (nothing there)
+        status = self.run_with_drops(self.EMPTY_HZ, 0.5)  # (nothing there)
         self.assertIn("dropped", status)
         self.assertNotIn("Tune onto a signal", status)
 
     def test_nothing_there_says_so(self):
-        status = self.run_with_drops(430.5e6, 0.0)
+        status = self.run_with_drops(self.EMPTY_HZ, 0.0)
         self.assertIn("Tune onto a signal", status)
 
 

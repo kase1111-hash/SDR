@@ -124,6 +124,36 @@ def test_the_cw_demodulator_reads_them_too():
     assert (other.decode_morse(keying) + other.flush()).strip() == MESSAGE + " TU"
 
 
+@pytest.mark.parametrize("wpm", [12, 25])
+def test_the_cw_live_decoder_reads_them_too(wpm):
+    # The Decoder tab's 'CW (Morse)' decoder (live, playback and Decode
+    # Recording) keys the Morse decoder with its own KeyingDetector: it
+    # must pass the steadiness on, or a lone E or T stays out there. A
+    # carrier 300 Hz from the LO, 20 dB above the noise in 500 Hz, in
+    # display-frame blocks.
+    from sdr_module.dsp.live_decoders import create_live_decoder
+
+    rate, offset, lines = 48e3, 300.0, []
+    rng = np.random.default_rng(wpm)
+    parts = [np.zeros(int(0.5 * rate), np.complex64)]
+    for item in (MESSAGE + " TU E E", 3.5, "T T T", 3.5):
+        if isinstance(item, str):
+            parts.append(enc.cw_baseband(item, rate, wpm, offset, amplitude=0.1))
+        else:
+            parts.append(np.zeros(int(item * rate), np.complex64))
+    x = np.concatenate(parts)
+    sigma = 0.1 * np.sqrt(rate / 500.0 / 10 ** (20.0 / 10) / 2)
+    noise = rng.standard_normal(len(x)) + 1j * rng.standard_normal(len(x))
+    x = (x + sigma * noise).astype(np.complex64)
+    decoder = create_live_decoder("CW (Morse)", rate, offset)
+    block = int(rate / 30)
+    for start in range(0, len(x), block):
+        lines += decoder.process(x[start : start + block])
+    lines += decoder.flush()
+    words = " ".join(m.text for m in lines).split()
+    assert words == (MESSAGE + " TU E E T T T").split()
+
+
 def test_an_empty_block_has_no_steadiness_left_over():
     # The steadiness is per sample of the last block, an empty one too
     # (decode_morse of an empty keying raised: one value per decision).

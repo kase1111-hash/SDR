@@ -12345,6 +12345,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             timestamp=stamp,
             noise_db=frame.noise_floor_db,
             usual=not self._pacer.overloaded,
+            mean_db=frame.mean_db,  # (what the hover reads, K-L2)
         )
 
     def _plot_time(self, count: int, rate: float) -> float:

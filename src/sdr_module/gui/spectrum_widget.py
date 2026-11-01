@@ -54,6 +54,7 @@ from ..dsp.frame_spectrum import (
     rbw_hz,
 )
 from ..utils.tooltips import get_short_tip
+from .plot_readout import Reading, mean_limit, noise_model, read_levels
 from .plot_view import ZOOM_LEVELS, PlotView, normalize_zoom
 from .themes import get_palette, mono_font, set_role, theme_notifier
 from .tuning import snap_click_frequency
@@ -964,6 +965,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._auto_range = False
         self._range_noise: Optional[float] = None
         self._range_peak: Optional[float] = None
+        self._range_zoom = 1  # (the zoom the range last followed)
 
         # Spectrum data, and the (center, span) it was received with
         self._spectrum = np.zeros(self._fft_size)
@@ -976,6 +978,11 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._avg_alpha = 0.3
         self._has_data = False
         self._trace_axis: Tuple[float, float] = (self._center_freq, self._sample_rate)
+        # The mean noise in a bin of the newest trace, when the caller knew
+        # it (update_spectrum's noise_db), and what the hover reading needs
+        # of the main trace, worked out once per trace (see _reading_at).
+        self._trace_floor: Optional[float] = None
+        self._readout_cache: Dict[Any, Any] = {}
         # With ``reset_on_gain_jump``, a jump of the noise floor (the
         # trace's median, dBFS) resets the peak hold and the average: the
         # gain changed. (The main window turns it on.)
@@ -1216,7 +1223,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
     # Public API
     # ------------------------------------------------------------------
 
-    def update_spectrum(self, power_db: np.ndarray):
+    def update_spectrum(self, power_db: np.ndarray, noise_db: Optional[float] = None):
         """
         Update spectrum with new data.
 
@@ -1224,10 +1231,22 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
             power_db: Power spectrum in dB, over the span set with
                 :meth:`set_frequency_range`. An empty array is ignored (the
                 previous frame stays on screen).
+            noise_db: The mean noise power in a bin (dBFS), e.g. a
+                :class:`~sdr_module.dsp.frame_spectrum.FrameSpectrum`'s
+                ``noise_floor_db`` when ``power_db`` is its ``mean_db``: the
+                hover's SNR is measured against it (else against the
+                trace's own noise, measured from its bins).
         """
         power_db = np.asarray(power_db, dtype=np.float64).ravel()
         if power_db.size == 0:
             return
+        try:
+            floor = None if noise_db is None else float(noise_db)
+        except (TypeError, ValueError):
+            floor = None
+        self._trace_floor = (
+            floor if floor is not None and math.isfinite(floor) else None
+        )
         if len(power_db) != self._fft_size:
             # Resample if needed
             power_db = np.interp(
@@ -1691,6 +1710,17 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         self._canvas.update()
 
     def _on_view_changed(self) -> None:
+        zoom = self._view.zoom
+        if (
+            self._auto_range
+            and self._has_data
+            and (zoom > 1 or zoom != self._range_zoom)
+        ):
+            # Range Auto fits what is in view: refit at once to the part
+            # zoomed to, as it moves, and to the whole span back at x1 (a
+            # retune at x1 keeps easing the range, as before).
+            self._observe_range(self._main_trace(), force=True)
+        self._range_zoom = zoom
         self._invalidate_background()
         self._canvas.update()
 
@@ -1793,6 +1823,54 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         finite = window[np.isfinite(window)]
         return float(finite.max()) if finite.size else None
 
+    def _bins_at(self, x: float) -> Optional[Tuple[int, int]]:
+        """``(first, stop)``: the main trace's bins under the pixel at
+        canvas ``x`` (None where the trace has no data)."""
+        if not self._has_data:
+            return None
+        n = len(self._main_trace())
+        center, span = self._trace_axis
+        freq = self.frequency_at(x)
+        if freq is None or n == 0 or span <= 0:
+            return None
+        bin_hz = span / n
+        # (As _level_at: in bins from the first bin's lower edge.)
+        pos = (freq - (center - span / 2)) / bin_hz + 0.5
+        half = max(0.5, self._hz_per_px() / bin_hz / 2)
+        lo = int(math.floor(pos - half))
+        hi = int(math.floor(pos + half)) + 1
+        if hi <= 0 or lo >= n:
+            return None
+        return max(0, lo), min(n, max(hi, lo + 1))
+
+    def _reading_at(self, x: float) -> Optional[Reading]:
+        """What the hover says at canvas ``x``: the main trace's level
+        there judged against its noise (see
+        :mod:`~sdr_module.gui.plot_readout`): a line (a carrier) at its
+        level, a signal filling the pixel at its power density, else
+        ``noise`` at the noise's average, whatever the FFT size and zoom
+        (the trace is drawn at the strongest of the bins a pixel holds,
+        which for plain noise reads several dB above its mean). None where
+        the trace has no data."""
+        bins = self._bins_at(x)
+        if bins is None:
+            return None
+        trace = self._main_trace()
+        lo, hi = bins
+        key = (id(trace), self._trace_floor)
+        cached = self._readout_cache.get("model")
+        if cached is None or cached[0] != key or cached[1] is not trace:
+            model = noise_model(trace, self._trace_floor)
+            self._readout_cache = {"model": (key, trace, model)}
+        else:
+            model = cached[2]
+        if model is None:
+            return None
+        limit_key = ("fill", hi - lo)
+        if limit_key not in self._readout_cache:
+            self._readout_cache[limit_key] = mean_limit(trace, hi - lo)
+        return read_levels(trace[lo:hi], model, self._readout_cache[limit_key])
+
     # -- vertical range ---------------------------------------------------
     def _set_range(self, floor: float, top: float) -> None:
         floor, top = float(floor), float(top)
@@ -1814,10 +1892,26 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         if (self._auto_range, tuple(self._db_range)) != before:
             self.display_settings_changed.emit()
 
+    def _in_view(self, n: int) -> slice:
+        """The bins of an ``n``-bin trace (on the newest trace's span) in
+        view: all of them at zoom x1, or while the trace is on another
+        span than the view's."""
+        center, span = self._trace_axis
+        found = visible_bins(
+            n, bins_start(center, span, n), span, self._view.start, self._view.span
+        )
+        if found is None:
+            return slice(0, n)
+        return slice(found[0], found[1])
+
     def _observe_range(self, trace: np.ndarray, force: bool = False) -> None:
         """Auto range: track the noise floor (median) and the strongest
-        signal, and move the range when they leave its comfortable part."""
+        signal of what is in view (the whole span at zoom x1), and move the
+        range when they leave its comfortable part."""
         values = np.asarray(trace, dtype=np.float64)
+        view = self._in_view(len(values))
+        if view.stop - view.start >= 16:
+            values = values[view]
         finite = values[np.isfinite(values)]
         n = finite.size
         if n < 16:
@@ -1830,11 +1924,13 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         # The holds drawn count too: a burst caught by Peak hold stays below
         # the top (where its level can be read), Min hold above the floor.
         if self._show_peak:
-            held = self._peak_hold[np.isfinite(self._peak_hold)]
+            held = self._peak_hold[self._in_view(len(self._peak_hold))]
+            held = held[np.isfinite(held)]
             if held.size:
                 peak = max(peak, float(held.max()))
         if self._show_min:
-            low = self._min_hold[np.isfinite(self._min_hold)]
+            low = self._min_hold[self._in_view(len(self._min_hold))]
+            low = low[np.isfinite(low)]
             if low.size >= 16:
                 noise = min(
                     noise, float(np.partition(low, low.size // 2)[low.size // 2])
@@ -2655,9 +2751,10 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
         here = self._snapped_frequency_at(x)
         here_text = tuned_mhz_text(freq if here is None else here, decimals)
         lines = [here_text]
-        level = self._level_at(x, plot)
+        reading = self._reading_at(x)
+        level = reading.level_db if reading is not None else self._level_at(x, plot)
         if level is not None:
-            lines.append(f"{level:.1f} dBFS")
+            lines.append(reading.text() if reading is not None else f"{level:.1f} dBFS")
             min_db, max_db = self._db_range
             if max_db > min_db and min_db <= level <= max_db:
                 y = plot.bottom() - (level - min_db) / (max_db - min_db) * plot.height()

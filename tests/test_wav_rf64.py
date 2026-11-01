@@ -310,6 +310,23 @@ class TestPastTheLimitIsRf64:
         header = wav_file.read_wav_header(path)
         assert (header.data_bytes, header.frames) == (5121, 5121)
 
+    def test_any_buffer_is_written_even_a_strided_one(self, tmp_path):
+        """writeframes takes any buffer: a NumPy slice with a step (not
+        contiguous) is written as its values, not refused."""
+        values = np.arange(40, dtype="<i2")
+        path = tmp_path / "strided.wav"
+        with wav_file.WavWriter(path, 2, 2, RATE, expected_bytes=40) as writer:
+            writer.writeframes(values[::2])
+        raw = path.read_bytes()
+        assert raw[44:] == values[::2].tobytes()
+        assert wav_file.read_wav_header(path).frames == 10  # (40 bytes)
+
+    def test_a_riff_file_cut_short_says_so(self, tmp_path):
+        path = tmp_path / "short.wav"
+        path.write_bytes(b"RIFF\x10\x00")
+        with pytest.raises(ValueError, match="cut short"):
+            wav_file.read_wav_header(path)
+
     def test_a_sample_rate_a_header_cant_hold_is_refused(self, tmp_path):
         for rate in (0, 2**32):
             with pytest.raises(ValueError):

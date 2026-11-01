@@ -205,6 +205,8 @@ def _scan(handle: IO[bytes]) -> _Found:
     handle.seek(0)
     head = handle.read(40)
     if head[:4] in _RIFF_IDS:
+        if len(head) < 12:
+            raise WavError("its header is cut short")
         if head[8:12] != b"WAVE":
             raise WavError("it is a RIFF file of another kind, not WAV")
         return _scan_riff(handle, head[:4].decode("ascii"), size)
@@ -414,7 +416,10 @@ class WavWriter:
         handle = self._file
         if handle is None:
             raise ValueError("the WAV file is closed")
-        view = memoryview(data).cast("B")
+        view = memoryview(data)
+        if not view.c_contiguous:  # (a NumPy slice with a step)
+            view = memoryview(view.tobytes())
+        view = view.cast("B")
         if not self._reserved and not fits_classic(self._data_bytes + view.nbytes):
             raise WavError(
                 "more samples than expected: a classic WAV file can't hold them"

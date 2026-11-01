@@ -649,6 +649,54 @@ class TestWaterfallBrightnessThroughALongOverload(_window_case()):
         self.assertLess(drop, -5.0)
 
 
+class TestSecondReceiverWaterfallThroughALongOverload(_window_case()):
+    """N-07 in Device > Second Receiver..., which has a display loop and a
+    waterfall of its own: frames read while its loop can't keep up (one
+    block each) don't move how bright the rows' noise shows either (a step
+    of about 7.6 dB during a 30 s overload, and a darker band after it)."""
+
+    demo = True
+    FRAME_S = 1 / 30
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+
+        from sdr_module.gui import device_dialog
+
+        patcher = mock.patch.object(device_dialog, "_MAX_LAG_S", 1e9)
+        patcher.start()  # (every demo sample is read)
+        self.addCleanup(patcher.stop)
+        rx = self.rx = self.win._second_rx.show()
+        self.addCleanup(rx.shutdown)
+        rx._status_timer.stop()
+        self.assertTrue(rx.start())
+        rx._frame_timer.stop()  # (its frames are run here)
+        rx._device._rng = np.random.default_rng(7)
+        rx._waterfall.set_history_seconds(0.0)  # (a row per line)
+
+    def frames(self, count, overloaded):
+        """``count`` of its frames, one block each (``overloaded``) or as
+        usual; the noise of each row as drawn (its median colour, dB)."""
+        rx, shown = self.rx, []
+        size = 2048 if overloaded else int(rx._rate() * self.FRAME_S)
+        for _ in range(count):
+            rx._pacer.reset()
+            rx._pacer.overloaded = overloaded
+            rx._process(rx._device.read_samples(size))
+            codes = rx._waterfall._row_codes[-1][1].astype(float)
+            shown.append(float(np.median(codes / 8.0 - 200.0)))
+        return np.array(shown)
+
+    def test_no_step_during_or_after(self):
+        usual = float(np.median(self.frames(160, False)[40:]))
+        behind = self.frames(170, True)  # (more than half of 301 lines)
+        after = self.frames(170, False)
+        first, last = np.median(behind[:20]), np.median(behind[-20:])
+        self.assertLess(abs(float(last - first)), 0.5, (first, last))
+        self.assertLess(float(np.max(np.abs(after - usual))), 0.5, after[:5])
+
+
 def _scan_window_case():
     from tests.test_gui_scanner import _ScanWindowCase
 

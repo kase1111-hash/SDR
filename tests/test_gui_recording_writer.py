@@ -525,3 +525,27 @@ class TestTheTakesStore(unittest.TestCase):
         gc.collect()
         self.assertEqual(_writer_threads(), [])
         self.assertFalse(os.path.exists(path))
+
+
+class TestAStretchAfterAPause(_WriterCase):
+    def test_starts_with_the_first_block_kept(self):
+        win = self.win
+        first, second = "2026-11-01T10:00:00.000Z", "2026-11-01T10:00:01.000Z"
+        stamps = iter([first, second])
+        with mock.patch.object(self.mw, "_CAPTURE_QUEUE_S", 1e-6, create=True):
+            self.start()
+            self.disk.gate.clear()
+            self.frames(1)  # (held at the gate: the queue is full)
+            win._on_panel_record_paused(True)
+            self.frames(1)  # (paused: not captured)
+            win._on_panel_record_paused(False)
+            with mock.patch.object(self.mw, "_utc_stamp", lambda: next(stamps)):
+                self.frames(1)  # the first block after the pause: refused
+                self.assertEqual(win._take_lost[1], FRAME)
+                self.disk.gate.set()
+                _settle_writes(win)
+                self.frames(1)  # the first block kept after the pause
+            self.stop()
+        # (The stretch after the pause starts with its first block kept,
+        # and when that was received.)
+        self.assertEqual(win._samples_buffer.segments, [(FRAME, second)])

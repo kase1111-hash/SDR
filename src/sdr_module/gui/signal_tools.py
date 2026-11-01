@@ -443,7 +443,9 @@ if HAS_PYQT6:
                 # The receiver's channel changed (its mode, filter or rate):
                 # listen afresh (to it again, if it still is the band).
                 rate = float(self._win._device_sample_rate())
-                ident = self._identifier = self._new_identifier(rate, chain)
+                ident = self._identifier = self._new_identifier(
+                    rate, chain if channel is not None else None
+                )
             if abs(ident.offset_hz - self._win._vfo_offset_hz()) > 0.5:
                 ident.set_offset(self._win._vfo_offset_hz())
             if lost_s > 0:

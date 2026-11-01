@@ -8863,7 +8863,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "warning",
                 10000,
             )
-        if self._capture_gap:
+        gap = self._capture_gap
+        if gap:
             # Capturing again after a pause or with the receiver started
             # again (REC WAITING): these samples were received now, not
             # straight after the last ones (SigMF: a capture of their own).
@@ -8878,8 +8879,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         if not queued:
             # The writer is a second behind: the disk can't keep up. A gap
-            # in the take, said as a driver's dropped samples are.
+            # in the take, said as a driver's dropped samples are (a stretch
+            # after a pause starts with the first block kept).
             self._lost_unreported += len(samples)
+            self._capture_gap = gap
             return
         self._buffer_unsaved = True
         # complex64 = 8 bytes/sample

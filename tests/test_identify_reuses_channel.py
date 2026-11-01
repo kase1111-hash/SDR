@@ -177,3 +177,16 @@ class TestNothingChangesAtTheDemosRates(_WindowTestCase):
         self.assertTrue(win._signal_tools.identify())
         self.assertIsNotNone(win._signal_tools._identifier._channel)
         self.assertIsNone(win._signal_tools._ident_chain)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestWithoutTheChannel(_HighRateCase):
+    def test_a_frame_without_the_channel_falls_back_to_the_raw_block(self):
+        tools = self.tools
+        self.assertTrue(tools.identify())
+        self.assertIsNotNone(tools._ident_chain)
+        n = int(RATE * FRAME_S)
+        tools._identify_frame(_fm(n, RATE), 0.0)  # (no channel, no chain)
+        self.assertIsNone(tools._ident_chain)
+        self.assertIsNotNone(tools._identifier._channel)  # (its own filter)
+        self.assertGreater(tools._identifier.received, 0)

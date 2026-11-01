@@ -440,3 +440,45 @@ class TestFrameSpectrumNeverWaitsForABusyHelper(unittest.TestCase):
         np.testing.assert_allclose(result[0].mean_db, want.mean_db, atol=1e-4)
         np.testing.assert_allclose(result[0].max_db, want.max_db, atol=1e-4)
         gate.set()
+
+
+# ---------------------------------------------------------------------------
+# ROB-14: the demo device's first frames at a new rate or in a new band
+# ---------------------------------------------------------------------------
+
+
+def _largest_prime_factor(n):
+    n, factor, largest = int(n), 2, 1
+    while factor * factor <= n:
+        while n % factor == 0:
+            largest, n = factor, n // factor
+        factor += 1
+    return max(largest, n)
+
+
+class TestDemoLoopsAreQuickToBuild(unittest.TestCase):
+    def test_the_music_loop_has_an_fft_friendly_length_at_every_rate(self):
+        # At 3.2 and 1.024 MS/s the demo tune's loop was 382,090 and
+        # 390,095 samples long (prime factors 2011 and 1279): its 75 us
+        # pre-emphasis (an FFT around the loop) took 200 ms a channel, and
+        # the first frame at the new rate stalled the window for 0.4-0.5 s.
+        from sdr_module.gui import device_dialog as dd
+
+        for rate in (1.024e6, 2.048e6, 2.4e6, 3.2e6, 8e6, 20e6):
+            program = dd._loops("wfm", dd._MUSIC_SEED, rate)[0]
+            self.assertLessEqual(
+                _largest_prime_factor(len(program.values)), 7, rate
+            )
+            am = dd._loops("amb", 0, rate)
+            self.assertLessEqual(_largest_prime_factor(len(am.values)), 7, rate)
+
+    def test_the_am_stations_reuse_the_fm_stations_tune(self):
+        # (Built once per loop rate: the AM band's stations took 0.08-0.45 s
+        # to build the same tune again.)
+        from sdr_module.gui import device_dialog as dd
+
+        rate = 1.5e6  # (a rate no other test builds loops at)
+        dd._loops("wfm", dd._MUSIC_SEED, rate)
+        with mock.patch.object(dd, "_music_tune", wraps=dd._music_tune) as tune:
+            dd._loops("amb", 1, rate)
+        self.assertEqual(tune.call_count, 0)

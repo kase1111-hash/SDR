@@ -205,6 +205,25 @@ class TestTuneToStaysOffered(_PanelCase):
         p._proto_combo.setCurrentText("Off")
         self.assertFalse(p._tune_btn.isVisible())
 
+    def test_rows_of_another_protocol_say_which_it_is(self):
+        # Now that "Tune to" is offered with rows in the table, choosing
+        # POCSAG keeps the APRS packets listed: with one protocol in the
+        # table the Protocol column hid ("it only repeats the selector"),
+        # so the packets read as POCSAG pages (skeptic of DEC-E2E-01).
+        p = self.panel
+        table, col = p._table, self.mod.COL_PROTOCOL
+        p.set_current_frequency(144.39e6)
+        p._proto_combo.setCurrentText("AX.25/APRS")
+        p.add_message("AX.25/APRS", "N0CALL-9", "49.0583, -72.0292")
+        self.assertTrue(table.isColumnHidden(col))  # (it repeats the selector)
+        p._proto_combo.setCurrentText("POCSAG")
+        self.assertFalse(table.isColumnHidden(col))
+        self.assertGreaterEqual(table.columnWidth(col), table.sizeHintForColumn(col))
+        p._proto_combo.setCurrentText("AX.25/APRS")
+        self.assertTrue(table.isColumnHidden(col))
+        p._proto_combo.setCurrentText("Off")  # (nothing chosen to repeat)
+        self.assertTrue(table.isColumnHidden(col))
+
 
 # --------------------------------------------------------------------------- #
 # DEC-E2E-13: CW (Morse) has a "Tune to" too

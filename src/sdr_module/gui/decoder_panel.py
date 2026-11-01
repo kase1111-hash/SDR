@@ -1153,6 +1153,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._chosen_counts = Counter(self._valid_per_protocol)
         self._update_views()
         self._update_state()
+        self._update_protocol_column()  # (rows of another protocol say so)
         self.protocol_changed.emit(proto or PROTOCOL_OFF)
 
     def _update_auto(self) -> None:
@@ -1992,11 +1993,18 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 self._proto_rows[name] = label
             label.setText(f"{count:,}")
         self._proto_none.setVisible(not self._per_protocol)
+        self._update_protocol_column()
 
-        # With a single protocol the column only repeats the selector.
-        hide_protocol = len(self._per_protocol) <= 1
-        if hide_protocol != self._table.isColumnHidden(COL_PROTOCOL):
-            self._table.setColumnHidden(COL_PROTOCOL, hide_protocol)
+    def _update_protocol_column(self) -> None:
+        """Show the Protocol column unless it would only repeat the
+        selector: one protocol in the table, the one chosen (or none is).
+        Rows of another protocol (listed before choosing this one) say
+        which they are."""
+        names = list(self._per_protocol)
+        chosen = self.protocol()
+        hide = len(names) <= 1 and (not names or chosen is None or names[0] == chosen)
+        if hide != self._table.isColumnHidden(COL_PROTOCOL):
+            self._table.setColumnHidden(COL_PROTOCOL, hide)
             self._fit_columns()
 
     def _update_detail(self) -> None:

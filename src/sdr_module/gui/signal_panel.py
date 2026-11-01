@@ -578,6 +578,7 @@ if HAS_PYQT6:
         play_requested = pyqtSignal(float, float)  # frequency, seconds
         live_requested = pyqtSignal()
         page_changed = pyqtSignal(str)
+        burst_selected = pyqtSignal(object)  # its BurstReport, or None
         scope_changed = pyqtSignal()
         #: A short note for the status bar (text, tone), e.g. "Copied ...".
         message = pyqtSignal(str, str)
@@ -1355,6 +1356,7 @@ if HAS_PYQT6:
 
         def _show_burst_details(self) -> None:
             report = self.selected_burst()
+            self.burst_selected.emit(report)
             if report is None:
                 self.burst_details.setPlainText("")
                 self.burst_details.setVisible(False)

@@ -441,6 +441,54 @@ class TestSignalsList(_SignalCase):
         self.assertEqual(self.freqs(), list(self.STATIONS))
 
 
+class TestBurstOnTheWaterfall(_SignalCase):
+    """Leftover 4: the Signal tab's bursts were never shown on the
+    waterfall. The selected one is outlined there, around the rows it was
+    received in, while the Bursts page is on screen."""
+
+    def test_the_selected_burst_is_outlined(self):
+        win, panel = self.win, self.panel
+        wf = win._waterfall
+        self.listen(433.92e6, ("None (I/Q)", None, None))
+        win._show_signal_page("bursts")
+        self.frames(3.4)
+        self.bursts_done()
+        reports = [r for _stamp, r in panel.bursts()]
+        row = next(
+            i for i, r in enumerate(reports) if abs(r.burst.center_hz - 433.92e6) < 20e3
+        )
+        burst = reports[row].burst
+        self.assertIsNone(wf.burst_mark_rect())
+        panel.bursts_table.selectRow(row)
+        rect = wf.burst_mark_rect()
+        self.assertIsNotNone(rect)
+        plot = wf.plot_rect()
+        # Around its frequency...
+        self.assertLessEqual(wf.frequency_at(rect.left()), burst.center_hz)
+        self.assertGreaterEqual(wf.frequency_at(rect.right()), burst.center_hz)
+        # ...and the rows it was received in (and no others).
+        rows_px = plot.height() / wf._rows_shown()
+        first = int(round((rect.top() - plot.top()) / rows_px))
+        last = int(round((rect.bottom() - plot.top()) / rows_px)) - 1
+
+        def level(row):
+            return wf.level_at(rect.center().x(), plot.top() + (row + 0.5) * rows_px)
+
+        inside = [level(row) for row in range(first, last + 1)]
+        self.assertGreater(min(inside), burst.peak_dbfs - 6.0, inside)
+        for row in (first - 1, last + 1):
+            if 0 <= row < len(wf._times):
+                self.assertLess(level(row), burst.peak_dbfs - 20.0, row)
+        wf._canvas.grab()  # (paints it)
+        # Another page, or no selection: no outline.
+        win._show_signal_page("signals")
+        self.assertIsNone(wf.burst_mark_rect())
+        win._show_signal_page("bursts")
+        self.assertIsNotNone(wf.burst_mark_rect())
+        panel.bursts_table.clearSelection()
+        self.assertIsNone(wf.burst_mark_rect())
+
+
 class TestHoverReadsOnePoint(unittest.TestCase):
     """PLOTS-E2E-19: with the pointer on the edge of a station the hover
     read the station's frequency (where a click lands) with the level under

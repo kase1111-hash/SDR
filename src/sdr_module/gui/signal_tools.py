@@ -30,11 +30,12 @@ screen or asked for:
 
 from __future__ import annotations
 
+import bisect
 import logging
 import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Deque, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -73,6 +74,8 @@ FORGET_S = 10.0
 #: Bursts waiting for their analysis (a busy band): beyond this many, a
 #: burst is listed without one rather than late.
 MAX_PENDING_BURSTS = 8
+#: The Bursts list keeps this many (the newest).
+MAX_LISTED_BURSTS = 500
 #: The most of the receiver's time the bursts worker may spend taking
 #: bursts apart (over the last few seconds of signal): beyond it, and while
 #: the display loop can't keep up, a burst is listed without its analysis,
@@ -143,6 +146,12 @@ if HAS_PYQT6:
             # (signal time, seconds) of the analyses done lately.
             self._analysis_cost: Deque[Tuple[float, float]] = deque()
             self._bursts_paused = False  # (the display loop is behind)
+            # Each listed burst's time on the waterfall's clock and its
+            # frequencies (the selected one is outlined there), from the
+            # watcher's time and the waterfall's at the end of each frame.
+            self._burst_spans: Dict[int, Tuple[float, float, float, float]] = {}
+            self._frame_times: Deque[Tuple[float, float]] = deque(maxlen=8192)
+            self._bursts_shown = False  # (the Bursts page was on screen)
             self._burst_timer = QTimer(self)
             self._burst_timer.setInterval(100)
             self._burst_timer.timeout.connect(self._collect_bursts)
@@ -173,6 +182,7 @@ if HAS_PYQT6:
             panel.play_requested.connect(self.play_recording_at)
             panel.live_requested.connect(self._reset_list)
             panel.page_changed.connect(lambda _p: self._page_changed())
+            panel.burst_selected.connect(self._mark_burst)
             panel.export_bursts_btn.clicked.connect(
                 lambda _c=False: self.export_bursts()
             )
@@ -690,6 +700,7 @@ if HAS_PYQT6:
             return bool(self._win.set_frequency(float(freq)))
 
         def _page_changed(self) -> None:
+            self._mark_burst(self.panel.selected_burst())
             if self.panel.page_visible("bursts") and not self._watch_always:
                 self._watcher.reset()  # its floor is from when it was last shown
 
@@ -721,6 +732,8 @@ if HAS_PYQT6:
         def _bursts_frame(self, samples: np.ndarray, rate: float) -> None:
             if self._burst_jobs:
                 self._collect_bursts()
+            if self.panel.page_visible("bursts") != self._bursts_shown:
+                self._mark_burst(self.panel.selected_burst())
             if not (self._watch_always or self.panel.page_visible("bursts")):
                 if self._watcher.detector.active:
                     self._queue_bursts(self._watcher.flush())
@@ -743,6 +756,9 @@ if HAS_PYQT6:
                 self._bursts_paused = False
                 self.panel.set_bursts_empty(BURSTS_EMPTY)
             reports = self._watcher.feed(samples, float(win._lo_frequency()), rate)
+            clock = getattr(win, "_plot_clock", None)  # (this frame's row)
+            if isinstance(clock, float):
+                self._frame_times.append((self._watcher.time_s, clock))
             self._queue_bursts(reports)
 
         def _queue_bursts(self, reports: List[BurstReport]) -> None:
@@ -758,6 +774,7 @@ if HAS_PYQT6:
                 # The list's Time is when it started, not when it was done.
                 ago = max(0.0, self._watcher.time_s - burst.start_s)
                 when = time.time() - ago
+                self._remember_span(report)
                 job: Optional[Future] = None
                 if report.samples is not None and self._may_analyze():
                     try:
@@ -774,6 +791,43 @@ if HAS_PYQT6:
                 self._collect_bursts()
                 if self._burst_jobs and not self._burst_timer.isActive():
                     self._burst_timer.start()
+
+        def _remember_span(self, report: BurstReport) -> None:
+            """Where ``report``'s burst is on the waterfall: the times of the
+            rows of the frames its start and end were in, and its
+            frequencies."""
+            frames = self._frame_times
+            if not frames:
+                return
+            ends = [watched for watched, _clock in frames]
+            last = len(frames) - 1
+            burst = report.burst
+            # The frames with its first and its last samples: the first that
+            # ends after its start, and the first that ends at its end.
+            first = min(bisect.bisect_right(ends, float(burst.start_s) + 1e-6), last)
+            final = min(bisect.bisect_left(ends, float(burst.end_s) - 1e-6), last)
+            half = 0.5 * float(burst.width_hz)
+            self._burst_spans[id(report)] = (
+                frames[first][1],
+                frames[max(first, final)][1],
+                float(burst.center_hz) - half,
+                float(burst.center_hz) + half,
+            )
+            if len(self._burst_spans) > 2 * MAX_LISTED_BURSTS:
+                listed = {id(r) for _stamp, r in self.panel.bursts()}
+                for key in [k for k in self._burst_spans if k not in listed]:
+                    del self._burst_spans[key]
+
+        def _mark_burst(self, report: Any = None) -> None:
+            """Outline the selected burst on the waterfall, while the Bursts
+            page is on screen."""
+            self._bursts_shown = self.panel.page_visible("bursts")
+            span = None if report is None else self._burst_spans.get(id(report))
+            waterfall = self._win._waterfall
+            if span is None or not self._bursts_shown:
+                waterfall.clear_burst_mark()
+            else:
+                waterfall.mark_burst(*span)
 
         def _may_analyze(self) -> bool:
             """Whether the next burst may be taken apart (see

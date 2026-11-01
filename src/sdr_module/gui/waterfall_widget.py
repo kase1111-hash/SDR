@@ -762,6 +762,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
 
         # Highlights
         self._highlights: List[Tuple[int, int, int, int, Any]] = []
+        # A burst outlined from the Signal tab's list: (start, end) on the
+        # rows' clock and (low, high) Hz (see mark_burst).
+        self._burst_mark: Optional[Tuple[float, float, float, float]] = None
         # Demodulated channel: (low, high) Hz offsets from the center.
         self._passband: Optional[Tuple[float, float]] = None
         # The tuned frequency (None: the center), and how clicks snap: the
@@ -1667,6 +1670,56 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._highlights.clear()
         self._canvas.update()
 
+    def mark_burst(
+        self, start: float, end: float, low_hz: float, high_hz: float
+    ) -> None:
+        """Outline a burst (the Signal tab's selected one): from ``start``
+        to ``end`` on the rows' clock (:meth:`add_line`'s timestamps), from
+        ``low_hz`` to ``high_hz``. It moves down with its rows."""
+        self._burst_mark = (float(start), float(end), float(low_hz), float(high_hz))
+        self._canvas.update()
+
+    def clear_burst_mark(self) -> None:
+        """Remove the burst's outline (:meth:`mark_burst`)."""
+        if self._burst_mark is not None:
+            self._burst_mark = None
+            self._canvas.update()
+
+    def burst_mark_rect(self, plot: Optional["QRectF"] = None) -> Optional["QRectF"]:
+        """Where the marked burst's outline is on the canvas: around the
+        rows it was received in (at least one) and its frequencies (at least
+        a few pixels). None without a mark, or when its rows have left the
+        history or it is out of view."""
+        mark = self._burst_mark
+        if mark is None or not self._times:
+            return None
+        start, end, low, high = mark
+        if end < self._times[0]:
+            return None  # (scrolled out of the history)
+        plot = self._plot_rect() if plot is None else plot
+        newest = self._row_of_time(min(end, self._times[-1]))
+        oldest = self._row_of_time(max(start, self._times[0]))
+        if newest is None or oldest is None or plot.width() <= 0:
+            return None
+        # The rows whose lines cover the burst's start and end.
+        top_row = math.ceil(newest - 1e-6)
+        bottom_row = max(top_row, math.ceil(oldest - 1e-6))
+        rows_px = plot.height() / self._rows_shown()
+        x0 = self._freq_to_x(low, plot)
+        x1 = self._freq_to_x(high, plot)
+        if x1 - x0 < 6.0:
+            middle = 0.5 * (x0 + x1)
+            x0, x1 = middle - 3.0, middle + 3.0
+        rect = QRectF(
+            x0,
+            plot.top() + top_row * rows_px,
+            x1 - x0,
+            (bottom_row - top_row + 1) * rows_px,
+        ).intersected(plot)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return None
+        return rect
+
     # ------------------------------------------------------------------
     # Internals: levels
     # ------------------------------------------------------------------
@@ -2526,6 +2579,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 draw_focus_frame(painter, plot, p)
 
             self._draw_highlights(painter, plot)
+            self._draw_burst_mark(painter, plot, p)
 
             self._draw_passband(painter, plot, p)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -2710,6 +2764,22 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             painter.setPen(QPen(color, 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)
+
+    def _draw_burst_mark(self, painter: "QPainter", plot: "QRectF", p) -> None:
+        """The selected burst's outline (see :meth:`mark_burst`): on a halo,
+        so it reads on any colormap."""
+        rect = self.burst_mark_rect(plot)
+        if rect is None:
+            return
+        painter.save()
+        painter.setClipRect(plot)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(p.qcolor("plot_bg", 210), 4))
+        painter.drawRect(rect)
+        painter.setPen(QPen(p.qcolor("accent"), 2))
+        painter.drawRect(rect)
+        painter.restore()
 
     def _draw_passband(self, painter: "QPainter", plot: "QRectF", p) -> None:
         """A thin bracket along the top edge spanning the demodulated channel.

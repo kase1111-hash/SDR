@@ -225,6 +225,8 @@ def _scan_riff(handle: IO[bytes], container: str, size: int) -> _Found:
     fmt: Optional[Tuple[int, int, int, int]] = None
     pos = 12
     for _ in range(_MAX_CHUNKS):
+        if pos + 8 > size:  # (the end; or a damaged size went past it)
+            break
         handle.seek(pos)
         header = handle.read(8)
         if len(header) < 8:
@@ -269,6 +271,8 @@ def _scan_w64(handle: IO[bytes], size: int) -> _Found:
     fmt: Optional[Tuple[int, int, int, int]] = None
     pos = 40
     for _ in range(_MAX_CHUNKS):
+        if pos + 24 > size:  # (the end; or a damaged size went past it)
+            break
         handle.seek(pos)
         header = handle.read(24)
         if len(header) < 24:

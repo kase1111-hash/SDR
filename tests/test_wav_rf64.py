@@ -15,7 +15,9 @@ a sparse file where the file system makes one (only its first and last
 samples then take room).
 """
 
+import io
 import os
+import re
 import struct
 import wave
 from pathlib import Path
@@ -530,6 +532,12 @@ class TestDamagedAndUnfinishedFiles:
         path = tmp_path / "streamed.wav"
         self._classic(path, x, declared=0xFFFFFFFF)
         assert wav_file.read_wav_header(path).frames == 1000
+        # (Open Recording, Recording Info and the playback strip counted
+        # 1,073,741,823 samples.)
+        with IQPlayer(path) as player:
+            assert player.total_samples == 1000
+            np.testing.assert_allclose(player.read(5000), x, atol=STEP)
+        assert detect_format(path).num_samples == 1000
 
     def test_an_unfinished_rf64_file_reads_to_the_end(self, tmp_path):
         """RF64 written by a program that stopped before it filled in its
@@ -573,6 +581,49 @@ class TestDamagedAndUnfinishedFiles:
             handle.seek(44 + data - len(tail))
             handle.write(tail)
         assert wav_file.read_wav_header(path).frames == frames
+
+    @pytest.mark.parametrize(
+        "kind, said",
+        [
+            ("w64 fmt", "no data chunk"),
+            ("w64 other", r"no format \(fmt\) chunk"),
+            ("rf64 table", "no data chunk"),
+        ],
+    )
+    def test_a_chunk_size_past_the_end_says_so_plainly(self, tmp_path, kind, said):
+        """A damaged 64-bit chunk size (RF64's ds64 table, Wave64) that
+        runs past the end of the file, and past what a file position can
+        hold: plain WavError, not "cannot fit 'int' into an offset-sized
+        integer" (a path) or OverflowError (an open file)."""
+        tail = bytes.fromhex("f3acd3118cd100c04f8edb8a")
+        samples = bytes(400)
+        if kind.startswith("w64"):
+            fmt = b"fmt " + tail + struct.pack("<Q", 24 + 16) + _fmt()
+            if kind == "w64 fmt":
+                fmt = fmt[:16] + struct.pack("<Q", 2**64 - 8) + fmt[24:]
+            else:  # (an unknown chunk before fmt)
+                fmt = b"junk" + tail + struct.pack("<Q", 2**63 + 24) + fmt
+            data = b"data" + tail + struct.pack("<Q", 24 + len(samples)) + samples
+            riff = b"riff" + bytes.fromhex("2e91cf11a5d628db04c10000")
+            raw = riff + struct.pack("<Q", 0) + b"wave" + tail + fmt + data
+        else:
+            table = struct.pack("<4sQ", b"LIST", 2**63)
+            ds64 = b"ds64" + struct.pack("<IQQQI", 40, 0, 400, 100, 1) + table
+            rest = _chunk(b"fmt ", _fmt()) + b"LIST" + struct.pack("<I", 0xFFFFFFFF)
+            rest += _chunk(b"data", samples)
+            raw = b"RF64" + struct.pack("<I", 0xFFFFFFFF) + b"WAVE" + ds64 + rest
+        path = tmp_path / "damaged.wav"
+        path.write_bytes(raw)
+        with pytest.raises(wav_file.WavError, match=said):
+            wav_file.read_wav_header(path)
+        with pytest.raises(wav_file.WavError, match=said):
+            wav_file.read_wav_header(io.BytesIO(raw))
+        assert wav_file.data_offset(io.BytesIO(raw)) == 0
+        assert wav_data_offset(path) == 0
+        with pytest.raises(ValueError, match=said):
+            IQPlayer(path)
+        info = detect_format(path)
+        assert not info.is_valid and re.search(said, info.error_message)
 
 
 # ---------------------------------------------------------------------------

@@ -707,3 +707,143 @@ class TestIqConditionerAtHighRates(unittest.TestCase):
         finally:
             tracemalloc.stop()
         self.assertLess(peak, 1.5 * out.nbytes)
+
+
+# ---------------------------------------------------------------------------
+# REC-E2E-05 (part 4): a recording playing back on a computer that can't
+# keep up, and the decoder hint while one plays
+# ---------------------------------------------------------------------------
+
+
+class _Clock:
+    """The ``time`` module of main_window, run by hand."""
+
+    def __init__(self, start=1000.0):
+        self.now = float(start)
+
+    def monotonic(self):
+        return self.now
+
+    def perf_counter(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += float(seconds)
+
+    def __getattr__(self, name):  # strftime, time...
+        import time
+
+        return getattr(time, name)
+
+
+class TestSlowRecordingRidesOutHiccups(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_a_late_frame_is_made_up_in_full(self):
+        # A 48 kHz recording's frames (1,600 samples) are never timed, so
+        # each could take only the probe limit (50 ms of signal) for good,
+        # and what was left over a block was dropped: every 90 ms hiccup
+        # of the window cost ~30 ms of the recording's real time (audio).
+        mw = _mw()
+        pacer = mw._Pacer()
+        rate, now, read = 48e3, 100.0, 0
+        pacer.paced_request(rate, now)
+        start = now
+        for frame in range(90):
+            now += 0.033 + (0.09 if frame % 8 == 7 else 0.0)
+            read += pacer.paced_request(rate, now)
+        self.assertAlmostEqual(
+            read / rate, now - start, delta=mw.DISPLAY_BLOCK / rate + 1e-3
+        )
+
+
+def _playback_case():
+    from tests.test_gui_playback import _PlaybackCase
+
+    return _PlaybackCase
+
+
+class TestPlaybackWhileOverloaded(_playback_case()):
+    """A 1 MS/s recording (looped) on a fake clock; processing costs
+    ``load`` times the time its samples cover at 1x."""
+
+    PLAY_RATE = 1e6
+
+    def setUp(self):
+        super().setUp()
+        from tests.test_gui_playback import _fm_tone
+
+        x = _fm_tone(1.0, rate=self.PLAY_RATE)
+        self.play(self.make_file(x, name="p.sigmf-data", rate=self.PLAY_RATE))
+        self.win._playback_bar.set_loop(True)
+        self.assertTrue(self.win._playback.active)
+        self.clock = _Clock()
+        patcher = mock.patch.object(self.mw, "time", self.clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.load = 0.0
+        self.read_wait = 0.0
+        self.played = 0
+        process = self.win._process_block
+
+        def slow_process(samples):
+            self.played += len(samples)
+            self.clock.advance(self.load * len(samples) / self.PLAY_RATE)
+            process(samples)
+
+        self.win._process_block = slow_process
+        device = self.win._device
+        read = device.read_samples
+
+        def slow_read(count):
+            if count:
+                self.clock.advance(self.read_wait)  # (waiting for the disk)
+            return read(count)
+
+        device.read_samples = slow_read
+
+    def run_frames(self, seconds):
+        """Seconds of the recording played in ``seconds`` of display frames
+        (one each 33 ms, or as soon as the last one ended)."""
+        win = self.win
+        win._pacer.restart()
+        win._update_display()
+        self.played = 0
+        start = self.clock.now
+        while self.clock.now - start < seconds:
+            tick = self.clock.now
+            win._update_display()
+            self.clock.now = max(self.clock.now, tick + 0.033)
+        return self.played / self.PLAY_RATE / (self.clock.now - start)
+
+    def test_too_slow_for_4x_still_plays_in_real_time(self):
+        # 4x needs 1.2x real time here: frames can't keep up. One block a
+        # frame (and a probe a second) played the recording at about 0.5x
+        # (0.3x in the window), though 1x was in reach.
+        self.win._playback_bar.set_speed(4.0)
+        self.load = 0.3
+        speed = self.run_frames(4.0)
+        self.assertTrue(self.win._pacer.overloaded)
+        self.assertGreater(speed, 0.95)
+        self.assertLess(speed, 2.0)
+
+    def test_too_slow_for_1x_plays_as_fast_as_it_can(self):
+        # Frames can't keep up even at 1x (1.25x real time): the recording
+        # plays as fast as this computer manages (it played at 0.17x, a
+        # block a frame).
+        self.load = 1.25
+        speed = self.run_frames(4.0)
+        self.assertTrue(self.win._pacer.overloaded)
+        self.assertGreater(speed, 0.6)
+        self.assertLessEqual(speed, 1.0)
+
+    def test_waiting_for_the_disk_isnt_a_computer_that_cant_keep_up(self):
+        # A file read cold waits for the disk (60 ms a frame here) with the
+        # processor idle: frames judged by the clock looked overloaded, and
+        # playback dropped to a block a frame.
+        self.load = 0.1
+        self.read_wait = 0.06
+        speed = self.run_frames(4.0)
+        self.assertFalse(self.win._pacer.overloaded)
+        self.assertGreater(speed, 0.9)

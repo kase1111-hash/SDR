@@ -1517,7 +1517,9 @@ class _Pacer:
     While the median frame takes more than ``_OVERLOAD_RATIO`` of it, this
     computer can't keep up (``overloaded``): each frame then reads one
     block, as it used to, so the window stays responsive, and as samples
-    no longer arrive in real time, audio is muted with a hint. One-block
+    no longer arrive in real time, audio is muted with a hint (a recording
+    playing back, which loses nothing by waiting, still plays in real time
+    as far as it can: see :meth:`paced_request`). One-block
     frames say nothing about full ones (their cost is mostly per frame,
     such as painting the plots) and aren't judged: once every
     ``_OVERLOAD_PROBE_S`` a frame reads a full frame's worth again (a
@@ -1607,12 +1609,24 @@ class _Pacer:
         self.backlog = max(0, int(wanted) - count)
         return count
 
-    def paced_request(self, rate: float, now: float) -> int:
+    def paced_request(
+        self, rate: float, now: float, real_rate: Optional[float] = None
+    ) -> int:
         """Like :meth:`demo_request`, for a source that must not run ahead
-        of real time (a recording playing back, ``rate`` times its speed):
-        a frame owed less than a display block reads nothing (0) and the
-        time carries over, so a source slower than a block a frame (a 48
-        kHz recording, or half speed) keeps its own pace."""
+        of real time (a recording playing back, ``rate`` times its speed;
+        ``real_rate``: its rate at 1x): a frame owed less than a display
+        block reads nothing (0) and the time carries over, so a source
+        slower than a block a frame (a 48 kHz recording, or half speed)
+        keeps its own pace. A frame may always take ``_TIMED_FRAME``
+        samples: the frames of a source that slow are never timed, so it
+        kept the probe limit (50 ms of signal) for good, and a hiccup of
+        the window longer than that lost the recording's real time (audio).
+
+        While frames can't keep up, a frame still takes what real time
+        (1x) owes, up to ``_PROBE_READ_S`` of it: nothing of a recording is
+        lost by reading less, but one block a frame (and a probe a second)
+        played it at 0.1-0.5x, though 1x (or most of it) was in reach.
+        Probe frames try the speed chosen."""
         last, self._last = self._last, now
         if last is None or rate <= 0:
             self._owed = 0.0
@@ -1623,6 +1637,11 @@ class _Pacer:
             return 0
         limit = self.read_limit(rate, now)
         smallest = _TIMED_FRAME if self.overloaded and limit > 0 else DISPLAY_BLOCK
+        if self.overloaded and limit <= 0:
+            real = rate if real_rate is None else min(rate, max(1.0, real_rate))
+            limit = min(owed * real / rate, real * _PROBE_READ_S)
+        elif not self.overloaded:
+            limit = max(limit, float(_TIMED_FRAME))
         count = int(max(smallest, min(owed, limit)))
         # What a frame couldn't take (a stall) is dropped, as for the demo;
         # a block read early is made up by the next frames.
@@ -8055,9 +8074,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return self._drain_device(dev)
         if getattr(dev, "paced", False):
             # A recording playing back: in real time times its speed, never
-            # ahead of it (a slow one skips frames; an empty read is fine).
+            # ahead of it (a slow one skips frames; an empty read is fine),
+            # and at least in real time while frames can't keep up.
             rate = self._pacing_rate()
-            return dev.read_samples(self._pacer.paced_request(rate, time.monotonic()))
+            count = self._pacer.paced_request(
+                rate, time.monotonic(), self._device_sample_rate()
+            )
+            return dev.read_samples(count)
         if self._demo_mode or _is_demo_device(dev):
             rate = self._pacing_rate()
             count = self._pacer.demo_request(rate, time.monotonic())
@@ -8216,17 +8239,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
 
         started = time.perf_counter()
+        paced = bool(getattr(self._device, "paced", False))
         samples = self._read_block()
         if samples is None or len(samples) == 0:
             self._stream_died()
             return
+        # A recording's read waits for the disk: no measure of what this
+        # computer processes (a file read cold, with the processor idle,
+        # looked like frames that can't keep up).
+        waited = time.perf_counter() - started if paced else 0.0
         self._note_block(len(samples))
         self._process_block(samples)
         if self._lost_unreported:  # (a recording lost samples: see _drain_device)
             self._report_lost_samples()
         # How long the frame took against the time its samples cover.
         self._pacer.measured(
-            len(samples), self._pacing_rate(), time.perf_counter() - started
+            len(samples), self._pacing_rate(), time.perf_counter() - started - waited
         )
         self._sync_decoder_skipping()
 

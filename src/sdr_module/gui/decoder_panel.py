@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import html
+import io
 import math
 import os
 import time
@@ -66,7 +67,39 @@ try:
 except ImportError:
     HAS_PYQT6 = False
 
+from .decoder_spool import MessageSpool
 from .themes import get_palette, set_role, set_tone
+
+#: Export's columns. The receive frequency and sample rate come last, so
+#: the columns of older exports keep their places.
+EXPORT_COLUMNS = (
+    "Date",
+    "Time",
+    "Protocol",
+    "Address",
+    "Content",
+    "Valid",
+    "Raw",
+    "Frequency (MHz)",
+    "Sample rate (MS/s)",
+)
+
+
+def _export_row(msg: Dict[str, Any]) -> List[Any]:
+    """A message as Export writes it (one CSV row, EXPORT_COLUMNS)."""
+    freq = msg.get("freq_hz")
+    rate = msg.get("sample_rate")
+    return [
+        msg.get("date", ""),
+        msg.get("time", ""),
+        msg.get("protocol", ""),
+        msg.get("address", ""),
+        msg.get("content", ""),
+        msg.get("valid", True),
+        msg.get("raw", ""),
+        f"{freq / 1e6:.6f}" if freq else "",
+        f"{rate / 1e6:g}" if rate else "",
+    ]
 
 
 def _format_mhz(freq_hz: float) -> str:
@@ -661,6 +694,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         decode_toggled = pyqtSignal(bool)
         # Clear removed the messages (the live decoder forgets its notes).
         cleared = pyqtSignal()
+        # Export can no longer keep every message (e.g. the temporary
+        # folder's disk is full): what to tell the user (already logged).
+        spool_failed = pyqtSignal(str)
 
     def __init__(self, parent=None, settings: Any = None):
         if not HAS_PYQT6:
@@ -672,7 +708,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         # settings it starts in Documents/SDR Recordings every time.
         self._settings = settings
         self._messages: List[Dict[str, Any]] = []
+        # The table and the Log show the newest _max_messages; every message
+        # since Clear is also kept on disk for Export (K-D3).
         self._max_messages = 1000
+        self._spool = MessageSpool()
         # Totals since the last Clear (the table keeps only the newest rows).
         self._total = 0
         self._invalid = 0
@@ -1011,8 +1050,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._kept_label = value_label()
         kept_caption = QLabel("In the table")
         kept_caption.setToolTip(
-            f"The table, the Log and Export keep the newest {self._max_messages:,} "
-            "messages"
+            f"The table and the Log show the newest {self._max_messages:,} "
+            "messages; Export saves every message since Clear"
         )
         form.addRow(kept_caption, self._kept_label)
 
@@ -1804,27 +1843,61 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             else "Nothing to clear yet"
         )
         kept, total = len(self._messages), self._total
+        spooled, newer, missing = self._export_counts()
         if not has:
             export_tip = "No messages to export yet"
+        elif missing:
+            export_tip = (
+                f"Save the first {spooled:,} and the newest {newer:,} of the "
+                f"{total:,} decoded messages to a CSV file (the others could "
+                f"not be kept: {self._spool.problem})"
+            )
         elif total > kept:
             export_tip = (
-                f"Save the newest {kept:,} of the {total:,} decoded messages to a "
-                f"CSV file (the Decoder keeps the newest {self._max_messages:,})"
+                f"Save all {total:,} decoded messages since Clear to a CSV file"
             )
         else:
             export_tip = "Save the decoded messages to a CSV file"
         if self._export_btn.toolTip() != export_tip:
             self._export_btn.setToolTip(export_tip)
 
+    def _export_counts(self) -> Tuple[int, int, int]:
+        """What Export saves: the spool's rows (every message since Clear,
+        in order, unless writing it failed: then the ones before), how many
+        of the table's messages come after them (the table holds the newest
+        ones, in order) and how many messages are in neither."""
+        spooled = self._spool.count
+        newer = max(0, min(len(self._messages), self._total - spooled))
+        return spooled, newer, max(0, self._total - spooled - newer)
+
     def _dropped_note(self) -> str:
         """What the table says once its oldest messages went ("" before)."""
         kept, total = len(self._messages), self._total
         if total <= kept:
             return ""
+        spooled, newer, missing = self._export_counts()
+        if missing:
+            return (
+                f"Showing the newest {kept:,} of {total:,} messages since Clear. "
+                f"Export saves {spooled + newer:,} of them: the others could "
+                f"not be kept ({self._spool.problem})."
+            )
         return (
-            f"Showing the newest {kept:,} of {total:,} messages since Clear: the "
-            f"table, the Log and Export keep the newest {self._max_messages:,}."
+            f"Showing the newest {kept:,} of {total:,} messages since Clear "
+            f"(Export saves all {total:,})."
         )
+
+    def _spool_failed_text(self) -> str:
+        """The status bar's line when the spool can take no more."""
+        return (
+            f"Decoder: could not keep every message for Export "
+            f"({self._spool.problem}): it saves the ones kept so far and the "
+            f"newest {self._max_messages:,}. Clear starts again."
+        )
+
+    def discard_spool(self) -> None:
+        """Delete the messages kept for Export (the app is closing)."""
+        self._spool.discard()
 
     # ------------------------------------------------------------------
     # Messages
@@ -1895,6 +1968,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         }
         self._messages.append(msg)
         self._total += 1
+        if not self._spool.problem and not self._spool.append(_export_row(msg)):
+            self.spool_failed.emit(self._spool_failed_text())
         if not valid:
             self._invalid += 1
         self._per_protocol[protocol] += 1
@@ -2118,6 +2193,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             int(getattr(status, attr, 0) or 0) for attr in ("frames", "valid", "failed")
         )
         self._messages.clear()
+        self._spool.clear()
         self._total = 0
         self._invalid = 0
         self._per_protocol.clear()
@@ -2158,7 +2234,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
     def _export_messages(self, path: Optional[str] = None) -> int:
         """
-        Export messages to a CSV file.
+        Export every message since Clear to a CSV file (the table shows
+        only the newest; the others are in the spool).
 
         Args:
             path: Destination file; a file dialog is shown when omitted.
@@ -2188,53 +2265,50 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         if not os.path.splitext(path)[1]:
             path += ".csv"
 
-        try:
-            with open(path, "w", newline="", encoding="utf-8") as handle:
-                writer = csv.writer(handle)
-                # The receive frequency and sample rate come last, so the
-                # columns of older exports keep their places.
-                writer.writerow(
-                    [
-                        "Date",
-                        "Time",
-                        "Protocol",
-                        "Address",
-                        "Content",
-                        "Valid",
-                        "Raw",
-                        "Frequency (MHz)",
-                        "Sample rate (MS/s)",
-                    ]
+        # What there is now (messages go on arriving while the file is
+        # written): the spool up to here, then the table's newer messages.
+        total = self._total
+        spooled, newer, missing = self._export_counts()
+        length = self._spool.snapshot()
+        rows = [_export_row(m) for m in self._messages[len(self._messages) - newer :]]
+        spool = self._spool
+
+        def write(report: Any) -> int:
+            with open(path, "wb") as handle:
+                text = io.StringIO()
+                writer = csv.writer(text)
+                writer.writerow(EXPORT_COLUMNS)
+                handle.write(text.getvalue().encode("utf-8"))
+                spool.copy_rows(handle, length, report)
+                text = io.StringIO()
+                writer = csv.writer(text)
+                writer.writerows(rows)
+                handle.write(text.getvalue().encode("utf-8"))
+            return spooled + len(rows)
+
+        from . import file_jobs
+
+        result = file_jobs.run_job(
+            self, "Export Decoded Messages", "Saving the decoded messages...", write
+        )
+        if not result.ok:
+            try:
+                os.remove(path)  # (no partial file)
+            except OSError:
+                pass
+            if result.error is not None and not result.cancelled:
+                QMessageBox.warning(
+                    self,
+                    "Export Failed",
+                    f"Could not write the file:\n{result.error}",
                 )
-                for msg in self._messages:
-                    freq = msg.get("freq_hz")
-                    rate = msg.get("sample_rate")
-                    writer.writerow(
-                        [
-                            msg.get("date", ""),
-                            msg.get("time", ""),
-                            msg.get("protocol", ""),
-                            msg.get("address", ""),
-                            msg.get("content", ""),
-                            msg.get("valid", True),
-                            msg.get("raw", ""),
-                            f"{freq / 1e6:.6f}" if freq else "",
-                            f"{rate / 1e6:g}" if rate else "",
-                        ]
-                    )
-        except OSError as exc:
-            QMessageBox.warning(
-                self, "Export Failed", f"Could not write the file:\n{exc}"
-            )
             return 0
 
-        count = len(self._messages)
-        if self._total > count:
-            # The oldest went when the table was full: not in the file.
+        count = int(result.value)
+        if missing:
             text = (
-                f"Exported the newest {count:,} of {self._total:,} messages to:\n"
-                f"{path}\n\nThe Decoder keeps the newest {self._max_messages:,}; "
-                "the older ones were not saved."
+                f"Exported {count:,} of {total:,} messages to:\n{path}\n\n"
+                f"{missing:,} messages could not be kept: {spool.problem}."
             )
         else:
             text = f"Exported {count:,} message{'' if count == 1 else 's'} to:\n{path}"

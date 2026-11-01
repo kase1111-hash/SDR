@@ -4201,6 +4201,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             lambda _on: self._update_decoder_chip()
         )
         self._decoder_panel.cleared.connect(self._on_decoder_cleared)
+        # Export can't keep every message any more (a full disk): say so
+        # (the spool logged it for Error History).
+        self._decoder_panel.spool_failed.connect(
+            lambda text: self._show_status_message(text, "warning", 10000, log=False)
+        )
         # Bookmarks and the Decoder panel's "Tune to ..." tune the receiver
         # (and select the mode they listen with); "Add" saves that mode.
         self._bookmarks_panel.tune_requested.connect(self._on_bookmark_tune)
@@ -12639,6 +12644,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             quietly(device.close)
         # Saved or declined by now: delete the temporary recording file.
         quietly(self._samples_buffer.discard)
+        quietly(self._decoder_panel.discard_spool)  # (the messages for Export)
         quietly(self._frame_spectrum.close)  # (its FFT helper thread)
 
         logger.info("Application closing")

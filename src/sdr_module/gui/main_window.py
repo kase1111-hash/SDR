@@ -116,12 +116,15 @@ from .audio_chain import (
     AGC_SPEEDS,
     AM_CARRIER_TIME_S,
     DEFAULT_CW_PITCH_HZ,
+    DEFAULT_NOTCH_HZ,
+    NOTCH_CHOICES,
     AudioAgc,
     AudioJoin,
     AudioOptions,
     DcBlocker,
     IqConditioner,
     LevelAverager,
+    ListeningFilters,
     NoiseFloorTracker,
     SquelchGate,
     ToneSquelch,
@@ -936,8 +939,10 @@ class _ReceiverChain:
     All audio is DC-blocked (a mistuned FM station otherwise comes out
     offset and clips), and ``options`` (an :class:`~.audio_chain.
     AudioOptions`, shared with the window) sets the CW pitch, the AGC speed
-    of AM, SSB and CW, and the noise reduction, all without rebuilding the
-    chain.
+    of AM, SSB and CW, the noise reduction and the notch, all without
+    rebuilding the chain. The notch (:class:`~.audio_chain.
+    ListeningFilters`) works on the demodulated audio before the noise
+    reduction and the AGC, in every mode but broadcast FM.
 
     The tuned channel need not be at the center of the span: ``offset_hz``
     (set with :meth:`set_offset`) is the VFO's offset from the LO, and
@@ -999,6 +1004,8 @@ class _ReceiverChain:
         corner = _FM_DC_CORNER_HZ if mode == "FM" else _AUDIO_DC_CORNER_HZ
         self._dc_blocker = self._make_dc_blocker(corner)
         self._audio_agc = AudioAgc(self.audio_rate)
+        # The notch (K-A1): after the demodulator, before noise reduction.
+        self._listening = ListeningFilters(self.audio_rate)
         # What the last demodulate() call saw: the fraction of FM audio
         # beyond full scale (clipped: the deviation is set too small), and
         # the audio before noise reduction (for the SSTV decoder).
@@ -1232,6 +1239,7 @@ class _ReceiverChain:
             self._resampler.reset()
         self._dc_blocker.reset()
         self._audio_agc.reset()
+        self._listening.reset_stream()
         noise_reduction = self._options().noise_reduction
         if noise_reduction is not None:
             noise_reduction.reset_stream()
@@ -1297,14 +1305,14 @@ class _ReceiverChain:
             self._unclipped = audio
             audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
             self.pre_nr_audio = audio
-            return self._reduce_noise(audio)
+            return self._reduce_noise(self._listen(audio))
         options = self._options()
         if self.mode == "AM":
             audio = self._am_detect(channel, options.agc_speed)
             audio = self._dc_blocker.process(self._to_audio_rate(audio))
             audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
             self.pre_nr_audio = audio
-            return self._reduce_noise(audio)
+            return self._reduce_noise(self._listen(audio))
         # USB / LSB / CW: the channel is already the sideband (or the CW
         # filter's passband); CW adds the beat note. Then the real part.
         narrow = channel
@@ -1321,10 +1329,35 @@ class _ReceiverChain:
             audio = self._resampler.process(audio)
         audio = self._dc_blocker.process(audio)
         self.pre_nr_audio = audio
+        audio = self._listen(audio)
         nr = options.noise_reduction
         if nr is not None:
             audio = np.asarray(nr.process(audio), dtype=np.float32)
         return self._agc(audio)
+
+    @property
+    def notch_frequency_hz(self) -> Optional[float]:
+        """The frequency the audio notch removes now (set by hand, or the
+        whistle Auto found), None when it removes none."""
+        return self._listening.notch_frequency_hz
+
+    def _listen(self, audio: np.ndarray) -> np.ndarray:
+        """The audio notch, in the modes it applies to (not broadcast FM,
+        whose audio is kept as it is), over the audio this mode hears."""
+        broadcast = self.mode == "FM" and self._deemphasis
+        pitch: Optional[float] = None
+        if self.mode in ("USB", "LSB"):
+            band = (_SSB_LOW_HZ, _SSB_LOW_HZ + self.bandwidth)
+        elif self.mode == "CW":
+            pitch = min(max(float(self._options().cw_pitch_hz), 200.0), 2000.0)
+            band = (pitch - self.bandwidth / 2.0, pitch + self.bandwidth / 2.0)
+        elif self.mode == "FM" and self._voice:
+            band = (0.0, _VOICE_AUDIO_HZ)
+        else:
+            band = (0.0, self._audio_cutoff)
+        return self._listening.process(
+            audio, self._options(), not broadcast, band, pitch
+        )
 
     def _am_detect(self, channel: np.ndarray, speed: str) -> np.ndarray:
         """AM envelope relative to the carrier (at the channel rate).
@@ -3311,6 +3344,24 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             [(value, text) for value, text, _tip in AGC_SPEED_LABELS],
             "How fast the audio level follows the signal (Audio group in the "
             "control panel)",
+        )
+        notch_menu = audio_menu.addMenu("Notc&h")
+        notch_menu.setToolTipsVisible(True)
+        choices(
+            notch_menu,
+            panel._notch_combo,
+            [(value, text) for value, text, _tip in NOTCH_CHOICES],
+            "Remove a whistle (a heterodyne) from the audio: Auto finds it, "
+            "Manual removes the frequency set (Audio group in the control "
+            "panel; AM, SSB, CW and narrow FM)",
+        )
+        notch_menu.addSeparator()
+        self._add_action(
+            notch_menu,
+            "Notch &Frequency...",
+            self._show_notch_frequency,
+            tip="Set the whistle's frequency by hand (Manual; the box next to "
+            "Notch in the Audio group)",
         )
         self._add_action(
             audio_menu,
@@ -6738,6 +6789,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         panel.noise_reduction_changed.connect(self._on_noise_reduction_changed)
         panel.audio_agc_changed.connect(self._on_audio_agc_changed)
         panel.tone_squelch_changed.connect(self._on_tone_squelch_changed)
+        panel.notch_changed.connect(self._on_notch_changed)
         panel.iq_options_changed.connect(self._on_iq_options_changed)
 
     def _save_filter_memory(self) -> None:
@@ -6778,6 +6830,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "info",
                 6000,
             )
+
+    def _on_notch_changed(self, mode: str, hz: int) -> None:
+        """The audio notch (K-A1): Off, Auto or Manual at ``hz``."""
+        options = self._audio_options
+        options.notch = mode
+        options.notch_hz = float(hz)
+        self._save_setting("audio/notch", mode)
+        self._save_setting("audio/notch_hz", int(hz))
+
+    def _show_notch_frequency(self) -> None:
+        """Radio > Audio > Notch > Notch Frequency...: Manual, and its box."""
+        panel = self._control_panel
+        panel.set_notch_mode("manual")
+        self._show_panel_control(panel._notch_spin)
 
     def _on_iq_options_changed(self, remove_dc: bool, balance_iq: bool) -> None:
         conditioner = self._iq_conditioner
@@ -6858,6 +6924,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 settings.get_float("audio/tone_squelch", 0.0)
             ),
         )
+
+        def notch_hz() -> None:
+            hz = settings.get_int("audio/notch_hz", DEFAULT_NOTCH_HZ)
+            panel.set_notch_hz(hz)
+            if panel.notch_hz() != hz:  # (beyond the box: its nearest end)
+                logger.warning(
+                    f"Ignoring the damaged setting audio/notch_hz={hz!r}: using "
+                    f"{panel.notch_hz()} Hz instead."
+                )
+
+        restore("audio/notch_hz", notch_hz)
+        restore(
+            "audio/notch",
+            lambda: choose(
+                "audio/notch", "off", panel.set_notch_mode, panel.notch_mode
+            ),
+        )
         restore(
             "audio/remove_dc, audio/balance_iq",
             lambda: panel.set_iq_options(
@@ -6877,6 +6960,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         hz = panel.tone_squelch_hz()
         self._tone_squelch.tone_hz = hz if hz else None
+        self._audio_options.notch = panel.notch_mode()
+        self._audio_options.notch_hz = float(panel.notch_hz())
         remove_dc, balance_iq = panel.iq_options()
         self._iq_conditioner.remove_dc = remove_dc
         self._iq_conditioner.balance_iq = balance_iq
@@ -6891,6 +6976,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         settings.set("audio/noise_reduction", panel.noise_reduction())
         settings.set("audio/agc_speed", panel.audio_agc_speed())
         settings.set("audio/tone_squelch", panel.tone_squelch_hz())
+        settings.set("audio/notch", panel.notch_mode())
+        settings.set("audio/notch_hz", panel.notch_hz())
         remove_dc, balance_iq = panel.iq_options()
         settings.set("audio/remove_dc", remove_dc)
         settings.set("audio/balance_iq", balance_iq)
@@ -9124,6 +9211,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._tone_squelch.reset()
                 self._demod_running = False
                 self._clip_s = 0.0
+                # (Nothing is notched while nothing plays.)
+                self._control_panel.show_notch_found(None)
             self._tone_blocked = False
             if self._audio_join.playing:
                 # (Another mode with no audio: no block to fade out.)
@@ -9146,6 +9235,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._record_audio_block(None, False, seconds, False)
             return
         self._demod_running = True
+        if self._audio_options.notch == "auto":
+            # (What Auto removes, next to the Notch choice.)
+            self._control_panel.show_notch_found(chain.notch_frequency_hz)
         tone_ok = True
         if mode == "FM":
             # CTCSS: what tone the station sends, and the tone squelch

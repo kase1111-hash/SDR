@@ -14,7 +14,9 @@ tested without a window and costs little at 30 frames a second:
   at least ~25 ms of signal, opens at the threshold and closes only after
   the level stays below it (with hysteresis) for a hang time.
 * :class:`AudioOptions`: the listening options the receiver chain reads
-  every block (CW pitch, AGC speed, noise reduction).
+  every block (CW pitch, AGC speed, noise reduction, notch);
+  :class:`ListeningFilters` the notch of a chain's audio (Off, Auto or a
+  frequency set by hand; ``dsp/audio_filters.py``).
 * :class:`DcBlocker`, :class:`AudioAgc`: a one-pole DC blocker and a peak
   AGC with selectable speed, for the demodulated audio;
   :func:`make_noise_reduction` the Light and Strong noise reduction.
@@ -32,6 +34,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
+from ..dsp.audio_filters import NOTCH_MODES, AudioNotch
 from ..dsp.filters import (
     CTCSSDetector,
     NoiseReduction,
@@ -358,6 +361,22 @@ CW_PITCH_RANGE = (400, 1000)
 DEFAULT_CW_PITCH_HZ = 700
 
 
+#: Audio notch choices: (key, label, tooltip).
+NOTCH_CHOICES: Tuple[Tuple[str, str, str], ...] = (
+    ("off", "Off", "No notch"),
+    (
+        "auto",
+        "Auto",
+        "Finds the strongest steady whistle (a heterodyne) and removes it, "
+        "following it as it drifts; voice is left alone",
+    ),
+    ("manual", "Manual", "Removes the frequency set in the box next to it"),
+)
+#: The notch frequency set by hand: range and default (Hz).
+NOTCH_RANGE_HZ = (200, 5000)
+DEFAULT_NOTCH_HZ = 1000
+
+
 class AudioOptions:
     """Listening options the receiver chain reads on every block.
 
@@ -370,12 +389,85 @@ class AudioOptions:
       and CW; FM has no AGC).
     * ``noise_reduction``: a streaming
       :class:`~sdr_module.dsp.filters.NoiseReduction`, or None.
+    * ``notch``: ``"off"``, ``"auto"`` or ``"manual"`` (at ``notch_hz``),
+      see :class:`ListeningFilters`.
     """
 
     def __init__(self) -> None:
         self.cw_pitch_hz: float = float(DEFAULT_CW_PITCH_HZ)
         self.agc_speed: str = DEFAULT_AGC_SPEED
         self.noise_reduction: Optional[NoiseReduction] = None
+        self.notch: str = "off"
+        self.notch_hz: float = float(DEFAULT_NOTCH_HZ)
+
+
+class ListeningFilters:
+    """The notch of one receiver chain's audio (a heterodyne whistle).
+
+    It applies in AM, USB, LSB, CW and narrow FM; broadcast FM (a
+    broadcast deviation) keeps its audio as it is, and I/Q has none. The
+    chain calls :meth:`process` on each block of 48 kHz audio after the
+    demodulator (before the noise reduction and the AGC, so a loud
+    whistle doesn't pump the AGC), with the audio band Auto searches:
+    the passband heard, without the CW note in CW (there the note is the
+    signal, never a whistle to remove).
+
+    :attr:`notch_frequency_hz` is the frequency being notched (Manual's,
+    or the whistle Auto found), None when nothing is.
+    """
+
+    #: Auto leaves this much either side of the CW pitch alone.
+    CW_NOTE_HZ = 150.0
+    #: Auto searches from here up (lower than this is hum: the low cut's).
+    AUTO_LOWEST_HZ = 200.0
+    AUTO_HIGHEST_HZ = 4500.0
+
+    def __init__(self, rate: float) -> None:
+        self.rate = float(rate)
+        self._notch = AudioNotch(self.rate)
+        self._band: Optional[Tuple[float, float, Optional[Tuple[float, float]]]] = None
+
+    def reset(self) -> None:
+        """Another channel or mode: Auto searches anew."""
+        self._notch.reset()
+
+    def reset_stream(self) -> None:
+        """A gap in the same channel (the squelch closed): the filter
+        state is dropped, the whistle Auto found is kept."""
+        self._notch.reset_stream()
+
+    @property
+    def notch_frequency_hz(self) -> Optional[float]:
+        notch = self._notch
+        if notch.mode == "off":
+            return None
+        return notch.frequency_hz
+
+    def process(
+        self,
+        audio: np.ndarray,
+        options: "AudioOptions",
+        applies: bool,
+        band: Tuple[float, float],
+        cw_pitch: Optional[float] = None,
+    ) -> np.ndarray:
+        """``audio`` with the notch of ``options`` (``applies``: the mode
+        takes it; ``band``: the audio heard, low and high Hz)."""
+        notch = self._notch
+        mode = getattr(options, "notch", "off") if applies else "off"
+        notch.mode = mode if mode in NOTCH_MODES else "off"
+        notch.manual_hz = getattr(options, "notch_hz", DEFAULT_NOTCH_HZ)
+        if notch.mode == "auto":
+            low = max(self.AUTO_LOWEST_HZ, float(band[0]))
+            high = min(self.AUTO_HIGHEST_HZ, float(band[1]))
+            skip = None
+            if cw_pitch is not None:
+                skip = (cw_pitch - self.CW_NOTE_HZ, cw_pitch + self.CW_NOTE_HZ)
+            wanted = (low, high, skip)
+            if wanted != self._band:
+                self._band = wanted
+                notch.finder.set_band(low, high, skip)
+        return notch.process(audio)
 
 
 class AudioAgc:

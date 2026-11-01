@@ -112,5 +112,122 @@ class TestIdentifyHearsVoiceAtItsDeviation(unittest.TestCase):
         self.assertIn("and stays near it: 5 kHz could clip", ident.details[-1])
 
 
+def _playback_case():
+    from tests.test_gui_playback import _PlaybackCase
+
+    return _PlaybackCase
+
+
+class TestPlaybackAudioHintGivesAdviceThatApplies(_playback_case()):
+    """N-02: a recording playing at 1x on a computer that can't keep up in
+    real time paused its audio with "This computer can't process 1 MS/s in
+    real time right now, so audio is paused until it catches up. A lower
+    sample rate (Receiver > Sample rate) helps.", but the rate is refused
+    while a file plays. Here processing costs ``load`` times the time its
+    samples cover at 1x (a fake clock, as in test_final_perf)."""
+
+    PLAY_RATE = 1e6
+
+    def setUp(self):
+        super().setUp()
+        from unittest import mock
+
+        from tests.test_final_perf import _Clock
+        from tests.test_gui_playback import _fm_tone
+
+        x = _fm_tone(1.0, rate=self.PLAY_RATE)
+        self.play(self.make_file(x, name="p.sigmf-data", rate=self.PLAY_RATE))
+        self.win._playback_bar.set_loop(True)
+        self.assertTrue(self.win._playback.active)
+        self.clock = _Clock()
+        patcher = mock.patch.object(self.mw, "time", self.clock)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.load = 0.0
+        process = self.win._process_block
+
+        def slow_process(samples):
+            self.clock.advance(self.load * len(samples) / self.PLAY_RATE)
+            process(samples)
+
+        self.win._process_block = slow_process
+
+    def run_frames(self, seconds):
+        win = self.win
+        win._pacer.restart()
+        win._update_display()
+        start = self.clock.now
+        while self.clock.now - start < seconds:
+            tick = self.clock.now
+            win._update_display()
+            self.clock.now = max(self.clock.now, tick + 0.033)
+
+    def hints(self):
+        """What the window says about the paused audio: the hint (the
+        status bar's) and the Audio button's tooltip (no sound card here:
+        its state is that of a computer with one)."""
+        from unittest import mock
+
+        win = self.win
+        with mock.patch.object(type(win), "_audio_state", return_value="paused"):
+            win._sync_audio_ui()
+        return win._realtime_hint(), win._audio_button.toolTip()
+
+    def test_a_computer_too_slow_for_1x(self):
+        # (Under half of real time: audio pauses.)
+        self.load = 3.0
+        self.run_frames(4.0)
+        win = self.win
+        self.assertTrue(win._pacer.overloaded)
+        self.assertFalse(win._realtime())
+        hint, tip = self.hints()
+        self.assertEqual(
+            hint,
+            "This computer can't process the recording's 1 MS/s in real time "
+            "right now, so audio is paused until it catches up. Closing other "
+            "programs may help.",
+        )
+        for text in (hint, tip):
+            self.assertNotIn("Sample rate", text)
+            self.assertNotIn("sample rate", text)
+        self.assertIn(hint, tip)
+
+    def test_frames_late_for_a_moment(self):
+        """A window hiccup (a stall of the display loop): what the recording
+        played meanwhile is behind real time for a moment."""
+        self.run_frames(2.0)
+        self.assertTrue(self.win._realtime())
+        self.clock.advance(1.5)  # (the stall)
+        self.run_frames(0.1)
+        win = self.win
+        self.assertFalse(win._pacer.overloaded)
+        self.assertFalse(win._realtime())
+        hint, tip = self.hints()
+        self.assertEqual(
+            hint,
+            "The recording isn't playing in real time right now, so audio is "
+            "paused until it catches up.",
+        )
+        self.assertNotIn("Sample rate", tip)
+
+    def test_faster_or_slower_than_1x(self):
+        self.win._playback_bar.set_speed(2.0)
+        self.assertEqual(
+            self.win._realtime_hint(),
+            "Playing at 2x: audio plays at 1x only (the spectrum, decoders and "
+            "recordings keep working).",
+        )
+
+    def test_live_hardware_keeps_its_advice(self):
+        """Back on a device, the advice to lower its rate stands."""
+        self.load = 3.0
+        self.run_frames(2.0)
+        self.win._playback.close()
+        self.assertFalse(self.win._playback.active)
+        self.win._demo_mode = False
+        self.win._pacer.overloaded = True
+        self.assertIn("A lower sample rate (Receiver > Sample rate) helps.", self.win._realtime_hint())
+
+
 if __name__ == "__main__":
     unittest.main()

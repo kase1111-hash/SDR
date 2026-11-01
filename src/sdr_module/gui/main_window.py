@@ -9233,6 +9233,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         job = self._busy_job_now()
         if job:  # (this app's own job, not the device: P-04)
             return f"{job} keeps this computer busy, so audio is paused meanwhile."
+        if self._playback.active:
+            # (A recording's rate can't be changed while it plays: no advice
+            # to lower it. N-02)
+            if self._pacer.overloaded:
+                return (
+                    "This computer can't process the recording's "
+                    f"{format_rate(self._device_sample_rate())} in real time "
+                    "right now, so audio is paused until it catches up. "
+                    "Closing other programs may help."
+                )
+            return (
+                "The recording isn't playing in real time right now, so audio "
+                "is paused until it catches up."
+            )
         if self._demo_mode:
             return (
                 "The demo device can't keep up in real time right now, so "

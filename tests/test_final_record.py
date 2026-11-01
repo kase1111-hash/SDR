@@ -1505,3 +1505,33 @@ class TestASavedFormatChoiceSurvivesTheNewNames(_FilesCase):
         self.store.values["recording_format"] = "Something else (.xyz)"
         win = self.reopen()
         self.assertEqual(win._control_panel.get_recording_extension(), ".sigmf-data")
+
+
+class TestUnsavedRecordingKeepsTheFrequencyWhole(_FilesCase):
+    """The Unsaved Recording question joins the take's frequency to its unit
+    with a non-breaking space, so a wrap never leaves the unit alone on the
+    next line. It did so only for " MHz", and format_frequency now writes
+    kHz below 2 MHz ("880 kHz", an AM broadcast take)."""
+
+    def ask(self, center_hz):
+        win = self.win
+        win._record_button.click()
+        for _ in range(2):
+            win._update_display()
+        win._record_button.click()
+        self.assertTrue(win._buffer_unsaved)
+        win._buffer_meta = (center_hz, win._buffer_meta[1])
+        self.answer("Cancel")
+        ask = self.mw.SDRMainWindow._confirm_discard_recording
+        self.assertFalse(ask(win, "closing"))
+        return self.boxes[-1].informativeText()
+
+    def test_every_unit_stays_with_its_number(self):
+        for center, shown in (
+            (880e3, "880\u00a0kHz"),
+            (1.2e6, "1200\u00a0kHz"),
+            (100.1e6, "100.100\u00a0MHz"),
+        ):
+            with self.subTest(center=center):
+                text = self.ask(center)
+                self.assertIn(f"recorded at {shown} ", text)

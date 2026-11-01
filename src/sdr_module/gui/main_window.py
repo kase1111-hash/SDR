@@ -7490,10 +7490,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             live = False
         count = self._buffer_sample_count()
         freq, _rate = self._buffer_meta
-        # (A non-breaking space keeps "100.000 MHz" on one line.)
-        where = (
-            f" at {format_frequency(freq)}".replace(" MHz", "\u00a0MHz") if freq else ""
-        )
+        # (A non-breaking space keeps "100.000 MHz", or "880 kHz" below 2
+        # MHz, on one line.)
+        shown = format_frequency(freq).replace(" ", "\u00a0") if freq else ""
+        where = f" at {shown}" if shown else ""
         box = QMessageBox(self)
         box.setIcon(QMessageBox.Icon.Warning)
         box.setWindowTitle("Unsaved Recording")

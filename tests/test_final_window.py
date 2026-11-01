@@ -30,7 +30,7 @@ from tests.test_gui_second_receiver import _FakeSink, _SecondCase  # noqa: E402
 
 if HAS_PYQT6:
     from PyQt6.QtCore import QPoint, QSettings, Qt
-    from PyQt6.QtWidgets import QApplication, QGroupBox, QMessageBox
+    from PyQt6.QtWidgets import QApplication, QGroupBox, QMessageBox, QPushButton
 
 
 def _block(n=4096, seed=1):
@@ -873,6 +873,114 @@ class TestThemeSwitch(_WindowTestCase):
         self.assertFalse(win._realtime())
         win._on_theme_changed("light")
         self.assertTrue(win._realtime())
+
+
+# --------------------------------------------------------------------------- #
+# Tune Back right after typing a frequency (DEV-E2E-08)
+# --------------------------------------------------------------------------- #
+class TestTuneBackAtOnce(_WindowTestCase):
+    demo = True
+
+    def test_alt_left_goes_back_within_the_dwell(self):
+        win = self.win
+        win._commit_pending_history()
+        self.assertTrue(win.set_frequency(145.29e6))
+        self.assertTrue(win._history_timer.isActive())  # (not committed yet)
+        back = win._back_action
+        self.assertTrue(back.isEnabled())
+        self.assertIn("100.100 MHz", back.toolTip())
+        self.assertFalse(win._forward_action.isEnabled())
+        back.trigger()
+        self.assertAlmostEqual(win._current_frequency(), 100.1e6)
+        # And forward again to the frequency typed.
+        self.assertTrue(win._forward_action.isEnabled())
+        win._forward_action.trigger()
+        self.assertAlmostEqual(win._current_frequency(), 145.29e6)
+
+
+# --------------------------------------------------------------------------- #
+# Find Connected Devices and the no-device question (DEV-E2E-11, -17)
+# --------------------------------------------------------------------------- #
+class TestFindDevicesWording(_DeviceCase):
+    def scan(self, devices=()):
+        from sdr_module.gui import main_window
+
+        boxes = []
+
+        def run(box):
+            boxes.append(box)
+            return 0
+
+        self.win._exec_dialog = run
+        with (
+            mock.patch.object(main_window, "_driver_importable", return_value=False),
+            mock.patch.object(
+                type(self.win), "_scan_hardware", return_value=list(devices)
+            ),
+        ):
+            self.win._hardware_classes = []
+            self.win._refresh_devices()
+        return boxes[0]
+
+    def buttons(self, box):
+        # (Shown first: QDialog picks its default button when it shows.)
+        if not box.isVisible():
+            box.show()
+            self.addCleanup(box.close)
+            self.settle()
+        return [b for b in box.findChildren(QPushButton) if b.isVisibleTo(box)]
+
+    def test_while_the_demo_runs_it_isnt_offered_again(self):
+        self.assertTrue(self.win._demo_mode)
+        box = self.scan()
+        texts = [b.text().replace("&", "") for b in self.buttons(box)]
+        self.assertNotIn("Use Demo Device", texts)
+        self.assertIn("the demo device is running", box._summary.text())
+        self.assertIn("Device > Find Connected Devices... again", box._summary.text())
+        self.assertNotIn("scan again", box._summary.text())
+        default = [
+            b.text().replace("&", "") for b in self.buttons(box) if b.isDefault()
+        ]
+        self.assertEqual(default, ["Close"])
+
+    def test_enter_presses_the_primary_button(self):
+        self.win._release_device()
+        box = self.scan()
+        default = [b for b in self.buttons(box) if b.isDefault()]
+        self.assertEqual(
+            [b.text().replace("&", "") for b in default], ["Use Demo Device"]
+        )
+        self.assertEqual(default[0].property("role"), "primary")
+        box = self.scan([("k1", "RTL-SDR #0")])
+        default = [b for b in self.buttons(box) if b.isDefault()]
+        self.assertEqual([b.text().replace("&", "") for b in default], ["Connect..."])
+
+    def test_no_device_names_the_devices_found(self):
+        win = self.win
+        win._release_device()
+        seen = []
+
+        def run(box):
+            seen.append((box.text(), box.informativeText()))
+            return 0
+
+        win._exec_dialog = run
+        for found, text, how in (
+            (["RTL-SDR #0"], "Found RTL-SDR #0, not opened yet.", "opens it"),
+            (
+                ["RTL-SDR #0", "HackRF One"],
+                "Found RTL-SDR #0 and HackRF One, not opened yet.",
+                "opens one of them",
+            ),
+        ):
+            with mock.patch.object(
+                type(win),
+                "_scan_hardware",
+                return_value=[(f"k{i}", n) for i, n in enumerate(found)],
+            ):
+                win._prompt_no_device()
+            self.assertEqual(seen[-1][0], text)
+            self.assertIn(how, seen[-1][1])
 
 
 if __name__ == "__main__":

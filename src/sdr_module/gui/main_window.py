@@ -5567,8 +5567,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _note_tuned(self) -> None:
         """A frequency was tuned: it joins the history once the receiver
         stays on it a moment (stepping through a band doesn't add each
-        step)."""
+        step). Tune Back works at once all the same."""
         self._history_timer.start(_HISTORY_DWELL_MS)
+        self._update_history_actions()
 
     def _commit_history_entry(self) -> None:
         """Record where the receiver is (frequency and mode) now."""
@@ -5681,12 +5682,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Enable Tune Back/Forward when there is somewhere to go, and say
         where in their tooltips."""
         history = self._tuning_history
-        for action, can, delta, verb in (
-            (self._back_action, history.can_go_back(), -1, "Go back to"),
-            (self._forward_action, history.can_go_forward(), 1, "Go forward to"),
+        here = history.current()
+        # A frequency tuned a moment ago joins the history after the dwell,
+        # but Tune Back commits it first (DEV-E2E-08): back then goes to
+        # where the history is now, and nothing is ahead any more.
+        pending = (
+            self._history_timer.isActive()
+            and here is not None
+            and not here.same_frequency(TunedEntry(self._current_frequency()))
+        )
+        back = here if pending else history.peek(-1)
+        forward = None if pending else history.peek(1)
+        for action, entry, delta, verb in (
+            (self._back_action, back, -1, "Go back to"),
+            (self._forward_action, forward, 1, "Go forward to"),
         ):
-            action.setEnabled(can)
-            entry = history.peek(delta) if can else None
+            action.setEnabled(entry is not None)
             if entry is not None:
                 tip = f"{verb} {self._entry_text(entry)}"
             elif delta < 0:
@@ -6329,11 +6340,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("No Device Connected")
         if hardware:
-            found = hardware[0] if len(hardware) == 1 else f"{len(hardware)} devices"
+            # (Named: "Found RTL-SDR #0 and HackRF One, not opened yet.")
+            names = hardware[:3]
+            found = (
+                ", ".join(names[:-1]) + " and " + names[-1] if names[1:] else names[0]
+            )
+            if len(hardware) > 3:
+                found = f"{', '.join(names)} and {len(hardware) - 3} more"
             box.setText(f"Found {found}, not opened yet.")
+            which = "it" if len(hardware) == 1 else "one of them"
             box.setInformativeText(
-                "Connect opens it and starts receiving. Demo Mode explores the "
-                "app with simulated signals instead."
+                f"Connect... opens {which} and starts receiving. Demo Mode "
+                "explores the app with simulated signals instead."
             )
         else:
             box.setText("No SDR hardware detected.")
@@ -8424,7 +8442,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         devices = self._scan_hardware()
         self._known_devices = dict(devices)
         missing = [] if devices else self._missing_drivers()
-        box = ScanResultsDialog([name for _key, name in devices], missing, self)
+        box = ScanResultsDialog(
+            [name for _key, name in devices],
+            missing,
+            self,
+            demo_running=bool(self._demo_mode and self._device is not None),
+        )
         self._exec_dialog(box)
         if box.choice == "connect":
             self._show_device_dialog()

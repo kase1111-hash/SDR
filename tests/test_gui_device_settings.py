@@ -1020,6 +1020,9 @@ class TestScanForDevices(_DeviceCase):
         return boxes[0]
 
     def test_shows_the_install_commands_selectable_and_monospace(self):
+        # (No device at all: with the demo device running the box doesn't
+        # offer it again, DEV-E2E-11.)
+        self.win._release_device()
         box = self.scan()
         self.assertEqual(box.windowTitle(), "No Devices Found")
         text = box.commands_text()

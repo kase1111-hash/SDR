@@ -796,9 +796,10 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
 
 
 class ScanResultsDialog(QDialog if HAS_PYQT6 else object):
-    """What Device > Scan for Devices found, with what to do next: the
-    devices (Connect...), or the drivers to install (a selectable command
-    block) and Use Demo Device / Connect...."""
+    """What Device > Find Connected Devices found, with what to do next:
+    the devices (Connect...), or the drivers to install (a selectable
+    command block) and Use Demo Device / Connect... (no Use Demo Device
+    while the demo device runs: ``demo_running``)."""
 
     #: What the user chose: "connect", "demo" or "" (Close).
     choice = ""
@@ -808,6 +809,7 @@ class ScanResultsDialog(QDialog if HAS_PYQT6 else object):
         devices: Sequence[str],
         missing: Sequence[Tuple[str, str]],
         parent: Any = None,
+        demo_running: bool = False,
     ):
         super().__init__(parent)
         self.choice = ""
@@ -821,11 +823,17 @@ class ScanResultsDialog(QDialog if HAS_PYQT6 else object):
             text = f"Found {count} SDR device{'s' if count != 1 else ''}:\n"
             text += "\n".join(f"  •  {name}" for name in devices)
             text += "\n\nConnect... opens one."
+        elif demo_running:
+            text = (
+                "No SDR devices were found; the demo device is running "
+                "(simulated signals). Plug in an RTL-SDR or HackRF One, then "
+                "choose Device > Find Connected Devices... again."
+            )
         else:
             text = (
-                "No SDR devices were found. Plug in an RTL-SDR or HackRF One and "
-                "scan again, or try the app with the demo device's simulated "
-                "signals."
+                "No SDR devices were found. Plug one in (an RTL-SDR or HackRF "
+                "One), then choose Device > Find Connected Devices... again, "
+                "or try the app with the demo device's simulated signals."
             )
         self._summary = QLabel(text)
         self._summary.setWordWrap(True)
@@ -861,23 +869,31 @@ class ScanResultsDialog(QDialog if HAS_PYQT6 else object):
         self._connect_btn.setToolTip("Open Device > Connect... to choose a device")
         buttons.addButton(self._connect_btn, QDialogButtonBox.ButtonRole.AcceptRole)
         self._demo_btn: Optional[QPushButton] = None
-        if not found:
+        if not found and not demo_running:
             self._demo_btn = QPushButton("Use &Demo Device")
             self._demo_btn.setToolTip(
                 "Explore the app with simulated signals (no hardware needed)"
             )
             buttons.addButton(self._demo_btn, QDialogButtonBox.ButtonRole.AcceptRole)
             set_role(self._demo_btn, "primary")
-            self._demo_btn.setDefault(True)
-        else:
+        elif found:
             set_role(self._connect_btn, "primary")
-            self._connect_btn.setDefault(True)
         close = buttons.addButton(QDialogButtonBox.StandardButton.Close)
         close.clicked.connect(self.reject)
         self._connect_btn.clicked.connect(lambda: self._choose("connect"))
         if self._demo_btn is not None:
             self._demo_btn.clicked.connect(lambda: self._choose("demo"))
         layout.addWidget(buttons)
+        # Enter presses the primary button (set once the buttons are in the
+        # dialog: before, QDialog didn't record it and made Connect... the
+        # default); with nothing to offer, Close.
+        default = self._demo_btn if self._demo_btn is not None else close
+        if found:
+            default = self._connect_btn
+        for button in buttons.buttons():
+            if isinstance(button, QPushButton):
+                button.setAutoDefault(button is default)
+        default.setDefault(True)
 
     def _choose(self, choice: str) -> None:
         self.choice = choice

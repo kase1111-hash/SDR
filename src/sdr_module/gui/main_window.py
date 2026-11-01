@@ -8466,14 +8466,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Decoder's status line says so (and the status bar, once): its
         counts alone looked healthy while it heard a fraction of the signal
         (with no speaker, as for ADS-B in None (I/Q), nothing else said
-        so). It says so until frames have kept up for _SKIP_HINT_HOLD_S."""
+        so). It says so until frames have kept up for _SKIP_HINT_HOLD_S.
+        Not while a Scanner scan runs: it moves the receiver, the decoder is
+        off its channel then (its line says "Not tuned to ..."), and no
+        device or sample rate is to blame for what it misses."""
         panel = self._own("_decoder_panel")
         if panel is None:
             return
+        scanner = self._own("_scanner_panel")
         decoding = (
             self._decoder is not None
             and self._decoder_protocol is not None
             and panel._enabled_check.isChecked()
+            and not (scanner is not None and scanner.engine.active)
         )
         now = time.monotonic()
         if self._pacer.overloaded:

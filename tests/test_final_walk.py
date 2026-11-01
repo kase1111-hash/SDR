@@ -724,5 +724,61 @@ class TestNotWhileTransmittingInOneTone(_tx_case()):
         self.assertEqual(tone, "danger")
 
 
+# --------------------------------------------------------------------------- #
+# W-12: no device hint while a scan moves the receiver
+# --------------------------------------------------------------------------- #
+
+
+class TestNoDeviceHintWhileAScanMovesTheReceiver(_demo_take_case()):
+    """W-12: with the POCSAG decoder on, a Scanner range scan was 1.5 s in
+    when the status bar (and the Decoder's line) said "The demo device
+    can't keep up in real time right now, so the POCSAG decoder misses part
+    of the signal. A lower sample rate (Receiver > Sample rate) helps.".
+    While a scan moves the receiver the decoder is off its channel anyway
+    (its line says "Not tuned to POCSAG: ..."): no hint about the device or
+    the sample rate then. (A busy computer, as in TestTheDecodersLine...:
+    the demo device on a fake clock at ten frames a second.)"""
+
+    FRAME_S = 0.1
+    HINT = "The demo device can't keep up in real time right now"
+
+    def setUp(self):
+        super().setUp()
+        panel = self.win._decoder_panel
+        panel._proto_combo.setCurrentText("POCSAG")
+        self.run_frames(0.1)
+        panel.set_receiving(True)
+
+    def run_frames(self, seconds):
+        end = self.clock.now + seconds
+        while self.clock.now < end:
+            tick = self.clock.now
+            self.win._update_display()
+            self.clock.now = max(self.clock.now, tick + self.FRAME_S)
+
+    def line(self):
+        return self.win._decoder_panel.decoder_status_text()
+
+    def test_a_range_scan(self):
+        win = self.win
+        scanner = win._scanner_panel
+        scanner._preset.setCurrentIndex(1)  # (FM broadcast)
+        scanner.set_scan_mode("continuous")
+        self.assertTrue(scanner.start_scan())
+        said = set()
+        for _ in range(40):
+            self.run_frames(self.FRAME_S)
+            said.update((self.line(), win._message_label.text()))
+        self.assertTrue(scanner.engine.active)
+        self.assertFalse([text for text in said if self.HINT in text], said)
+        self.assertFalse([text for text in said if "Sample rate" in text], said)
+        scanner.stop_scan()
+
+    def test_without_a_scan_the_hint_is_said(self):
+        """(The control: the same busy computer, no scan.)"""
+        self.run_frames(3.0)
+        self.assertTrue(self.line().startswith(self.HINT), self.line())
+
+
 if __name__ == "__main__":
     unittest.main()

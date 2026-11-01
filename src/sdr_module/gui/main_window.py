@@ -10891,12 +10891,29 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             else:
                 if isinstance(saved, dict):
                     settings.update(saved)
+                    self._log_damaged_plot_settings(saved)
         try:
             self._apply_spectrum_settings(settings)
         except Exception as e:
             # (A damaged setting must never stop the app from starting.)
             logger.warning(f"Ignoring the saved spectrum settings: {e}")
             self._apply_spectrum_settings(dict(self._SPECTRUM_DEFAULTS))
+
+    @staticmethod
+    def _log_damaged_plot_settings(saved: Dict[str, Any]) -> None:
+        """The FFT size, window and zoom the window applies from the saved
+        spectrum settings: one the app never saves (a damaged settings file)
+        gives the nearest or default value, logged."""
+        for key, normalize in (
+            ("fft_size", normalize_fft_size),
+            ("window", normalize_window),
+            ("zoom", normalize_zoom),
+        ):
+            if key in saved and normalize(saved[key]) != saved[key]:
+                logger.warning(
+                    f"Ignoring the damaged spectrum setting {key}="
+                    f"{saved[key]!r}: using {normalize(saved[key])!r} instead."
+                )
 
     def _apply_spectrum_settings(self, settings: Dict[str, Any]) -> None:
         self._spectrum.apply_display_settings(settings)

@@ -460,6 +460,33 @@ class TestDamagedSettingsInTheWindow(_IniSettings):
         self.assertIn("unreadable spectrum settings", text)
         self.assertIn("unreadable waterfall settings", text)
 
+    def test_a_damaged_fft_size_window_or_zoom_is_logged(self):
+        # (Checker, ROB-07: the values the window applies itself fell back
+        # to their defaults with nothing said.)
+        saved = {"fft_size": "abc", "window": "banana", "zoom": "x", "avg": 4}
+        with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+            win = self.window(spectrum_display=json.dumps(saved))
+        text = "\n".join(logs.output)
+        for key in ("fft_size", "window", "zoom"):
+            self.assertIn(f"spectrum setting {key}=", text)
+        self.assertNotIn("avg", text)
+        shown = win._spectrum.display_settings()
+        self.assertEqual(shown["fft_size"], 2048)
+        self.assertEqual(shown["window"], "hann")
+        self.assertEqual(shown["zoom"], 1)
+        # (A huge size: the nearest the app offers, said too.)
+        with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+            self.window(spectrum_display=json.dumps({"fft_size": 1e300}))
+        self.assertIn("fft_size=1e+300", "\n".join(logs.output))
+
+    def test_the_apps_own_spectrum_settings_say_nothing(self):
+        first = self.window()
+        first._apply_plot_resolution(8192, "blackman-harris", save=False)
+        own = json.dumps(first._spectrum.display_settings())
+        with self.assertNoLogs("sdr_module.gui.main_window", "WARNING"):
+            win = self.window(spectrum_display=own)
+        self.assertEqual(win._spectrum.display_settings()["fft_size"], 8192)
+
 
 class TestSavedDeviceGain(_DeviceCase):
     """ROB-08: a damaged saved gain ({"db": NaN, "agc": "x"}) keeps the

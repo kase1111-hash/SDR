@@ -493,10 +493,16 @@ class TestRecordingsFolder(unittest.TestCase):
         from sdr_module.gui import file_dialogs
 
         default = file_dialogs.default_recordings_folder()
+        # (A fresh "logged once" memory: whatever ran before in this process.)
+        patcher = mock.patch.object(file_dialogs, "_BAD_FOLDERS_LOGGED", set())
+        patcher.start()
+        self.addCleanup(patcher.stop)
         for bad in ("garbage", "['a', 'b']", "rec/sub"):
             with self.subTest(bad=bad):
                 with self.assertLogs("sdr_module.gui.file_dialogs", "WARNING"):
                     self.assertEqual(self.folder(bad), default)
+                with self.assertNoLogs("sdr_module.gui.file_dialogs", "WARNING"):
+                    self.assertEqual(self.folder(bad), default)  # (said once)
         self.assertEqual(self.folder("/data/rec"), "/data/rec")
         self.assertEqual(self.folder("~/rec"), os.path.expanduser("~/rec"))
         self.assertEqual(self.folder(""), default)

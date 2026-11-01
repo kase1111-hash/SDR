@@ -837,6 +837,11 @@ def apply_theme(app: Any, theme: str) -> str:
     if app is None:
         return name
     app.setPalette(build_qpalette(name))
+    # Clear the old stylesheet first: Qt restyles every widget about five
+    # times faster from none than from another one (the same result; a
+    # switch took about a second, stalling the receiver and its audio).
+    if app.styleSheet():
+        app.setStyleSheet("")
     app.setStyleSheet(get_stylesheet(name))
     try:
         for widget in app.allWidgets():

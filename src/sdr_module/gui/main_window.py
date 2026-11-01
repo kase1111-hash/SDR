@@ -10023,6 +10023,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _on_theme_changed(self, name: str) -> None:
         try:
             self._theme = normalize_theme(name)
+            # The restyle held the display loop a moment: that is no sign
+            # the receiver can't keep up (its audio isn't paused for it).
+            self._rx_history.clear()
             self._sync_theme_actions()
             self._sync_audio_ui()  # the speaker icon is drawn in theme colors
             if self._info_panel.isVisible():

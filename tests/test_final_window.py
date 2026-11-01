@@ -830,5 +830,50 @@ class TestListeningControls(_WindowTestCase):
         self.assertIs(QApplication.focusWidget(), panel._cw_pitch_spin)
 
 
+# --------------------------------------------------------------------------- #
+# A theme switch doesn't stall the receiver (DEV-E2E-05, ROB-10)
+# --------------------------------------------------------------------------- #
+class TestThemeSwitch(_WindowTestCase):
+    demo = True
+
+    def test_the_old_stylesheet_is_cleared_before_the_new_one(self):
+        # Replacing one stylesheet with another made Qt restyle all ~1150
+        # widgets the slow way (about 0.9 s); from none it is ~5x faster.
+        from sdr_module.gui import themes
+
+        class App:
+            def __init__(self):
+                self.sheet = "QWidget { color: red; }"
+                self.calls = []
+
+            def styleSheet(self):  # noqa: N802 (Qt API)
+                return self.sheet
+
+            def setStyleSheet(self, sheet):  # noqa: N802 (Qt API)
+                self.calls.append(sheet)
+                self.sheet = sheet
+
+            def setPalette(self, palette):  # noqa: N802 (Qt API)
+                pass
+
+            def allWidgets(self):  # noqa: N802 (Qt API)
+                return []
+
+        app = App()
+        old = themes.current_theme()
+        self.addCleanup(themes.apply_theme, None, old)
+        themes.apply_theme(app, "light")
+        self.assertEqual(app.calls, ["", themes.get_stylesheet("light")])
+
+    def test_the_switch_isnt_taken_for_an_overload(self):
+        # ROB-10: "The demo device can't keep up ..." after every switch.
+        win = self.win
+        now = 1000.0
+        win._rx_history.extend([(now, 0), (now + 1.5, 1000)])  # (a stall)
+        self.assertFalse(win._realtime())
+        win._on_theme_changed("light")
+        self.assertTrue(win._realtime())
+
+
 if __name__ == "__main__":
     unittest.main()

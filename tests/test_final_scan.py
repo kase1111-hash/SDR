@@ -1247,5 +1247,120 @@ class TestBookmarkScanFollowsTheList(_ScanWindowCase):
         panel.stop_scan()
 
 
+# --------------------------------------------------------------------------- #
+# L15: the steps a sweep's receiver refuses are one Error History entry
+# --------------------------------------------------------------------------- #
+class TestRefusedStepsAreToldOncePerSweep(unittest.TestCase):
+    """The engine: one line for a pass's refused steps, and a continuous
+    scan that keeps meeting the same ones doesn't say it every pass."""
+
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_one_line_a_sweep_and_not_again_for_the_same_steps(self):
+        from sdr_module.gui.scan_engine import ScanEngine, ScanSettings
+        from tests.test_gui_scanner import _demo, _DemoHost, _run
+
+        dev = _demo()
+        host = _DemoHost(dev)
+        host.refuse_above = 100e6
+        engine = ScanEngine(host)
+        settings = ScanSettings("once", 98e6, 104e6, 200e3)
+        with self.assertLogs("sdr_module.gui.scan_engine", "WARNING") as logs:
+            self.assertEqual(engine.start(settings, dev.sample_rate, 0.0), "")
+            _run(engine, dev)
+        self.assertFalse(engine.active)
+        refused = engine.steps_refused
+        self.assertGreater(refused, 1)
+        self.assertEqual(len(logs.records), 1, logs.output)
+        self.assertIn(f"{refused} steps", logs.records[0].getMessage())
+        # Continuously: the same steps every pass, said once.
+        settings = ScanSettings("continuous", 98e6, 104e6, 200e3)
+        with self.assertLogs("sdr_module.gui.scan_engine", "WARNING") as logs:
+            self.assertEqual(engine.start(settings, dev.sample_rate, 0.0), "")
+            _run(engine, dev, until=lambda: engine.pass_number > 3)
+            self.assertGreater(engine.pass_number, 3)
+            engine.stop()
+        self.assertEqual(len(logs.records), 1, logs.output)
+
+
+class TestRefusedStepsInTheWindow(_ScanWindowCase):
+    demo = True
+
+    def setUp(self):
+        super().setUp()
+        from sdr_module.gui.error_log_dialog import install_history_handler
+
+        self.history = install_history_handler()
+        self.history.clear_history()
+        self.addCleanup(self.history.clear_history)
+        win = self.win
+        win.set_frequency(95.0e6)  # (where the scan goes back to tunes)
+        dev = win._device
+        tune = dev.set_frequency
+        # The receiver refuses the top of the band, as a tuner that can't
+        # lock there does.
+        dev.set_frequency = lambda freq: tune(freq) if freq < 100e6 else False
+
+    def entries(self):
+        return [text for _t, _level, _name, text in self.history.entries()]
+
+    def sweep(self, mode, seconds, until=None):
+        panel = self.win._scanner_panel
+        panel._preset.setCurrentIndex(1)  # FM broadcast, 88-108 MHz
+        panel.set_scan_mode(mode)
+        self.assertTrue(panel.start_scan())
+        self.frames(seconds, until=until or (lambda: not panel.engine.active))
+        return panel
+
+    def test_a_sweep_is_one_entry_not_one_per_refused_step(self):
+        panel = self.sweep("once", 10.0)
+        self.assertFalse(panel.engine.active)
+        refused = panel.engine.steps_refused
+        self.assertGreater(refused, 2)
+        self.assertIn(
+            f"{refused} steps the receiver couldn't tune were skipped",
+            panel._status.text(),
+        )
+        entries = self.entries()
+        self.assertEqual(len(entries), 1, entries)
+        self.assertIn(f"{refused} steps", entries[0])
+        first = min(p.lo_hz for p in panel.engine.pages if p.lo_hz >= 100e6)
+        self.assertIn(f"skipped: {first / 1e6:.3f}, ", entries[0])
+        # Back where it began (95 MHz tunes): nothing more to say.
+        self.assertAlmostEqual(self.win._current_frequency(), 95.0e6)
+
+    def test_a_continuous_sweep_says_it_once(self):
+        panel = self.win._scanner_panel
+        self.sweep("continuous", 30.0, until=lambda: panel.engine.pass_number > 2)
+        self.assertGreater(panel.engine.pass_number, 2)
+        panel.stop_scan()
+        self.assertEqual(len(self.entries()), 1, self.entries())
+
+    def test_a_steps_driver_error_is_in_the_entry_not_an_entry_itself(self):
+        dev = self.win._device
+        tune = dev.set_frequency
+
+        def refuse(freq):
+            if freq >= 100e6:
+                logging.getLogger("sdr_module.devices.rtlsdr").error(
+                    "Failed to set frequency: PLL not locked"
+                )
+                return False
+            return tune(freq)
+
+        dev.set_frequency = refuse
+        self.sweep("once", 10.0)
+        entries = self.entries()
+        self.assertEqual(len(entries), 1, entries)
+        self.assertIn("PLL not locked", entries[0])
+
+    def test_a_refused_tune_outside_a_scan_is_still_logged(self):
+        self.assertFalse(self.win._tune_to(104.0e6, recenter=True))
+        entries = self.entries()
+        self.assertEqual(len(entries), 1, entries)
+        self.assertIn("104.000 MHz", entries[0])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -13,10 +13,12 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..devices.base import SDRDevice
 from .bookmarks_panel import default_bookmark_name, listening
+from .error_log_dialog import install_history_handler
 from .scan_engine import Listening, bookmark_scan_list
 from .scanner_panel import ScanHit, ScannerHost
 
@@ -41,6 +43,28 @@ def _parse_hz(text: str) -> Optional[float]:
         return None
 
 
+class _HeldBack(logging.Filter):
+    """Keeps from a handler what this thread logs, in ``records``."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._thread = threading.get_ident()
+        self.records: List[logging.LogRecord] = []
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.thread != self._thread:
+            return True  # (another thread's, while the step tunes)
+        self.records.append(record)
+        return False
+
+
+def _text(record: logging.LogRecord) -> str:
+    try:
+        return record.getMessage()
+    except Exception:  # (a malformed record: its bare message)
+        return str(record.msg)
+
+
 class WindowScannerHost(ScannerHost):
     """Adapts the main window (``SDRMainWindow``) to the scanner."""
 
@@ -53,6 +77,8 @@ class WindowScannerHost(ScannerHost):
         #: The frequency the scan tuned last (None outside a scan): any
         #: other means the user tuned elsewhere.
         self.expected_hz: Optional[float] = None
+        # What the driver said when the receiver last refused a step.
+        self._refusal = ""
 
     # ---- tuning ----------------------------------------------------------- #
     def _quietly(self, tune) -> bool:
@@ -67,6 +93,31 @@ class WindowScannerHost(ScannerHost):
             return bool(tune())
         finally:
             win._restoring, panel.remember_filters = restoring, remembering
+
+    def _tune_step(self, tune) -> bool:
+        """Tune a step of the scan (quietly, see :meth:`_quietly`). What a
+        refused step logs (the window's "didn't tune", the driver's error)
+        stays out of Tools > Error History: the scan tells the steps it
+        skipped in one line a pass (see ``ScanEngine._tell_refused``), not
+        one or two a step. A step that tunes logs as usual."""
+        history = install_history_handler()  # (installed at startup)
+        held = _HeldBack()
+        history.addFilter(held)
+        try:
+            ok = self._quietly(tune)
+        finally:
+            history.removeFilter(held)
+        if ok:
+            for record in held.records:
+                history.handle(record)
+        else:
+            errors = [_text(r) for r in held.records if r.levelno >= logging.ERROR]
+            self._refusal = errors[0] if errors else ""
+        return ok
+
+    def scan_refusal_reason(self) -> str:
+        reason, self._refusal = self._refusal, ""
+        return reason
 
     def _after_tune(self) -> None:
         win = self._win
@@ -137,7 +188,7 @@ class WindowScannerHost(ScannerHost):
                     win._tune_to(vfo_hz)  # inside the span: only the VFO moves
             return True
 
-        ok = self._quietly(tune)
+        ok = self._tune_step(tune)
         self._lo_moved = abs(win._lo_frequency() - before) >= 0.5
         if ok:
             self._after_tune()
@@ -164,7 +215,7 @@ class WindowScannerHost(ScannerHost):
             self._apply_listening(listening, tone_hz)
             return True
 
-        ok = self._quietly(tune)
+        ok = self._tune_step(tune)
         self._lo_moved = abs(win._lo_frequency() - before) >= 0.5
         if ok:
             self._after_tune()

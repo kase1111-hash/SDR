@@ -2527,8 +2527,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     _preset_decoder_note = ""
     # What the last tune away from it said ("ACARS decoder off: tuned away
     # ...") and its point ("ACARS decoder off"), which the next message to
-    # replace it keeps, once (see _keeping_release_note).
-    _released_decoder: Optional[Tuple[str, str]] = None
+    # replace it keeps, once, while that decoder ("ACARS", "SSTV") is
+    # still off (see _keeping_release_note).
+    _released_decoder: Optional[Tuple[str, str, str]] = None
     # Status messages shown so far, and how many there were at the last
     # tune and when it was done (back in the event loop, or at the next
     # frame at the latest): those in between are the tune's own (a scan it
@@ -11376,7 +11377,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         owned = self._preset_decoder
         if owned is None:
             return
-        _decoder, name, freq, bands = owned
+        decoder, name, freq, bands = owned
         if any(low <= freq_hz <= high for low, high in bands):
             return
         note = self._preset_decoder_off()
@@ -11390,21 +11391,27 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "which had turned it on."
         )
         self._show_status_message(message, "info", 5000)
-        self._released_decoder = (message, note)
+        self._released_decoder = (message, note, decoder)
 
     def _keeping_release_note(self, text: str) -> str:
         """``text``, a message the tune that turned a preset's decoder off
         posts next (the band plan's line, "Tuned to ..."), led by that point
         ("ACARS decoder off · ...") while it is what the message replaces:
         both facts stay in view (P-07). Once: a message after that says only
-        its own. (First: a long line is cut short at its end.)"""
+        its own. (First: a long line is cut short at its end.) Not once the
+        decoder is on again (Decode ticked, SSTV's Start): it isn't off."""
         released, self._released_decoder = self._released_decoder, None
         if released is None:
             return text
-        message, note = released
+        message, note, decoder = released
         if self._message_label.text() != message:
             return text  # (replaced, or gone)
-        return f"{note} · {text}"
+        if decoder == "SSTV":
+            on_again = self._sstv_listening()
+        else:
+            panel = self._decoder_panel
+            on_again = panel.is_decoding() and panel.protocol() == decoder
+        return text if on_again else f"{note} · {text}"
 
     def _preset_decoder_off(self) -> str:
         """Turn off the decoder a preset turned on (unless you changed it

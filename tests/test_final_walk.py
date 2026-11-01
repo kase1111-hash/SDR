@@ -240,6 +240,39 @@ class TestTheClippingWarningNamesADeviationThatHolds(_window_case()):
             ],
         )
 
+    def test_a_deviation_changed_while_it_clips(self):
+        """(Review: the swing is kept in Hz, not in multiples of the
+        deviation: a ±10 kHz station clipping 0.4 s at 2.5 kHz, then at 5
+        kHz, is held by 12.5 kHz, not the 25 kHz twice its multiples at 2.5
+        kHz times 5 kHz would say.)"""
+
+        class Chain:
+            last_clip_fraction = 0.5
+
+            def __init__(self):
+                self.deviation = 2.5e3
+
+            def clip_swing(self):
+                return 10e3 / self.deviation, 7.5e3 / self.deviation
+
+        win = self.win
+        said = []
+        win._show_status_message = lambda text, *a, **k: said.append(text)
+        win._clip_warn_due = 0.0
+        chain = Chain()
+        for deviation, blocks in (("2.5 kHz", 12), ("5 kHz", 6)):
+            win._set_demod_mode("FM", deviation, "25 kHz")
+            chain.deviation = win._control_panel.get_fm_deviation()
+            for _ in range(blocks):
+                win._check_fm_clipping(chain, 1 / 30, 30.0)
+        self.assertEqual(
+            said,
+            [
+                "FM audio is clipping: this station deviates more than 5 kHz. "
+                "Choose a larger FM deviation in Demodulation: 12.5 kHz holds it."
+            ],
+        )
+
 
 # --------------------------------------------------------------------------- #
 # W-04: one wording for a new bookmark

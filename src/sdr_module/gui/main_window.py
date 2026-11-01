@@ -2694,8 +2694,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._iq_conditioner = IqConditioner()
         self._clip_s = 0.0
         self._clip_warn_due = 0.0
-        # How far the audio swung, (peak, often) in deviations, in the
-        # frames that clipped lately (the warning names what holds it).
+        # How far the audio swung, (peak, often) in Hz, in the frames that
+        # clipped lately (the warning names what holds it).
         self._clip_swings: Deque[Tuple[float, float]] = deque(maxlen=60)
         # The Scanner tab mutes the speaker while it moves between channels,
         # and has a bookmark's CTCSS tone checked even with the speaker off.
@@ -9296,7 +9296,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if self._clip_s <= 0.0:
                 self._clip_swings.clear()  # (a new episode)
             self._clip_s += seconds
-            self._clip_swings.append(chain.clip_swing())
+            # (In Hz: the deviation may be changed while it clips.)
+            deviation = float(self._control_panel.get_fm_deviation())
+            peak, often = chain.clip_swing()
+            self._clip_swings.append((peak * deviation, often * deviation))
         else:
             self._clip_s = max(0.0, self._clip_s - seconds)
             return
@@ -9332,7 +9335,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         swings = np.asarray(self._clip_swings, dtype=float).reshape(-1, 2)
         if not len(swings):
             return larger[0]
-        peak, often = np.median(swings, axis=0) * float(deviation_hz)
+        peak, often = np.median(swings, axis=0)
         holds = _deviation_for(float(peak), float(often))
         return holds if holds in larger else larger[0]
 

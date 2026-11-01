@@ -519,7 +519,7 @@ class TestLowDiskSpace(_RecordingCase):
     Usage = namedtuple("Usage", "total used free")
 
     def _free(self, megabytes):
-        usage = self.Usage(10**12, 0, int(megabytes * 1024**2))
+        usage = self.Usage(10**12, 0, int(megabytes * 10**6))
         return mock.patch.object(self.mw.shutil, "disk_usage", return_value=usage)
 
     def test_recording_stops_with_a_warning_when_the_disk_fills(self):
@@ -559,7 +559,7 @@ class TestLowDiskSpace(_RecordingCase):
 
     def test_status_shows_the_space_on_the_recording_drive(self):
         self.win._record_button.click()
-        with self._free(2.5 * 1024) as usage:
+        with self._free(2500) as usage:
             self.win._update_status()
         usage.assert_called_with(self.folder)
         self.assertIn("2.5 GB free", self.win._recording_info_label.text())

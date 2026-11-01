@@ -134,6 +134,7 @@ from .device_settings import (
     gain_model_for_kind,
     load_front_end,
 )
+from .iq_files import format_size
 from .level_meter import LevelMeter
 
 # The receiver chain and the display loop's helpers are the main window's,
@@ -213,7 +214,7 @@ GAIN_RANGE = (0, 50)
 DEFAULT_GAIN_DB = 20
 
 DEMO_KEY = "demo"
-DEMO_NAME = "Demo Device (simulated)"
+DEMO_NAME = "Demo Device (simulated signals)"  # (as the main window names it)
 
 #: Whose audio plays: (key, item text, tooltip).
 LISTEN_MAIN = "main"
@@ -734,6 +735,8 @@ if HAS_PYQT6:
             # labelled with (tuning stays inside its span meanwhile).
             self._recorder: Optional[IQRecorder] = None
             self._record_path = ""
+            # What the last recording's end said (text, tone, ms).
+            self._recording_said: Optional[Tuple[str, str, int]] = None
             self._record_lo: Optional[float] = None
             self._next_space_check = 0.0
             # Transmit monitor: tune here when the main window transmits.
@@ -1817,8 +1820,11 @@ if HAS_PYQT6:
             """Stop receiving and close the device (so the main window can
             use it), ending a recording first."""
             was_running = self._running
+            # (Where a recording that ends here was saved is said too.)
+            self._recording_said = None
             if self._recorder is not None:
                 self._set_recording(False)
+            said, self._recording_said = self._recording_said, None
             self._running = False
             self._frame_timer.stop()
             if self._audio_open:
@@ -1832,7 +1838,12 @@ if HAS_PYQT6:
             self._refresh_state()
             if was_running:
                 self.running_changed.emit(False)
-                if not quiet:
+                if not quiet and said is not None:
+                    text, tone, duration = said
+                    self._show_message(
+                        f"Stopped; {name} is closed. {text}", tone, duration
+                    )
+                elif not quiet:
                     self._show_message(f"Stopped; {name} is closed.", None, 4000)
 
         # ------------------------------------------------------------ tuning
@@ -2792,8 +2803,7 @@ if HAS_PYQT6:
             free = self._free_space(folder)
             if free is not None and free < _MIN_FREE_BYTES:
                 self._show_message(
-                    f"Can't record: only {free / 1024 ** 2:.0f} MB of disk space "
-                    "is left.",
+                    f"Can't record: only {format_size(free)} of disk space is left.",
                     "danger",
                     10000,
                 )
@@ -2840,7 +2850,7 @@ if HAS_PYQT6:
                 free = self._free_space(self._record_path)
                 if free is not None and free < _MIN_FREE_BYTES:
                     self._stop_recording(
-                        f"only {free / 1024 ** 2:.0f} MB of disk space is left"
+                        f"only {format_size(free)} of disk space is left"
                     )
                     self._sync_record_ui()
                     return
@@ -2881,16 +2891,18 @@ if HAS_PYQT6:
             else:
                 text = (
                     f"Saved {where} ({_clock_text(seconds)}, "
-                    f"{size / 1024 ** 2:,.0f} MB). File > Open Recording in "
+                    f"{format_size(size)}). File > Open Recording in "
                     "the main window plays it."
                 )
             if problem:
                 text = f"Recording stopped: {problem}. {text}"
                 logger.warning(text)
-                self._show_message(text, "danger", 20000)
+                said = (text, "danger", 20000)
             else:
                 logger.info(text)
-                self._show_message(text, "success", 10000)
+                said = (text, "success", 10000)
+            self._recording_said = said
+            self._show_message(*said)
 
         def _sync_record_ui(self) -> None:
             on = self._recorder is not None
@@ -2918,9 +2930,9 @@ if HAS_PYQT6:
             recorder = self._recorder
             if recorder is None:
                 return
-            size = recorder.file_size_bytes / 1024**2
+            size = format_size(recorder.file_size_bytes)
             self._rec_label.setText(
-                f"REC {_clock_text(recorder.duration_seconds)} · {size:,.0f} MB"
+                f"REC {_clock_text(recorder.duration_seconds)} · {size}"
             )
             self._rec_label.setToolTip(f"Recording to {self._record_path}")
 

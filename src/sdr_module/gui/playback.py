@@ -22,8 +22,9 @@ the window to a file and back to the device it was using.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import numpy as np
 
@@ -55,6 +56,13 @@ logger = logging.getLogger(__name__)
 
 #: Playback speeds offered (the strip's Speed list).
 SPEEDS = (0.5, 1.0, 2.0, 4.0)
+#: Seconds over which the speed a recording really plays at is measured.
+_SPEED_CHECK_S = 3.0
+#: The playback strip leaves out its caption where the position slider
+#: would get less than _MIN_SLIDER px, and the file's name where that would
+#: get less than _MIN_FILE_LABEL px.
+_MIN_SLIDER = 200
+_MIN_FILE_LABEL = 120
 
 
 def format_clock(seconds: float, total: float = 0.0) -> str:
@@ -255,6 +263,9 @@ class _PreviousSource:
     lo_hz: float
     name: str
     rate: float = 0.0  # the device's sample rate
+    #: How it was heard: (mode, FM deviation, filter), as the window's
+    #: _set_demod_mode takes them ("" for one that doesn't apply).
+    listening: Tuple[str, str, str] = ("", "", "")
 
 
 if HAS_PYQT6:
@@ -442,6 +453,52 @@ if HAS_PYQT6:
             self._close.clicked.connect(lambda _c=False: self.close_clicked.emit())
             row.addWidget(self._close)
 
+        def resizeEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
+            super().resizeEvent(event)
+            self._fit_row()
+
+        def _fit_row(self) -> None:
+            """Give the position slider room to seek with on a narrow strip
+            (at 1024 px it got 100 px, and the file's name 40 px: "ap…ta").
+            The PLAYBACK caption goes first, where the slider would get
+            less than ``_MIN_SLIDER`` px; the file's name, where it would
+            get less than ``_MIN_FILE_LABEL`` px (it shares the room with
+            the slider 2:3). The status bar names the file, as Close's
+            tooltip does."""
+            row = self.layout()
+            spacing = max(0, row.spacing())
+            margins = row.contentsMargins()
+            fixed = [
+                w
+                for w in (
+                    self._play_button,
+                    self._elapsed,
+                    self._total,
+                    self._loop,
+                    self._speed,
+                    self._find,
+                    self._close,
+                )
+                if not w.isHidden()
+            ]
+            free = (
+                self.width()
+                - margins.left()
+                - margins.right()
+                - sum(w.sizeHint().width() + spacing for w in fixed)
+            )
+            caption = self._caption.sizeHint().width() + spacing
+            show_caption = free - caption >= _MIN_SLIDER
+            if show_caption:
+                free -= caption
+            show_file = 0.4 * (free - spacing) >= _MIN_FILE_LABEL
+            for widget, show in (
+                (self._caption, show_caption),
+                (self._file, show_file),
+            ):
+                if show == widget.isHidden():
+                    widget.setHidden(not show)
+
         # -- what is shown --------------------------------------------------
 
         def show_file(self, options: IqFileOptions, back_to: str) -> None:
@@ -545,6 +602,14 @@ if HAS_PYQT6:
             self._device: Optional[FilePlaybackDevice] = None
             self._previous: Optional[_PreviousSource] = None
             self._device_tip = ""
+            #: The last open() changed the listening by the band plan (its
+            #: status line is the one to keep).
+            self.band_plan_applied = False
+            # Where the file was (monotonic time, sample, loops) when the
+            # speed it really plays at was last measured; and whether a
+            # speed that can't be kept up was said.
+            self._speed_mark: Optional[Tuple[float, int, int]] = None
+            self._slow_said = False
             self._timer = QTimer(self)
             self._timer.setInterval(self._TICK_MS)
             self._timer.timeout.connect(self._tick)
@@ -598,6 +663,10 @@ if HAS_PYQT6:
                     f"Can't play {options.name}: {e}", "danger", 8000
                 )
                 return False
+            tuned_before = float(win._current_frequency())
+            self.band_plan_applied = False
+            self._speed_mark = None
+            self._slow_said = False
             if self.active:
                 # Another file: the device from before stays the one to go
                 # back to.
@@ -615,6 +684,10 @@ if HAS_PYQT6:
                     lo_hz=float(win._lo_frequency()),
                     name=win._device_display_name() if win._device else "",
                     rate=float(win._device_sample_rate()) if win._device else 0.0,
+                    listening=(
+                        *win._listening_mode(),
+                        win._control_panel._bw_combo.currentText(),
+                    ),
                 )
                 if running:
                     win._stop_acquisition()
@@ -628,6 +701,12 @@ if HAS_PYQT6:
             win._realtime_hint_shown = False
             win._apply_tuning_range()
             win._lock_lo(options.center_hz, options.sample_rate, "the recording")
+            # Heard the way its band usually is (a 2 m recording opened from
+            # broadcast FM: narrow FM), as a frequency typed there would be;
+            # the band plan's status line says so.
+            self.band_plan_applied = bool(
+                win._listen_by_band_plan(tuned_before, win._current_frequency())
+            )
             win._reset_demodulator()
             self._bar.show_file(options, self.back_to_text())
             self._bar.setVisible(True)
@@ -683,10 +762,14 @@ if HAS_PYQT6:
             win._realtime_hint_shown = False
             win._apply_tuning_range()
             if prev is not None:
-                # Back where the receiver was before the recording.
+                # Back where the receiver was before the recording, and
+                # listening as it was there.
                 if not win._retune_lo(prev.lo_hz):
                     win._lo_hz = float(prev.lo_hz)
                 win._finish_tune(prev.tuned_hz)
+                mode, deviation, width = prev.listening
+                if mode:
+                    win._set_demod_mode(mode, deviation or None, width or None)
             win._unlock_lo()  # the LO follows tuning again
             win._reset_demodulator()
             self._bar.setVisible(False)
@@ -727,6 +810,7 @@ if HAS_PYQT6:
             if device is None:
                 return
             device.seek_seconds(seconds)
+            self._speed_mark = None
             # A jump in the stream: the demodulator starts afresh (no click).
             self._win._reset_demodulator()
             self._win._pacer.restart()
@@ -747,10 +831,17 @@ if HAS_PYQT6:
             win._pacer.reset()
             win._rx_history.clear()
             win._realtime_hint_shown = False
+            self._speed_mark = None
+            self._slow_said = False
             if speed != 1.0:
                 win._show_status_message(
                     f"Playing at {speed:g}x: audio plays at 1x only.", "info", 4000
                 )
+            elif win._message_label.text().startswith("Playing at "):
+                # (The note on another speed no longer applies. Any other
+                # message stays: a file opened after one played at 2x goes
+                # back to 1x under the line that says how it is heard.)
+                win._show_status_message("Playing at 1x.", "info", 2500)
 
         def _tick(self) -> None:
             """Follow the playing position; pause at the end of the file."""
@@ -774,6 +865,7 @@ if HAS_PYQT6:
                 )
             self._bar.set_position(device.position_s)
             self._bar.set_playing(win._is_running, device.finished)
+            self._check_speed(device)
             if device.bad_samples and not getattr(device, "_warned", False):
                 device._warned = True  # type: ignore[attr-defined]
                 win._show_status_error(
@@ -781,6 +873,41 @@ if HAS_PYQT6:
                     "(NaN or infinity); they are played as silence. Is the "
                     "sample format right?"
                 )
+
+        def _check_speed(self, device: FilePlaybackDevice) -> None:
+            """Faster than 1x, say once when the recording plays much slower
+            than chosen: this computer can't read and show it that fast
+            (frames that can't keep up take what they can), and the speed
+            note said nothing of it."""
+            now = time.monotonic()
+            here = (now, device.position, device.loops)
+            mark, self._speed_mark = self._speed_mark, here
+            speed = float(device.speed)
+            if (
+                mark is None
+                or speed <= 1.0
+                or self._slow_said
+                or not self._win._is_running
+                or device.finished
+                or mark[2] != device.loops  # (looped: the position wrapped)
+                or here[1] < mark[1]
+            ):
+                return
+            if now - mark[0] < _SPEED_CHECK_S:
+                self._speed_mark = mark  # (measured over a few seconds)
+                return
+            real = (here[1] - mark[1]) / device.sample_rate / (now - mark[0])
+            if real >= 0.6 * speed:
+                return
+            self._slow_said = True
+            shown = f"{real:.1f}" if real >= 0.1 else "less than 0.1"
+            self._win._show_status_message(
+                f"Playing at about {shown}x, not {speed:g}x: this computer "
+                "can't read and show the recording that fast right now. A "
+                "lower speed helps.",
+                "info",
+                10000,
+            )
 
         # -- the window's state shown as playback --------------------------------
 

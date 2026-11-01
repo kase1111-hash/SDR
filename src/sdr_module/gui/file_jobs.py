@@ -32,7 +32,7 @@ from .iq_files import IqFileOptions
 
 try:
     from PyQt6.QtCore import QEvent, QEventLoop, QObject, Qt, QThread, pyqtSignal
-    from PyQt6.QtWidgets import QApplication, QProgressDialog
+    from PyQt6.QtWidgets import QApplication, QProgressDialog, QWidget
 
     HAS_PYQT6 = True
 except ImportError:  # pragma: no cover - the GUI needs PyQt6
@@ -133,6 +133,25 @@ def wav_fits(samples: int, sample_format: SampleFormat = SampleFormat.INT16) -> 
     return int(samples) * 2 * width <= WAV_MAX_DATA_BYTES
 
 
+def wav_problem(total: int, sample_format: SampleFormat, sample_rate: float) -> str:
+    """Why ``total`` samples can't be saved as one WAV file ("" when they
+    can): its header must hold the sample rate, and it holds 4 GiB at
+    most (writing more would fail only after 4 GiB)."""
+    if not sample_rate > 0:
+        return (
+            "a WAV file needs the sample rate, and this recording doesn't say "
+            "it. Save again and enter it, or choose another format (SigMF can "
+            "leave it unknown)."
+        )
+    if not wav_fits(total, sample_format):
+        return (
+            "it is too long for a WAV file, which holds 4 GiB at most "
+            f"({_wav_limit_text(sample_format, sample_rate)}). Choose SigMF or "
+            "cs16, which have no such limit."
+        )
+    return ""
+
+
 def _wav_limit_text(sample_format: SampleFormat, sample_rate: float) -> str:
     """How long a recording one WAV file holds at ``sample_rate``."""
     width = 1 if sample_format in (SampleFormat.UINT8, SampleFormat.INT8) else 2
@@ -164,20 +183,10 @@ def write_recording(
     ``core:hw`` and ``core:description``, and ``segments`` where the
     recording resumed after a gap (each a capture with its own time).
     Returns the samples written."""
-    if file_format is FileFormat.WAV and not sample_rate > 0:
-        # (Its header must hold one: nothing is written.)
-        raise ValueError(
-            "a WAV file needs the sample rate, and this recording doesn't say "
-            "it. Save again and enter it, or choose another format (SigMF can "
-            "leave it unknown)."
-        )
-    if file_format is FileFormat.WAV and not wav_fits(total, sample_format):
-        # (It would fail after writing 4 GiB: nothing is written.)
-        raise ValueError(
-            "it is too long for a WAV file, which holds 4 GiB at most "
-            f"({_wav_limit_text(sample_format, sample_rate)}). Choose SigMF or "
-            "cs16, which have no such limit."
-        )
+    if file_format is FileFormat.WAV:
+        problem = wav_problem(total, sample_format, sample_rate)
+        if problem:
+            raise ValueError(problem)  # (nothing is written)
     recorder = IQRecorder(
         sample_rate=sample_rate,
         center_frequency=center_frequency,
@@ -319,9 +328,10 @@ if HAS_PYQT6:
         """Keyboard and mouse input waits while a job runs: the window's
         event loop goes on (the spectrum keeps running), but a click on
         Record or a shortcut must not start something under the job's feet
-        (a recording going into the buffer being converted). Once the
-        progress dialog is up its modality does this; before (the first
-        moment) this filter swallows the input."""
+        (a recording going into the buffer being converted). Only the
+        progress dialog (its Cancel) takes input, once it is up. (Its
+        window modality isn't relied on: input that bypasses it, as QTest's
+        does offscreen, started a recording under a busy job.)"""
 
         _INPUT = frozenset(
             {
@@ -342,11 +352,20 @@ if HAS_PYQT6:
             self._dialog = dialog
 
         def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802 - Qt
-            if event.type() not in self._INPUT or self._dialog.isVisible():
+            if event.type() not in self._INPUT:
+                return False
+            if self._dialog.isVisible() and self._in_dialog(obj):
                 return False
             if event.type() == QEvent.Type.ShortcutOverride:
                 event.accept()  # (taken as a key press: no shortcut fires)
             return True
+
+        def _in_dialog(self, obj: Any) -> bool:
+            """Whether ``obj`` (a widget, or a window) is the dialog's."""
+            dialog = self._dialog
+            if not isinstance(obj, QWidget):
+                return obj is dialog.windowHandle()
+            return obj is dialog or dialog.isAncestorOf(obj)
 
     def run_job(
         parent: Any,

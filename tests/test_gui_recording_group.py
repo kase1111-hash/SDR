@@ -48,7 +48,7 @@ class TestTakeLine(_GroupCase):
         self.assertEqual(self.panel.take_text(), "")
         self.record()
         text = self.panel.take_text()
-        self.assertRegex(text, r"^Unsaved · 00:0\d · [\d,]+ MB @ 100\.100 MHz$")
+        self.assertRegex(text, r"^Unsaved · 00:0\d · [\d.]+ [kMG]B @ 100\.100 MHz$")
         self.assertTrue(self.panel._take_save_btn.isVisibleTo(self.panel))
         self.assertTrue(self.panel._take_discard_btn.isVisibleTo(self.panel))
         self.assertEqual(self.panel._take_label.property("tone"), "warning")
@@ -91,7 +91,7 @@ class TestFormats(_GroupCase):
         combo = self.panel._format_combo
         items = [combo.itemText(i) for i in range(combo.count())]
         self.assertEqual(len(items), 5)
-        self.assertEqual(items[0], "SigMF, keeps frequency & rate")
+        self.assertEqual(items[0], "SigMF, keeps frequency and rate")
         self.assertEqual(combo.currentIndex(), 0)
         self.win._record_button.click()
         self.assertTrue(combo.isEnabled())
@@ -143,7 +143,7 @@ class TestAutoSave(_GroupCase):
         win._record_button.click()
         win._update_display()
         win._next_space_check = 0.0
-        usage = namedtuple("Usage", "total used free")(10**12, 0, 420 * 1024**2)
+        usage = namedtuple("Usage", "total used free")(10**12, 0, 420 * 10**6)
         with mock.patch.object(self.mw.shutil, "disk_usage", return_value=usage):
             win._update_display()
         self.assertFalse(win._recording)

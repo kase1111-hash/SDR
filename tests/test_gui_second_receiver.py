@@ -403,7 +403,9 @@ class TestOpening(_SecondCase):
 
         self.assertIsInstance(rx.device, MockDevice)
         self.assertIsNot(rx.device, self.win._device)
-        self.assertEqual(rx.windowTitle(), "Second Receiver — Demo Device (simulated)")
+        self.assertEqual(
+            rx.windowTitle(), "Second Receiver — Demo Device (simulated signals)"
+        )
         self.assertEqual(rx._state_badge.text(), "RUNNING")
         self.frames()
         self.assertTrue(rx._spectrum._has_data)

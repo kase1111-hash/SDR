@@ -30,6 +30,7 @@ from ..dsp.recording import (
     SampleFormat,
     bytes_per_complex_sample,
     check_iq_samples,
+    confident_sample_format,
     detect_format,
     get_file_info,
     guess_sample_format,
@@ -134,9 +135,11 @@ _COMMON_RATES = {
 }
 _UNIT = {"": 1.0, "k": 1e3, "m": 1e6, "g": 1e9}
 _MIN_CENTER_HZ = 1e3
-_MAX_CENTER_HZ = 6e9
-#: Frequencies the playback can be tuned to: what the receiver tunes.
-PLAYBACK_RANGE = (_MIN_CENTER_HZ, _MAX_CENTER_HZ)
+_MAX_CENTER_HZ = 6e9  # (a bare number in a file name: what receivers tune)
+#: Where a recording can be centered (typed in Import Options): a capture
+#: through a downconverter lies above the receiver's range (a 10 GHz
+#: downlink), and plays there too.
+PLAYBACK_RANGE = (_MIN_CENTER_HZ, 300e9)
 
 
 @dataclass
@@ -292,10 +295,16 @@ def format_datetime(text: str) -> str:
 
 
 def format_size(size: float) -> str:
+    """A size in decimal units, as the app shows every size (recordings,
+    free space): ``72_474_856 -> "72.5 MB"``, ``440_401_920 -> "440 MB"``,
+    ``2.5e9 -> "2.5 GB"``."""
     size = float(size)
     for unit, scale in (("GB", 1e9), ("MB", 1e6), ("kB", 1e3)):
-        if size >= scale:
-            return f"{size / scale:.1f} {unit}"
+        if size >= 0.9995 * scale:  # (999.96 MB is "1 GB")
+            value = size / scale
+            if value >= 99.95:
+                return f"{value:.0f} {unit}"
+            return f"{value:.1f}".removesuffix(".0") + f" {unit}"
     return f"{size:.0f} bytes"
 
 
@@ -406,8 +415,9 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
     options = IqFileOptions(
         path=str(path),
         sample_format=info.sample_format,
-        sample_rate=float(info.sample_rate or 0.0),
-        center_hz=float(info.center_frequency or 0.0),
+        # (A value that isn't a finite positive number is unknown: asked.)
+        sample_rate=_known(info.sample_rate),
+        center_hz=_known(info.center_frequency),
         file_format=info.file_format,
         total_samples=int(info.num_samples),
         source=source,
@@ -433,13 +443,42 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
     return options, missing
 
 
-def _content_guess(path: str) -> Optional[SampleFormat]:
+def _known(value: Any) -> float:
+    """``value`` as a finite positive float, else 0.0 (unknown)."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) and number > 0 else 0.0
+
+
+def _content_guess(path: str, sure: bool = False) -> Optional[SampleFormat]:
+    """The sample format the start of the file looks like (None if it can't
+    be read; with ``sure``, also None when the data doesn't clearly say)."""
     try:
         with open(path, "rb") as handle:
             data = handle.read(65536)
     except OSError:
         return None
-    return guess_sample_format(data) if len(data) >= 64 else None
+    if len(data) < 64:
+        return None
+    return confident_sample_format(data) if sure else guess_sample_format(data)
+
+
+def format_dbfs(level_db: float) -> str:
+    """``-41.3 -> "-41 dBFS"``, ``2.6 -> "+3 dBFS"``."""
+    if not math.isfinite(level_db):
+        return "silent"
+    rounded = int(round(level_db))
+    return f"+{rounded} dBFS" if rounded > 0 else f"{rounded} dBFS"
+
+
+def sample_check_text(check: SampleCheck) -> str:
+    """What a sample check found, for samples that read as I/Q (its note,
+    or "The samples look right (peak -41 dBFS).")."""
+    if check.note:
+        return check.note
+    return f"The samples look right (peak {format_dbfs(check.peak_dbfs)})."
 
 
 #: What each use of a file needs to know (the others may stay unknown).
@@ -499,10 +538,12 @@ if HAS_PYQT6:
             self._missing = set(missing)
             self._purpose = purpose
             self._required = REQUIRED.get(purpose, set())
+            # (Only a clear one: "looks more like" a wild guess misleads.)
             self._content = (
-                _content_guess(options.path) if "format" in missing else None
+                _content_guess(options.path, sure=True) if "format" in missing else None
             )
             self._result: Optional[IqFileOptions] = None
+            self._refit = False
             self.setWindowTitle(f"Import Options – {options.name}")
             self.setMinimumWidth(500)
             self._build(guesses or {})
@@ -692,8 +733,8 @@ if HAS_PYQT6:
             if center is None:
                 return None, (
                     "Can't read the center frequency: type it in MHz (433.92) "
-                    "or with a unit (7074k, 1.09G); the receiver tunes "
-                    "0.001–6000 MHz."
+                    "or with a unit (7074k, 1.09G); a recording is centered "
+                    "between 0.001 MHz and 300 GHz."
                 )
             for key, value in (("rate", rate), ("center", center)):
                 if key in self._required and not value:
@@ -731,8 +772,9 @@ if HAS_PYQT6:
             if hint != self._format_hint_row.isVisibleTo(self):
                 self._format_hint_row.setVisible(hint)
                 # Fit the row in (or close the gap) instead of squeezing
-                # the fields.
-                self.adjustSize()
+                # the fields: once the check below is shown (its text may
+                # take another line).
+                self._refit = True
             self._rate_hint.setText(
                 self._note(self._rate_edit, self._rate_prefill, self._rate_note)
             )
@@ -760,10 +802,8 @@ if HAS_PYQT6:
                     f", {format_mhz(options.center_hz - half).split(' ')[0]}–"
                     f"{format_mhz(options.center_hz + half)}"
                 )
-            text += (
-                f". The samples look right (peak {check.max_abs:.2f} of full scale)."
-            )
-            self._show_check(text, "success")
+            text += f". {sample_check_text(check)}"
+            self._show_check(text, "warning" if check.note else "success")
 
         @staticmethod
         def _note(edit: "QLineEdit", prefill: str, note: str) -> str:
@@ -785,6 +825,19 @@ if HAS_PYQT6:
         def _show_check(self, text: str, tone: str) -> None:
             self._check_label.setText(text)
             set_role(self._check_label, "callout", tone)
+            self._fit_height()
+
+        def _fit_height(self) -> None:
+            """Show every row whole. The size hint leaves out how much
+            taller word-wrapped text gets at the dialog's width, so the
+            fields were cut off at the bottom."""
+            if self._refit:
+                self._refit = False
+                self.adjustSize()
+            layout = self.layout()
+            need = layout.totalHeightForWidth(self.width()) if layout else -1
+            if need > self.height():
+                self.resize(self.width(), need)
 
         def check_text(self) -> str:
             return self._check_label.text()
@@ -837,12 +890,14 @@ if HAS_PYQT6:
                 ),
             )
             self._check = QLabel(
-                f"The samples look right (peak {check.max_abs:.2f} of full scale)."
-                if check.ok
-                else check.problem
+                sample_check_text(check) if check.ok else check.problem
             )
             self._check.setWordWrap(True)
-            set_role(self._check, "callout", "success" if check.ok else "warning")
+            set_role(
+                self._check,
+                "callout",
+                "success" if check.ok and not check.note else "warning",
+            )
             layout.addWidget(self._check)
 
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)

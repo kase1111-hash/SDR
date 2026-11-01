@@ -371,12 +371,18 @@ class TestRecordingProtection(_WindowTestCase):
         self.assertAlmostEqual(meta.center_frequency, 145.8e6)
 
     def test_retuning_while_recording_warns(self):
+        # (A take holds one center frequency: a tune that would retune the
+        # receiver is refused while it records, saying why; it used to
+        # retune and warn that the file would be labelled wrongly.)
         self.win._record_button.click()
         self.win._update_display()
-        self.win.set_frequency(101e6)
+        lo = self.win._lo_frequency()
+        self.assertFalse(self.win.set_frequency(101e6))
         self.win._update_display()
-        self.assertIn("Retuned while recording", self.win._message_label.text())
-        self.assertEqual(self.win._message_label.property("tone"), "warning")
+        self.assertIn("stop recording to retune", self.win._message_label.text())
+        self.assertEqual(self.win._message_label.property("tone"), "danger")
+        self.assertEqual(self.win._lo_frequency(), lo)
+        self.assertEqual(self.win._buffer_meta[0], lo)
         self.win._record_button.click()
 
 

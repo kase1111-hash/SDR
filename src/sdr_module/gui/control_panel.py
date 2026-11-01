@@ -246,18 +246,27 @@ DEFAULT_FM_DEVIATION = "25 kHz"
 # Squelch threshold range (dBFS) of the slider and the toolbar meter.
 SQUELCH_RANGE = (-120, 0)
 
-# Named like File > Save Recording's filters, which preselect the choice.
-# SigMF first: it keeps the frequency and sample rate in a form every SDR
-# program reads.
-RECORDING_FORMATS = (
-    "SigMF, keeps frequency & rate",
-    "Complex Float32 I/Q (.cf32)",
-    "Complex Int16 I/Q (.cs16)",
-    "WAV, 16-bit I/Q (.wav)",
-    "Raw Float32 I/Q (.raw)",
+#: Every format File > Save Recording writes: (name, extension, file
+#: format, sample format). Its filters are "<name> (*<ext>)"; the Recording
+#: group's Format list offers the first five by the same names. SigMF
+#: first: it keeps the frequency and sample rate in a form every SDR
+#: program reads.
+SAVE_FORMATS: Tuple[Tuple[str, str, str, str], ...] = (
+    ("SigMF, keeps frequency and rate", ".sigmf-data", "SIGMF", "FLOAT32"),
+    ("Complex Float32", ".cf32", "RAW", "FLOAT32"),
+    ("Complex Int16", ".cs16", "RAW", "INT16"),
+    ("WAV, 16-bit I/Q", ".wav", "WAV", "INT16"),
+    ("Raw I/Q, Float32", ".raw", "RAW", "FLOAT32"),
+    ("Complex Uint8, rtl_sdr", ".cu8", "RAW", "UINT8"),
+    ("Complex Int8, hackrf_transfer", ".cs8", "RAW", "INT8"),
+)
+# The Recording group's choices (Save... preselects the same one).
+RECORDING_FORMATS = tuple(
+    name if ext == ".sigmf-data" else f"{name} ({ext})"
+    for name, ext, _kind, _sample in SAVE_FORMATS[:5]
 )
 #: The file extension of each of RECORDING_FORMATS (the save format).
-RECORDING_FORMAT_EXTENSIONS = (".sigmf-data", ".cf32", ".cs16", ".wav", ".raw")
+RECORDING_FORMAT_EXTENSIONS = tuple(ext for _n, ext, _k, _s in SAVE_FORMATS[:5])
 # What the Record buttons record: (key, Record list text, tooltip).
 RECORD_KINDS: Tuple[Tuple[str, str, str], ...] = (
     (
@@ -310,7 +319,8 @@ _VALUE_LABEL_WIDEST = "-120 dBFS"
 
 _FORMAT_TIP = (
     "File format for the recorded I/Q samples; File > Save Recording offers "
-    "it first. These are raw radio samples, not audio."
+    "it first, and can also write cu8 (rtl_sdr) and cs8 (hackrf_transfer). "
+    "These are raw radio samples, not audio."
 )
 
 _APPLY_PRESET_TIP = "Tune to this preset and set its bandwidth and demodulation mode"
@@ -873,6 +883,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         # ("waiting" once it has captured something: it resumes).
         self._armed = False
         self._waiting = False
+        # A recording of the kind the Record choice doesn't show (its text).
+        self._other_recording = ""
+        self._other_tone = "danger"
         # Bandwidth and FM deviation last used with each filter profile
         # (see filter_profile), and whether a mode change is applying them.
         self._filter_memory: Dict[str, Dict[str, str]] = {}
@@ -2329,14 +2342,29 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             audio = self.record_kind() == "audio"
             text = _STATUS_RECORDING_AUDIO if audio else _STATUS_RECORDING
             tone = "danger"
+        elif self._other_recording:  # (see set_other_recording)
+            text, tone = self._other_recording, self._other_tone
         else:
             text, tone = _STATUS_READY, None
         self._record_status.setText(text)
         self._record_status.setToolTip(tip)
         set_tone(self._record_status, tone)
         # The timer only runs while samples are captured; idle or armed it is
-        # muted (the LCD's default amber read as a warning).
-        set_tone(self._record_time, "muted" if armed else tone or "muted")
+        # muted (the LCD's default amber read as a warning), as it is while
+        # the other kind records (it times this one).
+        set_tone(self._record_time, tone if recording and not armed else "muted")
+
+    def set_other_recording(self, text: str, tone: str = "danger") -> None:
+        """Name a recording of the kind the Record choice doesn't show, while
+        that kind isn't recording: "● Recording audio 00:06 (Ctrl+Shift+A
+        stops it)" ("" when there is none), in `tone` ("warning" while it is
+        paused or armed, as the group's own line). Without it the group said
+        "Ready" while audio recorded."""
+        text = str(text or "")
+        if text != self._other_recording or tone != self._other_tone:
+            self._other_recording = text
+            self._other_tone = tone
+            self._update_record_status()
 
     def _on_record_toggled(self, checked: bool):
         """Handle record button toggle."""

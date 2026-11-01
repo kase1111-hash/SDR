@@ -784,9 +784,21 @@ if HAS_PYQT6:
             elif not win._channel_fits(freq - win._lo_frequency()):
                 self._moving = True
                 try:
-                    win._tune_to(freq)
+                    tuned = win._tune_to(freq)
                 finally:
                     self._moving = False
+                if not tuned:
+                    # (Refused, e.g. while an I/Q recording keeps its center:
+                    # asked again every frame, the refusal repeated.)
+                    recording = win._recording and not win._capture_pending
+                    self._stop_tracking(
+                        "Track Signal stopped: the signal drifted to the edge "
+                        "of the I/Q recording's span."
+                        if recording
+                        else "Track Signal stopped: the receiver didn't retune "
+                        "to follow the signal."
+                    )
+                    return
                 if self._tracker is not None:
                     self._tracker.lo_moved(win._vfo_offset_hz())
                 return

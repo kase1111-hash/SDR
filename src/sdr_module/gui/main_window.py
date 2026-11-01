@@ -135,6 +135,7 @@ from .bookmarks_panel import listening as bookmark_listening
 from .control_panel import (
     MAX_FREQUENCY_HZ,
     MIN_FREQUENCY_HZ,
+    SAVE_FORMATS,
     ControlPanel,
     bandwidth_options,
     closest_bandwidth,
@@ -150,6 +151,7 @@ from .file_jobs import (
     load_recording,
     run_job,
     wav_fits,
+    wav_problem,
     write_recording,
 )
 from .iq_files import (
@@ -161,6 +163,7 @@ from .iq_files import (
     RecordingInfoDialog,
     ask_recording_details,
     describe_iq_file,
+    format_size,
     needs_options,
     split_name,
 )
@@ -1261,6 +1264,9 @@ class _Pacer:
         # Samples a paced source (a recording playing back) is owed but not
         # yet given: less than a block, or a little ahead (negative).
         self._owed = 0.0
+        #: Demo samples the time since the last frame covers beyond what
+        #: :meth:`demo_request` gave (a frame that can't keep up).
+        self.backlog = 0
 
     def reset(self) -> None:
         """Forget everything (new device or sample rate)."""
@@ -1273,6 +1279,7 @@ class _Pacer:
         self._probes = 0
         self._warm_up = _WARM_UP_FRAMES
         self._owed = 0.0
+        self.backlog = 0
 
     def restart(self) -> None:
         """Reading pauses (receiver stopped): the next demo read starts
@@ -1309,12 +1316,15 @@ class _Pacer:
         the previous read times the rate, at least one display block (and
         a probe frame at least ``_TIMED_FRAME``, so it is timed)."""
         last, self._last = self._last, now
+        self.backlog = 0
         if last is None or rate <= 0:
             return DISPLAY_BLOCK
         wanted = round(rate * max(0.0, now - last))
         limit = self.read_limit(rate, now)
         smallest = _TIMED_FRAME if self.overloaded and limit > 0 else DISPLAY_BLOCK
-        return int(max(smallest, min(wanted, limit)))
+        count = int(max(smallest, min(wanted, limit)))
+        self.backlog = max(0, int(wanted) - count)
+        return count
 
     def paced_request(self, rate: float, now: float) -> int:
         """Like :meth:`demo_request`, for a source that must not run ahead
@@ -1417,7 +1427,10 @@ _RECORDING_PREFIX = "sdr-recording-"
 _RECORDING_SUFFIX = ".cf32"
 # A recording stops, with a warning, when the drive it is written to has
 # less than this much free space left.
-_MIN_FREE_BYTES = 500 * 1024 * 1024
+_MIN_FREE_BYTES = 500_000_000
+# A take peaking under this many of an 8-bit sample's 127 steps is asked
+# about before it is saved as cu8 or cs8 (it would keep a bit or two).
+_QUIET_8BIT_STEPS = 4
 _FREE_SPACE_CHECK_S = 0.5
 _SAVE_CHUNK = 1 << 20  # samples converted and written per step when saving
 _SAVE_OVERHEAD = 1 << 20  # a saved file's header and metadata, to spare
@@ -1492,6 +1505,12 @@ def _remove_stale_recordings(folder: str) -> int:
         removed += 1
         logger.info(f"Removed a stale temporary recording: {path}")
     return removed
+
+
+class _SaveRefused(ValueError):
+    """A save the user asked for that isn't done, with the reason (over the
+    recording converted, or the take's own temporary file): explained, but
+    no failure for Error History."""
 
 
 def _same_file(path: str, other: str) -> bool:
@@ -4177,7 +4196,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
         count = self._buffer_sample_count()
         if count:
-            p.set_value("buffer", f"{count:,} samples ({count * 8 / 1e6:.1f} MB)")
+            p.set_value("buffer", f"{count:,} samples ({format_size(count * 8)})")
         else:
             p.set_value("buffer", "Empty")
 
@@ -4476,6 +4495,48 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if audio and self._audio_take is not None:
             panel.update_record_time(int(self._audio_take.seconds))
         self._sync_recording_armed()
+        self._sync_other_recording()
+
+    def _sync_other_recording(self) -> None:
+        """The Recording group shows the kind its Record choice records; a
+        recording of the other kind is named in its status line, with how
+        to stop it (it said "Ready" while audio recorded)."""
+        text, tone = "", "danger"
+        # (As the group's own line: paused, armed or waiting for the
+        # receiver in the warning tone; red only while it captures.)
+        receiving = self._is_running and self._device is not None
+        if self._record_kind() == "audio":
+            if not self._recording:
+                pass
+            elif self._recording_paused:
+                text = "❚❚ I/Q recording paused (Ctrl+Shift+R stops it)"
+                tone = "warning"
+            elif not receiving:
+                state = "armed" if self._capture_pending else "waiting"
+                text = f"◌ I/Q recording {state} (Ctrl+Shift+R stops it)"
+                tone = "warning"
+            else:
+                text = (
+                    f"● Recording I/Q {_clock_text(self._recording_elapsed())} "
+                    "(Ctrl+Shift+R stops it)"
+                )
+        else:
+            take = getattr(self, "_audio_take", None)
+            if take is None:
+                pass
+            elif take.paused:
+                text = "❚❚ Audio recording paused (Ctrl+Shift+A stops it)"
+                tone = "warning"
+            elif not receiving:
+                state = "waiting" if take.samples else "armed"
+                text = f"◌ Audio recording {state} (Ctrl+Shift+A stops it)"
+                tone = "warning"
+            else:
+                text = (
+                    f"● Recording audio {_clock_text(take.seconds)} "
+                    "(Ctrl+Shift+A stops it)"
+                )
+        self._control_panel.set_other_recording(text, tone)
 
     def _update_record_button_tip(self) -> None:
         if self._record_kind() == "audio":
@@ -5216,6 +5277,32 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             lo = center
         elif recenter or self._keep_centered() or not self._channel_fits(freq - lo):
             lo = freq
+        if (
+            abs(lo - self._lo_hz) >= 0.5
+            and self._recording
+            and not self._capture_pending
+        ):
+            # An I/Q recording holds one center frequency (as it holds one
+            # rate): while it has samples the LO stays, and only the tuned
+            # frequency moves inside the span. (A retune labelled what
+            # followed with the old center, and lost the transfers drained.)
+            if not self._channel_fits(freq - self._lo_hz):
+                rate = self._device_sample_rate()
+                covered = format_mhz_range(
+                    self._lo_hz - rate / 2, self._lo_hz + rate / 2
+                )
+                if abs(freq - self._lo_hz) < rate / 2:
+                    width = self._control_panel._bw_combo.currentText()
+                    return self._refuse_tuning(
+                        f"A {width} channel at {format_frequency(freq)} doesn't "
+                        f"fit inside the I/Q recording's span ({covered}): tune "
+                        "nearer its middle, or stop recording to retune."
+                    )
+                return self._refuse_tuning(
+                    f"{format_frequency(freq)} is outside the I/Q recording's "
+                    f"span ({covered}): stop recording to retune there."
+                )
+            lo = self._lo_hz
         if abs(lo - self._lo_hz) >= 0.5 and not self._retune_lo(lo):
             return self._refuse_tuning(
                 f"{self._device_model_name()} didn't tune to "
@@ -6161,6 +6248,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._is_running = True
         self._rx_history.clear()
         self._pacer.restart()
+        # What a device dropped (or the demo skipped) while stopped is no
+        # gap in a take: it resumes as a capture of its own (REC WAITING).
+        self._drop_mark = None
         self._refresh_state_ui()
         logger.info("Acquisition started")
 
@@ -6263,7 +6353,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         free = self._free_recording_space()
         if free is not None and free < _MIN_FREE_BYTES:
             self._show_status_error(
-                f"Can't record: only {free / 1024**2:.0f} MB of disk space is "
+                f"Can't record: only {format_size(free)} of disk space is "
                 "left. Free up some space, then record again.",
                 10000,
             )
@@ -6411,12 +6501,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             state = "paused" if self._recording_paused else "in progress"
             box.setInformativeText(
                 f"A recording is {state}: {count:,} I/Q samples "
-                f"({count * 8 / 1e6:.1f} MB) so far{where}. Save and Don't Save "
+                f"({format_size(count * 8)}) so far{where}. Save and Don't Save "
                 "stop it; Cancel keeps it going."
             )
         else:
             box.setInformativeText(
-                f"{count:,} I/Q samples ({count * 8 / 1e6:.1f} MB) "
+                f"{count:,} I/Q samples ({format_size(count * 8)}) "
                 f"recorded{where} haven't been saved. If you don't save them, "
                 "they are lost."
             )
@@ -6491,6 +6581,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         elif self._recording and not self._capture_pending:
             self._capture_gap = True  # (see _capture)
 
+    def _take_details(self) -> Tuple[str, str]:
+        """(hardware, description) of a take starting now, for its SigMF
+        metadata: the device, and where it was tuned in what mode (a take
+        of a recording playing: that recording's hardware, and its name)."""
+        mode = self._mode_text(self._control_panel.get_demod_mode())
+        what = f"Tuned to {format_frequency(self._current_frequency())} ({mode})"
+        device = self._playback.device
+        if device is not None:
+            options = device.options
+            return options.hardware, f"{what}, played back from {options.name}"
+        return (self._device_display_name() if self._device else ""), what
+
     def _recording_elapsed(self) -> float:
         """Seconds spent capturing in the current recording."""
         elapsed = self._rec_accum
@@ -6534,14 +6636,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._sync_recording_armed()
         if self._record_kind() != "audio":  # (else the group times the audio)
             self._control_panel.update_record_time(int(self._recording_elapsed()))
+        else:  # (named in the group's status line)
+            self._sync_other_recording()
 
-        mb = self._recording_bytes / (1024 * 1024)
         # Recorded size + free space on the drive the recording goes to
         free = self._free_recording_space()
-        if free is None:
-            info = f"{mb:.1f} MB"
-        else:
-            info = f"{mb:.1f} MB · {free / 1024**3:.1f} GB free"
+        info = format_size(self._recording_bytes)
+        if free is not None:
+            info += f" · {format_size(free)} free"
         self._recording_info_label.setText(info)
 
     def _free_recording_space(self) -> Optional[int]:
@@ -6567,7 +6669,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if free is None or free >= _MIN_FREE_BYTES:
             return True
         self._stop_recording_with_warning(
-            f"only {free / 1024**2:.0f} MB of disk space is left"
+            f"only {format_size(free)} of disk space is left"
         )
         return False
 
@@ -6583,12 +6685,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._toggle_recording(False)
         finally:
             self._auto_save_later = False
-        size = self._samples_buffer.nbytes / 1024**2
+        size = format_size(self._samples_buffer.nbytes)
         if captured and self._samples_buffer and self._control_panel.is_auto_save():
-            kept = f" The {size:,.0f} MB recorded so far are kept."
+            kept = f" The {size} recorded so far are kept."
         elif captured and self._samples_buffer:
             kept = (
-                f" The {size:,.0f} MB recorded so far are kept: save them with "
+                f" The {size} recorded so far are kept: save them with "
                 "File > Save Recording (Ctrl+S)"
                 + (", on another drive if this one is full." if elsewhere else ".")
             )
@@ -6652,7 +6754,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             parts = []
             if rate:
                 parts.append(_clock_text(count / rate))
-            parts.append(f"{count * 8 / 1e6:,.0f} MB")
+            parts.append(format_size(count * 8))
             where = f" @ {format_frequency(center)}" if center else ""
             if self._buffer_source:
                 text = f"Loaded {self._buffer_source} · " + " · ".join(parts) + where
@@ -6696,7 +6798,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             answer = QMessageBox.question(
                 self,
                 "Discard Recording",
-                f"Delete the {count * 8 / 1e6:,.0f} MB recording without saving it?",
+                f"Delete the {format_size(count * 8)} recording without saving it?",
                 QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel,
                 QMessageBox.StandardButton.Cancel,
             )
@@ -6887,6 +6989,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._record_kind() == "audio":
             self._control_panel.update_record_time(int(take.seconds))
             self._sync_recording_armed()
+        else:  # (named in the group's status line)
+            self._sync_other_recording()
 
     def _record_audio_block(
         self, audio: Optional[np.ndarray], open_: bool, seconds: float, joined: bool
@@ -6947,8 +7051,35 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return dev.read_samples(self._pacer.paced_request(rate, time.monotonic()))
         if self._demo_mode or _is_demo_device(dev):
             rate = self._pacing_rate()
-            return dev.read_samples(self._pacer.demo_request(rate, time.monotonic()))
+            count = self._pacer.demo_request(rate, time.monotonic())
+            return self._read_demo(dev, count)
         return dev.read_samples(DISPLAY_BLOCK)
+
+    def _read_demo(self, dev: Any, count: int) -> Optional[np.ndarray]:
+        """``count`` demo samples for this frame. While an I/Q recording
+        captures, the recording takes every sample the time covers, as
+        from hardware (see :meth:`_drain_device`): what a frame that can't
+        keep up leaves (the pacer's backlog) goes only to the recording.
+        Read one block a frame, the demo fell behind and skipped ahead
+        (following the clock), and the take had silent gaps. Samples it
+        still skips (a long stall) are counted as lost, as a driver's
+        dropped samples are.
+
+        Both parts come in one read: the demo skips ahead when what is left
+        to read lags the clock by more than half a second, and read apart,
+        the newest part still to come counted as lag (a take started while
+        the demo lagged skipped at a stall of a third of a second)."""
+        capturing = self._recording and not self._recording_paused
+        backlog = min(self._pacer.backlog, _MAX_READ_SAMPLES) if capturing else 0
+        samples = dev.read_samples(backlog + count)
+        if backlog and samples is not None and len(samples) > count:
+            self._capture(samples[: len(samples) - count])
+            samples = samples[len(samples) - count :]
+        # (A skip in the frame a take starts in came before it; one after
+        # it stopped, e.g. on a full disk, isn't its.)
+        capturing = capturing and self._recording and not self._recording_paused
+        self._note_dropped_samples(dev, capturing)
+        return samples
 
     def _pacing_rate(self) -> float:
         """Samples per second the display loop takes: the sample rate, times
@@ -6994,11 +7125,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return blocks[0] if blocks else None
         return np.concatenate(blocks)
 
-    def _note_dropped_samples(self, dev: SDRDevice, capturing: bool) -> bool:
-        """Count the samples the driver dropped (its queue was full) since
-        the last frame, when this frame captures: a full queue drops the
-        newest transfer, so they were lost between the queued transfers
-        this frame records and the next ones (the take has gaps there).
+    def _note_dropped_samples(self, dev: Any, capturing: bool) -> bool:
+        """Count the samples the driver dropped (its queue was full), or the
+        demo device skipped, since the last frame, when this frame captures:
+        a full queue drops the newest transfer, so they were lost between
+        the queued transfers this frame records and the next ones (the take
+        has gaps there).
 
         True when a take (re)starts after such drops: what is queued then
         came before Record (or Resume), spread over seconds with gaps when
@@ -7037,7 +7169,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "Sample rate) helps."
             )
             logger.warning(message)
-            self._show_status_message(message, "warning", 15000)
+            self._show_status_message(message, "warning", 15000, log=False)
 
     def _take_lost_seconds(self) -> float:
         """Signal the take in the buffer lost while it was captured."""
@@ -7160,12 +7292,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._buffer_meta = tuned
             self._buffer_source = ""
             self._buffer_source_path = ""
-            self._take_started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            # (To the millisecond, as the stretches after a gap are.)
+            self._take_started = _utc_stamp()
             self._take_stamp = time.strftime("%Y%m%d_%H%M%S")
-            self._take_hardware = self._take_description = ""
+            self._take_hardware, self._take_description = self._take_details()
             self._retune_warned = False
             self._sync_recording_armed()
             self._update_take_panel()  # (the status line shows the new take)
+            if self._message_label.text().startswith("Recording armed:"):
+                # (Capturing now: the note on waiting no longer applies.)
+                self._show_status_message(
+                    "Recording I/Q samples. Press Record again to stop.", "info", 3000
+                )
         elif not self._retune_warned and any(
             known is not None and abs(known - now) > 0.5
             for known, now in zip(self._buffer_meta, tuned, strict=True)
@@ -8324,7 +8462,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             try:
                 options, missing = describe_iq_file(path)
             except (OSError, ValueError) as e:
-                logger.warning(f"Can't read the recording {path}: {e}")
+                # (A file this app doesn't read, e.g. audio, is explained,
+                # not listed in Error History; a read error is.)
+                if isinstance(e, OSError):
+                    logger.warning(f"Can't read the recording {path}: {e}")
+                else:
+                    logger.info(f"Can't read the recording {path}: {e}")
                 QMessageBox.warning(
                     self, "Can't Read Recording", f"{name} can't be read:\n{e}"
                 )
@@ -8467,6 +8610,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             scanner.stop_scan("Scan stopped: you opened a recording.", "warning")
         if not self._playback.open(options):
             return False
+        if self._playback.band_plan_applied:
+            return True  # its status line says how the file is heard
         half = options.sample_rate / 2.0
         self._show_status_message(
             f"Playing {options.name} "
@@ -8507,9 +8652,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             QMessageBox.warning(
                 self,
                 "Not Enough Disk Space",
-                f"Converting {options.name} needs {need / 1024**2:,.0f} MB of "
+                f"Converting {options.name} needs {format_size(need)} of "
                 f"space in {file_dialogs.display_path(self._capture_folder())}, "
-                f"which has {free / 1024**2:,.0f} MB free. Free up some space, "
+                f"which has {format_size(free)} free. Free up some space, "
                 "then try again.",
             )
             return False
@@ -8757,19 +8902,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     # Formats File > Save Recording writes:
     # (file dialog filter, extension, FileFormat name, SampleFormat name)
-    _SAVE_FORMATS: Tuple[Tuple[str, str, str, str], ...] = (
-        (
-            "SigMF, keeps frequency and rate (*.sigmf-data)",
-            ".sigmf-data",
-            "SIGMF",
-            "FLOAT32",
-        ),
-        ("Complex Float32 (*.cf32)", ".cf32", "RAW", "FLOAT32"),
-        ("Complex Int16 (*.cs16)", ".cs16", "RAW", "INT16"),
-        ("WAV, 16-bit I/Q (*.wav)", ".wav", "WAV", "INT16"),
-        ("Raw I/Q, Float32 (*.raw)", ".raw", "RAW", "FLOAT32"),
-        ("Complex Uint8, rtl_sdr (*.cu8)", ".cu8", "RAW", "UINT8"),
-        ("Complex Int8, hackrf_transfer (*.cs8)", ".cs8", "RAW", "INT8"),
+    # (filter, extension, file format, sample format): the Recording group's
+    # formats first, by the same names (control_panel.SAVE_FORMATS).
+    _SAVE_FORMATS: Tuple[Tuple[str, str, str, str], ...] = tuple(
+        (f"{name} (*{ext})", ext, kind, sample)
+        for name, ext, kind, sample in SAVE_FORMATS
     )
 
     def _panel_recording_extension(self) -> str:
@@ -8865,7 +9002,61 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         if not filename:
             return False
+        if not self._confirm_quiet_8bit_save(filename, selected_filter):
+            return False
         return self._write_buffer(filename, selected_filter)
+
+    def _confirm_quiet_8bit_save(self, filename: str, selected_filter: str) -> bool:
+        """A cu8 or cs8 file has 127 steps from zero to full scale: a take
+        peaking under ``_QUIET_8BIT_STEPS`` of them keeps a bit or two of
+        its signal, which plays back as noise ("FM audio is clipping").
+        Ask before saving one so; True to go on."""
+        _name, spec = self._resolve_save_format(filename, selected_filter)
+        if spec[3] not in ("UINT8", "INT8"):
+            return True
+        peak = self._buffer_peak()
+        steps = peak * 127.0
+        if peak <= 0 or steps >= _QUIET_8BIT_STEPS:
+            return True
+        kind = spec[1].lstrip(".")
+        level = 20.0 * math.log10(peak)
+        whole = int(round(steps))
+        held = (
+            f"only {whole} step{'' if whole == 1 else 's'} of 127"
+            if whole >= 1
+            else "less than one step of 127"
+        )
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Quiet Recording")
+        box.setText(f"Save this quiet recording as {kind} anyway?")
+        box.setInformativeText(
+            f"It peaks at {level:.0f} dBFS: in an 8-bit file that is {held}, "
+            "so most of the signal is lost and plays back as noise. cs16 and "
+            "SigMF keep it."
+        )
+        save = box.addButton("Save &Anyway", QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(cancel)
+        self._exec_dialog(box)
+        return box.clickedButton() is save
+
+    def _buffer_peak(self) -> float:
+        """The recording buffer's peak (of full scale) over stretches spread
+        through it (reading all of a long take would take seconds)."""
+        data = self._samples_buffer.samples()[: self._buffer_sample_count()]
+        count = len(data)
+        if count == 0:
+            return 0.0
+        per = 16384
+        starts = {int(i * max(0, count - per) / 15) for i in range(16)}
+        peak = 0.0
+        for start in sorted(starts):
+            block = np.asarray(data[start : start + per]).view(np.float32)
+            finite = block[np.isfinite(block)]
+            if finite.size:
+                peak = max(peak, float(np.max(np.abs(finite))))
+        return peak
 
     def _ask_missing_details(self) -> bool:
         """Ask for the buffer's unknown sample rate or center frequency
@@ -8927,6 +9118,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         snapshot: Any = None
         try:
             self._check_save_target(filename, fmt)
+            # (What a WAV file can't hold is said before whether it fits.)
+            problem = (
+                wav_problem(count, sample_fmt, rate) if fmt is FileFormat.WAV else ""
+            )
+            if problem:
+                raise ValueError(problem)
             moved = self._move_take(filename, fmt, sample_fmt, rate, center, details)
             if not moved:
                 self._check_save_room(filename, sample_fmt, count, reserve=quiet)
@@ -8976,15 +9173,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 )
             except OSError as e:
                 logger.warning(f"Could not write the metadata of {filename}: {e}")
+        if isinstance(error, _SaveRefused) and not quiet:
+            logger.info(f"Not saved to {filename}: {error}")
+            QMessageBox.warning(self, "Can't Save There", f"Not saved: {error}")
+            return False
         if error is not None:
             logger.error(f"Failed to save recording: {error}")
             if quiet:
                 # (Nobody watches an automatic save: shown as long as the
-                # warning it may replace, "Recording stopped: ...".)
+                # warning it may replace, "Recording stopped: ...". Short
+                # enough for the status bar at 1366 px, what to do too.)
                 reason = str(error).rstrip(".")
                 self._show_status_error(
-                    f"Could not save the recording to {name}: {reason}. It is "
-                    "kept: save it elsewhere with Save... in the Recording group.",
+                    f"Not saved automatically: {reason}. It is kept: save it "
+                    "elsewhere (Ctrl+S).",
                     20000,
                     log=False,
                 )
@@ -9020,7 +9222,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             targets.append(str(sidecar_path(filename)))
         store = self._samples_buffer
         if store.temporary and any(_same_file(t, store.path) for t in targets):
-            raise ValueError(
+            raise _SaveRefused(
                 "that is the recording's own temporary file. Choose another name."
             )
         source = self._buffer_source_path
@@ -9036,7 +9238,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if sidecar is not None:
                 originals.append(str(sidecar.path))
         if any(_same_file(t, o) for t in targets for o in originals):
-            raise ValueError(
+            raise _SaveRefused(
                 f"saving there would replace {self._buffer_source}, the "
                 "recording you converted (or its metadata). Choose another name."
             )
@@ -9109,23 +9311,24 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if need + (_MIN_FREE_BYTES if reserve else 0) <= free:
             return
         where = file_dialogs.display_path(folder)
-        need_mb, free_mb = need / 1024**2, free / 1024**2
+        need_text, free_text = format_size(need), format_size(free)
         if not reserve:
             raise ValueError(
-                f"there isn't enough space: it needs {need_mb:,.0f} MB, and {where} "
-                f"has {free_mb:,.0f} MB free. Save it to another drive, or free up "
+                f"there isn't enough space: it needs {need_text}, and {where} "
+                f"has {free_text} free. Save it to another drive, or free up "
                 "some space."
             )
-        # (Save automatically says what to do next itself.)
+        # (Save automatically says what to do next itself, and where: the
+        # recordings folder.)
         if need > free:
             raise ValueError(
-                f"there isn't enough space (it needs {need_mb:,.0f} MB, and "
-                f"{where} has {free_mb:,.0f} MB free)"
+                f"there isn't enough space (it needs {need_text}, the drive has "
+                f"{free_text} free)"
             )
         raise ValueError(
-            f"the drive would be nearly full (it needs {need_mb:,.0f} MB of the "
-            f"{free_mb:,.0f} MB free in {where}, and recording keeps "
-            f"{_MIN_FREE_BYTES // 1024**2} MB free)"
+            f"the drive would be nearly full (it needs {need_text} of "
+            f"{free_text} free; recording keeps {format_size(_MIN_FREE_BYTES)} "
+            "free)"
         )
 
     def _import_channels_csv(self) -> None:
@@ -10035,8 +10238,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # The mode (its choices), then its saved deviation and width.
             self._set_demod_mode(demod, deviation or None, bandwidth or None)
             combo = self._control_panel._format_combo
-            if rec_format and combo.findText(rec_format) >= 0:
-                combo.setCurrentText(rec_format)
+            index = combo.findText(rec_format) if rec_format else -1
+            if index < 0 and rec_format:
+                # (Saved by the names before they matched Save Recording's,
+                # "Complex Int16 I/Q (.cs16)": its extension says which.)
+                sigmf = rec_format.startswith("SigMF")
+                for i in range(combo.count()):
+                    ext = str(combo.itemData(i) or "")
+                    if rec_format.endswith(f"({ext})") or (
+                        sigmf and ext == ".sigmf-data"
+                    ):
+                        index = i
+                        break
+            if index >= 0:
+                combo.setCurrentIndex(index)
             self._control_panel.set_record_kind(
                 self._settings.get_str("recording/kind", "iq")
             )

@@ -19,6 +19,9 @@ import numpy as np
 from sdr_module.dsp.frame_spectrum import FrameSpectrumAnalyzer
 from sdr_module.gui import plot_readout as R
 from tests.test_gui_chrome import _WindowTestCase
+from tests.test_gui_second_receiver_thread import (
+    _ThreadCase as _SecondReceiverThreadCase,
+)
 
 try:
     from PyQt6.QtCore import QPointF, QRectF
@@ -684,6 +687,44 @@ class TestTheWindowsPlots(_WindowTestCase):
         self.assertEqual(len(readings), 2 * len(spots))
         with_snr = [line for line in readings if "SNR" in line]
         self.assertLessEqual(len(with_snr), 1, readings)
+
+
+@unittest.skipUnless(HAS_QT, "PyQt6 is required")
+class TestTheSecondReceiversWaterfall(_SecondReceiverThreadCase):
+    """The Second Receiver window's rows carry their averaged spectrum too
+    (its DSP worker's plot feed passes ``mean_db``, as the main window's
+    does): a steady station reads its level. Given the strongest FFTs
+    alone, its hover read the demo's 100.1 MHz station as "Peak -44 dBFS ·
+    SNR 44 dB" (the strongest FFT, taken for a burst)."""
+
+    def test_a_steady_station_reads_its_level(self):
+        rx = self.rx
+        wf = rx._waterfall
+        # Live, a row per frame (the frames here come at once, not at 30 Hz:
+        # a longer history would merge them all into one row), and frames
+        # as long as the display's at 2.4 MS/s (about 39 FFTs each).
+        wf.set_history_seconds(0.0)
+        rx._pacer.demo_request = lambda rate, now: 80_000
+        rx.tune(100.1e6)  # (the demo's broadcast FM station)
+        self.run_frames(40)
+        rx._settle_frames()
+        plot = wf.plot_rect()
+        rows = wf._rows_shown()
+        readings = []
+        for row in range(rows):
+            y = plot.top() + (row + 0.5) * plot.height() / rows
+            for step in range(-12, 13):
+                x = wf._freq_to_x(100.1e6 + step * 6e3, plot)
+                readings.append(wf.reading_at(x, y))
+        self.assertGreaterEqual(len(readings), 25 * 30)
+        self.assertNotIn(None, readings)
+        # (At its edges, where broadcast FM rarely goes, a few in a hundred
+        # can still read "Peak"; the strongest FFTs alone read all of them.)
+        peaks = [r.text(decimals=0) for r in readings if r.peak]
+        self.assertLessEqual(len(peaks), len(readings) // 20, peaks)
+        middle = readings[12]  # (the station's center, newest row)
+        self.assertFalse(middle.is_noise, middle)
+        self.assertFalse(middle.peak, middle)
 
 
 if __name__ == "__main__":  # pragma: no cover

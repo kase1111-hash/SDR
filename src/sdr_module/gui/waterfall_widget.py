@@ -1592,8 +1592,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         and its strongest FFTs only where they stand out of what that
         level explains: a burst shorter than the frame (``Peak``). None
         where the row has no data (it was received at another frequency),
-        or for rows added without ``noise_db`` or ``mean_db`` (the caller
-        then reads :meth:`level_at`)."""
+        or for rows added with neither ``noise_db`` nor ``mean_db`` (the
+        caller then reads :meth:`level_at`). Rows added with ``noise_db``
+        alone read a burst where their strongest FFTs stand out of the
+        noise's (``Peak``), else noise."""
         plot = self._plot_rect()
         if plot.width() <= 0 or plot.height() <= 0:
             return None

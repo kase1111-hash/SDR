@@ -86,6 +86,7 @@ from .scan_engine import (
 from .scanner_dialog import _CUSTOM, SCAN_PRESETS, _format_freq, _NumericItem
 
 if HAS_PYQT6:
+    from . import file_dialogs
     from .decoder_panel import ViewPlaceholder
     from .themes import set_role, set_tone
 
@@ -1862,9 +1863,22 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             return 0
         if not path:
             stamp = datetime.now().strftime("%Y%m%d-%H%M")
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Export Results (CSV)", f"scan-{stamp}.csv", "CSV (*.csv)"
-            )
+            name = f"scan-{stamp}.csv"
+            if self._settings is not None:
+                # In Documents, then the folder used last (not the folder
+                # the app was started from), as the other exports.
+                path, _ = file_dialogs.save_file(
+                    self,
+                    self._settings,
+                    "scan_results",
+                    "Export Results (CSV)",
+                    name,
+                    "CSV (*.csv)",
+                )
+            else:
+                path, _ = QFileDialog.getSaveFileName(
+                    self, "Export Results (CSV)", name, "CSV (*.csv)"
+                )
         if not path:
             return 0
         if not path.lower().endswith(".csv"):

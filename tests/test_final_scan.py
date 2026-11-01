@@ -626,5 +626,46 @@ class TestBookmarkResultsShowTheirNames(unittest.TestCase):
             _settle()
 
 
+# --------------------------------------------------------------------------- #
+# SCAN-07: Export Results starts in Documents, then the folder used last
+# --------------------------------------------------------------------------- #
+class TestExportResultsFolder(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+
+    def test_documents_first_then_the_folder_used_last(self):
+        from unittest import mock
+
+        from sdr_module.gui import file_dialogs
+        from sdr_module.gui.scanner_panel import ScanHit, ScannerPanel
+        from tests.test_gui_scanner import FakeWindow
+
+        panel = ScannerPanel(settings=_FakeSettings())
+        panel.set_host(FakeWindow())
+        panel._hits = [ScanHit(100.1e6, -40.0, 40.0, 150e3, "FM", "75 kHz")]
+        panel._rebuild_table()
+        offered = []
+        folder = tempfile.mkdtemp(prefix="scan-export-")
+
+        def save(_parent, _caption, start, _filters, _selected=""):
+            offered.append(start)
+            return os.path.join(folder, "mine.csv"), "CSV (*.csv)"
+
+        try:
+            target = "sdr_module.gui.file_dialogs.QFileDialog.getSaveFileName"
+            with mock.patch(target, side_effect=save):
+                self.assertEqual(panel.export_csv(), 1)
+                self.assertEqual(panel.export_csv(), 1)
+            self.assertEqual(
+                os.path.dirname(offered[0]), file_dialogs.documents_folder()
+            )
+            self.assertTrue(os.path.basename(offered[0]).startswith("scan-"))
+            self.assertEqual(os.path.dirname(offered[1]), folder)
+            self.assertTrue(os.path.exists(os.path.join(folder, "mine.csv")))
+        finally:
+            panel.deleteLater()
+            _settle()
+
+
 if __name__ == "__main__":
     unittest.main()

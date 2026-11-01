@@ -193,6 +193,37 @@ class TestLowCutInTheReceiver(_WindowTestCase):
         self.assertIsNone(self.win._receiver_chain()._listening.low_cut_hz)
 
 
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestBroadcastFmIsLeftAlone(unittest.TestCase):
+    """Broadcast FM's audio leaves the listening filters exactly as it came
+    in, whatever its shape (stereo too: they used to flatten it into one
+    channel), and they start afresh once they apply again."""
+
+    def test_untouched_then_afresh(self):
+        from sdr_module.gui import main_window as mw
+        from sdr_module.gui.audio_chain import AudioOptions
+
+        options = AudioOptions()
+        options.notch, options.notch_hz, options.low_cut_hz = "manual", 1000.0, 300.0
+        chain = mw._ReceiverChain(RATE, "FM", 200e3)
+        chain.options = options
+        rng = np.random.default_rng(3)
+        mono = (0.1 * rng.standard_normal(FRAME // 50)).astype(np.float32)
+        chain._listen(mono)  # (narrow FM: both apply)
+        self.assertEqual(chain.notch_frequency_hz, 1000.0)
+        self.assertEqual(chain._listening.low_cut_hz, 300.0)
+        chain._deemphasis = True  # (as demodulate() sets it at 75 kHz)
+        stereo = (0.1 * rng.standard_normal((FRAME // 50, 2))).astype(np.float32)
+        for audio in (mono, stereo):
+            self.assertIs(chain._listen(audio), audio)
+        self.assertIsNone(chain.notch_frequency_hz)
+        self.assertIsNone(chain._listening.low_cut_hz)
+        chain._deemphasis = False
+        out = chain._listen(mono)
+        self.assertEqual(out.shape, mono.shape)
+        self.assertEqual(chain._listening.low_cut_hz, 300.0)
+
+
 class TestDamagedLowCutSetting(_IniSettings):
     def window(self, **values):
         from unittest import mock

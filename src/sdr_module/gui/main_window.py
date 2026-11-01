@@ -1361,6 +1361,10 @@ class _ReceiverChain:
         squelch set heard without the tone or the DCS bits under it (a
         high-pass at SUBAUDIBLE_CUT_HZ at least)."""
         broadcast = self.mode == "FM" and self._deemphasis
+        if broadcast:
+            # (Its audio leaves as it came, whatever its shape.)
+            self._listening.rest()
+            return audio
         options = self._options()
         low_cut: Optional[float] = None
         voice = self.mode in ("AM", "USB", "LSB") or (

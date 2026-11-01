@@ -452,6 +452,7 @@ class ListeningFilters:
         self._notch = AudioNotch(self.rate)
         self._low_cut = LowCut(self.rate)
         self._band: Optional[Tuple[float, float, Optional[Tuple[float, float]]]] = None
+        self._resting = False
 
     def reset(self) -> None:
         """Another channel or mode: Auto searches anew."""
@@ -468,6 +469,16 @@ class ListeningFilters:
         """Another station tuned (the audio carries on): Auto forgets the
         whistle it found, fading the notch out, and searches anew."""
         self._notch.search_anew()
+
+    def rest(self) -> None:
+        """Nothing applies for now (broadcast FM, whose audio is kept as it
+        is and isn't given to :meth:`process`): the notch and the low cut
+        let go, and start afresh once they apply again."""
+        if not self._resting:
+            self._resting = True
+            self._notch.mode = "off"
+            self._notch.reset()
+            self._low_cut = LowCut(self.rate)
 
     @property
     def low_cut_hz(self) -> Optional[float]:
@@ -493,6 +504,7 @@ class ListeningFilters:
         """``audio`` with the notch of ``options`` (``applies``: the mode
         takes it; ``band``: the audio heard, low and high Hz), then the low
         cut at ``low_cut_hz`` (None: none)."""
+        self._resting = False
         notch = self._notch
         mode = getattr(options, "notch", "off") if applies else "off"
         notch.mode = mode if mode in NOTCH_MODES else "off"

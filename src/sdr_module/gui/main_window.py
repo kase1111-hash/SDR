@@ -9208,14 +9208,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         fading_out = self._audio_join.playing and not speaker
         # A broadcast FM station above squelch: the STEREO badge and the
         # radio tuner's lamp say whether it is received in stereo, speaker
-        # on or off (with Stereo on, the stereo decoder hears it).
+        # on or off (with Stereo on and a filter that holds it, the stereo
+        # decoder hears it; otherwise the badge says why without it).
         received = (
             mode == "FM"
             and gate.is_open
             and not self._scan_muted
             and self._control_panel.get_fm_deviation() >= _BROADCAST_DEVIATION_HZ
         )
-        stereo_watch = received and self._stereo_enabled
+        stereo_watch = received and self._stereo_enabled and StereoPath.usable(chain)
         demodulate = (
             speaker
             or sstv

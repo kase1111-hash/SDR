@@ -603,6 +603,29 @@ class TestStereoWork(_StereoWindowCase):
             self.frames(1)
             self.assertEqual(len(calls), 1)
 
+    def test_a_filter_too_narrow_for_stereo_needs_no_demodulation(self):
+        # The speaker off, broadcast FM is demodulated only for the STEREO
+        # badge and lamp. Through a filter too narrow for stereo the badge
+        # says so without it (the audio went on being demodulated, about
+        # half a millisecond a frame, for nothing).
+        from sdr_module.gui.main_window import _ReceiverChain
+
+        self.win._audio_enabled = False
+        self.tune(mode=("FM", "75 kHz", "100 kHz"))
+        calls = []
+        real = _ReceiverChain.demodulate
+
+        def counted(chain, channel, deviation):
+            calls.append(len(channel))
+            return real(chain, channel, deviation)
+
+        with mock.patch.object(_ReceiverChain, "demodulate", counted):
+            self.frames(4)
+        self.assertEqual(calls, [])
+        self.assertTrue(self.win._stereo_badge_action.isVisible())
+        self.assertEqual(self.win._stereo_badge.text(), "MONO")
+        self.assertIn("Filter is too narrow", self.win._stereo_badge.toolTip())
+
     def test_the_second_receiver_is_mono(self):
         from sdr_module.gui.main_window import _ReceiverChain
 

@@ -945,6 +945,7 @@ if HAS_PYQT6:
                 "didn't fit was left out.",
                 "warning",
                 5000,
+                log=False,  # (a notice, not a problem)
             )
 
         def _on_text_changed(self) -> None:
@@ -1103,6 +1104,7 @@ if HAS_PYQT6:
                     "Enter your callsign in Ham > Ham ID to use the macros.",
                     "warning",
                     5000,
+                    log=False,  # (what to do first: not a problem)
                 )
                 return False
             insert = template.format(call=call)
@@ -1120,6 +1122,7 @@ if HAS_PYQT6:
                     f"{MAX_TEXT_CHARS:,} characters.",
                     "warning",
                     5000,
+                    log=False,  # (a notice, not a problem)
                 )
                 return False
             cursor.insertText(insert)

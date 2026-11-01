@@ -469,6 +469,7 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
                 "ID not sent: enter your callsign in Ham > Ham ID first.",
                 "warning",
                 6000,
+                log=False,  # (what to do first: not a problem)
             )
             win._show_panel("ham_id")
             return False
@@ -487,7 +488,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         win = self._win
         if self.busy:
             win._show_status_message(
-                "Already transmitting: wait for it to end or press Stop.", "warning"
+                "Already transmitting: wait for it to end or press Stop.",
+                "warning",
+                log=False,  # (what to do first: not a problem)
             )
             return False
         what = "ID" if job.is_id else job.description

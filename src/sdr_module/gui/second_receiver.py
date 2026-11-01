@@ -3466,7 +3466,12 @@ if HAS_PYQT6:
             try:
                 saved = json.loads(raw)
             except ValueError:
-                logger.debug(f"Ignoring unreadable spectrum settings: {raw!r}")
+                # (Logged, as the main window's own are: a damaged settings
+                # file is listed in Tools > Error History.)
+                logger.warning(
+                    f"Ignoring the second receiver's unreadable spectrum "
+                    f"settings: {raw!r}"
+                )
                 return
             if not isinstance(saved, dict):
                 return

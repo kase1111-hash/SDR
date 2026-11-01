@@ -23,7 +23,7 @@ import unittest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
+from tests.test_gui_chrome import HAS_PYQT6, _WindowTestCase  # noqa: E402
 from tests.test_gui_station_tx import _TxCase  # noqa: E402
 
 if HAS_PYQT6:
@@ -122,6 +122,29 @@ class TestTheTransmitQuestionKeepsItsCheckBox(_TxCase):
         box.setIcon(QMessageBox.Icon.Information)
         QApplication.processEvents()
         self.assertEqual(box.checkBox().text(), "Don't ask again")
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
+class TestSecondReceiverSpectrumSettingDamaged(_WindowTestCase):
+    """A damaged settings file gives each setting its default and is
+    logged (F-window, ROB-07: the main window logs unreadable spectrum
+    settings at WARNING). The second receiver's own spectrum choices
+    (HAM-E2E-8) were ignored with a debug line only."""
+
+    demo = True
+
+    def test_unreadable_spectrum_settings_are_logged(self):
+        from sdr_module.gui.second_receiver import SPECTRUM_KEY
+
+        self.store.values[SPECTRUM_KEY] = "{not json"
+        with self.assertLogs("sdr_module.gui.second_receiver", "WARNING") as logs:
+            rx = self.win._second_rx.show()
+            self.addCleanup(rx.shutdown)
+            rx._status_timer.stop()
+        self.assertIn("unreadable spectrum settings", "\n".join(logs.output))
+        # (The defaults, as with no saved choice.)
+        self.assertFalse(rx._spectrum.peak_hold())
+        self.assertTrue(rx._spectrum.display_settings()["range_auto"])
 
 
 if __name__ == "__main__":

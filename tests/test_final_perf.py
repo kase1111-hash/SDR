@@ -528,3 +528,65 @@ class TestSecondReceiverPlotsOnlyWhenSeen(_WindowTestCase):
         self.settle()
         rx._process(block)
         self.assertEqual(analyzed, [80_000, 80_000])
+
+
+# ---------------------------------------------------------------------------
+# The spectrum's trace drawing (ROB-06's 5-6 ms of paints a frame)
+# ---------------------------------------------------------------------------
+
+
+class TestTraceDrawing(_WindowTestCase):
+    def _trace(self):
+        rng = np.random.default_rng(8)
+        spectrum = self.win._spectrum
+        spectrum.update_spectrum(
+            (-90 + 5 * rng.standard_normal(2048)).astype(np.float32)
+        )
+        return spectrum
+
+    def test_the_trace_is_not_built_point_by_point(self):
+        # The trace was built as one Python QPointF per pixel column, each
+        # frame (and again for peak and min hold): about a quarter of the
+        # spectrum's paint.
+        from sdr_module.gui import spectrum_widget as sw
+
+        spectrum = self._trace()
+        made = []
+        point = sw.QPointF
+
+        def counting(*args):
+            made.append(args)
+            return point(*args)
+
+        with mock.patch.object(sw, "QPointF", counting):
+            spectrum._canvas.repaint()
+        # (The axes' ticks and labels make a few dozen; the trace made 900.)
+        self.assertLess(len(made), 200)
+
+    def test_the_trace_is_drawn_exactly_as_before(self):
+        from sdr_module.gui import spectrum_widget as sw
+
+        spectrum = self._trace()
+        spectrum._show_peak = True
+        spectrum._peak_hold = spectrum._spectrum + 6.0
+        fast = spectrum._canvas.grab().toImage()
+
+        def slow(xs, ys):  # (a QPointF per point, as it was)
+            return sw.QPolygonF(
+                [sw.QPointF(x, y) for x, y in zip(list(xs), list(ys), strict=True)]
+            )
+
+        with mock.patch.object(sw, "polygon_of", slow):
+            reference = spectrum._canvas.grab().toImage()
+        self.assertEqual(fast, reference)
+
+    def test_polygons_of_any_length(self):
+        from sdr_module.gui.spectrum_widget import QPointF, polygon_of
+
+        for n in (0, 1, 2, 7, 1300):
+            xs = np.linspace(-3.5, 1000.25, n)
+            ys = np.cos(xs)
+            poly = polygon_of(xs, ys)
+            self.assertEqual(poly.count(), n)
+            for i in range(n):
+                self.assertEqual(poly.at(i), QPointF(float(xs[i]), float(ys[i])))

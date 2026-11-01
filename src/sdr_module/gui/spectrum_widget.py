@@ -646,6 +646,51 @@ def columns_max(data: np.ndarray, cols: int, axis: int = -1) -> np.ndarray:
     return out
 
 
+# Whether a QPolygonF's points can be written straight into its memory
+# (two doubles each); None until polygon_of first finds out.
+_POINTS_ARE_DOUBLES: Optional[bool] = None
+
+
+def _points_are_doubles() -> bool:
+    global _POINTS_ARE_DOUBLES
+    if _POINTS_ARE_DOUBLES is None:
+        try:
+            poly = _write_points(np.array([1.5, 3.5]), np.array([2.5, 4.5]))
+            points = [(p.x(), p.y()) for p in (poly.at(0), poly.at(1))]
+            _POINTS_ARE_DOUBLES = points == [(1.5, 2.5), (3.5, 4.5)]
+        except Exception:  # pragma: no cover - a Qt with float coordinates
+            _POINTS_ARE_DOUBLES = False
+    return bool(_POINTS_ARE_DOUBLES)
+
+
+def _write_points(xs: np.ndarray, ys: np.ndarray) -> "QPolygonF":
+    n = len(xs)
+    poly = QPolygonF()
+    poly.fill(QPointF(), n)
+    memory = poly.data()
+    memory.setsize(16 * n)
+    points = np.frombuffer(memory, dtype=np.float64).reshape(n, 2)
+    points[:, 0] = xs
+    points[:, 1] = ys
+    return poly
+
+
+def polygon_of(xs: np.ndarray, ys: np.ndarray) -> "QPolygonF":
+    """The points (``xs[i]``, ``ys[i]``) as a QPolygonF, written straight
+    into its memory: a Python QPointF per point of a trace (900 at 1366
+    pixels, more with peak or min hold) took a quarter of the spectrum's
+    paint, every frame."""
+    xs = np.asarray(xs, dtype=np.float64).ravel()
+    ys = np.asarray(ys, dtype=np.float64).ravel()
+    if not len(xs):
+        return QPolygonF()
+    if _points_are_doubles():
+        return _write_points(xs, ys)
+    return QPolygonF(  # pragma: no cover - a Qt with float coordinates
+        [QPointF(x, y) for x, y in zip(xs.tolist(), ys.tolist(), strict=True)]
+    )
+
+
 def bins_start(center_hz: float, span_hz: float, n: int) -> float:
     """Lower edge (Hz) of the first of the ``n`` FFT bins of a line received
     over ``span_hz`` around ``center_hz``. In ``fftshift`` order bin ``k``
@@ -2163,9 +2208,7 @@ class SpectrumWidget(QWidget if HAS_PYQT6 else object):
     @staticmethod
     def _polyline(xy: Tuple[np.ndarray, np.ndarray]) -> "QPolygonF":
         xs, ys = xy
-        return QPolygonF(
-            [QPointF(x, y) for x, y in zip(xs.tolist(), ys.tolist(), strict=True)]
-        )
+        return polygon_of(xs, ys)
 
     def _paint_canvas(self, canvas: "QWidget") -> None:
         p = get_palette()

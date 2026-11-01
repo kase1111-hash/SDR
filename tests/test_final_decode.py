@@ -1069,11 +1069,16 @@ class TestAdsbRateTips(_WindowTestCase):
     demo = True
 
     def test_the_tips_say_2_4_ms_s_or_more(self):
-        # They said "at least 2 MS/s", but 2.0-2.1 MS/s decode poorly.
+        # They said "at least 2 MS/s", but 2.0-2.1 MS/s decoded poorly. Now
+        # (K-D1) 2 MS/s decodes strong replies as well, weak ones less
+        # often: 2 MS/s is needed, 2.4 MS/s or more is best.
         from sdr_module.dsp.live_decoders import create_live_decoder
         from sdr_module.gui.device_settings import ADSB_RATE_TIP
 
-        self.assertIn("needs 2.4 MS/s or more", ADSB_RATE_TIP)
+        self.assertIn("needs 2 MS/s or more", ADSB_RATE_TIP)
+        self.assertIn(
+            "2.4 MS/s or more hears weak, distant aircraft best", ADSB_RATE_TIP
+        )
         remedy = create_live_decoder("ADS-B", 1.8e6).status.remedy
         self.assertIn("Choose 2.4 MS/s or more", remedy)
 
@@ -1086,7 +1091,7 @@ class TestAdsbRateTips(_WindowTestCase):
             "ADS-B decodes best at 2.4 MS/s or more", win._message_label.text()
         )
         self.assertTrue(win._device_controls.choose_rate(1.8e6))
-        self.assertIn("ADS-B needs 2.4 MS/s or more", win._message_label.text())
+        self.assertIn("ADS-B needs 2 MS/s or more", win._message_label.text())
         self.assertTrue(win._device_controls.choose_rate(2.4e6))
         self.assertNotIn("ADS-B", win._message_label.text())
 

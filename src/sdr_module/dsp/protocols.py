@@ -22,6 +22,8 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 
+from . import mode_s
+
 logger = logging.getLogger(__name__)
 
 
@@ -2194,11 +2196,16 @@ class ADSBDecoder(ProtocolDecoder):
     - Anything else (other formats, failed checks) is dropped, not returned.
 
     Features:
-    - Mode S preamble detection (dump1090's pulse/quiet test) on the
-      magnitude signal in 0.5 us slots. Except at exactly 2 MS/s the slots
-      are read at 4 or 5 phases (every 0.1-0.125 us), so a reply decodes
-      wherever it starts between two samples; the best-aligned phase of
-      each reply is demodulated
+    - Below 2.5 MS/s (a sample lasts 0.8 to 1 chip, so most samples mix two
+      chips) the samples are read as what they are: each reply's start
+      time, pulse level and noise floor are fitted from its preamble and
+      its bits found by a Viterbi search over the samples' chip mixtures
+      (:class:`~sdr_module.dsp.mode_s.ModeSDemodulator`), so a reply
+      decodes wherever it starts between two samples, at 2.048 MS/s too
+    - From 2.5 MS/s, Mode S preamble detection (dump1090's pulse/quiet
+      test) on the magnitude signal in 0.5 us slots, read at 4 or 5 phases
+      (every 0.1-0.125 us), so a reply decodes wherever it starts between
+      two samples; the best-aligned phase of each reply is demodulated
     - Frames that straddle two ``decode()`` calls are still found
     - Aircraft identification (callsign)
     - Airborne position decoding (CPR)
@@ -2286,6 +2293,12 @@ class ADSBDecoder(ProtocolDecoder):
             )
         self._ratio = sample_rate / self.WORK_RATE
         self._plan_slots()
+        # 2 to 2.5 MS/s: the samples are read as chip mixtures (see above).
+        self._fine: Optional[mode_s.ModeSDemodulator] = (
+            mode_s.ModeSDemodulator(sample_rate)
+            if sample_rate < mode_s.MAX_RATE
+            else None
+        )
 
         # Generate CRC table
         if not ADSBDecoder.CRC_TABLE:
@@ -2829,6 +2842,10 @@ class ADSBDecoder(ProtocolDecoder):
     def _scan(self, mag: np.ndarray) -> None:
         """Find and decode the replies in a block of magnitudes (the
         stream's next samples) into ``_messages``."""
+        if self._fine is not None:
+            self._forget_old_aircraft()
+            self._fine.feed(mag, self._take_first, self._known_icao.keys)
+            return
         work = self._to_work_rate(mag)
         if len(self._tail):
             work = np.concatenate((self._tail, work))
@@ -2877,6 +2894,17 @@ class ADSBDecoder(ProtocolDecoder):
 
     _FORMATS = np.array(_SHORT_FORMATS + _LONG_FORMATS)
 
+    def _take_first(self, frames: Sequence[bytes]) -> int:
+        """The first of a reply's possible ``frames`` (the likeliest
+        first) that passes the checks goes into ``_messages``; its bits, or
+        0 when none passes."""
+        for frame in frames:
+            msg = self._parse_frame(frame)
+            if msg is not None:
+                self._messages.append(msg)
+                return 8 * len(msg.raw_bits)
+        return 0
+
     @staticmethod
     def _clearest(groups: np.ndarray, clarity: np.ndarray) -> np.ndarray:
         """Index of the clearest candidate of each group (consecutive runs
@@ -2902,6 +2930,8 @@ class ADSBDecoder(ProtocolDecoder):
         self._rest = np.zeros(0, dtype=np.float32)
         self._tail = np.zeros(0, dtype=np.float32)
         self._skip = 0
+        if self._fine is not None:
+            self._fine.reset()
 
 
 # ============================================================================

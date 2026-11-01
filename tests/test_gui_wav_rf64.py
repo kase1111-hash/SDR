@@ -200,6 +200,25 @@ class TestOpeningRf64Recordings(_ReviewCase):
         loaded = np.array(self.win._samples_buffer.samples()[:count])
         np.testing.assert_allclose(loaded, x, atol=1 / 32767)
 
+    def test_find_signals_in_recording_reads_it(self):
+        from sdr_module.dsp.recording import SampleFormat, write_sidecar
+
+        rng = np.random.default_rng(6)
+        n = int(2.0 * RATE)
+        t = np.arange(n) / RATE
+        x = 1e-3 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+        x = (x + 0.1 * np.exp(2j * np.pi * 30e3 * t)).astype(np.complex64)
+        path = self.path("tone.wav")
+        offset = _rf64(path, n, head=_cs16(x), rate=int(RATE))
+        write_sidecar(path, SampleFormat.INT16, RATE, 145e6, header_bytes=offset)
+        tools = self.win._signal_tools
+        with self.warnings() as warn:
+            self.assertTrue(tools.find_in_recording(path))
+        warn.assert_not_called()
+        self.assertTrue(tools.panel.showing_recording())
+        found = [s.frequency_hz - 145e6 for s in tools.panel.signals()]
+        self.assertTrue(any(abs(f - 30e3) < 2e3 for f in found), found)
+
     def test_a_5_gib_recording_plays_to_its_end(self):
         if not _sparse_files_here(self.folder):
             self.skipTest(

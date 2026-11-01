@@ -9,8 +9,10 @@ and the real ones, in 64 bits, in a ``ds64`` chunk ahead of the others.
 
 :class:`WavWriter` writes integer PCM samples: a classic file while they
 fit, RF64 once they don't. A file whose size is known to fit gets the
-classic 44-byte header (the ``wave`` module's, byte for byte), readable
-everywhere; any other begins with a ``JUNK`` chunk where ``ds64`` goes (as
+classic 44-byte header, readable everywhere (byte for byte the ``wave``
+module's file for an even number of bytes of samples, as I/Q always is; an
+odd number gets RIFF's pad byte, which the ``wave`` module leaves out); any
+other begins with a ``JUNK`` chunk where ``ds64`` goes (as
 EBU Tech 3306 recommends), which WAV readers skip, and becomes RF64 in
 place once it passes 4 GiB. The header is brought up to date after every
 write, so a file cut short (a crash) still reads to its last write.

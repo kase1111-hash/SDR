@@ -95,6 +95,18 @@ def snr_of(text):
     return float(found.group(1)) if found else None
 
 
+def fm_station(count, offset_hz, seed=5):
+    """Broadcast FM: noise-like audio up to 15 kHz at 75 kHz deviation (its
+    frequency sweeps across a bin: in it for some FFTs, not others)."""
+    rng = np.random.default_rng(seed)
+    spec = np.fft.rfft(rng.normal(size=count))
+    spec[np.fft.rfftfreq(count, 1.0 / RATE) > 15e3] = 0
+    audio = np.fft.irfft(spec, count)
+    audio /= np.max(np.abs(audio))
+    t = np.arange(count) / RATE
+    return np.exp(2j * np.pi * (75e3 * np.cumsum(audio) / RATE + offset_hz * t))
+
+
 # --------------------------------------------------------------------------- #
 # The readout's statistics (Qt-free)
 # --------------------------------------------------------------------------- #
@@ -304,6 +316,36 @@ class TestWaterfallReadings(unittest.TestCase):
         rows_px = plot.height() / wf._rows_shown()
         older = self.hover(wf, [CENTER + 300 * bin_hz], plot.top() + 3.5 * rows_px)[0]
         self.assertIn("noise", older)
+
+    def test_a_steady_fm_station_reads_its_level_not_bursts(self):
+        """Broadcast FM's strongest FFTs stand 8-12 dB over its average in a
+        bin (it sweeps across the bin): taken for bursts, the hover across
+        a steady station read "Peak -55 dBFS" at a quarter of the places
+        and "-63 dBFS" at the others. It is there in the rows before and
+        after: its level."""
+        size, count = 2048, 80_000
+        wf = self.waterfall(size)
+        rng = np.random.default_rng(1)
+        station = 0.05 * fm_station(30 * count, 300e3)
+        analyzer = FrameSpectrumAnalyzer(size)
+        for i in range(30):
+            noise = (rng.normal(size=count) + 1j * rng.normal(size=count)) * 1e-4
+            x = station[i * count : (i + 1) * count] + noise
+            frame = analyzer.process(x.astype(np.complex64))
+            wf.add_line(
+                frame.max_db,
+                timestamp=i / 30,
+                noise_db=frame.noise_floor_db,
+                mean_db=frame.mean_db,
+            )
+        plot = wf.plot_rect()
+        rows_px = plot.height() / wf._rows_shown()
+        across = CENTER + 300e3 + np.linspace(-60e3, 60e3, 25)
+        lines = []
+        for row in range(4):
+            lines += self.hover(wf, across, plot.top() + (row + 0.5) * rows_px)
+        self.assertLessEqual(sum(line.startswith("Peak") for line in lines), 2, lines)
+        self.assertTrue(all(snr_of(line) and snr_of(line) > 30 for line in lines))
 
     def test_rows_merging_frames_read_their_average(self):
         """With a 1 min history each row merges several frames: its

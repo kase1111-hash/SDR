@@ -1613,7 +1613,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         (an SNR all over it at 32768 points) and weak signals high. So the
         row's averaged spectrum is read (:meth:`add_line`'s ``mean_db``),
         and its strongest FFTs only where they stand out of what that
-        level explains: a burst shorter than the frame (``Peak``). None
+        level explains: a burst shorter than the frame (``Peak``), unless
+        the row before or after holds that level too (a station there all
+        along whose strongest FFTs stand out of its average: broadcast FM
+        sweeps across a bin, in it for some FFTs and not others). None
         where the row has no data (it was received at another frequency),
         or for rows added with neither ``noise_db`` nor ``mean_db`` (the
         caller then reads :meth:`level_at`). Rows added with ``noise_db``
@@ -1651,20 +1654,50 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         noise = self._row_noise(h)
         if noise is None:
             return None
-        model, rise_db, means = noise
-        steady: Optional[Reading] = None
-        if means is not None:
-            levels = _mean_levels(means[lo:hi])
-            steady = read_levels(levels, model, self._row_fill_limit(h, hi - lo))
+        model, rise_db, _means = noise
+        steady = self._steady_reading(h, lo, hi)
         if rise_db is not None:
             peak = float(np.max(line[lo:hi]))
             base = None if steady is None or steady.is_noise else steady.level_db
             burst = read_burst(peak, model.floor_db, rise_db, hi - lo, base)
-            if burst is not None:
+            if burst is not None and not self._steady_beside(h, lo, hi, steady):
                 return burst
         if steady is not None:
             return steady
         return Reading(model.floor_db, None)
+
+    def _steady_reading(self, h: int, lo: int, hi: int) -> Optional[Reading]:
+        """History row ``h``'s averaged spectrum over its bins
+        ``lo:hi``, read against its noise; None without one."""
+        noise = self._row_noise(h)
+        if noise is None or noise[2] is None:
+            return None
+        model, _rise, means = noise
+        levels = _mean_levels(means[lo:hi])
+        return read_levels(levels, model, self._row_fill_limit(h, hi - lo))
+
+    def _steady_beside(
+        self, h: int, lo: int, hi: int, steady: Optional[Reading]
+    ) -> bool:
+        """Whether the row before or after history row ``h``, received on
+        the same bins, holds an averaged level there as strong as
+        ``steady`` (to within 6 dB): a station there all along, not a
+        burst in this row."""
+        if steady is None or steady.is_noise:
+            return False
+        axes = self._row_axes if len(self._row_axes) == len(self._history) else None
+        for j in (h - 1, h + 1):
+            if not 0 <= j < len(self._history):
+                continue
+            if len(self._history[j]) != len(self._history[h]):
+                continue
+            if axes is not None and axes[j] != axes[h]:
+                continue
+            other = self._steady_reading(j, lo, hi)
+            if other is not None and not other.is_noise:
+                if other.level_db >= steady.level_db - 6.0:
+                    return True
+        return False
 
     def _row_noise(self, h: int) -> Optional[Tuple[Any, Optional[float], Any]]:
         """``(noise model, rise, mean codes)`` of history row ``h``: the

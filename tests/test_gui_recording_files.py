@@ -787,7 +787,8 @@ class TestDecodeRecording(_FilesCase):
 
     def test_decoder_tab_button(self):
         panel = self.win._decoder_panel
-        self.assertEqual(panel._decode_file_btn.text(), "Decode File...")
+        # (Named like the menu item and the dialog: DEC-E2E-19.)
+        self.assertEqual(panel._decode_file_btn.text(), "Decode Recording...")
         with mock.patch.object(self.win, "_decode_recording") as decode:
             # (Connected with a lambda: the patched method is looked up.)
             panel._decode_file_btn.click()

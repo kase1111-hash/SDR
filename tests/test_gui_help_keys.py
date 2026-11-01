@@ -208,6 +208,56 @@ class TestEveryPanelKeyIsReal(_WindowTestCase):
         self.settle()
         self.assertIs(panel._tabs.currentWidget(), panel._messages_page)
         self.assertEqual(panel.address_filter(), "4840D6")
+        # A double-click does the same (the row says so).
+        panel.set_address_filter("")
+        panel._tabs.setCurrentWidget(view)
+        self.settle()
+        rect = view.table.visualRect(view.table.model().index(0, 0))
+        # (A click, then the double-click: the press that starts it.)
+        QTest.mouseClick(
+            view.table.viewport(), Qt.MouseButton.LeftButton, pos=rect.center()
+        )
+        self.settle()
+        QTest.mouseDClick(
+            view.table.viewport(), Qt.MouseButton.LeftButton, pos=rect.center()
+        )
+        self.settle()
+        self.assertIs(panel._tabs.currentWidget(), panel._messages_page)
+        self.assertEqual(panel.address_filter(), "4840D6")
+
+    def test_key_air_copy(self):
+        from sdr_module.dsp.live_decoders import describe_message, message_details
+        from sdr_module.dsp.protocols import ADSBMessage, ProtocolType
+
+        self.assertEqual(self.keys_of("air_copy"), ("Ctrl+C",))
+        panel = self.win._decoder_panel
+        panel._proto_combo.setCurrentText("ADS-B")
+        self.settle()
+        msg = ADSBMessage(
+            protocol=ProtocolType.ADSB,
+            timestamp=0.0,
+            raw_bits=b"",
+            valid=True,
+            icao_address="4840D6",
+            downlink_format=17,
+            type_code=4,
+            callsign="KLM1023",
+        )
+        address, content = describe_message(msg)
+        panel.add_message(
+            "ADS-B", address, content, message=msg, details=message_details(msg)
+        )
+        view = panel._aircraft_view
+        panel._tabs.setCurrentWidget(view)
+        view.select("4840D6")
+        view.table.setFocus()
+        self.settle()
+        QGuiApplication.clipboard().setText("")
+        QTest.keyClick(view.table, Qt.Key.Key_C, CTRL)
+        self.assertTrue(
+            QGuiApplication.clipboard().text().startswith("KLM1023 (4840D6)"),
+            QGuiApplication.clipboard().text(),
+        )
 
     # -- the Scanner results ---------------------------------------------
 

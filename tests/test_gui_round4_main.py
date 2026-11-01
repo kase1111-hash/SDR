@@ -619,7 +619,8 @@ class TestTuningBandwidth(_WindowTestCase):
         self.assertEqual(self.bandwidth(), "25 kHz")
         self.assertEqual(self.win._control_panel.get_fm_deviation_text(), "5 kHz")
         decoder.tune_requested.emit(131.55e6, "ACARS (131.550 MHz)", "AM", "")
-        self.assertEqual(self.bandwidth(), "10 kHz")
+        # (15 kHz: as the ACARS band preset is heard, DEC-E2E-14.)
+        self.assertEqual(self.bandwidth(), "15 kHz")
         self.assertEqual(self.win._control_panel.get_demod_mode(), "AM")
 
     def test_bookmark_modes(self):

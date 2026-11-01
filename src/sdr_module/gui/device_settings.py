@@ -110,8 +110,11 @@ RATE_LIMITS: Dict[str, Tuple[float, float]] = {
 }
 #: The ADS-B decoder's lowest usable rate (its 0.5 us pulses need 2 MS/s).
 ADSB_MIN_RATE = 2.0e6
+#: The rate it decodes well from (at 2.0-2.1 MS/s most replies are lost).
+ADSB_GOOD_RATE = 2.4e6
 ADSB_RATE_TIP = (
-    "ADS-B (1090 MHz) needs at least 2 MS/s; the other decoders work at any rate"
+    "ADS-B (1090 MHz) needs 2.4 MS/s or more (nothing decodes below 2 MS/s); "
+    "the other decoders work at any rate"
 )
 
 

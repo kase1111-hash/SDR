@@ -118,6 +118,9 @@ class TestLiveDecoderWiring(_WindowTestCase):
         # Regression: "Signal present but nothing decodes" stayed on after
         # retuning to a quiet channel (seen in the window going from a
         # 146.940 MHz voice channel to 150.000 MHz with POCSAG selected).
+        # (On a pager channel: elsewhere the line says "Not tuned to POCSAG"
+        # instead, the signal heard or not.)
+        self.assertTrue(self.win.set_frequency(152.24e6))
         decoder = self.select("POCSAG")
         panel = self.win._decoder_panel
         block = np.zeros(4096, dtype=np.complex64)
@@ -156,8 +159,8 @@ class TestLiveDecoderRates(_WindowTestCase):
         self.assertEqual(panel.decoder_status_text(), problem)
         self.assertEqual(panel._status_label.property("tone"), "warning")
         self.assertIn("ADS-B can't decode here", panel._empty.text())
-        self.assertIn("Choose a higher sample rate", panel._empty.text())
-        self.assertIn("Choose a higher sample rate", win._message_label.text())
+        self.assertIn("Choose 2.4 MS/s or more", panel._empty.text())
+        self.assertIn("Choose 2.4 MS/s or more", win._message_label.text())
         # A valid rate rebuilds it (TOOLS-04).
         win.set_sample_rate(2.4e6)
         self.assertEqual(win._decoder.sample_rate, 2.4e6)
@@ -219,8 +222,9 @@ class TestTuneToModes(_WindowTestCase):
         ):
             self.assertEqual(self.tune(name), ("FM", "5 kHz", "25 kHz"), name)
             self.assertAlmostEqual(self.freq(), freq)
+        # (As the ACARS preset is heard: 15 kHz, DEC-E2E-14.)
         mode, _dev, bandwidth = self.tune("ACARS")
-        self.assertEqual((mode, bandwidth), ("AM", "10 kHz"))
+        self.assertEqual((mode, bandwidth), ("AM", "15 kHz"))
         self.assertAlmostEqual(self.freq(), 131.55e6)
 
 
@@ -373,15 +377,30 @@ class TestDecoderPanelStatus(unittest.TestCase):
             "Not tuned to POCSAG: listening on 100.000 MHz",
         )
 
+    def add_pages(self, count, age):
+        """``count`` pages in the table, decoded ``age`` seconds ago."""
+        now, self.now = self.now, self.now - age
+        for i in range(count):
+            self.panel.add_message("POCSAG", f"{i} (F0)", "page")
+        self.now = now
+
     def test_counts_and_age(self):
+        # The pages in the table count (as the status-bar chip counts them);
+        # the decoder's own counts give the failed checks.
+        self.show(self.status())
+        self.add_pages(3, 4)
         text, tone = self.show(self.status(valid=3, last_time=self.now - 4))
         self.assertEqual(text, "POCSAG  ·  3 pages  ·  last 4 s ago")
         self.assertEqual(tone, "success")
+        self.panel.clear()
+        self.add_pages(1, 600)
         text, tone = self.show(self.status(valid=1, failed=2, last_time=self.now - 600))
         self.assertEqual(
             text, "POCSAG  ·  1 page  ·  last 10 min ago  ·  2 failed checks"
         )
         self.assertIsNone(tone)
+        self.panel.clear()
+        self.add_pages(2, 0)
         text, _tone = self.show(self.status(valid=2, failed=1, last_time=self.now))
         self.assertEqual(
             text, "POCSAG  ·  2 pages  ·  last just now  ·  1 failed check"
@@ -399,6 +418,7 @@ class TestDecoderPanelStatus(unittest.TestCase):
             (p._frames_label.text(), p._decoded_label.text(), p._failed_label.text()),
             ("0", "0", "0"),
         )
+        p.add_message("POCSAG", "1 (F0)", "page")  # (the page it decoded)
         p.set_decoder_status(
             self.status(frames=7, valid=6, failed=1, last_time=self.now)
         )
@@ -515,7 +535,7 @@ class TestDeviceDialogRates(unittest.TestCase):
                 low = rate < 2e6
                 self.assertEqual(combo.itemText(i).endswith("(too low for ADS-B)"), low)
                 tip = combo.itemData(i, Qt.ItemDataRole.ToolTipRole) or ""
-                self.assertEqual("needs at least 2 MS/s" in tip, low)
+                self.assertEqual("needs 2.4 MS/s or more" in tip, low)
             self.assertTrue(any(combo.itemData(i) < 2e6 for i in range(combo.count())))
         finally:
             dialog.close()

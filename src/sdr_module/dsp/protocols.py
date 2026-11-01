@@ -1900,6 +1900,11 @@ class RDSDecoder(ProtocolDecoder):
             self._confirm("pi", pi_code)
 
         self._tp = bool((data_b >> 10) & 0x01)
+        if group_type == 0:
+            # Traffic announcement and music/speech, read before the
+            # program type: its update describes the station with them.
+            self._ta = bool((data_b >> 4) & 0x01)
+            self._ms = bool((data_b >> 3) & 0x01)
         self._confirm("pty", (data_b >> 5) & 0x1F)
 
         if group_type == 0:
@@ -1936,8 +1941,7 @@ class RDSDecoder(ProtocolDecoder):
     def _group_0(
         self, data_b: int, version: int, c: Optional[int], d: Optional[int]
     ) -> None:
-        self._ta = bool((data_b >> 4) & 0x01)
-        self._ms = bool((data_b >> 3) & 0x01)
+        # (TA and M/S are read with the program type: _process_blocks.)
         if version == 0 and c is not None:
             for code in ((c >> 8) & 0xFF, c & 0xFF):
                 if 1 <= code <= 204:

@@ -52,6 +52,7 @@ except ImportError:  # pragma: no cover - the GUI needs PyQt6
     HAS_PYQT6 = False
 
 from .device_settings import (
+    ADSB_GOOD_RATE,
     ADSB_MIN_RATE,
     ADSB_RATE_TIP,
     AMP_WARNING,
@@ -683,11 +684,15 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
         if kind in REMEMBERED_KINDS:
             save_rate(self._settings, kind, rate)
         text = f"Sample rate {format_rate(rate)}: the span is {rate / 1e6:g} MHz."
-        tone = None
         if rate < ADSB_MIN_RATE and self._adsb_selected():
-            text += " ADS-B needs at least 2 MS/s."
-            tone = "warning"
-        self._status(text, tone, 5000)
+            text += " ADS-B needs 2.4 MS/s or more."
+            # Not logged again: the ADS-B decoder rebuilt for this rate
+            # logged it (one entry in Error History per step).
+            self._win._show_status_message(text, "warning", 5000, log=False)
+            return
+        if rate < ADSB_GOOD_RATE and self._adsb_selected():
+            text += " ADS-B decodes best at 2.4 MS/s or more."
+        self._status(text, None, 5000)
 
     def _adsb_selected(self) -> bool:
         decoder = getattr(self._win, "_decoder", None)

@@ -290,8 +290,7 @@ class DeviceDialog(QDialog if HAS_PYQT6 else object):
             if rate < _ADSB_MIN_RATE:
                 self._rate_combo.setItemData(
                     self._rate_combo.count() - 1,
-                    "ADS-B (1090 MHz) needs at least 2 MS/s; the other "
-                    "decoders work at any rate",
+                    device_settings.ADSB_RATE_TIP,
                     Qt.ItemDataRole.ToolTipRole,
                 )
         # Keep the previous choice when it is still valid, else the closest.

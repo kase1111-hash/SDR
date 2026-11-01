@@ -115,9 +115,10 @@ class TestAircraftView(_PanelCase):
         _add(self.panel, _adsb(icao_address="3C6586", downlink_format=17, type_code=4,
                                callsign="DLH9U"))  # fmt: skip
         self.assertEqual(self.view.table.rowCount(), 2)
+        # (Seen and Msgs come early: DEC-E2E-18.)
         self.assertEqual(
             self.cells(0),
-            ["KLM1023", "38,000", "450", "265°", "-640", "3472", "now", "4",
+            ["KLM1023", "38,000", "450", "now", "4", "265°", "-640", "3472",
              "52.257, 3.913", "4840D6"],
         )  # fmt: skip
         self.assertEqual(self.cells(1)[0], "DLH9U")
@@ -127,8 +128,10 @@ class TestAircraftView(_PanelCase):
         _add(self.panel, _adsb(icao_address="ABC123", downlink_format=17, type_code=19,
                                velocity=300.0, heading=359.7, vertical_rate=0,
                                vertical_rate_known=False))  # fmt: skip
+        from sdr_module.gui.decoder_views import AC_TRACK, AC_VS
+
         cells = self.cells(0)
-        self.assertEqual((cells[3], cells[4]), ("0°", "–"))
+        self.assertEqual((cells[AC_TRACK], cells[AC_VS]), ("0°", "–"))
 
     def test_rows_dim_after_a_minute_and_go_after_five(self):
         self.feed_klm()
@@ -139,7 +142,9 @@ class TestAircraftView(_PanelCase):
 
         self.assertEqual(item.foreground().color(), get_palette().qcolor("disabled"))
         self.assertFalse(item.font().bold())
-        self.assertEqual(self.cells(0)[6], "1 min")
+        from sdr_module.gui.decoder_views import AC_SEEN
+
+        self.assertEqual(self.cells(0)[AC_SEEN], "1 min")
         self.assertIn("Not heard for over a minute", item.toolTip())
         self.now += 240
         self.view.refresh()
@@ -346,9 +351,10 @@ class TestMorseText(_PanelCase):
         self.assertEqual(view.plain_text(), "CQ")
         self.assertEqual(view.speed.text(), "18 WPM")
         self.assertEqual(view.state.text(), "Receiving")
+        # (No line finished yet: no message in the table, as the chip says.)
         self.assertEqual(
             p.decoder_status_text(),
-            "CW (Morse)  ·  18 WPM  ·  3 characters  ·  last just now",
+            "CW (Morse)  ·  18 WPM  ·  0 messages (3 characters)  ·  last just now",
         )
         msg = MorseMessage(protocol=ProtocolType.CW, timestamp=0.0, raw_bits=b"",
                            valid=True, text="CQ DE N0CALL", wpm=18.0)  # fmt: skip
@@ -466,7 +472,8 @@ class TestMessageContext(_PanelCase):
             detail="SDR DEMO", signal_measured=True,
         ))  # fmt: skip
         self.assertEqual(
-            p.decoder_status_text(), "RDS  ·  SDR DEMO  ·  5 groups  ·  last just now"
+            p.decoder_status_text(),
+            "RDS  ·  SDR DEMO  ·  0 messages (5 groups)  ·  last just now",
         )
         p.set_decoder_status(LiveDecoderStatus(
             name="RDS", unit="group", signal_measured=True, signal_present=True,

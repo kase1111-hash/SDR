@@ -2527,7 +2527,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # top-level tabs (with Signal) fit the column at 1024 px.
         tabs.tabBar().setObjectName("toolTabs")
 
-        self._decoder_panel = DecoderPanel()
+        # (It keeps the folder Export saved to in the window's settings.)
+        self._decoder_panel = DecoderPanel(settings=self._settings)
         self._add_panel(
             tabs,
             "decoder",
@@ -3562,10 +3563,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # The decoder panel's protocol selector drives a live decoder over the
         # acquired samples (the panel was previously fed no data at all).
         self._decoder_panel.protocol_changed.connect(self._on_decoder_protocol_changed)
+        # Decode unticked or ticked: the status-bar chip says "paused" at once.
+        self._decoder_panel.decode_toggled.connect(
+            lambda _on: self._update_decoder_chip()
+        )
+        self._decoder_panel.cleared.connect(self._on_decoder_cleared)
         # Bookmarks and the Decoder panel's "Tune to ..." tune the receiver
         # (and select the mode they listen with); "Add" saves that mode.
         self._bookmarks_panel.tune_requested.connect(self._on_bookmark_tune)
-        self._decoder_panel.tune_requested.connect(self._on_bookmark_tune)
+        self._decoder_panel.tune_requested.connect(self._on_decoder_tune)
         self._bookmarks_panel.set_mode_source(self._listening_mode)
         # The license class decides where transmitting is allowed; remember it.
         self._control_panel.license_changed.connect(self._on_license_changed)
@@ -3593,7 +3599,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         panel.open_folder_requested.connect(self._on_open_folder)
         panel.folder_change_requested.connect(self._on_change_recordings_folder)
         panel.auto_save_changed.connect(self._on_auto_save_changed)
-        # The Decoder tab's Decode File... (File > Decode Recording).
+        # The Decoder tab's Decode Recording... (File > Decode Recording).
         self._decoder_panel.decode_file_requested.connect(
             lambda: self._decode_recording()
         )
@@ -4074,8 +4080,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._decoder_panel.protocol() is not None and self._decoder_rate != rate:
             self._rebuild_decoder()
 
-        # The Decoder panel's hint says whether it is listening; its
-        # messages note the sample rate, and Auto follows the mode.
+        # The Decoder panel's hint says whether it is listening (and Play
+        # for a recording); its messages note the sample rate, Auto follows
+        # the mode, and CW's "Tune to" offers the demo device's beacon.
+        if self._playback.active:
+            listening_to: Optional[str] = "recording"
+        elif _is_demo_device(self._device):
+            listening_to = "demo"
+        else:
+            listening_to = "device" if has_device else None
+        self._decoder_panel.set_source(listening_to)
         self._decoder_panel.set_receiving(running)
         self._decoder_panel.set_sample_rate(rate)
         self._decoder_panel.set_demod_mode(self._control_panel.get_demod_mode())
@@ -4643,6 +4657,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 f"{status.problem}.{remedy}", "warning", 10000, log=False
             )
 
+    def _on_decoder_cleared(self) -> None:
+        """The Decoder's Clear: the live decoder forgets its notes too (FLEX's
+        "sends FLEX at 3200 bps" stayed until it expired)."""
+        decoder = self._decoder
+        if decoder is None:
+            return
+        decoder.messages_cleared()
+        self._decoder_panel.set_decoder_status(decoder.status)
+        self._update_decoder_chip()
+
     def _decoder_offset_hz(self) -> float:
         """The tuned channel's offset from the LO (0 until the window tunes
         a VFO inside the span)."""
@@ -4702,6 +4726,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         note: str = "",
         freq_hz: Optional[float] = None,
         sample_rate: Optional[float] = None,
+        source: str = "",
+        when: Any = None,
     ) -> None:
         """Render one decoded message into the decoder panel.
 
@@ -4713,7 +4739,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Decode Recording names the file and the time in it). ``freq_hz``
         and ``sample_rate`` are where it was received and at what rate
         (default: the tuned frequency and the device's rate; 0 for
-        unknown).
+        unknown). ``source`` names the recording it came from (its row is
+        marked and kept out of the live views) and ``when`` is its time
+        there, when the recording says when it was made.
         """
         try:
             address, content = self._describe_message(msg)
@@ -4745,6 +4773,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 details=message_details(msg),
                 freq_hz=freq_hz,
                 sample_rate=sample_rate,
+                source=source,
+                when=when,
             )
             self._note_decoded()
         except Exception as exc:  # pragma: no cover - defensive
@@ -4845,27 +4875,40 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         count = panel.count_for(proto)
         status = getattr(self._decoder, "status", None)
         detail = str(getattr(status, "detail", "") or "")
+        paused = not panel._enabled_check.isChecked()
+        # A decoder that can't work here (ADS-B below 2 MS/s, FLEX at a
+        # speed it can't read) says so rather than counting on.
+        problem = "" if paused else str(getattr(status, "problem", "") or "")
         parts = [proto]
         if detail:
             parts.append(detail)
-        if not panel._enabled_check.isChecked():
+        if paused:
             parts.append("paused")
+        elif problem:
+            parts.append("can't decode")
         else:
             parts.append(f"{count:,} msg{'' if count == 1 else 's'}")
         # "&&": an "&" in a station's name is not a keyboard mnemonic.
         text = " · ".join(parts).replace("&", "&&")
         if chip.text() != text:
             chip.setText(text)
+        set_tone(chip, "warning" if problem else None)
         # Its View > Panels shortcut (Ctrl+1 while it is the first panel).
         index = next(
             (i for i, spec in enumerate(self._panel_specs) if spec[0] == "decoder"),
             9,
         )
+        remedy = str(getattr(status, "remedy", "") or "")
+        why = (
+            f"It can't decode: {problem}." + (f" {remedy}" if remedy else "") + " "
+            if problem
+            else ""
+        )
         tip = (
             f"Decoder: {proto}"
             + (" (chosen by Auto)" if panel.is_auto() else "")
             + f", {count:,} message{'' if count == 1 else 's'} since it started"
-            + " (or since Clear). Click to open the Decoder tab"
+            + f" (or since Clear). {why}Click to open the Decoder tab"
             + (f" (Ctrl+{index + 1})." if index < 9 else ".")
         )
         if chip.toolTip() != tip:
@@ -6154,11 +6197,35 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Short mode name for messages: ``"None (I/Q)"`` -> ``"I/Q"``."""
         return "I/Q" if mode.startswith("None") else mode
 
-    def _on_bookmark_tune(
+    def _on_decoder_tune(
         self, freq_hz: float, label: str, mode: str = "", deviation: str = ""
     ) -> None:
+        """The Decoder's "Tune to ...": tune there and, when a preset channel
+        is there in the same mode, listen as it is heard (its deviation and
+        filter: ACARS in AM with 15 kHz, ADS-B's 2.4 MHz), as Radio > Band
+        Presets and typing the frequency do."""
+        from . import presets
+
+        bandwidth: Optional[str] = None
+        preset = presets.preset_at(freq_hz)
+        if preset is not None and mode:
+            heard_mode, heard_deviation, heard_width = presets.listening(preset)
+            if heard_mode == mode:
+                deviation = heard_deviation or deviation
+                bandwidth = heard_width or None
+        self._on_bookmark_tune(freq_hz, label, mode, deviation, bandwidth)
+
+    def _on_bookmark_tune(
+        self,
+        freq_hz: float,
+        label: str,
+        mode: str = "",
+        deviation: str = "",
+        bandwidth: Optional[str] = None,
+    ) -> None:
         """Tune to a bookmark (or the Decoder panel's suggested channel), in
-        its mode when it names one, with a channel width that suits it."""
+        its mode when it names one, with a channel width that suits it (or
+        ``bandwidth``, a Bandwidth option)."""
         before = self._current_frequency()
         if not self.set_frequency(freq_hz):
             return  # refused: the status bar says why
@@ -6168,7 +6235,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._show_status_message(f"Tuned to {label}", "info", 2500)
             return
         self._set_demod_mode(
-            mode, deviation or None, self._bandwidth_for_mode(mode, deviation)
+            mode,
+            deviation or None,
+            bandwidth or self._bandwidth_for_mode(mode, deviation),
         )
         mode = self._mode_text(mode)
         if label.endswith(")"):  # "ACARS (131.550 MHz)" -> "(131.550 MHz, AM)"
@@ -8909,7 +8978,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _decode_recording(
         self, path: str = "", options: Optional[IqFileOptions] = None
     ) -> bool:
-        """File > Decode Recording (and the Decoder tab's Decode File...):
+        """File > Decode Recording (and the Decoder tab's Decode Recording...):
         run the Decoder panel's protocol over a whole I/Q file in a
         background thread, much faster than real time, with progress and
         Cancel. Each message goes to the Decoder tab as it is found, noted
@@ -8925,12 +8994,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         current = self._decoder_panel.protocol() or ""
         protocol = current if current in protocols else protocols[0]
+        # Each protocol's channel: choosing another one in the dialog moves
+        # the frequency there (until one is typed).
+        defaults = {p: self._decode_default_frequency(p, options) for p in protocols}
         dialog = DecodeOptionsDialog(
             options,
             protocols,
             protocol,
-            self._decode_default_frequency(protocol, options),
+            defaults[protocol],
             self,
+            defaults=defaults,
         )
         if not self._exec_dialog(dialog):
             return False
@@ -8940,17 +9013,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         protocol, offset = choice
         self._show_panel("decoder")
         counts = {"messages": 0}
+        # When the recording was made (SigMF's core:datetime), to stamp its
+        # messages with their own time rather than the decode's.
+        from datetime import datetime, timedelta
+
+        start: Any = None
+        try:
+            start = datetime.fromisoformat(options.start_time.replace("Z", "+00:00"))
+        except ValueError:
+            pass
 
         def show(batch: Any) -> None:
-            for msg, when in batch:
+            for msg, at in batch:
                 counts["messages"] += 1
                 # The file's frequency and rate (not the receiver's); 0 when
                 # the file doesn't say where it was made.
                 self._push_decoded_message(
                     msg,
-                    note=f"from {options.name} at {when:.1f} s",
+                    note=f"from {options.name} at {at:.1f} s",
                     freq_hz=options.center_hz + offset if options.center_hz else 0.0,
                     sample_rate=options.sample_rate,
+                    source=options.name,
+                    when=start + timedelta(seconds=at) if start else None,
                 )
 
         result = run_job(

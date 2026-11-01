@@ -1026,7 +1026,10 @@ if HAS_PYQT6:
         """File > Decode Recording: which protocol to decode, and where in
         the recording its channel is (a frequency inside the recorded span,
         or an offset from the center when the file doesn't say where it was
-        tuned)."""
+        tuned).
+
+        ``defaults`` gives each protocol's channel (Hz): choosing a protocol
+        moves the frequency there, until one is typed by hand."""
 
         def __init__(
             self,
@@ -1035,10 +1038,13 @@ if HAS_PYQT6:
             protocol: str = "",
             frequency_hz: float = 0.0,
             parent: Any = None,
+            defaults: Optional[Dict[str, float]] = None,
         ):
             super().__init__(parent)
             self._options = options
             self._result: Optional[Tuple[str, float]] = None
+            self._defaults = dict(defaults or {})
+            self._freq_typed = False  # a frequency typed by hand stays
             self.setWindowTitle(f"Decode Recording – {options.name}")
             self.setMinimumWidth(440)
             layout = QVBoxLayout(self)
@@ -1054,8 +1060,18 @@ if HAS_PYQT6:
             form.setHorizontalSpacing(12)
             self._protocol = QComboBox()
             self._protocol.addItems(list(protocols))
+            # Protocols this recording's rate is too low for (ADS-B below
+            # 2 MS/s) are greyed out, the reason in their tooltip.
+            self._too_slow = self._mark_too_slow(list(protocols), options.sample_rate)
             if protocol in protocols:
                 self._protocol.setCurrentText(protocol)
+            # The Decoder's protocol can't decode this file: another one,
+            # and the note says why.
+            gave_way = self._too_slow.get(self._protocol.currentText(), "")
+            usable = [p for p in protocols if p not in self._too_slow]
+            if gave_way and usable:
+                self._protocol.setCurrentText(usable[0])
+                frequency_hz = self._defaults.get(usable[0], frequency_hz)
             self._protocol.setAccessibleName("Protocol")
             form.addRow("&Protocol:", self._protocol)
             self._freq = QLineEdit()
@@ -1092,7 +1108,13 @@ if HAS_PYQT6:
             self._note = QLabel(span)
             self._note.setWordWrap(True)
             set_role(self._note, "hint")
+            if gave_way:
+                self._note.setText(f"{gave_way}: choose another protocol. {span}")
+                set_tone(self._note, "warning")
             layout.addWidget(self._note)
+            if self._has_center:
+                self._freq.textEdited.connect(self._on_freq_typed)
+                self._protocol.currentTextChanged.connect(self._on_protocol_changed)
             buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
             ok = QPushButton("&Decode")
             set_role(ok, "primary")
@@ -1119,7 +1141,35 @@ if HAS_PYQT6:
                     return None
             return offset if abs(offset) < half else None
 
+        def _mark_too_slow(self, protocols: List[str], rate: float) -> Dict[str, str]:
+            """Grey out the protocols ``rate`` is too low for; returns why,
+            by protocol."""
+            from ..dsp.live_decoders import live_decoder_class
+
+            marked: Dict[str, str] = {}
+            model = self._protocol.model()
+            for index, name in enumerate(protocols):
+                cls = live_decoder_class(name)
+                low = float(getattr(cls, "MIN_SAMPLE_RATE", 0.0) or 0.0)
+                if not 0 < rate < low:
+                    continue
+                why = (
+                    f"{name} needs at least {format_rate(low)}; this recording "
+                    f"is {format_rate(rate)}"
+                )
+                marked[name] = why
+                item = model.item(index) if hasattr(model, "item") else None
+                if item is not None:
+                    item.setEnabled(False)
+                self._protocol.setItemData(index, why, Qt.ItemDataRole.ToolTipRole)
+            return marked
+
         def _on_accept(self) -> None:
+            why = self._too_slow.get(self._protocol.currentText())
+            if why:  # (every protocol is: nothing to choose instead)
+                self._note.setText(f"{why}.")
+                set_tone(self._note, "danger")
+                return
             offset = self.offset()
             if offset is None:
                 what = "frequency" if self._has_center else "offset"
@@ -1136,7 +1186,21 @@ if HAS_PYQT6:
             return self._result
 
         def set_frequency_text(self, text: str) -> None:
+            """Enter a frequency (or offset) as if typed: it stays."""
+            self._freq_typed = True
             self._freq.setText(text)
+
+        def _on_freq_typed(self, _text: str) -> None:
+            self._freq_typed = True
+
+        def _on_protocol_changed(self, protocol: str) -> None:
+            """Another protocol: its channel, unless a frequency was typed."""
+            freq = self._defaults.get(protocol)
+            if self._freq_typed or not freq:
+                return
+            self._freq.setText(format_mhz(freq))
+            self._note.setText(self._span_text)  # (a refusal no longer applies)
+            set_tone(self._note, None)
 
     class RecordingDetailsDialog(QDialog):
         """Save Recording, when the recording doesn't say its sample rate or

@@ -178,6 +178,43 @@ class TestSpeeds:
             assert [m.text for m in lines] == [text], text
             assert morse.wpm == pytest.approx(wpm, rel=0.05), text
 
+    @pytest.mark.parametrize("wpm", [5, 6, 8, 10, 12])
+    def test_a_transmission_of_only_dashes(self, wpm):
+        # Leftover 27: "TTT" at 8 WPM read "S". Marks all of one kind with
+        # gaps as long as themselves were taken for dits; at the slowest
+        # speed (5 WPM) a dit is 0.24 s, and these marks (0.3-0.72 s) were
+        # measured against that clamped dit, which made them dits too.
+        rate = 2000.0
+        key = enc.morse_keying("TTT", rate, wpm, lead_s=1.0, tail_s=4.0)
+        morse = MorseDecoder(rate)
+        lines = []
+        for i in range(0, len(key), int(rate / 30)):
+            lines += morse.process(key[i : i + int(rate / 30)])
+        lines += morse.flush()
+        assert [m.text for m in lines] == ["TTT"]
+        assert morse.wpm == pytest.approx(wpm, rel=0.05)
+
+    @pytest.mark.parametrize("text", ["S", "SSS", "H", "5", "EEE", "II", "SOS"])
+    def test_dits_at_5_wpm_a_little_long_stay_dits(self, text):
+        # The "TTT" rule above took every mark longer than a 5 WPM dit
+        # (0.24 s) for a dash, so dits at 5 WPM measured a few ms long read
+        # as dashes: "SOS" read "TTT OS", "S" "TTT", "EEE" nothing. The
+        # keying detector measures 5 WPM dits at 234-246 ms in noise, and
+        # a keyer's weight (or a slow hand) makes them longer still.
+        rate = 2000.0
+        key = enc.morse_keying(text, rate, 5, lead_s=1.0, tail_s=4.0)
+        weight = int(0.015 * rate)  # each mark 15 ms longer
+        heavy = np.convolve(key > 0.5, np.ones(weight + 1))[: len(key)] > 0
+        morse = MorseDecoder(rate)
+        lines = []
+        for i in range(0, len(key), int(rate / 30)):
+            lines += morse.process(heavy[i : i + int(rate / 30)].astype(np.float64))
+        lines += morse.flush()
+        assert [m.text for m in lines] == [text]
+        for seed in range(3):
+            noisy = _noisy(key.astype(np.complex64), 12.0, seed)
+            assert _decode(noisy, rate, block=66)[0] == [text], seed
+
     @pytest.mark.parametrize("text", ["SOS DE N0CALL K", "HI HI DE N0CALL"])
     def test_slow_code_that_starts_with_dits_in_noise(self, text):
         rate = 2000.0
@@ -346,15 +383,37 @@ class TestSpeeds:
         assert text == [MESSAGE], seed
 
     def test_a_blip_before_a_long_pause_is_not_a_letter(self):
-        # One or two marks and then silence: noise, not a transmission.
+        # One mark, or two not keyed like a letter (a dit and a mark that is
+        # neither a dit nor a dash), and then silence: noise, not a
+        # transmission. (A dit and a dash a dit apart are an A: see
+        # test_a_transmission_of_one_letter_of_two_elements.)
         rate = 1000.0
-        for marks in ([60], [60, 180]):
+        for marks in ([60], [60, 110]):
             key = np.zeros(500)
             for length in marks:
                 key = np.concatenate([key, np.ones(length), np.zeros(60)])
             morse = MorseDecoder(rate)
             lines = morse.process(np.concatenate([key, np.zeros(3000)]))
             assert lines + morse.flush() == [] and morse.characters == 0, marks
+
+    @pytest.mark.parametrize("wpm", [6, 12, 20, 30])
+    def test_a_transmission_of_one_letter_of_two_elements(self, wpm):
+        # Leftover 27: a whole transmission of two marks was dropped as a
+        # blip of noise, so "A", "I", "N", "M" and "EE" sent on their own
+        # (a test, a reply) never showed. Two marks keyed like code (a dit
+        # and a dash a dit apart; two alike an element or a letter apart)
+        # are decoded. ("TT" at 15 WPM or faster has the timing of a slow
+        # "I": it is tried below that.)
+        rate = 2000.0
+        texts = ["A", "I", "N", "M", "EE"] + (["TT"] if wpm < 15 else [])
+        for text in texts:
+            key = enc.morse_keying(text, rate, wpm, lead_s=1.0, tail_s=4.0)
+            morse = MorseDecoder(rate)
+            lines = []
+            for i in range(0, len(key), int(rate / 30)):
+                lines += morse.process(key[i : i + int(rate / 30)])
+            lines += morse.flush()
+            assert [m.text for m in lines] == [text], (text, wpm)
 
     def test_silence_decodes_nothing(self):
         text, morse = _decode(np.zeros(20_000, dtype=np.complex64), 2000.0)

@@ -588,6 +588,10 @@ class TestTunerHintFollowsTheTuning(unittest.TestCase):
         self.assertAlmostEqual(t.get_frequency(), 101.3e6)
         self.assertFalse(t.is_seeking())
         self.assert_standing_footer()
+        # (Shift goes up again: QTest's click left it down for the tests
+        # that follow, as in test_gui_radio_tuner_t7.)
+        QTest.keyRelease(t._seek_up_btn, Qt.Key.Key_Shift)
+        self.assertEqual(self.app.keyboardModifiers(), Qt.KeyboardModifier.NoModifier)
 
     def test_tuning_the_dial_drops_it(self):
         t = self.tuner

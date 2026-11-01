@@ -324,6 +324,14 @@ class TestSeekWithoutReceiver(_TunerCase):
         )
         self.assertAlmostEqual(t.get_frequency(), 101.5e6)
         self.assertFalse(t.is_seeking())
+        # Shift goes up again: QTest's click left it down for the app, and
+        # for the tests that follow (a later selectRow extended the
+        # selection instead: test_final_window's TestRightColumnSplit
+        # failed when it ran after this one).
+        QTest.keyRelease(t._seek_up_btn, Qt.Key.Key_Shift)
+        self.assertEqual(
+            QApplication.keyboardModifiers(), Qt.KeyboardModifier.NoModifier
+        )
 
     def test_seek_goes_round_the_band_once_and_can_be_stopped(self):
         t = self.tuner

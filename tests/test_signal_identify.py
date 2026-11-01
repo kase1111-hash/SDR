@@ -333,10 +333,12 @@ class TestDeviationThatHoldsThePeak:
     peak with a margin; the band's only when it holds it too."""
 
     @staticmethod
-    def result(peak_hz, width_hz, kind="fm", rms_hz=0.0):
+    def result(peak_hz, width_hz, kind="fm", rms_hz=0.0, p95_hz=None):
         from sdr_module.dsp.classifiers import ClassificationResult
 
         features = {"freq_peak_hz": peak_hz, "freq_dev_hz": rms_hz}
+        if p95_hz is not None:
+            features["freq_p95_hz"] = p95_hz
         return ClassificationResult(
             SignalType.ANALOG, None, 0.9, width_hz, 0.0, 30.0, features, kind=kind
         )
@@ -411,6 +413,46 @@ class TestDeviationThatHoldsThePeak:
         # (Estimated from the rms swing, not measured: not said.)
         ident = listening_for(self.result(0.0, 8.9e3, rms_hz=1.77e3), 300e6)
         assert not [d for d in ident.details if "peaks" in d]
+
+    @pytest.mark.parametrize("freq", [146.52e6, 300e6])
+    @pytest.mark.parametrize("peak", [4.6e3, 4.8e3, 5.0e3])
+    def test_voice_reaching_5_khz_now_and_then_is_heard_at_5_khz(self, freq, peak):
+        """N-01: with 10 % to spare over the peak, a 2 m voice station
+        whose radio limits it at +/-5 kHz (measured peak 4.6-5 kHz) was
+        suggested 12.5 kHz: Apply Mode made it about 8 dB quieter. Voice
+        reaches its peak only now and then (the swing exceeded 5 % of the
+        time is well below it), so at 5 kHz it clips far less than the
+        clipping warning's 5 % of the time."""
+        ident = listening_for(self.result(peak, 15e3, p95_hz=0.75 * peak), freq)
+        assert (ident.mode, ident.fm_deviation) == ("FM", "5 kHz")
+        assert ident.filter_hz == 25e3
+        assert f"The swing peaks at about ±{peak / 1e3:.1f} kHz" in ident.details
+
+    def test_a_tone_near_a_choice_keeps_the_margin(self):
+        """A tone stays near its peak (the swing exceeded 5 % of the time
+        is the peak, near enough): measured up to 10 % low, just beyond the
+        deviation it clips most of the time, which the clipping warning
+        catches. So it keeps the margin, and the card says why."""
+        ident = listening_for(self.result(4.8e3, 15e3, p95_hz=4.78e3), 146.52e6)
+        assert ident.fm_deviation == "12.5 kHz"
+        assert (
+            "The swing peaks at about ±4.8 kHz and stays near it: 5 kHz could clip"
+            in ident.details
+        )
+        # Below the margin: the smallest choice holds it.
+        ident = listening_for(self.result(4.4e3, 15e3, p95_hz=4.38e3), 300e6)
+        assert ident.fm_deviation == "5 kHz"
+        assert "The swing peaks at about ±4.4 kHz" in ident.details
+
+    def test_voice_beyond_a_choice(self):
+        """Voice peaking beyond 5 kHz isn't held by it: 12.5 kHz, and the
+        card says why when the peak reads close to 5 kHz."""
+        ident = listening_for(self.result(5.3e3, 16e3, p95_hz=3.6e3), 146.52e6)
+        assert ident.fm_deviation == "12.5 kHz"
+        assert "The swing peaks at about ±5.3 kHz: 5 kHz could clip" in ident.details
+        ident = listening_for(self.result(7e3, 20e3, p95_hz=4.0e3), 300e6)
+        assert ident.fm_deviation == "12.5 kHz"
+        assert "The swing peaks at about ±7.0 kHz" in ident.details
 
 
 # --------------------------------------------------------------------------- #

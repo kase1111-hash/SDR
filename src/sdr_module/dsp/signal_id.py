@@ -58,11 +58,16 @@ MIN_S = 0.5
 WAIT_S = 4.0
 
 # FM deviation choices (Hz), as Demodulation > FM deviation offers them.
-# A station swinging beyond the deviation set clips its audio (the window
-# warns "FM audio is clipping"), so the one suggested holds the measured
-# peak swing with _DEVIATION_MARGIN to spare (the peak reads up to about
-# 10 % low on tones). The measured rms swing times about 2.2 (voice; a
-# tone is 1.4) estimates the peak when it wasn't measured.
+# A station swinging beyond the deviation set clips its audio; the window
+# warns "FM audio is clipping" when more than 5 % of it is beyond. So the
+# one suggested holds the measured peak swing (exceeded 0.5 % of the
+# time), and the swing exceeded 5 % of the time with _DEVIATION_MARGIN
+# to spare: the measure reads up to about 10 % low on tones, and a tone
+# stays near its peak (just beyond the deviation, it clips most of the
+# time). Voice reaches its peak only now and then: a 2 m station limited
+# at +/-5 kHz is heard at 5 kHz. The measured rms swing times about 2.2
+# (voice; a tone is 1.4) estimates the peak when it wasn't measured (held
+# with the margin, as a tone's).
 _DEVIATIONS: Tuple[Tuple[float, str], ...] = (
     (2.5e3, "2.5 kHz"),
     (5e3, "5 kHz"),
@@ -76,12 +81,29 @@ _PEAK_PER_RMS = 2.2
 _BROADCAST_PEAK_HZ = 40e3
 
 
-def _deviation_for(peak_hz: float) -> str:
-    """The smallest FM deviation choice that holds a peak swing of
-    ``peak_hz`` (with :data:`_DEVIATION_MARGIN` to spare), else the
-    widest: the audio doesn't clip."""
-    need = _DEVIATION_MARGIN * float(peak_hz)
-    return next((text for hz, text in _DEVIATIONS if need <= hz), _DEVIATIONS[-1][1])
+def _swing_to_hold(peak_hz: float, often_hz: Optional[float] = None) -> float:
+    """How wide a swing (Hz) the FM deviation must hold for the audio not
+    to clip: the peak ``peak_hz``, and ``often_hz`` (the swing exceeded
+    5 % of the time) with :data:`_DEVIATION_MARGIN` to spare. Without
+    ``often_hz``, the peak with the margin."""
+    if often_hz is None:
+        return _DEVIATION_MARGIN * float(peak_hz)
+    return max(float(peak_hz), _DEVIATION_MARGIN * float(often_hz))
+
+
+def _deviation_holding(swing_hz: float) -> str:
+    """The smallest FM deviation choice that holds a swing of ``swing_hz``,
+    else the widest."""
+    return next(
+        (text for hz, text in _DEVIATIONS if float(swing_hz) <= hz),
+        _DEVIATIONS[-1][1],
+    )
+
+
+def _deviation_for(peak_hz: float, often_hz: Optional[float] = None) -> str:
+    """The smallest FM deviation choice whose audio doesn't clip on a swing
+    peaking at ``peak_hz`` (see :func:`_swing_to_hold`), else the widest."""
+    return _deviation_holding(_swing_to_hold(peak_hz, often_hz))
 
 
 @dataclass
@@ -157,15 +179,12 @@ def listening_for(result: ClassificationResult, freq_hz: float) -> Identificatio
     if kind == "fm":
         measured = float(f.get("freq_peak_hz", 0.0))
         peak = measured or _PEAK_PER_RMS * float(f.get("freq_dev_hz", 0.0))
-        if measured > 0:
-            # (The classifier's "swings about" is the rms swing; the
-            # deviation suggested holds the peak.)
-            details.append(f"The swing peaks at about ±{_format_hz(measured)}")
-        deviation = _deviation_for(peak)
+        often = f.get("freq_p95_hz") if measured > 0 else None
+        need = _swing_to_hold(peak, None if often is None else float(often))
+        deviation = _deviation_holding(need)
         plan = _band_listening(freq_hz)
         planned = _khz(plan[1]) if plan and plan[0] == "FM" else 0.0
-        agrees = bool(planned) and 0.25 * planned <= peak
-        agrees = agrees and _DEVIATION_MARGIN * peak <= planned
+        agrees = bool(planned) and 0.25 * planned <= peak and need <= planned
         if agrees:
             # What the band uses, when the swing measured agrees (and the
             # band's deviation holds it).
@@ -180,6 +199,11 @@ def listening_for(result: ClassificationResult, freq_hz: float) -> Identificatio
             channel = 25e3 if deviation == "5 kHz" else 12.5e3
             filter_hz = max(1.25 * width, channel)
         mode = "FM"
+        if measured > 0:
+            # (The classifier's "swings about" is the rms swing; the
+            # deviation suggested holds the peak.)
+            dwells = often is not None and need > measured
+            details.append(_peak_detail(measured, deviation, dwells))
     elif kind == "am":
         mode, filter_hz = "AM", min(max(1.1 * width, 5e3), 15e3)
     elif kind == "ssb":
@@ -233,6 +257,20 @@ def listening_for(result: ClassificationResult, freq_hz: float) -> Identificatio
     )
     ident.details = _details(ident) + details
     return ident
+
+
+def _peak_detail(peak_hz: float, deviation: str, dwells: bool) -> str:
+    """The card's line on the FM swing's measured peak ``peak_hz``. Next
+    to the suggested ``deviation`` it says why the choice below it isn't
+    suggested when the peak is near that choice: it could clip (``dwells``:
+    the swing stays near its peak, as a tone's does)."""
+    line = f"The swing peaks at about ±{_format_hz(peak_hz)}"
+    below = [(hz, text) for hz, text in _DEVIATIONS if hz < _khz(deviation)]
+    if below:
+        hz, text = below[-1]
+        if hz / _DEVIATION_MARGIN <= peak_hz <= _DEVIATION_MARGIN * hz:
+            line += f"{' and stays near it' if dwells else ''}: {text} could clip"
+    return line
 
 
 def _mode_s_band(freq_hz: float) -> bool:

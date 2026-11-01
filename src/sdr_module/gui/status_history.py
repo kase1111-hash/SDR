@@ -49,6 +49,10 @@ _OVERFLOW_GAP = 4
 _OVERFLOW_EDGE = 8
 _OVERFLOW_MIN_WIDTH = 360
 
+#: A hint's new wording (its cause changed) is said once it has held this
+#: long (s): a cause that comes and goes within it is never said.
+HINT_SETTLE_S = 1.0
+
 
 class StatusEntry(NamedTuple):
     """One message: when it was (last) shown, its text, tone and how many
@@ -92,6 +96,47 @@ class StatusHistory:
 
     def __len__(self) -> int:
         return len(self._entries)
+
+
+class HintFollower:
+    """When a hint the status bar said once (why a live decoder misses part
+    of the signal, why audio is paused) is to be said again because its
+    cause changed: the device, then this app's own job (Decode Recording),
+    then the job done (Qt-free).
+
+    Only while the status bar still shows the hint (a message that took its
+    place stays), once the new wording has held for ``settle_s`` (a cause
+    that comes and goes within it is never said, so the status bar doesn't
+    flicker between two), and never the wording it shows already (so the
+    status history gets no repeats): once per change.
+    """
+
+    def __init__(self, settle_s: float = HINT_SETTLE_S):
+        self.settle_s = float(settle_s)
+        self._next = ""  # (a new wording, waiting to hold)
+        self._since = 0.0
+
+    def reset(self) -> None:
+        """Forget a new wording waiting to hold (a new episode)."""
+        self._next = ""
+
+    def follow(self, current: str, said: str, shown: str, now: float) -> str:
+        """The wording to say now in place of ``said``, "" for none.
+
+        ``current`` is the hint's wording now, ``said`` the one the status
+        bar was given, ``shown`` what the status bar shows and ``now`` a
+        monotonic time in seconds.
+        """
+        if not said or shown != said or not current or current == said:
+            self._next = ""
+            return ""
+        if current != self._next:
+            self._next, self._since = current, now
+            return ""
+        if now - self._since < self.settle_s:
+            return ""
+        self._next = ""
+        return current
 
 
 def entry_text(entry: StatusEntry) -> str:

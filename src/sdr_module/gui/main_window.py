@@ -193,7 +193,12 @@ from .signal_panel import SignalPanel
 from .signal_tools import SignalTools
 from .spectrum_widget import SpectrumWidget, format_hz
 from .status_history import CAPACITY as STATUS_HISTORY_SIZE
-from .status_history import MessageOverflow, StatusHistory, StatusHistoryPopup
+from .status_history import (
+    HintFollower,
+    MessageOverflow,
+    StatusHistory,
+    StatusHistoryPopup,
+)
 from .themes import (
     apply_theme,
     current_theme,
@@ -2779,6 +2784,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._busy_job = ""
         self._busy_job_at = -math.inf
         self._skip_by_job = ""
+        # The skip and pause hints said once per episode are said again
+        # when their cause changes while the status bar shows them (K-W2).
+        self._skip_follow = HintFollower()
+        self._audio_follow = HintFollower()
         self._pacer = _Pacer()  # how much each display frame reads
         self._entry_returns_focus = False  # Ctrl+L: Enter goes back to the plots
         self._restoring = False  # True while _restore_state applies settings
@@ -8499,9 +8508,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         counts alone looked healthy while it heard a fraction of the signal
         (with no speaker, as for ADS-B in None (I/Q), nothing else said
         so). It says so until frames have kept up for _SKIP_HINT_HOLD_S.
-        Not while a Scanner scan runs: it moves the receiver, the decoder is
-        off its channel then (its line says "Not tuned to ..."), and no
-        device or sample rate is to blame for what it misses."""
+        Should the cause change while the status bar still shows the hint
+        (the device, then Decode Recording's job, then the job done), the
+        status bar says it again with the current cause, once that has
+        held (_skip_follow). Not while a Scanner scan runs: it moves the
+        receiver, the decoder is off its channel then (its line says "Not
+        tuned to ..."), and no device or sample rate is to blame for what
+        it misses."""
         panel = self._own("_decoder_panel")
         if panel is None:
             return
@@ -8533,12 +8546,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._skip_hinted = False
         elif not self._skip_hinted:
             self._skip_hinted = True
+            self._skip_follow.reset()
             audio_hint = self._realtime_hint_shown and (
                 self._message_label.text() == self._realtime_hint_text
             )
             if not audio_hint:  # (not over it: the Decoder's line says it)
                 self._skip_hint_shown = text
                 self._show_status_message(text, "info", 10000)
+        else:
+            # Its cause changed while the status bar still says the first
+            # one: said again, once (K-W2).
+            again = self._skip_follow.follow(
+                text, self._skip_hint_shown, self._message_label.text(), now
+            )
+            if again:
+                self._skip_hint_shown = again
+                self._show_status_message(again, "info", 10000)
 
     def _busy_job_now(self) -> str:
         """This app's own job (Decode Recording, Convert Recording...) that
@@ -9128,6 +9151,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._realtime_hint_shown = False
             if self._message_label.text() == self._realtime_hint_text:
                 self._show_status_message("Audio resumed", "success", 2500)
+        if self._realtime_hint_shown:
+            self._follow_realtime_hint()
         # SSTV is FM (VHF/UHF) or USB/LSB (HF); it gets every block (no
         # squelch) so its line timing stays intact, and it listens even with
         # the speaker off.
@@ -9371,6 +9396,34 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         holds = _deviation_for(float(peak), float(often))
         return holds if holds in larger else larger[0]
 
+    def _follow_realtime_hint(self) -> None:
+        """While audio stays paused and the status bar still says why, it
+        says why again once the cause has changed and held (K-W2): the
+        demo device, then Decode Recording keeping this computer busy, then
+        the job done, then the device again. ("Audio resumed" replaces the
+        text said last.)"""
+        said = self._realtime_hint_text
+        shown = self._message_label.text()
+        if not said or shown != said or self._realtime():
+            self._audio_follow.reset()
+            return
+        now = time.monotonic()
+        again = self._audio_follow.follow(self._realtime_hint(), said, shown, now)
+        if again:
+            self._realtime_hint_text = again
+            self._realtime_hint_at = now
+            self._show_status_message(again, "info", 10000)
+
+    def _computer_behind(self) -> bool:
+        """Whether this computer can't keep up, or couldn't within the
+        seconds real time is judged over (_REALTIME_WINDOW_S): what the
+        display loop skipped then still counts, and it was this computer's
+        doing, not the device's (as the Decoder's line judges it,
+        _skip_by_computer)."""
+        if self._pacer.overloaded:
+            return True
+        return time.monotonic() - self._overloaded_at <= _REALTIME_WINDOW_S
+
     def _realtime_hint(self) -> str:
         if self._playback.active and self._playback.speed != 1.0:
             return (
@@ -9388,7 +9441,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._playback.active:
             # (A recording's rate can't be changed while it plays: no advice
             # to lower it. N-02)
-            if self._pacer.overloaded:
+            if self._computer_behind():
                 return (
                     "This computer can't process the recording's "
                     f"{format_rate(self._device_sample_rate())} in real time "
@@ -9406,7 +9459,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "catches up (a lower sample rate in Receiver > Sample rate "
                 "helps)."
             )
-        if self._pacer.overloaded:
+        if self._computer_behind():  # (also while it catches up again)
             return (
                 "This computer can't process "
                 f"{format_rate(self._device_sample_rate())} in real time right "

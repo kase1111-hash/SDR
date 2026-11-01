@@ -94,6 +94,15 @@ class TestToneSquelchOffersDcs(_WindowTestCase):
         self.assertIn("normal polarity", tip)
         self.assertIn("DCS", combo.toolTip())
 
+    def test_the_tone_lamp_says_a_code_too(self):
+        """The level meter's TONE lamp (a signal the tone squelch holds
+        back) said "not the chosen CTCSS tone" with a DCS code chosen too."""
+        from sdr_module.gui.level_meter import STATES
+
+        lamp, meaning = STATES["tone"]
+        self.assertEqual(lamp, "TONE")
+        self.assertIn("CTCSS tone or DCS code", meaning)
+
     def test_a_code_reaches_the_receiver_and_is_saved(self):
         p, win = self.panel, self.win
         p.set_dcs_squelch(754, True)

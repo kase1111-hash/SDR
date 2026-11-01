@@ -9439,7 +9439,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return "idle"
         gate = self._squelch
         if gate.is_open and self._tone_blocked:
-            return "tone"  # a signal, but not the chosen CTCSS tone
+            return "tone"  # a signal, but not the chosen CTCSS tone or DCS code
         if not gate.enabled:
             return "off"
         return "open" if gate.is_open else "closed"

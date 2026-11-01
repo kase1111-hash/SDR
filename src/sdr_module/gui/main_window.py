@@ -347,6 +347,10 @@ _SKIP_HINT_HOLD_S = 3.0
 # its buffers anew, which costs more than the load).
 _OVERLOAD_PROBE_S = 1.0
 _RECOVER_PROBES = 2
+# What the display loop skips is still this app's own job's doing (Decode
+# Recording...) for this long after it: frames are found to keep up again
+# only at the next probe, and real time is judged over the seconds after.
+_JOB_SKIP_S = _OVERLOAD_PROBE_S + _REALTIME_WINDOW_S
 # Timed frames after Start (or a new device or sample rate) that aren't
 # judged: the first frames design filters and plan FFTs.
 _WARM_UP_FRAMES = 2
@@ -8434,15 +8438,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _busy_job_now(self) -> str:
         """This app's own job (Decode Recording, Convert Recording...) that
-        keeps the computer busy now, or did within the seconds real time is
-        judged by: then what the display loop skips is the job's doing, not
-        the device's (P-04). "" when none."""
+        keeps the computer busy now, or did within _JOB_SKIP_S: then what
+        the display loop skips is the job's doing, not the device's (P-04).
+        "" when none."""
         now = time.monotonic()
         job = busy_with()
         if job:
             self._busy_job, self._busy_job_at = job, now
             return job
-        return self._busy_job if now - self._busy_job_at <= _REALTIME_WINDOW_S else ""
+        return self._busy_job if now - self._busy_job_at <= _JOB_SKIP_S else ""
 
     def _skip_hint_text(self) -> str:
         """The Decoder's line while it gets only part of the signal."""

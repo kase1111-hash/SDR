@@ -409,6 +409,105 @@ class TestTheAppsOwnJobIsNamedNotTheDevice(_hardware_case()):
         )
 
 
+def _demo_take_case():
+    from tests.test_final_record import _DemoTakeCase
+
+    return _DemoTakeCase
+
+
+class TestTheJobIsNamedUntilTheLoopCatchesUp(_demo_take_case()):
+    """P-04, on the demo device with the display loop at ten frames a second
+    (a busy computer): the job was named for the 2 s real time is judged
+    over, counted from its end. But the pacer finds out that frames keep up
+    again only at its next probe, up to a second after the job, and the
+    one-block frames before that still count for 2 s: what was skipped was
+    still measured up to 2 s after the job. After some jobs the Decoder's
+    line then said "The demo device can't keep up ... A lower sample rate
+    (Receiver > Sample rate) helps." for 3 s."""
+
+    FRAME_S = 0.1
+    JOB = (
+        "Decode Recording keeps this computer busy, so the POCSAG decoder "
+        "misses part of the signal meanwhile."
+    )
+
+    def setUp(self):
+        super().setUp()
+        panel = self.win._decoder_panel
+        panel._proto_combo.setCurrentText("POCSAG")
+        self.run_frames(0.1)
+        panel.set_receiving(True)
+
+    def run_frames(self, seconds, stall_at=None, stall=0.0):
+        end = self.clock.now + seconds
+        while self.clock.now < end:
+            tick = self.clock.now
+            self.win._update_display()
+            self.clock.now = max(self.clock.now, tick + self.FRAME_S)
+
+    def line(self):
+        return self.win._decoder_panel.decoder_status_text()
+
+    def a_busy_job(self, seconds):
+        """Decode Recording's job (run_job's own event loop), with
+        ``seconds`` of display frames meanwhile."""
+        import threading
+
+        from PyQt6.QtCore import QTimer
+
+        from sdr_module.gui.file_jobs import run_job
+
+        done = threading.Event()
+
+        def frames_meanwhile():
+            try:
+                self.run_frames(seconds)
+            finally:
+                done.set()
+
+        QTimer.singleShot(0, frames_meanwhile)
+        result = run_job(
+            self.win, "Decode Recording", "Decoding…", lambda report: done.wait(20)
+        )
+        self.assertTrue(result.ok, result.error)
+
+    def test_what_the_job_skipped_never_names_the_device(self):
+        win = self.win
+        # (Each job a frame longer, from a pacer that starts over: the job
+        # ends at each moment of its probes' period, a little over 1 s.)
+        for k in range(12):
+            seconds = 1.0 + k * self.FRAME_S
+            win._pacer.reset()
+            win._rx_history.clear()
+            self.load = 1.5  # (can't keep up, before and during the job)
+            self.run_frames(1.0)
+            self.assertTrue(win._pacer.overloaded)
+            self.a_busy_job(seconds)
+            self.load = 0.3  # (done: the computer keeps up again)
+            lines = []
+            for _ in range(35):
+                self.run_frames(self.FRAME_S)
+                lines.append(self.line())
+            where = (seconds, sorted(set(lines)))
+            self.assertIn(self.JOB, lines, where)
+            self.assertFalse([t for t in lines if "device" in t], where)
+        self.run_frames(3.0)
+        self.assertNotIn("misses", self.line())  # (then nothing)
+
+    def test_a_computer_still_too_slow_afterwards_names_the_device(self):
+        """...but not for good: still too slow once the job is done, the
+        device's wording comes back."""
+        self.load = 1.5
+        self.run_frames(1.0)
+        self.a_busy_job(1.0)
+        lines = [self.line()]
+        for _ in range(60):
+            self.run_frames(self.FRAME_S)
+            lines.append(self.line())
+        self.assertEqual(lines[0], self.JOB)
+        self.assertTrue(lines[-1].startswith("The demo device can't keep up"), lines)
+
+
 def _tx_case():
     from tests.test_gui_station_tx import _TxCase
 

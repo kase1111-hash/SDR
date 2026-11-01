@@ -171,7 +171,9 @@ class TestBandPlanListeningSegments(_WindowTestCase):
         self.type_frequency("151.85")
         self.assertEqual(self.listening(), ("FM", "2.5 kHz", "12.5 kHz"))
         self.assertTrue(self.message().startswith("MURS: listening in FM"))
-        self.type_frequency("154.57")  # MURS 4-5: wide (5 kHz deviation)
+        # MURS 4-5 (wide) are the same band: the narrow FM listened with
+        # there stays, as within any band.
+        self.type_frequency("154.57")
         self.assertEqual(self.listening(), ("FM", "2.5 kHz", "12.5 kHz"))
         self.win.set_frequency(14.2e6)
         self.win._set_demod_mode("USB")
@@ -184,10 +186,6 @@ class TestBandPlanListeningSegments(_WindowTestCase):
     def test_murs_from_broadcast_fm_is_narrow(self):
         self.type_frequency("151.85")
         self.assertEqual(self.listening(), ("FM", "2.5 kHz", "12.5 kHz"))
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 # --------------------------------------------------------------------------- #
@@ -860,3 +858,7 @@ class TestCtrlArrowsInFieldsAndLists(_WindowTestCase):
             win._spectrum, Qt.Key.Key_Up, Qt.KeyboardModifier.ControlModifier
         )
         self.assertEqual(win._volume_slider.value(), 70)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -266,6 +266,9 @@ class _PreviousSource:
     #: How it was heard: (mode, FM deviation, filter), as the window's
     #: _set_demod_mode takes them ("" for one that doesn't apply).
     listening: Tuple[str, str, str] = ("", "", "")
+    #: The decoder a preset had turned on there (the window's
+    #: _preset_decoder), which opening the recording may turn off.
+    preset_decoder: Any = None
 
 
 if HAS_PYQT6:
@@ -688,6 +691,7 @@ if HAS_PYQT6:
                         *win._listening_mode(),
                         win._control_panel._bw_combo.currentText(),
                     ),
+                    preset_decoder=getattr(win, "_preset_decoder", None),
                 )
                 if running:
                     win._stop_acquisition()
@@ -788,11 +792,23 @@ if HAS_PYQT6:
             win._refresh_state_ui()
             if resume and restore and prev is not None and prev.running and win._device:
                 win._start_acquisition()
+            again = ""
+            if restore and not quiet and prev is not None:
+                # Back on a preset's channel: the decoder it had turned on,
+                # which opening the file turned off, is on again.
+                again = win._resume_preset_decoder(prev.preset_decoder)
             if not quiet:
                 back = f"Back to {prev.name}." if restore and prev and prev.name else ""
                 ended = f" Stopped {' and '.join(stopped)} of it." if stopped else ""
                 text = " ".join(
-                    part for part in (f"Closed {name}.{ended}", back, note) if part
+                    part
+                    for part in (
+                        f"Closed {name}.{ended}",
+                        back,
+                        note,
+                        f"{again}." if again else "",
+                    )
+                    if part
                 )
                 win._show_status_message(
                     text,

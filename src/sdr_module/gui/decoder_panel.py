@@ -1182,6 +1182,13 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._enabled_check.setChecked(False)
         self._wanted_after_pause = wanted
 
+    def paused_by_window(self) -> bool:
+        """Whether Decode is unticked by the window (:meth:`pause_decoding`:
+        a preset's decoder, tuned away from), not by the user."""
+        return self._wanted_after_pause is not None and not (
+            self._enabled_check.isChecked()
+        )
+
     def _on_protocol_changed(self, text: str):
         """Handle protocol change."""
         if self._wanted_after_pause is not None:

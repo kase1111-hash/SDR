@@ -376,5 +376,98 @@ class TestALongNameWhileScanning(_panel_case()):
         )
 
 
+# --------------------------------------------------------------------------- #
+# W-06 and W-07: a preset's decoder, turned off as the tuning left it
+# --------------------------------------------------------------------------- #
+
+
+class TestAPresetsDecoderOffLeavesNoChip(_window_case()):
+    """W-06: Band Presets > Aviation > ACARS, then a tune elsewhere: the
+    message said "ACARS decoder off · ...", while the status bar's chip
+    said "ACARS · paused" and stayed there from then on."""
+
+    demo = True
+
+    def released(self):
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ACARS"))
+        self.assertFalse(win._decoder_chip.isHidden())
+        self.assertTrue(win.set_frequency(100.1e6))
+        self.assertTrue(win._message_label.text().startswith("ACARS decoder off"))
+        return win._decoder_chip
+
+    def test_tuned_away_from_the_preset(self):
+        chip = self.released()
+        self.assertTrue(chip.isHidden(), chip.text())
+        self.win._update_decoder_chip()  # (as the display loop refreshes it)
+        self.assertTrue(chip.isHidden(), chip.text())
+
+    def test_ticking_decode_again_brings_it_back(self):
+        chip = self.released()
+        self.win._decoder_panel._enabled_check.click()
+        self.assertFalse(chip.isHidden())
+        self.assertEqual(chip.text(), "ACARS · 0 msgs")
+
+    def test_a_pause_of_your_own_keeps_its_chip(self):
+        win, panel = self.win, self.win._decoder_panel
+        panel._proto_combo.setCurrentText("POCSAG")
+        panel._enabled_check.click()  # untick, as a user does
+        self.assertFalse(win._decoder_chip.isHidden())
+        self.assertEqual(win._decoder_chip.text(), "POCSAG · paused")
+
+
+def _files_case():
+    from tests.test_gui_recording_files import _FilesCase
+
+    return _FilesCase
+
+
+class TestCloseRecordingBringsThePresetsDecoderBack(_files_case()):
+    """W-07: ACARS preset, then File > Open Recording of an FM capture
+    ("ACARS decoder off · FM Broadcast: ..."), then File > Close
+    Recording: back on 131.550 MHz in AM with the preset's 15 kHz filter,
+    but its decoder stayed paused ("ACARS · paused", "Paused: tick Decode
+    to resume"). Going back now brings it back, and says so."""
+
+    def decoding(self):
+        panel = self.win._decoder_panel
+        return panel.selection(), panel._enabled_check.isChecked()
+
+    def open_fm_capture(self):
+        from tests.test_final_polish import _save_sigmf
+
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ACARS"))
+        path = _save_sigmf(self.path("fm8.sigmf-data"), 100.1e6)
+        with self.open_dialog(path):
+            self.assertTrue(win._open_recording())
+        self.assertEqual(self.decoding(), ("ACARS", False))
+
+    def test_back_on_the_presets_channel(self):
+        win = self.win
+        self.open_fm_capture()
+        win._playback.close(restore=True)  # (File > Close Recording)
+        self.assertEqual(win._current_frequency(), 131.55e6)
+        self.assertEqual(self.decoding(), ("ACARS", True))
+        self.assertEqual(
+            self.message(),
+            "Closed fm8.sigmf-data. Back to Demo Device (simulated signals). "
+            "ACARS decoder on again.",
+        )
+        self.assertEqual(win._decoder_chip.text(), "ACARS · 0 msgs")
+        # (It is the preset's again: tuned away, it goes off.)
+        self.assertTrue(win.set_frequency(100.1e6))
+        self.assertEqual(self.decoding(), ("ACARS", False))
+
+    def test_a_decoder_chosen_meanwhile_stays(self):
+        win = self.win
+        self.open_fm_capture()
+        win._decoder_panel._proto_combo.setCurrentText("RDS")
+        self.assertEqual(self.decoding(), ("RDS", True))
+        win._playback.close(restore=True)
+        self.assertEqual(self.decoding(), ("RDS", True))
+        self.assertNotIn("ACARS", self.message())
+
+
 if __name__ == "__main__":
     unittest.main()

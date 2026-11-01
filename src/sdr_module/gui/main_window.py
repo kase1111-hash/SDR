@@ -5685,7 +5685,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         panel = self._decoder_panel
         proto = panel.protocol()
-        if proto is None or self._decoder is None:
+        # (A preset's decoder the tuning turned off is off, as its message
+        # says: no "paused" chip left behind. W-06)
+        if proto is None or self._decoder is None or panel.paused_by_window():
             if not chip.isHidden():
                 chip.hide()
             return
@@ -11495,6 +11497,35 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         panel.pause_decoding()
         self._update_decoder_chip()  # ("ADS-B · paused")
         return f"{decoder} decoder off"
+
+    def _resume_preset_decoder(self, owned: Any) -> str:
+        """Turn the decoder a preset turned on, which going elsewhere turned
+        off (``owned``, as :meth:`_own_preset_decoder` keeps it), on again
+        now that the receiver is back where it is heard: closing a
+        recording goes back to the preset's channel (W-07). Not when you
+        changed it since (another protocol, Decode ticked or unticked, SSTV
+        started), nor when another preset's decoder is on. What was done
+        ("ACARS decoder on again"), or ""."""
+        if owned is None or self._preset_decoder is not None:
+            return ""
+        decoder, _name, _freq, bands = owned
+        here = self._current_frequency()
+        if not any(low <= here <= high for low, high in bands):
+            return ""
+        if decoder == "SSTV":
+            if not HAS_HAM_RADIO or self._sstv_listening():
+                return ""
+            if self._device is None or not self._is_running:
+                return ""
+            self._sstv_panel.start_listening()
+        else:
+            panel = self._decoder_panel
+            if panel.selection() != decoder or not panel.paused_by_window():
+                return ""
+            if not self._select_decoder(decoder):
+                return ""
+        self._preset_decoder = owned
+        return f"{decoder} decoder on again"
 
     def _select_decoder(self, protocol: str) -> bool:
         """Choose ``protocol`` in the Decoder panel and tick Decode (a

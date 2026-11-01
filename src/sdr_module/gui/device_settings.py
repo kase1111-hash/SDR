@@ -111,8 +111,8 @@ RATE_LIMITS: Dict[str, Tuple[float, float]] = {
 #: The ADS-B decoder's lowest usable rate (its 0.5 us pulses need 2 MS/s).
 ADSB_MIN_RATE = 2.0e6
 #: The rate it hears weak (distant) aircraft best from: at 2.0-2.2 MS/s
-#: strong replies decode as well, replies 15 dB above the noise 85-95 %
-#: as often (98 % from 2.4 MS/s).
+#: strong replies decode as well, replies 15 dB above the noise 60-90 %
+#: as often, depending on the receiver's filter (98-99 % from 2.4 MS/s).
 ADSB_GOOD_RATE = 2.4e6
 ADSB_RATE_TIP = (
     "ADS-B (1090 MHz) needs 2 MS/s or more (2.4 MS/s or more hears weak, "

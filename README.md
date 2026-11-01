@@ -337,8 +337,9 @@ is the full UI reference.
   and turns its decoder on (ADS-B, APRS, ACARS, POCSAG, FLEX, or SSTV for
   the ISS). Tuning out of that protocol's band, or choosing a preset that
   doesn't use it, turns the decoder off again and the status bar says so
-  (unless you have changed the decoder since). A preset the device can't
-  tune is refused with the reason.
+  (unless you have changed the decoder since); File → Close Recording, back
+  on the preset's channel, turns on again the decoder a recording turned
+  off. A preset the device can't tune is refused with the reason.
 - **Squelch** is on and **Auto** (7 dB above the channel's noise) by
   default. The LEVEL meter shows the channel level, the noise floor and the
   threshold (drag on it to set the threshold), with an OPEN, SQL, TONE, OFF
@@ -381,8 +382,8 @@ is the full UI reference.
   as CSV.
 - While the tab is out of sight its title counts the new messages, and
   while a decoder runs a status-bar chip shows how many it has decoded,
-  "paused" while Decode is unticked, or "can't decode" with the reason in
-  its tooltip (click it for the tab). **Decode Recording...** (on the tab,
+  "paused" while you have unticked Decode, or "can't decode" with the reason
+  in its tooltip (click it for the tab). **Decode Recording...** (on the tab,
   or File → Decode Recording...) runs a decoder over a whole recording,
   much faster than real time; protocols the recording's sample rate is too
   low for are grayed out, and its messages are marked "(file)".

@@ -1826,6 +1826,10 @@ def _span_text(seconds: float) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Width (px) the status bar keeps for its messages.
+_MESSAGE_MIN_WIDTH = 220
+
+
 class _ElidedLabel(QLabel if HAS_PYQT6 else object):
     """A one-line label that ends in "…" instead of being cut off.
 
@@ -1865,6 +1869,42 @@ class _ElidedLabel(QLabel if HAS_PYQT6 else object):
                 shown, Qt.TextElideMode.ElideRight, width
             )
         super().setText(shown)
+
+
+class _ShrinkingLabel(_ElidedLabel):
+    """A status bar label that takes its full text's width while there is
+    room, and gives it up (ending in "…") down to ``minimum`` px when the
+    status bar is short of it, before the messages do (DEV-E2E-07). With
+    ``tip`` its tooltip is the full text over ``tip``."""
+
+    def __init__(self, text: str = "", minimum: int = 60, tip: str = "", parent=None):
+        self._tip = tip
+        super().__init__(text, parent)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(int(minimum))
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt naming
+        super().setText(text)
+        if self._tip:
+            self.setToolTip(f"{self._full_text}\n{self._tip}".strip())
+        self.updateGeometry()  # (a longer text asks for more room)
+
+    def sizeHint(self) -> Any:  # noqa: N802 - Qt naming
+        # QLabel's own hint (padding included) for the text shown, widened
+        # to the full text.
+        hint = super().sizeHint()
+        metrics = self.fontMetrics()
+        shown = QLabel.text(self)
+        extra = metrics.horizontalAdvance(self._full_text) - metrics.horizontalAdvance(
+            shown
+        )
+        hint.setWidth(hint.width() + max(0, extra))
+        return hint
+
+    def minimumSizeHint(self) -> Any:  # noqa: N802 - Qt naming
+        hint = super().minimumSizeHint()
+        hint.setWidth(self.minimumWidth())
+        return hint
 
 
 # ---------------------------------------------------------------------------
@@ -3571,7 +3611,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._state_badge.installEventFilter(self)
         statusbar.addWidget(self._state_badge)
 
-        self._device_label = QLabel("No device")
+        # (The device's name gives up its width to the messages first.)
+        self._device_label = _ShrinkingLabel("No device", minimum=90)
         set_role(self._device_label, "value")
         self._device_label.setToolTip(
             "Current device. Click to change it (Device > Connect...)."
@@ -3603,6 +3644,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             f"Click for the last {STATUS_HISTORY_SIZE} status messages."
         )
         self._message_label.installEventFilter(self)
+        # Room to read a refusal while recording at 1024 px (DEV-E2E-07):
+        # the name and the size chip shrink first.
+        self._message_label.setMinimumWidth(_MESSAGE_MIN_WIDTH)
         statusbar.addWidget(self._message_label, 1)
         self._message_timer = QTimer(self)
         self._message_timer.setSingleShot(True)
@@ -3615,10 +3659,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._recording_label.setVisible(False)
         self._recording_label.setAccessibleName("Recording time")
         statusbar.addPermanentWidget(self._recording_label)
-        self._recording_info_label = QLabel("")
-        self._recording_info_label.setToolTip(
-            "Recorded size, and the free space left on the drive the "
-            "recording is written to (it stops below 500 MB)"
+        # "26.7 MB · 17.7 GB free": the free space goes first when the
+        # status bar is short of room (it stays in the tooltip).
+        self._recording_info_label = _ShrinkingLabel(
+            "",
+            minimum=QLabel().fontMetrics().horizontalAdvance("999.9 MB …") + 8,
+            tip="Recorded size, and the free space left on the drive the "
+            "recording is written to (it stops below 500 MB)",
         )
         self._recording_info_label.setVisible(False)
         statusbar.addPermanentWidget(self._recording_info_label)

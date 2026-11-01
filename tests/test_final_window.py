@@ -983,5 +983,45 @@ class TestFindDevicesWording(_DeviceCase):
             self.assertIn(how, seen[-1][1])
 
 
+# --------------------------------------------------------------------------- #
+# The status bar keeps room for its messages at 1024 px (DEV-E2E-07)
+# --------------------------------------------------------------------------- #
+class TestStatusBarRoom(_WindowTestCase):
+    demo = True
+
+    def test_messages_keep_room_with_every_chip_at_1024_px(self):
+        from tests.test_gui_coherent_window import _ThemedSizes
+
+        _ThemedSizes.each_theme(self, self.check_room)
+
+    def check_room(self, theme):
+        from PyQt6.QtWidgets import QLabel
+
+        from sdr_module.gui.themes import set_role
+
+        win = self.win
+        win.resize(1024, 640)
+        win._recording_label.setText("REC 00:12")
+        win._recording_label.setVisible(True)
+        win._recording_info_label.setText("26.7 MB · 17.7 GB free")
+        win._recording_info_label.setVisible(True)
+        win._audio_rec_label.setText("AUDIO 00:05")
+        win._audio_rec_label.setVisible(True)
+        win._decoder_chip.setText("ADS-B · 6 msgs")
+        win._decoder_chip.setVisible(True)
+        afc = QLabel("AFC +2.2 kHz")  # (as Track Signal shows it)
+        set_role(afc, "badge", "info")
+        win.statusBar().addPermanentWidget(afc)
+        self.addCleanup(afc.deleteLater)
+        self.settle(10)
+        self.assertGreaterEqual(win._message_label.width(), 220, theme)
+        self.assertLessEqual(win.minimumSizeHint().width(), 1024, theme)
+        self.assertEqual(win.width(), 1024, theme)
+        win.statusBar().removeWidget(afc)
+        # The free space gave way first; it is in the tooltip.
+        self.assertIn("17.7 GB free", win._recording_info_label.toolTip())
+        self.assertEqual(win._recording_info_label.text(), "26.7 MB · 17.7 GB free")
+
+
 if __name__ == "__main__":
     unittest.main()

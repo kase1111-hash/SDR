@@ -65,6 +65,7 @@ from .audio_chain import (
     DEFAULT_AGC_SPEED,
     DEFAULT_CW_PITCH_HZ,
     DEFAULT_NOTCH_HZ,
+    LOW_CUT_CHOICES,
     NOISE_REDUCTION_LEVELS,
     NOTCH_CHOICES,
     NOTCH_RANGE_HZ,
@@ -900,6 +901,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         dcs_squelch_changed = pyqtSignal(str)
         # The audio notch: off / auto / manual, and Manual's frequency (Hz).
         notch_changed = pyqtSignal(str, int)
+        # The low cut: "off" or its corner in Hz ("100", "200", "300").
+        low_cut_changed = pyqtSignal(str)
         iq_options_changed = pyqtSignal(bool, bool)  # remove DC, balance I/Q
         # Receiver > Sample rate: a rate picked (applied live by the window).
         sample_rate_selected = pyqtSignal(float)
@@ -1489,6 +1492,16 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._notch_combo.currentIndexChanged.connect(self._on_notch_changed)
         self._notch_spin.valueChanged.connect(self._on_notch_changed)
         self.show_notch_found(None)
+
+        # The low cut (K-A2): hum and rumble out of AM, SSB and narrow FM.
+        self._low_cut_combo = self._shrinkable_combo(_ValueComboBox(), 6)
+        for key, text, tip in LOW_CUT_CHOICES:
+            self._low_cut_combo.add_value(key, text, tip)
+        self._low_cut_combo.setAccessibleName("Low cut")
+        self._low_cut_combo.currentIndexChanged.connect(
+            lambda _i: self.low_cut_changed.emit(self.low_cut())
+        )
+        self._add_row(form, "Low cut:", self._low_cut_combo)
 
         self._tone_combo = self._shrinkable_combo(_ValueComboBox(), 6)
         self._tone_combo.add_value("off", "Off", "Plays whatever is on the channel")
@@ -2160,6 +2173,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         if not self._applying_filter and self._demod_combo.currentText() == "FM":
             self._remember_filter("deviation", self._fm_dev_combo.currentText())
         self._update_notch_controls()  # (broadcast FM keeps its audio)
+        self._update_low_cut_controls()
 
     def _update_mode_controls(self) -> None:
         """Controls that only apply to some modes."""
@@ -2192,6 +2206,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._squelch_check.setEnabled(audible)
         self._update_squelch_controls()
         self._update_notch_controls()
+        self._update_low_cut_controls()
         self._update_bandwidth_tip()
 
     def _update_fm_dev_enabled(self) -> None:
@@ -2463,6 +2478,28 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             self._notch_found.setText(text)
             self._notch_found.setToolTip(tip)
             set_tone(self._notch_found, "success" if hz is not None else "muted")
+
+    # -- the low cut (K-A2) -------------------------------------------------
+
+    def _update_low_cut_controls(self) -> None:
+        if self._demod_combo.currentText() == "CW":
+            why = "Not used in CW: its filter sits around the CW note."
+        else:
+            _applies, why = self._notch_applies()
+        self._low_cut_combo.setEnabled(not why)
+        self._low_cut_combo.setToolTip(
+            why
+            or "Cuts the audio below this frequency: mains hum and rumble out, "
+            "the voice stays (AM, SSB and narrow FM). With a tone squelch set, "
+            "narrow FM is cut below 300 Hz anyway (the tone or the DCS code)."
+        )
+
+    def low_cut(self) -> str:
+        """``"off"``, or the low cut's corner in Hz (``"100"``...)."""
+        return self._low_cut_combo.currentText()
+
+    def set_low_cut(self, value: str) -> None:
+        self._low_cut_combo.setCurrentText(str(value))
 
     def noise_reduction(self) -> str:
         return self._nr_combo.currentText()

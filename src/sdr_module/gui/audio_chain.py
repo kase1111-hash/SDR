@@ -376,6 +376,14 @@ NOTCH_CHOICES: Tuple[Tuple[str, str, str], ...] = (
 #: The notch frequency set by hand: range and default (Hz).
 NOTCH_RANGE_HZ = (200, 5000)
 DEFAULT_NOTCH_HZ = 1000
+#: Low cut choices (a high-pass for voice audio: hum and rumble out):
+#: (key, label, tooltip); the key is the corner in Hz, or "off".
+LOW_CUT_CHOICES: Tuple[Tuple[str, str, str], ...] = (
+    ("off", "Off", "Everything the mode hears, down to its lowest notes"),
+    ("100", "100 Hz", "Removes mains hum (50/60 Hz) and rumble"),
+    ("200", "200 Hz", "Also removes the hum's harmonics (100-180 Hz)"),
+    ("300", "300 Hz", "Voice only: as a phone line or a radio's speaker"),
+)
 #: Narrow FM with a tone squelch is heard from here up: the CTCSS tone
 #: (67-254 Hz) or the DCS bits under the voice are filtered out, as a
 #: radio does.
@@ -398,6 +406,8 @@ class AudioOptions:
       see :class:`ListeningFilters`.
     * ``tone_squelch``: a CTCSS tone or DCS code is the squelch: narrow FM
       is heard without its sub-audible band (the tone or the DCS bits).
+    * ``low_cut_hz``: the low cut chosen (Hz, 0 for none), for AM, SSB and
+      narrow FM.
     """
 
     def __init__(self) -> None:
@@ -407,6 +417,7 @@ class AudioOptions:
         self.notch: str = "off"
         self.notch_hz: float = float(DEFAULT_NOTCH_HZ)
         self.tone_squelch: bool = False
+        self.low_cut_hz: float = 0.0
 
 
 class ListeningFilters:

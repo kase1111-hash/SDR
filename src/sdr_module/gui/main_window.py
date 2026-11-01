@@ -118,6 +118,7 @@ from .audio_chain import (
     AM_CARRIER_TIME_S,
     DEFAULT_CW_PITCH_HZ,
     DEFAULT_NOTCH_HZ,
+    LOW_CUT_CHOICES,
     NOTCH_CHOICES,
     SUBAUDIBLE_CUT_HZ,
     AudioAgc,
@@ -1351,18 +1352,25 @@ class _ReceiverChain:
 
     def _listen(self, audio: np.ndarray) -> np.ndarray:
         """The audio notch, in the modes it applies to (not broadcast FM,
-        whose audio is kept as it is), over the audio this mode hears; and
-        narrow FM with a tone squelch set heard without the tone or the DCS
-        bits under it (a high-pass at SUBAUDIBLE_CUT_HZ)."""
+        whose audio is kept as it is), over the audio this mode hears; the
+        Low cut chosen (AM, SSB and narrow FM); and narrow FM with a tone
+        squelch set heard without the tone or the DCS bits under it (a
+        high-pass at SUBAUDIBLE_CUT_HZ at least)."""
         broadcast = self.mode == "FM" and self._deemphasis
         options = self._options()
         low_cut: Optional[float] = None
+        voice = self.mode in ("AM", "USB", "LSB") or (
+            self.mode == "FM" and not broadcast
+        )
+        chosen = float(getattr(options, "low_cut_hz", 0.0) or 0.0)
+        if voice and chosen > 0.0:
+            low_cut = chosen  # (the Low cut chosen: AM, SSB and narrow FM)
         if (
             self.mode == "FM"
             and not broadcast
             and getattr(options, "tone_squelch", False)
         ):
-            low_cut = SUBAUDIBLE_CUT_HZ
+            low_cut = max(low_cut or 0.0, SUBAUDIBLE_CUT_HZ)
         pitch: Optional[float] = None
         if self.mode in ("USB", "LSB"):
             band = (_SSB_LOW_HZ, _SSB_LOW_HZ + self.bandwidth)
@@ -3380,6 +3388,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._show_notch_frequency,
             tip="Set the whistle's frequency by hand (Manual; the box next to "
             "Notch in the Audio group)",
+        )
+        choices(
+            audio_menu.addMenu("&Low Cut"),
+            panel._low_cut_combo,
+            [(value, text) for value, text, _tip in LOW_CUT_CHOICES],
+            "Cut the audio below this frequency: hum and rumble out (Audio "
+            "group in the control panel; AM, SSB and narrow FM)",
         )
         self._add_action(
             audio_menu,
@@ -6809,6 +6824,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         panel.tone_squelch_changed.connect(self._on_tone_squelch_changed)
         panel.dcs_squelch_changed.connect(self._on_dcs_squelch_changed)
         panel.notch_changed.connect(self._on_notch_changed)
+        panel.low_cut_changed.connect(self._on_low_cut_changed)
         panel.iq_options_changed.connect(self._on_iq_options_changed)
 
     def _save_filter_memory(self) -> None:
@@ -6871,6 +6887,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         options.notch_hz = float(hz)
         self._save_setting("audio/notch", mode)
         self._save_setting("audio/notch_hz", int(hz))
+
+    def _on_low_cut_changed(self, value: str) -> None:
+        """Low cut (K-A2): "off", or the corner in Hz ("100", "200", "300")."""
+        try:
+            hz = float(value) if value != "off" else 0.0
+        except ValueError:
+            hz = 0.0
+        self._audio_options.low_cut_hz = hz
+        self._save_setting("audio/low_cut", value)
 
     def _show_notch_frequency(self) -> None:
         """Radio > Audio > Notch > Notch Frequency...: Manual, and its box."""
@@ -6990,6 +7015,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             ),
         )
         restore(
+            "audio/low_cut",
+            lambda: choose("audio/low_cut", "off", panel.set_low_cut, panel.low_cut),
+        )
+        restore(
             "audio/remove_dc, audio/balance_iq",
             lambda: panel.set_iq_options(
                 settings.get_bool("audio/remove_dc", False),
@@ -7012,6 +7041,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._audio_options.tone_squelch = self._tone_squelch.active
         self._audio_options.notch = panel.notch_mode()
         self._audio_options.notch_hz = float(panel.notch_hz())
+        self._audio_options.low_cut_hz = 0.0
+        if panel.low_cut() != "off":
+            self._audio_options.low_cut_hz = float(panel.low_cut())
         remove_dc, balance_iq = panel.iq_options()
         self._iq_conditioner.remove_dc = remove_dc
         self._iq_conditioner.balance_iq = balance_iq
@@ -7030,6 +7062,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         settings.set("audio/dcs_squelch", format_dcs(*dcs) if dcs else "")
         settings.set("audio/notch", panel.notch_mode())
         settings.set("audio/notch_hz", panel.notch_hz())
+        settings.set("audio/low_cut", panel.low_cut())
         remove_dc, balance_iq = panel.iq_options()
         settings.set("audio/remove_dc", remove_dc)
         settings.set("audio/balance_iq", balance_iq)

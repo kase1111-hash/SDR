@@ -2676,6 +2676,12 @@ if HAS_PYQT6:
                 # Taken (partly) before the last retune (_drop_stale_samples).
                 self._plot_skip_samples = max(0, self._plot_skip_samples - len(samples))
                 return
+            if self.isMinimized() or not self.isVisible():
+                # Nobody sees them (the receiver still plays): no plots, and
+                # the first frame shown again starts afresh. (Both windows
+                # share one thread: this was a quarter of this one's frame.)
+                self._frame_axis = None
+                return
             axis = (float(self._lo_hz), float(self._rate()))
             if axis != self._frame_axis:
                 # Samples kept from the last frame belong to another span.

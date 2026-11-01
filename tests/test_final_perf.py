@@ -466,9 +466,7 @@ class TestDemoLoopsAreQuickToBuild(unittest.TestCase):
 
         for rate in (1.024e6, 2.048e6, 2.4e6, 3.2e6, 8e6, 20e6):
             program = dd._loops("wfm", dd._MUSIC_SEED, rate)[0]
-            self.assertLessEqual(
-                _largest_prime_factor(len(program.values)), 7, rate
-            )
+            self.assertLessEqual(_largest_prime_factor(len(program.values)), 7, rate)
             am = dd._loops("amb", 0, rate)
             self.assertLessEqual(_largest_prime_factor(len(am.values)), 7, rate)
 
@@ -482,3 +480,51 @@ class TestDemoLoopsAreQuickToBuild(unittest.TestCase):
         with mock.patch.object(dd, "_music_tune", wraps=dd._music_tune) as tune:
             dd._loops("amb", 1, rate)
         self.assertEqual(tune.call_count, 0)
+
+
+# ---------------------------------------------------------------------------
+# DEV-E2E-04: the Second Receiver's plots while nobody sees them
+# ---------------------------------------------------------------------------
+
+
+class TestSecondReceiverPlotsOnlyWhenSeen(_WindowTestCase):
+    demo = True
+
+    def setUp(self):
+        super().setUp()
+        self.rx = self.win._second_rx.show()
+        self.rx._status_timer.stop()
+        self.settle()
+
+    def tearDown(self):
+        rx = self.win._second_rx.receiver
+        if rx is not None:
+            rx.shutdown()
+        super().tearDown()
+
+    def test_a_minimized_second_receiver_skips_its_plots_not_its_audio(self):
+        # Two demo receivers share one GUI thread (DEV-E2E-04): the second
+        # one's plots cost a quarter of its frame even with its window
+        # minimized. It still demodulates (Listen) then.
+        rx = self.rx
+        self.assertTrue(rx.start())
+        rx._frame_timer.stop()
+        self.settle()
+        analyzed = []
+        process = rx._frame_spectrum.process
+        rx._frame_spectrum.process = lambda s: analyzed.append(len(s)) or process(s)
+        heard = []
+        dsp_process = rx._dsp.process
+        rx._dsp.process = lambda s, play: heard.append(len(s)) or dsp_process(s, play)
+        block = rx.device.read_samples(80_000)
+        rx._process(block)
+        self.assertEqual(analyzed, [80_000])
+        rx.showMinimized()
+        self.settle()
+        rx._process(block)
+        self.assertEqual(analyzed, [80_000])  # no plots
+        self.assertEqual(heard, [80_000, 80_000])  # but the receiver runs
+        rx.showNormal()
+        self.settle()
+        rx._process(block)
+        self.assertEqual(analyzed, [80_000, 80_000])

@@ -30,6 +30,7 @@ import numpy as np
 
 from ..dsp.recording import SampleFormat
 from .iq_files import IqFileOptions, format_mhz, format_rate
+from .tuning import format_mhz_range
 
 try:
     from PyQt6.QtCore import QObject, Qt, QTimer, pyqtSignal
@@ -74,6 +75,14 @@ def format_clock(seconds: float, total: float = 0.0) -> str:
     if hours or total >= 3600:
         return f"{hours}:{minutes:02d}:{secs:02d}"
     return f"{minutes}:{secs:02d}"
+
+
+def playing_line(options: IqFileOptions) -> str:
+    """What the status bar says of a recording opened: ``"Playing
+    fm8.sigmf-data (99.6–100.6 MHz)"``."""
+    half = options.sample_rate / 2.0
+    span = format_mhz_range(options.center_hz - half, options.center_hz + half)
+    return f"Playing {options.name} ({span})"
 
 
 class FilePlaybackDevice:
@@ -266,6 +275,9 @@ class _PreviousSource:
     #: How it was heard: (mode, FM deviation, filter), as the window's
     #: _set_demod_mode takes them ("" for one that doesn't apply).
     listening: Tuple[str, str, str] = ("", "", "")
+    #: The decoder a preset had turned on there (the window's
+    #: _preset_decoder), which opening the recording may turn off.
+    preset_decoder: Any = None
 
 
 if HAS_PYQT6:
@@ -688,6 +700,7 @@ if HAS_PYQT6:
                         *win._listening_mode(),
                         win._control_panel._bw_combo.currentText(),
                     ),
+                    preset_decoder=getattr(win, "_preset_decoder", None),
                 )
                 if running:
                     win._stop_acquisition()
@@ -703,9 +716,11 @@ if HAS_PYQT6:
             win._lock_lo(options.center_hz, options.sample_rate, "the recording")
             # Heard the way its band usually is (a 2 m recording opened from
             # broadcast FM: narrow FM), as a frequency typed there would be;
-            # the band plan's status line says so.
+            # the band plan's status line says so, after what is playing.
             self.band_plan_applied = bool(
-                win._listen_by_band_plan(tuned_before, win._current_frequency())
+                win._listen_by_band_plan(
+                    tuned_before, win._current_frequency(), lead=playing_line(options)
+                )
             )
             win._reset_demodulator()
             self._bar.show_file(options, self.back_to_text())
@@ -788,11 +803,23 @@ if HAS_PYQT6:
             win._refresh_state_ui()
             if resume and restore and prev is not None and prev.running and win._device:
                 win._start_acquisition()
+            again = ""
+            if restore and not quiet and prev is not None:
+                # Back on a preset's channel: the decoder it had turned on,
+                # which opening the file turned off, is on again.
+                again = win._resume_preset_decoder(prev.preset_decoder)
             if not quiet:
                 back = f"Back to {prev.name}." if restore and prev and prev.name else ""
                 ended = f" Stopped {' and '.join(stopped)} of it." if stopped else ""
                 text = " ".join(
-                    part for part in (f"Closed {name}.{ended}", back, note) if part
+                    part
+                    for part in (
+                        f"Closed {name}.{ended}",
+                        back,
+                        note,
+                        f"{again}." if again else "",
+                    )
+                    if part
                 )
                 win._show_status_message(
                     text,
@@ -847,9 +874,11 @@ if HAS_PYQT6:
             self._speed_mark = None
             self._slow_said = False
             if speed != 1.0:
-                win._show_status_message(
-                    f"Playing at {speed:g}x: audio plays at 1x only.", "info", 4000
-                )
+                # The paused audio's own hint, said here (with the audio off
+                # too) and so not again when the audio pauses: one message.
+                win._realtime_hint_shown = True
+                win._realtime_hint_text = win._realtime_hint()
+                win._show_status_message(win._realtime_hint_text, "info", 6000)
             elif win._message_label.text().startswith("Playing at "):
                 # (The note on another speed no longer applies. Any other
                 # message stays: a file opened after one played at 2x goes

@@ -421,9 +421,10 @@ class TestOnlyFarTunesChooseTheMode(_WindowTestCase):
         self.assertIn("70cm Calling", self.win._message_label.text())
 
     def test_a_preset_channel_outside_the_bands_is_heard_its_way(self):
-        # POCSAG (152.240 MHz) lies in none of the band plan's bands.
+        # POCSAG (152.240 MHz) lies in none of the band plan's bands. (At
+        # 12.5 kHz: a pager's FSK swings beyond 5 kHz, W-01.)
         self.type_frequency("152.24")
-        self.assertEqual(self.listening(), ("FM", "5 kHz", "25 kHz"))
+        self.assertEqual(self.listening(), ("FM", "12.5 kHz", "25 kHz"))
         self.assertIn("POCSAG", self.win._message_label.text())
 
 

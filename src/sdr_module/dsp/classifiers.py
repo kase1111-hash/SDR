@@ -15,6 +15,8 @@ How it decides:
   passband* (``band_hz``, or the band a channel filter visibly passes).
   The stopband of a channel filter is never taken for noise: that gave
   50-150 dB "SNRs" and a confidence of 1.0 for anything, noise included.
+  What stands above it is judged against how much the noise's spectrum
+  actually varies (measured, not assumed from the averaging).
 * **Keying** (CW, OOK, pulses, a transmission starting) is found from the
   power envelope: two clearly separated levels, the low one at the noise.
   The modulation of what is keyed is then judged on the "on" samples only.
@@ -581,6 +583,22 @@ def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
     return float(v[order][min(k, len(v) - 1)])
 
 
+def _spread(ratio: np.ndarray, averages: float) -> float:
+    """The noise's standard deviation in ``ratio`` (an averaged spectrum
+    over the noise density: about 1 where there is only noise), measured
+    from its lower values (signals lie above them), and never less than
+    ``averages`` independent averages give. Neighbouring bins of a windowed
+    spectrum are not independent, nor is every noise source white: taken as
+    independent, the noise's own ripple stood out as signal all over a wide
+    band and joined a narrow FM call to a station 385 kHz away."""
+    floor = 1.0 / math.sqrt(max(float(averages), 1.0))
+    if len(ratio) < 32:
+        return floor
+    low, mid = np.percentile(ratio, (5.0, 30.0))
+    # (5th to 30th percentile of a normal spread: 1.12 standard deviations.)
+    return max(floor, float(mid - low) / 1.1205)
+
+
 def _power_span(excess: np.ndarray, offset: int) -> Tuple[int, int]:
     """First and last bin (plus ``offset``) holding the middle 98 % of the
     power in ``excess``."""
@@ -725,9 +743,8 @@ class SignalClassifier:
         wide_power = power = mag**2
         kurt_z = _kurtosis_z(power, noise * band_width, band_width / rate)
         features["power_kurtosis_z"] = kurt_z
-        present = (
-            spec["presence_z"] >= 6.0 and spec["presence_excess_db"] >= 1.5
-        ) or abs(kurt_z) >= 10.0
+        spectral = spec["presence_z"] >= 6.0 and spec["presence_excess_db"] >= 1.5
+        present = spectral or abs(kurt_z) >= 10.0
         if present and spec.get("nearest_signal_hz") is not None:
             present = False  # a signal, but not at the tuned frequency
         if not present:
@@ -847,8 +864,11 @@ class SignalClassifier:
             self._psk_features(xs[on] if on is not None else xs, rate_n, width)
         )
 
-        if snr_db < 3.0 and float(spec["presence_excess_db"]) < 6.0:
-            # A trace of something, too weak to say what it is.
+        trace = snr_db < 3.0 and float(spec["presence_excess_db"]) < 6.0
+        if trace or not (spectral or keying["keyed"]):
+            # A trace of something, too weak to say what it is. (Or only
+            # the power's spread said something is there, and no keying
+            # shows what: no spectrum peak clearly stands out.)
             evidence = ["Only a trace of a signal, too weak to judge"]
             return self._result("noise", 0.35, features, evidence, 0.0, 0.0, snr_db)
         kind, conf, evidence = self._decide(features, keying, snr_db)
@@ -1101,7 +1121,8 @@ class SignalClassifier:
         smooth = _smooth(np.where(band, psd, noise), 3)
         ratio = np.where(band, smooth / noise, 0.0)
         best = float(np.max(ratio))
-        out["presence_z"] = (best - 1.0) * math.sqrt(3.0 * k)
+        spread = _spread(ratio[band], 3.0 * k)
+        out["presence_z"] = (best - 1.0) / spread
         out["presence_excess_db"] = 10.0 * math.log10(max(best, 1e-30))
         out.update(
             bandwidth_hz=0.0,
@@ -1117,13 +1138,14 @@ class SignalClassifier:
         filled = np.where(band, psd, noise)
         wide = _smooth(filled, 9)
         broad = _smooth(filled, 33)
-        # Significance (noise standard deviations) at each smoothing: a
-        # narrow line, a signal a few bins wide, and broad weak sidebands.
+        # Significance (noise standard deviations, as measured) at each
+        # smoothing: a narrow line, a signal a few bins wide, and broad weak
+        # sidebands.
         z = np.maximum.reduce(
             [
-                (smooth / noise - 1.0) * math.sqrt(3.0 * k),
-                (wide / noise - 1.0) * math.sqrt(9.0 * k),
-                (broad / noise - 1.0) * math.sqrt(33.0 * k),
+                (smooth / noise - 1.0) / spread,
+                (wide / noise - 1.0) / _spread(wide[band] / noise, 9.0 * k),
+                (broad / noise - 1.0) / _spread(broad[band] / noise, 33.0 * k),
             ]
         )
         region = band & (z > 3.5)

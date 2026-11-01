@@ -200,7 +200,8 @@ class TestOpenRecording(_PlaybackCase):
         self.assertEqual(win._lo_frequency(), CENTER)  # the file's center
         self.assertEqual(win._rate_label.text(), "0.24 MS/s")
         # (A 2 m file opened from broadcast FM: heard as 2 m usually is,
-        # which the status line says instead of "Playing fm.sigmf-data".)
+        # which the status line says after "Playing fm.sigmf-data (...)".)
+        self.assertTrue(self.message().startswith("Playing fm.sigmf-data ("))
         self.assertIn("listening in FM (narrow", self.message())
         self.assertTrue(win._close_recording_action.isEnabled())
         self.assertEqual(win._start_button.text(), "❚❚  Pause")

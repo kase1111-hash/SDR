@@ -219,6 +219,18 @@ def _say_freq(freq_hz: float) -> str:
     return f"{whole}.{frac.ljust(3, '0')} MHz"
 
 
+def _bookmarked(hit: ScanHit) -> str:
+    """What bookmarking one result says, as Ctrl+B and the Signal tab's
+    Bookmark say it: the name the Bookmarks tab lists it under (the host
+    names it so), its mode, and how to rename it."""
+    from .bookmarks_panel import default_bookmark_name
+
+    name = hit.label or default_bookmark_name(hit.frequency_hz)
+    mode = "I/Q" if hit.mode.startswith("None") else hit.mode
+    how = f" ({mode})" if mode else ""
+    return f"Bookmarked {name}{how}. Rename it with F2 in the Bookmarks tab."
+
+
 def _valid_time(timestamp: float) -> float:
     """A saved time (seconds since 1970), 0 ("never") if no clock shows it."""
     return timestamp if 0.0 <= timestamp < _LAST_TIMESTAMP else 0.0
@@ -607,11 +619,12 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         listen_layout = QHBoxLayout(self._listen_row)
         listen_layout.setContentsMargins(0, 0, 0, 0)
         listen_layout.setSpacing(6)
-        self._listen_label = QLabel()
+        # (Ends in "…" where Skip and Hold leave too little room for a long
+        # name; the tooltip has it all.)
+        from .signal_panel import _ElidedLabel
+
+        self._listen_label = _ElidedLabel(mode=Qt.TextElideMode.ElideRight)
         set_role(self._listen_label, "value")
-        self._listen_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
-        )
         listen_layout.addWidget(self._listen_label, 1)
         self._skip_btn = QPushButton("S&kip")
         self._skip_btn.setToolTip(
@@ -773,9 +786,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         current = engine.current
         on_channel = engine.state in (DWELL, LISTEN) and current is not None
         if on_channel:
+            # (Whole: short of room the chip is cut as it is drawn, and its
+            # tooltip then starts with the whole text, the whole name too.)
             where = current.label or _say_freq(current.frequency_hz)
-            if len(where) > 24:
-                where = where[:23] + "…"
             text = f"Scanning · {where}" + (" · held" if engine.held else "")
         else:
             count = len(self._hits)
@@ -1988,7 +2001,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         added, existing = self._host.scan_add_bookmarks(hits, **extra)
         if len(hits) == 1:
             if added:
-                text = f"Bookmarked {_say_freq(hits[0].frequency_hz)}."
+                text = _bookmarked(hits[0])
             else:
                 text = f"Already bookmarked: {existing[0] if existing else ''}"
         else:

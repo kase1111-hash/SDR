@@ -170,7 +170,7 @@ from .iq_files import (
     split_name,
 )
 from .level_meter import LevelMeter
-from .playback import PlaybackBar, PlaybackController
+from .playback import PlaybackBar, PlaybackController, playing_line
 from .plot_view import PlotView, normalize_zoom
 from .preferences_dialog import (
     KEY_AUDIO_OUTPUT,
@@ -1004,6 +1004,7 @@ class _ReceiverChain:
         # the audio before noise reduction (for the SSTV decoder).
         self.last_clip_fraction = 0.0
         self.pre_nr_audio = np.empty(0, dtype=np.float32)
+        self._unclipped = np.empty(0, dtype=np.float32)  # (see clip_swing)
         # The AM detector's averaging (half of it), dip and fade lengths, in
         # samples at the channel rate (see _am_detect).
         self._am_half = max(1, int(round(_AM_WINDOW_S / 2.0 * self.channel_rate)))
@@ -1235,6 +1236,17 @@ class _ReceiverChain:
         if noise_reduction is not None:
             noise_reduction.reset_stream()
 
+    def clip_swing(self) -> Tuple[float, float]:
+        """How far the last FM block's audio swung, before it was clipped:
+        ``(peak, often)``, the swing exceeded 0.5 % and 5 % of the time, in
+        multiples of the FM deviation it was heard at (over 1: it clipped).
+        ``(0.0, 0.0)`` without one."""
+        audio = self._unclipped
+        if audio.size == 0:
+            return 0.0, 0.0
+        peak, often = np.percentile(np.abs(audio), (99.5, 95.0))
+        return float(peak), float(often)
+
     def channelize(self, samples: np.ndarray) -> np.ndarray:
         """The tuned channel of an I/Q block, at ``channel_rate``."""
         # The VFO's channel to 0 Hz (nothing to do at the LO itself).
@@ -1250,6 +1262,7 @@ class _ReceiverChain:
             # the SSTV decoder and the tone squelch) isn't this one's.
             self.pre_nr_audio = np.empty(0, dtype=np.float32)
             self.last_clip_fraction = 0.0
+            self._unclipped = np.empty(0, dtype=np.float32)
             return np.empty(0, dtype=np.float32)
         if self.mode == "FM":
             broadcast = float(fm_deviation) >= _BROADCAST_DEVIATION_HZ
@@ -1281,6 +1294,7 @@ class _ReceiverChain:
                 self.last_clip_fraction = float(over) / audio.size
             else:
                 self.last_clip_fraction = 0.0
+            self._unclipped = audio
             audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
             self.pre_nr_audio = audio
             return self._reduce_noise(audio)
@@ -2680,6 +2694,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._iq_conditioner = IqConditioner()
         self._clip_s = 0.0
         self._clip_warn_due = 0.0
+        # How far the audio swung, (peak, often) in Hz, in the frames that
+        # clipped lately (the warning names what holds it).
+        self._clip_swings: Deque[Tuple[float, float]] = deque(maxlen=60)
         # The Scanner tab mutes the speaker while it moves between channels,
         # and has a bookmark's CTCSS tone checked even with the speaker off.
         self._scan_muted = False
@@ -5668,7 +5685,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         panel = self._decoder_panel
         proto = panel.protocol()
-        if proto is None or self._decoder is None:
+        # (A preset's decoder the tuning turned off is off, as its message
+        # says: no "paused" chip left behind. W-06)
+        if proto is None or self._decoder is None or panel.paused_by_window():
             if not chip.isHidden():
                 chip.hide()
             return
@@ -5875,13 +5894,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._tune_to(freq_hz) and far:
             self._listen_by_band_plan(before, self._current_frequency())
 
-    def _listen_by_band_plan(self, before_hz: float, freq_hz: float) -> bool:
+    def _listen_by_band_plan(
+        self, before_hz: float, freq_hz: float, lead: str = ""
+    ) -> bool:
         """After a far tune with no mode of its own (a typed frequency, a
         bookmark or recent frequency without one): outside the band you
         were in, where the usual listening differs from the current mode
         profile, listen that way (the mode, filter and FM deviation of the
         preset channel there, else of the band) and say so. Radio > Choose
-        Mode From Band Plan turns this off. True when it changed."""
+        Mode From Band Plan turns this off. True when it changed.
+
+        ``lead``: what the tune itself says first ("Playing fm8.sigmf-data
+        (99.6–100.6 MHz)", a recording opened), so one message says both."""
         from ..core.band_plan import (
             band_for,
             preset_for,
@@ -5953,7 +5977,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "usually heard (Radio > Choose Mode From Band Plan)"
         )
         text = self._keeping_release_note(text)
-        self._show_status_message(text, "info", 6000)
+        if lead:
+            text = f"{lead} · {text}"
+        self._show_status_message(text, "info", 8000 if lead else 6000)
         self._band_plan_note = (text, zone)
         return True
 
@@ -6179,9 +6205,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         if self._tx_busy():
             # The HackRF sends where it is: it can't move mid-transmission.
+            # (Amber, as the other "not while transmitting" notices: what
+            # to do first. W-11)
             return self._refuse_tuning(
                 "Can't tune while transmitting: press Stop (or wait for the "
-                "transmission to end) first."
+                "transmission to end) first.",
+                tone="warning",
             )
         low, high = self._tuning_limits()
         if self._lo_lock is not None:
@@ -6265,9 +6294,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._on_frequency_changed(self._current_frequency())
         self._note_tuned()
 
-    def _refuse_tuning(self, reason: str, device_problem: bool = False) -> bool:
-        """A frequency can't be tuned: say why, and put the Frequency field
-        (and anything that showed the new frequency) back on the one tuned.
+    def _refuse_tuning(
+        self, reason: str, device_problem: bool = False, tone: str = "danger"
+    ) -> bool:
+        """A frequency can't be tuned: say why (in ``tone``), and put the
+        Frequency field (and anything that showed the new frequency) back on
+        the one tuned.
 
         Only a device that said no is logged (Tools > Error History); a
         frequency out of range is just explained.
@@ -6277,7 +6309,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if device_problem:
             self._show_status_error(reason)
         else:
-            self._show_status_message(reason, "danger", 6000)
+            self._show_status_message(reason, tone, 6000, log=False)
         self._tuning_refusal = reason
         return False
 
@@ -8434,14 +8466,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Decoder's status line says so (and the status bar, once): its
         counts alone looked healthy while it heard a fraction of the signal
         (with no speaker, as for ADS-B in None (I/Q), nothing else said
-        so). It says so until frames have kept up for _SKIP_HINT_HOLD_S."""
+        so). It says so until frames have kept up for _SKIP_HINT_HOLD_S.
+        Not while a Scanner scan runs: it moves the receiver, the decoder is
+        off its channel then (its line says "Not tuned to ..."), and no
+        device or sample rate is to blame for what it misses."""
         panel = self._own("_decoder_panel")
         if panel is None:
             return
+        scanner = self._own("_scanner_panel")
         decoding = (
             self._decoder is not None
             and self._decoder_protocol is not None
             and panel._enabled_check.isChecked()
+            and not (scanner is not None and scanner.engine.active)
         )
         now = time.monotonic()
         if self._pacer.overloaded:
@@ -8488,7 +8525,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         name = str(getattr(self._decoder, "name", "") or "live")
         rate = format_rate(self._device_sample_rate())
         if self._skip_by_job:
-            # (Its own job: a lower sample rate isn't the answer.)
+            # (Its own job: a lower sample rate isn't the answer. Once it is
+            # done, what it skipped still counts for a few seconds: said in
+            # the past tense then. W-10)
+            if busy_with() != self._skip_by_job:
+                return (
+                    f"{self._skip_by_job} kept this computer busy, so the {name} "
+                    "decoder missed part of the signal meanwhile."
+                )
             return (
                 f"{self._skip_by_job} keeps this computer busy, so the {name} "
                 "decoder misses part of the signal meanwhile."
@@ -9245,10 +9289,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Warn (now and then) while FM audio clips: the station deviates
         more than the FM deviation setting, which distorts it. Only a clear
         signal counts: noise (a squelch tail, an empty channel with the
-        squelch off) clips whatever the setting."""
+        squelch off) clips whatever the setting. The warning names the
+        deviation that holds the swing measured while it clipped."""
         clear = snr_db is not None and snr_db >= _CLIP_MIN_SNR_DB
         if clear and chain.last_clip_fraction > _CLIP_FRACTION:
+            if self._clip_s <= 0.0:
+                self._clip_swings.clear()  # (a new episode)
             self._clip_s += seconds
+            # (In Hz: the deviation may be changed while it clips.)
+            deviation = float(self._control_panel.get_fm_deviation())
+            peak, often = chain.clip_swing()
+            self._clip_swings.append((peak * deviation, often * deviation))
         else:
             self._clip_s = max(0.0, self._clip_s - seconds)
             return
@@ -9258,13 +9309,35 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._clip_warn_due = now + _CLIP_WARN_EVERY_S
         self._clip_s = 0.0
         current = self._control_panel.get_fm_deviation_text()
-        self._show_status_message(
-            f"FM audio is clipping: this station deviates more than "
-            f"{current}. Choose a larger FM deviation in Demodulation, such as "
-            "75 kHz (broadcast) for an FM radio station.",
-            "warning",
-            8000,
-        )
+        text = f"FM audio is clipping: this station deviates more than {current}"
+        holds = self._deviation_holding_clip(self._control_panel.get_fm_deviation())
+        if holds == "75 kHz":
+            text += (
+                ". Choose a larger FM deviation in Demodulation, such as 75 kHz "
+                "(broadcast) for an FM radio station."
+            )
+        elif holds:
+            text += f". Choose a larger FM deviation in Demodulation: {holds} holds it."
+        else:
+            text += ", the largest FM deviation offered."
+        self._show_status_message(text, "warning", 8000)
+
+    def _deviation_holding_clip(self, deviation_hz: float) -> str:
+        """The FM deviation choice that holds the swing measured while the
+        audio clipped at ``deviation_hz`` (the rule Identify suggests one
+        by: a pager heard at 5 kHz gets 12.5 kHz, a broadcast station 75
+        kHz), at least the next larger choice; "" when none is larger."""
+        from ..dsp.signal_id import _DEVIATIONS, _deviation_for
+
+        larger = [text for hz, text in _DEVIATIONS if hz > 1.001 * deviation_hz]
+        if not larger:
+            return ""
+        swings = np.asarray(self._clip_swings, dtype=float).reshape(-1, 2)
+        if not len(swings):
+            return larger[0]
+        peak, often = np.median(swings, axis=0)
+        holds = _deviation_for(float(peak), float(often))
+        return holds if holds in larger else larger[0]
 
     def _realtime_hint(self) -> str:
         if self._playback.active and self._playback.speed != 1.0:
@@ -9273,6 +9346,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "(the spectrum, decoders and recordings keep working)."
             )
         job = self._busy_job_now()
+        if job and busy_with() != job:  # (done: what it skipped still counts)
+            return (
+                f"{job} kept this computer busy, so audio is paused until it "
+                "catches up."
+            )
         if job:  # (this app's own job, not the device: P-04)
             return f"{job} keeps this computer busy, so audio is paused meanwhile."
         if self._playback.active:
@@ -10066,12 +10144,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if not self._playback.open(options):
             return False
         if self._playback.band_plan_applied:
-            return True  # its status line says how the file is heard
-        half = options.sample_rate / 2.0
+            return True  # its status line says how the file is heard (and plays)
+        # (A preset's decoder the tune to the file turned off is said after
+        # the file, as the band plan's line has it: "· ACARS decoder off".)
+        playing = playing_line(options)
+        note = self._release_note()
+        if note:
+            playing += f" · {note}"
         self._show_status_message(
-            f"Playing {options.name} "
-            f"({format_mhz_range(options.center_hz - half, options.center_hz + half)})."
-            " Click a signal to tune to it; Space pauses.",
+            f"{playing}. Click a signal to tune to it; Space pauses.",
             "info",
             8000,
         )
@@ -11416,18 +11497,24 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         both facts stay in view (P-07). Once: a message after that says only
         its own. (First: a long line is cut short at its end.) Not once the
         decoder is on again (Decode ticked, SSTV's Start): it isn't off."""
+        note = self._release_note()
+        return f"{note} · {text}" if note else text
+
+    def _release_note(self) -> str:
+        """The point :meth:`_keeping_release_note` leads a message with
+        ("ACARS decoder off"), "" for none; said once."""
         released, self._released_decoder = self._released_decoder, None
         if released is None:
-            return text
+            return ""
         message, note, decoder = released
         if self._message_label.text() != message:
-            return text  # (replaced, or gone)
+            return ""  # (replaced, or gone)
         if decoder == "SSTV":
             on_again = self._sstv_listening()
         else:
             panel = self._decoder_panel
             on_again = panel.is_decoding() and panel.protocol() == decoder
-        return text if on_again else f"{note} · {text}"
+        return "" if on_again else note
 
     def _preset_decoder_off(self) -> str:
         """Turn off the decoder a preset turned on (unless you changed it
@@ -11450,8 +11537,37 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return ""
         # (Not as your own untick: a protocol you choose next decodes.)
         panel.pause_decoding()
-        self._update_decoder_chip()  # ("ADS-B · paused")
+        self._update_decoder_chip()  # (gone: off, as the message says)
         return f"{decoder} decoder off"
+
+    def _resume_preset_decoder(self, owned: Any) -> str:
+        """Turn the decoder a preset turned on, which going elsewhere turned
+        off (``owned``, as :meth:`_own_preset_decoder` keeps it), on again
+        now that the receiver is back where it is heard: closing a
+        recording goes back to the preset's channel (W-07). Not when you
+        changed it since (another protocol, Decode ticked or unticked, SSTV
+        started), nor when another preset's decoder is on. What was done
+        ("ACARS decoder on again"), or ""."""
+        if owned is None or self._preset_decoder is not None:
+            return ""
+        decoder, _name, _freq, bands = owned
+        here = self._current_frequency()
+        if not any(low <= here <= high for low, high in bands):
+            return ""
+        if decoder == "SSTV":
+            if not HAS_HAM_RADIO or self._sstv_listening():
+                return ""
+            if self._device is None or not self._is_running:
+                return ""
+            self._sstv_panel.start_listening()
+        else:
+            panel = self._decoder_panel
+            if panel.selection() != decoder or not panel.paused_by_window():
+                return ""
+            if not self._select_decoder(decoder):
+                return ""
+        self._preset_decoder = owned
+        return f"{decoder} decoder on again"
 
     def _select_decoder(self, protocol: str) -> bool:
         """Choose ``protocol`` in the Decoder panel and tick Decode (a

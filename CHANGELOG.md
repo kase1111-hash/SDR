@@ -42,7 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   remembers yours; in SSB and CW the filter is the audio passband.
 - CW pitch (400–1000 Hz) in the Demodulation group; the FM deviation choices
   say what each is for, and FM audio clipped by too small a deviation is
-  reported.
+  reported, naming a deviation that holds the station ("12.5 kHz holds it").
 - **Audio group** — Noise reduction (Off, Light, Strong), Audio AGC (Off, Fast,
   Medium, Slow), Tone squelch (the 50 CTCSS tones) and Tone heard.
 - Receiver group: Remove DC spike, and Balance I/Q to remove the mirror
@@ -155,10 +155,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Decode Recording, Convert Recording, Save Recording, Find Signals or
   Transmit Text's Save Text Signal keeps the computer busy, they (and the
   Audio button's Paused) name that job as the cause instead ("Save Text
-  Signal keeps this computer busy, so audio is paused meanwhile.").
+  Signal keeps this computer busy, so audio is paused meanwhile."), and in
+  the past tense once it is done ("... kept this computer busy, so the RDS
+  decoder missed part of the signal meanwhile."). Not while a Scanner scan
+  moves the receiver: the decoder is off its channel then.
 - The Decoder tab counts unread messages ("Decoder (12)"), and a status-bar
-  chip ("ADS-B · 37 msgs"; "paused" with Decode unticked; "can't decode" in
-  amber, the reason in its tooltip) opens it. The chip and the status line
+  chip ("ADS-B · 37 msgs"; "paused" when you untick Decode; "can't decode"
+  in amber, the reason in its tooltip) opens it. The chip and the status line
   count the same messages, those that passed their checks since the protocol
   was chosen or Clear (the status line adds RDS's groups: "12 messages (310
   groups)").
@@ -192,7 +195,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   says so: "Playing at about 1.2x, not 4x") and Close. Recordings centered
   above 6 GHz (such as QO-100) play at their own frequency.
 - A recording is heard the way its band usually is (Radio → Choose Mode From
-  Band Plan), and File → Close Recording goes back to the device, frequency,
+  Band Plan; the status bar says so after "Playing fm8.sigmf-meta (98.9–101.3
+  MHz)"), and File → Close Recording goes back to the device, frequency,
   mode, FM deviation and filter you had before.
 - Big-endian or real-valued SigMF, and one-channel, 24-bit or 32-bit WAV
   files, are refused with the reason.
@@ -230,9 +234,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added — Scanner and bookmarks
 - **Scanner tab** (Tools → Frequency Scanner, `Ctrl+F`, or `Ctrl+8`) replaces
   the dialog: the plots, audio and decoders keep running while it scans, and
-  a status-bar chip ("Scanning · 7 found", or the channel it is on) shows
-  the scan from any tab, with Stop Scan, Skip, Hold and Show Scanner in its
-  menu.
+  a status-bar chip ("Scanning · 7 found", or the channel it is on, whole in
+  its tooltip when the chip is cut short) shows the scan from any tab, with
+  Stop Scan, Skip, Hold and Show Scanner in its menu.
 - Scan modes: Sweep once, Sweep continuously, Stop on signal (with Resume,
   Skip and Hold) and Scan bookmarks (each in its own mode, filter and CTCSS
   tone, from the top of the Bookmarks list and in its order: each group,
@@ -241,7 +245,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   about a second on the demo device); Threshold Auto is 12 dB over the noise.
 - Scan results (level, SNR, mode, last heard, and for a bookmark scan the
   bookmark's name, "Rpt 100 · 145.290 MHz") with Listen (a bookmark's result
-  with its tone squelch), Bookmark, Bookmark All (more than 20 results: it
+  with its tone squelch), Bookmark (which says what it added, as `Ctrl+B`
+  does: "Bookmarked FM Broadcast 88.5 (FM). Rename it with F2 in the
+  Bookmarks tab."), Bookmark All (more than 20 results: it
   asks first and files them in a group of their own, "Scan 2026-10-31
   22:00") and Export Results (CSV), which starts in Documents; when a scan
   ends the receiver goes back to where you were tuned.
@@ -307,8 +313,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Space to receive once it ends" when the receiver was off before), Start is
   off, and Record I/Q or Record Audio started then says when it will capture.
   Closing the window or disconnecting stops a transmission first, and a
-  recording can't be opened meanwhile. The demo device and the RTL-SDR can't
-  transmit.
+  recording can't be opened meanwhile. What can't be done until it ends
+  (tune, receive, play a recording, switch the RF amp...) is said in amber.
+  The demo device and the RTL-SDR can't transmit.
 - A confirmation before each transmission gives the frequency, mode and
   estimated output; "Don't ask again" skips it, and Tools → Preferences turns
   it back on.
@@ -366,8 +373,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ADS-B, APRS, ACARS, POCSAG and FLEX presets turn their decoder on, and ISS
   SSTV/Voice shows the SSTV tab (and starts its decoder while receiving). A
   decoder a preset turned on goes off again, and the status bar says so, when
-  you tune away from that preset or apply another preset that doesn't use it.
-- New POCSAG (152.240 MHz) and FLEX (931.9375 MHz) presets.
+  you tune away from that preset or apply another preset that doesn't use it
+  (its status-bar chip goes too); File → Close Recording back on the
+  preset's channel turns on again the decoder the recording turned off.
+- New POCSAG (152.240 MHz) and FLEX (931.9375 MHz) presets. They, the band
+  plan and the Decoder's "Tune to …" hear pagers at 12.5 kHz deviation (at
+  5 kHz their ±4.5–4.8 kHz swing clipped).
 - Tools also lists Protocol Decoder, S-Meter, SSTV Decoder, Ham ID (Station
   ID) and QRP Calculator, each showing its tab (with its `Ctrl`+number key),
   and SSTV: Tune to ISS (145.800 MHz), which tunes there and opens the SSTV
@@ -670,10 +681,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   set (not the mode on its own first, with its last filter), and None (I/Q)
   says it has no audio.
 - A tune that turns off the decoder a preset turned on, and has a message of
-  its own (the band plan's line, also on opening a recording, or a
-  bookmark's "Tuned to ..."), starts that message with the decoder's note
-  ("ACARS decoder off · FM Broadcast: listening in FM ...") instead of
-  replacing the note at once; the tune after it says only its own.
+  its own (the band plan's line, also on opening a recording, after
+  "Playing <file> (<span>) · ", or a bookmark's "Tuned to ..."), starts that
+  message with the decoder's note ("ACARS decoder off · FM Broadcast:
+  listening in FM ...") instead of replacing the note at once; the tune
+  after it says only its own. A recording opened in the band you were in
+  says it after the file: "Playing air125.sigmf-data (124.5–125.5 MHz) ·
+  ACARS decoder off. Click a signal ...".
 - Radio → Choose Mode From Band Plan also changes the FM deviation when a
   frequency typed in another FM band is heard at another deviation: a 2 m
   repeater typed after an FRS channel or MURS channels 1–3 is heard at 5 kHz
@@ -752,6 +766,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filter it said "Unknown signal").
 - The Identify card shows the bits first, with Copy Pulse Analysis next to
   Apply Mode (it says when it copied).
+- Identify judges what stands out against how much the noise's spectrum
+  actually varies. On a narrow FM call typed into the broadcast band (the
+  demo's 100.715 MHz) it says "Narrow FM" instead of describing the station
+  330 kHz above as an "Unknown signal" 382 kHz wide; with the call off it
+  says "Nothing at the tuned frequency; the nearest signal is …" (that
+  station), and a call keying up during a take is no longer called CW or
+  OOK. A mere trace is "Only a trace of a signal, too weak to judge", not an
+  unmodulated carrier.
 - Identify suggests an FM deviation that doesn't clip the station, so Apply
   Mode no longer leads straight to "FM audio is clipping" (it offered too
   small a deviation for the demo's narrow FM calls and its pager), and,
@@ -882,9 +904,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fields, and grows when its check text gets longer.
 - A NaN or infinite center or rate in a recording's metadata counts as
   unknown, so Import Options asks for it instead of playing at "nan MHz".
-- Status messages follow the state: back to 1× says "Playing at 1x.", and the
-  first captured samples replace "Recording armed: ..." with "Recording I/Q
-  samples. Press Record again to stop."
+- Status messages follow the state: another speed says so once ("Playing at
+  4x: audio plays at 1x only (the spectrum, decoders and recordings keep
+  working)."), back to 1× says "Playing at 1x.", and the first captured
+  samples replace "Recording armed: ..." with "Recording I/Q samples. Press
+  Record again to stop."
 - Sizes and free space are decimal MB/GB everywhere (the same file read 69 MB
   in one place and 72.5 MB in another), a small take reads "240 kB" instead
   of "0 MB", and the disk reserve is 500 MB, as the messages say.

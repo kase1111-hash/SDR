@@ -31,7 +31,8 @@ class TestAPresetsPauseIsNotTheUsersChoice(_WindowTestCase):
         self.assertEqual(self.decoding(), ("ACARS", True))
         self.assertTrue(win.set_frequency(100.1e6))  # away from the preset
         self.assertEqual(self.decoding(), ("ACARS", False))  # (LISTEN-05)
-        self.assertEqual(win._decoder_chip.text(), "ACARS · paused")
+        # (Off, as its message says: no "paused" chip left behind, W-06.)
+        self.assertTrue(win._decoder_chip.isHidden())
         panel._proto_combo.setCurrentText("RDS")
         self.assertEqual(self.decoding(), ("RDS", True))
         self.assertEqual(win._decoder_chip.text(), "RDS · 0 msgs")

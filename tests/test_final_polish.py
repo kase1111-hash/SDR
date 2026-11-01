@@ -256,7 +256,12 @@ class TestLongAndMediumWaveInKilohertz(_SignalCase):
         # (The results column is numeric, headed MHz.)
         self.assertEqual(panel._table.item(0, sp.COL_FREQ).text(), "0.660 MHz")
         panel.bookmark_selected()
-        self.assertEqual(panel._status.text(), "Bookmarked 660 kHz.")
+        # (Named as Ctrl+B names it, W-04: in kHz too.)
+        self.assertEqual(
+            panel._status.text(),
+            "Bookmarked AM Broadcast 660 kHz (AM). Rename it with F2 in the "
+            "Bookmarks tab.",
+        )
         panel.listen_selected()
         self.assertEqual(panel._status.text(), "Listening to 660 kHz (AM).")
         self.assertEqual(win._current_frequency(), 660e3)
@@ -338,6 +343,11 @@ class TestTheAppsOwnJobIsNamedNotTheDevice(_hardware_case()):
         "Decode Recording keeps this computer busy, so the ADS-B decoder "
         "misses part of the signal meanwhile."
     )
+    # (Once it is done: W-10.)
+    DONE = (
+        "Decode Recording kept this computer busy, so the ADS-B decoder "
+        "missed part of the signal meanwhile."
+    )
 
     def setUp(self):
         super().setUp()
@@ -398,8 +408,9 @@ class TestTheAppsOwnJobIsNamedNotTheDevice(_hardware_case()):
         self.assertFalse(self.win._pacer.overloaded)
         for line in lines:
             self.assertNotIn("device", line)
-        self.assertIn(self.JOB, lines)
+        self.assertIn(self.DONE, lines)
         self.assertNotIn("misses", lines[-1])
+        self.assertNotIn("missed", lines[-1])
 
     def test_without_a_job_the_device_is_still_named(self):
         self.run_frames(40)
@@ -429,6 +440,11 @@ class TestTheJobIsNamedUntilTheLoopCatchesUp(_demo_take_case()):
     JOB = (
         "Decode Recording keeps this computer busy, so the POCSAG decoder "
         "misses part of the signal meanwhile."
+    )
+    # (Once it is done: W-10.)
+    DONE = (
+        "Decode Recording kept this computer busy, so the POCSAG decoder "
+        "missed part of the signal meanwhile."
     )
 
     def setUp(self):
@@ -489,10 +505,11 @@ class TestTheJobIsNamedUntilTheLoopCatchesUp(_demo_take_case()):
                 self.run_frames(self.FRAME_S)
                 lines.append(self.line())
             where = (seconds, sorted(set(lines)))
-            self.assertIn(self.JOB, lines, where)
+            self.assertIn(self.DONE, lines, where)
             self.assertFalse([t for t in lines if "device" in t], where)
         self.run_frames(3.0)
         self.assertNotIn("misses", self.line())  # (then nothing)
+        self.assertNotIn("missed", self.line())
 
     def test_a_computer_still_too_slow_afterwards_names_the_device(self):
         """...but not for good: still too slow once the job is done, the
@@ -611,9 +628,9 @@ class TestThePresetsDecoderNoteStays(_FilesCase):
         with self.open_dialog(path):
             self.assertTrue(win._open_recording())
         text = self.message()
-        self.assertTrue(
-            text.startswith("ADS-B decoder off · APRS: listening in FM (narrow"), text
-        )
+        # (Led by the file it plays: "Playing aprs2m.sigmf-data (...) · ".)
+        self.assertTrue(text.startswith("Playing aprs2m.sigmf-data ("), text)
+        self.assertIn(" · ADS-B decoder off · APRS: listening in FM (narrow", text)
 
     def test_a_tune_that_says_nothing_else_keeps_the_note(self):
         win = self.win

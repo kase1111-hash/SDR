@@ -537,11 +537,13 @@ class TestDecoderPanelFixes(unittest.TestCase):
         self.assertEqual(tuned[-1][0], 144.39e6)
         self.assertEqual(tuned[-1][2:], ("FM", "5 kHz"))
         # Pagers use many channels; a common one (the demo's) is offered,
-        # in narrowband FM.
+        # in narrowband FM at 12.5 kHz (their FSK swings beyond 5 kHz: W-01).
         p._proto_combo.setCurrentText("POCSAG")
         self.assertEqual(p._empty.action_text(), "Tune to 152.240 MHz")
         p._empty.button.click()
-        self.assertEqual(tuned[-1], (152.24e6, "POCSAG (152.240 MHz)", "FM", "5 kHz"))
+        self.assertEqual(
+            tuned[-1], (152.24e6, "POCSAG (152.240 MHz)", "FM", "12.5 kHz")
+        )
 
     def test_hint_follows_the_receiver(self):
         self.connect_tuning()

@@ -89,7 +89,9 @@ BANDS: Tuple[Band, ...] = (
     Band("FRS/GMRS", 467.55e6, 467.725e6, "FM", "2.5 kHz", "12.5 kHz"),
     Band("ISM 868", 863.0e6, 870.0e6, _IQ, "", "500 kHz"),
     Band("ISM 915", 902.0e6, 928.0e6, _IQ, "", "2 MHz"),
-    Band("Pagers", 929.0e6, 932.0e6, "FM", "5 kHz", "25 kHz"),
+    # Pagers' FSK swings +/-4.5 kHz (POCSAG) to 4.8 kHz (FLEX): beyond what
+    # a 5 kHz deviation holds once filtered (the audio clips).
+    Band("Pagers", 929.0e6, 932.0e6, "FM", "12.5 kHz", "25 kHz"),
     Band("ADS-B", 1089.0e6, 1091.0e6, _IQ, "", "2.4 MHz"),
 )
 
@@ -259,13 +261,16 @@ def _cw_data_only(freq_hz: float) -> bool:
 
 
 def preset_listening(preset: FrequencyPreset) -> Optional[Tuple[str, str, str]]:
-    """How a built-in preset is listened to, in Mode list terms."""
+    """How a built-in preset is listened to, in Mode list terms (in FM, its
+    own deviation when it names one: pagers' 12.5 kHz)."""
     mode = str(preset.mode).strip().upper()
     width = _width_text(float(preset.bandwidth_hz))
     if mode == "WFM":
         return "FM", "75 kHz", "200 kHz"
     if mode in ("FM", "NFM"):
-        deviation = "25 kHz" if preset.bandwidth_hz >= 40e3 else "5 kHz"
+        deviation = str(getattr(preset, "fm_deviation", "") or "")
+        if not deviation:
+            deviation = "25 kHz" if preset.bandwidth_hz >= 40e3 else "5 kHz"
         return "FM", deviation, width
     if mode in ("AM", "USB", "LSB", "CW"):
         return mode, "", width

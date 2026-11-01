@@ -109,6 +109,18 @@ class TestSavedChoicesOfAnotherShape(_DamagedWindow):
         self.assertIn("unreadable saved Ham ID settings", text)
         self.assertIn("unreadable saved QRP settings", text)
 
+    def test_radio_presets_of_another_shape_are_logged(self):
+        """(Read when Tools > AM/FM Radio Tuner... first opens.)"""
+        from sdr_module.gui import main_window
+
+        if not main_window.HAS_HAM_RADIO:
+            self.skipTest("ham radio panels not installed")
+        win = self.window(ham__radio_presets="[1, 2]")
+        with self.assertLogs("sdr_module.gui.main_window", "WARNING") as logs:
+            win._show_radio_tuner()
+        self.assertIn("unreadable saved radio presets", "\n".join(logs.output))
+        win._radio_tuner.close()
+
 
 if __name__ == "__main__":
     unittest.main()

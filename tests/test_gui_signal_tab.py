@@ -182,11 +182,21 @@ class TestIdentify(_SignalCase):
         self.assertEqual(ident.kind, "ook")
         self.assertIsNotNone(ident.pulses)
         self.assertIn("{25}a1c5e38", self.panel.pulses_label.text())
+        # PLOTS-E2E-8: the bits come first (what it sent; the card is
+        # taller than the page at 1366x768), and Copy sits by Apply Mode,
+        # in view whatever the card's length, and says it copied.
+        self.assertTrue(self.panel.pulses_label.text().startswith("Bits: {25}a1c5e38"))
         self.assertTrue(self.panel.copy_pulses_btn.isVisible())
+        self.assertFalse(self.panel._card.isAncestorOf(self.panel.copy_pulses_btn))
+        copy, apply = self.panel.copy_pulses_btn, self.panel.apply_btn
+        self.assertLessEqual(
+            abs(copy.geometry().center().y() - apply.geometry().center().y()), 2
+        )
         self.panel.copy_pulses_btn.click()
         text = QApplication.clipboard().text()
         self.assertIn("Guessing modulation: Pulse width modulation", text)
         self.assertIn("-X 'n=name,m=OOK_PWM", text)
+        self.assertIn("Copied the pulse analysis", self.win._message_label.text())
         # The long card scrolls in its page; it doesn't make the other pages
         # taller than the column (their buttons fell out of view at 768 px).
         self.assertIs(self.panel.tabs.widget(0), self.panel.identify_area)
@@ -250,10 +260,75 @@ class TestIdentify(_SignalCase):
         self.assertIn("Stopped", self.panel.identify_status.text())
         self.assertTrue(self.panel.identify_btn.isEnabled())
 
+    def test_a_capture_never_spans_samples_the_receiver_dropped(self):
+        """PLOTS-E2E-2: on the ISM 433 preset (I/Q, 500 kHz) Identify said
+        'Short pulses' for the remote on a busy computer: the demo skipped
+        ahead after a stall and the capture spanned the gap, cutting the
+        packets. After samples are dropped the capture starts afresh: the
+        first take is half a second of signal from after the gap."""
+        from sdr_module.dsp.signal_id import SignalIdentifier
+
+        self.listen(433.92e6, ("None (I/Q)", None, "500 kHz"))
+        takes = []
+        real_take = SignalIdentifier.take
+
+        def take(ident):
+            capture = real_take(ident)
+            takes.append((ident.received, len(capture)))
+            return capture
+
+        dev = self.win._device
+        rate = self.win._device_sample_rate()
+        with mock.patch.object(SignalIdentifier, "take", take):
+            self.assertTrue(self.tools.identify())
+            ident = self.tools._identifier
+            self.frames(0.3)
+            # The window fell behind: the demo skips 0.3 s and counts it.
+            dev._stream_pos += int(0.3 * rate)
+            dev.dropped_samples += int(0.3 * rate)
+            before = ident.received  # (all before the gap)
+            result = self.identified()
+        received, length = takes[0]
+        self.assertGreaterEqual(received - before, 0.5 * ident.rate - 1)
+        self.assertLessEqual(length, received - before)
+        self.assertEqual(result.kind, "ook", result.summary())
+
+    def test_gives_up_when_the_receiver_keeps_dropping_samples(self):
+        """No unbroken half second to judge for a long while (a computer
+        that can't keep up): it says so instead of listening forever."""
+        from sdr_module.dsp.signal_id import WAIT_S
+
+        self.listen(433.92e6, ("None (I/Q)", None, "500 kHz"))
+        self.assertTrue(self.tools.identify())
+        dev = self.win._device
+        rate = self.win._device_sample_rate()
+        for _ in range(int(WAIT_S / 0.4) + 1):
+            # One block a frame, the demo skipping 0.4 s ahead each time.
+            dev._stream_pos += int(0.4 * rate)
+            dev.dropped_samples += int(0.4 * rate)
+            self.win._pacer.reset()
+            self.win._process_block(dev.read_samples(2048))
+        self.assertIsNone(self.tools._identifier)
+        self.assertTrue(self.panel.identify_btn.isEnabled())
+        self.assertIn("dropping samples", self.panel.identify_status.text())
+
+    def test_mode_s_in_fm_with_a_wide_filter(self):
+        """PLOTS-E2E-4: at 1090 MHz in FM with a 100 kHz filter the capture
+        was 400 kHz wide (each reply one burst): 'Unknown signal' after
+        4.4 s of work, now and then. It is analysed 2 MHz wide."""
+        self.listen(1090e6, ("FM", "25 kHz", "100 kHz"))
+        self.assertTrue(self.tools.identify())
+        self.assertGreaterEqual(self.tools._identifier.analysis_hz, 2e6)
+        ident = self.identified()
+        self.assertEqual(ident.label, "Mode S / ADS-B replies", ident.summary())
+
 
 class TestSignalsInView(_SignalCase):
     def setUp(self):
         super().setUp()
+        # The same noise every run: what is listed depends on the frames
+        # alone (it is measured every LIST_FRAMES frames, not by the clock).
+        self.win._device._rng = np.random.default_rng(1)
         self.listen(100.3e6, ("FM", "75 kHz", "200 kHz"))
         self.win._show_signal_page("signals")
         self.frames(1.2)
@@ -494,6 +569,151 @@ class TestBursts(_SignalCase):
         # Newest first, as they ended.
         starts = [r.burst.start_s for r in reports]
         self.assertEqual(starts, sorted(starts, reverse=True))
+
+    def test_the_list_keeps_no_samples(self):
+        """ROB-03: each listed burst kept its channel's samples (up to 1 s,
+        a few MB each): 500 of them held about 300 MB. The list keeps what
+        was learned (the analysis), not the samples."""
+        self.listen(433.92e6, ("None (I/Q)", None, None))
+        self.win._show_signal_page("bursts")
+        self.frames(3.4)
+        self.bursts_done()
+        reports = [r for _stamp, r in self.panel.bursts()]
+        self.assertTrue(reports)
+        self.assertTrue(any(r.analysis is not None for r in reports))
+        self.assertEqual([r.samples for r in reports], [None] * len(reports))
+
+    def test_broadcast_fm_lists_no_bursts(self):
+        """ROB-03: on the first-launch tuning (100.1 MHz) the broadcast
+        stations' sidebands were listed as 'bursts', four a second."""
+        self.listen(100.1e6, ("FM", "75 kHz", "200 kHz"))
+        self.win._device._rng = np.random.default_rng(3)  # (the same noise)
+        self.win._show_signal_page("bursts")
+        self.frames(8.0)
+        self.bursts_done()
+        listed = [r.burst.center_hz for _s, r in self.panel.bursts()]
+        for station in (99.5e6, 100.1e6, 101.1e6):
+            self.assertFalse(
+                [f for f in listed if abs(f - station) < 150e3], (station, listed)
+            )
+
+    def overloaded_frames(self, seconds):
+        """Frames as a computer that can't keep up runs them: one block."""
+        for _ in range(int(seconds / FRAME_S)):
+            self.win._pacer.reset()
+            self.win._pacer.overloaded = True
+            self.win._process_block(self.win._device.read_samples(2048))
+
+    def test_paused_while_the_display_loop_is_behind(self):
+        """ROB-03: while the window can't keep up, each frame reads one block
+        (a few per cent of the signal): bursts came out cut up or as
+        stations' sidebands, and the worker taking them apart competed
+        with the display loop when it could least afford it. Watching
+        pauses (the empty list says why) and goes on once it keeps up."""
+        from sdr_module.gui import signal_tools
+        from sdr_module.gui.signal_panel import BURSTS_EMPTY
+
+        self.listen(100.1e6, ("FM", "75 kHz", "200 kHz"))
+        self.win._show_signal_page("bursts")
+        watcher = self.tools._watcher
+        with mock.patch.object(watcher, "feed", wraps=watcher.feed) as fed:
+            self.overloaded_frames(2.0)
+            fed.assert_not_called()
+            self.assertIn("can't keep up", self.panel.bursts_empty.text())
+            self.assertTrue(self.panel.bursts_empty.is_visible())
+            self.frames(0.5)
+            fed.assert_called()
+        self.assertEqual(self.panel.bursts_empty.text(), BURSTS_EMPTY)
+        # A burst in progress when it falls behind is listed, not analysed.
+        self.listen(433.92e6, ("None (I/Q)", None, None))
+        self.assertTrue(self.frames(5.0, until=lambda: bool(watcher.detector.active)))
+        self.bursts_done()
+        before = len(self.panel.bursts())
+        analyze = mock.Mock(side_effect=signal_tools.analyze_report)
+        with mock.patch.object(signal_tools, "analyze_report", analyze):
+            self.overloaded_frames(1.0)
+            self.bursts_done()
+        analyze.assert_not_called()
+        new = [r for _s, r in self.panel.bursts()][: len(self.panel.bursts()) - before]
+        self.assertTrue(new)
+        self.assertTrue(all(r.analysis is None for r in new))
+
+    def test_the_worker_keeps_to_its_share_of_the_time(self):
+        """A busy band can't keep the bursts worker busy all the time: over
+        :data:`ANALYSIS_SHARE` of the last few seconds, the next bursts are
+        listed without their analysis."""
+        from sdr_module.dsp.bursts import Burst, BurstReport
+        from sdr_module.gui import signal_tools
+
+        tools = self.tools
+        tools._watcher.time_s = 100.0
+        window = signal_tools._ANALYSIS_WINDOW_S
+        tools._analysis_cost.extend(
+            [(99.0, 0.6 * signal_tools.ANALYSIS_SHARE * window)] * 2
+        )
+        self.assertFalse(tools._may_analyze())
+        tools._watcher.time_s = 99.0 + window + 0.1  # those are old now
+        self.assertTrue(tools._may_analyze())
+        report = BurstReport(
+            Burst(1.0, 1.1, 433.92e6, 10e3, -40.0, 30.0),
+            samples=np.zeros(4096, np.complex64),
+            sample_rate=300e3,
+        )
+        tools._analysis_cost.extend([(tools._watcher.time_s, 10.0)])
+        tools._queue_bursts([report])
+        self.bursts_done()
+        self.assertEqual([r for _s, r in self.panel.bursts()], [report])
+        self.assertIsNone(report.analysis)
+        self.assertIsNone(report.samples)
+
+    def test_closing_with_a_burst_in_progress_closes_the_device(self):
+        """ROB-04: closing the window while a burst was in progress raised
+        'cannot schedule new futures after shutdown' (stopping the
+        receiver handed the burst to the closed worker), so the device was
+        never closed (a HackRF's bias tee stayed on), nor the temporary
+        recording file and the FFT helper."""
+        self.listen(433.92e6, ("None (I/Q)", None, None))
+        self.win._show_signal_page("bursts")
+        self.assertTrue(
+            self.frames(5.0, until=lambda: bool(self.tools._watcher.detector.active))
+        )
+        device = self.win._device
+        spectrum = self.win._frame_spectrum
+        buffer = self.win._samples_buffer
+        with (
+            mock.patch.object(device, "close", wraps=device.close) as close,
+            mock.patch.object(
+                spectrum, "close", wraps=spectrum.close
+            ) as spectrum_close,
+            mock.patch.object(buffer, "discard", wraps=buffer.discard) as discard,
+            self.assertNoLogs("sdr_module", level="ERROR"),
+        ):
+            self.win.close()
+        close.assert_called_once_with()
+        spectrum_close.assert_called_once_with()
+        discard.assert_called_once_with()
+        self.assertIsNone(self.win._device)
+
+    def test_closing_still_closes_the_device_when_a_step_fails(self):
+        """Closing goes on past a step that fails (it is logged): the device
+        is closed whatever happened before."""
+        self.listen(433.92e6, ("None (I/Q)", None, None))
+        device = self.win._device
+        spectrum = self.win._frame_spectrum
+        with (
+            mock.patch.object(
+                self.win, "_stop_acquisition", side_effect=RuntimeError("boom")
+            ),
+            mock.patch.object(device, "close", wraps=device.close) as close,
+            mock.patch.object(
+                spectrum, "close", wraps=spectrum.close
+            ) as spectrum_close,
+            self.assertLogs("sdr_module.gui.main_window", level="ERROR") as logs,
+        ):
+            self.win.close()
+        close.assert_called_once_with()
+        spectrum_close.assert_called_once_with()
+        self.assertIn("boom", "\n".join(logs.output))
 
 
 class TestTrackSignal(_SignalCase):

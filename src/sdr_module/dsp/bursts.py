@@ -11,7 +11,10 @@ does.
   station that never stops becomes part of it); bins clearly above it
   (10 dB by default, over a few neighbouring bins), grouped into signals
   and followed from row to row. A burst ends when it has been gone for a
-  couple of rows. No warm-up, no flood of noise "bursts".
+  couple of rows. No warm-up, no flood of noise "bursts", and none where
+  the floor itself stands above the noise in a channel that never falls
+  quiet (an occupied channel: a station's modulation coming and going, or
+  a beacon's keying, is not a transmission there).
 * :func:`analyze_pulses` takes the I/Q of one burst's channel and measures
   its pulses and gaps, guesses the modulation (pulse width, pulse position,
   PCM / NRZ, Manchester, FSK) and slices the bits, row by row, in hex.
@@ -98,9 +101,44 @@ class BurstDetector:
         absorb_db_per_s: How fast the floor rises under a burst: a signal
             that stays on (a station) becomes the floor, a 30 dB one after
             about 20 s at 1 dB/s.
-        max_duration_s: A burst still on after this long is reported (and
-            a new one starts) so the activity list doesn't wait forever.
+        max_duration_s: A burst still on after this long is reported, so
+            the activity list doesn't wait forever (where its channel never
+            fell quiet, what follows is a station's, not a new burst).
+        occupied_db: No burst starts where the floor stands this far above
+            the noise around a station that never stops (or in the next
+            bin), nor a weak one whose energy runs into such a place (0:
+            anywhere): that channel is always occupied (a broadcast
+            station), and its modulation rising and falling there is not a
+            transmission. Nor where a channel has not fallen quiet for
+            :attr:`ALWAYS_S` and its floor stands half that far above the
+            noise (a beacon keying away). A transmission that comes and
+            goes (a remote, a repeater between overs) falls back to the
+            noise between its bursts, even where the floor still stands
+            above it for a while (it rises under them). One standing
+            :attr:`OVER_STATION_DB` past the burst threshold above the
+            station's floor, outside the bins the station never leaves, is
+            a burst all the same (a remote over a steady carrier, a call
+            beside one).
     """
+
+    #: Rows between two measurements of the noise under the floor.
+    OCCUPANCY_EVERY = 8
+    #: Seconds a channel must fall quiet (back near the noise) to count as
+    #: free again: longer than the gaps of Morse keying at 12 WPM or more
+    #: (a word's 7 dits), shorter than a repeater's pause between overs.
+    REST_S = 0.75
+    #: Seconds a channel goes on without falling quiet (for
+    #: :attr:`REST_S`) before it counts as a station with its floor only
+    #: half :attr:`occupied_db` up: Morse code never pauses that long, and
+    #: a beacon keying away raises its floor only a few dB.
+    ALWAYS_S = 10.0
+    #: dB past ``snr_db`` a signal must stand above an occupied channel's
+    #: floor (its highest where the station never stops), outside the bins
+    #: the station never leaves, to be a burst over it or beside it: a
+    #: station's own modulation stays in those bins (the demo's broadcast
+    #: stations) or well under that; a remote's packet over a steady
+    #: carrier (a spur), or a call beside one, stands far above it.
+    OVER_STATION_DB = 10.0
 
     def __init__(
         self,
@@ -113,6 +151,7 @@ class BurstDetector:
         slow_s: float = 4.0,
         max_duration_s: float = 30.0,
         absorb_db_per_s: float = 1.0,
+        occupied_db: float = 4.5,
     ):
         self.snr_db = float(snr_db)
         self.min_width_hz = float(min_width_hz)
@@ -123,6 +162,7 @@ class BurstDetector:
         self.slow_s = float(slow_s)
         self.max_duration_s = float(max_duration_s)
         self.absorb_db_per_s = float(absorb_db_per_s)
+        self.occupied_db = float(occupied_db)
         #: Signals that start in the same row this close are one burst.
         self.pair_hz = 60e3
         self._floor: Optional[np.ndarray] = None  # linear, per bin
@@ -131,6 +171,18 @@ class BurstDetector:
         self._key: Optional[Tuple[int, float, float]] = None
         self.active: List[Burst] = []
         self._next_id = 1
+        # Per bin: when its level last stood ``occupied_db`` over the noise,
+        # and when it had last been quiet for REST_S (a station that never
+        # stops never is; a repeater between its overs is); and when the
+        # floor was taken (no channel has been on for longer, as far as
+        # anyone knows).
+        self._last_on: Optional[np.ndarray] = None
+        self._rested_at: Optional[np.ndarray] = None
+        self._floor_t = 0.0
+        # The noise under the floor (linear, per bin), and the row it was
+        # measured at.
+        self._noise: Optional[np.ndarray] = None
+        self._noise_at = 0
 
     def reset(self) -> None:
         """Forget the floor and the bursts in progress (a retune)."""
@@ -139,6 +191,9 @@ class BurstDetector:
         self._last_t = None
         self._key = None
         self.active = []
+        self._last_on = None
+        self._rested_at = None
+        self._noise = None
 
     @property
     def settled(self) -> bool:
@@ -180,8 +235,12 @@ class BurstDetector:
             # The first row is the floor (averaged over a few bins): what is
             # on now, stations included, is not a burst.
             self._floor = _local_mean(lin, 5)
+            self._last_on = np.full(n, float(t))
+            self._rested_at = np.full(n, -np.inf)
+            self._floor_t = float(t)
             self._rows = 1
             self._last_t = t
+            self._noise = None
             return ended
         dt = 1.0 / 30.0 if self._last_t is None else max(1e-3, t - self._last_t)
         self._last_t = t
@@ -192,7 +251,9 @@ class BurstDetector:
         ratio = smooth / np.maximum(self._floor, 1e-30)
         above = ratio > 10.0 ** (self.snr_db / 10.0)
         regions = _regions(above, max(1, int(round(self.merge_hz / bin_hz))))
-        found: List[Tuple[float, float, float, float, float, float]] = []
+        occupied = self._occupancy() if regions else None
+        runs: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        found: List[Tuple[float, float, float, float, float, float, bool]] = []
         for a, b in regions:
             width = (b - a + 1) * bin_hz
             if width < self.min_width_hz or width > self.max_width_hz:
@@ -207,7 +268,27 @@ class BurstDetector:
             )
             lo = (a - n // 2 - 0.5) * bin_hz
             hi = (b - n // 2 + 0.5) * bin_hz
-            found.append((centre, lo, hi, peak, peak - floor, weight))
+            busy = False
+            if occupied is not None:
+                near, core, noise, station, own = occupied
+                if np.any(near[a : b + 1]):
+                    # An occupied channel's modulation, unless it stands far
+                    # above the station past the bins it never leaves: a
+                    # transmission over it or beside it (a remote's packet
+                    # over a steady carrier, a call next to one).
+                    past = seg[~own[a : b + 1]]
+                    busy = not len(past) or float(np.max(past)) < float(
+                        np.max(station[a : b + 1])
+                    ) * 10.0 ** ((self.snr_db + self.OVER_STATION_DB) / 10.0)
+                elif peak - floor < self.snr_db + 6.0:
+                    # Weak, and its energy runs (never within 6 dB of the
+                    # noise) into an occupied channel: that station's
+                    # modulation reaching out.
+                    if runs is None:
+                        runs = _joined_runs(smooth > 4.0 * noise, core)
+                    ids, joined = runs
+                    busy = bool(np.any(np.isin(ids[a : b + 1], joined)))
+            found.append((centre, lo, hi, peak, peak - floor, weight, busy))
         ended += self._track(found, center_hz, t, dt)
         # The floor follows the mean level of the bins around (both ways:
         # following the noise's dips only would sink it into the noise),
@@ -232,19 +313,105 @@ class BurstDetector:
             floor[busy] = np.maximum(
                 floor[busy], np.minimum(level[busy], floor[busy] * step)
             )
+        self._note_rest(level, t)
         return ended
+
+    def _note_rest(self, level: np.ndarray, t: float) -> None:
+        """Note the bins whose level stands :attr:`occupied_db` over the
+        noise in this row, and those that have been quiet for
+        :attr:`REST_S` (with the noise last measured; none before)."""
+        noise, on_at, rested = self._noise, self._last_on, self._rested_at
+        if noise is None or on_at is None or rested is None:
+            return
+        if not len(noise) == len(on_at) == len(level):
+            return
+        on_at[level > noise * 10.0 ** (self.occupied_db / 10.0)] = t
+        rested[t - on_at >= self.REST_S] = t
+
+    def _occupancy(
+        self,
+    ) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
+        """``(near, occupied, noise, station, own)``: the bins of a
+        station that never stops (where the floor stands
+        :attr:`occupied_db` above the noise under it, around a bin that
+        hasn't been quiet for :attr:`REST_S` lately; or half that far,
+        around one not quiet for :attr:`ALWAYS_S`), those with the next bin
+        either side, the noise (linear) per bin, each station's floor
+        (linear) at its highest in the bins it never leaves, over its near
+        bins (0 elsewhere), and those bins with the next either side; None
+        when that is off. A repeater's channel between its overs keeps a
+        raised floor for a while (it rises under their bursts) but falls
+        quiet: not occupied, nor the station's where it runs into one. The
+        noise is measured every :attr:`OCCUPANCY_EVERY` rows (the floor
+        moves slowly)."""
+        floor = self._floor
+        if floor is None or self.occupied_db <= 0:
+            return None
+        from .signal_list import DC_GUARD_BINS, local_floor_db
+
+        if (
+            self._noise is None
+            or len(self._noise) != len(floor)
+            or self._rows - self._noise_at >= self.OCCUPANCY_EVERY
+        ):
+            floor_db = 10.0 * np.log10(np.maximum(floor, 1e-30))
+            self._noise = _db_to_lin(local_floor_db(floor_db))
+            self._noise_at = self._rows
+        noise = self._noise
+        busy = floor > noise * 10.0 ** (self.occupied_db / 10.0)
+        core = busy
+        rested, now = self._rested_at, self._last_t
+        if rested is not None and len(rested) == len(busy) and now is not None:
+            # A raised floor counts around a channel on lately (a repeater's
+            # falls quiet between its overs; one on when the floor was taken
+            # counts as on); one raised half as far around a channel seen
+            # never quiet for a long while (a beacon keying away).
+            since = now - rested
+            always = now - np.maximum(rested, self._floor_t) > self.ALWAYS_S
+            always &= floor > noise * 10.0 ** (0.5 * self.occupied_db / 10.0)
+            core = (busy & (since > self.REST_S)) | always
+            busy = busy | always
+        n = len(busy)
+        # (Most receivers' DC spike sits at the centre: not a station.)
+        dc = slice(max(0, n // 2 - DC_GUARD_BINS), n // 2 + DC_GUARD_BINS + 1)
+        busy[dc] = False
+        core[dc] = False
+        ids, joined = _joined_runs(busy, core)
+        busy = np.isin(ids, joined)
+        # (A station's modulation reaching past its edge starts there.)
+        near = busy.copy()
+        near[1:] |= busy[:-1]
+        near[:-1] |= busy[1:]
+        # (Each station's floor at its highest where it never stops, over
+        # its near bins; and those bins, with the next either side.)
+        station = np.zeros(n)
+        own = core.copy()
+        if len(joined):
+            run = ids[busy]
+            firsts = np.flatnonzero(np.diff(run, prepend=-1))
+            held = np.where(core[busy], floor[busy], 0.0)
+            top = np.maximum.reduceat(held, firsts)
+            station[busy] = np.repeat(top, np.diff(np.append(firsts, len(run))))
+            station[1:] = np.maximum(station[1:], station[:-1] * busy[:-1])
+            station[:-1] = np.maximum(station[:-1], station[1:] * busy[1:])
+            own[1:] |= core[:-1]
+            own[:-1] |= core[1:]
+        return near, busy, noise, station, own
 
     def _track(
         self,
-        found: Sequence[Tuple[float, float, float, float, float, float]],
+        found: Sequence[Tuple[float, float, float, float, float, float, bool]],
         center_hz: float,
         t: float,
         dt: float,
     ) -> List[Burst]:
         seen = set()
-        for centre, lo, hi, peak, snr, weight in found:
+        fresh = set()  # the bursts this row starts
+        for centre, lo, hi, peak, snr, weight, occupied in found:
             match = None
             for burst in self.active:
+                if occupied and id(burst) in fresh:
+                    continue  # (a fresh burst doesn't reach into a station)
                 if (
                     lo <= burst.hi_hz + self.merge_hz
                     and hi >= burst.lo_hz - self.merge_hz
@@ -262,6 +429,8 @@ class BurstDetector:
                     match = burst
                     break
             if match is None:
+                if occupied:
+                    continue  # an occupied channel's modulation, not a burst
                 match = Burst(
                     start_s=t - dt,
                     end_s=t,
@@ -277,6 +446,7 @@ class BurstDetector:
                 )
                 self._next_id += 1
                 self.active.append(match)
+                fresh.add(id(match))
             match.rows += 1
             match.end_s = t
             match._missing = 0
@@ -329,6 +499,16 @@ def _regions(mask: np.ndarray, merge_bins: int) -> List[Tuple[int, int]]:
     firsts = np.concatenate(([idx[0]], idx[breaks + 1]))
     lasts = np.concatenate((idx[breaks], [idx[-1]]))
     return list(zip(firsts.tolist(), lasts.tolist(), strict=True))
+
+
+def _joined_runs(mask: np.ndarray, core: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """``(ids, joined)``: each bin's run of ``mask`` (0 outside it) and the
+    runs that contain a ``core`` bin."""
+    starts = mask.copy()
+    starts[1:] &= ~mask[:-1]
+    ids = np.cumsum(starts) * mask
+    joined = np.unique(ids[core & mask])
+    return ids, joined[joined > 0]
 
 
 def frame_rows(
@@ -903,7 +1083,8 @@ class BurstReport:
     burst: Burst
     analysis: Optional[PulseAnalysis] = None
     classification: Any = None
-    #: The burst's channel I/Q (kept for the details card; may be empty).
+    #: The burst's channel I/Q, for :func:`analyze_report` (may be empty;
+    #: up to a few MB: a list of bursts keeps what was learned instead).
     samples: Optional[np.ndarray] = None
     sample_rate: float = 0.0
 

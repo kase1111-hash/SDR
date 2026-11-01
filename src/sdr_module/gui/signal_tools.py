@@ -12,10 +12,10 @@ screen or asked for:
   tuned frequency (longer for a signal that comes and goes, up to 4 s) and
   classifies it in a worker thread; **Apply Mode** sets Mode, deviation and
   Bandwidth and centres the tuned frequency on the signal.
-* **Signals in view**: the spectrum averaged over half a second, its
-  signals listed (and marked on the spectrum when asked); Home, Page Up
-  and Page Down (plots focused) tune to the strongest, the next one up
-  and the next one down.
+* **Signals in view**: the spectrum averaged over :data:`LIST_FRAMES`
+  frames (half a second), its signals listed (and marked on the spectrum
+  when asked); Home, Page Up and Page Down (plots focused) tune to the
+  strongest, the next one up and the next one down.
 * **Scope**: the tuned channel, only while the Scope page is on screen.
 * **Bursts**: :class:`~sdr_module.dsp.bursts.BurstWatcher` over the span,
   while the Bursts page is on screen (or always, when asked).
@@ -30,11 +30,12 @@ screen or asked for:
 
 from __future__ import annotations
 
+import bisect
 import logging
 import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Any, Deque, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -47,6 +48,7 @@ from ..dsp.signal_id import (
     analysis_band,
     better,
     identify,
+    takes_needed,
 )
 from ..dsp.signal_list import SignalPeak, SignalSurvey, find_signals
 
@@ -60,13 +62,26 @@ except ImportError:  # pragma: no cover - the GUI needs PyQt6
 
 logger = logging.getLogger(__name__)
 
-#: How often the signals list is refreshed (s), and how long a signal no
-#: longer heard stays listed.
-LIST_EVERY_S = 0.5
+#: The display frames each refresh of the signals list is measured from
+#: (their mean spectrum). One frame shows a wide FM station only where its
+#: modulation was at that instant, a narrow peak off its centre: a list
+#: from a few frames held such pieces, and the keys tuned to them.
+LIST_FRAMES = 15
+#: How often the signals list is refreshed (s, at the display's 30 frames
+#: a second), and how long a signal no longer heard stays listed.
+LIST_EVERY_S = LIST_FRAMES / 30.0
 FORGET_S = 10.0
 #: Bursts waiting for their analysis (a busy band): beyond this many, a
 #: burst is listed without one rather than late.
 MAX_PENDING_BURSTS = 8
+#: The Bursts list keeps this many (the newest).
+MAX_LISTED_BURSTS = 500
+#: The most of the receiver's time the bursts worker may spend taking
+#: bursts apart (over the last few seconds of signal): beyond it, and while
+#: the display loop can't keep up, a burst is listed without its analysis,
+#: so the worker never starves the plots and the audio.
+ANALYSIS_SHARE = 0.25
+_ANALYSIS_WINDOW_S = 4.0
 #: Broadcast FM: wide deviations Track Signal leaves alone.
 _BROADCAST_DEVIATION_HZ = 50e3
 
@@ -101,15 +116,25 @@ if HAS_PYQT6:
             self._ident_reach = 0.0
             self._ident_band: Tuple[float, float] = (0.0, 0.0)
             self._ident_takes = 0
+            self._ident_kinds: List[str] = []  # what each take found
+            self._ident_lost_s = 0.0  # signal dropped while listening
+            # The device and its count of dropped samples at the last frame:
+            # a capture must not span samples lost in between.
+            self._drops: Optional[Tuple[int, int]] = None
             # Signals in view.
             self._acc: Optional[np.ndarray] = None
             self._acc_frames = 0
             self._acc_key: Optional[Tuple[int, float, float]] = None
-            self._list_due = 0.0
             self._heard: List[Tuple[SignalPeak, float]] = []
             self._markers = False
             self._listing_until = 0.0
-            self._listed_at = -1e9  # when the list was last measured
+            # Whether the list is kept up to date (measured, and every frame
+            # since; not while off screen or stopped), and the last mean
+            # spectrum it was measured from, with its span and time.
+            self._list_current = False
+            self._last_mean: Optional[
+                Tuple[Tuple[int, float, float], np.ndarray, float]
+            ] = None
             # Bursts: each finished one is taken apart off the display loop
             # (50-200 ms each), and listed in order once it is.
             self._watcher = BurstWatcher(defer=True)
@@ -118,6 +143,15 @@ if HAS_PYQT6:
                 max_workers=1, thread_name_prefix="bursts"
             )
             self._burst_jobs: Deque[Tuple[Future, BurstReport, float]] = deque()
+            # (signal time, seconds) of the analyses done lately.
+            self._analysis_cost: Deque[Tuple[float, float]] = deque()
+            self._bursts_paused = False  # (the display loop is behind)
+            # Each listed burst's time on the waterfall's clock and its
+            # frequencies (the selected one is outlined there), from the
+            # watcher's time and the waterfall's at the end of each frame.
+            self._burst_spans: Dict[int, Tuple[float, float, float, float]] = {}
+            self._frame_times: Deque[Tuple[float, float]] = deque(maxlen=4096)
+            self._bursts_shown = False  # (the Bursts page was on screen)
             self._burst_timer = QTimer(self)
             self._burst_timer.setInterval(100)
             self._burst_timer.timeout.connect(self._collect_bursts)
@@ -130,6 +164,7 @@ if HAS_PYQT6:
             self._afc_badge: Optional[QLabel] = None
             # A recording's signals (Find Signals in Recording).
             self._survey_options: Any = None
+            self._shut = False  # the window closed: nothing more to do
             self._connect()
 
         # -- wiring ------------------------------------------------------------------
@@ -141,14 +176,18 @@ if HAS_PYQT6:
             panel.tune_requested.connect(self._tune)
             panel.bookmark_requested.connect(win._bookmark_frequency)
             panel.markers_changed.connect(self.set_markers)
-            panel.min_snr_changed.connect(lambda _v: self._reset_list())
+            panel.min_snr_changed.connect(lambda _v: self._min_snr_changed())
             panel.step_requested.connect(self.step)
             panel.watch_changed.connect(self._set_watch_always)
             panel.play_requested.connect(self.play_recording_at)
             panel.live_requested.connect(self._reset_list)
             panel.page_changed.connect(lambda _p: self._page_changed())
+            panel.burst_selected.connect(self._mark_burst)
             panel.export_bursts_btn.clicked.connect(
                 lambda _c=False: self.export_bursts()
+            )
+            panel.message.connect(
+                lambda text, tone: win._show_status_message(text, tone or None, 3000)
             )
             for plot in (win._spectrum, win._waterfall):
                 add = getattr(plot, "add_context_action", None)
@@ -165,13 +204,17 @@ if HAS_PYQT6:
         def shutdown(self) -> None:
             """The window closes: no more work in the background, and no
             more signals from the panel (its widgets emit some while Qt
-            deletes them, when nothing of theirs may be touched)."""
+            deletes them, when nothing of theirs may be touched). A burst
+            in progress is dropped: the receiver stopping later (the
+            device closing) has nothing left to hand the closed worker."""
+            self._shut = True
             self._identifier = None
             self._tracking = False
             self._pool.shutdown(wait=False, cancel_futures=True)
             self._burst_timer.stop()
             self._burst_jobs.clear()
             self._burst_pool.shutdown(wait=False, cancel_futures=True)
+            self._watcher.reset()
             for obj in [self.panel, *self.panel.findChildren(QObject)]:
                 obj.blockSignals(True)
 
@@ -185,6 +228,8 @@ if HAS_PYQT6:
             chain: Any,
         ) -> None:
             """One block of the receiver (from the window's display loop)."""
+            if self._shut:
+                return
             now = time.monotonic()
             dt = 1.0 / 30.0
             rate = float(self._win._device_sample_rate())
@@ -192,7 +237,7 @@ if HAS_PYQT6:
                 dt = len(samples) / rate
             self._last_frame_t = now
             try:
-                self._identify_frame(samples)
+                self._identify_frame(samples, self._samples_lost(rate))
                 self._signals_frame(power, now)
                 self._scope_frame(channel, chain)
                 self._bursts_frame(samples, rate)
@@ -202,7 +247,7 @@ if HAS_PYQT6:
 
         def sync_state(self, running: bool, has_device: bool) -> None:
             """The receiver started, stopped or the device changed."""
-            if running:
+            if running or self._shut:
                 return
             if self._identifier is not None:
                 self._identifier = None
@@ -221,9 +266,7 @@ if HAS_PYQT6:
                     else "No receiver\nUse Device > Use Demo Device or "
                     "Connect... to list the signals in view."
                 )
-            self._heard = []
-            self._acc = None
-            self._listed_at = -1e9
+            self._reset_list()
             self._apply_markers([])
             if self._tracking:
                 self._set_paused_badge()
@@ -241,6 +284,8 @@ if HAS_PYQT6:
                     self._identifier.set_offset(offset)
                     self._ident_best = None
                     self._ident_takes = 0
+                    self._ident_kinds = []
+                    self._ident_lost_s = 0.0
             if self._tracker is not None:
                 self._tracker.retuned(float(self._win._vfo_offset_hz()))
                 if self._win._is_running:
@@ -273,20 +318,38 @@ if HAS_PYQT6:
             panel = win._control_panel
             mode = panel._demod_combo.currentText()
             rate = float(win._device_sample_rate())
-            width, reach = analysis_band(mode, win._channel_bandwidth(), rate)
-            self._identifier = SignalIdentifier(rate, win._vfo_offset_hz(), width)
             self._ident_freq = float(win._current_frequency())
+            width, reach = analysis_band(
+                mode, win._channel_bandwidth(), rate, self._ident_freq
+            )
+            self._identifier = SignalIdentifier(rate, win._vfo_offset_hz(), width)
             self._ident_reach = reach
             self._ident_band = self._identifier.passband_hz
             self._ident_best = None
             self._ident_takes = 0
+            self._ident_kinds = []
+            self._ident_lost_s = 0.0
             self.panel.set_identify_busy(True)
             self.panel.set_identify_status(
                 f"Listening to {_mhz(self._ident_freq)}…", None
             )
             return True
 
-        def _identify_frame(self, samples: np.ndarray) -> None:
+        def _samples_lost(self, rate: float) -> float:
+            """Seconds of signal the device dropped since the last frame (its
+            queue overflowed, or the demo skipped ahead to catch up)."""
+            device = self._win._device
+            try:
+                dropped = int(device.dropped_samples)
+            except (AttributeError, TypeError, ValueError):
+                self._drops = None
+                return 0.0
+            before, self._drops = self._drops, (id(device), dropped)
+            if before is None or before[0] != id(device) or dropped <= before[1]:
+                return 0.0
+            return (dropped - before[1]) / rate if rate > 0 else 0.0
+
+        def _identify_frame(self, samples: np.ndarray, lost_s: float = 0.0) -> None:
             ident = self._identifier
             job = self._ident_job
             if job is not None and job.done():
@@ -299,6 +362,7 @@ if HAS_PYQT6:
                 if result is not None and ident is not None:
                     if abs(result.tuned_hz - self._ident_freq) < 0.5:
                         self._ident_takes += 1
+                        self._ident_kinds.append(result.kind)
                         self._ident_best = better(self._ident_best, result)
                         self._maybe_finish()
             ident = self._identifier
@@ -306,6 +370,9 @@ if HAS_PYQT6:
                 return
             if abs(ident.offset_hz - self._win._vfo_offset_hz()) > 0.5:
                 ident.set_offset(self._win._vfo_offset_hz())
+            if lost_s > 0:
+                ident.gap()  # (no capture spans the samples lost)
+                self._ident_lost_s += lost_s
             ident.feed(samples)
             seconds = ident.seconds
             if self._ident_job is None and ident.ready():
@@ -325,16 +392,40 @@ if HAS_PYQT6:
                     + ("" if seconds < 1.0 else " (waiting for a signal)"),
                     None,
                 )
+            if (
+                self._ident_job is None
+                and seconds + self._ident_lost_s >= WAIT_S
+                and not ident.ready()
+            ):
+                # No unbroken half second to judge in all that time (the
+                # receiver keeps dropping samples): what was heard, if any.
+                self._maybe_finish(give_up=True)
 
-        def _maybe_finish(self) -> None:
+        def _maybe_finish(self, give_up: bool = False) -> None:
             best = self._ident_best
             ident = self._identifier
-            if best is None or ident is None:
+            if ident is None:
                 return
+            if best is None:
+                if give_up:
+                    self._identifier = None
+                    self.panel.set_identify_busy(False)
+                    self.panel.set_identify_status(
+                        f"Couldn't listen to {_mhz(self._ident_freq)} for half a "
+                        "second without a break: the receiver keeps dropping "
+                        "samples (this computer can't keep up). A lower sample "
+                        "rate helps.",
+                        "warning",
+                    )
+                return
+            # Steady carriers and short pulses wait for more takes that
+            # agree (keying, or the whole packet, may yet show).
+            agree = self._ident_kinds.count(best.kind)
             enough = best.is_signal and (
-                best.confidence >= 0.6 or self._ident_takes >= 3
+                (best.confidence >= 0.6 and agree >= takes_needed(best))
+                or self._ident_takes >= 3
             )
-            if not enough and ident.seconds < WAIT_S:
+            if not enough and ident.seconds < WAIT_S and not give_up:
                 return
             self._identifier = None
             self.panel.set_identify_busy(False)
@@ -349,6 +440,17 @@ if HAS_PYQT6:
                 )
                 self._win._show_status_message(
                     f"{_mhz(best.tuned_hz)}: {best.summary()}", "info", 5000
+                )
+            elif self._ident_lost_s >= 0.5:
+                # (What it missed may have held the signal: say so, rather
+                # than that nothing is there.)
+                self.panel.set_identify_status(
+                    f"Nothing identifiable at {_mhz(best.tuned_hz)} in "
+                    f"{WAIT_S:.0f} s ({stamp}), but the receiver dropped "
+                    f"{self._ident_lost_s:.1f} s of the signal meanwhile (this "
+                    "computer can't keep up). Try again; a lower sample rate "
+                    "helps.",
+                    "warning",
                 )
             else:
                 self.panel.set_identify_status(
@@ -419,11 +521,26 @@ if HAS_PYQT6:
         def _reset_list(self) -> None:
             self._acc = None
             self._acc_frames = 0
-            self._list_due = 0.0
             self._heard = []
+            self._list_current = False
+            self._last_mean = None
+
+        @staticmethod
+        def _in_view(freq_hz: float, lo_hz: float, rate: float) -> bool:
+            """Whether a list of the span ``rate`` wide around ``lo_hz``
+            covers ``freq_hz`` (its edges are left out of the list)."""
+            return abs(freq_hz - lo_hz) <= 0.45 * rate
 
         def _signals_frame(self, power: np.ndarray, now: float) -> None:
-            if not self._signals_active() or power is None or not len(power):
+            if not self._signals_active():
+                # Frames go by unmeasured: the list is not kept up to date,
+                # and its next mean starts afresh (not with frames from
+                # before).
+                self._list_current = False
+                self._acc = None
+                self._acc_frames = 0
+                return
+            if power is None or not len(power):
                 return
             win = self._win
             key = (
@@ -432,34 +549,66 @@ if HAS_PYQT6:
                 float(win._device_sample_rate()),
             )
             if key != self._acc_key:
+                # A new span: measured afresh. What was heard where it still
+                # shows stays listed meanwhile (the keys step on across the
+                # retune a step to a signal near the edge makes).
+                kept = [
+                    (s, t)
+                    for s, t in self._heard
+                    if self._in_view(s.frequency_hz, key[1], key[2])
+                ]
+                current = self._list_current and self._acc_key is not None
                 self._acc_key = key
                 self._reset_list()
+                if current and kept:
+                    self._heard = kept
+                    self._list_current = True
             lin = np.power(10.0, np.asarray(power, dtype=np.float64) / 10.0)
             if self._acc is None:
                 self._acc = lin
             else:
                 self._acc = self._acc + lin
             self._acc_frames += 1
-            if now < self._list_due:
+            if self._acc_frames < LIST_FRAMES:
                 return
-            self._list_due = now + LIST_EVERY_S
             avg_db = 10.0 * np.log10(np.maximum(self._acc / self._acc_frames, 1e-30))
             self._acc = None
             self._acc_frames = 0
             found = find_signals(
                 avg_db, key[1], key[2], float(self.panel.min_snr.value())
             )
-            self._listed_at = now
+            self._last_mean = (key, avg_db, now)
+            self._list_current = True
             self._remember(found, now)
-            current = [s for s, t in self._heard if t >= now - 0.01]
-            if not self.panel.showing_recording():
+            self._show_list(now, now)
+
+        def _show_list(self, now: float, heard_at: float) -> None:
+            """The list on the Signals page, and the markers of the signals
+            heard at ``heard_at`` (the last measurement) on the spectrum."""
+            live = not self.panel.showing_recording()
+            if live:
                 self.panel.set_signals(
                     [s for s, _t in self._heard],
-                    float(win._current_frequency()),
+                    float(self._win._current_frequency()),
                     [now - t for _s, t in self._heard],
                 )
-            live = not self.panel.showing_recording()
+            current = [s for s, t in self._heard if t >= heard_at - 0.01]
             self._apply_markers(current if self._markers and live else [])
+
+        def _min_snr_changed(self) -> None:
+            """List again at the new threshold, at once, from the mean the
+            list was last measured from: what was heard only at the old one
+            goes (a fresh, short mean listed pieces of stations)."""
+            last = self._last_mean
+            if last is None or last[0] != self._acc_key:
+                self._reset_list()
+                return
+            key, mean_db, when = last
+            found = find_signals(
+                mean_db, key[1], key[2], float(self.panel.min_snr.value())
+            )
+            self._heard = [(s, when) for s in found]
+            self._show_list(time.monotonic(), when)
 
         def _remember(self, found: List[SignalPeak], now: float) -> None:
             """Merge a fresh list into the signals heard lately (a signal
@@ -483,8 +632,6 @@ if HAS_PYQT6:
             self._markers = bool(on)
             if not on:
                 self._apply_markers([])
-            else:
-                self._list_due = 0.0
 
         def _apply_markers(self, signals: List[SignalPeak]) -> None:
             set_markers = getattr(self._win._spectrum, "set_markers", None)
@@ -508,21 +655,25 @@ if HAS_PYQT6:
             # (Pressing the keys keeps the list measured off the page.)
             self._ensure_listing()
             key = self._acc_key
-            here = (float(win._lo_frequency()), float(win._device_sample_rate()))
+            lo, rate = float(win._lo_frequency()), float(win._device_sample_rate())
+            # What was heard in the span shown now (a step to a signal near
+            # the edge retunes: the signals heard that the span still shows
+            # are stepped to while it is measured).
+            signals = [
+                s for s, _t in self._heard if self._in_view(s.frequency_hz, lo, rate)
+            ]
             if (
                 key is None
-                or (key[1], key[2]) != here
-                or time.monotonic() - self._listed_at > 3.0 * LIST_EVERY_S
+                or not self._list_current
+                or ((key[1], key[2]) != (lo, rate) and not signals)
             ):
-                # Not measured lately in this span (the page wasn't open,
-                # or it was long ago, elsewhere): measure now.
-                self._list_due = 0.0
+                # Not measured (the list wasn't kept up to date off screen,
+                # or it was of another span): measure now.
                 win._show_status_message(
                     "Looking for signals… press it again in a moment.", None, 3000
                 )
                 return False
             tuned = float(win._current_frequency())
-            signals = [s for s, _t in self._heard]
             target: Optional[SignalPeak] = None
             if direction == "strongest":
                 if not signals:
@@ -560,8 +711,7 @@ if HAS_PYQT6:
             return bool(self._win.set_frequency(float(freq)))
 
         def _page_changed(self) -> None:
-            if self.panel.page_visible("signals"):
-                self._list_due = 0.0
+            self._mark_burst(self.panel.selected_burst())
             if self.panel.page_visible("bursts") and not self._watch_always:
                 self._watcher.reset()  # its floor is from when it was last shown
 
@@ -593,18 +743,42 @@ if HAS_PYQT6:
         def _bursts_frame(self, samples: np.ndarray, rate: float) -> None:
             if self._burst_jobs:
                 self._collect_bursts()
+            if self.panel.page_visible("bursts") != self._bursts_shown:
+                self._mark_burst(self.panel.selected_burst())
             if not (self._watch_always or self.panel.page_visible("bursts")):
                 if self._watcher.detector.active:
                     self._queue_bursts(self._watcher.flush())
                 return
             win = self._win
+            if getattr(getattr(win, "_pacer", None), "overloaded", False):
+                # One block a frame, a few per cent of the signal: bursts
+                # would be cut up or missed, and their times wrong. Paused
+                # until the display loop keeps up, then watched afresh.
+                if not self._bursts_paused:
+                    self._bursts_paused = True
+                    self._queue_bursts(self._watcher.flush())
+                    self._watcher.reset()
+                    self.panel.set_bursts_paused(
+                        "Paused: this computer can't keep up right now\nBursts "
+                        "are logged again as soon as it catches up."
+                    )
+                return
+            if self._bursts_paused:
+                self._bursts_paused = False
+                self.panel.set_bursts_paused("")
             reports = self._watcher.feed(samples, float(win._lo_frequency()), rate)
+            clock = getattr(win, "_plot_clock", None)  # (this frame's row)
+            if isinstance(clock, float):
+                self._frame_times.append((self._watcher.time_s, clock))
             self._queue_bursts(reports)
 
         def _queue_bursts(self, reports: List[BurstReport]) -> None:
             """Take the finished bursts apart on the bursts worker (it takes
             50-200 ms each, too long for the display loop); they are listed
             in order as their analyses come back."""
+            if self._shut:
+                return  # (the worker is closed: the window is closing)
+            frames: Optional[Tuple[List[float], List[float]]] = None
             for report in reports:
                 burst = report.burst
                 if burst.duration_s < 0.02 and burst.snr_db < 15:
@@ -612,26 +786,99 @@ if HAS_PYQT6:
                 # The list's Time is when it started, not when it was done.
                 ago = max(0.0, self._watcher.time_s - burst.start_s)
                 when = time.time() - ago
-                job: Future
-                if len(self._burst_jobs) < MAX_PENDING_BURSTS:
-                    job = self._burst_pool.submit(analyze_report, report)
-                else:
-                    job = Future()  # a busy band: listed now, not taken apart
-                    job.set_result(report)
+                if frames is None:
+                    frames = (
+                        [watched for watched, _row in self._frame_times],
+                        [row for _watched, row in self._frame_times],
+                    )
+                self._remember_span(report, *frames)
+                job: Optional[Future] = None
+                if report.samples is not None and self._may_analyze():
+                    try:
+                        job = self._burst_pool.submit(_timed_analysis, report)
+                    except RuntimeError:  # pragma: no cover - (shut down)
+                        job = None
+                if job is None:
+                    # A busy band, or a busy computer: listed now, not taken
+                    # apart.
+                    job = Future()
+                    job.set_result(0.0)
                 self._burst_jobs.append((job, report, when))
             if self._burst_jobs:
                 self._collect_bursts()
                 if self._burst_jobs and not self._burst_timer.isActive():
                     self._burst_timer.start()
 
+        def _remember_span(
+            self, report: BurstReport, ends: List[float], rows: List[float]
+        ) -> None:
+            """Where ``report``'s burst is on the waterfall: the waterfall
+            times (``rows``) of the frames its start and end were in, from
+            the watcher's time at each frame's end (``ends``), and its
+            frequencies."""
+            if not ends:
+                return
+            last = len(ends) - 1
+            burst = report.burst
+            # The frames with its first and its last samples: the first that
+            # ends after its start, and the first that ends at its end.
+            first = min(bisect.bisect_right(ends, float(burst.start_s) + 1e-6), last)
+            final = min(bisect.bisect_left(ends, float(burst.end_s) - 1e-6), last)
+            half = 0.5 * float(burst.width_hz)
+            self._burst_spans[id(report)] = (
+                rows[first],
+                rows[max(first, final)],
+                float(burst.center_hz) - half,
+                float(burst.center_hz) + half,
+            )
+            if len(self._burst_spans) > 2 * MAX_LISTED_BURSTS:
+                # (Those the list no longer holds; not those waiting for it.)
+                keep = {id(r) for _stamp, r in self.panel.bursts()}
+                keep.update(id(r) for _job, r, _when in self._burst_jobs)
+                keep.add(id(report))
+                for key in [k for k in self._burst_spans if k not in keep]:
+                    del self._burst_spans[key]
+
+        def _mark_burst(self, report: Any = None) -> None:
+            """Outline the selected burst on the waterfall, while the Bursts
+            page is on screen."""
+            self._bursts_shown = self.panel.page_visible("bursts")
+            span = None if report is None else self._burst_spans.get(id(report))
+            waterfall = self._win._waterfall
+            if span is None or not self._bursts_shown:
+                waterfall.clear_burst_mark()
+            else:
+                waterfall.mark_burst(*span)
+
+        def _may_analyze(self) -> bool:
+            """Whether the next burst may be taken apart (see
+            :data:`ANALYSIS_SHARE`)."""
+            if len(self._burst_jobs) >= MAX_PENDING_BURSTS:
+                return False
+            pacer = getattr(self._win, "_pacer", None)
+            if getattr(pacer, "overloaded", False):
+                return False  # the display loop is behind: no more work
+            now = self._watcher.time_s
+            cost = self._analysis_cost
+            while cost and now - cost[0][0] > _ANALYSIS_WINDOW_S:
+                cost.popleft()
+            spent = sum(seconds for _t, seconds in cost)
+            return spent < ANALYSIS_SHARE * _ANALYSIS_WINDOW_S
+
         def _collect_bursts(self) -> None:
             """List the bursts whose analysis came back, oldest first."""
             while self._burst_jobs and self._burst_jobs[0][0].done():
                 job, report, when = self._burst_jobs.popleft()
                 try:
-                    job.result()
+                    seconds = float(job.result() or 0.0)
                 except Exception as exc:  # pragma: no cover - a bonus only
                     logger.warning("Taking a burst apart failed: %s", exc)
+                    seconds = 0.0
+                if seconds > 0.0:
+                    self._analysis_cost.append((self._watcher.time_s, seconds))
+                # The list keeps what was learned, not the burst's samples
+                # (up to a few MB each).
+                report.samples = None
                 self.panel.add_burst(report, when)
             if not self._burst_jobs:
                 self._burst_timer.stop()
@@ -965,6 +1212,15 @@ if HAS_PYQT6:
                     return
 
 
+def _timed_analysis(report: BurstReport) -> float:
+    """Take a burst apart (on the bursts worker); returns the processor
+    time it took (s): what it took from the display loop, however busy
+    the computer is."""
+    start = time.thread_time()
+    analyze_report(report)
+    return max(1e-6, time.thread_time() - start)
+
+
 def _mhz(freq_hz: float) -> str:
     return f"{float(freq_hz) / 1e6:.3f} MHz"
 
@@ -987,4 +1243,4 @@ def _width_text(hz: float) -> str:
     return f"{hz:.0f} Hz"
 
 
-__all__ = ["SignalTools", "LIST_EVERY_S", "FORGET_S"]
+__all__ = ["SignalTools", "LIST_FRAMES", "LIST_EVERY_S", "FORGET_S"]

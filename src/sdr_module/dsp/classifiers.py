@@ -1014,6 +1014,17 @@ class SignalClassifier:
             longest = float(np.max(on_lengths))
             held = on_lengths >= max(min_run, 0.1 * longest)
             features["on_runs_long"] = int(np.count_nonzero(held))
+            # Long enough for a Morse element (a dit at 80 WPM): keying,
+            # not the noise's clicks.
+            keyed_runs = on_s >= 0.015
+            features["on_runs_keyed"] = int(np.count_nonzero(keyed_runs))
+            # Those whole inside the block: one cut by its start or end may
+            # be the other end's carrier ringing round through the FFT that
+            # cut the channel out (:func:`_narrow`), not a key-down.
+            inside = (on_starts > 0) & (on_starts + on_lengths < n)
+            features["on_runs_keyed_inside"] = int(
+                np.count_nonzero(keyed_runs & inside)
+            )
         enough = True
         if span == 1:
             expected = n * math.exp(-high_ratio)
@@ -1446,6 +1457,16 @@ class SignalClassifier:
                 runs <= 3
                 and on_max >= self.TRANSMISSION_S
                 and (total_on <= 0 or on_max >= 0.7 * total_on)
+                # A narrow carrier switched on more than once at one steady
+                # level is keyed (a Morse element or two before a long
+                # one, one of them whole), not a transmission starting or
+                # ending (whose voice varies the level).
+                and not (
+                    narrow > 0.5
+                    and int(f.get("on_runs_keyed", 0)) >= 2
+                    and int(f.get("on_runs_keyed_inside", 0)) >= 1
+                    and float(f.get("on_level_spread", 1.0)) < 0.12
+                )
             )
         if keyed and not transmission:
             short = 1.0 - _ramp(on_s, self.SHORT_PULSE_S, 3.0 * self.SHORT_PULSE_S)
@@ -1519,6 +1540,10 @@ class SignalClassifier:
                 max(float(f.get("line_width_hz", 1.0)), 1e-3) / 6e3
             )
             conf = min(conf, 0.45 + 0.3 * _ramp(in_voice, 6.0, 16.0))
+            if transmission:
+                # Switched on or off while listening: a key held down for a
+                # while (CW) looks the same; never sure it isn't keyed.
+                conf = min(conf, 0.6)
         evidence = self._evidence(kind, f, keyed, transmission)
         if second_kind and second > 0.5 * best:
             evidence.append(

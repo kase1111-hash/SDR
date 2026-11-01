@@ -34,6 +34,7 @@ from sdr_module.dsp.signal_id import (  # noqa: E402
     confidence_words,
     identify,
     listening_for,
+    takes_needed,
 )
 
 FS = 48_000.0
@@ -343,14 +344,15 @@ def identify_demo(freq, lo, mode, channel_hz, rate=2.4e6, start_s=0.0):
     from sdr_module.gui.device_dialog import MockDevice
 
     dev = MockDevice()
+    dev._rng = np.random.default_rng(1)  # (the same noise every run)
     dev.set_sample_rate(rate)
     dev.set_frequency(lo)
     dev.start_rx()
     for _ in range(int(round(start_s * rate / 240000))):
         dev.read_samples(240000)
-    width, reach = analysis_band(mode, channel_hz, rate)
+    width, reach = analysis_band(mode, channel_hz, rate, freq)
     ident = SignalIdentifier(rate, freq - lo, width)
-    best, takes = None, 0
+    best, kinds = None, []
     while ident.seconds < WAIT_S:
         ident.feed(dev.read_samples(80000))
         if ident.ready():
@@ -358,8 +360,12 @@ def identify_demo(freq, lo, mode, channel_hz, rate=2.4e6, start_s=0.0):
                 ident.take(), ident.rate, freq, reach, band_hz=ident.passband_hz
             )
             best = better(best, result)
-            takes += 1
-            if best.is_signal and (best.confidence >= 0.6 or takes >= 3):
+            kinds.append(result.kind)
+            agree = kinds.count(best.kind)
+            if best.is_signal and (
+                (best.confidence >= 0.6 and agree >= takes_needed(best))
+                or len(kinds) >= 3
+            ):
                 break
     return best
 
@@ -402,3 +408,130 @@ def test_demo_ook_remote_is_taken_apart():
     # 0x5E3A1C sent, short pulse = 1: inverted, plus the sync pulse.
     assert bits[:24] == format(0x5E3A1C ^ 0xFFFFFF, "024b")
     assert count >= 2
+
+
+# --------------------------------------------------------------------------- #
+# The end-to-end journeys' problems (PLOTS-E2E-2, -3, -4)
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize("start_s", [5.0, 5.2, 6.0, 6.2, 6.4])
+def test_demo_cw_beacon_keying_into_its_carrier_is_cw(start_s):
+    """PLOTS-E2E-3: the 99.82 MHz beacon keys 'VVV DE SDR', then holds its
+    key down for 2.4 s. Listening over its last letters, Identify said
+    'Unmodulated carrier', confident 75 % (or AM), in about half the tries:
+    it stopped at the first take, a long element or the key held down. Now
+    keying heard in any take wins, and a carrier needs three takes. (From
+    6.6 s on every take hears only silence and the key held down: a carrier
+    switched on, nothing to tell it from one.)"""
+    ident = identify_demo(99.82e6, 100.1e6, "CW", 500.0, start_s=start_s)
+    assert ident.kind == "cw", ident.summary()
+
+
+def test_keyed_into_a_held_key_is_cw_not_a_transmission():
+    """Two dits, then the key held down: keyed, not a transmission
+    starting (whose level, voice, varies)."""
+    n = int(1.0 * FS)
+    key = np.zeros(n)
+    for start, stop in ((0.10, 0.18), (0.26, 0.34), (0.42, 1.0)):
+        key[int(start * n) : int(stop * n)] = 1.0
+    x, _ = S.add_noise(S.carrier(n, FS, 80.0) * key, FS, 30, 100.0, on_power=1.0)
+    r = classify(x)
+    assert not r.features["transmission"]
+    assert r.kind == "cw", (r.kind, r.features.get("scores"))
+
+
+def _switched(at, on=True, snr_db=30):
+    """A narrow carrier switched on (or off) ``at`` (a fraction) into one
+    second of signal, classified."""
+    n = int(1.0 * FS)
+    key = np.zeros(n)
+    if on:
+        key[int(at * n) :] = 1.0
+    else:
+        key[: int(at * n)] = 1.0
+    x, _ = S.add_noise(S.carrier(n, FS, 80.0) * key, FS, snr_db, 100.0, on_power=1.0)
+    return classify(x)
+
+
+@pytest.mark.parametrize("at", [0.1, 0.2, 0.4])
+def test_a_carrier_switched_on_is_never_confident(at):
+    """A steady carrier keyed up while listening could be a CW station
+    holding its key down: 'probably' at most."""
+    r = _switched(at)
+    assert r.features["transmission"]
+    assert r.kind == "carrier"
+    assert r.confidence <= 0.6
+
+
+@pytest.mark.parametrize("on", [True, False], ids=["on", "off"])
+@pytest.mark.parametrize("at", [0.2, 0.4, 0.6])
+def test_a_carrier_switched_once_is_not_keying(at, on):
+    """Switched on or off once, a strong carrier is no Morse code: the
+    channel is cut out through an FFT, whose ringing wraps the other end of
+    the block round to this one, and that 'key-down' at the edge (20-30 ms
+    at 40 dB) made it 'CW (Morse code)', confident 95 %. A key-down that
+    counts lies whole inside the block."""
+    r = _switched(at, on, snr_db=40)
+    assert r.kind != "cw", (r.kind, r.confidence, r.features.get("on_runs_keyed"))
+
+
+def test_keying_seen_once_is_kept():
+    """Of several takes, keying wins over what it looks like between its
+    keys (or across a gap in the stream), whatever their confidence."""
+    n = int(0.5 * FS)
+    carrier = identify(S.add_noise(S.carrier(n, FS, 80.0), FS, 30, 100.0)[0], FS, 1e6)
+    cw = identify(
+        S.add_noise(S.cw(n, FS, 80.0), FS, 30, 100.0, on_power=1.0)[0], FS, 1e6
+    )
+    assert (carrier.kind, cw.kind) == ("carrier", "cw")
+    cw.result.confidence = 0.55
+    assert better(carrier, cw) is cw
+    assert better(cw, carrier) is cw
+    assert takes_needed(carrier) == 3
+    assert takes_needed(cw) == 1
+
+
+def test_short_pulses_off_1090_wait_for_a_second_take():
+    sig, rate, occ, power, _want = _case("modes")
+    x, _ = S.add_noise(sig, rate, 25, occ, on_power=power)
+    for freq, want in ((433.92e6, 2), (1090e6, 1)):
+        ident = identify(x, rate, freq)
+        if ident.kind == "pulsed":
+            assert takes_needed(ident) == want
+
+
+def test_a_gap_in_the_stream_starts_the_capture_afresh():
+    """PLOTS-E2E-2: a capture spanning samples the receiver dropped (the
+    demo skipping ahead after a stall) cut the remote's packets into what
+    read 'Short pulses', the first take finishing on it. After a gap the
+    held samples go, and the next capture is half a second of unbroken
+    signal; how long Identify listened in all still counts."""
+    rate = 240e3
+    ident = SignalIdentifier(rate, 0.0, rate)
+    block = np.ones(int(0.1 * rate), np.complex64)
+    for _ in range(4):
+        ident.feed(block)
+    ident.gap()
+    for _ in range(4):
+        ident.feed(2 * block)
+        assert not ident.ready()
+    ident.feed(2 * block)
+    assert ident.ready()
+    capture = ident.take()
+    assert len(capture) == int(0.5 * rate)
+    assert np.all(capture == 2)
+    assert ident.seconds == pytest.approx(0.9)
+
+
+def test_1090_is_analysed_two_megahertz_wide_in_any_mode():
+    """PLOTS-E2E-4: at 1090 MHz in FM with a 100 kHz filter the analysis
+    was 400 kHz wide: each reply one burst, often 'Unknown' after 4.4 s of
+    work. The replies' pulses show 2 MHz wide, whatever the mode."""
+    assert analysis_band("FM", 100e3, 2.4e6, 1090e6)[0] == 2e6
+    assert analysis_band("AM", 10e3, 2.4e6, 1090e6)[0] == 2e6
+    assert analysis_band("FM", 100e3, 2.4e6, 100.1e6)[0] == 400e3
+    assert analysis_band("FM", 100e3, 2.4e6)[0] == 400e3
+    ident = identify_demo(1090e6, 1090e6, "FM", 100e3)
+    assert ident.label == "Mode S / ADS-B replies", ident.summary()
+    assert ident.seconds <= 1.0

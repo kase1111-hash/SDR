@@ -32,6 +32,11 @@ __all__ = [
 #: Bins either side of 0 Hz left out (most receivers' DC spike).
 DC_GUARD_BINS = 2
 
+#: Signals are told apart, and measured, where they stand this far above
+#: the noise floor (or a lower threshold): a higher threshold leaves out
+#: the weaker signals, it never splits one into pieces.
+GROUP_SNR_DB = 10.0
+
 
 @dataclass
 class SignalPeak:
@@ -115,8 +120,10 @@ def find_signals(
 ) -> List[SignalPeak]:
     """The signals of a spectrum (``power_db``: dBFS per bin, fftshifted,
     of a span ``span_hz`` wide around ``center_hz``) standing at least
-    ``min_snr_db`` above the local noise floor, in frequency order. The
-    outer edges (``usable_fraction``) and the DC spike are left out."""
+    ``min_snr_db`` above the local noise floor, in frequency order. A
+    signal is listed as wide and on the same frequency at any threshold
+    from :data:`GROUP_SNR_DB` up. The outer edges (``usable_fraction``) and
+    the DC spike are left out."""
     p = np.nan_to_num(np.asarray(power_db, dtype=np.float64), nan=-200.0)
     n = len(p)
     if n < 16 or not span_hz > 0:
@@ -124,11 +131,14 @@ def find_signals(
     bin_hz = float(span_hz) / n
     floor = local_floor_db(p)
     smooth = np.convolve(p, np.ones(3) / 3.0, mode="same")
-    above = smooth - floor >= float(min_snr_db)
+    over = smooth - floor
+    above = over >= min(float(min_snr_db), GROUP_SNR_DB)
     centre = n // 2
     edge = int(n * (1.0 - float(usable_fraction)) / 2.0)
     above[:edge] = False
     above[n - edge :] = False
+    # (The DC spike never lifts a signal next to it over the threshold.)
+    over[centre - DC_GUARD_BINS : centre + DC_GUARD_BINS + 1] = -np.inf
     idx = np.flatnonzero(above)
     if not len(idx):
         return []
@@ -142,6 +152,8 @@ def find_signals(
     for a, b in zip(firsts.tolist(), lasts.tolist(), strict=True):
         if a >= centre - DC_GUARD_BINS and b <= centre + DC_GUARD_BINS:
             continue  # only the DC spike at the LO
+        if float(np.max(over[a : b + 1])) < float(min_snr_db):
+            continue  # under the threshold
         k = a + int(np.argmax(p[a : b + 1]))
         peak = float(p[k])
         # The core: within 20 dB of the peak, contiguous.
@@ -171,13 +183,19 @@ def find_signals(
             )
         )
     # A much weaker "signal" inside a strong one's width is part of it, and
-    # so is a second part of one station (on the same channel).
+    # so is a far weaker one on its skirts (a broadcast station's edges rise
+    # out of the noise here and there), and a second part of one station
+    # (on the same channel).
     kept: List[SignalPeak] = []
     for s in sorted(found, key=lambda s: -s.peak_dbfs):
         inside = any(
             (
                 abs(s.offset_hz - k.offset_hz) <= 0.5 * k.width_hz
                 and s.peak_dbfs <= k.peak_dbfs - 20.0
+            )
+            or (
+                abs(s.offset_hz - k.offset_hz) <= 0.75 * k.width_hz
+                and s.peak_dbfs <= k.peak_dbfs - 30.0
             )
             or abs(s.frequency_hz - k.frequency_hz) < 0.5
             for k in kept

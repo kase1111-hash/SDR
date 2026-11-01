@@ -89,7 +89,6 @@ try:
     from PyQt6.QtWidgets import (
         QApplication,
         QComboBox,
-        QFileDialog,
         QFrame,
         QHBoxLayout,
         QLabel,
@@ -173,8 +172,9 @@ def time_step(raw: float, max_age: Optional[float] = None) -> float:
         if step < raw:
             continue
         if max_age is not None:
-            ticks = nice_ticks(0.0, max_age, step)
-            if ticks and len(format_age(ticks[-1], step)) > 4:
+            # (The oldest tick's label, also past nice_ticks' 1000 ticks.)
+            last = math.floor(max_age / step + 1e-9) * step
+            if len(format_age(last, step)) > 4:
                 continue
         return float(step)
     return float(_TIME_STEPS[-1])
@@ -246,6 +246,13 @@ def history_label(seconds: float) -> str:
         if abs(value - seconds) < 1e-6:
             return label
     return format_duration(seconds)
+
+
+def _noise_level(line: np.ndarray) -> float:
+    """A line's median bin (dB): its noise, as the auto levels take it."""
+    values = np.asarray(line, dtype=np.float32)
+    k = len(values) // 2
+    return float(np.partition(values, k)[k])
 
 
 def quantize_db(values: Any) -> np.ndarray:
@@ -577,6 +584,21 @@ class _WaterfallCanvas(QWidget if HAS_PYQT6 else object):
         event.accept()
 
 
+class _FolderMemory:
+    """Settings for :mod:`.file_dialogs` kept in a dict (while the app
+    runs): a plot without the window's settings still remembers its
+    folders."""
+
+    def __init__(self, store: Dict[str, str]):
+        self._store = store
+
+    def get_str(self, key: str, default: str = "") -> str:
+        return self._store.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        self._store[key] = str(value)
+
+
 class WaterfallWidget(QWidget if HAS_PYQT6 else object):
     """
     Waterfall display widget.
@@ -740,6 +762,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
 
         # Highlights
         self._highlights: List[Tuple[int, int, int, int, Any]] = []
+        # A burst outlined from the Signal tab's list: (start, end) on the
+        # rows' clock and (low, high) Hz (see mark_burst).
+        self._burst_mark: Optional[Tuple[float, float, float, float]] = None
         # Demodulated channel: (low, high) Hz offsets from the center.
         self._passband: Optional[Tuple[float, float]] = None
         # The tuned frequency (None: the center), and how clicks snap: the
@@ -766,6 +791,16 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._fm = QFontMetrics(self._font)
         self._hover: Optional[QPointF] = None
         self._exporting = False  # painting for Save Image (export_image)
+        #: Where Save Image remembers its folder (the window's settings: the
+        #: screenshots' folder memory, see file_dialogs); without them it is
+        #: remembered while the app runs.
+        self.file_settings: Any = None
+        self._session_folders: Dict[str, str] = {}
+        # How far a fresh line's noise reads above the noise floor it comes
+        # with (dB; slowly averaged), the reference each row's colours are
+        # brought to (see _noise_offset), and the span it was measured on.
+        self._noise_rise: Optional[float] = None
+        self._noise_rise_key: Optional[Tuple[float, float, int]] = None
 
         self.setMinimumHeight(200)
         self._setup_ui()
@@ -1111,7 +1146,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             previous = self._history[-1]
             merged = np.fmax(previous, line)
             self._history[-1] = merged
-            codes = quantize_db(merged)
+            codes = quantize_db(merged + self._noise_offset(line, merged, noise_db))
             if self._row_codes and self._row_codes[-1][0] is previous:
                 self._row_codes[-1] = (merged, codes)
             else:
@@ -1130,7 +1165,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             self._times.append(now)
             self._row_steps.append(step)
             self._row_axes.append(axis)
-            codes = quantize_db(line)
+            codes = quantize_db(line + self._noise_offset(line, line, noise_db))
             self._row_codes.append((line, codes))
             self._row_open = True
             self._write_top_row(codes, scroll=True)
@@ -1139,6 +1174,38 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         if not self._clear_action.isEnabled():
             self._update_clear_action()
         self._canvas.update()
+
+    def _noise_offset(
+        self, line: np.ndarray, row: np.ndarray, noise_db: Optional[float]
+    ) -> float:
+        """dB added to a row's colours (not to its levels, which the
+        readouts show) so its noise shows as bright as the other rows'.
+
+        A line is the strongest of the FFTs its frame holds, and its noise
+        reads higher the more of them there are: a long frame after a stall
+        or a row merging several frames (a history of 1 or 5 min) looked
+        brighter, one-block frames (a computer that can't keep up) darker,
+        like a change in the band. The rise is measured against the frame's
+        noise floor (``noise_db``, which doesn't depend on that), so a real
+        change of the floor still shows; rows are brought to the rise fresh
+        lines usually have. 0 without ``noise_db``."""
+        if noise_db is None or not math.isfinite(noise_db) or len(line) < 16:
+            return 0.0
+        key = (float(self._center_freq), float(self._sample_rate), len(line))
+        rise = _noise_level(line) - float(noise_db)
+        if not math.isfinite(rise):
+            return 0.0
+        ref = self._noise_rise
+        if ref is None or key != self._noise_rise_key:
+            ref = rise
+        else:
+            ref += 0.005 * (rise - ref)  # (follows over some 200 lines)
+        self._noise_rise, self._noise_rise_key = ref, key
+        if row is not line:
+            rise = _noise_level(row) - float(noise_db)
+            if not math.isfinite(rise):
+                return 0.0
+        return max(-12.0, min(12.0, ref - rise))
 
     def clear(self):
         """Clear the waterfall."""
@@ -1602,6 +1669,56 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         """Clear all highlights."""
         self._highlights.clear()
         self._canvas.update()
+
+    def mark_burst(
+        self, start: float, end: float, low_hz: float, high_hz: float
+    ) -> None:
+        """Outline a burst (the Signal tab's selected one): from ``start``
+        to ``end`` on the rows' clock (:meth:`add_line`'s timestamps), from
+        ``low_hz`` to ``high_hz``. It moves down with its rows."""
+        self._burst_mark = (float(start), float(end), float(low_hz), float(high_hz))
+        self._canvas.update()
+
+    def clear_burst_mark(self) -> None:
+        """Remove the burst's outline (:meth:`mark_burst`)."""
+        if self._burst_mark is not None:
+            self._burst_mark = None
+            self._canvas.update()
+
+    def burst_mark_rect(self, plot: Optional["QRectF"] = None) -> Optional["QRectF"]:
+        """Where the marked burst's outline is on the canvas: around the
+        rows it was received in (at least one) and its frequencies (at least
+        a few pixels). None without a mark, or when its rows have left the
+        history or it is out of view."""
+        mark = self._burst_mark
+        if mark is None or not self._times:
+            return None
+        start, end, low, high = mark
+        if end < self._times[0]:
+            return None  # (scrolled out of the history)
+        plot = self._plot_rect() if plot is None else plot
+        newest = self._row_of_time(min(end, self._times[-1]))
+        oldest = self._row_of_time(max(start, self._times[0]))
+        if newest is None or oldest is None or plot.width() <= 0:
+            return None
+        # The rows whose lines cover the burst's start and end.
+        top_row = math.ceil(newest - 1e-6)
+        bottom_row = max(top_row, math.ceil(oldest - 1e-6))
+        rows_px = plot.height() / self._rows_shown()
+        x0 = self._freq_to_x(low, plot)
+        x1 = self._freq_to_x(high, plot)
+        if x1 - x0 < 6.0:
+            middle = 0.5 * (x0 + x1)
+            x0, x1 = middle - 3.0, middle + 3.0
+        rect = QRectF(
+            x0,
+            plot.top() + top_row * rows_px,
+            x1 - x0,
+            (bottom_row - top_row + 1) * rows_px,
+        ).intersected(plot)
+        if rect.width() <= 0 or rect.height() <= 0:
+            return None
+        return rect
 
     # ------------------------------------------------------------------
     # Internals: levels
@@ -2399,8 +2516,25 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self.message.emit(f"Copied the measurement ({lines[0]})", "info")
 
     def _save_image_dialog(self) -> None:
-        path, _filter = QFileDialog.getSaveFileName(
-            self, "Save Waterfall Image", "waterfall.png", "PNG image (*.png)"
+        """Save Image...: in the screenshots' folder (the one last used), as
+        ``sdr_waterfall_<MHz>_<date>_<time>.png``; the status bar says
+        where it went."""
+        from . import file_dialogs
+
+        name = (
+            f"sdr_waterfall_{self._center_freq / 1e6:.3f}MHz_"
+            f"{time.strftime('%Y%m%d_%H%M%S')}.png"
+        )
+        settings = self.file_settings
+        if settings is None:
+            settings = _FolderMemory(self._session_folders)
+        path, _filter = file_dialogs.save_file(
+            self,
+            settings,
+            "screenshot",
+            "Save Waterfall Image",
+            name,
+            "PNG image (*.png)",
         )
         if not path:
             return
@@ -2410,6 +2544,11 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             QMessageBox.warning(
                 self, "Save Failed", f"Could not save the waterfall image to:\n{path}"
             )
+            return
+        self.message.emit(
+            f"Saved the waterfall image to {file_dialogs.display_path(path)}",
+            "success",
+        )
 
     # ------------------------------------------------------------------
     # Internals: painting
@@ -2452,6 +2591,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 draw_focus_frame(painter, plot, p)
 
             self._draw_highlights(painter, plot)
+            self._draw_burst_mark(painter, plot, p)
 
             self._draw_passband(painter, plot, p)
             painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -2490,7 +2630,8 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         checks use ``label_y``, where the text really is, so no two labels
         come closer than a line height. The newest line's ``0s`` always
         shows; then each pause's label (the older lines' age), then regular
-        ticks within the newest continuous run, wherever they fit.
+        ticks within each continuous run (the newest first; an older run's
+        count on from its pause's age), wherever they fit.
         """
         spr = self._seconds_per_row()
         ages = self._row_ages()
@@ -2505,36 +2646,47 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
 
         def place(tick_y: float, text: str) -> None:
             label_y = min(max(tick_y, y_min), y_max)
+            if any(text == other for _t, _y, other in labels):
+                return  # (an hour-old run's "60m" tick under its pause's)
             if all(abs(label_y - other) >= min_sep for _t, other, _s in labels):
                 labels.append((tick_y, label_y, text))
 
         gaps = self._gap_rows(ages, spr, self._row_steps_newest_first())
         separators = [round(plot.top() + row * rows_px) + 0.5 for row in gaps.tolist()]
 
-        # Regular ticks within the newest continuous run of lines.
-        run = ages[: int(gaps[0])] if gaps.size else ages
-        step = time_step(
-            spr * self._rows_shown() * max(28.0, fh * 2.2) / plot.height(),
-            max_age=float(run[-1]),
-        )
+        # Regular ticks within each continuous run of lines, newest first
+        # (an older run's from the age at its pause on), each at a step
+        # whose labels fit the margin at that run's ages.
+        raw_step = spr * self._rows_shown() * max(28.0, fh * 2.2) / plot.height()
+        bounds = [0, *gaps.tolist(), len(ages)]
         ticks: List[Tuple[float, str]] = []
-        for age in nice_ticks(0.0, float(run[-1]) + 1e-9, step):
-            # Fractional row between the two lines that bracket this age (the
-            # run has no pauses, so the pair is always close together).
-            i = min(int(np.searchsorted(run, age)), len(run) - 1)
-            if i == 0:
-                row = 0.0
-            else:
-                a0, a1 = float(run[i - 1]), float(run[i])
-                row = i - 1 + ((age - a0) / (a1 - a0) if a1 > a0 else 1.0)
-            ticks.append((plot.top() + (row + 0.5) * rows_px, format_age(age, step)))
+        steps: List[float] = []
+        for start, end in zip(bounds[:-1], bounds[1:], strict=True):
+            run = ages[start:end]
+            step = time_step(raw_step, max_age=float(run[-1]))
+            steps.append(step)
+            for age in nice_ticks(float(run[0]), float(run[-1]) + 1e-9, step):
+                # Fractional row between the two lines that bracket this age
+                # (a run has no pauses, so the pair is always close together).
+                i = min(int(np.searchsorted(run, age)), len(run) - 1)
+                if i == 0:
+                    row = 0.0
+                else:
+                    a0, a1 = float(run[i - 1]), float(run[i])
+                    row = i - 1 + ((age - a0) / (a1 - a0) if a1 > a0 else 1.0)
+                tick_y = plot.top() + (start + row + 0.5) * rows_px
+                ticks.append((tick_y, format_age(age, step)))
 
         # "0s" first: right after Stop -> Start the newest rows sit just above
         # a pause, and their label must not be the older lines' age.
         if ticks:
             place(*ticks[0])
-        for row, y in zip(gaps.tolist(), separators, strict=True):
-            place(y, format_elapsed(float(ages[row])))
+        for row, y, step in zip(gaps.tolist(), separators, steps[1:], strict=True):
+            age = float(ages[row])
+            text = format_elapsed(age)
+            if step < 60 and not text.endswith("s") and age < 999.5:
+                text = f"{age:.0f}s"  # in the unit of the run's ticks below
+            place(y, text)
         for tick in ticks[1:]:
             place(*tick)
         return separators, labels
@@ -2624,6 +2776,22 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             painter.setPen(QPen(color, 2))
             painter.setBrush(Qt.BrushStyle.NoBrush)
             painter.drawRect(rect)
+
+    def _draw_burst_mark(self, painter: "QPainter", plot: "QRectF", p) -> None:
+        """The selected burst's outline (see :meth:`mark_burst`): on a halo,
+        so it reads on any colormap."""
+        rect = self.burst_mark_rect(plot)
+        if rect is None:
+            return
+        painter.save()
+        painter.setClipRect(plot)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(QPen(p.qcolor("plot_bg", 210), 4))
+        painter.drawRect(rect)
+        painter.setPen(QPen(p.qcolor("accent"), 2))
+        painter.drawRect(rect)
+        painter.restore()
 
     def _draw_passband(self, painter: "QPainter", plot: "QRectF", p) -> None:
         """A thin bracket along the top edge spanning the demodulated channel.
@@ -2760,9 +2928,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
     def _draw_hover(
         self, painter: "QPainter", plot: "QRectF", p, avoid: Optional["QRectF"] = None
     ) -> None:
-        """Cursor lines and a readout of where a click tunes, the level of
-        the row under the cursor (where that row was received) and its age;
-        kept clear of ``avoid`` (the measurement's readout)."""
+        """Cursor lines and a readout of the frequency and level under the
+        cursor (where that row was received), the row's age and where a
+        click tunes (marked when it snaps away from the cursor); kept clear
+        of ``avoid`` (the measurement's readout)."""
         pos = self._hover
         if pos is None or not plot.contains(pos):
             return
@@ -2787,7 +2956,11 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             draw_landing_mark(painter, plot, landing_x, p)
 
         decimals = readout_decimals(snap_step_hz(self._hz_per_px()))
-        lines = [tuned_mhz_text(freq, decimals)]
+        # The frequency and the level under the cursor belong together; a
+        # click that snaps to a signal or the step says where it tunes.
+        here = self._snapped_frequency_at(x)
+        here_text = tuned_mhz_text(freq if here is None else here, decimals)
+        lines = [here_text]
         row = int((y - plot.top()) / plot.height() * self._rows_shown())
         if 0 <= row < len(self._history):
             # Strongest bin under this pixel, matching the decimated image
@@ -2800,9 +2973,10 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             lines.append(detail)
             age = self._times[-1] - self._times[len(self._times) - 1 - row]
             lines.append(f"{format_elapsed(age)} ago")
+        landing_text = tuned_mhz_text(freq, decimals)
         lines.append(
-            "Click to tune · drag to measure"
-            if exact or self._snap_step <= 0
-            else "Click to tune (Alt: exact) · drag to measure"
+            "Click to tune here · drag to measure"
+            if landing_text == here_text
+            else f"Click to tune to {landing_text} (Alt: exact) · drag to measure"
         )
         draw_readout(painter, lines, x, plot, self._fm, p, avoid=avoid)

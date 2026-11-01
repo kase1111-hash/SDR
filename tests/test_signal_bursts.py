@@ -174,6 +174,163 @@ class TestBurstDetector:
         ended = det.process(_noise_row(seed=4), 868e6, self.SPAN, 0.066)
         assert len(ended) == 1 and det.active == []
 
+    @staticmethod
+    def _station_row(i, rng, centre=320, core=12, reach=30):
+        """A station always on (bins ``centre`` +/- ``core`` at -40 dBFS)
+        whose modulation reaches out a random distance each row (-50
+        dBFS), as a broadcast FM station's sidebands do with the music
+        (on the noise of :meth:`test_noise_alone_gives_no_bursts`)."""
+        row = _noise_row(seed=i)
+        row[centre - core : centre + core + 1] = -40.0
+        out = int(rng.integers(core, reach + 1))
+        row[centre - out : centre - core] = -50.0
+        row[centre + core + 1 : centre + out + 1] = -50.0
+        return row
+
+    def test_an_occupied_channel_coming_and_going_is_no_burst(self):
+        """ROB-03: a station that never stops is not a burst, and neither is
+        its modulation reaching further out now and then (the floor there
+        is the station's average, above the noise). Before, the demo's
+        100.1 MHz station gave 95 'bursts' in 20 s."""
+        rng = np.random.default_rng(5)
+        det = BurstDetector()
+        ended = []
+        for i in range(600):  # 20 s of rows
+            row = self._station_row(i, rng)
+            ended += det.process(row, 100.1e6, self.SPAN, i / 30)
+        ended += det.flush()
+        assert ended == []
+
+    def test_a_burst_beside_an_occupied_channel_is_found(self):
+        """A transmission that comes and goes in the next channel (14 kHz
+        from the station's edge: no floor of its own) and one on the DC
+        spike of the receiver are still bursts."""
+        rng = np.random.default_rng(6)
+        det = BurstDetector()
+        ended = []
+        for i in range(600):
+            row = self._station_row(i, rng, reach=12)
+            row[512] = -50.0  # the DC spike, always there
+            if 300 <= i < 330:  # 1 s, from 10 s
+                row[338:344] = -45.0  # 6 bins past the station's edge
+            if 450 <= i < 455:
+                row[510:515] = -35.0  # on the DC spike
+            ended += det.process(row, 433.92e6, self.SPAN, i / 30)
+        ended += det.flush()
+        bins = sorted(
+            (b.center_hz - 433.92e6) / (self.SPAN / 1024) + 512 for b in ended
+        )
+        assert len(ended) == 2, [(b.center_hz, b.duration_s) for b in ended]
+        assert bins[0] == pytest.approx(340.5, abs=1.5)
+        assert bins[1] == pytest.approx(512, abs=1.5)
+
+    def test_occupied_db_zero_turns_it_off(self):
+        """``occupied_db=0`` gives the detector as it was (every excursion
+        10 dB over the floor is a burst)."""
+        rng = np.random.default_rng(5)
+        det = BurstDetector(occupied_db=0)
+        ended = []
+        for i in range(300):
+            ended += det.process(self._station_row(i, rng), 100.1e6, self.SPAN, i / 30)
+        assert ended
+
+    @staticmethod
+    def _top_row(rng, n=1024, segments=78):
+        """Noise as :func:`frame_rows` gives it at 2.4 MS/s: each bin's
+        strongest of a frame's 78 FFTs (steadier than one FFT's)."""
+        return -80.0 + 10 * np.log10(rng.exponential(1.0, (segments, n)).max(axis=0))
+
+    def _keyed(self, on_s, off_s, seconds):
+        """The bursts of a carrier keyed ``on_s`` on, ``off_s`` off (from
+        0.5 s, for ``seconds``), and how many times it was keyed on."""
+        rng = np.random.default_rng(8)
+        det = BurstDetector()
+        ended, overs, was_on = [], 0, False
+        for i in range(int(seconds * 30)):
+            t = i / 30
+            row = self._top_row(rng)
+            on = t >= 0.5 and (t - 0.5) % (on_s + off_s) < on_s
+            if on:
+                row[300:303] = -40.0
+            overs += on and not was_on
+            was_on = on
+            ended += det.process(row, 433.92e6, self.SPAN, t)
+        return ended + det.flush(), overs
+
+    @pytest.mark.parametrize(
+        "on_s, off_s, seconds",
+        [(10.0, 1.5, 60.0), (5.0, 1.0, 60.0), (2.0, 1.0, 30.0), (1.0, 0.8, 60.0)],
+    )
+    def test_overs_with_short_gaps_are_each_a_burst(self, on_s, off_s, seconds):
+        """A repeater's overs a second or so apart are transmissions that
+        start and stop: each one is a burst. The floor rises under them (a
+        decibel a second) and stands a few dB over the noise in the short
+        gaps between, but the level falls back to the noise there: the
+        channel is not occupied (the occupancy rule took them for a station
+        that never stops and missed most of them)."""
+        ended, overs = self._keyed(on_s, off_s, seconds)
+        assert len(ended) == overs, [round(b.start_s, 1) for b in ended]
+
+    def test_keying_that_never_pauses_is_a_station(self):
+        """A carrier keyed on and off without ever falling quiet for
+        :attr:`BurstDetector.REST_S` (Morse code, a beacon keying away) is a
+        station that never stops once it has gone on like that for
+        :attr:`BurstDetector.ALWAYS_S`: its keys are not listed one by one
+        for ever (they were for half a minute, and with its floor a few dB
+        over the noise, for good)."""
+        ended, overs = self._keyed(0.35, 0.45, 60.0)
+        assert overs == 75
+        starts = [round(b.start_s, 1) for b in ended]
+        assert starts and max(starts) < BurstDetector.ALWAYS_S + 1.0, starts
+
+    @pytest.mark.parametrize("spur_db", [10.0, 16.0])
+    def test_a_remote_over_a_steady_carrier_is_found(self, spur_db):
+        """A remote whose 30 kHz band holds a steady narrow carrier (a
+        receiver's spur, a carrier left on) is still found on every packet:
+        its bursts stand far above that 'station' (the occupancy rule hid
+        them all once the carrier stood some 10 dB over the noise)."""
+        rng = np.random.default_rng(4)
+        det = BurstDetector()
+        ended, sent, was_on = [], 0, False
+        for i in range(30 * 30):
+            t = i / 30
+            row = self._top_row(rng)
+            spur = 10.0 ** ((-73.0 + spur_db) / 10.0)
+            row[300] = 10.0 * np.log10(10.0 ** (row[300] / 10.0) + spur)
+            on = t >= 1.0 and (t - 1.0) % 2.5 < 0.4  # (0.4 s every 2.5 s)
+            if on:
+                row[294:307] = np.maximum(row[294:307], -40.0)
+            sent += on and not was_on
+            was_on = on
+            ended += det.process(row, 433.92e6, self.SPAN, t)
+        ended += det.flush()
+        assert sent == 12
+        assert len(ended) == sent, [round(b.start_s, 1) for b in ended]
+
+    def test_calls_beside_a_steady_carrier_are_each_a_burst(self):
+        """Calls that come and go (5 s every 8 s) a few kHz from a weak
+        carrier that never stops (the demo's 124.35 MHz airband channel
+        beside a carrier on 124.36 MHz) are each a burst: the floor that
+        rises under the calls and runs into the carrier's is not that
+        station's (the occupancy rule missed every one)."""
+        rng = np.random.default_rng(9)
+        det = BurstDetector()
+        ended, calls, was_on = [], 0, False
+        carrier = 10.0 ** (-63.0 / 10.0)  # (10 dB over the noise)
+        for i in range(60 * 30):
+            t = i / 30
+            row = self._top_row(rng)
+            row[306] = 10.0 * np.log10(10.0 ** (row[306] / 10.0) + carrier)
+            on = t >= 1.0 and (t - 1.0) % 8.0 < 5.0
+            if on:
+                row[298:303] = np.maximum(row[298:303], -45.0)
+            calls += on and not was_on
+            was_on = on
+            ended += det.process(row, 124.35e6, self.SPAN, t)
+        ended += det.flush()
+        assert calls == 8
+        assert len(ended) == calls, [round(b.start_s, 1) for b in ended]
+
 
 def test_frame_rows_show_a_short_burst_anywhere_in_the_block():
     rate = 2.4e6
@@ -284,6 +441,66 @@ class TestDemo:
         fsk = [r for r in reports if abs(r.burst.center_hz - 434.10e6) < 30e3]
         assert fsk and fsk[0].analysis is not None
         assert fsk[0].kind_text == "FSK PCM"  # both tones cut out together
+
+    def _bursts(self, centre, seconds, frame=None):
+        frame = frame or self.FRAME
+        dev = _demo(centre, self.RATE)
+        dev._rng = np.random.default_rng(11)  # (the same noise every run)
+        watcher = BurstWatcher(analyze=False)
+        reports = []
+        for _ in range(int(seconds * self.RATE / frame)):
+            reports += watcher.feed(dev.read_samples(frame), centre, self.RATE)
+        return reports + watcher.flush()
+
+    def test_broadcast_fm_stations_are_no_bursts(self):
+        """ROB-03: on the first-launch tuning (100.1 MHz) the music
+        station's sidebands came and went as 95 'bursts' in 20 s (and the
+        99.5 / 101.1 MHz stations' too), flooding the list and its
+        analysis. Stations that never stop are not bursts; the narrow FM
+        station on 100.715 MHz, on for 5 s every 9 s, still is."""
+        reports = self._bursts(100.1e6, 20.0)
+        on = [r.burst.center_hz for r in reports]
+        for station in (99.5e6, 100.1e6, 101.1e6):
+            assert not [f for f in on if abs(f - station) < 150e3], (station, on)
+        nfm = [r for r in reports if abs(r.burst.center_hz - 100.715e6) < 10e3]
+        assert len(nfm) >= 2
+        assert all(r.burst.duration_s > 2.0 for r in nfm)
+        # Nothing else but the keyed CW beacon on 99.82 MHz, now and then.
+        others = [f for f in on if abs(f - 100.715e6) >= 10e3]
+        assert all(abs(f - 99.82e6) < 5e3 for f in others), on
+
+    def test_the_cw_beacon_is_a_station(self):
+        """The 99.82 MHz beacon keys 'VVV DE SDR' and holds its key down,
+        never quiet for long: a station, not a burst every few seconds (it
+        was listed all along, its floor a few dB over the noise). Uneven
+        frames, as a busy display loop reads them."""
+        dev = _demo(100.1e6, self.RATE)
+        dev._rng = np.random.default_rng(2)  # (the same noise every run)
+        sizes = np.random.default_rng(99).uniform(0.5, 1.8, 30 * 60)
+        watcher = BurstWatcher(analyze=False)
+        reports = []
+        for size in sizes:  # about a minute
+            block = dev.read_samples(int(self.FRAME * size))
+            reports += watcher.feed(block, 100.1e6, self.RATE)
+        reports += watcher.flush()
+        beacon = [
+            round(r.burst.start_s, 1)
+            for r in reports
+            if abs(r.burst.center_hz - 99.82e6) < 25e3
+        ]
+        assert all(t < BurstDetector.ALWAYS_S + 1.0 for t in beacon), beacon
+        nfm = [r for r in reports if abs(r.burst.center_hz - 100.715e6) < 10e3]
+        assert len(nfm) >= 6  # (on for 5 s every 9 s: still listed)
+
+    def test_the_remote_is_still_found_on_every_packet(self):
+        """The occupancy rule leaves the 433.92 MHz remote (a packet every
+        2.5 s: 8 in 20 s) and the FSK burst on 434.10 MHz alone."""
+        reports = self._bursts(self.CENTRE, 20.0)
+        remote = [r for r in reports if abs(r.burst.center_hz - self.CENTRE) < 20e3]
+        fsk = [r for r in reports if abs(r.burst.center_hz - 434.10e6) < 30e3]
+        assert len(remote) == 8
+        assert len(fsk) == 3
+        assert len(reports) == 11
 
     def test_deferred_analysis_for_a_worker(self):
         """``defer``: the reports come out with their samples but not taken

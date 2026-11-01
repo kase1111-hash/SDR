@@ -83,6 +83,45 @@ class TestTheDecoderOffNoteHoldsOnlyWhileItIsOff(_FilesCase):
         )
 
 
+class TestABookmarksToneSquelchKeepsTheNote(_FilesCase):
+    """P-07 for a bookmark tuned in the Bookmarks tab that has a CTCSS tone:
+    the tune said "ADS-B decoder off · Tuned to 2m Rep (FM)" and, at once,
+    its tone squelch replaced it with "Tuned to 2m Rep (FM, tone squelch
+    88.5 Hz)": the note was gone from the status bar, as before P-07."""
+
+    def add(self, label, freq_hz, tone):
+        panel = self.win._bookmarks_panel
+        index = panel.add_bookmark(label, freq_hz, "FM", "5 kHz", "12.5 kHz")
+        panel.set_tone(index, tone)
+        return index
+
+    def tune(self, index):
+        self.win._bookmarks_panel._tune_index(index)  # (as a double click)
+        return self.win._message_label.text()
+
+    def test_its_tone_squelch_keeps_the_note(self):
+        index = self.add("2m Rep", 146.94e6, 88.5)
+        self.assertTrue(self.win._apply_preset_named("ADS-B"))
+        self.assertEqual(
+            self.tune(index),
+            "ADS-B decoder off · Tuned to 2m Rep (FM, tone squelch 88.5 Hz)",
+        )
+
+    def test_once(self):
+        """(The next bookmark says only its own, as P-07 has it.)"""
+        first = self.add("2m Rep", 146.94e6, 88.5)
+        second = self.add("Club Rep", 147.12e6, 100.0)
+        self.assertTrue(self.win._apply_preset_named("ADS-B"))
+        self.tune(first)
+        self.assertEqual(
+            self.tune(second), "Tuned to Club Rep (FM, tone squelch 100.0 Hz)"
+        )
+
+    def test_without_a_note(self):
+        index = self.add("2m Rep", 146.94e6, 88.5)
+        self.assertEqual(self.tune(index), "Tuned to 2m Rep (FM, tone squelch 88.5 Hz)")
+
+
 class TestTheAudioTipNamesTheJobOnlyWhileItCounts(_FilesCase):
     """P-04 names this app's own job as the reason audio is paused ("Decode
     Recording keeps this computer busy, so audio is paused meanwhile."),

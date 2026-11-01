@@ -2530,6 +2530,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # replace it keeps, once, while that decoder ("ACARS", "SSTV") is
     # still off (see _keeping_release_note).
     _released_decoder: Optional[Tuple[str, str, str]] = None
+    # A bookmark tune's "Tuned to ..." message and what led it (that point
+    # and " · ", or ""): its tone squelch's line replaces it, led alike.
+    _bookmark_said: Tuple[str, str] = ("", "")
     # Status messages shown so far, and how many there were at the last
     # tune and when it was done (back in the event loop, or at the next
     # frame at the latest): those in between are the tune's own (a scan it
@@ -7260,7 +7263,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             text = f"Tuned to {label[:-1]}, {mode})"
         else:
             text = f"Tuned to {label} ({mode})"
-        self._show_status_message(self._keeping_release_note(text), "info", 2500)
+        shown = self._keeping_release_note(text)
+        self._show_status_message(shown, "info", 2500)
+        # (A bookmark's tone squelch says it again, as led: _on_bookmark_tuned.)
+        self._bookmark_said = (shown, shown[: len(shown) - len(text)])
 
     # ------------------------------------------------------------------
     # Acquisition
@@ -11007,9 +11013,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._control_panel.set_tone_squelch_hz(tone)
             if tone:
                 label = str(bookmark.get("label") or format_frequency(freq))
-                self._show_status_message(
-                    f"Tuned to {label} (FM, tone squelch {tone:.1f} Hz)", "info", 3000
-                )
+                text = f"Tuned to {label} (FM, tone squelch {tone:.1f} Hz)"
+                # (It replaces the tune's own "Tuned to ...": led as that
+                # was, by a decoder's "off" note, P-07.)
+                said, lead = self._bookmark_said
+                if self._message_label.text() == said:
+                    text = lead + text
+                self._show_status_message(text, "info", 3000)
 
     def _show_radio_tuner(self):
         """Show the AM/FM radio tuner pop-out window."""

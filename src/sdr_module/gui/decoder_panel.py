@@ -471,10 +471,17 @@ class _MessageDetail(QFrame if HAS_PYQT6 else object):
 
     Long messages are cut to a few lines (with an ellipsis) so the card
     never crowds out the table; the Log tab always has the complete text.
+
+    ``yields`` (the table) gives up its height for the card: its minimum
+    shrinks by the card's while the card shows, so the page keeps its
+    minimum height and the window's right column doesn't jump (the tool
+    tabs' minimum would grow and push the split into the control panel).
     """
 
-    def __init__(self, parent: Any = None):
+    def __init__(self, parent: Any = None, yields: Any = None):
         super().__init__(parent)
+        self._yields = yields
+        self._yields_min = yields.minimumHeight() if yields is not None else 0
         set_role(self, "card")
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 6)
@@ -535,6 +542,23 @@ class _MessageDetail(QFrame if HAS_PYQT6 else object):
     def showEvent(self, event: Any) -> None:  # noqa: N802 (Qt API)
         super().showEvent(event)
         self._render()
+
+    def setVisible(self, visible: bool) -> None:  # noqa: N802 (Qt API)
+        super().setVisible(visible)
+        self._yield_height()
+
+    def _yield_height(self) -> None:
+        table = self._yields
+        if table is None:
+            return
+        if self.isHidden():
+            table.setMinimumHeight(self._yields_min)
+            return
+        parent = self.parentWidget()
+        layout = parent.layout() if parent is not None else None
+        spacing = max(0, layout.spacing()) if layout is not None else 0
+        taken = self.minimumSizeHint().height() + spacing
+        table.setMinimumHeight(max(0, self._yields_min - taken))
 
     def _render(self) -> None:
         # Measure the frame itself: the layout's own geometry is reset
@@ -883,7 +907,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._filter_bar.hide()
         page_layout.addWidget(self._filter_bar)
         page_layout.addWidget(self._table, 1)
-        self._detail = _MessageDetail()
+        self._detail = _MessageDetail(yields=self._table)
         page_layout.addWidget(self._detail)
         self._tabs.addTab(messages_page, "Messages")
         self._tabs.setTabToolTip(0, "Decoded messages as a table")

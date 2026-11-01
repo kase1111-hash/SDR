@@ -622,10 +622,14 @@ class TestDamagedSquelchSetting(unittest.TestCase):
                 self.assertEqual(win._control_panel.get_squelch_db(), -80.0)
                 self.assertEqual(win._squelch_db, -80.0)
 
-    def test_a_huge_threshold_is_the_nearest_end(self):
-        win = self.window("1e12")
-        self.assertEqual(win._control_panel.get_squelch_db(), 0.0)
-        self.assertEqual(win._squelch_db, 0.0)
+    def test_a_huge_threshold_is_the_default_too(self):
+        # (F-window, ROB-08: its nearest end, 0 dBFS, kept the squelch shut
+        # for good; only the slider's range is ever saved.)
+        for value in ("1e12", "50"):
+            with self.subTest(value=value):
+                win = self.window(value)
+                self.assertEqual(win._control_panel.get_squelch_db(), -80.0)
+                self.assertEqual(win._squelch_db, -80.0)
 
     def test_the_panel_ignores_a_threshold_that_is_not_a_number(self):
         require_pyqt6(self)

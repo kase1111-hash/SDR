@@ -29,6 +29,13 @@ APP = "SDR Module"
 # channel, and where demo mode's strongest station sits.
 DEFAULT_FREQUENCY_HZ = 100.1e6
 
+#: Qt's integers (a spin box, a slider) are 32-bit: a saved number outside
+#: this range is no value the app wrote.
+INT_RANGE = (-(2**31), 2**31 - 1)
+#: How a saved yes/no reads (QSettings' INI files hold text).
+_TRUE_TEXT = ("1", "true", "yes", "on")
+_FALSE_TEXT = ("0", "false", "no", "off")
+
 
 class GuiSettings:
     """Typed wrapper over QSettings for GUI state persistence."""
@@ -37,31 +44,66 @@ class GuiSettings:
         if not HAS_PYQT6:
             raise ImportError("PyQt6 is required")
         self._s = QSettings(ORG, APP)
+        self._damaged_keys: set[str] = set()  # (logged once each)
+
+    def _damaged(self, key: str, raw: Any, default: Any) -> Any:
+        """A saved value that can't be one the app wrote (a damaged or
+        hand-edited settings file): the default instead, said once per key
+        in the log (Tools > Error History)."""
+        if key not in self._damaged_keys:
+            self._damaged_keys.add(key)
+            logger.warning(
+                "Ignoring the damaged setting %s=%r: using %r instead.",
+                key,
+                raw,
+                default,
+            )
+        return default
 
     # ---- Simple typed getters ----
+    # A value that isn't of the key's type (or is out of reach: not a
+    # finite number, a 64-bit integer) gives the default, logged once.
     def get_float(self, key: str, default: float) -> float:
+        raw = self._s.value(key, default)
         try:
-            return float(self._s.value(key, default))
-        except (TypeError, ValueError):
-            return default
+            value = float(raw)
+        except (TypeError, ValueError, OverflowError):
+            return self._damaged(key, raw, default)
+        if not -float("inf") < value < float("inf") and self._s.contains(key):
+            return self._damaged(key, raw, default)
+        return value
 
     def get_int(self, key: str, default: int) -> int:
+        raw = self._s.value(key, default)
         try:
-            return int(self._s.value(key, default))
-        except (TypeError, ValueError):
-            return default
+            value = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            return self._damaged(key, raw, default)
+        if not INT_RANGE[0] <= value <= INT_RANGE[1]:
+            return self._damaged(key, raw, default)
+        return value
 
     def get_bool(self, key: str, default: bool) -> bool:
         raw = self._s.value(key, default)
         if isinstance(raw, bool):
             return raw
+        if isinstance(raw, int) and raw in (0, 1):
+            return bool(raw)
         if isinstance(raw, str):
-            return raw.lower() in ("1", "true", "yes", "on")
-        return bool(raw)
+            text = raw.strip().lower()
+            if text in _TRUE_TEXT:
+                return True
+            if text in _FALSE_TEXT:
+                return False
+        return self._damaged(key, raw, default)
 
     def get_str(self, key: str, default: str) -> str:
         v = self._s.value(key, default)
-        return str(v) if v is not None else default
+        if v is None:
+            return default
+        if isinstance(v, (list, tuple, dict, bytes, bytearray)):
+            return self._damaged(key, v, default)  # (e.g. "a, b": a list)
+        return str(v)
 
     def set(self, key: str, value: Any) -> None:
         self._s.setValue(key, value)
@@ -85,7 +127,9 @@ class GuiSettings:
 
     # ---- First-run flag ----
     def is_first_run(self) -> bool:
-        return self.get_bool("first_run_done", False) is False
+        # (A damaged flag that is there at all: the app has run before.)
+        done = self._s.contains("first_run_done")
+        return self.get_bool("first_run_done", done) is False
 
     def mark_first_run_done(self) -> None:
         self.set("first_run_done", True)

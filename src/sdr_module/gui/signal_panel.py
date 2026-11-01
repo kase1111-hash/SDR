@@ -570,7 +570,7 @@ if HAS_PYQT6:
             self.apply_btn = QPushButton("Apply Mode")
             self.apply_btn.setToolTip(
                 "Listen to it the suggested way: Mode, FM deviation and "
-                "Bandwidth, tuned to the signal's centre"
+                "Filter, tuned to the signal's center"
             )
             self.apply_btn.setEnabled(False)
             self.apply_btn.clicked.connect(lambda _c=False: self.apply_requested.emit())
@@ -754,7 +754,7 @@ if HAS_PYQT6:
             self.signals_table = self._table(
                 ["MHz", "dBFS", "SNR", "Width", "Heard"],
                 [
-                    "Where the signal's power is centred (double-click to tune). "
+                    "Where the signal's power is centered (double-click to tune). "
                     "The row number is its number on the spectrum's markers.",
                     "Its strongest bin, in dBFS (the spectrum's scale)",
                     "How far it stands above the noise floor around it (dB)",
@@ -1098,7 +1098,7 @@ if HAS_PYQT6:
                 ["Time", "MHz", "Length", "dBFS", "What"],
                 [
                     "When it started",
-                    "Where its power was centred (MHz)",
+                    "Where its power was centered (MHz)",
                     "How long it lasted",
                     "Its strongest level, in dBFS",
                     "What it looks like (OOK, FSK, voice...) and, for on/off "

@@ -614,6 +614,8 @@ QListView::item:hover, QTreeView::item:hover, QTableView::item:hover {{
     background-color: {p.surface0}; }}
 QListView::item:selected, QTreeView::item:selected, QTableView::item:selected {{
     background-color: {p.surface1}; color: {p.text}; }}
+QListView::item:disabled, QTreeView::item:disabled, QTableView::item:disabled {{
+    color: {p.disabled}; }}
 QHeaderView {{ background-color: {p.mantle}; }}
 QHeaderView::section {{ background-color: {p.mantle}; color: {p.subtext}; border: none;
     border-bottom: 1px solid {p.surface1}; border-right: 1px solid {p.surface0};
@@ -835,6 +837,11 @@ def apply_theme(app: Any, theme: str) -> str:
     if app is None:
         return name
     app.setPalette(build_qpalette(name))
+    # Clear the old stylesheet first: Qt restyles every widget about five
+    # times faster from none than from another one (the same result; a
+    # switch took about a second, stalling the receiver and its audio).
+    if app.styleSheet():
+        app.setStyleSheet("")
     app.setStyleSheet(get_stylesheet(name))
     try:
         for widget in app.allWidgets():

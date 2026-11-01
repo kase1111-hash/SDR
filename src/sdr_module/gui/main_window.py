@@ -144,6 +144,7 @@ from .decoder_panel import DecoderPanel
 from .device_controls import (
     DeviceControls,
     ScanResultsDialog,
+    confirm_stop_recordings,
     confirm_switch_to_demo,
 )
 from .file_jobs import (
@@ -288,6 +289,9 @@ _VOLUME_STEP = 10  # percent: Radio > Audio > Volume Up / Down
 # would come out as a buzz of short bursts.
 _REALTIME_FRACTION = 0.5
 _REALTIME_WINDOW_S = 2.0
+# While audio pauses for that again and again, the status bar says why at
+# most this often (the Audio button says Paused, its tooltip why).
+_REALTIME_HINT_EVERY_S = 30.0
 # The most signal one display frame takes from the device, in seconds (a
 # stalled window catches up in steps), and the most until frames are known
 # to keep up with real time (so finding out stalls a slow computer only
@@ -2091,6 +2095,10 @@ def _span_text(seconds: float) -> str:
 # ---------------------------------------------------------------------------
 
 
+#: Width (px) the status bar keeps for its messages.
+_MESSAGE_MIN_WIDTH = 220
+
+
 class _ElidedLabel(QLabel if HAS_PYQT6 else object):
     """A one-line label that ends in "…" instead of being cut off.
 
@@ -2132,6 +2140,50 @@ class _ElidedLabel(QLabel if HAS_PYQT6 else object):
         super().setText(shown)
 
 
+class _ShrinkingLabel(_ElidedLabel):
+    """A status bar label that takes its full text's width while there is
+    room, and gives it up (ending in "…") down to ``minimum`` px when the
+    status bar is short of it, before the messages do (DEV-E2E-07). Its
+    tooltip is the full text over ``tip`` (or the tooltip set later)."""
+
+    def __init__(self, text: str = "", minimum: int = 60, tip: str = "", parent=None):
+        self._tip = tip
+        super().__init__(text, parent)
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+        self.setMinimumWidth(int(minimum))
+
+    def setText(self, text: str) -> None:  # noqa: N802 - Qt naming
+        super().setText(text)
+        self._show_tip()
+        self.updateGeometry()  # (a longer text asks for more room)
+
+    def setToolTip(self, tip: str) -> None:  # noqa: N802 - Qt naming
+        # (Under the full text: the label may show it cut short.)
+        self._tip = str(tip or "")
+        self._show_tip()
+
+    def _show_tip(self) -> None:
+        if self._tip:
+            QLabel.setToolTip(self, f"{self._full_text}\n{self._tip}".strip())
+
+    def sizeHint(self) -> Any:  # noqa: N802 - Qt naming
+        # QLabel's own hint (padding included) for the text shown, widened
+        # to the full text.
+        hint = super().sizeHint()
+        metrics = self.fontMetrics()
+        shown = QLabel.text(self)
+        extra = metrics.horizontalAdvance(self._full_text) - metrics.horizontalAdvance(
+            shown
+        )
+        hint.setWidth(hint.width() + max(0, extra))
+        return hint
+
+    def minimumSizeHint(self) -> Any:  # noqa: N802 - Qt naming
+        hint = super().minimumSizeHint()
+        hint.setWidth(self.minimumWidth())
+        return hint
+
+
 # ---------------------------------------------------------------------------
 # Info tab
 # ---------------------------------------------------------------------------
@@ -2166,7 +2218,7 @@ class InfoPanel(QWidget if HAS_PYQT6 else object):
                     "Center (LO)",
                     get_short_tip("center_frequency")
                     + " The middle of the spectrum and waterfall; recordings "
-                    "are labelled with it.",
+                    "are labeled with it.",
                 ),
                 ("sample_rate", "Sample rate", get_short_tip("sample_rate")),
                 (
@@ -2427,12 +2479,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     _AUDIO_OFF_TEXT = " Muted"  # muted by you
     _AUDIO_NO_OUTPUT_TEXT = " No output"  # no audio output device
     _AUDIO_SILENT_TEXT = " No audio"  # on, but None (I/Q) mode has no audio
+    # (Two more: on, but silent for now.)
+    _AUDIO_SECOND_TEXT = " Muted (2nd RX)"  # the second receiver's Listen
+    _AUDIO_PAUSED_TEXT = " Paused"  # on, but the signal isn't real time
     _AUDIO_TEXTS = (
         _AUDIO_ON_TEXT,
         _AUDIO_OFF_TEXT,
         _AUDIO_NO_OUTPUT_TEXT,
         _AUDIO_SILENT_TEXT,
+        _AUDIO_SECOND_TEXT,
+        _AUDIO_PAUSED_TEXT,
     )
+    _audio_shown = ""  # the state the Audio button shows (_sync_audio_ui)
+    _realtime_hint_at = -math.inf  # when the status bar last said why
 
     def __init__(self, parent=None, demo_mode: bool = False):
         if not HAS_PYQT6:
@@ -2745,6 +2804,19 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._right_splitter.setStretchFactor(0, 1)
         self._right_splitter.setStretchFactor(1, 1)
         self._main_splitter.addWidget(self._right_splitter)
+        # When the column's height changes (the window resized, a split saved
+        # at another height restored), QSplitter scales the control pane:
+        # its lower edge goes back between two groups (_resnap_right_splitter).
+        self._resnap_timer = QTimer(self)
+        self._resnap_timer.setSingleShot(True)
+        self._resnap_timer.setInterval(0)
+        self._resnap_timer.timeout.connect(self._resnap_right_splitter)
+        self._right_splitter.installEventFilter(self)
+        # The share of the column the control pane is meant to have (the
+        # default's, or where the handle was dragged): the snap starts from
+        # it, so the pane grows back after the window shrank for a moment.
+        self._right_split_share: Optional[float] = None
+        self._right_splitter.splitterMoved.connect(self._note_right_split)
 
         # Extra window width goes to the displays, not the controls.
         self._main_splitter.setStretchFactor(0, 1)
@@ -2990,6 +3062,143 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         menu.addAction(action)
         return action
 
+    def _add_listening_menus(self, radio_menu: Any, audio_menu: Any) -> None:
+        """How you listen, one click away from anywhere (LISTEN-02, leftover
+        5): Radio > Mode and Radio > Squelch, and Radio > Audio's Noise
+        Reduction, Audio AGC, Tone Squelch... and CW Pitch... (the control
+        panel's Demodulation and Audio groups, kept in step with them)."""
+        from .audio_chain import AGC_SPEED_LABELS, NOISE_REDUCTION_LEVELS
+        from .control_panel import DEMOD_MODES
+
+        panel = self._control_panel
+        # A menu item is usable when its control is (the control panel's
+        # rules: no squelch or noise reduction in I/Q mode, Auto with the
+        # squelch on, the audio AGC in AM, SSB and CW), instead of changing
+        # a setting the panel shows greyed out (see eventFilter).
+        self._menu_followers: Dict[Any, List[Any]] = {}
+
+        def follow(widget, action):
+            self._menu_followers.setdefault(widget, []).append(action)
+            action.setEnabled(widget.isEnabled())
+            widget.installEventFilter(self)
+
+        def choices(menu, combo, items, tip):
+            # One checkable item per choice of ``combo`` (by value), checked
+            # as the combo is.
+            follow(combo, menu.menuAction())
+            group = QActionGroup(self)
+            actions = {}
+            for value, text in items:
+                action = self._add_action(
+                    menu,
+                    text,
+                    lambda on, v=value: on and combo.setCurrentText(v),
+                    tip=tip,
+                    checkable=True,
+                    checked=combo.currentText() == value,
+                )
+                group.addAction(action)
+                actions[value] = action
+
+            def sync(*_args):
+                action = actions.get(combo.currentText())
+                if action is not None and not action.isChecked():
+                    action.setChecked(True)
+
+            combo.currentIndexChanged.connect(sync)
+
+        # (Letters no other Radio item has: Choose Mode From Band Plan has
+        # M, Recent Frequencies Q.)
+        mode_menu = radio_menu.addMenu("Mod&e")
+        mode_menu.setToolTipsVisible(True)
+        choices(
+            mode_menu,
+            panel._demod_combo,
+            [(name, name) for name, _tip in DEMOD_MODES],
+            "How the tuned signal is turned into audio (MODE in the receiver "
+            "bar, Demodulation in the control panel)",
+        )
+        squelch_menu = radio_menu.addMenu("Sque&lch")
+        squelch_menu.setToolTipsVisible(True)
+        for text, check, tip in (
+            (
+                "Squelch &On",
+                panel._squelch_check,
+                "Mute the audio while the tuned channel is quieter than the "
+                "threshold (off: everything plays, noise too)",
+            ),
+            (
+                "&Auto Threshold",
+                panel._squelch_auto,
+                "Keep the threshold a little above the channel's noise (off: "
+                "the threshold set by hand, or by dragging the LEVEL meter)",
+            ),
+        ):
+            action = self._add_action(
+                squelch_menu,
+                text,
+                check.setChecked,
+                tip=tip,
+                checkable=True,
+                checked=check.isChecked(),
+            )
+            check.toggled.connect(
+                lambda on, a=action: a.isChecked() != on and a.setChecked(on)
+            )
+            follow(check, action)
+
+        audio_menu.addSeparator()
+        choices(
+            audio_menu.addMenu("&Noise Reduction"),
+            panel._nr_combo,
+            [(value, text) for value, text, _tip in NOISE_REDUCTION_LEVELS],
+            "Reduce steady hiss in the audio (Audio group in the control panel)",
+        )
+        choices(
+            audio_menu.addMenu("Audio &AGC"),
+            panel._audio_agc_combo,
+            [(value, text) for value, text, _tip in AGC_SPEED_LABELS],
+            "How fast the audio level follows the signal (Audio group in the "
+            "control panel)",
+        )
+        self._add_action(
+            audio_menu,
+            "&Tone Squelch...",
+            lambda: self._show_panel_control(panel._tone_combo, mode="FM"),
+            tip="Choose the CTCSS tone a repeater or PMR radio sends, to hear "
+            "only it (FM; the Audio group in the control panel)",
+        )
+        self._add_action(
+            audio_menu,
+            "&CW Pitch...",
+            lambda: self._show_panel_control(panel._cw_pitch_spin, mode="CW"),
+            tip="The pitch of the CW tone you hear (the Demodulation group in "
+            "the control panel; shown in CW)",
+        )
+
+    def _show_panel_control(self, widget: Any, mode: str = "") -> None:
+        """Show a control panel control (the tool tabs back to their place,
+        scrolled into view) and give it the focus. ``mode``: the mode it
+        belongs to, said when another one is in use."""
+        panel = self._control_panel
+        if mode and panel.get_demod_mode() != mode:
+            name = widget.accessibleName() or "setting"
+            if name[1:2].islower():  # ("Tone squelch", not "CW pitch")
+                name = name[0].lower() + name[1:]
+            self._show_status_message(
+                f"The {name} is used in {mode}: choose {mode} in Radio > Mode "
+                "first.",
+                None,
+                5000,
+            )
+            return
+        if self._tool_tabs.maximized:
+            self._tool_tabs.set_maximized(False)
+        scroll = getattr(panel, "_scroll", None)
+        if scroll is not None:
+            scroll.ensureWidgetVisible(widget, 0, 40)
+        widget.setFocus(Qt.FocusReason.OtherFocusReason)
+
     def _tool_panel_action(
         self, menu: Any, key: str, text: str, tip: str
     ) -> Optional["QAction"]:
@@ -3207,6 +3416,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             tip="Choose the speakers, headset or other output the audio plays "
             "through (Tools > Preferences)",
         )
+        self._add_listening_menus(radio_menu, audio_menu)
         radio_menu.addSeparator()
         # The one preset table (gui/presets.py): the favourites, then every
         # preset by category, as the Presets group lists them.
@@ -3320,7 +3530,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             radio_menu,
             "Track Si&gnal (AFC)",
             lambda on: self._signal_tools.set_tracking(on),
-            tip="Keep a drifting signal centred: the tuned frequency follows it "
+            tip="Keep a drifting signal centered: the tuned frequency follows it "
             "(narrow FM, AM and CW; the receiver retunes only at the span's "
             "edges). The status bar shows how far it moved",
             checkable=True,
@@ -3451,6 +3661,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         signal_menu = tools_menu.addMenu("Si&gnal")
         signal_menu.setToolTipsVisible(True)
+        # Every page of the Signal tab, Identify too (its Ctrl+I stays on
+        # Identify Signal above: one action per key).
+        self._add_action(
+            signal_menu,
+            "&Identify",
+            lambda: self._signal_tools.identify(),
+            tip="Say what the signal at the tuned frequency is (Ctrl+I)",
+        )
         for text, page, tip in (
             ("Signals in &View", "signals", "List the signals in the span"),
             ("&Scope", "scope", "The tuned channel in time or as a constellation"),
@@ -3724,7 +3942,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._state_badge.installEventFilter(self)
         statusbar.addWidget(self._state_badge)
 
-        self._device_label = QLabel("No device")
+        # (The device's name gives up its width to the messages first.)
+        self._device_label = _ShrinkingLabel("No device", minimum=90)
         set_role(self._device_label, "value")
         self._device_label.setToolTip(
             "Current device. Click to change it (Device > Connect...)."
@@ -3756,6 +3975,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             f"Click for the last {STATUS_HISTORY_SIZE} status messages."
         )
         self._message_label.installEventFilter(self)
+        # Room to read a refusal while recording at 1024 px (DEV-E2E-07):
+        # the name and the size chip shrink first.
+        self._message_label.setMinimumWidth(_MESSAGE_MIN_WIDTH)
         statusbar.addWidget(self._message_label, 1)
         self._message_timer = QTimer(self)
         self._message_timer.setSingleShot(True)
@@ -3768,10 +3990,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._recording_label.setVisible(False)
         self._recording_label.setAccessibleName("Recording time")
         statusbar.addPermanentWidget(self._recording_label)
-        self._recording_info_label = QLabel("")
-        self._recording_info_label.setToolTip(
-            "Recorded size, and the free space left on the drive the "
-            "recording is written to (it stops below 500 MB)"
+        # "26.7 MB · 17.7 GB free": the free space goes first when the
+        # status bar is short of room (it stays in the tooltip).
+        self._recording_info_label = _ShrinkingLabel(
+            "",
+            minimum=QLabel().fontMetrics().horizontalAdvance("999.9 MB …") + 8,
+            tip="Recorded size, and the free space left on the drive the "
+            "recording is written to (it stops below 500 MB)",
         )
         self._recording_info_label.setVisible(False)
         statusbar.addPermanentWidget(self._recording_info_label)
@@ -3896,6 +4121,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     # ------------------------------------------------------------------
 
     def eventFilter(self, obj, event):  # noqa: N802 - Qt naming
+        if obj is self._own("_right_splitter") and event.type() == QEvent.Type.Resize:
+            self._resnap_timer.start()  # (once QSplitter spread the new height)
+        if event.type() == QEvent.Type.EnabledChange:
+            # A listening menu item follows its control (_add_listening_menus).
+            for action in (self._own("_menu_followers") or {}).get(obj, ()):
+                action.setEnabled(obj.isEnabled())
         if (
             obj is getattr(self, "_freq_label", None)
             and event.type() == QEvent.Type.MouseButtonRelease
@@ -4159,7 +4390,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             history: Keep it in the last 20 messages (a click on the message
                 area lists them); False for passing flashes ("Volume 60%").
             log: A warning also goes to Tools > Error History; False when
-                the caller logged it already (so it is listed once).
+                the caller logged it already (so it is listed once), and for
+                a notice that is no problem ("Recording paused", "Recording
+                armed...", what to do first): only problems are listed there.
         """
         self._message_label.setText(message)
         self._message_label.setToolTip(
@@ -4586,7 +4819,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             - self._right_tabs.minimumSizeHint().height()
         )
         top = self._snap_to_section_gap(int(height * 0.55), height, limit)
-        self._right_splitter.setSizes([top, max(120, height - top)])
+        tabs = max(120, height - top)
+        self._right_splitter.setSizes([top, tabs])
+        self._right_split_share = top / max(1, top + tabs)  # (kept on resizes)
 
         height = self._display_splitter.height()
         if height < 300:
@@ -4607,14 +4842,32 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         group) don't count: then the deepest gap above it is used (at 640 px
         the one after Frequency), or ``limit`` itself.
         """
+        spans = self._section_spans()
+        if spans is None:
+            return top
+        gaps = [bottom + 3 for _top, bottom in spans]  # half the layout spacing
+        if limit is not None:
+            gaps = [g for g in gaps if g <= limit]
+        usable = [g for g in gaps if 0.4 * height <= g <= 0.7 * height]
+        if usable:
+            return min(usable, key=lambda g: abs(g - top))
+        if limit is None:
+            return top
+        if gaps:
+            return max(gaps)  # never through a group, even if lower
+        return max(0, min(top, limit))
+
+    def _section_spans(self) -> Optional[List[Tuple[int, int]]]:
+        """``(top, bottom)`` of each control panel section in the right
+        column's upper pane (as scrolled), or None if it can't be measured."""
         pane = self._right_splitter.widget(0)
         if pane is None:
-            return top
+            return None
+        spans = []
         try:
             if pane.layout() is not None:
                 pane.layout().activate()
             self._control_panel.layout().activate()
-            gaps = []
             for group in self._control_panel.findChildren(QGroupBox):
                 if not group.isVisibleTo(self._control_panel):
                     continue
@@ -4626,21 +4879,59 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     outer = outer.parentWidget()
                 if isinstance(outer, QGroupBox):
                     continue
-                bottom = group.mapTo(pane, QPoint(0, group.height())).y()
-                gaps.append(bottom + 3)  # half the usual layout spacing
+                top = group.mapTo(pane, QPoint(0, 0)).y()
+                spans.append((top, top + group.height()))
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Could not measure control panel sections: %s", exc)
-            return top
-        if limit is not None:
-            gaps = [g for g in gaps if g <= limit]
-        usable = [g for g in gaps if 0.4 * height <= g <= 0.7 * height]
-        if usable:
-            return min(usable, key=lambda g: abs(g - top))
-        if limit is None:
-            return top
-        if gaps:
-            return max(gaps)  # never through a group, even if lower
-        return max(0, min(top, limit))
+            return None
+        return sorted(spans)
+
+    def _note_right_split(self, _pos: int = 0, _index: int = 0) -> None:
+        """The right splitter's handle was dragged: the pane's new share of
+        the column is the one to keep (see _resnap_right_splitter)."""
+        sizes = self._right_splitter.sizes()
+        if len(sizes) == 2 and sum(sizes) > 0:
+            self._right_split_share = sizes[0] / sum(sizes)
+
+    def _resnap_right_splitter(self) -> None:
+        """(L10, DEV-E2E-06) The right column's height changed: QSplitter
+        scaled the control pane, whose lower edge can then cut a group in
+        half above the tool tabs (shrinking the window, or a split saved
+        at another height restored at launch). The pane takes its share of
+        the column (the default's, where the handle was dragged, or a
+        restored split's), and its lower edge moves to the nearest gap
+        between groups that leaves the tool tabs their minimum height. The
+        share is kept: growing the window again gives the pane back the
+        groups a smaller window had no room for."""
+        splitter = self._right_splitter
+        pane = splitter.widget(0)
+        if pane is None or pane.isHidden() or not self.isVisible():
+            return  # (the tool tabs fill the column)
+        sizes = splitter.sizes()
+        if len(sizes) != 2 or min(sizes) <= 0:
+            return
+        top, total = sizes[0], sum(sizes)
+        if self._right_split_share is None:
+            self._right_split_share = top / total
+        want = int(round(self._right_split_share * total))
+        spans = self._section_spans()
+        if not spans:
+            return
+        limit = total - self._right_tabs.minimumSizeHint().height()
+        if want <= limit and not any(start < want < end for start, end in spans):
+            target = want  # (between two groups already)
+        else:
+            gaps = [end + 3 for _start, end in spans if end + 3 <= limit]
+            above = [g for g in gaps if g <= want]
+            below = [g for g in gaps if g > want]
+            if not (above or below):
+                return
+            if above and (not below or want - max(above) <= min(below) - want):
+                target = max(above)
+            else:
+                target = min(below)
+        if target != top:
+            splitter.setSizes([target, total - target])
 
     def _set_plot_visible(self, plot: "QWidget", shown: bool) -> None:
         """View > Spectrum / Waterfall. Hiding the plot with the keyboard
@@ -4736,6 +5027,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "Audio recording paused" if paused else "Audio recording resumed",
                 "warning" if paused else None,
                 2500,
+                log=False,  # (a notice, not a problem)
             )
             return
         paused = bool(paused) and self._recording
@@ -4748,6 +5040,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "Recording paused" if paused else "Recording resumed",
             "warning" if paused else None,
             2500,
+            log=False,
         )
 
     def _on_record_kind_changed(self, kind: str) -> None:
@@ -5896,8 +6189,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _note_tuned(self) -> None:
         """A frequency was tuned: it joins the history once the receiver
         stays on it a moment (stepping through a band doesn't add each
-        step)."""
+        step). Tune Back works at once all the same."""
         self._history_timer.start(_HISTORY_DWELL_MS)
+        self._update_history_actions()
 
     def _commit_history_entry(self) -> None:
         """Record where the receiver is (frequency and mode) now."""
@@ -6010,12 +6304,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Enable Tune Back/Forward when there is somewhere to go, and say
         where in their tooltips."""
         history = self._tuning_history
-        for action, can, delta, verb in (
-            (self._back_action, history.can_go_back(), -1, "Go back to"),
-            (self._forward_action, history.can_go_forward(), 1, "Go forward to"),
+        here = history.current()
+        # A frequency tuned a moment ago joins the history after the dwell,
+        # but Tune Back commits it first (DEV-E2E-08): back then goes to
+        # where the history is now, and nothing is ahead any more.
+        pending = (
+            self._history_timer.isActive()
+            and here is not None
+            and not here.same_frequency(TunedEntry(self._current_frequency()))
+        )
+        back = here if pending else history.peek(-1)
+        forward = None if pending else history.peek(1)
+        for action, entry, delta, verb in (
+            (self._back_action, back, -1, "Go back to"),
+            (self._forward_action, forward, 1, "Go forward to"),
         ):
-            action.setEnabled(can)
-            entry = history.peek(delta) if can else None
+            action.setEnabled(entry is not None)
             if entry is not None:
                 tip = f"{verb} {self._entry_text(entry)}"
             elif delta < 0:
@@ -6222,19 +6526,74 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             try:
                 memory = json.loads(raw)
             except ValueError:
-                logger.debug("Ignoring unreadable saved mode filters: %r", raw)
+                logger.warning("Ignoring unreadable saved mode filters: %r", raw)
             else:
                 if isinstance(memory, dict):
                     panel.set_filter_memory(memory)
-        panel.set_squelch_auto(settings.get_bool("squelch/auto", True))
-        panel.set_squelch_enabled(settings.get_bool("squelch/enabled", True))
-        panel.set_cw_pitch(settings.get_int("audio/cw_pitch", DEFAULT_CW_PITCH_HZ))
-        panel.set_noise_reduction(settings.get_str("audio/noise_reduction", "off"))
-        panel.set_audio_agc_speed(settings.get_str("audio/agc_speed", "medium"))
-        panel.set_tone_squelch_hz(settings.get_float("audio/tone_squelch", 0.0))
-        panel.set_iq_options(
-            settings.get_bool("audio/remove_dc", False),
-            settings.get_bool("audio/balance_iq", False),
+
+        def restore(key: str, apply: Any) -> None:
+            # One damaged value is logged and left at its default: it never
+            # stops the others (or the app) from starting.
+            try:
+                apply()
+            except Exception as e:
+                logger.warning(f"Ignoring the damaged setting {key}: {e}")
+
+        def choose(key: str, default: str, setter: Any, getter: Any) -> None:
+            value = settings.get_str(key, default)
+            setter(value)
+            if getter() != value:  # (not one of its choices)
+                logger.warning(
+                    f"Ignoring the damaged setting {key}={value!r}: using "
+                    f"{getter()!r} instead."
+                )
+
+        restore(
+            "squelch/auto",
+            lambda: panel.set_squelch_auto(settings.get_bool("squelch/auto", True)),
+        )
+        restore(
+            "squelch/enabled",
+            lambda: panel.set_squelch_enabled(
+                settings.get_bool("squelch/enabled", True)
+            ),
+        )
+        restore(
+            "audio/cw_pitch",
+            lambda: panel.set_cw_pitch(
+                settings.get_int("audio/cw_pitch", DEFAULT_CW_PITCH_HZ)
+            ),
+        )
+        restore(
+            "audio/noise_reduction",
+            lambda: choose(
+                "audio/noise_reduction",
+                "off",
+                panel.set_noise_reduction,
+                panel.noise_reduction,
+            ),
+        )
+        restore(
+            "audio/agc_speed",
+            lambda: choose(
+                "audio/agc_speed",
+                "medium",
+                panel.set_audio_agc_speed,
+                panel.audio_agc_speed,
+            ),
+        )
+        restore(
+            "audio/tone_squelch",
+            lambda: panel.set_tone_squelch_hz(
+                settings.get_float("audio/tone_squelch", 0.0)
+            ),
+        )
+        restore(
+            "audio/remove_dc, audio/balance_iq",
+            lambda: panel.set_iq_options(
+                settings.get_bool("audio/remove_dc", False),
+                settings.get_bool("audio/balance_iq", False),
+            ),
         )
         # (The panel's signals applied these; make sure even unchanged
         # defaults are in effect.)
@@ -6526,7 +6885,39 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if problem is None and not self._audio.start(int(_AUDIO_RATE)):
             problem = "The audio output could not be opened"
         self._audio_problem = problem
+        if problem is None:
+            self._announce_missing_output()
         return problem is None
+
+    def _missing_output_text(self) -> str:
+        """``"Fake USB Headset isn't connected: playing through Fake
+        Speakers"`` while the output chosen in Tools > Preferences isn't
+        there (the sink plays through the default), else ""."""
+        if not getattr(self._audio, "output_missing", False):
+            return ""
+        from .audio_sink import default_output_name
+
+        chosen = self._settings.get_str(KEY_AUDIO_OUTPUT_NAME, "")
+        default = default_output_name() or "the default output"
+        return f"{chosen or 'The chosen output'} isn't connected: playing through {default}"
+
+    def _announce_missing_output(self) -> None:
+        """(DEV-E2E-14) Say once, when audio starts on the default because
+        the chosen output is gone (until it is back)."""
+        text = self._missing_output_text()
+        said = getattr(self, "_missing_output_said", "")
+        if text and text != said:
+            # (After the "Audio on" of the switch that started it; a bound
+            # method, so nothing is said by a window already closed.)
+            QTimer.singleShot(0, self._say_missing_output)
+        self._missing_output_said = text
+
+    def _say_missing_output(self) -> None:
+        text = self._missing_output_text()
+        if text:  # (still gone)
+            self._show_status_message(
+                f"{text}. Tools > Preferences chooses another output.", "info", 8000
+            )
 
     def _audio_output_problem(self) -> Optional[str]:
         """Why audio can't play right now, or None if it can."""
@@ -6654,11 +7045,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         box.setIcon(QMessageBox.Icon.Information)
         box.setWindowTitle("No Device Connected")
         if hardware:
-            found = hardware[0] if len(hardware) == 1 else f"{len(hardware)} devices"
+            # (Named: "Found RTL-SDR #0 and HackRF One, not opened yet.")
+            names = hardware[:3]
+            found = (
+                ", ".join(names[:-1]) + " and " + names[-1] if names[1:] else names[0]
+            )
+            if len(hardware) > 3:
+                found = f"{', '.join(names)} and {len(hardware) - 3} more"
             box.setText(f"Found {found}, not opened yet.")
+            which = "it" if len(hardware) == 1 else "one of them"
             box.setInformativeText(
-                "Connect opens it and starts receiving. Demo Mode explores the "
-                "app with simulated signals instead."
+                f"Connect... opens {which} and starts receiving. Demo Mode "
+                "explores the app with simulated signals instead."
             )
         else:
             box.setText("No SDR hardware detected.")
@@ -6898,6 +7296,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "(Space)",
                 "warning",
                 6000,
+                log=False,
             )
         else:
             # Replaces any "Use File > Save Recording" message about the
@@ -6945,6 +7344,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "was not running.",
                 "warning",
                 6000,
+                log=False,
             )
         self._update_take_panel()
         logger.info("Recording stopped")
@@ -7394,6 +7794,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "CW in Demodulation first.",
                 "warning",
                 8000,
+                log=False,
             )
             self._sync_audio_record_ui()
             return False
@@ -7470,6 +7871,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     "was saved.",
                     "warning",
                     6000,
+                    log=False,
                 )
         logger.info(f"Audio recording stopped: {take.path} ({seconds:.1f} s)")
         return take.path
@@ -7840,8 +8242,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # One file has one center frequency and rate: say which it keeps.
             self._retune_warned = True
             freq, rate = self._buffer_meta
+            # (Say what changed: a device or rate change is no retune.)
+            changed = (
+                "The sample rate changed while recording"
+                if rate is not None and abs(rate - tuned[1]) > 0.5
+                else "Retuned while recording"
+            )
             self._show_status_message(
-                "Retuned while recording: the saved file will be labelled "
+                f"{changed}: the saved file will be labeled "
                 f"{format_frequency(freq or 0)} at {format_rate(rate or 0)}, "
                 "where the recording started. Stop and record again for a "
                 "clean capture.",
@@ -8125,6 +8533,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "or Connect... to receive.",
                 "warning",
                 10000,
+                log=False,
             )
         elif self._is_running:
             self._show_status_message(
@@ -8204,6 +8613,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "Connect a device to save the S-meter calibration for it.",
                 "warning",
                 6000,
+                log=False,
             )
             return
         value = (
@@ -8268,7 +8678,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if not self._realtime_hint_shown:
                 self._realtime_hint_shown = True
                 self._realtime_hint_text = self._realtime_hint()
-                self._show_status_message(self._realtime_hint_text, "info", 10000)
+                now = time.monotonic()
+                if now - self._realtime_hint_at >= _REALTIME_HINT_EVERY_S:
+                    self._realtime_hint_at = now
+                    self._show_status_message(self._realtime_hint_text, "info", 10000)
+                elif self._message_label.text() == "Audio resumed":
+                    self._clear_status_message()  # (the button says Paused)
         elif speaker and self._realtime_hint_shown:
             # Keeping up again (e.g. after another program hogged the
             # computer for a moment): say so, and hint again next time.
@@ -8569,6 +8984,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._device_controls.show_auto_gain()  # "Auto (25.9 dB)"
         if self._info_panel.isVisible():
             self._refresh_info_panel()
+        # The Audio button follows what plays: the Second Receiver window's
+        # Listen, a pause while the signal isn't real time.
+        if self._audio_shown != self._audio_state():
+            self._sync_audio_ui()
         # (T6) Messages counted while the window was minimized are seen once
         # it is back with the Decoder tab in front.
         self._decoder_tab_seen()
@@ -8603,12 +9022,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         as "in use". Receiving resumes on the new device if it was running,
         and starts on it with ``start_after`` (Start pressed with no device).
         """
-        from .device_dialog import DeviceDialog
+        from .device_dialog import ConnectRefused, DeviceDialog
 
         was_running = self._is_running and self._device is not None
         released: List[str] = []
         ended: List[str] = []
         dialog = DeviceDialog(self)
+        # A device the second receiver has is listed as in use; a recording
+        # taking its samples from the current device is stopped first.
+        set_busy = getattr(dialog, "set_busy_check", None)
+        if callable(set_busy):
+            set_busy(self._device_entry_busy)
+        set_before = getattr(dialog, "set_before_connect", None)
+        if callable(set_before):
+            set_before(
+                lambda entry, name: self._confirm_device_switch(entry, name, dialog)
+            )
         self._preselect_rate(dialog)
         open_device = getattr(dialog, "_open_device", None)
         driver_class = getattr(DeviceDialog, "_device_class", None)
@@ -8628,7 +9057,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # before anything here is closed (the dialog shows why).
             problem = self._second_rx.entry_problem(entry)
             if problem:
-                raise RuntimeError(problem)
+                raise ConnectRefused(problem)
+            # A recording from the current device stops first (asked before
+            # the dialog opened anything; a dialog without that asks here).
+            if not self._confirm_device_switch(entry, "", dialog):
+                raise ConnectRefused("")
             end_playback()
             try:
                 device_class = driver_class(str(entry.get("type", "")))
@@ -8654,6 +9087,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     f"Disconnected from {released[0]}. No device is connected.",
                     "warning",
                     8000,
+                    log=False,  # (the failure itself is logged where it happened)
                 )
             elif ended:  # (connecting failed after the file was closed)
                 back = (
@@ -8661,7 +9095,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     if self._device is not None
                     else "No device is connected."
                 )
-                self._show_status_message(f"Closed {ended[0]}. {back}", "warning", 8000)
+                self._show_status_message(
+                    f"Closed {ended[0]}. {back}", "warning", 8000, log=False
+                )
             return False
 
         end_playback()
@@ -8683,6 +9119,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._pacer.reset()
         self._rx_history.clear()
         self._realtime_hint_shown = False
+        self._realtime_hint_at = -math.inf  # (and said at once)
         note = self._apply_controls_to_device()
         name = self._device_display_name()
         logger.info(f"Connected to {name}")
@@ -8726,10 +9163,48 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             min(range(len(rates)), key=lambda i: abs(rates[i] - wanted))
         )
 
+    def _device_entry_busy(self, entry: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+        """Device > Connect...: ``(status, reason)`` for a device listed that
+        can't be connected (the second receiver has it), else None."""
+        problem = self._second_rx.entry_problem(entry)
+        return ("In use by the second receiver", problem) if problem else None
+
+    def _confirm_device_switch(
+        self, entry: Dict[str, Any], name: str = "", parent: Any = None
+    ) -> bool:
+        """Device > Connect... (``entry``, listed as ``name``) while a
+        recording takes its samples from the current device: ask first, as
+        Use Demo Device does (one recording holds one device's samples at
+        one rate). True to go ahead (the recordings are stopped, the I/Q
+        samples kept to save). A recording playing back ends by itself."""
+        if self._device is None or self._playback.active:
+            return True
+        demo = str(entry.get("type", "")) == "demo"
+        current = "the demo device" if self._demo_mode else self._device_display_name()
+        new = "the demo device" if demo else str(entry.get("name") or name or "")
+        if new == current or not new:
+            question = f"Stop recording and reconnect {current}?"
+        else:
+            question = f"Stop recording and switch from {current} to {new}?"
+        return confirm_stop_recordings(
+            self,
+            question,
+            "A recording holds one device's samples, at one sample rate.",
+            parent=parent,
+        )
+
     def _release_device(self) -> None:
-        """Stop and close the current device (if any)."""
+        """Stop and close the current device (if any). A recording taking its
+        samples from it ends here (the I/Q samples stay to save), so the next
+        device never adds its own to it (callers ask first, as
+        :func:`confirm_stop_recordings` does)."""
         # A transmission ends first (and puts the HackRF back as it was).
         self._tx_station.shutdown()
+        if self._device is not None:
+            if self._recording and not self._capture_pending:
+                self._toggle_recording(False)
+            if self._audio_take is not None:
+                self._stop_audio_recording()
         if self._is_running:
             self._stop_acquisition()
         if self._device is not None:
@@ -8740,6 +9215,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._device = None
         self._demo_mode = False
         self._realtime_hint_shown = False
+        self._realtime_hint_at = -math.inf
         self._rx_history.clear()
         self._pacer.reset()
         self._frame_spectrum.reset()
@@ -8748,7 +9224,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _disconnect_device(self):
         """Disconnect from device (while a recording plays: close it, and
-        the device used before it too). A transmission ends first."""
+        the device used before it too). A transmission ends first. While a
+        recording takes its samples from the device, ask first: it ends
+        with the device."""
+        which = "the demo device" if self._demo_mode else self._device_display_name()
+        if (
+            self._device is not None
+            and not self._playback.active
+            and not confirm_stop_recordings(
+                self,
+                f"Stop recording and disconnect {which}?",
+                "A recording holds one device's samples, so it ends with the "
+                "device.",
+                accept="Stop and &Disconnect",
+            )
+        ):
+            return
         self._tx_station.shutdown()
         if self._playback.active:
             device = self._playback.device
@@ -8827,7 +9318,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         devices = self._scan_hardware()
         self._known_devices = dict(devices)
         missing = [] if devices else self._missing_drivers()
-        box = ScanResultsDialog([name for _key, name in devices], missing, self)
+        box = ScanResultsDialog(
+            [name for _key, name in devices],
+            missing,
+            self,
+            demo_running=bool(self._demo_mode and self._device is not None),
+        )
         self._exec_dialog(box)
         if box.choice == "connect":
             self._show_device_dialog()
@@ -8948,12 +9444,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         if self._device is not None:
             blocked = self._device_controls.rate_blocked()
-            if blocked:
-                self._show_status_message(blocked, "warning", 8000)
+            if blocked:  # (what to do first, or a limit: not a problem)
+                self._show_status_message(blocked, "warning", 8000, log=False)
                 return False
         refused = self._device_controls.rate_refused(rate)
         if refused:
-            self._show_status_message(refused, "warning", 8000)
+            self._show_status_message(refused, "warning", 8000, log=False)
             return False
         if self._device is None:
             self._device_controls.requested_rate = rate
@@ -9001,6 +9497,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Whether frames keep up depends on the rate: find out anew.
         self._pacer.reset()
         self._realtime_hint_shown = False
+        self._realtime_hint_at = -math.inf
         self._rx_history.clear()
         self._refresh_state_ui()
         # A smaller span may no longer hold the tuned channel.
@@ -9165,6 +9662,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "recording.",
                 "warning",
                 6000,
+                log=False,
             )
             return False
         path = path or self._choose_recording("Open Recording")
@@ -10627,6 +11125,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _on_theme_changed(self, name: str) -> None:
         try:
             self._theme = normalize_theme(name)
+            # The restyle held the display loop a moment: that is no sign
+            # the receiver can't keep up (its audio isn't paused for it).
+            self._rx_history.clear()
             self._sync_theme_actions()
             self._sync_audio_ui()  # the speaker icon is drawn in theme colors
             if self._info_panel.isVisible():
@@ -10689,14 +11190,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _audio_state(self) -> str:
         """What the Audio button shows: ``"on"``, ``"muted"`` (by you),
-        ``"no_output"`` (no audio output device, or no QtMultimedia) or
-        ``"silent"`` (on, but None (I/Q) mode has no audio)."""
+        ``"no_output"`` (no audio output device, or no QtMultimedia),
+        ``"silent"`` (on, but None (I/Q) mode has no audio), ``"second"``
+        (on, but Listen in the Second Receiver window plays only that
+        receiver) or ``"paused"`` (on, but the signal received isn't real
+        time: the receiver can't keep up, or a recording plays faster or
+        slower). Paused is what holds the audio now, as _route_audio judges
+        it: not after Stop, nor once the signal is real time again while
+        the squelch is closed."""
         if not self._audio.available:
             return "no_output"
         if not self._audio_enabled:
             return "no_output" if self._audio_problem else "muted"
         if self._control_panel.get_demod_mode() not in _AUDIBLE_MODES:
             return "silent"
+        second = getattr(self, "_second_rx", None)
+        if second is not None and second.mutes_main():
+            return "second"
+        if self._is_running and not self._realtime():
+            return "paused"
         return "on"
 
     def _on_audio_button(self, _checked: bool = False) -> None:
@@ -10758,10 +11270,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if not self._audio.available:
             return "Unavailable (needs QtMultimedia)", "muted"
         if self._audio_enabled:
+            if self._audio_state() == "second":
+                return "Muted by the Second Receiver (Listen: This receiver)", "muted"
             if self._is_running and not self._realtime():
                 return "On (the signal isn't real time)", "warning"
             if self._control_panel.get_demod_mode() not in _AUDIBLE_MODES:
                 return "On (no audio in I/Q mode)", "muted"
+            missing = self._missing_output_text()
+            if missing:
+                return f"On ({missing})", "warning"
             return "On", None
         problem = self._audio_problem
         if problem is not None:
@@ -10782,8 +11299,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._sync_audio_ui()
 
     def _sync_audio_ui(self) -> None:
-        """Show the audio state on the Audio button (four states, see
-        _audio_state) and Radio > Audio > Mute."""
+        """Show the audio state on the Audio button (see _audio_state) and
+        Radio > Audio > Mute."""
         state = self._audio_state()
         on = bool(self._audio_enabled and self._audio.available)
         # Mute is checked when you muted it, not when nothing can play
@@ -10816,6 +11333,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "USB, LSB or CW (MODE) to hear the tuned signal. Click to mute "
                 "(Ctrl+M).",
             ),
+            "second": (
+                self._AUDIO_SECOND_TEXT,
+                "Audio muted by the second receiver",
+                "Muted: Listen in the Second Receiver window plays only that "
+                "receiver. Choose Main window or Both there (or close that "
+                "window) to hear this one. Click to mute it here too (Ctrl+M).",
+            ),
+            "paused": (
+                self._AUDIO_PAUSED_TEXT,
+                "Audio paused",
+                # (Why now: also when the status bar's hint wasn't said.)
+                (self._realtime_hint() if state == "paused" else "")
+                + " Click to mute (Ctrl+M).",
+            ),
             "no_output": (
                 self._AUDIO_NO_OUTPUT_TEXT,
                 "No audio output device",
@@ -10834,7 +11365,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         button.setText(text)
         button.setAccessibleName(name)
         button.setIcon(self._speaker_icon(state))
-        set_tone(button, "warning" if state == "no_output" else None)
+        set_tone(button, "warning" if state in ("no_output", "paused") else None)
+        self._audio_shown = state
         available = self._audio.available
         self._volume_slider.setEnabled(available)
         if available:
@@ -10851,10 +11383,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         audio in this mode). (True / False: "on" / "muted".)"""
         if isinstance(state, bool):
             state = "on" if state else "muted"
-        on = state in ("on", "silent")  # the button is checked (accent fill)
+        # The button is checked (accent fill); paused: in the warning tone.
+        on = state in ("on", "silent", "second")
         p = get_palette()
         color = p.qcolor(
-            "warning" if state == "no_output" else "on_accent" if on else "text"
+            "warning"
+            if state in ("no_output", "paused")
+            else "on_accent" if on else "text"
         )
         icon = QIcon()
         for size in (16, 32):
@@ -10892,9 +11427,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                         -50 * 16,
                         100 * 16,
                     )
-            elif state == "muted":
+            elif state in ("muted", "second"):
                 painter.drawLine(QPointF(10.5 * k, 5.5 * k), QPointF(15 * k, 10.5 * k))
                 painter.drawLine(QPointF(15 * k, 5.5 * k), QPointF(10.5 * k, 10.5 * k))
+            elif state == "paused":
+                for x in (11.0, 14.5):
+                    painter.drawLine(QPointF(x * k, 4.5 * k), QPointF(x * k, 11.5 * k))
             elif state == "no_output":
                 pen.setWidthF(1.8 * k)
                 painter.setPen(pen)
@@ -10934,6 +11472,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
             deviation = bandwidth = rec_format = ""
             panel = "bookmarks"
+        from .control_panel import SQUELCH_RANGE
+
+        if not SQUELCH_RANGE[0] <= squelch <= SQUELCH_RANGE[1]:
+            # Damaged (only the slider's range is ever saved): its nearest
+            # end, 0 dBFS, would keep the squelch shut for good.
+            logger.warning(
+                f"Ignoring the damaged setting squelch_db={squelch!r}: using "
+                "-80.0 instead."
+            )
+            squelch = -80.0
         if not deviation and _FM_BROADCAST_BAND[0] <= freq <= _FM_BROADCAST_BAND[1]:
             deviation = _BROADCAST_FM_DEVIATION  # broadcast FM is wideband
         if math.isfinite(freq):  # (a damaged setting: the nearest end)
@@ -11003,6 +11551,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 restored = bool(self.restoreGeometry(geom))
             except Exception as e:
                 logger.debug(f"Could not restore window geometry: {e}")
+            if not restored:  # (a damaged settings file: said once)
+                logger.warning("Ignoring the saved window size: it can't be read.")
         if not restored:
             self._apply_default_geometry()
 
@@ -11016,6 +11566,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     ok = bool(splitter.restoreState(state))
                 except Exception as e:
                     logger.debug(f"Could not restore {name}: {e}")
+                if not ok:
+                    logger.warning(
+                        f"Ignoring the saved {name} layout: it can't be read."
+                    )
             if ok and min(splitter.sizes() or [0]) < 40:
                 ok = False
             restored_all = restored_all and ok
@@ -11060,7 +11614,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             try:
                 saved = json.loads(raw)
             except ValueError:
-                logger.debug("Ignoring unreadable waterfall settings: %r", raw)
+                logger.warning("Ignoring unreadable waterfall settings: %r", raw)
             else:
                 if isinstance(saved, dict):
                     settings.update(saved)
@@ -11290,16 +11844,35 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             try:
                 saved = json.loads(raw)
             except ValueError:
-                logger.debug("Ignoring unreadable spectrum settings: %r", raw)
+                logger.warning("Ignoring unreadable spectrum settings: %r", raw)
             else:
                 if isinstance(saved, dict):
-                    settings.update(saved)
+                    settings.update(self._without_damaged_plot_settings(saved))
         try:
             self._apply_spectrum_settings(settings)
         except Exception as e:
             # (A damaged setting must never stop the app from starting.)
             logger.warning(f"Ignoring the saved spectrum settings: {e}")
             self._apply_spectrum_settings(dict(self._SPECTRUM_DEFAULTS))
+
+    @staticmethod
+    def _without_damaged_plot_settings(saved: Dict[str, Any]) -> Dict[str, Any]:
+        """``saved`` without an FFT size, window or zoom the app never saves
+        (a damaged settings file): those the window applies itself, at their
+        defaults instead, each logged (not the nearest value: a huge size
+        would be the costliest FFT)."""
+        kept = dict(saved)
+        for key, normalize, default in (
+            ("fft_size", normalize_fft_size, DEFAULT_FFT_SIZE),
+            ("window", normalize_window, normalize_window("")),
+            ("zoom", normalize_zoom, 1),
+        ):
+            if key in kept and normalize(kept[key]) != kept[key]:
+                logger.warning(
+                    f"Ignoring the damaged spectrum setting {key}="
+                    f"{kept.pop(key)!r}: using {default!r} instead."
+                )
+        return kept
 
     def _apply_spectrum_settings(self, settings: Dict[str, Any]) -> None:
         self._spectrum.apply_display_settings(settings)

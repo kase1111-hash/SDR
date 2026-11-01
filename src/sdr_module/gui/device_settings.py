@@ -477,7 +477,7 @@ def load_gain(settings: Any, kind: str) -> Optional[Dict[str, Any]]:
     try:
         saved = json.loads(raw)
     except (TypeError, ValueError):
-        logger.debug(f"Ignoring an unreadable saved gain for {kind}: {raw!r}")
+        logger.warning(f"Ignoring an unreadable saved gain for {kind}: {raw!r}")
         return None
     return saved if isinstance(saved, dict) else None
 

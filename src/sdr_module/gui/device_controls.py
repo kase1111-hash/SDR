@@ -30,6 +30,7 @@ after tuning. :class:`ScanResultsDialog` is Device > Scan for Devices.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
@@ -223,19 +224,27 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
                         lna = int(saved.get("lna", lna))
                         vga = int(saved.get("vga", vga))
                         amp = bool(saved.get("amp", amp))
-                    except (TypeError, ValueError):
-                        logger.debug(f"Ignoring an unreadable HackRF gain: {saved!r}")
+                    except (TypeError, ValueError, OverflowError):
+                        logger.warning(f"Ignoring an unreadable HackRF gain: {saved!r}")
                 panel.set_hackrf_gains(lna, vga, amp)
                 panel.set_agc_silently(False)
             else:
                 agc = panel.is_agc_enabled()
                 if saved:
-                    try:
-                        if "db" in saved:
-                            panel.set_gain_silently(float(saved["db"]))
-                        agc = bool(saved.get("agc", agc))
-                    except (TypeError, ValueError):
-                        logger.debug(f"Ignoring an unreadable saved gain: {saved!r}")
+                    # Only what the app saves: a finite gain and a yes/no
+                    # (a damaged value keeps the default, logged).
+                    db, auto = saved.get("db"), saved.get("agc", agc)
+                    finite = isinstance(db, (int, float)) and not isinstance(db, bool)
+                    if finite and math.isfinite(db):
+                        panel.set_gain_silently(float(db))
+                    if isinstance(auto, bool):
+                        agc = auto
+                    if ("db" in saved and not (finite and math.isfinite(db))) or (
+                        not isinstance(auto, bool)
+                    ):
+                        logger.warning(
+                            f"Ignoring a damaged saved gain for {kind}: {saved!r}"
+                        )
                 panel.set_agc_silently(agc and model.agc)
             front = load_front_end(self._settings, kind)
             note = self._apply_front_end(dev, kind, front)
@@ -792,9 +801,10 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
 
 
 class ScanResultsDialog(QDialog if HAS_PYQT6 else object):
-    """What Device > Scan for Devices found, with what to do next: the
-    devices (Connect...), or the drivers to install (a selectable command
-    block) and Use Demo Device / Connect...."""
+    """What Device > Find Connected Devices found, with what to do next:
+    the devices (Connect...), or the drivers to install (a selectable
+    command block) and Use Demo Device / Connect... (no Use Demo Device
+    while the demo device runs: ``demo_running``)."""
 
     #: What the user chose: "connect", "demo" or "" (Close).
     choice = ""
@@ -804,6 +814,7 @@ class ScanResultsDialog(QDialog if HAS_PYQT6 else object):
         devices: Sequence[str],
         missing: Sequence[Tuple[str, str]],
         parent: Any = None,
+        demo_running: bool = False,
     ):
         super().__init__(parent)
         self.choice = ""
@@ -817,11 +828,17 @@ class ScanResultsDialog(QDialog if HAS_PYQT6 else object):
             text = f"Found {count} SDR device{'s' if count != 1 else ''}:\n"
             text += "\n".join(f"  •  {name}" for name in devices)
             text += "\n\nConnect... opens one."
+        elif demo_running:
+            text = (
+                "No SDR devices were found; the demo device is running "
+                "(simulated signals). Plug in an RTL-SDR or HackRF One, then "
+                "choose Device > Find Connected Devices... again."
+            )
         else:
             text = (
-                "No SDR devices were found. Plug in an RTL-SDR or HackRF One and "
-                "scan again, or try the app with the demo device's simulated "
-                "signals."
+                "No SDR devices were found. Plug one in (an RTL-SDR or HackRF "
+                "One), then choose Device > Find Connected Devices... again, "
+                "or try the app with the demo device's simulated signals."
             )
         self._summary = QLabel(text)
         self._summary.setWordWrap(True)
@@ -857,23 +874,31 @@ class ScanResultsDialog(QDialog if HAS_PYQT6 else object):
         self._connect_btn.setToolTip("Open Device > Connect... to choose a device")
         buttons.addButton(self._connect_btn, QDialogButtonBox.ButtonRole.AcceptRole)
         self._demo_btn: Optional[QPushButton] = None
-        if not found:
+        if not found and not demo_running:
             self._demo_btn = QPushButton("Use &Demo Device")
             self._demo_btn.setToolTip(
                 "Explore the app with simulated signals (no hardware needed)"
             )
             buttons.addButton(self._demo_btn, QDialogButtonBox.ButtonRole.AcceptRole)
             set_role(self._demo_btn, "primary")
-            self._demo_btn.setDefault(True)
-        else:
+        elif found:
             set_role(self._connect_btn, "primary")
-            self._connect_btn.setDefault(True)
         close = buttons.addButton(QDialogButtonBox.StandardButton.Close)
         close.clicked.connect(self.reject)
         self._connect_btn.clicked.connect(lambda: self._choose("connect"))
         if self._demo_btn is not None:
             self._demo_btn.clicked.connect(lambda: self._choose("demo"))
         layout.addWidget(buttons)
+        # Enter presses the primary button (set once the buttons are in the
+        # dialog: before, QDialog didn't record it and made Connect... the
+        # default); with nothing to offer, Close.
+        default = self._demo_btn if self._demo_btn is not None else close
+        if found:
+            default = self._connect_btn
+        for button in buttons.buttons():
+            if isinstance(button, QPushButton):
+                button.setAutoDefault(button is default)
+        default.setDefault(True)
 
     def _choose(self, choice: str) -> None:
         self.choice = choice
@@ -901,30 +926,47 @@ def missing_driver_text(missing: Sequence[Tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
-def confirm_switch_to_demo(window: Any) -> bool:
-    """Use Demo Device while a recording runs on hardware: ask first (the
-    recording would go on with simulated samples). True to go ahead (the
-    recordings are stopped), False to keep the device."""
+def records_from_device(window: Any) -> bool:
+    """Whether a recording takes its samples from the window's device: an
+    audio recording, or an I/Q recording that has samples (also waiting for
+    the receiver, REC WAITING) or captures them now. One armed before
+    receiving (nothing captured yet) records whichever device starts."""
+    if window._audio_take is not None:
+        return True
+    return bool(window._recording) and bool(
+        window._is_running or not window._capture_pending
+    )
+
+
+def confirm_stop_recordings(
+    window: Any,
+    question: str,
+    why: str,
+    accept: str = "Stop and &Switch",
+    parent: Any = None,
+) -> bool:
+    """Before the window's device is closed or replaced while a recording
+    takes its samples from it (:func:`records_from_device`): ask first, as
+    one recording holds one device's samples at one rate. True to go ahead
+    (the I/Q and audio recordings are stopped, the I/Q samples kept to
+    save), False (Cancel) to keep everything as it is."""
+    if not records_from_device(window):
+        return True
     iq = bool(window._recording)
     audio = window._audio_take is not None
-    if not (iq or audio):
-        return True
-    box = QMessageBox(window)
+    box = QMessageBox(parent if parent is not None else window)
     box.setIcon(QMessageBox.Icon.Question)
     box.setWindowTitle("Recording in Progress")
-    box.setText(
-        f"Stop recording and switch from {window._device_display_name()} to the "
-        "demo device?"
-    )
-    detail = "The recording would otherwise go on with simulated signals."
+    box.setText(question)
+    detail = why
     if iq:
         detail += (
             " The I/Q samples recorded so far stay in the Recording group, to save."
         )
     if audio:
         detail += " The audio recording is saved as it is."
-    box.setInformativeText(detail)
-    go = box.addButton("Stop and &Switch", QMessageBox.ButtonRole.AcceptRole)
+    box.setInformativeText(detail.strip())
+    go = box.addButton(accept, QMessageBox.ButtonRole.AcceptRole)
     set_role(go, "primary")
     cancel = box.addButton(QMessageBox.StandardButton.Cancel)
     box.setDefaultButton(cancel)
@@ -939,11 +981,25 @@ def confirm_switch_to_demo(window: Any) -> bool:
     return True
 
 
+def confirm_switch_to_demo(window: Any) -> bool:
+    """Use Demo Device while a recording runs on hardware: ask first (the
+    recording would go on with simulated samples). True to go ahead (the
+    recordings are stopped), False to keep the device."""
+    return confirm_stop_recordings(
+        window,
+        f"Stop recording and switch from {window._device_display_name()} to the "
+        "demo device?",
+        "The recording would otherwise go on with simulated signals.",
+    )
+
+
 __all__ = [
     "PLAYBACK_GAIN",
     "REMEMBERED_KINDS",
     "DeviceControls",
     "ScanResultsDialog",
+    "confirm_stop_recordings",
     "confirm_switch_to_demo",
     "missing_driver_text",
+    "records_from_device",
 ]

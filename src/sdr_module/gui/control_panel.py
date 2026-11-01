@@ -974,15 +974,18 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         layout.setContentsMargins(4, 4, 4, 6)
         layout.setSpacing(8)
 
-        # Where to listen first: Presets sit right under the frequency they
-        # set (the quickest way for a newcomer to find something to hear),
-        # then how to listen (mode, squelch) and the receiver settings. The
+        # The everyday listening controls first, right under the frequency
+        # (they are in view on a laptop screen): how to listen (mode,
+        # filter, squelch) and the audio options. Presets come next (they
+        # are in Radio > Band Presets too), then the receiver settings. The
         # occasional sections (recording, license) come last.
         layout.addWidget(self._build_frequency_group())
-        layout.addWidget(self._build_presets_group())
-        layout.addWidget(self._build_demod_group())
-        layout.addWidget(self._build_audio_group())
-        layout.addWidget(self._build_receiver_group())
+        demod_group = self._build_demod_group()
+        audio_group = self._build_audio_group()
+        presets_group = self._build_presets_group()
+        receiver_group = self._build_receiver_group()
+        for group in (demod_group, audio_group, presets_group, receiver_group):
+            layout.addWidget(group)
         layout.addWidget(self._build_recording_group())
         layout.addWidget(self._build_license_group())
         layout.addStretch()
@@ -1213,15 +1216,6 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._agc_check.toggled.connect(self._on_agc_changed)
         form.addRow("", self._agc_check)
 
-        self._bw_combo = self._shrinkable_combo(QComboBox(), 6)
-        self._bw_combo.addItems(list(BANDWIDTH_OPTIONS))
-        self._bw_combo.setCurrentText(DEFAULT_BANDWIDTH)
-        self._bw_combo.setToolTip(get_short_tip("bandwidth"))
-        self._bw_combo.currentTextChanged.connect(self._on_bandwidth_changed)
-        # "Filter" here, in the receiver bar (FILTER), the Info tab and the
-        # bookmarks: one name for the channel filter's width.
-        self._add_row(form, "Filter:", self._bw_combo)
-
         # Corrections of the raw samples (off by default).
         iq_row = QWidget()
         row = QHBoxLayout(iq_row)
@@ -1342,8 +1336,19 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
                 tip = f"Lower sideband. {tip} Usual for HF voice below 10 MHz."
             self._demod_combo.setItemData(index, tip, Qt.ItemDataRole.ToolTipRole)
         self._demod_combo.setToolTip("How the tuned signal is turned into audio")
-        self._demod_combo.currentTextChanged.connect(self._on_demod_changed)
         self._add_row(form, "Mode:", self._demod_combo)
+
+        # The channel filter, right under Mode as in the receiver bar (MODE,
+        # FILTER) and the second receiver. "Filter" here, in the receiver
+        # bar, the Info tab and the bookmarks: one name for its width.
+        self._bw_combo = self._shrinkable_combo(QComboBox(), 6)
+        self._bw_combo.addItems(list(BANDWIDTH_OPTIONS))
+        self._bw_combo.setCurrentText(DEFAULT_BANDWIDTH)
+        self._bw_combo.setToolTip(get_short_tip("bandwidth"))
+        self._bw_combo.currentTextChanged.connect(self._on_bandwidth_changed)
+        self._add_row(form, "Filter:", self._bw_combo)
+        # (Connected once the Filter exists: a mode change sets its choices.)
+        self._demod_combo.currentTextChanged.connect(self._on_demod_changed)
 
         self._fm_dev_combo = self._shrinkable_combo(_ValueComboBox(), 6)
         for value, text, tip in FM_DEVIATIONS:
@@ -2298,7 +2303,14 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         return int(self._cw_pitch_spin.value())
 
     def set_cw_pitch(self, hz: float) -> None:
-        self._cw_pitch_spin.setValue(int(round(hz)))
+        """The CW tone, in Hz (out of range: the nearest end; not a number,
+        e.g. a damaged setting: the default)."""
+        low, high = CW_PITCH_RANGE
+        try:
+            value = int(round(float(hz)))
+        except (TypeError, ValueError, OverflowError):
+            value = DEFAULT_CW_PITCH_HZ
+        self._cw_pitch_spin.setValue(min(max(value, low), high))
 
     def _on_iq_options_changed(self, _checked: bool = False) -> None:
         self.iq_options_changed.emit(

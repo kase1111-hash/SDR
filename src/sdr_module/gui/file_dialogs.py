@@ -158,14 +158,30 @@ def start_folder(settings: Any, kind: str, create: bool = False) -> str:
     return parent if os.path.isdir(parent) else os.path.expanduser("~")
 
 
+#: Damaged recordings folders already logged (said once each).
+_BAD_FOLDERS_LOGGED: set[str] = set()
+
+
 def recordings_folder(settings: Any) -> str:
     """Where automatic recordings go (``recording/folder``; default
-    ``Documents/SDR Recordings``). Not created here: see :func:`ensure_folder`."""
+    ``Documents/SDR Recordings``). Not created here: see :func:`ensure_folder`.
+    Only a full path is used: anything else (a damaged setting, which would
+    put recordings wherever the app was started from) gives the default,
+    logged once."""
     try:
         folder = str(settings.get_str(RECORDINGS_FOLDER_KEY, "") or "")
     except Exception:  # pragma: no cover - defensive
         folder = ""
-    return folder or default_recordings_folder()
+    full = os.path.expanduser(folder)
+    if folder and not os.path.isabs(full):
+        if folder not in _BAD_FOLDERS_LOGGED:
+            _BAD_FOLDERS_LOGGED.add(folder)
+            logger.warning(
+                f"Ignoring the recordings folder {folder!r} in the settings: "
+                f"not a full path. Using {default_recordings_folder()}."
+            )
+        folder = full = ""
+    return full or default_recordings_folder()
 
 
 def set_recordings_folder(settings: Any, folder: str) -> None:

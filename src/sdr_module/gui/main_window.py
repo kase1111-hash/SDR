@@ -194,6 +194,7 @@ from .signal_tools import SignalTools
 from .spectrum_widget import SpectrumWidget, format_hz
 from .status_history import CAPACITY as STATUS_HISTORY_SIZE
 from .status_history import StatusHistory, StatusHistoryPopup
+from .stereo_audio import StereoPath
 from .themes import (
     apply_theme,
     current_theme,
@@ -939,6 +940,12 @@ class _ReceiverChain:
     of AM, SSB and CW, and the noise reduction, all without rebuilding the
     chain.
 
+    Broadcast FM decodes stereo while ``stereo`` is True (the main window
+    sets it; the second receiver plays mono): ``demodulate`` still returns
+    the mono audio, exactly as without stereo, and :attr:`stereo_audio`
+    holds the block's left and right channels while it has stereo to play
+    (see :class:`~.stereo_audio.StereoPath`).
+
     The tuned channel need not be at the center of the span: ``offset_hz``
     (set with :meth:`set_offset`) is the VFO's offset from the LO, and
     ``channelize`` first mixes every block down by it with a
@@ -947,6 +954,7 @@ class _ReceiverChain:
     """
 
     options: Optional[AudioOptions] = None
+    stereo: bool = False
 
     @staticmethod
     def clamp_bandwidth(mode: str, bandwidth: float, rate: float) -> float:
@@ -1010,6 +1018,11 @@ class _ReceiverChain:
         self._am_half = max(1, int(round(_AM_WINDOW_S / 2.0 * self.channel_rate)))
         self._am_dip = max(1, int(round(_AM_DIP_S * self.channel_rate)))
         self._am_fade = max(1, int(round(_AM_FADE_S * self.channel_rate)))
+        # Broadcast FM stereo: the last block's (n, 2) left and right while
+        # it had stereo to play (else None), and the difference signal's
+        # path (built when stereo is first heard).
+        self.stereo_audio: Optional[np.ndarray] = None
+        self._stereo_path: Optional[StereoPath] = None
         self.reset_demodulator()
 
     def _options(self) -> AudioOptions:
@@ -1235,6 +1248,8 @@ class _ReceiverChain:
         noise_reduction = self._options().noise_reduction
         if noise_reduction is not None:
             noise_reduction.reset_stream()
+        if self._stereo_path is not None:
+            self._stereo_path.running = False  # (follows the new stream)
 
     def clip_swing(self) -> Tuple[float, float]:
         """How far the last FM block's audio swung, before it was clipped:
@@ -1257,6 +1272,7 @@ class _ReceiverChain:
 
     def demodulate(self, channel: np.ndarray, fm_deviation: float) -> np.ndarray:
         """Mono float32 audio in [-1, 1] at ``audio_rate`` (48 kHz)."""
+        self.stereo_audio = None
         if len(channel) == 0:
             # No audio from this block: what the last one saw (its audio for
             # the SSTV decoder and the tone squelch) isn't this one's.
@@ -1277,6 +1293,8 @@ class _ReceiverChain:
                     self._dc_blocker = self._make_dc_blocker(
                         _FM_BROADCAST_DC_CORNER_HZ if broadcast else _FM_DC_CORNER_HZ
                     )
+                if self._stereo_path is not None:
+                    self._stereo_path.running = False  # (a new audio stream)
             # Discriminator; the previous block's last sample keeps the phase
             # difference continuous. Scaled so +/- the deviation is full scale.
             if self._prev is not None:
@@ -1286,7 +1304,9 @@ class _ReceiverChain:
             self._prev = complex(channel[-1])
             detected = np.angle(channel * np.conj(prior)).astype(np.float32)
             gain = self.channel_rate / (2.0 * np.pi * max(float(fm_deviation), 1.0))
-            audio = self._to_audio_rate(detected * np.float32(gain))
+            mpx = detected * np.float32(gain)  # the multiplex (deviation = 1)
+            difference = self._stereo_difference(mpx, broadcast)
+            audio = self._to_audio_rate(mpx)
             # A tuning error is a constant frequency offset: DC, removed.
             audio = self._dc_blocker.process(audio)
             if audio.size:
@@ -1297,7 +1317,10 @@ class _ReceiverChain:
             self._unclipped = audio
             audio = np.clip(audio, -1.0, 1.0).astype(np.float32)
             self.pre_nr_audio = audio
-            return self._reduce_noise(audio)
+            out = self._reduce_noise(audio)
+            if difference is not None:
+                self.stereo_audio = StereoPath.mix(out, difference)
+            return out
         options = self._options()
         if self.mode == "AM":
             audio = self._am_detect(channel, options.agc_speed)
@@ -1325,6 +1348,37 @@ class _ReceiverChain:
         if nr is not None:
             audio = np.asarray(nr.process(audio), dtype=np.float32)
         return self._agc(audio)
+
+    @property
+    def stereo_decoder(self) -> Optional[Any]:
+        """The broadcast FM stereo decoder while it follows the audio (its
+        ``blend``, ``pilot`` and ``snr_db`` say how much stereo plays and
+        why), else None."""
+        path = self._stereo_path
+        return path.decoder if path is not None and path.running else None
+
+    def _stereo_difference(
+        self, mpx: np.ndarray, broadcast: bool
+    ) -> Optional[np.ndarray]:
+        """Broadcast FM with ``stereo`` on: this block's stereo difference
+        signal at 48 kHz, aligned with its mono audio (None otherwise). It
+        is taken before the mono stream moves on (the path starts where
+        that stream is). Switched off while it plays, it fades out (20
+        ms) and stops once its filters have emptied."""
+        path = self._stereo_path
+        nr = self._options().noise_reduction
+        if not (self.stereo and broadcast and StereoPath.usable(self)):
+            if path is None or not path.running:
+                return None
+            difference = path.process(mpx, nr, fade_out=True)
+            if path.faded_out and not StereoPath.audible(difference):
+                path.running = False  # (faded out, the filters empty)
+            return difference
+        if path is None:
+            path = self._stereo_path = StereoPath(self)
+        if not path.running:
+            path.sync(self)
+        return path.process(mpx, nr)
 
     def _am_detect(self, channel: np.ndarray, speed: str) -> np.ndarray:
         """AM envelope relative to the carrier (at the channel rate).

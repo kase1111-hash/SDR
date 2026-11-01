@@ -7095,6 +7095,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 f"Can't receive while transmitting (the HackRF is half duplex): "
                 f"{after}",
                 "warning",
+                log=False,  # (what to do first: not a problem)
             )
             return
         if not self._device:
@@ -7289,6 +7290,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 ),
                 "warning",
                 6000,
+                log=False,  # (a notice, not a problem)
             )
         elif not self._is_running:
             self._show_status_message(

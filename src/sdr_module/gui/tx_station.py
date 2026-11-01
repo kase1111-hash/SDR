@@ -643,7 +643,7 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
         if self.busy:
             self.engine.stop()
             self._win._show_status_message(
-                "Stopping the transmission…", "warning", 3000
+                "Stopping the transmission…", "warning", 3000, log=False
             )
 
     def shutdown(self) -> None:
@@ -718,7 +718,9 @@ class StationTx(QObject if HAS_PYQT6 else object):  # type: ignore[misc]
             line = f"✓ {result.message} at {stamp}."
             tone: Optional[str] = "success"
         elif result.status == "stopped":
-            win._show_status_message(result.message, "warning", 6000)
+            # (Stopped as asked: a notice, not a problem for Tools > Error
+            # History; the engine logs the transmission's end.)
+            win._show_status_message(result.message, "warning", 6000, log=False)
             line = f"{result.message}."
             if result.job.is_id or result.ids_sent == 0:
                 line += " Send your ID again to finish the contact."

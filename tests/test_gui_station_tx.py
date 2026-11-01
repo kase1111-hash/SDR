@@ -555,9 +555,9 @@ class TestAutoId(_TxCase):
         shown = []
         real = self.win._show_status_message
 
-        def spy(message, tone=None, duration_ms=4000):
+        def spy(message, tone=None, duration_ms=4000, **kwargs):
             shown.append((message, tone, duration_ms))
-            real(message, tone, duration_ms)
+            real(message, tone, duration_ms, **kwargs)
 
         self.win._show_status_message = spy
         return shown

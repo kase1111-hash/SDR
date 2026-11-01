@@ -45,7 +45,8 @@ def _decode(x, rate, block=None):
     step = block or len(x)
     lines = []
     for i in range(0, len(x), step):
-        lines += morse.process(keyer.process(np.abs(x[i : i + step])))
+        keying = keyer.process(np.abs(x[i : i + step]))
+        lines += morse.process(keying, keyer.steady)
     lines += morse.flush()
     return [m.text for m in lines], morse
 

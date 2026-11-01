@@ -641,7 +641,8 @@ class CWLiveDecoder(ChannelDecoder):
         lines: List[DecodedMessage] = list(self._held)
         self._held = []
         keying = self._keyer.process(np.abs(channel))
-        lines += self._counted(lambda: self._morse.process(keying))
+        steady = self._keyer.steady
+        lines += self._counted(lambda: self._morse.process(keying, steady))
         return lines
 
     def flush(self) -> List[DecodedMessage]:

@@ -990,5 +990,37 @@ class TestFarTunesBetweenNarrowFmBands(_WindowTestCase):
         self.assertEqual(self.listening(), ("FM", "5 kHz", "12.5 kHz"))
 
 
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestBookmarkAndDecoderTunesSayOnce(_WindowTestCase):
+    """LISTEN-13 for a bookmark's or the Decoder's "Tune to ...": the mode
+    change said the mode's last filter first ("AM: 6 kHz"), and the tune
+    then set another (the Decoder's ACARS channel 15 kHz, F-decode), both
+    kept in the status history, as presets did before LISTEN-13."""
+
+    def setUp(self):
+        super().setUp()
+        self.win._set_demod_mode("AM", None, "6 kHz")  # AM's last filter
+        self.win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        self.win.set_frequency(100.1e6)
+        self.panel = self.win._control_panel
+        self.win._status_history.clear()
+
+    def history(self):
+        return [entry.text for entry in self.win._status_history.entries()]
+
+    def test_the_decoders_tune_to_says_once_what_it_set(self):
+        self.win._decoder_panel.tune_requested.emit(
+            131.55e6, "ACARS (131.550 MHz)", "AM", ""
+        )
+        self.assertEqual(self.panel.get_demod_mode(), "AM")
+        self.assertEqual(self.panel._bw_combo.currentText(), "15 kHz")
+        self.assertEqual(self.history(), ["Tuned to ACARS (131.550 MHz, AM)"])
+
+    def test_a_bookmark_with_a_mode_says_once_what_it_set(self):
+        self.win._on_bookmark_tune(118.3e6, "Tower", "AM", "")
+        self.assertEqual(self.panel._bw_combo.currentText(), "10 kHz")
+        self.assertEqual(self.history(), ["Tuned to Tower (AM)"])
+
+
 if __name__ == "__main__":
     unittest.main()

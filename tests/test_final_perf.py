@@ -415,6 +415,47 @@ class TestDecoderSaysWhenSignalIsSkipped(_hardware_case()):
         self.assertNotIn("misses", self.win._decoder_panel.decoder_status_text())
         self.assertNotIn("misses", self.win._message_label.text())
 
+    def _lines_while(self, frames, per_frame=5):
+        """The Decoder's status lines over ``frames`` display frames."""
+        lines = []
+        for _ in range(frames):
+            self.run_frames(1, per_frame)
+            line = self.win._decoder_panel.decoder_status_text()
+            if not lines or lines[-1] != line:
+                lines.append(line)
+        return lines
+
+    def test_a_computer_catching_up_is_not_blamed_on_the_device(self):
+        # Once the computer keeps up again, the two seconds real time is
+        # judged by still hold the one-transfer frames: the line went on
+        # with "The device isn't delivering 20 MS/s in real time" for a
+        # few seconds, blaming the HackRF for what this computer dropped.
+        self._decode("ADS-B")
+        self.run_frames(40)
+        self.assertTrue(self.win._pacer.overloaded)
+        self.LOAD = 0.3
+        lines = self._lines_while(300)
+        self.assertFalse(self.win._pacer.overloaded)
+        skipping = [line for line in lines if "misses part of the signal" in line]
+        self.assertTrue(skipping)
+        for line in skipping:
+            self.assertIn("This computer can't process 20 MS/s", line)
+        self.assertNotIn("misses", lines[-1])
+
+    def test_a_device_short_of_its_rate_is_named(self):
+        # A computer that keeps up, but the device delivers a fifth of its
+        # sample rate (one transfer a frame): that is the device.
+        self.LOAD = 0.3
+        self._decode("ADS-B")
+        lines = self._lines_while(120, per_frame=1)
+        self.assertFalse(self.win._pacer.overloaded)
+        self.assertIn(
+            "The device isn't delivering 20 MS/s in real time, so the ADS-B "
+            "decoder misses part of the signal. A lower sample rate "
+            "(Receiver > Sample rate) helps.",
+            lines,
+        )
+
 
 class TestFrameSpectrumNeverWaitsForABusyHelper(unittest.TestCase):
     def test_the_frame_is_done_while_the_helper_cannot_run(self):

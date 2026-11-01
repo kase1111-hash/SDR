@@ -2320,6 +2320,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._skip_hint_until = 0.0
         self._skip_hinted = False
         self._skip_hint_shown = ""  # (the status bar's text, while shown)
+        # When frames last couldn't keep up (monotonic), and whether the
+        # skipping the hint is about came from that (or from the device).
+        self._overloaded_at = -math.inf
+        self._skip_by_computer = False
         self._pacer = _Pacer()  # how much each display frame reads
         self._entry_returns_focus = False  # Ctrl+L: Enter goes back to the plots
         self._restoring = False  # True while _restore_state applies settings
@@ -6232,6 +6236,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._rx_history.clear()
         self._pacer.restart()
         self._skip_hint_until = 0.0  # (found out anew, as the pacer)
+        self._overloaded_at = -math.inf
         self._refresh_state_ui()
         logger.info("Acquisition started")
 
@@ -7186,8 +7191,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             and panel._enabled_check.isChecked()
         )
         now = time.monotonic()
+        if self._pacer.overloaded:
+            self._overloaded_at = now
         if decoding and self._samples_skipped():
             self._skip_hint_until = now + _SKIP_HINT_HOLD_S
+            # (The seconds real time is judged by still hold the short
+            # frames for a while after this computer catches up again:
+            # those were skipped here, not by the device.)
+            self._skip_by_computer = now - self._overloaded_at <= _REALTIME_WINDOW_S
         skipping = decoding and now < self._skip_hint_until
         text = self._skip_hint_text() if skipping else None
         panel.set_skipping(text)
@@ -7211,7 +7222,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         rate = format_rate(self._device_sample_rate())
         if self._demo_mode:
             cause = "The demo device can't keep up in real time right now"
-        elif self._pacer.overloaded:
+        elif self._skip_by_computer:
             cause = f"This computer can't process {rate} in real time right now"
         else:
             cause = f"The device isn't delivering {rate} in real time"

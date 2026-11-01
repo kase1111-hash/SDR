@@ -697,11 +697,15 @@ def _symmetric_pair(
 
 def _sideband_reach(
     ratio: np.ndarray, band: np.ndarray, peak: int, averages: float, gap: int
-) -> int:
+) -> Tuple[int, int]:
     """How far (bins) from a carrier line at bin ``peak`` its sidebands
-    stand out of the noise: the last bin of what stands out, contiguous
-    (breaks of at most ``gap`` bins) from the line's main lobe outwards
-    (0: nothing does).
+    stand out of the noise: ``(reach, edge)``. ``reach`` is the last bin of
+    what stands out once smoothed, contiguous (breaks of at most ``gap``
+    bins) from the line's main lobe outwards (0: nothing does); ``edge``
+    is where the sidebands themselves end, the last bin within half the
+    smoothing that still stands out when smoothed less (a strong sideband
+    stands out smoothed up to half the smoothing past its end: a 400 Hz
+    tone's AM read 1.6 kHz wide), the reach where nothing does.
 
     ``ratio`` is the averaged spectrum over the noise density. A carrier's
     modulation (AM's voice, FM's swing, keying) puts the same power either
@@ -720,11 +724,12 @@ def _sideband_reach(
     d = np.arange(3, min(peak, n - 1 - peak) + 1)  # past the Hann main lobe
     d = d[band[peak + d] & band[peak - d]]
     if len(d) < 32:
-        return 0
+        return 0, 0
     above, below = ratio[peak + d], ratio[peak - d]
     mirrored = 0.5 * (above + below)
     reach = 0
-    for width in (9, 33):
+    standing: Dict[int, np.ndarray] = {}  # (the bins standing out, by width)
+    for width in (1, 9, 33):
         smooth = _smooth(mirrored, width)
         spread = _spread(smooth, 2.0 * width * averages)
         z = (smooth - 1.0) / spread
@@ -734,12 +739,19 @@ def _sideband_reach(
         stronger, weaker = np.maximum(up, down), np.minimum(up, down)
         one_sided = (stronger - weaker > 7.0 * spread) & (weaker < 0.25 * stronger)
         hits = np.flatnonzero((z > 3.5) & ~one_sided)
-        if not len(hits) or d[hits[0]] > 3 + gap:
-            continue
+        standing[width] = d[hits]
+        if width == 1 or not len(hits) or d[hits[0]] > 3 + gap:
+            continue  # (single bins only place the edge, below)
         breaks = np.flatnonzero(np.diff(d[hits]) > gap)
         last = hits[breaks[0]] if len(breaks) else hits[-1]
         reach = max(reach, int(d[last]))
-    return reach
+    edge = reach
+    for wider, narrower in ((33, 9), (9, 1)):
+        near = standing[narrower]
+        near = near[(near <= edge) & (near >= edge - (wider - 1) // 2)]
+        if len(near):
+            edge = int(near[-1])
+    return reach, edge
 
 
 def _power_span(excess: np.ndarray, offset: int) -> Tuple[int, int]:
@@ -1445,9 +1457,11 @@ class SignalClassifier:
         out["carrier_fraction"] = float(min(1.0, line / max(whole, 1e-30)))
         if out["carrier_fraction"] >= 0.25:
             # A carrier: how far its sidebands reach, however faint (AM's
-            # voice can hold a few per cent of the power, spread wide).
-            reach_bins = _sideband_reach(psd / noise, band, peak, k, gap)
+            # voice can hold a few per cent of the power, spread wide), and
+            # where they end (the reach runs past a strong one).
+            reach_bins, edge_bins = _sideband_reach(psd / noise, band, peak, k, gap)
             out["sideband_hz"] = float(reach_bins * bin_hz)
+            out["sideband_edge_hz"] = float(edge_bins * bin_hz)
         out["snr_db"] = 10.0 * math.log10(signal / (noise * width))
         # The strongest line's SNR in the resolution bandwidth (a carrier's
         # own width; its 99 % width above is mostly the noise's bins).
@@ -1768,7 +1782,7 @@ class SignalClassifier:
         elif kind == "am":
             # Its voice reaches as far as its sidebands do (the carrier
             # holds nearly all of its power, so 99 % of it is narrower).
-            wide = 2.0 * float(f.get("sideband_hz", 0.0))
+            wide = 2.0 * float(f.get("sideband_edge_hz", 0.0))
             if wide > float(f["bandwidth_hz"]) > 0.0:
                 snr_db -= 10.0 * math.log10(wide / float(f["bandwidth_hz"]))
                 f["bandwidth_hz"] = wide

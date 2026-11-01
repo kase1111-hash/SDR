@@ -94,6 +94,37 @@ class TestWeakAmIsAm:
             assert r.kind == "am"
             assert 8.0e3 <= r.bandwidth_hz <= 10.5e3, r.bandwidth_hz
 
+    @pytest.mark.parametrize("tone,snr", [(400.0, 30), (1000.0, 20), (1000.0, 40)])
+    def test_a_tone_reads_its_own_width(self, tone, snr):
+        """AM with one tone (a beacon's 400 Hz or 1020 Hz) occupies twice
+        the tone. Its sidebands' reach, smoothed over 33 bins to find faint
+        ones, ran up to 16 bins past a strong line: 400 Hz read 1.6 kHz
+        wide and 1 kHz 2.8 kHz (2.0 kHz before the reach counted), each
+        with its SNR 1.5-3 dB low."""
+        t = np.arange(N) / FS
+        sig = S.am(N, FS, 0.3, np.sin(2 * np.pi * tone * t))
+        for seed in range(3):
+            x, _ = S.add_noise(sig, FS, snr, 2 * tone, seed=17 * seed + 3)
+            r = classify(x)
+            assert r.kind == "am", (seed, r.kind)
+            assert 2 * tone <= r.bandwidth_hz <= 2 * tone + 300.0, r.bandwidth_hz
+            assert abs(r.snr_db - snr) <= 1.0, r.snr_db
+
+    @pytest.mark.parametrize("snr", [30, 50])
+    def test_a_strong_station_reads_its_audio_width(self, snr):
+        """However strong, +/- 3 kHz and +/- 4.5 kHz of voice read about 6
+        and 9 kHz wide (6.8 and 9.8 kHz: the reach's smoothing again)."""
+        for top, occupied in ((3000.0, 6e3), (4500.0, 9e3)):
+            sig = am_voice(band=(300.0, top))
+            x, _ = S.add_noise(sig, FS, snr, occupied, seed=snr + int(top))
+            r = classify(x)
+            assert r.kind == "am"
+            assert 0.97 * occupied <= r.bandwidth_hz <= 1.04 * occupied, (
+                top,
+                r.bandwidth_hz,
+            )
+            assert abs(r.snr_db - snr) <= 0.5, r.snr_db
+
     @pytest.mark.parametrize("side", [1, -1])
     def test_a_station_beside_it_is_not_its_sidebands(self, side):
         """Two AM stations 10 kHz apart, each +/- 4.5 kHz, the one beside

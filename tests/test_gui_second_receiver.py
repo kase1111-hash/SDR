@@ -15,6 +15,7 @@ import os
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 import numpy as np
 
@@ -311,6 +312,9 @@ class _FakeSink:
 
     def set_muted(self, muted):
         pass
+
+    def output_name(self):
+        return "Fake Speakers"
 
     def write(self, samples):
         if self.open and samples is not None and len(samples):
@@ -977,13 +981,29 @@ class TestListen(_SecondCase):
         rx.tune(100.1e6, recenter=True)
         rx.set_mode("FM", "75 kHz", "200 kHz")
 
-    def run_both(self, frames=10):
+    def run_both(self, frames=10, second=True):
+        """``frames`` display frames of both windows (``second`` False: the
+        main window's alone), 1/30 s apart on a fake clock. (On the real
+        clock a busy computer's late frames fell behind real time, which
+        pauses the audio by design, and these counts came out short.)"""
+        from sdr_module.gui import main_window, second_receiver
+        from tests.test_gui_round3_main import _FakeClock
+
         self.main_sink.blocks.clear()
         self.second_sink.blocks.clear()
-        for _ in range(frames):
-            self.win._update_display()
-            self.rx._frame()
-            time.sleep(0.005)
+        clock = getattr(self, "clock", None)
+        if clock is None:
+            # (Going on from the real clock the pacers last read.)
+            clock = self.clock = _FakeClock(time.monotonic())
+        with (
+            mock.patch.object(main_window, "time", clock),
+            mock.patch.object(second_receiver, "time", clock),
+        ):
+            for _ in range(frames):
+                clock.advance(1 / 30)
+                self.win._update_display()
+                if second:
+                    self.rx._frame()
 
     def test_both_plays_both(self):
         self.rx.set_listen("both")
@@ -1014,10 +1034,7 @@ class TestListen(_SecondCase):
         self.settle()
         self.assertFalse(self.host.mutes_main())
         self.assertIn("audio is back", self.win._message_label.text())
-        self.main_sink.blocks.clear()
-        for _ in range(12):
-            self.win._update_display()
-            time.sleep(0.005)
+        self.run_both(12, second=False)
         self.assertGreater(len(self.main_sink.samples()), 4800)
 
     def test_the_main_audio_switch_mutes_both(self):

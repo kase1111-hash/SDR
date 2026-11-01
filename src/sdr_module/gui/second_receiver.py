@@ -87,7 +87,7 @@ from ..dsp.frame_spectrum import (
     normalize_window,
 )
 from ..dsp.recording import FileFormat, IQRecorder, SampleFormat
-from . import file_dialogs
+from . import device_settings, file_dialogs
 from .audio_chain import (
     AudioJoin,
     AudioOptions,
@@ -198,12 +198,11 @@ WATERFALL_KEY = "layout/second_receiver/waterfall"
 #: The sample rate a device starts at (every device offers it: RTL-SDR
 #: 0.9-2.56 MS/s, HackRF 2-20 MS/s, the demo device 1-3.2 MS/s).
 SAMPLE_RATE = 2.4e6
-#: The sample rates offered for each kind of device (Device > Connect...
-#: offers the same; the demo device's span is limited like an RTL-SDR's).
+#: The sample rates offered for each kind of device: the main window's
+#: (Device > Connect..., the Receiver group and the status bar's rate).
 SAMPLE_RATES: Dict[str, Tuple[float, ...]] = {
-    "demo": (1.0e6, 1.4e6, 1.8e6, 2.0e6, 2.4e6, 2.56e6, 3.2e6),
-    "rtlsdr": (1.0e6, 1.4e6, 1.8e6, 2.0e6, 2.4e6, 2.56e6),
-    "hackrf": (2.0e6, 2.4e6, 4e6, 8e6, 10e6, 20e6),
+    kind: device_settings.sample_rates_for(kind)
+    for kind in ("demo", "rtlsdr", "hackrf")
 }
 #: Gain range of the RF gain slider (dB) with the demo device, and the
 #: gain to start with (the demo device's reference gain). The slider steps
@@ -829,9 +828,11 @@ if HAS_PYQT6:
             self._plots.setChildrenCollapsible(False)
             self._spectrum = SpectrumWidget()
             self._waterfall = WaterfallWidget()
-            # The waterfall fills at once (a row per frame) with levels that
-            # follow the noise floor.
-            self._waterfall.apply_display_settings({"auto_levels": True})
+            # The main window's waterfall defaults: levels that follow the
+            # noise floor and the strongest signal, a minute of history.
+            self._waterfall.apply_display_settings(
+                dict(getattr(self._win, "_WATERFALL_DEFAULTS", {"auto_levels": True}))
+            )
             # As in the main window: both plots show the same part of the
             # span (zoom), and every sample of a frame at the FFT size and
             # window chosen in the spectrum's menu (see _plot_frame).
@@ -2223,9 +2224,22 @@ if HAS_PYQT6:
 
         def _show_gain(self) -> None:
             """The gain readouts: the gain the device applied (an RTL-SDR
-            says which step of its tuner it took), else the step shown."""
+            says which step of its tuner it took), else the step shown. With
+            Auto: "Auto", or "Auto (25.9 dB)" where the device says what its
+            automatic gain chose, as in the main window."""
             db = self._gain_step_db()
             dev = self._device
+            lna, vga, _amp = self._hackrf_gains()
+            self._lna_label.setText(format_db(lna))
+            self._vga_label.setText(format_db(vga))
+            if self._gain_auto.isChecked() and self._gain_model.kind != "hackrf":
+                chosen = device_settings.auto_gain_db(dev)
+                self._gain_label.setText(
+                    "Auto"
+                    if chosen is None
+                    else f"Auto ({format_db(round(chosen, 1))})"
+                )
+                return
             if (
                 isinstance(dev, SDRDevice)
                 and self._gain_model.kind != "hackrf"
@@ -2238,9 +2252,6 @@ if HAS_PYQT6:
                 except Exception as e:  # pragma: no cover - defensive
                     logger.debug(f"Second receiver gain readout: {e}")
             self._gain_label.setText(format_db(db))
-            lna, vga, _amp = self._hackrf_gains()
-            self._lna_label.setText(format_db(lna))
-            self._vga_label.setText(format_db(vga))
 
         def _update_amp_warning(self) -> None:
             show = self._gain_model.kind == "hackrf" and self._amp_check.isChecked()
@@ -3229,6 +3240,8 @@ if HAS_PYQT6:
                 self._update_rec_label()
             self._update_tx_group()
             self._update_audio_note()
+            if self._gain_auto.isChecked():
+                self._show_gain()  # (what the automatic gain chose now)
             self._follow_main_output()  # (the output chosen meanwhile)
             want = self._running and self._plays_here() and self._dsp.audible
             if want != self._audio_open:
@@ -3591,11 +3604,15 @@ if HAS_PYQT6:
             return self.device_problem(kind, index)
 
         def _on_listen_changed(self, _key: str) -> None:
-            """Tell the main window when Listen mutes (or unmutes) it."""
+            """Tell the main window when Listen mutes (or unmutes) it: its
+            Audio button says so ("Muted (2nd RX)"), and a status message."""
             muting = self.mutes_main()
             if muting == self._muting:
                 return
             self._muting = muting
+            sync = getattr(self._win, "_sync_audio_ui", None)
+            if callable(sync):
+                sync()
             if muting:
                 text = (
                     "Main receiver muted: Listen in the Second Receiver window "

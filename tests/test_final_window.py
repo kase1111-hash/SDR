@@ -22,6 +22,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_chrome import HAS_PYQT6, require_pyqt6  # noqa: E402
 from tests.test_gui_device_settings import _DeviceCase  # noqa: E402
+from tests.test_gui_second_receiver import _FakeSink, _SecondCase  # noqa: E402
 
 if HAS_PYQT6:
     from PyQt6.QtCore import QSettings, Qt
@@ -531,6 +532,103 @@ class TestRecentFrequencies(unittest.TestCase):
 
         self.assertEqual(ENTRY_MODES, tuple(name for name, _tip in DEMOD_MODES))
         self.assertEqual(ENTRY_DEVIATIONS, tuple(v for v, _t, _tip in FM_DEVIATIONS))
+
+
+# --------------------------------------------------------------------------- #
+# The Audio button says what is really going on (DEV-E2E-02, ROB-12)
+# --------------------------------------------------------------------------- #
+class TestAudioButtonStates(_SecondCase):
+    demo = True
+
+    def setUp(self):
+        super().setUp()
+        win = self.win
+        win._audio = _FakeSink()
+        win._audio.open = True
+        win._audio_enabled = True
+        win._audio_problem = None  # (as with an output device)
+        win._sync_audio_ui()
+
+    def shown(self):
+        button = self.win._audio_button
+        return button.text(), button.toolTip(), button.accessibleName()
+
+    def test_listen_this_receiver_mutes_the_main_window_and_says_so(self):
+        win, rx = self.win, self.rx
+        rx.start()
+        rx.set_listen("second")
+        self.assertEqual(win._audio_state(), "second")
+        text, tip, name = self.shown()
+        self.assertEqual(text, " Muted (2nd RX)")
+        self.assertIn("Listen in the Second Receiver window", tip)
+        self.assertEqual(name, "Audio muted by the second receiver")
+        self.assertFalse(win._mute_action.isChecked())  # (not muted by you)
+        self.assertEqual(
+            win._audio_status()[0],
+            "Muted by the Second Receiver (Listen: This receiver)",
+        )
+        rx.set_listen("both")
+        self.assertEqual(win._audio_state(), "on")
+        self.assertEqual(self.shown()[0], " Audio")
+        rx.set_listen("second")
+        rx.close()  # (closing the window gives the main window its audio)
+        self.settle()
+        win._update_status()
+        self.assertEqual(self.shown()[0], " Audio")
+
+    def test_paused_while_the_signal_isnt_real_time(self):
+        # ROB-12: "Audio" while nothing played (the receiver couldn't keep
+        # up), and the hint gone from the status bar after 10 s.
+        win = self.win
+        win._realtime_hint_shown = True
+        win._realtime_hint_text = "The demo device can't keep up in real time."
+        win._update_status()  # (the status timer)
+        self.assertEqual(win._audio_state(), "paused")
+        text, tip, name = self.shown()
+        self.assertEqual(text, " Paused")
+        self.assertIn("can't keep up", tip)
+        self.assertEqual(win._audio_button.property("tone"), "warning")
+        win._realtime_hint_shown = False
+        win._update_status()
+        self.assertEqual(self.shown()[0], " Audio")
+        self.assertFalse(win._audio_button.property("tone"))
+
+    def test_the_new_texts_fit_the_button(self):
+        button = self.win._audio_button
+        for text in (" Muted (2nd RX)", " Paused"):
+            self.assertGreaterEqual(
+                button.minimumWidth(), button.fontMetrics().horizontalAdvance(text)
+            )
+
+
+# --------------------------------------------------------------------------- #
+# Second receiver: Auto gain, rates and plot defaults (DEV-E2E-09, -10)
+# --------------------------------------------------------------------------- #
+class TestSecondReceiverDevices(_SecondCase):
+    def test_auto_gain_reads_auto(self):
+        rx = self.rx
+        rx.start()  # (the demo device)
+        rx._gain_auto.setChecked(True)
+        rx._apply_gain()
+        rx._show_gain()
+        self.assertTrue(rx._gain_label.text().startswith("Auto"))
+        rx._gain_auto.setChecked(False)
+        self.assertTrue(rx._gain_label.text().endswith("dB"))
+        self.assertFalse(rx._gain_label.text().startswith("Auto"))
+
+    def test_the_main_windows_rates(self):
+        from sdr_module.gui import device_settings
+        from sdr_module.gui.second_receiver import SAMPLE_RATES
+
+        for kind in ("demo", "rtlsdr", "hackrf"):
+            self.assertEqual(SAMPLE_RATES[kind], device_settings.sample_rates_for(kind))
+        self.assertIn(2.56e6, SAMPLE_RATES["hackrf"])
+        self.assertIn(3.2e6, SAMPLE_RATES["hackrf"])
+
+    def test_the_waterfall_starts_as_the_main_windows(self):
+        shown = self.rx._waterfall.display_settings()
+        self.assertEqual(shown.get("history_s"), 60.0)
+        self.assertTrue(shown.get("auto_levels"))
 
 
 if __name__ == "__main__":

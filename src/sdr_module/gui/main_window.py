@@ -2137,18 +2137,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     _START_TEXT = "▶  Start"
     _STOP_TEXT = "■  Stop"
     _RECORD_TEXT = "●  Record"
-    # The Audio button's four states (see _audio_state). (A leading space:
+    # The Audio button's states (see _audio_state). (A leading space:
     # Qt leaves almost no gap after a button's icon.)
     _AUDIO_ON_TEXT = " Audio"
     _AUDIO_OFF_TEXT = " Muted"  # muted by you
     _AUDIO_NO_OUTPUT_TEXT = " No output"  # no audio output device
     _AUDIO_SILENT_TEXT = " No audio"  # on, but None (I/Q) mode has no audio
+    _AUDIO_SECOND_TEXT = " Muted (2nd RX)"  # the second receiver's Listen
+    _AUDIO_PAUSED_TEXT = " Paused"  # on, but the signal isn't real time
     _AUDIO_TEXTS = (
         _AUDIO_ON_TEXT,
         _AUDIO_OFF_TEXT,
         _AUDIO_NO_OUTPUT_TEXT,
         _AUDIO_SILENT_TEXT,
+        _AUDIO_SECOND_TEXT,
+        _AUDIO_PAUSED_TEXT,
     )
+    _audio_shown = ""  # the state the Audio button shows (_sync_audio_ui)
 
     def __init__(self, parent=None, demo_mode: bool = False):
         if not HAS_PYQT6:
@@ -7920,6 +7925,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._device_controls.show_auto_gain()  # "Auto (25.9 dB)"
         if self._info_panel.isVisible():
             self._refresh_info_panel()
+        # The Audio button follows what plays: the Second Receiver window's
+        # Listen, a pause while the signal isn't real time.
+        if self._audio_shown != self._audio_state():
+            self._sync_audio_ui()
         # (T6) Messages counted while the window was minimized are seen once
         # it is back with the Decoder tab in front.
         self._decoder_tab_seen()
@@ -9896,14 +9905,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _audio_state(self) -> str:
         """What the Audio button shows: ``"on"``, ``"muted"`` (by you),
-        ``"no_output"`` (no audio output device, or no QtMultimedia) or
-        ``"silent"`` (on, but None (I/Q) mode has no audio)."""
+        ``"no_output"`` (no audio output device, or no QtMultimedia),
+        ``"silent"`` (on, but None (I/Q) mode has no audio), ``"second"``
+        (on, but Listen in the Second Receiver window plays only that
+        receiver) or ``"paused"`` (on, but the signal isn't real time: the
+        receiver can't keep up, or a recording plays faster or slower)."""
         if not self._audio.available:
             return "no_output"
         if not self._audio_enabled:
             return "no_output" if self._audio_problem else "muted"
         if self._control_panel.get_demod_mode() not in _AUDIBLE_MODES:
             return "silent"
+        second = getattr(self, "_second_rx", None)
+        if second is not None and second.mutes_main():
+            return "second"
+        if self._realtime_hint_shown:
+            return "paused"
         return "on"
 
     def _on_audio_button(self, _checked: bool = False) -> None:
@@ -9965,6 +9982,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if not self._audio.available:
             return "Unavailable (needs QtMultimedia)", "muted"
         if self._audio_enabled:
+            if self._audio_state() == "second":
+                return "Muted by the Second Receiver (Listen: This receiver)", "muted"
             if self._is_running and not self._realtime():
                 return "On (the signal isn't real time)", "warning"
             if self._control_panel.get_demod_mode() not in _AUDIBLE_MODES:
@@ -9989,9 +10008,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._sync_audio_ui()
 
     def _sync_audio_ui(self) -> None:
-        """Show the audio state on the Audio button (four states, see
-        _audio_state) and Radio > Audio > Mute."""
+        """Show the audio state on the Audio button (see _audio_state) and
+        Radio > Audio > Mute."""
         state = self._audio_state()
+        self._audio_shown = state
         on = bool(self._audio_enabled and self._audio.available)
         controls = ((self._mute_action, not on), (self._audio_button, on))
         for control, checked in controls:
@@ -10020,6 +10040,23 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "USB, LSB or CW (MODE) to hear the tuned signal. Click to mute "
                 "(Ctrl+M).",
             ),
+            "second": (
+                self._AUDIO_SECOND_TEXT,
+                "Audio muted by the second receiver",
+                "Muted: Listen in the Second Receiver window plays only that "
+                "receiver. Choose Main window or Both there (or close that "
+                "window) to hear this one. Click to mute it here too (Ctrl+M).",
+            ),
+            "paused": (
+                self._AUDIO_PAUSED_TEXT,
+                "Audio paused",
+                (
+                    self._realtime_hint_text
+                    or "The signal isn't arriving in real time, so audio is "
+                    "paused until it does."
+                )
+                + " Click to mute (Ctrl+M).",
+            ),
             "no_output": (
                 self._AUDIO_NO_OUTPUT_TEXT,
                 "No audio output device",
@@ -10038,7 +10075,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         button.setText(text)
         button.setAccessibleName(name)
         button.setIcon(self._speaker_icon(state))
-        set_tone(button, "warning" if state == "no_output" else None)
+        set_tone(button, "warning" if state in ("no_output", "paused") else None)
         available = self._audio.available
         self._volume_slider.setEnabled(available)
         if available:
@@ -10055,10 +10092,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         audio in this mode). (True / False: "on" / "muted".)"""
         if isinstance(state, bool):
             state = "on" if state else "muted"
-        on = state in ("on", "silent")  # the button is checked (accent fill)
+        # The button is checked (accent fill); paused: in the warning tone.
+        on = state in ("on", "silent", "second")
         p = get_palette()
         color = p.qcolor(
-            "warning" if state == "no_output" else "on_accent" if on else "text"
+            "warning"
+            if state in ("no_output", "paused")
+            else "on_accent" if on else "text"
         )
         icon = QIcon()
         for size in (16, 32):
@@ -10096,9 +10136,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                         -50 * 16,
                         100 * 16,
                     )
-            elif state == "muted":
+            elif state in ("muted", "second"):
                 painter.drawLine(QPointF(10.5 * k, 5.5 * k), QPointF(15 * k, 10.5 * k))
                 painter.drawLine(QPointF(15 * k, 5.5 * k), QPointF(10.5 * k, 10.5 * k))
+            elif state == "paused":
+                for x in (11.0, 14.5):
+                    painter.drawLine(QPointF(x * k, 4.5 * k), QPointF(x * k, 11.5 * k))
             elif state == "no_output":
                 pen.setWidthF(1.8 * k)
                 painter.setPen(pen)

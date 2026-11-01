@@ -17,6 +17,7 @@ from sdr_module.dsp.sweep import (
     SharedSweep,
     SweepReceiver,
     channel_count,
+    page_count,
     plan_sweep,
 )
 
@@ -286,6 +287,25 @@ class TestEdges:
         assert together == pytest.approx(alone / 2, rel=0.15)
         # The estimate doesn't claim anything.
         assert sweep.progress == 0.0 and sweep.claim(0).first_index == 0
+
+    def test_the_estimate_counts_each_receivers_pages(self):
+        """(J-dual) The Scanner tab says how many steps a pass shared with
+        a second receiver takes: as the plan hands them out."""
+        plan = SharedSweep(88e6, 108e6, 100e3, [RTL, HACKRF])
+        seconds, pages = plan.estimate([0.15, 0.15])
+        assert seconds == plan.estimate_seconds([0.15, 0.15])
+        # Each page of the plan once (RTL and HACKRF have the same rate
+        # here: their pages are the same size), shared evenly.
+        total = page_count(88e6, 108e6, 100e3, RTL.sample_rate)
+        assert sum(pages) in (total, total + 1)
+        assert abs(pages[0] - pages[1]) <= 1
+        assert seconds == pytest.approx(max(pages) * 0.15)
+        # The faster receiver (a quicker step) takes more of them.
+        _seconds, uneven = plan.estimate([0.30, 0.10])
+        assert uneven[1] > 2 * uneven[0]
+        assert abs(sum(uneven) - sum(pages)) <= 1
+        # The estimate doesn't claim anything.
+        assert plan.progress == 0.0 and plan.claim(0).first_index == 0
 
     def test_threads_claim_each_channel_once(self):
         sweep = SharedSweep(24e6, 1766e6, 12.5e3, [RTL, HACKRF])

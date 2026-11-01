@@ -22,6 +22,17 @@ Modes (:data:`SCAN_MODES`):
 * ``bookmarks``: tunes each bookmark in turn, in its own mode, filter and
   tone squelch, and stops on the ones that are active, as ``stop`` does.
 
+A sweep (``once`` or ``continuous``) can be shared with a second receiver
+(a :class:`ScanPartner`: the Scanner tab's "Use both receivers", with the
+Second Receiver window), whose blocks come in through
+:meth:`ScanEngine.partner_frame`. The two take pages of one
+:class:`~sdr_module.dsp.sweep.SharedSweep`, each sized for its own sample
+rate and inside what it tunes, this one from the bottom of the range up
+and the partner from the top down, until they meet: a pass takes about
+half as long, and the results are one list. A page one of them can't tune
+goes to the other; a partner that leaves (:meth:`ScanEngine.drop_partner`)
+hands the rest to this one.
+
 Time is counted in samples (signal time), so the engine behaves the same
 whatever the display frame rate, and tests can drive it block by block.
 No Qt.
@@ -40,8 +51,10 @@ import numpy as np
 from ..dsp.sweep import (
     AUTO_MARGIN_DB,
     ChannelReading,
+    SharedSweep,
     SpectrumAverager,
     SweepPage,
+    SweepReceiver,
     measure_page,
     noise_floor_db,
     plan_sweep,
@@ -69,6 +82,12 @@ SETTLE = "settle"  # after a retune: blocks that may predate it are dropped
 MEASURE = "measure"  # averaging a page's spectrum
 DWELL = "dwell"  # on a channel, waiting for the squelch to open
 LISTEN = "listen"  # stopped on an active channel
+#: A shared sweep's receiver with no page now: the other may still hand
+#: one over (see SharedSweep.more_may_come), or the pass is about to end.
+WAIT = "wait"
+
+#: The receivers of a shared sweep, as its SharedSweep numbers them.
+MAIN, PARTNER = 0, 1
 
 #: Seconds of samples averaged per page (a broadcast station's spectrum
 #: needs about 30 ms to show its whole channel).
@@ -135,6 +154,54 @@ class ScanHost:
         error), for the scan's one line about the steps it skipped (see
         :meth:`ScanEngine._tell_refused`); "" when it just said no."""
         return ""
+
+
+class ScanPartner:
+    """A second receiver sharing a sweep with the host's (see the module
+    docstring): the engine tunes it as it tunes the host's receiver, and
+    its blocks come in through :meth:`ScanEngine.partner_frame`."""
+
+    def scan_tune_lo(self, center_hz: float, vfo_hz: Optional[float] = None) -> bool:
+        """As :meth:`ScanHost.scan_tune_lo`."""
+        raise NotImplementedError
+
+    def scan_lo_hz(self) -> float:
+        """Its centre frequency."""
+        raise NotImplementedError
+
+    def scan_sample_rate(self) -> float:
+        raise NotImplementedError
+
+    def scan_settle_s(self) -> float:
+        """Extra time it gets after a retune (a hardware receiver's
+        transfer in flight)."""
+        return 0.0
+
+    def scan_device_range(self) -> Optional[Tuple[float, float]]:
+        """What it tunes, (low, high) in Hz; None: anything."""
+        return None
+
+    def scan_set_muted(self, muted: bool) -> None:
+        """Mute its speaker while it sweeps."""
+
+
+class _Share:
+    """A receiver's part of a shared sweep: the page it measures and how far
+    it is with it (see ScanEngine._share_frame)."""
+
+    def __init__(self, index: int, host: Any, rate: float, settle_s: float) -> None:
+        self.index = index
+        self.host = host
+        self.rate = float(rate)
+        self.settle_s = max(0.0, float(settle_s))
+        self.page: Optional[SweepPage] = None
+        self.state = WAIT
+        self.averager = SpectrumAverager(max_segments=32)
+        self.skip_frames = 0
+        self.settle_left = 0.0
+        self.measured = 0
+        self.steps = 0  # pages measured in this pass
+        self.last_block_at = time.monotonic()
 
 
 @dataclass
@@ -238,6 +305,11 @@ class ScanEngine:
         self._start_failure = ""
         #: When the last block arrived (time.monotonic()), for a watchdog.
         self.last_block_at = 0.0
+        #: A sweep shared with a second receiver (start's ``partner``, while
+        #: it takes part), the plan, and each receiver's part of it.
+        self.partner: Optional[Any] = None
+        self._shared: Optional[SharedSweep] = None
+        self._shares: List[_Share] = []
 
     # ------------------------------------------------------------------ #
     # Control
@@ -250,8 +322,16 @@ class ScanEngine:
     def mode(self) -> str:
         return self.settings.mode
 
-    def start(self, settings: ScanSettings, sample_rate: float, settle_s: float) -> str:
-        """Start a scan; returns "" or why it can't start."""
+    def start(
+        self,
+        settings: ScanSettings,
+        sample_rate: float,
+        settle_s: float,
+        partner: Optional[Any] = None,
+    ) -> str:
+        """Start a scan; returns "" or why it can't start. A sweep (once,
+        continuous) is shared with ``partner`` (a :class:`ScanPartner`);
+        the other modes leave it alone."""
         if self.active:
             self.stop("stopped")
         self.settings = settings
@@ -271,6 +351,9 @@ class ScanEngine:
         self._skipped_visits = set()
         self._candidates = []
         self.last_block_at = time.monotonic()
+        self.partner = None
+        self._shared = None
+        self._shares = []
         if self.rate <= 0:
             return "The receiver's sample rate is unknown."
         if settings.mode == "bookmarks":
@@ -282,6 +365,12 @@ class ScanEngine:
             )
             self._bookmarks_left = len(settings.bookmarks)
             kick_off = self._next_bookmark
+        elif partner is not None and settings.mode in ("once", "continuous"):
+            why = self._share_with(partner, settings)
+            if why:
+                return why
+            self.pages = []
+            kick_off = self._start_shares
         else:
             self.pages = plan_sweep(
                 settings.start_hz, settings.end_hz, settings.step_hz, self.rate
@@ -345,14 +434,33 @@ class ScanEngine:
         if self.settings.mode == "bookmarks":
             total = max(1, len(self.settings.bookmarks))
             return min(1.0, (total - self._bookmarks_left) / total)
+        if self._shared is not None:
+            return self._shared.progress
         if not self.pages:
             return 0.0
         return min(1.0, max(0, self.page_index) / len(self.pages))
 
     def current_page(self) -> Optional[SweepPage]:
+        if self._shared is not None:
+            return self._shares[MAIN].page if self._shares else None
         if 0 <= self.page_index < len(self.pages):
             return self.pages[self.page_index]
         return None
+
+    def partner_page(self) -> Optional[SweepPage]:
+        """The page the partner measures (None without one)."""
+        return self._shares[PARTNER].page if len(self._shares) > PARTNER else None
+
+    def partner_only(self) -> List[Tuple[float, float]]:
+        """``(first_hz, last_hz)`` of the channels of the shared sweep only
+        the partner tunes (swept by no one once it leaves)."""
+        return self._shared.only_tuned_by(PARTNER) if self._shared is not None else []
+
+    def partner_quiet_s(self) -> float:
+        """Seconds since the partner's last block (0 without a partner)."""
+        if len(self._shares) <= PARTNER:
+            return 0.0
+        return max(0.0, time.monotonic() - self._shares[PARTNER].last_block_at)
 
     # ------------------------------------------------------------------ #
     # The display loop's blocks
@@ -364,7 +472,9 @@ class ScanEngine:
         self.last_block_at = time.monotonic()
         seconds = len(samples) / self.rate
         try:
-            if self.state == SETTLE:
+            if self._shares:
+                self._share_frame(self._shares[MAIN], samples)
+            elif self.state == SETTLE:
                 self._settle(len(samples))
             elif self.state == MEASURE:
                 self._measure(samples)
@@ -409,32 +519,7 @@ class ScanEngine:
             return
         self.steps_measured += 1
         s = self.settings
-        readings, noise, threshold = measure_page(
-            power,
-            self._receiver_lo(page),
-            self.rate,
-            page.channels,
-            s.step_hz,
-            threshold_db=s.threshold_db,
-            margin_db=s.margin_db,
-            min_width_hz=s.min_width_hz,
-        )
-        self.noise_db, self.threshold_db = noise, threshold
-        found = []
-        for reading in readings:
-            low, high = s.start_hz - s.step_hz / 2, s.end_hz + s.step_hz / 2
-            if not low <= reading.frequency_hz <= high:
-                continue  # a signal just outside the range, seen from inside
-            listening = s.listening or self.guess_listening(reading)
-            found.append(
-                Found(
-                    reading.frequency_hz,
-                    reading.peak_db,
-                    reading.noise_db,
-                    reading.width_hz,
-                    listening,
-                )
-            )
+        found = self._signals(power, page, self.rate, self._receiver_lo(page))
         if s.mode in ("once", "continuous"):
             for item in found:
                 self.found_count += 1
@@ -452,12 +537,53 @@ class ScanEngine:
         ]
         self._next_candidate()
 
-    def _receiver_lo(self, page: SweepPage) -> float:
+    def _signals(
+        self,
+        power: np.ndarray,
+        page: SweepPage,
+        rate: float,
+        lo_hz: float,
+        noise_too: bool = True,
+    ) -> List[Found]:
+        """The signals of a page's averaged spectrum, inside the range
+        (``noise_too``: its noise floor and threshold are the ones shown)."""
+        s = self.settings
+        readings, noise, threshold = measure_page(
+            power,
+            lo_hz,
+            rate,
+            page.channels,
+            s.step_hz,
+            threshold_db=s.threshold_db,
+            margin_db=s.margin_db,
+            min_width_hz=s.min_width_hz,
+        )
+        if noise_too:
+            self.noise_db, self.threshold_db = noise, threshold
+        found = []
+        for reading in readings:
+            low, high = s.start_hz - s.step_hz / 2, s.end_hz + s.step_hz / 2
+            if not low <= reading.frequency_hz <= high:
+                continue  # a signal just outside the range, seen from inside
+            listening = s.listening or self.guess_listening(reading)
+            found.append(
+                Found(
+                    reading.frequency_hz,
+                    reading.peak_db,
+                    reading.noise_db,
+                    reading.width_hz,
+                    listening,
+                )
+            )
+        return found
+
+    def _receiver_lo(self, page: SweepPage, host: Any = None) -> float:
         """The LO a page's blocks were received around: the host's (should
         the receiver not be exactly where the page was planned, the results
-        still say where the signals are), else the planned one."""
+        still say where the signals are), else the planned one. ``host``:
+        the partner's, for its pages."""
         try:
-            lo_hz = float(self.host.scan_lo_hz())
+            lo_hz = float((self.host if host is None else host).scan_lo_hz())
         except (NotImplementedError, TypeError, ValueError):
             return page.lo_hz
         return lo_hz if math.isfinite(lo_hz) else page.lo_hz
@@ -525,6 +651,10 @@ class ScanEngine:
         self.state = IDLE
         self._candidates = []
         self.host.scan_set_muted(False)
+        partner, self.partner = self.partner, None
+        self._shares = []
+        if partner is not None:
+            self._unmute(partner)
         if self._starting:
             self._start_failure = reason
             return
@@ -686,6 +816,209 @@ class ScanEngine:
             self._next_bookmark()
         else:
             self._next_candidate()
+
+    # ------------------------------------------------------------------ #
+    # A sweep shared with a second receiver (the partner)
+    # ------------------------------------------------------------------ #
+    def partner_frame(self, samples: np.ndarray) -> None:
+        """Take one block the partner read (as :meth:`frame` does the
+        host's)."""
+        if (
+            not self.active
+            or len(self._shares) <= PARTNER
+            or samples is None
+            or len(samples) == 0
+        ):
+            return
+        try:
+            self._share_frame(self._shares[PARTNER], samples)
+        except Exception as exc:  # keep the partner's display loop alive
+            logger.warning("The scan stopped because of an error: %s", exc)
+            self.stop(f"error: {exc}")
+
+    def drop_partner(self) -> None:
+        """The partner leaves the scan (stopped, tuned elsewhere, silent):
+        the page it was measuring goes back, and the host's receiver sweeps
+        the rest (what only the partner tunes is not swept)."""
+        if len(self._shares) <= PARTNER or self._shared is None:
+            return
+        share = self._shares.pop(PARTNER)
+        partner, self.partner = self.partner, None
+        if share.page is not None:
+            self._shared.release(PARTNER, share.page)
+        self._shared.give_up(PARTNER)
+        if partner is not None:
+            self._unmute(partner)
+        main = self._shares[MAIN]
+        if main.state == WAIT:
+            self._safely(lambda: self._claim(main))
+        self.on_state()
+
+    @staticmethod
+    def _unmute(partner: Any) -> None:
+        try:
+            partner.scan_set_muted(False)
+        except Exception as exc:  # pragma: no cover - a partner gone
+            logger.debug("Could not unmute the second receiver: %s", exc)
+
+    @staticmethod
+    def _tunes(receiver: Any) -> Tuple[float, float]:
+        """What a host or partner tunes, (low, high) in Hz."""
+        get = getattr(receiver, "scan_device_range", None)
+        limits = get() if get is not None else None
+        if not limits:
+            return 0.0, math.inf
+        return float(limits[0]), float(limits[1])
+
+    def _share_with(self, partner: Any, settings: ScanSettings) -> str:
+        """Plan the sweep shared with ``partner`` (""), or say why not."""
+        try:
+            rate = float(partner.scan_sample_rate())
+            settle_s = float(getattr(partner, "scan_settle_s", lambda: 0.0)())
+            shared = SharedSweep(
+                settings.start_hz,
+                settings.end_hz,
+                settings.step_hz,
+                [
+                    SweepReceiver(self.rate, *self._tunes(self.host)),
+                    SweepReceiver(rate, *self._tunes(partner)),
+                ],
+            )
+        except (TypeError, ValueError) as exc:
+            return f"The second receiver can't sweep: {exc}"
+        if shared.channel_total <= 0:
+            return "End must be above Start."
+        if shared.covered_count <= 0:
+            return "Neither receiver tunes this range."
+        self.partner = partner
+        self._shared = shared
+        self._shares = [
+            _Share(MAIN, self.host, self.rate, self.settle_s),
+            _Share(PARTNER, partner, rate, settle_s),
+        ]
+        return ""
+
+    def _start_shares(self) -> None:
+        self.state = WAIT  # (sweeping: each receiver's part says where)
+        partner = self.partner
+        if partner is not None:
+            partner.scan_set_muted(True)
+        for share in list(self._shares):
+            if self.state == IDLE:
+                return  # (nothing could be tuned: ended)
+            self._claim(share)
+        self._sync_state()
+
+    def _sync_state(self) -> None:
+        """The engine's state is the host receiver's part's (never IDLE
+        while the sweep runs)."""
+        if self._shares and self.state != IDLE:
+            self.state = self._shares[MAIN].state
+
+    def _share_frame(self, share: _Share, samples: np.ndarray) -> None:
+        share.last_block_at = time.monotonic()
+        if share.state == WAIT:
+            self._claim(share)  # (the other may have handed one over)
+        elif share.state == SETTLE:
+            # As _settle: the blocks that may predate the retune are dropped.
+            if share.skip_frames > 0:
+                share.skip_frames -= 1
+                if not share.skip_frames and share.settle_left <= 0:
+                    self._begin_measuring(share)
+            else:
+                share.settle_left -= len(samples)
+                if share.settle_left <= 0:
+                    self._begin_measuring(share)
+        elif share.state == MEASURE:
+            self._share_measure(share, samples)
+        self._sync_state()
+
+    @staticmethod
+    def _begin_measuring(share: _Share) -> None:
+        share.state = MEASURE
+        share.averager.reset()
+        share.measured = 0
+
+    def _share_measure(self, share: _Share, samples: np.ndarray) -> None:
+        share.averager.add(samples)
+        share.measured += len(samples)
+        if (
+            share.measured < MEASURE_S * share.rate
+            or share.averager.segments < MIN_SEGMENTS
+        ):
+            return
+        shared = self._shared
+        page, power = share.page, share.averager.power_db()
+        share.page = None
+        if shared is not None and page is not None:
+            if power is None:
+                shared.release(share.index, page)
+            else:
+                shared.done(share.index, page)
+                share.steps += 1
+                self.steps_measured += 1
+                for item in self._signals(
+                    power,
+                    page,
+                    share.rate,
+                    self._receiver_lo(page, share.host),
+                    noise_too=share.index == MAIN,
+                ):
+                    self.found_count += 1
+                    self.on_found(item)
+        if self.active:
+            self._claim(share)
+
+    def _claim(self, share: _Share) -> None:
+        """Tune ``share``'s receiver to its next page of the shared sweep,
+        or have it wait (WAIT) for one the other may still hand over; the
+        pass ends when neither has a page or can get one."""
+        shared = self._shared
+        if shared is None:
+            return
+        while True:
+            page = shared.claim(share.index)
+            if page is None:
+                share.page = None
+                share.state = WAIT
+                if shared.finished:
+                    self._end_shared_pass()
+                return
+            nearest = page.nearest_channel(page.lo_hz)
+            if share.host.scan_tune_lo(page.lo_hz, nearest):
+                share.page = page
+                share.state = SETTLE
+                share.skip_frames = 1
+                share.settle_left = share.settle_s * share.rate
+                share.host.scan_set_muted(True)
+                self._sync_state()
+                self.on_state()
+                return
+            # (The other receiver measures it, if it tunes it.)
+            shared.release(share.index, page)
+            self.steps_refused += 1
+            self._refused_hz.append(page.lo_hz)
+
+    def _end_shared_pass(self) -> None:
+        """Neither receiver has a page left: the pass is over. A sweep
+        once ends; a continuous one starts its next pass (each receiver
+        claims its first page on its next block). A pass in which no step
+        tuned ends the scan."""
+        shared = self._shared
+        if shared is None:
+            return
+        measured = any(share.steps for share in self._shares)
+        if self.settings.mode == "once" or not measured:
+            self._finish("complete" if measured else NO_STEP_TUNED)
+            return
+        self._tell_refused()
+        self.pass_number += 1
+        shared.reset()
+        if len(self._shares) <= PARTNER:
+            shared.give_up(PARTNER)  # (it left the scan)
+        for share in self._shares:
+            share.steps = 0
+        self.on_state()
 
 
 def bookmark_scan_list(

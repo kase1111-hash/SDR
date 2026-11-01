@@ -17,7 +17,10 @@ sessions; results can be bookmarked (one or all) and exported as CSV.
 
 The window is the panel's host (:class:`ScannerHost`): it tunes, starts
 the receiver, says whether a device is connected or a recording runs, and
-adds bookmarks.
+adds bookmarks. While Device > Second Receiver... runs, "Use both
+receivers" has the two sweep a range together (each its own part, so a
+pass takes about half as long): the host offers that receiver
+(:meth:`ScannerHost.scan_partner`).
 """
 
 from __future__ import annotations
@@ -66,6 +69,8 @@ from ..dsp.dcs import dcs_label, format_dcs, parse_dcs
 from ..dsp.sweep import (
     AUTO_MARGIN_DB,
     WIDE_SIGNAL_HZ,
+    SharedSweep,
+    SweepReceiver,
     channel_count,
     format_duration,
     page_count,
@@ -293,6 +298,14 @@ class ScannerHost(ScanHost):
     def scan_device_range(self) -> Optional[Tuple[float, float]]:
         return None
 
+    def scan_partner(self) -> Tuple[Optional[Any], str]:
+        """A second receiver a sweep can share ("Use both receivers"): a
+        :class:`~sdr_module.gui.scan_engine.ScanPartner` that can also
+        ``attach(feed, left)``, ``detach(restore)`` and say its
+        ``problem()``; or ``(None, why not)``, why "" when there is none
+        to offer."""
+        return None, ""
+
     def scan_begin(self) -> None:
         """A scan starts: remember where the receiver is tuned."""
 
@@ -374,6 +387,12 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._empty_reason = "idle"
         self._restoring = False
         self._blocker: Tuple[str, str] = ("", "")
+        # The second receiver the host offers for sweeps ((partner, "") or
+        # (None, why not), see _partner_offer), the one sweeping with the
+        # scan running, and the last estimate made with it.
+        self._offer: Tuple[Optional[Any], str] = (None, "")
+        self._partner: Optional[Any] = None
+        self._estimate_cache: Optional[Tuple[tuple, Tuple[int, float]]] = None
         self._stay = False  # end the scan on the channel listened to
         self._restarting = False  # a new scan replaces the one running
         self._status_tone: Optional[str] = None
@@ -561,6 +580,11 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         )
         self._group.setMinimumContentsLength(6)
         self._group_label = self._add_field(grid, 2, 2, "&Group:", self._group)
+        # (Range sweeps only, while a second receiver is open: the row
+        # Resume and Group take in the other modes.)
+        self._both = QCheckBox("Use both rece&ivers")
+        self._both.setVisible(False)
+        grid.addWidget(self._both, 2, 0, 1, 4)
         layout.addLayout(grid)
 
         self._hint = QLabel()
@@ -574,6 +598,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._auto.toggled.connect(self._on_setting_changed)
         self._resume.valueChanged.connect(self._on_setting_changed)
         self._group.currentIndexChanged.connect(self._on_setting_changed)
+        self._both.toggled.connect(self._on_both_toggled)
 
         # Start/Stop (or, with no device, Use Demo Device / Connect...),
         # with the status beside it.
@@ -947,6 +972,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             resume = self._setting("get_float", "resume_s", 3.0)
             if math.isfinite(resume):
                 self._resume.setValue(resume)
+            self._both.setChecked(
+                bool(self._setting("get_bool", "both_receivers", False))
+            )
             self._saved_group = self._setting("get_str", "bookmark_group", "")
             raw = self._setting("get_str", "results", "")
             self._hits = []
@@ -1044,6 +1072,58 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._update_steps_hint()
         self._update_controls()
 
+    def _on_both_toggled(self, on: bool) -> None:
+        self._save("both_receivers", bool(on))
+        self._update_steps_hint()
+        self._update_controls()
+
+    # ------------------------------------------------------------------ #
+    # The second receiver ("Use both receivers")
+    # ------------------------------------------------------------------ #
+    def _partner_offer(self) -> Tuple[Optional[Any], str]:
+        """What the host offers: ``(partner, "")``, ``(None, why not)``, or
+        ``(None, "")`` when no second receiver is open."""
+        offer = getattr(self._host, "scan_partner", None)
+        if offer is None:
+            return None, ""
+        try:
+            partner, why = offer()
+        except Exception as exc:  # (a second receiver closing as asked)
+            logger.debug("No second receiver to sweep with: %s", exc)
+            return None, ""
+        return partner, str(why or "")
+
+    def _sweep_partner(self) -> Optional[Any]:
+        """The second receiver a sweep with these settings shares: "Use
+        both receivers" ticked, a range sweep, and one offered."""
+        if self.scan_mode() not in ("once", "continuous"):
+            return None
+        if not self._both.isChecked():
+            return None
+        return self._offer[0]
+
+    def _partner_left(self, why: str) -> None:
+        """The second receiver can't go on (``why``): the main receiver
+        sweeps the rest, and the status bar says so."""
+        partner, self._partner = self._partner, None
+        if partner is None:
+            return
+        partner.detach(restore=False)  # (it stays where it is now)
+        engine = self._engine
+        only = engine.partner_only()
+        engine.drop_partner()
+        if engine.active:
+            missed = " and ".join(
+                f"{_say_freq(first)} – {_say_freq(last)}" for first, last in only
+            )
+            except_ = f", except {missed}, which only it tunes" if missed else ""
+            self._host.scan_message(
+                f"The second receiver left the scan ({why}): this receiver "
+                f"sweeps the rest{except_}.",
+                "info",
+            )
+        self._update_controls()
+
     def _refresh_groups(self, prefer: Optional[str] = None) -> None:
         """The Group list: all bookmarks, or one of their groups (keeping
         the one chosen, or ``prefer``)."""
@@ -1096,38 +1176,96 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         start_hz = self._start.value() * 1e6
         end_hz = self._end.value() * 1e6
         limits = self._host.scan_device_range()
+        partner = self._sweep_partner()
+        if partner is not None and limits is not None:
+            # (Either receiver: what only one tunes, it sweeps.)
+            other = partner.scan_device_range()
+            limits = (
+                None
+                if other is None
+                else (min(limits[0], other[0]), max(limits[1], other[1]))
+            )
         if limits is None:
             return (start_hz, end_hz), ""
         low, high = limits
         if end_hz < low or start_hz > high:
+            who = "The two receivers tune" if partner else "This device tunes"
             return None, (
-                f"This device tunes {_say_freq(low)} to {_say_freq(high)}. "
+                f"{who} {_say_freq(low)} to {_say_freq(high)}. "
                 "Choose a range inside it."
             )
         if start_hz < low or end_hz > high:
             start_hz, end_hz = max(start_hz, low), min(end_hz, high)
+            whose = "the receivers'" if partner else "the device's"
             return (start_hz, end_hz), (
-                f"Limited to the device's range, {_say_freq(start_hz)} to "
+                f"Limited to {whose} range, {_say_freq(start_hz)} to "
                 f"{_say_freq(end_hz)}."
             )
         return (start_hz, end_hz), ""
 
-    def _page_seconds(self) -> float:
+    def _page_seconds(self, settle_s: Optional[float] = None) -> float:
         """About how long one receiver step takes: the block after the
-        retune is dropped, the tuner settles, then a block is measured."""
+        retune is dropped, the tuner settles (``settle_s``: the host's),
+        then a block is measured."""
+        if settle_s is None:
+            settle_s = self._host.scan_settle_s()
         frames = 1 + max(1, math.ceil(MEASURE_S / _FRAME_S))
-        return frames * _FRAME_S + float(self._host.scan_settle_s())
+        return frames * _FRAME_S + float(settle_s)
 
     def estimate(self) -> Tuple[int, int, float]:
-        """``(channels, receiver steps, seconds)`` of one pass."""
+        """``(channels, receiver steps, seconds)`` of one pass (both
+        receivers' steps with "Use both receivers")."""
         sweep, _note = self._planned_sweep()
         if sweep is None or not self._range_valid():
             return 0, 0, 0.0
         step_hz = self._step.value() * 1e3
         rate = self._host.scan_sample_rate()
         channels = channel_count(sweep[0], sweep[1], step_hz)
+        partner = self._sweep_partner()
+        if partner is not None:
+            shared = self._shared_estimate(partner, sweep, step_hz, rate)
+            if shared is not None:
+                return channels, shared[0], shared[1]
         steps = page_count(sweep[0], sweep[1], step_hz, rate)
         return channels, steps, steps * self._page_seconds()
+
+    def _shared_estimate(
+        self, partner: Any, sweep: Tuple[float, float], step_hz: float, rate: float
+    ) -> Optional[Tuple[int, float]]:
+        """``(steps, seconds)`` of a pass shared with ``partner`` (each
+        receiver's steps as the plan hands them out); None if it can't be
+        planned. Kept while nothing it depends on changes (the tab asks
+        twice a second)."""
+
+        def tunes(limits: Optional[Tuple[float, float]]) -> Tuple[float, float]:
+            return (float(limits[0]), float(limits[1])) if limits else (0.0, math.inf)
+
+        try:
+            receivers = (
+                SweepReceiver(float(rate), *tunes(self._host.scan_device_range())),
+                SweepReceiver(
+                    float(partner.scan_sample_rate()),
+                    *tunes(partner.scan_device_range()),
+                ),
+            )
+            times = (
+                self._page_seconds(),
+                self._page_seconds(partner.scan_settle_s()),
+            )
+        except (TypeError, ValueError):
+            return None
+        key = (sweep, step_hz, receivers, times)
+        cached = self._estimate_cache
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        try:
+            seconds, pages = SharedSweep(
+                sweep[0], sweep[1], step_hz, receivers
+            ).estimate(times)
+        except ValueError:
+            return None
+        self._estimate_cache = (key, (sum(pages), seconds))
+        return sum(pages), seconds
 
     def _auto_level(self) -> Optional[Tuple[float, float]]:
         """``(noise floor, threshold)`` Auto uses now, in dBFS, if known:
@@ -1188,6 +1326,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         channels, steps, seconds = self.estimate()
         noun = "channel" if channels == 1 else "channels"
         snoun = "receiver step" if steps == 1 else "receiver steps"
+        if self._sweep_partner() is not None:
+            snoun += " with both receivers"
         per = " a pass" if mode != "once" else ""
         text = (
             f"{channels:,} {noun}, {steps:,} {snoun}: {format_duration(seconds)}{per}."
@@ -1223,9 +1363,22 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
     }
 
     def refresh(self) -> None:
-        """Follow the window: device, recording, receiver, noise floor."""
+        """Follow the window: device, recording, receiver, noise floor, and
+        the second receiver (offered, or sweeping with the scan)."""
         blocker = self._host.scan_blocker()
         engine = self._engine
+        offer, before = self._partner_offer(), self._offer
+        self._offer = offer
+        changed = (offer[0] is None, offer[1]) != (before[0] is None, before[1])
+        if changed and not engine.active:
+            self._update_steps_hint()  # (with or without the second receiver)
+        partner = self._partner
+        if engine.active and partner is not None:
+            why = partner.problem()
+            if not why and engine.partner_quiet_s() > NO_BLOCKS_S:
+                why = "it returned no samples"
+            if why:
+                self._partner_left(why)
         kind, reason = blocker
         if engine.active:
             if kind:
@@ -1289,6 +1442,18 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         stops = mode in ("stop", "bookmarks")
         self._resume.setEnabled(not scanning and stops)
         self._resume_label.setEnabled(stops)
+        partner, why = self._offer
+        self._both.setVisible(
+            mode in ("once", "continuous") and (partner is not None or bool(why))
+        )
+        self._both.setEnabled(partner is not None and not scanning)
+        self._both.setToolTip(
+            why
+            or "Sweep with the second receiver too (Device > Second Receiver...): "
+            "each takes part of the range at once, so a pass takes about half "
+            "as long. Its speaker is muted while it sweeps, and it goes back to "
+            "where it was when the scan ends."
+        )
         self._group.setVisible(mode == "bookmarks")
         self._group_label.setVisible(mode == "bookmarks")
         self._resume.setVisible(stops)
@@ -1421,6 +1586,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             self._set_status(reason, "warning")
             self._update_controls()
             return False
+        self._offer = self._partner_offer()
         why = self._cannot_start()
         if why:
             self._set_status(why + ".", "danger")
@@ -1461,8 +1627,19 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             host.scan_begin()
         self._stay = False
         rate = host.scan_sample_rate()
-        error = self._engine.start(settings, rate, host.scan_settle_s())
+        partner = self._sweep_partner()
+        if partner is not None and partner.problem():
+            partner = None  # (stopped since it was offered: this one alone)
+        if partner is not None:
+            partner.attach(self._engine.partner_frame, self._partner_left)
+        self._partner = partner
+        error = self._engine.start(
+            settings, rate, host.scan_settle_s(), partner=partner
+        )
         if error:
+            partner, self._partner = self._partner, None
+            if partner is not None:
+                partner.detach(restore=True)
             if begin:
                 host.scan_end(stay=False)
             if error.startswith("error: "):
@@ -1649,10 +1826,13 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         if engine.mode == "bookmarks":
             heard = "heard" if count else "heard yet"
             return f"{pass_text}{count} {noun} {heard}"
-        page = engine.current_page()
-        where = ""
-        if page is not None and page.count:
-            where = f"{_say_freq(page.first_hz)} – {_say_freq(page.last_hz)} · "
+        pages = [engine.current_page(), engine.partner_page()]
+        where = " and ".join(
+            f"{_say_freq(page.first_hz)} – {_say_freq(page.last_hz)}"
+            for page in pages
+            if page is not None and page.count
+        )
+        where = f"{where} · " if where else ""
         found = "found" if engine.mode != "stop" else "heard"
         return f"{pass_text}{where}{count} {noun} {found}"
 
@@ -1754,6 +1934,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         host = self._host
         if not self._restarting:  # (a new scan takes over where it is)
             host.scan_end(stay=self._stay)
+        # The second receiver, if it swept to the end: back where it was.
+        partner, self._partner = self._partner, None
+        if partner is not None:
+            partner.detach(restore=True)
         self._stay = False
         self._listen_row.setVisible(False)
         self._hold_btn.blockSignals(True)
@@ -1788,8 +1972,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 )
             else:
                 self._empty_reason = "nothing"
+                both = " with both receivers" if partner is not None else ""
                 self._set_status(
-                    f"Scan complete: {count} {noun} found.{floor}"
+                    f"Scan complete: {count} {noun} found{both}.{floor}"
                     f"{getattr(self, '_range_note', '')}{skipped}",
                     "success" if count else None,
                 )

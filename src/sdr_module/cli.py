@@ -419,8 +419,10 @@ def _hit_line(hit: Any, name_width: int) -> str:
 
 def _say_dual_pass(report: Any, names: List[str]) -> None:
     """``sdr-scan scan --dual``: what a sweep found, what each receiver
-    swept, and what it couldn't."""
-    if not report.complete:
+    swept, and what it couldn't. (A sweep cut short says nothing, nor one
+    in which neither receiver measured anything: the scan ends with the
+    error.)"""
+    if not report.complete or not any(report.steps):
         return
 
     def steps(count: int) -> str:
@@ -440,18 +442,18 @@ def _say_dual_pass(report: Any, names: List[str]) -> None:
         flush=True,
     )
     for index, name in enumerate(names):
-        others = [n for i, n in enumerate(names) if i != index]
+        # (The other receiver, when it measured anything in this sweep.)
+        other = " and ".join(
+            n for i, n in enumerate(names) if i != index and report.steps[i]
+        )
         if report.stopped[index]:
-            print(
-                f"Note: {name} {report.stopped[index]}; "
-                f"{' and '.join(others) or 'nothing else'} swept what it could "
-                "of its part.",
-                flush=True,
-            )
+            tail = f"; {other} swept what it could of its part" if other else ""
+            print(f"Note: {name} {report.stopped[index]}{tail}.", flush=True)
         elif report.failed and report.failed[index]:
+            tail = f"; {other} measured what it tunes of them" if other else ""
             print(
-                f"Note: {name} couldn't measure {steps(report.failed[index])}; "
-                f"{' and '.join(others)} measured what it tunes of them.",
+                f"Note: {name} couldn't measure {steps(report.failed[index])}"
+                f"{tail}.",
                 flush=True,
             )
     if report.missed:

@@ -241,6 +241,29 @@ def test_neither_device_delivering_is_an_error(monkeypatch, capsys, fast):
     assert (a.stopped, b.stopped, manager.closed) == (1, 1, 1)
 
 
+def test_devices_that_stop_delivering_end_a_continuous_scan(monkeypatch, capsys, fast):
+    """Like one device's scan: a sweep in which neither delivered ends it
+    with the error, and what the sweeps before found is still listed."""
+    a, b = rtl(), hackrf()
+    _use(monkeypatch, DualManager(("rtlsdr", 0, a), ("hackrf", 0, b)))
+    said = cli._say_dual_pass
+
+    def unplug_after_the_first(report, names):
+        said(report, names)
+        a.deliver = b.deliver = False
+
+    monkeypatch.setattr(cli, "_say_dual_pass", unplug_after_the_first)
+    rc = main(["scan", "--start", "88", "--end", "108", "--dual"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "Sweep 1 done" in out and "Sweep 2 done" not in out
+    assert _listed(out) == sorted(f / 1e6 for f in STATIONS)
+    assert out.rstrip().endswith(
+        "Error: No receiver returned samples. Check that they are plugged in "
+        "and not used by another program."
+    )
+
+
 def test_continuous_until_ctrl_c(monkeypatch, capsys, fast):
     a, b = rtl(), hackrf()
     manager = _use(monkeypatch, DualManager(("rtlsdr", 0, a), ("hackrf", 0, b)))

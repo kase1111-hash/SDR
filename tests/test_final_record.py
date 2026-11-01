@@ -1535,3 +1535,44 @@ class TestUnsavedRecordingKeepsTheFrequencyWhole(_FilesCase):
             with self.subTest(center=center):
                 text = self.ask(center)
                 self.assertIn(f"recorded at {shown} ", text)
+
+
+class TestCloseKeepsWhatGoingBackSaid(_FilesCase):
+    """Close Recording's "Closed <file>. Back to <device>." came right over
+    what going back said itself: that the decoder a preset turned on while
+    the file played is off again (LISTEN-05, "tuned away from the APRS
+    preset"). That note was gone at once (only the status history had it)."""
+
+    def play_and_close(self, preset="", name="aprs2m.sigmf-data", center=144.39e6):
+        win = self.win
+        self.assertTrue(win.set_frequency(100.1e6))
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        path = _save_sigmf(self.path(name), center)
+        with self.open_dialog(path):
+            self.assertTrue(win._open_recording())
+        if preset:
+            self.assertTrue(win._apply_preset_named(preset))
+        win._playback.close(restore=True)
+        self.assertEqual(win._current_frequency(), 100.1e6)
+        return self.message()
+
+    def test_the_decoder_note_is_in_the_close_message(self):
+        panel = self.win._decoder_panel
+        shown = self.play_and_close("APRS")
+        self.assertFalse(panel._enabled_check.isChecked())  # (off again)
+        self.assertTrue(shown.startswith("Closed aprs2m.sigmf-data. Back to "), shown)
+        self.assertIn("AX.25/APRS decoder off", shown)
+
+    def test_with_nothing_to_add_it_reads_as_before(self):
+        shown = self.play_and_close()
+        device = self.win._device_display_name()
+        self.assertEqual(shown, f"Closed aprs2m.sigmf-data. Back to {device}.")
+
+    def test_back_in_another_mode_too(self):
+        # An airband file (AM): going back to broadcast FM changes the mode
+        # as well, which said "FM: ..." over the decoder note.
+        shown = self.play_and_close("ACARS", "acars.sigmf-data", 131.55e6)
+        self.assertEqual(self.win._listening_mode(), ("FM", "75 kHz"))
+        self.assertTrue(shown.startswith("Closed acars.sigmf-data. Back to "), shown)
+        self.assertIn("ACARS decoder off", shown)
+

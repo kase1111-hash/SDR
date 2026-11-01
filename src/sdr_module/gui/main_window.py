@@ -3338,6 +3338,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         )
         signal_menu = tools_menu.addMenu("Si&gnal")
         signal_menu.setToolTipsVisible(True)
+        # Every page of the Signal tab, Identify too (its Ctrl+I stays on
+        # Identify Signal above: one action per key).
+        self._add_action(
+            signal_menu,
+            "&Identify",
+            lambda: self._signal_tools.identify(),
+            tip="Say what the signal at the tuned frequency is (Ctrl+I)",
+        )
         for text, page, tip in (
             ("Signals in &View", "signals", "List the signals in the span"),
             ("&Scope", "scope", "The tuned channel in time or as a constellation"),

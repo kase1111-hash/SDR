@@ -1071,5 +1071,102 @@ class TestMissingOutput(_WindowTestCase):
             self.assertIn("isn't connected", win._message_label.text())
 
 
+# --------------------------------------------------------------------------- #
+# F1 and the plot menus use the same names (DEV-E2E-16, PLOTS-E2E-15)
+# --------------------------------------------------------------------------- #
+class TestHelpUsesTheMenusNames(_WindowTestCase):
+    def found(self, text):
+        from sdr_module.gui.help_dialog import HelpDialog
+
+        dialog = HelpDialog(self.win)
+        self.addCleanup(dialog.deleteLater)
+        dialog._filter.setText(text)
+        return [search for row, search, _sec in dialog._rows if not row.isHidden()]
+
+    def test_wheel_finds_the_scroll_gestures(self):
+        # The app's own tips say "Ctrl+wheel"; F1 says "Ctrl+Scroll".
+        for text in ("wheel", "Wheel", "mouse wheel"):
+            found = self.found(text)
+            self.assertTrue(any("ctrl+scroll" in s for s in found), (text, found))
+            self.assertTrue(any("tune by the step" in s for s in found), found)
+        zoom = self.found("ctrl+wheel")
+        self.assertEqual(len(zoom), 1, zoom)
+        self.assertIn("zoom the spectrum and waterfall around the pointer", zoom[0])
+        self.assertEqual(self.found("Ctrl+Scroll"), zoom)
+        # "scroll" still finds every scroll gesture.
+        self.assertGreaterEqual(len(self.found("scroll")), len(self.found("wheel")))
+
+    def test_the_plot_rows_use_the_menus_words(self):
+        # The spectrum's menu says Range: so does F1.
+        ranges = [s for s in self.found("range") if "spectrum's range" in s]
+        self.assertGreaterEqual(len(ranges), 3, ranges)
+        self.assertFalse([s for s in self.found("db scale") if "db scale" in s])
+        # Shift+scroll over the dB labels (10 dB a notch) is listed.
+        shift = self.found("shift+scroll")
+        self.assertTrue(any("10 db" in s and "range" in s for s in shift), shift)
+        # "zoom" lists Full Span (Ctrl+0) with the other zoom keys.
+        zoom = self.found("zoom")
+        self.assertTrue(any("ctrl+0" in s for s in zoom), zoom)
+        self.assertTrue(any("full span" in s for s in zoom), zoom)
+        # The waterfall's level menu is named after the levels F1 talks about.
+        levels = self.found("color levels")
+        self.assertTrue(any("waterfall" in s for s in levels), levels)
+
+    def test_waterfall_level_presets_show_which_is_on(self):
+        from PyQt6.QtWidgets import QMenu
+
+        waterfall = self.win._waterfall
+
+        def level_actions():
+            menu = QMenu()
+            self.addCleanup(menu.deleteLater)
+            waterfall._display_menu(menu)
+            sub = next(
+                a.menu()
+                for a in menu.actions()
+                if a.menu() is not None and a.text().replace("&", "") == "Color Levels"
+            )
+            # The palette keeps its own menu.
+            self.assertTrue(
+                any(a.text().replace("&", "") == "Colors" for a in menu.actions())
+            )
+            return [a for a in sub.actions() if not a.isSeparator()]
+
+        def checked():
+            return [a.text().replace("&", "") for a in level_actions() if a.isChecked()]
+
+        waterfall.set_db_range(-80.0, 0.0)
+        presets = [a for a in level_actions() if a.text().endswith("full scale")]
+        self.assertEqual(len(presets), 4)
+        self.assertTrue(all(a.isCheckable() for a in presets))
+        self.assertEqual(checked(), ["80 dB below full scale"])
+        # Picking another preset moves the check mark.
+        next(a for a in level_actions() if a.text().startswith("120 dB")).trigger()
+        self.assertEqual(waterfall.levels(), (-120.0, 0.0))
+        self.assertEqual(checked(), ["120 dB below full scale"])
+        # Auto: only Auto is checked; unchecking it keeps fixed levels.
+        waterfall.set_auto_levels(True)
+        self.assertEqual(checked(), ["Auto (follow noise and signals)"])
+        next(a for a in level_actions() if a.text().startswith("&Auto")).trigger()
+        self.assertFalse(waterfall.auto_levels())
+        # Levels of your own (not a preset): nothing is checked.
+        waterfall.set_db_range(-73.0, -10.0)
+        self.assertEqual(checked(), [])
+
+    def test_identify_is_on_tools_signal(self):
+        win = self.win
+        action = _menu(win, "Tools", "Signal", "Identify")
+        calls = []
+        with mock.patch.object(
+            win._signal_tools, "identify", lambda *a: calls.append(a) or True
+        ):
+            action.trigger()
+        self.assertEqual(calls, [()])
+        # Ctrl+I stays on Tools > Identify Signal (one action has the key).
+        identify = _menu(win, "Tools", "Identify Signal")
+        self.assertEqual(identify.shortcut().toString(), "Ctrl+I")
+        self.assertTrue(action.shortcut().isEmpty())
+
+
 if __name__ == "__main__":
     unittest.main()

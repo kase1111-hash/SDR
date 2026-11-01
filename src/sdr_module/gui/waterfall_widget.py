@@ -2289,14 +2289,26 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 lambda _c=False, s=seconds: self.set_history_seconds(s)
             )
 
-        levels = menu.addMenu("&Levels")
+        # The levels of the COLORS scale (F1 calls them its color levels).
+        levels = menu.addMenu("Color &Levels")
+        group = QActionGroup(levels)
+        # One check mark, for Auto or the preset in use; unchecking Auto
+        # keeps the levels where they are, fixed.
+        group.setExclusionPolicy(QActionGroup.ExclusionPolicy.ExclusiveOptional)
         auto = levels.addAction("&Auto (follow noise and signals)")
         auto.setCheckable(True)
         auto.setChecked(self._auto_levels)
+        group.addAction(auto)
         auto.triggered.connect(self.set_auto_levels)
         levels.addSeparator()
+        floor, ceiling = self._db_range
         for index, db in enumerate(_RANGE_CHOICES):
             act = levels.addAction(f"{db} dB below full scale")
+            act.setCheckable(True)
+            act.setChecked(
+                not self._auto_levels and abs(ceiling) < 0.5 and abs(floor + db) < 0.5
+            )
+            group.addAction(act)
             act.triggered.connect(lambda _c=False, i=index: self._on_range_changed(i))
         if self._noise_db is not None:
             levels.addSeparator()

@@ -84,7 +84,7 @@ SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
         "Zoom the spectrum and waterfall in around the tuned frequency",
     ),
     ("View", ("Ctrl+-",), "Zoom the spectrum and waterfall out"),
-    ("View", ("Ctrl+0",), "Show the full span again"),
+    ("View", ("Ctrl+0",), "Zoom out to the full span"),
     ("Help", ("F1",), "Show this list of keyboard shortcuts"),
 )
 
@@ -202,12 +202,21 @@ MOUSE_ACTIONS: Tuple[Tuple[str, str], ...] = (
         "Right-click",
         "Tune, bookmark, copy or zoom at a frequency on either plot; options",
     ),
-    ("Drag", "Move the spectrum's dB scale (over its dB labels; double-click: Auto)"),
-    ("Scroll", "Step the spectrum's dB scale (over its dB labels)"),
+    # (The spectrum menu's Range: "range" finds these.)
+    ("Drag", "Move the spectrum's range (over its dB labels; double-click: Auto)"),
+    ("Scroll", "Move the spectrum's range by 5 dB (over its dB labels)"),
+    (
+        "Shift+Scroll",
+        "Make the spectrum's range 10 dB shallower / deeper (over its dB labels)",
+    ),
     ("Click", "Tune a bookmark from its label along the top of the spectrum"),
     ("Scroll", "Shift the waterfall's color levels (over its COLORS scale)"),
     ("Double-click", "Give the tool tabs the whole column (on a tab) and back"),
 )
+
+# Words the app uses for the same thing: the filter finds a row by either
+# (the tooltips' "Ctrl+wheel" is the Mouse section's "Ctrl+Scroll").
+_SYNONYMS: Tuple[Tuple[str, str], ...] = (("scroll", "wheel"),)
 
 _ARROWS = {"Left": "←", "Right": "→", "Up": "↑", "Down": "↓"}
 
@@ -522,6 +531,26 @@ def _key_needle(text: str) -> str:
     return ""
 
 
+def _with_synonyms(search: str) -> str:
+    """``search`` (lowercase) and, on lines of their own, its text with each
+    word of :data:`_SYNONYMS` swapped for the other, so that a filter typed
+    either way finds the row ("ctrl+wheel" finds "Ctrl+Scroll")."""
+    lines = [search]
+    for one, other in _SYNONYMS:
+        for word, swap in ((one, other), (other, one)):
+            if word in search:
+                lines.append(search.replace(word, swap))
+    return "\n".join(lines)
+
+
+def _text_matches(needle: str, search: str) -> bool:
+    """Whether every word of the filter ``needle`` (lowercase) is in the
+    row's ``search`` text, in any order ("mouse wheel", "waterfall
+    levels"), all on one of its lines."""
+    words = needle.split()
+    return any(all(word in line for word in words) for line in search.split("\n"))
+
+
 def _key_matches(needle: str, keys: Iterable[str]) -> bool:
     """Whether a row bound to ``keys`` (portable text, lowercase) answers
     the key filter ``needle``: the whole key ("ctrl+s" is not
@@ -670,7 +699,7 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
             section, box = sections[category]
             row = self._make_row(keys, description, kind)
             box.addWidget(row)
-            search = " ".join([category, description] + keys).lower()
+            search = _with_synonyms(" ".join([category, description] + keys).lower())
             tokens = {_portable(k).lower() for k in keys} if kind == "keys" else set()
             self._rows.append((row, search, section))
             self._keys.append(tokens)
@@ -735,7 +764,7 @@ class HelpDialog(QDialog if HAS_PYQT6 else object):
                 # "m" finds M and Ctrl+M.
                 show = _key_matches(key, keys)
             else:
-                show = not needle or needle in search
+                show = not needle or _text_matches(needle, search)
             row.setVisible(show)
             if show:
                 visible_sections.add(id(section))

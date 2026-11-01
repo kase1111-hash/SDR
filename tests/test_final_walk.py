@@ -6,6 +6,7 @@ on the demo device (or the part on its own where that is enough).
 """
 
 import os
+import time
 import unittest
 
 import numpy as np
@@ -92,6 +93,9 @@ class TestTheDemoPagersDontClipAsTheyAreHeard(unittest.TestCase):
             dev.start_rx()
             dev._stream_rate = self.RATE
             dev._stream_pos = int(position_s * self.RATE)
+            # (The stream follows the samples read, never skipped ahead to
+            # the clock however slowly this computer runs.)
+            dev._stream_epoch = time.monotonic() + 1e9
             return dev
 
         block = int(self.RATE / 30)
@@ -206,6 +210,7 @@ class TestTheClippingWarningNamesADeviationThatHolds(_window_case()):
         dev.start_rx()
         dev._stream_rate = rate
         dev._stream_pos = int(start_s * rate)
+        dev._stream_epoch = time.monotonic() + 1e9  # (never skipped ahead)
         chain = main_window._ReceiverChain(rate, "FM", float(width.split()[0]) * 1e3)
         said = []
         win._show_status_message = lambda text, *a, **k: said.append(text)

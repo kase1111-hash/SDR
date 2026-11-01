@@ -254,7 +254,12 @@ class TestDemoDecodesInTheWindow(_WindowTestCase):
             5.0,
         ),
         "FLEX": (
-            [("1234567", "SDR Module demo: FLEX 1600 page on 931.9375 MHz")],
+            [
+                (
+                    "1234567 (A, 1600 bps)",
+                    "SDR Module demo: FLEX 1600 page on 931.9375 MHz",
+                )
+            ],
             7.5,
         ),
         "ACARS": (

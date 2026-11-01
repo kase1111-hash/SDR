@@ -1128,6 +1128,25 @@ def _aprs_content(fields: Dict[str, Any]) -> str:
     )
 
 
+def _flex_address(msg: Any) -> str:
+    """A FLEX page's capcode with its phase and speed, the way a POCSAG
+    page's address carries its function: "1234567 (C, 6400 bps)"."""
+    capcode = str(getattr(msg, "capcode", "") or "")
+    baud = int(getattr(msg, "baud_rate", 0) or 0)
+    parts = [p for p in (_text(msg, "phase"), f"{baud} bps" if baud else "") if p]
+    return f"{capcode} ({', '.join(parts)})" if capcode and parts else capcode
+
+
+#: FLEX page types -> what the details card calls them.
+_FLEX_KINDS = {
+    "alpha": "Alphanumeric page",
+    "numeric": "Numeric page",
+    "tone": "Tone-only page (no message)",
+    "secure": "Secure page (its text isn't decoded)",
+    "binary": "Binary page (its data isn't decoded)",
+}
+
+
 def describe_message(msg: Any) -> Tuple[str, str]:
     """``(address, content)`` text for a decoded message, as the Decoder
     panel's table and the command line show it."""
@@ -1139,7 +1158,7 @@ def describe_message(msg: Any) -> Tuple[str, str]:
     if name == "POCSAGMessage":
         return f"{msg.address} (F{msg.function})", text("content")
     if name == "FLEXMessage":
-        return str(getattr(msg, "capcode", "") or ""), text("content")
+        return _flex_address(msg), text("content")
     if name == "ADSBMessage":
         return text("icao_address"), _adsb_content(msg)
     if name in ("AX25Frame", "APRSMessage"):
@@ -1206,7 +1225,7 @@ def message_details(msg: Any) -> List[str]:
     """Lines that say more about a decoded message than its row (for the
     Decoder panel's detail card): the path of an APRS packet, the kind of
     an ADS-B message, an ACARS message's flight and label, an RDS
-    station's codes."""
+    station's codes, a FLEX page's phase, speed, frame and kind."""
     name = type(msg).__name__
     lines: List[str] = []
     if name == "ADSBMessage":
@@ -1284,4 +1303,20 @@ def message_details(msg: Any) -> List[str]:
         wpm = float(getattr(msg, "wpm", 0.0) or 0.0)
         if wpm:
             lines.append(f"Sent at {wpm:.0f} words per minute")
+    elif name == "FLEXMessage":
+        phase = _text(msg, "phase")
+        baud = int(getattr(msg, "baud_rate", 0) or 0)
+        where = (
+            f"frame {int(getattr(msg, 'frame', 0) or 0)} of cycle "
+            f"{int(getattr(msg, 'cycle', 0) or 0)}"
+        )
+        sent = " at ".join(
+            p
+            for p in (f"Phase {phase}" if phase else "", f"{baud} bps" if baud else "")
+            if p
+        )
+        lines.append(f"{sent}, {where}" if sent else where.capitalize())
+        page_kind = _FLEX_KINDS.get(_text(msg, "message_type"))
+        if page_kind:
+            lines.append(page_kind)
     return lines

@@ -16,22 +16,34 @@ times.
 
 1. A preamble screen: the samples over the four pulses (wherever in a
    sample the reply starts) against the samples that are certainly quiet.
-2. A least-squares fit of the preamble, as an integrating ADC samples it,
+2. Cheap tests of what passed: both halves of the preamble hold pulses,
+   and the first 56 bits hold energy (a reply has a pulse in every bit;
+   Mode A/C replies and stray pulses, which make most of what passes the
+   screen in a busy sky, don't).
+3. A least-squares fit of the preamble, as an integrating ADC samples it,
    at a grid of start times a fraction of a sample apart: the reply's start
    time, pulse level and noise floor.
-3. A Viterbi search for the bits: each sample's expected value is the
-   pulse level times the share of the sample each of its two chips covers,
-   so the bits are the sequence whose samples fit best (two states, the
-   last bit). A short reply's search ends after bit 55. It runs at five
-   start times around the fitted one, the fitted one first.
-4. The CRC and format checks of the decoder that owns it (``accept``).
+4. A quick reading of each bit at the fitted start time: from its own
+   samples and the samples it shares with the bits on either side (the
+   other bit taken as unknown). A reply whose frame then checks itself is
+   read; most strong ones are.
+5. For the others, a Viterbi search for the bits: each sample's expected
+   value is the pulse level times the share of the sample each of its two
+   chips covers, so the bits are the sequence whose samples fit best (two
+   states, the last bit). A short reply's search ends after bit 55. It
+   runs at five start times around the fitted one, the fitted one first.
+6. The CRC and format checks of the decoder that owns it (``accept``).
 
 The fit and the search are vectorised across replies: a block's replies
-are searched together, whatever their number.
+are searched together, whatever their number. The fits and the searches
+have a budget per second of signal (:attr:`ModeSDemodulator.FITS_PER_S`,
+:attr:`~ModeSDemodulator.SEARCHES_PER_S`), so no input, however busy,
+costs more than it allows: when there is more to do, the clearest
+preambles are read first and the rest are counted in ``skipped``.
 """
 
 import math
-from typing import Callable, Collection, Dict, Iterable, List, Sequence, Tuple
+from typing import Callable, Collection, Dict, Iterable, Sequence, Tuple
 
 import numpy as np
 
@@ -158,7 +170,8 @@ class ModeSDemodulator:
     """Mode S replies in magnitude samples at 2 to 2.5 MS/s (see the module
     docstring). Feed the stream in blocks of any size with :meth:`feed`;
     replies that straddle two blocks are found once, and the replies found
-    don't depend on the block sizes.
+    don't depend on the block sizes (while the budget isn't reached: then
+    the clearest are read, and which those are depends on the blocks).
 
     Not thread-safe: one stream, one thread.
     """
@@ -179,9 +192,33 @@ class ModeSDemodulator:
     PHASES = 32
     #: Samples scanned per pass (bounds the memory a huge block takes).
     PASS = 1 << 20
-    #: Up to this many replies in a pass, all start times are searched at
-    #: once (see :meth:`_frames`).
-    ONE_PASS = 6
+    #: Up to this many replies left to search in a pass, all start times
+    #: are searched at once (see :meth:`_frames`): a search costs about
+    #: 50 replies' worth of work to set up, so one costs less than two
+    #: unless more than about 12 of them settle at the fitted start time.
+    ONE_PASS = 12
+    #: Cheap tests before the fit (see :meth:`_promising`): the weaker
+    #: preamble half's pulse level over the noise floor, at least this
+    #: share of the stronger's; the first 56 bits' mean level over the
+    #: floor, at least this share of the preamble pulses' (a reply's is
+    #: about a half over a half: every bit has a pulse in one of its two
+    #: chips). Real replies, alone or overlapped, measured no lower than
+    #: 0.37 and 0.33.
+    BALANCE = 0.2
+    DATA = 0.2
+    #: Read each reply's bits quickly at its fitted start time first, and
+    #: search (Viterbi, every start time) only those whose frame doesn't
+    #: then check itself.
+    HARD_PASS = True
+    #: The budget per second of signal: preamble fits, and timing
+    #: hypotheses searched by the Viterbi search. A busy sky (2,000 Mode S
+    #: and 6,000 Mode A/C replies a second) needs a third of it at 2.0 and
+    #: 2.4 MS/s, two thirds at 2.048 MS/s; 15,000 mixed replies a second
+    #: fit in it, 25,000 read 2 % fewer replies than without it. Unused
+    #: budget is kept for up to ``BUDGET_S`` of signal, for bursts.
+    FITS_PER_S = 20_000.0
+    SEARCHES_PER_S = 10_000.0
+    BUDGET_S = 0.05
     _MARGIN = 4  # samples kept before the next start position
     _LONGEST_CLUSTER = 64  # screen positions in a row worth waiting for
 
@@ -208,9 +245,19 @@ class ModeSDemodulator:
         self._n_pulse = sum(b - a for a, b in pulses)
         self._n_quiet = sum(b - a for a, b in quiet)
         self._widths = sorted({b - a for a, b in pulses + quiet})
+        # The samples certainly inside the first 56 bits for a reply the fit
+        # can put anywhere from 1.5 samples before a piece's first screen
+        # position to 1.5 after its last (at most 3 later), as offsets from
+        # the first: whole windows of the screen's widest sums.
+        wide = self._widths[-1]
+        data_a = int(math.ceil(4.5 + 16 * r))
+        data_b = int(math.floor(-1.5 + 128 * r))
+        self._data = data_a + wide * np.arange((data_b - data_a) // wide)
         self._plan_fit()
         self._plan_bits()
         self.searched = 0  # timing hypotheses searched (work done)
+        self.fitted = 0  # preamble fits (work done)
+        self.skipped = 0  # preambles neither fitted nor searched (budget)
         self.reset()
 
     def reset(self) -> None:
@@ -218,6 +265,9 @@ class ModeSDemodulator:
         self._buf = np.zeros(0, dtype=np.float32)
         self._pos0 = 0  # stream index of _buf[0]
         self._free = 0  # stream index before which replies are taken
+        # The budget, full.
+        self._fit_budget = self.FITS_PER_S * self.BUDGET_S
+        self._search_budget = self.SEARCHES_PER_S * self.BUDGET_S
 
     # -- Plans ----------------------------------------------------------
 
@@ -368,7 +418,8 @@ class ModeSDemodulator:
         if end <= margin + 4:
             self._buf = buf
             return
-        positions = self._screen(buf, end)
+        positions, stats = self._screen(buf, end)
+        first = last = positions[:0]
         if len(positions):
             new = np.diff(positions, prepend=-10) > 2
             firsts = np.flatnonzero(new)
@@ -380,14 +431,31 @@ class ModeSDemodulator:
                 # stream back for ever).
                 end = int(first[-1])
                 first, last = first[:-1], last[:-1]
-            if len(first):
-                self._replies(buf, first, last, accept, known)
+        # The budget grows with the signal scanned; what is left over is
+        # kept for up to BUDGET_S of signal (or this pass's, if longer).
+        seconds = (end - margin) / self.sample_rate
+        keep = max(seconds, self.BUDGET_S)
+        self._fit_budget = min(
+            self._fit_budget + seconds * self.FITS_PER_S, keep * self.FITS_PER_S
+        )
+        self._search_budget = min(
+            self._search_budget + seconds * self.SEARCHES_PER_S,
+            keep * self.SEARCHES_PER_S,
+        )
+        if len(first):
+            self._replies(buf, first, last, accept, known, positions, stats)
         self._buf = buf[end - margin :].copy()
         self._pos0 += end - margin
 
-    def _screen(self, buf: np.ndarray, end: int) -> np.ndarray:
+    def _screen(
+        self, buf: np.ndarray, end: int
+    ) -> Tuple[np.ndarray, Tuple[np.ndarray, ...]]:
         """Positions (``margin`` to ``end``) where a preamble may start:
-        the pulse samples' mean is ``SCREEN`` times the quiet samples'."""
+        the pulse samples' mean is ``SCREEN`` times the quiet samples'.
+
+        Also, for :meth:`_promising`: at each position the sums of the
+        two preamble halves' samples and of the quiet samples, and the
+        running sums of the widest region's width over ``buf``."""
         margin = self._MARGIN
         sums = {1: buf}
         running = buf
@@ -395,19 +463,23 @@ class ModeSDemodulator:
             running = running[:-1] + buf[width - 1 :]
             sums[width] = running
 
-        def region(parts: List[Tuple[int, int]]) -> np.ndarray:
-            total = None
-            for a, b in parts:
-                part = sums[b - a][margin + a : end + a]
-                total = part.copy() if total is None else total + part
-            assert total is not None
-            return total
+        def part(a: int, b: int) -> np.ndarray:
+            return sums[b - a][margin + a : end + a]
 
-        pulses, quiet = region(self._pulses), region(self._quiet)
+        (a1, b1), (a2, b2) = self._pulses
+        half1, half2 = part(a1, b1), part(a2, b2)
+        pulses = half1 + half2
+        quiet = None
+        for a, b in self._quiet:
+            total = part(a, b)
+            quiet = total.copy() if quiet is None else quiet + total
+        assert quiet is not None
         ok = pulses * np.float32(self._n_quiet) > (
             np.float32(self.SCREEN * self._n_pulse) * quiet
         )
-        return np.flatnonzero(ok) + margin
+        index = np.flatnonzero(ok)
+        stats = (half1[index], half2[index], quiet[index], sums[self._widths[-1]])
+        return index + margin, stats
 
     def _replies(
         self,
@@ -416,10 +488,13 @@ class ModeSDemodulator:
         last: np.ndarray,
         accept: Callable[[Sequence[bytes]], int],
         known: Callable[[], Collection[int]],
+        positions: np.ndarray,
+        stats: Tuple[np.ndarray, ...],
     ) -> None:
         """Fit the clusters of screen positions ``first..last`` (in pieces
-        of up to four positions), search the bits of those that fit and
-        hand them to ``accept``."""
+        of up to four positions) that pass the cheap tests, as many as the
+        budget allows (the clearest first), read the bits of those that fit
+        and hand them to ``accept``."""
         # Long clusters in pieces, each fitted on its own.
         span = last - first + 1
         pieces = (span + 3) // 4
@@ -431,6 +506,21 @@ class ModeSDemodulator:
         piece_first, piece_last = piece_first[keep], piece_last[keep]
         if not len(piece_first):
             return
+        good, clarity = self._promising(piece_first, piece_last, positions, stats)
+        piece_first, piece_last, clarity = (
+            piece_first[good],
+            piece_last[good],
+            clarity[good],
+        )
+        if len(piece_first) > self._fit_budget:
+            allowed = max(0, int(self._fit_budget))
+            self.skipped += len(piece_first) - allowed
+            chosen = np.sort(np.argsort(-clarity, kind="stable")[:allowed])
+            piece_first, piece_last = piece_first[chosen], piece_last[chosen]
+        if not len(piece_first):
+            return
+        self._fit_budget -= len(piece_first)
+        self.fitted += len(piece_first)
         start, level, floor = self._fit(buf, piece_first, piece_last)
         if not len(start):
             return
@@ -446,6 +536,40 @@ class ModeSDemodulator:
             if bits:
                 self._free = at + int(math.ceil((16 + 2 * bits) * r))
 
+    def _promising(
+        self,
+        piece_first: np.ndarray,
+        piece_last: np.ndarray,
+        positions: np.ndarray,
+        stats: Tuple[np.ndarray, ...],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Which pieces may be a reply's preamble, and how clear each is.
+
+        At each piece's clearest screen position (most pulse level over
+        the quiet samples): both halves of the preamble rise above the
+        quiet samples alike (``BALANCE``), and so do the first 56 bits
+        (``DATA``). Clarity: the pulse level over the quiet level."""
+        half1, half2, quiet, wide = stats
+        (a1, b1), (a2, b2) = self._pulses
+        floor_at = quiet.astype(np.float64) / self._n_quiet
+        excess_at = (half1.astype(np.float64) + half2) / self._n_pulse - floor_at
+        # The screen positions in each piece: lo..hi-1 (one at least).
+        lo = np.searchsorted(positions, piece_first)
+        hi = np.searchsorted(positions, piece_last, side="right")
+        best = lo
+        for k in range(1, 4):
+            at = np.minimum(lo + k, len(positions) - 1)
+            best = np.where((lo + k < hi) & (excess_at[at] > excess_at[best]), at, best)
+        floor, excess = floor_at[best], excess_at[best]
+        upper = half1[best] / (b1 - a1) - floor
+        lower = half2[best] / (b2 - a2) - floor
+        balanced = np.minimum(upper, lower) > self.BALANCE * np.maximum(upper, lower)
+        data = wide[piece_first[:, None] + self._data].sum(axis=1, dtype=np.float64)
+        data /= self._data.size * self._widths[-1]
+        busy = data - floor > self.DATA * excess
+        clarity = excess / np.maximum(floor, 1e-30)
+        return balanced & busy, clarity
+
     def _frames(
         self,
         buf: np.ndarray,
@@ -458,48 +582,116 @@ class ModeSDemodulator:
         (replies x offsets x 14 bytes), which of them pass
         :meth:`_checked`, and each reply's first sample.
 
-        A reply whose fitted start gives a frame that checks itself (a
-        DF17/18 or a DF11 with a CRC residual of 0) needs no other start
-        time: those are searched only for the others, in a second pass
-        when there are many replies (one pass costs less for a few). The
-        frames that reach ``accept`` are the same either way."""
+        A reply whose quick reading (:meth:`_hard`) at the fitted start
+        gives a frame that checks itself (see :meth:`_settled`) is that
+        frame. The others are searched as before: at the fitted start time,
+        and at the other start times only those whose frame there doesn't
+        check itself, in a second pass when there are many (one pass costs
+        less for a few); as many as the search budget allows, the clearest
+        first. The frames that reach ``accept`` are the ones a search of
+        every reply would offer, and a few more: replies the quick reading
+        reads where the search couldn't."""
         offsets = np.asarray(self.OFFSETS)
         replies, count = len(start), len(offsets)
         frames = np.zeros((replies, count, 14), dtype=np.uint8)
-        if replies <= self.ONE_PASS:
-            starts = (start[:, None] + offsets).ravel()
-            found, first = self._search(
-                buf, starts, np.repeat(level, count), np.repeat(floor, count)
-            )
-            frames[:] = found.reshape(replies, count, 14)
-            settled = self._settled(frames[:, 0])
-            first = first[::count]
+        made = np.zeros((replies, count), dtype=bool)  # frames read
+        first = np.floor(start).astype(np.int64)
+        settled = np.zeros(replies, dtype=bool)
+        if self.HARD_PASS:
+            quick = self._hard(buf, start, level, floor)
+            settled = self._settled(quick, known)
+            frames[settled, 0] = quick[settled]
+            made[settled, 0] = True
+        rest = np.flatnonzero(~settled)
+        if len(rest) <= self.ONE_PASS:
+            steps = [slice(0, count)]
         else:
-            frames[:, 0], first = self._search(buf, start, level, floor)
-            settled = self._settled(frames[:, 0])
-            rest = np.flatnonzero(~settled)
-            if len(rest):
-                starts = (start[rest, None] + offsets[1:]).ravel()
-                found, _first = self._search(
-                    buf,
-                    starts,
-                    np.repeat(level[rest], count - 1),
-                    np.repeat(floor[rest], count - 1),
-                )
-                frames[rest, 1:] = found.reshape(len(rest), count - 1, 14)
+            steps = [slice(0, 1), slice(1, count)]
+        for at in steps:
+            step = offsets[at]
+            rest = self._affordable(rest, len(step), level, floor)
+            if not len(rest):
+                break
+            found, _first = self._search(
+                buf,
+                (start[rest, None] + step).ravel(),
+                np.repeat(level[rest], len(step)),
+                np.repeat(floor[rest], len(step)),
+            )
+            self._search_budget -= len(rest) * len(step)
+            frames[rest, at] = found.reshape(len(rest), len(step), 14)
+            made[rest, at] = True
+            if at.start == 0:  # (the fitted start time read)
+                settled[rest] = self._settled(frames[rest, 0], known)
+                rest = rest[~settled[rest]]
         passes = self._checked(frames.reshape(-1, 14), known).reshape(replies, count)
-        # A settled reply is its first frame (the others weren't searched
-        # in two passes, and aren't looked at in one).
+        # Only frames read; a settled reply is its first frame.
+        passes &= made
         passes[settled, 1:] = False
         return frames, passes, first
 
+    def _affordable(
+        self, rest: np.ndarray, each: int, level: np.ndarray, floor: np.ndarray
+    ) -> np.ndarray:
+        """The replies among ``rest`` (indices) the search budget lets
+        search at ``each`` start times, the clearest first; the others are
+        counted in ``skipped``."""
+        if len(rest) * each <= self._search_budget:
+            return rest
+        allowed = max(0, int(self._search_budget // each))
+        self.skipped += len(rest) - allowed
+        clarity = level[rest] / np.maximum(floor[rest], 1e-30)
+        return np.sort(rest[np.argsort(-clarity, kind="stable")[:allowed]])
+
+    def _hard(
+        self, buf: np.ndarray, start: np.ndarray, level: np.ndarray, floor: np.ndarray
+    ) -> np.ndarray:
+        """Frames (rows of 14 bytes; a short reply's last 7 zero) read a
+        bit at a time at ``start``: from the bit's own samples, weighed as
+        the search weighs them, and from the samples it shares with the
+        bits before and after it, the other bit's chip taken as half lit.
+        Cheap (no search); right for most strong replies, at 2.4 MS/s most
+        of all."""
+        first = np.floor(start).astype(np.int64)
+        phase = np.minimum(
+            ((start - first) * self.PHASES).astype(np.int64), self.PHASES - 1
+        )
+        scale = (2.0 / level).astype(np.float32)[:, None, None]
+        offset = floor.astype(np.float32)[:, None, None]
+        own_j, own_c, own_0 = self._own
+        pair_j, pair_a, _pair_b, pair_c = self._pair[:4]
+        at = first[:, None, None]
+        y_own = (buf[own_j[phase] + at] - offset) * scale
+        # A shared sample with w of it in a bit's second chip and v in the
+        # next bit's first, y2 scaled as the search scales it: it weighs
+        # w (y2 - 1) for a 1 over a 0 in the bit, -v (y2 - 1) in the next
+        # (pair_a is -w, pair_c is -v; slots not used are 0).
+        y_pair = (buf[pair_j[phase] + at] - offset) * scale - np.float32(1.0)
+        cost = np.einsum("rnk,rnk->rn", y_own, own_c[phase]) + own_0[phase]
+        cost -= np.einsum("rnk,rnk->rn", y_pair, pair_a[phase])
+        cost[:, 1:] += np.einsum("rnk,rnk->rn", y_pair, pair_c[phase])[:, :-1]
+        frames = np.packbits(cost < 0, axis=1)
+        frames[_SHORT[frames[:, 0] >> 3], 7:] = 0
+        return frames
+
     @staticmethod
-    def _settled(frames: np.ndarray) -> np.ndarray:
+    def _settled(
+        frames: np.ndarray, known: Callable[[], Collection[int]]
+    ) -> np.ndarray:
         """Frames that check themselves: a DF17/18 or a DF11 whose CRC
-        residual is 0 (any decoder takes them as they are)."""
+        residual is 0, or an address/parity reply whose residual is an
+        address in ``known`` or that such a frame among ``frames`` carries
+        (any decoder takes them as they are)."""
         df = frames[:, 0] >> 3
         short, long = crc_residuals(frames)
-        return (_SQUITTER[df] & (long == 0)) | ((df == 11) & (short == 0))
+        residual = np.where(_SHORT[df], short, long)
+        settled = (_SQUITTER[df] | (df == 11)) & (residual == 0)
+        parity = (_SHORT[df] | _LONG[df]) & ~_SQUITTER[df] & (df != 11)
+        if parity.any():
+            addresses = _addresses(frames[settled], known())
+            if len(addresses):
+                settled |= parity & np.isin(residual, addresses)
+        return settled
 
     def _fit(
         self, buf: np.ndarray, first: np.ndarray, last: np.ndarray
@@ -610,15 +802,13 @@ class ModeSDemodulator:
         parity = (_SHORT[df] | _LONG[df]) & ~_SQUITTER[df] & (df != 11)
         if parity.any():
             addresses = _addresses(frames[checked], known())
-            if addresses:
-                ok = np.fromiter(addresses, dtype=np.int64, count=len(addresses))
-                checked |= parity & np.isin(residual, ok)
+            if len(addresses):
+                checked |= parity & np.isin(residual, addresses)
         return checked
 
 
-def _addresses(frames: np.ndarray, known: Iterable[int]) -> set:
-    """``known`` and the addresses the checked ``frames`` carry."""
-    found = set(int(a) for a in known)
-    for frame in frames:
-        found.add(int.from_bytes(bytes(frame[1:4]), "big"))
-    return found
+def _addresses(frames: np.ndarray, known: Iterable[int]) -> np.ndarray:
+    """``known`` and the addresses the checked ``frames`` carry (int64)."""
+    rows = frames[:, 1:4].astype(np.int64)
+    carried = (rows[:, 0] << 16) | (rows[:, 1] << 8) | rows[:, 2]
+    return np.concatenate((np.fromiter(known, dtype=np.int64), carried))

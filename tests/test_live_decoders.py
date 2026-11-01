@@ -63,7 +63,7 @@ CASES = {
     ),
     "FLEX": (
         lambda rate: enc.flex_baseband([(1234567, "FLEX TEST PAGE")], rate),
-        [("1234567", "FLEX TEST PAGE")],
+        [("1234567 (A, 1600 bps)", "FLEX TEST PAGE")],
         25e3,
     ),
     # (Rows read the APRS position and symbol, and the ACARS flight.)
@@ -1014,7 +1014,7 @@ class TestDescribeMessage:
         ) == ("8 (F3)", "HI")  # fmt: skip
         assert describe_message(
             FLEXMessage(protocol=ProtocolType.FLEX, capcode=12, content="X", **base)
-        ) == ("12", "X")
+        ) == ("12 (1600 bps)", "X")
         assert describe_message(
             AX25Frame(protocol=ProtocolType.AX25, source="A", destination="B",
                       info="!x", **base)

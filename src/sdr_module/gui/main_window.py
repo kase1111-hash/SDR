@@ -9133,9 +9133,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         bookmarks."""
         count = self._bookmarks_panel.import_csv()
         if count:
+            # (The Bookmarks panel says how many were imported.)
             self._show_panel("bookmarks")
-            noun = "bookmark" if count == 1 else "bookmarks"
-            self._show_status_message(f"Imported {count} {noun}", "success")
 
     def _export_channels_csv(self) -> None:
         """Export the saved channels to a CHIRP-compatible CSV file.
@@ -9700,9 +9699,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tone = self._control_panel.tone_squelch_hz() if mode == "FM" and tuned else 0.0
         if tone:
             panel.set_tone(index, tone)
+        # (The tone squelch saved with it is said, as tuning a bookmark does.)
+        tone_text = f", tone squelch {tone:.1f} Hz" if tone else ""
         self._show_status_message(
-            f"Bookmarked {label} ({self._mode_text(mode)}). Rename it with F2 "
-            "in the Bookmarks tab.",
+            f"Bookmarked {label} ({self._mode_text(mode)}{tone_text}). Rename it "
+            "with F2 in the Bookmarks tab.",
             "success",
             3000,
         )

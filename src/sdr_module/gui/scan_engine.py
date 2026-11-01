@@ -633,12 +633,17 @@ def bookmark_scan_list(
     bookmarks: Sequence[Dict[str, Any]],
     listening_of: Callable[[Dict[str, Any]], Tuple[str, str, str, float]],
     group: str = "",
+    order: Optional[Sequence[int]] = None,
 ) -> List[Dict[str, Any]]:
-    """The bookmarks a bookmark scan visits, in order: those not marked
-    Skip ("S"), of ``group`` when given, each with its ``index`` in the
-    list, its listening settings and its CTCSS ``tone_hz``."""
+    """The bookmarks a bookmark scan visits, in order (``order``: their
+    indices in the order to visit, e.g. as the Bookmarks list shows them;
+    else as stored): those not marked Skip ("S"), of ``group`` when given,
+    each with its ``index`` in the list, its listening settings and its
+    CTCSS ``tone_hz``."""
     visits = []
-    for index, b in enumerate(bookmarks):
+    indices = range(len(bookmarks)) if order is None else order
+    for index in indices:
+        b = bookmarks[index]
         if str(b.get("skip") or "") == "S":
             continue
         if group and str(b.get("group") or "") != group:

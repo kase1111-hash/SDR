@@ -245,7 +245,7 @@ class TestScan03EditKeepsTheChirpMode(_BookmarksCase):
             [self.mod.listening(b) for b in back],
             [
                 ("FM", "5 kHz", "12.5 kHz", 0.0),
-                ("FM", "5 kHz", "12.5 kHz", 0.0),
+                ("FM", "2.5 kHz", "12.5 kHz", 0.0),  # (CHIRP's NFM: 2.5 kHz)
             ],
         )
 
@@ -769,7 +769,8 @@ class TestScan10ModeColumnOfAMinimalCsv(unittest.TestCase):
         self.assertEqual(marks["RPT FM"]["mode"], "FM")
         self.assertEqual(_mode(marks["RPT FM"]), "FM")
         self.assertEqual(tune_mode(marks["RPT FM"]), ("FM", "5 kHz"))
-        self.assertEqual(tune_mode(marks["RPT NFM"]), ("FM", "5 kHz"))
+        # (CHIRP's NFM: 2.5 kHz deviation, as the app exports it.)
+        self.assertEqual(tune_mode(marks["RPT NFM"]), ("FM", "2.5 kHz"))
         self.assertEqual(tune_mode(marks["TWR AM"]), ("AM", ""))
 
     def test_a_file_that_doesnt_say_still_keeps_the_receivers_mode(self):

@@ -899,5 +899,353 @@ class TestBookmarkVisitsAreCached(_ScanPanelCase):
         self.assertEqual(len(panel.engine.settings.bookmarks), 3)
 
 
+# --------------------------------------------------------------------------- #
+# The Bookmarks tab and its Edit dialog (SCAN-08, 09, 15, 22, 23, DEV-E2E-18,
+# leftover 18) and Ctrl+B (SCAN-10)
+# --------------------------------------------------------------------------- #
+class _BookmarksCase(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+        from sdr_module.gui import bookmarks_panel
+
+        self.mod = bookmarks_panel
+        self.store = _FakeSettings()
+        self._saved = bookmarks_panel.GuiSettings
+        bookmarks_panel.GuiSettings = lambda: self.store
+        self.panels = []
+        self.messages = []
+
+    def tearDown(self):
+        self.mod.GuiSettings = self._saved
+        for panel in self.panels:
+            panel.close()
+            panel.deleteLater()
+        _settle()
+
+    def make(self, bookmarks=(), width=400):
+        self.store.bookmarks = [dict(b) for b in bookmarks]
+        panel = self.mod.BookmarksPanel()
+        panel.message.connect(lambda text, tone: self.messages.append((text, tone)))
+        panel.resize(width, 420)
+        panel.show()
+        _settle()
+        self.panels.append(panel)
+        return panel
+
+
+class TestBookmarksTabDetails(_BookmarksCase):
+    RPT = {
+        "label": "Rpt 100",
+        "freq_hz": 145.29e6,
+        "demod": "FM",
+        "fm_deviation": "5 kHz",
+        "mode": "FM",
+        "tone_mode": "TSQL",
+        "ctone": 100.0,
+    }
+
+    def test_scan_08_a_typed_name_isnt_lost_and_can_be_a_second_bookmark(self):
+        panel = self.make([self.RPT])
+        panel.set_mode_source(lambda: ("FM", "5 kHz"))
+        panel.set_current_frequency(145.29e6)
+        asked = []
+        panel._confirm_add_another = lambda name, new, freq: (
+            asked.append((name, new, freq)),
+            False,
+        )[1]
+        panel._label_input.setText("Rpt 88.5")
+        panel._add_btn.click()
+        self.assertEqual(asked, [("Rpt 100", "Rpt 88.5", "145.290 MHz")])
+        self.assertEqual(panel.bookmark_count(), 1)
+        self.assertEqual(panel._label_input.text(), "Rpt 88.5")  # kept
+        self.assertEqual(self.messages[-1][0], "Already bookmarked: Rpt 100")
+        # Yes: a second bookmark on the channel (another tone's users).
+        panel._confirm_add_another = lambda name, new, freq: True
+        panel._add_btn.click()
+        self.assertEqual(
+            [b["label"] for b in panel.bookmarks()], ["Rpt 100", "Rpt 88.5"]
+        )
+        self.assertEqual(panel._label_input.text(), "")
+        # No name typed: no question, as before.
+        panel._confirm_add_another = lambda *a: self.fail("asked")
+        panel._add_btn.click()
+        self.assertEqual(panel.bookmark_count(), 2)
+
+    def test_scan_23_the_name_placeholder_reads_in_full(self):
+        panel = self.make([], width=400)
+        field = panel._label_input
+        need = field.fontMetrics().horizontalAdvance(field.placeholderText())
+        # With the theme, the tab of a 1024-1366 px window gives the field
+        # its minimum width (80 px): "Name (optional)" read "Name (op...".
+        # (About 40 px go to the frame, the padding and the clear button.)
+        self.assertLessEqual(need, field.minimumWidth() - 40)
+        self.assertIn("optional", field.toolTip())
+
+    def test_scan_15_the_csv_buttons_import_says_how_many(self):
+        panel = self.make([])
+        path = os.path.join(tempfile.mkdtemp(), "two.csv")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(
+                "Name,Frequency,Mode\nCafe 1,146.520000,FM\nWx,162.550000,FM\n"
+            )
+        self.assertEqual(panel.import_csv(path), 2)
+        self.assertEqual(self.messages[-1], ("Imported 2 bookmarks", "success"))
+
+    def test_scan_22_scan_and_export_follow_the_order_shown(self):
+        from sdr_module.core.chirp_csv import list_order, read_chirp_csv
+        from sdr_module.gui.bookmarks_panel import COL_NAME
+
+        bookmarks = [
+            {"label": "FM 100.1", "freq_hz": 100.1e6},
+            {"label": "Rpt", "freq_hz": 145.29e6, "group": "Ham"},
+            {"label": "NOAA", "freq_hz": 162.4e6, "group": "Weather"},
+            {"label": "Tower", "freq_hz": 125.0e6},
+        ]
+        panel = self.make(bookmarks)
+        tree = panel._list
+        shown = []
+        for i in range(tree.topLevelItemCount()):
+            top = tree.topLevelItem(i)
+            if top.childCount():
+                shown += [top.child(c).text(COL_NAME) for c in range(top.childCount())]
+            else:
+                shown.append(top.text(COL_NAME))
+        self.assertEqual(shown, ["Rpt", "NOAA", "FM 100.1", "Tower"])
+        self.assertEqual(list_order(panel.bookmarks()), [1, 2, 0, 3])
+        from unittest import mock
+
+        path = os.path.join(tempfile.mkdtemp(), "out.csv")
+        with mock.patch.object(self.mod.QMessageBox, "information"):
+            panel.export_csv(path)  # (a box says it is done)
+        names = [c.name for c in read_chirp_csv(path).channels]
+        self.assertEqual(names, shown)
+
+    def test_l18_editing_a_bookmark_above_6_ghz_keeps_its_frequency(self):
+        from sdr_module.gui.bookmark_editor import BookmarkEditDialog
+
+        b = {"label": "10 GHz beacon", "freq_hz": 10368.1e6, "demod": "USB"}
+        dialog = BookmarkEditDialog(b, ("USB", ""), [])
+        try:
+            self.assertEqual(dialog.bookmark()["freq_hz"], 10368.1e6)
+        finally:
+            dialog.deleteLater()
+
+
+class TestKeepTheReceiversMode(_BookmarksCase):
+    def test_scan_09_an_own_bookmark_set_to_keep_has_no_chirp_mode(self):
+        from sdr_module.core.chirp_csv import is_chirp_channel
+        from sdr_module.gui.bookmark_editor import BookmarkEditDialog
+
+        own = {
+            "label": "FM Broadcast 99.5",
+            "freq_hz": 99.5e6,
+            "demod": "FM",
+            "fm_deviation": "75 kHz",
+            "mode": "WFM",
+        }
+        self.assertFalse(is_chirp_channel(own))
+        self.assertFalse(is_chirp_channel(dict(own, tone_mode="TSQL", ctone=100.0)))
+        dialog = BookmarkEditDialog(own, ("FM", "75 kHz"), [])
+        try:
+            dialog._mode.setCurrentIndex(0)  # Keep the receiver's mode
+            edited = dialog.bookmark()
+        finally:
+            dialog.deleteLater()
+        self.assertEqual(edited, {"label": "FM Broadcast 99.5", "freq_hz": 99.5e6})
+        self.assertEqual(self.mod._details(edited), "")
+        # A CHIRP channel keeps a CHIRP Mode: "Auto".
+        chirp = {"label": "Rptr", "freq_hz": 146.94e6, "mode": "NFM", "location": 4}
+        self.assertTrue(is_chirp_channel(chirp))
+        self.assertTrue(is_chirp_channel({"label": "x", "freq_hz": 1e8, "mode": "FM"}))
+        dialog = BookmarkEditDialog(chirp, ("FM", "5 kHz"), [])
+        try:
+            dialog._mode.setCurrentIndex(0)
+            self.assertEqual(dialog.bookmark()["mode"], "Auto")
+        finally:
+            dialog.deleteLater()
+
+
+class TestCtrlBSaysTheTone(_WindowTestCase):
+    def test_scan_10_the_message_names_the_saved_tone(self):
+        win = self.win
+        win.set_frequency(146.52e6)
+        win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        win._control_panel.set_tone_squelch_hz(100.0)
+        win._bookmark_current_frequency()
+        saved = self.store.bookmarks[-1]
+        self.assertEqual((saved["tone_mode"], saved["ctone"]), ("TSQL", 100.0))
+        self.assertIn("(FM, tone squelch 100.0 Hz)", win._message_label.text())
+
+    def test_scan_15_file_import_says_it_once(self):
+        from unittest import mock
+
+        path = os.path.join(tempfile.mkdtemp(), "two.csv")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("Name,Frequency\nA,146.520000\nB,162.550000\n")
+        shown = []
+        real = self.win._show_status_message
+        self.win._show_status_message = lambda text, *a, **k: (
+            shown.append(text),
+            real(text, *a, **k),
+        )
+        target = "sdr_module.gui.file_dialogs.QFileDialog.getOpenFileName"
+        with mock.patch(target, return_value=(path, "")):
+            self.win._import_channels_csv()
+        self.assertEqual(
+            [t for t in shown if t.startswith("Imported")], ["Imported 2 bookmarks"]
+        )
+        self.assertEqual(self.win._current_panel_key(), "bookmarks")
+
+
+# --------------------------------------------------------------------------- #
+# CHIRP files (SCAN-16, 17, 18) and sdr-scan channels import (leftover 33)
+# --------------------------------------------------------------------------- #
+_NATIVE = (
+    "Location,Name,Frequency,Duplex,Offset,Tone,rToneFreq,cToneFreq,DtcsCode,"
+    "DtcsPolarity,RxDtcsCode,CrossMode,Mode,TStep,Skip,Power,Comment\n"
+    "1,NFM TSQL,462.562500,,0.000000,TSQL,88.5,88.5,023,NN,023,Tone->Tone,NFM,"
+    "5.00,,,\n"
+    "2,FM rptr,146.940000,-,0.600000,,88.5,88.5,023,NN,023,Tone->Tone,FM,5.00,,,\n"
+    "3,CROSS,146.940000,,0.000000,Cross,100.0,123.0,023,NN,023,Tone->Tone,FM,"
+    "5.00,,,\n"
+    "4,TO DCS,147.000000,,0.000000,Cross,100.0,123.0,023,NN,023,Tone->DTCS,FM,"
+    "5.00,,,\n"
+    "8,,,,,,,,,,,,,,,,\n"
+    "9,,,,,,,,,,,,,,,,\n"
+    "10,Zero,0,,,,,,,,,,FM,,,,\n"
+)
+
+
+class TestChirpFiles(unittest.TestCase):
+    def setUp(self):
+        require_pyqt6(self)
+
+    def channels(self):
+        import io
+
+        from sdr_module.core.chirp_csv import read_chirp_csv
+
+        report = read_chirp_csv(io.StringIO(_NATIVE), strict=False)
+        return {c.name: c.to_bookmark() for c in report.channels}, report
+
+    def test_scan_16_nfm_is_heard_narrow(self):
+        from sdr_module.gui.bookmarks_panel import listening
+
+        marks, _report = self.channels()
+        self.assertEqual(
+            listening(marks["NFM TSQL"]), ("FM", "2.5 kHz", "12.5 kHz", 88.5)
+        )
+        self.assertEqual(listening(marks["FM rptr"]), ("FM", "5 kHz", "", 0.0))
+        # A filter saved with the channel wins; the app's own FM is as before.
+        wide = dict(marks["NFM TSQL"], bandwidth="25 kHz")
+        self.assertEqual(listening(wide)[2], "25 kHz")
+        own = {"label": "x", "freq_hz": 1.5e8, "demod": "FM", "fm_deviation": "2.5 kHz"}
+        self.assertEqual(listening(own), ("FM", "2.5 kHz", "", 0.0))
+
+    def test_scan_17_a_cross_channel_listens_for_its_receive_tone(self):
+        from sdr_module.gui import bookmarks_panel
+        from sdr_module.gui.bookmark_editor import bookmark_tone_hz
+
+        marks, _report = self.channels()
+        self.assertEqual(bookmark_tone_hz(marks["CROSS"]), 123.0)
+        self.assertEqual(bookmarks_panel.listening(marks["CROSS"])[3], 123.0)
+        for mode in ("->Tone", "DTCS->Tone"):
+            self.assertEqual(
+                bookmark_tone_hz(dict(marks["CROSS"], cross_mode=mode)), 123.0, mode
+            )
+        # Receiving with a DCS code isn't supported: no tone squelch, and the
+        # tooltip says so.
+        self.assertEqual(bookmark_tone_hz(marks["TO DCS"]), 0.0)
+        tip = bookmarks_panel._tooltip(marks["TO DCS"])
+        self.assertIn("not supported here", tip)
+        self.assertIn("123 Hz", bookmarks_panel._tooltip(marks["CROSS"]))
+
+    def test_scan_18_empty_memory_slots_are_not_unreadable_rows(self):
+        marks, report = self.channels()
+        self.assertEqual(len(marks), 4)
+        self.assertEqual(report.skipped, ["line 8: missing or zero frequency"])
+
+
+class TestCliImportSkipBad(unittest.TestCase):
+    def test_l33_each_skipped_row_is_said_once(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from sdr_module import cli
+        from sdr_module.gui import settings_store
+
+        path = os.path.join(tempfile.mkdtemp(), "bad.csv")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("Name,Frequency\nGood,146.520000\nBad,abc\n")
+        store = _FakeSettings()
+        out, err = io.StringIO(), io.StringIO()
+        logger = logging.getLogger("sdr_module.core.chirp_csv")
+        with (
+            mock.patch.object(settings_store, "GuiSettings", lambda: store),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+            self.assertNoLogs(logger, "WARNING"),
+        ):
+            rc = cli.main(["channels", "import", path, "--skip-bad"])
+        self.assertEqual(rc, 0)
+        said = (out.getvalue() + err.getvalue()).count("line 3")
+        self.assertEqual(said, 1, out.getvalue() + err.getvalue())
+        self.assertEqual([b["label"] for b in store.bookmarks], ["Good"])
+
+
+class TestCliExportFollowsTheList(unittest.TestCase):
+    def test_scan_22_channels_export_writes_the_list_order(self):
+        import contextlib
+        import io
+        from unittest import mock
+
+        from sdr_module import cli
+        from sdr_module.core.chirp_csv import read_chirp_csv
+        from sdr_module.gui import settings_store
+
+        store = _FakeSettings()
+        store.bookmarks = [
+            {"label": "FM 100.1", "freq_hz": 100.1e6},
+            {"label": "Rpt", "freq_hz": 145.29e6, "group": "Ham"},
+            {"label": "Tower", "freq_hz": 125.0e6},
+        ]
+        path = os.path.join(tempfile.mkdtemp(), "out.csv")
+        with (
+            mock.patch.object(settings_store, "GuiSettings", lambda: store),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(cli.main(["channels", "export", path]), 0)
+        names = [c.name for c in read_chirp_csv(path).channels]
+        self.assertEqual(names, ["Rpt", "FM 100.1", "Tower"])
+
+
+class TestBookmarkScanFollowsTheList(_ScanWindowCase):
+    demo = True
+
+    def test_scan_22_the_scan_visits_in_the_order_shown(self):
+        win, panel = self.win, self.win._scanner_panel
+        bookmarks = win._bookmarks_panel
+        for label, freq, group in (
+            ("FM 100.1", 100.1e6, ""),
+            ("Rpt", 145.29e6, "Ham"),
+            ("NOAA", 162.4e6, "Weather"),
+            ("Tower", 125.0e6, ""),
+        ):
+            index = bookmarks.add_bookmark(label, freq, "FM", "5 kHz")
+            if group:
+                b = bookmarks._bookmarks[index]
+                b["group"] = group
+        bookmarks._save()
+        visits = win._scanner_host.scan_bookmark_list()
+        self.assertEqual(
+            [v["label"] for v in visits], ["Rpt", "NOAA", "FM 100.1", "Tower"]
+        )
+        # Scan from Here on "FM 100.1" (stored first, listed third).
+        self.assertTrue(panel.scan_bookmarks_from(0))
+        self.assertEqual(panel.engine.current.label, "FM 100.1")
+        panel.stop_scan()
+
+
 if __name__ == "__main__":
     unittest.main()

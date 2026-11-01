@@ -517,7 +517,11 @@ class TestBookmarksReview(unittest.TestCase):
         self.assertAlmostEqual(spin.value(), 1090.000001, places=6)
 
     def test_name_field_says_it_is_optional(self):
-        self.assertIn("optional", self.make()._label_input.placeholderText())
+        # (In its tooltip: "Name (optional)" as the placeholder was cut to
+        # "Name (op..." in the tab; the placeholder is "Name".)
+        field = self.make()._label_input
+        self.assertIn("optional", field.toolTip())
+        self.assertEqual(field.placeholderText(), "Name")
 
     def test_imported_channel_with_default_mode_shows_fm(self):
         panel = self.make(

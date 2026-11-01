@@ -684,7 +684,7 @@ def _load_saved_channels():
         Tuple of (channels, error_message). `error_message` is set when the
         store cannot be read (PyQt6 missing), in which case channels is empty.
     """
-    from .core.chirp_csv import bookmarks_to_channels
+    from .core.chirp_csv import bookmarks_to_channels, list_order
 
     try:
         from .gui.settings_store import GuiSettings
@@ -698,7 +698,10 @@ def _load_saved_channels():
             "PyQt6 is required to read saved channels.\n"
             'Install it with: python -m pip install "sdr-module[gui]"'
         )
-    return bookmarks_to_channels(settings.get_bookmarks()), None
+    # In the order the Bookmarks tab lists them (each group, then the rest),
+    # as its export writes them.
+    bookmarks = settings.get_bookmarks()
+    return bookmarks_to_channels([bookmarks[i] for i in list_order(bookmarks)]), None
 
 
 def _print_channels(channels) -> None:

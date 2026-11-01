@@ -376,8 +376,10 @@ class WindowScannerHost(ScannerHost):
         return added, existing
 
     def scan_bookmark_list(self, group: str = "") -> List[Dict[str, Any]]:
+        panel = self._win._bookmarks_panel
+        # In the order the Bookmarks list shows them (each group first).
         visits = bookmark_scan_list(
-            self._win._bookmarks_panel.bookmarks(), listening, group
+            panel.bookmarks(), listening, group, order=panel.list_order()
         )
         for visit in visits:
             width = _parse_hz(visit.get("bandwidth") or "")

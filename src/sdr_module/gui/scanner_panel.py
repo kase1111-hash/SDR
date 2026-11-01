@@ -1388,9 +1388,18 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         if mode == "bookmarks":
             visits = [dict(visit) for visit in self._bookmark_visits()]
             settings.bookmarks = visits
+            # (Scan from Here: that bookmark; one marked Skip, the next one
+            # stored after it. The visits are in the list's order.)
             settings.start_index = next(
-                (i for i, v in enumerate(visits) if v.get("index", -1) >= start_index),
-                0,
+                (i for i, v in enumerate(visits) if v.get("index", -1) == start_index),
+                next(
+                    (
+                        i
+                        for i, v in enumerate(visits)
+                        if v.get("index", -1) >= start_index
+                    ),
+                    0,
+                ),
             )
         else:
             sweep, note = self._planned_sweep()

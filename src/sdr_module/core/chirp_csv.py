@@ -244,15 +244,27 @@ def split_listening_tag(comment: str) -> Tuple[str, Dict[str, str]]:
     return text[: match.start()].rstrip(), found
 
 
+#: Channel fields this application sets on its own bookmarks too: the tone
+#: squelch (Ctrl+B, Edit), the repeater shift (Edit), the comment and Skip.
+_OWN_FIELDS = frozenset(
+    ("name", "frequency_hz", "comment", "skip", "tone_mode", "ctone")
+    + ("duplex", "offset_hz")
+)
+
+
 def is_chirp_channel(bookmark: Mapping[str, Any]) -> bool:
     """Whether a stored bookmark came from a CHIRP channel: it has a CHIRP
-    field this application doesn't set itself (a memory location, CHIRP's
-    Mode, a repeater shift, a tone, a power level...). Such a channel
-    without a ``demod`` is listened to in its CHIRP Mode (FM by default);
-    a bookmark of this application without one keeps the current mode."""
-    own = {"name", "frequency_hz", "comment", "skip"}
-    chirp_only = {f.name for f in fields(Channel)} - own
-    return bool(chirp_only & set(bookmark))
+    field this application doesn't set itself (a memory location, a
+    transmit tone, a DCS code, a power level...), or CHIRP's Mode without
+    the application's own mode (``demod``: the application writes CHIRP's
+    Mode next to it). Such a channel without a ``demod`` is listened to in
+    its CHIRP Mode (FM by default); a bookmark of this application without
+    one keeps the current mode."""
+    keys = set(bookmark)
+    chirp_only = {f.name for f in fields(Channel)} - _OWN_FIELDS
+    if "demod" in keys:
+        chirp_only.discard("mode")
+    return bool(chirp_only & keys)
 
 
 def chirp_mode_for(demod: str, fm_deviation: str = "") -> str:
@@ -735,8 +747,15 @@ def read_chirp_csv(
 
     report = ImportReport()
     for line_no, row in enumerate(reader, start=2):
-        # Blank lines and CHIRP's empty memory slots have no frequency.
-        if not any(str(v or "").strip() for v in row.values()):
+        # Blank lines and CHIRP's empty memory slots have no frequency (a
+        # slot still has its Location, maybe CHIRP's defaults): skipped
+        # without a word. A row with a name, or a frequency such as "0",
+        # is listed below as unreadable.
+        get = {str(k).strip().lower(): v for k, v in row.items() if k}.get
+        if (
+            not str(get("frequency") or "").strip()
+            and not str(get("name") or "").strip()
+        ):
             continue
         if delimiter != ",":
             row = _fix_decimal_commas(row)
@@ -746,7 +765,9 @@ def read_chirp_csv(
             message = f"line {line_no}: {exc}"
             if strict:
                 raise ChirpCsvError(message) from exc
-            logger.warning("Skipping bad channel row: %s", message)
+            # (The report lists it, and the caller says so, once: the CLI
+            # printed it twice, the GUI shows a box.)
+            logger.debug("Skipping bad channel row: %s", message)
             report.skipped.append(message)
             continue
         if channel.frequency_hz <= 0:
@@ -812,6 +833,22 @@ def _write_rows(
 # =============================================================================
 # Bookmark-level helpers (what the GUI and CLI actually call)
 # =============================================================================
+
+
+def list_order(bookmarks: Sequence[Mapping[str, Any]]) -> List[int]:
+    """The indices of ``bookmarks`` in the order the Bookmarks list shows
+    them: each group (in the order the groups first appear) with its
+    bookmarks, then the bookmarks without a group. A bookmark scan visits
+    them, and an export writes them, in this order."""
+    groups: Dict[str, List[int]] = {}
+    ungrouped: List[int] = []
+    for index, bookmark in enumerate(bookmarks):
+        group = str(bookmark.get("group", "") or "")
+        if group:
+            groups.setdefault(group, []).append(index)
+        else:
+            ungrouped.append(index)
+    return [i for members in groups.values() for i in members] + ungrouped
 
 
 def bookmarks_to_channels(bookmarks: Iterable[Mapping[str, Any]]) -> List[Channel]:
@@ -902,6 +939,7 @@ __all__ = [
     "LISTEN_KEYS",
     "chirp_mode_for",
     "is_chirp_channel",
+    "list_order",
     "listening_tag",
     "split_listening_tag",
     "CHIRP_COLUMNS",

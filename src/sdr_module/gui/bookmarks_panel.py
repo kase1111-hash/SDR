@@ -55,6 +55,7 @@ from ..core.chirp_csv import (
     chirp_mode_to_demod,
     export_bookmarks_csv,
     is_chirp_channel,
+    list_order,
     presets_to_channels,
     read_chirp_csv,
     write_chirp_csv,
@@ -95,6 +96,10 @@ _IQ_MODE_TEXT = "I/Q"
 #: FM deviation choices for CHIRP's broadcast and narrowband FM modes.
 _WFM_DEVIATION = "75 kHz"
 _NFM_DEVIATION = "5 kHz"
+#: CHIRP's NFM: 2.5 kHz deviation on 12.5 kHz channels (the application
+#: exports its 2.5 kHz FM as NFM), and the filter for it.
+_NARROW_DEVIATION = "2.5 kHz"
+_NARROW_WIDTH = "12.5 kHz"
 #: Frequencies closer than this (Hz) are the same channel.
 _SAME_CHANNEL_HZ = 10.0
 #: Short names of the Add row's mode choices.
@@ -163,8 +168,8 @@ def tune_mode(bookmark: Dict[str, Any]) -> Tuple[str, str]:
     ``demod`` is a Mode list name ("FM", "AM", "USB", ...) and
     ``fm_deviation`` an FM deviation choice ("5 kHz", "75 kHz"); either is
     empty when the bookmark doesn't say (old bookmarks keep the current
-    mode). CHIRP modes are mapped: NFM/FM to FM at 5 kHz, WFM to FM at
-    75 kHz, CWR to CW and so on.
+    mode). CHIRP modes are mapped: FM to FM at 5 kHz, NFM at 2.5 kHz,
+    WFM at 75 kHz, CWR to CW and so on.
     """
     demod = str(bookmark.get("demod") or "")
     if demod in _DEMOD_NAMES:
@@ -177,8 +182,10 @@ def tune_mode(bookmark: Dict[str, Any]) -> Tuple[str, str]:
     if demod == DEFAULT_DEMOD or demod not in _DEMOD_NAMES:
         return "", ""  # e.g. RTTY or Auto: no matching demodulator here
     if demod == "FM":
-        wide = chirp.strip().upper() == "WFM"
-        return demod, _WFM_DEVIATION if wide else _NFM_DEVIATION
+        name = chirp.strip().upper()
+        if name == "WFM":
+            return demod, _WFM_DEVIATION
+        return demod, _NARROW_DEVIATION if name == "NFM" else _NFM_DEVIATION
     return demod, ""
 
 
@@ -190,6 +197,8 @@ def listening(bookmark: Dict[str, Any]) -> Tuple[str, str, str, float]:
     if not demod:
         return "", "", "", 0.0
     width = str(bookmark.get("bandwidth") or "")
+    if not width and not bookmark.get("demod") and deviation == _NARROW_DEVIATION:
+        width = _NARROW_WIDTH  # (CHIRP's NFM: a 12.5 kHz channel)
     tone = bookmark_tone_hz(bookmark) if demod == "FM" else 0.0
     return demod, deviation, width, tone
 
@@ -273,8 +282,15 @@ def _tooltip(bookmark: Dict[str, Any]) -> str:
     if tone_mode in ("Tone", "TSQL"):
         key = "rtone" if tone_mode == "Tone" else "ctone"
         lines.append(f"{tone_mode}: {_num(bookmark.get(key), 88.5):g} Hz")
+    elif tone_mode == "Cross" and bookmark_tone_hz(bookmark):
+        cross = str(bookmark.get("cross_mode") or "")
+        lines.append(f"Cross ({cross}): receives {bookmark_tone_hz(bookmark):g} Hz")
     elif tone_mode:
-        lines.append(f"Tone mode: {tone_mode}")
+        # (DCS, reverse tone squelch...: heard without a squelch here.)
+        lines.append(
+            f"Tone mode: {tone_mode} (its receive squelch is not supported "
+            "here: every station is heard)"
+        )
     duplex = str(bookmark.get("duplex") or "")
     if duplex in ("+", "-"):
         lines.append(f"Shift: {_offset_text(bookmark)} MHz")
@@ -371,7 +387,9 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         add_row = QHBoxLayout()
         add_row.setSpacing(6)
         self._label_input = QLineEdit()
-        self._label_input.setPlaceholderText("Name (optional)")
+        # ("Name (optional)" read "Name (op..." in the tab of a 1024-1366 px
+        # window, whatever room it had; the tooltip says it is optional.)
+        self._label_input.setPlaceholderText("Name")
         self._label_input.setClearButtonEnabled(True)
         self._label_input.setToolTip(
             "Name for the new bookmark (optional: when left empty it is named "
@@ -651,6 +669,12 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
         """Copies of all bookmarks, in order."""
         return [dict(b) for b in self._bookmarks]
 
+    def list_order(self) -> List[int]:
+        """The bookmarks' indices in the order the list shows them (each
+        group, then the bookmarks without one): the order a bookmark scan
+        visits them and an export writes them."""
+        return list_order(self._bookmarks)
+
     def groups(self) -> List[str]:
         """The group names in use, in the order they first appear."""
         names: List[str] = []
@@ -792,6 +816,11 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             QMessageBox.information(
                 self, "Import Bookmarks", first + "\n" + "\n".join(notes)
             )
+        else:
+            # (As File > Import Bookmarks said; it now relies on this.)
+            self.message.emit(
+                f"Imported {_plural(len(imported), 'bookmark')}", "success"
+            )
         return len(imported)
 
     def _ask_replace_or_append(self, count: int) -> Optional[str]:
@@ -849,7 +878,9 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             path += ".csv"
 
         try:
-            count = export_bookmarks_csv(path, self._bookmarks)
+            # In the order the list shows (each group, then the others).
+            shown = [self._bookmarks[i] for i in list_order(self._bookmarks)]
+            count = export_bookmarks_csv(path, shown)
         except OSError as exc:
             logger.warning("Channel export failed: %s", exc)
             QMessageBox.warning(self, "Export Failed", str(exc))
@@ -1191,15 +1222,44 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
                 demod, deviation, width = band
         index = self.find_bookmark(freq_hz, demod, deviation)
         if index >= 0:
-            self.select_bookmark(index)
             name = str(self._bookmarks[index].get("label") or format_mhz(freq_hz))
-            self.message.emit(f"Already bookmarked: {name}", "info")
-        else:
-            self.add_bookmark(label, freq_hz, demod, deviation, width)
-            self.message.emit(f"Bookmarked {label}", "success")
+            typed = self._label_input.text().strip()
+            # A name of its own for the channel: another bookmark there (a
+            # repeater's users with another tone)? Else it is selected, and
+            # the name typed stays (it isn't lost).
+            if not (
+                typed
+                and typed != name
+                and self._confirm_add_another(name, typed, format_mhz(freq_hz))
+            ):
+                self.select_bookmark(index)
+                self.message.emit(f"Already bookmarked: {name}", "info")
+                return
+        self.add_bookmark(label, freq_hz, demod, deviation, width)
+        self.message.emit(f"Bookmarked {label}", "success")
         self._label_input.clear()
         self._mode_follows = True
         self._sync_add_mode()
+
+    def _confirm_add_another(self, name: str, new_name: str, freq: str) -> bool:
+        """Ask whether to add ``new_name`` on ``freq``, already bookmarked
+        as ``name``."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("Add Bookmark")
+        box.setText(f"“{name}” is already bookmarked on {freq}.")
+        box.setInformativeText(
+            f"Add “{new_name}” as another bookmark there (for example with "
+            "another tone squelch, set with Edit...)?"
+        )
+        add = box.addButton("Add Another", QMessageBox.ButtonRole.AcceptRole)
+        cancel = box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(add)
+        box.setEscapeButton(cancel)
+        box.exec()
+        added = box.clickedButton() is add
+        box.deleteLater()
+        return added
 
     def _tune_index(self, idx: int) -> None:
         if not 0 <= idx < len(self._bookmarks):

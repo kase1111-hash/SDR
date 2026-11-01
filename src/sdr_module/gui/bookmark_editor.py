@@ -57,10 +57,21 @@ _CHIRP_KEEP_MODE = "Auto"
 _CHIRP_DEFAULT_TONE_HZ = 88.5
 
 
+#: CHIRP Cross modes (transmit->receive) that receive with a CTCSS tone:
+#: their receive tone is the cToneFreq too.
+_CROSS_RECEIVE_TONE = ("Tone->Tone", "->Tone", "DTCS->Tone")
+
+
 def bookmark_tone_hz(bookmark: Dict[str, Any]) -> float:
     """The CTCSS tone (Hz) a bookmark's tone squelch listens for, 0 for
-    none: CHIRP's TSQL tone (its cToneFreq, 88.5 Hz when not saved)."""
-    if str(bookmark.get("tone_mode") or "") != "TSQL":
+    none: CHIRP's TSQL tone, or a Cross channel's receive tone (its
+    cToneFreq, 88.5 Hz when not saved). DCS and reverse tone squelch
+    aren't supported: 0."""
+    tone_mode = str(bookmark.get("tone_mode") or "")
+    cross = str(bookmark.get("cross_mode") or "").replace(" ", "")
+    if not (
+        tone_mode == "TSQL" or (tone_mode == "Cross" and cross in _CROSS_RECEIVE_TONE)
+    ):
         return 0.0
     raw = bookmark.get("ctone")
     try:
@@ -114,7 +125,14 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
         form.addRow("&Name:", self._name)
 
         self._freq = _MhzSpinBox()
-        self._freq.setRange(MIN_FREQUENCY_HZ / 1e6, MAX_FREQUENCY_HZ / 1e6)
+        # (Up to the bookmark's own frequency: one made while a recording
+        # above 6 GHz played was rewritten to 6000 MHz by Save.)
+        try:
+            saved = float(b.get("freq_hz", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            saved = 0.0
+        top = max(MAX_FREQUENCY_HZ, saved) if math.isfinite(saved) else MAX_FREQUENCY_HZ
+        self._freq.setRange(MIN_FREQUENCY_HZ / 1e6, top / 1e6)
         self._freq.setDecimals(6)
         self._freq.setSuffix(" MHz")
         self._freq.setAlignment(Qt.AlignmentFlag.AlignRight)

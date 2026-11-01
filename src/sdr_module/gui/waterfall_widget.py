@@ -89,7 +89,6 @@ try:
     from PyQt6.QtWidgets import (
         QApplication,
         QComboBox,
-        QFileDialog,
         QFrame,
         QHBoxLayout,
         QLabel,
@@ -577,6 +576,21 @@ class _WaterfallCanvas(QWidget if HAS_PYQT6 else object):
         event.accept()
 
 
+class _FolderMemory:
+    """Settings for :mod:`.file_dialogs` kept in a dict (while the app
+    runs): a plot without the window's settings still remembers its
+    folders."""
+
+    def __init__(self, store: Dict[str, str]):
+        self._store = store
+
+    def get_str(self, key: str, default: str = "") -> str:
+        return self._store.get(key, default)
+
+    def set(self, key: str, value: Any) -> None:
+        self._store[key] = str(value)
+
+
 class WaterfallWidget(QWidget if HAS_PYQT6 else object):
     """
     Waterfall display widget.
@@ -766,6 +780,11 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._fm = QFontMetrics(self._font)
         self._hover: Optional[QPointF] = None
         self._exporting = False  # painting for Save Image (export_image)
+        #: Where Save Image remembers its folder (the window's settings: the
+        #: screenshots' folder memory, see file_dialogs); without them it is
+        #: remembered while the app runs.
+        self.file_settings: Any = None
+        self._session_folders: Dict[str, str] = {}
 
         self.setMinimumHeight(200)
         self._setup_ui()
@@ -2387,8 +2406,25 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self.message.emit(f"Copied the measurement ({lines[0]})", "info")
 
     def _save_image_dialog(self) -> None:
-        path, _filter = QFileDialog.getSaveFileName(
-            self, "Save Waterfall Image", "waterfall.png", "PNG image (*.png)"
+        """Save Image...: in the screenshots' folder (the one last used), as
+        ``sdr_waterfall_<MHz>_<date>_<time>.png``; the status bar says
+        where it went."""
+        from . import file_dialogs
+
+        name = (
+            f"sdr_waterfall_{self._center_freq / 1e6:.3f}MHz_"
+            f"{time.strftime('%Y%m%d_%H%M%S')}.png"
+        )
+        settings = self.file_settings
+        if settings is None:
+            settings = _FolderMemory(self._session_folders)
+        path, _filter = file_dialogs.save_file(
+            self,
+            settings,
+            "screenshot",
+            "Save Waterfall Image",
+            name,
+            "PNG image (*.png)",
         )
         if not path:
             return
@@ -2398,6 +2434,11 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             QMessageBox.warning(
                 self, "Save Failed", f"Could not save the waterfall image to:\n{path}"
             )
+            return
+        self.message.emit(
+            f"Saved the waterfall image to {file_dialogs.display_path(path)}",
+            "success",
+        )
 
     # ------------------------------------------------------------------
     # Internals: painting

@@ -199,3 +199,75 @@ class TestSignalsListCost(_PlotsCase):
         # Still sized to what they hold.
         width = table.fontMetrics().horizontalAdvance(table.item(0, 3).text())
         self.assertGreaterEqual(table.columnWidth(3), width)
+
+
+class TestWaterfallSaveImage(_PlotsCase):
+    """PLOTS-E2E-7: Waterfall > Save Image... opened in the folder the app
+    was started from, always offered 'waterfall.png', forgot the folder and
+    said nothing after saving."""
+
+    def test_like_save_screenshot(self):
+        import re
+        import shutil
+        import tempfile
+        from unittest import mock
+
+        from sdr_module.gui import file_dialogs
+
+        other = tempfile.mkdtemp(prefix="wf-images-")
+        self.addCleanup(shutil.rmtree, other, True)
+        offered = []
+
+        def save(_parent, caption, path, *_args):
+            offered.append((caption, path))
+            return os.path.join(other, os.path.basename(path)), "PNG image (*.png)"
+
+        wf = self.win._waterfall
+        with mock.patch.object(
+            file_dialogs.QFileDialog, "getSaveFileName", side_effect=save
+        ):
+            wf._save_image_dialog()
+            first = sorted(os.listdir(other))
+            self.assertIn(
+                "Saved the waterfall image to", self.win._message_label.text()
+            )
+            wf._save_image_dialog()
+        caption, path = offered[0]
+        self.assertEqual(caption, "Save Waterfall Image")
+        self.assertEqual(
+            os.path.dirname(path), file_dialogs.default_folder("screenshot")
+        )
+        self.assertRegex(
+            os.path.basename(path), r"^sdr_waterfall_\d+\.\d{3}MHz_\d{8}_\d{6}\.png$"
+        )
+        self.assertTrue(re.search(r"\.png$", first[0]), first)
+        # The folder used is remembered (in the window's settings).
+        self.assertEqual(os.path.dirname(offered[1][1]), other)
+        self.assertEqual(
+            file_dialogs.remembered_folder(self.win._settings, "screenshot"), other
+        )
+
+    def test_a_plot_without_settings_remembers_while_the_app_runs(self):
+        import shutil
+        import tempfile
+        from unittest import mock
+
+        from sdr_module.gui import file_dialogs
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        other = tempfile.mkdtemp(prefix="wf-images-")
+        self.addCleanup(shutil.rmtree, other, True)
+        offered = []
+
+        def save(_parent, _caption, path, *_args):
+            offered.append(path)
+            return os.path.join(other, "mine.png"), ""
+
+        wf = WaterfallWidget()
+        self.addCleanup(wf.deleteLater)
+        with mock.patch.object(
+            file_dialogs.QFileDialog, "getSaveFileName", side_effect=save
+        ):
+            wf._save_image_dialog()
+            wf._save_image_dialog()
+        self.assertEqual(os.path.dirname(offered[1]), other)

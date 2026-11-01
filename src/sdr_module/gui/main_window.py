@@ -10168,6 +10168,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         sp.bookmark_clicked.connect(self._tune_bookmark_label)
         sp.display_settings_changed.connect(self._save_spectrum_settings)
         sp.resolution_changed.connect(self._apply_plot_resolution)
+        wf.file_settings = self._settings  # (Save Image: the screenshots' folder)
         self._bookmarks_panel.bookmarks_changed.connect(self._sync_bookmark_labels)
         self._sync_bookmark_labels()
 

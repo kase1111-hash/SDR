@@ -212,8 +212,10 @@ class ModeSDemodulator:
     HARD_PASS = True
     #: The budget per second of signal: preamble fits, and timing
     #: hypotheses searched by the Viterbi search. A busy sky (2,000 Mode S
-    #: and 6,000 Mode A/C replies a second) needs well under half of it.
-    #: Unused budget is kept for up to ``BUDGET_S`` of signal, for bursts.
+    #: and 6,000 Mode A/C replies a second) needs a third of it at 2.0 and
+    #: 2.4 MS/s, two thirds at 2.048 MS/s; 15,000 mixed replies a second
+    #: fit in it, 25,000 read 2 % fewer replies than without it. Unused
+    #: budget is kept for up to ``BUDGET_S`` of signal, for bursts.
     FITS_PER_S = 20_000.0
     SEARCHES_PER_S = 10_000.0
     BUDGET_S = 0.05

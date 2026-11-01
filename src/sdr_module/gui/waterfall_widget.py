@@ -44,6 +44,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .plot_readout import (
+    NoiseModel,
+    Reading,
+    mean_limit,
+    noise_model,
+    read_burst,
+    read_levels,
+)
 from .plot_view import ZOOM_LEVELS, PlotView, normalize_zoom
 from .spectrum_widget import (
     HEADER_MARGINS,
@@ -732,6 +740,17 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         # row arrives, so re-mapping the history after a retune or a span
         # change only moves codes (found by the line's identity).
         self._row_codes: deque = deque(maxlen=history_size)
+        # Each row's averaged spectrum (the mean of its frames' FFTs, as
+        # level codes on the row's own bins; None when add_line wasn't
+        # given one), the noise floor it came with (or None) and how many
+        # lines it merges: what the hover reads (see reading_at).
+        self._row_means: deque = deque(maxlen=history_size)
+        self._row_floors: deque = deque(maxlen=history_size)
+        self._row_lines: deque = deque(maxlen=history_size)
+        # The newest row's averaged spectrum (dB) while lines merge into it.
+        self._open_mean: Optional[np.ndarray] = None
+        # What reading a row needs, worked out once per row (see _row_noise).
+        self._readout_cache: Dict[Tuple[int, int], Any] = {}
         self._row_open = False  # the newest row may still gather lines
         self._row_end = 0.0  # when the newest row stops gathering
         # Why the rows are no longer live ("Stopped - press Space"), or None.
@@ -1119,6 +1138,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         timestamp: Optional[float] = None,
         noise_db: Optional[float] = None,
         usual: bool = True,
+        mean_db: Optional[np.ndarray] = None,
     ):
         """
         Add a new spectrum line to the waterfall.
@@ -1147,6 +1167,13 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 coloured as bright as the others', but how bright that is
                 stays what the usual lines set, however long such frames
                 last (see :meth:`_noise_offset`).
+            mean_db: The frame's averaged spectrum (dB per bin, over the
+                same bins), e.g. the
+                :class:`~sdr_module.dsp.frame_spectrum.FrameSpectrum`'s
+                ``mean_db`` when ``power_db`` is its ``max_db``: the hover
+                reads a level there (a row merging several lines keeps
+                their power average), and the strongest of the frame's
+                FFTs only for a burst (see :meth:`reading_at`).
         """
         if self._paused:
             self._skipped += 1
@@ -1170,6 +1197,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             previous = self._history[-1]
             merged = np.fmax(previous, line)
             self._history[-1] = merged
+            self._merge_mean(mean_db, noise_db)
             offset = self._noise_offset(line, merged, noise_db, usual)
             codes = quantize_db(merged + offset)
             if self._row_codes and self._row_codes[-1][0] is previous:
@@ -1190,6 +1218,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             self._times.append(now)
             self._row_steps.append(step)
             self._row_axes.append(axis)
+            self._start_mean(mean_db, noise_db)
             codes = quantize_db(line + self._noise_offset(line, line, noise_db, usual))
             self._row_codes.append((line, codes))
             self._row_open = True
@@ -1241,6 +1270,57 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 return 0.0
         return max(-12.0, min(12.0, ref - rise))
 
+    def _mean_line(self, mean_db: Any) -> Optional[np.ndarray]:
+        """``mean_db`` fitted to the row's bins (float32), or None."""
+        if mean_db is None:
+            return None
+        values = np.asarray(mean_db, dtype=np.float32).ravel()
+        if len(values) == 0:
+            return None
+        return np.asarray(self._fit_line(values), dtype=np.float32)
+
+    @staticmethod
+    def _finite_db(value: Optional[float]) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return None
+        return value if math.isfinite(value) else None
+
+    def _start_mean(self, mean_db: Any, noise_db: Optional[float]) -> None:
+        """A new row: keep its averaged spectrum and noise floor."""
+        mean = self._mean_line(mean_db)
+        self._open_mean = mean
+        self._row_means.append(None if mean is None else quantize_db(mean))
+        self._row_floors.append(self._finite_db(noise_db))
+        self._row_lines.append(1)
+
+    def _merge_mean(self, mean_db: Any, noise_db: Optional[float]) -> None:
+        """Another line merges into the newest row: its averaged spectrum
+        is the power average of its lines' (a line without one leaves the
+        row reading its maxima)."""
+        if not self._row_lines:
+            return
+        count = int(self._row_lines[-1])
+        mean = self._mean_line(mean_db)
+        if mean is None or self._open_mean is None or len(mean) != len(self._open_mean):
+            self._open_mean = None
+            self._row_means[-1] = None
+        else:
+            total = count * np.power(10.0, self._open_mean / 10.0, dtype=np.float32)
+            total += np.power(10.0, mean / 10.0, dtype=np.float32)
+            np.maximum(total, 1e-30, out=total)
+            self._open_mean = (10.0 * np.log10(total / (count + 1))).astype(np.float32)
+            self._row_means[-1] = quantize_db(self._open_mean)
+        floor, new = self._row_floors[-1], self._finite_db(noise_db)
+        if floor is not None and new is not None:
+            self._row_floors[-1] = (count * floor + new) / (count + 1)
+        elif new is not None:
+            self._row_floors[-1] = new
+        self._row_lines[-1] = count + 1
+
     def clear(self):
         """Clear the waterfall."""
         self._history.clear()
@@ -1248,6 +1328,11 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._row_steps.clear()
         self._row_axes.clear()
         self._row_codes.clear()
+        self._row_means.clear()
+        self._row_floors.clear()
+        self._row_lines.clear()
+        self._open_mean = None
+        self._readout_cache.clear()
         self._row_open = False
         self._ring = None
         self._head = -1
@@ -1495,6 +1580,112 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         if code <= 0:
             return None
         return _Q_MIN_DB + code / _Q_PER_DB
+
+    def reading_at(self, x: float, y: float) -> Optional[Reading]:
+        """What the hover says at canvas ``(x, y)``: the level of that
+        row where it was received, at that pixel, judged against the row's
+        noise (see :mod:`~sdr_module.gui.plot_readout`). A row is the
+        strongest of its frame's FFTs, and a pixel the strongest of its
+        bins; read as drawn, plain noise read several dB above its mean
+        (an SNR all over it at 32768 points) and weak signals high. So the
+        row's averaged spectrum is read (:meth:`add_line`'s ``mean_db``),
+        and its strongest FFTs only where they stand out of what that
+        level explains: a burst shorter than the frame (``Peak``). None
+        where the row has no data (it was received at another frequency),
+        or for rows added without ``noise_db`` or ``mean_db`` (the caller
+        then reads :meth:`level_at`)."""
+        plot = self._plot_rect()
+        if plot.width() <= 0 or plot.height() <= 0:
+            return None
+        row = int((y - plot.top()) / plot.height() * self._rows_shown())
+        count = len(self._history)
+        if not 0 <= row < count or len(self._row_floors) != count:
+            return None
+        h = count - 1 - row
+        freq = self.frequency_at(x)
+        if freq is None:
+            return None
+        line = self._history[h]
+        n = len(line)
+        center, span = (
+            self._row_axes[h]
+            if len(self._row_axes) == count
+            else (self._center_freq, self._sample_rate)
+        )
+        if n == 0 or span <= 0:
+            return None
+        bin_hz = span / n
+        # (In bins from the first bin's lower edge, as level_at.)
+        pos = (freq - (center - span / 2)) / bin_hz + 0.5
+        half = max(0.5, self._hz_per_px() / bin_hz / 2)
+        lo = int(math.floor(pos - half))
+        hi = int(math.floor(pos + half)) + 1
+        if hi <= 0 or lo >= n:
+            return None
+        lo, hi = max(0, lo), min(n, max(hi, lo + 1))
+        noise = self._row_noise(h)
+        if noise is None:
+            return None
+        model, rise_db, means = noise
+        steady: Optional[Reading] = None
+        if means is not None:
+            levels = _Q_MIN_DB + means[lo:hi].astype(np.float64) / _Q_PER_DB
+            steady = read_levels(levels, model, self._row_fill_limit(h, hi - lo))
+        if rise_db is not None:
+            peak = float(np.max(line[lo:hi]))
+            base = None if steady is None or steady.is_noise else steady.level_db
+            burst = read_burst(peak, model.floor_db, rise_db, hi - lo, base)
+            if burst is not None:
+                return burst
+        if steady is not None:
+            return steady
+        return Reading(model.floor_db, None)
+
+    def _row_noise(self, h: int) -> Optional[Tuple[Any, Optional[float], Any]]:
+        """``(noise model, rise, mean codes)`` of history row ``h``: the
+        model of its averaged spectrum (its floor the one add_line was
+        given), how far its maxima's median sits above that floor (dB),
+        and the averaged spectrum's codes (None without one). None when
+        the row has no floor and no averaged spectrum."""
+        line, means = self._history[h], self._row_means[h]
+        floor = self._row_floors[h]
+        key = (id(line), id(means))
+        cached = self._readout_cache.get(key)
+        if cached is not None and cached[0] is line and cached[1] is means:
+            return cached[2]
+        if means is not None:
+            covered = means[means > 0]
+            levels = _Q_MIN_DB + covered.astype(np.float64) / _Q_PER_DB
+            model = noise_model(levels, floor)
+        elif floor is not None:
+            model = NoiseModel(floor, 1.0)  # (only bursts can be told)
+        else:
+            model = None
+        result = None
+        if model is not None:
+            rise = None
+            if floor is not None:
+                rise = _noise_level(np.asarray(line)) - model.floor_db
+            result = (model, rise, means)
+        if len(self._readout_cache) > 64:
+            self._readout_cache.clear()
+        self._readout_cache[key] = (line, means, result)
+        return result
+
+    def _row_fill_limit(self, h: int, bins: int) -> Optional[float]:
+        """:func:`~sdr_module.gui.plot_readout.mean_limit` of history
+        row ``h``'s averaged spectrum over ``bins`` bins (cached)."""
+        means = self._row_means[h]
+        if means is None:
+            return None
+        key = (id(means), -int(bins))
+        cached = self._readout_cache.get(key)
+        if cached is not None and cached[0] is means:
+            return cached[1]
+        covered = means[means > 0]
+        limit = mean_limit(_Q_MIN_DB + covered.astype(np.float64) / _Q_PER_DB, bins)
+        self._readout_cache[key] = (means, limit)
+        return limit
 
     def set_db_range(self, min_db: float, max_db: float):
         """Show ``min_db``..``max_db`` dBFS across the colors (manual levels)."""
@@ -2408,6 +2599,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 duration += spr
         peak = float("nan")
         peak_freq = float("nan")
+        readings = 0  # (the rows' bins the peak is the strongest of)
         ring = self._current_ring()
         if rows is not None and ring is not None:
             # The rows as drawn: each where it was received (re-mapped onto
@@ -2431,6 +2623,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                     peak = _Q_MIN_DB + code / _Q_PER_DB
                     col = int(np.unravel_index(np.argmax(block), block.shape)[1])
                     peak_freq = f_start + (lo + col) * bin_hz
+                    readings = int(np.count_nonzero(block))
         return {
             "f_low": f_low,
             "f_high": f_high,
@@ -2439,6 +2632,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             "duration": duration,
             "peak_db": peak,
             "peak_freq": peak_freq,
+            "readings": readings,
         }
 
     def _measure_lines(self) -> List[str]:
@@ -2451,8 +2645,24 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         ]
         if math.isfinite(stats["peak_db"]):
             peak = stats["peak_db"]
-            lines.append(f"Peak {peak:.0f} dBFS" + self._snr_text(peak))
+            lines.append(
+                f"Peak {peak:.0f} dBFS" + self._peak_snr_text(peak, stats["readings"])
+            )
         return lines
+
+    def _peak_snr_text(self, peak: float, readings: int) -> str:
+        """``" · SNR x dB"`` for the strongest of ``readings`` row bins
+        (each the strongest of a frame's FFTs), or ``" · noise"`` where
+        plain noise's strongest of as many reaches it (measured against the
+        noise floor add_line was given; see
+        :func:`~sdr_module.gui.plot_readout.read_burst`)."""
+        noise, shown = self._snr_noise_db, self._noise_db
+        if noise is None or shown is None:
+            return self._snr_text(peak)
+        burst = read_burst(peak, noise, shown - noise, max(1, readings))
+        if burst is None or burst.snr_db is None:
+            return " · noise"
+        return f" · SNR {burst.snr_db:.0f} dB"
 
     # -- menus -------------------------------------------------------------
     def _display_menu(self, menu: "QMenu") -> None:
@@ -3029,10 +3239,15 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         lines = [here_text]
         row = int((y - plot.top()) / plot.height() * self._rows_shown())
         if 0 <= row < len(self._history):
-            # Strongest bin under this pixel, matching the decimated image
-            # (and the row's own frequency, after a retune).
-            level = self.level_at(x, y)
-            if level is not None:
+            # The row's averaged level there, or its burst's peak, judged
+            # against its noise (see reading_at); rows added without them,
+            # the strongest bin under this pixel, matching the decimated
+            # image (and the row's own frequency, after a retune).
+            reading = self.reading_at(x, y)
+            level = None if reading is not None else self.level_at(x, y)
+            if reading is not None:
+                detail = reading.text(decimals=0)
+            elif level is not None:
                 detail = f"{level:.0f} dBFS" + self._snr_text(level)
             else:
                 detail = "Not received then"

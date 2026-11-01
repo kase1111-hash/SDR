@@ -22,7 +22,7 @@ if HAS_PYQT6:
     from PyQt6.QtCore import QPoint, QRect, Qt
     from PyQt6.QtGui import QFontMetrics
     from PyQt6.QtTest import QTest
-    from PyQt6.QtWidgets import QLabel
+    from PyQt6.QtWidgets import QApplication, QLabel
 
     from tests.test_gui_chrome import _WindowTestCase
 else:  # pragma: no cover - no Qt
@@ -43,6 +43,29 @@ def _themes(case, check):
     from tests.test_gui_coherent_window import _ThemedSizes
 
     _ThemedSizes.each_theme(case, check)
+
+
+def _second_click(widget, pos):
+    """A double-click's second click as Qt delivers it to ``widget`` when
+    the widget the first click pressed is gone: the double-click event,
+    then the release."""
+    from PyQt6.QtCore import QEvent, QPointF
+    from PyQt6.QtGui import QMouseEvent
+
+    left = Qt.MouseButton.LeftButton
+    for kind, buttons in (
+        (QEvent.Type.MouseButtonDblClick, left),
+        (QEvent.Type.MouseButtonRelease, Qt.MouseButton.NoButton),
+    ):
+        event = QMouseEvent(
+            kind,
+            QPointF(pos),
+            QPointF(widget.mapToGlobal(pos)),
+            left,
+            buttons,
+            Qt.KeyboardModifier.NoModifier,
+        )
+        QApplication.sendEvent(widget, event)
 
 
 class _StatusCase(_WindowTestCase):
@@ -328,10 +351,15 @@ class TestThePanelGoesWithItsMessage(_StatusCase):
         self.assertFalse(panel.isVisible())
         self.assertEqual(win._message_label.text(), "")
 
+    def click_away(self, panel):
+        """A click on the panel, and the time a double-click takes."""
+        QTest.mouseClick(panel, Qt.MouseButton.LeftButton)
+        QTest.qWait(QApplication.doubleClickInterval() + 50)
+
     def test_a_click_hides_it(self):
         win, panel = self.win, self.panel()
         win._show_status_message(REFUSAL, "warning", 8000, log=False)
-        QTest.mouseClick(panel, Qt.MouseButton.LeftButton)
+        self.click_away(panel)
         self.assertFalse(panel.isVisible())
         # The message stays in the status bar (and in the history).
         self.assertEqual(win._message_label.text(), REFUSAL)
@@ -352,6 +380,41 @@ class TestThePanelGoesWithItsMessage(_StatusCase):
         # And the refusal once more, after it was gone.
         win._show_status_message(REFUSAL, "warning", 8000, log=False)
         self.assertTrue(panel.isVisible())
+        win._clear_status_message()
+
+    def test_a_double_click_stays_on_it(self):
+        """The click that hides it doesn't let a double-click's second
+        click through to what is beneath: a button there would be pressed
+        (at 1024 px it covers the Bookmarks tab's Tune, Edit... and Remove)
+        and the waterfall would tune (a press and a release on it tune)."""
+        from PyQt6.QtWidgets import QPushButton
+
+        win, panel = self.win, self.panel()
+        win._show_status_message(GAPS, "warning", 8000, log=False)
+        self.settle(5)
+        beneath = QPushButton("Remove", win)
+        self.addCleanup(beneath.deleteLater)
+        beneath.setGeometry(panel.geometry())
+        beneath.show()
+        panel.raise_()
+        pressed = []
+        beneath.clicked.connect(lambda: pressed.append(True))
+        spot = QPoint(panel.width() // 2, panel.height() // 2)
+        where = panel.mapTo(win, spot)
+        QTest.mouseClick(panel, Qt.MouseButton.LeftButton, pos=spot)
+        # The second click goes to whatever is at that spot now: if what was
+        # pressed first went away meanwhile, Qt gives the widget beneath the
+        # double-click event alone (QWidget takes it for a press), and the
+        # release (QWidget.mouseDoubleClickEvent).
+        second = win.childAt(where)
+        _second_click(second, second.mapFrom(win, where))
+        self.settle(5)
+        self.assertEqual(pressed, [])
+        QTest.qWait(QApplication.doubleClickInterval() + 50)
+        self.assertFalse(panel.isVisible())
+        self.assertEqual(pressed, [])
+        # (Then what is beneath is there to click, as before.)
+        self.assertIs(win.childAt(where), beneath)
         win._clear_status_message()
 
     def test_esc_hides_it(self):
@@ -408,6 +471,34 @@ class TestThePanelGoesWithItsMessage(_StatusCase):
         self._afc.setVisible(False)
         self.settle(10)
         self.assertEqual(panel.isVisible(), self.shown_text() != REFUSAL)
+        win._clear_status_message()
+
+    def test_a_huge_message_stays_in_the_window(self):
+        """An internal error's text can be of any length: the panel takes at
+        most five lines, ending in "…" (the whole message stays in the
+        status history and is what screen readers get)."""
+        win, panel = self.win, self.panel()
+        huge = (
+            "Internal error: ValueError: "
+            + "operands could not be broadcast together " * 60
+            + ". Details are in Tools > Error History."
+        )
+        win._show_status_message(huge, "danger", 8000, log=False)
+        self.settle(5)
+        self.assertTrue(panel.isVisible())
+        self.assertLessEqual(self.lines(), 5)
+        self.assertEqual(self.lines(), 5)
+        self.assertTrue(panel.text().endswith("…"), panel.text()[-20:])
+        self.assertTrue(huge.startswith(panel.text()[:-1].rstrip()))
+        self.assertGreater(panel.y(), win._spectrum.mapTo(win, QPoint(0, 0)).y())
+        bar = win.statusBar().geometry()
+        self.assertLess(panel.geometry().bottom(), bar.top())
+        self.assertEqual(panel.message(), huge)
+        self.assertEqual(panel.accessibleDescription(), huge)
+        self.assertEqual(win._status_history.entries()[0].text, huge)
+        # A message that fits in five lines is whole again.
+        win._show_status_message(GAPS, "warning", 8000, log=False)
+        self.assert_shows_in_full(GAPS, "after a huge one")
         win._clear_status_message()
 
     def test_while_the_window_is_hidden(self):

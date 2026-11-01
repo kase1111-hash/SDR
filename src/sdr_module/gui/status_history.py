@@ -23,6 +23,7 @@ try:
     from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer
     from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWidgets import (
+        QApplication,
         QFrame,
         QHBoxLayout,
         QLabel,
@@ -48,6 +49,8 @@ CAPACITY = 20
 _OVERFLOW_GAP = 4
 _OVERFLOW_EDGE = 8
 _OVERFLOW_MIN_WIDTH = 360
+#: ...and the most lines it takes (the whole message is in the history).
+_OVERFLOW_MAX_LINES = 5
 
 #: A hint's new wording (its cause changed) is said once it has held this
 #: long (s): a cause that comes and goes within it is never said.
@@ -259,11 +262,12 @@ class MessageOverflow(QLabel if HAS_PYQT6 else object):
     and nothing else moves: this is a panel of the window laid over the
     bottom of the plots and the right column, starting where the message
     starts, wrapped to the window's width, in the message's tone. It shows
-    for as long as the message does; a click on it, or Esc in the window,
-    hides it until the next message, and so does a click on the message
-    area (the last 20 messages take its place). Being part of the window,
-    it is never over a dialog or another window. A message that fits shows
-    no panel: the status bar looks as it always did.
+    for as long as the message does; a click on it (once a double-click's
+    time is over, so a double-click's second click stays on it), or Esc in
+    the window, hides it until the next message, and so does a click on
+    the message area (the last 20 messages take its place). Being part of
+    the window, it is never over a dialog or another window. A message
+    that fits shows no panel: the status bar looks as it always did.
 
     ``anchor`` is the status bar's message label: its ``text()`` is the
     whole message and its ``is_elided()`` says whether it is drawn cut
@@ -295,6 +299,11 @@ class MessageOverflow(QLabel if HAS_PYQT6 else object):
         self._place_timer.setSingleShot(True)
         self._place_timer.setInterval(0)
         self._place_timer.timeout.connect(self.sync)
+        # A click hides it once a double-click's time is over (see
+        # mouseReleaseEvent).
+        self._linger_timer = QTimer(self)
+        self._linger_timer.setSingleShot(True)
+        self._linger_timer.timeout.connect(self.hide)
         anchor.installEventFilter(self)
         bar = anchor.parentWidget()
         if bar is not None and bar is not window:
@@ -311,6 +320,7 @@ class MessageOverflow(QLabel if HAS_PYQT6 else object):
         text = str(text or "")
         if text != self._message:
             self._dismissed = False
+            self._linger_timer.stop()
         self._message = text
         self.setText(text)
         self.setAccessibleDescription(text)
@@ -321,14 +331,16 @@ class MessageOverflow(QLabel if HAS_PYQT6 else object):
         """The message is gone (its time is up)."""
         self._message = ""
         self._dismissed = False
+        self._linger_timer.stop()
         self.setText("")
         self.setAccessibleDescription("")
         self.hide()
 
     def dismiss(self) -> None:
-        """Hide it until the next message (a click, Esc)."""
+        """Hide it until the next message (Esc, the last messages shown)."""
         if self._message:
             self._dismissed = True
+        self._linger_timer.stop()
         self.hide()
 
     def wanted(self) -> bool:
@@ -346,7 +358,8 @@ class MessageOverflow(QLabel if HAS_PYQT6 else object):
     def sync(self) -> None:
         """Show, place or hide it as the message and the status bar are."""
         if not self.wanted():
-            self.hide()
+            if not self._linger_timer.isActive():  # (a click's: see below)
+                self.hide()
             return
         self._place()
         self.show()
@@ -378,10 +391,36 @@ class MessageOverflow(QLabel if HAS_PYQT6 else object):
         width = min(max(wanted, anchor.width()), room)
         right = window.width() - _OVERFLOW_EDGE - width
         left = max(_OVERFLOW_EDGE, min(start.x(), right))
+        # At most _OVERFLOW_MAX_LINES lines (an internal error's text can be
+        # of any length): the rest is in the status history.
+        inner = width - margins.left() - margins.right()
+        self.setText(self._fitting_text(inner, metrics))
         height = self.heightForWidth(width)
         if height <= 0:  # pragma: no cover - a word-wrapped label has one
             height = self.sizeHint().height()
         self.setGeometry(left, bar_top - _OVERFLOW_GAP - height, width, height)
+
+    def _fitting_text(self, width: int, metrics: Any) -> str:
+        """The message, or as much of it as _OVERFLOW_MAX_LINES lines of
+        ``width`` px hold, ending in "…"."""
+        text = self._message
+        most = metrics.lineSpacing() * _OVERFLOW_MAX_LINES
+        flags = int(Qt.TextFlag.TextWordWrap.value)
+
+        def fits(candidate: str) -> bool:
+            box = metrics.boundingRect(0, 0, max(1, width), 1 << 20, flags, candidate)
+            return box.height() <= most
+
+        if fits(text):
+            return text
+        low, high = 0, len(text)  # (the longest start that fits, with "…")
+        while low < high:
+            middle = (low + high + 1) // 2
+            if fits(text[:middle].rstrip() + "…"):
+                low = middle
+            else:
+                high = middle - 1
+        return text[:low].rstrip() + "…"
 
     def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802 - Qt naming
         if event.type() in (
@@ -407,5 +446,13 @@ class MessageOverflow(QLabel if HAS_PYQT6 else object):
 
     def mouseReleaseEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
         if event.button() == Qt.MouseButton.LeftButton:
-            self.dismiss()
+            # Hidden for this message once a double-click's time is over:
+            # hidden at once, the second click of a double-click would go
+            # to what is beneath (a plot tunes, a button is pressed).
+            if self._message:
+                self._dismissed = True
+            self._linger_timer.start(max(0, QApplication.doubleClickInterval()))
         event.accept()
+
+    def mouseDoubleClickEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
+        event.accept()  # (it stays here: see mouseReleaseEvent)

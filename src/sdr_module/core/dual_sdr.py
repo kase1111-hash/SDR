@@ -631,7 +631,8 @@ class DualSDRController:
         progress and the signals found, ``wideband_scan.wait()`` waits for
         it, :meth:`stop_wideband_scan` (or :meth:`stop_all`) stops it.
         While it runs both devices are streaming, so the mode and the
-        devices can't change and the other modes don't start.
+        devices can't change, the other modes don't start and the scan
+        alone tunes the devices (``set_*_frequency`` refuse).
 
         Args:
             start_hz, end_hz, step_hz: The channels to measure.
@@ -704,7 +705,14 @@ class DualSDRController:
             self._state.rtlsdr_streaming = self._rtlsdr is not None
             self._state.hackrf_streaming = self._hackrf is not None
             self._scan = scan
-        scan.start()
+            try:
+                scan.start()
+            except RuntimeError as exc:  # (no thread to be had)
+                logger.error(f"Wideband scan not started: {exc}")
+                self._state.rtlsdr_streaming = False
+                self._state.hackrf_streaming = False
+                self._scan = None
+                return False
         logger.info(
             f"Wideband scan of {float(start_hz) / 1e6:.3f} - "
             f"{float(end_hz) / 1e6:.3f} MHz started with "

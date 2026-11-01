@@ -148,6 +148,23 @@ class TestScan:
         assert controller.wideband_scan is None
         assert not controller.state.rtlsdr_streaming
 
+    def test_a_scan_that_cannot_start_changes_nothing(self, monkeypatch, caplog):
+        from sdr_module.core import wideband_scan
+
+        def no_thread(self):
+            raise RuntimeError("can't start new thread")
+
+        monkeypatch.setattr(wideband_scan.WidebandScan, "start", no_thread)
+        controller = _controller()
+        with caplog.at_level(logging.ERROR):
+            assert not controller.start_wideband_scan(88e6, 108e6, 100e3)
+        assert "can't start new thread" in caplog.text
+        assert controller.wideband_scan is None
+        state = controller.state
+        assert not state.rtlsdr_streaming and not state.hackrf_streaming
+        assert controller.start_dual_rx()
+        controller.stop_all()
+
     def test_continuous_until_stopped_from_a_callback(self):
         controller = _controller()
         passes = []

@@ -69,9 +69,10 @@ READ_TIMEOUT_S = 1.0
 #: Pages a device may fail in a row before it is left out of the pass.
 MAX_FAILURES = 3
 
-#: Why a scan ended (:attr:`WidebandScan.reason`): it swept the range (once,
-#: or a continuous scan stopped by a device), it was cancelled, or no device
-#: returned samples in a whole pass. Anything else is an error's text.
+#: Why a scan ended (:attr:`WidebandScan.reason`): it swept the range (a
+#: scan that isn't continuous), it was cancelled (a continuous scan ends
+#: so), or no device returned samples in a whole pass. Anything else is an
+#: error's text.
 COMPLETE = "complete"
 CANCELLED = "cancelled"
 NO_SAMPLES = (

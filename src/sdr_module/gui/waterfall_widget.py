@@ -155,10 +155,11 @@ _SNR_ABOVE_ROWS_DB = 3.0
 
 #: The rise a fresh line's noise usually reads above its noise floor (the
 #: reference rows are coloured to, see WaterfallWidget._noise_offset) is the
-#: median of the last this many lines' rises: a stretch of odd frames (one
-#: block each while the display loop is behind, a long one after a stall)
-#: shorter than half of it doesn't move it, a lasting change does, and
-#: after a retune it is the usual rise again within a few lines (P-10).
+#: median of the last this many usual lines' rises: an odd frame now and
+#: then (a long one after a stall) doesn't move it, and after a retune it
+#: is the usual rise again within a few lines (P-10). Lines the caller says
+#: are from frames of an unusual length (one block each while the display
+#: loop is behind) are kept out of it, however long they last (N-07).
 _NOISE_RISE_LINES = 301
 
 #: A pause between two lines longer than this many typical line intervals
@@ -816,6 +817,8 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._noise_rise: Optional[float] = None
         self._noise_rise_key: Optional[Tuple[float, float, int]] = None
         self._noise_rises: "deque[float]" = deque(maxlen=_NOISE_RISE_LINES)
+        # (The unusual lines' rises: the reference until a usual line comes.)
+        self._odd_rises: "deque[float]" = deque(maxlen=_NOISE_RISE_LINES)
 
         self.setMinimumHeight(200)
         self._setup_ui()
@@ -1115,6 +1118,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         power_db: np.ndarray,
         timestamp: Optional[float] = None,
         noise_db: Optional[float] = None,
+        usual: bool = True,
     ):
         """
         Add a new spectrum line to the waterfall.
@@ -1138,6 +1142,11 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
                 ``noise_floor_db`` when the line is its ``max_db``. Default:
                 the rows' median bin (right for a line that is one FFT; a
                 maximum over several FFTs reads it several dB high).
+            usual: False for a line from a frame of an unusual length (one
+                block while the display loop is behind): its row's noise is
+                coloured as bright as the others', but how bright that is
+                stays what the usual lines set, however long such frames
+                last (see :meth:`_noise_offset`).
         """
         if self._paused:
             self._skipped += 1
@@ -1161,7 +1170,8 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             previous = self._history[-1]
             merged = np.fmax(previous, line)
             self._history[-1] = merged
-            codes = quantize_db(merged + self._noise_offset(line, merged, noise_db))
+            offset = self._noise_offset(line, merged, noise_db, usual)
+            codes = quantize_db(merged + offset)
             if self._row_codes and self._row_codes[-1][0] is previous:
                 self._row_codes[-1] = (merged, codes)
             else:
@@ -1180,7 +1190,7 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             self._times.append(now)
             self._row_steps.append(step)
             self._row_axes.append(axis)
-            codes = quantize_db(line + self._noise_offset(line, line, noise_db))
+            codes = quantize_db(line + self._noise_offset(line, line, noise_db, usual))
             self._row_codes.append((line, codes))
             self._row_open = True
             self._write_top_row(codes, scroll=True)
@@ -1191,7 +1201,11 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         self._canvas.update()
 
     def _noise_offset(
-        self, line: np.ndarray, row: np.ndarray, noise_db: Optional[float]
+        self,
+        line: np.ndarray,
+        row: np.ndarray,
+        noise_db: Optional[float],
+        usual: bool = True,
     ) -> float:
         """dB added to a row's colours (not to its levels, which the
         readouts show) so its noise shows as bright as the other rows'.
@@ -1203,8 +1217,12 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
         like a change in the band. The rise is measured against the frame's
         noise floor (``noise_db``, which doesn't depend on that), so a real
         change of the floor still shows; rows are brought to the rise fresh
-        lines usually have (the median of the last _NOISE_RISE_LINES). 0
-        without ``noise_db``."""
+        lines usually have (the median of the last _NOISE_RISE_LINES).
+        Lines from frames of an unusual length (not ``usual``) don't count:
+        a long stretch of them moved the median at once, a 7 dB step in
+        the rows' brightness during it and again about 5 s after it (N-07);
+        until a usual line comes they are all there is. 0 without
+        ``noise_db``."""
         if noise_db is None or not math.isfinite(noise_db) or len(line) < 16:
             return 0.0
         key = (float(self._center_freq), float(self._sample_rate), len(line))
@@ -1213,8 +1231,9 @@ class WaterfallWidget(QWidget if HAS_PYQT6 else object):
             return 0.0
         if key != self._noise_rise_key:
             self._noise_rises.clear()
-        self._noise_rises.append(rise)
-        ref = float(np.median(self._noise_rises))
+            self._odd_rises.clear()
+        (self._noise_rises if usual else self._odd_rises).append(rise)
+        ref = float(np.median(self._noise_rises or self._odd_rises))
         self._noise_rise, self._noise_rise_key = ref, key
         if row is not line:
             rise = _noise_level(row) - float(noise_db)

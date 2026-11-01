@@ -2770,7 +2770,13 @@ if HAS_PYQT6:
             if frame is None:
                 return  # less than one FFT of samples yet (a large FFT size)
             self._spectrum.update_spectrum(frame.mean_db)
-            self._waterfall.add_line(frame.max_db, noise_db=frame.noise_floor_db)
+            # (As in the main window: while frames can't keep up their
+            # length isn't the usual one, N-07.)
+            self._waterfall.add_line(
+                frame.max_db,
+                noise_db=frame.noise_floor_db,
+                usual=not self._pacer.overloaded,
+            )
 
         def _apply_plot_resolution(self, size: int, window: str) -> None:
             """The spectrum's FFT Size or Window menu: both plots use it."""

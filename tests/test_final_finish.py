@@ -541,5 +541,109 @@ class TestSecondReceiverWaterfallSettingDamaged(_window_case()):
         self.assertEqual(rx._waterfall.display_settings()["history_s"], 300.0)
 
 
+class TestWaterfallKeepsUnusualLinesOutOfItsReference(unittest.TestCase):
+    """N-07, the waterfall on its own: lines it is told are from frames of
+    an unusual length (``usual=False``) are coloured like the others but
+    don't set how bright their noise shows, however many there are."""
+
+    BINS = 1024
+
+    def setUp(self):
+        require_pyqt6(self)
+        from sdr_module.gui.waterfall_widget import WaterfallWidget
+
+        self.wf = WaterfallWidget()
+        self.addCleanup(self.wf.deleteLater)
+        self.wf.set_frequency_range(100e6, 2.4e6)
+        self.wf.set_history_seconds(0.0)  # (a row per line)
+        self.rng = np.random.default_rng(5)
+        self.t = 0.0
+
+    def lines(self, ffts, count, usual=True):
+        """Rows of the strongest of ``ffts`` FFTs of noise; their noise as
+        drawn (dB)."""
+        wf, shown = self.wf, []
+        for _ in range(count):
+            power = self.rng.exponential(1.0, (ffts, self.BINS)).max(axis=0)
+            self.t += 1 / 30
+            wf.add_line(-80.0 + 10 * np.log10(power), self.t, -80.0, usual=usual)
+            codes = wf._row_codes[-1][1].astype(float)
+            shown.append(float(np.median(codes / 8.0 - 200.0)))
+        return np.array(shown)
+
+    def test_a_long_stretch_of_one_block_frames(self):
+        usual = float(np.median(self.lines(39, 300)))
+        for shown in (self.lines(1, 300, usual=False), self.lines(39, 300)):
+            self.assertLess(float(np.max(np.abs(shown - usual))), 0.5)
+
+    def test_only_unusual_lines_since_a_retune(self):
+        """They are all there is to go by; the first usual lines take over
+        within a few rows."""
+        self.lines(39, 60)
+        self.wf.set_frequency_range(144e6, 2.4e6)  # (a retune)
+        self.lines(1, 40, usual=False)
+        shown = self.lines(39, 10)
+        normal = float(np.median(self.lines(39, 30)))
+        self.assertLess(float(np.max(np.abs(shown[2:] - normal))), 0.5, shown)
+
+
+class TestWaterfallBrightnessThroughALongOverload(_window_case()):
+    """N-07: the waterfall colours each row so its noise shows as bright as
+    usual lines' (P-10: the median of the last 301 lines' noise rise). An
+    overload longer than half of that (one-block frames for ~5 s) moved the
+    median at once: the rows stepped by about 7 dB during it and again
+    about 5 s after it. Frames read while this computer can't keep up are
+    kept out of that reference, however long it lasts."""
+
+    demo = True
+    FRAME_S = 1 / 30
+
+    def shown_db(self):
+        """The noise of the newest row as drawn (its median colour, dB)."""
+        codes = self.win._waterfall._row_codes[-1][1].astype(float)
+        return float(np.median(codes / 8.0 - 200.0))
+
+    def frames(self, count, overloaded):
+        win = self.win
+        rate = win._device_sample_rate()
+        shown = []
+        for _ in range(count):
+            win._pacer.reset()
+            win._pacer.overloaded = overloaded
+            size = 2048 if overloaded else int(rate * self.FRAME_S)
+            win._process_block(win._device.read_samples(size))  # (one block)
+            shown.append(self.shown_db())
+        return np.array(shown)
+
+    def test_no_step_during_or_after(self):
+        from unittest import mock
+
+        from sdr_module.gui import device_dialog
+
+        patcher = mock.patch.object(device_dialog, "_MAX_LAG_S", 1e9)
+        patcher.start()  # (every demo sample is read)
+        self.addCleanup(patcher.stop)
+        win = self.win
+        win._device._rng = np.random.default_rng(7)
+        win._waterfall.set_history_seconds(0.0)  # (a row per line)
+        if not win._is_running:
+            win._start_acquisition()
+        before = self.frames(160, False)
+        usual = float(np.median(before[40:]))
+        behind = self.frames(170, True)  # (more than half of 301 lines)
+        after = self.frames(170, False)
+        # Drawn alike all through (one-block rows read their noise floor a
+        # little differently: about 1.4 dB here, as from the first one).
+        first, last = np.median(behind[:20]), np.median(behind[-20:])
+        self.assertLess(abs(float(last - first)), 0.5, (first, last))
+        self.assertLess(float(np.ptp(behind)), 2.0, behind)
+        self.assertLess(float(np.max(np.abs(after - usual))), 0.5, after[:5])
+        # (The frames were one block each: their rows' own levels read
+        # several dB lower.)
+        history = win._waterfall._history
+        drop = float(np.median(history[-200]) - np.median(history[-1]))
+        self.assertLess(drop, -5.0)
+
+
 if __name__ == "__main__":
     unittest.main()

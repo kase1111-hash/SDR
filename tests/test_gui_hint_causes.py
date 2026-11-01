@@ -347,5 +347,63 @@ class TestACatchingUpComputerIsNotBlamedOnTheDevice(_hardware_case()):
         self.assertFalse(blamed, _runs(hints))
 
 
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
+class TestANewRateIsJudgedAfresh(_hardware_case()):
+    """Overloaded at 20 MS/s, the hints say a lower sample rate helps. At
+    10 MS/s this computer keeps up, but the device delivers 40 % of it.
+    The overload was at the old rate, before the seconds real time is
+    judged over started again: the audio's hint (the status bar and the
+    Audio button) said "This computer can't process 10 MS/s ..." for a
+    second, then "The device isn't delivering ...", and the Decoder's line
+    went on naming this computer once it judged the new rate."""
+
+    def overloaded_then_10_ms(self):
+        win = self.win
+        self.run_frames(60)
+        self.assertTrue(win._pacer.overloaded)
+        self.LOAD = 0.3
+        self.assertTrue(win.set_sample_rate(10e6))
+
+    def test_the_audio_hint_names_the_device(self):
+        win = self.win
+        win._set_demod_mode("FM", "5 kHz", "12.5 kHz")
+        win._audio_enabled = True
+        win._control_panel.set_squelch_db(-120)
+        self.overloaded_then_10_ms()
+        hints, bar = [], []
+        for _ in range(150):
+            self.run_frames(1, per_frame=1)  # (the device: 40 % of 10 MS/s)
+            if not win._realtime():
+                hints.append(win._realtime_hint())
+            bar.append(win._message_label.text())
+        self.assertFalse(win._realtime())
+        self.assertTrue(hints)
+        blamed = [text for text in _runs(hints + bar) if "This computer" in text]
+        self.assertFalse(blamed, _runs(hints + bar))
+        self.assertTrue(
+            win._realtime_hint().startswith("The device isn't delivering"),
+            win._realtime_hint(),
+        )
+
+    def test_the_decoders_line_names_the_device(self):
+        win = self.win
+        panel = win._decoder_panel
+        panel._proto_combo.setCurrentText("POCSAG")
+        self.run_frames(1)
+        panel.set_receiving(True)
+        self.overloaded_then_10_ms()
+        judged = []  # (the line once the new rate is found short)
+        for _ in range(150):
+            self.run_frames(1, per_frame=1)
+            if not win._realtime():
+                judged.append(panel.decoder_status_text())
+        self.assertTrue(judged)
+        blamed = [text for text in _runs(judged) if text.startswith("This computer")]
+        self.assertFalse(blamed, _runs(judged))
+        self.assertTrue(
+            judged[-1].startswith("The device isn't delivering 10 MS/s"), judged[-1]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

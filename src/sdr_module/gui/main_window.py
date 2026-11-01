@@ -8536,7 +8536,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # (The seconds real time is judged by still hold the short
             # frames for a while after this computer catches up again:
             # those were skipped here, not by the device.)
-            self._skip_by_computer = now - self._overloaded_at <= _REALTIME_WINDOW_S
+            self._skip_by_computer = self._computer_behind()
             self._skip_by_job = job
         skipping = decoding and now < self._skip_hint_until
         text = self._skip_hint_text() if skipping else None
@@ -9418,13 +9418,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
     def _computer_behind(self) -> bool:
         """Whether this computer can't keep up, or couldn't within the
-        seconds real time is judged over (_REALTIME_WINDOW_S): what the
-        display loop skipped then still counts, and it was this computer's
-        doing, not the device's (as the Decoder's line judges it,
-        _skip_by_computer)."""
+        seconds real time is judged over (_rx_history, _REALTIME_WINDOW_S):
+        what the display loop skipped then still counts, and it was this
+        computer's doing, not the device's (the Decoder's line judges it
+        so too, _skip_by_computer). An overload from before those seconds
+        started again (a new sample rate, device or recording) is not: what
+        is missing since is the device's (or the recording's)."""
         if self._pacer.overloaded:
             return True
-        return time.monotonic() - self._overloaded_at <= _REALTIME_WINDOW_S
+        history = self._rx_history
+        return bool(history) and self._overloaded_at >= history[0][0]
 
     def _realtime_hint(self) -> str:
         if self._playback.active and self._playback.speed != 1.0:

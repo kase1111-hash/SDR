@@ -469,5 +469,56 @@ class TestCloseRecordingBringsThePresetsDecoderBack(_files_case()):
         self.assertNotIn("ACARS", self.message())
 
 
+# --------------------------------------------------------------------------- #
+# W-08: Open Recording in another band says the file is playing
+# --------------------------------------------------------------------------- #
+
+
+class TestOpeningARecordingInAnotherBandNamesIt(_files_case()):
+    """W-08: opening an FM recording while tuned elsewhere said only "ACARS
+    decoder off · FM Broadcast: listening in FM (broadcast, 75 kHz
+    deviation) with a 200 kHz filter, as the band is usually heard ...";
+    the same file opened in its own band says "Playing fm8.sigmf-meta
+    (98.9–101.3 MHz). Click a signal to tune to it; Space pauses."."""
+
+    def test_from_a_presets_channel(self):
+        from tests.test_final_polish import _save_sigmf
+
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ACARS"))
+        path = _save_sigmf(self.path("fm8.sigmf-data"), 100.1e6)
+        with self.open_dialog(path):
+            self.assertTrue(win._open_recording())
+        text = self.message()
+        self.assertTrue(
+            text.startswith("Playing fm8.sigmf-data (99.6–100.6 MHz) · "), text
+        )
+        self.assertIn(
+            " · ACARS decoder off · FM Broadcast: listening in FM (broadcast, "
+            "75 kHz deviation) with a 200 kHz filter",
+            text,
+        )
+        # One message: not also the band plan's line without the file (a
+        # click on the message area lists the messages).
+        said = [entry.text for entry in win._status_history.entries()]
+        self.assertEqual(said[0], text)
+        self.assertEqual([t for t in said[1:] if t in text], [], said)
+
+    def test_in_its_own_band_as_before(self):
+        from tests.test_final_polish import _save_sigmf
+
+        win = self.win
+        win._set_demod_mode("FM", "75 kHz", "200 kHz")
+        self.assertTrue(win.set_frequency(100.1e6))
+        path = _save_sigmf(self.path("fm8.sigmf-data"), 100.1e6)
+        with self.open_dialog(path):
+            self.assertTrue(win._open_recording())
+        self.assertEqual(
+            self.message(),
+            "Playing fm8.sigmf-data (99.6–100.6 MHz). Click a signal to tune "
+            "to it; Space pauses.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

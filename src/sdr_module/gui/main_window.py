@@ -170,7 +170,7 @@ from .iq_files import (
     split_name,
 )
 from .level_meter import LevelMeter
-from .playback import PlaybackBar, PlaybackController
+from .playback import PlaybackBar, PlaybackController, playing_line
 from .plot_view import PlotView, normalize_zoom
 from .preferences_dialog import (
     KEY_AUDIO_OUTPUT,
@@ -5894,13 +5894,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._tune_to(freq_hz) and far:
             self._listen_by_band_plan(before, self._current_frequency())
 
-    def _listen_by_band_plan(self, before_hz: float, freq_hz: float) -> bool:
+    def _listen_by_band_plan(
+        self, before_hz: float, freq_hz: float, lead: str = ""
+    ) -> bool:
         """After a far tune with no mode of its own (a typed frequency, a
         bookmark or recent frequency without one): outside the band you
         were in, where the usual listening differs from the current mode
         profile, listen that way (the mode, filter and FM deviation of the
         preset channel there, else of the band) and say so. Radio > Choose
-        Mode From Band Plan turns this off. True when it changed."""
+        Mode From Band Plan turns this off. True when it changed.
+
+        ``lead``: what the tune itself says first ("Playing fm8.sigmf-data
+        (99.6–100.6 MHz)", a recording opened), so one message says both."""
         from ..core.band_plan import (
             band_for,
             preset_for,
@@ -5972,7 +5977,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "usually heard (Radio > Choose Mode From Band Plan)"
         )
         text = self._keeping_release_note(text)
-        self._show_status_message(text, "info", 6000)
+        if lead:
+            text = f"{lead} · {text}"
+        self._show_status_message(text, "info", 8000 if lead else 6000)
         self._band_plan_note = (text, zone)
         return True
 
@@ -10111,12 +10118,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if not self._playback.open(options):
             return False
         if self._playback.band_plan_applied:
-            return True  # its status line says how the file is heard
-        half = options.sample_rate / 2.0
+            return True  # its status line says how the file is heard (and plays)
         self._show_status_message(
-            f"Playing {options.name} "
-            f"({format_mhz_range(options.center_hz - half, options.center_hz + half)})."
-            " Click a signal to tune to it; Space pauses.",
+            f"{playing_line(options)}. Click a signal to tune to it; Space pauses.",
             "info",
             8000,
         )

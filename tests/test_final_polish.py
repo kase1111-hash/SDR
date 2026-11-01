@@ -616,9 +616,9 @@ class TestThePresetsDecoderNoteStays(_FilesCase):
         with self.open_dialog(path):
             self.assertTrue(win._open_recording())
         text = self.message()
-        self.assertTrue(
-            text.startswith("ADS-B decoder off · APRS: listening in FM (narrow"), text
-        )
+        # (Led by the file it plays: "Playing aprs2m.sigmf-data (...) · ".)
+        self.assertTrue(text.startswith("Playing aprs2m.sigmf-data ("), text)
+        self.assertIn(" · ADS-B decoder off · APRS: listening in FM (narrow", text)
 
     def test_a_tune_that_says_nothing_else_keeps_the_note(self):
         win = self.win

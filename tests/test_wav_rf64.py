@@ -514,6 +514,30 @@ class TestDamagedAndUnfinishedFiles:
         self._classic(path, x, declared=0xFFFFFFFF)
         assert wav_file.read_wav_header(path).frames == 1000
 
+    def test_an_unfinished_rf64_file_reads_to_the_end(self, tmp_path):
+        """RF64 written by a program that stopped before it filled in its
+        sizes (a crash): ds64's data size still 0, the chunk's own -1."""
+        x = _tone(1000)
+        path = tmp_path / "unfinished.wav"
+        offset = _rf64(path, len(x), head=_cs16(x))
+        with open(path, "r+b") as handle:
+            handle.seek(20)
+            handle.write(struct.pack("<QQQ", 0, 0, 0))
+        header = wav_file.read_wav_header(path)
+        assert (header.data_offset, header.frames) == (offset, len(x))
+
+    def test_an_unfinished_wave64_file_reads_to_the_end(self, tmp_path):
+        """Wave64 whose data size was never written (0)."""
+        tail = bytes.fromhex("f3acd3118cd100c04f8edb8a")
+        x = _tone(500)
+        body = _fmt()
+        fmt = b"fmt " + tail + struct.pack("<Q", 24 + len(body)) + body
+        data = b"data" + tail + struct.pack("<Q", 0) + _cs16(x)
+        riff = b"riff" + bytes.fromhex("2e91cf11a5d628db04c10000")
+        path = tmp_path / "unfinished.w64"
+        path.write_bytes(riff + struct.pack("<Q", 0) + b"wave" + tail + fmt + data)
+        assert wav_file.read_wav_header(path).frames == len(x)
+
     def test_a_classic_file_over_4_gib_whose_size_wrapped(self, tmp_path):
         """A writer that knows no RF64 wrote past 4 GiB: its 32-bit data
         size went round (it holds the size less 4 GiB)."""

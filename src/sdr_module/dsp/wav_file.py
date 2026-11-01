@@ -18,8 +18,9 @@ write, so a file cut short (a crash) still reads to its last write.
 :func:`read_wav_header` reads classic, RF64 and BW64 files, and Sony Wave64
 (``.w64``): how the samples are stored and where they lie. A size larger
 than the file (a recording cut short), an unknown one (0xFFFFFFFF, written
-while streaming) and a classic 32-bit size that went round past 4 GiB (a
-writer that knows no RF64) are all read as what the file holds.
+while streaming; in RF64 or Wave64 also a size never filled in) and a
+classic 32-bit size that went round past 4 GiB (a writer that knows no
+RF64) are all read as what the file holds.
 """
 
 from __future__ import annotations
@@ -242,7 +243,9 @@ def _scan_riff(handle: IO[bytes], container: str, size: int) -> _Found:
                 raise WavError("its samples come before their format (fmt) chunk")
             declared: Optional[int] = cksize
             if cksize == SIZE_32_MAX:
-                declared = ds64_data if big else None
+                # (In RF64, ds64's; 0 there is a size never filled in, as by
+                # a writer that stopped before it finished: to the end too.)
+                declared = (ds64_data or None) if big else None
             elif big and ds64_data is not None and ds64_data & SIZE_32_MAX == cksize:
                 declared = ds64_data  # (a writer that gave the low 32 bits)
             return _Found(container, fmt, pos + 8, declared, size)
@@ -268,14 +271,16 @@ def _scan_w64(handle: IO[bytes], size: int) -> _Found:
             break
         guid = header[:16]
         cksize = struct.unpack("<Q", header[16:])[0]
+        if guid == W64_DATA:
+            if fmt is None:
+                raise WavError("its samples come before their format (fmt) chunk")
+            # (A size short of its own header was never filled in: to the end.)
+            declared = cksize - 24 if cksize >= 24 else None
+            return _Found("W64", fmt, pos + 24, declared, size)
         if cksize < 24:
             raise WavError("a chunk of this Wave64 file is damaged")
         if guid == W64_FMT:
             fmt = _parse_fmt(handle.read(min(cksize - 24, _MAX_READ)))
-        elif guid == W64_DATA:
-            if fmt is None:
-                raise WavError("its samples come before their format (fmt) chunk")
-            return _Found("W64", fmt, pos + 24, cksize - 24, size)
         pos += (cksize + 7) & ~7
     if fmt is None:
         raise WavError("it has no format (fmt) chunk")

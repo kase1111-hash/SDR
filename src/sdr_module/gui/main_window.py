@@ -10145,8 +10145,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         if self._playback.band_plan_applied:
             return True  # its status line says how the file is heard (and plays)
+        # (A preset's decoder the tune to the file turned off is said after
+        # the file, as the band plan's line has it: "· ACARS decoder off".)
+        playing = playing_line(options)
+        note = self._release_note()
+        if note:
+            playing += f" · {note}"
         self._show_status_message(
-            f"{playing_line(options)}. Click a signal to tune to it; Space pauses.",
+            f"{playing}. Click a signal to tune to it; Space pauses.",
             "info",
             8000,
         )
@@ -11491,18 +11497,24 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         both facts stay in view (P-07). Once: a message after that says only
         its own. (First: a long line is cut short at its end.) Not once the
         decoder is on again (Decode ticked, SSTV's Start): it isn't off."""
+        note = self._release_note()
+        return f"{note} · {text}" if note else text
+
+    def _release_note(self) -> str:
+        """The point :meth:`_keeping_release_note` leads a message with
+        ("ACARS decoder off"), "" for none; said once."""
         released, self._released_decoder = self._released_decoder, None
         if released is None:
-            return text
+            return ""
         message, note, decoder = released
         if self._message_label.text() != message:
-            return text  # (replaced, or gone)
+            return ""  # (replaced, or gone)
         if decoder == "SSTV":
             on_again = self._sstv_listening()
         else:
             panel = self._decoder_panel
             on_again = panel.is_decoding() and panel.protocol() == decoder
-        return text if on_again else f"{note} · {text}"
+        return "" if on_again else note
 
     def _preset_decoder_off(self) -> str:
         """Turn off the decoder a preset turned on (unless you changed it
@@ -11525,7 +11537,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return ""
         # (Not as your own untick: a protocol you choose next decodes.)
         panel.pause_decoding()
-        self._update_decoder_chip()  # ("ADS-B · paused")
+        self._update_decoder_chip()  # (gone: off, as the message says)
         return f"{decoder} decoder off"
 
     def _resume_preset_decoder(self, owned: Any) -> str:

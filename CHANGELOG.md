@@ -235,8 +235,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Scanner tab** (Tools → Frequency Scanner, `Ctrl+F`, or `Ctrl+8`) replaces
   the dialog: the plots, audio and decoders keep running while it scans, and
   a status-bar chip ("Scanning · 7 found", or the channel it is on, whole in
-  its tooltip) shows the scan from any tab, with Stop Scan, Skip, Hold and
-  Show Scanner in its menu.
+  its tooltip when the chip is cut short) shows the scan from any tab, with
+  Stop Scan, Skip, Hold and Show Scanner in its menu.
 - Scan modes: Sweep once, Sweep continuously, Stop on signal (with Resume,
   Skip and Hold) and Scan bookmarks (each in its own mode, filter and CTCSS
   tone, from the top of the Bookmarks list and in its order: each group,
@@ -685,7 +685,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   "Playing <file> (<span>) · ", or a bookmark's "Tuned to ..."), starts that
   message with the decoder's note ("ACARS decoder off · FM Broadcast:
   listening in FM ...") instead of replacing the note at once; the tune
-  after it says only its own.
+  after it says only its own. A recording opened in the band you were in
+  says it after the file: "Playing air125.sigmf-data (124.5–125.5 MHz) ·
+  ACARS decoder off. Click a signal ...".
 - Radio → Choose Mode From Band Plan also changes the FM deviation when a
   frequency typed in another FM band is heard at another deviation: a 2 m
   repeater typed after an FRS channel or MURS channels 1–3 is heard at 5 kHz

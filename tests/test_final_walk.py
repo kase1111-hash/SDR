@@ -558,6 +558,41 @@ class TestOpeningARecordingInAnotherBandNamesIt(_files_case()):
         )
 
 
+class TestOpeningARecordingInThePresetsBandKeepsItsNote(_files_case()):
+    """W-08's other half (checker): the ACARS preset, then Open Recording
+    of an airband capture at 125 MHz: the same band, so no band plan line,
+    but off the ACARS channels, so the preset's decoder goes off. "ACARS
+    decoder off: tuned away from the ACARS preset ..." was replaced at once
+    by "Playing air125.sigmf-data (124.5–125.5 MHz). Click a signal ...":
+    the decoder going off was no longer said. One message says both, the
+    file first, as when the band plan's line follows it."""
+
+    def open_air125(self):
+        from tests.test_final_polish import _save_sigmf
+
+        win = self.win
+        self.assertTrue(win._apply_preset_named("ACARS"))
+        path = _save_sigmf(self.path("air125.sigmf-data"), 125e6)
+        with self.open_dialog(path):
+            self.assertTrue(win._open_recording())
+        panel = win._decoder_panel
+        self.assertEqual((panel.selection(), panel.is_decoding()), ("ACARS", False))
+
+    def test_the_decoder_going_off_is_said(self):
+        self.open_air125()
+        self.assertEqual(
+            self.message(),
+            "Playing air125.sigmf-data (124.5–125.5 MHz) · ACARS decoder off. "
+            "Click a signal to tune to it; Space pauses.",
+        )
+
+    def test_once(self):
+        """(As every tune's note: the next tune's message says only its own.)"""
+        self.open_air125()
+        self.win._on_bookmark_tune(124.9e6, "Tower", "AM", "")
+        self.assertEqual(self.message(), "Tuned to Tower (AM)")
+
+
 # --------------------------------------------------------------------------- #
 # W-09: another playback speed is said once
 # --------------------------------------------------------------------------- #

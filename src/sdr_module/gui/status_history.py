@@ -7,6 +7,10 @@ the last 20 in a :class:`StatusHistory`; a click on the message area opens
 (warnings and errors in their colors), so a notice that vanished while you
 looked elsewhere ("Retuned while recording...") can still be read.
 Warnings and errors also go to Tools > Error History (the window logs them).
+
+A message too long for its place in the status bar (it keeps 220 px at
+1024 px with every chip shown) ends there in "…"; :class:`MessageOverflow`
+shows the whole of it just above the status bar while it lasts.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from collections import deque
 from typing import Any, Callable, Deque, List, NamedTuple, Optional
 
 try:
-    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtCore import QEvent, QPoint, Qt, QTimer
     from PyQt6.QtGui import QGuiApplication
     from PyQt6.QtWidgets import (
         QFrame,
@@ -33,10 +37,17 @@ except ImportError:  # pragma: no cover - no Qt
     HAS_PYQT6 = False
 
 if HAS_PYQT6:
-    from .themes import get_palette, set_role
+    from .themes import get_palette, set_role, set_tone
 
 #: How many messages are kept.
 CAPACITY = 20
+
+#: The whole message's panel: its gap to the status bar and the least room
+#: it keeps from the window's edges (px), and the least width it wraps a
+#: message in, should the message area sit far to the right.
+_OVERFLOW_GAP = 4
+_OVERFLOW_EDGE = 8
+_OVERFLOW_MIN_WIDTH = 360
 
 
 class StatusEntry(NamedTuple):
@@ -191,3 +202,165 @@ class StatusHistoryPopup(QFrame if HAS_PYQT6 else object):
         self.move(left, corner.y() - self.height() - 4)
         self.show()
         self.list.setFocus(Qt.FocusReason.PopupFocusReason)
+
+
+class MessageOverflow(QLabel if HAS_PYQT6 else object):
+    """The status bar's message in full, just above the status bar, while
+    a message too long for its place there shows (at 1024 px with REC,
+    AUDIO and the chips shown the message area keeps 220 px: "Stop
+    recording to change the sam…").
+
+    The status bar keeps its layout (the message still ends in "…" there)
+    and nothing else moves: this is a panel of the window laid over the
+    bottom of the plots and the right column, starting where the message
+    starts, wrapped to the window's width, in the message's tone. It shows
+    for as long as the message does; a click on it, or Esc in the window,
+    hides it until the next message, and so does a click on the message
+    area (the last 20 messages take its place). Being part of the window,
+    it is never over a dialog or another window. A message that fits shows
+    no panel: the status bar looks as it always did.
+
+    ``anchor`` is the status bar's message label: its ``text()`` is the
+    whole message and its ``is_elided()`` says whether it is drawn cut
+    short. The panel follows it as the window, the status bar and its
+    chips change size.
+    """
+
+    def __init__(self, window: Any, anchor: Any):
+        super().__init__(window)
+        self._anchor = anchor
+        self._message = ""
+        self._dismissed = False
+        self.setObjectName("statusMessageOverflow")
+        set_role(self, "status-overflow")
+        self.setTextFormat(Qt.TextFormat.PlainText)
+        self.setWordWrap(True)
+        self.setIndent(0)  # (a framed label indents its text by an "x")
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAccessibleName("Status message")
+        self.setToolTip(
+            "The status bar's message in full. Click (or press Esc) to hide "
+            f"it; click the message in the status bar for the last {CAPACITY}."
+        )
+        self.hide()
+        # Placed again once a resize has been dealt with (the message area
+        # cuts its text anew in its own resize event, after this one's).
+        self._place_timer = QTimer(self)
+        self._place_timer.setSingleShot(True)
+        self._place_timer.setInterval(0)
+        self._place_timer.timeout.connect(self.sync)
+        anchor.installEventFilter(self)
+        bar = anchor.parentWidget()
+        if bar is not None and bar is not window:
+            bar.installEventFilter(self)  # (the window's height moves it)
+
+    def message(self) -> str:
+        """The message shown (or held back), "" when none."""
+        return self._message
+
+    def show_message(self, text: str, tone: Optional[str] = None) -> None:
+        """The status bar now shows ``text`` in ``tone``: shown whole here
+        if the status bar cuts it. The same text again keeps a panel the
+        user hid hidden (it is still the message they hid)."""
+        text = str(text or "")
+        if text != self._message:
+            self._dismissed = False
+        self._message = text
+        self.setText(text)
+        self.setAccessibleDescription(text)
+        set_tone(self, tone)
+        self.sync()
+
+    def clear(self) -> None:
+        """The message is gone (its time is up)."""
+        self._message = ""
+        self._dismissed = False
+        self.setText("")
+        self.setAccessibleDescription("")
+        self.hide()
+
+    def dismiss(self) -> None:
+        """Hide it until the next message (a click, Esc)."""
+        if self._message:
+            self._dismissed = True
+        self.hide()
+
+    def wanted(self) -> bool:
+        """Whether the message is on and the status bar cuts it short."""
+        anchor = self._anchor
+        elided = getattr(anchor, "is_elided", None)
+        return bool(
+            self._message
+            and not self._dismissed
+            and anchor.isVisible()
+            and callable(elided)
+            and elided()
+        )
+
+    def sync(self) -> None:
+        """Show, place or hide it as the message and the status bar are."""
+        if not self.wanted():
+            self.hide()
+            return
+        self._place()
+        self.show()
+        self.raise_()
+
+    def _place(self) -> None:
+        """Just above the status bar, its text starting where the
+        message's text starts: as wide as the message (at least the message
+        area), wrapped to what the window has room for from there."""
+        window = self.parentWidget()
+        anchor = self._anchor
+        bar = anchor.parentWidget() or anchor
+        self.ensurePolished()
+        margins = self.contentsMargins()
+        # (Where the status bar draws the message's first letter.)
+        start = anchor.mapTo(window, QPoint(anchor.contentsRect().left(), 0))
+        start.setX(start.x() - margins.left())
+        bar_top = bar.mapTo(window, QPoint(0, 0)).y()
+        metrics = self.fontMetrics()
+        widest = max(
+            (metrics.horizontalAdvance(line) for line in self._message.splitlines()),
+            default=0,
+        )
+        # (+2: a line exactly as wide as the room might wrap its last word.)
+        wanted = widest + margins.left() + margins.right() + 2
+        width_room = max(1, window.width() - 2 * _OVERFLOW_EDGE)
+        from_start = window.width() - _OVERFLOW_EDGE - start.x()
+        room = min(width_room, max(from_start, _OVERFLOW_MIN_WIDTH))
+        width = min(max(wanted, anchor.width()), room)
+        right = window.width() - _OVERFLOW_EDGE - width
+        left = max(_OVERFLOW_EDGE, min(start.x(), right))
+        height = self.heightForWidth(width)
+        if height <= 0:  # pragma: no cover - a word-wrapped label has one
+            height = self.sizeHint().height()
+        self.setGeometry(left, bar_top - _OVERFLOW_GAP - height, width, height)
+
+    def eventFilter(self, obj: Any, event: Any) -> bool:  # noqa: N802 - Qt naming
+        if event.type() in (
+            QEvent.Type.Resize,
+            QEvent.Type.Move,
+            QEvent.Type.Show,
+            QEvent.Type.Hide,
+            QEvent.Type.FontChange,
+            QEvent.Type.StyleChange,
+        ) and (self._message or self.isVisible()):
+            self._place_timer.start()
+        return False
+
+    def changeEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
+        super().changeEvent(event)
+        # (A theme switch restyles it: its size may change.)
+        if event.type() in (QEvent.Type.FontChange, QEvent.Type.StyleChange):
+            if self._message:
+                self._place_timer.start()
+
+    def mousePressEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
+        event.accept()  # (not on to the window beneath)
+
+    def mouseReleaseEvent(self, event: Any) -> None:  # noqa: N802 - Qt naming
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.dismiss()
+        event.accept()

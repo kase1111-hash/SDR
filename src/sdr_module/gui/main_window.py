@@ -193,7 +193,7 @@ from .signal_panel import SignalPanel
 from .signal_tools import SignalTools
 from .spectrum_widget import SpectrumWidget, format_hz
 from .status_history import CAPACITY as STATUS_HISTORY_SIZE
-from .status_history import StatusHistory, StatusHistoryPopup
+from .status_history import MessageOverflow, StatusHistory, StatusHistoryPopup
 from .themes import (
     apply_theme,
     current_theme,
@@ -2218,6 +2218,10 @@ class _ElidedLabel(QLabel if HAS_PYQT6 else object):
     def text(self) -> str:
         return self._full_text
 
+    def is_elided(self) -> bool:
+        """Whether the text is drawn cut short (ending in "…")."""
+        return QLabel.text(self) != self._full_text
+
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt naming
         super().resizeEvent(event)
         self._elide()
@@ -4123,8 +4127,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
 
         # Transient messages (neutral, success or error), auto-clearing. A
         # long message ends in "…" instead of raising the window's minimum
-        # width; the full text is also in the tooltip. A click lists the
-        # last messages (they vanish after a few seconds).
+        # width; the whole of it shows just above the status bar meanwhile
+        # (_message_overflow) and is in the tooltip. A click lists the last
+        # messages (they vanish after a few seconds).
         self._status_history = StatusHistory()
         self._status_popup: Optional[StatusHistoryPopup] = None
         self._message_label = _ElidedLabel("")
@@ -4138,6 +4143,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # the name and the size chip shrink first.
         self._message_label.setMinimumWidth(_MESSAGE_MIN_WIDTH)
         statusbar.addWidget(self._message_label, 1)
+        # The whole of a message the status bar cuts short, above it while
+        # the message lasts; nothing moves (K-W1).
+        self._message_overflow = MessageOverflow(self, self._message_label)
         self._message_timer = QTimer(self)
         self._message_timer.setSingleShot(True)
         self._message_timer.timeout.connect(self._clear_status_message)
@@ -4437,7 +4445,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def keyPressEvent(self, event):
         """Space starts/stops receiving; Left/Right tune; [ and ] change the
         tuning step; Esc cancels typing in the Frequency field and returns
-        the focus to the plots.
+        the focus to the plots (and hides the whole of a long status
+        message shown above the status bar).
 
         These are handled here instead of as window-wide shortcuts, so they
         only act when the focused widget does not use the key itself: a
@@ -4450,6 +4459,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         key = event.key()
         mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
         if key == Qt.Key.Key_Escape and mods == Qt.KeyboardModifier.NoModifier:
+            overflow = self._own("_message_overflow")
+            if overflow is not None:
+                overflow.dismiss()
             if self._frequency_field().hasFocus():
                 # Esc cancels the edit (moving the focus would commit it).
                 self._control_panel._freq_input.cancel_edit()
@@ -4560,7 +4572,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._message_label.setToolTip(
             f"{message}\n\nClick for the last {STATUS_HISTORY_SIZE} messages."
         )
+        self._message_label.setAccessibleDescription(message)  # (screen readers)
         set_tone(self._message_label, tone)
+        overflow = self._own("_message_overflow")
+        if overflow is not None:  # (whole, should the status bar cut it)
+            overflow.show_message(message, tone)
         self._message_timer.start(max(500, int(duration_ms)))
         if history:
             self._status_history.add(message, tone)
@@ -4582,10 +4598,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._message_label.setToolTip(
             f"Click for the last {STATUS_HISTORY_SIZE} status messages."
         )
+        self._message_label.setAccessibleDescription("")
         set_tone(self._message_label, None)
+        overflow = self._own("_message_overflow")
+        if overflow is not None:
+            overflow.clear()
 
     def _show_status_history(self) -> None:
-        """A click on the message area: the last messages, newest first."""
+        """A click on the message area: the last messages, newest first
+        (over where the whole message showed: that goes)."""
+        overflow = self._own("_message_overflow")
+        if overflow is not None:
+            overflow.dismiss()
         popup = StatusHistoryPopup(
             self._status_history, self, open_error_history=self._show_error_history
         )

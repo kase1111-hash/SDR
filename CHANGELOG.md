@@ -152,9 +152,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line says in amber that the decoder misses part of the signal and that a
   lower sample rate (Receiver → Sample rate) helps, and the status bar says it
   once; both clear once the receiver has kept up for 3 s. While the app's own
-  Decode Recording, Convert Recording, Save Recording or Find Signals keeps
-  the computer busy, they (and the Audio button's Paused) name that job as
-  the cause instead.
+  Decode Recording, Convert Recording, Save Recording, Find Signals or
+  Transmit Text's Save Text Signal keeps the computer busy, they (and the
+  Audio button's Paused) name that job as the cause instead ("Save Text
+  Signal keeps this computer busy, so audio is paused meanwhile.").
 - The Decoder tab counts unread messages ("Decoder (12)"), and a status-bar
   chip ("ADS-B · 37 msgs"; "paused" with Decode unticked; "can't decode" in
   amber, the reason in its tooltip) opens it. The chip and the status line
@@ -272,8 +273,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   BPSK/QPSK/8PSK/16QAM overlay and its EVM (samples, not symbols).
 - Bursts logs the transmissions that come and go, with the bits in hex for
   keyed data and CSV export; the selected burst is outlined on the
-  waterfall, and while the computer can't keep up the page pauses logging and
-  says why.
+  waterfall, and while the computer can't keep up with the device the page
+  pauses logging and says why (a recording is read in full however slowly it
+  plays, so its bursts are still logged).
 - File → Find Signals in Recording... lists a file's signals; double-click one
   to play the recording from there.
 
@@ -712,8 +714,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clears the peak hold.
 - Waterfall noise keeps one brightness whatever a row covers: rows after a
   stall, rows of a 1 or 5 min history and a busy computer's rows no longer
-  look like a change in the band, and the rows after a moment when the
-  display fell behind no longer form a darker band.
+  look like a change in the band, and the rows drawn while the display falls
+  behind, however long that lasts, and those after it no longer form a darker
+  band (in the second receiver's waterfall too).
 - After Stop and Start, the waterfall's time axis labels the older rows too.
 - The waterfall's Color Levels menu checks the preset in use.
 - The Signal tab's Signals list lists stations, not pieces of them: it is
@@ -751,8 +754,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Apply Mode (it says when it copied).
 - Identify suggests an FM deviation that doesn't clip the station, so Apply
   Mode no longer leads straight to "FM audio is clipping" (it offered too
-  small a deviation for the demo's narrow FM calls and its pager); the card
-  also says how far the station's swing peaks.
+  small a deviation for the demo's narrow FM calls and its pager), and,
+  unless the band plan's own deviation fits the swing, no wider than that
+  needs: voice, which reaches its peak only now and then, gets the deviation
+  that holds that peak (an ordinary 2 m station, limited at about ±5 kHz, is
+  heard at 5 kHz), while a swing that stays near its peak, as a test tone's
+  does, gets 10 % to spare. The card also says how far the swing peaks and,
+  when the next narrower deviation is close to that peak and could clip,
+  says so ("The swing peaks at about ±4.9 kHz and stays near it: 5 kHz could
+  clip").
 - The Scope shows one EVM (the plot and the line under it disagreed), reads
   small levels on its axis ("2.8m", "506u" instead of "0.00"), and its Freeze
   button reads "Freeze" while frozen.
@@ -801,8 +811,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   POCSAG) show the Protocol column, so they don't read as the chosen
   protocol's, and the Protocol, Address and Time columns show their text in
   full.
-- Each sample-rate step too low for ADS-B adds one Error History entry, not
-  two (none while the decoder is paused).
+- A decoder that can't work at the sample rate (ADS-B below 2 MS/s) is listed
+  in Tools → Error History once for the device and once for a recording
+  playing at that rate, and again only after the rate or the decoder changes
+  (never while the decoder is paused): each rate step adds one entry, not
+  two, and opening and closing a recording at the device's rate again adds
+  none. The Decoder tab, its chip and the status bar's messages still say it
+  each time.
 - Clear also clears FLEX's "sends FLEX at 3200 bps" note.
 - While receiving, the Decoder's Off hint no longer asks you to press Start;
   with a recording open it says "press Play (Space)".
@@ -901,7 +916,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0.1–0.5×, 0.3× with 4× chosen), and a file read for the first time no
   longer counts as a computer that can't keep up; a 48 kHz recording no
   longer loses about 30 ms of audio each time the window is busy for a
-  moment.
+  moment. When a recording at 1× falls behind, the Audio button's tooltip
+  and the status bar give advice that fits it ("This computer can't process
+  the recording's 1 MS/s in real time right now, so audio is paused until it
+  catches up. Closing other programs may help."), instead of pointing to
+  Receiver → Sample rate, which can't change while a recording plays.
 - File → Close Recording keeps what going back turned off in its message
   ("Closed aprs2m.sigmf-data. Back to Demo Device (simulated signals).
   AX.25/APRS decoder off: tuned away from the APRS preset (144.390 MHz),
@@ -996,11 +1015,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer listed in Tools → Error History; a scan that breaks is listed as it
   is with the tab in view (not once more), and a receiver that returns no
   samples during a scan is listed whichever tab is shown.
-- A preset or bookmark tuned from another tab during a scan keeps its own
-  message, after "Scan stopped · " ("Scan stopped · ADS-B: 1090.000 MHz, I/Q,
-  2.4 MHz filter · ADS-B decoder on"), instead of the next frame replacing it
-  with "Scan stopped: you tuned to ..."; a tune that says nothing of its own
-  still gets that.
+- A preset, a bookmark or the Decoder's "Tune to …" chosen from another tab
+  during a scan keeps its own message, after "Scan stopped · " ("Scan
+  stopped · ADS-B: 1090.000 MHz, I/Q, 2.4 MHz filter · ADS-B decoder on"),
+  instead of the next frame replacing it with "Scan stopped: you tuned to
+  ...". Only the tune's own message is kept that way: a tune that says
+  nothing of its own, or one followed at once by another message (such as
+  "Saved the recording."), still gets "Scan stopped: you tuned to ...".
 - A range scan starting below 1.2 MHz (at 2.4 MS/s) measures each step where
   it planned it (its first step missed 150–235 kHz).
 - The Bookmarks tab's Add row keeps a name typed for a channel already
@@ -1084,9 +1105,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   range, colors, history, levels), or an unreadable window size or split
   gives that setting's default (or its nearest allowed value), and a recent
   frequency out of range is dropped, each logged once. An unreadable
-  transmit-confirmation setting asks again, and the second receiver's
-  unreadable spectrum settings are listed in Tools → Error History too (its
-  waterfall's are still dropped quietly).
+  transmit-confirmation setting asks again. The spectrum's and waterfall's
+  saved choices (in the main window and the second receiver), the Ham ID and
+  QRP settings and the radio tuner's presets, when they can't be read at all
+  or read as a list, a number or anything else the window doesn't save
+  there, give their defaults with one warning in Tools → Error History.
 - Damaged saved bookmarks no longer stop the app starting on every launch:
   an entry that isn't a bookmark is skipped, one whose frequency is unusable
   (not a number, too big, below zero) is listed at 0 Hz to edit or remove,

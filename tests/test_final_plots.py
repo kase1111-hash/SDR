@@ -437,6 +437,41 @@ class TestSignalsList(_SignalCase):
         self.assertEqual(self.freqs(), list(self.STATIONS))
 
 
+class TestIdentifyThroughDrops(_SignalCase):
+    """PLOTS-E2E-2: when the receiver drops samples every second or so, the
+    half seconds left whole may hear only noise (the remote's packets fell
+    in the gaps), and Identify said "Nothing identifiable ... Tune onto a
+    signal and try again", as if nothing were there, though seconds of the
+    signal had been lost."""
+
+    def run_with_drops(self, freq, drop_s):
+        self.listen(freq, ("None (I/Q)", None, "200 kHz"))
+        self.assertTrue(self.tools.identify())
+        dev = self.win._device
+        rate = self.win._device_sample_rate()
+        for _ in range(12):
+            if self.tools._identifier is None:
+                break
+            self.frames(0.6)  # (half a second whole: a take)
+            if drop_s:
+                dev._stream_pos += int(drop_s * rate)
+                dev.dropped_samples += int(drop_s * rate)
+        for job in [self.tools._ident_job] if self.tools._ident_job else []:
+            job.result(timeout=30)
+        self.frames(0.2)
+        self.assertIsNone(self.tools._identifier)
+        return self.panel.identify_status.text()
+
+    def test_nothing_heard_says_samples_were_lost(self):
+        status = self.run_with_drops(430.5e6, 0.5)  # (nothing there)
+        self.assertIn("dropped", status)
+        self.assertNotIn("Tune onto a signal", status)
+
+    def test_nothing_there_says_so(self):
+        status = self.run_with_drops(430.5e6, 0.0)
+        self.assertIn("Tune onto a signal", status)
+
+
 class TestBurstsPausedWithRows(_SignalCase):
     """While the display loop is behind, bursts are not logged (ROB-03):
     only an empty list said so; with bursts in it, it just stopped growing

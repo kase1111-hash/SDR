@@ -441,6 +441,17 @@ if HAS_PYQT6:
                 self._win._show_status_message(
                     f"{_mhz(best.tuned_hz)}: {best.summary()}", "info", 5000
                 )
+            elif self._ident_lost_s >= 0.5:
+                # (What it missed may have held the signal: say so, rather
+                # than that nothing is there.)
+                self.panel.set_identify_status(
+                    f"Nothing identifiable at {_mhz(best.tuned_hz)} in "
+                    f"{WAIT_S:.0f} s ({stamp}), but the receiver dropped "
+                    f"{self._ident_lost_s:.1f} s of the signal meanwhile (this "
+                    "computer can't keep up). Try again; a lower sample rate "
+                    "helps.",
+                    "warning",
+                )
             else:
                 self.panel.set_identify_status(
                     f"Nothing identifiable at {_mhz(best.tuned_hz)} in "

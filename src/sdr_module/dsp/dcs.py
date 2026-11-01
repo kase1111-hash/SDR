@@ -343,13 +343,19 @@ class DcsDetector:
     def _read_word(self, x: np.ndarray, words: int) -> Optional[int]:
         """The 23 bits of the last ``words`` words of ``x``, added up bit
         by bit, or None when they don't read as DCS."""
-        # Halfway between the two levels (two-means, from the median).
-        middle = float(np.median(x))
+        # Halfway between the two levels (two-means, from the median; on
+        # the sorted samples each round is a search and two sums).
+        ordered = np.sort(x)
+        sums = np.concatenate(([0.0], np.cumsum(ordered)))
+        n = ordered.size
+        middle = float(ordered[n // 2])
+        upper = lower = middle
         for _ in range(3):
-            high = x > middle
-            if high.all() or not high.any():
+            below = int(np.searchsorted(ordered, middle, side="right"))
+            if below == 0 or below == n:
                 return None
-            upper, lower = float(x[high].mean()), float(x[~high].mean())
+            lower = float(sums[below]) / below
+            upper = float(sums[n] - sums[below]) / (n - below)
             middle = 0.5 * (upper + lower)
         if not upper - lower > 1e-9:
             return None

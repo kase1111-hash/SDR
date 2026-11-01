@@ -456,7 +456,10 @@ class WindowScannerHost(ScannerHost):
         self._win._show_device_dialog(start_after=True)
 
     def scan_message(self, text: str, tone: Optional[str] = None) -> None:
-        self._win._show_status_message(text, tone, 4000)
+        # (Not logged: the scan lists its problems itself, a scan that broke
+        # or steps the receiver refused, whichever tab is shown. Its stop
+        # for something you did is a notice: Error History lists problems.)
+        self._win._show_status_message(text, tone, 4000, log=False)
 
     def scan_show_panel(self) -> None:
         self._win._show_panel("scanner", focus=True)

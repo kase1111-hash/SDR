@@ -857,7 +857,8 @@ _DATA_SCHEDULE: Dict[str, Tuple[float, Tuple[Tuple[float, Any], ...]]] = {
             ),
         ),
     ),
-    # FLEX 1600 frames: (frame number, ((capcode, text), ...)).
+    # FLEX frames: (frame number, ((capcode, text), ...)) at 1600 bps
+    # 2-level, or (frame number, {phase: pages}, (bits/s, FSK levels)).
     "flex": (
         22.0,
         (
@@ -865,7 +866,31 @@ _DATA_SCHEDULE: Dict[str, Tuple[float, Tuple[Tuple[float, Any], ...]]] = {
                 5.0,
                 (10, ((1234567, "SDR Module demo: FLEX 1600 page on 931.9375 MHz"),)),
             ),
+            (
+                9.0,
+                (
+                    12,
+                    {
+                        "A": ((1234567, "FLEX 3200 bps page, phase A"),),
+                        "C": ((1000456, "Phase C at 3200 bps: parking lot closed"),),
+                    },
+                    (3200, 2),
+                ),
+            ),
             (16.0, (16, ((1000123, "Second FLEX page: meeting moved to 3 PM"),))),
+            (
+                19.5,
+                (
+                    18,
+                    {
+                        "A": ((1234567, "FLEX 6400 bps page, phase A"),),
+                        "B": ((1000789, "Phase B: call the office"),),
+                        "C": ((1000456, "Phase C: the shipment arrived"),),
+                        "D": ((1000999, "Phase D: 4-level FSK at 3200 baud"),),
+                    },
+                    (6400, 4),
+                ),
+            ),
         ),
     ),
     # ACARS downlinks: (label, message number, text).
@@ -901,10 +926,12 @@ def _data_transmission(
         phase = enc.fm_phase(-enc.POCSAG_DEVIATION_HZ * levels, loop_rate)
         envelope = np.ones(len(phase))
     elif kind == "flex":
-        frame, pages = sent
-        bits = enc.flex_frame_bits(pages, 0, frame, bit_sync_bits=96)
-        levels = enc.bit_levels(bits, loop_rate, 1600)
-        phase = enc.fm_phase(enc.FLEX_DEVIATION_HZ * levels, loop_rate)
+        frame, pages, *more = sent
+        speed = more[0] if more else (1600, 2)
+        hz = enc.flex_frequency(
+            pages, loop_rate, 0, frame, bit_sync_bits=96, speed=speed
+        )
+        phase = enc.fm_phase(hz, loop_rate)
         envelope = np.ones(len(phase))
     else:  # acars
         label, number, text = sent
@@ -1138,6 +1165,18 @@ _DRIFT_HZ = 2.5e3
 _DRIFT_PERIOD_S = 40.0  # a whole number of _TONE_LOOP_S
 _DEMO_SIGNALS = _DEMO_SIGNALS + ((438.5e6, "drift", -50.0, None),)
 
+# --- K-A3: a repeater with a DCS code (Audio > Tone squelch, Tone heard) ---
+# A 70 cm repeater output sending the same voice-like narrow FM with DCS
+# code 023 (normal) under it, 8 s on in every 12. Its loop is a whole
+# number of DCS words (28, about 4.8 s), so it joins seamlessly. Appended,
+# so the other stations keep their seeds.
+_DEMO_DCS_HZ = 442.1e6
+_DEMO_DCS_CODE = 23
+_DEMO_DCS_DEVIATION_HZ = 750.0  # 15 % of 5 kHz, as radios send it
+_DEMO_DCS_WORDS = 28
+_DEMO_SIGNALS = _DEMO_SIGNALS + ((_DEMO_DCS_HZ, "dcs", -46.0, (12.0, 8.0)),)
+# --- end K-A3 ---
+
 
 def _ook_units(code: int, bits: int = 24) -> List[Tuple[int, int]]:
     """(on units, off units) of one EV1527 frame."""
@@ -1232,9 +1271,15 @@ _EMPHASIS_TAU_S = 75e-6
 # because every loop is periodic.
 _LOOP_RATE_HZ = 48e3
 _TONE_LOOP_S = 4.0  # loops of tones (their pitch sweeps once per loop)
-_LOOP_CACHE_SIZE = 24
+_LOOP_CACHE_SIZE = 64  # (at most: the loops of _LOOP_RATES sample rates)
 _LOOP_CACHE: Dict[tuple, Any] = {}
 _LOOP_LOCK = threading.Lock()
+# Loops (and the SSTV transmission) are kept for the sample rates of this
+# many demo devices running at once, the rates used last: the main
+# window's and a second receiver's, or a wideband scan's two. (One rate
+# needs about 22 loops, 30 MB; two devices at two rates rebuilt them, the
+# SSTV transmission at every read, when one rate's worth was kept.)
+_LOOP_RATES = 2
 _RAMPS: Dict[int, np.ndarray] = {}
 
 # Complex white noise (unit variance per component) that every demo device
@@ -1368,6 +1413,20 @@ def _fm_phase(deviation_hz: np.ndarray, loop_rate: float) -> np.ndarray:
     return phase - np.mean(phase)
 
 
+def _half_sample_ahead(values: np.ndarray) -> np.ndarray:
+    """One loop of ``values`` half a loop sample early (exactly: by FFT,
+    around the loop). The program's FM phase (:func:`_fm_phase`, a running
+    sum) holds each frequency sample over the interval before it once read
+    back by linear interpolation: half a sample early. An amplitude loop
+    read the same way (the stereo difference signal) is on time, so it is
+    moved as far, or left and right blur into each other (14 degrees apart
+    at 3.7 kHz: the right channel kept a tone 18 dB down instead of none)."""
+    values = np.asarray(values, dtype=float)
+    spectrum = np.fft.rfft(values)
+    spectrum *= np.exp(1j * np.pi * np.fft.rfftfreq(len(values)))
+    return np.fft.irfft(spectrum, len(values))
+
+
 def _midi_hz(note: int) -> float:
     return 440.0 * 2.0 ** ((note - 69) / 12.0)
 
@@ -1489,15 +1548,26 @@ def _build_loops(kind: str, variant: Any, rate: float):
             mono = (left + right) * (_PROGRAM_SHARE / 2)
             diff = (left - right) * (_PROGRAM_SHARE / 2)
         else:
-            # Three tones for the program and a 2.5 kHz L-R tone.
+            # Three tones for the program; the 3.7 kHz one is on the left
+            # only (L-R carries it as L+R does: twice it on the left, none
+            # on the right), so stereo is heard (and tested) here too.
             factor, loop_rate, t = _loop_timebase(rate, _TONE_LOOP_S)
             twist = variant * 2.1
             mono = 0.30 * _swept_tone(1.5e3, 400.0, t, twist)
-            mono += 0.18 * _tone(3.7e3, t, twist)
+            left_only = 0.18 * _tone(3.7e3, t, twist)
+            mono += left_only
             mono += 0.12 * _swept_tone(6.9e3, -1e3, t, twist)
-            diff = 0.16 * _tone(2.5e3, t)
-        # L-R rides on 2 x pilot: its phase is S(t) sin(2 theta) * dev / 38k.
-        diff *= _WFM_DEVIATION_HZ / (2 * _PILOT_HZ)
+            diff = left_only
+        # L-R rides on the pilot's second harmonic (K-S1). Its phase term is
+        # S(t) cos(2 theta) * dev / 38k (theta: the pilot's phase term's
+        # angle, see _stereo_terms), so its frequency is -S(t) sin(2 theta)
+        # * dev (plus a quadrature remainder from S's own slope, which a
+        # receiver's synchronous detector ignores): with the pilot's
+        # frequency cos(theta) = sin(phi), phi = theta + 90 degrees, that is
+        # S(t) sin(2 phi), as the standard sends it (both crossing zero
+        # upward together). Sent as sin(2 theta), L-R was in quadrature with
+        # that carrier and a stereo decoder heard none of it.
+        diff = _half_sample_ahead(diff) * (_WFM_DEVIATION_HZ / (2 * _PILOT_HZ))
         return (
             _Loop(_fm_phase(_WFM_DEVIATION_HZ * mono.astype(float), loop_rate), factor),
             _Loop(diff, factor),
@@ -1517,6 +1587,24 @@ def _build_loops(kind: str, variant: Any, rate: float):
         deviation = 2.2e3 * _swept_tone(820.0, 200.0, t, twist)
         deviation += 1.2e3 * _swept_tone(1650.0, -250.0, t, twist)
         deviation += _DEMO_CTCSS_DEVIATION_HZ * _tone(_DEMO_CTCSS_HZ, t)
+        return _Loop(_fm_phase(deviation, loop_rate), factor)
+    if kind == "dcs":
+        # (K-A3) The same voice-like FM plus a DCS code: the loop holds a
+        # whole number of words, at a bit rate within 1e-5 of 134.4 bit/s.
+        from ..dsp.dcs import DCS_BIT_RATE, dcs_waveform
+
+        bits = _DEMO_DCS_WORDS * 23
+        factor, loop_rate, t = _loop_timebase(rate, bits / DCS_BIT_RATE)
+        twist = variant * 2.1
+        deviation = 2.2e3 * _swept_tone(820.0, 200.0, t, twist)
+        deviation += 1.2e3 * _swept_tone(1650.0, -250.0, t, twist)
+        code = dcs_waveform(
+            _DEMO_DCS_CODE,
+            rate=loop_rate,
+            samples=len(t),
+            bit_rate=bits * loop_rate / len(t),
+        )
+        deviation += _DEMO_DCS_DEVIATION_HZ * code
         return _Loop(_fm_phase(deviation, loop_rate), factor)
     if kind == "amb":
         # (T7) AM broadcast: the demo tune (mono, as heard) as the envelope,
@@ -1581,13 +1669,31 @@ def _loops(kind: str, seed: int, rate: float):
     key = (kind, variant, float(rate))
     # The scanner reads from its own thread.
     with _LOOP_LOCK:
-        loops = _LOOP_CACHE.get(key)
+        loops = _LOOP_CACHE.pop(key, None)
         if loops is None:
             loops = _build_loops(kind, variant, rate)
-            while len(_LOOP_CACHE) >= _LOOP_CACHE_SIZE:
-                _LOOP_CACHE.pop(next(iter(_LOOP_CACHE)))
             _LOOP_CACHE[key] = loops
+            _keep_recent_rates(_LOOP_CACHE, lambda cached: cached[2])
+            while len(_LOOP_CACHE) > _LOOP_CACHE_SIZE:
+                _LOOP_CACHE.pop(next(iter(_LOOP_CACHE)))
+        else:
+            _LOOP_CACHE[key] = loops  # (the ones used last go last)
     return loops
+
+
+def _keep_recent_rates(cache: Dict[Any, Any], rate_of: Callable[[Any], float]) -> None:
+    """Drop what ``cache`` holds for sample rates other than the
+    ``_LOOP_RATES`` used last (its entries are in the order they were last
+    used; lock held)."""
+    recent: List[float] = []
+    for key in reversed(list(cache)):
+        rate = rate_of(key)
+        if rate not in recent:
+            recent.append(rate)
+            if len(recent) == _LOOP_RATES:
+                break
+    for key in [k for k in cache if rate_of(k) not in recent]:
+        del cache[key]
 
 
 def _sstv_transmission(rate: float) -> Tuple[Any, int]:
@@ -1601,7 +1707,9 @@ def _sstv_transmission(rate: float) -> Tuple[Any, int]:
     """
     key = float(rate)
     with _LOOP_LOCK:
-        cached = _SSTV_CACHE.get(key)
+        cached = _SSTV_CACHE.pop(key, None)
+        if cached is not None:
+            _SSTV_CACHE[key] = cached  # (the rate used last goes last)
     if cached is not None:
         return cached
     from ..ham.sstv import find_mode
@@ -1618,8 +1726,8 @@ def _sstv_transmission(rate: float) -> Tuple[Any, int]:
     length = (len(audio) - tail // 2) * factor
     cached = (_Loop(phase, factor), length)
     with _LOOP_LOCK:
-        _SSTV_CACHE.clear()  # one device rate at a time
         _SSTV_CACHE[key] = cached
+        _keep_recent_rates(_SSTV_CACHE, float)
     return cached
 
 
@@ -1982,7 +2090,8 @@ class MockDevice:
     of a realistic noise floor. Signals move across
     the display as you tune, so click-to-tune and the frequency scanner
     behave as they would with real hardware. A 2 m repeater on 145.290 MHz
-    sends a 100.0 Hz CTCSS tone (Audio > Tone squelch shows it). The AM
+    sends a 100.0 Hz CTCSS tone (Audio > Tone squelch shows it), and a
+    70 cm repeater on 442.100 MHz DCS code 023 (DCS 023 N). The AM
     band has a broadcast station on each of the radio tuner's six AM presets
     (660, 770, 880, 1010, 1050 and 1260 kHz) playing the demo tune.
     Raising the gain lifts signals and noise together and, as on a
@@ -2003,9 +2112,11 @@ class MockDevice:
     (KLM1023, ICAO 4840D6: identification, position, velocity and a squawk
     reply) that the ADS-B decoder decodes, among weaker replies from other
     aircraft that it drops. The Decoder panel's other protocols have real
-    traffic too (see _DATA_SCHEDULE), every 8 to 13 s: APRS AFSK1200
-    position reports on 144.390 MHz, POCSAG 1200 pages on 152.240 MHz, FLEX
-    1600 pages on 931.9375 MHz and ACARS messages on 131.550 MHz.
+    traffic too (see _DATA_SCHEDULE): APRS AFSK1200 position reports on
+    144.390 MHz every 8 s, POCSAG 1200 pages on 152.240 MHz every 10 s,
+    FLEX pages on 931.9375 MHz every 3.5 to 7.5 s (in turn at 1600, 3200,
+    1600 and 6400 bps, the faster ones on several phases) and ACARS
+    messages on 131.550 MHz every 13 s.
 
     For the Signal tab, a remote control on 433.920 MHz (the EV1527 kind:
     on/off keyed, pulse width modulated) sends its code eight times every
@@ -2240,8 +2351,9 @@ class MockDevice:
     def _add_signal(self, out, kind, offset, amp, seed, rate, pos, stereo) -> None:
         """Add one signal to ``out`` (starting at stream position ``pos``).
 
-        ``stereo`` gives the broadcast FM pilot's phase term, sin(2 theta)
-        and sin(3 theta) (theta: the pilot's phase) for the same samples.
+        ``stereo`` gives the broadcast FM pilot's phase term, cos(2 theta)
+        (the L-R subcarrier's) and sin(3 theta) (RDS's), theta the pilot's
+        phase, for the same samples (see _stereo_terms).
         """
         n = len(out)
         if kind == "sstv":
@@ -2285,11 +2397,11 @@ class MockDevice:
         phase = self._phase(offset, rate, pos, n)
         if kind == "wfm":
             program, subcarrier = loops
-            pilot, sin2, sin3 = stereo
+            pilot, cos2, sin3 = stereo
             phase += program.read(pos, n)
             phase += pilot
             diff = subcarrier.read(pos, n)
-            diff *= sin2
+            diff *= cos2
             phase += diff
             if seed == _MUSIC_SEED:
                 # (T6) RDS on the 57 kHz subcarrier, locked to the pilot.
@@ -2327,21 +2439,23 @@ class MockDevice:
             done += count
 
     def _stereo_terms(self, rate: float, pos: int, n: int):
-        """Broadcast FM pilot phase, sin(2 theta) and sin(3 theta), theta
+        """Broadcast FM pilot phase, cos(2 theta) and sin(3 theta), theta
         the pilot's phase, shared by every FM station (they are locked to
-        the stream). The RDS station's data rides on sin(3 theta)."""
+        the stream). L-R rides on cos(2 theta) (see _build_loops), the RDS
+        station's data on sin(3 theta)."""
         theta = self._phase(_PILOT_HZ, rate, pos, n)
         sin1 = np.sin(theta)
-        sin2 = np.cos(theta)
-        sin2 *= sin1
-        sin2 *= 2.0
-        # sin(3 theta) = sin(theta) * (3 - 4 sin^2(theta))
-        sin3 = sin1 * sin1
-        sin3 *= -4.0
-        sin3 += 3.0
+        # cos(2 theta) = 1 - 2 sin^2(theta)
+        cos2 = sin1 * sin1
+        cos2 *= -2.0
+        cos2 += 1.0
+        # sin(3 theta) = sin(theta) * (3 - 4 sin^2(theta)) = sin(theta) *
+        # (1 + 2 cos(2 theta))
+        sin3 = cos2 * 2.0
+        sin3 += 1.0
         sin3 *= sin1
         sin1 *= _PILOT_SHARE * _WFM_DEVIATION_HZ / _PILOT_HZ
-        return sin1, sin2, sin3
+        return sin1, cos2, sin3
 
     def _noise(self, n: int, sigma: float) -> np.ndarray:
         """``n`` samples of the noise floor (complex64)."""

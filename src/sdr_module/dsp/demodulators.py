@@ -8,7 +8,7 @@ Supports analog and digital modulation types:
 
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -1312,6 +1312,8 @@ class CWDemodulator(Demodulator):
         self._keyer = KeyingDetector(sample_rate)
         self._morse = MorseDecoder(sample_rate, wpm=wpm)
         self._decoded_text = ""
+        self._last_keying: Optional[np.ndarray] = None
+        self._last_steady: Optional[np.ndarray] = None
 
     @property
     def bfo_frequency(self) -> float:
@@ -1407,7 +1409,10 @@ class CWDemodulator(Demodulator):
         Returns:
             Binary keying signal (1 = key down, 0 = key up)
         """
-        return self._keyer.process(np.asarray(samples)).astype(np.float32)
+        keying = self._keyer.process(np.asarray(samples)).astype(np.float32)
+        # (decode_morse uses the envelope's steadiness with this keying)
+        self._last_keying, self._last_steady = keying, self._keyer.steady
+        return keying
 
     def analyze_timing(self, keying: np.ndarray) -> list:
         """
@@ -1459,7 +1464,8 @@ class CWDemodulator(Demodulator):
             newline after a line ends on a long pause or carrier)
         """
         before = len(self._morse.text)
-        self._morse.process(np.asarray(keying))
+        steady = self._last_steady if keying is self._last_keying else None
+        self._morse.process(np.asarray(keying), steady)
         decoded = self._morse.text[before:]
         self._decoded_text += decoded
         return decoded

@@ -184,12 +184,16 @@ class _HardwareCase(_WindowTestCase):
 
     def run_frames(self, frames, per_frame=5):
         """``frames`` display frames, the driver queueing ``per_frame``
-        transfers before each (20 MS/s at 30 frames a second)."""
+        transfers before each (20 MS/s at 30 frames a second). A take's
+        writer thread has written each frame's samples before the next
+        frame: the disk keeps up with the fake clock's time (the frames run
+        faster than real time; K-P1)."""
         for _ in range(frames):
             self.dev.deliver(per_frame)
             tick = self.clock.now
             self.win._update_display()
             self.clock.now = max(self.clock.now, tick + 0.033)  # the timer
+            self.win._samples_buffer.flush()
 
     def recorded_transfers(self):
         data = np.concatenate(list(self.win._samples_buffer))

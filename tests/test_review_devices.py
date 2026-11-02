@@ -812,14 +812,16 @@ class TestDev7SecondReceiverLiveRate(_SecondDriverCase):
 
             setattr(dev, name, spy)
         processed = []
-        real_process = rx._process
+        # (A display frame hands its samples to the DSP worker through
+        # _feed, K-P2.)
+        real_feed = rx._feed
 
-        def process(samples):
+        def feed(samples):
             old = np.allclose(samples[:4], (self.OLD + 1j * self.OLD) / 128.0)
             processed.append(("old" if old else "new", rx._rate()))
-            return real_process(samples)
+            return real_feed(samples)
 
-        rx._process = process
+        rx._feed = feed
         self.choose_rate(8e6)
         self.assertEqual(
             calls, ["stop_rx", "set_sample_rate", "discard_queued_samples", "start_rx"]

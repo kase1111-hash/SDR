@@ -15,12 +15,15 @@ import math
 import re
 import time
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from fractions import Fraction
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
+
+from . import mode_s
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +149,13 @@ class BitSlicer:
         self._gain = float(gain)
         self.reset()
 
+    @property
+    def length(self) -> int:
+        """Samples added up in each decision's value (1 without
+        ``integrate``): a DC of d in the input moves a value by d times
+        this."""
+        return self._length
+
     def reset(self) -> None:
         """Forget the stream."""
         self._history = np.zeros(self._length - 1, dtype=np.float64)
@@ -158,6 +168,7 @@ class BitSlicer:
         self._t = self.sps - 1.0
         self._adjusted = False
         self._carried: List[float] = []
+        self._consumed = 0  # samples processed since the reset
 
     def process(self, samples: Any) -> List[int]:
         """Bits (0/1) decided in ``samples``."""
@@ -166,10 +177,18 @@ class BitSlicer:
     def process_values(self, samples: Any) -> List[float]:
         """The filtered signal at each decision in ``samples`` (positive:
         1), for a decoder that wants soft decisions."""
+        return self.process_timed(samples)[0]
+
+    def process_timed(self, samples: Any) -> Tuple[List[float], List[float]]:
+        """:meth:`process_values` and where each decision was taken: the
+        (fractional) index of the last sample of its symbol, counted from
+        the first sample processed since the reset."""
         x = _as_real(samples)
         n = len(x)
+        consumed = self._consumed
+        self._consumed += n
         if n == 0:
-            return []
+            return [], []
         length = self._length
         if length > 1:
             buf = np.concatenate((self._history, x))
@@ -194,6 +213,7 @@ class BitSlicer:
             crossings = crossings + (idx - 1 + a / (a - b)).tolist()
 
         values: List[float] = []
+        times: List[float] = []
         t = self._t
         adjusted = self._adjusted
         sps = self.sps
@@ -219,12 +239,13 @@ class BitSlicer:
             frac = at - i
             value = yy[i] if frac == 0.0 else yy[i] + frac * (yy[i + 1] - yy[i])
             values.append(float(value))
+            times.append(consumed + t)
             t += sps
             adjusted = False
         self._t = t - n
         self._adjusted = adjusted
         self._carried = [c - n for c in crossings[ci:]]
-        return values
+        return values, times
 
 
 def _bch_mod(value: int, top: int) -> int:
@@ -2194,11 +2215,16 @@ class ADSBDecoder(ProtocolDecoder):
     - Anything else (other formats, failed checks) is dropped, not returned.
 
     Features:
-    - Mode S preamble detection (dump1090's pulse/quiet test) on the
-      magnitude signal in 0.5 us slots. Except at exactly 2 MS/s the slots
-      are read at 4 or 5 phases (every 0.1-0.125 us), so a reply decodes
-      wherever it starts between two samples; the best-aligned phase of
-      each reply is demodulated
+    - Below 2.5 MS/s (a sample lasts 0.8 to 1 chip, so most samples mix two
+      chips) the samples are read as what they are: each reply's start
+      time, pulse level and noise floor are fitted from its preamble and
+      its bits found by a Viterbi search over the samples' chip mixtures
+      (:class:`~sdr_module.dsp.mode_s.ModeSDemodulator`), so a reply
+      decodes wherever it starts between two samples, at 2.048 MS/s too
+    - From 2.5 MS/s, Mode S preamble detection (dump1090's pulse/quiet
+      test) on the magnitude signal in 0.5 us slots, read at 4 or 5 phases
+      (every 0.1-0.125 us), so a reply decodes wherever it starts between
+      two samples; the best-aligned phase of each reply is demodulated
     - Frames that straddle two ``decode()`` calls are still found
     - Aircraft identification (callsign)
     - Airborne position decoding (CPR)
@@ -2286,6 +2312,12 @@ class ADSBDecoder(ProtocolDecoder):
             )
         self._ratio = sample_rate / self.WORK_RATE
         self._plan_slots()
+        # 2 to 2.5 MS/s: the samples are read as chip mixtures (see above).
+        self._fine: Optional[mode_s.ModeSDemodulator] = (
+            mode_s.ModeSDemodulator(sample_rate)
+            if sample_rate < mode_s.MAX_RATE
+            else None
+        )
 
         # Generate CRC table
         if not ADSBDecoder.CRC_TABLE:
@@ -2829,6 +2861,10 @@ class ADSBDecoder(ProtocolDecoder):
     def _scan(self, mag: np.ndarray) -> None:
         """Find and decode the replies in a block of magnitudes (the
         stream's next samples) into ``_messages``."""
+        if self._fine is not None:
+            self._forget_old_aircraft()
+            self._fine.feed(mag, self._take_first, self._known_icao.keys)
+            return
         work = self._to_work_rate(mag)
         if len(self._tail):
             work = np.concatenate((self._tail, work))
@@ -2877,6 +2913,17 @@ class ADSBDecoder(ProtocolDecoder):
 
     _FORMATS = np.array(_SHORT_FORMATS + _LONG_FORMATS)
 
+    def _take_first(self, frames: Sequence[bytes]) -> int:
+        """The first of a reply's possible ``frames`` (the likeliest
+        first) that passes the checks goes into ``_messages``; its bits, or
+        0 when none passes."""
+        for frame in frames:
+            msg = self._parse_frame(frame)
+            if msg is not None:
+                self._messages.append(msg)
+                return 8 * len(msg.raw_bits)
+        return 0
+
     @staticmethod
     def _clearest(groups: np.ndarray, clarity: np.ndarray) -> np.ndarray:
         """Index of the clearest candidate of each group (consecutive runs
@@ -2902,6 +2949,8 @@ class ADSBDecoder(ProtocolDecoder):
         self._rest = np.zeros(0, dtype=np.float32)
         self._tail = np.zeros(0, dtype=np.float32)
         self._skip = 0
+        if self._fine is not None:
+            self._fine.reset()
 
 
 # ============================================================================
@@ -2919,7 +2968,7 @@ class FLEXMessage(DecodedMessage):
     phase: str = ""  # Phase (A, B, C, D)
     message_type: str = ""  # "alpha", "numeric", "tone", "secure"
     content: str = ""
-    baud_rate: int = 1600
+    baud_rate: int = 1600  # The frame's data speed, bits/s (1600, 3200, 6400)
 
 
 class FLEXDecoder(ProtocolDecoder):
@@ -2930,12 +2979,21 @@ class FLEXDecoder(ProtocolDecoder):
     1.875 s frame starts with a 1600 bps header: bit sync, a 64-bit sync
     pattern naming the data speed (a 16-bit code, the marker 0xA6C6AAAA
     and the code inverted) and the frame information word (FIW: cycle and
-    frame number). 11 blocks of data follow, each 8 codewords interleaved
-    bit by bit; at 1600 bps 2-level FSK they form one phase of 88
-    codewords: the block information word (BIW), address words, vector
-    words (page type and where its message words are) and message words.
-    Codewords are BCH(31,21) with a parity bit, sent least significant
-    bit first.
+    frame number). Then, at the data speed's symbol rate, 25 ms of second
+    sync and 1.76 s of data: 11 blocks per phase, each 8 codewords
+    interleaved bit by bit, so that a phase holds 88 codewords: the block
+    information word (BIW), address words, vector words (page type and
+    where its message words are) and message words. Codewords are
+    BCH(31,21) with a parity bit, sent least significant bit first.
+
+    The speeds (ARIB STD-43A, as multimon-ng reads FLEX): 1600 bps 2-level
+    FSK carries phase A; 3200 bps 2-level sends 3200 symbols/s, phases A
+    and C on alternate symbols; 3200 bps 4-level sends 1600 symbols/s, each
+    carrying a bit of phases A and B (Gray coded: the A bit is the sign of
+    the deviation, the B bit is set on the inner levels, +/-1600 Hz against
+    +/-4800 Hz); 6400 bps 4-level sends 3200 symbols/s, A and B on one
+    symbol and C and D on the next. 4-level symbols are told apart at two
+    thirds of the outer level, measured on the frame's own header.
 
     Input is an FM-discriminator baseband (either polarity) at any sample
     rate; consecutive ``decode()`` calls are one continuous stream.
@@ -2946,8 +3004,14 @@ class FLEXDecoder(ProtocolDecoder):
     - BCH(31,21) correction of up to two bit errors per codeword
     - Short and long addresses (capcodes)
     - Alphanumeric, numeric and tone-only pages
-    - 1600 bps 2-level frames (the other speeds are recognised and counted
-      in ``unsupported_frames``, not decoded)
+    - 1600, 3200 and 6400 bps frames, every phase (a frame at 3200
+      symbols/s needs 3 samples a symbol, 9.6 kS/s: below that it is
+      counted in ``unsupported_frames``, not decoded)
+    - The input's DC (a mistuned carrier) followed between frames and held
+      through each one, so frames sent back to back decode (see _DC_BITS)
+    - Damaged structure gives no pages: a BIW failing its checksum or
+      pointing past the phase (the frame counts as failed), a message
+      running off the phase (as multimon-ng reads FLEX)
     """
 
     # FLEX constants: the marker in the middle of the 64-bit sync pattern
@@ -2994,6 +3058,22 @@ class FLEXDecoder(ProtocolDecoder):
     _NUMERIC_CHARS = "0123456789 U -]["
 
     _SYNC1, _FIW, _SYNC2, _DATA = range(4)
+    _SECOND_SYNC_S = 0.025
+    # Header bits (sync pattern, 16 bits, FIW) all at the outer levels: the
+    # level and centre 4-level symbols are judged against.
+    _HEADER_BITS = 112
+    _MIN_SAMPLES_PER_SYMBOL = 3.0
+    # The discriminator's DC (a mistuned carrier) is followed while no
+    # frame is read, as the mean of the last 32 bits' samples (a header
+    # starts with 32 bits of bit sync), and held through each frame at the
+    # mean of its sync pattern (as many ones as zeros), as multimon-ng
+    # reads FLEX: the data's own average (idle words are all ones) must
+    # move neither its 4-level decisions nor the next frame's header.
+    _DC_BITS = 32
+    # The stream is sliced in steps of 16 bits, counted from its start:
+    # the DC is held from the step after the one a sync pattern ended in
+    # (the FIW starts 16 bits after the pattern), whatever the block sizes.
+    _STEP_BITS = 16
 
     def __init__(
         self, sample_rate: float, baud_rate: int = 1600, matched_filter: bool = True
@@ -3017,7 +3097,11 @@ class FLEXDecoder(ProtocolDecoder):
                 f"{baud_rate} baud; need at least {baud_rate} Hz"
             )
         # The frame header is always 1600 bps 2-level FSK.
+        self._matched_filter = matched_filter
         self._slicer = BitSlicer(sample_rate, 1600, matched_filter)
+        self._fast_ok = sample_rate / 3200.0 >= self._MIN_SAMPLES_PER_SYMBOL
+        self._step = max(1, int(round(self._STEP_BITS * sample_rate / 1600.0)))
+        self._dc_width = max(1, int(round(self._DC_BITS * sample_rate / 1600.0)))
 
         # State
         self._state = self._SYNC1
@@ -3028,6 +3112,9 @@ class FLEXDecoder(ProtocolDecoder):
         self._phase = "A"
         self._cycle = 0
         self._frame_num = 0
+        self._speed: Tuple[int, int] = (1600, 2)
+        self._symbol_rate = 1600
+        self._init_stream()
 
         # Messages
         self._messages: List[FLEXMessage] = []
@@ -3041,6 +3128,28 @@ class FLEXDecoder(ProtocolDecoder):
     def baud_rate(self) -> int:
         """Get baud rate."""
         return self._baud_rate
+
+    def _init_stream(self) -> None:
+        """Where the stream is: decisions waiting for the state machine
+        (``(sample index, value)``, the 1600 symbols/s slicer's and, while
+        a frame at 3200 symbols/s is read, the fast one's), the last header
+        values, the stream's last samples (to start the fast slicer on)
+        and its DC."""
+        self._consumed = 0
+        # (time, value, value without the DC removal) of each decision.
+        self._slow: Deque[Tuple[float, float, float]] = deque()
+        self._fast_values: Deque[Tuple[float, float]] = deque()
+        self._fast: Optional[BitSlicer] = None
+        self._fast_origin = 0
+        self._header: Deque[Tuple[float, float]] = deque(maxlen=self._HEADER_BITS)
+        self._recent = np.zeros(0)
+        self._values: List[float] = []
+        self._fiw_at = 0.0
+        self._sync_at = 0.0
+        self._level = (0.0, 1.0)  # (centre, outer level) for 4-level symbols
+        self._dc_history = np.zeros(0)  # the last samples searched
+        self._dc_hold = 0.0  # the DC through the frame being read
+        self._step_follows = True  # this step follows the DC (else holds it)
 
     def _bits_to_word(self, bits: Sequence[int]) -> int:
         """Convert 32 bits to word."""
@@ -3165,7 +3274,14 @@ class FLEXDecoder(ProtocolDecoder):
             return messages  # an idle frame
         first_address = ((biw >> 8) & 0x3) + 1
         first_vector = (biw >> 10) & 0x3F
-        if first_vector <= first_address - 1 or first_vector >= self.WORDS_PER_PHASE:
+        # A BIW that passes BCH but not its checksum was "corrected" into
+        # another word: what it points to would be read as pages. So would
+        # a vector field (a vector per address word) running off the phase.
+        if (
+            not self._checksum_ok(biw)
+            or first_vector < first_address
+            or 2 * first_vector - first_address > self.WORDS_PER_PHASE
+        ):
             self.frames_failed += 1
             return messages
 
@@ -3195,12 +3311,12 @@ class FLEXDecoder(ProtocolDecoder):
                 if long_address:
                     header = vector_index + 1
                     used.append(header)
-                    words = list(range(start, min(start + length - 1, 88)))
+                    words = list(range(start, start + length - 1))
                 else:
-                    words = list(range(start + 1, min(start + length, 88)))
+                    words = list(range(start + 1, start + length))
                     used.append(header)
-                if header >= self.WORDS_PER_PHASE:
-                    continue
+                if max([header] + words) >= self.WORDS_PER_PHASE:
+                    continue  # (a damaged vector: the message runs off the phase)
                 fragment = (values[header] >> 11) & 0x3
                 used += words
                 content = self._decode_alpha(
@@ -3213,7 +3329,8 @@ class FLEXDecoder(ProtocolDecoder):
                     words = [vector_index + 1] + list(range(start, start + count - 1))
                 else:
                     words = list(range(start, start + count))
-                words = [w for w in words if w < self.WORDS_PER_PHASE]
+                if max(words) >= self.WORDS_PER_PHASE:
+                    continue  # (as for alpha pages)
                 used += words
                 skip = 10 if (vector >> 4) & 0x7 == 7 else 2
                 content = self._decode_numeric([values[w] for w in words], skip)
@@ -3236,7 +3353,7 @@ class FLEXDecoder(ProtocolDecoder):
                 phase=self._phase,
                 message_type=page_type,
                 content=content,
-                baud_rate=1600,
+                baud_rate=self._speed[0],
             )
             messages.append(msg)
         return messages
@@ -3281,12 +3398,88 @@ class FLEXDecoder(ProtocolDecoder):
         x = _as_real(samples)
         self._messages = []
         self._timestamp += len(x) / self._sample_rate
-        for bit in self._slicer.process(x):
-            self._feed_bit(bit)
+        done, step = 0, self._step
+        while done < len(x):
+            into = self._consumed % step
+            if into == 0:
+                self._step_follows = self._state == self._SYNC1
+            take = min(len(x) - done, step - into)
+            self._slice(x[done : done + take])
+            self._run()
+            done += take
         return self._messages
 
+    def _slice(self, x: np.ndarray) -> None:
+        """Slice the stream's next samples (part of one step) with its DC
+        removed, followed or held as the step started."""
+        start = self._consumed
+        self._consumed += len(x)
+        # Enough of the stream to start the fast slicer on at a sync found
+        # in this step (it starts 80 header bits before).
+        keep = int(100 * self._sample_rate / 1600) + len(x)
+        self._recent = np.concatenate((self._recent, x))[-keep:]
+        if self._step_follows:
+            dc = self._follow_dc(x)
+        else:
+            dc = np.full(len(x), self._dc_hold)
+        values, times = self._slicer.process_timed(x - dc)
+        at = np.clip(np.asarray(times) - start, 0, len(x) - 1).astype(np.int64)
+        raw = np.asarray(values) + self._slicer.length * dc[at]
+        self._slow.extend(zip(times, values, raw.tolist(), strict=True))
+        if self._fast is not None:
+            values, times = self._fast.process_timed(x - self._dc_hold)
+            origin = self._fast_origin
+            self._fast_values.extend(
+                (origin + t, v) for t, v in zip(times, values, strict=True)
+            )
+
+    def _follow_dc(self, x: np.ndarray) -> np.ndarray:
+        """The DC at each sample of ``x`` (searched for a frame): the mean of
+        the last ``_DC_BITS`` bits' samples searched, up to that one."""
+        buf = np.concatenate((self._dc_history, x))
+        sums = np.concatenate(([0.0], np.cumsum(buf)))
+        end = np.arange(len(buf) - len(x) + 1, len(buf) + 1)
+        begin = np.maximum(end - self._dc_width, 0)
+        self._dc_history = buf[-self._dc_width :]
+        return (sums[end] - sums[begin]) / (end - begin)
+
+    def _pattern_dc(self, sync_at: float) -> float:
+        """The mean of the samples of the sync pattern that ended at
+        ``sync_at``: its 64 bits are half ones, half zeros."""
+        first = self._consumed - len(self._recent)
+        end = int(round(sync_at)) + 1 - first
+        begin = max(0, end - int(round(64 * self._sample_rate / 1600)))
+        pattern = self._recent[begin : max(begin, end)]
+        return float(np.mean(pattern)) if len(pattern) else self._dc_hold
+
+    def _run(self) -> None:
+        """Feed the state machine the decisions that are there: the 1600
+        symbols/s slicer's, or the fast one's while the data of a frame at
+        3200 symbols/s is read."""
+        while True:
+            if self._state == self._DATA and self._symbol_rate == 3200:
+                if not self._fast_values:
+                    return
+                t, v = self._fast_values.popleft()
+                self._fast_symbol(t, v)
+            else:
+                if not self._slow:
+                    return
+                t, v, raw = self._slow.popleft()
+                self._slow_symbol(t, v, raw)
+
     def _feed_bit(self, bit: int) -> None:
+        """One 1600 symbols/s decision (as a bit) for the state machine."""
+        value = 1.0 if bit else -1.0
+        self._slow_symbol(0.0, value, value)
+
+    def _slow_symbol(self, t: float, value: float, raw: float) -> None:
+        """One 1600 symbols/s decision: ``value`` with the DC removed (as
+        followed or held then) and ``raw`` without."""
+        bit = 1 if value > 0 else 0
         state = self._state
+        if state in (self._SYNC1, self._FIW):
+            self._header.append((t, raw))
         if state == self._SYNC1:
             self._reg = ((self._reg << 1) | bit) & 0xFFFFFFFFFFFFFFFF
             if ((self._reg >> 16 ^ self.MARKER) & 0xFFFFFFFF).bit_count() >= 4 and (
@@ -3298,18 +3491,24 @@ class FLEXDecoder(ProtocolDecoder):
                 return
             code, inverted = found
             mode = None
-            for known, value in self.SYNC_CODES.items():
+            for known, value_mode in self.SYNC_CODES.items():
                 if (known ^ code).bit_count() <= 2:
-                    mode = value
+                    mode = value_mode
                     break
             if mode is None:
                 return
             self.frames_seen += 1
-            if mode != (1600, 2):
+            symbol_rate = mode[0] // (2 if mode[1] == 4 else 1)
+            if symbol_rate == 3200 and not self._fast_ok:
                 self.unsupported_frames += 1
                 self.last_unsupported = f"{mode[0]} bps {mode[1]}-level"
                 self._reg = 0
                 return
+            self._speed, self._symbol_rate = (mode[0], mode[1]), symbol_rate
+            self._sync_at = t
+            self._dc_hold = self._pattern_dc(t)
+            if symbol_rate == 3200:
+                self._start_fast(t)
             # The sync pattern is sent with the opposite polarity to the
             # data (as multimon-ng reads FLEX).
             self._data_invert = 0 if inverted else 1
@@ -3323,25 +3522,121 @@ class FLEXDecoder(ProtocolDecoder):
             if len(self._bits) < 32:
                 return
             if self._read_fiw(self._bits):
-                self._state, self._count = self._SYNC2, 0
+                self._fiw_at = t
+                self._level = self._header_level()
+                self._state, self._count, self._values = self._SYNC2, 0, []
+                if self._symbol_rate == 3200:
+                    self._state = self._DATA  # (its second sync is skipped there)
             else:
                 self.frames_failed += 1
+                self._stop_fast()
                 self._state = self._SYNC1
             self._bits = []
         elif state == self._SYNC2:
             self._count += 1
             if self._count >= self._SYNC2_BITS:
-                self._state, self._bits = self._DATA, []
-        else:
+                self._state, self._bits, self._values = self._DATA, [], []
+        elif self._speed == (1600, 2):
             self._bits.append(bit ^ self._data_invert)
             if len(self._bits) < self.BLOCKS_PER_FRAME * self.BLOCK_BITS:
                 return
-            self._baud_rate = 1600
-            for msg in self._parse_frame(self._bits):
+            self._frame_done(self._bits)
+        else:  # 3200 bps 4-level: 1600 symbols/s
+            self._values.append(value)
+            if len(self._values) >= self.BLOCKS_PER_FRAME * self.BLOCK_BITS:
+                self._frame_done(self._values)
+
+    def _fast_symbol(self, t: float, value: float) -> None:
+        """One decision at 3200 symbols/s, in a frame's data."""
+        sps = self._sample_rate / 3200.0
+        second_sync = round(self._SECOND_SYNC_S * 3200)
+        if t <= self._fiw_at + (second_sync + 0.5) * sps:
+            return  # the second sync (or still the header)
+        self._values.append(value)
+        if len(self._values) >= 2 * self.BLOCKS_PER_FRAME * self.BLOCK_BITS:
+            self._frame_done(self._values)
+            # The slow slicer's decisions in the data go: the next frame's
+            # header follows.
+            while self._slow and self._slow[0][0] <= t:
+                self._slow.popleft()
+
+    def _start_fast(self, sync_at: float) -> None:
+        """Start the 3200 symbols/s slicer on the samples from 80 header
+        bits before the sync pattern's end (its clock locks on them)."""
+        start = max(0, int(sync_at - 80 * self._sample_rate / 1600))
+        first = self._consumed - len(self._recent)
+        start = max(start, first)
+        self._fast = BitSlicer(self._sample_rate, 3200, self._matched_filter)
+        self._fast_origin = start
+        values, times = self._fast.process_timed(
+            self._recent[start - first :] - self._dc_hold
+        )
+        self._fast_values = deque(
+            (start + t, v) for t, v in zip(times, values, strict=True)
+        )
+
+    def _stop_fast(self) -> None:
+        self._fast = None
+        self._fast_values = deque()
+
+    def _header_level(self) -> Tuple[float, float]:
+        """``(centre, outer level)`` of the frame's header, as the slicer
+        that reads its data sees it: the 2-level header sends only the
+        outer levels."""
+        if self._symbol_rate == 3200:
+            begin = self._sync_at - 64 * self._sample_rate / 1600
+            values = [v for t, v in self._fast_values if begin < t <= self._fiw_at]
+        else:
+            held = self._slicer.length * self._dc_hold
+            values = [raw - held for _t, raw in self._header]
+        if not values:
+            return 0.0, 1.0
+        v = np.asarray(values, dtype=np.float64)
+        sign = np.where(v > 0, 1.0, -1.0)
+        level = float(np.mean(v * sign))
+        centre = float(np.mean(v)) - level * float(np.mean(sign))
+        return centre, level if level > 0 else 1.0
+
+    def _frame_done(self, symbols: Sequence[Any]) -> None:
+        """The data of one frame (its symbols as decided, or their values):
+        split into its phases and parse each one."""
+        self._baud_rate = self._speed[0]
+        for phase, bits in self._phase_bits(symbols).items():
+            self._phase = phase
+            for msg in self._parse_frame(bits):
                 self._messages.append(msg)
                 self._notify_callbacks(msg)
-            self._bits = []
-            self._state = self._SYNC1
+        self._phase = "A"
+        self._bits, self._values = [], []
+        self._stop_fast()
+        self._state = self._SYNC1
+
+    def _phase_bits(self, symbols: Sequence[Any]) -> Dict[str, List[int]]:
+        """Each phase's 2816 data bits, as sent (``symbols``: the bits of a
+        1600 bps 2-level frame, else the slicer's values)."""
+        if self._speed == (1600, 2):
+            return {"A": [int(bit) for bit in symbols]}
+        centre, level = self._level
+        u = np.asarray(symbols, dtype=np.float64) - centre
+        invert = bool(self._data_invert)
+        if self._speed[1] == 2:
+            bits = ((u > 0) ^ invert).astype(np.int8)
+            return {"A": bits[0::2].tolist(), "C": bits[1::2].tolist()}
+        # 4-level: 0..3 from the lowest frequency, as sent (after polarity).
+        sym = np.where(u > 0, 2, 1) + np.where(u > 2.0 / 3.0 * level, 1, 0)
+        sym -= np.where(u < -2.0 / 3.0 * level, 1, 0)
+        if invert:
+            sym = 3 - sym
+        a = (sym > 1).astype(np.int8)
+        b = ((sym == 1) | (sym == 2)).astype(np.int8)
+        if self._speed == (3200, 4):
+            return {"A": a.tolist(), "B": b.tolist()}
+        return {
+            "A": a[0::2].tolist(),
+            "B": b[0::2].tolist(),
+            "C": a[1::2].tolist(),
+            "D": b[1::2].tolist(),
+        }
 
     def reset(self) -> None:
         """Reset decoder state."""
@@ -3354,6 +3649,8 @@ class FLEXDecoder(ProtocolDecoder):
         self._timestamp = 0.0
         self.unsupported_frames = 0
         self.last_unsupported = ""
+        self._speed, self._symbol_rate = (1600, 2), 1600
+        self._init_stream()
 
 
 # ============================================================================

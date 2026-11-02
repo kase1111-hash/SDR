@@ -1,12 +1,19 @@
 """
 Audio output sink.
 
-Thin wrapper around QAudioSink (PyQt6.QtMultimedia). Accepts a mono
-int16 stream and plays it on the output device chosen in Tools >
-Preferences (:meth:`AudioSink.set_output_device`), the system default
-unless one is chosen or when the chosen one isn't there (unplugged).
-Absent a working Qt multimedia backend, falls back to a no-op so the rest
-of the GUI still works.
+Thin wrapper around QAudioSink (PyQt6.QtMultimedia). Plays float audio
+as int16 on the output device chosen in Tools > Preferences
+(:meth:`AudioSink.set_output_device`), the system default unless one is
+chosen or when the chosen one isn't there (unplugged). Absent a working Qt
+multimedia backend, falls back to a no-op so the rest of the GUI still
+works.
+
+A sink made with ``channels=2`` (the main window's: broadcast FM plays in
+stereo) opens its output in stereo whenever the output can (practically
+all can) and plays mono audio on both channels. So going from stereo to
+mono and back never reopens the output: no gap, no click. An output that
+can't take two channels opens in mono, and stereo is mixed down to it.
+A sink made with the default ``channels=1`` plays mono, as before.
 
 ``start()`` reports whether the output really opened: it returns False when
 there is no output device or Qt could not open it, so callers can tell the
@@ -77,10 +84,11 @@ def default_output_name() -> str:
 
 
 class AudioSink:
-    """Simple int16 mono audio sink.
+    """Simple int16 audio sink, mono or stereo (see the module notes).
 
     Call ``start(sample_rate)`` once, then push numpy float arrays with
-    ``write(samples)``. Call ``stop()`` when done.
+    ``write(samples)``: mono (1-D) or stereo (``(n, 2)``, left and right).
+    Call ``stop()`` when done.
     """
 
     #: Audio kept queued (in the output plus not yet accepted by it): the
@@ -98,10 +106,18 @@ class AudioSink:
     #: often (milliseconds).
     FEED_MS = 10
 
-    def __init__(self) -> None:
+    def __init__(self, channels: int = 1) -> None:
         self._sink = None
         self._io: Optional["QIODevice"] = None
         self._sample_rate = 0
+        # Two channels asked for (stereo when the output can), and what the
+        # open stream has.
+        self._wanted_channels = 2 if int(channels) >= 2 else 1
+        self._channels = 1
+        # Bytes at the start of the backlog that finish a frame the output
+        # has taken part of (padding and drops go after them, so left and
+        # right never swap).
+        self._head = 0
         self._muted = False
         self._volume = 0.7
         self._backlog = bytearray()  # PCM the output hasn't accepted yet
@@ -124,6 +140,11 @@ class AudioSink:
     def is_open(self) -> bool:
         """True while an output stream is open (``write`` plays sound)."""
         return self._io is not None
+
+    @property
+    def channels(self) -> int:
+        """Channels of the open stream (2: stereo; 1: mono, or closed)."""
+        return self._channels
 
     @property
     def output_id(self) -> str:
@@ -194,12 +215,16 @@ class AudioSink:
                 return False
             fmt = QAudioFormat()
             fmt.setSampleRate(int(sample_rate))
-            fmt.setChannelCount(1)
+            fmt.setChannelCount(self._wanted_channels)
             fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+            if fmt.channelCount() > 1 and not device.isFormatSupported(fmt):
+                logger.info("The audio output can't play stereo; playing mono")
+                fmt.setChannelCount(1)
+            channels = 2 if fmt.channelCount() >= 2 else 1
 
             sink = QAudioSink(device, fmt)
             sink.setVolume(self._volume)
-            sink.setBufferSize(int(self.BUFFER_S * int(sample_rate)) * 2)
+            sink.setBufferSize(int(self.BUFFER_S * int(sample_rate)) * 2 * channels)
             io = sink.start()
             if io is None or sink.error() != QAudio.Error.NoError:
                 logger.warning(
@@ -213,7 +238,9 @@ class AudioSink:
         self._sink = sink
         self._io = io
         self._sample_rate = int(sample_rate)
+        self._channels = channels
         self._backlog = bytearray()
+        self._head = 0
         self._last_write = None
         return True
 
@@ -226,7 +253,9 @@ class AudioSink:
         self._sink = None
         self._io = None
         self._sample_rate = 0
+        self._channels = 1
         self._backlog = bytearray()
+        self._head = 0
         self._stop_feed()
         self._last_write = None
 
@@ -238,11 +267,26 @@ class AudioSink:
     def set_muted(self, muted: bool) -> None:
         self._muted = bool(muted)
         if self._muted:
-            self._backlog = bytearray()  # stale by the time it would play
+            # Stale by the time it would play (but a frame the output has
+            # begun is finished, so its channels stay in step).
+            del self._backlog[self._head :]
             self._stop_feed()
 
+    def _frames(self, samples: np.ndarray) -> np.ndarray:
+        """``samples`` (mono, or ``(n, 2)`` stereo) as the stream's
+        channels: mono on both sides, or stereo mixed down."""
+        audio = np.asarray(samples, dtype=np.float32)
+        if audio.ndim == 2:
+            if self._channels == 2:
+                return audio[:, :2]
+            return audio.mean(axis=1)
+        if self._channels == 2:
+            return np.repeat(audio[:, None], 2, axis=1)
+        return audio
+
     def write(self, samples: np.ndarray) -> None:
-        """Push mono float samples in [-1, 1].
+        """Push float samples in [-1, 1]: mono (1-D) or stereo (``(n,
+        2)``, left and right).
 
         What the output can't take yet stays queued for the next call (see
         the module notes), so a partial write loses nothing.
@@ -251,8 +295,8 @@ class AudioSink:
             return
         if samples is None or len(samples) == 0:
             return
-        # Clip, scale to int16
-        clipped = np.clip(samples, -1.0, 1.0)
+        # Clip, scale to int16 (stereo interleaved: left, right)
+        clipped = np.clip(self._frames(samples), -1.0, 1.0)
         pcm = (clipped * 32767.0).astype(np.int16).tobytes()
         now = time.monotonic()
         continuing = (
@@ -262,15 +306,20 @@ class AudioSink:
         self._backlog += pcm
         self._pump(continuing, len(pcm))
 
+    @property
+    def _frame_bytes(self) -> int:
+        """Bytes of one sample of every channel."""
+        return 2 * self._channels
+
     def _bytes(self, seconds: float) -> int:
-        """``seconds`` of audio in bytes (whole samples)."""
-        return int(seconds * self._sample_rate) * 2
+        """``seconds`` of audio in bytes (whole frames)."""
+        return int(seconds * self._sample_rate) * self._frame_bytes
 
     def queued_seconds(self) -> float:
         """Audio waiting to be played: in the output and not yet taken."""
         if self._sink is None or self._sample_rate <= 0:
             return 0.0
-        return self._queued_bytes() / (2.0 * self._sample_rate)
+        return self._queued_bytes() / (float(self._frame_bytes) * self._sample_rate)
 
     def _in_output(self) -> int:
         try:
@@ -288,32 +337,35 @@ class AudioSink:
         if sink is None or io is None:
             return
         target = self._bytes(self.TARGET_S)
+        frame = self._frame_bytes
+        head = self._head  # (the rest of a frame the output has begun)
         in_output = self._in_output()
         queued = in_output + len(self._backlog)
         if in_output == 0 and 0 < len(self._backlog) < target:
             # Dry: start (or restart) with a cushion of silence.
             pad = target - len(self._backlog)
-            self._backlog[0:0] = bytes(pad)
+            pad -= pad % frame
+            self._backlog[head:head] = bytes(pad)
             if continuing:
                 self.underruns += 1
                 logger.debug(
                     "Audio underrun: the output ran dry; padded %.0f ms of silence",
-                    1000.0 * pad / (2.0 * self._sample_rate),
+                    1000.0 * pad / (frame * self._sample_rate),
                 )
         elif queued > self._bytes(self.HIGH_S):
             # Too much queued (the clocks drift, or a stall delivered a
             # burst): drop the oldest audio not yet handed over. (A chunk
             # longer than the target is kept whole: it has to last until
             # the next one.)
-            drop = min(len(self._backlog), queued - max(target, chunk))
-            drop -= drop % 2
+            drop = min(len(self._backlog) - head, queued - max(target, chunk))
+            drop -= drop % frame
             if drop > 0:
-                del self._backlog[:drop]
+                del self._backlog[head : head + drop]
                 self.overruns += 1
                 logger.debug(
                     "Audio overrun: dropped %.0f ms (sound card and receiver "
                     "clocks drift, or the window stalled)",
-                    1000.0 * drop / (2.0 * self._sample_rate),
+                    1000.0 * drop / (frame * self._sample_rate),
                 )
         self._feed()
 
@@ -347,7 +399,9 @@ class AudioSink:
                 self._stop_feed()
                 return
             written = min(written, count)
-            del self._backlog[: written - written % 2]
+            taken = written - written % 2
+            del self._backlog[:taken]
+            self._head = (self._head - taken) % self._frame_bytes
         if self._backlog:
             self._start_feed()
         else:

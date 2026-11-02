@@ -36,7 +36,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   7 dB above the tuned channel's own noise; the squelch has an on/off box.
 - **Level meter** — LEVEL shows the channel's power, its noise floor and a
   squelch threshold you can drag, with an OPEN / SQL / TONE / OFF / I/Q lamp
-  (TONE: a signal without the chosen CTCSS tone, also with the audio off).
+  (TONE: a signal without the chosen CTCSS tone or DCS code, also with the
+  audio off).
 - The Filter choices and default widths follow the mode (USB/LSB 2.7 kHz, CW
   500 Hz, AM 10 kHz, narrow FM 25 kHz, broadcast FM 200 kHz), and each mode
   remembers yours; in SSB and CW the filter is the audio passband.
@@ -44,24 +45,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   say what each is for, and FM audio clipped by too small a deviation is
   reported, naming a deviation that holds the station ("12.5 kHz holds it").
 - **Audio group** — Noise reduction (Off, Light, Strong), Audio AGC (Off, Fast,
-  Medium, Slow), Tone squelch (the 50 CTCSS tones) and Tone heard.
+  Medium, Slow), Notch, Low cut, Tone squelch (the 50 CTCSS tones and the 104
+  DCS codes) and Tone heard.
+- **Notch** (Audio group, or Radio → Audio → Notch) takes a whistle (a
+  heterodyne) out of AM, SSB, CW and narrow FM audio. Auto finds the
+  strongest steady one in about half a second and follows it as it drifts,
+  leaving voice and the CW note alone (the Whistle row under it says what it
+  removes, "1350 Hz"; for music use Off: a note held for half a second
+  counts as a whistle); Manual removes the frequency set in the Whistle row
+  (200–5000 Hz; Radio → Audio → Notch → Notch Frequency...). Remembered;
+  greyed out, saying why, in broadcast FM and None (I/Q).
+- **Low cut** (Audio group, or Radio → Audio → Low Cut): Off, 100, 200 or
+  300 Hz takes mains hum and rumble out of AM, SSB and narrow FM audio
+  (200 Hz also the hum's harmonics). Remembered; greyed out in CW, broadcast
+  FM and None (I/Q).
+- **DCS tone squelch** — the Tone squelch list (Radio → Audio → Tone
+  Squelch...) adds the 104 standard DCS codes, normal ("DCS 023 N") and
+  inverted ("DCS 023 I"): in narrow FM the squelch then opens only on that
+  code (or the code of the other polarity that sends the same bits, as on a
+  radio), and Tone heard names the code on the channel. With a tone squelch
+  set, CTCSS or DCS, narrow FM is cut below 300 Hz, so the tone or the
+  code's bits are out of what you hear. The notch, the low cut and DCS are
+  the main window's (the Second Receiver window has none of them). DCS was
+  checked against the standard and synthetic signals, not yet against a
+  real radio.
 - Receiver group: Remove DC spike, and Balance I/Q to remove the mirror
   images of strong signals (recordings stay raw).
 - Radio → Audio: Mute (`Ctrl+M`, or `M` with the plots focused), Volume Up /
   Down (`Ctrl+Up` / `Ctrl+Down`, except in number fields and lists, which
-  keep those keys), Output Device..., Noise Reduction, Audio AGC, Tone
-  Squelch... and CW Pitch...; the Audio button says Audio, Muted, No output,
-  No audio, Muted (2nd RX) while the second receiver's Listen plays only that
-  one, or Paused while the signal isn't arriving in real time (the computer
-  can't keep up, or a recording plays at another speed), and the status bar
-  says why at most every 30 s.
+  keep those keys), Output Device..., Stereo, Noise Reduction, Audio AGC,
+  Notch, Low Cut, Tone Squelch... and CW Pitch...; the Audio button says
+  Audio, Muted, No output, No audio, Muted (2nd RX) while the second
+  receiver's Listen plays only that one, or Paused while the signal isn't
+  arriving in real time (the computer can't keep up, or a recording plays at
+  another speed), and the status bar says why at most every 30 s, and again
+  a second after the cause changes while it still shows.
 - Radio → Mode and Radio → Squelch (Squelch On, Auto Threshold) set the mode
-  and squelch from any window size. They and Radio → Audio's Noise Reduction
-  and Audio AGC follow the control panel both ways and are greyed out when
-  its control is (Auto Threshold with the squelch off, Audio AGC outside AM,
-  SSB and CW, squelch and noise reduction in None (I/Q)); Radio → Audio → Tone
-  Squelch... and CW Pitch... take you to the control, or say which mode it
-  belongs to.
+  and squelch from any window size. They and Radio → Audio's Noise Reduction,
+  Audio AGC, Notch and Low Cut follow the control panel both ways and are
+  greyed out when its control is (Auto Threshold with the squelch off, Audio
+  AGC outside AM, SSB and CW, squelch and noise reduction in None (I/Q), the
+  notch and the low cut in broadcast FM and None (I/Q), the low cut in CW);
+  Radio → Audio → Tone Squelch... and CW Pitch... take you to the control, or
+  say which mode it belongs to.
+- **Broadcast FM in stereo** — a station that sends stereo plays left and
+  right on their own speakers, and a weak or noisy one blends toward mono
+  by itself to keep the hiss down; Radio → Audio → Stereo (on by default,
+  remembered) switches to mono. A STEREO / MONO badge after the volume
+  slider in the receiver bar says how the station is received and, in its
+  tooltip, why ("Mono: the signal is too weak for clean stereo ...", "Mono:
+  the Filter is too narrow for the stereo signal ..."); it shows while a
+  broadcast station is above the squelch, speaker on or off, but not while
+  the audio is paused (the computer can't keep up, or a recording plays at
+  another speed) or the Second Receiver's Listen plays only that receiver
+  (unless Record Audio is recording the station in stereo).
+  Stereo needs broadcast FM's 200 kHz filter; the squelch, LEVEL, RDS, SSTV
+  and the decoders hear the mono program as before, and the Second Receiver
+  window plays mono. Checked on standard stereo test signals and the demo
+  device, not yet on real stations.
 - **RDS station names** next to FREQ and on the radio tuner while you listen
   to broadcast FM (RadioText in the tooltip), cleared when you tune away or
   change source; Radio → RDS Station Names turns them off.
@@ -107,6 +148,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   between them (0.1 ms at 20 MS/s with the default FFT size) may not show.
 - **Zoom ×2–×16** — View → Zoom: Zoom In (`Ctrl+=`), Zoom Out (`Ctrl+-`),
   Full Span (`Ctrl+0`); `Ctrl`+wheel zooms both plots around the pointer.
+  Zoomed in, the spectrum's Range → Auto and the waterfall's Color Levels →
+  Auto (the COLORS bar's Auto) fit the part in view, its noise and strongest
+  signal, refitting as the zoom changes or the view moves, and the whole
+  span again at ×1; Color Levels → Fit to Current Signals sets levels once
+  from the part in view, and levels set by hand stay put.
 - The spectrum's ⋯ button and right-click menu add FFT Size (1024–32768,
   with its RBW), Window (Hann, Blackman-Harris, Flat-top), Range (Auto,
   60–120 dB, Top at 0 dBFS), Min Hold and Bookmark Labels.
@@ -129,8 +175,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added — Decoding
 - **Live decoding of POCSAG, FLEX, AX.25/APRS and ACARS** in the Decoder tab
   (only ADS-B decoded live before), each picking its own channel at the tuned
-  frequency; messages that fail their checks are tinted red. FLEX at 3200
-  and 6400 bps is not supported yet.
+  frequency; messages that fail their checks are tinted red. FLEX decodes
+  1600 bps (2-level), 3200 bps (2- and 4-level) and 6400 bps (4-level)
+  frames, every phase (3200 and 6400 bps were checked against an encoder
+  written from the format, not yet an off-air recording).
+- A FLEX page's address carries its phase and speed, as a POCSAG page's
+  carries its function: "1000999 (D, 6400 bps)" in the Messages table, the
+  Log, Export and `sdr-scan decode flex`; its detail card adds the frame,
+  the cycle and the kind of page ("Phase D at 6400 bps, frame 18 of cycle
+  0", "Numeric page").
 - Decoder → RDS lists the station name, program type, RadioText, clock and
   alternative frequencies.
 - Decoder → CW (Morse) shows Morse code as text with its speed (5–60 WPM)
@@ -151,14 +204,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sample rate, or the device doesn't deliver it in real time), the status
   line says in amber that the decoder misses part of the signal and that a
   lower sample rate (Receiver → Sample rate) helps, and the status bar says it
-  once; both clear once the receiver has kept up for 3 s. While the app's own
-  Decode Recording, Convert Recording, Save Recording, Find Signals or
-  Transmit Text's Save Text Signal keeps the computer busy, they (and the
-  Audio button's Paused) name that job as the cause instead ("Save Text
-  Signal keeps this computer busy, so audio is paused meanwhile."), and in
-  the past tense once it is done ("... kept this computer busy, so the RDS
-  decoder missed part of the signal meanwhile."). Not while a Scanner scan
-  moves the receiver: the decoder is off its channel then.
+  once (and again a second after its cause changes, while it still shows);
+  both clear once the receiver has kept up for 3 s. While the app's own
+  Decode Recording, Convert Recording, Save Recording, Find Signals, Export
+  Decoded Messages or Transmit Text's Save Text Signal keeps the computer
+  busy, they (and the Audio button's Paused) name that job as the cause
+  instead ("Save Text Signal keeps this computer busy, so audio is paused
+  meanwhile."), and in the past tense once it is done ("... kept this
+  computer busy, so the RDS decoder missed part of the signal meanwhile.").
+  Not while a Scanner scan moves the receiver: the decoder is off its
+  channel then.
 - The Decoder tab counts unread messages ("Decoder (12)"), and a status-bar
   chip ("ADS-B · 37 msgs"; "paused" when you untick Decode; "can't decode"
   in amber, the reason in its tooltip) opens it. The chip and the status line
@@ -168,8 +223,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Readable rows (APRS positions and messages, ADS-B callsign, speed and
   climb, ACARS flight) with a detail card; Export (CSV) adds the frequency
   and sample rate, and starts in Documents/SDR Recordings, then the folder
-  last used. The table keeps the newest 1,000 messages and says so (Stats'
-  "In the table" row, the tooltips and Export's message).
+  last used. The table and the Log keep the newest 1,000 messages and say so
+  (Stats' "In the table" row and the tooltips); Export saves every message
+  since Clear, with progress and Cancel (the messages are kept meanwhile in
+  a file in the system's temporary folder, which Clear and quitting delete).
+  Should the disk fill, the status bar says so once and Export says which
+  messages it could keep.
 - "Tune to …" also for POCSAG, FLEX, RDS and CW (Morse) (with the demo device
   "Tune to 99.820 MHz", its beacon; otherwise "Listen in CW" switches the
   mode), listening the way the band presets do (ACARS with its 15 kHz
@@ -184,16 +243,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that works); its rows are marked ("POCSAG (file)", the recording's own
   time, its name in the tooltip) and kept out of the live Aircraft and Text
   views.
-- ADS-B needs at least 2 MS/s and works best at 2.4 MS/s or more; lower rates
-  are marked "(too low for ADS-B)" in the rate lists, and with ADS-B chosen a
-  rate from 2 to 2.4 MS/s says "ADS-B decodes best at 2.4 MS/s or more."
+- ADS-B needs at least 2 MS/s and hears weak, distant aircraft best at
+  2.4 MS/s or more; lower rates are marked "(too low for ADS-B)" in the rate
+  lists (their tooltip says both), and with ADS-B chosen a rate from 2 to
+  2.4 MS/s says "ADS-B decodes best at 2.4 MS/s or more."
 
 ### Added — Recordings and playback
-- **File → Open Recording...** (`Ctrl+O`) plays SigMF, WAV and raw I/Q captures
-  through the receiver with a playback strip: Play/Pause (`Space`), position,
-  Loop, 0.5×–4× speed (audio at 1× only; when the computer can't keep up it
-  says so: "Playing at about 1.2x, not 4x") and Close. Recordings centered
-  above 6 GHz (such as QO-100) play at their own frequency.
+- **File → Open Recording...** (`Ctrl+O`) plays SigMF, WAV (RF64, BW64 and
+  Sony Wave64 `.w64` too, past 4 GiB as well) and raw I/Q captures through
+  the receiver with a playback strip: Play/Pause (`Space`), position, Loop,
+  0.5×–4× speed (audio at 1× only; when the computer can't keep up it says
+  so: "Playing at about 1.2x, not 4x") and Close. Recordings centered above
+  6 GHz (such as QO-100) play at their own frequency. Recording Info (which
+  names the kind: "WAV file (RF64, the WAV format for files over 4 GiB)"),
+  Convert Recording, Decode Recording and Find Signals in Recording read the
+  same files.
 - A recording is heard the way its band usually is (Radio → Choose Mode From
   Band Plan; the status bar says so after "Playing fm8.sigmf-meta (98.9–101.3
   MHz)"), and File → Close Recording goes back to the device, frequency,
@@ -211,8 +275,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - File → Recording Info... shows a file's format, rate, frequency, span,
   length and origin.
 - **Radio → Record Audio** (`Ctrl+Shift+A`) records what you hear as a 48 kHz
-  WAV (silence while the squelch is closed or a scan moves between channels);
-  the Recording group's Record choice picks I/Q or audio.
+  WAV (silence while the squelch is closed or a scan moves between channels),
+  in stereo when it starts on broadcast FM with Radio → Audio → Stereo on
+  ("Recording stereo audio to ..."); past 4 GiB (about 12 hours, 6 in
+  stereo) the file becomes RF64 and the recording goes on. The Recording
+  group's Record choice picks I/Q or audio.
 - The Recording group shows the take ("Unsaved · 00:04 · 77 MB @ 100.100
   MHz") with Save... and Discard, a Folder, and Save automatically; REC
   WAITING shows while the receiver is stopped mid-recording.
@@ -226,8 +293,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Saving as SigMF, cf32 or raw on the same drive is an instant move and
   other saves run in the background; a save that doesn't fit is refused
   before it starts, a failed one leaves no partial files, and on a nearly
-  full drive Save automatically keeps the take and says why. WAV holds at
-  most 4 GiB (about 7 minutes at 2.4 MS/s).
+  full drive Save automatically keeps the take and says why. A WAV take past
+  4 GiB (about 7 minutes at 2.4 MS/s) is saved as RF64, the WAV format for
+  bigger files, by Save... and Save automatically alike, and the status bar
+  says so ("Saved ... as RF64 (the WAV format for files over 4 GiB) to
+  ..."); the Format list's WAV tooltip warns that programs reading only
+  classic WAV files can't open it. A take that fits stays a classic WAV.
 - Recording file dialogs remember their folder for each kind of file,
   starting in Documents/SDR Recordings.
 
@@ -239,10 +310,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Stop Scan, Skip, Hold and Show Scanner in its menu.
 - Scan modes: Sweep once, Sweep continuously, Stop on signal (with Resume,
   Skip and Hold) and Scan bookmarks (each in its own mode, filter and CTCSS
-  tone, from the top of the Bookmarks list and in its order: each group,
-  then the rest).
+  tone or DCS code, from the top of the Bookmarks list and in its order: each
+  group, then the rest).
 - A sweep steps about 80% of the sample rate at a time (the FM band takes
   about a second on the demo device); Threshold Auto is 12 dB over the noise.
+- **Use both receivers** (Scanner tab, `Alt+I`): while Device → Second
+  Receiver... runs, Sweep once and Sweep continuously can share the sweep
+  with it: each receiver first takes what only it tunes, then they sweep the
+  rest from opposite ends until they meet, each step sized for its own
+  sample rate and kept to what its device tunes, so a pass takes about half
+  as long. One result list, each signal once with the stronger reading
+  (each receiver's levels are in its own dBFS); the status line says where
+  each receiver is, and the second receiver is muted while it sweeps and
+  goes back to its frequency when the scan ends. If it can't go on (stopped,
+  tuned elsewhere, recording, a new sample rate, no samples), the main
+  receiver sweeps the rest and the status bar says why. Off by default and
+  remembered; greyed out, saying what to do, while the second receiver is
+  stopped or recording. Stop on signal and Scan bookmarks use the main
+  receiver only. Tried with two demo devices, not yet with two real SDRs.
 - Scan results (level, SNR, mode, last heard, and for a bookmark scan the
   bookmark's name, "Rpt 100 · 145.290 MHz") with Listen (a bookmark's result
   with its tone squelch), Bookmark (which says what it added, as `Ctrl+B`
@@ -256,14 +341,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the sample rate, open a recording, record I/Q or transmit; one that ends
   while the Scanner tab is out of sight says how in the status bar.
 - Bookmarks get a Mode choice when added, automatic names ("2m Calling"), an
-  Edit... dialog (mode, deviation, filter, CTCSS tone, group, shift, Skip,
-  comment), groups and a filter box.
+  Edit... dialog (mode, deviation, filter, CTCSS tone or DCS code, group,
+  shift, Skip, comment), groups and a filter box.
 - Right-click a bookmark for Tune, Edit..., Rename... (`F2`), Copy Frequency,
   Move Up / Down, Scan Bookmarks from Here and Remove... (`Delete`), or a
   group's folder for Remove Group...; select several (`Shift`/`Ctrl`+click,
   `Ctrl+A`) to remove them with one question.
-- Tuning a bookmark restores its mode, deviation, filter and tone squelch,
-  and `Ctrl+B` selects an existing bookmark instead of adding a duplicate.
+- Tuning a bookmark restores its mode, deviation, filter and tone squelch (a
+  CTCSS tone, or a DCS code: "Tuned to RPT (FM, DCS 023 N)"), and `Ctrl+B`
+  selects an existing bookmark instead of adding a duplicate.
 
 ### Added — Signal tab
 - **Signal tab** (`Ctrl+9`, or Tools → Signal) with Identify, Signals, Scope
@@ -302,7 +388,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   QSO list and a Contest Exchange, all remembered.
 - **Radio tuner** (`Ctrl+R`): presets remembered and renamed or cleared by
   right-click, seek arrows (`Shift`+click: one channel) that also work on a
-  receiver tuning only part of the band, STEREO from the real pilot.
+  receiver tuning only part of the band, and a STEREO lamp that lights when
+  the station is decoded in stereo (not merely when it sends a pilot: it
+  stays dark with Radio → Audio → Stereo off or on a station too weak for
+  stereo).
 
 ### Added — Transmitting
 - **One transmit engine** for the HackRF One: transmissions stream in the
@@ -359,11 +448,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   main window's HackRF transmissions, and it keeps receiving while the HackRF
   transmits (the demo device can't hear a real transmission).
 - The demo device adds decodable APRS (144.390 MHz), POCSAG (152.240 MHz),
-  FLEX (931.9375 MHz) and ACARS (131.550 MHz), RDS on 100.1 MHz, an SSTV
-  test card on 145.800 MHz, a 100.0 Hz CTCSS repeater on 145.290 MHz, AM
-  stations on 660–1260 kHz, an EV1527-style remote on 433.920 MHz and a
-  drifting handheld on 438.500 MHz; its CW beacon on 99.820 MHz decodes as
-  "VVV DE SDR".
+  FLEX (931.9375 MHz, pages at 1600, 3200 and 6400 bps) and ACARS
+  (131.550 MHz), RDS on 100.1 MHz, an SSTV test card on 145.800 MHz, a
+  100.0 Hz CTCSS repeater on 145.290 MHz, a DCS 023 N repeater on
+  442.100 MHz, AM stations on 660–1260 kHz, an EV1527-style remote on
+  433.920 MHz and a drifting handheld on 438.500 MHz; its CW beacon on
+  99.820 MHz decodes as "VVV DE SDR". Its broadcast FM stations send real
+  stereo (100.1 MHz's tune; the others a tone on the left only).
 
 ### Added — Window, menus and help
 - The tool tabs fit a 1024×640 window; View → Maximize Tool Tabs (or a
@@ -387,6 +478,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message area lists the last 20 messages, and its warnings also go to Tools
   → Error History (problems only: notices such as "Recording paused" stay in
   the status bar).
+- A status message the status bar cuts short (at 1024 px it keeps 220 px for
+  messages) also shows whole in a panel just above it, starting above the
+  message, in its tone and for as long as it shows (above the playback strip
+  while a recording plays, so its controls stay in reach); click the panel or
+  press `Esc` to hide it (F1's `Esc` row says so). A message that fits shows
+  no panel, and screen readers get the whole message.
 - The window title shows the frequency, mode, device and REC while
   recording.
 - The Info tab's Band plan row and FREQ's tooltip show the band plan at the
@@ -403,6 +500,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   once with `--single` (new `--device`, `--rate`, `--gain` and
   `--threshold auto`); with no SDR it exits with an error, and a `--rate` the
   device can't run is replaced by one it can, with a note.
+- `sdr-scan scan --dual` sweeps with two connected SDRs at once (an RTL-SDR
+  and a HackRF One, or two of a kind): each first takes what only it tunes,
+  then they share the rest from opposite ends, the faster one taking more.
+  Signals are listed as found with the receiver that found them (a Receiver
+  column), and at the end in frequency order, each once; `--rate` takes one
+  rate for both or one each (`--rate 2.4e6,20e6`). A receiver that returns
+  no samples three steps in a row is left out and the other sweeps what it
+  can, saying what was not swept; with fewer than two SDRs `--dual` says
+  so. Tried through the real drivers with simulated USB devices, not yet on
+  hardware.
+- `sdr-scan decode ... -i` and `sdr-scan scan --input` read WAV files past
+  4 GiB (RF64, BW64) and Sony Wave64 (`.w64`); they stopped with "file does
+  not start with RIFF id".
 - `sdr-scan decode` uses the live decoders (APRS, ACARS and RDS now decode),
   adds `cw`, `--offset` and `--show-invalid`.
 - `sdr-scan encode` sends standard RTTY (45.45 Bd, 170 Hz), full PSK31 and
@@ -474,12 +584,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - New modules: `dsp.nco` (the tuning mixer), `core.band_plan`,
   `core.band_info`, `protocols.text_modes` (CW, RTTY, PSK31 and ASCII text
   signals), `ham.sstv_encoder` and `devices.polled.PolledDevice`.
+- New modules for listening: `dsp.fm_stereo` (`StereoDecoder`: the pilot,
+  the stereo difference signal and the blend toward mono), `dsp.audio_filters`
+  (`AudioNotch`, `LowCut`, `ToneFinder` and `SosFilter`, a streaming biquad
+  cascade) and `dsp.dcs` (the 104 DCS codes, `dcs_codeword()`,
+  `dcs_waveform()` to make a coded signal, and `DcsDetector`, fed DC-coupled
+  discriminator audio). `StereoDecoder` and the filters give the same output
+  whatever the block sizes. `dsp.filters.Squelch` still refuses
+  `SquelchMode.DCS`, and its message now names `DcsDetector`.
+- `dsp.background_writer.BackgroundWriter` writes blocks in order on a
+  thread of its own from a bounded queue: `put()` returns False when a block
+  doesn't fit, and the first write error stops the writer and waits in
+  `error` (`put()` raises it too); `flush()`, `close()` and `abort()`. The
+  GUI's I/Q recordings write through it.
 - `protocols.ProtocolDetector` works: it tries every live decoder on the
   samples (it had none registered, and registering one made `detect()`
   raise).
-- `DualSDRController.set_mode()` raises `NotImplementedError` for
-  `WIDEBAND_SCAN` and `RELAY`, which aren't implemented (it returned True);
+- `DualSDRController.set_mode()` raises `NotImplementedError` for `RELAY`,
+  which is deliberately not implemented (it returned True; the message says
+  why: retransmitting what you receive is restricted almost everywhere);
   `supported_modes()` and `use_devices()` are new.
+- **Wideband scan** — `core.wideband_scan.WidebandScan(devices, start_hz,
+  end_hz, step_hz, ...)` sweeps one range with one or two open devices at
+  once, each its own part (what only it tunes first, then the shared part
+  from opposite ends, the faster taking more), in threads of its own, and
+  merges what they find in frequency order (`hits`, each with the receiver
+  that found it), with progress, a report per sweep, continuous sweeps and
+  `cancel()`. `DualSDRController.start_wideband_scan()`,
+  `stop_wideband_scan()` and `wideband_scan` run it on the controller's
+  devices; `set_mode(OperationMode.WIDEBAND_SCAN)` is accepted and listed by
+  `supported_modes()`, and while a scan runs the other modes and
+  `set_rtlsdr_frequency()` / `set_hackrf_frequency()` are refused (they
+  return False). `dsp.sweep.SharedSweep` and `SweepReceiver` plan such a
+  shared sweep.
 - `HackRFDevice.start_tx()` and `write_samples()` take `bandwidth_hz` and
   `mode` for the legality check; `last_tx_error` and `wait_tx_done()` are new.
 - `HackRFDevice.write_samples()` sends the whole block (the last ~0.15 s was
@@ -517,10 +654,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `confident_sample_format()`, and reads `.bin` as cu8. `FormatDetector`
   takes a NaN, infinite, zero or negative SigMF rate or center as unknown,
   and `IQRecorder` no longer writes an empty `core:author`.
+- **WAV files past 4 GiB** — `dsp.wav_file` (standard library only):
+  `WavWriter` writes integer PCM WAV, byte for byte the `wave` module's
+  classic file when the length is known to fit, otherwise with an 80-byte
+  header (a JUNK chunk every WAV reader skips) that turns the file into RF64
+  (EBU Tech 3306) in place once it passes 4 GiB, kept up to date after every
+  write; `read_wav_header()` reads classic WAV, RF64, BW64 and Sony Wave64,
+  counting the samples an unfinished file holds; `WavError` is both a
+  `ValueError` and a `wave.Error`. `IQRecorder.start()` and
+  `AudioRecorder.start()` take `expected_samples` (a WAV take known to fit
+  stays classic; without it the file can grow past 4 GiB as RF64), and
+  `IQPlayer`, `FormatDetector`, `AudioPlayer` and `load_audio_file` read
+  RF64, BW64 and Wave64 (`.w64`) files.
+  `gui.file_jobs.wav_problem()` no longer refuses a long take (only one
+  without a sample rate), and `rf64_note()` is new.
 - `dsp.protocols`: the POCSAG, FLEX, AX.25 and ACARS decoders stream;
   `RDSDecoder.decode_bits()` and `parse_aprs_info()` are new.
-- `FrequencyPreset.decoder` names the decoder a preset turns on;
-  `ham.callsign.MorseIdSource` streams a CW or MCW station ID.
+- `FLEXDecoder` decodes 3200 and 6400 bps frames too (`FLEXMessage.baud_rate`
+  is the frame's speed; it was always 1600) and follows the input's DC
+  between frames, holding it through each one, so it takes an FM
+  discriminator's output as it is (`FLEXLiveDecoder` no longer has a DC
+  blocker). Changed: a block information word that fails its checksum, or
+  whose vector field runs past the phase, gives no pages and counts in
+  `frames_failed`, and a page whose message runs off the phase is skipped.
+  `describe_message()` gives a FLEX page's address as "capcode (phase, speed
+  bps)"; `protocol_encoders.flex_baseband()` takes `speed` (its 1600 bps
+  output is unchanged) and `FLEX_SPEEDS` lists the speeds.
+- `dsp.mode_s.ModeSDemodulator` reads Mode S replies at 2.0 to 2.5 MS/s by
+  fitting each reply's start time, pulse level and noise floor and searching
+  its bits; `ADSBDecoder` uses it below 2.5 MS/s. Its work has a budget per
+  second of signal (`FITS_PER_S`, `SEARCHES_PER_S`, `BUDGET_S`): over it the
+  clearest preambles are read first and `skipped` counts the rest.
+  `BitSlicer.process_timed()` and `BitSlicer.length` are new.
+- `MorseDecoder.process(keying, steady=None)` takes `KeyingDetector.steady`
+  (whether the envelope was steady at each decision) to show a lone E or T
+  keyed like code; without it lone letters behave as before.
+  `CWDemodulator.decode_morse()` and the CW live decoder pass it.
+- `FrequencyPreset.decoder` names the decoder a preset turns on, and
+  `FrequencyPreset.fm_deviation` the FM deviation it is heard with
+  ("12.5 kHz" for the pager presets; empty: the channel width decides, as
+  before); `ham.callsign.MorseIdSource` streams a CW or MCW station ID.
+- `create_live_decoder()` (and `ADSBLiveDecoder`) take `recording=True` for
+  samples from a recording playing: a sample rate too low for the protocol
+  is then worded for the recording ("ADS-B needs at least 2 MS/s; this
+  recording is 1 MS/s"), with no advice to change the sample rate.
+- `SignalIdentifier` takes `channel_pass_hz` (the blocks fed are a
+  receiver's channel already, kept as they are) and `analysis_rate` (the
+  rate its captures are judged at), as `identify()` takes `analysis_rate`;
+  `ANALYSIS_MAX_HZ` is new. `SignalClassifier.classify()` gives an AM
+  station's `bandwidth_hz` as twice where its sidebands end (when that is
+  wider than its 99% width) and its `snr_db` in that width.
 - `gui.SpectrumWidget.apply_display_settings()` and
   `gui.WaterfallWidget.apply_display_settings()` take `defaults`: a damaged
   saved value is logged and replaced by a usable one (from `defaults`, the
@@ -530,6 +713,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   user's choice for the next protocol, and `gui.decoder_panel.DecoderChip` is
   a status-bar chip that, short of room, is shortened to fit, keeping at
   least its first part, with the whole text in its tooltip.
+- `gui.SpectrumWidget.update_spectrum()` takes `noise_db`,
+  `gui.WaterfallWidget.add_line()` takes `mean_db` (the frame's averaged
+  spectrum) and `WaterfallWidget.reading_at()` gives the hover's reading
+  (new `gui.plot_readout`: `Reading`, `NoiseModel`, `read_levels()`). New
+  too: `gui.decoder_spool.MessageSpool` (the messages kept for Export),
+  `gui.status_history.MessageOverflow` and `HintFollower`,
+  `gui.frame_pipeline.FramePipeline` (one job at a time on a worker thread,
+  a frame behind), `gui.stereo_audio.StereoPath`; `gui.audio_sink.AudioSink`
+  and `gui.audio_recording.AudioTake` take `channels=2` (blocks of shape
+  `(n, 2)`), and `gui.scan_engine.ScanEngine.start()` takes `partner` (a
+  `ScanPartner`) to share a sweep with a second receiver.
 
 ### Added — GUI
 - **Passband display** — a shaded band on the spectrum marks the channel
@@ -607,8 +801,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   one (it cost them three times as much on an idle computer, and 60–380 ms on
   a busy one), and on a busy computer a frame no longer waits for the plots'
   helper thread.
+- The Second Receiver's channel filter, demodulator and plot spectrum run on
+  a worker thread, a frame behind its window, so it takes about a third less
+  of the display thread both windows share (its plots, level meter and audio
+  come one frame, 33 ms, later).
+- Identify at a high sample rate no longer overloads the receiver: above
+  3.2 MS/s in None (I/Q) with a 100 kHz to 2.4 MHz filter it listens to the
+  receiver's own channel instead of filtering it again (at 20 MS/s with the
+  2.4 MHz filter that took 7–9 ms of each frame, and the driver dropped up to
+  40% of the signal; now about 0.3 ms), with the same verdicts.
+- Two demo devices at different sample rates (the main window's at 2.4 MS/s
+  and Device → Second Receiver... at 3.2 MS/s, near 145.800 MHz) no longer
+  crawl at about 9 frames a second with blocky waterfalls: both run at about
+  31.
 - The demo device no longer freezes the window for half a second at a new
-  sample rate (3.2 or 1.024 MS/s).
+  sample rate (3.2 or 1.024 MS/s); the first frame at a rate it hasn't used
+  lately (it keeps the two rates used last) still takes up to about a
+  quarter of a second (3.2 MS/s on the FM band).
+- At 1024 px the status bar's device name, rate, message and chips no longer
+  move a pixel at every message.
 - `Ctrl+T` switches the theme in about 0.2 s instead of a second, and no
   longer says afterwards that the demo device can't keep up.
 - At 1024 px the status bar keeps 220 px for its message with REC (or a
@@ -717,11 +928,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - When the output chosen in Tools → Preferences is unplugged, the status bar
   says once that audio plays through another one ("... isn't connected:
   playing through ..."), and the Info tab says so too.
+- While this computer catches up after an overload, the Audio button's
+  tooltip and the status bar name this computer until audio resumes (they
+  said the device wasn't delivering samples in real time), and an overload
+  from before a new sample rate, device or recording no longer counts as
+  this computer's: at a lower rate the device can't deliver, the audio hint
+  names the device at once, and the Decoder's line once it has judged the
+  new rate.
 
 ### Fixed — Spectrum, waterfall and Signal tab
 - After a hardware retune, the first waterfall row and the peak hold no
   longer show the old frequency's stations.
 - The waterfall's SNR readouts no longer read 6–8 dB low.
+- The plots' hover readouts read what is there at any FFT size: the
+  waterfall reads each row's average, so plain noise reads "-95 dBFS ·
+  noise" (at 32768 points it was given an SNR at most places) and a weak
+  carrier its own level (one 6 dB over the noise read "SNR 12"; at 32768
+  points a carrier needs about 10 dB to stand out), and a burst that stands
+  out of its row reads "Peak -60 dBFS · SNR 33 dB", as the measurement box's
+  Peak is judged. The spectrum's hover says "· noise" or "· SNR 31 dB" too,
+  and the Second Receiver window's plots read the same way.
 - Waterfall → Save Image after Stop or Pause saves a clean picture, without
   the dimming or badge.
 - The hover readout no longer covers a measurement's readout, and Disconnect
@@ -776,6 +1002,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unmodulated carrier. A steady carrier in a band heard in AM (AM
   broadcast, airband), most likely a weak AM station whose sidebands are
   lost in the noise, is listened to in AM with the band's filter, not in CW.
+- Identify hears weak signals better: an AM station 10 dB over the noise
+  reads AM (it read "Unmodulated carrier", and Apply Mode listened in CW),
+  FSK at 8 dB is no longer taken for OOK, and a few Mode S replies 4–6 dB
+  over the noise are pulses, not noise. An AM station's "Occupies about" is
+  how far its sidebands reach (6 kHz for ±3 kHz of audio; the demo's
+  broadcast stations, which read 1.1–1.8 kHz, now read 4–8 kHz as their
+  music changes) and its SNR is the SNR in that width, so Apply Mode's AM
+  filter no longer cuts their audio to 2.5 kHz.
 - Identify suggests an FM deviation that doesn't clip the station, so Apply
   Mode no longer leads straight to "FM audio is clipping" (it offered too
   small a deviation for the demo's narrow FM calls and its pager), and,
@@ -814,6 +1048,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ADS-B says when the sample rate is below 2 MS/s instead of decoding
   nothing, and no longer shows −64 ft/min for aircraft that send no climb
   rate.
+- ADS-B decodes at 2.0 and 2.048 MS/s: below 2.5 MS/s each reply's timing
+  is fitted from its preamble, so replies that start between two samples
+  decode (the demo's airliner gave 73 and 50 of 80 messages in 20 s at 2.0
+  and 2.048 MS/s, now 80 at both) and weak ones decode more often at
+  2.4 MS/s too. The fitting costs more in a busy sky (about 5 ms of a 33 ms
+  display frame for 3,000 Mode S replies a second) and is capped, the
+  clearest replies read first, so no sky or pulse interference takes more
+  than about a quarter of a frame on a typical 4-core computer.
 - The HackRF One's gain reaches its full range (the slider stopped at 50 dB),
   and its AGC box no longer shows "Auto" for an AGC it doesn't have.
 - Moving an RTL-SDR's gain slider no longer fills Error History with "gain
@@ -827,6 +1069,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of only A, I, N, M or EE (5–30 WPM, heard over background noise) or TT (up
   to 12 WPM; faster, a lone TT reads as I) is decoded instead of dropped as
   static.
+- Morse: a word of a lone E or T keyed like code shows ("... 73 TU E E" and
+  "T T T" read in full; they read "... 73 TU" and nothing), while one
+  standing alone between long pauses, as static makes, is still left out.
+- FLEX frames sent back to back, as paging channels send them, all decode
+  (only the first of a run did, at 1600 bps too), and a frame whose block
+  information word fails its check gives no pages, so near the decoding
+  threshold damaged frames seldom make up "valid" pages.
 - RDS's Program type row says Music for a music station (it said Speech).
 - Switching straight between ADS-B and CW (Morse), or Auto doing so, brings
   that protocol's Aircraft or Text view to the front instead of leaving
@@ -842,7 +1091,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   two, and opening and closing a recording at the device's rate again adds
   none. The Decoder tab, its chip and the status bar's messages still say it
   each time.
-- Clear also clears FLEX's "sends FLEX at 3200 bps" note.
 - While receiving, the Decoder's Off hint no longer asks you to press Start;
   with a recording open it says "press Play (Space)".
 - After tuning away from a band preset turned its decoder off, the protocol
@@ -853,7 +1101,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   opening a 1 MS/s recording after the ADS-B preset said "ADS-B needs at
   least 2 MS/s …" over the band plan's line and listed it in Tools → Error
   History. The Decoder tab and its chip still say so once Decode is ticked
-  (and choosing a rate below 2 MS/s still says "ADS-B needs 2.4 MS/s or
+  (and choosing a rate below 2 MS/s still says "ADS-B needs 2 MS/s or
   more." in the status bar).
 - While a recording plays, the Decoder no longer says it misses part of the
   signal (a recording is read in full, however slowly it plays) or points to
@@ -866,8 +1114,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Sample rate, which can't change while a recording plays.
 
 ### Fixed — Recordings
+- `AudioRecorder` counts a stereo recording's samples once per moment:
+  `samples_written`, `duration_seconds`, what `write()` returns and the
+  metadata `stop()` returns counted both channels' values, so a stereo
+  take read twice its length (the file itself was right).
+- `AudioPlayer` and `load_audio_file` play an audio take past 4 GiB (RF64)
+  back, count the samples a WAV file cut short or streamed (its size
+  unknown) holds rather than what its header says, and refuse 32-bit
+  samples in plain words instead of reading them as 16-bit noise.
 - I/Q recordings no longer lose most of the signal when the computer falls
   behind at high sample rates.
+- Recording I/Q no longer slows the receiver: a thread of the take's own
+  writes the samples, so at 20 MS/s a recording takes about 0.5 ms of a
+  display frame instead of 13–25 ms (frames fell behind, the device dropped
+  samples and the audio paused); only a disk still busy writing back earlier
+  recordings can now and then hold up a 20 MS/s frame (20–140 ms; every
+  sample is still kept). A disk that falls more than about a second of
+  signal behind loses the blocks it can't take, said once ("The recording
+  has gaps: ... because this computer (or its disk) couldn't keep up ...")
+  and counted in the take's "lost"; Stop, Save and closing the window first
+  write what is still queued. The Second Receiver's recordings are written
+  the same way.
+- A WAV file counts the samples it holds: one cut short, or whose size was
+  written as unknown (as a program streaming it writes), counted what its
+  header said (1,073,741,823 samples for a file of 1,000) in Recording Info
+  and the playback strip, and an RF64 or Wave64 file whose size was never
+  filled in (a crash) reads to its end. A floating-point WAV is refused in
+  plain words ("its samples are floating point (WAV format 3), and only
+  integer (PCM) WAV files are read"), and one whose chunk sizes run past its
+  end says what it lacks ("it holds no samples (no data chunk)") instead of
+  "cannot fit 'int' into an offset-sized integer".
 - An rtl_sdr `.bin` file is no longer read as 32-bit floats, and an empty
   file is refused.
 - cu8, cs8 and cs16 saves round instead of truncating (no false spur at the
@@ -930,9 +1206,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   give way (the status bar names the file).
 - When Save automatically can't save a take, its message fits the status bar
   and says what to do ("Not saved automatically: the drive would be nearly
-  full ... It is kept: save it elsewhere (Ctrl+S)."), and a WAV save that is
-  too long says so first (4 GiB at most) rather than that the drive has no
-  room.
+  full ... It is kept: save it elsewhere (Ctrl+S).").
 - Transmit Text's I/Q save leaves no partial file when the disk fills up at
   the end of the write.
 - While Convert Recording, Save or Decode Recording runs, only its progress
@@ -1060,11 +1334,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   saves no mode (it saved CHIRP's "Auto"), and a bookmark above 6 GHz keeps
   its frequency (Save wrote 6000 MHz).
 - CHIRP NFM channels are heard narrow (2.5 kHz deviation, 12.5 kHz filter);
-  Cross channels that receive with a CTCSS tone keep it as their tone
-  squelch, and the tooltip says when a receive squelch isn't supported here
-  (or that a Tone-> channel has none); empty memory slots are skipped quietly
+  DTCS channels keep their DCS code (with its receive polarity) as their
+  tone squelch, Cross channels that receive with a CTCSS tone or a DCS code
+  keep that, and the tooltip names it ("DTCS: DCS 023 N") or says when a
+  receive squelch isn't supported here (a reverse one such as DTCS-R) or
+  that a Tone-> channel has none; empty memory slots are skipped quietly
   instead of listed as unreadable rows; and
   `sdr-scan channels import --skip-bad` names each skipped row once.
+- In Edit..., None as a CHIRP Cross channel's tone stops its receive
+  squelch (it changed nothing); the channel keeps what it sends.
+- A sweep no longer lists a strong station twice: a bump in its skirt that
+  is the highest point of the next channel is the same signal, not another
+  one (the demo's 100.1 MHz was listed twice in a 99.9–100.7 MHz sweep).
 
 ### Removed — GUI
 - The radio tuner's volume, tone, balance and power/mute controls, which
@@ -1103,8 +1384,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   returned fewer samples than it consumed; both spectral-subtraction and
   Wiener paths now use a complex-safe, length-preserving overlap-add.
 - Noise reduction no longer amplifies block edges by 20–45 dB.
-- The CTCSS tone squelch no longer opens for the adjacent tones; DCS, not
-  implemented, is refused instead of acting as a carrier squelch.
+- The CTCSS tone squelch no longer opens for the adjacent tones; `Squelch`
+  refuses DCS instead of acting as a carrier squelch (the GUI's DCS squelch
+  uses `dsp.dcs.DcsDetector`).
 - AGC log mode no longer runs the gain to its maximum, and the NOISE squelch
   opens on a signal.
 - I/Q imbalance correction no longer makes the mirror image worse.

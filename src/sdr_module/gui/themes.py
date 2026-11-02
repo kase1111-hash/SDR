@@ -670,6 +670,9 @@ QFrame[role="card"] QLabel {{ background: transparent; }}
 QLabel[role="callout"], QFrame[role="callout"] {{ color: {p.info};
     background-color: {p.info_bg}; border: 1px solid {p.info}; border-radius: 4px;
     padding: 6px 8px; }}
+QLabel[role="status-overflow"] {{ color: {p.text}; background-color: {p.mantle};
+    border: 1px solid {p.surface2}; border-radius: 4px; padding: 4px 8px;
+    font-size: 11px; }}
 QLabel[role="badge"] {{ color: {p.on_accent}; background-color: {p.accent};
     border-radius: 3px; padding: 1px 6px; font-weight: bold; }}
 QLabel[role="keycap"] {{ color: {p.text}; background-color: {p.surface0};
@@ -701,6 +704,14 @@ QLabel[role="callout"][tone="warning"], QFrame[role="callout"][tone="warning"] {
     color: {p.warning}; background-color: {p.warning_bg}; border-color: {p.warning}; }}
 QLabel[role="callout"][tone="danger"], QFrame[role="callout"][tone="danger"] {{
     color: {p.danger}; background-color: {p.danger_bg}; border-color: {p.danger}; }}
+QLabel[role="status-overflow"][tone="success"] {{ color: {p.success};
+    background-color: {p.success_bg}; border-color: {p.success}; }}
+QLabel[role="status-overflow"][tone="warning"] {{ color: {p.warning};
+    background-color: {p.warning_bg}; border-color: {p.warning}; }}
+QLabel[role="status-overflow"][tone="danger"] {{ color: {p.danger};
+    background-color: {p.danger_bg}; border-color: {p.danger}; }}
+QLabel[role="status-overflow"][tone="info"] {{ color: {p.info};
+    background-color: {p.info_bg}; border-color: {p.info}; }}
 QLabel[role="badge"][tone="success"] {{ background-color: {p.success};
     color: {p.on_accent}; }}
 QLabel[role="badge"][tone="warning"] {{ background-color: {p.warning};

@@ -89,14 +89,22 @@ EXTENSION_FORMATS: Dict[str, SampleFormat] = {
 OPEN_FILTERS = ";;".join(
     (
         "I/Q recordings (*.sigmf-data *.sigmf-meta *.cf32 *.cs16 *.cs8 *.cu8 "
-        "*.cf64 *.wav *.bin *.raw *.iq *.dat)",
+        "*.cf64 *.wav *.w64 *.bin *.raw *.iq *.dat)",
         "SigMF (*.sigmf-data *.sigmf-meta)",
         "rtl_sdr / rtl_433 (*.bin *.cu8)",
         "HackRF (*.iq *.cs8 *.bin)",
-        "WAV I/Q (*.wav)",
+        "WAV I/Q (*.wav *.w64)",
         "All files (*)",
     )
 )
+
+#: How Recording Info names a WAV file that isn't a classic one (its
+#: ``wav_container``): RF64 holds more than 4 GiB.
+WAV_CONTAINER_NAMES: Dict[str, str] = {
+    "RF64": "RF64, the WAV format for files over 4 GiB",
+    "BW64": "BW64, the WAV format for files over 4 GiB",
+    "W64": "Sony Wave64",
+}
 
 # Sample rates SDRs commonly run at: a bare number in a file name is read as
 # a rate only if it is one of these (a time like 120000 is not).
@@ -961,6 +969,9 @@ if HAS_PYQT6:
                 "raw": "Raw I/Q samples (no header)",
             }
             kind = kinds.get(info["file_format"], info["file_format"])
+            container = (info.get("metadata") or {}).get("wav_container")
+            if info["file_format"] == "wav" and container in WAV_CONTAINER_NAMES:
+                kind = f"WAV file ({WAV_CONTAINER_NAMES[container]}), I/Q as stereo"
             fmt = options.sample_format
             rate = float(info["sample_rate_hz"] or 0.0)
             center = float(info["center_frequency_hz"] or 0.0)

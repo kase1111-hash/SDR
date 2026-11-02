@@ -550,8 +550,10 @@ class TestLowDiskSpace(_RecordingCase):
     def test_write_errors_stop_the_recording(self):
         self.win._record_button.click()
         self.win._update_display()
+        # (A take's blocks are queued for its writer thread, K-P1: queue()
+        # raises the error a write failed with.)
         with mock.patch.object(
-            self.mw._SampleStore, "append", side_effect=OSError(28, "No space left")
+            self.mw._SampleStore, "queue", side_effect=OSError(28, "No space left")
         ):
             self.win._update_display()
         self.assertFalse(self.win._recording)

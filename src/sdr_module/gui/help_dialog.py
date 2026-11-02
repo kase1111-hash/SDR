@@ -76,7 +76,11 @@ SHORTCUTS: Tuple[Tuple[str, Tuple[str, ...], str], ...] = (
     ("Tools", ("Home",), "Tune to the strongest signal in view (plots focused)"),
     ("Tools", ("PgUp", "PgDown"), "Tune to the next signal up / down (plots focused)"),
     ("View", ("F6",), "Put the keyboard focus on the spectrum"),
-    ("View", ("Esc",), "Return the keyboard focus to the spectrum"),
+    (
+        "View",
+        ("Esc",),
+        "Return the keyboard focus to the spectrum, and hide the full text of a long status message",
+    ),
     ("View", ("Ctrl+T",), "Switch between the light and dark themes"),
     (
         "View",

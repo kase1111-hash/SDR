@@ -1,9 +1,12 @@
 """
 Record what you hear: the demodulated audio as a WAV file.
 
-An :class:`AudioTake` writes 48 kHz, 16-bit mono WAV from the audio the
+An :class:`AudioTake` writes 48 kHz, 16-bit WAV from the audio the
 receiver demodulates (before the volume control), whether or not the
-speaker is on. While the squelch is closed it records silence, so the
+speaker is on: mono, or stereo (``channels=2``: broadcast FM with Radio >
+Audio > Stereo on), whose mono stretches (a station without stereo, a weak
+one blended to mono) play on both channels; stereo given to a mono take is
+mixed down. While the squelch is closed it records silence, so the
 recording keeps time with what was received; the audio fades in and out
 over a few milliseconds where the squelch opens and closes, as the speaker
 does. The WAV header is kept up to date as it records, so even a recording
@@ -48,15 +51,18 @@ class AudioTake:
         freq_hz: float = 0.0,
         mode: str = "",
         rate: int = AUDIO_RATE,
+        channels: int = 1,
     ):
         self.path = str(path)
         self.rate = int(rate)
         self.freq_hz = float(freq_hz)
         self.mode = str(mode)
+        #: 2: a stereo WAV (left, right); 1: mono.
+        self.channels = 2 if int(channels) >= 2 else 1
         self._recorder = AudioRecorder(
             sample_rate=self.rate,
             sample_format=AudioSampleFormat.INT16,
-            channels=1,
+            channels=self.channels,
             normalize=False,
         )
         self._recorder.set_metadata(source_frequency=self.freq_hz, demodulation=mode)
@@ -76,14 +82,27 @@ class AudioTake:
     def seconds(self) -> float:
         return self.samples / float(self.rate)
 
+    def _as_recorded(self, audio: np.ndarray) -> np.ndarray:
+        """``audio`` (mono, or ``(n, 2)`` stereo) in the file's channels."""
+        audio = np.asarray(audio, dtype=np.float32)
+        if self.channels == 2 and audio.ndim == 1:
+            return np.repeat(audio[:, None], 2, axis=1)
+        if self.channels == 1 and audio.ndim == 2:
+            return audio.mean(axis=1)
+        return audio
+
+    def _zeros(self, n: int) -> np.ndarray:
+        shape = (n, 2) if self.channels == 2 else (n,)
+        return np.zeros(shape, dtype=np.float32)
+
     def write(self, audio: np.ndarray, open_: bool, continuous: bool = True) -> None:
-        """A block of demodulated audio: recorded as it is while the
-        squelch is ``open_``, as silence of the same length otherwise.
-        ``continuous`` False: it doesn't follow the last block (a new
-        receiver chain), so it is crossfaded in."""
+        """A block of demodulated audio (mono, or ``(n, 2)`` stereo):
+        recorded as it is while the squelch is ``open_``, as silence of the
+        same length otherwise. ``continuous`` False: it doesn't follow the
+        last block (a new receiver chain), so it is crossfaded in."""
         if self.paused or self.closed:
             return
-        audio = np.asarray(audio, dtype=np.float32)
+        audio = self._as_recorded(audio)
         n = len(audio)
         if n == 0:
             return
@@ -93,10 +112,10 @@ class AudioTake:
             self.heard_s += n / float(self.rate)
         elif join.playing:
             tail = join.fade_out(audio)
-            out = np.zeros(n, dtype=np.float32)
+            out = self._zeros(n)
             out[: len(tail)] = tail
         else:
-            out = np.zeros(n, dtype=np.float32)
+            out = self._zeros(n)
         self._write(out)
 
     def silence(self, seconds: float) -> None:
@@ -109,9 +128,9 @@ class AudioTake:
         self._carry = wanted - n
         if n <= 0:
             return
-        out = np.zeros(n, dtype=np.float32)
+        out = self._zeros(n)
         if self._join.playing:
-            tail = self._join.release()[:n]
+            tail = self._as_recorded(self._join.release()[:n])
             out[: len(tail)] = tail
         self._write(out)
 
@@ -124,7 +143,7 @@ class AudioTake:
         if not self.closed:
             self.closed = True
             if self._join.playing:
-                self._write(self._join.release())
+                self._write(self._as_recorded(self._join.release()))
             try:
                 self._recorder.stop()
             except Exception as e:  # pragma: no cover - disk trouble

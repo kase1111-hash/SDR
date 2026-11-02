@@ -39,6 +39,7 @@ try:
         QSizePolicy,
         QSlider,
         QSpinBox,
+        QStackedWidget,
         QStyle,
         QVBoxLayout,
         QWidget,
@@ -55,6 +56,7 @@ from ..core.frequency_manager import (
     LicenseClass,
     get_frequency_manager,
 )
+from ..dsp.dcs import DCS_CODES, dcs_label, dcs_same_signal, format_dcs, parse_dcs
 from ..dsp.filters import CTCSS_FREQUENCIES, ctcss_label
 from ..utils.tooltips import get_short_tip
 from .audio_chain import (
@@ -62,7 +64,11 @@ from .audio_chain import (
     CW_PITCH_RANGE,
     DEFAULT_AGC_SPEED,
     DEFAULT_CW_PITCH_HZ,
+    DEFAULT_NOTCH_HZ,
+    LOW_CUT_CHOICES,
     NOISE_REDUCTION_LEVELS,
+    NOTCH_CHOICES,
+    NOTCH_RANGE_HZ,
 )
 from .device_settings import (
     ADSB_MIN_RATE,
@@ -169,6 +175,9 @@ MODE_BANDWIDTHS: Dict[str, Tuple[str, ...]] = {
 # in the broadcast band, voice and data (narrow) elsewhere. Picking FM
 # uses the settings of the one the tuned frequency is in.
 FM_BROADCAST_PROFILE = "FM broadcast"
+#: An FM deviation from this one up is broadcast FM (its audio is kept as
+#: it is: no notch).
+_BROADCAST_DEVIATION_HZ = 50e3
 FM_BROADCAST_BAND = (87.5e6, 108e6)
 
 # Bandwidth and FM deviation a mode starts with, until the user changes
@@ -320,6 +329,13 @@ _FORMAT_TIP = (
     "File format for the recorded I/Q samples; File > Save Recording offers "
     "it first, and can also write cu8 (rtl_sdr) and cs8 (hackrf_transfer). "
     "These are raw radio samples, not audio."
+)
+# (The WAV choice: past 4 GiB it is RF64, K-R1.)
+_WAV_FORMAT_TIP = (
+    "WAV, 16-bit I/Q (.wav): audio editors and many SDR programs open it. "
+    "Past 4 GiB (about 7 minutes at 2.4 MS/s) it is saved as RF64, the WAV "
+    "format for bigger files, which programs that read only classic WAV "
+    "files can't open."
 )
 
 _APPLY_PRESET_TIP = "Tune to this preset and set its bandwidth and demodulation mode"
@@ -888,6 +904,12 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         noise_reduction_changed = pyqtSignal(str)  # off / light / strong
         audio_agc_changed = pyqtSignal(str)  # off / fast / medium / slow
         tone_squelch_changed = pyqtSignal(float)  # Hz, 0 = off
+        # A DCS code chosen in the Tone squelch list ("D023N"), "" for none.
+        dcs_squelch_changed = pyqtSignal(str)
+        # The audio notch: off / auto / manual, and Manual's frequency (Hz).
+        notch_changed = pyqtSignal(str, int)
+        # The low cut: "off" or its corner in Hz ("100", "200", "300").
+        low_cut_changed = pyqtSignal(str)
         iq_options_changed = pyqtSignal(bool, bool)  # remove DC, balance I/Q
         # Receiver > Sample rate: a rate picked (applied live by the window).
         sample_rate_selected = pyqtSignal(float)
@@ -1440,10 +1462,74 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         )
         self._add_row(form, "Audio AGC:", self._audio_agc_combo)
 
+        # The notch (K-A1): Off, Auto or Manual; under it, in Auto and
+        # Manual, the whistle: Manual's frequency, or the one Auto removes
+        # (a row of its own: beside the choice it widened the column).
+        self._notch_combo = self._shrinkable_combo(_ValueComboBox(), 6)
+        for key, text, tip in NOTCH_CHOICES:
+            self._notch_combo.add_value(key, text, tip)
+        self._notch_combo.setAccessibleName("Notch")
+        self._add_row(form, "Notch:", self._notch_combo)
+        self._notch_spin = QSpinBox()
+        self._notch_spin.setRange(*NOTCH_RANGE_HZ)
+        self._notch_spin.setValue(DEFAULT_NOTCH_HZ)
+        self._notch_spin.setSuffix(" Hz")
+        self._notch_spin.setAccelerated(True)
+        self._notch_spin.setAccessibleName("Notch frequency")
+        self._notch_spin.setToolTip(
+            "The whistle's frequency, to remove it by hand (Manual; "
+            f"{NOTCH_RANGE_HZ[0]}-{NOTCH_RANGE_HZ[1]} Hz). Type it, or use the "
+            "arrows (Page Up/Down: 10 Hz) until the whistle is gone."
+        )
+        self._notch_found = QLabel()
+        self._notch_found.setAccessibleName("Whistle removed")
+        self._notch_stack = QStackedWidget()
+        self._notch_stack.addWidget(self._notch_spin)
+        self._notch_stack.addWidget(self._notch_found)
+        self._notch_stack.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+        )
+        notch_row = QWidget()
+        row = QHBoxLayout(notch_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self._notch_stack)
+        row.addStretch(1)
+        whistle_label = self._add_row(form, "Whistle:", notch_row)
+        whistle_label.setBuddy(self._notch_spin)
+        self._notch_row = notch_row
+        form.setRowVisible(notch_row, False)  # (Off)
+        self._notch_combo.currentIndexChanged.connect(self._on_notch_changed)
+        self._notch_spin.valueChanged.connect(self._on_notch_changed)
+        self.show_notch_found(None)
+
+        # The low cut (K-A2): hum and rumble out of AM, SSB and narrow FM.
+        self._low_cut_combo = self._shrinkable_combo(_ValueComboBox(), 6)
+        for key, text, tip in LOW_CUT_CHOICES:
+            self._low_cut_combo.add_value(key, text, tip)
+        self._low_cut_combo.setAccessibleName("Low cut")
+        self._low_cut_combo.currentIndexChanged.connect(
+            lambda _i: self.low_cut_changed.emit(self.low_cut())
+        )
+        self._add_row(form, "Low cut:", self._low_cut_combo)
+
         self._tone_combo = self._shrinkable_combo(_ValueComboBox(), 6)
         self._tone_combo.add_value("off", "Off", "Plays whatever is on the channel")
         for freq in CTCSS_FREQUENCIES:
             self._tone_combo.add_value(f"{freq:.1f}", ctcss_label(freq))
+        # DCS codes (K-A3), normal then inverted, after the CTCSS tones.
+        for inverted in (False, True):
+            self._tone_combo.insertSeparator(self._tone_combo.count())
+            polarity = (
+                "inverted polarity (also written I or R)"
+                if inverted
+                else "normal polarity"
+            )
+            for code in DCS_CODES:
+                self._tone_combo.add_value(
+                    format_dcs(code, inverted),
+                    dcs_label(code, inverted),
+                    f"DCS code {code:03d}, {polarity}",
+                )
         self._tone_combo.setAccessibleName("Tone squelch")
         self._tone_combo.currentIndexChanged.connect(self._on_tone_changed)
         self._add_row(form, "Tone squelch:", self._tone_combo)
@@ -1486,6 +1572,11 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             0,
             "SigMF (.sigmf-data and .sigmf-meta): keeps the frequency, sample "
             "rate and time, and SDR programs read it.",
+            Qt.ItemDataRole.ToolTipRole,
+        )
+        self._format_combo.setItemData(
+            self._format_combo.findData(".wav"),
+            _WAV_FORMAT_TIP,
             Qt.ItemDataRole.ToolTipRole,
         )
         self._format_combo.setToolTip(_FORMAT_TIP)
@@ -2095,6 +2186,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
     def _on_fm_deviation_changed(self, _index: int) -> None:
         if not self._applying_filter and self._demod_combo.currentText() == "FM":
             self._remember_filter("deviation", self._fm_dev_combo.currentText())
+        self._update_notch_controls()  # (broadcast FM keeps its audio)
+        self._update_low_cut_controls()
 
     def _update_mode_controls(self) -> None:
         """Controls that only apply to some modes."""
@@ -2115,9 +2208,10 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._tone_combo.setEnabled(is_fm)
         self._audio_form.setRowVisible(self._tone_heard, is_fm)
         self._tone_combo.setToolTip(
-            "CTCSS tone squelch: only play stations that send this "
-            "sub-audible tone (repeaters, PMR). Tone heard shows the one on "
-            "the channel."
+            "Tone squelch: only play stations that send this sub-audible "
+            "CTCSS tone or DCS code (repeaters, PMR); the tone or the code's "
+            "bits are filtered out of what you hear. Tone heard shows the "
+            "one on the channel."
             if is_fm
             else "Only used in FM mode"
         )
@@ -2125,6 +2219,8 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._nr_combo.setEnabled(audible)
         self._squelch_check.setEnabled(audible)
         self._update_squelch_controls()
+        self._update_notch_controls()
+        self._update_low_cut_controls()
         self._update_bandwidth_tip()
 
     def _update_fm_dev_enabled(self) -> None:
@@ -2246,9 +2342,12 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
 
     def _on_tone_changed(self, _index: int) -> None:
         self.tone_squelch_changed.emit(self.tone_squelch_hz())
+        code = self.dcs_squelch()
+        self.dcs_squelch_changed.emit(format_dcs(*code) if code else "")
 
     def tone_squelch_hz(self) -> float:
-        """The tone squelch's tone (Hz), 0 when it is off."""
+        """The tone squelch's CTCSS tone (Hz), 0 when it is off (or a DCS
+        code is chosen)."""
         value = self._tone_combo.currentText()
         try:
             return float(value)
@@ -2260,10 +2359,42 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         index = self._tone_combo.findText(f"{float(freq):.1f}") if freq else -1
         self._tone_combo.setCurrentIndex(max(index, 0))
 
-    def set_detected_tone(self, freq: Optional[float], checked: bool = True) -> None:
-        """Show the sub-audible tone heard on the channel (None: none;
-        ``checked`` False: tones aren't looked for, at a broadcast FM
-        deviation without a tone squelch)."""
+    def dcs_squelch(self) -> Optional[Tuple[int, bool]]:
+        """The tone squelch's DCS code, ``(code, inverted)``, or None."""
+        return parse_dcs(self._tone_combo.currentText())
+
+    def set_dcs_squelch(self, code: Optional[int], inverted: bool = False) -> None:
+        """Choose a DCS code for the tone squelch (None or a code not in
+        the standard list: off)."""
+        index = -1
+        if code is not None and parse_dcs(code) is not None:
+            index = self._tone_combo.findData(format_dcs(int(code), bool(inverted)))
+        self._tone_combo.setCurrentIndex(max(index, 0))
+
+    def set_detected_tone(
+        self,
+        freq: Optional[float],
+        checked: bool = True,
+        dcs: Optional[Tuple[int, bool]] = None,
+    ) -> None:
+        """Show the sub-audible tone (or DCS code, ``(code, inverted)``)
+        heard on the channel (None: none; ``checked`` False: tones aren't
+        looked for, at a broadcast FM deviation without a tone squelch)."""
+        if checked and dcs is not None:
+            code, inverted = dcs
+            text = dcs_label(code, inverted)
+            tip = (
+                f"The station sends DCS code {code:03d} "
+                f"({'inverted' if inverted else 'normal'} polarity)"
+            )
+            twin = dcs_same_signal(code, inverted)
+            if twin is not None:
+                tip += f": the same signal as {dcs_label(*twin)}"
+            if self._tone_heard.text() != text or self._tone_heard.toolTip() != tip:
+                self._tone_heard.setText(text)
+                self._tone_heard.setToolTip(tip)
+                set_tone(self._tone_heard, "success")
+            return
         if not checked:
             text = "Not checked"
             tip = (
@@ -2274,9 +2405,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         elif freq is None:
             text = "None"
             tip = (
-                "No sub-audible (CTCSS) tone heard on the channel. Repeaters "
-                "and PMR radios often send one; set the tone squelch to it to "
-                "hear only them."
+                "No sub-audible tone (CTCSS) or code (DCS) heard on the "
+                "channel. Repeaters and PMR radios often send one; set the tone "
+                "squelch to it to hear only them."
             )
         else:
             text = ctcss_label(freq)
@@ -2286,6 +2417,104 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
             self._tone_heard.setToolTip(tip)
             heard = checked and freq is not None
             set_tone(self._tone_heard, "success" if heard else "muted")
+
+    # -- the notch (K-A1) ---------------------------------------------------
+
+    def _notch_applies(self) -> Tuple[bool, str]:
+        """Whether the notch is used in the mode chosen, and why not."""
+        mode = self._demod_combo.currentText()
+        if mode in ("AM", "USB", "LSB", "CW"):
+            return True, ""
+        if mode == "FM":
+            if self.get_fm_deviation() < _BROADCAST_DEVIATION_HZ:
+                return True, ""
+            return False, "Not used in broadcast FM: its audio is kept as it is."
+        return False, "Not used in None (I/Q) mode: there is no audio."
+
+    def _update_notch_controls(self) -> None:
+        applies, why = self._notch_applies()
+        mode = self.notch_mode()
+        self._notch_combo.setEnabled(applies)
+        self._notch_spin.setEnabled(applies and mode == "manual")
+        self._notch_found.setEnabled(applies)
+        if not applies:
+            self.show_notch_found(None)  # (nothing is removed here)
+        self._notch_stack.setCurrentWidget(
+            self._notch_found if mode == "auto" else self._notch_spin
+        )
+        self._audio_form.setRowVisible(self._notch_row, mode != "off")
+        self._notch_combo.setToolTip(
+            why
+            or "Removes a whistle (a heterodyne) from the audio. Auto finds the "
+            "strongest steady one and follows it as it drifts, leaving voice "
+            "alone (for music use Off: a held note counts as a whistle); Manual "
+            "removes the frequency you set (AM, SSB, CW and narrow FM)."
+        )
+
+    def _on_notch_changed(self, *_args) -> None:
+        self._update_notch_controls()
+        self.notch_changed.emit(self.notch_mode(), self.notch_hz())
+
+    def notch_mode(self) -> str:
+        """``"off"``, ``"auto"`` or ``"manual"``."""
+        return self._notch_combo.currentText()
+
+    def set_notch_mode(self, mode: str) -> None:
+        self._notch_combo.setCurrentText(str(mode))
+
+    def notch_hz(self) -> int:
+        """The notch frequency set by hand (Manual), in Hz."""
+        return int(self._notch_spin.value())
+
+    def set_notch_hz(self, hz) -> None:
+        """Set Manual's frequency (out of range: the nearest end; not a
+        number, e.g. a damaged setting: unchanged)."""
+        try:
+            value = float(hz)
+        except (TypeError, ValueError, OverflowError):
+            return
+        if not math.isfinite(value):
+            return
+        low, high = NOTCH_RANGE_HZ
+        self._notch_spin.setValue(int(round(min(max(value, low), high))))
+
+    def show_notch_found(self, hz: Optional[float]) -> None:
+        """Auto's readout: the whistle it removes (Hz), or None."""
+        if hz is None:
+            text = "None"
+            tip = (
+                "Auto hears no steady whistle on the channel: the audio plays "
+                "as it is. It finds one within about half a second."
+            )
+        else:
+            text = f"{hz:.0f} Hz"
+            tip = f"Auto removes a steady whistle at {hz:.1f} Hz"
+        if self._notch_found.text() != text:
+            self._notch_found.setText(text)
+            self._notch_found.setToolTip(tip)
+            set_tone(self._notch_found, "success" if hz is not None else "muted")
+
+    # -- the low cut (K-A2) -------------------------------------------------
+
+    def _update_low_cut_controls(self) -> None:
+        if self._demod_combo.currentText() == "CW":
+            why = "Not used in CW: its filter sits around the CW note."
+        else:
+            _applies, why = self._notch_applies()
+        self._low_cut_combo.setEnabled(not why)
+        self._low_cut_combo.setToolTip(
+            why
+            or "Cuts the audio below this frequency: mains hum and rumble out, "
+            "the voice stays (AM, SSB and narrow FM). With a tone squelch set, "
+            "narrow FM is cut below 300 Hz anyway (the tone or the DCS code)."
+        )
+
+    def low_cut(self) -> str:
+        """``"off"``, or the low cut's corner in Hz (``"100"``...)."""
+        return self._low_cut_combo.currentText()
+
+    def set_low_cut(self, value: str) -> None:
+        self._low_cut_combo.setCurrentText(str(value))
 
     def noise_reduction(self) -> str:
         return self._nr_combo.currentText()

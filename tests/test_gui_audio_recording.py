@@ -110,8 +110,10 @@ class TestRecordAudio(_AudioCase):
         self.assertEqual(len(names), 1)
         self.assertRegex(names[0], r"^100\.100MHz_FM_\d{8}_\d{6}\.wav$")
         params, audio = _read_wav(os.path.join(self.folder, "rec", names[0]))
-        self.assertEqual(params, (48000, 2, 1))
-        self.assertAlmostEqual(len(audio) / 48000, 20 * 24000 / 2.4e6, delta=0.02)
+        # (K-S1: broadcast FM with Radio > Audio > Stereo on records a
+        # stereo WAV, left and right interleaved.)
+        self.assertEqual(params, (48000, 2, 2))
+        self.assertAlmostEqual(len(audio) / 2 / 48000, 20 * 24000 / 2.4e6, delta=0.02)
         self.assertGreater(float(np.sqrt(np.mean(audio**2))), 0.05)  # music
         self.assertEqual(self.spoken, [])  # nothing went to the speaker
         self.assertIn("Saved 00:00 of audio", win._message_label.text())

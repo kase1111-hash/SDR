@@ -67,7 +67,10 @@ class TestAudioGroup(_WindowTestCase):
         ]
         self.assertEqual(agc, ["Off", "Fast", "Medium", "Slow"])
         self.assertEqual(p.audio_agc_speed(), "medium")
-        self.assertEqual(p._tone_combo.count(), 51)
+        # Off and the 50 CTCSS tones, then (K-A3) the DCS codes.
+        values = [p._tone_combo.itemData(i) for i in range(p._tone_combo.count())]
+        tones = [v for v in values if isinstance(v, str) and not v.startswith("D")]
+        self.assertEqual(len(tones), 51)
         self.assertEqual(p._tone_combo.itemText(13), "100.0 Hz (1Z)")
 
     def test_agc_and_tone_only_where_they_apply(self):

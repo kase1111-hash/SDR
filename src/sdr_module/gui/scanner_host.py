@@ -7,6 +7,10 @@ open, start the receiver, add bookmarks and so on. It keeps the window's
 side of the scanner in one place, so ``main_window.py`` only needs a few
 hooks: the panel, ``_scan_frame`` in the display loop and the mute in
 ``_route_audio``.
+
+:class:`SecondReceiverPartner` is the Second Receiver window (Device >
+Second Receiver...) sweeping part of the range with it: the Scanner tab's
+"Use both receivers".
 """
 
 from __future__ import annotations
@@ -14,12 +18,16 @@ from __future__ import annotations
 import logging
 import math
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import numpy as np
 
 from ..devices.base import SDRDevice
+from ..dsp.dcs import dcs_label, format_dcs, parse_dcs
+from .bookmark_editor import bookmark_dcs
 from .bookmarks_panel import default_bookmark_name, listening
 from .error_log_dialog import install_history_handler
-from .scan_engine import Listening, bookmark_scan_list
+from .scan_engine import Listening, ScanPartner, bookmark_scan_list
 from .scanner_panel import ScanHit, ScannerHost
 
 logger = logging.getLogger(__name__)
@@ -65,14 +73,130 @@ def _text(record: logging.LogRecord) -> str:
         return str(record.msg)
 
 
+def _mhz(freq_hz: float) -> str:
+    return f"{float(freq_hz) / 1e6:.3f} MHz"
+
+
+class SecondReceiverPartner(ScanPartner):
+    """The Second Receiver window sweeping with the main window (the
+    Scanner tab's "Use both receivers"): the scan tunes it step by step and
+    takes every block it reads (:meth:`attach`), its speaker is muted
+    meanwhile, and it goes back where it was when the scan ends
+    (:meth:`detach`). It leaves the scan, through ``left``, when it can't
+    go on: stopped, recording, its sample rate or tuning changed by hand."""
+
+    def __init__(self, receiver: Any) -> None:
+        self.receiver = receiver
+        self._rate = float(receiver.sample_rate())
+        # (tuned, LO) before the scan, and what the scan tuned last.
+        self._saved: Optional[Tuple[float, float]] = None
+        self._expected: Optional[Tuple[float, float]] = None
+        self._feed: Optional[Callable[[np.ndarray], None]] = None
+        self._left: Optional[Callable[[str], None]] = None
+
+    # ---- ScanPartner ------------------------------------------------------ #
+    def scan_tune_lo(self, center_hz: float, vfo_hz: Optional[float] = None) -> bool:
+        rx = self.receiver
+        if not rx.tune(center_hz, recenter=True):
+            return False
+        if vfo_hz is not None and abs(vfo_hz - center_hz) >= 0.5:
+            rx.tune(vfo_hz)  # (inside the span: only the VFO moves)
+        self._expected = (rx.tuned_frequency(), rx.lo_frequency())
+        return True
+
+    def scan_lo_hz(self) -> float:
+        return float(self.receiver.lo_frequency())
+
+    def scan_sample_rate(self) -> float:
+        return self._rate
+
+    def scan_settle_s(self) -> float:
+        hardware = isinstance(self.receiver.device, SDRDevice)
+        return _HARDWARE_SETTLE_S if hardware else 0.0
+
+    def scan_device_range(self) -> Optional[Tuple[float, float]]:
+        low, high = self.receiver.tuning_range()
+        return float(low), float(high)
+
+    def scan_set_muted(self, muted: bool) -> None:
+        self.receiver.set_scan_muted(muted)
+
+    # ---- the scan's side -------------------------------------------------- #
+    def problem(self) -> str:
+        """Why it can't go on sweeping ("" when it can)."""
+        rx = self.receiver
+        if not rx.running:
+            return "it was stopped"
+        if rx.is_recording():
+            return "it is recording, which keeps it on one frequency"
+        if abs(float(rx.sample_rate()) - self._rate) > 0.5:
+            return "its sample rate changed"
+        if not self._where_left():
+            return f"you tuned it to {_mhz(rx.tuned_frequency())}"
+        return ""
+
+    def _where_left(self) -> bool:
+        """Whether it is still where the scan tuned it last (nobody, not
+        the user nor Follow transmissions, has tuned it since)."""
+        expected = self._expected
+        if expected is None:
+            return True
+        rx = self.receiver
+        tuned, lo = rx.tuned_frequency(), rx.lo_frequency()
+        return abs(tuned - expected[0]) <= 1.0 and abs(lo - expected[1]) <= 1.0
+
+    def attach(
+        self, feed: Callable[[np.ndarray], None], left: Callable[[str], None]
+    ) -> None:
+        """Sweep with the scan: ``feed`` takes the blocks this receiver
+        reads; ``left(why)`` when it can't go on (it is then detached)."""
+        rx = self.receiver
+        self._saved = (rx.tuned_frequency(), rx.lo_frequency())
+        self._expected = self._saved
+        self._feed, self._left = feed, left
+        rx.set_scan_feed(self._block)
+
+    def _block(self, samples: np.ndarray) -> None:
+        why = self.problem()
+        if why:
+            left = self._left
+            self.detach(restore=False)
+            if left is not None:
+                left(why)
+            return
+        feed = self._feed
+        if feed is not None:
+            feed(samples)
+
+    def detach(self, restore: bool = True) -> None:
+        """Out of the scan: unmuted, no longer feeding it, and (``restore``)
+        back on the frequency and span it had before, unless someone tuned
+        it since the scan did (then it stays there)."""
+        rx = self.receiver
+        saved, self._saved = self._saved, None
+        self._feed = self._left = None
+        try:
+            restore = restore and self._where_left()
+            self._expected = None
+            rx.set_scan_feed(None)
+            rx.set_scan_muted(False)
+            if restore and saved is not None and rx.running:
+                tuned, lo = saved
+                # The span first (the plots where they were), then the VFO.
+                if rx.tune(lo, recenter=True) and abs(tuned - lo) >= 0.5:
+                    rx.tune(tuned)
+        except RuntimeError as exc:  # pragma: no cover - its window deleted
+            logger.debug("The second receiver is gone: %s", exc)
+
+
 class WindowScannerHost(ScannerHost):
     """Adapts the main window (``SDRMainWindow``) to the scanner."""
 
     def __init__(self, window: Any):
         self._win = window
         # Where the receiver was before the scan: (frequency, LO, mode,
-        # deviation, bandwidth, tone squelch).
-        self._saved: Optional[Tuple[float, float, str, str, str, float]] = None
+        # deviation, bandwidth, CTCSS tone squelch, DCS code squelch).
+        self._saved: Optional[Tuple[float, float, str, str, str, float, str]] = None
         self._lo_moved = False
         #: The frequency the scan tuned last (None outside a scan): any
         #: other means the user tuned elsewhere.
@@ -196,7 +320,11 @@ class WindowScannerHost(ScannerHost):
         return ok
 
     def scan_tune_channel(
-        self, freq_hz: float, listening: Listening, tone_hz: float = 0.0
+        self,
+        freq_hz: float,
+        listening: Listening,
+        tone_hz: float = 0.0,
+        dcs: str = "",
     ) -> bool:
         win = self._win
         before = win._lo_frequency()
@@ -204,16 +332,19 @@ class WindowScannerHost(ScannerHost):
             # "The receiver's mode" (an old bookmark, a signal of a range
             # without a band): the mode, filter and tone squelch the scan
             # began with, not whatever the channel visited last left.
-            _freq, _lo, mode, deviation, width, tone_hz = self._saved
+            _freq, _lo, mode, deviation, width, tone_hz, dcs = self._saved
             listening = (mode, deviation, width)
-        # A bookmark with a tone squelch is judged by its tone, so the
-        # window checks it even with the speaker off (see _route_audio).
-        win._scan_checks_tone = bool(tone_hz and tone_hz > 0)
+        # A bookmark with a tone squelch (a CTCSS tone or a DCS code) is
+        # judged by it, so the window checks it even with the speaker off
+        # (see _route_audio).
+        win._scan_checks_tone = bool(tone_hz and tone_hz > 0) or (
+            parse_dcs(dcs) is not None
+        )
 
         def tune() -> bool:
             if not win._tune_to(freq_hz):
                 return False
-            self._apply_listening(listening, tone_hz)
+            self._apply_listening(listening, tone_hz, dcs)
             return True
 
         ok = self._tune_step(tune)
@@ -222,7 +353,9 @@ class WindowScannerHost(ScannerHost):
             self._after_tune()
         return ok
 
-    def _apply_listening(self, listening: Listening, tone_hz: float) -> None:
+    def _apply_listening(
+        self, listening: Listening, tone_hz: float, dcs: str = ""
+    ) -> None:
         demod, deviation, width = listening
         if not demod:
             return
@@ -230,7 +363,17 @@ class WindowScannerHost(ScannerHost):
         width = width or win._bandwidth_for_mode(demod, deviation) or ""
         win._set_demod_mode(demod, deviation or None, width or None)
         if demod == "FM":
-            win._control_panel.set_tone_squelch_hz(float(tone_hz or 0.0))
+            self._set_squelch(float(tone_hz or 0.0), dcs)
+
+    def _set_squelch(self, tone_hz: float, dcs: str) -> None:
+        """The tone squelch: a DCS code ("D023N"), else a CTCSS tone (0 for
+        none)."""
+        panel = self._win._control_panel
+        code = parse_dcs(dcs) if dcs else None
+        if code is not None:
+            panel.set_dcs_squelch(*code)
+        else:
+            panel.set_tone_squelch_hz(tone_hz)
 
     def scan_lo_moved(self) -> bool:
         return self._lo_moved
@@ -319,10 +462,31 @@ class WindowScannerHost(ScannerHost):
     def scan_device_range(self) -> Optional[Tuple[float, float]]:
         return self._win._device_tuning_range()
 
+    def scan_partner(self) -> Tuple[Optional[SecondReceiverPartner], str]:
+        """The Second Receiver window to sweep with (the Scanner tab's "Use
+        both receivers"), or None and why not; ("" when no such window is
+        open: nothing to offer)."""
+        host = getattr(self._win, "_second_rx", None)
+        receiver = getattr(host, "receiver", None)
+        if receiver is None or not receiver.isVisible():
+            return None, ""
+        if not receiver.running:
+            return None, (
+                "Start the second receiver (Device > Second Receiver..., Start) "
+                "to sweep with it too."
+            )
+        if receiver.is_recording():
+            return None, (
+                "The second receiver is recording, which keeps it on one "
+                "frequency: stop its recording to sweep with it."
+            )
+        return SecondReceiverPartner(receiver), ""
+
     def scan_begin(self) -> None:
         win = self._win
         panel = win._control_panel
         mode, deviation = win._listening_mode()
+        code = panel.dcs_squelch()
         self._saved = (
             win._current_frequency(),
             win._lo_frequency(),
@@ -330,6 +494,7 @@ class WindowScannerHost(ScannerHost):
             deviation,
             panel._bw_combo.currentText(),
             float(panel.tone_squelch_hz()),
+            format_dcs(*code) if code else "",
         )
         self.expected_hz = win._current_frequency()
 
@@ -348,7 +513,14 @@ class WindowScannerHost(ScannerHost):
         win._note_tuned()
 
     def _go_back(
-        self, freq: float, lo: float, mode: str, deviation: str, width: str, tone: float
+        self,
+        freq: float,
+        lo: float,
+        mode: str,
+        deviation: str,
+        width: str,
+        tone: float,
+        dcs: str = "",
     ) -> None:
         """To where the scan began, in the mode, filter and tone squelch it
         began with. A receiver that can't go back (it refused) stays on the
@@ -375,7 +547,7 @@ class WindowScannerHost(ScannerHost):
             )
         # (Whatever the mode: the scan sets it for the FM channels it visits,
         # and it is kept, and saved, for when FM is next used.)
-        win._control_panel.set_tone_squelch_hz(tone)
+        self._set_squelch(tone, dcs)
         if off_centre and abs(win._lo_frequency() - lo) < 0.5:
             # Then the VFO, in the filter it was tuned with: only it moves.
             self._quietly(lambda: win._tune_to(freq))
@@ -394,11 +566,16 @@ class WindowScannerHost(ScannerHost):
             win._set_demod_mode(hit.mode, hit.fm_deviation or None, hit.bandwidth)
         if hit.mode == "FM":
             tone = float(hit.tone_hz or 0.0)
-            win._control_panel.set_tone_squelch_hz(tone)
-            if tone:
+            code = parse_dcs(hit.dcs) if hit.dcs else None
+            self._set_squelch(tone, hit.dcs)
+            if code is not None:
+                squelch = dcs_label(*code)
+            else:
+                squelch = f"tone squelch {tone:.1f} Hz" if tone else ""
+            if squelch:
                 # (As tuning the bookmark says.)
                 win._show_status_message(
-                    f"Tuned to {label} (FM, tone squelch {tone:.1f} Hz)", "info", 3000
+                    f"Tuned to {label} (FM, {squelch})", "info", 3000
                 )
         if win._device is not None and not win._is_running:
             win._start_acquisition()
@@ -430,12 +607,17 @@ class WindowScannerHost(ScannerHost):
     def scan_bookmark_list(self, group: str = "") -> List[Dict[str, Any]]:
         panel = self._win._bookmarks_panel
         # In the order the Bookmarks list shows them (each group first).
+        bookmarks = panel.bookmarks()
         visits = bookmark_scan_list(
-            panel.bookmarks(), listening, group, order=panel.list_order()
+            bookmarks, listening, group, order=panel.list_order()
         )
         for visit in visits:
             width = _parse_hz(visit.get("bandwidth") or "")
             visit["width_hz"] = width or 10e3
+            # (A DCS code squelch, FM only, as the CTCSS tone is.)
+            code = bookmark_dcs(bookmarks[visit["index"]])
+            if visit.get("demod") == "FM" and code is not None:
+                visit["dcs"] = format_dcs(*code)
         return visits
 
     def scan_bookmark_order(self) -> List[int]:

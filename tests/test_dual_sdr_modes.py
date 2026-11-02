@@ -1,9 +1,9 @@
 """Which dual-SDR operation modes the controller really implements (FG-B16).
 
-``OperationMode`` lists five modes, but only dual receive, full duplex and
-TX monitor have code behind them. Choosing wideband scan or relay used to
-succeed (``set_mode`` returned True) and then nothing happened; now it is
-refused with an error that says so and what to use instead.
+``OperationMode`` lists five modes. Choosing relay used to succeed
+(``set_mode`` returned True) and then nothing happened; now it is refused
+with an error that says why. Wideband scan was refused the same way until
+the controller implemented it (K-X1, ``tests/test_dual_sdr_wideband.py``).
 """
 
 import pytest
@@ -23,7 +23,7 @@ def _controller() -> DualSDRController:
     return controller
 
 
-@pytest.mark.parametrize("mode", [OperationMode.WIDEBAND_SCAN, OperationMode.RELAY])
+@pytest.mark.parametrize("mode", [OperationMode.RELAY])
 def test_set_mode_refuses_a_mode_that_is_not_implemented(mode):
     controller = _controller()
     with pytest.raises(NotImplementedError) as raised:
@@ -36,9 +36,7 @@ def test_set_mode_refuses_a_mode_that_is_not_implemented(mode):
 
 
 def test_the_reasons_point_somewhere_useful():
-    scan = NOT_IMPLEMENTED_MODES[OperationMode.WIDEBAND_SCAN]
     relay = NOT_IMPLEMENTED_MODES[OperationMode.RELAY]
-    assert "Scanner" in scan and "sdr-scan scan" in scan
     assert "transmit" in relay.lower()
 
 
@@ -47,6 +45,7 @@ def test_implemented_flag_and_supported_modes():
         OperationMode.DUAL_RX,
         OperationMode.FULL_DUPLEX,
         OperationMode.TX_MONITOR,
+        OperationMode.WIDEBAND_SCAN,
     )
     for mode in OperationMode:
         assert mode.implemented == (mode in implemented)

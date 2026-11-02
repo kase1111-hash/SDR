@@ -19,7 +19,8 @@ decoded 33 ms at a time gives the same text as the whole recording at once:
   clear of the floor, so noise alone does not key. A change must hold for
   a few milliseconds (both edges are delayed alike, so the timing is
   kept). Decisions are made at about 1 kHz whatever the input rate; the
-  smoothing is vectorised.
+  smoothing is vectorised. Each decision also says whether the envelope
+  was steady (a carrier) or fluctuating as noise does (:attr:`steady`).
 - :class:`MorseDecoder` times the marks and gaps (the run in progress is
   carried over block boundaries), learns the dit length from the marks
   (two clusters, dits and dashes, so the speed is found on its own) and
@@ -29,12 +30,15 @@ decoded 33 ms at a time gives the same text as the whole recording at once:
   mark much longer than a dash (a tuning carrier) ends the line and is
   left out of the speed; so does a long silence. A lone dit or dash (an E
   or a T as a word of its own: what a crash of static gives) is not shown
-  next to words of several letters, nor in a line of nothing else; in
-  code spaced letter by letter (Farnsworth practice, a loose hand: a word
-  per letter) it shows once the code is heard to go so. A blip of one
-  mark, or of two not timed like a letter (A, I, N, M, EE, TT), is not
-  shown either. The speed is ``1.2 / dit`` words per minute (PARIS), 5 to
-  60 WPM.
+  next to words of several letters, nor in a line of nothing else, unless
+  it was keyed like code: a steady carrier (the detector says which
+  envelope is), a dit or a dash at the speed the code around it has
+  established, and a word gap from that code ("TU E E", "T T T"). In code
+  spaced letter by letter (Farnsworth practice, a loose hand: a word per
+  letter) it shows once the code is heard to go so. A blip of one mark, or
+  of two not timed like a letter (A, I, N, M, EE, TT), is not shown
+  either. The speed is ``1.2 / dit`` words per minute (PARIS), 5 to 60
+  WPM.
 
 NumPy only; no Qt.
 """
@@ -228,9 +232,11 @@ class KeyingDetector:
         self._floor = 0.0
         self._open = False  # the gate (peak clear of the floor)
         self._settling = self._warmup  # decisions left in the settling time
-        # The raw envelope's mean and power over STEADY_S (while settling).
+        # The raw envelope's mean and power over STEADY_S.
         self._raw_mean = MovingAverage(self._steady_len)
         self._raw_power = MovingAverage(self._steady_len)
+        self._steady = np.zeros(0, dtype=bool)  # the last block's (see steady)
+        self._last_steady = False
 
     @property
     def key_down(self) -> bool:
@@ -250,6 +256,15 @@ class KeyingDetector:
         signal is there), as of the last decision."""
         return self._open
 
+    @property
+    def steady(self) -> np.ndarray:
+        """For each sample of the last block :meth:`process` took, whether
+        the envelope was steady there (a carrier: its fluctuation over
+        ``STEADY_S`` below ``STEADY_CV`` of its level; the envelope of a
+        crash of static fluctuates by half its level). For
+        :meth:`MorseDecoder.process`."""
+        return self._steady
+
     def process(self, envelope: np.ndarray) -> np.ndarray:
         """Decisions (bool, True = key down) for each sample of ``envelope``
         (the magnitude of the CW channel; complex input is taken as I/Q)."""
@@ -257,6 +272,7 @@ class KeyingDetector:
         x = np.nan_to_num(x.astype(np.float64, copy=False))
         n = len(x)
         if n == 0:
+            self._steady = np.zeros(0, dtype=bool)
             return np.zeros(0, dtype=bool)
         if self._peak is None:
             # Start the smoothing from the first level, not from silence
@@ -267,30 +283,34 @@ class KeyingDetector:
             self._raw_mean.process(np.full(self._steady_len - 1, x[0]))
             self._raw_power.process(np.full(self._steady_len - 1, 2.0 * x[0] ** 2))
         smooth = self._avg.process(x)
+        mean_all = self._raw_mean.process(x)
+        power_all = self._raw_power.process(x * x)
         picks = np.arange(self._phase, n, self._factor)
         before = self._key
         if len(picks):
             self._phase = int(picks[-1]) + self._factor - n
-            steady = None
-            if self._settling > 0:
-                mean = self._raw_mean.process(x)[picks]
-                power = self._raw_power.process(x * x)[picks]
-                steady = (mean > self.MIN_LEVEL) & (
-                    power - mean * mean < self.STEADY_CV**2 * mean * mean
-                )
+            mean, power = mean_all[picks], power_all[picks]
+            steady = (mean > self.MIN_LEVEL) & (
+                power - mean * mean < self.STEADY_CV**2 * mean * mean
+            )
             decisions = self._track(smooth[picks], steady)
             counts = np.diff(np.append(picks, n))
             out = np.empty(n, dtype=bool)
             out[: picks[0]] = before
             out[picks[0] :] = np.repeat(decisions, counts)
+            self._steady = np.empty(n, dtype=bool)
+            self._steady[: picks[0]] = self._last_steady
+            self._steady[picks[0] :] = np.repeat(steady, counts)
+            self._last_steady = bool(steady[-1])
             return out
         self._phase -= n
+        self._steady = np.full(n, self._last_steady, dtype=bool)
         return np.full(n, before, dtype=bool)
 
-    def _track(self, values: np.ndarray, steady: Optional[np.ndarray]) -> np.ndarray:
+    def _track(self, values: np.ndarray, steady: np.ndarray) -> np.ndarray:
         """The level trackers and the key, one decision per value
-        (``steady``: whether the raw envelope is steady there; needed
-        while settling)."""
+        (``steady``: whether the raw envelope is steady there; while
+        settling only a steady one keys)."""
         out = np.empty(len(values), dtype=bool)
         peak = self._peak
         floor = self._floor
@@ -318,9 +338,7 @@ class KeyingDetector:
                 settling -= 1
                 if not key:
                     floor += a_fd * (v - floor)
-                gate_open = (
-                    steady is not None and bool(steady[i]) and peak > gate_high * floor
-                )
+                gate_open = bool(steady[i]) and peak > gate_high * floor
             else:
                 if v < floor:
                     floor += a_fd * (v - floor)
@@ -403,7 +421,8 @@ class MorseDecoder:
     #: a little long, which stay dits ("SOS", "S", "EEE").
     SLOW_DIT_SLACK = 1.2
     #: A word that is a lone E or T (what a crash of static keys) waits.
-    #: Next to a word of several letters it is static: dropped.
+    #: Next to a word of several letters it is static: dropped (unless it
+    #: was keyed like code, see KEYED_MARKS).
     #: Next to a word of one letter, up to this many in a row show while
     #: the code reads letter by letter (Farnsworth practice, a loose hand):
     #: two of the last ``SPACED_WORDS`` other words were one letter, one of
@@ -413,6 +432,19 @@ class MorseDecoder:
     SPACED_WORDS = 4
     #: A lone dit shorter than this (in dits) is a blip of noise, not an E.
     SOLID_DIT = 0.6
+    #: A lone E or T keyed like code shows wherever it is ("TU E E", "T T
+    #: T"): the speed is established (``KEYED_FIT`` of the last marks, at
+    #: least ``KEYED_MARKS``, dits and dashes, were a dit or a dash at that
+    #: speed within ``KEYED_SLACK`` of their length), its mark is a dit or
+    #: a dash too, at least ``KEYED_STEADY`` of it a steady carrier (see
+    #: process's ``steady``: the envelope of a crash of static is not), and
+    #: the code goes on a word gap (``KEYED_WORD_GAP`` dits) before or after
+    #: it. A blip of noise in a gap is part of the gap.
+    KEYED_MARKS = 6
+    KEYED_FIT = 0.85
+    KEYED_SLACK = 0.35
+    KEYED_WORD_GAP = (4.5, 10.0)
+    KEYED_STEADY = 0.3
 
     def __init__(self, rate: float, wpm: float = 20.0, line_chars: int = 60):
         rate = float(rate)
@@ -432,7 +464,9 @@ class MorseDecoder:
         self._gap = 0  # the gap before the mark in progress
         self._stage = 3  # gap stages done (0 none ... 3 line ended)
         self._marks: Deque[float] = deque(maxlen=self.MARKS_KEPT)
-        self._queue: List[Tuple[str, int]] = []  # events waiting for a speed
+        # Events waiting for a speed: (kind, samples, steady share of a mark).
+        self._queue: List[Tuple[str, int, float]] = []
+        self._steady = 0  # steady samples in the mark in progress
         self._replaying = False
         self._letter = ""
         self._mark_dits = 1.0  # the last mark (dits)
@@ -440,7 +474,17 @@ class MorseDecoder:
         self._codes: List[str] = []  # their codes
         self._word_dits = 1.0  # its last dit or dash (dits)
         self._word_shown = False  # its letters show as they come
-        self._held: List[str] = []  # lone Es and Ts waiting (HELD_WORDS)
+        # Lone Es and Ts waiting (HELD_WORDS): (word, its mark and the gap
+        # before it in samples, whether it may be keyed: the speed was
+        # established then and its mark steady, see KEYED_MARKS).
+        self._held: List[Tuple[str, int, int, bool]] = []
+        self._fits: Deque[Tuple[bool, bool]] = deque(maxlen=self.MARKS_KEPT)
+        self._mark_length = 0  # the last mark (samples)
+        self._mark_steady = 0.0  # the share of it whose envelope was steady
+        # The gap before the word in progress (samples), and that of a
+        # blip dropped before it, with the blip (they are one gap).
+        self._word_gap = 0
+        self._blip = 0
         self._after_one = False  # the line's last word was one letter
         # The last SPACED_WORDS other words: (one letter, of 3+ elements).
         self._recent: Deque[Tuple[bool, bool]] = deque(maxlen=self.SPACED_WORDS)
@@ -533,7 +577,7 @@ class MorseDecoder:
         if not self._calibrated:
             # The queued gaps after the first mark (the one before it is
             # the silence before the transmission).
-            gaps = [length for kind, length in self._queue[2:] if kind == "gap"]
+            gaps = [length for kind, length, _s in self._queue[2:] if kind == "gap"]
             if gaps:
                 slowest_dit = self.rate * 1.2 / self.WPM_RANGE[0]
                 longest_dit = self.SLOW_DIT_SLACK * slowest_dit
@@ -551,12 +595,18 @@ class MorseDecoder:
         self._calibrated = True
         queued, self._queue = self._queue, []
         self._replaying = True
+        self._fits.extend(
+            self._fit(length)
+            for kind, length, _steady in queued
+            if kind == "mark" and not self._is_carrier(length)
+        )
         try:
-            for kind, length in queued:
+            for kind, length, steady in queued:
                 if kind == "mark":
-                    self._mark(length)
+                    self._mark(length, steady)
                 else:
                     self._stage = 0
+                    self._gap = length
                     self._gap_reached(length)
         finally:
             self._replaying = False
@@ -572,11 +622,12 @@ class MorseDecoder:
             self._run = self._gap + length
             return
         self._run = 0
+        steady = self._steady / max(length, 1)
         if self._calibrated:
-            self._mark(length)
+            self._mark(length, steady)
         else:
-            self._queue.append(("gap", self._gap))
-            self._queue.append(("mark", length))
+            self._queue.append(("gap", self._gap, 0.0))
+            self._queue.append(("mark", length, steady))
             if length > self._longest_element:
                 # A carrier, longer than an element at any speed: what was
                 # heard before it is a transmission of its own.
@@ -600,8 +651,9 @@ class MorseDecoder:
             and length > self.CARRIER_MIN_S * self.rate
         )
 
-    def _mark(self, length: int) -> None:
-        """Classify a mark (the speed is known). It counts in the speed
+    def _mark(self, length: int, steady: float = 0.0) -> None:
+        """Classify a mark (the speed is known; ``steady``: the share of it
+        whose envelope was steady). It counts in the speed
         first, so a speed measured wrong (the first marks were all dits,
         taken for dashes) is put right by the next dash rather than taking
         that dash for a carrier."""
@@ -614,6 +666,12 @@ class MorseDecoder:
             self._end_letter()
             self._end_line()
             return
+        if not self._replaying:
+            self._fits.append(self._fit(length))
+        if self._stage >= 2:  # the first mark of a word
+            self._word_gap, self._blip = self._blip + self._gap, 0
+        self._mark_length = length
+        self._mark_steady = steady
         self._mark_dits = length / self._dit
         self._letter += "." if length < 2.0 * self._dit else "-"
         if len(self._letter) > 9:  # not Morse: give up on this letter
@@ -673,7 +731,7 @@ class MorseDecoder:
         alike an element apart (a dit, or a third of a dash) or a letter
         apart (three dits, or a dash). Two marks of a crash of static are
         seldom timed like that."""
-        marks = [length for kind, length in self._queue if kind == "mark"]
+        marks = [length for kind, length, _s in self._queue if kind == "mark"]
         if len(marks) != 2 or len(self._marks) != 2:
             return False
         gap = self._queue[2][1]  # the gap between them
@@ -691,6 +749,36 @@ class MorseDecoder:
         # Dashes a dit apart (M); dits a dit or dashes a letter apart (I,
         # TT); dits a letter apart (EE).
         return 0.2 <= ratio <= 0.5 or 0.7 <= ratio <= 1.5 or 2.2 <= ratio <= 4.0
+
+    def _fit(self, length: int) -> Tuple[bool, bool]:
+        """``(a dit or a dash at the speed, a dash)`` for a mark."""
+        dits = length / self._dit
+        slack = self.KEYED_SLACK
+        if abs(dits - 1.0) <= slack:
+            return True, False
+        return abs(dits - 3.0) <= 3.0 * slack, dits >= 2.0
+
+    def _established(self) -> bool:
+        """Whether the recent marks are the dits and dashes of one speed
+        (see KEYED_MARKS)."""
+        fits = list(self._fits)
+        good = [dash for fit, dash in fits if fit]
+        return (
+            len(fits) >= self.KEYED_MARKS
+            and len(good) >= self.KEYED_FIT * len(fits)
+            and any(good)
+            and not all(good)
+        )
+
+    def _keyed(self, mark: int, before: int, after: Optional[int]) -> bool:
+        """Whether a lone E or T (its mark, and the gaps before and after
+        it in samples; None: the line ended after it) is timed like code at
+        the established speed (see KEYED_MARKS)."""
+        low, high = self.KEYED_WORD_GAP
+        return self._fit(mark)[0] and any(
+            gap is not None and low <= gap / self._dit <= high
+            for gap in (before, after)
+        )
 
     # -- text ----------------------------------------------------------------
 
@@ -718,8 +806,9 @@ class MorseDecoder:
             # It waits: maybe static (see HELD_WORDS), or a word of one
             # letter that decides about the words that waited before it.
             return
-        # A word of several letters: the words that waited were static.
-        self._held = []
+        # A word of several letters: the words that waited were static,
+        # but those keyed like code.
+        self._show_held(False, self._word_gap)
         self._show_word()
 
     def _show_word(self) -> None:
@@ -740,8 +829,12 @@ class MorseDecoder:
             return
         if not self._word_shown and _lone_e_or_t(codes):
             # It waits (a lone dit much shorter than a dit is a blip).
-            if not (self._word == "E" and self._word_dits < self.SOLID_DIT):
-                self._held.append(self._word)
+            if self._word == "E" and self._word_dits < self.SOLID_DIT:
+                self._blip = self._word_gap + self._mark_length
+            else:
+                keyable = self._established() and self._mark_steady >= self.KEYED_STEADY
+                held = (self._word, self._mark_length, self._word_gap, keyable)
+                self._held.append(held)
             self._word = ""
             return
         one = len(codes) == 1
@@ -749,7 +842,7 @@ class MorseDecoder:
         if not self._word_shown:
             # A word of one letter after words that waited: they show
             # with it if the code reads letter by letter.
-            self._show_held(self._letter_by_letter())
+            self._show_held(self._letter_by_letter(), self._word_gap)
             self._show_word()
         self._word_shown = False
         self._after_one = one
@@ -759,13 +852,17 @@ class MorseDecoder:
         ones = [longer for one, longer in self._recent if one]
         return len(ones) >= 2 and any(ones)
 
-    def _show_held(self, show: bool) -> None:
+    def _show_held(self, show: bool, after: Optional[int] = None) -> None:
         """Show the words that waited (``show``: up to ``HELD_WORDS`` of
-        them), or drop them."""
+        them), or drop them, but those keyed like code (see KEYED_MARKS;
+        ``after``: the gap after the last of them, samples, None when the
+        line ended)."""
         held, self._held = self._held, []
-        if not show or len(held) > self.HELD_WORDS:
-            return
-        for word in held:
+        show = show and len(held) <= self.HELD_WORDS
+        for i, (word, mark, gap, keyable) in enumerate(held):
+            gap_after = held[i + 1][2] if i + 1 < len(held) else after
+            if not (show or keyable and self._keyed(mark, gap, gap_after)):
+                continue
             if self.line:
                 self._pending_space = True
             for letter in word:
@@ -830,10 +927,23 @@ class MorseDecoder:
 
     # -- stream --------------------------------------------------------------
 
-    def process(self, keying: np.ndarray) -> List[MorseMessage]:
-        """Decode a block of key decisions; returns the lines completed."""
+    def process(
+        self, keying: np.ndarray, steady: Optional[np.ndarray] = None
+    ) -> List[MorseMessage]:
+        """Decode a block of key decisions; returns the lines completed.
+
+        ``steady`` (optional, one per decision, as
+        :attr:`KeyingDetector.steady` gives it): whether the envelope was
+        steady there, a carrier rather than a crash of static. Without it
+        no mark counts as steady, so a lone E or T word is never taken for
+        one keyed like code (see KEYED_MARKS) and shows only as before."""
         k = np.asarray(keying).ravel() > 0.5
         n = len(k)
+        calm = None
+        if steady is not None:
+            calm = np.asarray(steady).ravel().astype(bool)
+            if len(calm) != n:
+                raise ValueError("steady must have one value per decision")
         if n:
             self._elapsed += n
             edges = np.flatnonzero(k[1:] != k[:-1]) + 1
@@ -844,6 +954,8 @@ class MorseDecoder:
                 if state != self._key:
                     self._switch(state)
                 self._run += end - start
+                if state and calm is not None:
+                    self._steady += int(np.count_nonzero(calm[start:end]))
             if not self._key:
                 self._gap_reached(self._run)
         messages, self._messages = self._messages, []
@@ -856,5 +968,6 @@ class MorseDecoder:
             self._gap = self._run
             self._key = True
             self._run = 0
+            self._steady = 0
         else:  # a mark ended
             self._mark_ended(self._run)

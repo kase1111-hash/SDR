@@ -321,7 +321,10 @@ class _FakeSink:
             self.blocks.append(np.asarray(samples, dtype=np.float32))
 
     def samples(self):
-        return np.concatenate(self.blocks) if self.blocks else np.zeros(0)
+        # (K-S1: the main window plays broadcast FM in stereo, (n, 2)
+        # blocks: here as their mono mix, one sample per frame.)
+        blocks = [b.mean(axis=1) if b.ndim == 2 else b for b in self.blocks]
+        return np.concatenate(blocks) if blocks else np.zeros(0)
 
 
 class _SecondCase(_WindowTestCase):
@@ -1232,9 +1235,11 @@ class TestRecording(_SecondCase):
         self.assertTrue(rx._rec_label.isVisible())
         recorder = rx._recorder
         self.frames(6)
+        rx._record_button.click()
+        # (Written by the recording's writer thread, K-P1: all of it once
+        # the recording stopped.)
         written = recorder.samples_written
         self.assertGreater(written, 0)
-        rx._record_button.click()
         self.assertIsNone(rx._recorder)
         self.assertFalse(rx._rec_label.isVisible())
         files = sorted(os.listdir(self.folder))

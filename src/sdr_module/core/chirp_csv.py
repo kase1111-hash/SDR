@@ -245,9 +245,11 @@ def split_listening_tag(comment: str) -> Tuple[str, Dict[str, str]]:
 
 
 #: Channel fields this application sets on its own bookmarks too: the tone
-#: squelch (Ctrl+B, Edit), the repeater shift (Edit), the comment and Skip.
+#: squelch (Ctrl+B, Edit: a CTCSS tone, or a DCS code and its polarity),
+#: the repeater shift (Edit), the comment and Skip.
 _OWN_FIELDS = frozenset(
     ("name", "frequency_hz", "comment", "skip", "tone_mode", "ctone")
+    + ("dtcs", "dtcs_polarity")
     + ("duplex", "offset_hz")
 )
 

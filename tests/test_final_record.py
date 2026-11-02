@@ -1054,28 +1054,32 @@ class TestAutoSaveRefusalFitsTheStatusBar(_ReviewCase):
 
 class TestWavLimitBeforeRoom(_ReviewCase):
     """Leftover 30: a WAV save over 4 GiB onto a drive with less room was
-    first told there isn't room, then (room made) that WAV can't hold it."""
+    first told there isn't room, then (room made) that WAV can't hold it.
+    Since K-R1 a WAV file over 4 GiB is RF64: the room is all there is to
+    say."""
 
-    def test_the_wav_limit_is_said_first(self):
+    def test_only_the_room_is_said(self):
         from unittest import mock
 
         from PyQt6.QtWidgets import QMessageBox
 
+        from sdr_module.dsp import wav_file
         from sdr_module.gui import file_jobs
 
         self.record(3)
         count = self.win._buffer_sample_count()
-        small = count * 4 - 1  # (this take is "over 4 GiB")
+        small = count * 4 - 4  # (this take is "over 4 GiB")
         target = self.path("take.wav")
         with (
             mock.patch.object(file_jobs, "WAV_MAX_DATA_BYTES", small),
+            mock.patch.object(wav_file, "RIFF_SIZE_LIMIT", 36 + small),
             self.free(0.01),  # (and the drive has no room for it)
             self.save_dialog(target),
             mock.patch.object(QMessageBox, "warning") as warn,
         ):
             self.assertFalse(self.win._save_recording())
-        self.assertIn("too long for a WAV file", warn.call_args[0][2])
-        self.assertNotIn("enough space", warn.call_args[0][2])
+        self.assertIn("enough space", warn.call_args[0][2])
+        self.assertNotIn("too long for a WAV file", warn.call_args[0][2])
         self.assertFalse(os.path.exists(target))
 
 

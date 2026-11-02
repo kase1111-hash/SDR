@@ -151,14 +151,14 @@ allow proper signal analysis. Use a directional coupler for best results.""",
     ),
     "wideband_scan": Tooltip(
         title="Wideband Scan Mode",
-        short=(
-            "Not implemented yet: scan each SDR's range with the Scanner tab "
-            "instead."
-        ),
-        detailed="""Not implemented yet. The plan: split the spectrum between devices
-for faster scanning, the RTL-SDR covering 0-1.7 GHz while the HackRF
-covers 1.7-6 GHz. Until then, scan each device's range with the Scanner
-tab (Tools > Frequency Scanner) or `sdr-scan scan --device ...`.""",
+        short="Both SDRs sweep one range at once, each its own part.",
+        detailed="""Split a sweep between the two devices: each measures what only it
+tunes (above 1.766 GHz only the HackRF), then they meet in the middle
+of what both tune, the faster one (a HackRF at a high sample rate)
+taking more of it. The signals found are merged in frequency order.
+Use `sdr-scan scan --dual`, DualSDRController.start_wideband_scan()
+in a script, or in the GUI the Scanner tab's "Use both receivers" while
+Device > Second Receiver... runs (Sweep once or continuously).""",
     ),
     "clock_sync": Tooltip(
         title="Clock Synchronization",

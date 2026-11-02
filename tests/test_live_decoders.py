@@ -63,7 +63,7 @@ CASES = {
     ),
     "FLEX": (
         lambda rate: enc.flex_baseband([(1234567, "FLEX TEST PAGE")], rate),
-        [("1234567", "FLEX TEST PAGE")],
+        [("1234567 (A, 1600 bps)", "FLEX TEST PAGE")],
         25e3,
     ),
     # (Rows read the APRS position and symbol, and the ACARS flight.)
@@ -793,15 +793,18 @@ class TestFLEX:
             (0x4C7C, "6400 bps 4-level"),
         ],
     )
-    def test_other_speeds_are_recognised_but_not_decoded(self, code, speed):
+    def test_other_speeds_are_recognised_and_read_at_their_speed(self, code, speed):
+        # K-D4: they were "not supported yet" (unsupported_frames); now the
+        # data after the header is read at the speed the sync code names
+        # (tests/test_flex_speeds.py decodes every speed and phase).
         bits = enc.flex_frame_bits([(1234567, "AT 1600")])
         # Make the sync pattern name another speed.
         sync = (code << 48) | (0xA6C6AAAA << 16) | (code ^ 0xFFFF)
         bits[32:96] = [((sync >> (63 - i)) & 1) ^ 1 for i in range(64)]
         decoder, messages = self._decode(bits)
-        assert messages == []
-        assert decoder.unsupported_frames == 1
-        assert decoder.last_unsupported == speed
+        assert decoder.frames_seen == 1
+        assert (decoder.unsupported_frames, decoder.last_unsupported) == (0, "")
+        assert {m.baud_rate for m in messages} <= {int(speed.split()[0])}
 
     @staticmethod
     def _fast_frames(count, gap_s=1.875, rate=240e3):
@@ -825,16 +828,25 @@ class TestFLEX:
         for start in range(0, len(x), block):
             decoder.process(x[start : start + block])
 
+    @staticmethod
+    def _slow_reader(rate):
+        """A FLEX live decoder that can't read 3200 symbols/s, as at a
+        sample rate below 9.6 kS/s (K-D4: at the channel's own rate every
+        speed decodes)."""
+        decoder = FLEXLiveDecoder(rate)
+        decoder._decoder._fast_ok = False
+        return decoder
+
     def test_a_speed_it_cant_decode_is_a_problem_while_it_is_heard(self):
         # DEC-09: the problem came from a lifetime count, so it stayed on
         # a quiet channel, after retuning and after Clear.
         rate = 240e3
-        decoder = FLEXLiveDecoder(rate)
+        decoder = self._slow_reader(rate)
         self._feed(decoder, self._fast_frames(4))
         problem = decoder.status.problem
         assert problem == (
-            "This channel sends FLEX at 3200 bps 2-level; "
-            "only 1600 bps 2-level FLEX decodes yet"
+            "This channel sends FLEX at 3200 bps 2-level, which the decoder "
+            "can't read at this sample rate"
         )
         # Another channel: forgotten at once.
         decoder.set_offset(50e3)
@@ -855,7 +867,7 @@ class TestFLEX:
     def test_clear_forgets_a_speed_it_cant_decode(self):
         # Leftover 29: the Decoder's Clear left "This channel sends FLEX at
         # 3200 bps" on the status line until 6 s after the last such frame.
-        decoder = FLEXLiveDecoder(240e3)
+        decoder = self._slow_reader(240e3)
         self._feed(decoder, self._fast_frames(4))
         problem = decoder.status.problem
         assert problem
@@ -1002,7 +1014,7 @@ class TestDescribeMessage:
         ) == ("8 (F3)", "HI")  # fmt: skip
         assert describe_message(
             FLEXMessage(protocol=ProtocolType.FLEX, capcode=12, content="X", **base)
-        ) == ("12", "X")
+        ) == ("12 (1600 bps)", "X")
         assert describe_message(
             AX25Frame(protocol=ProtocolType.AX25, source="A", destination="B",
                       info="!x", **base)

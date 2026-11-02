@@ -694,7 +694,7 @@ class DeviceControls(QObject if HAS_PYQT6 else object):
             save_rate(self._settings, kind, rate)
         text = f"Sample rate {format_rate(rate)}: the span is {rate / 1e6:g} MHz."
         if rate < ADSB_MIN_RATE and self._adsb_selected():
-            text += " ADS-B needs 2.4 MS/s or more."
+            text += " ADS-B needs 2 MS/s or more."
             # Not logged again: the ADS-B decoder rebuilt for this rate
             # logged it (one entry in Error History per step).
             self._win._show_status_message(text, "warning", 5000, log=False)

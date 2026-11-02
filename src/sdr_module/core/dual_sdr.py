@@ -5,10 +5,13 @@ Provides coordinated control of both devices for:
 - Dual RX monitoring
 - Full-duplex operation (RTL-SDR RX + HackRF TX)
 - TX monitoring
+- Wideband scanning: both devices sweep one range at once, each its own
+  part (:meth:`DualSDRController.start_wideband_scan`, see
+  :mod:`sdr_module.core.wideband_scan`)
 
-:class:`OperationMode` also names wideband scanning and relaying, which are
-not implemented: :meth:`DualSDRController.set_mode` refuses them with a
-``NotImplementedError`` that says what to use instead (see
+:class:`OperationMode` also names relaying (receive and retransmit), which
+is deliberately not implemented: :meth:`DualSDRController.set_mode` refuses
+it with a ``NotImplementedError`` that says why (see
 :data:`NOT_IMPLEMENTED_MODES`).
 
 In the GUI, Device > Second Receiver... gives the same uses with any two
@@ -24,6 +27,8 @@ hardware.
 """
 
 import logging
+import math
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from threading import Event, RLock
@@ -32,9 +37,19 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import numpy as np
 
 from ..devices.base import SDRDevice
+from ..dsp.sweep import AUTO_MARGIN_DB
 from .config import SDRConfig
 from .device_manager import DeviceManager
 from .sample_buffer import SampleBuffer
+from .wideband_scan import (
+    MEASURE_SAMPLES,
+    READ_TIMEOUT_S,
+    SETTLE_S,
+    WidebandHit,
+    WidebandPass,
+    WidebandProgress,
+    WidebandScan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,16 +58,15 @@ class OperationMode(Enum):
     """Dual-SDR operation modes.
 
     Only :attr:`implemented` modes can be chosen with
-    :meth:`DualSDRController.set_mode`; WIDEBAND_SCAN and RELAY are listed
-    for configuration files and are refused (see
-    :data:`NOT_IMPLEMENTED_MODES`).
+    :meth:`DualSDRController.set_mode`; RELAY is listed for configuration
+    files and is refused (see :data:`NOT_IMPLEMENTED_MODES`).
     """
 
     DUAL_RX = "dual_rx"  # Both devices receiving
     FULL_DUPLEX = "full_duplex"  # RTL-SDR RX + HackRF TX
     TX_MONITOR = "tx_monitor"  # Monitor own transmission
-    WIDEBAND_SCAN = "wideband_scan"  # Coordinated scanning (not implemented)
-    RELAY = "relay"  # Receive and retransmit (not implemented)
+    WIDEBAND_SCAN = "wideband_scan"  # Both sweep one range, each its part
+    RELAY = "relay"  # Receive and retransmit (deliberately not implemented)
 
     @property
     def implemented(self) -> bool:
@@ -60,22 +74,30 @@ class OperationMode(Enum):
         return self not in NOT_IMPLEMENTED_MODES
 
 
-#: Modes the controller doesn't implement, and what to use instead (the
-#: text of the ``NotImplementedError`` that ``set_mode`` raises for them).
+#: Modes the controller doesn't implement, and why (the text of the
+#: ``NotImplementedError`` that ``set_mode`` raises for them).
 NOT_IMPLEMENTED_MODES: Dict[OperationMode, str] = {
-    OperationMode.WIDEBAND_SCAN: (
-        "Wideband scan mode is not implemented by DualSDRController. Scan with "
-        "one device at a time instead: the GUI's Scanner tab (Tools > "
-        "Frequency Scanner), or `sdr-scan scan --device rtlsdr` and "
-        "`sdr-scan scan --device hackrf` for each device's range."
-    ),
     OperationMode.RELAY: (
-        "Relay mode (receive and retransmit) is not implemented: "
-        "retransmitting what is received needs checks this controller "
-        "doesn't make. To transmit, use the GUI's transmit engine (Radio > "
-        "Send Station ID), which checks the license, mode and power first."
+        "Relay mode (receive and retransmit) is deliberately not "
+        "implemented: retransmitting what you receive is restricted almost "
+        "everywhere, and this library can't tell whether a relay would be "
+        "legal. In the US, for example, FCC 97.113 lets an amateur station "
+        "retransmit other amateur stations automatically only as a "
+        "repeater, auxiliary or space station, and other radio services' "
+        "transmissions hardly ever. To transmit your own signals, use the "
+        "GUI's transmit engine (Radio > Send Station ID, Tools > Transmit "
+        "Text), which checks the license, mode and power first."
     ),
 }
+
+
+def _tuned(device: Optional[SDRDevice], default: float) -> float:
+    """The frequency ``device`` says it is tuned to, else ``default``."""
+    try:
+        freq = float(device.state.frequency)  # type: ignore[union-attr]
+    except (AttributeError, TypeError, ValueError):
+        return default
+    return freq if math.isfinite(freq) else default
 
 
 @dataclass
@@ -106,6 +128,9 @@ class DualSDRController:
         - Device initialization (initialize()) should be called from the main thread
         - start_*() and stop_*() methods are thread-safe
         - Callbacks execute in device threads and should not modify controller state directly
+        - A wideband scan runs in threads of its own and its callbacks run
+          one at a time in the scan's thread (to stop it from one, call
+          ``wideband_scan.cancel()``)
     """
 
     def __init__(self, config: Optional[SDRConfig] = None) -> None:
@@ -138,6 +163,9 @@ class DualSDRController:
         self._hackrf_callback: Optional[Callable[[np.ndarray], None]] = None
         self._tx_generator: Optional[Callable[[], np.ndarray]] = None
 
+        # The wideband scan running (or the last one)
+        self._scan: Optional[WidebandScan] = None
+
     @property
     def state(self) -> DualSDRState:
         """Get current controller state (thread-safe copy)."""
@@ -161,6 +189,12 @@ class DualSDRController:
     def hackrf(self) -> Optional[SDRDevice]:
         """Get HackRF device (the one that can transmit)."""
         return self._hackrf
+
+    @property
+    def wideband_scan(self) -> Optional[WidebandScan]:
+        """The wideband scan running, or the last one (its ``hits``,
+        ``progress``, ``passes`` and ``reason``); None before the first."""
+        return self._scan
 
     @property
     def rtlsdr_buffer(self) -> SampleBuffer:
@@ -284,7 +318,7 @@ class DualSDRController:
 
         Raises:
             NotImplementedError: for a mode the controller doesn't implement
-                (WIDEBAND_SCAN, RELAY); the message says what to use instead.
+                (RELAY); the message says why.
         """
         reason = NOT_IMPLEMENTED_MODES.get(mode)
         if reason is not None:
@@ -305,12 +339,20 @@ class DualSDRController:
                     logger.error("TX monitor requires HackRF")
                     return False
 
+            if mode == OperationMode.WIDEBAND_SCAN:
+                if not self._rtlsdr and not self._hackrf:
+                    logger.error("Wideband scan requires a device (two to share)")
+                    return False
+
             self._state.mode = mode
             logger.info(f"Operation mode set to: {mode.value}")
             return True
 
     def set_rtlsdr_frequency(self, freq_hz: float) -> bool:
-        """Set RTL-SDR center frequency."""
+        """Set RTL-SDR center frequency (refused during a wideband scan,
+        which tunes the devices itself)."""
+        if self._refuse_while_scanning():
+            return False
         with self._lock:
             if self._rtlsdr is None:
                 return False
@@ -320,7 +362,10 @@ class DualSDRController:
             return False
 
     def set_hackrf_frequency(self, freq_hz: float) -> bool:
-        """Set HackRF center frequency."""
+        """Set HackRF center frequency (refused during a wideband scan,
+        which tunes the devices itself)."""
+        if self._refuse_while_scanning():
+            return False
         with self._lock:
             if self._hackrf is None:
                 return False
@@ -354,6 +399,8 @@ class DualSDRController:
         Returns:
             True if both started successfully
         """
+        if self._refuse_while_scanning():
+            return False
         with self._lock:
             if self._state.mode != OperationMode.DUAL_RX:
                 self.set_mode(OperationMode.DUAL_RX)
@@ -436,6 +483,8 @@ class DualSDRController:
         Returns:
             True if started successfully
         """
+        if self._refuse_while_scanning():
+            return False
         with self._lock:
             if not self._rtlsdr or not self._hackrf:
                 logger.error("Full-duplex requires both devices")
@@ -513,6 +562,8 @@ class DualSDRController:
         Returns:
             True if started successfully
         """
+        if self._refuse_while_scanning():
+            return False
         if not self._hackrf:
             logger.error("TX monitor requires HackRF")
             return False
@@ -534,8 +585,156 @@ class DualSDRController:
 
         return self.start_full_duplex(monitor_callback, tx_generator)
 
+    # ------------------------------------------------------------------ #
+    # Wideband scan
+    # ------------------------------------------------------------------ #
+    def _scanning(self) -> bool:
+        scan = self._scan
+        return scan is not None and not scan.wait(0)
+
+    def _refuse_while_scanning(self) -> bool:
+        if not self._scanning():
+            return False
+        logger.error(
+            "A wideband scan is using the devices: stop it first "
+            "(stop_wideband_scan())"
+        )
+        return True
+
+    def start_wideband_scan(
+        self,
+        start_hz: float,
+        end_hz: float,
+        step_hz: float,
+        threshold_db: Optional[float] = None,
+        *,
+        continuous: bool = False,
+        margin_db: float = AUTO_MARGIN_DB,
+        min_width_hz: float = 0.0,
+        settle_s: float = SETTLE_S,
+        measure_samples: int = MEASURE_SAMPLES,
+        read_timeout_s: float = READ_TIMEOUT_S,
+        on_found: Optional[Callable[[WidebandHit], None]] = None,
+        on_progress: Optional[Callable[[WidebandProgress], None]] = None,
+        on_pass: Optional[Callable[[WidebandPass], None]] = None,
+        on_finished: Optional[Callable[[str], None]] = None,
+    ) -> bool:
+        """
+        Start a wideband scan: both devices sweep ``start_hz`` to
+        ``end_hz`` at once, each its own part, and the signals they find
+        are merged (see :class:`~sdr_module.core.wideband_scan.WidebandScan`,
+        which takes the same options). Each device keeps its sample rate
+        and gain and measures only what it tunes; the faster takes more of
+        the range. With one device, it sweeps the range alone.
+
+        The scan runs in threads of its own: :attr:`wideband_scan` has its
+        progress and the signals found, ``wideband_scan.wait()`` waits for
+        it, :meth:`stop_wideband_scan` (or :meth:`stop_all`) stops it.
+        While it runs both devices are streaming, so the mode and the
+        devices can't change, the other modes don't start and the scan
+        alone tunes the devices (``set_*_frequency`` refuse).
+
+        Args:
+            start_hz, end_hz, step_hz: The channels to measure.
+            threshold_db: Level (dBFS per bin) a signal must exceed; None:
+                each page's noise floor plus ``margin_db``.
+            continuous: Sweep again until stopped.
+            on_found, on_progress, on_pass, on_finished: Called in the
+                scan's thread (see WidebandScan).
+
+        Returns:
+            True if the scan started; False (logged, with the reason) while
+            streaming, transmitting or scanning, without a device, or for a
+            range the devices can't scan.
+        """
+        with self._lock:
+            if (
+                self._state.rtlsdr_streaming
+                or self._state.hackrf_streaming
+                or self._state.hackrf_transmitting
+                or self._scanning()
+            ):
+                logger.warning("Stop streaming before starting a wideband scan")
+                return False
+            devices = [d for d in (self._rtlsdr, self._hackrf) if d is not None]
+            if not devices:
+                logger.error(
+                    "A wideband scan needs a device: initialize() or "
+                    "use_devices() first"
+                )
+                return False
+            try:
+                scan = WidebandScan(
+                    devices,
+                    start_hz,
+                    end_hz,
+                    step_hz,
+                    threshold_db=threshold_db,
+                    margin_db=margin_db,
+                    min_width_hz=min_width_hz,
+                    continuous=continuous,
+                    settle_s=settle_s,
+                    measure_samples=measure_samples,
+                    read_timeout_s=read_timeout_s,
+                    on_found=on_found,
+                    on_progress=on_progress,
+                    on_pass=on_pass,
+                )
+            except ValueError as exc:
+                logger.error(f"Wideband scan not started: {exc}")
+                return False
+
+            def finished(reason: str, scan: WidebandScan = scan) -> None:
+                with self._lock:
+                    if self._scan is scan:
+                        self._state.rtlsdr_streaming = False
+                        self._state.hackrf_streaming = False
+                        # (Where the scan left them.)
+                        self._state.rtlsdr_frequency = _tuned(
+                            self._rtlsdr, self._state.rtlsdr_frequency
+                        )
+                        self._state.hackrf_frequency = _tuned(
+                            self._hackrf, self._state.hackrf_frequency
+                        )
+                logger.info(f"Wideband scan ended: {reason}")
+                if on_finished is not None:
+                    on_finished(reason)
+
+            scan.on_finished = finished
+            self._state.mode = OperationMode.WIDEBAND_SCAN
+            self._state.rtlsdr_streaming = self._rtlsdr is not None
+            self._state.hackrf_streaming = self._hackrf is not None
+            self._scan = scan
+            try:
+                scan.start()
+            except RuntimeError as exc:  # (no thread to be had)
+                logger.error(f"Wideband scan not started: {exc}")
+                self._state.rtlsdr_streaming = False
+                self._state.hackrf_streaming = False
+                self._scan = None
+                return False
+        logger.info(
+            f"Wideband scan of {float(start_hz) / 1e6:.3f} - "
+            f"{float(end_hz) / 1e6:.3f} MHz started with "
+            f"{' and '.join(scan.names)}"
+        )
+        return True
+
+    def stop_wideband_scan(self, timeout: Optional[float] = 5.0) -> bool:
+        """Stop the wideband scan and wait (up to ``timeout`` seconds) until
+        it has ended and its devices have stopped streaming. Returns False
+        if it is still ending after that."""
+        scan = self._scan
+        if scan is None:
+            return True
+        scan.cancel()
+        if threading.current_thread() is getattr(scan, "_thread", None):
+            return False  # (asked from its own callback: it ends after it)
+        return scan.wait(timeout)
+
     def stop_all(self) -> None:
-        """Stop all streaming and transmission."""
+        """Stop all streaming and transmission (a wideband scan too)."""
+        self.stop_wideband_scan()
         self._stop_event.set()
 
         with self._lock:
@@ -617,11 +816,21 @@ class DualSDRController:
                 hackrf_status["sample_rate"] = self._hackrf.state.sample_rate
                 hackrf_status["gain"] = self._hackrf.state.gain
 
-            return {
+            status: Dict[str, Any] = {
                 "mode": self._state.mode.value,
                 "rtlsdr": rtlsdr_status,
                 "hackrf": hackrf_status,
             }
+            scan = self._scan
+            if scan is not None:
+                status["wideband_scan"] = {
+                    "running": not scan.wait(0),
+                    "pass": scan.pass_number,
+                    "progress": scan.progress,
+                    "found": len(scan.hits),
+                    "reason": scan.reason,
+                }
+            return status
 
     def __enter__(self) -> "DualSDRController":
         """Context manager entry."""

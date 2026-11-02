@@ -34,7 +34,10 @@ from .themes import get_palette, mono_font, theme_notifier
 STATES = {
     "open": ("OPEN", "the squelch is open: the signal plays"),
     "closed": ("SQL", "squelched: quieter than the threshold, so muted"),
-    "tone": ("TONE", "muted by the tone squelch: not the chosen CTCSS tone"),
+    "tone": (
+        "TONE",
+        "muted by the tone squelch: not the chosen CTCSS tone or DCS code",
+    ),
     "off": ("OFF", "the squelch is off: everything plays, noise too"),
     "idle": ("I/Q", "no audio in None (I/Q) mode: choose AM, FM, USB, LSB or CW"),
     "none": ("—", "not receiving"),

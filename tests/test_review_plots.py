@@ -944,7 +944,10 @@ class TestWaterfallSnr(unittest.TestCase):
         # Each row is the strongest of 39 FFTs, so plain noise is drawn about
         # 6 dB above its mean: no signal, yet the hover read "SNR 6 dB" all
         # over it. An SNR shows where the level stands out from the noise as
-        # the rows show it (a weak carrier still does).
+        # the rows show it (a weak carrier still does). (K-L2: the rows are
+        # fed their averaged spectrum too, as the main window feeds them,
+        # and the hover reads that: from the strongest FFTs alone a carrier
+        # 6 dB over the noise can't be told from the noise's own peaks.)
         rate, size = 2.4e6, 2048
         analyzer = FrameSpectrumAnalyzer(size)
         wf = self.waterfall(rate, size)
@@ -958,7 +961,9 @@ class TestWaterfallSnr(unittest.TestCase):
             )
             x = x + np.sqrt(power) * np.exp(2j * np.pi * weak * rate / size * t)
             frame = analyzer.process(x.astype(np.complex64))
-            wf.add_line(frame.max_db, noise_db=frame.noise_floor_db)
+            wf.add_line(
+                frame.max_db, noise_db=frame.noise_floor_db, mean_db=frame.mean_db
+            )
         bin_hz = rate / size
         spots = [
             f

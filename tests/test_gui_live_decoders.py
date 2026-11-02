@@ -254,7 +254,12 @@ class TestDemoDecodesInTheWindow(_WindowTestCase):
             5.0,
         ),
         "FLEX": (
-            [("1234567", "SDR Module demo: FLEX 1600 page on 931.9375 MHz")],
+            [
+                (
+                    "1234567 (A, 1600 bps)",
+                    "SDR Module demo: FLEX 1600 page on 931.9375 MHz",
+                )
+            ],
             7.5,
         ),
         "ACARS": (
@@ -536,7 +541,7 @@ class TestDeviceDialogRates(unittest.TestCase):
                 low = rate < 2e6
                 self.assertEqual(combo.itemText(i).endswith("(too low for ADS-B)"), low)
                 tip = combo.itemData(i, Qt.ItemDataRole.ToolTipRole) or ""
-                self.assertEqual("needs 2.4 MS/s or more" in tip, low)
+                self.assertEqual("needs 2 MS/s or more" in tip, low)
             self.assertTrue(any(combo.itemData(i) < 2e6 for i in range(combo.count())))
         finally:
             dialog.close()

@@ -2,7 +2,7 @@
 I/Q Recording and Playback for SDR signals.
 
 Provides functionality to record and playback raw baseband signals:
-- Multiple file formats: raw I/Q, WAV, SigMF
+- Multiple file formats: raw I/Q, WAV (RF64 past 4 GiB: see wav_file), SigMF
 - Various sample formats: 8-bit, 16-bit, 32-bit float
 - Streaming recording with buffering
 - Metadata support (frequency, sample rate, timestamps)
@@ -18,7 +18,6 @@ import logging
 import math
 import os
 import struct
-import wave
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -26,6 +25,10 @@ from pathlib import Path
 from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
+
+from .wav_file import WavError, WavHeader, WavWriter
+from .wav_file import data_offset as _wav_data_offset
+from .wav_file import looks_like_wav, read_wav_header
 
 logger = logging.getLogger(__name__)
 
@@ -333,24 +336,9 @@ def write_sidecar(
 
 def wav_data_offset(path: Union[str, Path]) -> int:
     """Where a WAV file's samples start (the size of everything before its
-    ``data`` chunk), or 0 if it isn't a WAV file."""
-    try:
-        with open(path, "rb") as handle:
-            if handle.read(4) != b"RIFF":
-                return 0
-            handle.read(4)
-            if handle.read(4) != b"WAVE":
-                return 0
-            while True:
-                header = handle.read(8)
-                if len(header) < 8:
-                    return 0
-                name, size = header[:4], struct.unpack("<I", header[4:])[0]
-                if name == b"data":
-                    return handle.tell()
-                handle.seek(size + (size & 1), os.SEEK_CUR)
-    except OSError:
-        return 0
+    ``data`` chunk; classic, RF64 or Wave64), or 0 if it isn't a WAV
+    file."""
+    return _wav_data_offset(path)
 
 
 def bytes_per_complex_sample(sample_format: SampleFormat) -> int:
@@ -445,7 +433,7 @@ class IQRecorder:
 
         # Recording state
         self._file: Optional[BinaryIO] = None
-        self._wav_file: Optional[wave.Wave_write] = None
+        self._wav_file: Optional[WavWriter] = None
         self._filepath: Optional[Path] = None
         self._recording = False
         self._samples_written = 0
@@ -590,12 +578,20 @@ class IQRecorder:
         sample 0 at the recording's start time)."""
         self._segments.append((int(sample_start), str(start_time or "")))
 
-    def start(self, filepath: Union[str, Path]) -> None:
+    def start(
+        self, filepath: Union[str, Path], expected_samples: Optional[int] = None
+    ) -> None:
         """
         Start recording to file.
 
         Args:
             filepath: Output file path
+            expected_samples: How many samples will be written, when known
+                (WAV only): a take that fits in a classic WAV file (4 GiB)
+                gets its plain 44-byte header, read everywhere. Without it
+                (a recording of unknown length), or past 4 GiB, the header
+                keeps room to become RF64 if the take passes 4 GiB (see
+                :mod:`sdr_module.dsp.wav_file`).
         """
         if self._recording:
             raise RuntimeError("Already recording")
@@ -607,16 +603,14 @@ class IQRecorder:
         self._metadata.start_time = self._start_time.isoformat() + "Z"
 
         if self._file_format == FileFormat.WAV:
-            self._start_wav()
+            self._start_wav(expected_samples)
         else:
             self._file = open(self._filepath, "wb")
 
         self._recording = True
 
-    def _start_wav(self) -> None:
-        """Start WAV file recording."""
-        self._wav_file = wave.open(str(self._filepath), "wb")
-
+    def _start_wav(self, expected_samples: Optional[int] = None) -> None:
+        """Start WAV file recording: classic up to 4 GiB, RF64 past it."""
         # WAV parameters
         # Use 2 channels for I/Q (stereo)
         n_channels = 2
@@ -641,9 +635,16 @@ class IQRecorder:
                 wav_sample_rate,
             )
 
-        self._wav_file.setnchannels(n_channels)
-        self._wav_file.setsampwidth(sample_width)
-        self._wav_file.setframerate(wav_sample_rate)
+        expected = None
+        if expected_samples is not None:
+            expected = max(0, int(expected_samples)) * n_channels * sample_width
+        self._wav_file = WavWriter(
+            str(self._filepath),
+            n_channels,
+            sample_width,
+            wav_sample_rate,
+            expected_bytes=expected,
+        )
 
     def write(self, samples: np.ndarray) -> int:
         """
@@ -672,19 +673,18 @@ class IQRecorder:
         return len(samples)
 
     def _write_wav(self, data: np.ndarray) -> None:
-        """Write data to WAV file."""
+        """Write data to WAV file (16-bit samples little-endian, as WAV
+        stores them)."""
         if self._wav_file is None:
             return
 
-        # Convert to bytes
-        if data.dtype == np.int16:
-            self._wav_file.writeframes(data.tobytes())
-        elif data.dtype in (np.uint8, np.int8):
-            self._wav_file.writeframes(data.tobytes())
-        else:
+        if data.dtype in (np.uint8, np.int8):
+            self._wav_file.writeframes(np.ascontiguousarray(data))
+            return
+        if data.dtype != np.int16:
             # Convert float to int16 for WAV (rounded, as _convert_samples)
-            int_data = np.clip(np.rint(data * 32767), -32768, 32767).astype(np.int16)
-            self._wav_file.writeframes(int_data.tobytes())
+            data = np.clip(np.rint(data * 32767), -32768, 32767)
+        self._wav_file.writeframes(np.ascontiguousarray(data, dtype="<i2"))
 
     def stop(self) -> RecordingMetadata:
         """
@@ -808,7 +808,7 @@ class IQPlayer:
     or transmission.
 
     Features:
-    - Supports raw, WAV, and SigMF formats
+    - Supports raw, WAV (classic, RF64, BW64 and Wave64), and SigMF formats
     - Automatic format detection
     - Streaming playback with buffering
     - Loop and seek support
@@ -850,7 +850,8 @@ class IQPlayer:
 
         # Playback state
         self._file: Optional[BinaryIO] = None
-        self._wav_file: Optional[wave.Wave_read] = None
+        # A WAV file's header: its samples are read from self._file.
+        self._wav_header: Optional[WavHeader] = None
         self._position = 0
         self._total_samples = 0
         self._eof = False
@@ -875,10 +876,19 @@ class IQPlayer:
         # resolves the companion .sigmf-data/.sigmf-meta pair either way)
         if suffix in (".sigmf-data", ".sigmf", ".sigmf-meta"):
             self._open_sigmf()
-        elif suffix == ".wav":
+        elif suffix in (".wav", ".w64") or self._starts_like_wav():
+            # (A WAV file by its header whatever its name, as FormatDetector
+            # takes it: an RF64 file named .rf64, a .w64.)
             self._open_wav()
         else:
             self._open_raw()
+
+    def _starts_like_wav(self) -> bool:
+        try:
+            with open(self._filepath, "rb") as handle:
+                return looks_like_wav(handle.read(16))
+        except OSError:
+            return False  # (_open_raw says why)
 
     def _apply_given_values(self) -> None:
         """The caller's sample rate and centre frequency over the file's."""
@@ -952,14 +962,14 @@ class IQPlayer:
         self._open_data_file(data_path)
 
     def _open_wav(self) -> None:
-        """Open WAV recording (its centre frequency from a sidecar)."""
-        self._wav_file = wave.open(str(self._filepath), "rb")
+        """Open WAV recording: classic, RF64 (past 4 GiB) or Wave64 (its
+        centre frequency from a sidecar)."""
+        header = read_wav_header(self._filepath)
 
         # Get parameters
-        self._wav_file.getnchannels()
-        sample_width = self._wav_file.getsampwidth()
-        self._sample_rate = float(self._wav_file.getframerate())
-        self._total_samples = self._wav_file.getnframes()
+        sample_width = header.sample_width
+        self._sample_rate = float(header.frame_rate)
+        self._total_samples = header.frames
 
         # Determine sample format
         if sample_width == 1:
@@ -973,7 +983,6 @@ class IQPlayer:
         sidecar = find_sidecar(self._filepath)
         if sidecar is not None:
             self._use_sidecar(sidecar)
-            self._header_bytes = 0  # the wave module reads the header
             if rate > 0:
                 self._sample_rate = rate  # the header's rate is the truth
         else:
@@ -982,6 +991,11 @@ class IQPlayer:
                 sample_format=self._sample_format,
                 num_samples=self._total_samples,
             )
+        # The samples follow the header (whatever a sidecar says).
+        self._header_bytes = header.data_offset
+        self._file = open(self._filepath, "rb")
+        self._file.seek(header.data_offset)
+        self._wav_header = header
 
     def _open_raw(self) -> None:
         """Open raw I/Q file (its metadata from a sidecar, if there is one)."""
@@ -1084,7 +1098,7 @@ class IQPlayer:
         Returns:
             Complex samples array
         """
-        if self._wav_file is not None:
+        if self._wav_header is not None:
             return self._read_wav(num_samples)
         elif self._file is not None:
             return self._read_raw(num_samples)
@@ -1121,17 +1135,19 @@ class IQPlayer:
 
     def _read_wav(self, num_samples: int) -> np.ndarray:
         """Read from WAV file."""
-        if self._wav_file is None:
+        header = self._wav_header
+        if header is None or self._file is None:
             return np.array([], dtype=np.complex64)
-        frames = self._wav_file.readframes(num_samples)
+        count = min(max(0, int(num_samples)), self._total_samples - self._position)
+        frames = self._file.read(count * header.frame_bytes) if count > 0 else b""
 
         if len(frames) == 0:
             self._eof = True
             return np.array([], dtype=np.complex64)
 
         # Convert bytes to samples (in float32, like _read_raw)
-        sample_width = self._wav_file.getsampwidth()
-        n_channels = self._wav_file.getnchannels()
+        sample_width = header.sample_width
+        n_channels = header.channels
 
         samples: np.ndarray
         if sample_width == 1:
@@ -1166,8 +1182,10 @@ class IQPlayer:
         # (The end itself is a position too: the next read returns nothing.)
         position = min(max(0, int(position)), max(0, self._total_samples))
 
-        if self._wav_file is not None:
-            self._wav_file.setpos(position)
+        if self._wav_header is not None:
+            if self._file is not None:
+                frame = self._wav_header.frame_bytes
+                self._file.seek(self._header_bytes + position * frame)
         elif self._file is not None:
             bytes_per_sample = self._get_bytes_per_sample() * 2
             self._file.seek(self._header_bytes + position * bytes_per_sample)
@@ -1181,10 +1199,6 @@ class IQPlayer:
 
     def close(self) -> None:
         """Close the file."""
-        if self._wav_file is not None:
-            self._wav_file.close()
-            self._wav_file = None
-
         if self._file is not None:
             self._file.close()
             self._file = None
@@ -1386,7 +1400,8 @@ def save_iq_file(
         file_format=file_format,
     )
 
-    recorder.start(filepath)
+    # (Its size known: a WAV file that fits is a classic one.)
+    recorder.start(filepath, expected_samples=len(samples))
     recorder.write(samples)
     return recorder.stop()
 
@@ -1476,7 +1491,7 @@ class AudioRecorder:
         self._normalize = normalize
 
         # Recording state
-        self._wav_file: Optional[wave.Wave_write] = None
+        self._wav_file: Optional[WavWriter] = None
         self._filepath: Optional[Path] = None
         self._recording = False
         self._samples_written = 0
@@ -1599,12 +1614,21 @@ class AudioRecorder:
             else:
                 self._metadata.custom[key] = value
 
-    def start(self, filepath: Union[str, Path]) -> None:
+    def start(
+        self, filepath: Union[str, Path], expected_samples: Optional[int] = None
+    ) -> None:
         """
         Start recording to WAV file.
 
         Args:
             filepath: Output WAV file path
+            expected_samples: How many samples (of each channel) will be
+                written, when known: a file that fits in a classic WAV file
+                (4 GiB) gets its plain 44-byte header. Without it (a
+                recording of unknown length, as Record Audio's), the header
+                keeps room to become RF64 if the recording passes 4 GiB,
+                about 12 hours of 48 kHz mono (see
+                :mod:`sdr_module.dsp.wav_file`).
         """
         if self._recording:
             raise RuntimeError("Already recording")
@@ -1615,18 +1639,24 @@ class AudioRecorder:
         self._start_time = _utc_now()
         self._metadata.start_time = self._start_time.isoformat() + "Z"
 
-        # Open WAV file
-        self._wav_file = wave.open(str(self._filepath), "wb")
-
         # WAV parameters
         sample_width = self._get_sample_width()
         # WAV float32 stores as 16-bit internally for compatibility
         if self._sample_format == AudioSampleFormat.FLOAT32:
             sample_width = 2
 
-        self._wav_file.setnchannels(self._channels)
-        self._wav_file.setsampwidth(sample_width)
-        self._wav_file.setframerate(self._sample_rate)
+        # Open WAV file: classic up to 4 GiB, RF64 past it (the wave module
+        # failed there, with its file position left in the header).
+        expected = None
+        if expected_samples is not None:
+            expected = max(0, int(expected_samples)) * self._channels * sample_width
+        self._wav_file = WavWriter(
+            str(self._filepath),
+            self._channels,
+            sample_width,
+            self._sample_rate,
+            expected_bytes=expected,
+        )
 
         self._recording = True
 
@@ -1638,7 +1668,8 @@ class AudioRecorder:
             samples: Real audio samples (float, -1.0 to 1.0)
 
         Returns:
-            Number of samples written
+            Number of samples written (of each channel: a stereo block of
+            ``n`` left/right pairs counts ``n``)
         """
         if not self._recording:
             raise RuntimeError("Not recording")
@@ -1650,7 +1681,9 @@ class AudioRecorder:
         data = self._convert_samples(samples)
         self._wav_file.writeframes(data)
 
-        n_samples = len(samples.flatten())
+        # (Each moment once: the values of all channels, interleaved, are
+        # channels times as many.)
+        n_samples = int(np.asarray(samples).size) // max(1, int(self._channels))
         self._samples_written += n_samples
 
         return n_samples
@@ -1698,10 +1731,16 @@ class AudioPlayer:
     processing or playback.
 
     Features:
-    - WAV file support (8-bit, 16-bit, 24-bit)
+    - WAV file support (8-bit, 16-bit, 24-bit integer PCM): classic WAV,
+      RF64 and BW64 (what a recording past 4 GiB becomes) and Sony Wave64,
+      counting the samples a file holds (one cut short, or whose size was
+      written as unknown, plays what it has)
     - Mono and stereo support
     - Streaming playback
     - Seek and loop support
+
+    Raises WavError (a ValueError) from the constructor for a file that
+    isn't one of these, and OSError when it can't be read.
 
     Example:
         player = AudioPlayer("audio.wav")
@@ -1721,7 +1760,8 @@ class AudioPlayer:
         self._filepath = Path(filepath)
 
         # Playback state
-        self._wav_file: Optional[wave.Wave_read] = None
+        self._file: Optional[BinaryIO] = None
+        self._data_offset = 0
         self._position = 0
         self._eof = False
 
@@ -1738,32 +1778,36 @@ class AudioPlayer:
         self._open()
 
     def _open(self) -> None:
-        """Open the WAV file."""
-        self._wav_file = wave.open(str(self._filepath), "rb")
+        """Open the WAV file (classic, RF64, BW64 or Wave64)."""
+        header = read_wav_header(self._filepath)
+        formats = {
+            1: AudioSampleFormat.UINT8,
+            2: AudioSampleFormat.INT16,
+            3: AudioSampleFormat.INT24,
+        }
+        sample_format = formats.get(header.sample_width)
+        if sample_format is None:
+            raise WavError(
+                f"its samples are {8 * header.sample_width}-bit, and only 8, 16 "
+                "and 24-bit WAV audio is read"
+            )
 
         # Get parameters
-        self._channels = self._wav_file.getnchannels()
-        self._sample_width = self._wav_file.getsampwidth()
-        self._sample_rate = self._wav_file.getframerate()
-        self._total_samples = self._wav_file.getnframes()
-
-        # Determine format
-        if self._sample_width == 1:
-            sample_format = AudioSampleFormat.UINT8
-        elif self._sample_width == 2:
-            sample_format = AudioSampleFormat.INT16
-        elif self._sample_width == 3:
-            sample_format = AudioSampleFormat.INT24
-        else:
-            sample_format = AudioSampleFormat.INT16
+        self._channels = header.channels
+        self._sample_width = header.sample_width
+        self._sample_rate = header.frame_rate
+        self._total_samples = header.frames
+        self._data_offset = header.data_offset
 
         self._metadata = AudioMetadata(
             sample_rate=self._sample_rate,
             sample_format=sample_format,
             channels=self._channels,
             num_samples=self._total_samples,
-            duration_seconds=self._total_samples / self._sample_rate,
+            duration_seconds=self.duration_seconds,
         )
+        self._file = open(self._filepath, "rb")
+        self._file.seek(self._data_offset)
 
     @property
     def sample_rate(self) -> int:
@@ -1815,10 +1859,13 @@ class AudioPlayer:
         Returns:
             Float samples array (-1.0 to 1.0)
         """
-        if self._wav_file is None:
+        if self._file is None:
             return np.array([], dtype=np.float32)
 
-        frames = self._wav_file.readframes(num_samples)
+        frame_bytes = self._channels * self._sample_width
+        count = min(max(0, int(num_samples)), self._total_samples - self._position)
+        frames = self._file.read(count * frame_bytes) if count > 0 else b""
+        frames = frames[: len(frames) - len(frames) % frame_bytes]  # whole frames
 
         if len(frames) == 0:
             self._eof = True
@@ -1834,25 +1881,16 @@ class AudioPlayer:
 
         elif self._sample_width == 2:
             # Signed 16-bit
-            raw = np.frombuffer(frames, dtype=np.int16)
+            raw = np.frombuffer(frames, dtype="<i2")
             samples = raw.astype(np.float32) / 32767.0
 
-        elif self._sample_width == 3:
-            # Signed 24-bit (unpack manually)
-            n_frames = len(frames) // (3 * self._channels)
-            samples = np.zeros(n_frames * self._channels, dtype=np.float32)
-            for i in range(len(samples)):
-                offset = i * 3
-                if offset + 3 <= len(frames):
-                    b = frames[offset : offset + 3]
-                    val = struct.unpack(
-                        "<i", b + (b"\xff" if b[2] & 0x80 else b"\x00")
-                    )[0]
-                    samples[i] = val / 8388607.0
         else:
-            # Default to 16-bit
-            raw = np.frombuffer(frames, dtype=np.int16)
-            samples = raw.astype(np.float32) / 32767.0
+            # Signed 24-bit: three little-endian bytes each, sign-extended
+            raw = np.frombuffer(frames, dtype=np.uint8).reshape(-1, 3)
+            values = raw.astype(np.int32)
+            values = values[:, 0] | (values[:, 1] << 8) | (values[:, 2] << 16)
+            values = np.where(values & 0x800000, values - 0x1000000, values)
+            samples = (values / 8388607.0).astype(np.float32)
 
         # Handle multi-channel: return as (n_samples, n_channels) or flatten for mono
         if self._channels > 1:
@@ -1880,11 +1918,12 @@ class AudioPlayer:
         Args:
             position: Sample position
         """
-        if self._wav_file is None:
+        if self._file is None:
             return
 
-        position = max(0, min(position, self._total_samples - 1))
-        self._wav_file.setpos(position)
+        position = max(0, min(int(position), self._total_samples - 1))
+        frame_bytes = self._channels * self._sample_width
+        self._file.seek(self._data_offset + position * frame_bytes)
         self._position = position
         self._eof = False
 
@@ -1904,9 +1943,9 @@ class AudioPlayer:
 
     def close(self) -> None:
         """Close the file."""
-        if self._wav_file is not None:
-            self._wav_file.close()
-            self._wav_file = None
+        if self._file is not None:
+            self._file.close()
+            self._file = None
 
     def __enter__(self):
         return self
@@ -1961,7 +2000,8 @@ def save_audio_file(
         sample_rate=sample_rate, sample_format=sample_format, channels=1
     )
 
-    recorder.start(filepath)
+    # (Its size known: a file that fits is a classic one.)
+    recorder.start(filepath, expected_samples=np.asarray(samples).size)
     recorder.write(samples)
     return recorder.stop()
 
@@ -2799,7 +2839,7 @@ class FormatDetector:
 
     Supports detection of:
     - Raw I/Q files (.raw, .iq, .cu8, .cs8, .cs16, .cf32, .cf64)
-    - WAV files (.wav)
+    - WAV files (.wav; classic, RF64 past 4 GiB, BW64 and Sony Wave64, .w64)
     - SigMF files (.sigmf-data, .sigmf-meta)
 
     Example:
@@ -2815,6 +2855,7 @@ class FormatDetector:
     # Extension to format mapping
     EXTENSION_MAP = {
         ".wav": (FileFormat.WAV, None),
+        ".w64": (FileFormat.WAV, None),
         ".cu8": (FileFormat.RAW, SampleFormat.UINT8),
         ".cs8": (FileFormat.RAW, SampleFormat.INT8),
         ".cs16": (FileFormat.RAW, SampleFormat.INT16),
@@ -2898,11 +2939,11 @@ class FormatDetector:
             )
 
     def _is_wav_file(self, filepath: Path) -> bool:
-        """Check if file is a WAV file by magic bytes."""
+        """Check if file is a WAV file by magic bytes (RIFF, RF64, BW64 or
+        Wave64's)."""
         try:
             with open(filepath, "rb") as f:
-                magic = f.read(4)
-                return magic == self.WAV_MAGIC
+                return looks_like_wav(f.read(16))
         except (OSError, ValueError) as e:
             logger.debug(f"WAV magic byte detection failed for {filepath}: {e}")
             return False
@@ -2952,47 +2993,47 @@ class FormatDetector:
         )
 
     def _detect_wav(self, filepath: Path) -> FormatInfo:
-        """Detect WAV file format."""
+        """Detect WAV file format: classic, RF64 (past 4 GiB), BW64 or Sony
+        Wave64 (``wav_container`` in its metadata says which)."""
         try:
-            with wave.open(str(filepath), "rb") as wav:
-                n_channels = wav.getnchannels()
-                sample_width = wav.getsampwidth()
-                sample_rate = wav.getframerate()
-                n_frames = wav.getnframes()
-
-                # Map sample width to format
-                if sample_width == 1:
-                    sample_format = SampleFormat.UINT8
-                elif sample_width == 2:
-                    sample_format = SampleFormat.INT16
-                else:
-                    sample_format = SampleFormat.INT16
-
-                file_size = filepath.stat().st_size
-                duration = n_frames / sample_rate if sample_rate > 0 else 0
-
-                return FormatInfo(
-                    file_format=FileFormat.WAV,
-                    sample_format=sample_format,
-                    sample_rate=float(sample_rate),
-                    num_samples=n_frames,
-                    num_channels=n_channels,
-                    file_size_bytes=file_size,
-                    duration_seconds=duration,
-                    bits_per_sample=sample_width * 8,
-                    is_valid=True,
-                    metadata={
-                        "wav_channels": n_channels,
-                        "wav_sample_width": sample_width,
-                    },
-                )
-        except (OSError, wave.Error, ValueError) as e:
+            header = read_wav_header(filepath)
+            file_size = filepath.stat().st_size
+        except (OSError, ValueError) as e:
             return FormatInfo(
                 file_format=FileFormat.WAV,
                 sample_format=SampleFormat.INT16,
                 is_valid=False,
                 error_message=str(e),
             )
+        n_channels = header.channels
+        sample_width = header.sample_width
+        sample_rate = header.frame_rate
+        n_frames = header.frames
+
+        # Map sample width to format
+        if sample_width == 1:
+            sample_format = SampleFormat.UINT8
+        else:
+            sample_format = SampleFormat.INT16
+
+        duration = n_frames / sample_rate if sample_rate > 0 else 0
+
+        return FormatInfo(
+            file_format=FileFormat.WAV,
+            sample_format=sample_format,
+            sample_rate=float(sample_rate),
+            num_samples=n_frames,
+            num_channels=n_channels,
+            file_size_bytes=file_size,
+            duration_seconds=duration,
+            bits_per_sample=sample_width * 8,
+            is_valid=True,
+            metadata={
+                "wav_channels": n_channels,
+                "wav_sample_width": sample_width,
+                "wav_container": header.container,
+            },
+        )
 
     def _detect_sigmf(self, filepath: Path) -> FormatInfo:
         """Detect SigMF file format."""
@@ -3635,7 +3676,7 @@ def check_iq_samples(
             total = player.total_samples
             read_as = player.sample_format
             name = (read_as or SampleFormat.FLOAT32).value
-            stated = player.metadata_path is not None or player._wav_file is not None
+            stated = player.metadata_path is not None or player._wav_header is not None
             if total == 0:
                 return SampleCheck(problem="The file holds no I/Q samples.")
             per = max(1, int(max_samples) // 3)

@@ -2112,10 +2112,11 @@ class MockDevice:
     (KLM1023, ICAO 4840D6: identification, position, velocity and a squawk
     reply) that the ADS-B decoder decodes, among weaker replies from other
     aircraft that it drops. The Decoder panel's other protocols have real
-    traffic too (see _DATA_SCHEDULE), every 8 to 13 s: APRS AFSK1200
-    position reports on 144.390 MHz, POCSAG 1200 pages on 152.240 MHz, FLEX
-    pages on 931.9375 MHz (at 1600, 3200 and 6400 bps) and ACARS messages on
-    131.550 MHz.
+    traffic too (see _DATA_SCHEDULE): APRS AFSK1200 position reports on
+    144.390 MHz every 8 s, POCSAG 1200 pages on 152.240 MHz every 10 s,
+    FLEX pages on 931.9375 MHz every 3.5 to 7.5 s (in turn at 1600, 3200,
+    1600 and 6400 bps, the faster ones on several phases) and ACARS
+    messages on 131.550 MHz every 13 s.
 
     For the Signal tab, a remote control on 433.920 MHz (the EV1527 kind:
     on/off keyed, pulse width modulated) sends its code eight times every

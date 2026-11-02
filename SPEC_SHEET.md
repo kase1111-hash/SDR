@@ -731,7 +731,7 @@ F1 names `Enter` "Return" and `Delete` "Del".
 | `PgUp` / `PgDown` | Tune to the next signal up / down (plots focused) |
 | **View** | |
 | `F6` | Put the keyboard focus on the spectrum |
-| `Esc` | Return the keyboard focus to the spectrum |
+| `Esc` | Return the keyboard focus to the spectrum, and hide the full text of a long status message |
 | `Ctrl+T` | Switch between the light and dark themes |
 | `Ctrl+=` / `Ctrl++` | Zoom the spectrum and waterfall in around the tuned frequency |
 | `Ctrl+-` | Zoom the spectrum and waterfall out |
@@ -799,13 +799,13 @@ or list keeps them (the Frequency field steps ten times as far, a list moves
 its current row), and anywhere else they set the volume.
 
 `Esc` in the window also hides the panel above the status bar that shows a
-cut-short message in full (8.1); F1's `Esc` row doesn't say so. Where the
-focused control has a use for `Esc` (the Decoder's list with a message
-selected, the Bookmarks filter with text in it, the waterfall with a
-measurement shown), the first `Esc` does that and a second one hides the
-panel. Radio → Audio → Stereo, Notch and Low Cut and the Scanner tab's Use
-both receivers have no shortcut of their own, so F1 doesn't list them (Use
-both receivers has the access key `Alt+I` while the Scanner tab shows it).
+cut-short message in full (8.1). Where the focused control has a use for
+`Esc` (the Decoder's list with a message selected, the Bookmarks filter with
+text in it, the waterfall with a measurement shown), the first `Esc` does
+that and a second one hides the panel. Radio → Audio → Stereo, Notch and Low
+Cut and the Scanner tab's Use both receivers have no shortcut of their own,
+so F1 doesn't list them (Use both receivers has the access key `Alt+I` while
+the Scanner tab shows it).
 
 ### 8.4 Persisted state
 

@@ -18,7 +18,6 @@ import logging
 import math
 import os
 import struct
-import wave
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -27,7 +26,7 @@ from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
-from .wav_file import WavHeader, WavWriter
+from .wav_file import WavError, WavHeader, WavWriter
 from .wav_file import data_offset as _wav_data_offset
 from .wav_file import looks_like_wav, read_wav_header
 
@@ -1669,7 +1668,8 @@ class AudioRecorder:
             samples: Real audio samples (float, -1.0 to 1.0)
 
         Returns:
-            Number of samples written
+            Number of samples written (of each channel: a stereo block of
+            ``n`` left/right pairs counts ``n``)
         """
         if not self._recording:
             raise RuntimeError("Not recording")
@@ -1681,7 +1681,9 @@ class AudioRecorder:
         data = self._convert_samples(samples)
         self._wav_file.writeframes(data)
 
-        n_samples = len(samples.flatten())
+        # (Each moment once: the values of all channels, interleaved, are
+        # channels times as many.)
+        n_samples = int(np.asarray(samples).size) // max(1, int(self._channels))
         self._samples_written += n_samples
 
         return n_samples
@@ -1729,10 +1731,16 @@ class AudioPlayer:
     processing or playback.
 
     Features:
-    - WAV file support (8-bit, 16-bit, 24-bit)
+    - WAV file support (8-bit, 16-bit, 24-bit integer PCM): classic WAV,
+      RF64 and BW64 (what a recording past 4 GiB becomes) and Sony Wave64,
+      counting the samples a file holds (one cut short, or whose size was
+      written as unknown, plays what it has)
     - Mono and stereo support
     - Streaming playback
     - Seek and loop support
+
+    Raises WavError (a ValueError) from the constructor for a file that
+    isn't one of these, and OSError when it can't be read.
 
     Example:
         player = AudioPlayer("audio.wav")
@@ -1752,7 +1760,8 @@ class AudioPlayer:
         self._filepath = Path(filepath)
 
         # Playback state
-        self._wav_file: Optional[wave.Wave_read] = None
+        self._file: Optional[BinaryIO] = None
+        self._data_offset = 0
         self._position = 0
         self._eof = False
 
@@ -1769,32 +1778,36 @@ class AudioPlayer:
         self._open()
 
     def _open(self) -> None:
-        """Open the WAV file."""
-        self._wav_file = wave.open(str(self._filepath), "rb")
+        """Open the WAV file (classic, RF64, BW64 or Wave64)."""
+        header = read_wav_header(self._filepath)
+        formats = {
+            1: AudioSampleFormat.UINT8,
+            2: AudioSampleFormat.INT16,
+            3: AudioSampleFormat.INT24,
+        }
+        sample_format = formats.get(header.sample_width)
+        if sample_format is None:
+            raise WavError(
+                f"its samples are {8 * header.sample_width}-bit, and only 8, 16 "
+                "and 24-bit WAV audio is read"
+            )
 
         # Get parameters
-        self._channels = self._wav_file.getnchannels()
-        self._sample_width = self._wav_file.getsampwidth()
-        self._sample_rate = self._wav_file.getframerate()
-        self._total_samples = self._wav_file.getnframes()
-
-        # Determine format
-        if self._sample_width == 1:
-            sample_format = AudioSampleFormat.UINT8
-        elif self._sample_width == 2:
-            sample_format = AudioSampleFormat.INT16
-        elif self._sample_width == 3:
-            sample_format = AudioSampleFormat.INT24
-        else:
-            sample_format = AudioSampleFormat.INT16
+        self._channels = header.channels
+        self._sample_width = header.sample_width
+        self._sample_rate = header.frame_rate
+        self._total_samples = header.frames
+        self._data_offset = header.data_offset
 
         self._metadata = AudioMetadata(
             sample_rate=self._sample_rate,
             sample_format=sample_format,
             channels=self._channels,
             num_samples=self._total_samples,
-            duration_seconds=self._total_samples / self._sample_rate,
+            duration_seconds=self.duration_seconds,
         )
+        self._file = open(self._filepath, "rb")
+        self._file.seek(self._data_offset)
 
     @property
     def sample_rate(self) -> int:
@@ -1846,10 +1859,13 @@ class AudioPlayer:
         Returns:
             Float samples array (-1.0 to 1.0)
         """
-        if self._wav_file is None:
+        if self._file is None:
             return np.array([], dtype=np.float32)
 
-        frames = self._wav_file.readframes(num_samples)
+        frame_bytes = self._channels * self._sample_width
+        count = min(max(0, int(num_samples)), self._total_samples - self._position)
+        frames = self._file.read(count * frame_bytes) if count > 0 else b""
+        frames = frames[: len(frames) - len(frames) % frame_bytes]  # whole frames
 
         if len(frames) == 0:
             self._eof = True
@@ -1865,25 +1881,16 @@ class AudioPlayer:
 
         elif self._sample_width == 2:
             # Signed 16-bit
-            raw = np.frombuffer(frames, dtype=np.int16)
+            raw = np.frombuffer(frames, dtype="<i2")
             samples = raw.astype(np.float32) / 32767.0
 
-        elif self._sample_width == 3:
-            # Signed 24-bit (unpack manually)
-            n_frames = len(frames) // (3 * self._channels)
-            samples = np.zeros(n_frames * self._channels, dtype=np.float32)
-            for i in range(len(samples)):
-                offset = i * 3
-                if offset + 3 <= len(frames):
-                    b = frames[offset : offset + 3]
-                    val = struct.unpack(
-                        "<i", b + (b"\xff" if b[2] & 0x80 else b"\x00")
-                    )[0]
-                    samples[i] = val / 8388607.0
         else:
-            # Default to 16-bit
-            raw = np.frombuffer(frames, dtype=np.int16)
-            samples = raw.astype(np.float32) / 32767.0
+            # Signed 24-bit: three little-endian bytes each, sign-extended
+            raw = np.frombuffer(frames, dtype=np.uint8).reshape(-1, 3)
+            values = raw.astype(np.int32)
+            values = values[:, 0] | (values[:, 1] << 8) | (values[:, 2] << 16)
+            values = np.where(values & 0x800000, values - 0x1000000, values)
+            samples = (values / 8388607.0).astype(np.float32)
 
         # Handle multi-channel: return as (n_samples, n_channels) or flatten for mono
         if self._channels > 1:
@@ -1911,11 +1918,12 @@ class AudioPlayer:
         Args:
             position: Sample position
         """
-        if self._wav_file is None:
+        if self._file is None:
             return
 
-        position = max(0, min(position, self._total_samples - 1))
-        self._wav_file.setpos(position)
+        position = max(0, min(int(position), self._total_samples - 1))
+        frame_bytes = self._channels * self._sample_width
+        self._file.seek(self._data_offset + position * frame_bytes)
         self._position = position
         self._eof = False
 
@@ -1935,9 +1943,9 @@ class AudioPlayer:
 
     def close(self) -> None:
         """Close the file."""
-        if self._wav_file is not None:
-            self._wav_file.close()
-            self._wav_file = None
+        if self._file is not None:
+            self._file.close()
+            self._file = None
 
     def __enter__(self):
         return self

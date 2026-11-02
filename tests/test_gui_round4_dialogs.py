@@ -134,6 +134,11 @@ class TestScannerEmptyState(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # Help: Esc
 # --------------------------------------------------------------------------- #
+#: What F1 says Esc does (it also hides the panel above the status bar that
+#: shows a cut-short message whole).
+ESC_ROW = "Return the keyboard focus to the spectrum, and hide the full text of a long status message"
+
+
 class TestHelpEsc(unittest.TestCase):
     def setUp(self):
         require_pyqt6(self)
@@ -146,7 +151,7 @@ class TestHelpEsc(unittest.TestCase):
         self.assertEqual(keys[esc - 1], ("F6",))
         self.assertEqual(
             SHORTCUTS[esc],
-            ("View", ("Esc",), "Return the keyboard focus to the spectrum"),
+            ("View", ("Esc",), ESC_ROW),
         )
 
     def test_footer_names_esc(self):
@@ -179,11 +184,7 @@ class TestHelpEsc(unittest.TestCase):
             esc = [e for e in entries if e[1] == ("Esc",)]
             self.assertEqual(
                 esc,
-                (
-                    [("View", ("Esc",), "Return the keyboard focus to the spectrum")]
-                    if listed
-                    else []
-                ),
+                ([("View", ("Esc",), ESC_ROW)] if listed else []),
             )
             win.deleteLater()
         _settle()
@@ -195,7 +196,7 @@ class TestHelpEscInTheMainWindow(_WindowTestCase):
 
         dialog = HelpDialog(self.win)
         self.assertIn(
-            ("View", ("Esc",), "Return the keyboard focus to the spectrum"),
+            ("View", ("Esc",), ESC_ROW),
             dialog.shortcut_entries(),
         )
         dialog.deleteLater()

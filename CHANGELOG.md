@@ -482,8 +482,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   messages) also shows whole in a panel just above it, starting above the
   message, in its tone and for as long as it shows (above the playback strip
   while a recording plays, so its controls stay in reach); click the panel or
-  press `Esc` to hide it. A message that fits shows no panel, and screen
-  readers get the whole message.
+  press `Esc` to hide it (F1's `Esc` row says so). A message that fits shows
+  no panel, and screen readers get the whole message.
 - The window title shows the frequency, mode, device and REC while
   recording.
 - The Info tab's Band plan row and FREQ's tooltip show the band plan at the
@@ -664,7 +664,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ValueError` and a `wave.Error`. `IQRecorder.start()` and
   `AudioRecorder.start()` take `expected_samples` (a WAV take known to fit
   stays classic; without it the file can grow past 4 GiB as RF64), and
-  `IQPlayer` and `FormatDetector` read RF64, BW64 and Wave64 (`.w64`) files.
+  `IQPlayer`, `FormatDetector`, `AudioPlayer` and `load_audio_file` read
+  RF64, BW64 and Wave64 (`.w64`) files.
   `gui.file_jobs.wav_problem()` no longer refuses a long take (only one
   without a sample rate), and `rf64_note()` is new.
 - `dsp.protocols`: the POCSAG, FLEX, AX.25 and ACARS decoders stream;
@@ -1113,6 +1114,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Sample rate, which can't change while a recording plays.
 
 ### Fixed — Recordings
+- `AudioRecorder` counts a stereo recording's samples once per moment:
+  `samples_written`, `duration_seconds`, what `write()` returns and the
+  metadata `stop()` returns counted both channels' values, so a stereo
+  take read twice its length (the file itself was right).
+- `AudioPlayer` and `load_audio_file` play an audio take past 4 GiB (RF64)
+  back, count the samples a WAV file cut short or streamed (its size
+  unknown) holds rather than what its header says, and refuse 32-bit
+  samples in plain words instead of reading them as 16-bit noise.
 - I/Q recordings no longer lose most of the signal when the computer falls
   behind at high sample rates.
 - Recording I/Q no longer slows the receiver: a thread of the take's own

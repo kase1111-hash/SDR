@@ -27,7 +27,9 @@ import pytest
 
 from sdr_module.dsp import wav_file
 from sdr_module.dsp.recording import (
+    AudioPlayer,
     AudioRecorder,
+    AudioSampleFormat,
     FileFormat,
     IQPlayer,
     IQRecorder,
@@ -35,6 +37,7 @@ from sdr_module.dsp.recording import (
     check_iq_samples,
     detect_format,
     get_file_info,
+    load_audio_file,
     load_iq_file,
     save_audio_file,
     save_iq_file,
@@ -756,3 +759,158 @@ class TestRecordAudioPastTheLimit:
         assert (header.channels, header.frames) == (2, 3000)
         raw = path.read_bytes()
         assert raw[header.data_offset :] == self._int16(blocks)
+
+    def test_a_stereo_take_counts_frames_not_values(self, tmp_path):
+        """samples_written, duration_seconds and the metadata count each
+        moment once (samples of each channel, as start's expected_samples
+        does), not both channels' values: a stereo take read twice its
+        length."""
+        path = tmp_path / "stereo_count.wav"
+        recorder = AudioRecorder(self.AUDIO_RATE, channels=2, normalize=False)
+        recorder.start(path)
+        block = np.stack([np.zeros(1000), np.zeros(1000)], axis=1)
+        assert recorder.write(block) == 1000
+        recorder.write(block)
+        assert recorder.samples_written == 2000
+        assert recorder.duration_seconds == 2000 / self.AUDIO_RATE
+        meta = recorder.stop()
+        assert meta.num_samples == 2000
+        assert wav_file.read_wav_header(path).frames == 2000
+
+
+class TestPlayingAudioBack:
+    """AudioPlayer and load_audio_file read what Record Audio writes, of any
+    length. They read through the wave module, which refuses RF64 ("file
+    does not start with RIFF id"), so a take past 4 GiB (about 12 hours of
+    mono, 6 of stereo) couldn't be read back, and a take cut short (or
+    streamed, its size unknown) counted what its header said and failed to
+    read. Now they read classic WAV, RF64, BW64 and Wave64 files as the I/Q
+    reader does, counting the samples a file holds."""
+
+    AUDIO_RATE = 48000
+
+    def _take(self, path, blocks, channels, sample_format=None):
+        kwargs = {} if sample_format is None else {"sample_format": sample_format}
+        recorder = AudioRecorder(
+            self.AUDIO_RATE, channels=channels, normalize=False, **kwargs
+        )
+        recorder.start(path)
+        for block in blocks:
+            recorder.write(block)
+        recorder.stop()
+
+    @staticmethod
+    def _stored(values):
+        """``values`` as a 16-bit take stores them, read back as floats."""
+        ints = (np.clip(values, -1.0, 1.0) * 32767).astype(np.int16)
+        return ints.astype(np.float32) / 32767.0
+
+    def test_a_stereo_take_past_the_limit(self, tmp_path, small_limit):
+        rng = np.random.default_rng(5)
+        blocks = [
+            np.clip(0.4 * rng.standard_normal((700, 2)), -1.0, 1.0) for _ in range(6)
+        ]
+        path = tmp_path / "long.wav"
+        self._take(path, blocks, channels=2)
+        assert wav_file.read_wav_header(path).container == "RF64"
+        expected = self._stored(np.concatenate(blocks))
+        with AudioPlayer(path) as player:
+            assert (player.channels, player.sample_rate) == (2, self.AUDIO_RATE)
+            assert player.total_samples == 4200
+            assert player.duration_seconds == 4200 / self.AUDIO_RATE
+            first = player.read(1000)
+            assert first.shape == (1000, 2) and first.dtype == np.float32
+            np.testing.assert_array_equal(first, expected[:1000])
+            assert player.position == 1000
+            player.seek(4000)
+            np.testing.assert_array_equal(player.read(500), expected[4000:])
+            assert player.position == 4200 and not player.eof
+            assert player.read(10).size == 0 and player.eof
+            np.testing.assert_array_equal(player.read_all(), expected)
+        samples, meta = load_audio_file(path)
+        np.testing.assert_array_equal(samples, expected)
+        assert (meta.channels, meta.num_samples) == (2, 4200)
+        assert meta.sample_rate == self.AUDIO_RATE
+
+    def test_a_take_cut_short_or_of_unknown_length(self, tmp_path):
+        """A take whose writing stopped part way (a crash, a full disk) says
+        more samples than the file holds, and a streamed one says none it
+        can count (0xFFFFFFFF): what the file holds is read."""
+        rng = np.random.default_rng(6)
+        x = np.clip(0.3 * rng.standard_normal(3000), -1.0, 1.0)
+        path = tmp_path / "cut.wav"
+        self._take(path, [x], channels=1)
+        raw = path.read_bytes()
+        path.write_bytes(raw[: len(raw) - 2 * 1000 - 1])  # 1000.5 samples short
+        with AudioPlayer(path) as player:
+            assert player.total_samples == 1999
+            samples = player.read_all()
+        np.testing.assert_array_equal(samples, self._stored(x)[:1999])
+
+        streamed = tmp_path / "streamed.wav"
+        body = (np.clip(x, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+        fmt = _chunk(b"fmt ", _fmt(channels=1, rate=self.AUDIO_RATE))
+        streamed.write_bytes(
+            b"RIFF"
+            + struct.pack("<I", 0xFFFFFFFF)
+            + b"WAVE"
+            + fmt
+            + b"data"
+            + struct.pack("<I", 0xFFFFFFFF)
+            + body
+        )
+        samples, meta = load_audio_file(streamed)
+        assert meta.num_samples == 3000
+        np.testing.assert_array_equal(samples, self._stored(x))
+
+    def test_rf64_and_wave64_from_other_programs(self, tmp_path):
+        x = _tone(2000)
+        info_chunk = _chunk(b"LIST", b"INFOISFT" + struct.pack("<I", 5) + b"test\0")
+        rf64 = tmp_path / "other.wav"
+        _rf64(rf64, len(x), head=_cs16(x), extra=info_chunk, rate=self.AUDIO_RATE)
+
+        tail = bytes.fromhex("f3acd3118cd100c04f8edb8a")
+        body = _fmt(rate=self.AUDIO_RATE)
+        fmt = b"fmt " + tail + struct.pack("<Q", 24 + len(body)) + body
+        data = b"data" + tail + struct.pack("<Q", 24 + len(x) * FRAME) + _cs16(x)
+        riff = b"riff" + bytes.fromhex("2e91cf11a5d628db04c10000")
+        size = 40 + len(fmt) + len(data)
+        w64 = tmp_path / "take.w64"
+        w64.write_bytes(riff + struct.pack("<Q", size) + b"wave" + tail + fmt + data)
+
+        for path in (rf64, w64):
+            samples, meta = load_audio_file(path)
+            assert samples.shape == (2000, 2)
+            np.testing.assert_allclose(samples[:, 0], x.real, atol=STEP)
+            np.testing.assert_allclose(samples[:, 1], x.imag, atol=STEP)
+            assert (meta.sample_rate, meta.channels) == (self.AUDIO_RATE, 2)
+
+    @pytest.mark.parametrize("channels", [1, 2])
+    def test_8_and_24_bit_samples_read_as_before(self, tmp_path, channels):
+        rng = np.random.default_rng(7)
+        shape = (500, 2) if channels == 2 else (500,)
+        x = np.clip(0.5 * rng.standard_normal(shape), -1.0, 1.0)
+        u8 = tmp_path / "u8.wav"
+        self._take(u8, [x], channels, AudioSampleFormat.UINT8)
+        stored = ((x + 1.0) * 127.5).astype(np.uint8)
+        expected = (stored.astype(np.float32) - 128) / 128.0
+        np.testing.assert_array_equal(load_audio_file(u8)[0], expected)
+
+        s24 = tmp_path / "s24.wav"
+        self._take(s24, [x], channels, AudioSampleFormat.INT24)
+        stored = (x * 8388607).astype(np.int32)
+        expected = (stored / 8388607.0).astype(np.float32)
+        samples, meta = load_audio_file(s24)
+        np.testing.assert_array_equal(samples, expected)
+        assert meta.sample_format is AudioSampleFormat.INT24
+
+    def test_32_bit_samples_are_refused_plainly(self, tmp_path):
+        """They were read as 16-bit ones: noise, twice as long."""
+        path = tmp_path / "s32.wav"
+        with wave.open(str(path), "wb") as handle:
+            handle.setnchannels(1)
+            handle.setsampwidth(4)
+            handle.setframerate(self.AUDIO_RATE)
+            handle.writeframes(np.zeros(100, "<i4").tobytes())
+        with pytest.raises(ValueError, match="32-bit"):
+            AudioPlayer(path)

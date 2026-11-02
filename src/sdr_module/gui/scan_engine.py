@@ -27,11 +27,14 @@ A sweep (``once`` or ``continuous``) can be shared with a second receiver
 Second Receiver window), whose blocks come in through
 :meth:`ScanEngine.partner_frame`. The two take pages of one
 :class:`~sdr_module.dsp.sweep.SharedSweep`, each sized for its own sample
-rate and inside what it tunes, this one from the bottom of the range up
-and the partner from the top down, until they meet: a pass takes about
-half as long, and the results are one list. A page one of them can't tune
-goes to the other; a partner that leaves (:meth:`ScanEngine.drop_partner`)
-hands the rest to this one.
+rate and inside what it tunes. Each first measures what only it tunes,
+then the two meet in what both tune, from opposite ends: the one whose
+part of the range starts lower sweeps up from the bottom (of two that
+start together, the one whose part ends lower; this one when both tune
+the same part, as with the whole range) and the other down from the top.
+A pass takes about half as long, and the results are one list. A page one
+of them can't tune goes to the other; a partner that leaves
+(:meth:`ScanEngine.drop_partner`) hands the rest to this one.
 
 Time is counted in samples (signal time), so the engine behaves the same
 whatever the display frame rate, and tests can drive it block by block.

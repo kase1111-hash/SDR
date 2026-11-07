@@ -45,6 +45,8 @@ class _Speaker:
         self.queued = 0.0
         self.at = None
         self.started = False
+        #: False while running dry is no gap (the squelch closed).
+        self.listening = True
         self.gaps = 0.0
         self.dropped = 0.0
         self.most = 0.0
@@ -53,7 +55,7 @@ class _Speaker:
     def advance(self, now):
         if self.at is not None:
             elapsed = now - self.at
-            if self.started and self.queued < elapsed:
+            if self.started and self.listening and self.queued < elapsed:
                 self.gaps += elapsed - self.queued
             self.queued = max(0.0, self.queued - elapsed)
         self.at = now
@@ -347,11 +349,67 @@ class TestTheSoundEnds(unittest.TestCase):
     def test_the_next_sound_starts_afresh(self):
         run = _Run(2.0)
         run.frames(2.0)
-        run.sound.finish()
-        run.speaker = _Speaker()
+        run.speaker.write(run.sound.finish(), run.now)
+        run.now += 1.0  # (the squelch closed for a second: it ran dry)
+        run.speaker = _Speaker()  # (what the next sound gets, from silence)
         run.frames(3.0)
         self.assertEqual(run.speaker.gaps, 0.0)
         self.assertLess(_steps(run.speaker.stream()), 1.05)
+
+    def test_a_speaker_opened_anew_plays_on(self):
+        # Audio switched off and on, another output chosen: the new output
+        # holds nothing, not what this thinks the old one held (the end of
+        # a sound, too). AudioSink pads a new output to its cushion, which
+        # covers the difference: no gaps, mid-sound or right after one.
+        for speed in (0.5, 2.0, 4.0):
+            for after_finish in (False, True):
+                with self.subTest(speed=speed, after_finish=after_finish):
+                    run = _Run(speed)
+                    run.frames(2.0)
+                    if after_finish:
+                        run.sound.finish(run.now)  # (to the old output)
+                    run.speaker = _Speaker()
+                    run.frames(3.0)
+                    self.assertEqual(run.speaker.gaps, 0.0)
+                    self.assertEqual(run.speaker.dropped, 0.0)
+                    self.assertLess(_steps(run.speaker.stream()), 1.05)
+
+    def test_a_squelch_that_closes_briefly_leaves_no_gaps(self):
+        """The squelch closes for a frame or a few (the signal flutters)
+        and opens again while the speaker still plays what the last sound
+        left: the next sound plays on without running the speaker dry (it
+        used to, about every fourth time at 2x), and nothing piles up."""
+        for speed in (0.5, 2.0, 4.0):
+            for open_n, closed_n in ((3, 1), (3, 2), (6, 3), (10, 2), (15, 5)):
+                with self.subTest(speed=speed, open=open_n, closed=closed_n):
+                    sound = PlaybackSound(RATE, AudioSink.TARGET_S)
+                    speaker = _Speaker()
+                    # (Silence before a sound starts, or after it ended, is
+                    # the squelch's: only a gap within a sound counts.)
+                    speaker.listening = False
+                    rng = np.random.default_rng(1)
+                    now, position = 100.0, 0
+                    for _cycle in range(40):
+                        for i in range(open_n + closed_n):
+                            jitter = 1.0 + 0.15 * rng.uniform(-1.0, 1.0)
+                            count = int(round(speed * RATE / 30.0 * jitter))
+                            block = _tone(position, count)
+                            position += count
+                            sound.note(count / RATE, now, speed)
+                            if i < open_n:  # (the squelch open)
+                                last = i == open_n - 1  # (it closes after)
+                                out = sound.play(block, now, last=last)
+                                speaker.write(out, now)
+                                if len(out):
+                                    speaker.listening = True
+                                if last:
+                                    speaker.listening = False
+                            else:
+                                speaker.advance(now)
+                            now += jitter / 30.0
+                    self.assertEqual(speaker.gaps, 0.0)
+                    self.assertEqual(speaker.dropped, 0.0)
+                    self.assertLess(speaker.most, AudioSink.HIGH_S)
 
     def test_stereo(self):
         def stereo(first, count):

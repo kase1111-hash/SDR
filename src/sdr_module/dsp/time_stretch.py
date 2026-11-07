@@ -33,9 +33,10 @@ recording's sound at 0.5x, 2x or 4x (``gui/playback_sound.py``).
   continues the input exactly, so blocks played as they are join it
   without a step.
 
-NumPy only: two real FFTs of 2048 points per hop of output (12.5 ms), so
-the work follows the time played, not the speed (about 0.2 ms per 33 ms
-display frame on a 4-core computer).
+NumPy only: two real FFTs of 2048 points and an inverse one per hop of
+output (12.5 ms), so the work follows the time played, not the speed
+(about 0.2 ms per 33 ms display frame in mono, 0.3 ms in stereo, on a
+4-core computer).
 """
 
 from __future__ import annotations

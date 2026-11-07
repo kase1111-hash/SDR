@@ -322,8 +322,9 @@ class TestWhatTheFollowerAsks(unittest.TestCase):
 
 class TestCost(unittest.TestCase):
     def test_the_work_follows_the_sound_played_not_the_speed(self):
-        # Two FFTs per hop of output whatever the ratio: 4x costs what 1x
-        # does for the same seconds played (counted, not timed).
+        # Two forward FFTs (and an inverse) per hop of output whatever the
+        # ratio: 4x costs what 1x does for the same seconds played
+        # (counted, not timed).
         calls = []
         real = np.fft.rfft
 

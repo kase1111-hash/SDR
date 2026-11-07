@@ -369,6 +369,72 @@ class TestWhatStopsTheSound(_SoundCase):
         self.frames(1.0)
         self.assertGreater(len(self.sound(since=start)) / AUDIO, 0.8)
 
+    def test_audio_off_and_on_again_plays_on(self):
+        """Audio off and straight on again opens the speaker anew, empty,
+        while the stretch still thinks of what the old one held (the
+        sound's end): the new output's cushion covers it, no gaps."""
+        self.open()
+        win = self.win
+        win._playback_bar.set_speed(2.0)
+        self.frames(1.5)
+        win._set_audio_enabled(False)
+        self.frames(0.07)  # (what played fades out)
+        win._set_audio_enabled(True)
+        start = self.clock.now
+        self.frames(2.0)
+        speaker = self.speaker(since=start)  # (the new output, empty)
+        self.assertEqual(speaker.gaps, 0.0)
+        self.assertEqual(speaker.dropped, 0.0)
+        self.assertGreater(len(self.sound(since=start)) / AUDIO, 1.7)
+
+    def test_a_squelch_that_closes_briefly_leaves_no_gaps(self):
+        """Tone bursts 0.45 s apart: the squelch closes (after its hang)
+        and opens again a frame or two later at 2x and 4x, while the
+        speaker still plays the end of the last burst. No burst's sound
+        runs the speaker dry mid-way (it did: 0.006 s of gaps in these 6 s
+        at 2x, 0.74 s at 4x)."""
+        burst = _fm_tone(0.6, deviation=2.5e3)
+        quiet = np.zeros(int(0.45 * RATE), np.complex64)
+        self.open(np.concatenate([burst, quiet] * 3))
+        win = self.win
+        panel = win._control_panel
+        panel.set_squelch_auto(False)
+        panel.set_squelch_enabled(True)
+        panel.set_squelch_db(-40.0)
+        update = win._update_display
+        opened = []  # (fake time, the squelch open after the frame)
+
+        def frame():
+            update()
+            opened.append((self.clock.now, win._squelch.is_open))
+
+        win._update_display = frame
+        for speed in (2.0, 4.0):
+            with self.subTest(speed=speed):
+                win._playback_bar.set_speed(speed)
+                self.frames(1.0)
+                start = self.clock.now
+                self.frames(6.0)
+                closes = sum(
+                    1
+                    for i in range(1, len(opened))
+                    if opened[i - 1][1] and not opened[i][1] and opened[i][0] >= start
+                )
+                self.assertGreaterEqual(closes, 4)
+                # Within each burst's sound (from its first block on to
+                # the squelch closing), the speaker never runs dry.
+                model = _Speaker()
+                model.listening = False
+                state = dict(opened)
+                for when, block in self.heard:
+                    if when < start:
+                        continue
+                    model.write(block, when)
+                    if len(block):
+                        model.listening = state.get(when, False)
+                self.assertEqual(model.gaps, 0.0)
+                self.assertEqual(model.dropped, 0.0)
+
     def test_a_seek_or_pause_ends_what_was_held(self):
         self.open()
         win = self.win

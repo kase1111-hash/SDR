@@ -37,6 +37,13 @@ audio:
   again the stretch drains and hands back sample for sample.
 * :meth:`finish` ends a stream (the squelch closed, the speaker stopped):
   what the stretch still holds plays at once, in at most ``FLUSH_S``.
+* **A new stream** (the squelch opened again) starts once the stretch
+  holds enough to bring the speaker to its level by itself: what the last
+  one left still plays first (the speaker's queue is followed across
+  streams, a seek and :meth:`reset`), and no silence is padded in front
+  of it, so a squelch that closes for a frame or two doesn't run the
+  speaker dry mid-sound. (A speaker opened anew holds less than this
+  thinks: AudioSink pads a new stream to its cushion, which covers it.)
 
 Qt-free: the window calls it from its display loop with the time of each
 frame (tests drive it with made-up times).
@@ -97,7 +104,10 @@ class PlaybackSound:
         self.cushion_s = float(cushion_s)
         self._stretch = TimeStretch(self.rate)
         self._speed = 1.0
-        self._queued = 0.0  # seconds the speaker held after the last block
+        # The speaker, as it plays what it is given in real time: what it
+        # held after the last write, and when (kept across streams).
+        self._queued = 0.0
+        self._spoke_at: Optional[float] = None
         self._waits: Deque[Tuple[float, float]] = deque()
         self._swings: Deque[Tuple[float, float]] = deque()
         self.reset()
@@ -161,20 +171,21 @@ class PlaybackSound:
         return held / self.rate
 
     def reset(self) -> None:
-        """Forget the stream and the pace (a new recording, a seek)."""
+        """Forget the stream and the pace (a new recording, a seek). What
+        the speaker still plays is kept in mind: it is the same speaker."""
         self._follow_speed(self._speed)
         self._end_stream()
-        self._queued = 0.0
 
     def _end_stream(self) -> None:
         self._stretch.reset()
-        self._last: Optional[float] = None  # when the last block came
+        self._last: Optional[float] = None  # when this stream's last block came
         self._carry = 0.0  # a fraction of an output sample owed
         self._settled: Optional[float] = None  # input kept, smoothed
         self._waits.clear()
         self._swings.clear()
         self._stretching = False
         self._flowing = False
+        self._passing = False  # (blocks played as they are, at 1x)
         self._ratio = 1.0
 
     def _held_max(
@@ -188,13 +199,21 @@ class PlaybackSound:
         store.append((now, value))
         return store[0][1]
 
-    def _wrote(self, remaining: float, seconds: float) -> None:
-        """The speaker had ``remaining`` seconds and got ``seconds`` more
-        (a dry speaker pads a short block to its cushion)."""
+    def _speaker_left(self, now: float) -> float:
+        """Seconds the speaker still holds at ``now``."""
+        if self._spoke_at is None:
+            return 0.0
+        return max(0.0, self._queued - max(0.0, now - self._spoke_at))
+
+    def _wrote(self, now: float, remaining: float, seconds: float) -> None:
+        """The speaker had ``remaining`` seconds at ``now`` and got
+        ``seconds`` more (a dry speaker pads a short block to its
+        cushion)."""
         if remaining <= 0.0 and 0.0 < seconds < self.cushion_s:
             self._queued = self.cushion_s
         else:
             self._queued = remaining + seconds
+        self._spoke_at = now
 
     def play(self, block: np.ndarray, now: float, last: bool = False) -> np.ndarray:
         """The sound for the speaker for ``block`` (mono or ``(n, 2)``
@@ -205,19 +224,17 @@ class PlaybackSound:
         speaker stopped): what the stretch still holds comes with it
         (:meth:`finish`)."""
         if not len(block):
-            return _joined(block, self.finish()) if last else block
+            return _joined(block, self.finish(now)) if last else block
         out = self._play(block, float(now))
-        return _joined(out, self.finish()) if last else out
+        return _joined(out, self.finish(now)) if last else out
 
     def _play(self, block: np.ndarray, now: float) -> np.ndarray:
         seconds = len(block) / self.rate
         pace = self.pace
         one = self._speed == 1.0
-        if self._last is None:
-            remaining, elapsed = 0.0, 0.0
-        else:
-            elapsed = max(0.0, now - self._last)
-            remaining = max(0.0, self._queued - elapsed)
+        remaining = self._speaker_left(now)
+        # (The time since this stream's last block: 0 for its first.)
+        elapsed = 0.0 if self._last is None else max(0.0, now - self._last)
         # A block much later than the others (a stall) is no pattern to
         # keep: the speaker ran dry, and plays on as before.
         steady = elapsed <= self.STALL_S
@@ -225,14 +242,16 @@ class PlaybackSound:
         self._last = now
         if not self._stretching:
             if one and pace >= self.ENGAGE_BELOW:
-                self._wrote(remaining, seconds)
+                self._passing = True
+                self._wrote(now, remaining, seconds)
                 return block
             self._stretching = True
             self._stretch.reset()
             self._settled = None
             self._swings.clear()
-            # (Taking over a sound that plays: no wait to fill up first.)
-            self._flowing = remaining > 0.0
+            # Taking over a sound that plays as it is (at 1x, falling
+            # behind): no wait to fill up first. A new sound fills up.
+            self._flowing = self._passing and remaining > 0.0
         stretch = self._stretch
         stretch.feed(block)
         lookahead = stretch.lookahead / self.rate
@@ -242,8 +261,11 @@ class PlaybackSound:
         have = stretch.pending / self.rate
         level = max(self.cushion_s, wait)
         if not self._flowing:
-            # Starting: once the input kept reaches the target.
-            want = max(0.0, (have - target) / max(pace, self.MIN_RATIO))
+            # Starting: once the input kept beyond the target brings the
+            # speaker to its level by itself (after what the last stream
+            # left; nothing padded in front of it).
+            surplus = max(0.0, (have - target) / max(pace, self.MIN_RATIO))
+            want = surplus if surplus >= level - remaining else 0.0
         elif remaining > level:
             want = max(0.0, elapsed - 0.1 * (remaining - level))
         else:
@@ -273,7 +295,7 @@ class PlaybackSound:
             drained = stretch.drain()
             out = _joined(out, drained)
             self._stretching = False
-        self._wrote(remaining, len(out) / self.rate)
+        self._wrote(now, remaining, len(out) / self.rate)
         return out
 
     def _ratio_for(
@@ -297,19 +319,27 @@ class PlaybackSound:
             ratio += pile / self.FAST_DRAIN_S
         return ratio
 
-    def finish(self) -> np.ndarray:
+    def finish(self, now: Optional[float] = None) -> np.ndarray:
         """The stream ended (the squelch closed, the speaker stopped):
         what the stretch still holds, at once, in at most ``FLUSH_S``
         (faster than the ratio where needed), ending in its fade-out.
-        Empty when nothing is held."""
+        Empty when nothing is held. ``now``: when it goes to the speaker
+        (the last block's time when not given)."""
         out = np.zeros(0, dtype=np.float32)
         if self._stretching:
             stretch = self._stretch
             held = stretch.pending / self.rate
-            ratio = min(max(self._ratio, held / self.FLUSH_S), self.MAX_RATIO * 2)
+            # (Output made but not yet given out plays first.)
+            room = max(
+                self.FLUSH_S - stretch.ready / self.rate, stretch.hop / self.rate
+            )
+            ratio = min(max(self._ratio, held / room), self.MAX_RATIO * 2)
             out = stretch.finish(ratio)
+        when = self._spoke_at if now is None else float(now)
+        if len(out) and when is not None:
+            # (The speaker plays it after what it holds.)
+            self._wrote(when, self._speaker_left(when), len(out) / self.rate)
         self._end_stream()
-        self._queued = 0.0
         return out
 
 

@@ -43,6 +43,7 @@ from ..dsp.filters import (
     NoiseReductionMethod,
     ctcss_label,
 )
+from ..dsp.fm_stereo import DEEMPHASIS_S
 from ..utils.iq import estimate_iq_imbalance
 
 #: Level reported for an empty block (dBFS).
@@ -368,9 +369,10 @@ NOTCH_CHOICES: Tuple[Tuple[str, str, str], ...] = (
     (
         "auto",
         "Auto",
-        "Finds the strongest steady whistle (a heterodyne) and removes it, "
-        "following it as it drifts; voice is left alone. Not for music (use "
-        "Off): a note held for half a second counts as a whistle",
+        "Finds steady whistles (heterodynes) and removes up to three at once, "
+        "the strongest first, following each as it drifts; voice is left "
+        "alone. Not for music (use Off): a note held for half a second counts "
+        "as a whistle",
     ),
     ("manual", "Manual", "Removes the frequency set in the box next to it"),
 )
@@ -409,6 +411,13 @@ class AudioOptions:
       is heard without its sub-audible band (the tone or the DCS bits).
     * ``low_cut_hz``: the low cut chosen (Hz, 0 for none), for AM, SSB and
       narrow FM.
+    * ``deemphasis_s``: broadcast FM's de-emphasis time constant, 75 us
+      (the Americas, South Korea) or 50 us (Europe, Australia, most of the
+      world); see ``gui/deemphasis.py``. Mono and stereo alike; other
+      modes have none.
+    * ``stereo_blend``: how far a weak broadcast FM station blends toward
+      mono: ``"less"``, ``"normal"`` or ``"more"`` (see
+      ``dsp/fm_stereo.py``'s ``BLEND_OFFSETS_DB``).
     """
 
     def __init__(self) -> None:
@@ -419,6 +428,8 @@ class AudioOptions:
         self.notch_hz: float = float(DEFAULT_NOTCH_HZ)
         self.tone_squelch: bool = False
         self.low_cut_hz: float = 0.0
+        self.deemphasis_s: float = DEEMPHASIS_S
+        self.stereo_blend: str = "normal"
 
 
 class ListeningFilters:
@@ -434,7 +445,8 @@ class ListeningFilters:
     signal, never a whistle to remove).
 
     :attr:`notch_frequency_hz` is the frequency being notched (Manual's,
-    or the whistle Auto found), None when nothing is.
+    or the strongest whistle Auto found), None when nothing is;
+    :attr:`notch_frequencies_hz` every one (Auto removes up to three).
 
     The low cut (``low_cut_hz`` of :meth:`process`, None for none) is a
     high-pass after the notch (see :class:`~sdr_module.dsp.audio_filters.
@@ -492,6 +504,15 @@ class ListeningFilters:
         if notch.mode == "off":
             return None
         return notch.frequency_hz
+
+    @property
+    def notch_frequencies_hz(self) -> Tuple[float, ...]:
+        """Every frequency being notched (Manual's, or each whistle Auto
+        removes, the strongest first); empty when nothing is."""
+        notch = self._notch
+        if notch.mode == "off":
+            return ()
+        return tuple(notch.frequencies_hz)
 
     def process(
         self,

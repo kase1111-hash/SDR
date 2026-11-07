@@ -15,13 +15,14 @@ every display frame:
 * :func:`notch_sos` and :func:`highpass_sos`: a narrow notch (unity gain
   away from it), and an inverse-Chebyshev high-pass whose response is -3
   dB at the corner and at least ``stop_db`` down below about 0.8 times it.
-* :class:`ToneFinder`: the strongest *steady* tone in the audio. A
-  heterodyne stays on one frequency, to within a fraction of a hertz, for
-  as long as it lasts; a voice's harmonics glide with its pitch, so they
-  never hold still long enough to count.
-* :class:`AudioNotch`: Off, Auto (the tone the finder hears, followed as
-  it drifts) or a frequency set by hand, engaged and released over a few
-  milliseconds so the audio never clicks.
+* :class:`ToneFinder`: the strongest *steady* tones in the audio (up to
+  three). A heterodyne stays on one frequency, to within a fraction of a
+  hertz, for as long as it lasts; a voice's harmonics glide with its
+  pitch, so they never hold still long enough to count.
+* :class:`AudioNotch`: Off, Auto (a notch for each whistle the finder
+  hears, followed as it drifts) or a frequency set by hand, each notch
+  engaged and released on its own over a few milliseconds so the audio
+  never clicks.
 * :class:`LowCut`: the high-pass at a chosen corner (or none), crossfaded
   when the corner changes.
 """
@@ -266,27 +267,64 @@ class SosFilter:
 
 
 # --------------------------------------------------------------------------- #
-# Auto: finding the whistle
+# Auto: finding the whistles
 # --------------------------------------------------------------------------- #
+def _median(values: Sequence[float]) -> float:
+    """The median of a few numbers (what ``np.median`` gives, without its
+    cost for five of them)."""
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[middle])
+    return (float(ordered[middle - 1]) + float(ordered[middle])) / 2.0
+
+
+class _Tone:
+    """A tone being followed: its frequency (the median of its last five
+    refined ones), its level (the median of its last five, for which is
+    the strongest) and the spectra that missed it lately."""
+
+    __slots__ = ("freq", "recent", "levels", "level", "misses")
+
+    def __init__(self, recent: Sequence[float], level: float) -> None:
+        self.recent: List[float] = [float(f) for f in recent][-5:]
+        self.freq = _median(self.recent)
+        self.levels: List[float] = [float(level)]
+        self.level = float(level)
+        self.misses: List[bool] = []
+
+
 class ToneFinder:
-    """The strongest steady tone in audio, followed as it drifts.
+    """The strongest steady tones in audio (up to ``max_tones``, three by
+    default), each followed as it drifts.
 
     Every ``hop`` (about 43 ms at 48 kHz) a Hann-windowed spectrum of the
     last ~85 ms is searched (4096 points at 48 kHz, 11.7 Hz a bin) for
     peaks standing ``PROMINENCE_DB`` above the spectrum around them, in
     the band set with :meth:`set_band`. Each peak's frequency is refined
     to a small fraction of a hertz from how its phase turned since the
-    last spectrum (a steady tone advances exactly by its frequency).
+    last spectrum (a steady tone advances exactly by its frequency); the
+    first spectrum of a stream, with none before it, is only that
+    reference.
 
     A tone counts once a peak has been within ``NEAR_HZ`` of the same
     frequency in ``NEED`` of the last ``FRAMES`` spectra (about half a
     second), its refined frequencies no more than ``2 x SPREAD_HZ`` apart.
     A voice's harmonics glide with its pitch and come and go with its
-    syllables, so they never qualify. Once found, the tone is followed (the
+    syllables, so they never qualify. Each tone found is followed (the
     median of its last five refined frequencies) while it stands
     ``KEEP_DB`` above its surroundings, and let go once it has been
     missing from three quarters of the last ``RELEASE_FRAMES`` spectra
-    (about a second: a loud word over it doesn't release it).
+    (about a second: a loud word over it doesn't release it), each on
+    its own. Meanwhile the search goes on for more, away from those
+    followed (``APART_BINS``): several qualifying in one spectrum are taken
+    strongest first, and with all ``max_tones`` taken a new one takes the
+    weakest one's place only if it is ``REPLACE_DB`` stronger.
+
+    :attr:`frequency_hz` is the strongest tone followed (what a one-tone
+    finder gave), :attr:`frequencies_hz` all of them, strongest first;
+    :meth:`slot_frequencies` keeps each tone in its own place while it
+    lasts (one notch each).
     """
 
     SIZE_S = 0.085
@@ -297,13 +335,30 @@ class ToneFinder:
     PROMINENCE_DB = 12.0
     KEEP_DB = 6.0
     RELEASE_FRAMES = 24
-    #: Peaks looked at per spectrum (the strongest), and the bins around a
-    #: peak that make its surroundings (its own main lobe left out).
-    _PEAKS = 6
+    #: Tones followed at once (each takes a notch).
+    MAX_TONES = 3
+    #: A new tone is looked for this many bins (11.7 Hz each) or more from
+    #: those followed: nearer, it is one of them.
+    APART_BINS = 2
+    #: All taken: a new tone this much stronger than the weakest one
+    #: followed takes its place.
+    REPLACE_DB = 6.0
+    #: Peaks looked at per spectrum (the strongest: six to search among,
+    #: as with one tone, and the ones followed; with six in all a voice's
+    #: harmonics crowded the weakest of three whistles out for seconds),
+    #: and the bins around a peak that make its surroundings (its own main
+    #: lobe left out).
+    _PEAKS = 9
     _AROUND = 13
     _LOBE = 2
 
-    def __init__(self, rate: float, low_hz: float = 200.0, high_hz: float = 4500.0):
+    def __init__(
+        self,
+        rate: float,
+        low_hz: float = 200.0,
+        high_hz: float = 4500.0,
+        max_tones: Optional[int] = None,
+    ):
         self.rate = float(rate)
         size = 1 << max(8, int(round(math.log2(self.SIZE_S * self.rate))))
         self._size = size
@@ -312,6 +367,8 @@ class ToneFinder:
         self._bin_hz = self.rate / size
         self._prominence = 10.0 ** (self.PROMINENCE_DB / 10.0)
         self._keep = 10.0 ** (self.KEEP_DB / 10.0)
+        self._replace = 10.0 ** (self.REPLACE_DB / 10.0)
+        self.max_tones = max(1, int(self.MAX_TONES if max_tones is None else max_tones))
         self._low = float(low_hz)
         self._high = float(high_hz)
         self._skip: Optional[Tuple[float, float]] = None
@@ -329,8 +386,10 @@ class ToneFinder:
         followed outside them is let go."""
         self._low, self._high = float(low_hz), float(high_hz)
         self._skip = None if skip is None else (float(skip[0]), float(skip[1]))
-        if self._freq is not None and not self._allowed(self._freq):
-            self._release()
+        for index, tone in enumerate(self._tones):
+            if tone is not None and not self._allowed(tone.freq):
+                self._tones[index] = None
+        self._order()
 
     def _allowed(self, freq: float) -> bool:
         if not self._low <= freq <= self._high:
@@ -340,30 +399,46 @@ class ToneFinder:
 
     # -- state ---------------------------------------------------------- #
     def reset(self) -> None:
-        """Forget everything, the tone found too."""
-        self._freq: Optional[float] = None
+        """Forget everything, the tones found too."""
+        self._tones: List[Optional[_Tone]] = [None] * self.max_tones
+        self._found: Tuple[float, ...] = ()
         self._history: List[List[Tuple[float, float]]] = []
         self.reset_stream()
 
     def reset_stream(self) -> None:
         """A new stream of the same channel (after a gap): the samples are
-        dropped, the tone found is kept (it is checked again at once)."""
+        dropped, the tones found are kept (each is checked again at once)."""
         self._tail = np.zeros(self._size, dtype=np.float64)
         self._seen = 0
         self._next = self._size
         self._prev: Optional[np.ndarray] = None
-        self._recent: List[float] = []
-        self._misses: List[bool] = []
-
-    def _release(self) -> None:
-        self._freq = None
-        self._recent = []
-        self._misses = []
+        for tone in self._tones:
+            if tone is not None:
+                tone.recent = []
+                tone.misses = []
 
     @property
     def frequency_hz(self) -> Optional[float]:
-        """The tone being followed (Hz), or None."""
-        return self._freq
+        """The strongest tone being followed (Hz), or None."""
+        found = self.frequencies_hz
+        return found[0] if found else None
+
+    @property
+    def frequencies_hz(self) -> Tuple[float, ...]:
+        """Every tone being followed (Hz), the strongest first."""
+        return self._found
+
+    def _order(self) -> None:
+        """Sort the tones followed, the strongest first (after each
+        spectrum, and whatever else changes them)."""
+        tones = [tone for tone in self._tones if tone is not None]
+        tones.sort(key=lambda tone: tone.level, reverse=True)
+        self._found = tuple(tone.freq for tone in tones)
+
+    def slot_frequencies(self) -> Tuple[Optional[float], ...]:
+        """The tone in each of the ``max_tones`` places (None for an empty
+        one): a tone keeps its place while it is followed."""
+        return tuple(None if tone is None else tone.freq for tone in self._tones)
 
     def until_next_frame(self) -> int:
         """Samples still to come before the next spectrum is taken."""
@@ -386,7 +461,7 @@ class ToneFinder:
             if self._seen >= self._next:
                 self._spectrum()
                 self._next += self._hop
-        return self._freq
+        return self.frequency_hz
 
     def _refine(self, spectrum: np.ndarray, k: int) -> float:
         """Bin ``k``'s tone frequency from its phase advance over a hop."""
@@ -409,6 +484,14 @@ class ToneFinder:
 
     def _spectrum(self) -> None:
         spectrum = np.fft.rfft(self._tail * self._window)
+        if self._prev is None:
+            # (No phase advance to refine its peaks with: they would be
+            # their bins' centres, up to half a bin off. Counted, a whistle
+            # away from a bin's centre qualified a spectrum after the others
+            # found with it, which then took every place, stronger or not;
+            # and a tone followed across a gap was moved off its frequency.)
+            self._prev = spectrum
+            return
         power = spectrum.real**2 + spectrum.imag**2
         guard = self._AROUND + 1
         first = max(guard, int(math.ceil(self._low / self._bin_hz)))
@@ -434,33 +517,67 @@ class ToneFinder:
                         peaks.append((self._refine(spectrum, int(k)), level))
         self._history.append(peaks)
         del self._history[: -self.FRAMES]
-        if self._freq is None:
-            self._find(peaks)
-        else:
-            self._follow(spectrum, power)
+        for index, tone in enumerate(self._tones):
+            if tone is not None and not self._follow(tone, spectrum, power):
+                self._tones[index] = None  # (let go)
+        self._part()
+        self._find(peaks)
+        self._order()
         self._prev = spectrum
 
-    def _find(self, peaks: List[Tuple[float, float]]) -> None:
-        for freq, _level in peaks:  # strongest first
-            if not self._allowed(freq):
-                continue
-            near = [
-                f
-                for frame in self._history
-                for f, _p in frame
-                if abs(f - freq) <= self.NEAR_HZ
-            ]
-            if len(near) >= self.NEED and max(near) - min(near) <= 2.0 * self.SPREAD_HZ:
-                self._recent = near[-5:]
-                self._freq = float(np.median(self._recent))
-                self._misses = []
-                return
+    def _taken(self, freq: float) -> bool:
+        """Whether ``freq`` is one of the tones followed (or too near one
+        to be told from it)."""
+        apart = self.APART_BINS * self._bin_hz
+        return any(
+            tone is not None and abs(tone.freq - freq) < apart for tone in self._tones
+        )
 
-    def _follow(self, spectrum: np.ndarray, power: np.ndarray) -> None:
-        freq = self._freq
-        assert freq is not None
+    def _place(self, level: float) -> Optional[int]:
+        """Where a new tone of ``level`` goes: a free place, else the
+        weakest tone's if it is ``REPLACE_DB`` stronger, else nowhere."""
+        followed: List[Tuple[float, int]] = []
+        for index, tone in enumerate(self._tones):
+            if tone is None:
+                return index
+            followed.append((tone.level, index))
+        weakest_level, weakest = min(followed)
+        return weakest if level >= self._replace * weakest_level else None
+
+    def _find(self, peaks: List[Tuple[float, float]]) -> None:
+        peaks = [
+            (freq, level)
+            for freq, level in peaks
+            if self._allowed(freq) and not self._taken(freq)
+        ]
+        if not peaks:
+            return
+        history = np.asarray(
+            [f for frame in self._history for f, _p in frame], dtype=np.float64
+        )
+        if history.size < self.NEED:
+            return
+        # How many of the last spectra had each peak (all at once).
+        freqs = np.asarray([freq for freq, _level in peaks])
+        close = np.abs(history[None, :] - freqs[:, None]) <= self.NEAR_HZ
+        counts = np.count_nonzero(close, axis=1)
+        for (freq, level), row, count in zip(peaks, close, counts, strict=True):
+            if count < self.NEED:  # (strongest first)
+                continue
+            near = history[row]
+            if near.max() - near.min() > 2.0 * self.SPREAD_HZ or self._taken(freq):
+                continue
+            place = self._place(level)
+            if place is None:
+                return  # (the rest are weaker still)
+            self._tones[place] = _Tone(near[-5:], level)
+
+    def _follow(self, tone: _Tone, spectrum: np.ndarray, power: np.ndarray) -> bool:
+        """Follow ``tone`` in this spectrum; False once it is to be let go."""
+        freq = tone.freq
         k = int(round(freq / self._bin_hz))
         there: Optional[float] = None
+        level = 0.0
         guard = self._AROUND + 1
         candidates = [
             kk
@@ -476,34 +593,144 @@ class ToneFinder:
                 if power[kk] >= self._keep * float(floor):
                     f = self._refine(spectrum, kk)
                     if abs(f - freq) <= self.NEAR_HZ:
-                        there = f
-        self._misses.append(there is None)
-        del self._misses[: -self.RELEASE_FRAMES]
+                        there, level = f, float(power[kk])
+        tone.misses.append(there is None)
+        del tone.misses[: -self.RELEASE_FRAMES]
         if there is not None:
-            self._recent = (self._recent + [there])[-5:]
-            self._freq = float(np.median(self._recent))
-        elif (
-            len(self._misses) >= self.RELEASE_FRAMES
-            and sum(self._misses) >= 0.75 * self.RELEASE_FRAMES
-        ):
-            self._release()
+            tone.recent = (tone.recent + [there])[-5:]
+            tone.freq = _median(tone.recent)
+            tone.levels = (tone.levels + [level])[-5:]
+            tone.level = _median(tone.levels)
+            return True
+        return not (
+            len(tone.misses) >= self.RELEASE_FRAMES
+            and sum(tone.misses) >= 0.75 * self.RELEASE_FRAMES
+        )
+
+    def _part(self) -> None:
+        """Two tones followed that have come together (one drifted onto
+        the other) are one: the weaker is let go."""
+        apart = self.APART_BINS * self._bin_hz
+        tones = self._tones
+        for i in range(len(tones)):
+            for j in range(i + 1, len(tones)):
+                one, other = tones[i], tones[j]
+                if one is None or other is None:
+                    continue
+                if abs(one.freq - other.freq) < apart:
+                    weaker = j if other.level <= one.level else i
+                    tones[weaker] = None
 
 
 # --------------------------------------------------------------------------- #
 # The notch
 # --------------------------------------------------------------------------- #
-class AudioNotch:
-    """The audio notch: ``mode`` ``"off"``, ``"auto"`` (the tone the
-    :attr:`finder` hears) or ``"manual"`` (``manual_hz``), read on every
-    block, so changing them takes effect at once.
+class _NotchSlot:
+    """One notch of an :class:`AudioNotch`: its filter, the frequency it
+    is tuned to and how much of it is heard (engaged, released and moved
+    on its own; see :class:`AudioNotch`)."""
 
-    It engages and lets go over ``RAMP_S`` (the notched audio is faded in
-    or out against the audio as it was). A small move of its frequency (a
-    drifting whistle, a step of the frequency box) retunes it in place; a
-    jump fades it out and in again at the new frequency. A notch tuned
-    afresh first runs over the last ``WARM_S`` of audio, so it starts in
-    step with it. Off (and Auto with nothing found) the audio passes
-    untouched.
+    def __init__(self, owner: "AudioNotch") -> None:
+        self._owner = owner
+        self.filter: Optional[SosFilter] = None
+        self.freq: Optional[float] = None  # where the filter is tuned
+        self.mix = 0.0  # how much of the notched audio is heard (0-1)
+        self.recent = np.zeros(0, dtype=np.float64)  # the last WARM_S in
+
+    def reset_stream(self, engaged: bool) -> None:
+        """A new stream: the filter starts from rest; ``engaged``: it is
+        to notch at once (the audio itself fades in after a gap)."""
+        self.recent = np.zeros(0, dtype=np.float64)
+        self.filter = None
+        self.freq = None
+        self.mix = 1.0 if engaged else 0.0
+
+    def apply(self, x: np.ndarray, want: Optional[float]) -> np.ndarray:
+        if want is not None and self.freq is not None:
+            if abs(want - self.freq) > self._owner.RETUNE_HZ and self.mix > 0.0:
+                # A jump: out at the old frequency, then in at the new one.
+                # (At least a sample of it: rounding can leave a sliver of
+                # the old notch, and a step out of no samples ended nowhere.)
+                step = self._owner._step
+                count = min(x.size, max(1, int(math.ceil(self.mix / step - 1e-9))))
+                head = self._ramp(x[:count], None)
+                if count == x.size:
+                    return head
+                return np.concatenate((head, self.apply(x[count:], want)))
+        return self._ramp(x, want)
+
+    def _ramp(self, x: np.ndarray, want: Optional[float]) -> np.ndarray:
+        """``x`` notched at ``want`` (None: on the way out), fading."""
+        owner = self._owner
+        target = 0.0 if want is None else 1.0
+        if want is not None and (
+            self.freq is None or abs(want - self.freq) > owner.STILL_HZ
+        ):
+            fresh = (
+                self.filter is None
+                or self.freq is None
+                or abs(want - self.freq) > owner.RETUNE_HZ
+            )
+            self._tune(want, fresh)
+        n = x.size
+        if self.filter is None or (self.mix <= 0.0 and target <= 0.0):
+            # Silent: the audio as it was (the filter rests until needed).
+            # (No filter yet: a gap meant the notch to engage at once, but
+            # nothing is wanted now. The audio fades in after a gap anyway.)
+            self.filter = None
+            self.freq = None
+            self.mix = 0.0
+            self._remember(x)
+            return x
+        notched = self.filter.process(x)
+        step = owner._step
+        if target == self.mix:
+            mix: np.ndarray = np.full(n, self.mix)
+        elif target > self.mix:
+            mix = np.minimum(self.mix + step * np.arange(1, n + 1), target)
+        else:
+            mix = np.maximum(self.mix - step * np.arange(1, n + 1), target)
+        self.mix = float(mix[-1])
+        out = x + mix * (notched - x)
+        self._remember(x)
+        return out.astype(np.float32)
+
+    def _tune(self, freq: float, fresh: bool) -> None:
+        owner = self._owner
+        sos = notch_sos(freq, owner.rate, owner.width_hz)
+        if fresh or self.filter is None:
+            self.filter = SosFilter(sos)
+            if self.recent.size:
+                self.filter.process(self.recent)  # in step with the audio
+        else:
+            self.filter.set_sos(sos)
+        self.freq = freq
+
+    def _remember(self, x: np.ndarray) -> None:
+        warm = self._owner._warm
+        if x.size >= warm:
+            self.recent = x[-warm:].astype(np.float64)
+        else:
+            self.recent = np.concatenate((self.recent, x))[-warm:]
+
+
+class AudioNotch:
+    """The audio notch: ``mode`` ``"off"``, ``"auto"`` (the whistles the
+    :attr:`finder` hears, up to three) or ``"manual"`` (``manual_hz``),
+    read on every block, so changing them takes effect at once.
+
+    Each notch engages and lets go over ``RAMP_S`` (the notched audio is
+    faded in or out against the audio as it was), on its own: in Auto a
+    whistle that comes or goes doesn't disturb the others' notches (they
+    run one after the other, each on what the one before it left). A
+    small move of a notch's frequency (a drifting whistle, a step of the
+    frequency box) retunes it in place; a jump fades it out and in again
+    at the new frequency. A notch tuned afresh first runs over the last
+    ``WARM_S`` of its audio, so it starts in step with it. Off (and Auto
+    with nothing found) the audio passes untouched.
+
+    :attr:`frequency_hz` is the frequency notched (Manual's, or the
+    strongest whistle Auto removes), :attr:`frequencies_hz` every one.
 
     :meth:`process` gives the same audio whatever the block sizes.
     """
@@ -523,17 +750,24 @@ class AudioNotch:
         self.finder = ToneFinder(self.rate)
         self._step = 1.0 / max(self.RAMP_S * self.rate, 1.0)
         self._warm = max(1, int(round(self.WARM_S * self.rate)))
-        self._filter: Optional[SosFilter] = None
-        self._freq: Optional[float] = None  # where the filter is tuned
-        self._mix = 0.0  # how much of the notched audio is heard (0-1)
-        self._recent = np.zeros(0, dtype=np.float64)  # the last WARM_S in
+        # One notch per tone the finder follows (Manual uses the first).
+        self._slots = [_NotchSlot(self) for _ in range(self.finder.max_tones)]
         self._finding = False
 
     @property
     def frequency_hz(self) -> Optional[float]:
-        """The frequency being notched: the one set by hand, Auto's tone,
-        or None (off, or Auto with nothing found)."""
+        """The frequency being notched: the one set by hand, the strongest
+        whistle Auto removes, or None (off, or Auto with nothing found)."""
         return self._wanted()
+
+    @property
+    def frequencies_hz(self) -> Tuple[float, ...]:
+        """Every frequency being notched: Manual's one, Auto's whistles
+        (the strongest first), or none."""
+        if self.mode == "auto":
+            return self.finder.frequencies_hz
+        wanted = self._wanted()
+        return () if wanted is None else (wanted,)
 
     def _wanted(self) -> Optional[float]:
         if self.mode == "manual":
@@ -541,6 +775,23 @@ class AudioNotch:
         if self.mode == "auto":
             return self.finder.frequency_hz
         return None
+
+    def _wants(self) -> Tuple[Optional[float], ...]:
+        """What each notch is to remove now."""
+        if self.mode == "auto":
+            return self._per_notch(self.finder.slot_frequencies())
+        first = self._manual() if self.mode == "manual" else None
+        return self._per_notch((first,))
+
+    def _per_notch(
+        self, wants: Sequence[Optional[float]]
+    ) -> Tuple[Optional[float], ...]:
+        """``wants`` for each notch: a finder following fewer tones than
+        there are notches leaves the rest with none; one given more places
+        (``finder`` replaced) gets a notch for each, engaging as any does."""
+        while len(self._slots) < len(wants):
+            self._slots.append(_NotchSlot(self))
+        return tuple(wants) + (None,) * (len(self._slots) - len(wants))
 
     def _manual(self) -> Optional[float]:
         try:
@@ -558,20 +809,17 @@ class AudioNotch:
         self.reset_stream()
 
     def search_anew(self) -> None:
-        """Another station tuned: Auto forgets the tone it found (the notch
-        fades out, as when a tone ends) and searches afresh."""
+        """Another station tuned: Auto forgets the whistles it found (their
+        notches fade out, as when a whistle ends) and searches afresh."""
         self.finder.reset()
 
     def reset_stream(self) -> None:
         """A new stream of the same channel (the squelch closed and opened
-        again): the filter starts from rest, Auto keeps the tone it found."""
+        again): the filters start from rest, Auto keeps the whistles it
+        found."""
         self.finder.reset_stream()
-        self._recent = np.zeros(0, dtype=np.float64)
-        self._filter = None
-        self._freq = None
-        self._mix = 0.0
-        if self._wanted() is not None:
-            self._mix = 1.0  # (the audio itself fades in after a gap)
+        for slot, want in zip(self._slots, self._wants(), strict=True):
+            slot.reset_stream(want is not None)
 
     def process(self, audio: np.ndarray) -> np.ndarray:
         """Notch a block of audio (float32 out)."""
@@ -582,7 +830,7 @@ class AudioNotch:
             self.finder.reset()
             self._finding = False
         if self.mode != "auto":
-            return self._apply(x, self._wanted())
+            return self._apply(x, self._wants())
         # Auto: a spectrum is taken at fixed sample counts, and what it
         # finds applies from there on (whatever the block sizes).
         self._finding = True
@@ -591,71 +839,18 @@ class AudioNotch:
         while pos < x.size:
             take = min(x.size - pos, self.finder.until_next_frame())
             piece = x[pos : pos + take]
-            out[pos : pos + take] = self._apply(piece, self.finder.frequency_hz)
+            wants = self._per_notch(self.finder.slot_frequencies())
+            out[pos : pos + take] = self._apply(piece, wants)
             self.finder.process(piece)
             pos += take
         return out
 
-    def _apply(self, x: np.ndarray, want: Optional[float]) -> np.ndarray:
-        if want is not None and self._freq is not None:
-            if abs(want - self._freq) > self.RETUNE_HZ and self._mix > 0.0:
-                # A jump: out at the old frequency, then in at the new one.
-                count = min(x.size, int(math.ceil(self._mix / self._step - 1e-9)))
-                head = self._ramp(x[:count], None)
-                if count == x.size:
-                    return head
-                return np.concatenate((head, self._apply(x[count:], want)))
-        return self._ramp(x, want)
-
-    def _ramp(self, x: np.ndarray, want: Optional[float]) -> np.ndarray:
-        """``x`` notched at ``want`` (None: on the way out), fading."""
-        target = 0.0 if want is None else 1.0
-        if want is not None and (
-            self._freq is None or abs(want - self._freq) > self.STILL_HZ
-        ):
-            fresh = (
-                self._filter is None
-                or self._freq is None
-                or abs(want - self._freq) > self.RETUNE_HZ
-            )
-            self._tune(want, fresh)
-        n = x.size
-        if self._filter is None or (self._mix <= 0.0 and target <= 0.0):
-            # Silent: the audio as it was (the filter rests until needed).
-            # (No filter yet: a gap meant the notch to engage at once, but
-            # nothing is wanted now. The audio fades in after a gap anyway.)
-            self._filter = None
-            self._freq = None
-            self._mix = 0.0
-            self._remember(x)
-            return x
-        notched = self._filter.process(x)
-        if target == self._mix:
-            mix: np.ndarray = np.full(n, self._mix)
-        elif target > self._mix:
-            mix = np.minimum(self._mix + self._step * np.arange(1, n + 1), target)
-        else:
-            mix = np.maximum(self._mix - self._step * np.arange(1, n + 1), target)
-        self._mix = float(mix[-1])
-        out = x + mix * (notched - x)
-        self._remember(x)
-        return out.astype(np.float32)
-
-    def _tune(self, freq: float, fresh: bool) -> None:
-        sos = notch_sos(freq, self.rate, self.width_hz)
-        if fresh or self._filter is None:
-            self._filter = SosFilter(sos)
-            if self._recent.size:
-                self._filter.process(self._recent)  # in step with the audio
-        else:
-            self._filter.set_sos(sos)
-        self._freq = freq
-
-    def _remember(self, x: np.ndarray) -> None:
-        if x.size >= self._warm:
-            self._recent = x[-self._warm :].astype(np.float64)
-        else:
-            self._recent = np.concatenate((self._recent, x))[-self._warm :]
+    def _apply(self, x: np.ndarray, wants: Sequence[Optional[float]]) -> np.ndarray:
+        """``x`` through every notch, each at what it is to remove (the
+        audio as it was where none is)."""
+        for slot, want in zip(self._slots, wants, strict=True):
+            x = slot.apply(x, want)
+        return x
 
 
 # --------------------------------------------------------------------------- #

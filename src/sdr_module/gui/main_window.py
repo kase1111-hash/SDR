@@ -149,6 +149,16 @@ from .control_panel import (
     closest_bandwidth,
 )
 from .decoder_panel import DecoderPanel
+from .deemphasis import (
+    CROSSFADE_S,
+    DEEMPHASIS_CHOICES,
+    DEFAULT_DEEMPHASIS,
+    StageCrossfade,
+    carry_state,
+    deemphasis_note,
+    deemphasis_seconds,
+    usable_deemphasis,
+)
 from .device_controls import (
     DeviceControls,
     ScanResultsDialog,
@@ -207,7 +217,13 @@ from .status_history import (
     StatusHistory,
     StatusHistoryPopup,
 )
-from .stereo_audio import StereoPath
+from .stereo_audio import (
+    DEFAULT_STEREO_BLEND,
+    STEREO_BLEND_CHOICES,
+    StereoPath,
+    stereo_blend_note,
+    usable_blend,
+)
 from .themes import (
     apply_theme,
     current_theme,
@@ -306,11 +322,18 @@ _NO_VALUE = "—"  # em dash for "not available"
 _DEFAULT_VOLUME = 70  # percent
 # Radio > Audio > Stereo (K-S1): broadcast FM in stereo, on by default.
 _STEREO_KEY = "audio/stereo"
+# Radio > Audio > De-emphasis (M-A1): "75" (us, the default) or "50".
+_DEEMPHASIS_KEY = "audio/deemphasis"
+# Radio > Audio > Stereo Blend (M-A2): "less", "normal" (default), "more".
+_STEREO_BLEND_KEY = "audio/stereo_blend"
 # The STEREO badge and lamp light while at least this much of the stereo
 # difference plays (about 10 dB of separation), and go out below
 # _STEREO_OFF_BLEND (no flicker while the blend hovers).
 _STEREO_ON_BLEND = 0.5
 _STEREO_OFF_BLEND = 0.35
+# Below the lamp's threshold, more of the difference than this (2 %, a
+# third of a dB of separation) is "nearly mono" in the badge's tooltip.
+_NEARLY_MONO_BLEND = 0.02
 _VOLUME_STEP = 10  # percent: Radio > Audio > Volume Up / Down
 # Audio is only played while the device delivers at least this fraction of
 # its sample rate: less than that (a device or computer that can't keep up)
@@ -946,7 +969,10 @@ class _ReceiverChain:
 
     AM and FM audio is low-passed to at most 15 kHz, 60 dB down by 18.5 kHz
     (below broadcast FM's 19 kHz stereo pilot); FM with a broadcast
-    deviation (50 kHz or more) is also de-emphasized (75 us).
+    deviation (50 kHz or more) is also de-emphasized: 75 us, or the
+    ``deemphasis_s`` of ``options`` (50 us in most of the world). A new
+    time constant takes over in 10 ms while a station plays, mono and
+    stereo alike (see ``gui/deemphasis.py``).
 
     In USB, LSB and CW the Bandwidth is the filter width, and the channel
     filter ends in that filter: USB/LSB keep 200 Hz to 200 Hz plus the width
@@ -1016,12 +1042,18 @@ class _ReceiverChain:
         self._audio_factor = total // first
         self._audio_cutoff = min(half, _MAX_AUDIO_HZ, 0.45 * self.intermediate_rate)
         self._deemphasis = False  # set by demodulate() for broadcast FM
+        self._deemphasis_s = _DEEMPHASIS_S  # its time constant (the options')
         self._voice = False  # set by demodulate() for narrow FM (voice)
+        # A new de-emphasis time constant while broadcast FM plays: the old
+        # audio filters crossfade into the new ones (gui/deemphasis.py).
+        self._stage_fade: Optional[StageCrossfade] = None
         self._design_demodulator()
         # Stream objects are built once and only reset after a gap: muted or
         # squelched frames reset the demodulator every frame, and rebuilding
         # the resampler table and filter designs each time cost ~0.6 ms.
-        self._audio_cache: Dict[Tuple[bool, bool], List[_FirDecimator]] = {}
+        self._audio_cache: Dict[
+            Tuple[bool, bool, Optional[float]], List[_FirDecimator]
+        ] = {}
         self._sideband: Optional[_FirDecimator] = None  # (now in the channel)
         self._resampler: Optional[_Resampler] = None
         if abs(self.intermediate_rate - self.audio_rate) > 1e-6 * self.audio_rate:
@@ -1216,14 +1248,21 @@ class _ReceiverChain:
         in narrow FM) and the decimation to the intermediate rate, reset to
         a fresh stream.
 
-        Built once per de-emphasis and voice setting and reused."""
-        key = (self._deemphasis, self._voice)
+        Built once per de-emphasis (and time constant) and voice setting
+        and reused."""
+        key = self._audio_key()
         cached = self._audio_cache.get(key)
         if cached is None:
             cached = self._audio_cache[key] = self._build_audio_stages()
         for stage in cached:
             stage.reset()
         return cached
+
+    def _audio_key(self) -> Tuple[bool, bool, Optional[float]]:
+        """What the audio stages depend on: de-emphasis (and its time
+        constant), voice."""
+        tau = self._deemphasis_s if self._deemphasis else None
+        return (self._deemphasis, self._voice, tau)
 
     def _build_audio_stages(self) -> List[_FirDecimator]:
         stages = []
@@ -1235,7 +1274,7 @@ class _ReceiverChain:
             # free of aliases too.)
             taps = _lowpass_taps(_VOICE_AUDIO_HZ, _VOICE_STOP_HZ, self._audio_rate_in)
         if self._deemphasis:
-            deemphasis = _deemphasis_taps(self._audio_rate_in)
+            deemphasis = _deemphasis_taps(self._audio_rate_in, self._deemphasis_s)
             taps = (
                 deemphasis
                 if taps is None
@@ -1265,6 +1304,9 @@ class _ReceiverChain:
         self._am_last = 0.0
         self._am_last_gain = 0.0
         self._bfo_phase = 0.0
+        # (A new stream starts with the de-emphasis asked for: no crossfade.)
+        self._deemphasis_s = self._wanted_deemphasis()
+        self._stage_fade = None
         self._audio = self._audio_stages()
         if self._sideband is not None:
             self._sideband.reset()
@@ -1312,9 +1354,12 @@ class _ReceiverChain:
         if self.mode == "FM":
             broadcast = float(fm_deviation) >= _BROADCAST_DEVIATION_HZ
             voice = float(fm_deviation) <= _FM_VOICE_DEVIATION_HZ
+            tau = self._wanted_deemphasis()
             if (broadcast, voice) != (self._deemphasis, self._voice):
                 changed = broadcast != self._deemphasis
                 self._deemphasis, self._voice = broadcast, voice
+                self._deemphasis_s = tau  # (a new stream: no crossfade)
+                self._stage_fade = None
                 self._audio = self._audio_stages()
                 if changed:
                     # Broadcast keeps its deepest bass (a 2 Hz corner still
@@ -1324,6 +1369,8 @@ class _ReceiverChain:
                     )
                 if self._stereo_path is not None:
                     self._stereo_path.running = False  # (a new audio stream)
+            elif tau != self._deemphasis_s:
+                self._change_deemphasis(tau)
             # Discriminator; the previous block's last sample keeps the phase
             # difference continuous. Scaled so +/- the deviation is full scale.
             if self._prev is not None:
@@ -1383,10 +1430,56 @@ class _ReceiverChain:
         return self._agc(audio)
 
     @property
+    def deemphasis_s(self) -> float:
+        """Broadcast FM's de-emphasis time constant (s): what the options
+        ask for (``deemphasis_s``: 75 us, or 50 us in most of the world),
+        75 us without options. The mono program and the stereo difference
+        signal are both heard through it."""
+        return self._deemphasis_s
+
+    def _wanted_deemphasis(self) -> float:
+        return usable_deemphasis(
+            getattr(self._options(), "deemphasis_s", _DEEMPHASIS_S)
+        )
+
+    def _change_deemphasis(self, tau: float) -> None:
+        """Another de-emphasis time constant asked for while FM plays. In
+        broadcast FM the audio filters for it start where the old ones are
+        in the stream and take over in 10 ms (the stereo difference path
+        alike, from the same sample): no click. A change while the last
+        one still crossfades waits for the next block."""
+        if not self._deemphasis:
+            self._deemphasis_s = tau  # (narrow FM has none: nothing to do)
+            return
+        if self._stage_fade is not None:
+            return
+        old = self._audio
+        self._deemphasis_s = tau
+        key = self._audio_key()
+        new = self._audio_cache.get(key)
+        if new is None:
+            new = self._audio_cache[key] = self._build_audio_stages()
+        for theirs, mine in zip(old, new, strict=True):
+            carry_state(theirs, mine)
+        length = int(round(CROSSFADE_S * self.intermediate_rate))
+        self._stage_fade = StageCrossfade(old, new, length)
+        self._audio = new
+        path = self._stereo_path
+        if path is not None and path.running:
+            path.change_deemphasis(self, length)
+
+    @property
     def notch_frequency_hz(self) -> Optional[float]:
         """The frequency the audio notch removes now (set by hand, or the
-        whistle Auto found), None when it removes none."""
+        strongest whistle Auto found), None when it removes none."""
         return self._listening.notch_frequency_hz
+
+    @property
+    def notch_frequencies_hz(self) -> Tuple[float, ...]:
+        """Every frequency the audio notch removes now: the one set by
+        hand, or each whistle Auto found (up to three, the strongest
+        first); empty when it removes none."""
+        return self._listening.notch_frequencies_hz
 
     def retuned(self) -> None:
         """Another station tuned: the notch's Auto searches anew."""
@@ -1460,6 +1553,11 @@ class _ReceiverChain:
             path = self._stereo_path = StereoPath(self)
         if not path.running:
             path.sync(self)
+        decoder = path.decoder
+        decoder.tau_s = self._deemphasis_s  # (its hiss estimate)
+        decoder.blending = usable_blend(
+            getattr(self._options(), "stereo_blend", DEFAULT_STEREO_BLEND)
+        )
         return path.process(mpx, nr)
 
     def _am_detect(self, channel: np.ndarray, speed: str) -> np.ndarray:
@@ -1650,8 +1748,15 @@ class _ReceiverChain:
 
     def _to_audio_rate(self, audio: np.ndarray) -> np.ndarray:
         """Audio filter, decimation and resampling to exactly 48 kHz."""
-        for stage in self._audio:
-            audio = stage.process(audio)
+        fade = self._stage_fade
+        if fade is not None:
+            # (A new de-emphasis time constant taking over.)
+            audio = fade.process(audio)
+            if fade.finished:
+                self._stage_fade = None
+        else:
+            for stage in self._audio:
+                audio = stage.process(audio)
         if self._resampler is not None:
             audio = self._resampler.process(audio)
         return audio
@@ -3156,6 +3261,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         # Radio > Audio > Stereo, and what the STEREO badge and the radio
         # tuner's lamp show: (text, tone, tip) and whether stereo plays.
         self._stereo_enabled = self._settings.get_bool(_STEREO_KEY, True)
+        # Radio > Audio > De-emphasis (M-A1): broadcast FM's time constant,
+        # read by every receiver chain from the audio options.
+        self._deemphasis_choice = self._saved_choice(
+            _DEEMPHASIS_KEY, DEEMPHASIS_CHOICES, DEFAULT_DEEMPHASIS
+        )
+        self._audio_options.deemphasis_s = (
+            deemphasis_seconds(self._deemphasis_choice) or _DEEMPHASIS_S
+        )
+        # Radio > Audio > Stereo Blend (M-A2): how far a weak station
+        # blends toward mono (the chains' stereo decoders read it).
+        self._stereo_blend_choice = self._saved_choice(
+            _STEREO_BLEND_KEY, STEREO_BLEND_CHOICES, DEFAULT_STEREO_BLEND
+        )
+        self._audio_options.stereo_blend = self._stereo_blend_choice
         self._stereo_shown: Tuple[str, Optional[str], str] = ("", None, "")
         self._stereo_lit = False
         self._audio_problem: Optional[str] = None
@@ -3648,9 +3767,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             notch_menu,
             panel._notch_combo,
             [(value, text) for value, text, _tip in NOTCH_CHOICES],
-            "Remove a whistle (a heterodyne) from the audio: Auto finds it, "
-            "Manual removes the frequency set (Audio group in the control "
-            "panel; AM, SSB, CW and narrow FM)",
+            "Remove whistles (heterodynes) from the audio: Auto finds up to "
+            "three, Manual removes the frequency set (Audio group in the "
+            "control panel; AM, SSB, CW and narrow FM)",
         )
         notch_menu.addSeparator()
         self._add_action(
@@ -3931,6 +4050,27 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "hiss down). Off: always mono.",
             checkable=True,
             checked=self._stereo_enabled,
+        )
+        self._stereo_blend_actions = self._add_choice_menu(
+            audio_menu,
+            "Stereo &Blend",
+            STEREO_BLEND_CHOICES,
+            self._stereo_blend_choice,
+            self._set_stereo_blend,
+            "How far a weak or noisy broadcast FM station blends toward mono "
+            "to keep its hiss down: less (more stereo, more hiss) or more "
+            "(quieter weak stations)",
+        )
+        self._deemphasis_actions = self._add_choice_menu(
+            audio_menu,
+            "De-&emphasis",
+            DEEMPHASIS_CHOICES,
+            self._deemphasis_choice,
+            self._set_deemphasis,
+            "How much of broadcast FM's treble is cut back, as the station "
+            "lifted it: 75 µs in the Americas and South Korea, 50 µs in "
+            "Europe, Australia and most of the world (mono and stereo; other "
+            "modes have none)",
         )
         self._add_listening_menus(radio_menu, audio_menu)
         radio_menu.addSeparator()
@@ -9752,7 +9892,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._demod_running = True
         if self._audio_options.notch == "auto":
             # (What Auto removes, next to the Notch choice.)
-            self._control_panel.show_notch_found(chain.notch_frequency_hz)
+            self._control_panel.show_notch_found(chain.notch_frequencies_hz)
         # Broadcast FM in stereo: left and right while there is stereo to
         # play (the mono audio, (L+R)/2, is what everything else hears).
         heard = audio if chain.stereo_audio is None else chain.stereo_audio
@@ -9850,6 +9990,99 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             log=False,  # (what was asked: no problem)
         )
 
+    def _saved_choice(
+        self, key: str, choices: Tuple[Tuple[str, str, str], ...], default: str
+    ) -> str:
+        """The saved key of one of ``choices`` (``(key, label, tip)``; case
+        and spaces aside), or ``default`` for anything else (a damaged
+        setting: logged)."""
+        raw = self._settings.get_str(key, default)
+        value = str(raw).strip().lower()
+        for choice, _label, _tip in choices:
+            if value == choice.lower():
+                return choice
+        logger.warning(
+            f"Ignoring the damaged setting {key}={raw!r}: using {default!r} instead."
+        )
+        return default
+
+    def _add_choice_menu(
+        self,
+        menu: Any,
+        title: str,
+        choices: Tuple[Tuple[str, str, str], ...],
+        current: str,
+        slot: Any,
+        tip: str,
+    ) -> Dict[str, Any]:
+        """A submenu of exclusive checkable items, one per ``(key, label,
+        tip)`` of ``choices`` (``current`` checked); choosing one calls
+        ``slot(key)``. Returns the actions by key."""
+        submenu = menu.addMenu(title)
+        submenu.setToolTipsVisible(True)
+        submenu.menuAction().setToolTip(tip)
+        submenu.menuAction().setStatusTip(tip)
+        group = QActionGroup(self)
+        group.setExclusive(True)
+        actions: Dict[str, Any] = {}
+        for key, label, choice_tip in choices:
+            action = self._add_action(
+                submenu,
+                f"&{label}",
+                lambda on, k=key: on and slot(k),
+                tip=choice_tip,
+                checkable=True,
+                checked=key == current,
+            )
+            group.addAction(action)
+            actions[key] = action
+        return actions
+
+    @staticmethod
+    def _check_choice(actions: Dict[str, Any], key: str) -> None:
+        action = actions.get(key)
+        if action is not None and not action.isChecked():
+            action.blockSignals(True)
+            action.setChecked(True)  # (its group unchecks the others)
+            action.blockSignals(False)
+
+    def _set_deemphasis(self, key: str) -> None:
+        """Radio > Audio > De-emphasis (M-A1): 75 µs (the Americas, South
+        Korea) or 50 µs (Europe, Australia, most of the world). Saved at
+        once; broadcast FM takes it on the next block (its audio filters
+        crossfade in 10 ms: no click), mono and stereo alike, and with it
+        Record Audio and the radio tuner's station."""
+        key = str(key).strip()  # (as a choice's key: "75" or "50")
+        seconds = deemphasis_seconds(key)
+        if seconds is None:
+            return
+        self._check_choice(getattr(self, "_deemphasis_actions", {}), key)
+        if key == self._deemphasis_choice:
+            return
+        self._deemphasis_choice = key
+        self._audio_options.deemphasis_s = seconds
+        self._settings.set(_DEEMPHASIS_KEY, key)
+        self._show_status_message(
+            deemphasis_note(key), "info", 4000, log=False  # (what was asked)
+        )
+
+    def _set_stereo_blend(self, key: str) -> None:
+        """Radio > Audio > Stereo Blend (M-A2): how far a weak station
+        blends toward mono, Less, Normal or More. Saved at once; the stereo
+        decoder's thresholds move to it over 20 ms."""
+        key = str(key).strip().lower()  # (as a choice's key)
+        if usable_blend(key) != key:
+            return
+        self._check_choice(getattr(self, "_stereo_blend_actions", {}), key)
+        if key == self._stereo_blend_choice:
+            return
+        self._stereo_blend_choice = key
+        self._audio_options.stereo_blend = key
+        self._settings.set(_STEREO_BLEND_KEY, key)
+        self._show_status_message(
+            stereo_blend_note(key), "info", 4000, log=False  # (what was asked)
+        )
+
     def _show_stereo(self, chain: Optional["_ReceiverChain"], received: bool) -> None:
         """The receiver bar's STEREO / MONO badge and the radio tuner's
         STEREO lamp (K-S1): whether the broadcast FM station received (a
@@ -9877,6 +10110,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 lit = blend >= _STEREO_ON_BLEND or (
                     self._stereo_lit and blend >= _STEREO_OFF_BLEND
                 )
+                # (What a blended or mono station is heard with.)
+                setting = (
+                    f"Radio > Audio > Stereo Blend: {decoder.blending.capitalize()}"
+                )
                 if lit:
                     text, tone = "STEREO", "success"
                     tip = (
@@ -9884,7 +10121,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                         "and right are fully apart."
                         if blend >= 0.95
                         else "Stereo, blended partly toward mono to keep the hiss "
-                        "down: the signal is a little weak."
+                        f"down: the signal is a little weak ({setting})."
                     ) + " Radio > Audio > Stereo switches stereo off."
                 elif not decoder.pilot:
                     tip = (
@@ -9894,10 +10131,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 elif decoder.target >= _STEREO_ON_BLEND:
                     tip = "Mono for a moment: stereo is coming in."
                 else:
+                    # (Under half the stereo difference: MONO, but say so
+                    # when some of it still plays.)
+                    heard = (
+                        "Nearly mono: the signal is too weak for clean stereo, "
+                        "so it is blended most of the way toward mono"
+                        if blend > _NEARLY_MONO_BLEND
+                        else "Mono: the signal is too weak for clean stereo, so "
+                        "it plays in mono"
+                    )
                     tip = (
-                        "Mono: the signal is too weak for clean stereo, so it "
-                        "plays in mono to keep the hiss down. Stereo comes back "
-                        "as the signal gets stronger."
+                        f"{heard} to keep the hiss down ({setting}). Stereo "
+                        "comes back as the signal gets stronger."
                     )
         self._stereo_lit = text == "STEREO"
         shown = (text, tone, tip)

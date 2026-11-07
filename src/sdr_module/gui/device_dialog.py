@@ -1175,7 +1175,17 @@ _DEMO_DCS_CODE = 23
 _DEMO_DCS_DEVIATION_HZ = 750.0  # 15 % of 5 kHz, as radios send it
 _DEMO_DCS_WORDS = 28
 _DEMO_SIGNALS = _DEMO_SIGNALS + ((_DEMO_DCS_HZ, "dcs", -46.0, (12.0, 8.0)),)
+# (M-Q1) Each transmission ends with its turn-off code, as radios send it:
+# its last DCS_TURN_OFF_S (0.18 s) are the 134.4 Hz tone at the code's
+# deviation, the voice and the code faded out over the first
+# _DEMO_DCS_FADE_S of it, before the carrier drops (_dcs_modulation).
+_DEMO_DCS_FADE_S = 0.02
 # --- end K-A3 ---
+# (M-Q2) The 2 m repeater ends each transmission with a reverse burst, as
+# many radios do: its last CTCSS_BURST_S (0.15 s) are the 100.0 Hz tone
+# with its phase shifted by CTCSS_BURST_DEG (180 degrees), the voice (and
+# the tone as it was) faded out over the first _DEMO_DCS_FADE_S of it,
+# before the carrier drops (_rpt_modulation).
 
 
 def _ook_units(code: int, bits: int = 24) -> List[Tuple[int, int]]:
@@ -1655,6 +1665,10 @@ def _build_loops(kind: str, variant: Any, rate: float):
         return _data_transmitter(kind, rate)
     if kind == "drift":  # T10
         return _drift_loop(rate, variant)
+    if kind == "dcs_off":  # (M-Q1) the DCS repeater's turn-off code
+        return _dcs_turn_off_tail(rate)
+    if kind == "rpt_off":  # (M-Q2) the 2 m repeater's reverse burst
+        return _rpt_burst_tail(rate)
     return None
 
 
@@ -2080,6 +2094,127 @@ def _on_ranges(
         cycle += 1
 
 
+def _dcs_turn_off_tail(rate: float) -> Tuple[_Loop, np.ndarray]:
+    """(M-Q1) The DCS repeater's turn-off code at ``rate``: its FM phase
+    from the start of the tone (a table read like a loop, long enough never
+    to wrap), and the weights that fade the voice and the code out over the
+    first ``_DEMO_DCS_FADE_S`` (1 to 0, one per sample)."""
+    from ..dsp.dcs import DCS_TURN_OFF_HZ, DCS_TURN_OFF_S
+
+    factor, loop_rate, t = _loop_timebase(rate, DCS_TURN_OFF_S + 0.01)
+    # 2 pi * the integral of dev * sin(2 pi f t): the tone's own phase.
+    phase = (_DEMO_DCS_DEVIATION_HZ / DCS_TURN_OFF_HZ) * (
+        1.0 - np.cos((2 * np.pi * DCS_TURN_OFF_HZ) * t)
+    )
+    fade = max(1, int(round(_DEMO_DCS_FADE_S * rate)))
+    weights = 0.5 + 0.5 * np.cos(np.pi * np.arange(fade) / fade)
+    return _Loop(phase, factor), weights
+
+
+def _dcs_turn_off_start(
+    duty: Tuple[float, float], seed: int, pos: int, n: int, rate: float
+) -> int:
+    """(M-Q1) The stream sample where the turn-off code of the DCS
+    repeater's transmission that holds samples ``pos`` to ``pos + n`` (a
+    part of one of :func:`_on_ranges`' ranges) starts."""
+    from ..dsp.dcs import DCS_TURN_OFF_S
+
+    end = _transmission_end(duty, seed, pos, n, rate)
+    return end - int(round(DCS_TURN_OFF_S * rate))
+
+
+def _transmission_end(
+    duty: Tuple[float, float], seed: int, pos: int, n: int, rate: float
+) -> int:
+    """The stream sample where the transmission that holds samples
+    ``pos`` to ``pos + n`` (a part of one of :func:`_on_ranges`' ranges)
+    ends."""
+    period, on = duty
+    shift = (seed * 1.7) % period
+    cycle = math.floor(((pos + 0.5 * n) / rate + shift) / period)
+    return int(math.ceil((cycle * period - shift + on) * rate))
+
+
+def _rpt_burst_tail(rate: float) -> Tuple[_Loop, np.ndarray]:
+    """(M-Q2) The 2 m repeater's reverse burst at ``rate``: the FM phase
+    of its tone shifted by ``CTCSS_BURST_DEG`` (a loop read like the
+    repeater's own, so it is the same tone, in step with it), and the
+    weights that fade the voice and the tone as it was out over
+    ``_DEMO_DCS_FADE_S`` (1 to 0, one per sample)."""
+    from ..dsp.filters import CTCSS_BURST_DEG
+
+    factor, loop_rate, t = _loop_timebase(rate, _TONE_LOOP_S)
+    tone_hz = _whole_cycles(_DEMO_CTCSS_HZ, len(t) / loop_rate)
+    # 2 pi * the integral of dev * cos(2 pi f t + shift): the tone's phase.
+    shifted = 2 * np.pi * tone_hz * t + math.radians(CTCSS_BURST_DEG)
+    phase = (_DEMO_CTCSS_DEVIATION_HZ / tone_hz) * np.sin(shifted)
+    fade = max(1, int(round(_DEMO_DCS_FADE_S * rate)))
+    weights = 0.5 + 0.5 * np.cos(np.pi * np.arange(fade) / fade)
+    return _Loop(phase, factor), weights
+
+
+def _rpt_modulation(
+    loop: _Loop, duty: Tuple[float, float], seed: int, rate: float, pos: int, n: int
+) -> np.ndarray:
+    """(M-Q2) The 2 m repeater's FM phase for ``n`` samples from
+    ``pos``: its loop (the voice and the 100.0 Hz tone), and in the last
+    ``CTCSS_BURST_S`` of each transmission the reverse burst instead: the
+    voice and the tone faded out over ``_DEMO_DCS_FADE_S`` and the tone
+    shifted by ``CTCSS_BURST_DEG`` in their place, the phase continuous."""
+    from ..dsp.filters import CTCSS_BURST_S
+
+    out = loop.read(pos, n)
+    end = _transmission_end(duty, seed, pos, n, rate)
+    start = end - int(round(CTCSS_BURST_S * rate))
+    if pos + n <= start:
+        return out
+    first = max(0, start - pos)  # (where the burst starts in this block)
+    into = pos + first - start  # (and how far into the burst that is)
+    count = n - first
+    burst, weights = _loops("rpt_off", 0, rate)
+    fading = min(len(weights), into + count)
+    held = loop.read(start, fading + 1).astype(np.float64)
+    faded = np.empty(fading + 1)
+    faded[0] = held[0]
+    np.cumsum(np.diff(held) * weights[:fading], out=faded[1:])
+    faded[1:] += held[0]
+    # The shifted tone from the burst's start, plus the voice and the tone
+    # as they fade (then held where they faded to).
+    tail = out[first:]
+    tail[:] = burst.read(start + into, count)
+    tail -= float(burst.read(start, 1)[0])
+    head = min(count, max(0, fading - into))
+    tail[:head] += faded[into : into + head]
+    tail[head:] += faded[fading]
+    return out
+
+
+def _dcs_modulation(
+    loop: _Loop, duty: Tuple[float, float], seed: int, rate: float, pos: int, n: int
+) -> np.ndarray:
+    """(M-Q1) The DCS repeater's FM phase for ``n`` samples from ``pos``:
+    its loop (the voice and the code), and in the last ``DCS_TURN_OFF_S`` of
+    each transmission the turn-off code instead, the voice and the code
+    faded out over its first ``_DEMO_DCS_FADE_S``, the phase continuous."""
+    out = loop.read(pos, n)
+    start = _dcs_turn_off_start(duty, seed, pos, n, rate)
+    if pos + n <= start:
+        return out
+    first = max(0, start - pos)  # (where the tone starts in this block)
+    into = pos + first - start  # (and how far into the tone that is)
+    count = n - first
+    tone, weights = _loops("dcs_off", 0, rate)
+    fading = min(len(weights), into + count)
+    held = loop.read(start, fading + 1).astype(np.float64)
+    faded = np.empty(fading + 1)
+    faded[0] = held[0]
+    np.cumsum(np.diff(held) * weights[:fading], out=faded[1:])
+    faded[1:] += held[0]
+    at = np.minimum(np.arange(into, into + count), fading)
+    out[first:] = faded[at] + tone.read(into, count)
+    return out
+
+
 class MockDevice:
     """Simulated receiver used by demo mode and the Demo Device.
 
@@ -2090,8 +2225,10 @@ class MockDevice:
     of a realistic noise floor. Signals move across
     the display as you tune, so click-to-tune and the frequency scanner
     behave as they would with real hardware. A 2 m repeater on 145.290 MHz
-    sends a 100.0 Hz CTCSS tone (Audio > Tone squelch shows it), and a
-    70 cm repeater on 442.100 MHz DCS code 023 (DCS 023 N). The AM
+    sends a 100.0 Hz CTCSS tone (Audio > Tone squelch shows it), ending
+    each transmission with a reverse burst (150 ms of the tone shifted 180
+    degrees), and a 70 cm repeater on 442.100 MHz DCS code 023 (DCS 023
+    N), ending each with the DCS turn-off code (180 ms of 134.4 Hz). The AM
     band has a broadcast station on each of the radio tuner's six AM presets
     (660, 770, 880, 1010, 1050 and 1260 kHz) playing the demo tune.
     Raising the gain lifts signals and noise together and, as on a
@@ -2348,7 +2485,9 @@ class MockDevice:
         )
         return (starts[:, None] * table[None, :]).ravel()[:n]
 
-    def _add_signal(self, out, kind, offset, amp, seed, rate, pos, stereo) -> None:
+    def _add_signal(
+        self, out, kind, offset, amp, seed, rate, pos, stereo, duty=None
+    ) -> None:
         """Add one signal to ``out`` (starting at stream position ``pos``).
 
         ``stereo`` gives the broadcast FM pilot's phase term, cos(2 theta)
@@ -2408,6 +2547,12 @@ class MockDevice:
                 rds = _loops("rds", 0, rate).read(pos, n)
                 rds *= sin3
                 phase += rds
+        elif kind == "dcs" and duty is not None:
+            # (M-Q1) Each transmission ends with its turn-off code.
+            phase += _dcs_modulation(loops, duty, seed, rate, pos, n)
+        elif kind == "rpt" and duty is not None:
+            # (M-Q2) And the 2 m repeater's with its reverse burst.
+            phase += _rpt_modulation(loops, duty, seed, rate, pos, n)
         else:
             phase += loops.read(pos, n)
         part = np.cos(phase)
@@ -2505,6 +2650,7 @@ class MockDevice:
                     rate,
                     pos + a,
                     terms,
+                    duty=duty,
                 )
 
         # An 8-bit ADC clips at full scale: overdriving the gain distorts.

@@ -174,6 +174,7 @@ class ScanHit:
     count: int = 1
     tone_hz: float = 0.0  # a bookmark's CTCSS tone squelch (0: none)
     dcs: str = ""  # a bookmark's DCS code squelch ("D023N"; "": none)
+    reverse: bool = False  # that squelch reversed (TSQL-R, DTCS-R)
 
     @property
     def listening(self) -> Listening:
@@ -210,6 +211,8 @@ class ScanHit:
         raw = data.get("dcs")
         code = parse_dcs(raw) if isinstance(raw, str) else None
         hit.dcs = format_dcs(*code) if code else ""
+        # (Only a squelch to reverse, and only a real yes: never bool().)
+        hit.reverse = data.get("reverse") is True and bool(hit.tone_hz or hit.dcs)
         return hit
 
 
@@ -1872,6 +1875,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 1,
                 float(getattr(found, "tone_hz", 0.0) or 0.0),
                 str(getattr(found, "dcs", "") or ""),
+                bool(getattr(found, "reverse", False)),
             )
         )
         index = len(self._hits) - 1
@@ -1888,6 +1892,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         with different tones, are two results)."""
         tone = float(getattr(found, "tone_hz", 0.0) or 0.0)
         dcs = str(getattr(found, "dcs", "") or "")
+        reverse = bool(getattr(found, "reverse", False))
         bookmarks = self._engine.mode == "bookmarks"
         freq = found.frequency_hz
         if bookmarks:
@@ -1910,6 +1915,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                     and hit.listening == tuple(found.listening)
                     and hit.tone_hz == tone
                     and hit.dcs == dcs
+                    and hit.reverse == reverse
                 )
             else:
                 same = same_signal(hit.frequency_hz, hit.width_hz, freq, step)
@@ -2114,6 +2120,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             code = parse_dcs(hit.dcs) if hit.mode == "FM" else None
             if code is not None:
                 tone = f", {dcs_label(*code)}"
+            if tone and hit.reverse:
+                tone = f", reverse {tone[2:]}"  # (muted while it is heard)
             lines.append(f"Listen: {mode}{width}{tone}")
         if hit.first_seen:
             first = datetime.fromtimestamp(hit.first_seen).strftime("%H:%M:%S")

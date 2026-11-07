@@ -18,7 +18,10 @@ receiver can't tell those apart, and doesn't need to.
 * :data:`DCS_CODES`: the 104 standard codes (CHIRP's list; written as
   their octal digits, 23 for "023").
 * :func:`dcs_codeword`, :func:`dcs_waveform`: the encoder (tests and the
-  demo device).
+  demo device); :func:`dcs_turn_off` the turn-off code a transmission ends
+  with (a :data:`DCS_TURN_OFF_HZ` tone for :data:`DCS_TURN_OFF_S`), and
+  :func:`dcs_transmission` a whole transmission, the code then its
+  turn-off code.
 * :func:`format_dcs` / :func:`parse_dcs` (``"D023N"``), :func:`dcs_label`
   (``"DCS 023 N"``), :func:`dcs_same_signal`.
 * :class:`DcsDetector`: the code heard on FM discriminator audio, a block
@@ -49,6 +52,13 @@ DCS_CODES: Tuple[int, ...] = (
 )  # fmt: skip
 #: Bit rate (bit/s).
 DCS_BIT_RATE = 134.4
+#: The turn-off code: the tone a radio sends after the code, while its
+#: carrier is still up, so receivers close before the squelch tail (CML's
+#: CMX882 datasheet: 134.4 +/- 0.5 Hz for 150-200 ms; Norcomm's NC105: a
+#: 134.4 Hz sine for 180 ms). The code itself has a null there.
+DCS_TURN_OFF_HZ = 134.4
+#: How long a transmitter sends it (s).
+DCS_TURN_OFF_S = 0.18
 #: The Golay (23,12) generator polynomial, bit i for x^i.
 DCS_GENERATOR = 0xC75
 _BITS = 23
@@ -172,18 +182,86 @@ def dcs_waveform(
         else int(round(float(seconds or 0.0) * rate))
     )
     word = dcs_codeword(code, inverted)
-    pad = int(math.ceil(0.08 * rate)) if smooth else 0
+    pad = _smoothing_pad(rate) if smooth else 0
     index = np.arange(int(start) - pad, int(start) + count + pad, dtype=np.float64)
     bit = np.floor(index * float(bit_rate) / rate).astype(np.int64) % _BITS
     levels = np.where((word >> bit) & 1, 1.0, -1.0)
     if not smooth or levels.size == 0:
         return levels[pad : pad + count]
+    return _band_limited(levels, rate)[pad : pad + count]
+
+
+def _smoothing_pad(rate: float) -> int:
+    """Samples either side a band-limited piece is computed over."""
+    return int(math.ceil(0.08 * rate))
+
+
+def _band_limited(levels: np.ndarray, rate: float) -> np.ndarray:
+    """``levels`` band-limited as a DCS transmitter sends them: flat to 250
+    Hz, nothing above 350 Hz (by FFT, around the whole array)."""
     spectrum = np.fft.rfft(levels)
     f = np.fft.rfftfreq(levels.size, 1.0 / rate)
     taper = np.clip((350.0 - f) / 100.0, 0.0, 1.0)
     response = 0.5 - 0.5 * np.cos(np.pi * taper)
-    smoothed = np.fft.irfft(spectrum * response, levels.size)
-    return smoothed[pad : pad + count]
+    return np.fft.irfft(spectrum * response, levels.size)
+
+
+def dcs_turn_off(
+    rate: float = 48000.0,
+    seconds: Optional[float] = None,
+    samples: Optional[int] = None,
+    start: int = 0,
+) -> np.ndarray:
+    """The turn-off code: a :data:`DCS_TURN_OFF_HZ` sine at the code's own
+    level (peak 1, as the code's +1/-1), ``samples`` (or ``seconds``,
+    :data:`DCS_TURN_OFF_S` by default) of it from sample ``start``."""
+    rate = float(rate)
+    if samples is not None:
+        count = int(samples)
+    else:
+        length = DCS_TURN_OFF_S if seconds is None else float(seconds)
+        count = int(round(length * rate))
+    t = (np.arange(max(count, 0), dtype=np.float64) + int(start)) / rate
+    return np.sin((2.0 * math.pi * DCS_TURN_OFF_HZ) * t)
+
+
+def dcs_transmission(
+    code: int,
+    inverted: bool = False,
+    rate: float = 48000.0,
+    seconds: Optional[float] = None,
+    samples: Optional[int] = None,
+    turn_off_s: Optional[float] = None,
+    bit_rate: float = DCS_BIT_RATE,
+    smooth: bool = True,
+) -> np.ndarray:
+    """One transmission's DCS signal, as a radio sends it: ``code`` from the
+    first bit of its word for ``samples`` (or ``seconds``), then its
+    turn-off code for ``turn_off_s`` (:data:`DCS_TURN_OFF_S` when None, 0
+    for none), +1/-1 levels. ``smooth`` band-limits the whole of it as
+    :func:`dcs_waveform` does (with silence before and after it), so the
+    code and the turn-off code join without a step."""
+    rate = float(rate)
+    count = (
+        int(samples)
+        if samples is not None
+        else int(round(float(seconds or 0.0) * rate))
+    )
+    tail_s = DCS_TURN_OFF_S if turn_off_s is None else float(turn_off_s)
+    tail = max(0, int(round(tail_s * rate)))
+    levels = np.concatenate(
+        (
+            dcs_waveform(
+                code, inverted, rate, samples=count, bit_rate=bit_rate, smooth=False
+            ),
+            dcs_turn_off(rate, samples=tail),
+        )
+    )
+    if not smooth or levels.size == 0:
+        return levels
+    pad = _smoothing_pad(rate)
+    padded = np.concatenate((np.zeros(pad), levels, np.zeros(pad)))
+    return _band_limited(padded, rate)[pad : pad + levels.size]
 
 
 class DcsDetector:
@@ -208,6 +286,20 @@ class DcsDetector:
     about 0.4 s to recognise one. The answers don't depend on how the
     audio is cut into blocks.
 
+    A transmission that ends with its turn-off code (a
+    :data:`DCS_TURN_OFF_HZ` tone sent after the code, while the carrier is
+    still up) is let go as soon as that is heard, 60-80 ms into it, instead
+    of ``HOLD_S`` after the code was last read: while a code is heard, each
+    new sample ends a ``TURN_OFF_WINDOW_S`` window of the DCS band, and the
+    turn-off code is there when, in such a window, the tone holds at least
+    ``TURN_OFF_SHARE`` of the power (the code itself has none at 134.4 Hz,
+    its bits being 1/134.4 s long), what is left is under
+    ``TURN_OFF_RESIDUE`` of the code's own power (the code has gone: a low
+    note or a voice's pitch near 134 Hz comes with the code, which stays)
+    and the tone is at least ``TURN_OFF_LEVEL`` of it (a tone, not
+    silence). A code is then read again only from what follows
+    (:attr:`turned_off` until then; :attr:`turn_offs` counts them).
+
     :attr:`detected` is the code heard (as the normal code where a normal
     and an inverted one send the same bits), :meth:`is_present` asks about
     one code (the squelch).
@@ -221,6 +313,13 @@ class DcsDetector:
     #: main lobe ends at 134.4 Hz).
     PASS_HZ = 150.0
     STOP_HZ = 250.0
+    #: The turn-off code (see the class docstring). A window of the code
+    #: alone has at most 2 % of its power at 134.4 Hz, and at least 42 % of
+    #: the code's power left besides it (long runs of a bit lower it).
+    TURN_OFF_WINDOW_S = 0.06
+    TURN_OFF_SHARE = 0.5
+    TURN_OFF_RESIDUE = 0.3
+    TURN_OFF_LEVEL = 0.05
     _TARGET_RATE = 2400.0
 
     def __init__(self, sample_rate: float) -> None:
@@ -237,6 +336,15 @@ class DcsDetector:
         self._update_n = max(1, int(round(self.UPDATE_S * self._out_rate)))
         self._hold_n = int(round(self.HOLD_S * self._out_rate))
         self._probe = np.array([-0.25, -0.125, 0.0, 0.125, 0.25]) * self._spb
+        # The turn-off code's windows (each new sample ends one, so up to
+        # one piece of samples more than a window is looked at).
+        self._turn_off_n = max(8, int(round(self.TURN_OFF_WINDOW_S * self._out_rate)))
+        span = self._turn_off_n + self._update_n
+        step = 2.0 * math.pi * DCS_TURN_OFF_HZ / self._out_rate
+        self._turn_off_basis = np.exp(-1j * step * np.arange(span))
+        self._turn_off_sums = np.concatenate(([0j], np.cumsum(self._turn_off_basis)))
+        self._turn_off_cos = np.cos(step * np.arange(self._keep))
+        self._turn_off_sin = np.sin(step * np.arange(self._keep))
         self.reset()
 
     def reset(self) -> None:
@@ -250,12 +358,32 @@ class DcsDetector:
         self._word: Optional[int] = None  # the last 23 bits read reliably
         self._age = 0  # decimated samples since then
         self._detected: Optional[Code] = None
+        self._code_power = 0.0  # the DCS band's power when it was read
+        self._turned_off = False
+        self._listened = 0  # decimated samples since then, or the reset
+        #: Turn-off codes heard since the last reset.
+        self.turn_offs = 0
 
     # -- answers -------------------------------------------------------- #
     @property
     def detected(self) -> Optional[Code]:
         """``(code, inverted)`` heard lately, or None."""
         return self._detected
+
+    @property
+    def turned_off(self) -> bool:
+        """Whether the code heard last ended with its turn-off code (until
+        a code is heard again)."""
+        return self._turned_off
+
+    @property
+    def heard_s(self) -> float:
+        """Seconds of audio a code is read from now: since the reset, or
+        since the turn-off code that ended the last one. A code there all
+        along is read once this passes about 0.35 s (0.5 s at 6 dB signal
+        to noise in the DCS band): whether a code is absent can only be
+        told after that (the reverse tone squelch waits for it)."""
+        return self._listened / self._out_rate
 
     def is_present(self, code: int, inverted: bool = False) -> bool:
         """Whether the bits heard lately are ``code``'s (with ``inverted``
@@ -309,8 +437,13 @@ class DcsDetector:
             pos += piece.size
             self._buffer = np.concatenate((self._buffer[piece.size :], piece))
             self._filled = min(self._keep, self._filled + piece.size)
+            self._listened = min(self._listened + piece.size, 1 << 30)
             self._since += piece.size
             self._age += piece.size
+            if self._word is not None:
+                after = self._turn_off_heard(piece.size)
+                if after is not None:
+                    self._turn_off(after)
             if self._since >= self._update_n:
                 self._since = 0
                 self._read()
@@ -318,6 +451,7 @@ class DcsDetector:
     def _read(self) -> None:
         found: Optional[Code] = None
         word: Optional[int] = None
+        length = 0
         for words in (3, 2):
             length = int(math.ceil((words * _BITS + 1) * self._spb))
             if self._filled >= length:
@@ -330,9 +464,65 @@ class DcsDetector:
         if found is not None:
             self._word, self._age = word, 0
             self._detected = found
+            self._turned_off = False
+            self._code_power = self._power_besides_tone(self._buffer[-length:])
         elif self._age > self._hold_n:
             self._word = None
             self._detected = None
+
+    def _power_besides_tone(self, x: np.ndarray) -> float:
+        """The power of DCS-band samples ``x`` (their mean taken out) other
+        than at 134.4 Hz: the code's own. A note or a voice's pitch held
+        there would otherwise count as part of the code, and a window of
+        the code with that note in it as the code gone."""
+        n = min(x.size, self._turn_off_cos.size)
+        if n == 0:
+            return 0.0
+        y = x[-n:] - float(np.mean(x[-n:]))
+        re = float(np.dot(y, self._turn_off_cos[:n]))
+        im = float(np.dot(y, self._turn_off_sin[:n]))
+        tone = 2.0 * (re * re + im * im) / (n * n)
+        return max(float(np.dot(y, y)) / n - tone, 0.0)
+
+    def _turn_off_heard(self, count: int) -> Optional[int]:
+        """Whether a window ending at one of the last ``count`` samples
+        holds the turn-off code (see the class docstring): how many samples
+        came after the first such window, or None."""
+        n = self._turn_off_n
+        span = min(n + count - 1, self._filled, self._buffer.size)
+        if span < n or not self._code_power > 0.0:
+            return None
+        x = self._buffer[-span:]
+        rolled = np.concatenate(([0j], np.cumsum(x * self._turn_off_basis[:span])))
+        sums = np.concatenate(([0.0], np.cumsum(x)))
+        squares = np.concatenate(([0.0], np.cumsum(x * x)))
+        basis = self._turn_off_sums
+        end = np.arange(n, span + 1)
+        mean = (sums[end] - sums[end - n]) / n
+        # The window's 134.4 Hz part, its mean taken out (a tuning offset).
+        c = (rolled[end] - rolled[end - n]) - mean * (basis[end] - basis[end - n])
+        power = (squares[end] - squares[end - n]) / n - mean * mean
+        tone = 2.0 * (c.real * c.real + c.imag * c.imag) / (n * n)
+        code = self._code_power
+        heard = np.flatnonzero(
+            (tone >= self.TURN_OFF_SHARE * power)
+            & (power - tone <= self.TURN_OFF_RESIDUE * code)
+            & (tone >= self.TURN_OFF_LEVEL * code)
+        )
+        if heard.size == 0:
+            return None
+        return int(span - end[heard[0]])
+
+    def _turn_off(self, after: int) -> None:
+        """The turn-off code was heard ``after`` samples ago: the code has
+        ended. The next one is read from what follows only (the words
+        buffered still hold this one)."""
+        self._word = None
+        self._detected = None
+        self._filled = after
+        self._listened = after
+        self._turned_off = True
+        self.turn_offs += 1
 
     @staticmethod
     def _name(word: int) -> Optional[Code]:

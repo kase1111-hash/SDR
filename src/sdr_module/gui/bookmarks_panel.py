@@ -62,7 +62,7 @@ from ..core.chirp_csv import (
 )
 from ..dsp.dcs import dcs_label
 from . import file_dialogs
-from .bookmark_editor import bookmark_dcs, bookmark_tone_hz
+from .bookmark_editor import bookmark_dcs, bookmark_squelch, bookmark_tone_hz
 from .bookmark_editor import edit_bookmark as _edit_dialog
 from .control_panel import DEMOD_MODES, MAX_FREQUENCY_HZ, MIN_FREQUENCY_HZ
 from .decoder_panel import ViewPlaceholder
@@ -285,7 +285,18 @@ def _tooltip(bookmark: Dict[str, Any]) -> str:
     tone_mode = bookmark.get("tone_mode")
     cross = str(bookmark.get("cross_mode") or "")
     dcs = bookmark_dcs(bookmark)
-    if tone_mode in ("Tone", "TSQL"):
+    reverse_tone, reverse_dcs, reverse = bookmark_squelch(bookmark)
+    if reverse and reverse_dcs is not None:
+        lines.append(
+            f"Reverse DCS ({tone_mode}): muted while {dcs_label(*reverse_dcs)} "
+            "is heard, every other station plays"
+        )
+    elif reverse:
+        lines.append(
+            f"Reverse tone squelch ({tone_mode}): muted while {reverse_tone:g} Hz "
+            "is heard, every other station plays"
+        )
+    elif tone_mode in ("Tone", "TSQL"):
         key = "rtone" if tone_mode == "Tone" else "ctone"
         lines.append(f"{tone_mode}: {_num(bookmark.get(key), 88.5):g} Hz")
     elif tone_mode == "Cross" and bookmark_tone_hz(bookmark):
@@ -297,8 +308,8 @@ def _tooltip(bookmark: Dict[str, Any]) -> str:
         # (A tone or code sent, none to receive: nothing unsupported.)
         lines.append(f"Cross ({cross}): no receive squelch")
     elif tone_mode:
-        # (Reverse tone squelch, a code no standard list has...: heard
-        # without a squelch here.)
+        # (A code no standard list has, a damaged tone...: heard without a
+        # squelch here.)
         lines.append(
             f"Tone mode: {tone_mode} (its receive squelch is not supported "
             "here: every station is heard)"
@@ -656,29 +667,32 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
                 return index
         return -1
 
-    def set_tone(self, index: int, tone_hz: float) -> None:
+    def set_tone(self, index: int, tone_hz: float, reverse: bool = False) -> None:
         """Give bookmark ``index`` a CTCSS tone squelch (0: none), as
-        CHIRP's TSQL tone."""
+        CHIRP's TSQL tone (``reverse``: TSQL-R, muted while it is heard)."""
         if not 0 <= index < len(self._bookmarks):
             return
         b = self._bookmarks[index]
         if tone_hz and tone_hz > 0:
-            b["tone_mode"] = "TSQL"
+            b["tone_mode"] = "TSQL-R" if reverse else "TSQL"
             b["ctone"] = float(tone_hz)
-        elif str(b.get("tone_mode") or "") == "TSQL":
+        elif str(b.get("tone_mode") or "") in ("TSQL", "TSQL-R"):
             b.pop("tone_mode", None)
             b.pop("ctone", None)
         self._save()
         self._refresh_list(select=index)
 
-    def set_dcs(self, index: int, code: int, inverted: bool = False) -> None:
+    def set_dcs(
+        self, index: int, code: int, inverted: bool = False, reverse: bool = False
+    ) -> None:
         """Give bookmark ``index`` a DCS code squelch, as CHIRP's DTCS
-        channel sending and hearing that code."""
+        channel sending and hearing that code (``reverse``: DTCS-R, muted
+        while it is heard)."""
         if not 0 <= index < len(self._bookmarks):
             return
         b = self._bookmarks[index]
         letter = "R" if inverted else "N"
-        b["tone_mode"] = "DTCS"
+        b["tone_mode"] = "DTCS-R" if reverse else "DTCS"
         b["dtcs"] = int(code)
         b["dtcs_polarity"] = letter + letter
         self._save()

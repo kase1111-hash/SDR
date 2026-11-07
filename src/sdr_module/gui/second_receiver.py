@@ -37,12 +37,14 @@ thread a frame behind the window (:class:`~.frame_pipeline.FramePipeline`):
 the GUI thread reads, records, paints and plays.
 
 Broadcast FM plays in stereo there as in the main window (its own Stereo
-switch, and a STEREO lamp in its status bar).
+switch, and a STEREO lamp in its status bar), and it has the main window's
+audio notch and low cut, its own (:mod:`.second_receiver_audio`).
 
 Settings: ``device/second_receiver/*`` (device, sample rate per kind of
 device, frequency, mode, filter, step per mode, squelch, Listen, volume,
-stereo, gain, Follow transmissions) and ``layout/second_receiver/*``
-(window geometry, splitters and the waterfall's look).
+stereo, notch, notch_hz, low_cut, gain, Follow transmissions) and
+``layout/second_receiver/*`` (window geometry, splitters and the
+waterfall's look).
 """
 
 from __future__ import annotations
@@ -509,6 +511,9 @@ class Frame:
     audio: Optional[np.ndarray]
     #: The STEREO lamp: (text, tone, tooltip), see stereo_reading.
     stereo: StereoReading = NO_STEREO_READING
+    #: The frequency the audio notch removes (Manual's, or the whistle
+    #: Auto found), None when it removes none or nothing was demodulated.
+    notch_hz: Optional[float] = None
 
 
 class ReceiverDsp:
@@ -546,6 +551,10 @@ class ReceiverDsp:
         #: above the squelch shows on the STEREO lamp (FrameWork sets it
         #: for each frame).
         self.heard = False
+        #: The tuned frequency (Hz): another one is another station (the
+        #: notch's Auto searches anew). None: not known.
+        self.tuned_hz: Optional[float] = None
+        self._tuned_last: Optional[float] = None
         self.squelch = SquelchGate(-80.0)
         self._level_average = LevelAverager()
         self._noise = NoiseFloorTracker()
@@ -630,6 +639,10 @@ class ReceiverDsp:
         power = self.spectrum(display)
         self._noise.update(power, len(samples) / max(self.rate, 1.0))
         chain = self.chain()
+        if self.tuned_hz != self._tuned_last:
+            if self._tuned_last is not None:
+                chain.retuned()  # (Auto's whistle was the last station's)
+            self._tuned_last = self.tuned_hz
         channel = chain.channelize(samples)
         seconds = len(channel) / max(chain.channel_rate, 1.0)
         if len(channel):
@@ -659,6 +672,8 @@ class ReceiverDsp:
         speaker = play and audible and gate.is_open
         frame.audio = self._audio(chain, channel, speaker, received)
         frame.stereo = self._stereo_lamp(chain, received)
+        # (Nothing is notched while nothing is demodulated.)
+        frame.notch_hz = chain.notch_frequency_hz if self._demod_running else None
         return frame
 
     def _stereo_lamp(self, chain: _ReceiverChain, received: bool) -> StereoReading:
@@ -866,7 +881,9 @@ if HAS_PYQT6:
             self._refresh()
             super().showPopup()
 
-    class SecondReceiverWindow(QMainWindow):
+    from .second_receiver_audio import ListeningRows
+
+    class SecondReceiverWindow(QMainWindow, ListeningRows):
         """The second receiver (see the module docstring)."""
 
         #: The Listen choice changed (its key).
@@ -1462,8 +1479,11 @@ if HAS_PYQT6:
             label = QLabel("Stereo:")
             label.setBuddy(self._stereo_check)
             form.addRow(label, self._stereo_check)
+            # The notch and the low cut (ListeningRows).
+            self._build_filter_rows(form)
             self._audio_note = self._hint()
             form.addRow(self._audio_note)
+            self._audio_form = form
             return group
 
         def _build_bookmarks_group(self) -> "QGroupBox":
@@ -2090,6 +2110,7 @@ if HAS_PYQT6:
             self._sync_audio_output()
             self._level_meter.clear()
             self._show_stereo(NO_STEREO_READING)  # (nothing is received)
+            self._show_notch_found(None)
             self._refresh_state()
             if was_running:
                 self.running_changed.emit(False)
@@ -2233,6 +2254,7 @@ if HAS_PYQT6:
             self._freq_input.set_frequency(self._tuned_hz)
             self._freq_label.setText(format_frequency(self._tuned_hz))
             self._dsp.offset_hz = self._tuned_hz - self._lo_hz
+            self._dsp.tuned_hz = self._tuned_hz
             self._update_passband()
             self._update_tx_group()
 
@@ -2324,6 +2346,7 @@ if HAS_PYQT6:
                 self._load_step()
             self._tuning_form.setRowVisible(self._deviation_combo, mode == "FM")
             self._apply_dsp_settings()
+            self._update_filter_controls()
 
         def _fill_filters(self, mode: str) -> None:
             combo = self._filter_combo
@@ -2377,6 +2400,7 @@ if HAS_PYQT6:
 
         def _on_deviation_changed(self) -> None:
             self._apply_dsp_settings()
+            self._update_filter_controls()  # (broadcast FM keeps its audio)
             if not self._restoring:
                 self._load_step()
 
@@ -2387,6 +2411,7 @@ if HAS_PYQT6:
             dsp.bandwidth_hz = self._bandwidth_hz()
             dsp.deviation_hz = self._deviation_hz()
             dsp.offset_hz = self._tuned_hz - self._lo_hz
+            dsp.tuned_hz = self._tuned_hz
             self._update_passband()
             self._update_click_snap()
 
@@ -3039,6 +3064,8 @@ if HAS_PYQT6:
             if gate.auto and gate.last_threshold_db is not None:
                 self._show_auto_threshold(gate.last_threshold_db)
             self._show_stereo(frame.stereo)
+            if self._notch_mode() == "auto":
+                self._show_notch_found(frame.notch_hz)
             if frame.audio is not None and len(frame.audio) and self._audio_open:
                 self._audio.write(frame.audio)
 
@@ -3799,6 +3826,7 @@ if HAS_PYQT6:
                 self._on_volume_changed(self._volume_slider.value())
                 self._stereo_check.setChecked(s.get_bool(KEY + "stereo", True))
                 self._dsp.stereo = self._stereo_check.isChecked()
+                self._restore_filters()
                 listen = s.get_str(KEY + "listen", DEFAULT_LISTEN)
                 if listen not in _LISTEN_KEYS:
                     listen = DEFAULT_LISTEN

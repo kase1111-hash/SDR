@@ -6,22 +6,77 @@ The Second Receiver's listening options, as the main window has them.
   ``stereo`` set, :class:`~.stereo_audio.StereoPath`); its STEREO lamp says
   what a station is received as and why, as the main window's badge does
   (:func:`stereo_reading`).
+* **Notch** and **Low cut**: the receiver chain's own listening filters
+  (``audio_chain.ListeningFilters``, set through the receiver's
+  ``AudioOptions``): the Notch (Off, Auto, Manual at a frequency), the
+  Whistle row under it (Manual's frequency, or the whistle Auto removes)
+  and the Low cut (Off, 100, 200, 300 Hz), greyed with the reason where
+  they don't apply (:func:`notch_unused`, :func:`low_cut_unused`), as in
+  the main window's Audio group.
 
 What is decided here is Qt-free: the Second Receiver's DSP runs on a worker
-thread (``second_receiver.FrameWork``), which hands the lamp's reading back
-to the window with each frame.
+thread (``second_receiver.FrameWork``), which hands the lamp's reading and
+the whistle Auto found back to the window with each frame.
+:class:`ListeningRows` (Qt) is a part of the Second Receiver window: its
+rows in the Squelch and audio group, what they set on its DSP, and their
+settings (``device/second_receiver/notch``, ``notch_hz``, ``low_cut``).
 """
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional, Tuple
+
+from .audio_chain import (
+    DEFAULT_NOTCH_HZ,
+    LOW_CUT_CHOICES,
+    NOTCH_CHOICES,
+    NOTCH_RANGE_HZ,
+)
 
 # The main window's thresholds: STEREO lights at half the stereo
 # difference or more (about 10 dB of separation) and goes out below a
 # third of it (no flicker while the blend hovers).
-from .main_window import _STEREO_OFF_BLEND, _STEREO_ON_BLEND
+from .main_window import (
+    _BROADCAST_DEVIATION_HZ,
+    _STEREO_OFF_BLEND,
+    _STEREO_ON_BLEND,
+)
 
-__all__ = ["NO_STEREO_READING", "StereoReading", "stereo_reading"]
+try:
+    from PyQt6.QtCore import Qt
+    from PyQt6.QtWidgets import (
+        QHBoxLayout,
+        QLabel,
+        QSizePolicy,
+        QSpinBox,
+        QStackedWidget,
+        QWidget,
+    )
+
+    HAS_PYQT6 = True
+except ImportError:  # pragma: no cover - environment
+    HAS_PYQT6 = False
+
+if HAS_PYQT6:
+    from .themes import set_tone
+
+logger = logging.getLogger(__name__)
+
+#: The Second Receiver's settings (``second_receiver.KEY``).
+KEY = "device/second_receiver/"
+#: The notch's choices (keys) and the low cut's.
+_NOTCH_KEYS = tuple(key for key, _text, _tip in NOTCH_CHOICES)
+_LOW_CUT_KEYS = tuple(key for key, _text, _tip in LOW_CUT_CHOICES)
+
+__all__ = [
+    "NO_STEREO_READING",
+    "StereoReading",
+    "low_cut_unused",
+    "notch_found_text",
+    "notch_unused",
+    "stereo_reading",
+]
 
 #: ``(text, tone, tooltip)`` of the STEREO lamp: "STEREO" or "MONO" (""
 #: hides it), its theme tone (None: plain) and why.
@@ -88,3 +143,212 @@ def stereo_reading(
         "Mono: the signal is too weak for clean stereo, so it plays in mono to "
         "keep the hiss down. Stereo comes back as the signal gets stronger.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Notch and low cut (the main window's Audio group's rules and wording)
+# ---------------------------------------------------------------------------
+
+#: The Notch's and the Low cut's tooltips where they apply.
+NOTCH_TIP = (
+    "Removes a whistle (a heterodyne) from the audio. Auto finds the "
+    "strongest steady one and follows it as it drifts, leaving voice alone "
+    "(for music use Off: a held note counts as a whistle); Manual removes "
+    "the frequency you set (AM, SSB, CW and narrow FM)."
+)
+LOW_CUT_TIP = (
+    "Cuts the audio below this frequency: mains hum and rumble out, the "
+    "voice stays (AM, SSB and narrow FM). With a tone squelch set, narrow FM "
+    "is cut below 300 Hz anyway (the tone or the DCS code)."
+)
+
+
+def notch_unused(mode: str, deviation_hz: float) -> str:
+    """Why the notch isn't used in ``mode`` (at an FM ``deviation_hz``),
+    "" where it is: AM, USB, LSB, CW and narrow FM (broadcast FM keeps its
+    audio as it is; I/Q has none)."""
+    if mode in ("AM", "USB", "LSB", "CW"):
+        return ""
+    if mode == "FM":
+        if float(deviation_hz) < _BROADCAST_DEVIATION_HZ:
+            return ""
+        return "Not used in broadcast FM: its audio is kept as it is."
+    return "Not used in None (I/Q) mode: there is no audio."
+
+
+def low_cut_unused(mode: str, deviation_hz: float) -> str:
+    """Why the low cut isn't used in ``mode``, "" where it is: AM, USB, LSB
+    and narrow FM (not CW, whose filter sits around the note)."""
+    if mode == "CW":
+        return "Not used in CW: its filter sits around the CW note."
+    return notch_unused(mode, deviation_hz)
+
+
+def notch_found_text(hz: Optional[float]) -> Tuple[str, str, str]:
+    """Auto's readout, ``(text, tooltip, tone)``: the whistle it removes
+    (Hz), or None."""
+    if hz is None:
+        return (
+            "None",
+            "Auto hears no steady whistle on the channel: the audio plays as "
+            "it is. It finds one within about half a second.",
+            "muted",
+        )
+    return f"{hz:.0f} Hz", f"Auto removes a steady whistle at {hz:.1f} Hz", "success"
+
+
+if HAS_PYQT6:
+
+    class ListeningRows:
+        """Part of the Second Receiver window (a mixin of
+        ``SecondReceiverWindow``): the Notch, Whistle and Low cut rows of
+        its Squelch and audio group, what they set on its DSP's options
+        (``self._dsp.options``: the receiver chain reads them on every
+        block, so a change takes effect at once, without a click), and
+        their settings. Uses the window's ``_combo``, ``_dsp``,
+        ``_settings``, ``_save``, ``mode()`` and ``_deviation_hz()``."""
+
+        def _build_filter_rows(self, form: Any) -> None:
+            """The Notch, Whistle and Low cut rows, added to ``form``."""
+            self._filter_form = form
+            self._notch_combo = self._combo(6)
+            for key, text, tip in NOTCH_CHOICES:
+                self._notch_combo.addItem(text, key)
+                self._notch_combo.setItemData(
+                    self._notch_combo.count() - 1, tip, Qt.ItemDataRole.ToolTipRole
+                )
+            self._notch_combo.setAccessibleName("Second receiver's notch")
+            label = QLabel("Notch:")
+            label.setBuddy(self._notch_combo)
+            form.addRow(label, self._notch_combo)
+            # Under it, in Auto and Manual: Manual's frequency, or the
+            # whistle Auto removes (a row of its own, as in the main window).
+            self._notch_spin = QSpinBox()
+            self._notch_spin.setRange(*NOTCH_RANGE_HZ)
+            self._notch_spin.setValue(DEFAULT_NOTCH_HZ)
+            self._notch_spin.setSuffix(" Hz")
+            self._notch_spin.setAccelerated(True)
+            self._notch_spin.setAccessibleName("Second receiver's notch frequency")
+            self._notch_spin.setToolTip(
+                "The whistle's frequency, to remove it by hand (Manual; "
+                f"{NOTCH_RANGE_HZ[0]}-{NOTCH_RANGE_HZ[1]} Hz). Type it, or use "
+                "the arrows (Page Up/Down: 10 Hz) until the whistle is gone."
+            )
+            self._notch_found = QLabel()
+            self._notch_found.setAccessibleName("Whistle the second receiver removes")
+            self._notch_stack = QStackedWidget()
+            self._notch_stack.addWidget(self._notch_spin)
+            self._notch_stack.addWidget(self._notch_found)
+            self._notch_stack.setSizePolicy(
+                QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed
+            )
+            notch_row = QWidget()
+            row = QHBoxLayout(notch_row)
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(self._notch_stack)
+            row.addStretch(1)
+            label = QLabel("Whistle:")
+            label.setBuddy(self._notch_spin)
+            form.addRow(label, notch_row)
+            self._notch_row = notch_row
+            form.setRowVisible(notch_row, False)  # (Off)
+            self._notch_combo.currentIndexChanged.connect(self._on_notch_changed)
+            self._notch_spin.valueChanged.connect(self._on_notch_changed)
+            self._show_notch_found(None)
+
+            self._low_cut_combo = self._combo(6)
+            for key, text, tip in LOW_CUT_CHOICES:
+                self._low_cut_combo.addItem(text, key)
+                self._low_cut_combo.setItemData(
+                    self._low_cut_combo.count() - 1, tip, Qt.ItemDataRole.ToolTipRole
+                )
+            self._low_cut_combo.setAccessibleName("Second receiver's low cut")
+            self._low_cut_combo.currentIndexChanged.connect(self._on_low_cut_changed)
+            label = QLabel("Low cut:")
+            label.setBuddy(self._low_cut_combo)
+            form.addRow(label, self._low_cut_combo)
+
+        def _notch_mode(self) -> str:
+            """``"off"``, ``"auto"`` or ``"manual"``."""
+            key = self._notch_combo.currentData()
+            return key if key in _NOTCH_KEYS else "off"
+
+        def _low_cut_key(self) -> str:
+            """``"off"``, or the low cut's corner in Hz (``"100"``...)."""
+            key = self._low_cut_combo.currentData()
+            return key if key in _LOW_CUT_KEYS else "off"
+
+        def _on_notch_changed(self, *_args: Any) -> None:
+            options = self._dsp.options
+            options.notch = self._notch_mode()
+            options.notch_hz = float(self._notch_spin.value())
+            self._update_filter_controls()
+            self._save(KEY + "notch", options.notch)
+            self._save(KEY + "notch_hz", int(self._notch_spin.value()))
+
+        def _on_low_cut_changed(self, *_args: Any) -> None:
+            key = self._low_cut_key()
+            self._dsp.options.low_cut_hz = 0.0 if key == "off" else float(key)
+            self._save(KEY + "low_cut", key)
+
+        def _update_filter_controls(self) -> None:
+            """Greyed, with the reason in the tooltip, where they don't
+            apply (the mode, or broadcast FM); the Whistle row in Auto
+            and Manual."""
+            mode, deviation = self.mode(), self._deviation_hz()
+            why = notch_unused(mode, deviation)
+            notch = self._notch_mode()
+            self._notch_combo.setEnabled(not why)
+            self._notch_spin.setEnabled(not why and notch == "manual")
+            self._notch_found.setEnabled(not why)
+            if why:
+                self._show_notch_found(None)  # (nothing is removed here)
+            self._notch_stack.setCurrentWidget(
+                self._notch_found if notch == "auto" else self._notch_spin
+            )
+            self._filter_form.setRowVisible(self._notch_row, notch != "off")
+            self._notch_combo.setToolTip(why or NOTCH_TIP)
+            why = low_cut_unused(mode, deviation)
+            self._low_cut_combo.setEnabled(not why)
+            self._low_cut_combo.setToolTip(why or LOW_CUT_TIP)
+
+        def _show_notch_found(self, hz: Optional[float]) -> None:
+            """The Whistle row's readout in Auto (refreshed every frame:
+            nothing is touched unless it changed)."""
+            text, tip, tone = notch_found_text(hz)
+            label = self._notch_found
+            if label.text() != text:
+                label.setText(text)
+                label.setToolTip(tip)
+                set_tone(label, tone)
+
+        def _restore_filters(self) -> None:
+            """The saved Notch, its frequency and the Low cut, each on its
+            own: a damaged value is logged and gives Off (the frequency: its
+            box's nearest end), never stopping the others."""
+            s = self._settings
+            hz = s.get_int(KEY + "notch_hz", DEFAULT_NOTCH_HZ)
+            low, high = NOTCH_RANGE_HZ
+            kept = int(min(max(hz, low), high))
+            if kept != hz:
+                logger.warning(
+                    f"Ignoring the damaged setting {KEY}notch_hz={hz!r}: using "
+                    f"{kept} Hz instead."
+                )
+            self._notch_spin.setValue(kept)
+            for key, choices, combo in (
+                ("notch", _NOTCH_KEYS, self._notch_combo),
+                ("low_cut", _LOW_CUT_KEYS, self._low_cut_combo),
+            ):
+                value = s.get_str(KEY + key, "off")
+                if value not in choices:
+                    logger.warning(
+                        f"Ignoring the damaged setting {KEY}{key}={value!r}: "
+                        "using Off instead."
+                    )
+                    value = "off"
+                combo.setCurrentIndex(max(0, combo.findData(value)))
+            # (The signals applied these; make sure even unchanged defaults
+            # are in effect.)
+            self._on_notch_changed()
+            self._on_low_cut_changed()

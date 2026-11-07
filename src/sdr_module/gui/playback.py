@@ -79,10 +79,13 @@ def format_clock(seconds: float, total: float = 0.0) -> str:
 
 def playing_line(options: IqFileOptions) -> str:
     """What the status bar says of a recording opened: ``"Playing
-    fm8.sigmf-data (99.6–100.6 MHz)"``."""
+    fm8.sigmf-data (99.6–100.6 MHz)"``; a one-channel WAV file (a real
+    signal, read as I/Q) says so: ``"Playing audio.wav (one channel,
+    0–0.024 MHz)"``."""
     half = options.sample_rate / 2.0
     span = format_mhz_range(options.center_hz - half, options.center_hz + half)
-    return f"Playing {options.name} ({span})"
+    held = "one channel, " if options.real_signal else ""
+    return f"Playing {options.name} ({held}{span})"
 
 
 class FilePlaybackDevice:

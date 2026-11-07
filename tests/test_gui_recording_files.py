@@ -611,18 +611,26 @@ class TestUnreadableFiles(_FilesCase):
             self.assertIn(why, warn.call_args[0][2])
             self.assertFalse(self.win._playback.active)
 
-    def test_an_audio_wav_is_not_taken_for_iq(self):
+    def test_an_audio_wav_plays_as_the_real_signal_it_holds(self):
+        """It was refused ("it is audio, not I/Q"); since M-F2 a one-channel
+        file plays as I/Q at half its rate, centered on a quarter of it: its
+        own frequencies, not the 145.8 MHz its name was received on."""
         from sdr_module.dsp.recording import save_audio_file
 
         path = self.path("145.800MHz_FM_20261030_120000.wav")
         save_audio_file(path, np.zeros(4800, np.float32), 48000)
         with self.open_dialog(path), mock.patch.object(QMessageBox, "warning") as warn:
-            self.assertFalse(self.win._open_recording())
-        self.assertIn("it is audio, not I/Q", warn.call_args[0][2])
+            self.assertTrue(self.win._open_recording())
+        warn.assert_not_called()
+        self.assertEqual(self.boxes, [])
+        self.assertAlmostEqual(self.win._lo_frequency(), 12e3, delta=0.5)
+        self.assertEqual(self.win._playback.device.sample_rate, 24e3)
+        self.win._playback.close()
 
-    def test_wav_samples_wider_than_16_bits_are_refused_not_misread(self):
+    def test_wav_samples_wider_than_16_bits_are_read_not_misread(self):
         # 24- and 32-bit I/Q WAV files (HDSDR can write them) were read as
-        # 16-bit: garbage, with "the samples look right".
+        # 16-bit: garbage, with "the samples look right"; then refused.
+        # Since M-F1 they are read, full scale 1.0.
         import wave
 
         x = _tone(4800)
@@ -638,14 +646,16 @@ class TestUnreadableFiles(_FilesCase):
                 handle.setsampwidth(width)
                 handle.setframerate(48000)
                 handle.writeframes(data.tobytes())
-            for action in (self.win._open_recording, self.win._show_recording_info):
-                with (
-                    self.open_dialog(path),
-                    mock.patch.object(QMessageBox, "warning") as warn,
-                ):
-                    action()
-                self.assertIn(f"its samples are {8 * width}-bit", warn.call_args[0][2])
-            self.assertFalse(self.win._playback.active)
+            with (
+                self.open_dialog(path),
+                mock.patch.object(QMessageBox, "warning") as warn,
+            ):
+                self.assertTrue(self.win._open_recording())
+            warn.assert_not_called()
+            device = self.win._playback.device
+            self.assertEqual(device.total_samples, len(x))
+            np.testing.assert_allclose(device._player.read(len(x)), x, atol=1e-4)
+            self.win._playback.close()
 
 
 class TestRecordingInfo(_FilesCase):

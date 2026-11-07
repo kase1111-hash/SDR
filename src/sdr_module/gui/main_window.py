@@ -10989,7 +10989,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         rate = options.sample_rate
         center = options.center_hz
         lines = [
-            f"Sample format: {options.sample_format.value}",
+            f"Sample format: {options.format_label}",
             f"Sample rate: {format_rate(rate) if rate else unknown}",
             f"Center frequency: {format_frequency(center) if center else unknown}",
         ]

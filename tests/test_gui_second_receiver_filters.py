@@ -19,8 +19,10 @@ import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_fm_stereo import _tone  # noqa: E402
+from tests.test_gui_audio_notch import _analytic  # noqa: E402
 from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
 from tests.test_gui_second_receiver import _FakeSink, _SecondCase  # noqa: E402
+from tests.voice_synth import pitched_voice, tone_level  # noqa: E402
 
 RATE = 2.4e6
 BLOCK = 80_000
@@ -36,6 +38,21 @@ def _usb(seconds, tones, rate=RATE, seed=4):
     rng = np.random.default_rng(seed)
     iq = iq + 1e-4 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
     return iq.astype(np.complex64)
+
+
+def _usb_voice(seconds, whistles, rate=RATE, seed=6):
+    """USB voice at -50 dBFS (as the main window's notch tests have it)
+    and each ``(audio_hz, dbfs)`` a carrier that far above the tuned
+    frequency: a steady whistle at that pitch."""
+    voice = pitched_voice(seconds, AUDIO, seed=seed)
+    iq = 10 ** (-50 / 20) * _analytic(voice)
+    iq = np.repeat(iq, int(rate / AUDIO))  # (the channel filter takes the copies)
+    t = np.arange(len(iq)) / rate
+    for hz, dbfs in whistles:
+        iq = iq + 10 ** (dbfs / 20) * np.exp(2j * np.pi * hz * t)
+    rng = np.random.default_rng(seed)
+    noise = rng.standard_normal(len(iq)) + 1j * rng.standard_normal(len(iq))
+    return (iq + 1e-5 * noise).astype(np.complex64)
 
 
 def _am(seconds, tones, rate=RATE):
@@ -99,15 +116,40 @@ class TestTheNotch(_DspCase):
         self.assertEqual(frames[-1].notch_hz, 1000.0)
 
     def test_auto_finds_the_whistle_and_says_where(self):
-        iq = _usb(2.0, [(1350.0, 0.05), (700.0, 0.01)])
+        # (Voice is what Auto must leave: a second steady tone would be a
+        # second whistle, which it removes too: see the next test.)
+        iq = _usb_voice(4.0, [(1350.0, -56.0)])
         dsp = self.dsp()
         dsp.options.notch = "auto"
+        dsp.options.agc_speed = "off"  # (a fixed gain: compare levels)
         frames, audio = self.listen(dsp, iq)
         found = frames[-1].notch_hz
         self.assertIsNotNone(found)
         self.assertAlmostEqual(found, 1350.0, delta=1.0)
-        tail = audio[-int(0.5 * AUDIO) :]
-        self.assertGreater(_db(_tone(tail, 700, AUDIO), _tone(tail, 1350, AUDIO)), 20.0)
+        before = tone_level(audio[int(0.1 * AUDIO) : int(0.4 * AUDIO)], 1350.0)
+        after = tone_level(audio[int(2.0 * AUDIO) :], 1350.0)
+        self.assertGreater(before, 0.005)
+        self.assertLess(_db(after, before), -30.0)
+        # Only the whistle: none of the voice's harmonics is taken for one.
+        notched = dsp.chain().notch_frequencies_hz
+        self.assertEqual([round(f) for f in notched], [1350])
+
+    def test_auto_takes_out_two_steady_whistles(self):
+        """The main window's Auto removes up to three steady whistles: the
+        Second Receiver's chain is the same, so it does too."""
+        iq = _usb(4.0, [(1350.0, 0.05), (700.0, 0.01)])
+        plain_frames, plain = self.listen(self.dsp(), iq)
+        dsp = self.dsp()
+        dsp.options.notch = "auto"
+        frames, audio = self.listen(dsp, iq)
+        tail = slice(int(2.0 * AUDIO), None)
+        for hz in (1350.0, 700.0):
+            heard = _tone(audio[tail], hz, AUDIO)
+            unfiltered = _tone(plain[tail], hz, AUDIO)
+            self.assertLess(_db(heard, unfiltered), -30.0, hz)
+        notched = dsp.chain().notch_frequencies_hz
+        self.assertEqual([round(f) for f in notched], [1350, 700])  # (strongest first)
+        self.assertAlmostEqual(frames[-1].notch_hz, 1350.0, delta=1.0)
 
     def test_off_and_nothing_heard_say_none(self):
         dsp = self.dsp()

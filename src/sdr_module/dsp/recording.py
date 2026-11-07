@@ -931,6 +931,8 @@ class IQPlayer:
         self._file: Optional[BinaryIO] = None
         # A WAV file's header: its samples are read from self._file.
         self._wav_header: Optional[WavHeader] = None
+        # How far the Hilbert filter of a one-channel file reaches (real_iq).
+        self._real_context = real_iq.CONTEXT
         self._position = 0
         self._total_samples = 0
         self._eof = False
@@ -1052,6 +1054,7 @@ class IQPlayer:
         # Get parameters (a real signal's are its I/Q's)
         real = header.channels == 1
         frame_rate = float(header.frame_rate)
+        self._real_context = real_iq.context_for(frame_rate)
         self._sample_rate = real_iq.iq_rate(frame_rate) if real else frame_rate
         self._total_samples = real_iq.iq_count(header.frames) if real else header.frames
         self._sample_format = wav_sample_format(header)
@@ -1253,7 +1256,8 @@ class IQPlayer:
         if header is None or self._file is None or count <= 0:
             self._eof = True
             return np.array([], dtype=np.complex64)
-        start, stop = real_iq.frame_span(self._position, count)
+        context = self._real_context
+        start, stop = real_iq.frame_span(self._position, count, context)
         values = np.zeros(stop - start, dtype=np.float32)
         low, high = max(0, start), min(stop, header.frames)
         width = header.sample_width
@@ -1268,8 +1272,8 @@ class IQPlayer:
             if count == 0:
                 self._eof = True
                 return np.array([], dtype=np.complex64)
-            values = values[: 2 * count + 2 * real_iq.CONTEXT - 1]
-        samples = real_iq.real_to_iq(values, self._position)
+            values = values[: 2 * count + 2 * context - 1]
+        samples = real_iq.real_to_iq(values, self._position, context)
         self._position += len(samples)
         return samples
 

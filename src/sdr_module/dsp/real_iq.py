@@ -16,17 +16,22 @@ How: the real samples are mixed down by a quarter of their rate (times
 With the mix, the half-band filter's zeros and the decimation, I/Q sample
 ``m`` is ``(-1)**m * (x[2m] + j*H(x)[2m])``: I is every other real sample
 with alternating sign, Q the samples between through a windowed Hilbert
-filter (:data:`TAPS`, 2/(pi*d) for odd d, a Kaiser window). Over the inner
-80% of the span (the file's 5% to 45% of its rate: what the receiver tunes)
-its gain is flat to 0.0001 dB and the mirror image of a signal is at least
-100 dB down. Nearer the edges (the file's lowest and highest frequencies,
-below 5% or above 45% of its rate) the image grows and the signal weakens:
-54 dB down at 4% (or 46%), 20 dB at 2%, 9 dB at 1% (the signal 2.6 dB
-weaker there). The image of a signal near one edge shows near the other,
-not on the signal: a Morse tone at 700 Hz in 48 kHz audio still decodes.
+filter (:func:`hilbert_taps`, 2/(pi*d) for odd d, a Kaiser window).
+
+Over the inner 80% of the span (the file's 5% to 45% of its rate: what the
+receiver tunes) its gain is flat to 0.0001 dB and the mirror image of a
+signal is at least 100 dB down. Nearer the edges (the file's lowest and
+highest frequencies) the image grows and the signal weakens. With the
+shortest filter (:data:`CONTEXT`, 34 taps, used at high rates) the image is
+54 dB down at 4% of the rate (and at 46%), 20 dB at 2% (48%) and 9 dB at 1%
+(49%). At lower rates, where it costs little, the filter is longer
+(:func:`context_for`: 212 taps at 48 kHz), so in audio the image of a tone
+is 54 dB down from 300 Hz up (108 dB at 700 Hz), within a budget of work
+per second of signal. The image of a signal near one edge shows near the
+other, not on the signal.
 
 The filter is centred (no delay): I/Q sample ``m`` depends only on the
-real samples around ``2m`` (:data:`CONTEXT` on each side; zeros before the
+real samples around ``2m`` (``context`` on each side; zeros before the
 file's first sample and after its last). So any stretch of the file reads
 the same by itself as within the whole (seeking needs no history).
 NumPy only.
@@ -34,31 +39,59 @@ NumPy only.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Tuple
 
 import numpy as np
 
-#: Real samples the filter reaches on each side of the one it centres on.
+#: Real samples the shortest filter reaches on each side of the one it
+#: centres on (34 taps: the image 54 dB down at 4% of the rate).
 CONTEXT = 33
-#: The Kaiser window's beta: over 100 dB of image rejection with 34 taps.
+#: The Kaiser window's beta: over 100 dB of image rejection in the inner
+#: 80% of the span, whatever the filter's length.
 _BETA = 10.25
+#: Where the filter's length allows, a tone's image is 54 dB down from
+#: this frequency up (the shortest filter's 4% of the rate, moved down).
+LOW_HZ = 300.0
+#: The most multiply-adds the filter may take per second of signal (the
+#: shortest filter takes more only above 3 MS/s, where it is needed).
+WORK_PER_S = 5e7
+_MAX_CONTEXT = 1023
 
 
-def _hilbert_taps() -> np.ndarray:
-    """The Hilbert filter on the odd real samples, as :func:`real_to_iq`
-    applies it (correlated with them, from offset +CONTEXT down to
-    -CONTEXT)."""
-    d = np.arange(-CONTEXT, CONTEXT + 1)
-    window = np.kaiser(2 * CONTEXT + 1, _BETA)
-    taps = np.zeros(2 * CONTEXT + 1)
+def context_for(frame_rate: float) -> int:
+    """How far the filter reaches (real samples on each side, odd) for a
+    recording at ``frame_rate``: at least :data:`CONTEXT`, longer at low
+    rates so a tone's image is 54 dB down from :data:`LOW_HZ` up, within
+    :data:`WORK_PER_S` multiply-adds a second (48 kHz: 211; 2.4 MHz: 39;
+    from 3 MHz: 33)."""
+    rate = max(1.0, float(frame_rate))
+    wanted = CONTEXT * (0.04 * rate / LOW_HZ)
+    affordable = WORK_PER_S / (rate / 2.0) - 1.0  # (context + 1 taps)
+    context = int(max(CONTEXT, min(wanted, affordable, _MAX_CONTEXT)))
+    # (Odd, the outermost taps being the odd ones: rounded down, so never
+    # past the budget; CONTEXT itself is odd.)
+    return context if context % 2 else context - 1
+
+
+@lru_cache(maxsize=16)
+def hilbert_taps(context: int = CONTEXT) -> np.ndarray:
+    """The Hilbert filter on the odd real samples (``context + 1`` taps),
+    in the order :func:`real_to_iq` applies them: correlated with the
+    samples, from offset ``+context`` down to ``-context``. Read-only."""
+    d = np.arange(-context, context + 1)
+    window = np.kaiser(2 * context + 1, _BETA)
+    taps = np.zeros(2 * context + 1)
     odd = d % 2 != 0
     taps[odd] = 2.0 / (np.pi * d[odd]) * window[odd]
-    # (Correlation runs from the oldest sample: offset +CONTEXT first.)
-    return taps[odd][::-1].astype(np.float32)
+    # (Correlation runs from the oldest sample: offset +context first.)
+    out = taps[odd][::-1].astype(np.float32)
+    out.setflags(write=False)
+    return out
 
 
-#: The odd taps of the Hilbert filter (34), in the order they are used.
-TAPS = _hilbert_taps()
+#: The shortest filter's taps (34).
+TAPS = hilbert_taps(CONTEXT)
 
 
 def iq_rate(frame_rate: float) -> float:
@@ -77,30 +110,31 @@ def iq_count(frames: int) -> int:
     return max(0, int(frames)) // 2
 
 
-def frame_span(first: int, count: int) -> Tuple[int, int]:
+def frame_span(first: int, count: int, context: int = CONTEXT) -> Tuple[int, int]:
     """The real samples (``start``, ``stop``: frame indices, ``stop`` past
-    the last) that I/Q samples ``first`` to ``first + count - 1`` need.
-    ``start`` is below 0 near the beginning and ``stop`` may lie past the
-    end: those samples are zeros."""
+    the last) that I/Q samples ``first`` to ``first + count - 1`` need with
+    a filter reaching ``context``. ``start`` is below 0 near the beginning
+    and ``stop`` may lie past the end: those samples are zeros."""
     first, count = int(first), max(0, int(count))
-    return 2 * first - CONTEXT, 2 * (first + count) + CONTEXT - 1
+    return 2 * first - context, 2 * (first + count) + context - 1
 
 
-def real_to_iq(frames: np.ndarray, first: int) -> np.ndarray:
+def real_to_iq(frames: np.ndarray, first: int, context: int = CONTEXT) -> np.ndarray:
     """I/Q samples from ``first`` on, as complex64, from the real samples
-    ``frames`` of :func:`frame_span` (``2 * count + 2 * CONTEXT - 1`` of
+    ``frames`` of :func:`frame_span` (``2 * count + 2 * context - 1`` of
     them, for ``count`` I/Q samples; any float or integer type, full scale
     1.0 gives full scale 1.0)."""
     x = np.asarray(frames, dtype=np.float32)
-    count = (len(x) - 2 * CONTEXT + 1) // 2
+    count = (len(x) - 2 * context + 1) // 2
     out = np.empty(max(0, count), dtype=np.complex64)
     if count <= 0:
         return out
     parts = out.view(np.float32)
     # I: the samples at 2m themselves. Q: the odd samples around them
     # through the Hilbert filter (the even samples' taps are zero).
-    parts[0::2] = x[CONTEXT : CONTEXT + 2 * count : 2]
-    parts[1::2] = np.correlate(x[0 : 2 * (count + CONTEXT) : 2], TAPS, "valid")
+    parts[0::2] = x[context : context + 2 * count : 2]
+    taps = hilbert_taps(context)
+    parts[1::2] = np.correlate(x[0 : 2 * (count + context) : 2], taps, "valid")
     # The quarter-rate mix: every other I/Q sample turned over.
     turned = out[(int(first) & 1) ^ 1 :: 2]
     np.negative(turned, out=turned)

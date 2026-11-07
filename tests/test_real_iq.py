@@ -79,6 +79,35 @@ class TestTheConversion:
         signs = np.where(np.arange(7, 507) % 2, -1.0, 1.0)
         np.testing.assert_allclose(y.real, (signs * even).astype(np.float32))
 
+    def test_audio_tones_leave_no_ghost_at_the_far_edge(self, tmp_path):
+        """In 48 kHz audio a Morse tone at 700 Hz (1.5% of the rate) had a
+        ghost at 23.3 kHz only 14 dB down with the shortest filter; the
+        filter is longer at audio rates: 700 Hz's image over 100 dB down,
+        300 Hz's over 50 dB."""
+        path = tmp_path / "tones.wav"
+        x = _cos(int(1.2 * RATE), 700.0, amplitude=0.4)
+        x += _cos(len(x), 300.0, amplitude=0.4, phase=1.1)
+        iq_wav(path, x, "float", 8)
+        y = load_iq_file(path)[0]
+        for tone, floor_db in ((700.0, -100.0), (300.0, -50.0)):
+            wanted, mirror = _components(y, tone - RATE / 4, RATE / 2, 1000, 24000)
+            assert abs(wanted) == pytest.approx(0.4, rel=1e-2)
+            assert 20 * np.log10(abs(mirror) / abs(wanted)) < floor_db, tone
+
+    def test_the_filter_is_sized_by_the_rate(self):
+        """Longer where it costs little (audio), the shortest at high
+        rates, never more work a second than the budget allows."""
+        assert real_iq.context_for(48000) == 211
+        assert real_iq.context_for(2.4e6) == 39
+        assert real_iq.context_for(4.8e6) == real_iq.CONTEXT
+        assert real_iq.context_for(20e6) == real_iq.CONTEXT
+        for rate in (8000, 11025, 44100, 96000, 192000, 1e6, 2.4e6, 10e6):
+            context = real_iq.context_for(rate)
+            assert context % 2 == 1 and context >= real_iq.CONTEXT
+            work = (context + 1) * rate / 2
+            assert work <= real_iq.WORK_PER_S or context == real_iq.CONTEXT
+            assert len(real_iq.hilbert_taps(context)) == context + 1
+
     def test_the_spans_the_reader_needs(self):
         assert real_iq.frame_span(0, 10) == (-real_iq.CONTEXT, 20 + real_iq.CONTEXT - 1)
         assert real_iq.frame_span(5, 1) == (10 - real_iq.CONTEXT, 11 + real_iq.CONTEXT)

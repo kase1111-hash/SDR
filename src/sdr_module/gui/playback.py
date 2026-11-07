@@ -79,10 +79,13 @@ def format_clock(seconds: float, total: float = 0.0) -> str:
 
 def playing_line(options: IqFileOptions) -> str:
     """What the status bar says of a recording opened: ``"Playing
-    fm8.sigmf-data (99.6–100.6 MHz)"``."""
+    fm8.sigmf-data (99.6–100.6 MHz)"``; a one-channel WAV file (a real
+    signal, read as I/Q) says so: ``"Playing audio.wav (one channel,
+    0–0.024 MHz)"``."""
     half = options.sample_rate / 2.0
     span = format_mhz_range(options.center_hz - half, options.center_hz + half)
-    return f"Playing {options.name} ({span})"
+    held = "one channel, " if options.real_signal else ""
+    return f"Playing {options.name} ({held}{span})"
 
 
 class FilePlaybackDevice:
@@ -129,10 +132,21 @@ class FilePlaybackDevice:
         self.error: Optional[str] = None
         #: Samples that weren't numbers were replaced by zeros.
         self.bad_samples = 0
-        self._float_data = self._player.sample_format in (
-            SampleFormat.FLOAT32,
-            SampleFormat.FLOAT64,
-        )
+        wav = self._player.wav_header
+        if wav is not None:
+            # (A WAV file's 24- and 32-bit integers are read as cf32, but
+            # they are always numbers.)
+            self._float_data = wav.sample_type == "float"
+        else:
+            self._float_data = self._player.sample_format in (
+                SampleFormat.FLOAT32,
+                SampleFormat.FLOAT64,
+            )
+        #: How much of the span (around its middle) the window tunes (see
+        #: its _channel_fits): all of a one-channel file's, whose I/Q holds
+        #: its own frequencies, 0 Hz to half its rate, with no receiver's
+        #: roll-off at the edges (dsp.real_iq); None: a receiver's inner part.
+        self.usable_fraction: Optional[float] = 1.0 if options.real_signal else None
 
     # -- the MockDevice / driver API ------------------------------------------
 
@@ -614,7 +628,8 @@ if HAS_PYQT6:
             self._device: Optional[FilePlaybackDevice] = None
             self._previous: Optional[_PreviousSource] = None
             self._device_tip = ""
-            #: The last open() changed the listening by the band plan (its
+            #: The last open() changed the listening by the band plan, or
+            #: to hear a one-channel file's audio as recorded (its
             #: status line is the one to keep).
             self.band_plan_applied = False
             # Where the file was (monotonic time, sample, loops) when the
@@ -722,6 +737,8 @@ if HAS_PYQT6:
                     tuned_before, win._current_frequency(), lead=playing_line(options)
                 )
             )
+            if not self.band_plan_applied and options.audio:
+                self.band_plan_applied = self._hear_as_recorded(options)
             win._reset_demodulator()
             self._bar.show_file(options, self.back_to_text())
             self._bar.setVisible(True)
@@ -730,6 +747,33 @@ if HAS_PYQT6:
             self._timer.start()
             self._tick()
             logger.info(f"Playing back {options.path}")
+            return True
+
+        def _hear_as_recorded(self, options: IqFileOptions) -> bool:
+            """Audio in a one-channel file (0 Hz to half its rate, its sound
+            itself) heard as it was recorded: in USB from 0 Hz, whose filter
+            passes it from 200 Hz up at its own pitch (2.7 kHz: to 2.9 kHz),
+            as Radio > Choose Mode From Band Plan hears a band its usual way
+            (not when that is off). True when its status line says so."""
+            win = self._win
+            action = win._own("_band_plan_action")
+            if action is not None and not action.isChecked():
+                return False
+            win._quiet_mode_change = True  # (the line below says how)
+            try:
+                win._set_demod_mode("USB", None, None)
+            finally:
+                win._quiet_mode_change = False
+            # (Its lowest frequency the window tunes: just above 0 Hz.)
+            lowest, _top = win._control_panel._freq_input.tuning_range()
+            if not win.set_frequency(lowest):
+                return False
+            width = win._control_panel._bw_combo.currentText()
+            text = win._keeping_release_note(
+                f"Audio: listening in USB from 0 Hz with a {width} filter, so it "
+                "plays as recorded (Radio > Choose Mode From Band Plan)"
+            )
+            win._show_status_message(f"{playing_line(options)} · {text}", "info", 8000)
             return True
 
         def close(

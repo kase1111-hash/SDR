@@ -837,22 +837,27 @@ class TestRefusalsAreNotErrors(_FilesCase):
         self.assertEqual(warn.call_args[0][1], "Can't Save There")
         self.assertIn("the recording you converted", warn.call_args[0][2])
 
-    def test_an_audio_wav_is_refused_quietly(self):
+    def test_a_wav_file_it_cant_read_is_refused_quietly(self):
+        # (A mono WAV was this test's file; since M-F2 it is read, as the
+        # real signal it holds. Three channels still aren't I/Q.)
+        import wave
         from unittest import mock
 
         from PyQt6.QtWidgets import QMessageBox
 
-        from sdr_module.dsp.recording import save_audio_file
-
-        path = self.path("mono_audio.wav")
-        save_audio_file(path, np.zeros(4800, np.float32), 48000)
+        path = self.path("three_channels.wav")
+        with wave.open(path, "wb") as handle:
+            handle.setnchannels(3)
+            handle.setsampwidth(2)
+            handle.setframerate(48000)
+            handle.writeframes(np.zeros(3 * 4800, "<i2").tobytes())
         with (
             self.open_dialog(path),
             mock.patch.object(QMessageBox, "warning") as warn,
             self.assertNoLogs("sdr_module.gui.main_window", level="WARNING"),
         ):
             self.win._show_recording_info()
-        self.assertIn("it is audio, not I/Q", warn.call_args[0][2])
+        self.assertIn("it has 3 channels", warn.call_args[0][2])
 
 
 class TestPlaybackStripAt1024(_FilesCase):

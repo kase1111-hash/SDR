@@ -26,6 +26,7 @@ from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
+from . import real_iq
 from .wav_file import WavError, WavHeader, WavWriter
 from .wav_file import data_offset as _wav_data_offset
 from .wav_file import looks_like_wav, read_wav_header
@@ -380,6 +381,76 @@ def iq_from_bytes(data: bytes, sample_format: SampleFormat) -> np.ndarray:
         np.subtract(parts, np.float32(127.5), out=parts)
         np.divide(parts, np.float32(127.5), out=parts)
     return out
+
+
+def wav_values(
+    data: bytes, header: WavHeader, out: Optional[np.ndarray] = None
+) -> np.ndarray:
+    """A WAV file's samples (``data``: the bytes as stored, each channel's
+    sample in turn) as float32, full scale 1.0: 8-bit unsigned (128 is
+    zero) over 128, wider integers over their largest value (16-bit over
+    32767, 24-bit over 8388607, 32-bit over 2147483647), floating point as
+    stored. Converted in place into ``out`` (float32, one value a sample)
+    when given; a trailing partial sample is ignored."""
+    width = header.sample_width
+    count = len(data) // width
+    if out is None:
+        out = np.empty(count, dtype=np.float32)
+    raw = memoryview(data)[: count * width]
+    if header.sample_type == "float":
+        # (A float64 too big for float32 reads as infinity, not a warning.)
+        with np.errstate(over="ignore", invalid="ignore"):
+            out[:] = np.frombuffer(raw, dtype="<f4" if width == 4 else "<f8")
+    elif width == 1:
+        out[:] = np.frombuffer(raw, dtype=np.uint8)
+        np.subtract(out, np.float32(128.0), out=out)
+        np.divide(out, np.float32(128.0), out=out)
+    elif width == 2:
+        out[:] = np.frombuffer(raw, dtype="<i2")
+        np.divide(out, np.float32(32767.0), out=out)
+    elif width == 3:
+        # Each 3-byte sample as the top of a 4-byte word that starts a
+        # byte before it (words 3 bytes apart, overlapping): an int32 of
+        # 256 times the sample, its sign included, once the byte below it
+        # (the sample before's top byte) is masked off; over 256 times
+        # 8388607. (Three times faster than copying into 4-byte words.)
+        padded = np.empty(count * 3 + 1, dtype=np.uint8)
+        padded[0] = 0
+        padded[1:] = np.frombuffer(raw, dtype=np.uint8)
+        words = np.ndarray((count,), dtype="<i4", buffer=padded, strides=(3,))
+        out[:] = np.bitwise_and(words, np.int32(-256))
+        np.divide(out, np.float32(8388607.0 * 256.0), out=out)
+    else:
+        out[:] = np.frombuffer(raw, dtype="<i4")
+        np.divide(out, np.float32(2147483647.0), out=out)
+    return out
+
+
+def wav_sample_format(header: WavHeader) -> SampleFormat:
+    """The I/Q sample format nearest a WAV file's samples, as
+    :class:`IQPlayer` and :class:`FormatDetector` report it: cu8 and cs16
+    for 8- and 16-bit integers, cf32 and cf64 for 32- and 64-bit floats,
+    and cf32 (what they are read as, without loss for 24-bit) for 24- and
+    32-bit integers. ``header.sample_name`` says how they are stored."""
+    if header.sample_type == "float":
+        return (
+            SampleFormat.FLOAT64 if header.sample_width == 8 else SampleFormat.FLOAT32
+        )
+    if header.sample_width == 1:
+        return SampleFormat.UINT8
+    if header.sample_width == 2:
+        return SampleFormat.INT16
+    return SampleFormat.FLOAT32
+
+
+def _wav_channels_problem(channels: int) -> str:
+    """Why a WAV file of ``channels`` can't be read as I/Q ("" if it can)."""
+    if channels in (1, 2):
+        return ""
+    return (
+        f"it has {channels} channels, and this app reads WAV files of two "
+        "channels (I and Q) or one (a real signal)"
+    )
 
 
 class IQRecorder:
@@ -809,6 +880,14 @@ class IQPlayer:
 
     Features:
     - Supports raw, WAV (classic, RF64, BW64 and Wave64), and SigMF formats
+    - WAV files of 8-, 16-, 24- and 32-bit integers or 32- and 64-bit
+      floats, scaled so full scale is 1.0 (floats as stored). A two-channel
+      file holds I and Q; a one-channel file a real signal, read as I/Q at
+      half its rate centred on a quarter of it (see
+      :mod:`~sdr_module.dsp.real_iq`): its sample rate, sample count and
+      position are the I/Q's, and its center frequency is a quarter of its
+      own rate (its frequencies are its own, 0 Hz to half its rate) unless
+      a sidecar or the caller gives another
     - Automatic format detection
     - Streaming playback with buffering
     - Loop and seek support
@@ -852,6 +931,8 @@ class IQPlayer:
         self._file: Optional[BinaryIO] = None
         # A WAV file's header: its samples are read from self._file.
         self._wav_header: Optional[WavHeader] = None
+        # How far the Hilbert filter of a one-channel file reaches (real_iq).
+        self._real_context = real_iq.CONTEXT
         self._position = 0
         self._total_samples = 0
         self._eof = False
@@ -963,21 +1044,20 @@ class IQPlayer:
 
     def _open_wav(self) -> None:
         """Open WAV recording: classic, RF64 (past 4 GiB) or Wave64 (its
-        centre frequency from a sidecar)."""
+        centre frequency from a sidecar). Two channels are I and Q; one is
+        a real signal, read as I/Q at half its rate (see real_iq)."""
         header = read_wav_header(self._filepath)
+        problem = _wav_channels_problem(header.channels)
+        if problem:
+            raise WavError(problem)
 
-        # Get parameters
-        sample_width = header.sample_width
-        self._sample_rate = float(header.frame_rate)
-        self._total_samples = header.frames
-
-        # Determine sample format
-        if sample_width == 1:
-            self._sample_format = SampleFormat.UINT8
-        elif sample_width == 2:
-            self._sample_format = SampleFormat.INT16
-        else:
-            self._sample_format = SampleFormat.INT16
+        # Get parameters (a real signal's are its I/Q's)
+        real = header.channels == 1
+        frame_rate = float(header.frame_rate)
+        self._real_context = real_iq.context_for(frame_rate)
+        self._sample_rate = real_iq.iq_rate(frame_rate) if real else frame_rate
+        self._total_samples = real_iq.iq_count(header.frames) if real else header.frames
+        self._sample_format = wav_sample_format(header)
 
         rate = self._sample_rate
         sidecar = find_sidecar(self._filepath)
@@ -991,6 +1071,9 @@ class IQPlayer:
                 sample_format=self._sample_format,
                 num_samples=self._total_samples,
             )
+        if real and not self._center_frequency:
+            # (Its frequencies are its own: 0 Hz to half its rate.)
+            self._center_frequency = real_iq.iq_center(frame_rate)
         # The samples follow the header (whatever a sidecar says).
         self._header_bytes = header.data_offset
         self._file = open(self._filepath, "rb")
@@ -1088,6 +1171,12 @@ class IQPlayer:
         """The SigMF metadata (or sidecar) file read, if any."""
         return self._meta_path
 
+    @property
+    def wav_header(self) -> Optional[WavHeader]:
+        """How a WAV file stores its samples (None for other files): its
+        channels (1: a real signal read as I/Q), sample width and type."""
+        return self._wav_header
+
     def read(self, num_samples: int) -> np.ndarray:
         """
         Read samples from recording.
@@ -1134,43 +1223,59 @@ class IQPlayer:
         return np.dtype(np.float32)
 
     def _read_wav(self, num_samples: int) -> np.ndarray:
-        """Read from WAV file."""
+        """Read from WAV file (converted in float32 straight into the
+        result, like _read_raw)."""
         header = self._wav_header
         if header is None or self._file is None:
             return np.array([], dtype=np.complex64)
         count = min(max(0, int(num_samples)), self._total_samples - self._position)
-        frames = self._file.read(count * header.frame_bytes) if count > 0 else b""
-
-        if len(frames) == 0:
+        if header.channels == 1:
+            return self._read_real(count)
+        frame = header.frame_bytes
+        frames = self._file.read(count * frame) if count > 0 else b""
+        whole = len(frames) // frame
+        if whole == 0:
             self._eof = True
             return np.array([], dtype=np.complex64)
+        if whole * frame != len(frames):
+            # (Cut short since it was opened, mid-frame: the next read
+            # starts at the frame after the last whole one.)
+            self._file.seek(self._header_bytes + (self._position + whole) * frame)
 
-        # Convert bytes to samples (in float32, like _read_raw)
-        sample_width = header.sample_width
-        n_channels = header.channels
-
-        samples: np.ndarray
-        if sample_width == 1:
-            samples = np.frombuffer(frames, dtype=np.uint8).astype(np.float32)
-            np.subtract(samples, np.float32(128.0), out=samples)
-            np.divide(samples, np.float32(128.0), out=samples)
-        else:
-            raw = np.frombuffer(frames[: len(frames) // 2 * 2], dtype="<i2")
-            samples = raw.astype(np.float32)
-            np.divide(samples, np.float32(32767.0), out=samples)
-
-        # Handle channels
-        if n_channels == 2:
-            # Stereo: I on left, Q on right
-            complex_samples = np.empty(len(samples) // 2, dtype=np.complex64)
-            parts = complex_samples.view(np.float32)
-            parts[:] = samples[: 2 * len(complex_samples)]
-        else:
-            # Mono: real only
-            complex_samples = samples.astype(np.complex64)
-
-        self._position += len(complex_samples)
+        # I on the left channel, Q on the right
+        complex_samples = np.empty(whole, dtype=np.complex64)
+        wav_values(frames[: whole * frame], header, complex_samples.view(np.float32))
+        self._position += whole
         return complex_samples
+
+    def _read_real(self, count: int) -> np.ndarray:
+        """``count`` I/Q samples of a one-channel (real) WAV file from the
+        position: the real samples around them, read as I/Q (real_iq).
+        Each read reads what it needs, so seeking keeps no history."""
+        header = self._wav_header
+        if header is None or self._file is None or count <= 0:
+            self._eof = True
+            return np.array([], dtype=np.complex64)
+        context = self._real_context
+        start, stop = real_iq.frame_span(self._position, count, context)
+        values = np.zeros(stop - start, dtype=np.float32)
+        low, high = max(0, start), min(stop, header.frames)
+        width = header.sample_width
+        self._file.seek(self._header_bytes + low * width)
+        data = self._file.read((high - low) * width)
+        got = len(data) // width
+        wav_values(data, header, values[low - start : low - start + got])
+        if low + got < high:
+            # (Cut short since it was opened: only the I/Q samples whose
+            # own real sample is still there.)
+            count = min(count, max(0, (low + got + 1) // 2 - self._position))
+            if count == 0:
+                self._eof = True
+                return np.array([], dtype=np.complex64)
+            values = values[: 2 * count + 2 * context - 1]
+        samples = real_iq.real_to_iq(values, self._position, context)
+        self._position += len(samples)
+        return samples
 
     def seek(self, position: int) -> None:
         """
@@ -1184,7 +1289,10 @@ class IQPlayer:
 
         if self._wav_header is not None:
             if self._file is not None:
+                # (A real signal's I/Q sample n is around real sample 2n.)
                 frame = self._wav_header.frame_bytes
+                if self._wav_header.channels == 1:
+                    frame *= 2
                 self._file.seek(self._header_bytes + position * frame)
         elif self._file is not None:
             bytes_per_sample = self._get_bytes_per_sample() * 2
@@ -1731,7 +1839,8 @@ class AudioPlayer:
     processing or playback.
 
     Features:
-    - WAV file support (8-bit, 16-bit, 24-bit integer PCM): classic WAV,
+    - WAV file support (8-, 16-, 24- and 32-bit integer PCM, 32- and
+      64-bit floating point): classic WAV,
       RF64 and BW64 (what a recording past 4 GiB becomes) and Sony Wave64,
       counting the samples a file holds (one cut short, or whose size was
       written as unknown, plays what it has)
@@ -1773,6 +1882,8 @@ class AudioPlayer:
 
         # Metadata
         self._metadata: Optional[AudioMetadata] = None
+        # How the file stores its samples
+        self._header: Optional[WavHeader] = None
 
         # Open file
         self._open()
@@ -1780,17 +1891,19 @@ class AudioPlayer:
     def _open(self) -> None:
         """Open the WAV file (classic, RF64, BW64 or Wave64)."""
         header = read_wav_header(self._filepath)
+        # (32-bit integers and 64-bit floats have no AudioSampleFormat of
+        # their own: FLOAT32, the nearest, which holds them.)
         formats = {
             1: AudioSampleFormat.UINT8,
             2: AudioSampleFormat.INT16,
             3: AudioSampleFormat.INT24,
         }
-        sample_format = formats.get(header.sample_width)
-        if sample_format is None:
-            raise WavError(
-                f"its samples are {8 * header.sample_width}-bit, and only 8, 16 "
-                "and 24-bit WAV audio is read"
-            )
+        sample_format = (
+            AudioSampleFormat.FLOAT32
+            if header.sample_type == "float"
+            else formats.get(header.sample_width, AudioSampleFormat.FLOAT32)
+        )
+        self._header = header
 
         # Get parameters
         self._channels = header.channels
@@ -1859,7 +1972,8 @@ class AudioPlayer:
         Returns:
             Float samples array (-1.0 to 1.0)
         """
-        if self._file is None:
+        header = self._header
+        if self._file is None or header is None:
             return np.array([], dtype=np.float32)
 
         frame_bytes = self._channels * self._sample_width
@@ -1871,26 +1985,8 @@ class AudioPlayer:
             self._eof = True
             return np.array([], dtype=np.float32)
 
-        # Convert bytes to samples
-        raw: np.ndarray
-        samples: np.ndarray
-        if self._sample_width == 1:
-            # Unsigned 8-bit
-            raw = np.frombuffer(frames, dtype=np.uint8)
-            samples = (raw.astype(np.float32) - 128) / 128.0
-
-        elif self._sample_width == 2:
-            # Signed 16-bit
-            raw = np.frombuffer(frames, dtype="<i2")
-            samples = raw.astype(np.float32) / 32767.0
-
-        else:
-            # Signed 24-bit: three little-endian bytes each, sign-extended
-            raw = np.frombuffer(frames, dtype=np.uint8).reshape(-1, 3)
-            values = raw.astype(np.int32)
-            values = values[:, 0] | (values[:, 1] << 8) | (values[:, 2] << 16)
-            values = np.where(values & 0x800000, values - 0x1000000, values)
-            samples = (values / 8388607.0).astype(np.float32)
+        # Convert bytes to samples (full scale 1.0, floats as stored)
+        samples = wav_values(frames, header)
 
         # Handle multi-channel: return as (n_samples, n_channels) or flatten for mono
         if self._channels > 1:
@@ -2839,7 +2935,11 @@ class FormatDetector:
 
     Supports detection of:
     - Raw I/Q files (.raw, .iq, .cu8, .cs8, .cs16, .cf32, .cf64)
-    - WAV files (.wav; classic, RF64 past 4 GiB, BW64 and Sony Wave64, .w64)
+    - WAV files (.wav; classic, RF64 past 4 GiB, BW64 and Sony Wave64, .w64;
+      8- to 32-bit integers, 32- and 64-bit floats). A one-channel file is
+      described as the I/Q :class:`IQPlayer` reads from it: half its rate,
+      centred on a quarter of it (``metadata["wav_frame_rate"]`` is the
+      file's own rate)
     - SigMF files (.sigmf-data, .sigmf-meta)
 
     Example:
@@ -2918,7 +3018,10 @@ class FormatDetector:
             if suffix == ".wav" or self._is_wav_file(filepath):
                 info = self._detect_wav(filepath)
                 if sidecar is not None and info.is_valid:
-                    info.center_frequency = sidecar.center_frequency
+                    # (One that gives none keeps a real signal's own.)
+                    info.center_frequency = (
+                        sidecar.center_frequency or info.center_frequency
+                    )
                     info.sample_rate = info.sample_rate or sidecar.sample_rate
                     info.metadata.update(self._sidecar_metadata(sidecar))
                 return info
@@ -2994,7 +3097,10 @@ class FormatDetector:
 
     def _detect_wav(self, filepath: Path) -> FormatInfo:
         """Detect WAV file format: classic, RF64 (past 4 GiB), BW64 or Sony
-        Wave64 (``wav_container`` in its metadata says which)."""
+        Wave64 (``wav_container`` in its metadata says which), how its
+        samples are stored (``wav_sample_type``: "int" or "float",
+        ``wav_sample_width`` in bytes) and, for one channel (a real
+        signal), the I/Q it is read as (``wav_frame_rate``: its own rate)."""
         try:
             header = read_wav_header(filepath)
             file_size = filepath.stat().st_size
@@ -3006,23 +3112,34 @@ class FormatDetector:
                 error_message=str(e),
             )
         n_channels = header.channels
+        problem = _wav_channels_problem(n_channels)
+        if problem:
+            return FormatInfo(
+                file_format=FileFormat.WAV,
+                sample_format=SampleFormat.INT16,
+                num_channels=n_channels,
+                file_size_bytes=file_size,
+                is_valid=False,
+                error_message=problem,
+            )
         sample_width = header.sample_width
-        sample_rate = header.frame_rate
-        n_frames = header.frames
-
-        # Map sample width to format
-        if sample_width == 1:
-            sample_format = SampleFormat.UINT8
+        frame_rate = float(header.frame_rate)
+        if n_channels == 1:
+            # A real signal, as IQPlayer reads it: I/Q at half the rate.
+            sample_rate = real_iq.iq_rate(frame_rate)
+            center = real_iq.iq_center(frame_rate)
+            n_samples = real_iq.iq_count(header.frames)
         else:
-            sample_format = SampleFormat.INT16
+            sample_rate, center, n_samples = frame_rate, 0.0, header.frames
 
-        duration = n_frames / sample_rate if sample_rate > 0 else 0
+        duration = n_samples / sample_rate if sample_rate > 0 else 0
 
         return FormatInfo(
             file_format=FileFormat.WAV,
-            sample_format=sample_format,
-            sample_rate=float(sample_rate),
-            num_samples=n_frames,
+            sample_format=wav_sample_format(header),
+            sample_rate=sample_rate,
+            center_frequency=center,
+            num_samples=n_samples,
             num_channels=n_channels,
             file_size_bytes=file_size,
             duration_seconds=duration,
@@ -3031,6 +3148,8 @@ class FormatDetector:
             metadata={
                 "wav_channels": n_channels,
                 "wav_sample_width": sample_width,
+                "wav_sample_type": header.sample_type,
+                "wav_frame_rate": header.frame_rate,
                 "wav_container": header.container,
             },
         )
@@ -3668,15 +3787,23 @@ def check_iq_samples(
     A file that states its own format (SigMF, WAV, a sidecar) can't be
     read in another one: its problem says so instead. Integer samples at
     full scale (clipped, or read in the wrong format) are counted and
-    noted, as are samples that are all zero."""
+    noted, as are samples that are all zero. In a one-channel WAV file (a
+    real signal, read as I/Q) the samples themselves are counted (I):
+    the Hilbert part (Q) of a loud signal can pass 1.0 unclipped."""
     pieces = []
     read_as: Optional[SampleFormat] = None
+    wav: Optional[WavHeader] = None
     try:
         with IQPlayer(filepath, sample_format) as player:
             total = player.total_samples
             read_as = player.sample_format
-            name = (read_as or SampleFormat.FLOAT32).value
-            stated = player.metadata_path is not None or player._wav_header is not None
+            wav = player.wav_header
+            name = (
+                wav.sample_name
+                if wav is not None
+                else (read_as or SampleFormat.FLOAT32).value
+            )
+            stated = player.metadata_path is not None or wav is not None
             if total == 0:
                 return SampleCheck(problem="The file holds no I/Q samples.")
             per = max(1, int(max_samples) // 3)
@@ -3695,13 +3822,26 @@ def check_iq_samples(
         max_abs = float(magnitude.max()) if magnitude.size else 0.0
         rms = float(np.sqrt(np.mean(magnitude**2))) if magnitude.size else 0.0
     nonfinite = int(samples.size - good.size)
-    integer = read_as in (SampleFormat.UINT8, SampleFormat.INT8, SampleFormat.INT16)
+    if wav is not None:
+        integer = wav.sample_type == "int"
+    else:
+        integer = read_as in (
+            SampleFormat.UINT8,
+            SampleFormat.INT8,
+            SampleFormat.INT16,
+        )
+    real = wav is not None and wav.channels == 1
+    # (The values looked at for full scale: I and Q, or a real signal's own.)
+    values = good.size if real else 2 * good.size
     full_scale = 0
     imbalance_db = 0.0
     if integer and good.size:
         # (Within 1% of it: cs8's 126..127 and -127..-128, cu8's 0..1 and
         # 254..255.)
-        parts = np.abs(good.astype(np.complex64, copy=False).view(np.float32))
+        if real:
+            parts = np.abs(good.real)
+        else:
+            parts = np.abs(good.astype(np.complex64, copy=False).view(np.float32))
         full_scale = int(np.count_nonzero(parts >= 0.99))
         spread_i = float(np.var(good.real.astype(np.float64)))
         spread_q = float(np.var(good.imag.astype(np.float64)))
@@ -3738,15 +3878,15 @@ def check_iq_samples(
             f"about equal), so this is probably not {name} data. Choose another "
             "sample format."
         )
-    elif full_scale and 100.0 * full_scale >= 5.0 * 2 * good.size and not stated:
-        share = 100.0 * full_scale / (2 * good.size)
+    elif full_scale and 100.0 * full_scale >= 5.0 * values and not stated:
+        share = 100.0 * full_scale / values
         problem = (
             f"{share:.0f}% of the samples are at full scale, so this is probably "
             f"not {name} data (or the recording is badly clipped). Choose another "
             "sample format."
         )
     elif full_scale:
-        share = 100.0 * full_scale / (2 * good.size)
+        share = 100.0 * full_scale / values
         amount = f"{share:.1f}%" if share >= 0.1 else "under 0.1%"
         note = f"Some samples reach full scale ({amount}): " + (
             "the signal was clipped when it was recorded (too much gain)."

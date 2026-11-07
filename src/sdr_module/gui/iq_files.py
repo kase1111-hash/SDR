@@ -278,6 +278,32 @@ def format_mhz(freq_hz: float) -> str:
     return f"{whole}.{frac.ljust(3, '0')} MHz"
 
 
+#: Up to this rate (Hz) a one-channel file is probably audio (an IF or RF
+#: sampled directly is faster): the Decode dialog then says what decodes.
+AUDIO_RATE_MAX = 200e3
+
+
+def _real_signal_text(iq_rate_hz: float, center_hz: float) -> str:
+    """What Recording Info says of a one-channel WAV file read as I/Q at
+    ``iq_rate_hz`` (half its own rate), centered on ``center_hz``: its own
+    frequencies, unless its metadata places it elsewhere (an IF at its
+    RF)."""
+    top = float(iq_rate_hz)
+    text = (
+        "One: a real signal (audio, or an IF or RF sampled directly), played "
+        "as I/Q at half its rate"
+    )
+    if abs(float(center_hz) - top / 2.0) > 0.5:
+        return (
+            f"{text}, each frequency once (not mirrored), where its metadata places it"
+        )
+    band = f"{top / 1e6:g} MHz" if top >= 1e6 else f"{top / 1e3:g} kHz"
+    return (
+        f"{text}, so the spectrum shows its own frequencies, 0 Hz to {band}, "
+        "once each (not mirrored)"
+    )
+
+
 def format_duration(seconds: float) -> str:
     """``75.4 -> "1:15.4"``, ``3725 -> "1:02:05"``."""
     seconds = max(0.0, float(seconds))
@@ -339,10 +365,40 @@ class IqFileOptions:
     #: Where it resumed after a gap in time: (first sample, UTC start) of
     #: each SigMF capture after the first.
     segments: Tuple[Tuple[int, str], ...] = ()
+    #: How a WAV file stores its samples, in words ("24-bit integer",
+    #: "32-bit float"); "" for other files (their sample format says it).
+    wav_format: str = ""
+    #: A WAV file's channels: 2 (I and Q), or 1: a real signal, read as
+    #: I/Q at half its rate, centred on a quarter of it (dsp.real_iq), so
+    #: ``sample_rate``, ``center_hz`` and ``total_samples`` are the I/Q's.
+    channels: int = 2
 
     @property
     def name(self) -> str:
         return os.path.basename(self.path)
+
+    @property
+    def real_signal(self) -> bool:
+        """One channel: a real signal (audio, or an IF or RF sampled
+        directly), read as I/Q."""
+        return self.channels == 1
+
+    @property
+    def audio(self) -> bool:
+        """A one-channel file at a sound card's rate (up to
+        :data:`AUDIO_RATE_MAX`): audio, probably, rather than an IF or RF
+        sampled directly."""
+        return self.real_signal and 0 < 2 * self.sample_rate <= AUDIO_RATE_MAX
+
+    @property
+    def format_label(self) -> str:
+        """How the samples are stored, as the window names it: ``"cu8"``,
+        or a WAV file's own format, ``"24-bit integer WAV"``, ``"16-bit
+        integer WAV, one channel"``."""
+        if not self.wav_format:
+            return self.sample_format.value
+        text = f"{self.wav_format} WAV"
+        return text + ", one channel" if self.real_signal else text
 
     @property
     def duration_s(self) -> float:
@@ -393,18 +449,6 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
     ):
         stem = split_name(path)[0]
         raise ValueError(f"its samples are missing: {stem}.sigmf-data isn't next to it")
-    if info.file_format is FileFormat.WAV and meta.get("wav_channels") == 1:
-        raise ValueError(
-            "it has one channel: it is audio, not I/Q (an I/Q WAV file has two, "
-            "I and Q)"
-        )
-    width = meta.get("wav_sample_width")
-    if info.file_format is FileFormat.WAV and width not in (None, 1, 2):
-        # (The reader takes them for 16-bit: they would play as noise.)
-        raise ValueError(
-            f"its samples are {8 * int(width)}-bit, and this app reads 8- and "
-            "16-bit I/Q WAV files"
-        )
     datatype = str(meta.get("sigmf_datatype", "") or "")
     if datatype and sigmf_format(datatype) is None:
         raise ValueError(
@@ -434,6 +478,9 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
         description=str(meta.get("sigmf_description", "") or ""),
         segments=tuple(meta.get("sigmf_segments") or ()),
     )
+    if info.file_format is FileFormat.WAV:
+        options.wav_format = _wav_format(meta)
+        options.channels = 1 if meta.get("wav_channels") == 1 else 2
     missing: Set[str] = set()
     if options.headerless:
         missing.add("format")
@@ -449,6 +496,19 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
     if not options.center_hz:
         missing.add("center")
     return options, missing
+
+
+def _wav_format(meta: Dict[str, Any]) -> str:
+    """A WAV file's samples in words, from what FormatDetector found
+    ("24-bit integer", "32-bit float")."""
+    try:
+        bits = 8 * int(meta.get("wav_sample_width") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if bits <= 0:
+        return ""
+    kind = "float" if meta.get("wav_sample_type") == "float" else "integer"
+    return f"{bits}-bit {kind}"
 
 
 def _known(value: Any) -> float:
@@ -593,6 +653,11 @@ if HAS_PYQT6:
             index = self._format_combo.findData(options.sample_format)
             self._format_combo.setCurrentIndex(max(0, index))
             editable_format = "format" in self._missing
+            if not editable_format and options.wav_format:
+                # (As the WAV file states it: "24-bit integer WAV", not the
+                # cf32 it is read as.)
+                self._format_combo.clear()
+                self._format_combo.addItem(options.format_label, options.sample_format)
             self._format_combo.setEnabled(editable_format)
             self._format_combo.setToolTip(
                 "How each I and Q value is stored. rtl_sdr writes cu8, "
@@ -970,11 +1035,20 @@ if HAS_PYQT6:
             }
             kind = kinds.get(info["file_format"], info["file_format"])
             container = (info.get("metadata") or {}).get("wav_container")
-            if info["file_format"] == "wav" and container in WAV_CONTAINER_NAMES:
-                kind = f"WAV file ({WAV_CONTAINER_NAMES[container]}), I/Q as stereo"
+            if info["file_format"] == "wav":
+                held = (
+                    "one channel (a real signal)"
+                    if options.real_signal
+                    else "I/Q as stereo"
+                )
+                named = WAV_CONTAINER_NAMES.get(container)
+                kind = f"WAV file ({named}), {held}" if named else f"WAV file, {held}"
             fmt = options.sample_format
             rate = float(info["sample_rate_hz"] or 0.0)
             center = float(info["center_frequency_hz"] or 0.0)
+            rate_text = format_rate(rate) if rate else unknown
+            if options.real_signal and rate:
+                rate_text = f"{rate_text} as I/Q ({format_rate(2 * rate)} in the file)"
             rows = [
                 ("File", options.name),
                 (
@@ -982,8 +1056,15 @@ if HAS_PYQT6:
                     display_path(os.path.dirname(os.path.abspath(options.path))),
                 ),
                 ("Type", kind),
-                ("Sample format", FORMAT_NAMES.get(fmt, fmt.value)),
-                ("Sample rate", format_rate(rate) if rate else unknown),
+            ]
+            if options.real_signal:
+                rows.append(("Channels", _real_signal_text(rate, center)))
+            rows += [
+                (
+                    "Sample format",
+                    options.wav_format or FORMAT_NAMES.get(fmt, fmt.value),
+                ),
+                ("Sample rate", rate_text),
                 ("Center frequency", format_mhz(center) if center else unknown),
             ]
             if rate and center:
@@ -1115,6 +1196,14 @@ if HAS_PYQT6:
                     f"from its middle (within ±{options.sample_rate / 2e3:g} kHz)."
                 )
             layout.addLayout(form)
+            if options.audio:
+                # (Audio, probably: what decodes in it, and what doesn't.)
+                span += (
+                    " It has one channel (a real signal), read as the radio "
+                    "signal it holds: Morse tones decode with CW (Morse) at "
+                    "their pitch, but a receiver's audio (APRS tones, pager "
+                    "audio) isn't decoded as audio."
+                )
             self._span_text = span
             self._note = QLabel(span)
             self._note.setWordWrap(True)
@@ -1141,7 +1230,10 @@ if HAS_PYQT6:
             text = self._freq.text().strip()
             half = 0.5 * self._options.sample_rate
             if self._has_center:
-                parsed = parse_frequency_text(text, 1e6, *PLAYBACK_RANGE)
+                # (A real signal's frequencies start at 0 Hz: a Morse tone
+                # at 700 Hz.)
+                low = 0.0 if self._options.real_signal else PLAYBACK_RANGE[0]
+                parsed = parse_frequency_text(text, 1e6, low, PLAYBACK_RANGE[1])
                 if parsed.state != ACCEPTABLE or parsed.hz is None:
                     return None
                 offset = parsed.hz - self._options.center_hz

@@ -206,13 +206,15 @@ class BookmarkEditDialog(QDialog if HAS_PYQT6 else object):
 
         self._freq = _MhzSpinBox()
         # (Up to the bookmark's own frequency: one made while a recording
-        # above 6 GHz played was rewritten to 6000 MHz by Save.)
+        # above 6 GHz played was rewritten to 6000 MHz by Save; and down to
+        # it, one below 1 kHz in a one-channel recording.)
         try:
             saved = float(b.get("freq_hz", 0.0) or 0.0)
         except (TypeError, ValueError):
             saved = 0.0
         top = max(MAX_FREQUENCY_HZ, saved) if math.isfinite(saved) else MAX_FREQUENCY_HZ
-        self._freq.setRange(MIN_FREQUENCY_HZ / 1e6, top / 1e6)
+        bottom = saved if 0 < saved < MIN_FREQUENCY_HZ else MIN_FREQUENCY_HZ
+        self._freq.setRange(bottom / 1e6, top / 1e6)
         self._freq.setDecimals(6)
         self._freq.setSuffix(" MHz")
         self._freq.setAlignment(Qt.AlignmentFlag.AlignRight)

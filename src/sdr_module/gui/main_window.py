@@ -411,7 +411,12 @@ _RETUNE_SETTLE_S = 0.12
 # Tuning (see SDRMainWindow.set_frequency): the tuned channel may sit
 # anywhere in this inner fraction of the span (the receiver's anti-alias
 # filter rolls off at its edges) before the LO is retuned to center it.
+# (A device can say otherwise with ``usable_fraction``: a one-channel
+# recording's I/Q has no such roll-off, see gui/playback.py.)
 _USABLE_SPAN_FRACTION = 0.8
+# The lowest frequency tuned in a recording whose span reaches 0 Hz (a
+# one-channel file's: 0 Hz to half its rate), below the receiver's range.
+_LOWEST_PLAYBACK_HZ = 1.0
 # A frequency joins the Back/Forward history and Recent Frequencies once
 # the receiver has stayed on it this long (so stepping through a band
 # doesn't fill them with every step).
@@ -6597,11 +6602,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         bandwidth_hz: Optional[float] = None,
     ) -> bool:
         """Whether the tuned channel, ``offset_hz`` from the LO, lies inside
-        the usable inner part (``_USABLE_SPAN_FRACTION``) of a span of
-        ``rate`` Hz (the device's). At the LO itself it always does (a
-        channel wider than that is best centered). ``mode`` and
-        ``bandwidth_hz``: a channel in that mode and width instead of the
-        one tuned."""
+        the usable inner part (``_USABLE_SPAN_FRACTION``, or the device's
+        ``usable_fraction``) of a span of ``rate`` Hz (the device's). At the
+        LO itself it always does (a channel wider than that is best
+        centered). ``mode`` and ``bandwidth_hz``: a channel in that mode and
+        width instead of the one tuned."""
         if abs(offset_hz) < 0.5:
             return True
         rate = float(rate or self._device_sample_rate())
@@ -6610,7 +6615,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             bandwidth_hz or self._channel_bandwidth(),
             rate,
         )
-        half = 0.5 * _USABLE_SPAN_FRACTION * rate
+        usable = getattr(self._own("_device"), "usable_fraction", None)
+        if not isinstance(usable, (int, float)) or not 0 < usable <= 1:
+            usable = _USABLE_SPAN_FRACTION
+        half = 0.5 * usable * rate
         return -half <= offset_hz + low and offset_hz + high <= half
 
     def _lo_for(self, freq_hz: float) -> float:
@@ -6670,14 +6678,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Let the Frequency field accept the connected device's range (its
         tooltip and messages say what it is), and the span of a recording
         playing back even where it lies above (a 10 GHz downlink: then they
-        say what the recording covers, not that the receiver tunes there)."""
+        say what the recording covers, not that the receiver tunes there)
+        or below (a one-channel file's, from 0 Hz)."""
         low, high = self._tuning_limits()
         text = self._range_text() if self._device_tuning_range() else ""
         if self._lo_lock is not None:
             center, span, why = self._lo_lock
-            if center + span / 2 > high:
-                high = center + span / 2
-                text = f"{why} covers {format_mhz_range(center - span / 2, high)}"
+            bottom, top = center - span / 2, center + span / 2
+            if top > high or bottom < low:
+                high = max(high, top)
+                low = min(low, max(_LOWEST_PLAYBACK_HZ, bottom))
+                text = f"{why} covers {format_mhz_range(max(0.0, bottom), top)}"
         self._control_panel._freq_input.set_tuning_range(low, high, text)
 
     def _device_frequency(self) -> Optional[float]:
@@ -6776,8 +6787,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         low, high = self._tuning_limits()
         if self._lo_lock is not None:
             # A recording plays: nothing is retuned, so its span (checked
-            # below) may lie above the receiver's range.
-            high = math.inf
+            # below) may lie above the receiver's range, or below it (a
+            # one-channel file's starts at 0 Hz).
+            low, high = min(low, _LOWEST_PLAYBACK_HZ), math.inf
         if not low <= freq <= high:
             return self._refuse_tuning(
                 f"{format_frequency(freq)} is out of range: {self._range_text()}."
@@ -11297,7 +11309,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         rate = options.sample_rate
         center = options.center_hz
         lines = [
-            f"Sample format: {options.sample_format.value}",
+            f"Sample format: {options.format_label}",
             f"Sample rate: {format_rate(rate) if rate else unknown}",
             f"Center frequency: {format_frequency(center) if center else unknown}",
         ]
@@ -13729,7 +13741,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Frequency Centered the LO always follows (every tune retunes the
         device). While the LO is locked (:meth:`_lock_lo`, a recording
         playing back) frequencies outside its span are refused, and those
-        inside it are tuned even above the receiver's range.
+        inside it are tuned even above the receiver's range (or below it,
+        down to just above 0 Hz in a one-channel file).
 
         A frequency outside the connected device's range, or one the device
         rejects, is refused: the status bar says why ("RTL-SDR tunes

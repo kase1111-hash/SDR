@@ -132,10 +132,16 @@ class FilePlaybackDevice:
         self.error: Optional[str] = None
         #: Samples that weren't numbers were replaced by zeros.
         self.bad_samples = 0
-        self._float_data = self._player.sample_format in (
-            SampleFormat.FLOAT32,
-            SampleFormat.FLOAT64,
-        )
+        wav = self._player.wav_header
+        if wav is not None:
+            # (A WAV file's 24- and 32-bit integers are read as cf32, but
+            # they are always numbers.)
+            self._float_data = wav.sample_type == "float"
+        else:
+            self._float_data = self._player.sample_format in (
+                SampleFormat.FLOAT32,
+                SampleFormat.FLOAT64,
+            )
         #: How much of the span (around its middle) the window tunes (see
         #: its _channel_fits): all of a one-channel file's, whose I/Q holds
         #: its own frequencies, 0 Hz to half its rate, with no receiver's

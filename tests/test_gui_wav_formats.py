@@ -139,6 +139,28 @@ class TestWideAndFloatRecordings(_WavCase):
             self.assertGreater(device.position, start)
             self.win._playback.close()
 
+    def test_only_floating_point_samples_are_checked_for_numbers(self):
+        """24- and 32-bit integers are read as cf32 but are always numbers:
+        playback doesn't look for NaN in them every block (it did, as for
+        any cf32); in floating-point samples it still does."""
+        from sdr_module.gui.iq_files import describe_iq_file
+        from sdr_module.gui.playback import FilePlaybackDevice
+
+        x = _noisy_tone(4800, 30e3, RATE)
+        for kind, width, container, _name in FORMATS:
+            path = self._wav(f"n{kind}{width}.wav", x, kind, width, container, 145e6)
+            device = FilePlaybackDevice(describe_iq_file(path)[0])
+            self.addCleanup(device.close)
+            self.assertEqual(device._float_data, kind == "float", (kind, width))
+        x[100] = np.nan
+        device = FilePlaybackDevice(
+            describe_iq_file(self._wav("nan.wav", x, "float", 4, "RIFF", 145e6))[0]
+        )
+        self.addCleanup(device.close)
+        device.start_rx()
+        block = device.read_samples(200)
+        self.assertEqual((device.bad_samples, block[100]), (1, 0))
+
     def test_recording_info_says_how_the_samples_are_stored(self):
         x = _noisy_tone(int(0.2 * RATE), 30e3, RATE)
         for kind, width, container, name in FORMATS:

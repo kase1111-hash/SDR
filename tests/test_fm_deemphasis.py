@@ -288,10 +288,12 @@ class TestChangingItWhilePlaying(_ChainCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def _switched(self, stereo, switch_at=10, back_at=None, block=80_000 + 777):
+    def _switched(
+        self, stereo, switch_at=10, back_at=None, block=80_000 + 777, tone_hz=None
+    ):
         n = int(1.0 * RATE)
         t = np.arange(n) / RATE
-        tone = 0.25 * np.sin(2 * np.pi * self.TONE_HZ * t)
+        tone = 0.25 * np.sin(2 * np.pi * (tone_hz or self.TONE_HZ) * t)
         if stereo:
             iq = _fm(_multiplex(tone, 0 * tone, RATE))
         else:
@@ -308,8 +310,8 @@ class TestChangingItWhilePlaying(_ChainCase):
         switch = int(switch_at * block / RATE * AUDIO)
         return chain, mono, both, switch
 
-    def _expected(self, tau, amplitude=0.25):
-        return amplitude / abs(1 + 2j * math.pi * self.TONE_HZ * tau)
+    def _expected(self, tau, amplitude=0.25, tone_hz=None):
+        return amplitude / abs(1 + 2j * math.pi * (tone_hz or self.TONE_HZ) * tau)
 
     def test_mono_takes_the_new_setting_without_a_click(self):
         chain, mono, _both, switch = self._switched(stereo=False)
@@ -360,6 +362,38 @@ class TestChangingItWhilePlaying(_ChainCase):
         natural = 2 * self._expected(50e-6) * math.sin(math.pi * self.TONE_HZ / AUDIO)
         steps = np.abs(np.diff(mono[int(0.05 * AUDIO) :]))
         self.assertLess(float(np.max(steps)), natural * 1.03)
+
+    def test_no_step_where_it_changes(self):
+        # A step shows in the second difference, against which a 1 kHz
+        # tone's own is small: switched at once from the old filters'
+        # output to the new ones', it stands out three times over (a 10 kHz
+        # tone's own steps hide it); the crossfade leaves none.
+        for stereo in (False, True):
+            with self.subTest(stereo=stereo):
+                _chain_, mono, both, _switch = self._switched(
+                    stereo=stereo, switch_at=12, tone_hz=1000.0
+                )
+                heard = both[:, 0] if stereo else mono
+                share = 0.9 if stereo else 1.0  # (the program's share)
+                own = (
+                    4
+                    * share
+                    * self._expected(50e-6, tone_hz=1000.0)
+                    * math.sin(math.pi * 1000.0 / AUDIO) ** 2
+                )
+                steps = np.abs(np.diff(heard[int(0.35 * AUDIO) :], 2))
+                self.assertLess(float(np.max(steps)), 1.3 * own)
+
+    def test_left_and_right_stay_apart_while_it_changes(self):
+        # The difference signal crossfades with the mono program, from the
+        # same sample: right stays as far below a left-only tone during the
+        # 10 ms of the change as before it.
+        _chain_, _mono, both, switch = self._switched(
+            stereo=True, switch_at=12, tone_hz=1000.0
+        )
+        for part in (both[switch - 4800 : switch], both[switch : switch + 480]):
+            left, right = _level(part[:, 0], 1000.0), _level(part[:, 1], 1000.0)
+            self.assertGreater(_db(left, right), 50.0)
 
     def test_a_new_stream_starts_with_the_setting(self):
         # Set while nothing played (the squelch closed): the next stream

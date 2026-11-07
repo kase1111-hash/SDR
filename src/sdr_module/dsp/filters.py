@@ -2165,6 +2165,12 @@ class CTCSSDetector:
     (:attr:`burst_heard`, :attr:`bursts`) and the next ``BURST_HOLD_S`` of
     audio (the rest of the burst) isn't listened to: the tone is found
     again only in what follows.
+
+    ``reverse_burst`` (True by default; settable while audio runs) switches
+    the burst on or off, as radios' squelch tail elimination (STE) menus
+    do: a voice pitched near the tone, sent with little filtering, can
+    sound like a burst now and then. Off, nothing is looked for (the band
+    filter isn't run) and a tone is held until it stops, as before M-Q2.
     """
 
     #: (M-Q2) The reverse burst: see above.
@@ -2187,7 +2193,10 @@ class CTCSSDetector:
         select_db: float = 6.0,
         snr_db: float = 10.0,
         update_s: float = 0.05,
+        reverse_burst: bool = True,
     ):
+        #: Whether a reverse burst lets the tone go (see above).
+        self.reverse_burst = bool(reverse_burst)
         self._rate = float(sample_rate)
         self._factor = max(1, int(self._rate // 1200.0))
         self._out_rate = self._rate / self._factor
@@ -2231,6 +2240,9 @@ class CTCSSDetector:
         self._deaf = 0  # decimated samples not listened to (a burst's rest)
         self._listened = 0  # decimated samples since the reset or a burst
         self._burst = False
+        # Samples went by with reverse_burst off: the band's history and
+        # windows are not the samples just before the next ones.
+        self._band_stale = False
         #: Reverse bursts heard since the last reset.
         self.bursts = 0
 
@@ -2278,7 +2290,11 @@ class CTCSSDetector:
         if x.size == 0:
             return self._detected
         low = self._decimate(x)
-        burst = self._burst_in(low)
+        burst = None
+        if self.reverse_burst:
+            burst = self._burst_in(low)
+        elif low.size:
+            self._band_stale = True
         if burst is not None:
             self._end_with_burst()
             low = low[burst + 1 :]  # (what follows it)
@@ -2318,6 +2334,12 @@ class CTCSSDetector:
         if low.size == 0:
             return None
         taps = self._band_taps
+        if self._band_stale:
+            # (Switched back on: what the band held is from before samples
+            # that went by unheard, so it starts afresh, as after a reset.)
+            self._band_stale = False
+            self._band_history = np.zeros(len(taps) - 1)
+            self._band_tail = np.zeros(0)
         buf = np.concatenate((self._band_history, low))
         self._band_history = buf[len(buf) - (len(taps) - 1) :].copy()
         band = np.convolve(buf, taps, mode="valid")  # (one per new sample)

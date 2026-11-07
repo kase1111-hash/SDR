@@ -122,6 +122,7 @@ from .audio_chain import (
     LOW_CUT_CHOICES,
     NOTCH_CHOICES,
     SUBAUDIBLE_CUT_HZ,
+    TAIL_ELIMINATION_TIP,
     AudioAgc,
     AudioJoin,
     AudioOptions,
@@ -327,6 +328,9 @@ _STEREO_KEY = "audio/stereo"
 _DEEMPHASIS_KEY = "audio/deemphasis"
 # Radio > Audio > Stereo Blend (M-A2): "less", "normal" (default), "more".
 _STEREO_BLEND_KEY = "audio/stereo_blend"
+# Radio > Audio > Squelch Tail Elimination (radios' STE): a CTCSS station's
+# reverse burst closes the tone squelch (M-Q2); on by default.
+_TAIL_ELIMINATION_KEY = "audio/tail_elimination"
 # The STEREO badge and lamp light while at least this much of the stereo
 # difference plays (about 10 dB of separation), and go out below
 # _STEREO_OFF_BLEND (no flicker while the blend hovers).
@@ -3287,6 +3291,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             _STEREO_BLEND_KEY, STEREO_BLEND_CHOICES, DEFAULT_STEREO_BLEND
         )
         self._audio_options.stereo_blend = self._stereo_blend_choice
+        # Radio > Audio > Squelch Tail Elimination: whether a CTCSS
+        # station's reverse burst closes the tone squelch (and so what Scan
+        # Bookmarks hears); a damaged value is logged and read as on.
+        self._tail_elimination = self._settings.get_bool(_TAIL_ELIMINATION_KEY, True)
+        self._tone_squelch.tail_elimination = self._tail_elimination
         self._stereo_shown: Tuple[str, Optional[str], str] = ("", None, "")
         self._stereo_lit = False
         self._audio_problem: Optional[str] = None
@@ -3821,6 +3830,15 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             lambda on, a=reverse_action: a.isChecked() != on and a.setChecked(on)
         )
         follow(reverse, reverse_action)
+        # Radios' STE: the CTCSS reverse burst closes the tone squelch.
+        self._tail_elimination_action = self._add_action(
+            audio_menu,
+            "S&quelch Tail Elimination",
+            self._set_tail_elimination,
+            tip=TAIL_ELIMINATION_TIP,
+            checkable=True,
+            checked=self._tail_elimination,
+        )
         self._add_action(
             audio_menu,
             "&CW Pitch...",
@@ -7415,6 +7433,37 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             text = f"Tone squelch: only stations sending {what} play."
         self._show_status_message(text, "info", 4000)
         self._say_tone_squelch_unused()
+
+    def _set_tail_elimination(self, on: bool) -> None:
+        """Radio > Audio > Squelch Tail Elimination (radios' STE): whether a
+        CTCSS station's reverse burst closes the tone squelch before its
+        squelch tail (M-Q2), as heard and for Scan Bookmarks, which judges
+        a channel by the same tone squelch. Saved at once. A DCS code's
+        turn-off code closes it either way (part of the DCS standard, and no
+        voice was heard to fake it)."""
+        on = bool(on)
+        action = getattr(self, "_tail_elimination_action", None)
+        if action is not None and action.isChecked() != on:
+            action.blockSignals(True)
+            action.setChecked(on)
+            action.blockSignals(False)
+        if on == self._tail_elimination:
+            return
+        self._tail_elimination = on
+        self._tone_squelch.tail_elimination = on
+        self._settings.set(_TAIL_ELIMINATION_KEY, on)
+        self._show_status_message(
+            (
+                "Squelch tail elimination on: a CTCSS station's reverse burst "
+                "closes the squelch before its tail."
+                if on
+                else "Squelch tail elimination off: CTCSS stations play until "
+                "their carrier drops, squelch tail too."
+            ),
+            "info",
+            4000,
+            log=False,  # (what was asked: no problem)
+        )
 
     def _say_tone_squelch_unused(self) -> None:
         """A tone or code chosen at a broadcast deviation: say it isn't

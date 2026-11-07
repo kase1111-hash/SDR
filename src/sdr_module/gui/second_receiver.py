@@ -36,10 +36,19 @@ signal path and the plots' spectrum, :class:`FrameWork`) runs on a worker
 thread a frame behind the window (:class:`~.frame_pipeline.FramePipeline`):
 the GUI thread reads, records, paints and plays.
 
+Broadcast FM plays in stereo there as in the main window (its own Stereo
+switch, and a STEREO lamp in its status bar), and it has the main window's
+tone squelch (CTCSS tones and DCS codes, narrow FM), audio notch and low
+cut, its own (:mod:`.second_receiver_audio`); a bookmark tuned there
+applies its tone or code. It runs a live decoder of its own on its DSP
+worker (:mod:`.second_receiver_decoding`), whose messages go into the main
+window's Decoder tab marked "2nd RX".
+
 Settings: ``device/second_receiver/*`` (device, sample rate per kind of
-device, frequency, mode, filter, step per mode, squelch, Listen, volume,
-gain, Follow transmissions) and ``layout/second_receiver/*`` (window
-geometry, splitters and the waterfall's look).
+device, frequency, mode, filter, step per mode, squelch, tone_squelch,
+dcs_squelch, Listen, volume, stereo, notch, notch_hz, low_cut, decoder,
+decode, gain, Follow transmissions) and ``layout/second_receiver/*``
+(window geometry, splitters and the waterfall's look).
 """
 
 from __future__ import annotations
@@ -52,7 +61,7 @@ import os
 import shutil
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -90,6 +99,7 @@ except ImportError:  # pragma: no cover - environment
 
 from ..devices.base import SDRDevice
 from ..dsp.background_writer import BackgroundWriter
+from ..dsp.dcs import dcs_label
 from ..dsp.frame_spectrum import (
     WINDOW_LABELS,
     FrameSpectrumAnalyzer,
@@ -104,9 +114,11 @@ from .audio_chain import (
     LevelAverager,
     NoiseFloorTracker,
     SquelchGate,
+    ToneSquelch,
     channel_power_db,
 )
 from .audio_sink import AudioSink
+from .bookmark_editor import bookmark_dcs
 from .bookmarks_panel import default_bookmark_name, format_mhz
 from .bookmarks_panel import listening as bookmark_listening
 from .control_panel import (
@@ -154,6 +166,7 @@ from .level_meter import LevelMeter
 from .main_window import (
     _AUDIBLE_MODES,
     _AUDIO_RATE,
+    _BROADCAST_DEVIATION_HZ,
     _CW_SQUELCH_HANG_S,
     _DEVICE_MODELS,
     _FREE_SPACE_CHECK_S,
@@ -181,7 +194,16 @@ from .main_window import (
 )
 from .plot_view import PlotView
 from .receiver_bar import FrequencyDigits
+from .second_receiver_audio import (
+    NO_STEREO_READING,
+    StereoReading,
+    ToneHeard,
+    stereo_reading,
+)
+from .second_receiver_decoding import ReceiverDecoding
 from .spectrum_widget import SpectrumWidget, format_hz
+from .status_history import MessageOverflow
+from .stereo_audio import StereoPath
 from .themes import set_role, set_tone
 from .tuning import (
     STEP_CHOICES_HZ,
@@ -498,7 +520,16 @@ class Frame:
     noise_db: Optional[float]  # the channel's noise level (dBFS), once known
     threshold_db: float  # the squelch threshold in effect
     state: str  # the level meter's lamp (see level_meter.STATES)
-    audio: Optional[np.ndarray]  # 48 kHz audio for the speaker, or None
+    # 48 kHz audio for the speaker (mono, or (n, 2) left and right while
+    # broadcast FM plays in stereo), or None
+    audio: Optional[np.ndarray]
+    #: The STEREO lamp: (text, tone, tooltip), see stereo_reading.
+    stereo: StereoReading = NO_STEREO_READING
+    #: The frequency the audio notch removes (Manual's, or the whistle
+    #: Auto found), None when it removes none or nothing was demodulated.
+    notch_hz: Optional[float] = None
+    #: Tone heard: (CTCSS tone, DCS code, checked), see ToneHeard.
+    tone_heard: ToneHeard = (None, None, False)
 
 
 class ReceiverDsp:
@@ -511,6 +542,21 @@ class ReceiverDsp:
     their state between blocks (rebuilt when the rate, mode or width
     changes), and the audio fades in and out with the squelch (and
     crossfades into a new chain), so it never clicks.
+
+    With :attr:`stereo` set, broadcast FM plays in stereo where the station
+    sends it, as in the main window (its chain's ``stereo``): the audio is
+    then ``(n, 2)`` left and right, mono stretches stay 1-D (the speaker
+    plays them on both sides), and each frame's :attr:`Frame.stereo` is the
+    STEREO lamp. The lamp shows while a broadcast station is above the
+    squelch and someone listens (``play``, or :attr:`heard` with the
+    speaker off): only then is its stereo decoded.
+
+    :attr:`tone_squelch` is the CTCSS tone or DCS code narrow FM must send
+    to be heard (:attr:`tones`, the main window's ``ToneSquelch``): another
+    one, or none, reads ``"tone"`` on the frame's lamp and stays silent;
+    each frame says what is heard (:attr:`Frame.tone_heard`). Set
+    ``options.tone_squelch`` with it (narrow FM is then heard from 300 Hz
+    up, without the tone or the code's bits).
     """
 
     def __init__(self) -> None:
@@ -520,6 +566,28 @@ class ReceiverDsp:
         self.deviation_hz = 5e3
         self.offset_hz = 0.0
         self.options = AudioOptions()
+        #: Broadcast FM in stereo (the window's Stereo switch). False:
+        #: mono, as before (the default for anyone else using this class).
+        self.stereo = False
+        #: Someone listens to this receiver (Listen includes it and its
+        #: audio isn't paused), its speaker on or off: a broadcast station
+        #: above the squelch shows on the STEREO lamp (FrameWork sets it
+        #: for each frame).
+        self.heard = False
+        #: The tuned frequency (Hz): another one is another station (the
+        #: notch's Auto searches anew, its tone is heard anew). None: not
+        #: known.
+        self.tuned_hz: Optional[float] = None
+        self._tuned_last: Optional[float] = None
+        #: The tone squelch: ``(CTCSS tone Hz, DCS (code, inverted))``, at
+        #: most one of them set; ``(None, None)``: none. One value, taken up
+        #: by :attr:`tones` at the next block (on the DSP worker).
+        self.tone_squelch: Tuple[Optional[float], Optional[Tuple[int, bool]]] = (
+            None,
+            None,
+        )
+        self.tones = ToneSquelch(_AUDIO_RATE)
+        self._tone_blocked = False  # (the last block: not the tone chosen)
         self.squelch = SquelchGate(-80.0)
         self._level_average = LevelAverager()
         self._noise = NoiseFloorTracker()
@@ -528,6 +596,7 @@ class ReceiverDsp:
         self._join_chain: Optional[_ReceiverChain] = None
         self._join_deviation = 0.0
         self._demod_running = False
+        self._stereo_lit = False  # (the lamp said STEREO for the last block)
         self._window: Optional[np.ndarray] = None
         self._window_gain = 1.0
 
@@ -546,6 +615,9 @@ class ReceiverDsp:
         self._chain = None
         self._join_chain = None
         self._demod_running = False
+        self._stereo_lit = False
+        self._tone_blocked = False
+        self.tones.reset()
         self.squelch.reset()
         self._level_average.reset()
         self._noise.reset()
@@ -563,9 +635,17 @@ class ReceiverDsp:
             chain = self._chain = _ReceiverChain(
                 self.rate, self.mode, self.bandwidth_hz, self.offset_hz
             )
-            chain.options = self.options
-        chain.set_offset(self.offset_hz)
+        self._configure(chain)
         return chain
+
+    def _configure(self, chain: _ReceiverChain) -> None:
+        """What this receiver sets on its chain before each block: its own
+        listening options (:attr:`options`: the notch, the low cut, the
+        CW pitch) and the VFO. The one place for the chain's settings (the
+        main window sets its own in ``_route_audio``); whether a block
+        decodes stereo is decided per block (:meth:`_audio`)."""
+        chain.options = self.options
+        chain.set_offset(self.offset_hz)
 
     def band_edges(self) -> Tuple[float, float]:
         """Offsets from the tuned frequency (Hz) of what is demodulated."""
@@ -590,10 +670,21 @@ class ReceiverDsp:
         """One block: its spectrum, the channel's level and squelch, and
         (``play``: the speaker wants this receiver) the audio to play."""
         samples = np.asarray(samples, dtype=np.complex64)
+        tones = self.tones
+        tone_hz, dcs = self.tone_squelch
+        if (tones.tone_hz, tones.dcs) != (tone_hz, dcs):
+            tones.tone_hz, tones.dcs = tone_hz, dcs
         display = samples[-DISPLAY_BLOCK:] if len(samples) > DISPLAY_BLOCK else samples
         power = self.spectrum(display)
         self._noise.update(power, len(samples) / max(self.rate, 1.0))
         chain = self.chain()
+        tuned = self.tuned_hz  # (read once: the window may set it meanwhile)
+        if tuned != self._tuned_last:
+            if self._tuned_last is not None:
+                chain.retuned()  # (Auto's whistle was the last station's)
+                # Another channel: its tone (if any) must be heard anew.
+                tones.reset()
+            self._tuned_last = tuned
         channel = chain.channelize(samples)
         seconds = len(channel) / max(chain.channel_rate, 1.0)
         if len(channel):
@@ -611,17 +702,85 @@ class ReceiverDsp:
         else:
             state = "idle"
         frame = Frame(power, level, noise, gate.threshold_db(noise), state, None)
-        frame.audio = self._audio(chain, channel, play and audible and gate.is_open)
+        # A broadcast FM station above the squelch that someone listens to:
+        # the STEREO lamp says what it is received as (speaker on or off).
+        received = (
+            audible
+            and self.mode == "FM"
+            and self.deviation_hz >= _BROADCAST_DEVIATION_HZ
+            and gate.is_open
+            and (play or self.heard)
+        )
+        speaker = play and audible and gate.is_open
+        # The TONE lamp: a signal without the chosen tone or code reads
+        # TONE whether the speaker plays or not (narrow FM: broadcast FM
+        # isn't checked, so isn't demodulated for it).
+        tone_check = audible and self._tones_checked() and gate.is_open and tones.active
+        frame.audio = self._audio(chain, channel, speaker, received, tone_check)
+        frame.stereo = self._stereo_lamp(chain, received)
+        # (Nothing is notched while nothing is demodulated.)
+        frame.notch_hz = chain.notch_frequency_hz if self._demod_running else None
+        frame.tone_heard = (
+            tones.detected_hz,
+            tones.detected_dcs,
+            self._tones_checked(),
+        )
+        if audible and gate.is_open and self._tone_blocked:
+            frame.state = "tone"
         return frame
 
+    def _tones_checked(self) -> bool:
+        """Whether FM audio is searched for a tone or code: narrow FM (as in
+        the main window: broadcast stations send none, and their bass
+        notes pass for tones)."""
+        return self.mode == "FM" and self.deviation_hz < _BROADCAST_DEVIATION_HZ
+
+    def _tone_gate(self, chain: _ReceiverChain) -> bool:
+        """Feed a demodulated FM block to the tone squelch; False while it
+        holds the speaker shut (not the tone or code chosen)."""
+        tones = self.tones
+        if not self._tones_checked():
+            if tones.detected_hz is not None or tones.detected_dcs is not None:
+                tones.reset()
+            return True
+        tones.feed_dcs(chain.fm_raw_audio)  # (DCS: before DC blocking)
+        if tones.process(chain.pre_nr_audio):
+            return True
+        self._tone_blocked = True
+        return False
+
+    def _stereo_lamp(self, chain: _ReceiverChain, received: bool) -> StereoReading:
+        """The STEREO lamp for this block (see :func:`stereo_reading`)."""
+        reading = stereo_reading(
+            received,
+            self.stereo,
+            StereoPath.usable(chain),
+            chain.stereo_decoder,
+            self._stereo_lit,
+        )
+        self._stereo_lit = reading[0] == "STEREO"
+        return reading
+
     def _audio(
-        self, chain: _ReceiverChain, channel: np.ndarray, speaker: bool
+        self,
+        chain: _ReceiverChain,
+        channel: np.ndarray,
+        speaker: bool,
+        received: bool = False,
+        tone_check: bool = False,
     ) -> Optional[np.ndarray]:
         join = self._join
-        if not speaker and not join.playing:
+        self._tone_blocked = False
+        # Stereo is decoded for what plays (or fades out) and for the lamp
+        # while a broadcast station is received: never for nobody. Through
+        # a filter too narrow for it the lamp says so without decoding.
+        watch = received and self.stereo and StereoPath.usable(chain)
+        chain.stereo = self.stereo and (speaker or join.playing or watch)
+        if not speaker and not join.playing and not watch and not tone_check:
             if self._demod_running:
                 # Closed for real (not during the hang): start afresh.
                 chain.reset_demodulator()
+                self.tones.reset()
                 self._demod_running = False
             return None
         if not self.audible or len(channel) == 0:
@@ -636,17 +795,24 @@ class ReceiverDsp:
             self._demod_running = False
             return join.release()
         self._demod_running = True
+        if self.mode == "FM" and not self._tone_gate(chain):
+            speaker = False  # (another tone or code, or none)
+        # Broadcast FM in stereo: left and right while there is stereo to
+        # play (the mono audio, (L+R)/2, otherwise).
+        heard = audio if chain.stereo_audio is None else chain.stereo_audio
         # A new chain or deviation: the audio doesn't continue the last
         # block played.
         new_stream = (
             chain is not self._join_chain or self.deviation_hz != self._join_deviation
         )
         if speaker:
-            out = join.join(audio) if join.playing and new_stream else join.play(audio)
+            out = join.join(heard) if join.playing and new_stream else join.play(heard)
             self._join_chain, self._join_deviation = chain, self.deviation_hz
             return out
+        if not join.playing:
+            return None  # (demodulated for the STEREO or TONE lamp only)
         # Stopping: fade this block out (or decay from the last sample).
-        return join.release() if new_stream else join.fade_out(audio)
+        return join.release() if new_stream else join.fade_out(heard)
 
     def release(self) -> np.ndarray:
         """Audio is stopping (receiver stopped, Listen changed): a short
@@ -661,6 +827,12 @@ class FrameResult:
     frame: Frame  # the signal path's: level, squelch, audio
     spectrum: Any  # the plots' spectrum (a FrameSpectrum), or None
     axis: Tuple[float, float]  # the (LO, rate) the samples were taken at
+    #: The live decoder's messages from this frame (decoded on the worker).
+    decoded: List[Any] = field(default_factory=list)
+    #: The live decoder's status after this frame (None: it didn't run).
+    decoder_status: Any = None
+    #: The tuned frequency the frame was decoded at (Hz).
+    tuned_hz: Optional[float] = None
 
 
 class FrameWork:
@@ -679,14 +851,31 @@ class FrameWork:
     def __init__(self, dsp: ReceiverDsp, analyzer: FrameSpectrumAnalyzer) -> None:
         self.dsp = dsp
         self.analyzer = analyzer
+        #: The live decoder (the window chooses it between frames).
+        self.decoding = ReceiverDecoding()
         #: The (LO, rate) the analyzer's samples kept from the last frame
         #: belong to (None: the next frame starts afresh).
         self.axis: Optional[Tuple[float, float]] = None
 
     def __call__(
-        self, samples: np.ndarray, play: bool, plots: bool, axis: Tuple[float, float]
+        self,
+        samples: np.ndarray,
+        play: bool,
+        plots: bool,
+        axis: Tuple[float, float],
+        heard: bool = False,
+        decode: bool = False,
     ) -> FrameResult:
-        frame = self.dsp.process(samples, play)
+        # (Set here, on the worker, for this frame: see ReceiverDsp.heard.)
+        dsp = self.dsp
+        dsp.heard = bool(heard or play)
+        frame = dsp.process(samples, play)
+        decoded: List[Any] = []
+        status = None
+        tuned = dsp.tuned_hz
+        if decode:
+            decoded = self.decoding.process(samples, dsp.offset_hz, tuned)
+            status = self.decoding.status()
         spectrum = None
         if plots:
             if axis != self.axis:
@@ -696,7 +885,7 @@ class FrameWork:
             spectrum = self.analyzer.process(samples)
         else:
             self.axis = None  # (the first frame plotted again starts afresh)
-        return FrameResult(frame, spectrum, axis)
+        return FrameResult(frame, spectrum, axis, decoded, status, tuned)
 
 
 # ---------------------------------------------------------------------------
@@ -786,7 +975,10 @@ if HAS_PYQT6:
             self._refresh()
             super().showPopup()
 
-    class SecondReceiverWindow(QMainWindow):
+    from .second_receiver_audio import ListeningRows
+    from .second_receiver_decoding import DecoderRows
+
+    class SecondReceiverWindow(QMainWindow, ListeningRows, DecoderRows):
         """The second receiver (see the module docstring)."""
 
         #: The Listen choice changed (its key).
@@ -823,7 +1015,9 @@ if HAS_PYQT6:
             self._lo_hz = _DEFAULT_FREQUENCY_HZ
             self._tuned_hz = _DEFAULT_FREQUENCY_HZ
             self._step_hz = 12.5e3
-            self._audio = AudioSink()
+            # In stereo where the output can (broadcast FM), mono on both
+            # channels otherwise: stereo coming and going never reopens it.
+            self._audio = AudioSink(channels=2)
             self._audio_open = False
             self._audio_retry_at = 0.0  # (monotonic) after a failed open
             self._audio_failed = False
@@ -987,6 +1181,7 @@ if HAS_PYQT6:
             column.addWidget(self._build_device_group())
             column.addWidget(self._build_tuning_group())
             column.addWidget(self._build_audio_group())
+            column.addWidget(self._build_decoder_group())
             column.addWidget(self._build_bookmarks_group())
             column.addWidget(self._build_tx_group())
             column.addStretch(1)
@@ -1333,6 +1528,8 @@ if HAS_PYQT6:
             label = QLabel("Threshold:")
             label.setBuddy(self._squelch_slider)
             form.addRow(label, threshold_row)
+            # The tone squelch (CTCSS, DCS) and the tone heard (ListeningRows).
+            self._build_tone_rows(form)
 
             self._listen_combo = self._combo(8)
             for key, text, tip in LISTEN_CHOICES:
@@ -1365,8 +1562,26 @@ if HAS_PYQT6:
             label = QLabel("Volume:")
             label.setBuddy(self._volume_slider)
             form.addRow(label, volume_row)
+
+            # Broadcast FM in stereo (this receiver's own switch; the main
+            # window's is Radio > Audio > Stereo). The STEREO lamp in the
+            # status bar says what plays.
+            self._stereo_check = QCheckBox("Broadcast FM in stereo")
+            self._stereo_check.setChecked(True)
+            self._stereo_check.setAccessibleName("Second receiver's stereo")
+            self._stereo_check.setToolTip(
+                "On: broadcast FM plays in stereo where the station sends it "
+                "(the STEREO lamp in the status bar says so). Off: always mono."
+            )
+            self._stereo_check.toggled.connect(self._on_stereo_toggled)
+            label = QLabel("Stereo:")
+            label.setBuddy(self._stereo_check)
+            form.addRow(label, self._stereo_check)
+            # The notch and the low cut (ListeningRows).
+            self._build_filter_rows(form)
             self._audio_note = self._hint()
             form.addRow(self._audio_note)
+            self._audio_form = form
             return group
 
         def _build_bookmarks_group(self) -> "QGroupBox":
@@ -1446,11 +1661,25 @@ if HAS_PYQT6:
             self._message_timer = QTimer(self)
             self._message_timer.setSingleShot(True)
             self._message_timer.timeout.connect(self._clear_message)
+            # Broadcast FM: STEREO or MONO, and why (as the main window's
+            # badge); hidden while no broadcast station is heard.
+            self._stereo_badge = QLabel("STEREO")
+            set_role(self._stereo_badge, "badge", "success")
+            self._stereo_badge.setAccessibleName("Second receiver's stereo indicator")
+            self._stereo_badge.setVisible(False)
+            self._stereo_shown: StereoReading = NO_STEREO_READING
+            bar.addPermanentWidget(self._stereo_badge)
             self._rec_label = QLabel("REC")
             set_role(self._rec_label, "badge", "danger")
             self._rec_label.setAccessibleName("Second receiver recording time")
             self._rec_label.setVisible(False)
             bar.addPermanentWidget(self._rec_label)
+            # A message the status line cuts short shows whole just above it
+            # while it lasts (as in the main window); a click or Esc hides it.
+            self._message_overflow = MessageOverflow(self, self._message_label)
+            self._message_overflow.setToolTip(
+                "The status line's message in full. Click (or press Esc) to hide it."
+            )
 
         def _setup_actions(self) -> None:
             """Window-local commands (they act while this window is active)."""
@@ -1499,6 +1728,10 @@ if HAS_PYQT6:
             if panel is not None:
                 panel.bookmarks_changed.connect(self._refresh_bookmarks)
             self._refresh_bookmarks()
+            decoders = getattr(self._win, "_decoder_panel", None)
+            if decoders is not None:
+                # (Its Clear clears this receiver's rows too.)
+                decoders.cleared.connect(self._on_decoder_tab_cleared)
             # Never outlive the main window running (the host closes this
             # window first; this covers a main window deleted without it).
             destroyed = getattr(self._win, "destroyed", None)
@@ -1580,8 +1813,10 @@ if HAS_PYQT6:
         def set_scan_feed(self, feed: Optional[Callable[[np.ndarray], None]]) -> None:
             """Hand every block this receiver reads to ``feed`` too, after
             its own frame (the main window's Scanner tab sweeping with it:
-            "Use both receivers"); None ends that."""
+            "Use both receivers"); None ends that. (This receiver doesn't
+            decode meanwhile: the scan tunes it step by step.)"""
             self._scan_feed = feed
+            self._update_decoder_line()
 
         def set_scan_muted(self, muted: bool) -> None:
             """Mute this receiver while a scan sweeps with it."""
@@ -1764,12 +1999,18 @@ if HAS_PYQT6:
             self._rx_history.clear()
             self._refresh_state()
             self._ensure_vfo_fits()
-            self._show_message(
+            span = (
                 f"{format_rate(rate)}: {format_mhz_range(self._lo_hz - rate / 2, self._lo_hz + rate / 2)} "
-                "in view.",
-                None,
-                3000,
+                "in view."
             )
+            problem, remedy = self._decoder_problem()
+            if problem:
+                # The decoder can't take this rate (ADS-B below 2 MS/s): why,
+                # after the span rather than covered by it.
+                text = f"{span} {problem}. {remedy}".strip()
+                self._show_message(text, "warning", 10000)
+                return
+            self._show_message(span, None, 3000)
 
         def _apply_baseband_filter(self) -> None:
             """A HackRF's baseband filter follows its sample rate, as in the
@@ -1968,6 +2209,7 @@ if HAS_PYQT6:
             is played first (then the audio fades out)."""
             self._settle_frames()
             self._pipeline.close()
+            self._flush_decoder()  # (a Morse line in progress)
             was_running = self._running
             # (Where a recording that ends here was saved is said too.)
             self._recording_said = None
@@ -1984,6 +2226,9 @@ if HAS_PYQT6:
             self._dsp.reset()
             self._sync_audio_output()
             self._level_meter.clear()
+            self._show_stereo(NO_STEREO_READING)  # (nothing is received)
+            self._show_notch_found(None)
+            self._show_no_tone_heard()
             self._refresh_state()
             if was_running:
                 self.running_changed.emit(False)
@@ -2127,6 +2372,7 @@ if HAS_PYQT6:
             self._freq_input.set_frequency(self._tuned_hz)
             self._freq_label.setText(format_frequency(self._tuned_hz))
             self._dsp.offset_hz = self._tuned_hz - self._lo_hz
+            self._dsp.tuned_hz = self._tuned_hz
             self._update_passband()
             self._update_tx_group()
 
@@ -2218,6 +2464,7 @@ if HAS_PYQT6:
                 self._load_step()
             self._tuning_form.setRowVisible(self._deviation_combo, mode == "FM")
             self._apply_dsp_settings()
+            self._update_filter_controls()
 
         def _fill_filters(self, mode: str) -> None:
             combo = self._filter_combo
@@ -2271,6 +2518,7 @@ if HAS_PYQT6:
 
         def _on_deviation_changed(self) -> None:
             self._apply_dsp_settings()
+            self._update_filter_controls()  # (broadcast FM keeps its audio)
             if not self._restoring:
                 self._load_step()
 
@@ -2281,6 +2529,7 @@ if HAS_PYQT6:
             dsp.bandwidth_hz = self._bandwidth_hz()
             dsp.deviation_hz = self._deviation_hz()
             dsp.offset_hz = self._tuned_hz - self._lo_hz
+            dsp.tuned_hz = self._tuned_hz
             self._update_passband()
             self._update_click_snap()
 
@@ -2714,6 +2963,26 @@ if HAS_PYQT6:
             if not self._restoring:
                 self._save(KEY + "volume", int(value))
 
+        def _on_stereo_toggled(self, on: bool) -> None:
+            """The Stereo switch: the next block follows it (the stereo
+            difference fades in or out: no click)."""
+            self._dsp.stereo = bool(on)
+            self._save(KEY + "stereo", bool(on))
+
+        def _show_stereo(self, reading: StereoReading) -> None:
+            """The STEREO lamp (a frame's reading; hidden without one)."""
+            if reading == self._stereo_shown:
+                return
+            self._stereo_shown = reading
+            text, tone, tip = reading
+            badge = self._stereo_badge
+            if text:
+                badge.setText(text)
+                badge.setToolTip(tip)
+                badge.setAccessibleDescription(tip)
+                set_tone(badge, tone)
+            badge.setVisible(bool(text))
+
         def _output_failed(self) -> bool:
             """This receiver should play, but its audio output didn't open
             (it is tried again every few seconds)."""
@@ -2859,8 +3128,19 @@ if HAS_PYQT6:
             axis = (float(self._lo_hz), float(self._rate()))
             if self._recorder is not None:
                 self._record(samples)
+            # Someone listens to this receiver, its speaker on or off (the
+            # main window's Audio switch): the STEREO lamp keeps up. Not
+            # while only the main window plays, the audio is paused or a
+            # scan sweeps with it.
+            heard = self._listen != LISTEN_MAIN and realtime and not self._scan_muted
             return functools.partial(
-                self._work, samples, play and realtime, plots, axis
+                self._work,
+                samples,
+                play and realtime,
+                plots,
+                axis,
+                heard=heard,
+                decode=self._decoding_now(),
             )
 
         def _plots_want(self, samples: np.ndarray) -> bool:
@@ -2907,6 +3187,12 @@ if HAS_PYQT6:
             )
             if gate.auto and gate.last_threshold_db is not None:
                 self._show_auto_threshold(gate.last_threshold_db)
+            self._show_stereo(frame.stereo)
+            if self._notch_mode() == "auto":
+                self._show_notch_found(frame.notch_hz)
+            tone, dcs, checked = frame.tone_heard
+            self._show_tone_heard(tone, checked, dcs)
+            self._show_decoded(result)
             if frame.audio is not None and len(frame.audio) and self._audio_open:
                 self._audio.write(frame.audio)
 
@@ -3268,12 +3554,23 @@ if HAS_PYQT6:
                 return False
             if not self.tune(freq):
                 return False
-            demod, deviation, width, _tone = bookmark_listening(bookmark)
+            demod, deviation, width, tone = bookmark_listening(bookmark)
+            squelch = ""
             if demod:
                 self._listen_like_bookmark(demod, deviation, width)
+                if demod == "FM":
+                    # Its tone squelch, as the main window applies it: its
+                    # CTCSS tone or DCS code, or none.
+                    dcs = None if tone else bookmark_dcs(bookmark)
+                    self._set_tone_choice(tone, dcs)
+                    tone, dcs = self._tone_choice()
+                    if dcs is not None:
+                        squelch = f", {dcs_label(*dcs)}"
+                    elif tone:
+                        squelch = f", tone squelch {tone:.1f} Hz"
             label = str(bookmark.get("label") or "") or format_frequency(freq)
             mode = "I/Q" if self.mode().startswith("None") else self.mode()
-            self._show_message(f"Tuned to {label} ({mode})", "info", 3000)
+            self._show_message(f"Tuned to {label} ({mode}{squelch})", "info", 3000)
             return True
 
         def _listen_like_bookmark(self, demod: str, deviation: str, width: str) -> None:
@@ -3304,6 +3601,17 @@ if HAS_PYQT6:
             name = str(existing.get("label") or label)
             if added:
                 short = "I/Q" if mode.startswith("None") else mode
+                # The tone squelch belongs to the channel listened to, not to
+                # another signal right-clicked on the waterfall.
+                tone, dcs = self._tone_choice()
+                if mode != "FM" or abs(freq - self._tuned_hz) >= 0.5:
+                    tone, dcs = None, None
+                if tone:
+                    panel.set_tone(index, tone)
+                    short += f", tone squelch {tone:.1f} Hz"
+                elif dcs is not None:
+                    panel.set_dcs(index, *dcs)
+                    short += f", {dcs_label(*dcs)}"
                 self._show_message(
                     f"Bookmarked {name} ({short}) in the main window's Bookmarks.",
                     "success",
@@ -3391,10 +3699,16 @@ if HAS_PYQT6:
                 return False
             demod, deviation, width = self.tx_listening(mode, bandwidth)
             self.set_mode(demod, deviation, width)
+            squelch = ""
+            if demod == "FM" and self._tone_choice() != (None, None):
+                # The main window sends no CTCSS tone or DCS code: a tone
+                # squelch left on would hold the transmission back (TONE).
+                self._set_tone_choice(None, None)
+                squelch = ", tone squelch off"
             if not self._running and not self.start():
                 return False
             self._show_message(
-                f"Monitoring {what} on {format_frequency(freq)} ({demod}).",
+                f"Monitoring {what} on {format_frequency(freq)} ({demod}{squelch}).",
                 "info",
                 5000,
             )
@@ -3518,6 +3832,8 @@ if HAS_PYQT6:
             )
             self._update_tx_group()
             self._update_audio_note()
+            self._follow_decoder_rate()
+            self._update_decoder_line()
 
         def _update_status(self) -> None:
             if self._main_gone:
@@ -3527,6 +3843,7 @@ if HAS_PYQT6:
                 self._update_rec_label()
             self._update_tx_group()
             self._update_audio_note()
+            self._update_decoder_line()
             if self._gain_auto.isChecked():
                 self._show_gain()  # (what the automatic gain chose now)
             self._follow_main_output()  # (the output chosen meanwhile)
@@ -3539,13 +3856,18 @@ if HAS_PYQT6:
         ) -> None:
             self._message_label.setText(text)
             self._message_label.setToolTip(text)
+            self._message_label.setAccessibleDescription(text)  # (screen readers)
             set_tone(self._message_label, tone)
+            # (Whole, should the status line cut it.)
+            self._message_overflow.show_message(text, tone)
             self._message_timer.start(max(500, int(duration_ms)))
 
         def _clear_message(self) -> None:
             self._message_label.setText("")
             self._message_label.setToolTip("")
+            self._message_label.setAccessibleDescription("")
             set_tone(self._message_label, None)
+            self._message_overflow.clear()
 
         def message(self) -> str:
             return self._message_label.text()
@@ -3554,12 +3876,13 @@ if HAS_PYQT6:
 
         def keyPressEvent(self, event):  # noqa: N802 - Qt naming
             """Space starts/stops this receiver, Left/Right tune it, [ and ]
-            change its step (plots focused), Esc goes back to the plots: as
-            in the main window, only when the focused widget doesn't use
-            the key itself."""
+            change its step (plots focused), Esc goes back to the plots (and
+            hides a long message's panel): as in the main window, only when
+            the focused widget doesn't use the key itself."""
             key = event.key()
             mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
             if key == Qt.Key.Key_Escape and mods == Qt.KeyboardModifier.NoModifier:
+                self._message_overflow.dismiss()  # (a long message's panel)
                 entry = getattr(self._freq_input, "_freq_input", None)
                 if entry is not None and entry.hasFocus():
                     self._freq_input.cancel_edit()
@@ -3665,6 +3988,10 @@ if HAS_PYQT6:
                 volume = s.get_int(KEY + "volume", 70)
                 self._volume_slider.setValue(min(max(volume, 0), 100))
                 self._on_volume_changed(self._volume_slider.value())
+                self._stereo_check.setChecked(s.get_bool(KEY + "stereo", True))
+                self._dsp.stereo = self._stereo_check.isChecked()
+                self._restore_filters()
+                self._restore_decoder()
                 listen = s.get_str(KEY + "listen", DEFAULT_LISTEN)
                 if listen not in _LISTEN_KEYS:
                     listen = DEFAULT_LISTEN

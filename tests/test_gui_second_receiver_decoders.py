@@ -231,6 +231,41 @@ class TestRatesTooLow(_DecodeCase):
         self.assertIsNone(decoder.status.problem)
         self.assertNotIn("needs at least", rx._decoder_line.text())
 
+    def test_a_new_rate_too_low_says_why_after_the_span(self):
+        # (Review: choosing 1 MS/s with ADS-B on said why, then "1 MS/s:
+        # ... in view." took its place at once.)
+        rx = self.rx
+        self.start_on(1090e6, ("None (I/Q)", "", "2 MHz"))
+        self.choose("ADS-B")
+        self.assertNotIn("needs at least", rx._decoder_line.text())
+        index = rx._rate_combo.findData(1.0e6)
+        rx._rate_combo.setCurrentIndex(index)
+        with self.assertLogs("sdr_module.gui", "WARNING"):
+            rx._rate_combo.activated.emit(index)
+        message = rx.message()
+        self.assertIn("1 MS/s: ", message)  # (the span, as before)
+        self.assertIn("ADS-B needs at least 2 MS/s", message)
+        self.assertIn("Choose 2 MS/s or more in Sample rate", message)
+        self.assertEqual(rx._message_label.property("tone"), "warning")
+
+    def test_chosen_again_it_is_said_again(self):
+        # (Review: once said for a protocol and rate, choosing it again
+        # there said nothing in the status line; the main window says it
+        # each time its decoder is built.)
+        rx = self.rx
+        index = rx._rate_combo.findData(1.0e6)
+        rx._rate_combo.setCurrentIndex(index)
+        rx._rate_combo.activated.emit(index)
+        self.start_on(1090e6, ("None (I/Q)", "", "2 MHz"))
+        with self.assertLogs("sdr_module.gui", "WARNING"):
+            self.choose("ADS-B")
+        self.assertIn("ADS-B needs at least 2 MS/s", rx.message())
+        rx._clear_message()
+        self.choose("Off")
+        with self.assertLogs("sdr_module.gui", "WARNING"):
+            self.choose("ADS-B")
+        self.assertIn("ADS-B needs at least 2 MS/s", rx.message())
+
 
 class TestTheDecoderTab(_DecodeCase):
     def test_show_in_decoder_tab(self):

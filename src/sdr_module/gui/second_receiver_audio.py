@@ -517,7 +517,7 @@ if HAS_PYQT6:
             nothing is touched unless it changed)."""
             text, tip, tone = notch_found_text(hz)
             label = self._notch_found
-            if label.text() != text:
+            if label.text() != text or label.toolTip() != tip:
                 label.setText(text)
                 label.setToolTip(tip)
                 set_tone(label, tone)

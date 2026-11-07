@@ -117,6 +117,26 @@ class TestCtcss(_DspCase):
         self.assertGreater(len(audio), 0.5 * AUDIO)
         self.assertEqual(frames[-1].tone_heard, (None, None, False))
 
+    def test_broadcast_fm_isnt_demodulated_for_a_tone_nobody_checks(self):
+        # (Review: with a tone set, broadcast FM nobody listens to was
+        # demodulated every block for a check it never makes.)
+        dsp = _dsp(tone_hz=123.0, deviation=75e3, bandwidth=200e3)
+        calls = []
+        chain = dsp.chain()
+        real = chain.demodulate
+        chain.demodulate = lambda *a, **k: calls.append(1) or real(*a, **k)
+        frames, _audio = _listen(dsp, _repeater(seconds=0.5), play=False)
+        self.assertEqual(calls, [])
+        self.assertEqual(frames[-1].tone_heard, (None, None, False))
+        # Narrow FM still is (the TONE lamp, speaker off).
+        narrow = _dsp(tone_hz=123.0)
+        chain = narrow.chain()
+        real_narrow = chain.demodulate
+        chain.demodulate = lambda *a, **k: calls.append(1) or real_narrow(*a, **k)
+        frames, _audio = _listen(narrow, _repeater(seconds=0.5), play=False)
+        self.assertTrue(calls)
+        self.assertEqual(frames[-1].state, "tone")
+
     def test_another_channel_is_heard_anew(self):
         # The last channel's tone must not keep the squelch open on one
         # without it.

@@ -291,6 +291,13 @@ class TestAutoSaysWhatItRemoves(_SecondCase):
         self.assertRegex(found.text(), r"^13(49|50|51) Hz$")
         self.assertEqual(found.property("tone"), "success")
         self.assertIn("1350", found.toolTip())
+        # A drift within the same whole hertz: the tooltip's tenth follows
+        # (review: it kept the first one's).
+        rx._show_notch_found(1350.04)
+        self.assertEqual(found.toolTip(), "Auto removes a steady whistle at 1350.0 Hz")
+        rx._show_notch_found(1350.4)
+        self.assertEqual(found.text(), "1350 Hz")
+        self.assertEqual(found.toolTip(), "Auto removes a steady whistle at 1350.4 Hz")
         # Manual shows its own frequency, not what Auto found.
         rx._notch_combo.setCurrentIndex(2)
         self.assertIs(rx._notch_stack.currentWidget(), rx._notch_spin)

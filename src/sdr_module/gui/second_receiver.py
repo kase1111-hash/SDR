@@ -678,12 +678,13 @@ class ReceiverDsp:
         power = self.spectrum(display)
         self._noise.update(power, len(samples) / max(self.rate, 1.0))
         chain = self.chain()
-        if self.tuned_hz != self._tuned_last:
+        tuned = self.tuned_hz  # (read once: the window may set it meanwhile)
+        if tuned != self._tuned_last:
             if self._tuned_last is not None:
                 chain.retuned()  # (Auto's whistle was the last station's)
                 # Another channel: its tone (if any) must be heard anew.
                 tones.reset()
-            self._tuned_last = self.tuned_hz
+            self._tuned_last = tuned
         channel = chain.channelize(samples)
         seconds = len(channel) / max(chain.channel_rate, 1.0)
         if len(channel):
@@ -712,8 +713,9 @@ class ReceiverDsp:
         )
         speaker = play and audible and gate.is_open
         # The TONE lamp: a signal without the chosen tone or code reads
-        # TONE whether the speaker plays or not.
-        tone_check = audible and self.mode == "FM" and gate.is_open and tones.active
+        # TONE whether the speaker plays or not (narrow FM: broadcast FM
+        # isn't checked, so isn't demodulated for it).
+        tone_check = audible and self._tones_checked() and gate.is_open and tones.active
         frame.audio = self._audio(chain, channel, speaker, received, tone_check)
         frame.stereo = self._stereo_lamp(chain, received)
         # (Nothing is notched while nothing is demodulated.)
@@ -1997,12 +1999,18 @@ if HAS_PYQT6:
             self._rx_history.clear()
             self._refresh_state()
             self._ensure_vfo_fits()
-            self._show_message(
+            span = (
                 f"{format_rate(rate)}: {format_mhz_range(self._lo_hz - rate / 2, self._lo_hz + rate / 2)} "
-                "in view.",
-                None,
-                3000,
+                "in view."
             )
+            problem, remedy = self._decoder_problem()
+            if problem:
+                # The decoder can't take this rate (ADS-B below 2 MS/s): why,
+                # after the span rather than covered by it.
+                text = f"{span} {problem}. {remedy}".strip()
+                self._show_message(text, "warning", 10000)
+                return
+            self._show_message(span, None, 3000)
 
         def _apply_baseband_filter(self) -> None:
             """A HackRF's baseband filter follows its sample rate, as in the

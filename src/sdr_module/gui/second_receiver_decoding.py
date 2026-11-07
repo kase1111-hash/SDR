@@ -451,12 +451,15 @@ if HAS_PYQT6:
 
         def _say_decoder_problem(self) -> None:
             """A decoder that can't work here (a rate too low): said in the
-            status bar and logged, once per protocol and rate, as in the
-            main window."""
+            status bar and logged each time it is built so, as in the main
+            window (not again while it stays so)."""
             problem, remedy = self._decoder_problem()
             decoding = self._work.decoding
             key = (decoding.protocol, decoding.rate)
-            if not problem or key == self._decoder_said:
+            if not problem:
+                self._decoder_said = None  # (chosen there again: said again)
+                return
+            if key == self._decoder_said:
                 return
             self._decoder_said = key
             text = f"{problem}. {remedy}".strip() if remedy else problem

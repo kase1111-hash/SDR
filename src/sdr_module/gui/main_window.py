@@ -5940,6 +5940,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         sample_rate: Optional[float] = None,
         source: str = "",
         when: Any = None,
+        at_s: Optional[float] = None,
     ) -> None:
         """Render one decoded message into the decoder panel.
 
@@ -5952,8 +5953,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         and ``sample_rate`` are where it was received and at what rate
         (default: the tuned frequency and the device's rate; 0 for
         unknown). ``source`` names the recording it came from (its row is
-        marked and kept out of the live views) and ``when`` is its time
-        there, when the recording says when it was made.
+        marked; the Aircraft and Text views list it with that recording's,
+        never the live ones), ``at_s`` is where in it (seconds) and ``when``
+        its time there, when the recording says when it was made.
         """
         try:
             address, content = self._describe_message(msg)
@@ -5986,6 +5988,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 freq_hz=freq_hz,
                 sample_rate=sample_rate,
                 source=source,
+                at_s=at_s,
                 when=when,
             )
             self._note_decoded()
@@ -11114,6 +11117,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         protocol, offset = choice
         self._show_panel("decoder")
+        # (Decoded again: its aircraft and text are listed anew.)
+        self._decoder_panel.recording_decode_started(options.name)
         counts = {"messages": 0}
         # When the recording was made (SigMF's core:datetime), to stamp its
         # messages with their own time rather than the decode's.
@@ -11137,6 +11142,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                     sample_rate=options.sample_rate,
                     source=options.name,
                     when=start + timedelta(seconds=at) if start else None,
+                    at_s=at,
                 )
 
         result = run_job(

@@ -7,12 +7,21 @@ Views the Decoder panel adds for particular protocols.
   heard. Rows dim after a minute without a message and go after five.
 - :class:`MorseTextView` (CW): the decoded text as it comes in, the line
   still being received included, and the sending speed.
+
+Both also show what File > Decode Recording finds in a recording, in a
+list of its own per recording, picked under "Showing:" (:class:`SourceBar`)
+above the view: what is heard live and what a recording holds are never
+mixed. A recording's messages are timed by its own clock (its time of day
+when it says when it was made, else the time into it), so its aircraft
+neither dim nor go as the wall clock runs on.
 """
 
 from __future__ import annotations
 
+import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 try:
@@ -20,6 +29,7 @@ try:
     from PyQt6.QtGui import QBrush, QFont, QFontMetrics, QKeySequence, QTextCursor
     from PyQt6.QtWidgets import (
         QAbstractItemView,
+        QComboBox,
         QHBoxLayout,
         QHeaderView,
         QLabel,
@@ -80,6 +90,51 @@ def format_age(seconds: float) -> str:
     return f"{seconds / 60:.0f} min"
 
 
+def format_recording_time(t: float, absolute: bool) -> str:
+    """When a recording's message came, by the recording's clock: its time
+    of day (``absolute``: ``t`` is a time since 1970, shown in local time
+    as the Messages table shows it, ``"07:00:01"``), else the time into the
+    recording (``t`` seconds: ``"1:15"``, ``"1:02:05"``)."""
+    if absolute:
+        try:
+            return datetime.fromtimestamp(float(t)).strftime("%H:%M:%S")
+        except (OverflowError, OSError, ValueError):
+            return _NO_VALUE
+    value = float(t)
+    if not math.isfinite(value):
+        return _NO_VALUE
+    hours, rest = divmod(int(max(0.0, value)), 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def recording_time(
+    absolute: bool, at_s: Optional[float], when: Optional[datetime], last: float
+) -> float:
+    """A recording's message time on its own clock (see
+    :func:`format_recording_time`): ``when`` (its time of day, given when
+    the recording says when it was made) for an ``absolute`` clock, else
+    the seconds ``at_s`` into it; ``last`` (the latest time so far) when
+    the message has no such time, or now for an absolute clock."""
+    if absolute:
+        if when is not None:
+            try:
+                return float(when.timestamp())
+            except (OverflowError, OSError, ValueError):
+                pass
+        return time.time()
+    if at_s is not None:
+        try:
+            value = float(at_s)
+        except (TypeError, ValueError):
+            return last
+        if math.isfinite(value):
+            return value
+    return last
+
+
 def format_vertical_rate(rate: Optional[int]) -> str:
     """``1200 -> "+1,200"`` (feet per minute), ``0 -> "level"``."""
     if rate is None:
@@ -89,8 +144,10 @@ def format_vertical_rate(rate: Optional[int]) -> str:
     return f"{rate:+,}"
 
 
-def describe_aircraft(aircraft: Aircraft, now: float) -> str:
-    """One line about an aircraft (the Aircraft view's detail line)."""
+def describe_aircraft(aircraft: Aircraft, now: float, heard: str = "") -> str:
+    """One line about an aircraft (the Aircraft view's detail line).
+    ``heard`` says when it was last heard instead of its age (a
+    recording's aircraft: "last heard at 07:00:01 in adsb.sigmf-data")."""
     parts = [
         aircraft.callsign and f"{aircraft.callsign} ({aircraft.icao})" or aircraft.icao
     ]
@@ -119,6 +176,9 @@ def describe_aircraft(aircraft: Aircraft, now: float) -> str:
         parts.append(f"squawk {aircraft.squawk}")
     count = aircraft.messages
     parts.append(f"{count:,} message{'' if count == 1 else 's'}")
+    if heard:
+        parts.append(heard)
+        return "  ·  ".join(parts)
     age = format_age(now - aircraft.last_seen)
     parts.append("last heard just now" if age == "now" else f"last heard {age} ago")
     return "  ·  ".join(parts)
@@ -131,13 +191,17 @@ class AircraftTracker:
     field wins, a field not in a message keeps its value); an aircraft not
     heard for ``STALE_S`` is stale, and after ``DROP_S`` it is dropped by
     :meth:`expire`.
+
+    ``ages`` False: a recording's aircraft, timed by the recording's clock
+    (``update(msg, at=...)``), which are never stale and never dropped.
     """
 
     STALE_S = 60.0
     DROP_S = 300.0
 
-    def __init__(self, clock: Callable[[], float] = time.monotonic):
+    def __init__(self, clock: Callable[[], float] = time.monotonic, ages: bool = True):
         self._clock = clock
+        self.ages = bool(ages)
         self._aircraft: Dict[str, Aircraft] = {}
 
     def __len__(self) -> int:
@@ -154,15 +218,16 @@ class AircraftTracker:
         self._aircraft.clear()
 
     def is_stale(self, aircraft: Aircraft) -> bool:
-        return self._clock() - aircraft.last_seen > self.STALE_S
+        return self.ages and self._clock() - aircraft.last_seen > self.STALE_S
 
-    def update(self, msg: Any) -> Optional[Aircraft]:
-        """Take one ADS-B message; returns its aircraft (None if the
-        message is not a valid one with an address)."""
+    def update(self, msg: Any, at: Optional[float] = None) -> Optional[Aircraft]:
+        """Take one ADS-B message (heard ``at``, default: the clock's now);
+        returns its aircraft (None if the message is not a valid one with an
+        address)."""
         icao = str(getattr(msg, "icao_address", "") or "").strip()
         if not icao or not getattr(msg, "valid", True):
             return None
-        now = self._clock()
+        now = self._clock() if at is None else float(at)
         aircraft = self._aircraft.get(icao)
         if aircraft is None:
             aircraft = self._aircraft[icao] = Aircraft(icao=icao, first_seen=now)
@@ -205,6 +270,8 @@ class AircraftTracker:
 
     def expire(self) -> List[str]:
         """Drop aircraft not heard for ``DROP_S``; returns their addresses."""
+        if not self.ages:
+            return []
         cutoff = self._clock() - self.DROP_S
         gone = [icao for icao, a in self._aircraft.items() if a.last_seen < cutoff]
         for icao in gone:
@@ -266,12 +333,133 @@ class _AircraftItem(QTableWidgetItem if HAS_PYQT6 else object):
         return bool(super().__lt__(other))
 
 
+#: What the source bar calls what is heard now.
+LIVE = "Live"
+
+_LIVE_TABLE_TIP = (
+    "One row per aircraft heard, with its latest information. Click an "
+    "aircraft to show only its messages under Messages (double-click to go "
+    "there); click a title to sort by it. Rows dim after a minute without a "
+    "message and are removed after five."
+)
+_RECORDING_TABLE_TIP = (
+    "One row per aircraft heard in {name}, as File > Decode Recording found "
+    "them, with when each was last heard in it (the recording's own time). "
+    "Click an aircraft to show only its messages under Messages "
+    "(double-click to go there); click a title to sort by it. Showing: "
+    "Live goes back to the aircraft heard now."
+)
+_LIVE_SEEN_TIP = _AC_HEADERS[AC_SEEN][1]
+_RECORDING_SEEN_TIP = (
+    "When it was last heard in the recording: its time of day when the "
+    "recording says when it was made, else the time into the recording"
+)
+
+
+class SourceBar(QWidget if HAS_PYQT6 else object):
+    """ "Showing: [Live]" above a protocol view: Live, or one of the
+    recordings File > Decode Recording decoded, each in a list of its own
+    (what is heard now and what a recording holds are never mixed). Hidden
+    while there is no recording (a live view looks as it did). Picking one
+    emits :attr:`chosen` with its name ("" for Live)."""
+
+    if HAS_PYQT6:
+        chosen = pyqtSignal(str)
+
+    def __init__(self, what: str, parent: Any = None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(2, 0, 2, 0)
+        row.setSpacing(6)
+        label = QLabel("Showing:")
+        set_role(label, "hint")
+        row.addWidget(label)
+        self.combo = QComboBox()
+        self.combo.setAccessibleName(f"{what} shown")
+        self.combo.setToolTip(
+            f"Which {what.lower()} this view shows: {LIVE} (what the receiver "
+            "decodes now) or a recording File > Decode Recording decoded, "
+            "timed by the recording's clock. Clear empties them all."
+        )
+        self.combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.combo.setMinimumContentsLength(10)
+        self.combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        label.setBuddy(self.combo)
+        self.combo.activated.connect(self._on_activated)
+        row.addWidget(self.combo, 1)
+        self.hide()
+
+    def set_sources(self, recordings: List[str], current: str) -> None:
+        """Offer Live and ``recordings`` (in this order), ``current`` picked;
+        shown while there is a recording."""
+        blocked = self.combo.blockSignals(True)
+        try:
+            self.combo.clear()
+            self.combo.addItem(LIVE, "")
+            for name in recordings:
+                self.combo.addItem(name, name)
+                self.combo.setItemData(
+                    self.combo.count() - 1,
+                    f"What File > Decode Recording found in {name}",
+                    Qt.ItemDataRole.ToolTipRole,
+                )
+            index = self.combo.findData(current)
+            self.combo.setCurrentIndex(max(0, index))
+        finally:
+            self.combo.blockSignals(blocked)
+        self.setVisible(bool(recordings))
+
+    def current_text(self) -> str:
+        return self.combo.currentText()
+
+    def current_source(self) -> str:
+        return str(self.combo.currentData() or "")
+
+    def texts(self) -> List[str]:
+        return [self.combo.itemText(i) for i in range(self.combo.count())]
+
+    def choose(self, source: str) -> None:
+        """Pick ``source`` ("" for Live) as the user would."""
+        index = self.combo.findData(str(source or ""))
+        if index >= 0:
+            self.combo.setCurrentIndex(index)
+            self._on_activated(index)
+
+    def _on_activated(self, index: int) -> None:
+        self.chosen.emit(str(self.combo.itemData(index) or ""))
+
+
+@dataclass
+class _RecordedAircraft:
+    """A recording's aircraft (see :class:`AircraftView`): timed by its own
+    clock, ``absolute`` (its time of day) or into it."""
+
+    absolute: bool
+    latest: float = 0.0
+    tracker: Any = None
+
+
+#: Hints of the empty views: recordings show there too.
+AIRCRAFT_RECORDING_HINT = (
+    "File > Decode Recording lists the aircraft of a recording here too."
+)
+TEXT_RECORDING_HINT = "File > Decode Recording shows the text of a recording here too."
+
+
 class AircraftView(QWidget if HAS_PYQT6 else object):
     """One row per aircraft (ADS-B), newest information in place.
 
     Selecting an aircraft emits :attr:`aircraft_selected` with its ICAO
     address ("" when the selection is cleared); double-click or Enter emits
     :attr:`aircraft_activated`.
+
+    The aircraft heard live are in :attr:`tracker`; each recording's
+    (``update_message(msg, source=name, ...)``, Decode Recording) in a list
+    of its own, timed by its clock, which never dims or drops them. The
+    table shows one list at a time, picked in the source bar above it (the
+    newest recording when it comes); the live list goes on behind it.
     """
 
     if HAS_PYQT6:
@@ -284,6 +472,10 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         super().__init__(parent)
         self._clock = clock
         self.tracker = AircraftTracker(clock)
+        # Each recording's aircraft (Decode Recording), in the order they
+        # came, and the list the table shows ("": live).
+        self._recordings: Dict[str, _RecordedAircraft] = {}
+        self._shown = ""
         # Each aircraft's Flight item (its row moves when the list is
         # sorted: the row is looked up from the item).
         self._items: Dict[str, Any] = {}
@@ -298,6 +490,9 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
+        self._source_bar = SourceBar("Aircraft")
+        self._source_bar.chosen.connect(self.show_source)
+        layout.addWidget(self._source_bar)
         self.table = QTableWidget(0, len(_AC_HEADERS))
         self.table.setAccessibleName("Aircraft")
         self.table.setHorizontalHeaderLabels([h for h, _tip in _AC_HEADERS])
@@ -336,12 +531,7 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         header.setSortIndicatorShown(False)
         header.sortIndicatorChanged.connect(self._on_sort_changed)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
-        self.table.setToolTip(
-            "One row per aircraft heard, with its latest information. Click an "
-            "aircraft to show only its messages under Messages (double-click "
-            "to go there); click a title to sort by it. Rows dim after a "
-            "minute without a message and are removed after five."
-        )
+        self.table.setToolTip(_LIVE_TABLE_TIP)
         self.table.setMinimumHeight(110)
         self.table.itemSelectionChanged.connect(self._on_selection)
         self.table.itemDoubleClicked.connect(
@@ -356,7 +546,7 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
             self.table,
             "No aircraft yet\nEach aircraft gets a row here as its ADS-B "
             "messages are decoded: callsign, altitude, speed, track and "
-            "position.",
+            f"position.\n{AIRCRAFT_RECORDING_HINT}",
         )
         self._empty.action_triggered.connect(self.tune_requested.emit)
 
@@ -382,22 +572,69 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
 
     # -- API -----------------------------------------------------------------
 
-    def update_message(self, msg: Any) -> None:
-        """Take a decoded ADS-B message."""
+    def update_message(
+        self,
+        msg: Any,
+        source: str = "",
+        at_s: Optional[float] = None,
+        when: Optional[datetime] = None,
+    ) -> bool:
+        """Take a decoded ADS-B message: heard live, or (``source``) found
+        in that recording by Decode Recording, ``at_s`` seconds into it and
+        (``when``, if the recording says when it was made) at that time.
+        True when it started the list of a recording (it is shown now)."""
+        source = str(source or "")
+        if source:
+            return self._recorded(msg, source, at_s, when)
         aircraft = self.tracker.update(msg)
         if aircraft is None:
-            return
+            return False
+        if not self._timer.isActive():
+            self._timer.start()  # (ages tick, the gone go, shown or not)
+        if not self._shown:
+            self._show_row(aircraft)
+        return False
+
+    def _recorded(
+        self, msg: Any, source: str, at_s: Optional[float], when: Optional[datetime]
+    ) -> bool:
+        record = self._recordings.get(source)
+        new = record is None
+        if record is None:
+            # Its clock: the time of day when the recording says when it
+            # was made, else the time into it.
+            record = _RecordedAircraft(absolute=when is not None or at_s is None)
+            held = record
+            record.tracker = AircraftTracker(clock=lambda: held.latest, ages=False)
+        heard = recording_time(record.absolute, at_s, when, record.latest)
+        aircraft = record.tracker.update(msg, at=heard)
+        if aircraft is None:
+            return False  # (a list only for a recording with aircraft)
+        record.latest = max(record.latest, heard)
+        if new:
+            self._recordings[source] = record
+            self.show_source(source)  # (the newest decode: what was asked)
+            return True
+        if self._shown == source:
+            self._show_row(aircraft)
+        return False
+
+    def _show_row(self, aircraft: Aircraft) -> None:
+        """An aircraft of the list shown, in its row (a new one at the
+        bottom)."""
         if aircraft.icao not in self._items:
             self._add_row(aircraft.icao)
         self._fill(aircraft)
         self._empty.set_visible(False)
-        if not self._timer.isActive():
-            self._timer.start()
         if self.selected_icao() == aircraft.icao:
             self._show_detail(aircraft)
 
     def clear(self) -> None:
         self.tracker.clear()
+        self._recordings.clear()
+        self._shown = ""
+        self._source_bar.set_sources([], "")
+        self._show_list_tips()
         self._items.clear()
         self._dimmed.clear()
         self._widest.clear()
@@ -407,6 +644,78 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         self._timer.stop()
         self._fit_columns()
 
+    def forget_source(self, source: str) -> None:
+        """Drop a recording's list (it is decoded again: it starts over);
+        while it was shown, Live is shown again."""
+        if self._recordings.pop(str(source or ""), None) is None:
+            return
+        if self._shown == source:
+            self.show_source("")
+        else:
+            self._source_bar.set_sources(list(self._recordings), self._shown)
+
+    def show_source(self, source: str) -> None:
+        """Show the aircraft heard live ("") or those of a recording."""
+        source = str(source or "")
+        if source and source not in self._recordings:
+            return
+        changed = source != self._shown
+        selected = self.selected_icao() if changed else ""
+        self._shown = source
+        self._source_bar.set_sources(list(self._recordings), source)
+        if not changed:
+            return
+        self._show_list_tips()
+        self._rebuild("")
+        self.detail.hide()
+        if selected:
+            self.aircraft_selected.emit("")  # (its messages' filter goes)
+        self._empty.set_visible(not len(self._shown_tracker()))
+
+    def _show_list_tips(self) -> None:
+        """The table's and the Seen column's tooltips, for the list shown."""
+        if self._shown:
+            tip = _RECORDING_TABLE_TIP.format(name=self._shown)
+            seen = _RECORDING_SEEN_TIP
+        else:
+            tip, seen = _LIVE_TABLE_TIP, _LIVE_SEEN_TIP
+        self.table.setToolTip(tip)
+        item = self.table.horizontalHeaderItem(AC_SEEN)
+        if item is not None:
+            item.setToolTip(seen)
+
+    def sources(self) -> List[str]:
+        """The recordings with aircraft here, in the order they came."""
+        return list(self._recordings)
+
+    def shown_source(self) -> str:
+        """The list shown: "" (live) or a recording's name."""
+        return self._shown
+
+    def has_recordings(self) -> bool:
+        return bool(self._recordings)
+
+    def tracker_for(self, source: str = "") -> Optional[AircraftTracker]:
+        """The live aircraft (""), a recording's, or None (no such list)."""
+        if not source:
+            return self.tracker
+        record = self._recordings.get(source)
+        return record.tracker if record is not None else None
+
+    def source_bar(self) -> "SourceBar":
+        return self._source_bar
+
+    def find(self, icao: str) -> Optional[Aircraft]:
+        """An aircraft of the list shown, else heard live."""
+        return self._shown_tracker().get(icao) or self.tracker.get(icao)
+
+    def detail_text(self, icao: str) -> str:
+        """The line about an aircraft of the list shown ("" if none)."""
+        aircraft = self._shown_tracker().get(icao)
+        if aircraft is None:
+            return ""
+        return describe_aircraft(aircraft, self._clock(), self._heard_text(aircraft))
+
     def set_waiting(
         self, text: str, action: Optional[str] = None, tip: str = ""
     ) -> None:
@@ -414,13 +723,14 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         "Tune to ..." button, as the Decoder panel's table has them."""
         self._empty.set_text(text)
         self._empty.set_action(action, tip)
-        self._empty.set_visible(not len(self.tracker))
+        self._empty.set_visible(not len(self._shown_tracker()))
 
     def placeholder(self) -> Any:
         return self._empty
 
     def count(self) -> int:
-        return len(self.tracker)
+        """The aircraft of the list shown."""
+        return len(self._shown_tracker())
 
     def selected_icao(self) -> str:
         rows = self.table.selectionModel().selectedRows()
@@ -435,25 +745,43 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
             self.table.selectRow(item.row())
 
     def refresh(self) -> None:
-        """Update the ages, dim stale rows and drop old ones."""
+        """Update the ages, dim stale rows and drop old ones (the live
+        list, shown or not: a recording's aircraft keep their own time,
+        and its rows are only filled in again)."""
         gone = self.tracker.expire()
-        if gone:
+        if gone and not self._shown:
             selected = self.selected_icao()
             for icao in gone:
                 self._items.pop(icao, None)
             self._rebuild(selected)
             if selected in gone:
                 self._on_selection()  # nothing picked now
+        shown = self._shown_tracker()
         for icao in list(self._items):
-            aircraft = self.tracker.get(icao)
+            aircraft = shown.get(icao)
             if aircraft is not None:
                 self._fill(aircraft)
-        current = self.tracker.get(self.selected_icao())
+        current = shown.get(self.selected_icao())
         if current is not None:
             self._show_detail(current)
-        if not len(self.tracker):
+        if not len(shown):
             self._empty.set_visible(True)
-            self._timer.stop()
+        if not len(self.tracker):
+            self._timer.stop()  # (it ticks the live ages)
+
+    def _shown_tracker(self) -> AircraftTracker:
+        record = self._recordings.get(self._shown)
+        return record.tracker if record is not None else self.tracker
+
+    def _heard_text(self, aircraft: Aircraft) -> str:
+        """When a recording's aircraft was last heard in it ("" live)."""
+        record = self._recordings.get(self._shown)
+        if record is None:
+            return ""
+        when = format_recording_time(aircraft.last_seen, record.absolute)
+        if record.absolute:
+            return f"last heard at {when} in {self._shown}"
+        return f"last heard {when} into {self._shown}"
 
     # -- internals -----------------------------------------------------------
 
@@ -542,13 +870,13 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
                 self.table.clearSelection()
                 return True
             if event.matches(QKeySequence.StandardKey.Copy):
-                current = self.tracker.get(self.selected_icao())
-                if current is not None:
+                text = self.detail_text(self.selected_icao())
+                if text:
                     from PyQt6.QtGui import QGuiApplication
 
                     clipboard = QGuiApplication.clipboard()
                     if clipboard is not None:
-                        clipboard.setText(describe_aircraft(current, self._clock()))
+                        clipboard.setText(text)
                     return True
         return super().eventFilter(obj, event)
 
@@ -568,7 +896,7 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
             self._items.clear()
             self._dimmed.clear()
             self._widest.clear()  # the widest values may have gone
-            for aircraft in self.tracker.aircraft():
+            for aircraft in self._shown_tracker().aircraft():
                 self._add_row(aircraft.icao)
                 self._fill(aircraft)
             if selected in self._items:
@@ -591,7 +919,16 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         row = name_item.row()
         items = [self.table.item(row, col) for col in range(len(_AC_HEADERS))]
         now = self._clock()
-        stale = self.tracker.is_stale(aircraft)
+        record = self._recordings.get(self._shown)
+        stale = self._shown_tracker().is_stale(aircraft)
+        if record is None:
+            seen = format_age(now - aircraft.last_seen)
+            seen_key = now - aircraft.last_seen
+        else:
+            # When the recording heard it last (the latest first, as the
+            # live list's youngest).
+            seen = format_recording_time(aircraft.last_seen, record.absolute)
+            seen_key = -aircraft.last_seen
         if aircraft.on_ground:
             altitude = "ground"
         elif aircraft.altitude is not None:
@@ -617,13 +954,13 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
             AC_POSITION: position,
             AC_SQUAWK: aircraft.squawk or _NO_VALUE,
             AC_MESSAGES: f"{aircraft.messages:,}",
-            AC_SEEN: format_age(now - aircraft.last_seen),
+            AC_SEEN: seen,
         }
         # Sort keys of the columns of numbers (unknown values sort first).
         keys = {
             AC_ALTITUDE: 0.0 if aircraft.on_ground else _number(aircraft.altitude),
             AC_SPEED: _number(aircraft.speed),
-            AC_SEEN: now - aircraft.last_seen,
+            AC_SEEN: seen_key,
             AC_MESSAGES: float(aircraft.messages),
             AC_TRACK: _number(aircraft.track),
             AC_VS: _number(aircraft.vertical_rate),
@@ -636,7 +973,7 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
             if restyle
             else None
         )
-        tip = describe_aircraft(aircraft, now)
+        tip = describe_aircraft(aircraft, now, self._heard_text(aircraft))
         if stale:
             tip += "\nNot heard for over a minute: it may be out of range."
         # Heard again: its name is bold again, so maybe wider.
@@ -664,7 +1001,7 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
 
     def _on_selection(self) -> None:
         icao = self.selected_icao()
-        aircraft = self.tracker.get(icao)
+        aircraft = self._shown_tracker().get(icao)
         if aircraft is None:
             self.detail.hide()
         else:
@@ -672,7 +1009,7 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         self.aircraft_selected.emit(icao)
 
     def _show_detail(self, aircraft: Aircraft) -> None:
-        text = describe_aircraft(aircraft, self._clock())
+        text = describe_aircraft(aircraft, self._clock(), self._heard_text(aircraft))
         if self.detail.text() != text:
             self.detail.setText(text)
         self.detail.show()
@@ -683,9 +1020,25 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
 # --------------------------------------------------------------------------- #
 
 
+@dataclass
+class _RecordedText:
+    """A recording's Morse text (see :class:`MorseTextView`): its lines,
+    each with its time by the recording's clock, and the last speed."""
+
+    absolute: bool
+    latest: float = 0.0
+    lines: List[str] = field(default_factory=list)
+    wpm: float = 0.0
+
+
 class MorseTextView(QWidget if HAS_PYQT6 else object):
     """The decoded Morse text as it arrives: finished lines, then the line
-    being received (in the accent color), and the speed above."""
+    being received (in the accent color), and the speed above.
+
+    A recording's text (``add_line(text, source=name, ...)``, Decode
+    Recording) is kept apart from what is heard live, a list per recording,
+    each line after its time by the recording's clock; the source bar above
+    picks the one shown (the newest recording when it comes)."""
 
     if HAS_PYQT6:
         # Its empty state's button was clicked.
@@ -698,6 +1051,15 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
+        # Each recording's text (Decode Recording), in the order they came,
+        # and the one shown ("": live).
+        self._recordings: Dict[str, _RecordedText] = {}
+        self._shown = ""
+        # The live speed and whether a signal is heard (shown when live is).
+        self._live_speed = ("", False)
+        self._source_bar = SourceBar("Text")
+        self._source_bar.chosen.connect(self.show_source)
+        layout.addWidget(self._source_bar)
 
         row = QHBoxLayout()
         row.setContentsMargins(2, 0, 2, 0)
@@ -730,24 +1092,89 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
             "shown last, in color. Select text to copy it."
         )
         layout.addWidget(self.text, 1)
+        # A recording's text, in place of the live text while it is shown.
+        self._recorded = QPlainTextEdit()
+        self._recorded.setReadOnly(True)
+        self._recorded.setAccessibleName("Morse text of the recording")
+        self._recorded.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
+        self._recorded.document().setMaximumBlockCount(self._MAX_LINES)
+        set_role(self._recorded, "terminal")
+        self._recorded.hide()
+        layout.addWidget(self._recorded, 1)
 
         from .decoder_panel import TailFollower, ViewPlaceholder
 
         self._empty = ViewPlaceholder(
             self.text,
             "No Morse code yet\nTune to a CW signal in CW mode and press Start "
-            "(Space). The demo device has a beacon on 99.820 MHz.",
+            "(Space). The demo device has a beacon on 99.820 MHz.\n"
+            f"{TEXT_RECORDING_HINT}",
         )
         self._empty.action_triggered.connect(self.tune_requested.emit)
         self._tail = TailFollower(self.text.verticalScrollBar())
+        self._recorded_tail = TailFollower(self._recorded.verticalScrollBar())
         self._live = ""
         self._has_live = False  # the document's last block is the live line
         self._lines = 0
         theme_notifier().theme_changed.connect(self._restyle_live)
 
-    def add_line(self, text: str) -> None:
+    def add_line(
+        self,
+        text: str,
+        source: str = "",
+        at_s: Optional[float] = None,
+        when: Optional[datetime] = None,
+        wpm: float = 0.0,
+    ) -> bool:
         """A finished line of text (the live line is cleared: it was this
-        line; the next :meth:`set_live` shows what follows)."""
+        line; the next :meth:`set_live` shows what follows). From a
+        recording (``source``: Decode Recording), it goes to that
+        recording's text, after its time there (``when`` it was sent, if
+        the recording says when it was made, else ``at_s`` seconds into it),
+        at ``wpm``. True when it started the text of a recording (it is
+        shown now)."""
+        source = str(source or "")
+        if source:
+            return self._recorded_line(str(text), source, at_s, when, wpm)
+        self._live_line(text)
+        return False
+
+    def _recorded_line(
+        self,
+        text: str,
+        source: str,
+        at_s: Optional[float],
+        when: Optional[datetime],
+        wpm: float,
+    ) -> bool:
+        record = self._recordings.get(source)
+        new = record is None
+        if record is None:
+            record = self._recordings[source] = _RecordedText(
+                absolute=when is not None or at_s is None
+            )
+        heard = recording_time(record.absolute, at_s, when, record.latest)
+        record.latest = max(record.latest, heard)
+        line = f"{format_recording_time(heard, record.absolute)}  {text}"
+        record.lines.append(line)
+        del record.lines[: -self._MAX_LINES]
+        try:
+            record.wpm = float(wpm or 0.0)
+        except (TypeError, ValueError):
+            record.wpm = 0.0
+        if new:
+            self.show_source(source)  # (the newest decode: what was asked)
+            return True
+        if self._shown == source:
+            cursor = QTextCursor(self._recorded.document())
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            if not self._recorded.document().isEmpty():
+                cursor.insertBlock()
+            cursor.insertText(line, self._format(False))
+            self._show_speed()
+        return False
+
+    def _live_line(self, text: str) -> None:
         self._replace_live("")
         self._live = ""
         cursor = QTextCursor(self.text.document())
@@ -766,7 +1193,17 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
 
     def set_speed(self, wpm_text: str, receiving: bool) -> None:
         """Show the speed ("" before it is known) and whether a keyed signal
-        is heard now."""
+        is heard now (live: a recording shown shows its own speed)."""
+        self._live_speed = (str(wpm_text or ""), bool(receiving))
+        self._show_speed()
+
+    def _show_speed(self) -> None:
+        record = self._recordings.get(self._shown)
+        if record is None:
+            wpm_text, receiving = self._live_speed
+        else:
+            wpm_text = f"{record.wpm:.0f} WPM" if record.wpm > 0 else ""
+            receiving = False
         speed = wpm_text or _NO_VALUE
         if self.speed.text() != speed:
             self.speed.setText(speed)
@@ -781,8 +1218,60 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         self._live = ""
         self._lines = 0
         self._tail.reset()
+        self._recordings.clear()
+        self.show_source("")
+        self._source_bar.set_sources([], "")
         self._empty.set_visible(True)
         self.set_speed("", False)
+
+    def forget_source(self, source: str) -> None:
+        """Drop a recording's text (it is decoded again: it starts over);
+        while it was shown, the live text is shown again."""
+        if self._recordings.pop(str(source or ""), None) is None:
+            return
+        if self._shown == source:
+            self.show_source("")
+        else:
+            self._source_bar.set_sources(list(self._recordings), self._shown)
+
+    def show_source(self, source: str) -> None:
+        """Show the live text ("") or a recording's."""
+        source = str(source or "")
+        record = self._recordings.get(source)
+        if source and record is None:
+            return
+        changed = source != self._shown
+        self._shown = source
+        self._source_bar.set_sources(list(self._recordings), source)
+        if record is not None and changed:
+            self._recorded.setPlainText("\n".join(record.lines))
+            self._recorded_tail.reset()
+            self._recorded.moveCursor(QTextCursor.MoveOperation.End)
+        self.text.setVisible(record is None)
+        self._recorded.setVisible(record is not None)
+        if record is None:
+            self._recorded.clear()  # (rebuilt when shown again)
+        self._show_speed()
+
+    def sources(self) -> List[str]:
+        """The recordings with text here, in the order they came."""
+        return list(self._recordings)
+
+    def shown_source(self) -> str:
+        """The text shown: "" (live) or a recording's name."""
+        return self._shown
+
+    def has_recordings(self) -> bool:
+        return bool(self._recordings)
+
+    def source_bar(self) -> "SourceBar":
+        return self._source_bar
+
+    def shown_text(self) -> str:
+        """The text shown (live, or the recording's)."""
+        if self._shown:
+            return self._recorded.toPlainText()
+        return self.text.toPlainText()
 
     def set_waiting(
         self, text: str, action: Optional[str] = None, tip: str = ""
@@ -796,8 +1285,13 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
     def placeholder(self) -> Any:
         return self._empty
 
-    def plain_text(self) -> str:
-        return self.text.toPlainText()
+    def plain_text(self, source: str = "") -> str:
+        """The live text (the line being received included), or a
+        recording's ("" for one not here)."""
+        if not source:
+            return self.text.toPlainText()
+        record = self._recordings.get(source)
+        return "\n".join(record.lines) if record is not None else ""
 
     # -- internals -----------------------------------------------------------
 

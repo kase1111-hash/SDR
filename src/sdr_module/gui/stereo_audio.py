@@ -251,9 +251,7 @@ def _tau(chain: Any) -> float:
 def stereo_blend_note(key: str) -> str:
     """What the status bar says when ``key`` is chosen."""
     if key == "less":
-        return (
-            "Stereo blend Less: weak stations stay in stereo longer, with more " "hiss."
-        )
+        return "Stereo blend Less: weak stations stay in stereo longer, with more hiss."
     if key == "more":
         return (
             "Stereo blend More: weak stations blend toward mono sooner and play "

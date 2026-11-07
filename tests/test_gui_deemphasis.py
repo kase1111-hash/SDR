@@ -37,6 +37,8 @@ if HAS_PYQT6:
 
 AUDIO = 48000.0
 LOW_HZ, HIGH_HZ = 1000.0, 10e3
+FIFTY = "50 µs (Europe, Australia, most of the world)"
+SEVENTY_FIVE = "75 µs (the Americas, South Korea)"
 
 
 def _menu(win, *path):
@@ -93,8 +95,8 @@ class TestTheMenu(_WindowTestCase):
         self.assertEqual(
             [a.text().replace("&", "") for a in actions],
             [
-                "75 µs (the Americas, South Korea)",
-                "50 µs (Europe, Australia, most of the world)",
+                SEVENTY_FIVE,
+                FIFTY,
             ],
         )
         for action in actions:
@@ -121,14 +123,14 @@ class TestTheMenu(_WindowTestCase):
             "Radio",
             "Audio",
             "De-emphasis",
-            "50 µs (Europe, Australia, " "most of the world)",
+            FIFTY,
         )
         seventy_five = _menu(
             self.win,
             "Radio",
             "Audio",
             "De-emphasis",
-            "75 µs (the Americas, South Korea)",
+            SEVENTY_FIVE,
         )
         with self.assertNoLogs(level="WARNING"):  # (what was asked: no problem)
             fifty.trigger()
@@ -155,7 +157,7 @@ class TestTheMenu(_WindowTestCase):
             "Radio",
             "Audio",
             "De-emphasis",
-            "50 µs (Europe, Australia, " "most of the world)",
+            FIFTY,
         )
         self.assertTrue(fifty.isChecked())
 
@@ -196,7 +198,7 @@ class TestADamagedSetting(_IniSettings):
                     "Radio",
                     "Audio",
                     "De-emphasis",
-                    "75 µs (the Americas, South Korea)",
+                    SEVENTY_FIVE,
                 )
                 self.assertTrue(checked.isChecked())
 
@@ -216,8 +218,8 @@ class TestWhatPlays(_WindowTestCase):
 
     def choose(self, key):
         label = {
-            "75": "75 µs (the Americas, South Korea)",
-            "50": "50 µs (Europe, Australia, most of the world)",
+            "75": SEVENTY_FIVE,
+            "50": FIFTY,
         }[key]
         _menu(self.win, "Radio", "Audio", "De-emphasis", label).trigger()
 
@@ -300,7 +302,7 @@ class TestStereoStations(_WindowTestCase):
             "Radio",
             "Audio",
             "De-emphasis",
-            "50 µs (Europe, Australia, " "most of the world)",
+            FIFTY,
         ).trigger()
         self.written.clear()
         self.frames(device, 8)
@@ -319,7 +321,7 @@ class TestStereoStations(_WindowTestCase):
             "Radio",
             "Audio",
             "De-emphasis",
-            "50 µs (Europe, Australia, " "most of the world)",
+            FIFTY,
         ).trigger()
         self.win.set_frequency(98.0e6)  # (the tuner opens on its FM band)
         self.win._show_radio_tuner()

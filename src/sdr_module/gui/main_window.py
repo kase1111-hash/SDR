@@ -9987,12 +9987,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _saved_choice(
         self, key: str, choices: Tuple[Tuple[str, str, str], ...], default: str
     ) -> str:
-        """The saved key of one of ``choices`` (``(key, label, tip)``), or
-        ``default`` for anything else (a damaged setting: logged)."""
+        """The saved key of one of ``choices`` (``(key, label, tip)``; case
+        and spaces aside), or ``default`` for anything else (a damaged
+        setting: logged)."""
         raw = self._settings.get_str(key, default)
-        value = str(raw).strip()
-        if any(value == choice for choice, _label, _tip in choices):
-            return value
+        value = str(raw).strip().lower()
+        for choice, _label, _tip in choices:
+            if value == choice.lower():
+                return choice
         logger.warning(
             f"Ignoring the damaged setting {key}={raw!r}: using {default!r} instead."
         )

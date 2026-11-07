@@ -80,7 +80,7 @@ class TestTheMenu(_WindowTestCase):
                 self.assertIn("Stereo blend", self.win._message_label.text())
 
     def test_a_saved_choice_is_restored(self):
-        self.store.values["audio/stereo_blend"] = "more"
+        self.store.values["audio/stereo_blend"] = " More"  # (as hand-edited)
         other = self.mw.SDRMainWindow()
         self.addCleanup(other.deleteLater)
         self.addCleanup(other.close)

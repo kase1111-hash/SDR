@@ -767,9 +767,17 @@ class AudioNotch:
     def _wants(self) -> Tuple[Optional[float], ...]:
         """What each notch is to remove now."""
         if self.mode == "auto":
-            return self.finder.slot_frequencies()
+            return self._per_notch(self.finder.slot_frequencies())
         first = self._manual() if self.mode == "manual" else None
-        return (first,) + (None,) * (len(self._slots) - 1)
+        return self._per_notch((first,))
+
+    def _per_notch(
+        self, wants: Sequence[Optional[float]]
+    ) -> Tuple[Optional[float], ...]:
+        """``wants`` for each notch (a finder following fewer tones than
+        there are notches leaves the rest with none)."""
+        count = len(self._slots)
+        return tuple(wants[:count]) + (None,) * max(0, count - len(wants))
 
     def _manual(self) -> Optional[float]:
         try:
@@ -817,7 +825,8 @@ class AudioNotch:
         while pos < x.size:
             take = min(x.size - pos, self.finder.until_next_frame())
             piece = x[pos : pos + take]
-            out[pos : pos + take] = self._apply(piece, self.finder.slot_frequencies())
+            wants = self._per_notch(self.finder.slot_frequencies())
+            out[pos : pos + take] = self._apply(piece, wants)
             self.finder.process(piece)
             pos += take
         return out

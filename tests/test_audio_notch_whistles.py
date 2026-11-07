@@ -204,6 +204,28 @@ class TestSeveralWhistles(unittest.TestCase):
         self.assertLess(np.max(np.abs(whole - split)), 1e-5)
 
 
+class TestAFinderOfItsOwn(unittest.TestCase):
+    def test_a_finder_following_one_tone_uses_one_notch(self):
+        # (A library user's own ToneFinder: the notches it has no tone for
+        # stay idle.)
+        from sdr_module.dsp.audio_filters import ToneFinder
+
+        notch = _notch()
+        notch.finder = ToneFinder(RATE, max_tones=1)
+        specs = ((800.0, 0.2), (1500.0, 0.1))
+        x = _whistles(int(3.0 * RATE), specs)
+        out, _said = _feed(notch, x)
+        found = notch.frequencies_hz
+        self.assertEqual(len(found), 1)
+        notch.reset_stream()  # (every notch given what it is to remove)
+        tail = out[int(1.5 * RATE) :]
+        for hz, amp in specs:
+            if abs(hz - found[0]) < 1.0:
+                self.assertLess(tone_level(tail, hz), amp * 0.01)
+            else:
+                self.assertGreater(tone_level(tail, hz), 0.9 * amp)
+
+
 class TestStillNeverVoiceOrTheCwNote(unittest.TestCase):
     """The finder's protections hold for every notch: a voice's harmonics
     glide and never count, and in CW the note is the signal."""

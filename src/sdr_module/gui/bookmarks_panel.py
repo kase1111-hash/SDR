@@ -962,6 +962,13 @@ class BookmarksPanel(QWidget if HAS_PYQT6 else object):
             return
         self._tuned_hz = freq_hz
         self._freq_input.blockSignals(True)
+        # (A recording plays outside the receiver's range too: below 1 kHz
+        # in a one-channel file. The box takes the tuned frequency, so Add
+        # never saves a clamped one.)
+        self._freq_input.setRange(
+            min(MIN_FREQUENCY_HZ, max(1.0, freq_hz)) / 1e6,
+            max(MAX_FREQUENCY_HZ, freq_hz) / 1e6,
+        )
         self._freq_input.setValue(freq_hz / 1e6)
         self._freq_input.blockSignals(False)
         self._sync_add_mode()

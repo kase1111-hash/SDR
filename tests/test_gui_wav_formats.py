@@ -446,6 +446,168 @@ class TestOneChannelRecordings(_WavCase):
             self.assertIn("look right", dialog._check.text(), (kind, width))
 
 
+class TestTuningInsideAOneChannelRecording(_WavCase):
+    """A one-channel recording's I/Q holds its own frequencies, 0 Hz to half
+    its rate, without a receiver's roll-off at the edges: the window tunes
+    all of them. Before, in 48 kHz audio nothing below 2.4 kHz (where Morse
+    tones and voices are) could be tuned: "0.7 kHz is out of range: the
+    receiver tunes 0.001–6000 MHz" (the receiver's lowest frequency, though
+    nothing is retuned during playback), and "A 2.7 kHz channel at 1 kHz
+    doesn't fit inside the recording (0–0.024 MHz)" (the inner 80% a
+    receiver's I/Q is good for). Find Signals' "Double-click one to play it
+    there" was refused for both its tones; and audio opened in the wide FM
+    it was opened from, where no click in its 24 kHz could tune (and the
+    speaker gave FM noise): it is now heard as the sound it is, in USB from
+    0 Hz."""
+
+    def _audio(self, name="tones.wav", tones=((700.0, 0.3), (5000.0, 0.2))):
+        n = 2 * AUDIO_RATE
+        t = np.arange(n) / AUDIO_RATE
+        x = 0.002 * np.random.default_rng(9).standard_normal(n)
+        for freq, amplitude in tones:
+            x += amplitude * np.sin(2 * np.pi * freq * t)
+        path = self.path(name)
+        iq_wav(path, x, "int", 2, AUDIO_RATE)
+        return path
+
+    def _open(self, path):
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertTrue(self.win._open_recording())
+        warn.assert_not_called()
+
+    def _mode(self):
+        panel = self.win._control_panel
+        return panel._demod_combo.currentText(), panel._bw_combo.currentText()
+
+    def test_audio_opens_heard_as_the_sound_it_holds(self):
+        from tests.test_gui_round3_main import _FakeClock
+        from tests.test_gui_second_receiver import _FakeSink
+
+        win = self.win
+        sink = _FakeSink()
+        sink.open = True
+        win._audio, win._audio_enabled, win._audio_problem = sink, True, None
+        win._audio_output_problem = lambda: None
+        before = self._mode()
+        self.assertEqual(before[0], "FM")  # (broadcast FM, 200 kHz)
+        self._open(self._audio(tones=((1000.0, 0.3),)))
+        self.assertEqual(self._mode(), ("USB", "2.7 kHz"))
+        self.assertLess(win._current_frequency(), 10.0)  # (from 0 Hz)
+        self.assertAlmostEqual(win._lo_frequency(), AUDIO_RATE / 4, delta=0.5)
+        said = self.message()
+        self.assertIn("(one channel, 0–0.024 MHz)", said)
+        self.assertIn("USB from 0 Hz", said)
+        clock = _FakeClock()
+        with mock.patch.object(self.mw, "time", clock):
+            win._pacer.restart()
+            for _ in range(30):  # (0.9 s)
+                clock.advance(0.03)
+                win._update_display()
+        heard = sink.samples()[-16384:]
+        self.assertEqual(len(heard), 16384)
+        spectrum = np.abs(np.fft.rfft(heard * np.hanning(len(heard))))
+        freqs = np.fft.rfftfreq(len(heard), 1 / 48000)
+        # The file's own 1 kHz tone, as recorded.
+        self.assertAlmostEqual(freqs[np.argmax(spectrum[20:]) + 20], 1000.0, delta=10)
+        win._playback.close()
+        self.assertEqual(self._mode(), before)  # (as it was before the file)
+
+    def test_its_mode_stays_without_choose_mode_from_band_plan(self):
+        win = self.win
+        win._band_plan_action.setChecked(False)
+        before = self._mode()
+        self._open(self._audio())
+        self.assertEqual(self._mode(), before)
+        self.assertNotIn("USB", self.message())
+        win._playback.close()
+
+    def test_a_tone_below_1_khz_is_tuned(self):
+        win = self.win
+        self._open(self._audio())
+        low, _high = win._control_panel._freq_input.tuning_range()
+        self.assertLessEqual(low, 1.0)  # (the Frequency field takes 700 Hz)
+        win._set_demod_mode("CW", None, "500 Hz")
+        self.assertTrue(win.set_frequency(700.0), self.message())
+        self.assertEqual(win._current_frequency(), 700.0)
+        win._playback.close()
+        # (Back to the receiver's range.)
+        self.assertEqual(win._control_panel._freq_input.tuning_range()[0], 1e3)
+
+    def test_the_edges_of_its_span_are_tuned(self):
+        win = self.win
+        self._open(self._audio())
+        win._set_demod_mode("USB", None, "2.7 kHz")
+        for freq in (1000.0, 21000.0):  # (in the outer 10% at each end)
+            self.assertTrue(win.set_frequency(freq), self.message())
+            self.assertEqual(win._current_frequency(), freq)
+        # (A channel that leaves the span still doesn't: 23.2-25.9 kHz.)
+        self.assertFalse(win.set_frequency(23000.0))
+        self.assertIn("doesn't fit inside the recording", self.message())
+        win._playback.close()
+
+    def test_found_signals_play_where_they_are(self):
+        win = self.win
+        tools = win._signal_tools
+        self.assertTrue(tools.find_in_recording(self._audio()))
+        found = sorted(s.frequency_hz for s in tools.panel.signals())
+        self.assertEqual(len(found), 2, found)
+        self.assertAlmostEqual(found[0], 700.0, delta=50)
+        for freq in found:
+            self.assertTrue(tools.play_recording_at(freq, 0.5), self.message())
+            self.assertAlmostEqual(win._current_frequency(), freq, delta=1.0)
+        win._playback.close()
+
+    def test_a_bookmark_below_1_khz_keeps_its_frequency(self):
+        """(The Bookmarks tab's Add box and the bookmark editor took the
+        receiver's range only: tuned to 0.7 kHz, the box read 0.001 MHz and
+        Add saved 1 kHz; Save in the editor rewrote 0.7 kHz to 1 kHz.)"""
+        from sdr_module.gui.bookmark_editor import BookmarkEditDialog
+
+        win = self.win
+        panel = win._bookmarks_panel
+        self._open(self._audio())
+        win._set_demod_mode("CW", None, "500 Hz")
+        self.assertTrue(win.set_frequency(700.0), self.message())
+        self.assertAlmostEqual(panel._freq_input.value() * 1e6, 700.0, delta=0.01)
+        panel._add_current()
+        saved = panel.bookmark(panel.bookmark_count() - 1)
+        self.assertEqual(saved["freq_hz"], 700.0)
+        dialog = BookmarkEditDialog(saved)
+        self.addCleanup(dialog.deleteLater)
+        self.assertEqual(dialog.bookmark()["freq_hz"], 700.0)
+        win._playback.close()
+        # (Tuned in the receiver's range again: the box takes that range.)
+        low, high = panel._freq_input.minimum(), panel._freq_input.maximum()
+        self.assertEqual((low * 1e6, high * 1e6), (1e3, 6e9))
+
+    def test_a_two_channel_recording_keeps_to_its_inner_part(self):
+        """(A receiver's I/Q rolls off towards its edges: as before.)"""
+        win = self.win
+        x = _noisy_tone(int(0.5 * RATE), 30e3, RATE)
+        self._open(self._wav("iq.wav", x, "int", 2, "RIFF", 145e6))
+        self.assertEqual(win._control_panel._freq_input.tuning_range()[0], 1e3)
+        win._set_demod_mode("USB", None, "2.7 kHz")
+        # (240 kS/s: the inner 80% reaches 96 kHz from the middle.)
+        self.assertTrue(win.set_frequency(145e6 + 90e3), self.message())
+        self.assertFalse(win.set_frequency(145e6 + 110e3))
+        self.assertIn("doesn't fit inside the recording", self.message())
+        win._playback.close()
+
+    def test_a_direct_sampled_capture_keeps_its_mode(self):
+        """(Above audio rates it is a receiver's IF or RF: not heard as
+        sound.)"""
+        win = self.win
+        rate = 1200000  # (0-600 kHz: its middle, 300 kHz, in no band)
+        x = 0.1 * np.cos(2 * np.pi * 200e3 * np.arange(rate // 4) / rate)
+        path = self.path("if.wav")
+        iq_wav(path, x, "int", 2, rate)
+        before = self._mode()
+        self._open(path)
+        self.assertEqual(self._mode(), before)
+        self.assertEqual(win._current_frequency(), rate / 4)
+        win._playback.close()
+
+
 class TestStillRefused(_WavCase):
     def _refused(self, path, said):
         with (

@@ -384,6 +384,13 @@ class IqFileOptions:
         return self.channels == 1
 
     @property
+    def audio(self) -> bool:
+        """A one-channel file at a sound card's rate (up to
+        :data:`AUDIO_RATE_MAX`): audio, probably, rather than an IF or RF
+        sampled directly."""
+        return self.real_signal and 0 < 2 * self.sample_rate <= AUDIO_RATE_MAX
+
+    @property
     def format_label(self) -> str:
         """How the samples are stored, as the window names it: ``"cu8"``,
         or a WAV file's own format, ``"24-bit integer WAV"``, ``"16-bit
@@ -1189,7 +1196,7 @@ if HAS_PYQT6:
                     f"from its middle (within ±{options.sample_rate / 2e3:g} kHz)."
                 )
             layout.addLayout(form)
-            if options.real_signal and 2 * options.sample_rate <= AUDIO_RATE_MAX:
+            if options.audio:
                 # (Audio, probably: what decodes in it, and what doesn't.)
                 span += (
                     " It has one channel (a real signal), read as the radio "

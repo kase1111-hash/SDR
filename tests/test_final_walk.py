@@ -609,12 +609,14 @@ class TestAnotherPlaybackSpeedIsSaidOnce(_playback_case()):
     10 ms later, the paused audio's own "Playing at 4x: audio plays at 1x
     only (the spectrum, decoders and recordings keep working).": two
     entries in the status history (a click on the message area) for one
-    choice. One message says it."""
+    choice. One message says it. (M-P1: the sound plays at every speed now,
+    and the one message says how it sounds: ``playback.speed_note``.)"""
 
-    SAID = (
-        "Playing at {}x: audio plays at 1x only (the spectrum, decoders and "
-        "recordings keep working)."
-    )
+    @staticmethod
+    def said(speed):
+        from sdr_module.gui.playback import speed_note
+
+        return speed_note(speed)
 
     def speed_messages(self):
         return [
@@ -635,9 +637,9 @@ class TestAnotherPlaybackSpeedIsSaidOnce(_playback_case()):
         win._control_panel.set_squelch_db(-120)
         win._playback_bar.set_speed(4.0)
         self.run_frames()
-        self.assertFalse(win._realtime())  # (the audio is paused)
-        self.assertEqual(self.message(), self.SAID.format(4))
-        self.assertEqual(self.speed_messages(), [self.SAID.format(4)])
+        self.assertTrue(win._realtime())  # (M-P1: the sound plays at 4x)
+        self.assertEqual(self.message(), self.said(4))
+        self.assertEqual(self.speed_messages(), [self.said(4)])
         # Back at 1x, as before.
         win._playback_bar.set_speed(1.0)
         self.run_frames()
@@ -649,7 +651,7 @@ class TestAnotherPlaybackSpeedIsSaidOnce(_playback_case()):
         self.play()
         win._playback_bar.set_speed(2.0)
         self.run_frames()
-        self.assertEqual(self.speed_messages(), [self.SAID.format(2)])
+        self.assertEqual(self.speed_messages(), [self.said(2)])
 
 
 # --------------------------------------------------------------------------- #

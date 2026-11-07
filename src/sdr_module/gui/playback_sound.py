@@ -196,12 +196,20 @@ class PlaybackSound:
         else:
             self._queued = remaining + seconds
 
-    def play(self, block: np.ndarray, now: float) -> np.ndarray:
+    def play(self, block: np.ndarray, now: float, last: bool = False) -> np.ndarray:
         """The sound for the speaker for ``block`` (mono or ``(n, 2)``
         audio of the recording, as demodulated) at monotonic time
         ``now``: the block itself at 1x while the recording keeps up, else
-        what the speaker plays until the next block, time-stretched."""
-        now = float(now)
+        what the speaker plays until the next block, time-stretched.
+        ``last``: the stream ends with this block (the squelch closed, the
+        speaker stopped): what the stretch still holds comes with it
+        (:meth:`finish`)."""
+        if not len(block):
+            return _joined(block, self.finish()) if last else block
+        out = self._play(block, float(now))
+        return _joined(out, self.finish()) if last else out
+
+    def _play(self, block: np.ndarray, now: float) -> np.ndarray:
         seconds = len(block) / self.rate
         pace = self.pace
         one = self._speed == 1.0

@@ -1460,8 +1460,15 @@ class _ReceiverChain:
     @property
     def notch_frequency_hz(self) -> Optional[float]:
         """The frequency the audio notch removes now (set by hand, or the
-        whistle Auto found), None when it removes none."""
+        strongest whistle Auto found), None when it removes none."""
         return self._listening.notch_frequency_hz
+
+    @property
+    def notch_frequencies_hz(self) -> Tuple[float, ...]:
+        """Every frequency the audio notch removes now: the one set by
+        hand, or each whistle Auto found (up to three, the strongest
+        first); empty when it removes none."""
+        return self._listening.notch_frequencies_hz
 
     def retuned(self) -> None:
         """Another station tuned: the notch's Auto searches anew."""
@@ -3739,9 +3746,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             notch_menu,
             panel._notch_combo,
             [(value, text) for value, text, _tip in NOTCH_CHOICES],
-            "Remove a whistle (a heterodyne) from the audio: Auto finds it, "
-            "Manual removes the frequency set (Audio group in the control "
-            "panel; AM, SSB, CW and narrow FM)",
+            "Remove whistles (heterodynes) from the audio: Auto finds up to "
+            "three, Manual removes the frequency set (Audio group in the "
+            "control panel; AM, SSB, CW and narrow FM)",
         )
         notch_menu.addSeparator()
         self._add_action(
@@ -9851,7 +9858,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._demod_running = True
         if self._audio_options.notch == "auto":
             # (What Auto removes, next to the Notch choice.)
-            self._control_panel.show_notch_found(chain.notch_frequency_hz)
+            self._control_panel.show_notch_found(chain.notch_frequencies_hz)
         # Broadcast FM in stereo: left and right while there is stereo to
         # play (the mono audio, (L+R)/2, is what everything else hears).
         heard = audio if chain.stereo_audio is None else chain.stereo_audio

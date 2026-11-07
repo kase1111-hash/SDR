@@ -19,7 +19,7 @@ import logging
 import math
 import os
 from contextlib import contextmanager
-from typing import Dict, Iterator, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Tuple
 
 try:
     from PyQt6.QtCore import QEvent, QObject, QSize, Qt, pyqtSignal
@@ -369,6 +369,23 @@ def _parse_hz(text: str) -> float:
     value, _, unit = text.strip().partition(" ")
     scale = {"Hz": 1.0, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9}.get(unit.strip(), 1.0)
     return float(value) * scale
+
+
+def _frequencies(value: Any) -> Tuple[float, ...]:
+    """The notch's readout as frequencies: None (none), a number or a
+    sequence of them (anything else, or not finite, left out)."""
+    if value is None:
+        return ()
+    values = value if isinstance(value, (list, tuple)) else (value,)
+    found = []
+    for item in values:
+        try:
+            hz = float(item)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if math.isfinite(hz):
+            found.append(hz)
+    return tuple(found)
 
 
 def _elide_middle(text: str, limit: int) -> str:
@@ -1483,6 +1500,9 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         )
         self._notch_found = QLabel()
         self._notch_found.setAccessibleName("Whistle removed")
+        # (Up to three frequencies: it may wrap rather than widen the
+        # column; at the column's width it is one line.)
+        self._notch_found.setWordWrap(True)
         self._notch_stack = QStackedWidget()
         self._notch_stack.addWidget(self._notch_spin)
         self._notch_stack.addWidget(self._notch_found)
@@ -1496,6 +1516,7 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         row.addStretch(1)
         whistle_label = self._add_row(form, "Whistle:", notch_row)
         whistle_label.setBuddy(self._notch_spin)
+        self._notch_label = whistle_label  # ("Whistles:" for several)
         self._notch_row = notch_row
         form.setRowVisible(notch_row, False)  # (Off)
         self._notch_combo.currentIndexChanged.connect(self._on_notch_changed)
@@ -2445,10 +2466,11 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._audio_form.setRowVisible(self._notch_row, mode != "off")
         self._notch_combo.setToolTip(
             why
-            or "Removes a whistle (a heterodyne) from the audio. Auto finds the "
-            "strongest steady one and follows it as it drifts, leaving voice "
-            "alone (for music use Off: a held note counts as a whistle); Manual "
-            "removes the frequency you set (AM, SSB, CW and narrow FM)."
+            or "Removes whistles (heterodynes) from the audio. Auto finds up to "
+            "three steady ones, the strongest first, and follows each as it "
+            "drifts, leaving voice alone (for music use Off: a held note counts "
+            "as a whistle); Manual removes the frequency you set (AM, SSB, CW "
+            "and narrow FM)."
         )
 
     def _on_notch_changed(self, *_args) -> None:
@@ -2478,21 +2500,36 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         low, high = NOTCH_RANGE_HZ
         self._notch_spin.setValue(int(round(min(max(value, low), high))))
 
-    def show_notch_found(self, hz: Optional[float]) -> None:
-        """Auto's readout: the whistle it removes (Hz), or None."""
-        if hz is None:
+    def show_notch_found(self, hz: Any) -> None:
+        """Auto's readout: what it removes: a whistle's frequency (Hz),
+        several (a sequence, the strongest first: up to three), or None."""
+        found = _frequencies(hz)
+        if not found:
             text = "None"
             tip = (
                 "Auto hears no steady whistle on the channel: the audio plays "
-                "as it is. It finds one within about half a second."
+                "as it is. It finds one within about half a second, and removes "
+                "up to three at once."
             )
+        elif len(found) == 1:
+            text = f"{found[0]:.0f} Hz"
+            tip = f"Auto removes a steady whistle at {found[0]:.1f} Hz"
         else:
-            text = f"{hz:.0f} Hz"
-            tip = f"Auto removes a steady whistle at {hz:.1f} Hz"
+            # (In order of frequency, so the row doesn't jump about when
+            # two are about as loud.)
+            text = ", ".join(f"{f:.0f}" for f in sorted(found)) + " Hz"
+            tip = (
+                f"Auto removes {len(found)} steady whistles, the strongest "
+                "first: " + ", ".join(f"{f:.1f} Hz" for f in found)
+            )
+        label = getattr(self, "_notch_label", None)
+        if label is not None:
+            label.setText("Whistles:" if len(found) > 1 else "Whistle:")
         if self._notch_found.text() != text:
             self._notch_found.setText(text)
+            set_tone(self._notch_found, "success" if found else "muted")
+        if self._notch_found.toolTip() != tip:
             self._notch_found.setToolTip(tip)
-            set_tone(self._notch_found, "success" if hz is not None else "muted")
 
     # -- the low cut (K-A2) -------------------------------------------------
 

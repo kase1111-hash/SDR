@@ -369,9 +369,10 @@ NOTCH_CHOICES: Tuple[Tuple[str, str, str], ...] = (
     (
         "auto",
         "Auto",
-        "Finds the strongest steady whistle (a heterodyne) and removes it, "
-        "following it as it drifts; voice is left alone. Not for music (use "
-        "Off): a note held for half a second counts as a whistle",
+        "Finds steady whistles (heterodynes) and removes up to three at once, "
+        "the strongest first, following each as it drifts; voice is left "
+        "alone. Not for music (use Off): a note held for half a second counts "
+        "as a whistle",
     ),
     ("manual", "Manual", "Removes the frequency set in the box next to it"),
 )
@@ -440,7 +441,8 @@ class ListeningFilters:
     signal, never a whistle to remove).
 
     :attr:`notch_frequency_hz` is the frequency being notched (Manual's,
-    or the whistle Auto found), None when nothing is.
+    or the strongest whistle Auto found), None when nothing is;
+    :attr:`notch_frequencies_hz` every one (Auto removes up to three).
 
     The low cut (``low_cut_hz`` of :meth:`process`, None for none) is a
     high-pass after the notch (see :class:`~sdr_module.dsp.audio_filters.
@@ -498,6 +500,15 @@ class ListeningFilters:
         if notch.mode == "off":
             return None
         return notch.frequency_hz
+
+    @property
+    def notch_frequencies_hz(self) -> Tuple[float, ...]:
+        """Every frequency being notched (Manual's, or each whistle Auto
+        removes, the strongest first); empty when nothing is."""
+        notch = self._notch
+        if notch.mode == "off":
+            return ()
+        return tuple(notch.frequencies_hz)
 
     def process(
         self,

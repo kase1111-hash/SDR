@@ -202,6 +202,7 @@ from .second_receiver_audio import (
 )
 from .second_receiver_decoding import ReceiverDecoding
 from .spectrum_widget import SpectrumWidget, format_hz
+from .status_history import MessageOverflow
 from .stereo_audio import StereoPath
 from .themes import set_role, set_tone
 from .tuning import (
@@ -1671,6 +1672,12 @@ if HAS_PYQT6:
             self._rec_label.setAccessibleName("Second receiver recording time")
             self._rec_label.setVisible(False)
             bar.addPermanentWidget(self._rec_label)
+            # A message the status line cuts short shows whole just above it
+            # while it lasts (as in the main window); a click or Esc hides it.
+            self._message_overflow = MessageOverflow(self, self._message_label)
+            self._message_overflow.setToolTip(
+                "The status line's message in full. Click (or press Esc) to hide it."
+            )
 
         def _setup_actions(self) -> None:
             """Window-local commands (they act while this window is active)."""
@@ -3835,13 +3842,18 @@ if HAS_PYQT6:
         ) -> None:
             self._message_label.setText(text)
             self._message_label.setToolTip(text)
+            self._message_label.setAccessibleDescription(text)  # (screen readers)
             set_tone(self._message_label, tone)
+            # (Whole, should the status line cut it.)
+            self._message_overflow.show_message(text, tone)
             self._message_timer.start(max(500, int(duration_ms)))
 
         def _clear_message(self) -> None:
             self._message_label.setText("")
             self._message_label.setToolTip("")
+            self._message_label.setAccessibleDescription("")
             set_tone(self._message_label, None)
+            self._message_overflow.clear()
 
         def message(self) -> str:
             return self._message_label.text()
@@ -3850,12 +3862,13 @@ if HAS_PYQT6:
 
         def keyPressEvent(self, event):  # noqa: N802 - Qt naming
             """Space starts/stops this receiver, Left/Right tune it, [ and ]
-            change its step (plots focused), Esc goes back to the plots: as
-            in the main window, only when the focused widget doesn't use
-            the key itself."""
+            change its step (plots focused), Esc goes back to the plots (and
+            hides a long message's panel): as in the main window, only when
+            the focused widget doesn't use the key itself."""
             key = event.key()
             mods = event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier
             if key == Qt.Key.Key_Escape and mods == Qt.KeyboardModifier.NoModifier:
+                self._message_overflow.dismiss()  # (a long message's panel)
                 entry = getattr(self._freq_input, "_freq_input", None)
                 if entry is not None and entry.hasFocus():
                     self._freq_input.cancel_edit()

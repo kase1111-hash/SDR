@@ -111,6 +111,9 @@ class DecodeResult:
     #: (message, seconds into the file) of every message, valid or not.
     messages: List[Tuple[Any, float]] = field(default_factory=list)
     seconds: float = 0.0  # of the file decoded
+    #: ADS-B below 2.5 MS/s: replies left unread in a very busy sky (the
+    #: decoder's work per second is bounded, the clearest are read first).
+    skipped: int = 0
 
     @property
     def valid(self) -> int:
@@ -321,6 +324,7 @@ def decode_recording(
         if found is not None:
             found(stamped)
     result.seconds = position / rate
+    result.skipped = int(getattr(decoder, "skipped", 0) or 0)
     return result
 
 

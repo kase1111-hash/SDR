@@ -1747,6 +1747,12 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             if status is not None
             else ""
         )
+        busy = self._busy_sky(status)
+        if busy:
+            # ADS-B in a very busy sky leaves replies unread (M-D2): said
+            # while it lasts (the decoder's rate clears a few seconds of
+            # signal after it stops); the counts are in the tooltip.
+            return busy[0], "info", f"{busy[1]}\n\n{tip}" if tip else busy[1]
         if here and self._tuned_away(proto, status):
             # The count stays, but not as good news from here.
             earlier = f" ({_plural(rows, row_unit)} earlier)" if rows else ""
@@ -1789,6 +1795,19 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             text = f"Signal on {here}: waiting for {proto} {unit}s"
             return text, "info", tip
         return (f"Listening on {here}" if here else "Listening"), None, tip
+
+    def _busy_sky(self, status: Any) -> Optional[Tuple[str, str]]:
+        """``(line, tooltip)`` while the ADS-B decoder leaves replies unread
+        in a very busy sky, else None."""
+        from ..dsp.live_decoders import skipped_text, skipped_tip
+
+        per_s = getattr(status, "skipped_per_s", 0.0) or 0.0
+        rate = float(getattr(status, "sample_rate", 0.0) or 0.0)
+        recording = self._source == "recording"
+        text = skipped_text(per_s, rate, recording)
+        if not text:
+            return None
+        return text, skipped_tip(per_s, rate, recording)
 
     def _tuned_away(self, proto: str, status: Any) -> bool:
         """Whether the receiver is tuned away from where ``proto`` is heard

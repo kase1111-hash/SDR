@@ -5904,12 +5904,37 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return
         for msg in messages:
             self._push_decoded_message(msg)
-        self._decoder_panel.set_decoder_status(decoder.status)
+        status = decoder.status
+        self._decoder_panel.set_decoder_status(status)
+        self._say_busy_sky(status)
         self._update_decoder_chip()
         if getattr(decoder, "name", "") == "RDS":
             # The Decoder's own RDS names the station (the background
             # listener rests meanwhile).
             self._show_rds_station(decoder.station)
+
+    def _say_busy_sky(self, status: Any) -> None:
+        """ADS-B below 2.5 MS/s leaves replies unread in a very busy sky
+        (M-D2): the Decoder tab's line says so while it lasts; the status
+        bar says it once when it starts (a notice, not a problem: not in
+        Error History), and the message goes when it ends."""
+        from ..dsp.live_decoders import skipped_text
+
+        said = self._own("_busy_sky_said") or ""
+        text = skipped_text(
+            getattr(status, "skipped_per_s", 0.0) or 0.0,
+            float(getattr(status, "sample_rate", 0.0) or 0.0),
+            bool(self._own("_decoder_recording")),
+        )
+        if not text:
+            if said:
+                self._busy_sky_said = ""
+                if self._message_label.text() == said:
+                    self._clear_status_message()
+            return
+        if not said:
+            self._busy_sky_said = text
+            self._show_status_message(text, "info", 10000, log=False)
 
     def _decoder_takes_channel(
         self,
@@ -11176,20 +11201,29 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
             return False
         decoded = result.value
+        # ADS-B in a very busy sky below 2.5 MS/s: replies left unread (M-D2).
+        skipped = int(getattr(decoded, "skipped", 0) or 0)
+        unread = (
+            f" {skipped:,} replies weren't read: too many at once for "
+            f"{format_rate(options.sample_rate)} (the clearest were read first)."
+            if skipped
+            else ""
+        )
         if decoded.valid:
             failed = (
                 f" ({decoded.failed} failed their checks)" if decoded.failed else ""
             )
             self._show_status_message(
                 f"Decoded {decoded.valid} {protocol} message(s) from "
-                f"{options.name}{where}{failed}.",
+                f"{options.name}{where}{failed}.{unread}",
                 "success",
                 8000,
             )
         else:
             self._show_status_message(
                 f"No {protocol} messages in {options.name}{where}. Check the "
-                "protocol and the frequency (the signal must be in the file).",
+                "protocol and the frequency (the signal must be in the file)."
+                f"{unread}",
                 "warning",
                 10000,
             )

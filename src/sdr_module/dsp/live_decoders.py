@@ -107,8 +107,6 @@ SKIPPED_WINDOW_S = 3.0
 #: decoder's budget lets a burst through at once, so the first moments of
 #: a busy spell leave few unread, and a blip isn't worth a warning.
 SKIPPED_SETTLE_S = 0.5
-#: From this rate the ADS-B decoder reads every reply (no bound on its work).
-_UNBOUNDED_RATE = 2.5e6
 
 
 def format_rate(rate_hz: float) -> str:

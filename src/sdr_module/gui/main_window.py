@@ -5764,8 +5764,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         from ..dsp.protocols import ProtocolType
 
         proto_value = self._DECODER_PROTOCOLS.get(text)
-        # The badge's station came from the old decoder (if it was RDS).
+        # The badge's station came from the old decoder (if it was RDS), as
+        # did a busy sky's notice (a new decoder says it anew).
         self._show_rds_station(None)
+        self._say_busy_sky(None)
         if proto_value is None:
             # "Off" (or unknown): no live decoder.
             self._decoder = None
@@ -5917,7 +5919,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """ADS-B below 2.5 MS/s leaves replies unread in a very busy sky
         (M-D2): the Decoder tab's line says so while it lasts; the status
         bar says it once when it starts (a notice, not a problem: not in
-        Error History), and the message goes when it ends."""
+        Error History), and the message goes when it ends (``status``
+        None: the decoder is turned off or rebuilt)."""
         from ..dsp.live_decoders import skipped_text
 
         said = self._own("_busy_sky_said") or ""

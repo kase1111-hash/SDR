@@ -267,6 +267,16 @@ class TestTheWindow(_FilesCase):
         self._run_with(calm)
         self.assertNotIn("weren't read", self.win._message_label.text())
 
+    def test_a_new_decoder_starts_a_new_episode(self):
+        # Turned off (or rebuilt: another rate, a recording starting) mid
+        # spell: what the old decoder said goes, and the new one says it
+        # again when its sky is busy.
+        busy = [_status(873.0)] * 5
+        self.assertEqual(len(self._run_with(busy)), 1)
+        self.win._on_decoder_protocol_changed("Off")
+        self.assertNotIn("weren't read", self.win._message_label.text())
+        self.assertEqual(len(self._run_with(busy)), 1)
+
     def test_decode_recording_counts_them(self):
         from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
 

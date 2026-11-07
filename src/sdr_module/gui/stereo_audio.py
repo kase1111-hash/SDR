@@ -25,10 +25,18 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..dsp.fm_stereo import DEEMPHASIS_S, MIN_RATE, StereoDecoder
+from ..dsp.fm_stereo import BLEND_OFFSETS_DB, DEEMPHASIS_S, MIN_RATE, StereoDecoder
 from .deemphasis import StageCrossfade, carry_state
 
-__all__ = ["StereoPath", "AUDIBLE_DIFFERENCE", "MIN_FILTER_HZ"]
+__all__ = [
+    "StereoPath",
+    "AUDIBLE_DIFFERENCE",
+    "MIN_FILTER_HZ",
+    "STEREO_BLEND_CHOICES",
+    "DEFAULT_STEREO_BLEND",
+    "stereo_blend_note",
+    "usable_blend",
+]
 
 #: A difference signal below this (about -80 dBFS) is no stereo to play:
 #: left and right are then the mono audio.
@@ -41,6 +49,31 @@ FADE_S = 0.02
 #: much of it that left and right came out only 6-8 dB apart (and its
 #: distortion read as hiss): mono instead.
 MIN_FILTER_HZ = 150e3
+#: Radio > Audio > Stereo Blend: how far a weak station blends toward mono
+#: (key, label, tooltip); the key is ``StereoDecoder.blending``'s, as it
+#: is saved (audio/stereo_blend).
+STEREO_BLEND_CHOICES: Tuple[Tuple[str, str, str], ...] = (
+    (
+        "less",
+        "Less (more stereo, more hiss)",
+        "Weak stations stay in full stereo longer: more separation, with up "
+        "to twice the hiss (6 dB more) before stereo is turned down",
+    ),
+    (
+        "normal",
+        "Normal",
+        "Full stereo while its hiss stays 50 dB below full scale; a weaker "
+        "station blends toward mono to keep it there, and plays in mono when "
+        "it is very weak (the default)",
+    ),
+    (
+        "more",
+        "More (quieter weak stations)",
+        "Weak stations blend toward mono sooner: their hiss stays 6 dB lower, "
+        "with less separation",
+    ),
+)
+DEFAULT_STEREO_BLEND = "normal"
 
 
 class StereoPath:
@@ -213,3 +246,27 @@ class StereoPath:
 def _tau(chain: Any) -> float:
     """The chain's broadcast de-emphasis time constant (s)."""
     return float(getattr(chain, "deemphasis_s", DEEMPHASIS_S))
+
+
+def stereo_blend_note(key: str) -> str:
+    """What the status bar says when ``key`` is chosen."""
+    if key == "less":
+        return (
+            "Stereo blend Less: weak stations stay in stereo longer, with more " "hiss."
+        )
+    if key == "more":
+        return (
+            "Stereo blend More: weak stations blend toward mono sooner and play "
+            "quieter."
+        )
+    return (
+        "Stereo blend Normal: weak stations blend toward mono to keep the hiss "
+        "50 dB down."
+    )
+
+
+def usable_blend(value: Any) -> str:
+    """``value`` as a Stereo Blend choice (``"less"``, ``"normal"``,
+    ``"more"``; case and spaces aside), else ``"normal"``."""
+    name = str(value).strip().lower()
+    return name if name in BLEND_OFFSETS_DB else DEFAULT_STEREO_BLEND

@@ -58,6 +58,7 @@ from .channelizer import Delay, FirDecimator, MovingAverage, lowpass_taps
 __all__ = [
     "PILOT_HZ",
     "MIN_RATE",
+    "BLEND_OFFSETS_DB",
     "StereoDecoder",
     "stereo_noise_bandwidth",
 ]
@@ -68,6 +69,11 @@ MIN_RATE = 120e3
 #: Broadcast FM de-emphasis (Americas) and the audio bandwidth.
 DEEMPHASIS_S = 75e-6
 AUDIO_HZ = 15e3
+#: How far a weak station blends toward mono (``StereoDecoder.blending``):
+#: the blend's thresholds (``FULL_SNR_DB``, ``MONO_SNR_DB``) moved by this
+#: much. "less": full stereo with 6 dB more hiss (more separation on weak
+#: stations); "more": the hiss kept 6 dB lower (weak stations quieter).
+BLEND_OFFSETS_DB = {"less": -6.0, "normal": 0.0, "more": 6.0}
 
 
 def stereo_noise_bandwidth(
@@ -114,6 +120,9 @@ class StereoDecoder:
     ``tau_s`` is the de-emphasis the audio is heard with (75 us in the
     Americas, 50 us in most of the world): the hiss estimate assumes it,
     and :attr:`tau_s` can be changed while the decoder runs.
+    ``blending`` (a key of :data:`BLEND_OFFSETS_DB`) moves the blend's
+    thresholds (:attr:`full_snr_db`, :attr:`mono_snr_db`); it too can be
+    changed while the decoder runs.
     """
 
     #: The blend: full separation while stereo's hiss is at least this far
@@ -150,6 +159,7 @@ class StereoDecoder:
         tau_s: float = DEEMPHASIS_S,
         audio_hz: float = AUDIO_HZ,
         phase_step: bool = True,
+        blending: str = "normal",
     ):
         rate = float(rate)
         if rate < MIN_RATE:
@@ -160,6 +170,7 @@ class StereoDecoder:
         self.rate = rate
         self._audio_hz = float(audio_hz)
         self._tau_s = _checked_tau(tau_s)
+        self._blending = _checked_blending(blending)
         # Twice the carrier (DSB), and the droop made up.
         droop = float(np.sinc(2.0 * PILOT_HZ / rate)) if phase_step else 1.0
         self._gain = np.float32(2.0 / droop)
@@ -203,6 +214,7 @@ class StereoDecoder:
         # constant glides there over _GLIDE_S, so the blend doesn't jump.
         glide = max(1, int(round(self._GLIDE_S * self.work_rate)))
         self._hiss_bw = _Glide(stereo_noise_bandwidth(self._tau_s, audio_hz), glide)
+        self._offset = _Glide(BLEND_OFFSETS_DB[self._blending], glide)
         # Work samples before the averages (and the filters before them)
         # have filled after a reset.
         self._warm_up = n_phasor + self._noise.length + len(sharp)
@@ -231,6 +243,7 @@ class StereoDecoder:
         self.snr_db: Optional[float] = None
         self.pilot_db: Optional[float] = None
         self._hiss_bw.settle()  # (nothing plays: no glide)
+        self._offset.settle()
 
     @property
     def tau_s(self) -> float:
@@ -247,6 +260,32 @@ class StereoDecoder:
         if tau != self._tau_s:
             self._tau_s = tau
             self._hiss_bw.set(stereo_noise_bandwidth(tau, self._audio_hz))
+
+    @property
+    def blending(self) -> str:
+        """How far a weak station blends toward mono: ``"less"``,
+        ``"normal"`` (the default) or ``"more"`` (see
+        :data:`BLEND_OFFSETS_DB`). Set it while the decoder runs and the
+        thresholds move over 20 ms; anything else is a ValueError."""
+        return self._blending
+
+    @blending.setter
+    def blending(self, value: str) -> None:
+        name = _checked_blending(value)
+        if name != self._blending:
+            self._blending = name
+            self._offset.set(BLEND_OFFSETS_DB[name])
+
+    @property
+    def full_snr_db(self) -> float:
+        """Full stereo while its hiss is at least this far below full
+        scale (``FULL_SNR_DB`` moved by :attr:`blending`)."""
+        return self.FULL_SNR_DB + BLEND_OFFSETS_DB[self._blending]
+
+    @property
+    def mono_snr_db(self) -> float:
+        """Mono below this (``MONO_SNR_DB`` moved by :attr:`blending`)."""
+        return self.MONO_SNR_DB + BLEND_OFFSETS_DB[self._blending]
 
     @property
     def offset_hz(self) -> float:
@@ -341,8 +380,10 @@ class StereoDecoder:
         known = np.arange(self._work, self._work + m) >= self._warm_up
         pilot_db = np.where(2.0 * magnitude >= self.MIN_PILOT, pilot_db, -100.0)
         present = self._pilot_state(np.where(known, pilot_db, np.nan))
-        target = np.power(10.0, np.minimum(snr_db - self.FULL_SNR_DB, 0.0) / 20.0)
-        target *= np.clip((snr_db - self.MONO_SNR_DB) / self.FADE_DB, 0.0, 1.0)
+        offset = self._offset.take(m)  # (the blending chosen)
+        full, mono = self.FULL_SNR_DB + offset, self.MONO_SNR_DB + offset
+        target = np.power(10.0, np.minimum(snr_db - full, 0.0) / 20.0)
+        target *= np.clip((snr_db - mono) / self.FADE_DB, 0.0, 1.0)
         target = np.where(present, target, 0.0)
         blends = self._slew(target)
         self._work += m
@@ -379,6 +420,15 @@ class StereoDecoder:
         candidates = np.minimum.accumulate(target - rise * k)
         out = np.minimum(self.blend + rise * k, candidates + rise * k)
         return np.clip(out, 0.0, 1.0)
+
+
+def _checked_blending(value: str) -> str:
+    """One of the keys of :data:`BLEND_OFFSETS_DB`."""
+    if not isinstance(value, str) or value not in BLEND_OFFSETS_DB:
+        raise ValueError(
+            f"blending must be one of {sorted(BLEND_OFFSETS_DB)}, got {value!r}"
+        )
+    return value
 
 
 def _checked_tau(value: float) -> float:

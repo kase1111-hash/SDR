@@ -415,6 +415,9 @@ class AudioOptions:
       (the Americas, South Korea) or 50 us (Europe, Australia, most of the
       world); see ``gui/deemphasis.py``. Mono and stereo alike; other
       modes have none.
+    * ``stereo_blend``: how far a weak broadcast FM station blends toward
+      mono: ``"less"``, ``"normal"`` or ``"more"`` (see
+      ``dsp/fm_stereo.py``'s ``BLEND_OFFSETS_DB``).
     """
 
     def __init__(self) -> None:
@@ -426,6 +429,7 @@ class AudioOptions:
         self.tone_squelch: bool = False
         self.low_cut_hz: float = 0.0
         self.deemphasis_s: float = DEEMPHASIS_S
+        self.stereo_blend: str = "normal"
 
 
 class ListeningFilters:

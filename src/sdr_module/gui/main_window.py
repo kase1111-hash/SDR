@@ -217,7 +217,13 @@ from .status_history import (
     StatusHistory,
     StatusHistoryPopup,
 )
-from .stereo_audio import StereoPath
+from .stereo_audio import (
+    DEFAULT_STEREO_BLEND,
+    STEREO_BLEND_CHOICES,
+    StereoPath,
+    stereo_blend_note,
+    usable_blend,
+)
 from .themes import (
     apply_theme,
     current_theme,
@@ -318,6 +324,8 @@ _DEFAULT_VOLUME = 70  # percent
 _STEREO_KEY = "audio/stereo"
 # Radio > Audio > De-emphasis (M-A1): "75" (us, the default) or "50".
 _DEEMPHASIS_KEY = "audio/deemphasis"
+# Radio > Audio > Stereo Blend (M-A2): "less", "normal" (default), "more".
+_STEREO_BLEND_KEY = "audio/stereo_blend"
 # The STEREO badge and lamp light while at least this much of the stereo
 # difference plays (about 10 dB of separation), and go out below
 # _STEREO_OFF_BLEND (no flicker while the blend hovers).
@@ -1542,7 +1550,11 @@ class _ReceiverChain:
             path = self._stereo_path = StereoPath(self)
         if not path.running:
             path.sync(self)
-        path.decoder.tau_s = self._deemphasis_s  # (its hiss estimate)
+        decoder = path.decoder
+        decoder.tau_s = self._deemphasis_s  # (its hiss estimate)
+        decoder.blending = usable_blend(
+            getattr(self._options(), "stereo_blend", DEFAULT_STEREO_BLEND)
+        )
         return path.process(mpx, nr)
 
     def _am_detect(self, channel: np.ndarray, speed: str) -> np.ndarray:
@@ -3254,6 +3266,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._audio_options.deemphasis_s = (
             deemphasis_seconds(self._deemphasis_choice) or _DEEMPHASIS_S
         )
+        # Radio > Audio > Stereo Blend (M-A2): how far a weak station
+        # blends toward mono (the chains' stereo decoders read it).
+        self._stereo_blend_choice = self._saved_choice(
+            _STEREO_BLEND_KEY, STEREO_BLEND_CHOICES, DEFAULT_STEREO_BLEND
+        )
+        self._audio_options.stereo_blend = self._stereo_blend_choice
         self._stereo_shown: Tuple[str, Optional[str], str] = ("", None, "")
         self._stereo_lit = False
         self._audio_problem: Optional[str] = None
@@ -4029,6 +4047,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             "hiss down). Off: always mono.",
             checkable=True,
             checked=self._stereo_enabled,
+        )
+        self._stereo_blend_actions = self._add_choice_menu(
+            audio_menu,
+            "Stereo &Blend",
+            STEREO_BLEND_CHOICES,
+            self._stereo_blend_choice,
+            self._set_stereo_blend,
+            "How far a weak or noisy broadcast FM station blends toward mono "
+            "to keep its hiss down: less (more stereo, more hiss) or more "
+            "(quieter weak stations)",
         )
         self._deemphasis_actions = self._add_choice_menu(
             audio_menu,
@@ -10029,6 +10057,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             deemphasis_note(key), "info", 4000, log=False  # (what was asked)
         )
 
+    def _set_stereo_blend(self, key: str) -> None:
+        """Radio > Audio > Stereo Blend (M-A2): how far a weak station
+        blends toward mono, Less, Normal or More. Saved at once; the stereo
+        decoder's thresholds move to it over 20 ms."""
+        if usable_blend(key) != key:
+            return
+        self._check_choice(getattr(self, "_stereo_blend_actions", {}), key)
+        if key == self._stereo_blend_choice:
+            return
+        self._stereo_blend_choice = key
+        self._audio_options.stereo_blend = key
+        self._settings.set(_STEREO_BLEND_KEY, key)
+        self._show_status_message(
+            stereo_blend_note(key), "info", 4000, log=False  # (what was asked)
+        )
+
     def _show_stereo(self, chain: Optional["_ReceiverChain"], received: bool) -> None:
         """The receiver bar's STEREO / MONO badge and the radio tuner's
         STEREO lamp (K-S1): whether the broadcast FM station received (a
@@ -10056,6 +10100,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 lit = blend >= _STEREO_ON_BLEND or (
                     self._stereo_lit and blend >= _STEREO_OFF_BLEND
                 )
+                # (What a blended or mono station is heard with.)
+                setting = (
+                    f"Radio > Audio > Stereo Blend: {decoder.blending.capitalize()}"
+                )
                 if lit:
                     text, tone = "STEREO", "success"
                     tip = (
@@ -10063,7 +10111,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                         "and right are fully apart."
                         if blend >= 0.95
                         else "Stereo, blended partly toward mono to keep the hiss "
-                        "down: the signal is a little weak."
+                        f"down: the signal is a little weak ({setting})."
                     ) + " Radio > Audio > Stereo switches stereo off."
                 elif not decoder.pilot:
                     tip = (
@@ -10075,8 +10123,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 else:
                     tip = (
                         "Mono: the signal is too weak for clean stereo, so it "
-                        "plays in mono to keep the hiss down. Stereo comes back "
-                        "as the signal gets stronger."
+                        f"plays in mono to keep the hiss down ({setting}). Stereo "
+                        "comes back as the signal gets stronger."
                     )
         self._stereo_lit = text == "STEREO"
         shown = (text, tone, tip)

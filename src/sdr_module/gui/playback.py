@@ -628,7 +628,8 @@ if HAS_PYQT6:
             self._device: Optional[FilePlaybackDevice] = None
             self._previous: Optional[_PreviousSource] = None
             self._device_tip = ""
-            #: The last open() changed the listening by the band plan (its
+            #: The last open() changed the listening by the band plan, or
+            #: to hear a one-channel file's audio as recorded (its
             #: status line is the one to keep).
             self.band_plan_applied = False
             # Where the file was (monotonic time, sample, loops) when the

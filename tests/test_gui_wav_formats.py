@@ -347,6 +347,9 @@ class TestOneChannelRecordings(_WavCase):
         warn.assert_not_called()
         texts = [m["content"] for m in panel._messages]
         self.assertTrue(any("From a real IF" in t for t in texts), texts)
+        # (Not audio at 960 kS/s: the dialog says nothing of audio.)
+        note = self.boxes[0]._note.text()
+        self.assertNotIn("audio", note)
 
     def test_a_direct_sampled_capture_is_heard(self):
         """A receiver's RF sampled directly (one channel at 1.2 MS/s: the
@@ -389,6 +392,50 @@ class TestOneChannelRecordings(_WavCase):
             freqs = np.fft.rfftfreq(len(heard), 1 / 48000)
             loudest = freqs[np.argmax(spectrum[20:]) + 20]
             self.assertAlmostEqual(loudest, tone, delta=10, msg=station)
+        win._playback.close()
+
+    def test_a_sidecar_that_places_it_elsewhere_is_said_so(self):
+        """A sidecar may place a real IF recording at its RF: Recording
+        Info then doesn't claim the file's own 0-24 kHz are what shows."""
+        from sdr_module.dsp.recording import SampleFormat, write_sidecar
+
+        path, _x = self._audio("if_10m.wav")
+        write_sidecar(path, SampleFormat.INT16, AUDIO_RATE, 28.4e6, header_bytes=44)
+        dialog, options, _missing = self.info_dialog(path)
+        self.assertEqual(dialog.value("Center frequency"), "28.400 MHz")
+        channels = dialog.value("Channels")
+        self.assertIn("not mirrored", channels)
+        self.assertNotIn("its own frequencies", channels)
+        self.assertIn("where its metadata places it", channels)
+
+    def test_telephone_rate_audio_plays_too(self):
+        """8 kHz audio is 4 kS/s of I/Q (0 to 4 kHz): it plays in real time
+        like any slow recording (a display block, 2048 samples, at a time:
+        half a second here)."""
+        from tests.test_gui_round3_main import _FakeClock
+
+        n = 2 * 8000
+        x = 0.3 * np.sin(2 * np.pi * 1000.0 * np.arange(n) / 8000)
+        path = self.path("phone.wav")
+        iq_wav(path, x, "int", 2, 8000)
+        win = self.win
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertTrue(win._open_recording())
+        warn.assert_not_called()
+        device = win._playback.device
+        self.assertEqual((device.sample_rate, device.total_samples), (4000, n // 2))
+        self.assertAlmostEqual(win._lo_frequency(), 2000, delta=0.5)
+        clock = _FakeClock()
+        with mock.patch.object(self.mw, "time", clock):
+            win._pacer.restart()
+            win._update_display()
+            first = device.position
+            for _ in range(50):  # (1.5 s)
+                clock.advance(0.03)
+                win._update_display()
+        played = (device.position - first) / device.sample_rate
+        self.assertGreater(played, 0.9)
+        self.assertAlmostEqual(played, 1.5, delta=2048 / 4000 + 0.03)
         win._playback.close()
 
     def test_every_format_of_one_channel_opens(self):

@@ -278,15 +278,29 @@ def format_mhz(freq_hz: float) -> str:
     return f"{whole}.{frac.ljust(3, '0')} MHz"
 
 
-def _real_signal_text(iq_rate_hz: float) -> str:
+#: Up to this rate (Hz) a one-channel file is probably audio (an IF or RF
+#: sampled directly is faster): the Decode dialog then says what decodes.
+AUDIO_RATE_MAX = 200e3
+
+
+def _real_signal_text(iq_rate_hz: float, center_hz: float) -> str:
     """What Recording Info says of a one-channel WAV file read as I/Q at
-    ``iq_rate_hz`` (half its own rate)."""
+    ``iq_rate_hz`` (half its own rate), centered on ``center_hz``: its own
+    frequencies, unless its metadata places it elsewhere (an IF at its
+    RF)."""
     top = float(iq_rate_hz)
+    text = (
+        "One: a real signal (audio, or an IF or RF sampled directly), played "
+        "as I/Q at half its rate"
+    )
+    if abs(float(center_hz) - top / 2.0) > 0.5:
+        return (
+            f"{text}, each frequency once (not mirrored), where its metadata places it"
+        )
     band = f"{top / 1e6:g} MHz" if top >= 1e6 else f"{top / 1e3:g} kHz"
     return (
-        "One: a real signal (audio, or an IF or RF sampled directly), played "
-        "as I/Q at half its rate, so the spectrum shows its own frequencies, "
-        f"0 Hz to {band}, once each (not mirrored)"
+        f"{text}, so the spectrum shows its own frequencies, 0 Hz to {band}, "
+        "once each (not mirrored)"
     )
 
 
@@ -1037,7 +1051,7 @@ if HAS_PYQT6:
                 ("Type", kind),
             ]
             if options.real_signal:
-                rows.append(("Channels", _real_signal_text(rate)))
+                rows.append(("Channels", _real_signal_text(rate, center)))
             rows += [
                 (
                     "Sample format",
@@ -1175,7 +1189,8 @@ if HAS_PYQT6:
                     f"from its middle (within ±{options.sample_rate / 2e3:g} kHz)."
                 )
             layout.addLayout(form)
-            if options.real_signal:
+            if options.real_signal and 2 * options.sample_rate <= AUDIO_RATE_MAX:
+                # (Audio, probably: what decodes in it, and what doesn't.)
                 span += (
                     " It has one channel (a real signal), read as the radio "
                     "signal it holds: Morse tones decode with CW (Morse) at "

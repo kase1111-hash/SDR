@@ -716,6 +716,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._total = 0
         self._invalid = 0
         self._per_protocol: Counter = Counter()
+        # Protocol names of another receiver's rows ("2nd RX · POCSAG").
+        self._receiver_protocols: set = set()
         # Valid messages per protocol since Clear, and their count when the
         # protocol being decoded was chosen: what it decoded since then (or
         # since Clear) is what the status line and the window's status-bar
@@ -1917,6 +1919,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         sample_rate: Optional[float] = None,
         source: str = "",
         when: Optional[datetime] = None,
+        receiver: str = "",
     ):
         """
         Add a decoded message.
@@ -1937,6 +1940,12 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 counted apart; they stay out of the live Aircraft and Text
                 views.
             when: When it was sent (a recording's time; default: now)
+            receiver: The receiver it came from, when not the main window's
+                ("2nd RX": the Second Receiver's). Its rows say so before
+                the protocol ("2nd RX · POCSAG": first, so a Protocol column
+                too narrow for the whole name still shows whose they are)
+                and are counted apart, as a recording's are; they stay out
+                of the main receiver's Aircraft and Text views.
         """
         now = datetime.now()
         if when is not None:
@@ -1947,6 +1956,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         source = str(source or "")
         if source:
             protocol = f"{protocol} (file)"
+        elif receiver:
+            protocol = f"{receiver} · {protocol}"
+            message = None  # (the views are the main receiver's)
+            self._receiver_protocols.add(protocol)
         valid = bool(valid)
         if freq_hz is None:
             freq_hz = self._tuned_hz
@@ -2142,10 +2155,11 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         """Show the Protocol column unless it would only repeat the
         selector: one protocol in the table, the one chosen (or none is).
         Rows of another protocol (listed before choosing this one) say
-        which they are."""
+        which they are, and so do another receiver's ("2nd RX · ...")."""
         names = list(self._per_protocol)
         chosen = self.protocol()
         hide = len(names) <= 1 and (not names or chosen is None or names[0] == chosen)
+        hide = hide and not self._receiver_protocols.intersection(names)
         if hide != self._table.isColumnHidden(COL_PROTOCOL):
             self._table.setColumnHidden(COL_PROTOCOL, hide)
             self._fit_columns()
@@ -2197,6 +2211,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._total = 0
         self._invalid = 0
         self._per_protocol.clear()
+        self._receiver_protocols.clear()
         self._valid_per_protocol.clear()
         self._chosen_counts.clear()
         self._row_times.clear()

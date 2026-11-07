@@ -40,13 +40,15 @@ Broadcast FM plays in stereo there as in the main window (its own Stereo
 switch, and a STEREO lamp in its status bar), and it has the main window's
 tone squelch (CTCSS tones and DCS codes, narrow FM), audio notch and low
 cut, its own (:mod:`.second_receiver_audio`); a bookmark tuned there
-applies its tone or code.
+applies its tone or code. It runs a live decoder of its own on its DSP
+worker (:mod:`.second_receiver_decoding`), whose messages go into the main
+window's Decoder tab marked "2nd RX".
 
 Settings: ``device/second_receiver/*`` (device, sample rate per kind of
 device, frequency, mode, filter, step per mode, squelch, tone_squelch,
-dcs_squelch, Listen, volume, stereo, notch, notch_hz, low_cut, gain, Follow
-transmissions) and ``layout/second_receiver/*`` (window geometry, splitters
-and the waterfall's look).
+dcs_squelch, Listen, volume, stereo, notch, notch_hz, low_cut, decoder,
+decode, gain, Follow transmissions) and ``layout/second_receiver/*``
+(window geometry, splitters and the waterfall's look).
 """
 
 from __future__ import annotations
@@ -59,7 +61,7 @@ import os
 import shutil
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -198,6 +200,7 @@ from .second_receiver_audio import (
     ToneHeard,
     stereo_reading,
 )
+from .second_receiver_decoding import ReceiverDecoding
 from .spectrum_widget import SpectrumWidget, format_hz
 from .stereo_audio import StereoPath
 from .themes import set_role, set_tone
@@ -821,6 +824,12 @@ class FrameResult:
     frame: Frame  # the signal path's: level, squelch, audio
     spectrum: Any  # the plots' spectrum (a FrameSpectrum), or None
     axis: Tuple[float, float]  # the (LO, rate) the samples were taken at
+    #: The live decoder's messages from this frame (decoded on the worker).
+    decoded: List[Any] = field(default_factory=list)
+    #: The live decoder's status after this frame (None: it didn't run).
+    decoder_status: Any = None
+    #: The tuned frequency the frame was decoded at (Hz).
+    tuned_hz: Optional[float] = None
 
 
 class FrameWork:
@@ -839,6 +848,8 @@ class FrameWork:
     def __init__(self, dsp: ReceiverDsp, analyzer: FrameSpectrumAnalyzer) -> None:
         self.dsp = dsp
         self.analyzer = analyzer
+        #: The live decoder (the window chooses it between frames).
+        self.decoding = ReceiverDecoding()
         #: The (LO, rate) the analyzer's samples kept from the last frame
         #: belong to (None: the next frame starts afresh).
         self.axis: Optional[Tuple[float, float]] = None
@@ -850,10 +861,18 @@ class FrameWork:
         plots: bool,
         axis: Tuple[float, float],
         heard: bool = False,
+        decode: bool = False,
     ) -> FrameResult:
         # (Set here, on the worker, for this frame: see ReceiverDsp.heard.)
-        self.dsp.heard = bool(heard or play)
-        frame = self.dsp.process(samples, play)
+        dsp = self.dsp
+        dsp.heard = bool(heard or play)
+        frame = dsp.process(samples, play)
+        decoded: List[Any] = []
+        status = None
+        tuned = dsp.tuned_hz
+        if decode:
+            decoded = self.decoding.process(samples, dsp.offset_hz, tuned)
+            status = self.decoding.status()
         spectrum = None
         if plots:
             if axis != self.axis:
@@ -863,7 +882,7 @@ class FrameWork:
             spectrum = self.analyzer.process(samples)
         else:
             self.axis = None  # (the first frame plotted again starts afresh)
-        return FrameResult(frame, spectrum, axis)
+        return FrameResult(frame, spectrum, axis, decoded, status, tuned)
 
 
 # ---------------------------------------------------------------------------
@@ -954,8 +973,9 @@ if HAS_PYQT6:
             super().showPopup()
 
     from .second_receiver_audio import ListeningRows
+    from .second_receiver_decoding import DecoderRows
 
-    class SecondReceiverWindow(QMainWindow, ListeningRows):
+    class SecondReceiverWindow(QMainWindow, ListeningRows, DecoderRows):
         """The second receiver (see the module docstring)."""
 
         #: The Listen choice changed (its key).
@@ -1158,6 +1178,7 @@ if HAS_PYQT6:
             column.addWidget(self._build_device_group())
             column.addWidget(self._build_tuning_group())
             column.addWidget(self._build_audio_group())
+            column.addWidget(self._build_decoder_group())
             column.addWidget(self._build_bookmarks_group())
             column.addWidget(self._build_tx_group())
             column.addStretch(1)
@@ -1698,6 +1719,10 @@ if HAS_PYQT6:
             if panel is not None:
                 panel.bookmarks_changed.connect(self._refresh_bookmarks)
             self._refresh_bookmarks()
+            decoders = getattr(self._win, "_decoder_panel", None)
+            if decoders is not None:
+                # (Its Clear clears this receiver's rows too.)
+                decoders.cleared.connect(self._on_decoder_tab_cleared)
             # Never outlive the main window running (the host closes this
             # window first; this covers a main window deleted without it).
             destroyed = getattr(self._win, "destroyed", None)
@@ -1779,8 +1804,10 @@ if HAS_PYQT6:
         def set_scan_feed(self, feed: Optional[Callable[[np.ndarray], None]]) -> None:
             """Hand every block this receiver reads to ``feed`` too, after
             its own frame (the main window's Scanner tab sweeping with it:
-            "Use both receivers"); None ends that."""
+            "Use both receivers"); None ends that. (This receiver doesn't
+            decode meanwhile: the scan tunes it step by step.)"""
             self._scan_feed = feed
+            self._update_decoder_line()
 
         def set_scan_muted(self, muted: bool) -> None:
             """Mute this receiver while a scan sweeps with it."""
@@ -2167,6 +2194,7 @@ if HAS_PYQT6:
             is played first (then the audio fades out)."""
             self._settle_frames()
             self._pipeline.close()
+            self._flush_decoder()  # (a Morse line in progress)
             was_running = self._running
             # (Where a recording that ends here was saved is said too.)
             self._recording_said = None
@@ -3091,7 +3119,13 @@ if HAS_PYQT6:
             # scan sweeps with it.
             heard = self._listen != LISTEN_MAIN and realtime and not self._scan_muted
             return functools.partial(
-                self._work, samples, play and realtime, plots, axis, heard=heard
+                self._work,
+                samples,
+                play and realtime,
+                plots,
+                axis,
+                heard=heard,
+                decode=self._decoding_now(),
             )
 
         def _plots_want(self, samples: np.ndarray) -> bool:
@@ -3143,6 +3177,7 @@ if HAS_PYQT6:
                 self._show_notch_found(frame.notch_hz)
             tone, dcs, checked = frame.tone_heard
             self._show_tone_heard(tone, checked, dcs)
+            self._show_decoded(result)
             if frame.audio is not None and len(frame.audio) and self._audio_open:
                 self._audio.write(frame.audio)
 
@@ -3776,6 +3811,8 @@ if HAS_PYQT6:
             )
             self._update_tx_group()
             self._update_audio_note()
+            self._follow_decoder_rate()
+            self._update_decoder_line()
 
         def _update_status(self) -> None:
             if self._main_gone:
@@ -3785,6 +3822,7 @@ if HAS_PYQT6:
                 self._update_rec_label()
             self._update_tx_group()
             self._update_audio_note()
+            self._update_decoder_line()
             if self._gain_auto.isChecked():
                 self._show_gain()  # (what the automatic gain chose now)
             self._follow_main_output()  # (the output chosen meanwhile)
@@ -3926,6 +3964,7 @@ if HAS_PYQT6:
                 self._stereo_check.setChecked(s.get_bool(KEY + "stereo", True))
                 self._dsp.stereo = self._stereo_check.isChecked()
                 self._restore_filters()
+                self._restore_decoder()
                 listen = s.get_str(KEY + "listen", DEFAULT_LISTEN)
                 if listen not in _LISTEN_KEYS:
                     listen = DEFAULT_LISTEN

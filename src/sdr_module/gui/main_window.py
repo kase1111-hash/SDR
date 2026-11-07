@@ -5940,6 +5940,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         sample_rate: Optional[float] = None,
         source: str = "",
         when: Any = None,
+        receiver: str = "",
     ) -> None:
         """Render one decoded message into the decoder panel.
 
@@ -5953,7 +5954,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         (default: the tuned frequency and the device's rate; 0 for
         unknown). ``source`` names the recording it came from (its row is
         marked and kept out of the live views) and ``when`` is its time
-        there, when the recording says when it was made.
+        there, when the recording says when it was made. ``receiver`` names
+        another receiver it came from ("2nd RX": the Second Receiver's).
         """
         try:
             address, content = self._describe_message(msg)
@@ -5987,6 +5989,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 sample_rate=sample_rate,
                 source=source,
                 when=when,
+                receiver=receiver,
             )
             self._note_decoded()
         except Exception as exc:  # pragma: no cover - defensive

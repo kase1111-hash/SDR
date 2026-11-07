@@ -20,8 +20,10 @@ filter (:data:`TAPS`, 2/(pi*d) for odd d, a Kaiser window). Over the inner
 80% of the span (the file's 5% to 45% of its rate: what the receiver tunes)
 its gain is flat to 0.0001 dB and the mirror image of a signal is at least
 100 dB down. Nearer the edges (the file's lowest and highest frequencies,
-below 5% or above 45% of its rate) the image grows (about 20 dB down at
-1%); it shows at the other edge of the span, not on the signal.
+below 5% or above 45% of its rate) the image grows and the signal weakens:
+54 dB down at 4% (or 46%), 20 dB at 2%, 9 dB at 1% (the signal 2.6 dB
+weaker there). The image of a signal near one edge shows near the other,
+not on the signal: a Morse tone at 700 Hz in 48 kHz audio still decodes.
 
 The filter is centred (no delay): I/Q sample ``m`` depends only on the
 real samples around ``2m`` (:data:`CONTEXT` on each side; zeros before the

@@ -2088,11 +2088,20 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._update_buttons()
         self._update_status_line()  # (it counts the messages)
 
-    def recording_decode_started(self, source: str) -> None:
-        """File > Decode Recording starts on ``source``: what the Aircraft
-        and Text views hold of an earlier decode of it goes (the decode
-        lists it again; the Messages table keeps every row)."""
-        for view in self._protocol_views.values():
+    def recording_decode_started(
+        self, source: str, protocol: Optional[str] = None
+    ) -> None:
+        """File > Decode Recording starts on ``source`` with ``protocol``:
+        what that protocol's view (Aircraft, Text) holds of an earlier
+        decode of it goes (the decode lists it again; the Messages table
+        keeps every row, and the other view what another protocol found).
+        ``protocol`` None: both views'."""
+        if protocol is None:
+            views = list(self._protocol_views.values())
+        else:
+            view = self._protocol_views.get(protocol)
+            views = [view] if view is not None else []
+        for view in views:
             view.forget_source(source)
         self._update_views()
 

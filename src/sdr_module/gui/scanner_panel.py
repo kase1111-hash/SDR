@@ -255,8 +255,9 @@ class ScanHit:
                     continue
                 if key in RECEIVER_NAMES and math.isfinite(peak):
                     hit.readings[key] = peak
+        # (Only a string is looked up: a list or an object can't be.)
         receiver = data.get("receiver")
-        if receiver in RECEIVER_NAMES and receiver in hit.readings:
+        if isinstance(receiver, str) and receiver in hit.readings:
             hit.receiver = receiver
         else:
             hit.readings = {}
@@ -1956,8 +1957,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 1,
                 float(getattr(found, "tone_hz", 0.0) or 0.0),
                 str(getattr(found, "dcs", "") or ""),
-                key,
-                {key: peak} if key else {},
+                # (By name: a field added after dcs doesn't shift them.)
+                receiver=key,
+                readings={key: peak} if key else {},
             )
         )
         index = len(self._hits) - 1

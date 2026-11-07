@@ -97,16 +97,23 @@ __all__ = [
     "skipped_tip",
     "SKIPPED_WINDOW_S",
     "SKIPPED_SETTLE_S",
+    "SKIPPED_MIN_PER_S",
 ]
 
 #: ADS-B's replies skipped a second (``LiveDecoderStatus.skipped_per_s``)
 #: are counted over this much of the latest signal: it reads 0 again (and
 #: the Decoder tab's line clears) once none was skipped in it.
 SKIPPED_WINDOW_S = 3.0
-#: ... and only once they have been for this long (seconds of signal): the
-#: decoder's budget lets a burst through at once, so the first moments of
-#: a busy spell leave few unread, and a blip isn't worth a warning.
+#: ... and only once they have been left unread for this long (seconds of
+#: signal from the first to the latest): the decoder's budget lets a burst
+#: through at once, so the first moments of a busy spell leave few unread,
+#: and a burst isn't worth a warning.
 SKIPPED_SETTLE_S = 0.5
+#: ... and at this many a second or more: at the edge of the budget a few
+#: go unread now and then (5 a second of 20,000 in the synthetic sky),
+#: which costs next to no decodes and isn't worth a warning either. Once
+#: said, the rate is said until it clears, however low it falls.
+SKIPPED_MIN_PER_S = 100.0
 
 
 def format_rate(rate_hz: float) -> str:
@@ -158,7 +165,8 @@ class LiveDecoderStatus:
     #: ADS-B below 2.5 MS/s: replies left unread since the decoder started
     #: (its work per second is bounded: the clearest are read first), and
     #: how many a second over the last ``SKIPPED_WINDOW_S`` of signal (0
-    #: once none were). Other decoders: 0.
+    #: once none were, and while too few to be worth saying: see
+    #: ``ADSBLiveDecoder.skipped_per_s``). Other decoders: 0.
     skipped: int = 0
     skipped_per_s: float = 0.0
 
@@ -995,8 +1003,12 @@ class ADSBLiveDecoder(LiveDecoder):
         # SKIPPED_WINDOW_S, the one before it kept as the baseline.
         self._skip_base = 0
         self._skip_marks: Deque[Tuple[float, int]] = deque([(0.0, 0)])
-        # Stream seconds when the busy spell now going on began (None: calm).
+        # Stream seconds when the busy spell now going on began (None: calm),
+        # when its latest block left replies unread, and whether it is worth
+        # saying (see skipped_per_s).
         self._skipping_since: Optional[float] = None
+        self._last_skip_s = 0.0
+        self._spell_said = False
         if self.sample_rate < self.MIN_SAMPLE_RATE and recording:
             self._problem = _too_slow(self.name, self.MIN_SAMPLE_RATE, self.sample_rate)
         elif self.sample_rate < self.MIN_SAMPLE_RATE:
@@ -1028,14 +1040,17 @@ class ADSBLiveDecoder(LiveDecoder):
     def skipped_per_s(self) -> float:
         """Replies left unread a second over the last ``SKIPPED_WINDOW_S``
         of signal, from the first block that left some after a calm spell;
-        0 until that spell has lasted ``SKIPPED_SETTLE_S``, and once none
-        were left for ``SKIPPED_WINDOW_S``."""
-        since = self._skipping_since
+        0 until they have been left unread for ``SKIPPED_SETTLE_S`` at
+        ``SKIPPED_MIN_PER_S`` or more a second (a burst, or a few now and
+        then, isn't worth saying), and once none were left for
+        ``SKIPPED_WINDOW_S``."""
+        return self._spell_rate() if self._spell_said else 0.0
+
+    def _spell_rate(self) -> float:
+        """Replies left unread a second in the busy spell's window."""
         first_s, first = self._skip_marks[0]
         last_s, last = self._skip_marks[-1]
-        if since is None or last_s - since < SKIPPED_SETTLE_S:
-            return 0.0
-        if last <= first or last_s <= first_s:
+        if self._skipping_since is None or last <= first or last_s <= first_s:
             return 0.0
         return (last - first) / (last_s - first_s)
 
@@ -1045,6 +1060,8 @@ class ADSBLiveDecoder(LiveDecoder):
         self._skip_base = int(fine.skipped) if fine is not None else 0
         self._skip_marks = deque([(self._stream_s, 0)])
         self._skipping_since = None
+        self._last_skip_s = self._stream_s
+        self._spell_said = False
 
     @property
     def status(self) -> LiveDecoderStatus:
@@ -1069,11 +1086,21 @@ class ADSBLiveDecoder(LiveDecoder):
             marks.clear()
             marks.append((last_s, last))
             self._skipping_since = last_s
+        if count > last:
+            self._last_skip_s = now
         marks.append((now, count))
         while len(marks) > 2 and marks[1][0] <= now - SKIPPED_WINDOW_S:
             marks.popleft()
-        if count <= marks[0][1]:
+        since = self._skipping_since
+        if count <= marks[0][1] or since is None:
             self._skipping_since = None  # (none left for the whole window)
+            self._spell_said = False
+        elif (
+            not self._spell_said
+            and self._last_skip_s - since >= SKIPPED_SETTLE_S
+            and self._spell_rate() >= SKIPPED_MIN_PER_S
+        ):
+            self._spell_said = True  # (until it clears)
         return messages
 
 

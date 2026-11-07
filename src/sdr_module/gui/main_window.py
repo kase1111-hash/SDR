@@ -5920,14 +5920,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         (M-D2): the Decoder tab's line says so while it lasts; the status
         bar says it once when it starts (a notice, not a problem: not in
         Error History), and the message goes when it ends (``status``
-        None: the decoder is turned off or rebuilt)."""
+        None: the decoder is turned off or rebuilt). While a recording
+        plays it gives no rate to choose: whether one plays now, as the
+        Decoder tab's line has it (a recording at the device's rate keeps
+        the decoder built for the device)."""
         from ..dsp.live_decoders import skipped_text
 
         said = self._own("_busy_sky_said") or ""
+        playback = self._own("_playback")
         text = skipped_text(
             getattr(status, "skipped_per_s", 0.0) or 0.0,
             float(getattr(status, "sample_rate", 0.0) or 0.0),
-            bool(self._own("_decoder_recording")),
+            bool(playback is not None and playback.active),
         )
         if not text:
             if said:
@@ -11145,8 +11149,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return False
         protocol, offset = choice
         self._show_panel("decoder")
-        # (Decoded again: its aircraft and text are listed anew.)
-        self._decoder_panel.recording_decode_started(options.name)
+        # (Decoded again: its aircraft or text are listed anew.)
+        self._decoder_panel.recording_decode_started(options.name, protocol)
         counts = {"messages": 0}
         # When the recording was made (SigMF's core:datetime), to stamp its
         # messages with their own time rather than the decode's.

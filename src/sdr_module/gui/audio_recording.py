@@ -12,6 +12,13 @@ over a few milliseconds where the squelch opens and closes, as the speaker
 does. The WAV header is kept up to date as it records, so even a recording
 cut short (a crash) plays.
 
+While a recording plays at another speed (the playback strip's 0.5x, 2x
+or 4x), the take still gets the recording's own audio at its own pace: 10
+s of the recording make 10 s of WAV, whatever the speed chosen or how
+fast this computer manages to play it. What was received is recorded as
+it was; the speaker's sound, time-stretched to the speed
+(``playback_sound.py``), isn't.
+
 Files are named after what was tuned: ``<freq>_<mode>_<date>_<time>.wav``
 (:func:`audio_file_name`), e.g. ``145.800MHz_FM_20261030_142233.wav``.
 """

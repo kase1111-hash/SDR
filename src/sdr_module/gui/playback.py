@@ -294,6 +294,22 @@ class _PreviousSource:
     preset_decoder: Any = None
 
 
+def speed_note(speed: float) -> str:
+    """What the status bar says when another playback speed is chosen
+    (M-P1: the sound plays at every speed, time-stretched with its pitch
+    kept): ``"Playing at 2x: the sound keeps its pitch."``. At 4x speech
+    is hard to follow, and it says so; at 1x, ``"Playing at 1x."``."""
+    speed = float(speed)
+    if speed == 1.0:
+        return "Playing at 1x."
+    if speed > 2.0:
+        return (
+            f"Playing at {speed:g}x: the sound keeps its pitch, but speech is "
+            "hard to follow this fast (2x or slower to listen)."
+        )
+    return f"Playing at {speed:g}x: the sound keeps its pitch."
+
+
 if HAS_PYQT6:
 
     class _FileLabel(QLabel):
@@ -446,8 +462,11 @@ if HAS_PYQT6:
                 self._speed.addItem(f"{speed:g}x", speed)
             self._speed.setCurrentIndex(SPEEDS.index(1.0))
             self._speed.setToolTip(
-                "Playback speed. Audio plays at 1x only; the spectrum, "
-                "waterfall, decoders and recordings work at any speed."
+                "Playback speed. The sound plays at every speed and keeps its "
+                "pitch; at 4x speech is hard to follow, so use it to find "
+                "where something is said. On a computer that can't keep up "
+                "the recording plays more slowly, and the sound follows. "
+                "Record Audio keeps the recording's own pace."
             )
             self._speed.currentIndexChanged.connect(
                 lambda _i: self.speed_changed.emit(float(self._speed.currentData()))
@@ -918,16 +937,14 @@ if HAS_PYQT6:
             self._speed_mark = None
             self._slow_said = False
             if speed != 1.0:
-                # The paused audio's own hint, said here (with the audio off
-                # too) and so not again when the audio pauses: one message.
-                win._realtime_hint_shown = True
-                win._realtime_hint_text = win._realtime_hint()
-                win._show_status_message(win._realtime_hint_text, "info", 6000)
+                # How it sounds now (M-P1: at every speed, its pitch kept),
+                # said once, with the speaker off too.
+                win._show_status_message(speed_note(speed), "info", 6000)
             elif win._message_label.text().startswith("Playing at "):
                 # (The note on another speed no longer applies. Any other
                 # message stays: a file opened after one played at 2x goes
                 # back to 1x under the line that says how it is heard.)
-                win._show_status_message("Playing at 1x.", "info", 2500)
+                win._show_status_message(speed_note(1.0), "info", 2500)
 
         def _tick(self) -> None:
             """Follow the playing position; pause at the end of the file."""

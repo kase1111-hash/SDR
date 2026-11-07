@@ -670,12 +670,13 @@ class TestStereoWork(_StereoWindowCase):
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestStereoNobodyHears(_StereoWindowCase):
-    """While nobody can hear the main receiver (a recording playing at 2x
-    or 4x, a computer that can't keep up, the Second Receiver's Listen
-    playing only that receiver), its stereo isn't decoded unless Record
-    Audio records it: the STEREO badge then says nothing. It went on
-    decoding mono and stereo for the badge, about 1 ms per 33 ms of
-    signal (4 ms a frame at 4x), and said STEREO next to "Paused"."""
+    """While nobody can hear the main receiver (a computer that can't keep
+    up, the Second Receiver's Listen playing only that receiver; a
+    recording playing at 2x or 4x was paused too, until its sound played
+    at every speed, M-P1), its stereo isn't decoded unless Record Audio
+    records it: the STEREO badge then says nothing. It went on decoding
+    mono and stereo for the badge, about 1 ms per 33 ms of signal (4 ms a
+    frame at 4x), and said STEREO next to "Paused"."""
 
     def setUp(self):
         super().setUp()
@@ -704,8 +705,8 @@ class TestStereoNobodyHears(_StereoWindowCase):
         self.assertEqual(self.win._stereo_badge.text(), "STEREO")
 
     def test_not_while_the_audio_is_paused(self):
-        # At 2x or 4x, or on a computer that can't keep up, the audio is
-        # paused, the speaker on or off.
+        # On a computer that can't keep up the audio is paused, the
+        # speaker on or off.
         for speaker in (True, False):
             with self.subTest(speaker=speaker):
                 self.win._audio_enabled = speaker
@@ -745,8 +746,8 @@ class TestStereoNobodyHears(_StereoWindowCase):
         self.assert_back_in_stereo()
 
     def test_record_audio_still_records_stereo(self):
-        # "The spectrum, decoders and recordings keep working" at 2x and 4x:
-        # a stereo take still gets left and right, and the badge says so.
+        # While the audio is paused a stereo take still gets left and
+        # right, and the badge says so.
         folder = tempfile.mkdtemp(prefix="stereo-rec-")
         self.addCleanup(shutil.rmtree, folder, True)
         self.store.values["recording/folder"] = folder

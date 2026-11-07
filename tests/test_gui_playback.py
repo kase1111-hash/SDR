@@ -312,14 +312,16 @@ class TestOpenRecording(_PlaybackCase):
         played, elapsed = self._play_for(0.5)
         self.assertAlmostEqual(played, 0.5 * elapsed, delta=0.08)
 
-    def test_speed_reads_faster_and_mutes_the_speaker(self):
+    def test_speed_reads_faster_and_the_speaker_keeps_playing(self):
+        # (M-P1: another speed used to pause the speaker, "audio plays at 1x
+        # only"; it plays time-stretched now: tests/test_gui_playback_sound.py.)
         self.play()
         win = self.win
         win._playback_bar.set_speed(2.0)
         self.assertEqual(win._device.speed, 2.0)
         self.assertEqual(win._pacing_rate(), 2 * RATE)
-        self.assertFalse(win._realtime())
-        self.assertIn("audio plays at 1x only", win._realtime_hint())
+        self.assertTrue(win._realtime())
+        self.assertNotIn("1x only", win._realtime_hint())
         win._playback_bar.set_speed(1.0)
         self.assertEqual(win._pacing_rate(), RATE)
 

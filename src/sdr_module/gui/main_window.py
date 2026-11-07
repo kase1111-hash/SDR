@@ -189,6 +189,7 @@ from .iq_files import (
 )
 from .level_meter import LevelMeter
 from .playback import PlaybackBar, PlaybackController, playing_line
+from .playback_sound import PlaybackSound
 from .plot_view import PlotView, normalize_zoom
 from .preferences_dialog import (
     KEY_AUDIO_OUTPUT,
@@ -3114,6 +3115,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._noise_floor = NoiseFloorTracker()
         self._audio_options = AudioOptions()
         self._audio_join = AudioJoin(_AUDIO_RATE)
+        # A recording's sound at 0.5x, 2x or 4x (and at 1x on a computer
+        # that can't keep up): time-stretched to the pace it really plays
+        # at, its pitch kept (M-P1; see _speak).
+        self._playback_sound = PlaybackSound(_AUDIO_RATE, AudioSink.TARGET_S)
         self._join_chain: Optional["_ReceiverChain"] = None
         self._join_deviation = 0.0
         self._join_nr: Any = None  # the noise reduction the last block had
@@ -8847,6 +8852,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             note = " It starts with the receiver (Space)."
         elif not self._audio_enabled:
             note = " (The speaker is off; the recording still gets the audio.)"
+        note += self._take_pace_note()
         kind = "stereo audio" if stereo else "audio"
         self._show_status_message(
             f"Recording {kind} to {os.path.basename(path)}.{note}", "info", 5000
@@ -8930,14 +8936,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             label.setText(f"AUDIO {clock}")
             set_tone(label, "danger")
             label.setToolTip(
-                f"Recording what you hear to {where}. Radio > Record Audio "
-                "(Ctrl+Shift+A) stops it."
+                f"Recording what you hear to {where}.{self._take_pace_note()} "
+                "Radio > Record Audio (Ctrl+Shift+A) stops it."
             )
         if self._record_kind() == "audio":
             self._control_panel.update_record_time(int(take.seconds))
             self._sync_recording_armed()
         else:  # (named in the group's status line)
             self._sync_other_recording()
+
+    def _take_pace_note(self) -> str:
+        """While a recording plays at another speed: an audio take keeps
+        the recording's own pace (M-P1). What was received is recorded as
+        it was, 10 s of it making 10 s of audio: not the speaker's sound,
+        stretched to a speed that can change during the take (and slows on
+        a computer that can't keep up). "" otherwise."""
+        speed = float(self._playback.speed) if self._playback.active else 1.0
+        if speed == 1.0:
+            return ""
+        return (
+            f" It keeps the recording's own pace, not {speed:g}x (10 s of the "
+            "recording make 10 s of audio)."
+        )
 
     def _record_audio_block(
         self, audio: Optional[np.ndarray], open_: bool, seconds: float, joined: bool
@@ -9547,11 +9567,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Whether the device delivers (close to) its full sample rate.
 
         True until there is a second of history to judge by. A recording
-        playing faster or slower than real time isn't (its audio would
-        stutter): audio plays at 1x only.
+        playing faster or slower than real time is judged at its speed
+        (M-P1): its sound follows the pace it really plays at (see
+        _speak), down to half of real time (half of 0.5x at 0.5x); slower
+        than that the audio pauses, as at 1x.
         """
-        if self._playback.active and self._playback.speed != 1.0:
-            return False
         history = self._rx_history
         if len(history) < 2:
             return True
@@ -9559,14 +9579,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if span < 1.0:
             return True
         received = sum(count for _t, count in list(history)[1:])
-        return received >= _REALTIME_FRACTION * self._device_sample_rate() * span
+        fraction = _REALTIME_FRACTION
+        if self._playback.active:
+            fraction *= min(1.0, float(self._playback.speed))
+        return received >= fraction * self._device_sample_rate() * span
 
     def _audio_held(self) -> bool:
         """Whether nobody can hear the receiver now, whatever the Audio
         button's switch: the Second Receiver's Listen plays only that
-        receiver, or the audio is paused (a recording playing faster than
-        real time, a computer that can't keep up). With the speaker on,
-        the Audio button says which (see _audio_state)."""
+        receiver, or the audio is paused (a computer that can't keep up,
+        a recording playing below half of real time). With the speaker
+        on, the Audio button says which (see _audio_state)."""
         second = getattr(self, "_second_rx", None)
         if second is not None and second.mutes_main():
             return True
@@ -9829,6 +9852,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         mode = chain.mode
         audible = mode in _AUDIBLE_MODES
         seconds = len(channel) / max(chain.channel_rate, 1.0)
+        if self._playback.active:
+            # (The pace the recording really plays at, which its sound
+            # follows: every frame, the squelch open or not.)
+            self._playback_sound.note(seconds, time.monotonic(), self._playback.speed)
         gate_level = level_db
         if len(channel):
             level_db = channel_power_db(channel)
@@ -9932,7 +9959,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._tone_blocked = False
             if self._audio_join.playing:
                 # (Another mode with no audio: no block to fade out.)
-                self._audio.write(self._audio_join.release())
+                self._speak(self._audio_join.release(), last=True)
             self._show_detected_tone()
             if recording:
                 self._record_audio_block(None, False, seconds, False)
@@ -9947,7 +9974,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             chain.reset_demodulator()
             self._demod_running = False
             if self._audio_join.playing:
-                self._audio.write(self._audio_join.release())
+                self._speak(self._audio_join.release(), last=True)
             if recording:
                 self._record_audio_block(None, False, seconds, False)
             self._show_stereo(chain, False)
@@ -10022,11 +10049,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 out = join.play(heard)  # fades in after silence
             self._join_chain, self._join_deviation = chain, deviation
             self._join_nr = nr
-            self._audio.write(out)
+            self._speak(out)
         elif join.playing:
             # Stopping: fade this block out, or (if it doesn't continue the
             # last one) decay from the last sample played.
-            self._audio.write(join.release() if new_stream else join.fade_out(heard))
+            self._speak(
+                join.release() if new_stream else join.fade_out(heard), last=True
+            )
         if sstv:
             try:
                 self._sstv_panel.process_audio(
@@ -10034,6 +10063,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 )
             except Exception as exc:  # pragma: no cover - defensive
                 logger.debug("SSTV decoder failed: %s", exc)
+
+    def _speak(self, audio: np.ndarray, last: bool = False) -> None:
+        """Give the speaker ``audio`` (mono or ``(n, 2)``, as the fades
+        made it): as it is, or, while a recording plays, time-stretched to
+        the pace it really plays at, its pitch kept (M-P1: PlaybackSound;
+        at 1x while it keeps up, the same block). ``last``: the sound
+        stops after this block (the squelch closed, the speaker stopped,
+        the stream broke off): what the stretch still holds plays with it.
+        Everything else (Record Audio, SSTV, the decoders) keeps the
+        recording's own pace."""
+        sound = self._playback_sound
+        if self._playback.active or sound.stretching:
+            audio = sound.play(audio, time.monotonic(), last=last)
+        self._audio.write(audio)
 
     def _set_stereo_enabled(self, on: bool) -> None:
         """Radio > Audio > Stereo (K-S1): broadcast FM in stereo where the
@@ -10395,11 +10438,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         return bool(history) and self._overloaded_at >= history[0][0]
 
     def _realtime_hint(self) -> str:
-        if self._playback.active and self._playback.speed != 1.0:
-            return (
-                f"Playing at {self._playback.speed:g}x: audio plays at 1x only "
-                "(the spectrum, decoders and recordings keep working)."
-            )
+        # (A recording's sound plays at every speed now, M-P1: it pauses
+        # only below half of real time, for the reasons below.)
         job = self._busy_job_now()
         if job and busy_with() != job:  # (done: what it skipped still counts)
             return (
@@ -10410,16 +10450,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return f"{job} keeps this computer busy, so audio is paused meanwhile."
         if self._playback.active:
             # (A recording's rate can't be changed while it plays: no advice
-            # to lower it. N-02)
+            # to lower it. N-02) Below 1x, judged at the speed chosen.
+            speed = float(self._playback.speed)
+            pace = "in real time" if speed >= 1.0 else f"at {speed:g}x"
             if self._computer_behind():
                 return (
                     "This computer can't process the recording's "
-                    f"{format_rate(self._device_sample_rate())} in real time "
+                    f"{format_rate(self._device_sample_rate())} {pace} "
                     "right now, so audio is paused until it catches up. "
                     "Closing other programs may help."
                 )
             return (
-                "The recording isn't playing in real time right now, so audio "
+                f"The recording isn't playing {pace} right now, so audio "
                 "is paused until it catches up."
             )
         if self._demo_mode:
@@ -10450,7 +10492,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._squelch.reset()
         self._level_average.reset()
         if self._audio_join.playing:
-            self._audio.write(self._audio_join.release())
+            self._speak(self._audio_join.release(), last=True)
+        # (What a playing recording's stretch held is played out above; the
+        # pace is measured anew, as the pacer finds it out anew.)
+        self._playback_sound.reset()
         self._join_chain = None
         self._demod_running = False
         self._tone_squelch.reset()
@@ -12829,10 +12874,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         ``"silent"`` (on, but None (I/Q) mode has no audio), ``"second"``
         (on, but Listen in the Second Receiver window plays only that
         receiver) or ``"paused"`` (on, but the signal received isn't real
-        time: the receiver can't keep up, or a recording plays faster or
-        slower). Paused is what holds the audio now, as _route_audio judges
-        it: not after Stop, nor once the signal is real time again while
-        the squelch is closed."""
+        time: the receiver can't keep up, or a recording plays below half
+        of real time, at 0.5x below a quarter; at any speed the computer
+        keeps up with it plays, M-P1). Paused is what holds the audio now,
+        as _route_audio judges it: not after Stop, nor once the signal is
+        real time again while the squelch is closed."""
         if not self._audio.available:
             return "no_output"
         if not self._audio_enabled:

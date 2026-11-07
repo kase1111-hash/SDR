@@ -222,12 +222,27 @@ class TestPlaybackAudioHintGivesAdviceThatApplies(_SlowPlaybackCase):
         self.assertNotIn("Sample rate", tip)
 
     def test_faster_or_slower_than_1x(self):
-        self.win._playback_bar.set_speed(2.0)
+        """M-P1: another speed no longer pauses the audio ("Playing at 2x:
+        audio plays at 1x only ..."): the sound plays, time-stretched. Paused
+        there by a computer far too slow, it says why as at 1x, at the speed
+        chosen."""
+        win = self.win
+        win._playback_bar.set_speed(2.0)
+        self.run_frames(2.0)
+        self.assertTrue(win._realtime())
+        self.assertNotIn("1x only", win._realtime_hint())
+        win._playback_bar.set_speed(0.5)
+        self.load = 6.0  # (under half of 0.5x: audio pauses)
+        self.run_frames(4.0)
+        self.assertFalse(win._realtime())
+        hint, tip = self.hints()
         self.assertEqual(
-            self.win._realtime_hint(),
-            "Playing at 2x: audio plays at 1x only (the spectrum, decoders and "
-            "recordings keep working).",
+            hint,
+            "This computer can't process the recording's 1 MS/s at 0.5x right "
+            "now, so audio is paused until it catches up. Closing other "
+            "programs may help.",
         )
+        self.assertIn(hint, tip)
 
     def test_live_hardware_keeps_its_advice(self):
         """Back on a device, the advice to lower its rate stands."""

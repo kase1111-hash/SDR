@@ -13,20 +13,27 @@ The Second Receiver's listening options, as the main window has them.
   and the Low cut (Off, 100, 200, 300 Hz), greyed with the reason where
   they don't apply (:func:`notch_unused`, :func:`low_cut_unused`), as in
   the main window's Audio group.
+* **Tone squelch**: the main window's choices (Off, the 50 CTCSS tones,
+  the 104 DCS codes in normal then inverted polarity: :func:`tone_choices`)
+  and its Tone heard readout (:func:`tone_heard_text`), through the same
+  ``audio_chain.ToneSquelch``, in narrow FM only.
 
 What is decided here is Qt-free: the Second Receiver's DSP runs on a worker
-thread (``second_receiver.FrameWork``), which hands the lamp's reading and
-the whistle Auto found back to the window with each frame.
+thread (``second_receiver.FrameWork``), which hands the lamp's reading, the
+whistle Auto found and the tone heard back to the window with each frame.
 :class:`ListeningRows` (Qt) is a part of the Second Receiver window: its
 rows in the Squelch and audio group, what they set on its DSP, and their
-settings (``device/second_receiver/notch``, ``notch_hz``, ``low_cut``).
+settings (``device/second_receiver/notch``, ``notch_hz``, ``low_cut``,
+``tone_squelch``, ``dcs_squelch``).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
+from ..dsp.dcs import DCS_CODES, dcs_label, dcs_same_signal, format_dcs, parse_dcs
+from ..dsp.filters import CTCSS_FREQUENCIES, ctcss_label
 from .audio_chain import (
     DEFAULT_NOTCH_HZ,
     LOW_CUT_CHOICES,
@@ -72,10 +79,14 @@ _LOW_CUT_KEYS = tuple(key for key, _text, _tip in LOW_CUT_CHOICES)
 __all__ = [
     "NO_STEREO_READING",
     "StereoReading",
+    "ToneHeard",
     "low_cut_unused",
     "notch_found_text",
     "notch_unused",
+    "parse_tone_choice",
     "stereo_reading",
+    "tone_choices",
+    "tone_heard_text",
 ]
 
 #: ``(text, tone, tooltip)`` of the STEREO lamp: "STEREO" or "MONO" (""
@@ -197,16 +208,199 @@ def notch_found_text(hz: Optional[float]) -> Tuple[str, str, str]:
     return f"{hz:.0f} Hz", f"Auto removes a steady whistle at {hz:.1f} Hz", "success"
 
 
+# ---------------------------------------------------------------------------
+# Tone squelch (the main window's choices and Tone heard wording)
+# ---------------------------------------------------------------------------
+
+#: What the tone squelch hears: ``(CTCSS tone Hz or None, DCS (code,
+#: inverted) or None, checked)``; ``checked`` False where tones aren't
+#: looked for (not narrow FM).
+ToneHeard = Tuple[Optional[float], Optional[Tuple[int, bool]], bool]
+
+#: The Tone squelch's tooltip in FM, and elsewhere.
+TONE_SQUELCH_TIP = (
+    "Tone squelch: only play stations that send this sub-audible CTCSS tone "
+    "or DCS code (repeaters, PMR); the tone or the code's bits are filtered "
+    "out of what you hear. Tone heard shows the one on the channel."
+)
+TONE_SQUELCH_UNUSED = "Only used in FM mode"
+
+
+def tone_choices() -> List[Optional[Tuple[str, str, str]]]:
+    """The Tone squelch list, as the main window's: ``(value, text,
+    tooltip)`` for Off, the CTCSS tones ("100.0") and the DCS codes, normal
+    then inverted ("D023N", "D023I"), with None for a separator before each
+    run of codes."""
+    choices: List[Optional[Tuple[str, str, str]]] = [
+        ("off", "Off", "Plays whatever is on the channel")
+    ]
+    for freq in CTCSS_FREQUENCIES:
+        choices.append((f"{freq:.1f}", ctcss_label(freq), ""))
+    for inverted in (False, True):
+        choices.append(None)
+        polarity = (
+            "inverted polarity (also written I or R)" if inverted else "normal polarity"
+        )
+        for code in DCS_CODES:
+            choices.append(
+                (
+                    format_dcs(code, inverted),
+                    dcs_label(code, inverted),
+                    f"DCS code {code:03d}, {polarity}",
+                )
+            )
+    return choices
+
+
+def parse_tone_choice(
+    value: Any,
+) -> Tuple[Optional[float], Optional[Tuple[int, bool]]]:
+    """``(CTCSS tone, DCS code)`` of a Tone squelch choice ("off", "100.0",
+    "D023N"): at most one of them set; ``(None, None)`` for Off or anything
+    else."""
+    text = str(value or "")
+    if text.startswith("D"):
+        return None, parse_dcs(text)
+    try:
+        tone = float(text)
+    except ValueError:
+        return None, None
+    return (tone if tone > 0 else None), None
+
+
+def tone_heard_text(
+    freq: Optional[float], checked: bool = True, dcs: Optional[Tuple[int, bool]] = None
+) -> Tuple[str, str, str]:
+    """Tone heard, ``(text, tooltip, tone)``: the sub-audible tone (or DCS
+    code) on the channel, None for none, ``checked`` False where tones
+    aren't looked for (a broadcast deviation). The main window's wording
+    (``ControlPanel.set_detected_tone``)."""
+    if checked and dcs is not None:
+        code, inverted = dcs
+        tip = (
+            f"The station sends DCS code {code:03d} "
+            f"({'inverted' if inverted else 'normal'} polarity)"
+        )
+        twin = dcs_same_signal(code, inverted)
+        if twin is not None:
+            tip += f": the same signal as {dcs_label(*twin)}"
+        return dcs_label(code, inverted), tip, "success"
+    if not checked:
+        return (
+            "Not checked",
+            "Tones aren't looked for at a broadcast FM deviation (broadcast "
+            "stations send none). Choose 5 kHz (narrow voice) for a repeater or "
+            "PMR channel to see the tone it sends.",
+            "muted",
+        )
+    if freq is None:
+        return (
+            "None",
+            "No sub-audible tone (CTCSS) or code (DCS) heard on the channel. "
+            "Repeaters and PMR radios often send one; set the tone squelch to "
+            "it to hear only them.",
+            "muted",
+        )
+    label = ctcss_label(freq)
+    return label, f"The station sends a {label} CTCSS tone", "success"
+
+
 if HAS_PYQT6:
 
     class ListeningRows:
         """Part of the Second Receiver window (a mixin of
-        ``SecondReceiverWindow``): the Notch, Whistle and Low cut rows of
-        its Squelch and audio group, what they set on its DSP's options
-        (``self._dsp.options``: the receiver chain reads them on every
-        block, so a change takes effect at once, without a click), and
-        their settings. Uses the window's ``_combo``, ``_dsp``,
-        ``_settings``, ``_save``, ``mode()`` and ``_deviation_hz()``."""
+        ``SecondReceiverWindow``): the Tone squelch, Tone heard, Notch,
+        Whistle and Low cut rows of its Squelch and audio group, what they
+        set on its DSP (``self._dsp.options``, read by the receiver chain
+        on every block, and ``self._dsp.tone_squelch``: a change takes
+        effect at once, without a click), and their settings. Uses the
+        window's ``_combo``, ``_dsp``, ``_settings``, ``_save``,
+        ``_restoring``, ``_show_message``, ``mode()`` and
+        ``_deviation_hz()``."""
+
+        def _build_tone_rows(self, form: Any) -> None:
+            """The Tone squelch and Tone heard rows, added to ``form``."""
+            self._tone_form = form
+            combo = self._combo(6)
+            for choice in tone_choices():
+                if choice is None:
+                    combo.insertSeparator(combo.count())
+                    continue
+                value, text, tip = choice
+                combo.addItem(text, value)
+                if tip:
+                    combo.setItemData(
+                        combo.count() - 1, tip, Qt.ItemDataRole.ToolTipRole
+                    )
+            combo.setAccessibleName("Second receiver's tone squelch")
+            combo.currentIndexChanged.connect(self._on_tone_changed)
+            self._tone_combo = combo
+            label = QLabel("Tone squelch:")
+            label.setBuddy(combo)
+            form.addRow(label, combo)
+            # The tone (or code) the station sends (FM only).
+            self._tone_heard = QLabel()
+            self._tone_heard.setAccessibleName("Tone the second receiver hears")
+            form.addRow(QLabel("Tone heard:"), self._tone_heard)
+            self._show_tone_heard(None, True, None)
+
+        def _tone_choice(
+            self,
+        ) -> Tuple[Optional[float], Optional[Tuple[int, bool]]]:
+            """The Tone squelch's ``(CTCSS tone, DCS code)``."""
+            return parse_tone_choice(self._tone_combo.currentData())
+
+        def _on_tone_changed(self, *_args: Any) -> None:
+            tone, dcs = self._tone_choice()
+            dsp = self._dsp
+            # (One value the DSP worker takes up at its next block.)
+            dsp.tone_squelch = (tone, dcs)
+            dsp.options.tone_squelch = tone is not None or dcs is not None
+            self._save(KEY + "tone_squelch", float(tone or 0.0))
+            self._save(KEY + "dcs_squelch", format_dcs(*dcs) if dcs else "")
+            deviation = self._deviation_hz()
+            if (
+                dsp.options.tone_squelch
+                and not self._restoring
+                and self.mode() == "FM"
+                and deviation >= _BROADCAST_DEVIATION_HZ
+            ):
+                self._show_message(
+                    "Tone squelch works on narrow FM (repeaters, PMR): it isn't "
+                    f"used at {deviation / 1e3:g} kHz deviation, so this station "
+                    "plays as before.",
+                    "info",
+                    6000,
+                )
+
+        def _set_tone_choice(
+            self, tone: Optional[float], dcs: Optional[Tuple[int, bool]]
+        ) -> None:
+            """Choose a CTCSS tone or a DCS code (one not in the list, or
+            neither: Off)."""
+            combo = self._tone_combo
+            if dcs is not None:
+                index = combo.findData(format_dcs(*dcs))
+            elif tone:
+                index = combo.findData(f"{float(tone):.1f}")
+            else:
+                index = 0
+            combo.setCurrentIndex(max(index, 0))
+
+        def _show_tone_heard(
+            self,
+            freq: Optional[float],
+            checked: bool,
+            dcs: Optional[Tuple[int, bool]],
+        ) -> None:
+            """Tone heard (refreshed every frame: nothing is touched unless
+            it changed)."""
+            text, tip, tone = tone_heard_text(freq, checked, dcs)
+            label = self._tone_heard
+            if label.text() != text or label.toolTip() != tip:
+                label.setText(text)
+                label.setToolTip(tip)
+                set_tone(label, tone)
 
         def _build_filter_rows(self, form: Any) -> None:
             """The Notch, Whistle and Low cut rows, added to ``form``."""
@@ -296,6 +490,12 @@ if HAS_PYQT6:
             apply (the mode, or broadcast FM); the Whistle row in Auto
             and Manual."""
             mode, deviation = self.mode(), self._deviation_hz()
+            is_fm = mode == "FM"
+            self._tone_combo.setEnabled(is_fm)
+            self._tone_combo.setToolTip(
+                TONE_SQUELCH_TIP if is_fm else TONE_SQUELCH_UNUSED
+            )
+            self._tone_form.setRowVisible(self._tone_heard, is_fm)
             why = notch_unused(mode, deviation)
             notch = self._notch_mode()
             self._notch_combo.setEnabled(not why)
@@ -323,10 +523,30 @@ if HAS_PYQT6:
                 set_tone(label, tone)
 
         def _restore_filters(self) -> None:
-            """The saved Notch, its frequency and the Low cut, each on its
-            own: a damaged value is logged and gives Off (the frequency: its
-            box's nearest end), never stopping the others."""
+            """The saved tone squelch, Notch, its frequency and the Low cut,
+            each on its own: a damaged value is logged and gives Off (the
+            frequency: its box's nearest end), never stopping the others."""
             s = self._settings
+            tone = s.get_float(KEY + "tone_squelch", 0.0)
+            index = self._tone_combo.findData(f"{tone:.1f}") if tone else 0
+            if index < 0:
+                logger.warning(
+                    f"Ignoring the damaged setting {KEY}tone_squelch={tone!r}: no "
+                    "tone squelch."
+                )
+                index = 0
+            raw = s.get_str(KEY + "dcs_squelch", "")
+            if raw:
+                code = parse_dcs(raw)
+                if code is None:
+                    logger.warning(
+                        f"Ignoring the damaged setting {KEY}dcs_squelch={raw!r}: no "
+                        "DCS code squelch."
+                    )
+                else:
+                    index = max(0, self._tone_combo.findData(format_dcs(*code)))
+            self._tone_combo.setCurrentIndex(index)
+            self._on_tone_changed()
             hz = s.get_int(KEY + "notch_hz", DEFAULT_NOTCH_HZ)
             low, high = NOTCH_RANGE_HZ
             kept = int(min(max(hz, low), high))

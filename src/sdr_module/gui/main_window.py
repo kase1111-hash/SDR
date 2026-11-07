@@ -137,7 +137,7 @@ from .audio_chain import (
 )
 from .audio_recording import AudioTake, audio_file_name
 from .audio_sink import AudioSink
-from .bookmark_editor import bookmark_dcs
+from .bookmark_editor import bookmark_squelch
 from .bookmarks_panel import BookmarksPanel, default_bookmark_name
 from .bookmarks_panel import listening as bookmark_listening
 from .control_panel import (
@@ -3011,6 +3011,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._demod_running = False
         self._tone_squelch = ToneSquelch(_AUDIO_RATE)
         self._tone_channel: Optional[float] = None  # where the tone was heard
+        self._quiet_reverse = False  # (a bookmark sets Reverse: it says so)
         self._iq_conditioner = IqConditioner()
         self._clip_s = 0.0
         self._clip_warn_due = 0.0
@@ -3674,6 +3675,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             tip="Choose the CTCSS tone or DCS code a repeater or PMR radio "
             "sends, to hear only it (FM; the Audio group in the control panel)",
         )
+        # (M-Q3) Reverse: muted while the tone or code is heard.
+        reverse = panel._tone_reverse_check
+        reverse_action = self._add_action(
+            audio_menu,
+            "&Reverse Tone Squelch",
+            reverse.setChecked,
+            tip="Mute the stations that send the tone or code chosen in Tone "
+            "Squelch and hear every other one (CHIRP's TSQL-R and DTCS-R; FM, "
+            "the Audio group's Reverse)",
+            checkable=True,
+            checked=reverse.isChecked(),
+        )
+        reverse.toggled.connect(
+            lambda on, a=reverse_action: a.isChecked() != on and a.setChecked(on)
+        )
+        follow(reverse, reverse_action)
         self._add_action(
             audio_menu,
             "&CW Pitch...",
@@ -7139,6 +7156,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         panel.audio_agc_changed.connect(self._on_audio_agc_changed)
         panel.tone_squelch_changed.connect(self._on_tone_squelch_changed)
         panel.dcs_squelch_changed.connect(self._on_dcs_squelch_changed)
+        panel.tone_reverse_changed.connect(self._on_tone_reverse_changed)
         panel.notch_changed.connect(self._on_notch_changed)
         panel.low_cut_changed.connect(self._on_low_cut_changed)
         panel.iq_options_changed.connect(self._on_iq_options_changed)
@@ -7178,6 +7196,28 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._save_setting("audio/dcs_squelch", str(code or ""))
         if code:
             self._say_tone_squelch_unused()
+
+    def _on_tone_reverse_changed(self, reverse: bool) -> None:
+        """(M-Q3) The tone squelch reversed: muted while its tone or code is
+        heard, every other station plays (CHIRP's TSQL-R and DTCS-R)."""
+        tones = self._tone_squelch
+        tones.reverse = bool(reverse)
+        self._save_setting("audio/tone_reverse", bool(reverse))
+        if self._restoring or self._quiet_reverse or not tones.active:
+            return
+        if tones.dcs is not None:
+            what = dcs_label(*tones.dcs)
+        else:
+            what = f"the {float(tones.tone_hz or 0.0):.1f} Hz tone"
+        if reverse:
+            text = (
+                f"Reverse tone squelch: stations sending {what} are muted, "
+                "every other station plays."
+            )
+        else:
+            text = f"Tone squelch: only stations sending {what} play."
+        self._show_status_message(text, "info", 4000)
+        self._say_tone_squelch_unused()
 
     def _say_tone_squelch_unused(self) -> None:
         """A tone or code chosen at a broadcast deviation: say it isn't
@@ -7313,6 +7353,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             panel.set_dcs_squelch(*code)
 
         restore("audio/dcs_squelch", dcs_squelch)
+        restore(
+            "audio/tone_reverse",
+            lambda: panel.set_tone_reverse(
+                settings.get_bool("audio/tone_reverse", False)
+            ),
+        )
 
         def notch_hz() -> None:
             hz = settings.get_int("audio/notch_hz", DEFAULT_NOTCH_HZ)
@@ -7354,6 +7400,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         hz = panel.tone_squelch_hz()
         self._tone_squelch.tone_hz = hz if hz else None
         self._tone_squelch.dcs = panel.dcs_squelch()
+        self._tone_squelch.reverse = panel.tone_reverse()
         self._audio_options.tone_squelch = self._tone_squelch.active
         self._audio_options.notch = panel.notch_mode()
         self._audio_options.notch_hz = float(panel.notch_hz())
@@ -7376,6 +7423,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         settings.set("audio/tone_squelch", panel.tone_squelch_hz())
         dcs = panel.dcs_squelch()
         settings.set("audio/dcs_squelch", format_dcs(*dcs) if dcs else "")
+        settings.set("audio/tone_reverse", panel.tone_reverse())
         settings.set("audio/notch", panel.notch_mode())
         settings.set("audio/notch_hz", panel.notch_hz())
         settings.set("audio/low_cut", panel.low_cut())
@@ -7407,6 +7455,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         dcs = self._tone_squelch.dcs if mode == "FM" else None
         if dcs is not None:
             tone = f", {dcs_label(*dcs)}"
+        if tone and self._tone_squelch.reverse:
+            tone = f", reverse {tone[2:]}"  # (muted while it is heard)
         if not gate.enabled:
             return f"Off (everything plays){tone}", None
         threshold = gate.last_threshold_db
@@ -9950,6 +10000,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return "idle"
         gate = self._squelch
         if gate.is_open and self._tone_blocked:
+            if self._tone_squelch.reverse:
+                return "reverse"  # (M-Q3) its tone or code is heard, or may be
             return "tone"  # a signal, but not the chosen CTCSS tone or DCS code
         if not gate.enabled:
             return "off"
@@ -11830,14 +11882,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if width:
             self._set_demod_mode(demod, deviation or None, width)
         if demod == "FM":
-            dcs = None if tone else bookmark_dcs(bookmark)
+            # (Its own tone squelch, reversed or not: CHIRP's TSQL-R, DTCS-R.)
+            tone, dcs, reverse = bookmark_squelch(bookmark)
             if dcs is not None:
                 self._control_panel.set_dcs_squelch(*dcs)
             else:
                 self._control_panel.set_tone_squelch_hz(tone)
+            self._quiet_reverse = True  # (its own message says it)
+            try:
+                self._control_panel.set_tone_reverse(reverse)
+            finally:
+                self._quiet_reverse = False
             if tone or dcs is not None:
                 label = str(bookmark.get("label") or format_frequency(freq))
                 squelch = dcs_label(*dcs) if dcs else f"tone squelch {tone:.1f} Hz"
+                if reverse:
+                    squelch = f"reverse {squelch}"
                 text = f"Tuned to {label} (FM, {squelch})"
                 # (It replaces the tune's own "Tuned to ...": led as that
                 # was, by a decoder's "off" note, P-07.)
@@ -12384,14 +12444,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         tuned = abs(freq - self._current_frequency()) < 0.5
         tone = self._control_panel.tone_squelch_hz() if mode == "FM" and tuned else 0.0
         dcs = self._control_panel.dcs_squelch() if mode == "FM" and tuned else None
+        reverse = self._control_panel.tone_reverse()
         if tone:
-            panel.set_tone(index, tone)
+            panel.set_tone(index, tone, reverse=reverse)
         elif dcs is not None:
-            panel.set_dcs(index, *dcs)
+            panel.set_dcs(index, *dcs, reverse=reverse)
         # (The tone squelch saved with it is said, as tuning a bookmark does.)
         tone_text = f", tone squelch {tone:.1f} Hz" if tone else ""
         if dcs is not None:
             tone_text = f", {dcs_label(*dcs)}"
+        if tone_text and reverse:
+            tone_text = f", reverse {tone_text[2:]}"
         self._show_status_message(
             f"Bookmarked {label} ({self._mode_text(mode)}{tone_text}). Rename it "
             "with F2 in the Bookmarks tab.",

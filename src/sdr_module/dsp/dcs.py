@@ -360,6 +360,7 @@ class DcsDetector:
         self._detected: Optional[Code] = None
         self._code_power = 0.0  # the DCS band's power when it was read
         self._turned_off = False
+        self._listened = 0  # decimated samples since then, or the reset
         #: Turn-off codes heard since the last reset.
         self.turn_offs = 0
 
@@ -374,6 +375,15 @@ class DcsDetector:
         """Whether the code heard last ended with its turn-off code (until
         a code is heard again)."""
         return self._turned_off
+
+    @property
+    def heard_s(self) -> float:
+        """Seconds of audio a code is read from now: since the reset, or
+        since the turn-off code that ended the last one. A code there all
+        along is read once this passes about 0.35 s (0.5 s at 6 dB signal
+        to noise in the DCS band): whether a code is absent can only be
+        told after that (the reverse tone squelch waits for it)."""
+        return self._listened / self._out_rate
 
     def is_present(self, code: int, inverted: bool = False) -> bool:
         """Whether the bits heard lately are ``code``'s (with ``inverted``
@@ -427,6 +437,7 @@ class DcsDetector:
             pos += piece.size
             self._buffer = np.concatenate((self._buffer[piece.size :], piece))
             self._filled = min(self._keep, self._filled + piece.size)
+            self._listened = min(self._listened + piece.size, 1 << 30)
             self._since += piece.size
             self._age += piece.size
             if self._word is not None:
@@ -509,6 +520,7 @@ class DcsDetector:
         self._word = None
         self._detected = None
         self._filled = after
+        self._listened = after
         self._turned_off = True
         self.turn_offs += 1
 

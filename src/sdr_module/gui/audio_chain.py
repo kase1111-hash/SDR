@@ -22,7 +22,8 @@ tested without a window and costs little at 30 frames a second:
   :func:`make_noise_reduction` the Light and Strong noise reduction.
 * :class:`AudioJoin`: short fades so the audio never steps (squelch opening
   or closing, a new receiver chain after a Bandwidth or Mode change).
-* :class:`ToneSquelch`: CTCSS or DCS tone squelch on FM audio.
+* :class:`ToneSquelch`: CTCSS or DCS tone squelch on FM audio (or reversed:
+  muted while the tone or code is heard).
 * :class:`IqConditioner`: optional DC-spike removal and I/Q balance
   correction of the raw samples.
 """
@@ -389,6 +390,15 @@ LOW_CUT_CHOICES: Tuple[Tuple[str, str, str], ...] = (
 #: (67-254 Hz) or the DCS bits under the voice are filtered out, as a
 #: radio does.
 SUBAUDIBLE_CUT_HZ = 300.0
+#: What the reverse tone squelch does (see :class:`ToneSquelch`), for the
+#: controls that set it.
+REVERSE_TONE_TIP = (
+    "Reverse tone squelch (CHIRP's TSQL-R and DTCS-R): mute the stations "
+    "that send this CTCSS tone or DCS code and hear every other one, to "
+    "leave out one station or a repeater on a channel you listen to. Each "
+    "transmission is held about half a second while its tone or code is "
+    "looked for."
+)
 
 
 class AudioOptions:
@@ -781,14 +791,30 @@ class ToneSquelch:
 
     The DCS detector needs the discriminator's audio before any DC
     blocking (:meth:`feed_dcs`, each block before :meth:`process`).
+
+    ``reverse`` (False by default) reverses it, as CHIRP's TSQL-R and
+    DTCS-R and the radios that have them do: muted while the tone or code
+    is heard, open for every other station. It opens only once it is sure
+    the tone or code isn't there (:data:`REVERSE_DECIDE_S` of audio since
+    :meth:`reset`, or since a DCS turn-off code: the detectors find one in
+    0.35-0.5 s), so the station it mutes isn't heard as each of its
+    transmissions starts either.
     """
+
+    #: Audio the reverse tone squelch hears before it opens (s): the CTCSS
+    #: detector decides from 0.5 s, and a DCS code is read from 0.35 s
+    #: (0.5 s at 6 dB signal to noise in its band).
+    REVERSE_DECIDE_S = 0.55
 
     def __init__(self, rate: float):
         self.rate = float(rate)
         self.tone_hz: Optional[float] = None
         self.dcs: Optional[Tuple[int, bool]] = None
+        #: Reverse: muted while the tone or code is heard (see above).
+        self.reverse: bool = False
         self._detector = CTCSSDetector(self.rate)
         self._dcs_detector = DcsDetector(self.rate)
+        self._heard_n = 0  # samples of FM audio since the reset (CTCSS)
 
     @property
     def active(self) -> bool:
@@ -798,6 +824,7 @@ class ToneSquelch:
     def reset(self) -> None:
         self._detector.reset()
         self._dcs_detector.reset()
+        self._heard_n = 0
 
     @property
     def detected_hz(self) -> Optional[float]:
@@ -826,11 +853,18 @@ class ToneSquelch:
     def process(self, audio: np.ndarray) -> bool:
         """Feed FM audio; True while the speaker may play."""
         self._detector.process(audio)
+        self._heard_n = min(self._heard_n + int(np.size(audio)), 1 << 40)
         if self.dcs is not None:
-            return self._dcs_detector.is_present(*self.dcs)
+            heard = self._dcs_detector.is_present(*self.dcs)
+            if not self.reverse:
+                return heard
+            return not heard and self._dcs_detector.heard_s >= self.REVERSE_DECIDE_S
         if self.tone_hz is None:
             return True
-        return self._detector.is_present(self.tone_hz)
+        heard = self._detector.is_present(self.tone_hz)
+        if not self.reverse:
+            return heard
+        return not heard and self._heard_n >= self.REVERSE_DECIDE_S * self.rate
 
 
 class IqConditioner:

@@ -348,6 +348,49 @@ class TestOneChannelRecordings(_WavCase):
         texts = [m["content"] for m in panel._messages]
         self.assertTrue(any("From a real IF" in t for t in texts), texts)
 
+    def test_a_direct_sampled_capture_is_heard(self):
+        """A receiver's RF sampled directly (one channel at 1.2 MS/s: the
+        AM band's 0-600 kHz): each station is heard at its own frequency
+        in AM, its tone what the speaker gets."""
+        from tests.test_gui_round3_main import _FakeClock
+        from tests.test_gui_second_receiver import _FakeSink
+
+        rate = 1.2e6
+        t = np.arange(int(1.5 * rate)) / rate
+        real = 0.002 * np.random.default_rng(8).standard_normal(len(t))
+        for station, tone in ((450e3, 800.0), (200e3, 400.0)):
+            envelope = 0.1 * (1 + 0.6 * np.sin(2 * np.pi * tone * t))
+            real += envelope * np.cos(2 * np.pi * station * t)
+        path = self.path("am_band.wav")
+        iq_wav(path, real, "int", 2, int(rate))
+        win = self.win
+        sink = _FakeSink()
+        sink.open = True
+        win._audio, win._audio_enabled, win._audio_problem = sink, True, None
+        # (As with an output device: a mode change asks the system again.)
+        win._audio_output_problem = lambda: None
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertTrue(win._open_recording())
+        warn.assert_not_called()
+        self.assertAlmostEqual(win._lo_frequency(), rate / 4, delta=0.5)
+        clock = _FakeClock()
+        win._set_demod_mode("AM", None, "10 kHz")
+        for station, tone in ((450e3, 800.0), (200e3, 400.0)):
+            self.assertTrue(win.set_frequency(station), self.message())
+            sink.blocks.clear()
+            with mock.patch.object(self.mw, "time", clock):
+                win._pacer.restart()
+                for _ in range(20):  # (0.6 s)
+                    clock.advance(0.03)
+                    win._update_display()
+            heard = sink.samples()[-16384:]
+            self.assertEqual(len(heard), 16384, station)
+            spectrum = np.abs(np.fft.rfft(heard * np.hanning(len(heard))))
+            freqs = np.fft.rfftfreq(len(heard), 1 / 48000)
+            loudest = freqs[np.argmax(spectrum[20:]) + 20]
+            self.assertAlmostEqual(loudest, tone, delta=10, msg=station)
+        win._playback.close()
+
     def test_every_format_of_one_channel_opens(self):
         for kind, width in (("int", 1), ("int", 3), ("float", 4), ("float", 8)):
             path, x = self._audio(f"a{kind}{width}.wav", 0.2, kind, width)

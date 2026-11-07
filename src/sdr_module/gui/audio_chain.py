@@ -792,13 +792,17 @@ class ToneSquelch:
     The DCS detector needs the discriminator's audio before any DC
     blocking (:meth:`feed_dcs`, each block before :meth:`process`).
 
+    A transmission that ends with a DCS turn-off code or a CTCSS reverse
+    burst closes it within 100 ms of either (M-Q1, M-Q2), before the
+    carrier drops: its squelch tail isn't heard.
+
     ``reverse`` (False by default) reverses it, as CHIRP's TSQL-R and
     DTCS-R and the radios that have them do: muted while the tone or code
     is heard, open for every other station. It opens only once it is sure
     the tone or code isn't there (:data:`REVERSE_DECIDE_S` of audio since
-    :meth:`reset`, or since a DCS turn-off code: the detectors find one in
-    0.35-0.5 s), so the station it mutes isn't heard as each of its
-    transmissions starts either.
+    :meth:`reset`, or since a DCS turn-off code or a reverse burst: the
+    detectors find one in 0.35-0.5 s), so the station it mutes isn't heard
+    as each of its transmissions starts (or ends) either.
     """
 
     #: Audio the reverse tone squelch hears before it opens (s): the CTCSS
@@ -814,7 +818,6 @@ class ToneSquelch:
         self.reverse: bool = False
         self._detector = CTCSSDetector(self.rate)
         self._dcs_detector = DcsDetector(self.rate)
-        self._heard_n = 0  # samples of FM audio since the reset (CTCSS)
 
     @property
     def active(self) -> bool:
@@ -824,7 +827,6 @@ class ToneSquelch:
     def reset(self) -> None:
         self._detector.reset()
         self._dcs_detector.reset()
-        self._heard_n = 0
 
     @property
     def detected_hz(self) -> Optional[float]:
@@ -853,7 +855,6 @@ class ToneSquelch:
     def process(self, audio: np.ndarray) -> bool:
         """Feed FM audio; True while the speaker may play."""
         self._detector.process(audio)
-        self._heard_n = min(self._heard_n + int(np.size(audio)), 1 << 40)
         if self.dcs is not None:
             heard = self._dcs_detector.is_present(*self.dcs)
             if not self.reverse:
@@ -864,7 +865,7 @@ class ToneSquelch:
         heard = self._detector.is_present(self.tone_hz)
         if not self.reverse:
             return heard
-        return not heard and self._heard_n >= self.REVERSE_DECIDE_S * self.rate
+        return not heard and self._detector.heard_s >= self.REVERSE_DECIDE_S
 
 
 class IqConditioner:

@@ -376,7 +376,13 @@ def _frequencies(value: Any) -> Tuple[float, ...]:
     sequence of them (anything else, or not finite, left out)."""
     if value is None:
         return ()
-    values = value if isinstance(value, (list, tuple)) else (value,)
+    if isinstance(value, (str, bytes)):
+        values: Sequence[Any] = (value,)
+    else:
+        try:
+            values = tuple(value)  # (a list, a tuple, a NumPy array...)
+        except TypeError:
+            values = (value,)  # (one number)
     found = []
     for item in values:
         try:
@@ -2458,8 +2464,10 @@ class ControlPanel(QWidget if HAS_PYQT6 else object):
         self._notch_combo.setEnabled(applies)
         self._notch_spin.setEnabled(applies and mode == "manual")
         self._notch_found.setEnabled(applies)
-        if not applies:
-            self.show_notch_found(None)  # (nothing is removed here)
+        if not applies or mode != "auto":
+            # (Nothing is removed here, or Manual's one frequency: Auto
+            # shows what it finds again within a frame.)
+            self.show_notch_found(None)
         self._notch_stack.setCurrentWidget(
             self._notch_found if mode == "auto" else self._notch_spin
         )

@@ -10,6 +10,8 @@ import math
 import os
 import unittest
 
+import numpy as np
+
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_audio_notch import (  # noqa: E402
@@ -72,6 +74,17 @@ class TestTheWhistleRow(_WindowTestCase):
             self.assertEqual(p._notch_found.text(), "None")
             self.assertEqual(p._notch_label.text(), "Whistle:")
             self.assertIn("up to three", p._notch_found.toolTip())
+        # (Any sequence, a NumPy array too.)
+        p.show_notch_found(np.array([1900.0, 700.0]))
+        self.assertEqual(p._notch_found.text(), "700, 1900 Hz")
+
+    def test_manual_is_one_whistle_again(self):
+        p = self.panel
+        p.show_notch_found((700.0, 1900.0))
+        self.assertEqual(p._notch_label.text(), "Whistles:")
+        for mode in ("manual", "off", "auto"):
+            p.set_notch_mode(mode)
+            self.assertEqual(p._notch_label.text(), "Whistle:", mode)
 
     def test_auto_says_it_removes_up_to_three(self):
         combo = self.panel._notch_combo

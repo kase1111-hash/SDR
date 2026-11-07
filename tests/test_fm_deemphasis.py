@@ -446,7 +446,7 @@ class TestTheDecodersTimeConstant(unittest.TestCase):
 
     def test_a_time_constant_must_be_positive(self):
         decoder = StereoDecoder(240e3)
-        for bad in (0.0, -1e-6, float("nan"), float("inf")):
+        for bad in (0.0, -1e-6, float("nan"), float("inf"), None, "75 us"):
             with self.assertRaises(ValueError):
                 decoder.tau_s = bad
             with self.assertRaises(ValueError):

@@ -432,8 +432,12 @@ def _checked_blending(value: str) -> str:
 
 
 def _checked_tau(value: float) -> float:
-    """A de-emphasis time constant: a positive, finite number of seconds."""
-    tau = float(value)
+    """A de-emphasis time constant: a positive, finite number of seconds
+    (ValueError for anything else, a non-number too)."""
+    try:
+        tau = float(value)
+    except (TypeError, ValueError, OverflowError):
+        tau = math.nan
     if not math.isfinite(tau) or tau <= 0.0:
         raise ValueError(f"a de-emphasis time constant must be positive, got {value!r}")
     return tau

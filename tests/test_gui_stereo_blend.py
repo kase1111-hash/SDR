@@ -79,6 +79,14 @@ class TestTheMenu(_WindowTestCase):
                 self.assertEqual(self.store.values["audio/stereo_blend"], key)
                 self.assertIn("Stereo blend", self.win._message_label.text())
 
+    def test_set_from_code_in_any_case(self):
+        self.win._set_stereo_blend(" More ")
+        self.assertTrue(_choice(self.win, "more").isChecked())
+        self.assertEqual(self.win._audio_options.stereo_blend, "more")
+        self.assertEqual(self.store.values["audio/stereo_blend"], "more")
+        self.win._set_stereo_blend("loud")  # (not a choice: nothing changes)
+        self.assertEqual(self.win._audio_options.stereo_blend, "more")
+
     def test_a_saved_choice_is_restored(self):
         self.store.values["audio/stereo_blend"] = " More"  # (as hand-edited)
         other = self.mw.SDRMainWindow()
@@ -171,13 +179,49 @@ class TestAWeakStation(_WindowTestCase):
         self.assertEqual(badge.text(), "STEREO")
         self.assertIn("fully apart", badge.toolTip())
 
-    def test_more_plays_it_in_mono(self):
+    def test_more_plays_it_nearly_in_mono(self):
         decoder, badge = self.listen("more")
         self.assertEqual(decoder.blending, "more")
         self.assertLess(decoder.blend, 0.5)
+        self.assertGreater(decoder.blend, 0.1)  # (some of the stereo plays...)
         self.assertEqual(badge.text(), "MONO")
         self.assertIn("too weak", badge.toolTip())
+        self.assertIn("most of the way toward mono", badge.toolTip())  # (...so)
+        self.assertNotIn("plays in mono", badge.toolTip())
         self.assertIn("Stereo Blend: More", badge.toolTip())
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestTheBadgeSaysWhatPlays(_WindowTestCase):
+    """Under half the stereo difference the badge says MONO; its tooltip
+    says whether any of the stereo still plays."""
+
+    def show(self, blend):
+        from types import SimpleNamespace
+
+        from sdr_module.gui.stereo_audio import StereoPath
+
+        decoder = SimpleNamespace(
+            blend=blend, target=blend, pilot=True, blending="more"
+        )
+        chain = SimpleNamespace(stereo_decoder=decoder)
+        with mock.patch.object(StereoPath, "usable", return_value=True):
+            self.win._show_stereo(chain, True)
+        return self.win._stereo_badge
+
+    def test_none_of_it(self):
+        badge = self.show(0.0)
+        self.assertEqual(badge.text(), "MONO")
+        self.assertIn("plays in mono", badge.toolTip())
+        self.assertIn("Stereo Blend: More", badge.toolTip())
+
+    def test_some_of_it(self):
+        for blend in (0.05, 0.3, 0.45):
+            badge = self.show(blend)
+            self.assertEqual(badge.text(), "MONO", blend)
+            self.assertNotIn("plays in mono", badge.toolTip(), blend)
+            self.assertIn("most of the way toward mono", badge.toolTip(), blend)
+            self.assertIn("Stereo Blend: More", badge.toolTip(), blend)
 
 
 if __name__ == "__main__":

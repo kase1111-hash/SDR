@@ -331,6 +331,9 @@ _STEREO_BLEND_KEY = "audio/stereo_blend"
 # _STEREO_OFF_BLEND (no flicker while the blend hovers).
 _STEREO_ON_BLEND = 0.5
 _STEREO_OFF_BLEND = 0.35
+# Below the lamp's threshold, more of the difference than this (2 %, a
+# third of a dB of separation) is "nearly mono" in the badge's tooltip.
+_NEARLY_MONO_BLEND = 0.02
 _VOLUME_STEP = 10  # percent: Radio > Audio > Volume Up / Down
 # Audio is only played while the device delivers at least this fraction of
 # its sample rate: less than that (a device or computer that can't keep up)
@@ -10046,6 +10049,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         once; broadcast FM takes it on the next block (its audio filters
         crossfade in 10 ms: no click), mono and stereo alike, and with it
         Record Audio and the radio tuner's station."""
+        key = str(key).strip()  # (as a choice's key: "75" or "50")
         seconds = deemphasis_seconds(key)
         if seconds is None:
             return
@@ -10063,6 +10067,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         """Radio > Audio > Stereo Blend (M-A2): how far a weak station
         blends toward mono, Less, Normal or More. Saved at once; the stereo
         decoder's thresholds move to it over 20 ms."""
+        key = str(key).strip().lower()  # (as a choice's key)
         if usable_blend(key) != key:
             return
         self._check_choice(getattr(self, "_stereo_blend_actions", {}), key)
@@ -10123,9 +10128,17 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 elif decoder.target >= _STEREO_ON_BLEND:
                     tip = "Mono for a moment: stereo is coming in."
                 else:
+                    # (Under half the stereo difference: MONO, but say so
+                    # when some of it still plays.)
+                    heard = (
+                        "Nearly mono: the signal is too weak for clean stereo, "
+                        "so it is blended most of the way toward mono"
+                        if blend > _NEARLY_MONO_BLEND
+                        else "Mono: the signal is too weak for clean stereo, so "
+                        "it plays in mono"
+                    )
                     tip = (
-                        "Mono: the signal is too weak for clean stereo, so it "
-                        f"plays in mono to keep the hiss down ({setting}). Stereo "
+                        f"{heard} to keep the hiss down ({setting}). Stereo "
                         "comes back as the signal gets stronger."
                     )
         self._stereo_lit = text == "STEREO"

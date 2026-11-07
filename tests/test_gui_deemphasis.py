@@ -117,6 +117,15 @@ class TestTheMenu(_WindowTestCase):
         self.assertLess(audio.index("Stereo"), audio.index("De-emphasis"))
         self.assertLess(audio.index("Output Device..."), audio.index("Stereo"))
 
+    def test_set_from_code_with_spaces_too(self):
+        self.win._set_deemphasis(" 50 ")
+        fifty = _menu(self.win, "Radio", "Audio", "De-emphasis", FIFTY)
+        self.assertTrue(fifty.isChecked())
+        self.assertEqual(self.win._audio_options.deemphasis_s, 50e-6)
+        self.assertEqual(self.store.values["audio/deemphasis"], "50")
+        self.win._set_deemphasis("25")  # (not a choice: nothing changes)
+        self.assertEqual(self.win._audio_options.deemphasis_s, 50e-6)
+
     def test_choosing_50_us_applies_at_once_and_is_saved(self):
         fifty = _menu(
             self.win,

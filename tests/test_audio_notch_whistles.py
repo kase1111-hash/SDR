@@ -225,6 +225,20 @@ class TestAFinderOfItsOwn(unittest.TestCase):
             else:
                 self.assertGreater(tone_level(tail, hz), 0.9 * amp)
 
+    def test_a_finder_following_four_tones_gets_four_notches(self):
+        # (What it says it removes is what it removes: a notch per place.)
+        from sdr_module.dsp.audio_filters import ToneFinder
+
+        notch = _notch()
+        notch.finder = ToneFinder(RATE, max_tones=4)
+        specs = ((600.0, 0.2), (1100.0, 0.15), (1700.0, 0.1), (2500.0, 0.08))
+        x = _whistles(int(3.0 * RATE), specs)
+        out, _said = _feed(notch, x)
+        self.assertEqual(len(notch.frequencies_hz), 4)
+        tail = out[int(1.5 * RATE) :]
+        for hz, amp in specs:
+            self.assertLess(tone_level(tail, hz), amp * 0.01, hz)
+
 
 class TestStillNeverVoiceOrTheCwNote(unittest.TestCase):
     """The finder's protections hold for every notch: a voice's harmonics

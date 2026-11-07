@@ -774,10 +774,12 @@ class AudioNotch:
     def _per_notch(
         self, wants: Sequence[Optional[float]]
     ) -> Tuple[Optional[float], ...]:
-        """``wants`` for each notch (a finder following fewer tones than
-        there are notches leaves the rest with none)."""
-        count = len(self._slots)
-        return tuple(wants[:count]) + (None,) * max(0, count - len(wants))
+        """``wants`` for each notch: a finder following fewer tones than
+        there are notches leaves the rest with none; one given more places
+        (``finder`` replaced) gets a notch for each, engaging as any does."""
+        while len(self._slots) < len(wants):
+            self._slots.append(_NotchSlot(self))
+        return tuple(wants) + (None,) * (len(self._slots) - len(wants))
 
     def _manual(self) -> Optional[float]:
         try:

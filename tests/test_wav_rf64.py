@@ -484,7 +484,12 @@ class TestReadingOtherProgramsFiles:
         )
         np.testing.assert_allclose(load_iq_file(path)[0], x, atol=STEP)
 
-    def test_floating_point_samples_are_refused_plainly(self, tmp_path):
+    def test_floating_point_samples_are_read_and_compressed_ones_refused(
+        self, tmp_path
+    ):
+        """Floating point was refused ("only integer (PCM) WAV files are
+        read"); since M-F1 it is read (tests/test_wav_formats.py). A
+        compressed format is still refused plainly."""
         x = np.zeros(200, np.float32)
         chunks = _chunk(b"fmt ", _fmt(tag=3, width=4)) + _chunk(b"data", x.tobytes())
         path = tmp_path / "float.wav"
@@ -492,8 +497,14 @@ class TestReadingOtherProgramsFiles:
             b"RIFF" + struct.pack("<I", 4 + len(chunks)) + b"WAVE" + chunks
         )
         info = detect_format(path)
+        assert info.is_valid and info.num_samples == 100
+        chunks = _chunk(b"fmt ", _fmt(tag=7, width=1)) + _chunk(b"data", bytes(200))
+        path.write_bytes(
+            b"RIFF" + struct.pack("<I", 4 + len(chunks)) + b"WAVE" + chunks
+        )
+        info = detect_format(path)
         assert not info.is_valid
-        assert "floating" in info.error_message
+        assert "WAV format 7" in info.error_message
 
     def test_a_file_that_isnt_wav(self, tmp_path):
         path = tmp_path / "noise.wav"
@@ -904,13 +915,16 @@ class TestPlayingAudioBack:
         np.testing.assert_array_equal(samples, expected)
         assert meta.sample_format is AudioSampleFormat.INT24
 
-    def test_32_bit_samples_are_refused_plainly(self, tmp_path):
-        """They were read as 16-bit ones: noise, twice as long."""
+    def test_32_bit_samples_are_read(self, tmp_path):
+        """They were read as 16-bit ones (noise, twice as long), then
+        refused; since M-F1 they are read, full scale 1.0."""
         path = tmp_path / "s32.wav"
+        values = np.array([2147483647, -1073741824, 0, 1], "<i4")
         with wave.open(str(path), "wb") as handle:
             handle.setnchannels(1)
             handle.setsampwidth(4)
             handle.setframerate(self.AUDIO_RATE)
-            handle.writeframes(np.zeros(100, "<i4").tobytes())
-        with pytest.raises(ValueError, match="32-bit"):
-            AudioPlayer(path)
+            handle.writeframes(np.tile(values, 25).tobytes())
+        with AudioPlayer(path) as player:
+            assert player.total_samples == 100
+            np.testing.assert_allclose(player.read(4), [1.0, -0.5, 0.0, 0.0], atol=1e-7)

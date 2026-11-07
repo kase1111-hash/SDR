@@ -18,11 +18,12 @@ place once it passes 4 GiB. The header is brought up to date after every
 write, so a file cut short (a crash) still reads to its last write.
 
 :func:`read_wav_header` reads classic, RF64 and BW64 files, and Sony Wave64
-(``.w64``): how the samples are stored and where they lie. A size larger
-than the file (a recording cut short), an unknown one (0xFFFFFFFF, written
-while streaming; in RF64 or Wave64 also a size never filled in) and a
-classic 32-bit size that went round past 4 GiB (a writer that knows no
-RF64) are all read as what the file holds.
+(``.w64``): how the samples are stored (8-, 16-, 24- and 32-bit integer PCM,
+32- and 64-bit IEEE floating point; :data:`READ_WIDTHS`) and where they lie.
+A size larger than the file (a recording cut short), an unknown one
+(0xFFFFFFFF, written while streaming; in RF64 or Wave64 also a size never
+filled in) and a classic 32-bit size that went round past 4 GiB (a writer
+that knows no RF64) are all read as what the file holds.
 """
 
 from __future__ import annotations
@@ -50,6 +51,11 @@ RF64_HEADER_BYTES = 80
 WAVE_FORMAT_PCM = 0x0001
 WAVE_FORMAT_IEEE_FLOAT = 0x0003
 WAVE_FORMAT_EXTENSIBLE = 0xFFFE
+
+#: The samples :func:`read_wav_header` reads, by :attr:`WavHeader.sample_type`:
+#: bytes per sample ("int": 8-bit unsigned, 16- to 32-bit signed; "float":
+#: IEEE single and double precision).
+READ_WIDTHS: Dict[str, Tuple[int, ...]] = {"int": (1, 2, 3, 4), "float": (4, 8)}
 
 #: What every KSDATAFORMAT_SUBTYPE GUID ends with (as stored); the two
 #: bytes before it are the subformat's format tag (1: PCM, 3: float).
@@ -82,7 +88,7 @@ class WavHeader:
     #: "RIFF" (a classic WAV file), "RF64", "BW64" or "W64" (Sony Wave64).
     container: str
     channels: int
-    #: Bytes of one channel's sample (1: 8-bit, 2: 16-bit).
+    #: Bytes of one channel's sample (1: 8-bit, 2: 16-bit, 3: 24-bit...).
     sample_width: int
     #: Frames (a sample of every channel) a second.
     frame_rate: int
@@ -90,10 +96,21 @@ class WavHeader:
     data_offset: int
     #: Bytes of samples the file holds.
     data_bytes: int
+    #: How each sample is stored: "int" (integer PCM, little-endian: 8-bit
+    #: unsigned with 128 as zero, wider ones signed) or "float" (IEEE
+    #: floating point: WAV format 3, or the extensible format's float).
+    sample_type: str = "int"
 
     @property
     def frame_bytes(self) -> int:
         return self.channels * self.sample_width
+
+    @property
+    def sample_name(self) -> str:
+        """How each sample is stored, in words: "16-bit integer",
+        "24-bit integer", "32-bit float"..."""
+        kind = "float" if self.sample_type == "float" else "integer"
+        return f"{8 * self.sample_width}-bit {kind}"
 
     @property
     def frames(self) -> int:
@@ -143,7 +160,8 @@ def read_wav_header(source: Source) -> WavHeader:
     binary file open on a WAV file, read from its start).
 
     Raises WavError (a ValueError) for a file that isn't WAV or whose
-    samples aren't integer PCM, and OSError when it can't be read.
+    samples are in a form not read (:data:`READ_WIDTHS`: e.g. compressed,
+    or 64-bit integers), saying which, and OSError when it can't be read.
     """
     handle, own = _opened(source)
     try:
@@ -152,20 +170,24 @@ def read_wav_header(source: Source) -> WavHeader:
         if own:
             handle.close()
     tag, channels, rate, bits = found.fmt
-    if tag == WAVE_FORMAT_IEEE_FLOAT:
-        raise WavError(
-            "its samples are floating point (WAV format 3), and only integer "
-            "(PCM) WAV files are read"
-        )
-    if tag != WAVE_FORMAT_PCM:
+    if tag not in (WAVE_FORMAT_PCM, WAVE_FORMAT_IEEE_FLOAT):
         kind = f"WAV format {tag}" if tag >= 0 else "an extensible WAV format"
         raise WavError(
-            f"its samples are in {kind}, not integer PCM, and only PCM WAV files "
-            "are read"
+            f"its samples are in {kind}, not integer PCM or floating point, and "
+            "only those WAV files are read"
         )
     width = (bits + 7) // 8
     if channels < 1 or width < 1:
         raise WavError("its format (fmt) chunk is damaged: no channels or samples")
+    # (Integer samples narrower than their bytes, 20 bits in 3, are
+    # left-justified: read as their bytes' width, full scale is the same.)
+    sample_type = "float" if tag == WAVE_FORMAT_IEEE_FLOAT else "int"
+    if width not in READ_WIDTHS[sample_type]:
+        what = "floating point" if sample_type == "float" else "integers"
+        raise WavError(
+            f"its samples are {bits}-bit {what}, and this app reads 8-, 16-, 24- "
+            "and 32-bit integer and 32- and 64-bit floating-point WAV files"
+        )
     return WavHeader(
         container=found.container,
         channels=channels,
@@ -173,6 +195,7 @@ def read_wav_header(source: Source) -> WavHeader:
         frame_rate=rate,
         data_offset=found.data_offset,
         data_bytes=_data_bytes(found),
+        sample_type=sample_type,
     )
 
 

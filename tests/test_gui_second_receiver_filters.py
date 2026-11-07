@@ -114,6 +114,23 @@ class TestTheNotch(_DspCase):
         frames, _audio = self.listen(dsp, _usb(0.3, [(1000.0, 0.05)]))
         self.assertIsNone(frames[-1].notch_hz)
 
+    def test_nothing_demodulated_nothing_said_removed(self):
+        # (Check: as in the main window, Auto's readout says None once
+        # nothing is demodulated: here nobody listens any more. The chain
+        # still holds the last whistle.)
+        dsp = self.dsp()
+        dsp.options.notch = "auto"
+        iq = _usb(2.0, [(1350.0, 0.05), (700.0, 0.01)])
+        frames, _audio = self.listen(dsp, iq[: int(1.5 * RATE)])
+        self.assertIsNotNone(frames[-1].notch_hz)
+        tail = iq[int(1.5 * RATE) :]
+        frames = [
+            dsp.process(tail[start : start + BLOCK], False)
+            for start in range(0, len(tail), BLOCK)
+        ]
+        self.assertIsNotNone(dsp.chain().notch_frequency_hz)
+        self.assertIsNone(frames[-1].notch_hz)
+
     def test_another_station_tuned_searches_anew(self):
         # Auto forgets the last station's whistle once another is tuned.
         dsp = self.dsp()

@@ -565,6 +565,10 @@ if HAS_PYQT6:
             if self._main_gone or not callable(show):
                 return
             show("decoder")
+            if win.isMinimized():
+                # (Back as it was, maximized or not.)
+                state = win.windowState() & ~Qt.WindowState.WindowMinimized
+                win.setWindowState(state | Qt.WindowState.WindowActive)
             win.raise_()
             win.activateWindow()
 

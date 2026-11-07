@@ -2228,7 +2228,7 @@ if HAS_PYQT6:
             self._level_meter.clear()
             self._show_stereo(NO_STEREO_READING)  # (nothing is received)
             self._show_notch_found(None)
-            self._show_tone_heard(None, True, None)
+            self._show_no_tone_heard()
             self._refresh_state()
             if was_running:
                 self.running_changed.emit(False)
@@ -3699,10 +3699,16 @@ if HAS_PYQT6:
                 return False
             demod, deviation, width = self.tx_listening(mode, bandwidth)
             self.set_mode(demod, deviation, width)
+            squelch = ""
+            if demod == "FM" and self._tone_choice() != (None, None):
+                # The main window sends no CTCSS tone or DCS code: a tone
+                # squelch left on would hold the transmission back (TONE).
+                self._set_tone_choice(None, None)
+                squelch = ", tone squelch off"
             if not self._running and not self.start():
                 return False
             self._show_message(
-                f"Monitoring {what} on {format_frequency(freq)} ({demod}).",
+                f"Monitoring {what} on {format_frequency(freq)} ({demod}{squelch}).",
                 "info",
                 5000,
             )

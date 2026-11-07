@@ -336,5 +336,91 @@ class TestBookmarks(_SecondCase):
         self.assertIn("DCS 754 I", rx.message())
 
 
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestTheTxMonitor(_SecondCase):
+    """Check: Monitor (and Follow transmissions) hears the transmission.
+    The main window's transmissions send no CTCSS tone or DCS code, so a
+    tone squelch left on (a repeater listened to before) held the monitor
+    silent, reading TONE."""
+
+    def setUp(self):
+        super().setUp()
+        main_sink = _FakeSink()
+        main_sink.open = True
+        self.win._audio = main_sink
+        self.win._audio_enabled = True
+        self.win._audio_problem = None
+        self.speaker = self.sink()
+        station = self.win._tx_station
+        station.device_problem = lambda: None
+        self.spec = ("mcw", "FM", 16e3, "FM tone, 20 WPM")
+        station.id_spec = lambda freq: self.spec
+        self.win.set_frequency(146.52e6)
+        rx = self.rx
+        rx.set_listen("second")
+        rx.tune(145.29e6, recenter=True)
+        rx.set_mode("FM", "5 kHz", "25 kHz")
+
+    def test_monitoring_turns_the_tone_squelch_off(self):
+        rx = self.rx
+        rx._tone_combo.setCurrentIndex(rx._tone_combo.findData("100.0"))
+        self.assertTrue(rx.monitor_tx())
+        rx._frame_timer.stop()
+        self.assertEqual((rx.tuned_frequency(), rx.mode()), (146.52e6, "FM"))
+        self.assertEqual(rx._tone_combo.currentData(), "off")
+        self.assertEqual(rx._dsp.tone_squelch, (None, None))
+        self.assertIn("tone squelch off", rx.message())
+        # What is sent (no tone) is heard, not held back as TONE.
+        rx._sync_audio_output()
+        self.speaker.blocks.clear()
+        iq = _repeater(1.2, ctcss_hz=None, rate=rx._rate())
+        block = int(rx._rate() / 30)
+        for start in range(0, len(iq), block):
+            rx._process(iq[start : start + block])
+        self.assertEqual(rx._level_meter.state(), "open")
+        self.assertGreater(len(self.speaker.samples()), 0.5 * AUDIO)
+
+    def test_a_dcs_code_too_and_nothing_said_without_one(self):
+        rx = self.rx
+        rx._tone_combo.setCurrentIndex(rx._tone_combo.findData("D023N"))
+        self.assertTrue(rx.monitor_tx())
+        rx._frame_timer.stop()
+        self.assertEqual(rx._dsp.tone_squelch, (None, None))
+        self.assertIn("tone squelch off", rx.message())
+        self.assertTrue(rx.monitor_tx())  # (none set: nothing to say)
+        self.assertNotIn("tone squelch", rx.message())
+
+    def test_in_cw_the_tone_squelch_stays(self):
+        # (It acts on narrow FM only: monitoring a CW ID leaves it be.)
+        rx = self.rx
+        rx._tone_combo.setCurrentIndex(rx._tone_combo.findData("100.0"))
+        self.spec = ("cw", "CW", 100.0, "CW, 20 WPM")
+        self.assertTrue(rx.monitor_tx())
+        rx._frame_timer.stop()
+        self.assertEqual(rx.mode(), "CW")
+        self.assertEqual(rx._dsp.tone_squelch, (100.0, None))
+        self.assertNotIn("tone squelch", rx.message())
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestToneHeardWhileStopped(_SecondCase):
+    """Check: stopped, Tone heard said "None" (no tone on the channel) at
+    a broadcast deviation too, where tones aren't looked for."""
+
+    def test_it_says_whether_tones_are_looked_for(self):
+        rx = self.rx
+        rx.set_mode("FM", "75 kHz", "200 kHz")
+        self.assertEqual(rx._tone_heard.text(), "Not checked")
+        rx.set_mode("FM", "5 kHz", "25 kHz")
+        self.assertEqual(rx._tone_heard.text(), "None")
+        self.assertTrue(rx.start())
+        rx._frame_timer.stop()
+        rx.set_mode("FM", "75 kHz", "200 kHz")
+        rx._process(rx.device.read_samples(int(rx._rate() / 30)))
+        rx.stop()
+        self.assertEqual(rx._tone_heard.text(), "Not checked")
+        self.assertIn("broadcast", rx._tone_heard.toolTip())
+
+
 if __name__ == "__main__":
     unittest.main()

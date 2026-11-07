@@ -197,6 +197,24 @@ class TestTheSignalPathPlaysStereo(_DspCase):
         self.assertLess(float(np.max(np.abs(np.diff(both, axis=0)))), 0.25)
         self.assertEqual(frames[-1].audio.ndim, 1)
 
+    def test_the_speaker_stopping_fades_out_in_stereo(self):
+        # (Check: the block that fades out when the speaker stops, as when
+        # Listen moves to the main window, is the stereo audio too; a mono
+        # one after stereo would step each side to (L+R)/2 at once.)
+        dsp = self.dsp()
+        iq = _station(0.6)
+        half = int(0.4 * RATE)
+        frames = self.run_blocks(dsp, iq[:half])
+        self.assertEqual(frames[-1].audio.ndim, 2)
+        last = frames[-1].audio[-1]
+        stopped = self.run_blocks(dsp, iq[half:], play=False)
+        fade = stopped[0].audio
+        self.assertEqual(fade.ndim, 2)
+        self.assertTrue(all(f.audio is None for f in stopped[1:]))
+        # Each side goes on from where it was (one sample of the tones).
+        self.assertLess(float(np.max(np.abs(fade[0] - last))), 0.2)
+        self.assertLess(float(np.max(np.abs(fade[-1]))), 0.05)  # (faded out)
+
 
 # ---------------------------------------------------------------------------
 # The window

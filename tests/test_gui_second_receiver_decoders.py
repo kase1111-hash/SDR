@@ -274,6 +274,19 @@ class TestTheDecoderTab(_DecodeCase):
         self.rx._decoder_show.click()
         self.assertTrue(self.win._decoder_page_visible())
 
+    def test_a_minimized_main_window_comes_back(self):
+        # (Check: with the main window minimized the button did nothing
+        # one could see.)
+        win = self.win
+        win._show_panel("bookmarks")
+        win.showMinimized()
+        self.settle()
+        self.assertTrue(win.isMinimized())
+        self.rx._decoder_show.click()
+        self.settle()
+        self.assertFalse(win.isMinimized())
+        self.assertTrue(win._decoder_page_visible())
+
     def test_clear_there_clears_the_last_message_here(self):
         rx = self.rx
         self.start_on()

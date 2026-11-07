@@ -315,7 +315,7 @@ if HAS_PYQT6:
         on every block, and ``self._dsp.tone_squelch``: a change takes
         effect at once, without a click), and their settings. Uses the
         window's ``_combo``, ``_dsp``, ``_settings``, ``_save``,
-        ``_restoring``, ``_show_message``, ``mode()`` and
+        ``_restoring``, ``_running``, ``_show_message``, ``mode()`` and
         ``_deviation_hz()``."""
 
         def _build_tone_rows(self, form: Any) -> None:
@@ -401,6 +401,14 @@ if HAS_PYQT6:
                 label.setText(text)
                 label.setToolTip(tip)
                 set_tone(label, tone)
+
+        def _show_no_tone_heard(self) -> None:
+            """Nothing is received (stopped): Tone heard says None in narrow
+            FM and Not checked at a broadcast deviation, as while receiving."""
+            narrow = (
+                self.mode() == "FM" and self._deviation_hz() < _BROADCAST_DEVIATION_HZ
+            )
+            self._show_tone_heard(None, narrow, None)
 
         def _build_filter_rows(self, form: Any) -> None:
             """The Notch, Whistle and Low cut rows, added to ``form``."""
@@ -496,6 +504,8 @@ if HAS_PYQT6:
                 TONE_SQUELCH_TIP if is_fm else TONE_SQUELCH_UNUSED
             )
             self._tone_form.setRowVisible(self._tone_heard, is_fm)
+            if not self._running:
+                self._show_no_tone_heard()  # (frames say it while running)
             why = notch_unused(mode, deviation)
             notch = self._notch_mode()
             self._notch_combo.setEnabled(not why)

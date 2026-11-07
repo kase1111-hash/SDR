@@ -357,5 +357,129 @@ class TestTheChain(unittest.TestCase):
         self.assertAlmostEqual(chain.notch_frequency_hz, found[0])
 
 
+class TestTheFinderInDetail(unittest.TestCase):
+    """Several whistles there from the start, coming together, changing
+    level or ending; and a notch moved while it still fades in."""
+
+    def test_found_together_the_three_strongest_go(self):
+        # Four steady whistles within 6 dB, all there from the start (as on
+        # tuning to a busy channel): the three strongest are removed. (The
+        # first spectrum of a stream can't refine a peak's frequency: one
+        # away from its bin's centre, as 2500 Hz is, counted a spectrum
+        # later, and the three others took every notch.)
+        n = int(3.0 * RATE)
+        cases = (
+            (((600.0, 0.10), (1100.0, 0.13), (1700.0, 0.16), (2500.0, 0.19)), None),
+            (((530.0, 0.10), (1213.0, 0.125), (1790.0, 0.19), (2644.0, 0.15)), 6),
+        )
+        for specs, seed in cases:
+            with self.subTest(specs=specs, voice=seed):
+                if seed is None:
+                    under = 0.002 * np.random.default_rng(2).standard_normal(n)
+                else:
+                    under = pitched_voice(3.0, RATE, seed=seed)
+                notch = _notch()
+                out, _said = _feed(notch, under + _whistles(n, specs))
+                ranked = sorted(specs, key=lambda spec: -spec[1])
+                self.assertEqual(
+                    sorted(round(f) for f in notch.frequencies_hz),
+                    sorted(round(hz) for hz, _amp in ranked[:3]),
+                )
+                tail = out[int(1.5 * RATE) :]
+                for hz, amp in ranked[:3]:
+                    self.assertLess(tone_level(tail, hz), amp * 0.01, hz)
+
+    def test_two_that_come_within_two_bins_count_as_one(self):
+        # B, 27 Hz above A, is found as a whistle of its own; drifting to
+        # 20 Hz from A it would be a second notch on top of A's: it is let
+        # go (A's notch takes it partly), never two notches that close.
+        n = int(9.0 * RATE)
+        t = np.arange(n) / RATE
+        b_hz = np.interp(t, [0.0, 2.0, 6.0, 9.0], [1027.0, 1027.0, 1020.0, 1020.0])
+        x = 0.15 * np.sin(2 * np.pi * 1000.0 * t)
+        x = x + 0.12 * np.sin(2 * np.pi * np.cumsum(b_hz) / RATE)
+        x = x + 0.001 * np.random.default_rng(1).standard_normal(n)
+        notch = _notch()
+        _out, said = _feed(notch, x)
+        self.assertEqual(
+            sorted(round(f) for f in said[int(1.9 * RATE / FRAME)]), [1000, 1027]
+        )
+        apart = 2 * RATE / 4096  # (two bins of the finder's spectrum)
+        for frame in said:
+            for i, one in enumerate(frame):
+                for other in frame[i + 1 :]:
+                    self.assertGreaterEqual(abs(one - other), apart, frame)
+        self.assertEqual([round(f) for f in notch.frequencies_hz], [1000])
+
+    def test_the_strongest_first_as_their_levels_change(self):
+        # A (800 Hz) fades from 0.2 to 0.02 while B (1900 Hz) stays at 0.1:
+        # B is then the strongest (what the tooltip lists first).
+        n = int(6.0 * RATE)
+        t = np.arange(n) / RATE
+        fading = np.interp(t, [0.0, 2.0, 3.0, 6.0], [0.2, 0.2, 0.02, 0.02])
+        x = fading * np.sin(2 * np.pi * 800.0 * t)
+        x = x + 0.1 * np.sin(2 * np.pi * 1900.0 * t + 1.0)
+        x = x + 0.001 * np.random.default_rng(3).standard_normal(n)
+        notch = _notch()
+        _out, said = _feed(notch, x)
+        self.assertEqual([round(f) for f in said[int(1.5 * RATE / FRAME)]], [800, 1900])
+        self.assertEqual([round(f) for f in notch.frequencies_hz], [1900, 800])
+        self.assertAlmostEqual(notch.frequency_hz, 1900.0, delta=0.5)
+
+    def test_one_ending_leaves_the_others_notched_throughout(self):
+        # B (600 Hz, found first: the stronger) ends at 2 s; A (1300 Hz)
+        # stays removed in every 20 ms of it while B's notch lets go.
+        n = int(5.0 * RATE)
+        t = np.arange(n) / RATE
+        end = int(2.0 * RATE) // 80 * 80  # (whole cycles of B)
+        b = np.zeros(n)
+        b[:end] = 0.2 * np.sin(2 * np.pi * 600.0 * t[:end])
+        x = 0.1 * np.sin(2 * np.pi * 1300.0 * t) + b
+        x = x + 0.001 * np.random.default_rng(4).standard_normal(n)
+        notch = _notch()
+        out, _said = _feed(notch, x)
+        self.assertEqual([round(f) for f in notch.frequencies_hz], [1300])
+        window = int(0.02 * RATE)
+        for start in range(int(1.0 * RATE), n - window, window // 2):
+            level = tone_level(out[start : start + window], 1300.0)
+            self.assertLess(level, 0.1 * 10 ** (-30 / 20), start / RATE)
+
+    def test_a_notch_moved_while_it_fades_in(self):
+        # Moved more than RETUNE_HZ before it has fully engaged (a whistle
+        # replaced, or Manual's box changed within 20 ms), it fades out at
+        # once and in at the new frequency, for any block sizes. (Rounding
+        # left a sliver of the old one; the next step out was then zero
+        # samples long and the block failed: no audio, the chain reset.)
+        x = tone(4000, 1000.0, 0.1, RATE)
+        for first, second in ((2, 100), (3, 7), (13, 7), (14, 100)):
+            with self.subTest(first=first, second=second):
+                notch = _notch("manual", 1000.0)
+                notch.process(x[:first])
+                notch.process(x[first : first + second])
+                notch.manual_hz = 1500.0
+                out = np.asarray(notch.process(x[:1600]), dtype=float)
+                self.assertEqual(out.size, 1600)
+                self.assertEqual(notch.frequencies_hz, (1500.0,))
+                self.assertTrue(np.all(np.isfinite(out)))
+
+    def test_a_notch_tuned_afresh_starts_in_step_with_the_audio(self):
+        # Moved to a whistle already playing, a notch's filter first runs
+        # over the last WARM_S of its audio: once it has faded in (20 ms
+        # out, 20 ms in) the whistle is gone at once, not after the
+        # filter's own settling (45 dB down where it is 90 dB down).
+        n = int(1.0 * RATE)
+        x = tone(n, 1500.0, 0.2, RATE) + tone(n, 700.0, 0.1, RATE, phase=1.0)
+        notch = _notch("manual", 1000.0)
+        pieces = []
+        for index, start in enumerate(range(0, n, FRAME)):
+            if index == 10:
+                notch.manual_hz = 1500.0
+                moved = start
+            pieces.append(np.asarray(notch.process(x[start : start + FRAME]), float))
+        out = np.concatenate(pieces)
+        after = out[moved + int(0.04 * RATE) : moved + int(0.06 * RATE)]
+        self.assertLess(tone_level(after, 1500.0), 0.2 * 10 ** (-70 / 20))
+
+
 if __name__ == "__main__":
     unittest.main()

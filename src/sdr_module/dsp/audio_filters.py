@@ -303,7 +303,9 @@ class ToneFinder:
     peaks standing ``PROMINENCE_DB`` above the spectrum around them, in
     the band set with :meth:`set_band`. Each peak's frequency is refined
     to a small fraction of a hertz from how its phase turned since the
-    last spectrum (a steady tone advances exactly by its frequency).
+    last spectrum (a steady tone advances exactly by its frequency); the
+    first spectrum of a stream, with none before it, is only that
+    reference.
 
     A tone counts once a peak has been within ``NEAR_HZ`` of the same
     frequency in ``NEED`` of the last ``FRAMES`` spectra (about half a
@@ -482,6 +484,14 @@ class ToneFinder:
 
     def _spectrum(self) -> None:
         spectrum = np.fft.rfft(self._tail * self._window)
+        if self._prev is None:
+            # (No phase advance to refine its peaks with: they would be
+            # their bins' centres, up to half a bin off. Counted, a whistle
+            # away from a bin's centre qualified a spectrum after the others
+            # found with it, which then took every place, stronger or not;
+            # and a tone followed across a gap was moved off its frequency.)
+            self._prev = spectrum
+            return
         power = spectrum.real**2 + spectrum.imag**2
         guard = self._AROUND + 1
         first = max(guard, int(math.ceil(self._low / self._bin_hz)))
@@ -639,8 +649,10 @@ class _NotchSlot:
         if want is not None and self.freq is not None:
             if abs(want - self.freq) > self._owner.RETUNE_HZ and self.mix > 0.0:
                 # A jump: out at the old frequency, then in at the new one.
+                # (At least a sample of it: rounding can leave a sliver of
+                # the old notch, and a step out of no samples ended nowhere.)
                 step = self._owner._step
-                count = min(x.size, int(math.ceil(self.mix / step - 1e-9)))
+                count = min(x.size, max(1, int(math.ceil(self.mix / step - 1e-9))))
                 head = self._ramp(x[:count], None)
                 if count == x.size:
                     return head

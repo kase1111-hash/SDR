@@ -20,7 +20,10 @@ the receiver, says whether a device is connected or a recording runs, and
 adds bookmarks. While Device > Second Receiver... runs, "Use both
 receivers" has the two sweep a range together (each its own part, so a
 pass takes about half as long): the host offers that receiver
-(:meth:`ScannerHost.scan_partner`).
+(:meth:`ScannerHost.scan_partner`). The results of such a sweep say which
+receiver read each signal (the RX column: Main, 2nd or Both; the two
+measure in their own dBFS), and Listen tunes the Second Receiver window to
+one only it tunes.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ import logging
 import math
 import time
 from bisect import bisect_left, bisect_right, insort
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -81,7 +84,9 @@ from .scan_engine import (
     ALL_SKIPPED,
     DWELL,
     LISTEN,
+    MAIN,
     MEASURE_S,
+    PARTNER,
     SCAN_MODES,
     Found,
     Listening,
@@ -100,7 +105,23 @@ logger = logging.getLogger(__name__)
 
 # Results table columns, and the item data role holding a row's result.
 COL_FREQ, COL_LEVEL, COL_SNR, COL_MODE, COL_HEARD = range(5)
+#: Which receiver read it: shown only for a sweep with both receivers.
+COL_RECEIVER = 5
 _HIT_ROLE = Qt.ItemDataRole.UserRole + 1 if HAS_PYQT6 else 0
+
+#: A shared sweep's receivers (the engine's MAIN, PARTNER) as a result keeps
+#: them, as Export names them, and as the narrow RX column does.
+RECEIVER_KEYS = {MAIN: "main", PARTNER: "second"}
+RECEIVER_NAMES = {"main": "Main", "second": "Second"}
+_RECEIVER_SHORT = {"main": "Main", "second": "2nd"}
+#: What they say of a signal both receivers read.
+BOTH = "Both"
+#: The RX column sorts as the receivers' parts of the range lie: the main
+#: one's, where they meet (both), the second one's.
+_RECEIVER_ORDER = {"Main": 0, BOTH: 1, "Second": 2}
+#: What to do to listen to a result only the second receiver tunes, when
+#: no Second Receiver window runs.
+OPEN_SECOND = "open Device > Second Receiver... and start it, then Listen again."
 
 #: A scan whose pass takes longer than this asks before it starts.
 CONFIRM_SECONDS = 120.0
@@ -174,10 +195,24 @@ class ScanHit:
     count: int = 1
     tone_hz: float = 0.0  # a bookmark's CTCSS tone squelch (0: none)
     dcs: str = ""  # a bookmark's DCS code squelch ("D023N"; "": none)
+    #: A sweep with both receivers: whose reading the level and SNR are
+    #: ("main" or "second", see RECEIVER_KEYS; "": a sweep with one), and
+    #: each one's strongest peak (dBFS, in its own scale).
+    receiver: str = ""
+    readings: Dict[str, float] = field(default_factory=dict)
 
     @property
     def listening(self) -> Listening:
         return self.mode, self.fm_deviation, self.bandwidth
+
+    @property
+    def read_by(self) -> str:
+        """Which receiver read it, as Export's Receiver column says:
+        "Main", "Second", "Both" (each read it), or "" (a sweep with one
+        receiver)."""
+        if len(self.readings) > 1:
+            return BOTH
+        return RECEIVER_NAMES.get(self.receiver, "")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -210,6 +245,21 @@ class ScanHit:
         raw = data.get("dcs")
         code = parse_dcs(raw) if isinstance(raw, str) else None
         hit.dcs = format_dcs(*code) if code else ""
+        # (Damaged values: the result is kept, without whose it is.)
+        readings = data.get("readings")
+        if isinstance(readings, dict):
+            for key, value in readings.items():
+                try:
+                    peak = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    continue
+                if key in RECEIVER_NAMES and math.isfinite(peak):
+                    hit.readings[key] = peak
+        receiver = data.get("receiver")
+        if receiver in RECEIVER_NAMES and receiver in hit.readings:
+            hit.receiver = receiver
+        else:
+            hit.readings = {}
         return hit
 
 
@@ -297,6 +347,13 @@ class ScannerHost(ScanHost):
 
     def scan_device_range(self) -> Optional[Tuple[float, float]]:
         return None
+
+    def scan_listen_second(self, hit: ScanHit) -> Tuple[bool, str]:
+        """Listen to ``hit`` with the second receiver: a result of a sweep
+        with both receivers that only that one tunes. ``(tuned, note)``:
+        the note says what else to do to hear it, or (not tuned) why not
+        and what to do first."""
+        return False, OPEN_SECOND
 
     def scan_partner(self) -> Tuple[Optional[Any], str]:
         """A second receiver a sweep can share ("Use both receivers"): a
@@ -676,9 +733,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         layout.addWidget(self._listen_row)
 
         # Results
-        self._table = _ResultsTable(0, 5)
+        self._table = _ResultsTable(0, 6)
         self._table.setHorizontalHeaderLabels(
-            ["Frequency", "Level", "SNR", "Mode", "Heard"]
+            ["Frequency", "Level", "SNR", "Mode", "Heard", "RX"]
         )
         header = self._table.horizontalHeader()
         # One line per result; the small columns as wide as their widest
@@ -698,6 +755,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             get_short_tip("snr"),
             "How Listen tunes it: the band's mode (or the bookmark's)",
             "When it was last found or heard (hover for how often)",
+            "Receiver, for a sweep with both: which read it, Main (this "
+            "window's), 2nd (Device > Second Receiver...) or Both (where their "
+            "parts of the range meet). Each measures in its own dBFS: the "
+            "level is the stronger reading (hover for whose)",
         )
         for col, tip in enumerate(header_tips):
             item = self._table.horizontalHeaderItem(col)
@@ -726,6 +787,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._show_context_menu)
         self._table.installEventFilter(self)
+        # (Shown for a sweep with both receivers: see _show_receiver_column;
+        # after SNR, as the level and SNR are its reading.)
+        self._table.setColumnHidden(COL_RECEIVER, True)
+        header.moveSection(header.visualIndex(COL_RECEIVER), COL_SNR + 1)
         self._size_columns()
         layout.addWidget(self._table, 1)
         # Empty states: a bold title over what to do next.
@@ -841,15 +906,20 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             chip.show()
 
     def _size_columns(self) -> None:
-        """Level, SNR, Mode and Heard as wide as their widest text."""
+        """Level, SNR, Mode and Heard (and RX) as wide as their widest
+        text. With the RX column shown (a sweep with both receivers) the
+        levels go without their unit (see _level_text), so that the
+        frequency keeps its room in the narrow right column ("1850.000 MHz"
+        whole at 1024x640 and 1366x768)."""
         cells = self._table.fontMetrics()
         header = self._table.horizontalHeader()
         titles = header.fontMetrics()
         widest = {
-            COL_LEVEL: ("Level", ("-120 dBFS",)),
+            COL_LEVEL: ("Level", (self._level_text(-120.0),)),
             COL_SNR: ("SNR", ("120 dB",)),
             COL_MODE: ("Mode", ("WFM", "USB", "I/Q")),
             COL_HEARD: ("Heard", ("00:00:00",)),
+            COL_RECEIVER: ("RX", ("Main", "2nd", BOTH)),
         }
         for col, (title, texts) in widest.items():
             width = max(
@@ -857,6 +927,14 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 max(cells.horizontalAdvance(t) for t in texts) + 14,
             )
             header.resizeSection(col, width)
+
+    def _level_text(self, peak_db: float) -> str:
+        """A result's level in its column: "-52 dBFS", or "-52" while the
+        RX column shows (the unit is in the header's tooltip and the
+        row's)."""
+        if self._table.isColumnHidden(COL_RECEIVER):
+            return f"{peak_db:.0f} dBFS"
+        return f"{peak_db:.0f}"
 
     def changeEvent(self, event):  # noqa: N802 (Qt API)
         super().changeEvent(event)
@@ -1840,17 +1918,23 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         # (In the display loop: the engine's on_state, after the page's
         # readings, says how many were found and updates the buttons.)
         now = time.time()
+        # Which receiver of a sweep with both read it ("": a sweep with one).
+        key = RECEIVER_KEYS.get(getattr(found, "receiver", None), "")
         index = self._repeated_hit(found)
         if index >= 0:
             hit = self._hits[index]
             hit.count += 1
             hit.last_seen = now
+            if key and math.isfinite(found.peak_db):
+                hit.readings[key] = max(hit.readings.get(key, -math.inf), found.peak_db)
             if found.peak_db > hit.peak_db:
                 self._index_frequency(index, found.frequency_hz)
                 hit.frequency_hz = found.frequency_hz
                 hit.peak_db = found.peak_db
                 hit.snr_db = found.snr_db
                 hit.width_hz = found.width_hz
+                if key:
+                    hit.receiver = key  # (the reading shown is its)
                 self._note_width(hit.width_hz)
             self._render_hit(index)
             return
@@ -1872,14 +1956,33 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 1,
                 float(getattr(found, "tone_hz", 0.0) or 0.0),
                 str(getattr(found, "dcs", "") or ""),
+                key,
+                {key: peak} if key else {},
             )
         )
         index = len(self._hits) - 1
         insort(self._by_freq, (found.frequency_hz, index))
         self._note_width(found.width_hz)
         self._render_hit(index)
+        if key:
+            self._show_receiver_column()
         if self._table.rowCount() == 1:
             self._update_controls()  # the first: the list's buttons and empty state
+
+    def _show_receiver_column(self) -> None:
+        """The RX column: shown while the results come from a sweep
+        with both receivers (single-receiver results look as before)."""
+        hide = not any(hit.receiver for hit in self._hits)
+        if self._table.isColumnHidden(COL_RECEIVER) != hide:
+            self._table.setColumnHidden(COL_RECEIVER, hide)
+            self._size_columns()
+            # The rows listed anew: the levels' unit comes or goes (see
+            # _level_text), sorted once.
+            sorting = self._table.isSortingEnabled()
+            self._table.setSortingEnabled(False)
+            for index in list(self._cells):
+                self._render_hit(index)
+            self._table.setSortingEnabled(sorting)
 
     def _repeated_hit(self, found: Found) -> int:
         """The result ``found`` repeats (the first listed, if several), or
@@ -2030,6 +2133,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         self._table.setSortingEnabled(False)
         self._cells = {}  # (the rows' cells go)
         self._table.setRowCount(0)
+        self._show_receiver_column()  # (before the rows: their levels' unit)
         self._by_freq = sorted((h.frequency_hz, i) for i, h in enumerate(self._hits))
         self._widest_hz = 0.0
         for index, hit in enumerate(self._hits):
@@ -2079,15 +2183,21 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             freq = _NumericItem(_format_freq(hit.frequency_hz), hit.frequency_hz)
         freq.setData(_HIT_ROLE, index)
         # Whole dB in the narrow column (the tooltip has tenths).
-        level = _NumericItem(f"{hit.peak_db:.0f} dBFS", hit.peak_db)
+        level = _NumericItem(self._level_text(hit.peak_db), hit.peak_db)
         snr = _NumericItem(f"{hit.snr_db:.0f} dB", hit.snr_db)
         mode = QTableWidgetItem(mode_text(hit.mode, hit.fm_deviation) or "—")
         heard_at = datetime.fromtimestamp(hit.last_seen) if hit.last_seen else None
         heard = _NumericItem(
             heard_at.strftime("%H:%M:%S") if heard_at else "—", hit.last_seen, False
         )
+        read_by = hit.read_by
+        receiver = _NumericItem(
+            _RECEIVER_SHORT.get(hit.receiver, "") if read_by != BOTH else BOTH,
+            _RECEIVER_ORDER.get(read_by, -1),
+            False,
+        )
         tip = self._hit_tooltip(hit)
-        for col, item in enumerate((freq, level, snr, mode, heard)):
+        for col, item in enumerate((freq, level, snr, mode, heard, receiver)):
             item.setToolTip(tip)
             self._table.setItem(row, col, item)
         self._cells[index] = freq
@@ -2101,6 +2211,9 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         band = band_for(hit.frequency_hz)
         lines.append(_say_freq(hit.frequency_hz) + (f" ({band.name})" if band else ""))
         lines.append(f"Peak {hit.peak_db:.1f} dBFS, SNR {hit.snr_db:.1f} dB")
+        read_by = ScannerPanel._read_by_text(hit)
+        if read_by:
+            lines.append(read_by)
         if hit.width_hz > 0:
             lines.append(f"Occupied width about {hit.width_hz / 1e3:.0f} kHz")
         mode = mode_text(hit.mode, hit.fm_deviation)
@@ -2122,6 +2235,26 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         lines.append("Double-click or Enter: listen")
         return "\n".join(lines)
 
+    @staticmethod
+    def _read_by_text(hit: ScanHit) -> str:
+        """Which receiver read a result of a sweep with both, and whose
+        level it shows ("" for a sweep with one)."""
+        if not hit.receiver:
+            return ""
+        whose = "main" if hit.receiver == "main" else "second"
+        if len(hit.readings) < 2:
+            return (
+                f"Read by the {whose} receiver (the level in its own dBFS: the "
+                "two receivers aren't calibrated against each other)"
+            )
+        other = "second" if whose == "main" else "main"
+        return (
+            f"Read by both receivers, where their parts of the range meet: the "
+            f"level is the {whose} receiver's, the stronger; the {other} "
+            f"receiver read {hit.readings.get(other, -120.0):.1f} dBFS (each "
+            "in its own dBFS)"
+        )
+
     def selected_hit(self) -> Optional[ScanHit]:
         rows = self._table.selectionModel().selectedRows()
         if not rows:
@@ -2138,12 +2271,16 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         return hit.frequency_hz if hit is not None else None
 
     def listen_selected(self) -> None:
-        """Tune to the selected result in its mode (stopping a scan)."""
+        """Tune to the selected result in its mode (stopping a scan): with
+        this window's receiver, or, for one only the second receiver tunes
+        (a sweep with both), with that one."""
         hit = self.selected_hit()
         if hit is None:
             return
         if self._engine.active:
             self.stop_scan(stay=True)
+        if self._listen_with_second(hit):
+            return
         if self._host.scan_listen(hit):
             mode = mode_text(hit.mode, hit.fm_deviation)
             self._set_status(
@@ -2151,6 +2288,44 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                 + (f" ({mode})." if mode else "."),
                 "success",
             )
+
+    def _listen_with_second(self, hit: ScanHit) -> bool:
+        """A result the second receiver read, outside what this window's
+        receiver tunes (above 1.766 GHz with an RTL-SDR beside a HackRF
+        One): the Second Receiver window is tuned to it, and the status
+        says so, or why it isn't and what to do. False for any other
+        result (this receiver listens)."""
+        if "second" not in hit.readings:
+            return False
+        try:
+            limits = self._host.scan_device_range()
+        except Exception:  # pragma: no cover - defensive (a host closing)
+            limits = None
+        if not limits or limits[0] <= hit.frequency_hz <= limits[1]:
+            return False
+        freq = _say_freq(hit.frequency_hz)
+        listen = getattr(self._host, "scan_listen_second", None)
+        tuned, note = listen(hit) if listen is not None else (False, OPEN_SECOND)
+        if not tuned:
+            self._set_status(
+                f"Only the second receiver tunes {freq}: {note}", "warning"
+            )
+            return True
+        mode = mode_text(hit.mode, hit.fm_deviation)
+        how = f" ({mode})" if mode else ""
+        if note:
+            self._set_status(
+                f"Tuned the Second Receiver window to {freq}{how}, as this "
+                f"window's receiver doesn't tune it: {note}",
+                "warning",
+            )
+        else:
+            self._set_status(
+                f"Listening to {freq}{how} in the Second Receiver window: this "
+                "window's receiver doesn't tune it.",
+                "success",
+            )
+        return True
 
     def bookmark_selected(self) -> None:
         hit = self.selected_hit()
@@ -2247,6 +2422,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         if not path.lower().endswith(".csv"):
             path += ".csv"
         rows = sorted(self._hits, key=lambda h: h.frequency_hz)
+        # Results of a sweep with both receivers also say which read each,
+        # and whose reading the level and SNR are (after the other columns:
+        # a single receiver's export is as it was).
+        both = any(hit.receiver for hit in rows)
         try:
             with open(path, "w", newline="", encoding="utf-8") as handle:
                 writer = csv.writer(handle)
@@ -2265,6 +2444,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                         "Last heard",
                         "Times heard",
                     ]
+                    + (["Receiver", "Level from"] if both else [])
                 )
                 for hit in rows:
                     band = band_for(hit.frequency_hz)
@@ -2283,6 +2463,11 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                             _iso(hit.last_seen),
                             hit.count,
                         ]
+                        + (
+                            [hit.read_by, RECEIVER_NAMES.get(hit.receiver, "")]
+                            if both
+                            else []
+                        )
                     )
         except OSError as exc:
             logger.warning("Could not export the scan results: %s", exc)

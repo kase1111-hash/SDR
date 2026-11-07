@@ -32,8 +32,10 @@ then the two meet in what both tune, from opposite ends: the one whose
 part of the range starts lower sweeps up from the bottom (of two that
 start together, the one whose part ends lower; this one when both tune
 the same part, as with the whole range) and the other down from the top.
-A pass takes about half as long, and the results are one list. A page one
-of them can't tune goes to the other; a partner that leaves
+A pass takes about half as long, and the results are one list, each
+signal saying which receiver read it (``Found.receiver``: MAIN or
+PARTNER, their levels not being calibrated against each other). A page
+one of them can't tune goes to the other; a partner that leaves
 (:meth:`ScanEngine.drop_partner`) hands the rest to this one.
 
 Time is counted in samples (signal time), so the engine behaves the same
@@ -244,6 +246,9 @@ class Found:
     heard: bool = False  # the scan stopped on it and the squelch opened
     tone_hz: float = 0.0  # a bookmark's CTCSS tone squelch (0: none)
     dcs: str = ""  # a bookmark's DCS code squelch ("D023N"; "": none)
+    #: A sweep shared with a second receiver: which one took the reading
+    #: (MAIN or PARTNER: each measures in its own dBFS). None otherwise.
+    receiver: Optional[int] = None
 
     @property
     def snr_db(self) -> float:
@@ -551,9 +556,11 @@ class ScanEngine:
         rate: float,
         lo_hz: float,
         noise_too: bool = True,
+        receiver: Optional[int] = None,
     ) -> List[Found]:
         """The signals of a page's averaged spectrum, inside the range
-        (``noise_too``: its noise floor and threshold are the ones shown)."""
+        (``noise_too``: its noise floor and threshold are the ones shown;
+        ``receiver``: which receiver of a shared sweep measured it)."""
         s = self.settings
         readings, noise, threshold = measure_page(
             power,
@@ -580,6 +587,7 @@ class ScanEngine:
                     reading.noise_db,
                     reading.width_hz,
                     listening,
+                    receiver=receiver,
                 )
             )
         return found
@@ -970,6 +978,7 @@ class ScanEngine:
                     share.rate,
                     self._receiver_lo(page, share.host),
                     noise_too=share.index == MAIN,
+                    receiver=share.index,
                 ):
                     self.found_count += 1
                     self.on_found(item)

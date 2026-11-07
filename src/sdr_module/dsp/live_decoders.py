@@ -32,7 +32,10 @@ RDS         channel (+/-100 kHz, ~250 kHz) -> FM discriminator (multiplex)
 Each decoder reports its health in :attr:`LiveDecoder.status` (frames
 found, valid and failed, when the last message came, whether a signal is
 in the channel and any problem, such as a sample rate too low for ADS-B),
-which the Decoder panel shows.
+which the Decoder panel shows. Below 2.5 MS/s the ADS-B decoder's work per
+second is bounded: in a very busy sky it reads the clearest replies first
+and leaves the rest, counted in its status (``skipped``, ``skipped_per_s``)
+and said in plain words by :func:`skipped_text`.
 
 To add a protocol, subclass :class:`LiveDecoder` (or :class:`ChannelDecoder`
 for a narrow channel) and register the class in :data:`LIVE_DECODERS` under
@@ -41,6 +44,7 @@ the name the Decoder panel lists. NumPy only; no Qt.
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from dataclasses import dataclass, replace
@@ -89,7 +93,27 @@ __all__ = [
     "describe_message",
     "message_details",
     "format_rate",
+    "skipped_text",
+    "skipped_tip",
+    "SKIPPED_WINDOW_S",
+    "SKIPPED_SETTLE_S",
+    "SKIPPED_MIN_PER_S",
 ]
+
+#: ADS-B's replies skipped a second (``LiveDecoderStatus.skipped_per_s``)
+#: are counted over this much of the latest signal: it reads 0 again (and
+#: the Decoder tab's line clears) once none was skipped in it.
+SKIPPED_WINDOW_S = 3.0
+#: ... and only once they have been left unread for this long (seconds of
+#: signal from the first to the latest): the decoder's budget lets a burst
+#: through at once, so the first moments of a busy spell leave few unread,
+#: and a burst isn't worth a warning.
+SKIPPED_SETTLE_S = 0.5
+#: ... and at this many a second or more: at the edge of the budget a few
+#: go unread now and then (5 a second of 20,000 in the synthetic sky),
+#: which costs next to no decodes and isn't worth a warning either. Once
+#: said, the rate is said until it clears, however low it falls.
+SKIPPED_MIN_PER_S = 100.0
 
 
 def format_rate(rate_hz: float) -> str:
@@ -138,6 +162,65 @@ class LiveDecoderStatus:
     detail: str = ""
     #: Text still being received (Morse: the line in progress), or "".
     live_text: str = ""
+    #: ADS-B below 2.5 MS/s: replies left unread since the decoder started
+    #: (its work per second is bounded: the clearest are read first), and
+    #: how many a second over the last ``SKIPPED_WINDOW_S`` of signal (0
+    #: once none were, and while too few to be worth saying: see
+    #: ``ADSBLiveDecoder.skipped_per_s``). Other decoders: 0.
+    skipped: int = 0
+    skipped_per_s: float = 0.0
+
+
+def _about(count: float) -> str:
+    """A count in two figures: ``873 -> "870"``, ``4519 -> "4,500"``,
+    ``4.6 -> "5"``."""
+    value = float(count)
+    if value < 10:
+        return f"{max(1, round(value))}"
+    scale = 10 ** (int(math.floor(math.log10(value))) - 1)
+    return f"{int(round(value / scale) * scale):,}"
+
+
+def skipped_text(per_s: float, sample_rate: float, recording: bool = False) -> str:
+    """What the Decoder tab says while ADS-B leaves replies unread in a
+    very busy sky (``per_s`` a second, see ``LiveDecoderStatus``), and what
+    helps at ``sample_rate`` ("" while none are). ``recording``: a recording
+    plays, whose rate can't be changed."""
+    try:
+        per_s = float(per_s)
+    except (TypeError, ValueError):
+        return ""
+    if not (math.isfinite(per_s) and per_s > 0):
+        return ""
+    text = (
+        f"Busy sky: about {_about(per_s)} replies a second weren't read "
+        "(the clearest are read first)."
+    )
+    if recording:
+        return text
+    if float(sample_rate) < 2.4e6:
+        return text + " 2.4 MS/s reads more of them, 2.56 MS/s or more every one."
+    return text + " 2.56 MS/s or more reads every one."
+
+
+def skipped_tip(per_s: float, sample_rate: float, recording: bool = False) -> str:
+    """The longer story behind :func:`skipped_text` (a tooltip)."""
+    rate = format_rate(sample_rate)
+    tip = (
+        f"Below 2.5 MS/s the ADS-B decoder reads only so many replies a second, "
+        "so that it never holds up the display: in a very busy sky (more than "
+        "about 15,000 replies a second, the older Mode A/C ones included) it "
+        "reads the clearest first and leaves the rest, the least clear, which "
+        f"are weak or overlap others and seldom decode. At {rate}, about "
+        f"{_about(per_s)} a second were left over the last "
+        f"{SKIPPED_WINDOW_S:.0f} seconds."
+    )
+    if recording:
+        return tip + " A recording made at 2.56 MS/s or more is read in full."
+    return tip + (
+        " From 2.5 MS/s there is no such limit: choose 2.56 MS/s or more in "
+        "Receiver > Sample rate (or click the rate in the status bar)."
+    )
 
 
 class LiveDecoder:
@@ -915,6 +998,17 @@ class ADSBLiveDecoder(LiveDecoder):
     ):
         super().__init__(sample_rate, offset_hz, clock)
         self._decoder: Optional[ADSBDecoder] = None
+        # Replies skipped (see skipped): the demodulator's count at the
+        # start, and (stream seconds, count) after each block of the last
+        # SKIPPED_WINDOW_S, the one before it kept as the baseline.
+        self._skip_base = 0
+        self._skip_marks: Deque[Tuple[float, int]] = deque([(0.0, 0)])
+        # Stream seconds when the busy spell now going on began (None: calm),
+        # when its latest block left replies unread, and whether it is worth
+        # saying (see skipped_per_s).
+        self._skipping_since: Optional[float] = None
+        self._last_skip_s = 0.0
+        self._spell_said = False
         if self.sample_rate < self.MIN_SAMPLE_RATE and recording:
             self._problem = _too_slow(self.name, self.MIN_SAMPLE_RATE, self.sample_rate)
         elif self.sample_rate < self.MIN_SAMPLE_RATE:
@@ -932,6 +1026,49 @@ class ADSBLiveDecoder(LiveDecoder):
     def _decoders(self) -> List[ProtocolDecoder]:
         return [self._decoder] if self._decoder is not None else []
 
+    @property
+    def skipped(self) -> int:
+        """Replies left unread since the decoder started (or was reset):
+        below 2.5 MS/s its work per second is bounded, and in a very busy
+        sky it reads the clearest first (0 from 2.5 MS/s)."""
+        fine = getattr(self._decoder, "_fine", None)
+        if fine is None:
+            return 0
+        return max(0, int(fine.skipped) - self._skip_base)
+
+    @property
+    def skipped_per_s(self) -> float:
+        """Replies left unread a second over the last ``SKIPPED_WINDOW_S``
+        of signal, from the first block that left some after a calm spell;
+        0 until they have been left unread for ``SKIPPED_SETTLE_S`` at
+        ``SKIPPED_MIN_PER_S`` or more a second (a burst, or a few now and
+        then, isn't worth saying), and once none were left for
+        ``SKIPPED_WINDOW_S``."""
+        return self._spell_rate() if self._spell_said else 0.0
+
+    def _spell_rate(self) -> float:
+        """Replies left unread a second in the busy spell's window."""
+        first_s, first = self._skip_marks[0]
+        last_s, last = self._skip_marks[-1]
+        if self._skipping_since is None or last <= first or last_s <= first_s:
+            return 0.0
+        return (last - first) / (last_s - first_s)
+
+    def reset(self) -> None:
+        super().reset()
+        fine = getattr(self._decoder, "_fine", None)
+        self._skip_base = int(fine.skipped) if fine is not None else 0
+        self._skip_marks = deque([(self._stream_s, 0)])
+        self._skipping_since = None
+        self._last_skip_s = self._stream_s
+        self._spell_said = False
+
+    @property
+    def status(self) -> LiveDecoderStatus:
+        return replace(
+            super().status, skipped=self.skipped, skipped_per_s=self.skipped_per_s
+        )
+
     def _decode(self, iq: np.ndarray) -> List[DecodedMessage]:
         if self._decoder is None:
             return []
@@ -939,7 +1076,32 @@ class ADSBLiveDecoder(LiveDecoder):
             magnitude = np.abs(iq).astype(np.float32, copy=False)
         else:
             magnitude = np.abs(np.asarray(iq, dtype=np.float32))
-        return list(self._decoder.decode(magnitude))
+        messages: List[DecodedMessage] = list(self._decoder.decode(magnitude))
+        # (process() counted this block's seconds in _stream_s already.)
+        marks, now, count = self._skip_marks, self._stream_s, self.skipped
+        last_s, last = marks[-1]
+        if count > last and last <= marks[0][1]:
+            # A busy spell after a calm one: counted from this block on, not
+            # diluted by the calm seconds before it.
+            marks.clear()
+            marks.append((last_s, last))
+            self._skipping_since = last_s
+        if count > last:
+            self._last_skip_s = now
+        marks.append((now, count))
+        while len(marks) > 2 and marks[1][0] <= now - SKIPPED_WINDOW_S:
+            marks.popleft()
+        since = self._skipping_since
+        if count <= marks[0][1] or since is None:
+            self._skipping_since = None  # (none left for the whole window)
+            self._spell_said = False
+        elif (
+            not self._spell_said
+            and self._last_skip_s - since >= SKIPPED_SETTLE_S
+            and self._spell_rate() >= SKIPPED_MIN_PER_S
+        ):
+            self._spell_said = True  # (until it clears)
+        return messages
 
 
 #: Decoder panel name -> live decoder class.

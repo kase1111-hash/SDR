@@ -1263,16 +1263,17 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
     def _update_views(self) -> None:
         """Show the protocol's own view (Aircraft, Text), in front when the
-        protocol was just chosen; the others' tabs hide."""
+        protocol was just chosen; the others' tabs hide, unless they hold
+        what a recording decoded (Decode Recording's own protocol)."""
         proto = self.protocol()
         chosen = proto != getattr(self, "_views_for", None)
         self._views_for = proto
         for name, view in self._protocol_views.items():
             index = self._tabs.indexOf(view)
-            shown = name == proto
+            shown = name == proto or view.has_recordings()
             if self._tabs.isTabVisible(index) != shown:
                 self._tabs.setTabVisible(index, shown)
-            if shown and chosen:
+            if name == proto and chosen:
                 self._tabs.setCurrentWidget(view)
         # A view that went with its protocol leaves Messages in front. (What
         # is in front now: the tab in front before may be the view that
@@ -1282,7 +1283,11 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             self._tabs.indexOf(current)
         ):
             self._tabs.setCurrentWidget(self._messages_page)
-        if proto != "ADS-B" and self._filter_address:
+        if (
+            proto != "ADS-B"
+            and self._filter_address
+            and not self._aircraft_view.has_recordings()
+        ):
             self.set_address_filter("")
         self._fit_tab_bar()
 
@@ -1388,7 +1393,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
     def _filter_name(self) -> str:
         """The filtered aircraft: its callsign and address, once heard."""
         address = self._filter_address
-        aircraft = self._aircraft_view.tracker.get(address)
+        aircraft = self._aircraft_view.find(address)
         if aircraft is not None and aircraft.callsign:
             return f"{aircraft.callsign} ({address})"
         return address
@@ -1677,15 +1682,23 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
     def _view_hint(self, proto: Optional[str], empty: str) -> str:
         """The empty-state text for a protocol's view: the table's, but
-        about that view once the receiver listens in the right place."""
-        if proto == "ADS-B" and empty.startswith("Listening for"):
-            title = empty.partition("\n")[0]
-            return (
-                f"{title}\nEach aircraft gets a row here as its messages are decoded."
-            )
-        if proto == "CW (Morse)" and empty.startswith("Listening for"):
-            title = empty.partition("\n")[0]
-            return f"{title}\nThe text appears here as it is received."
+        about that view once the receiver listens in the right place, and
+        that a recording's show there too (Decode Recording)."""
+        from .decoder_views import AIRCRAFT_RECORDING_HINT, TEXT_RECORDING_HINT
+
+        if proto == "ADS-B":
+            if empty.startswith("Listening for"):
+                title = empty.partition("\n")[0]
+                empty = (
+                    f"{title}\nEach aircraft gets a row here as its messages "
+                    "are decoded."
+                )
+            return f"{empty}\n{AIRCRAFT_RECORDING_HINT}"
+        if proto == "CW (Morse)":
+            if empty.startswith("Listening for"):
+                title = empty.partition("\n")[0]
+                empty = f"{title}\nThe text appears here as it is received."
+            return f"{empty}\n{TEXT_RECORDING_HINT}"
         return empty
 
     def _status_parts(self) -> Tuple[str, Optional[str], str]:
@@ -1736,6 +1749,12 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             if status is not None
             else ""
         )
+        busy = self._busy_sky(status)
+        if busy:
+            # ADS-B in a very busy sky leaves replies unread (M-D2): said
+            # while it lasts (the decoder's rate clears a few seconds of
+            # signal after it stops); the counts are in the tooltip.
+            return busy[0], "info", f"{busy[1]}\n\n{tip}" if tip else busy[1]
         if here and self._tuned_away(proto, status):
             # The count stays, but not as good news from here.
             earlier = f" ({_plural(rows, row_unit)} earlier)" if rows else ""
@@ -1778,6 +1797,19 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             text = f"Signal on {here}: waiting for {proto} {unit}s"
             return text, "info", tip
         return (f"Listening on {here}" if here else "Listening"), None, tip
+
+    def _busy_sky(self, status: Any) -> Optional[Tuple[str, str]]:
+        """``(line, tooltip)`` while the ADS-B decoder leaves replies unread
+        in a very busy sky, else None."""
+        from ..dsp.live_decoders import skipped_text, skipped_tip
+
+        per_s = getattr(status, "skipped_per_s", 0.0) or 0.0
+        rate = float(getattr(status, "sample_rate", 0.0) or 0.0)
+        recording = self._source == "recording"
+        text = skipped_text(per_s, rate, recording)
+        if not text:
+            return None
+        return text, skipped_tip(per_s, rate, recording)
 
     def _tuned_away(self, proto: str, status: Any) -> bool:
         """Whether the receiver is tuned away from where ``proto`` is heard
@@ -1918,6 +1950,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         freq_hz: Optional[float] = None,
         sample_rate: Optional[float] = None,
         source: str = "",
+        at_s: Optional[float] = None,
         when: Optional[datetime] = None,
         receiver: str = "",
     ):
@@ -1937,8 +1970,11 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
             sample_rate: The receiver's sample rate (default: as reported)
             source: The recording it was decoded from ("": the live
                 signal). Its rows say "(file)" after the protocol and are
-                counted apart; they stay out of the live Aircraft and Text
-                views.
+                counted apart; in the Aircraft and Text views its messages
+                go to that recording's own list, never the live one.
+            at_s: Where in the recording ``source`` it was found (seconds
+                from its start): the views' time for it when the recording
+                doesn't say when it was made
             when: When it was sent (a recording's time; default: now)
             receiver: The receiver it came from, when not the main window's
                 ("2nd RX": the Second Receiver's). Its rows say so before
@@ -2031,13 +2067,30 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
         self._append_log(msg)
 
-        # A recording's messages stay out of the live views: an aircraft
-        # heard in it is not one heard now.
-        kind = type(message).__name__ if message is not None and not source else ""
+        # A recording's messages go to its own list in the views, timed by
+        # its clock: an aircraft heard in it is not one heard now (M-D1).
+        kind = type(message).__name__ if message is not None else ""
+        if source:
+            at, sent = at_s, when
+            if at is None and when is None:
+                sent = now  # (as the table times it)
+        else:
+            at, sent = None, None
+        view, added = None, False
         if kind == "ADSBMessage" and valid:
-            self._aircraft_view.update_message(message)
+            view = self._aircraft_view
+            added = view.update_message(message, source=source, at_s=at, when=sent)
         elif kind == "MorseMessage":
-            self._cw_view.add_line(str(getattr(message, "text", "") or content))
+            view = self._cw_view
+            added = view.add_line(
+                str(getattr(message, "text", "") or content),
+                source=source,
+                at_s=at,
+                when=sent,
+                wpm=getattr(message, "wpm", 0.0),
+            )
+        if view is not None and added:
+            self._recording_shown(view)
         if self._filter_address:
             self._show_filter_label()  # its count (and the callsign, once heard)
 
@@ -2047,6 +2100,29 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self._update_stats()
         self._update_buttons()
         self._update_status_line()  # (it counts the messages)
+
+    def recording_decode_started(
+        self, source: str, protocol: Optional[str] = None
+    ) -> None:
+        """File > Decode Recording starts on ``source`` with ``protocol``:
+        what that protocol's view (Aircraft, Text) holds of an earlier
+        decode of it goes (the decode lists it again; the Messages table
+        keeps every row, and the other view what another protocol found).
+        ``protocol`` None: both views'."""
+        if protocol is None:
+            views = list(self._protocol_views.values())
+        else:
+            view = self._protocol_views.get(protocol)
+            views = [view] if view is not None else []
+        for view in views:
+            view.forget_source(source)
+        self._update_views()
+
+    def _recording_shown(self, view: Any) -> None:
+        """A recording's first aircraft or line came to ``view``: its tab
+        shows (whatever protocol is chosen), in front."""
+        self._update_views()
+        self._tabs.setCurrentWidget(view)
 
     def _append_log(self, msg: Dict[str, Any]) -> None:
         """Append one message to the log with a hanging indent."""
@@ -2227,6 +2303,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         self.set_address_filter("")
         self._aircraft_view.clear()
         self._cw_view.clear()
+        self._update_views()  # (a view shown for a recording goes)
         self._update_stats()
         self._update_state()
         self.cleared.emit()

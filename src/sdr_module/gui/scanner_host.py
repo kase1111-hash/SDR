@@ -28,7 +28,7 @@ from .bookmark_editor import bookmark_squelch
 from .bookmarks_panel import default_bookmark_name, listening
 from .error_log_dialog import install_history_handler
 from .scan_engine import Listening, ScanPartner, bookmark_scan_list
-from .scanner_panel import ScanHit, ScannerHost
+from .scanner_panel import OPEN_SECOND, ScanHit, ScannerHost
 
 logger = logging.getLogger(__name__)
 
@@ -476,6 +476,45 @@ class WindowScannerHost(ScannerHost):
 
     def scan_device_range(self) -> Optional[Tuple[float, float]]:
         return self._win._device_tuning_range()
+
+    def scan_listen_second(self, hit: ScanHit) -> Tuple[bool, str]:
+        """Listen to ``hit`` with the Second Receiver window, a result of a
+        sweep with both receivers that only it tunes (the Scanner tab's
+        Listen): tuned there in the result's mode and filter, its window
+        brought up. ``(True, "")``; ``(True, how to hear it)`` while its
+        Listen is the main window's audio only; ``(False, what to do)``
+        when it isn't open and running, or refuses (its status line says
+        why: out of its range, outside the span it records)."""
+        from .bookmarks_panel import _new_bookmark
+        from .second_receiver import LISTEN_MAIN
+
+        host = getattr(self._win, "_second_rx", None)
+        rx = getattr(host, "receiver", None)
+        if rx is None or not rx.isVisible():
+            return False, OPEN_SECOND
+        if not rx.running:
+            return False, (
+                "start it in its window (Device > Second Receiver..., Start), "
+                "then Listen again."
+            )
+        label = hit.label or default_bookmark_name(hit.frequency_hz)
+        bookmark = _new_bookmark(
+            label, hit.frequency_hz, hit.mode, hit.fm_deviation, hit.bandwidth
+        )
+        try:
+            if not rx.tune_bookmark(bookmark):
+                return False, "it didn't tune there: its window says why."
+            rx.raise_()
+            silent = rx.listen() == LISTEN_MAIN
+        except RuntimeError as exc:  # pragma: no cover - its window deleted
+            logger.debug("The second receiver is gone: %s", exc)
+            return False, OPEN_SECOND
+        if silent:
+            return True, (
+                "its Listen is set to Main window: choose This receiver or Both "
+                "(mixed) there to hear it."
+            )
+        return True, ""
 
     def scan_partner(self) -> Tuple[Optional[SecondReceiverPartner], str]:
         """The Second Receiver window to sweep with (the Scanner tab's "Use

@@ -49,7 +49,7 @@ floating-point rounding). NumPy only; no Qt.
 from __future__ import annotations
 
 import math
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Union
 
 import numpy as np
 
@@ -110,6 +110,10 @@ class StereoDecoder:
     follows it: at once down, over ``RISE_S`` up), :attr:`pilot` whether a
     pilot is there, and :attr:`snr_db` how far below full scale the hiss of
     full stereo would be (None before anything was measured).
+
+    ``tau_s`` is the de-emphasis the audio is heard with (75 us in the
+    Americas, 50 us in most of the world): the hiss estimate assumes it,
+    and :attr:`tau_s` can be changed while the decoder runs.
     """
 
     #: The blend: full separation while stereo's hiss is at least this far
@@ -138,6 +142,7 @@ class StereoDecoder:
     _NOISE_S = 0.016
     _OFFSET_S = 0.25
     _ROT_BLOCK = 4096  # samples of the 19 kHz phasor table
+    _GLIDE_S = 0.02  # a setting changed while it runs takes effect over this
 
     def __init__(
         self,
@@ -153,7 +158,8 @@ class StereoDecoder:
                 f"more, got {rate / 1e3:.0f} kS/s"
             )
         self.rate = rate
-        self._noise_bw_stereo = stereo_noise_bandwidth(tau_s, audio_hz)
+        self._audio_hz = float(audio_hz)
+        self._tau_s = _checked_tau(tau_s)
         # Twice the carrier (DSB), and the droop made up.
         droop = float(np.sinc(2.0 * PILOT_HZ / rate)) if phase_step else 1.0
         self._gain = np.float32(2.0 / droop)
@@ -193,6 +199,10 @@ class StereoDecoder:
         self._measured_bw = mid * float(np.sum(taps * taps)) / float(np.sum(taps)) ** 2
         self._phasor_bw = self.work_rate / n_phasor
         self._rise = self.factor / (self.RISE_S * rate)  # blend per work sample
+        # The noise bandwidth of full stereo's hiss (see tau_s): a new time
+        # constant glides there over _GLIDE_S, so the blend doesn't jump.
+        glide = max(1, int(round(self._GLIDE_S * self.work_rate)))
+        self._hiss_bw = _Glide(stereo_noise_bandwidth(self._tau_s, audio_hz), glide)
         # Work samples before the averages (and the filters before them)
         # have filled after a reset.
         self._warm_up = n_phasor + self._noise.length + len(sharp)
@@ -220,6 +230,23 @@ class StereoDecoder:
         self.pilot = False
         self.snr_db: Optional[float] = None
         self.pilot_db: Optional[float] = None
+        self._hiss_bw.settle()  # (nothing plays: no glide)
+
+    @property
+    def tau_s(self) -> float:
+        """The de-emphasis time constant (s) the audio is heard with: the
+        blend's hiss estimate assumes it (50 us lets more of the stereo
+        difference signal's hiss through than 75 us). Set it while the
+        decoder runs and the estimate moves to the new one over 20 ms;
+        it must be a positive number (ValueError otherwise)."""
+        return self._tau_s
+
+    @tau_s.setter
+    def tau_s(self, value: float) -> None:
+        tau = _checked_tau(value)
+        if tau != self._tau_s:
+            self._tau_s = tau
+            self._hiss_bw.set(stereo_noise_bandwidth(tau, self._audio_hz))
 
     @property
     def offset_hz(self) -> float:
@@ -308,7 +335,7 @@ class StereoDecoder:
         pilot_db = 10.0 * np.log10(
             (pilot_power + 1e-30) / (density * self._phasor_bw + 1e-20)
         )
-        hiss = density * self._noise_bw_stereo
+        hiss = density * self._hiss_bw.take(m)
         snr_db = 10.0 * np.log10(0.5 / (hiss + 1e-12))
         # Until the averages have filled (after a reset), nothing is known.
         known = np.arange(self._work, self._work + m) >= self._warm_up
@@ -352,3 +379,43 @@ class StereoDecoder:
         candidates = np.minimum.accumulate(target - rise * k)
         out = np.minimum(self.blend + rise * k, candidates + rise * k)
         return np.clip(out, 0.0, 1.0)
+
+
+def _checked_tau(value: float) -> float:
+    """A de-emphasis time constant: a positive, finite number of seconds."""
+    tau = float(value)
+    if not math.isfinite(tau) or tau <= 0.0:
+        raise ValueError(f"a de-emphasis time constant must be positive, got {value!r}")
+    return tau
+
+
+class _Glide:
+    """A setting that moves to a new value in a straight line over
+    ``samples`` work samples, instead of at once."""
+
+    def __init__(self, value: float, samples: int) -> None:
+        self.value = self.goal = float(value)
+        self._samples = max(1, int(samples))
+        self._step = 0.0
+
+    def set(self, goal: float) -> None:
+        self.goal = float(goal)
+        self._step = (self.goal - self.value) / self._samples
+
+    def settle(self) -> None:
+        """Be at the goal now."""
+        self.value = self.goal
+        self._step = 0.0
+
+    def take(self, m: int) -> Union[np.ndarray, float]:
+        """The value over the next ``m`` work samples (a scalar while it
+        stays put)."""
+        if self.value == self.goal or m <= 0:
+            return self.value
+        values = self.value + self._step * np.arange(1, m + 1, dtype=np.float64)
+        if self._step > 0:
+            values = np.minimum(values, self.goal)
+        else:
+            values = np.maximum(values, self.goal)
+        self.value = float(values[-1])
+        return values

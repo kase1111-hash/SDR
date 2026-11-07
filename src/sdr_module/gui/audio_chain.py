@@ -43,6 +43,7 @@ from ..dsp.filters import (
     NoiseReductionMethod,
     ctcss_label,
 )
+from ..dsp.fm_stereo import DEEMPHASIS_S
 from ..utils.iq import estimate_iq_imbalance
 
 #: Level reported for an empty block (dBFS).
@@ -409,6 +410,10 @@ class AudioOptions:
       is heard without its sub-audible band (the tone or the DCS bits).
     * ``low_cut_hz``: the low cut chosen (Hz, 0 for none), for AM, SSB and
       narrow FM.
+    * ``deemphasis_s``: broadcast FM's de-emphasis time constant, 75 us
+      (the Americas, South Korea) or 50 us (Europe, Australia, most of the
+      world); see ``gui/deemphasis.py``. Mono and stereo alike; other
+      modes have none.
     """
 
     def __init__(self) -> None:
@@ -419,6 +424,7 @@ class AudioOptions:
         self.notch_hz: float = float(DEFAULT_NOTCH_HZ)
         self.tone_squelch: bool = False
         self.low_cut_hz: float = 0.0
+        self.deemphasis_s: float = DEEMPHASIS_S
 
 
 class ListeningFilters:

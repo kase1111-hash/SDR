@@ -7,10 +7,11 @@ channels made from the two.
 chain hands it each block of the FM multiplex before it turns that block
 into mono audio; the path recovers L-R with
 :class:`~sdr_module.dsp.fm_stereo.StereoDecoder` and runs it through fresh
-copies of the chain's own audio stages (the 15 kHz low-pass with the 75 us
-de-emphasis, the decimation, the resampler to 48 kHz, the DC blocker and the
-noise reduction), started at the same decimation phases and times as the
-mono stream's. The two come out aligned to the sample, so::
+copies of the chain's own audio stages (the 15 kHz low-pass with the
+chain's de-emphasis, 75 or 50 us, the decimation, the resampler to 48 kHz,
+the DC blocker and the noise reduction), started at the same decimation
+phases and times as the mono stream's. The two come out aligned to the
+sample, so::
 
     left = mono + difference, right = mono - difference
 
@@ -24,7 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from ..dsp.fm_stereo import MIN_RATE, StereoDecoder
+from ..dsp.fm_stereo import DEEMPHASIS_S, MIN_RATE, StereoDecoder
+from .deemphasis import StageCrossfade, carry_state
 
 __all__ = ["StereoPath", "AUDIBLE_DIFFERENCE", "MIN_FILTER_HZ"]
 
@@ -46,12 +48,13 @@ class StereoPath:
     docstring)."""
 
     def __init__(self, chain: Any):
-        self.decoder = StereoDecoder(chain.channel_rate)
+        self.decoder = StereoDecoder(chain.channel_rate, tau_s=_tau(chain))
         #: False until it follows the chain's stream (see :meth:`sync`);
         #: set False to make the next block start afresh.
         self.running = False
-        self._stage_cache: Dict[Tuple[bool, bool], List[Any]] = {}
+        self._stage_cache: Dict[Tuple[bool, bool, Optional[float]], List[Any]] = {}
         self._stages: List[Any] = []
+        self._stage_fade: Optional[StageCrossfade] = None
         self._resampler: Any = None
         self._dc: Any = None
         self._nr: Any = None
@@ -76,14 +79,12 @@ class StereoPath:
         histories, at the same decimation phases and output times, and the
         decoder starting afresh (mono, widening to stereo as the pilot is
         heard)."""
-        key = (bool(chain._deemphasis), bool(chain._voice))
-        stages = self._stage_cache.get(key)
-        if stages is None:
-            stages = self._stage_cache[key] = chain._build_audio_stages()
+        stages = self._stages_for(chain)
         for mine, theirs in zip(stages, chain._audio, strict=True):
             mine.reset()
             mine._phase = theirs._phase
         self._stages = stages
+        self._stage_fade = None
         theirs = chain._resampler
         if theirs is None:
             self._resampler = None
@@ -102,8 +103,33 @@ class StereoPath:
             self._dc._x = 0.0  # (what came before was silence)
         self._nr = self._nr_source = None
         self._fade = 1.0
+        self.decoder.tau_s = _tau(chain)
         self.decoder.reset()
         self.running = True
+
+    def _stages_for(self, chain: Any) -> List[Any]:
+        """Copies of the chain's audio stages as they are now (built once
+        per de-emphasis, time constant and voice setting)."""
+        deemphasis = bool(chain._deemphasis)
+        key = (deemphasis, bool(chain._voice), _tau(chain) if deemphasis else None)
+        stages = self._stage_cache.get(key)
+        if stages is None:
+            stages = self._stage_cache[key] = chain._build_audio_stages()
+        return stages
+
+    def change_deemphasis(self, chain: Any, length: int) -> None:
+        """The chain crossfades to another de-emphasis time constant from
+        this block on, over ``length`` samples of its audio stages: the
+        difference signal does the same, from the same sample (left and
+        right stay aligned)."""
+        stages = self._stages_for(chain)
+        if stages is self._stages:
+            return
+        for theirs, mine in zip(self._stages, stages, strict=True):
+            carry_state(theirs, mine)
+        self._stage_fade = StageCrossfade(self._stages, stages, length)
+        self._stages = stages
+        self.decoder.tau_s = _tau(chain)
 
     def process(
         self, mpx: np.ndarray, noise_reduction: Any = None, fade_out: bool = False
@@ -122,8 +148,14 @@ class StereoPath:
             ramp = np.clip(ramp, 0.0, 1.0)
             self._fade = float(ramp[-1])
             difference *= ramp.astype(np.float32)
-        for stage in self._stages:
-            difference = stage.process(difference)
+        crossfade = self._stage_fade
+        if crossfade is not None:
+            difference = crossfade.process(difference)
+            if crossfade.finished:
+                self._stage_fade = None
+        else:
+            for stage in self._stages:
+                difference = stage.process(difference)
         if self._resampler is not None:
             difference = self._resampler.process(difference)
         difference = self._dc.process(difference)
@@ -176,3 +208,8 @@ class StereoPath:
         out[:n, 0] += difference[:n]
         out[:n, 1] -= difference[:n]
         return np.clip(out, -1.0, 1.0, out=out)
+
+
+def _tau(chain: Any) -> float:
+    """The chain's broadcast de-emphasis time constant (s)."""
+    return float(getattr(chain, "deemphasis_s", DEEMPHASIS_S))

@@ -120,6 +120,23 @@ class _SoundCase(_PlaybackCase):
         model.advance(self.clock.now)
         return model
 
+    def troubles_since(self, start):
+        """Seconds the speaker ran dry, and of audio dropped, after
+        ``start``: the speaker followed from the first block it got (one
+        started at ``start`` would start empty, and run dry where the real
+        one still held what it got before)."""
+        model = _Speaker()
+        base = None
+        for when, block in self.heard:
+            if base is None and when >= start:
+                model.advance(start)
+                base = (model.gaps, model.dropped)
+            model.write(block, when)
+        model.advance(self.clock.now)
+        if base is None:
+            base = (model.gaps, model.dropped)
+        return model.gaps - base[0], model.dropped - base[1]
+
 
 class TestEverySpeedPlays(_SoundCase):
     def test_0_5x_2x_and_4x_play_at_the_recordings_pitch_in_time(self):
@@ -266,6 +283,32 @@ class TestARecordingTheComputerCantKeepUpWith(_SoundCase):
         self.assertLess(speaker.gaps, 0.02)
         audio = self.sound(since=start)
         self.assertAlmostEqual(_peak_hz(audio), 1000.0, delta=1.0)
+
+    def test_4x_with_frames_that_vary_plays_without_gaps(self):
+        """Each frame costs 0.6 s per second of the recording at 1x (4x
+        needs 2.4 times real time), give or take 10 %: the sound plays
+        through. (Kept at just the longest recent wait, the speaker ran
+        dry whenever a probe frame took a little longer than the longest
+        so far: 0.04 s of gaps in these 30 s.)"""
+        self.open_fast()
+        win = self.win
+        win._playback_bar.set_speed(4.0)
+        rng = np.random.default_rng(2)
+        process = win._process_block  # (costly: self.cost a second of signal)
+
+        def varying(samples):
+            share = self.cost * len(samples) / win._device_sample_rate()
+            self.clock.advance(0.1 * share * float(rng.uniform(-1.0, 1.0)))
+            process(samples)
+
+        win._process_block = varying
+        self.cost = 0.6
+        self.frames(3.0)
+        start = self.clock.now
+        self.frames(30.0)
+        self.assertTrue(win._pacer.overloaded)
+        self.assertEqual(self.troubles_since(start), (0.0, 0.0))
+        self.assertEqual(win._audio_state(), "on")
 
     def test_far_too_slow_pauses_and_says_why(self):
         # Below half of real time the sound pauses, as at 1x: the hint

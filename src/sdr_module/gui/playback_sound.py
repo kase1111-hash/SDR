@@ -18,9 +18,17 @@ audio:
   drops, and the sound follows.
 * **The speaker** gets, with each block, what it played since the last
   one: it is kept at its own cushion (``cushion_s``, the AudioSink's
-  ``TARGET_S``), or at the longest recent wait between frames when that is
-  longer (``HOLD_S``; at most ``MAX_OUT_S``), so frames that come late now
-  and then don't make it run dry, and the wait settles back afterwards.
+  ``TARGET_S``), or at the longest recent wait between frames
+  (``HOLD_S``, measured every frame, squelch open or not) and a quarter
+  more (``WAIT_MARGIN``) when that is longer, so frames that come late
+  now and then (a computer that can't keep up: its frames, and the probe
+  frame it reads once a second most, take some percent more or less each
+  time) don't make it run dry, and the wait settles back afterwards. It
+  never holds more than AudioSink's own buffer (``MOST_HELD_S``), a
+  stream's end included: what doesn't fit waits in AudioSink for the
+  window to hand it over, which a frame that takes long doesn't, and then
+  more is queued than this follows (past its ``HIGH_S`` AudioSink drops
+  the oldest audio: the start of a sound, or the end of one).
 * **The input not yet played** waits in the stretch: what a frame may
   look ahead, plus the largest recent swing between what a block brought
   and what the speaker took meanwhile (a computer that can't keep up
@@ -36,7 +44,9 @@ audio:
   ``ENGAGE_BELOW``) is it stretched to the pace, and once it keeps up
   again the stretch drains and hands back sample for sample.
 * :meth:`finish` ends a stream (the squelch closed, the speaker stopped):
-  what the stretch still holds plays at once, in at most ``FLUSH_S``.
+  what the stretch still holds plays at once, in at most ``FLUSH_S`` and
+  in no more than the speaker can still take (faster, or cut short and
+  faded, when it holds a long wait).
 * **A new stream** (the squelch opened again) starts once the stretch
   holds enough to bring the speaker to its level by itself: what the last
   one left still plays first (the speaker's queue is followed across
@@ -89,6 +99,18 @@ class PlaybackSound:
     FAST_DRAIN_S = 0.5
     #: The largest swing and the longest wait are remembered this long.
     HOLD_S = 3.0
+    #: The speaker is kept this much (a fraction) above the longest recent
+    #: wait between frames: the next frame may take a little longer (the
+    #: probe frames of an overloaded 4x vary by 10-20 %, and with no margin
+    #: one of them ran the speaker dry every few seconds).
+    WAIT_MARGIN = 0.25
+    #: The most sound the speaker holds, a stream's end included (but for
+    #: its last fade): AudioSink's own buffer (its BUFFER_S). What doesn't
+    #: fit there waits in AudioSink for the window to hand it over between
+    #: frames, so a frame that takes long plays only what fits (and then
+    #: the speaker holds more than this follows: past AudioSink's HIGH_S it
+    #: drops the oldest audio, the start of a sound or the end of one).
+    MOST_HELD_S = 0.25
     #: The slowest and fastest the sound may play (input per output).
     MIN_RATIO = 0.25
     MAX_RATIO = 5.0
@@ -139,7 +161,13 @@ class PlaybackSound:
         last, self._noted = self._noted, float(now)
         if last is None:
             return
-        elapsed = min(max(0.0, float(now) - last), self.STALL_S)
+        gap = max(0.0, float(now) - last)
+        if gap <= self.STALL_S:  # (a stall is no pattern to keep)
+            # The longest recent wait between frames, which the speaker is
+            # kept above: kept across streams (the squelch closing for a
+            # moment doesn't make this computer any faster).
+            self._held_max(self._waits, float(now), gap)
+        elapsed = min(gap, self.STALL_S)
         decay = math.exp(-elapsed / self.PACE_S)
         self._a = self._a * decay + max(0.0, float(seconds))
         self._b = self._b * decay + elapsed
@@ -175,13 +203,13 @@ class PlaybackSound:
         the speaker still plays is kept in mind: it is the same speaker."""
         self._follow_speed(self._speed)
         self._end_stream()
+        self._waits.clear()
 
     def _end_stream(self) -> None:
         self._stretch.reset()
         self._last: Optional[float] = None  # when this stream's last block came
         self._carry = 0.0  # a fraction of an output sample owed
         self._settled: Optional[float] = None  # input kept, smoothed
-        self._waits.clear()
         self._swings.clear()
         self._stretching = False
         self._flowing = False
@@ -198,6 +226,13 @@ class PlaybackSound:
             store.pop()
         store.append((now, value))
         return store[0][1]
+
+    def _longest_wait(self, now: float) -> float:
+        """The longest wait between frames within the last ``HOLD_S``."""
+        waits = self._waits
+        while waits and waits[0][0] < now - self.HOLD_S:
+            waits.popleft()
+        return waits[0][1] if waits else 0.0
 
     def _speaker_left(self, now: float) -> float:
         """Seconds the speaker still holds at ``now``."""
@@ -238,7 +273,7 @@ class PlaybackSound:
         # A block much later than the others (a stall) is no pattern to
         # keep: the speaker ran dry, and plays on as before.
         steady = elapsed <= self.STALL_S
-        wait = self._held_max(self._waits, now, elapsed if steady else 0.0)
+        wait = self._longest_wait(now)
         self._last = now
         if not self._stretching:
             if one and pace >= self.ENGAGE_BELOW:
@@ -259,7 +294,8 @@ class PlaybackSound:
         allowance = 0.0 if release or not self._swings else self._swings[0][1]
         target = lookahead + self.MARGIN_S + allowance
         have = stretch.pending / self.rate
-        level = max(self.cushion_s, wait)
+        most = max(self.cushion_s, self.MOST_HELD_S)
+        level = min(max(self.cushion_s, wait * (1.0 + self.WAIT_MARGIN)), most)
         if not self._flowing:
             # Starting: once the input kept beyond the target brings the
             # speaker to its level by itself (after what the last stream
@@ -278,6 +314,8 @@ class PlaybackSound:
         if steady and self._flowing:
             swing = abs(seconds - want * pace)
             self._held_max(self._swings, now, swing)
+        # (Never more than fits AudioSink's own buffer: see MOST_HELD_S.)
+        want = min(want, max(0.0, most - remaining))
         wanted = want * self.rate + self._carry
         count = int(wanted)
         self._carry = wanted - count
@@ -322,25 +360,43 @@ class PlaybackSound:
     def finish(self, now: Optional[float] = None) -> np.ndarray:
         """The stream ended (the squelch closed, the speaker stopped):
         what the stretch still holds, at once, in at most ``FLUSH_S``
-        (faster than the ratio where needed), ending in its fade-out.
+        (faster than the ratio where needed), ending in its fade-out, and
+        no more than fits what the speaker holds under ``MOST_HELD_S`` but
+        for that fade (cut short and faded when even that is too long).
         Empty when nothing is held. ``now``: when it goes to the speaker
         (the last block's time when not given)."""
         out = np.zeros(0, dtype=np.float32)
+        when = self._spoke_at if now is None else float(now)
         if self._stretching:
             stretch = self._stretch
             held = stretch.pending / self.rate
-            # (Output made but not yet given out plays first.)
-            room = max(
-                self.FLUSH_S - stretch.ready / self.rate, stretch.hop / self.rate
-            )
-            ratio = min(max(self._ratio, held / room), self.MAX_RATIO * 2)
+            hop = stretch.hop / self.rate
+            left = 0.0 if when is None else self._speaker_left(when)
+            # (What the speaker can still take: see MOST_HELD_S.)
+            fits = min(self.FLUSH_S + 2 * hop, max(0.0, self.MOST_HELD_S - left) + hop)
+            # (Output made but not yet given out plays first, the last
+            # frame's fade-out after it; frames come in whole hops.)
+            room = max(fits - 2 * hop - stretch.ready / self.rate, hop)
+            ratio = min(max(self._ratio, held / room), self.MAX_RATIO * 4)
             out = stretch.finish(ratio)
-        when = self._spoke_at if now is None else float(now)
+            most = max(stretch.hop, int(fits * self.rate))
+            if len(out) > most:
+                out = _faded(out[:most], stretch.hop)
         if len(out) and when is not None:
             # (The speaker plays it after what it holds.)
             self._wrote(when, self._speaker_left(when), len(out) / self.rate)
         self._end_stream()
         return out
+
+
+def _faded(audio: np.ndarray, count: int) -> np.ndarray:
+    """``audio`` (a copy) faded out over its last ``count`` samples."""
+    out = np.array(audio, dtype=np.float32, copy=True)
+    n = min(int(count), len(out))
+    if n:
+        fall = (0.5 + 0.5 * np.cos(np.pi * (np.arange(n) + 1) / n)).astype(np.float32)
+        out[-n:] *= fall if out.ndim == 1 else fall[:, None]
+    return out
 
 
 def _joined(first: np.ndarray, second: np.ndarray) -> np.ndarray:

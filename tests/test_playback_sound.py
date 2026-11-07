@@ -94,15 +94,18 @@ class _Run:
     pacer does for a source that keeps up, ``fps`` frames a second with a
     little jitter; or, given ``load`` (seconds of processing per second of
     signal at 1x), what the real ``_Pacer`` reads on a computer that much
-    too slow."""
+    too slow, each frame taking that much more or less by up to ``jitter``
+    (a fraction) as on a real computer."""
 
-    def __init__(self, speed, load=None, rate=2.4e6, seed=0):
+    def __init__(self, speed, load=None, rate=2.4e6, seed=0, jitter=0.0):
         self.speed = float(speed)
         self.load = load
         self.rate = float(rate)
         self.sound = PlaybackSound(RATE, AudioSink.TARGET_S)
         self.speaker = _Speaker()
         self.rng = np.random.default_rng(seed)
+        self.jitter = float(jitter)
+        self.costs = np.random.default_rng(seed + 1000)
         self.pacer = _Pacer() if load is not None else None
         self.now = 100.0
         self.position = 0.0  # audio samples of the recording played
@@ -111,8 +114,11 @@ class _Run:
         self.ratios = []
         self.delays = []  # (time, seconds of sound waiting)
 
-    def frames(self, seconds, stall=None, signal=None):
-        """Run ``seconds`` of frames (``stall``: a frame that late once)."""
+    def frames(self, seconds, stall=None, signal=None, gate=None):
+        """Run ``seconds`` of frames (``stall``: a frame that late once;
+        ``gate``: whether the squelch is open at a time of the recording,
+        in seconds: closed, the speaker gets nothing, and a sound ends with
+        the block the squelch closes in)."""
         end = self.now + seconds
         while self.now < end:
             start = self.now
@@ -127,13 +133,26 @@ class _Run:
                 self.position += n
                 block = (signal or _tone)(first, int(self.position) - first)
                 self.sound.note(len(block) / RATE, self.now, self.speed)
-                out = self.sound.play(block, self.now)
-                self.speaker.write(out, self.now)
+                if gate is None:
+                    self.speaker.write(self.sound.play(block, self.now), self.now)
+                elif gate(first / RATE):
+                    closing = not gate(self.position / RATE)
+                    out = self.sound.play(block, self.now, last=closing)
+                    self.speaker.write(out, self.now)
+                    # (Only a gap within a sound counts.)
+                    if closing:
+                        self.speaker.listening = False
+                    elif len(out):
+                        self.speaker.listening = True
+                else:
+                    self.speaker.advance(self.now)
                 if self.sound.stretching:
                     self.ratios.append(self.sound.ratio)
                 self.delays.append((self.now, self.speaker.queued + self.waiting()))
                 if self.pacer is not None:
                     work = self.load * count / self.rate
+                    if self.jitter:
+                        work *= 1.0 + self.jitter * self.costs.uniform(-1.0, 1.0)
                     self.now += work
                     self.pacer.measured(count, self.rate * self.speed, work)
             tick = (1 / 30.0) * (1.0 + 0.15 * self.rng.uniform(-1.0, 1.0))
@@ -281,6 +300,60 @@ class TestAComputerThatCantKeepUp(unittest.TestCase):
         self.assertLess(max(run.delay_after(8.0)), 0.5)
         self.assertLess(np.mean(run.delay_after(16.0)), 0.25)
         self.assertEqual(run.speaker.gaps, 0.0)
+
+    def test_frames_that_take_a_little_more_or_less_dont_run_it_dry(self):
+        """Each frame of a computer that can't keep up takes some percent
+        more or less than the last (here up to 10 %), its probe frames
+        most (0.2 s of the recording at once at 4x). The speaker is kept a
+        margin above the longest recent wait: one a little longer than the
+        longest so far doesn't run it dry. (Kept at just the longest wait,
+        it ran dry every few seconds: 40-52 ms of gaps in 30 s at 4x on a
+        computer 2.4 times too slow, about 70 ms 3.6 times, 24-43 ms at 2x
+        2.4 times.)"""
+        for speed, load in ((4.0, 0.6), (4.0, 0.9), (2.0, 1.2)):
+            for seed in (0, 1):
+                with self.subTest(speed=speed, load=load, seed=seed):
+                    run = _Run(speed, load=load, seed=seed, jitter=0.1)
+                    run.frames(30.0)
+                    self.assertEqual(run.speaker.gaps, 0.0)
+                    self.assertEqual(run.speaker.dropped, 0.0)
+                    self.assertLessEqual(run.speaker.most, AudioSink.BUFFER_S)
+
+    def test_sounds_that_come_and_go_dont_break_up(self):
+        """Tone bursts (the squelch open for 0.6 s of the recording, closed
+        for 0.45 s) at 4x on a computer 2.4 and 3.6 times too slow, its
+        frames varying by up to 10 %: every sound plays through without
+        the speaker running dry, and no more is ever queued than fits
+        AudioSink's own buffer, the ends of sounds included (beyond it a
+        frame that takes long plays only what fits, and past HIGH_S
+        AudioSink drops the oldest audio). The longest wait between frames
+        was forgotten at each new sound (11-17 ms of gaps in 40 s at 2.4
+        times too slow, 0.4-0.5 s at 3.6 times), and the end of a sound
+        went on top of a full speaker (up to 0.34 s queued)."""
+
+        def squelch(t):
+            return t % 1.05 < 0.6
+
+        hop = 0.0125  # (a stream's end may add its last fade)
+        for load in (0.6, 0.9):
+            for seed in (0, 1):
+                with self.subTest(load=load, seed=seed):
+                    run = _Run(4.0, load=load, seed=seed, jitter=0.1)
+                    run.speaker.listening = False
+                    run.frames(40.0, gate=squelch)
+                    self.assertEqual(run.speaker.gaps, 0.0)
+                    self.assertEqual(run.speaker.dropped, 0.0)
+                    self.assertLessEqual(run.speaker.most, AudioSink.BUFFER_S + hop)
+
+
+class TestTheSpeakersRoom(unittest.TestCase):
+    def test_no_more_than_audiosink_plays_while_a_frame_takes_long(self):
+        """The most the speaker is given fits AudioSink's own buffer (what
+        doesn't fit waits for the window to hand it over between frames),
+        with room under its HIGH_S for a stream's end."""
+        self.assertLessEqual(PlaybackSound.MOST_HELD_S, AudioSink.BUFFER_S)
+        self.assertLess(PlaybackSound.MOST_HELD_S + 0.0125, AudioSink.HIGH_S)
+        self.assertGreaterEqual(PlaybackSound.MOST_HELD_S, AudioSink.TARGET_S)
 
 
 class TestStallsAndChanges(unittest.TestCase):

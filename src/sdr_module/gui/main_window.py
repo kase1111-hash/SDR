@@ -12543,10 +12543,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         ``"silent"`` (on, but None (I/Q) mode has no audio), ``"second"``
         (on, but Listen in the Second Receiver window plays only that
         receiver) or ``"paused"`` (on, but the signal received isn't real
-        time: the receiver can't keep up, or a recording plays faster or
-        slower). Paused is what holds the audio now, as _route_audio judges
-        it: not after Stop, nor once the signal is real time again while
-        the squelch is closed."""
+        time: the receiver can't keep up, or a recording plays below half
+        of real time, at 0.5x below a quarter; at any speed the computer
+        keeps up with it plays, M-P1). Paused is what holds the audio now,
+        as _route_audio judges it: not after Stop, nor once the signal is
+        real time again while the squelch is closed."""
         if not self._audio.available:
             return "no_output"
         if not self._audio_enabled:

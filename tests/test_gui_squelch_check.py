@@ -181,5 +181,40 @@ class TestTheScanPutsBackAReversedSquelch(_WindowTestCase):
         self.assertTrue(win._tone_squelch.reverse)
 
 
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestReversedAndPlainAreTwoResults(_WindowTestCase):
+    """Two bookmarks alike but for Reverse (one muted while its tone is
+    heard, the other only then) are two results of a bookmark scan."""
+
+    def test_two_results(self):
+        from sdr_module.gui.scan_engine import Found, ScanEngine
+
+        scanner = self.win._scanner_panel
+
+        def found(reverse):
+            return Found(
+                145.29e6,
+                -50.0,
+                -90.0,
+                12.5e3,
+                ("FM", "5 kHz", "12.5 kHz"),
+                label="Rpt",
+                tone_hz=100.0,
+                reverse=reverse,
+            )
+
+        with mock.patch.object(
+            ScanEngine, "mode", new_callable=mock.PropertyMock, return_value="bookmarks"
+        ):
+            scanner._on_found(found(False))
+            scanner._on_found(found(True))
+            scanner._on_found(found(True))
+        hits = scanner.hits()
+        self.assertEqual(len(hits), 2)
+        self.assertEqual(
+            sorted((hit.reverse, hit.count) for hit in hits), [(False, 1), (True, 2)]
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3011,6 +3011,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._demod_running = False
         self._tone_squelch = ToneSquelch(_AUDIO_RATE)
         self._tone_channel: Optional[float] = None  # where the tone was heard
+        self._tone_gate_open = False  # the squelch, as the tone squelch saw it
         self._quiet_reverse = False  # (a bookmark sets Reverse: it says so)
         self._iq_conditioner = IqConditioner()
         self._clip_s = 0.0
@@ -9810,7 +9811,14 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # (broadcast stations send none: not looked for unless asked).
             tones = self._tone_squelch
             tuned = self._current_frequency()
-            if tuned != self._tone_channel:
+            # A signal the squelch has just opened on is judged afresh, as
+            # it is when demodulating stopped while the squelch was closed:
+            # Record Audio (or SSTV) keeps demodulating, and the noise
+            # before the signal let a reverse tone squelch play the station
+            # it mutes for its first half second (M-Q3).
+            opened = bool(gate.is_open) and not self._tone_gate_open
+            self._tone_gate_open = bool(gate.is_open)
+            if tuned != self._tone_channel or opened:
                 # Another channel: its tone (if any) must be heard anew.
                 # The last second of the old channel's audio kept a tone
                 # squelch open on a channel without the tone for 0.9 s.

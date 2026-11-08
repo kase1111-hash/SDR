@@ -461,12 +461,15 @@ class IqFileOptions:
         when nothing else gives one (:attr:`center_named`): what Import
         Options offers Open Recording, for Decode Recording and Recording
         Info, which don't ask for it. Unchanged for a one-channel file (its
-        frequencies are its own), a name that gives none, or options the
-        user confirmed (a center cleared in Import Options stays unknown)."""
+        frequencies are its own), a name that gives none or one no
+        recording is centered on (:data:`PLAYBACK_RANGE`, as Import Options
+        takes it: a test tone's "440Hz"), or options the user confirmed (a
+        center cleared in Import Options stays unknown)."""
         if self.center_hz or self.real_signal or self.confirmed:
             return self
         named = guess_from_filename(self.path).center_hz
-        if not named:
+        low, high = PLAYBACK_RANGE
+        if not named or not low <= named <= high:
             return self
         return replace(self, center_hz=float(named), center_named=True)
 

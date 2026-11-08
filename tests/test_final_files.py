@@ -319,6 +319,43 @@ class TestTheFrequencyInTheFileName(_WavCase):
         self.assertEqual(dialog._freq.accessibleName(), "Offset from the center")
         self.assertNotIn("from the file name", dialog._note.text())
 
+    def test_a_frequency_no_recording_is_centered_on_isnt_taken(self):
+        """(A frequency in the name that no recording is centered on, below
+        1 kHz or above 300 GHz, as Import Options refuses it: a test tone's
+        "440Hz". Taken as the center, Decode Recording refused every
+        frequency, its own default too ("That frequency isn't inside the
+        recording"), so the file couldn't be decoded at all, and Recording
+        Info showed a center Open Recording then refused. It stays unknown,
+        as before: the offset is asked, and the file decodes.)"""
+        from sdr_module.dsp import protocol_encoders as enc
+
+        burst = enc.aprs_baseband(
+            "N0CALL-9", "APZ001", "!4903.50N/07201.75W>Tone name", RATE, ["WIDE1-1"]
+        ).astype(np.complex64)
+        pad = np.zeros(int(0.3 * RATE), np.complex64)
+        x = np.concatenate([pad, 0.5 * burst, pad])  # (in the middle)
+        panel = self.win._decoder_panel
+        panel._proto_combo.setCurrentText("AX.25/APRS")
+        self.settle(2)
+        for name in ("test_440Hz_IQ.wav", "SDRSharp_20261108_101500Z_400GHz_IQ.wav"):
+            path = self.path(name)
+            iq_wav(path, x, "int", 2, int(RATE))
+            dialog, options, _missing = self.info_dialog(path)
+            self.assertIs(options.with_name_center(), options)
+            self.assertEqual(
+                dialog.value("Center frequency"), "Unknown (not stored in the file)"
+            )
+            self.boxes.clear()
+            self.answer()
+            with self.open_dialog(path), self.warnings() as warn:
+                self.assertTrue(self.win._decode_recording(), name)
+            warn.assert_not_called()
+            (decode,) = self.boxes
+            self.assertEqual(decode._freq.accessibleName(), "Offset from the center")
+            self.assertIn(
+                f"Decoded 1 AX.25/APRS message(s) from {name}.", self.message()
+            )
+
     def test_open_recording_still_asks(self):
         """(Open Recording confirms it as before: Import Options, filled in
         from the file name.)"""

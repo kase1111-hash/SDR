@@ -147,6 +147,7 @@ from .bookmark_editor import bookmark_squelch
 from .bookmarks_panel import BookmarksPanel, default_bookmark_name
 from .bookmarks_panel import listening as bookmark_listening
 from .control_panel import (
+    FM_DEVIATIONS,
     MAX_FREQUENCY_HZ,
     MIN_FREQUENCY_HZ,
     SAVE_FORMATS,
@@ -6586,16 +6587,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if change is None:
             return False
         (target, target_deviation, target_width), name, where = change
-        broadcast = _BROADCAST_FM_DEVIATION
         self._quiet_mode_change = True  # (this says how instead)
         try:
             self._set_demod_mode(target, target_deviation or None, target_width or None)
         finally:
             self._quiet_mode_change = False
-        how = self._mode_text(target)
-        if target == "FM":
-            fm = "broadcast" if target_deviation == broadcast else "narrow"
-            how = f"FM ({fm}, {self._control_panel.get_fm_deviation_text()} deviation)"
+        how = self._band_plan_how(target, self._control_panel.get_fm_deviation_text())
         text = (
             f"{name}: listening in {how} with a "
             f"{self._control_panel._bw_combo.currentText()} filter, as {where} is "
@@ -6667,6 +6664,20 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         elif mode == "CW" and kind != "data" and cls._segment_allows_cw(freq_hz):
             return None  # Morse code in a CW segment stays CW (not on FT8)
         return heard, name, where
+
+    @classmethod
+    def _band_plan_how(cls, mode: str, deviation: str) -> str:
+        """How the band plan's message names the way a receiver now listens
+        (both windows'): the mode ("AM", "I/Q"), FM with the deviation in
+        the FM deviation list's own words (its table, FM_DEVIATIONS: "FM
+        (wide voice, 12.5 kHz deviation)" for "12.5 kHz (wide voice)")."""
+        if mode != "FM":
+            return cls._mode_text(mode)
+        shown = {value: text for value, text, _tip in FM_DEVIATIONS}
+        _value, _, words = shown.get(deviation, "").partition(" (")
+        if not words.endswith(")"):
+            return f"FM ({deviation} deviation)"
+        return f"FM ({words[:-1]}, {deviation} deviation)"
 
     @staticmethod
     def _band_plan_zone(freq_hz: float) -> Tuple[str, str]:

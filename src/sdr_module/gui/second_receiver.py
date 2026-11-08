@@ -2554,11 +2554,7 @@ if HAS_PYQT6:
                 return False
             (target, target_deviation, width), name, where = change
             self.set_mode(target, target_deviation, width)
-            how = "I/Q" if target.startswith("None") else target
-            if target == "FM":
-                wide = self._deviation_hz() >= _BROADCAST_DEVIATION_HZ
-                fm = "broadcast" if wide else "narrow"
-                how = f"FM ({fm}, {self._deviation_value()} deviation)"
+            how = SDRMainWindow._band_plan_how(target, self._deviation_value())
             text = (
                 f"{name}: listening in {how} with a "
                 f"{self._filter_combo.currentText()} filter, as {where} is "

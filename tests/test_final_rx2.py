@@ -560,16 +560,8 @@ class TestTheSecondReceiverSaysItsFmClips(_TypingCase):
 # --------------------------------------------------------------------------- #
 
 
-@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
-class TestALonePresetKeepsWhatYouPickedThere(_TypingCase):
-    """R8-02: POCSAG 152.240 MHz is a preset channel outside every band.
-    With a deviation picked there by hand, a click 10 kHz away and 152.24
-    typed again set the preset's 12.5 kHz again, with its message: outside
-    every band the "same zone" test was skipped, so the short hop counted
-    as a far tune. Inside a band the same steps keep your choice. Now the
-    lone preset's neighbourhood (its channel width either side) is its
-    zone, in both windows; a real far tune to it still applies the
-    preset's listening."""
+class _BothWindowsCase(_TypingCase):
+    """The same steps in the Second Receiver and in the main window."""
 
     def type_main(self, text):
         """Type ``text`` into the main window's Frequency box."""
@@ -618,6 +610,18 @@ class TestALonePresetKeepsWhatYouPickedThere(_TypingCase):
         self.type_main("145.8")
         self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
         self.type_frequency("145.8")
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestALonePresetKeepsWhatYouPickedThere(_BothWindowsCase):
+    """R8-02: POCSAG 152.240 MHz is a preset channel outside every band.
+    With a deviation picked there by hand, a click 10 kHz away and 152.24
+    typed again set the preset's 12.5 kHz again, with its message: outside
+    every band the "same zone" test was skipped, so the short hop counted
+    as a far tune. Inside a band the same steps keep your choice. Now the
+    lone preset's neighbourhood (its channel width either side) is its
+    zone, in both windows; a real far tune to it still applies the
+    preset's listening."""
 
     def test_a_short_hop_off_the_channel_and_back_keeps_your_deviation(self):
         self.start_on_2m()
@@ -672,6 +676,67 @@ class TestALonePresetKeepsWhatYouPickedThere(_TypingCase):
             self.assertEqual(zone(far), ("", ""), far)
         # Inside a band, as before.
         self.assertEqual(zone(145.8e6), zone(146.52e6))
+
+
+# --------------------------------------------------------------------------- #
+# R8-03: the band plan's message names a deviation as the list does
+# --------------------------------------------------------------------------- #
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestTheBandPlanNamesTheDeviationAsTheListDoes(_BothWindowsCase):
+    """R8-03: typed 152.240 MHz (POCSAG), the band plan's message said "FM
+    (narrow, 12.5 kHz deviation)" while the FM deviation list's item reads
+    "12.5 kHz (wide voice)". The message now takes its words from the
+    list's own table, in both windows: "FM (wide voice, 12.5 kHz
+    deviation)"."""
+
+    PLACES = (
+        ("97.1", "75 kHz"),  # FM Broadcast
+        ("145.29", "5 kHz"),  # 2m Ham
+        ("152.24", "12.5 kHz"),  # POCSAG
+        ("137.5", "25 kHz"),  # Weather Satellites
+        ("151.88", "2.5 kHz"),  # MURS
+    )
+
+    def shown_deviations(self):
+        """For each window: what its FM deviation list shows."""
+        return (
+            self.rx._deviation_combo.currentText(),
+            self.win._control_panel._fm_dev_combo.current_label(),
+        )
+
+    def test_pocsag(self):
+        self.start_on_2m()
+        for name, type_in, *_rest, message, _clear in self.windows():
+            type_in("152.24")
+            self.assertTrue(
+                message().startswith(
+                    "POCSAG: listening in FM (wide voice, 12.5 kHz deviation) "
+                    "with a 25 kHz filter, as this channel is usually heard"
+                ),
+                (name, message()),
+            )
+        self.assertEqual(self.shown_deviations(), ("12.5 kHz (wide voice)",) * 2)
+
+    def test_every_deviation_in_the_lists_words(self):
+        windows = self.windows()
+        for text, value in self.PLACES:
+            # (From a place heard otherwise: the band plan says how.)
+            self.type_main("118.3")
+            self.type_frequency("118.3")
+            for _name, type_in, *_rest in windows:
+                type_in(text)
+            for (name, *_rest, message, _clear), shown in zip(
+                windows, self.shown_deviations(), strict=True
+            ):
+                self.assertTrue(shown.startswith(f"{value} ("), (name, shown))
+                words = shown[len(value) + 2 : -1]
+                self.assertIn(
+                    f"listening in FM ({words}, {value} deviation) with a ",
+                    message(),
+                    (name, text),
+                )
 
 
 if __name__ == "__main__":

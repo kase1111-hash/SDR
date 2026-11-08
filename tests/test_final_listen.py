@@ -970,7 +970,8 @@ class TestFarTunesBetweenNarrowFmBands(_WindowTestCase):
         self.assertEqual(self.listening(), ("FM", "5 kHz", "25 kHz"))
         self.assertTrue(
             self.message().startswith(
-                "2m Ham: listening in FM (narrow, 5 kHz deviation) with a 25 kHz"
+                "2m Ham: listening in FM (narrow voice, 5 kHz deviation) with a "
+                "25 kHz"
             ),
             self.message(),
         )

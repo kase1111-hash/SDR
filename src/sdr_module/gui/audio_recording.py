@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
-import string
+import re
 import time
 from typing import Optional
 
@@ -50,18 +50,28 @@ def audio_file_name(
     audio recording playing, after whose name its sound is named
     (``scanner_audio_USB_20261030_142233.wav``): the frequency it is
     listened from, 1 Hz, says nothing ("0.000MHz"). That name is cut to
-    60 characters, then loses the spaces, dots and underscores at either
-    end (a cut left a space before "_USB_", and a recording named ".wav"
-    a hidden file); with nothing left, the frequency it is."""
+    60 characters and 180 bytes on disk (a file name holds 255; emoji take
+    four bytes each), then loses the spaces of any kind, dots and
+    underscores at either end (a cut left a space before "_USB_", and a
+    recording named ".wav" a hidden file); with nothing left, the
+    frequency it is."""
     stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(when))
     mode = "".join(ch for ch in str(mode) if ch.isalnum()) or "audio"
     name = os.path.basename(str(source))
     # (Without its extension: ".wav" is one, not a name to keep.)
     stem = name.rsplit(".", 1)[0] if "." in name else name
-    what = stem[:60].strip(string.whitespace + "._")
+    what = _trimmed(stem[:60])
+    while len(os.fsencode(what)) > 180:
+        what = _trimmed(what[:-1])
     if not what:
         what = f"{float(freq_hz) / 1e6:.3f}MHz"
     return f"{what}_{mode}_{stamp}.wav"
+
+
+def _trimmed(text: str) -> str:
+    """``text`` without the spaces (of any kind), dots and underscores at
+    either end."""
+    return re.sub(r"^[\s._]+|[\s._]+$", "", text)
 
 
 class AudioTake:

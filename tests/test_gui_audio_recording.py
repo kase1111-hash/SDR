@@ -95,6 +95,33 @@ class TestAudioTake(unittest.TestCase):
         plain = audio_file_name(1.0, "USB", 0, source="net_check_in")
         self.assertRegex(plain, "^net_check_in" + stamp)
 
+    def test_a_take_name_fits_a_file_name_in_any_script(self):
+        """A recording named in emoji, four bytes each on disk (58 of them
+        and ".wav": 236 bytes, a file name a disk holds), named a take of
+        256 bytes, past the 255 a file name may have: Record Audio failed
+        ("File name too long"). And a space other than an ASCII one (no-break,
+        ideographic) at either end stayed before "_USB_", or in front."""
+        from sdr_module.gui.audio_recording import audio_file_name
+
+        stamp = r"_USB_\d{8}_\d{6}\.wav$"
+        for source in ("😀" * 58 + ".wav", "😀" * 59 + "x.wav"):
+            with self.subTest(source=source[-8:]):
+                name = audio_file_name(1.0, "USB", 0, source=source)
+                self.assertRegex(name, "^😀+" + stamp)
+                # (Room for unique_path's "_2" and a longer mode as well.)
+                self.assertLessEqual(len(os.fsencode(name)), 230)
+        # Names in other scripts keep their 60 characters.
+        cjk = audio_file_name(1.0, "USB", 0, source="中文录音" * 20 + ".wav")
+        self.assertRegex(cjk, "^(中文录音){15}" + stamp)
+        for source in (
+            "　net check-in .wav",
+            " net check-in　.wav",
+            "x" * 59 + "　 net.wav",
+        ):
+            with self.subTest(source=source):
+                name = audio_file_name(1.0, "USB", 0, source=source)
+                self.assertRegex(name, r"^(net check-in|x{59})" + stamp)
+
 
 class _AudioCase(_WindowTestCase):
     demo = True

@@ -503,6 +503,18 @@ class TestConvertingAnAudioFile(_WavCase):
             self.assertIn("Tune There", names)
             self.assertAlmostEqual(self.win._current_frequency(), where, delta=1)
 
+    def test_its_rate_reads_as_recording_info_says_it(self):
+        # The summary said "Sample rate: 0.24 MS/s" where Recording Info
+        # (and an audio file's own line here) says "240 kS/s".
+        from tests.test_gui_wav_formats import _noisy_tone
+
+        x = _noisy_tone(int(0.2 * RATE), 30e3, RATE)
+        iq = self._wav("iq240k.wav", x, "int", 2, "RIFF", 145e6)
+        box, _names = self.summary(iq, "Close")
+        self.assertIn("Sample rate: 240 kS/s\n", box.informativeText())
+        dialog, _options, _missing = self.info_dialog(iq)
+        self.assertEqual(dialog.value("Sample rate"), "240 kS/s")
+
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
 class TestTheRateInTheFileName(_WavCase):

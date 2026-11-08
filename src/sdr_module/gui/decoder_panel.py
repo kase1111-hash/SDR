@@ -1427,6 +1427,9 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         receiving = bool(receiving)
         if receiving != self._receiving:
             self._receiving = receiving
+            if not receiving:
+                # (Stopped: the Morse line isn't being received now.)
+                self._cw_view.stop_receiving()
             self._update_state()
 
     def set_source(self, source: Optional[str]) -> None:
@@ -1464,6 +1467,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 str(getattr(status, "detail", "") or ""),
                 bool(getattr(status, "signal_present", False)),
             )
+        else:
+            # Off, or another protocol's decoder: no Morse is received now
+            # ("Receiving" stayed above the Text view's Live entry).
+            self._cw_view.stop_receiving()
 
     def set_receiver_live(
         self, receiver: str, text: str, speed: str = "", receiving: bool = False

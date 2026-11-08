@@ -1565,13 +1565,17 @@ if HAS_PYQT6:
 
             # Broadcast FM in stereo (this receiver's own switch; the main
             # window's is Radio > Audio > Stereo). The STEREO lamp in the
-            # status bar says what plays.
+            # status bar says what plays. De-emphasis and Stereo Blend are
+            # the main window's, for both receivers (follow_main_audio).
             self._stereo_check = QCheckBox("Broadcast FM in stereo")
             self._stereo_check.setChecked(True)
             self._stereo_check.setAccessibleName("Second receiver's stereo")
             self._stereo_check.setToolTip(
                 "On: broadcast FM plays in stereo where the station sends it "
-                "(the STEREO lamp in the status bar says so). Off: always mono."
+                "(the STEREO lamp in the status bar says so). Off: always mono. "
+                "This switch is this receiver's own; De-emphasis and Stereo "
+                "Blend are the main window's, for both receivers: Radio > "
+                "Audio there."
             )
             self._stereo_check.toggled.connect(self._on_stereo_toggled)
             label = QLabel("Stereo:")
@@ -1717,7 +1721,29 @@ if HAS_PYQT6:
 
         # ------------------------------------------------------- main window
 
+        def follow_main_audio(self) -> None:
+            """Radio > Audio's De-emphasis, Stereo Blend and Squelch Tail
+            Elimination are the main window's, for both receivers: this one
+            takes them up when it opens and whenever they change there (the
+            main window calls this through its host). Plain values the DSP
+            worker reads at its next block (the chain from its options, the
+            CTCSS detector its reverse burst switch), so they take effect
+            without a click; the burst's windows start afresh by themselves
+            when it is switched back on."""
+            win = self._win
+            shared = getattr(win, "_audio_options", None)
+            options = self._dsp.options
+            if shared is not None:
+                options.deemphasis_s = shared.deemphasis_s
+                options.stereo_blend = shared.stereo_blend
+            tones = self._dsp.tones
+            tail = bool(getattr(win, "_tail_elimination", True))
+            if tones.tail_elimination != tail:
+                tones.tail_elimination = tail
+
         def _connect_main_window(self) -> None:
+            # (Its audio settings both receivers share.)
+            self.follow_main_audio()
             station = getattr(self._win, "_tx_station", None)
             engine = getattr(station, "engine", None)
             if engine is not None:
@@ -4211,6 +4237,14 @@ if HAS_PYQT6:
             receiver._focus_plots()
             self._on_listen_changed(receiver.listen())
             return receiver
+
+        def follow_audio(self) -> None:
+            """Radio > Audio's De-emphasis, Stereo Blend or Squelch Tail
+            Elimination changed in the main window: the second receiver
+            (if it was opened) follows (it takes them up when it opens)."""
+            receiver = self._receiver
+            if receiver is not None:
+                receiver.follow_main_audio()
 
         def mutes_main(self) -> bool:
             """Listen in the second receiver plays only that one: the main

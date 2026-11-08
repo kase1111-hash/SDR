@@ -43,9 +43,11 @@ from .audio_chain import (
 
 # The main window's thresholds: STEREO lights at half the stereo
 # difference or more (about 10 dB of separation) and goes out below a
-# third of it (no flicker while the blend hovers).
+# third of it (no flicker while the blend hovers); below
+# _NEARLY_MONO_BLEND what plays is mono.
 from .main_window import (
     _BROADCAST_DEVIATION_HZ,
+    _NEARLY_MONO_BLEND,
     _STEREO_OFF_BLEND,
     _STEREO_ON_BLEND,
 )
@@ -111,7 +113,9 @@ def stereo_reading(
     follows the audio, else None), ``lit`` (the lamp said STEREO for the
     last block: it goes out only below a third of the stereo difference).
     ``switch`` names the switch that turns stereo off. The wording is the
-    main window's badge's (``SDRMainWindow._show_stereo``)."""
+    main window's badge's (``SDRMainWindow._show_stereo``), naming the
+    Stereo Blend a blended or mono station is heard with: the main
+    window's, which this receiver follows (``decoder.blending``)."""
     if not received:
         return NO_STEREO_READING
     if not enabled:
@@ -126,13 +130,15 @@ def stereo_reading(
     if decoder is None:
         return "MONO", None, "Mono: listening for the station's stereo pilot."
     blend = float(decoder.blend)
+    blending = str(getattr(decoder, "blending", "") or "normal")
+    setting = f"the main window's Radio > Audio > Stereo Blend: {blending.capitalize()}"
     if blend >= _STEREO_ON_BLEND or (lit and blend >= _STEREO_OFF_BLEND):
         how = (
             "Stereo: the station's 19 kHz pilot is locked and left and right "
             "are fully apart."
             if blend >= 0.95
             else "Stereo, blended partly toward mono to keep the hiss down: the "
-            "signal is a little weak."
+            f"signal is a little weak ({setting})."
         )
         return (
             "STEREO",
@@ -148,11 +154,19 @@ def stereo_reading(
         )
     if float(decoder.target) >= _STEREO_ON_BLEND:
         return "MONO", None, "Mono for a moment: stereo is coming in."
+    # (Under half the stereo difference: MONO, but said so when some of it
+    # still plays, as the main window's badge does.)
+    heard = (
+        "Nearly mono: the signal is too weak for clean stereo, so it is "
+        "blended most of the way toward mono"
+        if blend > _NEARLY_MONO_BLEND
+        else "Mono: the signal is too weak for clean stereo, so it plays in mono"
+    )
     return (
         "MONO",
         None,
-        "Mono: the signal is too weak for clean stereo, so it plays in mono to "
-        "keep the hiss down. Stereo comes back as the signal gets stronger.",
+        f"{heard} to keep the hiss down ({setting}). Stereo comes back as the "
+        "signal gets stronger.",
     )
 
 
@@ -221,7 +235,9 @@ ToneHeard = Tuple[Optional[float], Optional[Tuple[int, bool]], bool]
 TONE_SQUELCH_TIP = (
     "Tone squelch: only play stations that send this sub-audible CTCSS tone "
     "or DCS code (repeaters, PMR); the tone or the code's bits are filtered "
-    "out of what you hear. Tone heard shows the one on the channel."
+    "out of what you hear. Tone heard shows the one on the channel. Squelch "
+    "Tail Elimination (closing at a CTCSS station's reverse burst) is the "
+    "main window's, for both receivers: Radio > Audio there."
 )
 TONE_SQUELCH_UNUSED = "Only used in FM mode"
 

@@ -266,25 +266,26 @@ class TestTheDemoRepeaterSendsIt(unittest.TestCase):
 
         def cost():
             device._stream_pos = int(start * rate)
-            device.read_samples(int(rate / 30))  # (warm)
-            best = []
-            for _ in range(3):
-                device._stream_pos = int(start * rate)
-                t0 = time.perf_counter()
-                for _ in range(4):
-                    device.read_samples(int(rate / 30))
-                best.append(time.perf_counter() - t0)
-            return min(best)
+            t0 = time.perf_counter()
+            for _ in range(4):
+                device.read_samples(int(rate / 30))
+            return time.perf_counter() - t0
 
         with mock.patch.object(device_dialog, "_MAX_LAG_S", 1e9):
             device = MockDevice()
             device.set_sample_rate(rate)
             device.set_frequency(freq)
             device.start_rx()
-            with_burst = cost()
-            with mock.patch.object(device_dialog, "_rpt_modulation", plain):
-                without = cost()
-        self.assertLess(with_burst, 2.0 * without)
+            device._stream_pos = int(start * rate)
+            device.read_samples(int(rate / 30))  # (warm)
+            # The two are timed in turns, so a machine that gets busier
+            # (another test run, say) slows both alike.
+            with_burst, without = [], []
+            for _ in range(5):
+                with_burst.append(cost())
+                with mock.patch.object(device_dialog, "_rpt_modulation", plain):
+                    without.append(cost())
+        self.assertLess(min(with_burst), 2.0 * min(without))
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")

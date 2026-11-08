@@ -789,14 +789,17 @@ class TestTheDemoAirlinerFliesOneSky(unittest.TestCase):
         dev._stream_pos += int(seconds * self.RATE)
         dev._stream_epoch -= seconds
 
-    def decode(self, devices, seconds):
+    def decode(self, devices, seconds, tick=None):
         """Each device's ADS-B messages over the same ``seconds``, read a
-        display frame at a time, in turn: (time s, raw frame) lists."""
+        display frame at a time, in turn (``tick()`` first: a frame's time
+        goes by): (time s, raw frame) lists."""
         from sdr_module.dsp.live_decoders import create_live_decoder
 
         decoders = [create_live_decoder("ADS-B", self.RATE) for _ in devices]
         heard = [[] for _ in devices]
         for step in range(int(seconds * self.RATE / self.BLOCK)):
+            if tick is not None:
+                tick()
             for dev, decoder, out in zip(devices, decoders, heard, strict=True):
                 for msg in decoder.process(dev.read_samples(self.BLOCK)):
                     out.append((step * self.BLOCK / self.RATE, bytes(msg.raw_bits)))
@@ -830,6 +833,43 @@ class TestTheDemoAirlinerFliesOneSky(unittest.TestCase):
             tracker.get("4840D6").messages, max(len(ours), len(theirs))
         )
 
+    def test_a_receiver_started_again_joins_the_sky(self):
+        # (Check) Stop in the main window, the Second Receiver started on
+        # 1090 MHz meanwhile, then Start again: the main window's demo
+        # device streamed anew on the airliner clock of its first start,
+        # the Second Receiver on its own (the Aircraft view read 48 for 32
+        # + 32 replies). A stream started again joins the sky as a first
+        # one does.
+        clock = [1000.0]
+        patcher = mock.patch.object(
+            self.dd, "time", SimpleNamespace(monotonic=lambda: clock[0])
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+        def tick():
+            clock[0] += self.BLOCK / self.RATE
+
+        main = self.demo(seed=1)
+        for _ in range(100):  # (it streams for 3.3 s)
+            tick()
+            main.read_samples(self.BLOCK)
+        main.stop_rx()  # (Stop)
+        clock[0] += 2.0
+        second = self.demo(seed=2)
+        for _ in range(51):  # (the Second Receiver alone for 1.7 s)
+            tick()
+            second.read_samples(self.BLOCK)
+        main.start_rx()  # (Start again)
+        ours, theirs = self.decode((main, second), 6.0, tick)
+        self.assertGreater(len(ours), 15)
+        for at, frame in ours:
+            if 0.2 < at < 5.8:
+                self.assertTrue(
+                    any(f == frame and abs(t - at) < 0.1 for t, f in theirs),
+                    (at, frame.hex()),
+                )
+
     def test_a_device_on_its_own_flies_from_its_start(self):
         # Exactly the samples it gave before (its first half second: the
         # airliner's ident at 0.10 s and a position at 0.35 s): no other
@@ -846,6 +886,17 @@ class TestTheDemoAirlinerFliesOneSky(unittest.TestCase):
         live.close()
         later = self.demo(seed=3)
         np.testing.assert_array_equal(later.read_samples(n), samples)
+        later.close()
+        # Stopped and started again with no other demo receiver streaming,
+        # it goes on on its own clock, as it did.
+        again = self.demo(seed=5)
+        head = again.read_samples(n)
+        again.stop_rx()
+        again.start_rx()
+        tail = again.read_samples(n)
+        never_stopped = self.demo(shared=False, seed=5)
+        np.testing.assert_array_equal(head, never_stopped.read_samples(n))
+        np.testing.assert_array_equal(tail, never_stopped.read_samples(n))
 
 
 # --------------------------------------------------------------------------- #

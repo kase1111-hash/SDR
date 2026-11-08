@@ -2005,8 +2005,9 @@ def _squitter_spans(pos: int, n: int, rate: float) -> List[tuple]:
 
 # (R8-04) One sky for the demo receivers: the airliner is one aircraft. A
 # demo device made with ``shared_sky`` (the main window's, the Second
-# Receiver's) whose stream starts while another such device streams (read
-# in the last _SKY_LIVE_S) flies it on that device's clock, so the two
+# Receiver's) whose stream starts (its first, or again after a stop) while
+# another such device streams (read in the last _SKY_LIVE_S) flies it on
+# that device's clock, so the two
 # receivers on 1090 MHz hear each of its replies at the same moment, bit
 # for bit, as two real receivers do (the Aircraft view counts it once). A
 # device on its own flies it from its own stream position 0, as before;
@@ -2348,6 +2349,9 @@ class MockDevice:
         #: streaming when this one's stream started (see _join_sky).
         self._last_read: Optional[float] = None
         self._sky_offset_s = 0.0
+        #: The next read starts a stream (the first, or the first after
+        #: start_rx): the airliner's clock is chosen then (_join_sky).
+        self._sky_join = True
         #: Samples skipped to catch up with the clock (read too slowly), as
         #: the drivers count those their queue dropped: an I/Q recording
         #: says it has gaps.
@@ -2426,6 +2430,9 @@ class MockDevice:
 
     def start_rx(self) -> bool:
         self._running = True
+        # (Its stream starts again: the airliner joins the sky streaming
+        # now, as at its first start; the main window's Stop and Start.)
+        self._sky_join = True
         return True
 
     def stop_rx(self) -> bool:
@@ -2495,7 +2502,6 @@ class MockDevice:
             self._stream_rate = rate
         if self._stream_epoch is None:
             self._stream_epoch = now - self._stream_pos / rate
-            self._sky_offset_s = _join_sky(self, self._stream_pos, rate, now)
         self._last_read = now
         # Reading slower than real time: skip ahead, so timed signals follow
         # the clock. Reading faster (a scan) just runs ahead.
@@ -2504,6 +2510,11 @@ class MockDevice:
             self._stream_pos += int(behind)
             self.dropped_samples += int(behind)
         pos = self._stream_pos
+        if self._sky_join:
+            # A stream starts here (the first, or again after a stop, where
+            # it just skipped ahead to the clock): the airliner's clock.
+            self._sky_join = False
+            self._sky_offset_s = _join_sky(self, pos, rate, now)
         self._stream_pos += n
         return pos
 

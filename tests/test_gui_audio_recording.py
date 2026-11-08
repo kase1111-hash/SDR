@@ -71,6 +71,30 @@ class TestAudioTake(unittest.TestCase):
         long_name = audio_file_name(1.0, "USB", 0, source="x" * 300 + ".wav")
         self.assertLess(len(long_name), 100)
 
+    def test_a_take_name_never_ends_in_a_space_or_starts_with_a_dot(self):
+        """R8-08: the recording's name was cut at 60 characters after its
+        spaces were stripped, so a space at the cut stayed before "_USB_";
+        a recording named ".wav" (or ".net.wav") named a hidden file."""
+        from sdr_module.gui.audio_recording import audio_file_name
+
+        stamp = r"_USB_\d{8}_\d{6}\.wav$"
+        cut = audio_file_name(1.0, "USB", 0, source="a" * 59 + " tail end.wav")
+        self.assertRegex(cut, "^a{59}" + stamp)
+        cut = audio_file_name(1.0, "USB", 0, source="b" * 57 + "_._ more.wav")
+        self.assertRegex(cut, "^b{57}" + stamp)
+        hidden = audio_file_name(1.0, "USB", 0, source=".net check-in.wav")
+        self.assertRegex(hidden, "^net check-in" + stamp)
+        # Nothing usable left: named after the frequency, as live audio is.
+        for source in (".wav", "..wav", " .wav", "_.wav", " _ . _.wav", ".WAV"):
+            with self.subTest(source=source):
+                name = audio_file_name(1.0, "USB", 0, source=source)
+                self.assertRegex(name, r"^0\.000MHz" + stamp)
+        # (A name with dots inside keeps them; no extension, all of it.)
+        dotted = audio_file_name(1.0, "USB", 0, source="net 2026.11.08.wav")
+        self.assertRegex(dotted, r"^net 2026\.11\.08" + stamp)
+        plain = audio_file_name(1.0, "USB", 0, source="net_check_in")
+        self.assertRegex(plain, "^net_check_in" + stamp)
+
 
 class _AudioCase(_WindowTestCase):
     demo = True

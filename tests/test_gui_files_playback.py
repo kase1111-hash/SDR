@@ -26,7 +26,13 @@ import numpy as np
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
-from tests.test_gui_playback_sound import AUDIO, _peak_hz, _SoundCase  # noqa: E402
+from tests.test_gui_playback_sound import (  # noqa: E402
+    AUDIO,
+    _marked,
+    _marker_seconds,
+    _peak_hz,
+    _SoundCase,
+)
 from tests.test_gui_wav_formats import AUDIO_RATE, _WavCase  # noqa: E402
 from tests.test_playback_sound import _Speaker  # noqa: E402
 from tests.wav_builders import iq_wav  # noqa: E402
@@ -52,13 +58,22 @@ def _tone_wav(path, rate, seconds, freq=1000.0, bursts=None):
     return path
 
 
+def _marked_wav(path, rate, seconds, mark_s):
+    """A one-channel WAV file of :func:`_marked`'s tone: its last
+    ``mark_s`` at 600 Hz."""
+    x = 0.3 * _marked(seconds, mark_s, rate)
+    x = x + 0.001 * np.random.default_rng(4).standard_normal(len(x))
+    iq_wav(path, x, "int", 2, int(rate))
+    return path
+
+
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
 class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
     """Sound at 0.5x and 2x of recordings slower than a display block a
     frame: telephone-rate and other low-rate audio in one-channel files."""
 
-    def open_audio(self, rate, seconds=6.0, bursts=None):
-        path = _tone_wav(
+    def open_audio(self, rate, seconds=6.0, bursts=None, path=None):
+        path = path or _tone_wav(
             os.path.join(self.folder, f"audio{rate}.wav"), rate, seconds, bursts=bursts
         )
         self.play(path)
@@ -386,13 +401,101 @@ class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
                     self.assertEqual(model.dropped, 0.0)
                     win._playback.close()
 
+    def test_every_speed_plays_a_recording_to_its_very_end(self):
+        """Without Loop, 8 kHz audio plays its last block at the speed
+        chosen, its pitch kept, and then the playback pauses (R8-06). At
+        0.5x, 2x and 4x what the time-stretch held of it when the end was
+        read went out at once when the playback paused, in at most 0.1 s:
+        rushed, or cut short and faded (its last 0.3 s lasted 0.04-0.05 s
+        at 0.5x, not 0.6 s, and 0.03-0.05 s at 2x). At 1x a last block
+        short of a whole one went into the time-stretch (the pace measured
+        sank with it), and out the same way."""
+        win = self.win
+        mark_s = 0.3
+        # (These frames read 2048 samples, then 2112 at a time: the last
+        # block holds 1500, the 0.3 s marked among them.)
+        seconds = 2 * (2048 + 5 * 2112 + 1500) / 8000
+        for speed in (0.5, 1.0, 2.0, 4.0):
+            for phase in (0.0, 0.1):  # (when the bar's timer ticks)
+                with self.subTest(speed=speed, phase=phase):
+                    self.clock.advance(1.0)  # (the last one's sound has played)
+                    path = os.path.join(self.folder, "end.wav")
+                    self.open_audio(8000, path=_marked_wav(path, 8000, seconds, mark_s))
+                    win._playback_bar.set_loop(False)
+                    win._playback_bar.set_speed(speed)
+                    win._rx_history.clear()
+                    win._pacer.restart()
+                    self.heard.clear()
+                    paused = []
+
+                    def stop(paused=paused):
+                        if not win._is_running and not paused:
+                            paused.append(self.clock.now)
+                        return False
+
+                    tick = self.clock.now - phase
+                    self.ticked_frames(seconds / speed + 2.0, tick, stop)
+                    self.assertFalse(win._is_running)
+                    self.assertEqual(win._state_badge.text(), "ENDED")
+                    self.assertIn("End of end.wav", self.message())
+                    # Its last 0.3 s as long as the speed makes it...
+                    self.assertAlmostEqual(
+                        _marker_seconds(self.sound()),
+                        mark_s / speed,
+                        delta=0.1 * mark_s / speed + 0.02,
+                    )
+                    # ...with no gap before its end, which fades out...
+                    writes = [(t, b) for t, b in self.heard if len(b)]
+                    model = _Speaker()
+                    for when, block in writes:
+                        model.write(block, when)
+                    self.assertLess(model.gaps, 0.005)
+                    self.assertEqual(model.dropped, 0.0)
+                    peak = float(np.max(np.abs(self.sound())))
+                    self.assertLess(abs(float(writes[-1][1][-1])), 0.01 * peak)
+                    # ...and nothing after it: then the playback paused.
+                    self.assertLessEqual(writes[-1][0], paused[0])
+                    win._playback.close()
+
+    def test_a_short_last_block_is_heard_at_0_5x(self):
+        """At 0.5x two blocks of 8 kHz audio make the two seconds real time
+        is judged over: the last block, short because the file ends there
+        (not a device that can't keep up), counted alone, and under half a
+        block it muted its own sound and flashed "The recording isn't
+        playing at 0.5x right now, so audio is paused" (R8-06)."""
+        win = self.win
+        for last in (600, 1000):  # (I/Q samples in the last block: < 1056)
+            with self.subTest(last=last):
+                self.clock.advance(1.0)  # (the last one's sound has played)
+                mark_s = 0.8 * last / 4000
+                seconds = 2 * (2048 + 5 * 2112 + last) / 8000
+                path = os.path.join(self.folder, "short.wav")
+                self.open_audio(8000, path=_marked_wav(path, 8000, seconds, mark_s))
+                win._playback_bar.set_loop(False)
+                win._playback_bar.set_speed(0.5)
+                win._rx_history.clear()
+                win._pacer.restart()
+                self.heard.clear()
+                show = win._show_status_message
+                with mock.patch.object(
+                    win, "_show_status_message", side_effect=show
+                ) as said:
+                    self.ticked_frames(2 * seconds + 2.0, self.clock.now)
+                texts = " ".join(str(c.args[0]) for c in said.call_args_list)
+                self.assertNotIn("isn't playing", texts)
+                self.assertIn("End of short.wav", self.message())
+                # (Its last part, less what the filters still held: 20 ms.)
+                heard = _marker_seconds(self.sound())
+                self.assertGreater(heard, 0.75 * mark_s / 0.5)
+                win._playback.close()
+
     def test_loop_turned_on_as_the_end_plays_plays_on(self):
         """Loop turned on while the last of a recording's sound still plays
         (its end read, the window waiting for that sound): it plays on from
         the start, as with Loop on before (the end, read without it, still
         stopped it at the playback's next tick, though it had started
-        again). (The file's last block, short of a whole one, may leave the
-        speaker dry for that much before the start.)"""
+        again), and without a gap at the wrap (R8-07: see
+        test_loop_turned_on_late_wraps_without_a_gap)."""
         win = self.win
         seconds = 6 * 2 * 2048 / 8000
         self.open_audio(8000, seconds=seconds)
@@ -409,10 +512,116 @@ class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
         self.assertFalse(device.finished)
         self.assertGreaterEqual(device.loops, 1)
         self.assertGreater(len(self.sound(since=start)) / AUDIO, 2.5)
-        gaps, dropped = self.troubles_since(start + 1.0)  # (from the start on)
+        gaps, dropped = self.troubles_since(start)
         self.assertLess(gaps, 0.005)
         self.assertEqual(dropped, 0.0)
         win._playback.close()
+
+    def test_loop_turned_on_late_wraps_without_a_gap(self):
+        """Loop turned on as the end of slow audio plays (R8-07): the start
+        follows its end at once, as with Loop on all along. The window had
+        counted the last read, short of a whole block, as a whole one: the
+        start came only when the next block was due, after a gap as long
+        as the last block fell short (up to half a second of 8 kHz audio,
+        a second at 0.5x), and at 1x the start was then cut by as much."""
+        win = self.win
+        for speed in (1.0, 0.5, 2.0):
+            for last in (100, 1000, 1800):  # (I/Q samples in the last block)
+                with self.subTest(speed=speed, last=last):
+                    self.clock.advance(1.0)  # (the last one's sound has played)
+                    seconds = 2 * (2048 + 5 * 2112 + last) / 8000
+                    self.open_audio(8000, seconds=seconds)
+                    win._playback_bar.set_loop(False)
+                    win._playback_bar.set_speed(speed)
+                    win._rx_history.clear()
+                    win._pacer.restart()
+                    device = win._device
+                    tick = self.ticked_frames(
+                        seconds / speed + 1.0,
+                        self.clock.now,
+                        lambda device=device: device.finished,
+                    )
+                    self.assertTrue(win._is_running)
+                    win._playback_bar.set_loop(True)
+                    start = self.clock.now
+                    self.ticked_frames(3.0, tick)
+                    self.assertTrue(win._is_running)
+                    self.assertGreaterEqual(device.loops, 1)
+                    gaps, dropped = self.troubles_since(start)
+                    self.assertLess(gaps, 0.005)
+                    self.assertEqual(dropped, 0.0)
+                    # (As much sound as time went by, counting what the
+                    # speaker held then and holds now: none of it skipped.)
+                    before = _Speaker()
+                    for when, block in self.heard:
+                        if when < start:
+                            before.write(block, when)
+                    before.advance(start)
+                    heard = len(self.sound(since=start)) / AUDIO
+                    held = before.queued - self.speaker().queued
+                    self.assertAlmostEqual(heard + held, 3.0, delta=0.035)
+                    win._playback.close()
+
+    def test_loop_turned_on_after_the_end_was_given_out_plays_on(self):
+        """(The same with Loop turned on once the last of the end has gone
+        to the speaker, which still plays it, before the playback pauses:
+        the start follows as a new sound, faded in, without a gap.)"""
+        win = self.win
+        for speed in (1.0, 2.0):
+            with self.subTest(speed=speed):
+                self.clock.advance(1.0)  # (the last one's sound has played)
+                seconds = 2 * (2048 + 5 * 2112 + 1000) / 8000
+                self.open_audio(8000, seconds=seconds)
+                win._playback_bar.set_loop(False)
+                win._playback_bar.set_speed(speed)
+                win._rx_history.clear()
+                win._pacer.restart()
+                join = win._audio_join
+                tick = self.ticked_frames(
+                    seconds / speed + 1.0,
+                    self.clock.now,
+                    lambda join=join: not join.playing,
+                )
+                self.assertTrue(win._is_running)  # (not paused yet)
+                win._playback_bar.set_loop(True)
+                start = self.clock.now
+                self.ticked_frames(2.0, tick)
+                self.assertTrue(win._is_running)
+                self.assertGreaterEqual(win._device.loops, 1)
+                gaps, dropped = self.troubles_since(start)
+                self.assertLess(gaps, 0.005)
+                self.assertEqual(dropped, 0.0)
+                win._playback.close()
+
+    def test_loop_turned_on_late_at_11_khz_drops_nothing(self):
+        """(Loop turned on as the end of 11.025 kHz audio plays, at 1x: the
+        read that found the end, under a quarter of a second of sound, went
+        to the speaker whole, and so did the start that came with the next
+        frame. Together more than AudioSink keeps: it dropped 0.15-0.2 s of
+        them, and the speaker ran dry for as long before the next block.)"""
+        win = self.win
+        for last in (600, 950, 1300):  # (I/Q samples in the last block)
+            with self.subTest(last=last):
+                self.clock.advance(1.0)  # (the last one's sound has played)
+                seconds = 2 * (2048 + 5 * 2182 + last) / 11025
+                self.open_audio(11025, seconds=seconds)
+                win._playback_bar.set_loop(False)
+                win._rx_history.clear()
+                win._pacer.restart()
+                device = win._device
+                tick = self.ticked_frames(
+                    seconds + 1.0, self.clock.now, lambda device=device: device.finished
+                )
+                self.assertTrue(win._is_running)
+                win._playback_bar.set_loop(True)
+                start = self.clock.now
+                self.ticked_frames(3.0, tick)
+                self.assertTrue(win._is_running)
+                self.assertGreaterEqual(device.loops, 1)
+                gaps, dropped = self.troubles_since(start)
+                self.assertLess(gaps, 0.005)
+                self.assertEqual(dropped, 0.0)
+                win._playback.close()
 
     def test_stalls_at_1x_dont_make_the_sound_later_and_later(self):
         """A stall of the window at 1x: the speaker runs dry, and starts

@@ -873,9 +873,18 @@ class _Resampler:
 
 def _filter_width(mode: str, bandwidth: float, rate: float) -> float:
     """The Bandwidth control, limited to what ``mode`` can use: the SSB or
-    CW filter width in those modes, else the channel width."""
+    CW filter width in those modes, else the channel width.
+
+    An SSB filter is no wider than ``rate`` holds above its 200 Hz edge,
+    skirt included: a slow recording's I/Q rate is a few kHz (6 kHz
+    audio's, 3 kHz, holds a 1.15 kHz filter: its sound to 1.35 kHz). A
+    wider one folded its top back into what played (8 kHz audio with the
+    3.6 kHz filter: its 3.3 kHz tone at 0.7 kHz, as loud)."""
     if mode in ("USB", "LSB"):
         low, high = _SSB_WIDTH_RANGE
+        room = 0.5 * float(rate) - _SSB_LOW_HZ - _SSB_TRANSITION_HZ
+        if room > 0:
+            high = max(low, min(high, room))
         return min(max(float(bandwidth), low), high)
     if mode == "CW":
         low, high = _CW_WIDTH_RANGE
@@ -1126,7 +1135,10 @@ class _ReceiverChain:
 
         In USB, LSB and CW the decimation only needs to keep +/- a quarter
         of the channel rate (a lighter filter), and the SSB or CW filter at
-        the channel rate ends the chain: the channel is the passband.
+        the channel rate ends the chain: the channel is the passband. Not
+        decimated (a slow recording's I/Q, a few kHz), it keeps all of
+        that channel, which a quarter of the rate may not hold (8 kHz audio
+        played only to 1 kHz, 6 kHz audio's 1 kHz tone not at all).
         """
         rate = self.rate
         narrow = mode in _NARROW_MODES
@@ -1134,6 +1146,10 @@ class _ReceiverChain:
             return []  # the channel is the whole span: nothing to remove
         if narrow:
             pass_hz = 0.25 * self.channel_rate
+            if factor == 1:
+                low, high = _channel_edges(mode, self.bandwidth, rate)
+                reach = min(max(-low, high), 0.5 * rate - _SSB_TRANSITION_HZ)
+                pass_hz = max(pass_hz, reach)
         else:
             pass_hz = min(half, 0.45 * self.channel_rate)
         stop_hz = min(pass_hz * 1.25, max(self.channel_rate - pass_hz, pass_hz * 1.05))
@@ -9734,7 +9750,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 logger.debug("Could not show the passband: %s", exc)
 
     def _note_block(self, count: int) -> None:
-        """Remember when samples arrived (for ``_realtime``)."""
+        """Remember when samples arrived (for ``_realtime``). The read that
+        found the end of a recording counts as the read it was: short
+        because the file ends there, it said nothing of the rate (8 kHz
+        audio at 0.5x: a last block under half of one muted its own sound,
+        as for a device that can't keep up)."""
+        if self._playback.active:
+            count += int(getattr(self._device, "short_by", 0))
         now = time.monotonic()
         history = self._rx_history
         history.append((now, int(count)))
@@ -10257,11 +10279,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         at 1x while it keeps up, the same block). ``last``: the sound
         stops after this block (the squelch closed, the speaker stopped,
         the stream broke off): what the stretch still holds plays with it.
-        Everything else (Record Audio, SSTV, the decoders) keeps the
-        recording's own pace."""
+        Once the recording's end was read (Loop off), what is held plays
+        out as the speaker plays it, at the speed chosen (see
+        _between_blocks). Everything else (Record Audio, SSTV, the
+        decoders) keeps the recording's own pace."""
         sound = self._playback_sound
         if self._playback.active or sound.holding:
-            audio = sound.play(audio, time.monotonic(), last=last)
+            now = time.monotonic()
+            device = self._playback.device
+            if device is not None and device.finished:
+                audio = sound.play(audio, now, last=last, end=True)
+            else:
+                audio = sound.play(audio, now, last=last)
         self._audio.write(audio)
 
     def _between_blocks(self) -> None:
@@ -10279,11 +10308,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         next block would end it: what is held, faded out, and nothing
         after it (with that block, up to a second later at 0.5x, it came
         back for a moment after it had stopped). At the end of a
-        recording its sound ends with the last of it given out: the decay
-        from its last sample comes right after it, and the playback stops
-        at its next tick (which waits for it: stopped as soon as the end
-        was read, up to a quarter of a second of 8 kHz audio's end was cut
-        off)."""
+        recording (Loop off) what is held plays out at the speed chosen,
+        the decay from its last sample right after the last of it, and the
+        playback stops at its next tick, which waits for that. (Stopped as
+        soon as the end was read, the end of 8 kHz audio was cut short at
+        1x, and at another speed what the time-stretch held was rushed
+        out: its last 0.3 s at 0.5x in 0.05 s. And the decay waited for
+        that tick, up to 0.2 s, often after the speaker had run dry.)"""
         if not self._playback.active:
             return
         sound = self._playback_sound
@@ -10298,11 +10329,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._speak(np.zeros(0, dtype=np.float32), last=True)
                 join.stop()
             return
-        rest = sound.rest_s
         audio = sound.more(now)
         if len(audio):
             self._audio.write(audio)
-        if rest and not sound.rest_s and getattr(self._device, "finished", False):
+        if getattr(self._device, "finished", False) and not sound.rest_s:
             self._speak(join.release(), last=True)
 
     def _set_stereo_enabled(self, on: bool) -> None:

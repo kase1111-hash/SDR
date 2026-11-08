@@ -483,14 +483,16 @@ class TestTuningInsideAOneChannelRecording(_WavCase):
     speaker gave FM noise): it is now heard as the sound it is, in USB from
     0 Hz."""
 
-    def _audio(self, name="tones.wav", tones=((700.0, 0.3), (5000.0, 0.2))):
-        n = 2 * AUDIO_RATE
-        t = np.arange(n) / AUDIO_RATE
+    def _audio(
+        self, name="tones.wav", tones=((700.0, 0.3), (5000.0, 0.2)), rate=AUDIO_RATE
+    ):
+        n = 2 * rate
+        t = np.arange(n) / rate
         x = 0.002 * np.random.default_rng(9).standard_normal(n)
         for freq, amplitude in tones:
             x += amplitude * np.sin(2 * np.pi * freq * t)
         path = self.path(name)
-        iq_wav(path, x, "int", 2, AUDIO_RATE)
+        iq_wav(path, x, "int", 2, rate)
         return path
 
     def _open(self, path):
@@ -588,6 +590,88 @@ class TestTuningInsideAOneChannelRecording(_WavCase):
         said = self.message()
         self.assertIn("with a 3.6 kHz filter, so its sound from 0.2–3.8 kHz", said)
         win._playback.close()
+
+    def _heard(self, rate, tones, width):
+        """``rate`` audio of ``tones`` opened in USB with ``width`` (the
+        filter USB has): the speaker's level (dB) at a frequency, and the
+        line."""
+        from tests.test_gui_round3_main import _FakeClock
+        from tests.test_gui_second_receiver import _FakeSink
+
+        win = self.win
+        sink = _FakeSink()
+        sink.open = True
+        win._audio, win._audio_enabled, win._audio_problem = sink, True, None
+        win._audio_output_problem = lambda: None
+        win._set_demod_mode("USB", None, width)
+        win._set_demod_mode("FM")
+        self._open(self._audio(f"heard{rate}.wav", tones, rate))
+        said = self.message()
+        clock = _FakeClock()
+        with mock.patch.object(self.mw, "time", clock):
+            win._pacer.restart()
+            for _ in range(40):  # (1.2 s of its 2 s)
+                clock.advance(0.03)
+                win._update_display()
+        win._playback.close()
+        heard = sink.samples()[-16384:]
+        self.assertEqual(len(heard), 16384, (rate, width))
+        spectrum = np.abs(np.fft.rfft(heard * np.hanning(len(heard))))
+        freqs = np.fft.rfftfreq(len(heard), 1 / 48000)
+
+        def level_db(freq):
+            return 20 * np.log10(spectrum[np.abs(freqs - freq) < 30].max() + 1e-12)
+
+        return level_db, said
+
+    def test_slow_audio_says_which_of_its_sound_plays(self):
+        """Audio slower than twice what a USB filter keeps from 0 Hz (6 kHz
+        audio holds 0-3 kHz; the 3.0 kHz filter keeps 0.2-3.2 kHz) was
+        heard from its middle with no word of USB ("Playing slow.wav (one
+        channel, 0–0.003 MHz)"), and slow audio's line claimed more than
+        it played (8 kHz audio: "0.2–2.9 kHz"; 0.2-1 kHz played). The
+        receiver plays a file's sound to a quarter of its rate (less the
+        filter's edges): from 0 Hz, the filter as chosen, the line says
+        that band."""
+        win = self.win
+        for rate, width, band in (
+            (6000, "3.6 kHz", "0.2–1.4"),
+            (6000, "3.0 kHz", "0.2–1.4"),
+            (3600, "1.8 kHz", "0.2–0.8"),  # (no filter fitted it)
+            (8000, "2.7 kHz", "0.2–1.9"),
+            (16000, "3.6 kHz", "0.2–3.8"),  # (all of the filter)
+        ):
+            with self.subTest(rate=rate, width=width):
+                win._set_demod_mode("USB", None, width)
+                win._set_demod_mode("FM")
+                self._open(self._audio(f"slow{rate}.wav", ((300.0, 0.3),), rate))
+                said = self.message()
+                self.assertEqual(self._mode(), ("USB", width))
+                self.assertLess(win._current_frequency(), 10.0)  # (from 0 Hz)
+                self.assertIn(
+                    f"USB from 0 Hz with a {width} filter, so its sound from "
+                    f"{band} kHz plays at its own pitch",
+                    said,
+                )
+                win._playback.close()
+
+    def test_slow_audio_plays_the_band_its_line_says(self):
+        """(The receiver kept a quarter of a slow file's I/Q rate around
+        the tuned frequency, an eighth of its sound's rate: 8 kHz audio
+        played to 1 kHz, 16 kHz audio to 2 kHz, and 6 kHz audio's 1 kHz
+        tone not at all. A filter wider than its rate holds, past a quarter
+        of the sound's rate, folded its top back into what played: 8 kHz
+        audio's 3.3 kHz tone at 0.7 kHz, as loud.)"""
+        level, said = self._heard(8000, ((500.0, 0.2), (1600.0, 0.2)), "2.7 kHz")
+        self.assertIn("so its sound from 0.2–1.9 kHz plays", said)
+        self.assertGreater(level(1600.0) - level(500.0), -3.0)  # (was -72 dB)
+        level, _said = self._heard(16000, ((500.0, 0.2), (3000.0, 0.2)), "3.6 kHz")
+        self.assertGreater(level(3000.0) - level(500.0), -3.0)
+        # Above what plays: not heard, nor folded back (at 4 kHz - 3.3 kHz).
+        level, _said = self._heard(8000, ((500.0, 0.2), (3300.0, 0.2)), "3.6 kHz")
+        self.assertLess(level(700.0) - level(500.0), -50.0)  # (was -0.5 dB)
+        level, _said = self._heard(6000, ((1000.0, 0.3),), "3.6 kHz")
+        self.assertGreater(level(1000.0) - level(300.0), 40.0)  # (was silent)
 
     def test_its_mode_stays_without_choose_mode_from_band_plan(self):
         win = self.win

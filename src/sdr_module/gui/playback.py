@@ -122,6 +122,9 @@ class FilePlaybackDevice:
         self.info = self.Info(f"Playback: {options.name}")
         self._running = False
         self._finished = False
+        # What the read that found the end of the file (Loop off) asked for
+        # beyond it: the next read brings it once Loop is on (see play_on).
+        self._short = 0
         #: Start again at the end of the file.
         self.loop = False
         #: Playback speed (the window reads this much faster than real time).
@@ -205,6 +208,9 @@ class FilePlaybackDevice:
         if not self._running:
             return None
         n = int(num_samples)
+        if self.loop and self._short:
+            # (Loop turned on after the end was read: see play_on.)
+            n, self._short = max(n, 0) + self._short, 0
         if n <= 0 or self._total <= 0:
             return np.zeros(0, dtype=np.complex64)
         try:
@@ -226,6 +232,7 @@ class FilePlaybackDevice:
             return None
         if not self.loop and self._player.position >= self._total:
             self._finished = True
+            self._short = max(0, n - len(out))
         if self._float_data and len(out):
             finite = np.isfinite(out)
             if not finite.all():
@@ -249,6 +256,12 @@ class FilePlaybackDevice:
         return self._finished
 
     @property
+    def short_by(self) -> int:
+        """Samples the read that found the end of the file asked for
+        beyond it, still owed (see :meth:`play_on`); 0 when none are."""
+        return self._short
+
+    @property
     def total_samples(self) -> int:
         return self._total
 
@@ -269,6 +282,17 @@ class FilePlaybackDevice:
         """Go to ``sample`` (clamped to the file)."""
         sample = min(max(0, int(sample)), self._total)
         self._player.seek(sample)
+        self._finished = False
+        self._short = 0
+
+    def play_on(self) -> None:
+        """Loop turned on after the end of the file was read (its sound
+        still playing): reading goes on from the start, and the next read
+        also brings what the one that found the end asked for beyond it,
+        from the start, as Loop on all along would have. (The window
+        counted that read whole and asks for the next only when it is
+        due: the start came after a gap as long as the last read fell
+        short, up to half a second of 8 kHz audio.)"""
         self._finished = False
 
     def seek_seconds(self, seconds: float) -> None:
@@ -772,11 +796,12 @@ if HAS_PYQT6:
             """Audio in a one-channel file (0 Hz to half its rate, its sound
             itself) heard at its own pitch: in USB from 0 Hz, whose filter
             passes it from 200 Hz up (2.7 kHz: to 2.9 kHz; the widest, 3.6
-            kHz, to 3.8 kHz), as Radio > Choose Mode From Band Plan hears a
-            band its usual way (not when that is off). Not all of it: what
-            lies above the filter isn't heard, which the status line says
-            (it claimed the file "plays as recorded"). True when the line
-            says so."""
+            kHz, to 3.8 kHz; audio slower than about 16 kHz to under a
+            quarter of its rate, all its I/Q holds: _filter_width), as
+            Radio > Choose Mode From Band Plan hears a band its usual way
+            (not when that is off). Not all of it: what lies above the
+            filter isn't heard, which the status line says (it claimed the
+            file "plays as recorded"). True when the line says so."""
             win = self._win
             action = win._own("_band_plan_action")
             if action is not None and not action.isChecked():
@@ -935,7 +960,7 @@ if HAS_PYQT6:
                     # Its end was read, its sound still plays (see _tick):
                     # it plays on from the start, as Loop does, instead of
                     # stopping at the next tick.
-                    device.seek(device.position)
+                    device.play_on()
 
         def set_speed(self, speed: float) -> None:
             device = self.device
@@ -961,9 +986,9 @@ if HAS_PYQT6:
 
         def _tick(self) -> None:
             """Follow the playing position; pause at the end of the file,
-            once its sound has played (at 1x the rest of a block longer
-            than the speaker holds is still given out as it plays: see the
-            window's ``_between_blocks``)."""
+            once its sound has played (what the sound still holds when the
+            end is read is given out as the speaker plays it, at the speed
+            chosen: see the window's ``_between_blocks``)."""
             device = self.device
             if device is None:
                 self._timer.stop()

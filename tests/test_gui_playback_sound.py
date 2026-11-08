@@ -54,6 +54,45 @@ def _level(audio, freq, rate=AUDIO):
     )
 
 
+#: A recording's last part is marked: a 600 Hz tone after a 1 kHz one.
+MARK_HZ, TONE_HZ = 600.0, 1000.0
+
+
+def _marked(seconds, mark_s, rate):
+    """The tone a marked recording plays, ``seconds`` long at ``rate``: 1
+    kHz, then ``MARK_HZ`` for its last ``mark_s`` (no step between)."""
+    t = np.arange(int(round(seconds * rate))) / rate
+    freq = np.where(t < seconds - mark_s, TONE_HZ, MARK_HZ)
+    return np.sin(2 * np.pi * np.cumsum(freq) / rate)
+
+
+def _marked_fm(seconds, mark_s, deviation=5e3, rate=RATE):
+    """An FM recording of :func:`_marked`'s tone."""
+    tone = _marked(seconds, mark_s, rate)
+    x = 0.5 * np.exp(1j * 2 * np.pi * deviation * np.cumsum(tone) / rate)
+    return x.astype(np.complex64)
+
+
+def _marker_seconds(audio, rate=AUDIO):
+    """How long ``audio`` plays the mark of :func:`_marked` (the end of the
+    recording): from the first 10 ms in which it is louder than the tone
+    before it to the last in which it is at least half as loud as usual.
+    (10 ms holds whole cycles of both: neither leaks into the other.)"""
+    hop, size = int(0.0025 * rate), int(0.01 * rate)
+    marks, tones = [], []
+    for i in range(0, len(audio) - size + 1, hop):
+        piece = audio[i : i + size]
+        marks.append(_level(piece, MARK_HZ, rate))
+        tones.append(_level(piece, TONE_HZ, rate))
+    marks, tones = np.array(marks), np.array(tones)
+    louder = marks > tones
+    if not louder.any():
+        return 0.0
+    usual = float(np.median(marks[louder]))
+    on = np.nonzero(louder & (marks >= 0.5 * usual))[0]
+    return (on[-1] - on[0]) * hop / rate + 0.5 * size / rate
+
+
 class _SoundCase(_PlaybackCase):
     """A recording on a fake clock, a frame every 33 ms (or as soon as the
     last one ended), the speaker's audio captured with when it came."""
@@ -492,6 +531,119 @@ class TestWhatStopsTheSound(_SoundCase):
         self.assertFalse(win._is_running)
         self.assertFalse(win._playback_sound.stretching)
         self.assertEqual(win._playback_sound.waiting_s, 0.0)
+
+
+class TestTheEndOfARecording(_SoundCase):
+    """Without Loop a recording's sound plays to its end at the speed
+    chosen, and then the playback pauses (R8-06)."""
+
+    def play_to_the_end(self, samples, speed, phase):
+        """Play ``samples`` without Loop at ``speed``, the playback's own
+        timer ticked every 200 ms from ``phase`` s before the start, until
+        a second after it paused. Returns when the end was read and when
+        it paused."""
+        win = self.win
+        self.open(samples)
+        win._playback_bar.set_loop(False)
+        win._playback_bar.set_speed(speed)
+        win._rx_history.clear()
+        win._pacer.restart()
+        self.heard.clear()
+        device = win._device
+        read = paused = None
+        began, tick = self.clock.now, self.clock.now - phase
+        while paused is None or self.clock.now < paused + 1.0:
+            start = self.clock.now
+            win._update_display()
+            if read is None and device.finished:
+                read = self.clock.now
+            if self.clock.now - tick >= win._playback._TICK_MS / 1e3 - 1e-9:
+                tick = self.clock.now
+                win._playback._tick()
+                if paused is None and not win._is_running:
+                    paused = self.clock.now
+            self.clock.now = max(self.clock.now, start + 0.033)
+            self.assertLess(self.clock.now - began, 60.0)
+        return read, paused
+
+    def test_its_end_plays_at_the_speed_chosen_then_it_pauses(self):
+        """What the speaker was still to get went out at once when the
+        playback paused, at its first tick after the end was read (up to
+        0.2 s later): often after the speaker had run dry (30-100 ms), a
+        burst from full level; at 0.5x, 2x and 4x the input the
+        time-stretch held, rushed."""
+        mark_s = 0.3
+        for speed in (0.5, 1.0, 2.0, 4.0):
+            for phase in (0.0, 0.05, 0.1, 0.15):
+                with self.subTest(speed=speed, phase=phase):
+                    self.clock.advance(1.0)  # (the last one's sound has played)
+                    read, paused = self.play_to_the_end(
+                        _marked_fm(1.6, mark_s), speed, phase
+                    )
+                    win = self.win
+                    self.assertIsNotNone(read)
+                    self.assertFalse(win._is_running)
+                    self.assertEqual(win._state_badge.text(), "ENDED")
+                    self.assertIn("End of fm.sigmf-data", self.message())
+                    # Its last part as long as the speed makes it...
+                    self.assertAlmostEqual(
+                        _marker_seconds(self.sound()),
+                        mark_s / speed,
+                        delta=0.1 * mark_s / speed + 0.02,
+                    )
+                    # ...with no gap before its end, which fades out...
+                    writes = [(t, b) for t, b in self.heard if len(b)]
+                    last = writes[-1][0]
+                    model = _Speaker()
+                    for when, block in writes:
+                        model.write(block, when)
+                    self.assertLess(model.gaps, 0.005)
+                    self.assertEqual(model.dropped, 0.0)
+                    peak = float(np.max(np.abs(self.sound())))
+                    self.assertLess(abs(float(writes[-1][1][-1])), 0.01 * peak)
+                    # ...and nothing after it: then the playback paused.
+                    self.assertLessEqual(last, paused)
+                    win._playback.close()
+
+    def test_loop_turned_on_once_its_end_was_given_out_plays_on(self):
+        """Loop turned on once the last of the end has gone to the speaker
+        (its decay right after it), while the speaker still plays it,
+        before the playback pauses: the start follows without a gap, at
+        every speed. (At another speed the start came as a new sound,
+        which filled the time-stretch first while the speaker ran dry: a
+        gap of 20-100 ms at 0.5x, 2x and 4x.)"""
+        for speed, wait in ((0.5, 0), (0.5, 1), (1.0, 0), (2.0, 1), (4.0, 1)):
+            # (wait: frames after the end was given out; at 1x the speaker
+            # holds its cushion, which the next frame's start follows.)
+            with self.subTest(speed=speed, wait=wait):
+                self.clock.advance(1.0)  # (the last one's sound has played)
+                win = self.win
+                self.open(_fm_tone(1.0))
+                win._playback_bar.set_loop(False)
+                win._playback_bar.set_speed(speed)
+                win._rx_history.clear()
+                win._pacer.restart()
+                self.heard.clear()
+                device = win._device
+                began = self.clock.now
+                while not (device.finished and not win._audio_join.playing):
+                    start = self.clock.now
+                    win._update_display()
+                    self.clock.now = max(self.clock.now, start + 0.033)
+                    self.assertLess(self.clock.now - began, 10.0)
+                self.frames(0.033 * wait)
+                self.assertTrue(win._is_running)  # (not paused yet)
+                held = self.speaker()
+                self.assertGreater(held.queued, 0.02)  # (it still plays)
+                win._playback_bar.set_loop(True)
+                start = self.clock.now
+                self.frames(2.0)
+                self.assertTrue(win._is_running)
+                self.assertGreaterEqual(device.loops, 1)
+                gaps, dropped = self.troubles_since(start)
+                self.assertLess(gaps, 0.005)
+                self.assertEqual(dropped, 0.0)
+                win._playback.close()
 
 
 class TestWhatItSays(_SoundCase):

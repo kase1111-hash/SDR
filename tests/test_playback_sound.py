@@ -400,6 +400,156 @@ class TestARecordingSlowerThanABlockAFrame(unittest.TestCase):
         self.assertEqual(dropped, 0.0)
 
 
+@unittest.skipUnless(HAS_PACER, "the display loop's pacer needs PyQt6")
+class TestTheEndOfARecording(unittest.TestCase):
+    """The recording's end read (Loop off: ``play``'s ``end``): no more
+    input comes. What is held plays out at the speed chosen, as the
+    speaker plays it, and the stream ends only then, with the window's
+    decay (R8-06). Given out at once when the playback paused, it was
+    rushed into 0.1 s or cut short; as frames, the pace measured sank with
+    no input coming and slowed it down, until no frame could be made."""
+
+    def end_of(self, audio_rate, speed):
+        """A recording of ``audio_rate`` audio at ``speed`` that ends with
+        half a block. Returns the run, the sound it had to give out when
+        its end was read (seconds) and what the speaker got from then on,
+        the ratios the stretch played that at, and the decay."""
+        run = _SlowRun(audio_rate, speed)
+        run.frames(3.0)
+        sound, speaker = run.sound, run.speaker
+        while True:  # (frames until the next block: the last)
+            count = run.pacer.paced_request(run.iq_rate * speed, run.now, run.iq_rate)
+            if count:
+                break
+            sound.note(0.0, run.now, speed)
+            speaker.write(sound.more(run.now), run.now)
+            run.now += run.frame_s
+        first = int(run.position)
+        run.position += 0.5 * count * RATE / run.iq_rate
+        block = _tone(first, int(run.position) - first)
+        sound.note(len(block) / RATE, run.now, speed)
+        writes = [sound.play(block, run.now, end=True)]
+        speaker.write(writes[0], run.now)
+        held = len(writes[0]) / RATE + sound.waiting_s
+        ratios = []
+        start = run.now
+        while sound.rest_s:
+            run.now += run.frame_s + run.rng.uniform(-run.jitter_s, run.jitter_s)
+            sound.note(0.0, run.now, speed)
+            writes.append(sound.more(run.now))
+            speaker.write(writes[-1], run.now)
+            if sound.stretching:
+                ratios.append(sound.ratio)
+            self.assertLess(run.now - start, 5.0)
+        # (The window's AudioJoin.release: 5 ms from the last sample down.)
+        decay = (block[-1] * np.cos(np.linspace(0, np.pi / 2, 240))).astype(np.float32)
+        writes.append(sound.play(decay, run.now, last=True, end=True))
+        speaker.write(writes[-1], run.now)
+        return run, held, writes, ratios, decay
+
+    def test_what_is_held_plays_out_at_the_speed_chosen(self):
+        for audio_rate in (8000, 96000):  # (96 kHz: I/Q at 48 kS/s)
+            for speed in (0.5, 1.0, 2.0, 4.0):
+                with self.subTest(audio_rate=audio_rate, speed=speed):
+                    run, held, writes, ratios, decay = self.end_of(audio_rate, speed)
+                    sound, speaker = run.sound, run.speaker
+                    self.assertFalse(sound.holding)
+                    self.assertEqual(sound.rest_s, 0.0)
+                    # All of it, at the speed chosen, as the speaker plays it:
+                    # no gap, nothing dropped, the last of it faded out.
+                    self.assertTrue(all(r == speed for r in ratios), ratios)
+                    out = np.concatenate([w for w in writes if len(w)])
+                    tail = sound._stretch.hop if speed != 1.0 else 0
+                    expected = held + len(decay) / RATE / speed + tail / RATE
+                    self.assertAlmostEqual(len(out) / RATE, expected, delta=0.015)
+                    self.assertLess(speaker.gaps, 0.005)
+                    self.assertEqual(speaker.dropped, 0.0)
+                    self.assertLess(abs(float(out[-1])), 0.005)
+                    if speed == 1.0:
+                        # (At 1x as it is: the recording's samples, the decay.)
+                        np.testing.assert_array_equal(out[-len(decay) :], decay)
+                    # (Never more at once than the speaker holds.)
+                    longest = max(len(w) for w in writes) / RATE
+                    self.assertLessEqual(longest, PlaybackSound.MOST_HELD_S)
+
+    def test_more_after_all_plays_on(self):
+        """Loop turned on as the end plays: the start of the recording
+        continues the sound without a gap, at the pace it had (the end's
+        frames bring nothing, which is no pace: counted, the pace sank and
+        the stretch slowed down)."""
+        run = _SlowRun(8000, 2.0)
+        run.frames(3.0)
+        sound = run.sound
+        block = _tone(int(run.position), 2048)
+        run.position += len(block)
+        sound.note(len(block) / RATE, run.now, 2.0)
+        run.speaker.write(sound.play(block, run.now, end=True), run.now)
+        pace = sound.pace
+        for _frame in range(4):
+            run.now += run.frame_s
+            sound.note(0.0, run.now, 2.0)
+            run.speaker.write(sound.more(run.now), run.now)
+        self.assertEqual(sound.pace, pace)
+        self.assertGreater(sound.rest_s, 0.0)  # (its sound still plays)
+        gaps = run.speaker.gaps
+        run.frames(3.0)
+        self.assertLess(run.speaker.gaps - gaps, 0.005)
+        self.assertEqual(run.speaker.dropped, 0.0)
+        self.assertTrue(sound.stretching)
+        self.assertEqual(sound.rest_s, 0.0)  # (a stream that goes on)
+
+    def test_going_on_after_its_end_continues_its_sound(self):
+        """Loop turned on once the end was all given out (the window's
+        decay after its last sample), while the speaker still plays it:
+        the recording's start follows at once. (A new sound at another
+        speed filled the stretch first, and the speaker ran dry meanwhile:
+        20-100 ms at 0.5x, 2x and 4x.)"""
+        for audio_rate in (96000, 4.8e6):  # (I/Q at 48 kS/s and at 2.4 MS/s)
+            for speed in (0.5, 1.0, 2.0, 4.0):
+                for wait in (0, 1, 2):  # (frames after the decay)
+                    with self.subTest(audio_rate=audio_rate, speed=speed, wait=wait):
+                        run, _held, _writes, _ratios, _decay = self.end_of(
+                            audio_rate, speed
+                        )
+                        sound, speaker = run.sound, run.speaker
+                        for _frame in range(wait):  # (the window's frames)
+                            run.now += run.frame_s
+                            sound.note(0.0, run.now, speed)
+                        speaker.advance(run.now)
+                        self.assertGreater(speaker.queued, 0.02)  # (it still plays)
+                        gaps = speaker.gaps
+                        run.frames(2.0)  # (the start of the recording, and on)
+                        self.assertLess(speaker.gaps - gaps, 0.005)
+                        self.assertEqual(speaker.dropped, 0.0)
+
+    def test_at_1x_the_block_it_goes_on_with_waits_its_turn(self):
+        """Loop turned on as the end of 11.025 kHz audio plays at 1x: the
+        read that found the end (0.17 s of sound) went to the speaker
+        whole, and what it fell short by (0.21 s) came the next frame, as
+        the recording went on. Handed over whole too, it took AudioSink
+        past its HIGH_S, which dropped 0.15-0.2 s, and the speaker ran dry
+        before the next block. Given out as the speaker plays it, as it is:
+        nothing dropped, no gap, every sample in order."""
+        sound, speaker = PlaybackSound(RATE, AudioSink.TARGET_S), _Speaker()
+        now, position, fed = 10.0, 0, []
+        blocks = ((0.06, 3, False), (0.15, 4, False), (0.15, 4, False))
+        blocks += ((0.17, 1, True), (0.21, 12, False))  # (the end, Loop on)
+        for block_s, frames, end in blocks:
+            block = _tone(position, int(block_s * RATE))
+            position += len(block)
+            fed.append(block)
+            sound.note(block_s, now, 1.0)
+            speaker.write(sound.play(block, now, end=end), now)
+            self.assertLessEqual(speaker.queued, AudioSink.HIGH_S + 1e-9)
+            for _frame in range(frames):  # (frames until the next block)
+                now += 0.033
+                sound.note(0.0, now, 1.0)
+                speaker.write(sound.more(now), now)
+        self.assertEqual(speaker.dropped, 0.0)
+        self.assertLess(speaker.gaps, 0.005)
+        np.testing.assert_array_equal(speaker.stream(), np.concatenate(fed))
+
+
 class TestEverySpeedPlays(unittest.TestCase):
     """At 0.5x, 2x and 4x on a computer that keeps up."""
 
@@ -550,10 +700,12 @@ class TestTheSpeakersRoom(unittest.TestCase):
     def test_no_more_than_audiosink_plays_while_a_frame_takes_long(self):
         """The most the speaker is given fits AudioSink's own buffer (what
         doesn't fit waits for the window to hand it over between frames),
-        with room under its HIGH_S for a stream's end."""
+        with room under its HIGH_S for a stream's end; a recording going on
+        after its end at 1x never takes it past HIGH_S."""
         self.assertLessEqual(PlaybackSound.MOST_HELD_S, AudioSink.BUFFER_S)
         self.assertLess(PlaybackSound.MOST_HELD_S + 0.0125, AudioSink.HIGH_S)
         self.assertGreaterEqual(PlaybackSound.MOST_HELD_S, AudioSink.TARGET_S)
+        self.assertLessEqual(PlaybackSound.OVERRUN_S, AudioSink.HIGH_S)
 
 
 class TestStallsAndChanges(unittest.TestCase):

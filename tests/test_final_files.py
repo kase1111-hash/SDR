@@ -16,6 +16,11 @@ menu says about them (R7-files).
   to a quarter of its rate, "where the recording was made": no receiver
   was tuned there.
 
+And the last cleanup's (R8-files):
+
+- R8-10: Recording Info showed a center from the file name but not a rate
+  from it ("Sample rate: Unknown"), though Import Options takes it.
+
 The files are packed by hand (``tests/wav_builders.py``).
 """
 
@@ -186,8 +191,9 @@ class TestAOneChannelFileWithoutARate(_WavCase):
         self.win._playback.close()
 
     def test_recording_info_doesnt_invent_its_frequencies(self):
-        """(Its rate unknown: no "0 Hz to 0 kHz".)"""
-        dialog, options, _missing = self.info_dialog(self._tone_file())
+        """(Its rate unknown, its name giving none either: no "0 Hz to 0
+        kHz". A name that gives one: TestTheRateInTheFileName.)"""
+        dialog, options, _missing = self.info_dialog(self._tone_file("tone.wav"))
         self.assertTrue(options.real_signal)
         self.assertEqual(
             dialog.value("Sample rate"), "Unknown (not stored in the file)"
@@ -432,6 +438,111 @@ class TestConvertingAnAudioFile(_WavCase):
             box, names = self.summary(path, "Tune There")
             self.assertIn("Tune There", names)
             self.assertAlmostEqual(self.win._current_frequency(), where, delta=1)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
+class TestTheRateInTheFileName(_WavCase):
+    """R8-10: a WAV file whose header gives no sample rate, its rate in its
+    name (capture_100.1MHz_48ksps.wav). Recording Info showed the center the
+    name gives "(from the file name)" but "Sample rate: Unknown" and
+    "Duration: Unknown (needs the sample rate)", though Import Options and
+    Open Recording take the name's rate. Now Info shows that rate too,
+    marked, with the span and the length that follow from it; a rate no
+    recording has (one Import Options refuses) isn't taken."""
+
+    def _rate0_iq(self, name, seconds=0.5):
+        """Two channels (I/Q) of 16-bit samples, the header's rate 0."""
+        x = _tone(int(seconds * 48000), 5e3, 48000)
+        path = self.path(name)
+        write_wav(path, fmt_body(2, 0, 2), encode(interleave(x), "int", 2))
+        return path
+
+    def test_recording_info_shows_it(self):
+        dialog, options, missing = self.info_dialog(
+            self._rate0_iq("capture_100.1MHz_48ksps.wav")
+        )
+        self.assertIn("rate", missing)  # (not stored in the file)
+        self.assertEqual(dialog.value("Sample rate"), "48 kS/s (from the file name)")
+        self.assertEqual(
+            dialog.value("Center frequency"), "100.100 MHz (from the file name)"
+        )
+        self.assertEqual(dialog.value("Covers"), "100.076–100.124 MHz")
+        self.assertEqual(dialog.value("Duration"), "0:00.5")
+        self.assertEqual(dialog.value("Samples"), "24,000")
+
+    def test_a_one_channel_files_name_gives_its_own_rate(self):
+        """(Its I/Q's is half of it, and its frequencies are its own: 0 Hz
+        to half its rate, centered on a quarter of it.)"""
+        t = np.arange(2 * AUDIO_RATE) / AUDIO_RATE
+        path = _rate0_wav(
+            self.path("tone_48ksps.wav"), 0.5 * np.cos(2 * np.pi * 1e3 * t)
+        )
+        dialog, options, _missing = self.info_dialog(path)
+        self.assertTrue(options.real_signal)
+        self.assertEqual(
+            dialog.value("Sample rate"),
+            "24 kS/s as I/Q (48 kS/s in the file, from the file name)",
+        )
+        self.assertEqual(dialog.value("Center frequency"), "0.012 MHz")
+        self.assertEqual(dialog.value("Covers"), "0.000–0.024 MHz")
+        self.assertEqual(dialog.value("Duration"), "0:02.0")
+        self.assertIn("0 Hz to 24 kHz", dialog.value("Channels"))
+        # (A sidecar placing it at an IF keeps it there, at the name's rate.)
+        from sdr_module.dsp.recording import SampleFormat, write_sidecar
+
+        write_sidecar(path, SampleFormat.INT16, 0.0, 10.7e6, header_bytes=44)
+        dialog, options, _missing = self.info_dialog(path)
+        self.assertEqual(dialog.value("Center frequency"), "10.700 MHz")
+        self.assertEqual(dialog.value("Covers"), "10.688–10.712 MHz")
+
+    def test_the_headers_rate_wins(self):
+        path = self.path("capture_100.1MHz_48ksps.wav")
+        iq_wav(path, _tone(9600, 5e3, 96000), "int", 2, 96000)
+        dialog, _options, _missing = self.info_dialog(path)
+        self.assertEqual(dialog.value("Sample rate"), "96 kS/s")
+        self.assertEqual(dialog.value("Duration"), "0:00.1")
+
+    def test_a_rate_no_recording_has_isnt_taken(self):
+        """(Below 1 kS/s or above 200 MS/s, as Import Options refuses it.)"""
+        for name in ("hum_100sps.wav", "capture_100.1MHz_500MSps.wav"):
+            dialog, options, _missing = self.info_dialog(self._rate0_iq(name))
+            self.assertIs(options.with_name_rate(), options)
+            self.assertEqual(
+                dialog.value("Sample rate"), "Unknown (not stored in the file)", name
+            )
+            self.assertEqual(
+                dialog.value("Duration"), "Unknown (needs the sample rate)", name
+            )
+
+    def test_a_rate_cleared_in_import_options_stays_unknown(self):
+        """(A headerless file is asked about, its rate prefilled from its
+        name: cleared there, it is the user's word, not the name's.)"""
+        from sdr_module.gui import iq_files
+
+        path = self.path("capture_144440000Hz_240ksps.cf32")
+        self._aprs_iq().tofile(path)
+
+        def fake_exec(dialog):
+            self.boxes.append(dialog)
+            if isinstance(dialog, iq_files.ImportOptionsDialog):
+                self.assertEqual(dialog._rate_edit.text(), "240 kS/s")
+                dialog._rate_edit.setText("")
+                dialog._on_accept()
+                return dialog.result()
+            self.assertIsInstance(dialog, iq_files.RecordingInfoDialog)
+            self.assertEqual(
+                dialog.value("Sample rate"), "Unknown (not stored in the file)"
+            )
+            return 0
+
+        self.win._exec_dialog = fake_exec
+        with self.open_dialog(path), self.warnings() as warn:
+            self.win._show_recording_info()
+        warn.assert_not_called()
+        self.assertEqual(
+            [type(b).__name__ for b in self.boxes],
+            ["ImportOptionsDialog", "RecordingInfoDialog"],
+        )
 
 
 if __name__ == "__main__":

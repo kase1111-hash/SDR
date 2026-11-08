@@ -150,6 +150,9 @@ _MAX_CENTER_HZ = 6e9  # (a bare number in a file name: what receivers tune)
 #: through a downconverter lies above the receiver's range (a 10 GHz
 #: downlink), and plays there too.
 PLAYBACK_RANGE = (_MIN_CENTER_HZ, 300e9)
+#: The sample rates a recording can have (typed in Import Options: a file's
+#: own rate, a one-channel file's too).
+RATE_RANGE = (1e3, 200e6)
 
 
 @dataclass
@@ -244,8 +247,8 @@ def guess_from_filename(name: str) -> FileNameHints:
 def parse_rate_text(text: str) -> Optional[float]:
     """A sample rate typed as ``2.4``, ``2.4M``, ``2.4 MS/s``, ``2048000``,
     ``250k`` or ``250 kS/s``, in samples per second (None if it can't be
-    read, or isn't between 1 kS/s and 200 MS/s). A bare number up to 100
-    is in MS/s, up to 1000 in kS/s, above that in S/s."""
+    read, or isn't between 1 kS/s and 200 MS/s: :data:`RATE_RANGE`). A bare
+    number up to 100 is in MS/s, up to 1000 in kS/s, above that in S/s."""
     compact = re.sub(r"\s+", "", str(text or "")).lower().replace(",", ".")
     match = re.fullmatch(
         r"(\d+(?:\.\d*)?|\.\d+)([kmg]?)(?:s/s|sps|sa/s|samples/s|hz)?", compact
@@ -262,7 +265,7 @@ def parse_rate_text(text: str) -> Optional[float]:
         rate = value * 1e3
     else:
         rate = value
-    return rate if 1e3 <= rate <= 200e6 else None
+    return rate if RATE_RANGE[0] <= rate <= RATE_RANGE[1] else None
 
 
 def format_rate(rate_hz: float) -> str:
@@ -379,6 +382,9 @@ class IqFileOptions:
     #: ``center_hz`` is the one the file's name gives (SDR# and HDSDR put
     #: it there), not its metadata's or the user's: see with_name_center.
     center_named: bool = False
+    #: ``sample_rate`` is worked out from the one the file's name gives
+    #: (``_48ksps``), not its metadata's or the user's: see with_name_rate.
+    rate_named: bool = False
 
     @property
     def name(self) -> str:
@@ -473,6 +479,32 @@ class IqFileOptions:
         if not named or not low <= named <= high:
             return self
         return replace(self, center_hz=float(named), center_named=True)
+
+    def with_name_rate(self) -> "IqFileOptions":
+        """These options with the sample rate the file's name gives when
+        nothing else gives one (:attr:`rate_named`): what Import Options
+        offers Open Recording, for Recording Info, which doesn't ask for
+        it. A one-channel file's name gives its own rate: its I/Q's is half
+        of it, and unless its metadata places it, its center a quarter (its
+        own frequencies). Unchanged for a name that gives none or one no
+        recording has (:data:`RATE_RANGE`, as Import Options takes it), or
+        options the user confirmed (a rate cleared in Import Options stays
+        unknown)."""
+        if self.sample_rate or self.confirmed:
+            return self
+        named = guess_from_filename(self.path).sample_rate
+        low, high = RATE_RANGE
+        if not named or not low <= named <= high:
+            return self
+        if not self.real_signal:
+            return replace(self, sample_rate=float(named), rate_named=True)
+        center = self.center_hz or real_iq.iq_center(named)
+        return replace(
+            self,
+            sample_rate=real_iq.iq_rate(named),
+            center_hz=center,
+            rate_named=True,
+        )
 
     def open_player(self) -> IQPlayer:
         """An :class:`IQPlayer` reading the file with these settings."""
@@ -1154,16 +1186,32 @@ if HAS_PYQT6:
             fmt = options.sample_format
             rate = float(info["sample_rate_hz"] or 0.0)
             center = float(info["center_frequency_hz"] or 0.0)
+            seconds = float(info["duration_seconds"] or 0.0)
+            # The rate and center the file's name gives, when nothing else
+            # does: as Import Options offers them for Open Recording.
+            rate_named = False
+            if not rate:
+                named = options.with_name_rate()
+                if named.rate_named:
+                    rate, rate_named = named.sample_rate, True
+                    seconds = int(info["num_samples"]) / rate
+                    if options.real_signal and not center:
+                        center = named.center_hz  # (its own frequencies)
             center_text = format_mhz(center) if center else unknown
             if not center:
-                # (As Import Options offers it for Open Recording.)
                 named = options.with_name_center()
                 if named.center_named:
                     center = named.center_hz
                     center_text = f"{format_mhz(center)} (from the file name)"
             rate_text = format_rate(rate) if rate else unknown
+            named_note = ", from the file name" if rate_named else ""
             if options.real_signal and rate:
-                rate_text = f"{rate_text} as I/Q ({format_rate(2 * rate)} in the file)"
+                rate_text = (
+                    f"{rate_text} as I/Q ({format_rate(2 * rate)} in the "
+                    f"file{named_note})"
+                )
+            elif rate_named:
+                rate_text += " (from the file name)"
             rows = [
                 ("File", options.name),
                 (
@@ -1194,7 +1242,7 @@ if HAS_PYQT6:
                 (
                     "Duration",
                     (
-                        format_duration(info["duration_seconds"])
+                        format_duration(seconds)
                         if rate
                         else "Unknown (needs the sample rate)"
                     ),

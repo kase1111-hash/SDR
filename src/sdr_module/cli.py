@@ -830,12 +830,14 @@ def _audio_rate(args: argparse.Namespace, path: Path) -> float:
     """The rate at which ``sdr-scan decode`` reads ``path``'s own samples as
     a receiver's audio, as File > Decode Recording does: a one-channel WAV
     file at an audio rate (up to real_iq.AUDIO_RATE_MAX: its header's, or
-    ``--sample-rate``, or its sidecar's) and a protocol sent as a receiver's
-    audio (APRS, POCSAG and FLEX after its FM discriminator, ACARS after
-    its AM detector). 0.0 when it is decoded from I/Q: two channels, an IF
-    or RF sampled directly (faster), Morse (at its pitch), ``--format``."""
+    ``--sample-rate``, or its sidecar's) at its own frequencies (not placed
+    elsewhere by its sidecar: real_iq.is_audio, the window's rule) and a
+    protocol sent as a receiver's audio (APRS, POCSAG and FLEX after its FM
+    discriminator, ACARS after its AM detector). 0.0 when it is decoded
+    from I/Q: two channels, an IF or RF sampled directly (faster, or placed
+    by its sidecar), Morse (at its pitch), ``--format``."""
     from .dsp.live_decoders import audio_input
-    from .dsp.real_iq import AUDIO_RATE_MAX
+    from .dsp.real_iq import is_audio
     from .dsp.recording import find_sidecar
     from .dsp.wav_file import is_wav_file, read_wav_header
 
@@ -847,11 +849,12 @@ def _audio_rate(args: argparse.Namespace, path: Path) -> float:
         return 0.0  # (the I/Q reader says why)
     if header.channels != 1:
         return 0.0
+    sidecar = find_sidecar(path)
     rate = float(args.sample_rate or header.frame_rate)
     if not rate:
-        sidecar = find_sidecar(path)
         rate = float(sidecar.sample_rate) if sidecar is not None else 0.0
-    return rate if 0 < rate <= AUDIO_RATE_MAX else 0.0
+    center = float(sidecar.center_frequency) if sidecar is not None else 0.0
+    return rate if is_audio(rate, center) else 0.0
 
 
 def _decode_audio(args: argparse.Namespace, path: Path, rate: float) -> int:

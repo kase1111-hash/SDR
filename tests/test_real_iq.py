@@ -356,3 +356,29 @@ class TestAOneChannelFileWithoutARate:
         assert info.duration_seconds == pytest.approx(len(x) / RATE)
         with IQPlayer(path) as player:
             assert (player.sample_rate, player.total_samples) == (RATE, len(x))
+
+
+class TestWhatIsAudio:
+    """R8-13: one rule for what a one-channel recording is, which File >
+    Open, Recording Info, Convert and Decode Recording and ``sdr-scan
+    decode`` all go by: a receiver's audio (its sound) is at an audio rate
+    and at its own frequencies; an audio-rate file its metadata places
+    elsewhere (an IF at 10.7 MHz) is a recording of an IF, decoded from its
+    I/Q there (Decode Recording read its samples as a receiver's audio,
+    though Convert offered Tune There to 10.7 MHz)."""
+
+    @pytest.mark.parametrize(
+        "rate,center,audio",
+        [
+            (48000, 0.0, True),  # (nothing places it)
+            (48000, 12000.0, True),  # (its own frequencies' middle)
+            (8000, 2000.0, True),
+            (200e3, 50e3, True),  # (the highest audio rate)
+            (8000, 10.7e6, False),  # (an IF its sidecar places)
+            (48000, 28.4e6, False),
+            (2.4e6, 0.0, False),  # (RF sampled directly)
+            (0.0, 0.0, False),  # (its rate unknown)
+        ],
+    )
+    def test_audio_rate_and_its_own_frequencies(self, rate, center, audio):
+        assert real_iq.is_audio(rate, center) is audio

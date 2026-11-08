@@ -288,7 +288,8 @@ def format_mhz(freq_hz: float) -> str:
 
 
 #: Up to this rate (Hz) a one-channel file is probably audio (an IF or RF
-#: sampled directly is faster): the Decode dialog then says what decodes.
+#: sampled directly is faster), unless its metadata places it elsewhere
+#: (IqFileOptions.audio): the Decode dialog then says what decodes.
 AUDIO_RATE_MAX = real_iq.AUDIO_RATE_MAX
 
 
@@ -403,9 +404,11 @@ class IqFileOptions:
     @property
     def audio(self) -> bool:
         """A one-channel file at a sound card's rate (up to
-        :data:`AUDIO_RATE_MAX`): audio, probably, rather than an IF or RF
-        sampled directly."""
-        return self.real_signal and 0 < 2 * self.sample_rate <= AUDIO_RATE_MAX
+        :data:`AUDIO_RATE_MAX`) at its own frequencies: audio, probably,
+        rather than an IF or RF sampled directly. One its metadata places
+        elsewhere (an IF at 10.7 MHz) is that IF, played, converted and
+        decoded there (dsp.real_iq.is_audio, the one rule)."""
+        return self.real_signal and real_iq.is_audio(self.frame_rate, self.center_hz)
 
     @property
     def frame_rate(self) -> float:

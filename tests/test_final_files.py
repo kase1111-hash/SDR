@@ -20,6 +20,11 @@ And the last cleanup's (R8-files):
 
 - R8-10: Recording Info showed a center from the file name but not a rate
   from it ("Sample rate: Unknown"), though Import Options takes it.
+- R8-11: 24-bit samples in 32-bit words (files-3) are read where their data
+  shows them to be; only words that fit neither layout are refused.
+- R8-13: a one-channel file at an audio rate that its sidecar places at an
+  IF was decoded as a receiver's audio, though the other File menu items
+  took it as placed there: one rule now (dsp.real_iq.is_audio).
 
 The files are packed by hand (``tests/wav_builders.py``).
 """
@@ -602,6 +607,97 @@ class TestTheRateInTheFileName(_WavCase):
             [type(b).__name__ for b in self.boxes],
             ["ImportOptionsDialog", "RecordingInfoDialog"],
         )
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
+class TestAnAudioRateFileItsSidecarPlaces(_WavCase):
+    """R8-13: a one-channel file at an audio rate whose sidecar places it at
+    an IF (10.7 MHz): a receiver's IF recorded at 48 kS/s, not its sound.
+    Open Recording played it there, Recording Info said "where its metadata
+    places it" and Convert Recording offered Tune There to 10.7 MHz, but
+    Decode Recording read its samples as a receiver's audio (its rate alone
+    decided) and found nothing in the FM signal they hold. One rule now
+    (dsp.real_iq.is_audio): a receiver's audio is at an audio rate and at
+    its own frequencies; a file its metadata places elsewhere is decoded
+    from its I/Q there, as any recording made there."""
+
+    IF_HZ = 10.7e6
+
+    def _if_file(self, name="if_aprs.wav", placed=True):
+        """An APRS packet's FM signal on a 12 kHz carrier (the middle of the
+        file's own frequencies) at 48 kS/s, one channel; its sidecar places
+        that middle at 10.7 MHz."""
+        from sdr_module.dsp import protocol_encoders as enc
+        from sdr_module.dsp.recording import SampleFormat, write_sidecar
+
+        rate = AUDIO_RATE
+        burst = enc.aprs_baseband(
+            "N0CALL-9", "APZ001", "!4903.50N/07201.75W>From an IF", rate, ["WIDE1-1"]
+        )
+        pad = np.zeros(int(0.3 * rate), np.complex64)
+        s = np.concatenate([pad, burst, pad])
+        carrier = np.exp(2j * np.pi * (rate / 4) * np.arange(len(s)) / rate)
+        path = self.path(name)
+        offset = iq_wav(path, 0.5 * np.real(s * carrier), "int", 2, rate)
+        if placed:
+            write_sidecar(
+                path, SampleFormat.INT16, rate, self.IF_HZ, header_bytes=offset
+            )
+        return path
+
+    def test_decode_recording_decodes_it_where_it_is_placed(self):
+        from sdr_module.gui import iq_files
+
+        path = self._if_file()
+        panel = self.win._decoder_panel
+        panel._proto_combo.setCurrentText("AX.25/APRS")
+        self.settle(2)
+        dialogs = []
+
+        def fake_exec(dialog):
+            self.boxes.append(dialog)
+            self.assertIsInstance(dialog, iq_files.DecodeOptionsDialog)
+            dialogs.append(dialog)
+            dialog._on_accept()
+            return dialog.result()
+
+        self.win._exec_dialog = fake_exec
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertTrue(self.win._decode_recording())
+        warn.assert_not_called()
+        (dialog,) = dialogs
+        # A frequency inside the IF it holds (no receiver's sound to read).
+        self.assertTrue(dialog._freq.isEnabled())
+        self.assertEqual(dialog._freq.text(), "10.700 MHz")
+        self.assertNotIn("as a receiver's audio", dialog._note.text())
+        self.assertIn(
+            "Decoded 1 AX.25/APRS message(s) from if_aprs.wav at 10.700 MHz",
+            self.message(),
+        )
+        (row,) = list(panel._messages)
+        self.assertAlmostEqual(row["freq_hz"], self.IF_HZ, delta=1.0)
+
+    def test_every_file_menu_item_agrees(self):
+        from sdr_module.gui.iq_files import describe_iq_file
+
+        placed = self._if_file()
+        options = describe_iq_file(placed)[0]
+        self.assertFalse(options.audio)
+        self.assertFalse(options.decodes_as_audio("AX.25/APRS"))
+        # (The same file without its sidecar: its sound, its own frequencies.)
+        self.assertTrue(describe_iq_file(self._if_file("own.wav", False))[0].audio)
+        dialog, _options, _missing = self.info_dialog(placed)
+        self.assertIn("where its metadata places it", dialog.value("Channels"))
+        # Open Recording plays it at 10.7 MHz as any recording made there:
+        # not "Audio: listening in USB from 0 Hz", its lowest frequency.
+        with self.open_dialog(placed), self.warnings() as warn:
+            self.assertTrue(self.win._open_recording())
+        warn.assert_not_called()
+        self.assertAlmostEqual(self.win._lo_frequency(), self.IF_HZ, delta=1.0)
+        self.assertNotIn("Audio: listening in USB", self.message())
+        mode = self.win._control_panel.get_demod_mode()
+        self.assertNotEqual(self.win._mode_text(mode), "USB")
+        self.win._playback.close()
 
 
 if __name__ == "__main__":

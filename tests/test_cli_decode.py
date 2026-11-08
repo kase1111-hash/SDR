@@ -273,3 +273,30 @@ def test_a_one_channel_files_rate_is_its_own_read_as_iq_too(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Center: 0.0020 MHz" in out, out
     assert "     0.0007 MHz (    -1.3 kHz)" in out, out
+
+
+def test_an_audio_rate_file_its_sidecar_places_is_read_as_iq(tmp_path, capsys):
+    """R8-13: a one-channel file at an audio rate whose sidecar places it at
+    an IF (10.7 MHz) holds a receiver's IF, not its sound: it is read as
+    I/Q there (--offset counts from 10.7 MHz), as the window's File menu
+    reads it. Its samples were read as a receiver's FM discriminator audio
+    and the FM signal in them gave nothing."""
+    from sdr_module.dsp.recording import write_sidecar
+    from tests.wav_builders import iq_wav
+
+    rate = 48000
+    burst = enc.aprs_baseband(
+        "N0CALL-9", "APZ001", "!4903.50N/07201.75W>From an IF", rate, ["WIDE1-1"]
+    )
+    pad = np.zeros(int(0.3 * rate), np.complex64)
+    s = np.concatenate([pad, burst, pad])
+    carrier = np.exp(2j * np.pi * (rate / 4) * np.arange(len(s)) / rate)
+    path = tmp_path / "if_aprs.wav"
+    offset = iq_wav(path, 0.5 * np.real(s * carrier), "int", 2, rate)
+    write_sidecar(path, SampleFormat.INT16, rate, 10.7e6, header_bytes=offset)
+    assert main(["decode", "aprs", "-i", str(path)]) == 0
+    out = capsys.readouterr().out
+    assert "read as a receiver's audio" not in out
+    assert "centered on 10.7 MHz, which --offset counts from" in out, out
+    assert "Decoded 1 APRS message(s)" in out, out
+    assert "From an IF" in out

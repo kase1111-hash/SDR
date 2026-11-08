@@ -100,6 +100,10 @@ OPEN_FILTERS = ";;".join(
     )
 )
 
+#: Where in 32-bit words a WAV file's 24-bit samples lie, by its
+#: ``wav_sample_justified`` (see dsp.wav_file.WavHeader.justified).
+_WORD_PLACES: Dict[str, str] = {"left": "top", "right": "low"}
+
 #: How Recording Info names a WAV file that isn't a classic one (its
 #: ``wav_container``): RF64 holds more than 4 GiB.
 WAV_CONTAINER_NAMES: Dict[str, str] = {
@@ -597,9 +601,11 @@ def describe_iq_file(path: str) -> Tuple[IqFileOptions, Set[str]]:
 
 def _wav_format(meta: Dict[str, Any]) -> str:
     """A WAV file's samples in words, from what FormatDetector found
-    ("24-bit integer", "32-bit float")."""
+    ("24-bit integer", also in 32-bit words; "32-bit float")."""
     try:
-        bits = 8 * int(meta.get("wav_sample_width") or 0)
+        bits = int(meta.get("wav_sample_bits") or 0) or 8 * int(
+            meta.get("wav_sample_width") or 0
+        )
     except (TypeError, ValueError):
         return ""
     if bits <= 0:
@@ -1222,11 +1228,15 @@ if HAS_PYQT6:
             ]
             if options.real_signal:
                 rows.append(("Channels", _real_signal_text(rate, center)))
+            stored = options.wav_format or FORMAT_NAMES.get(fmt, fmt.value)
+            where = _WORD_PLACES.get(
+                str((info.get("metadata") or {}).get("wav_sample_justified") or "")
+            )
+            if where:
+                # (Its header doesn't say where: as its data shows them.)
+                stored += f", in the {where} three bytes of 32-bit words"
             rows += [
-                (
-                    "Sample format",
-                    options.wav_format or FORMAT_NAMES.get(fmt, fmt.value),
-                ),
+                ("Sample format", stored),
                 ("Sample rate", rate_text),
                 ("Center frequency", center_text),
             ]

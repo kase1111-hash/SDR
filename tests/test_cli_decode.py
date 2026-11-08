@@ -208,17 +208,35 @@ class TestAudioRecordings:
 
 
 def test_a_file_that_cant_be_read_is_said_plainly(tmp_path, capsys):
-    """files-3: 24-bit samples in 32-bit words are refused by the WAV reader
-    (they read as noise before); the command says so, as the window does,
-    instead of a traceback."""
-    from tests.wav_builders import fmt_body, integers, write_wav
+    """files-3: 24-bit samples in 32-bit words whose words fit neither
+    layout (R8-11 reads the others: test_samples_in_32_bit_words_decode)
+    are refused by the WAV reader (they read as noise before); the command
+    says so, as the window does, instead of a traceback."""
+    from tests.wav_builders import encode, fmt_body, write_wav
 
     path = tmp_path / "s24_le.wav"
-    write_wav(path, fmt_body(2, 48000, 4, bits=24), integers(np.arange(800), 4))
+    packed = encode(0.5 * np.sin(np.arange(800) / 3.0), "int", 3)
+    write_wav(path, fmt_body(2, 48000, 4, bits=24), packed)
     for argv in (["decode", "aprs", "-i", str(path)], ["scan", "--input", str(path)]):
         assert main(argv) == 1
         out = capsys.readouterr().out
         assert "Error: s24_le.wav can't be read: its 24-bit samples are stored" in out
+
+
+def test_samples_in_32_bit_words_decode(tmp_path, capsys):
+    """R8-11: 24-bit samples in 32-bit words (ALSA's arecord's S24_LE, in
+    each word's low three bytes) are read where the data shows them: an
+    APRS packet decodes, as from packed samples (they were refused)."""
+    from tests.wav_builders import fmt_body, full_scale, integers, interleave, write_wav
+
+    x = _place(_aprs("!4903.50N/07201.75W>From S24_LE"), offset=-50e3)
+    ints = np.rint(interleave(0.5 * x) * full_scale(3)).astype(np.int64)
+    path = tmp_path / "aprs_s24_le.wav"
+    write_wav(path, fmt_body(2, int(RATE), 4, bits=24), integers(ints, 4))
+    assert main(["decode", "aprs", "-i", str(path), "--offset", "-50000"]) == 0
+    out = capsys.readouterr().out
+    assert "Decoded 1 APRS message(s)" in out, out
+    assert "From S24_LE" in out
 
 
 def test_a_one_channel_files_rate_is_its_own_read_as_iq_too(tmp_path, capsys):

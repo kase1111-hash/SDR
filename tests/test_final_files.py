@@ -58,14 +58,32 @@ class TestSamplesInWiderWords(_WavCase):
     """files-3: 24-bit samples in 32-bit words (block align 8 for two
     channels) were read 3 bytes at a time: a third more samples than the
     file holds, all noise, with no warning; Decode Recording then blamed
-    the content. Now every File menu item says it can't be read, and why."""
+    the content. R7 refused them (Can't Read Recording: the header doesn't
+    say where in each word a sample lies). R8-11 reads them where their
+    data shows them to be, in every File menu item; words that fit neither
+    layout (packed samples under a wrong block align) are still refused,
+    saying why."""
 
-    def _s24_in_32(self, name="arecord_s24_le.wav"):
-        x = _tone(int(0.2 * RATE), 30e3, RATE)
+    def _s24_in_32(self, name="arecord_s24_le.wav", x=None, center=None):
+        """``x`` as ALSA's S24_LE writes it: each sample in the low three
+        bytes of its 32-bit word (a sidecar giving ``center``, if one)."""
+        from sdr_module.dsp.recording import SampleFormat, write_sidecar
+
+        if x is None:
+            x = _tone(int(0.2 * RATE), 30e3, RATE)
         ints = np.rint(interleave(x) * full_scale(3)).astype(np.int64)
         path = self.path(name)
-        # (ALSA's S24_LE: each sample in the low three bytes of its word.)
-        write_wav(path, fmt_body(2, int(RATE), 4, bits=24), integers(ints, 4))
+        offset = write_wav(path, fmt_body(2, int(RATE), 4, bits=24), integers(ints, 4))
+        if center is not None:
+            write_sidecar(path, SampleFormat.INT16, RATE, center, header_bytes=offset)
+        return path, x
+
+    def _neither(self):
+        """Packed 24-bit samples under a header saying 32-bit words: its
+        words fit neither layout."""
+        x = interleave(_tone(int(0.2 * RATE), 30e3, RATE))
+        path = self.path("arecord_s24_le.wav")
+        write_wav(path, fmt_body(2, int(RATE), 4, bits=24), encode(x, "int", 3))
         return path
 
     def _refused(self, warn):
@@ -74,21 +92,62 @@ class TestSamplesInWiderWords(_WavCase):
         self.assertEqual(title, "Can't Read Recording")
         self.assertIn("arecord_s24_le.wav can't be read", text)
         self.assertIn("24-bit samples are stored in 32-bit words", text)
+        self.assertIn("neither in each word's top three bytes nor", text)
 
     def test_open_recording_says_it_cant_be_read(self):
-        path = self._s24_in_32()
+        """(Words that fit neither layout.)"""
+        path = self._neither()
         with self.open_dialog(path), self.warnings() as warn:
             self.assertFalse(self.win._open_recording())
         self._refused(warn)
         self.assertFalse(self.win._playback.active)
 
     def test_decode_and_info_say_so_too(self):
-        path = self._s24_in_32()
+        """(Words that fit neither layout.)"""
+        path = self._neither()
         for run in (self.win._decode_recording, self.win._show_recording_info):
             with self.open_dialog(path), self.warnings() as warn:
                 self.assertFalse(run())
             self._refused(warn)
         self.assertEqual(self.boxes, [])  # (no dialog of what it holds)
+
+    def test_open_recording_plays_them(self):
+        path, x = self._s24_in_32(center=145e6)
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertTrue(self.win._open_recording())
+        warn.assert_not_called()
+        self.assertEqual(self.boxes, [])  # (nothing to ask)
+        device = self.win._playback.device
+        self.assertEqual(device.total_samples, len(x))
+        device.seek(1000)
+        np.testing.assert_allclose(
+            device._player.read(2000), x[1000:3000], atol=1.0 / full_scale(3)
+        )
+        self.win._playback.close()
+
+    def test_recording_info_says_how_they_are_stored(self):
+        path, x = self._s24_in_32()
+        dialog, _options, _missing = self.info_dialog(path)
+        self.assertEqual(
+            dialog.value("Sample format"),
+            "24-bit integer, in the low three bytes of 32-bit words",
+        )
+        self.assertEqual(dialog.value("Samples"), f"{len(x):,}")
+        self.assertIn("look right", dialog._check.text())
+
+    def test_decode_recording_finds_the_packet(self):
+        panel = self.win._decoder_panel
+        panel._proto_combo.setCurrentText("AX.25/APRS")
+        self.settle(2)
+        path, _x = self._s24_in_32(
+            "aprs_s24_le.wav", self._aprs_iq("From S24_LE"), self.CENTER
+        )
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertTrue(self.win._decode_recording())
+        warn.assert_not_called()
+        self.assertIn("Decoded 1 AX.25/APRS message(s)", self.message())
+        texts = [m["content"] for m in panel._messages]
+        self.assertTrue(any("From S24_LE" in t for t in texts), texts)
 
 
 def _rate0_wav(path, x):

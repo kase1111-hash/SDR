@@ -1781,7 +1781,11 @@ if HAS_PYQT6:
             self._refresh_bookmarks()
             decoders = getattr(self._win, "_decoder_panel", None)
             if decoders is not None:
-                # (Its Clear clears this receiver's rows too.)
+                # (Its Clear clears this receiver's rows too, with those of
+                # the frame on the DSP worker: that frame is shown before
+                # the rows go, so the tab and this window agree on what
+                # came before Clear.)
+                decoders.clearing.connect(self._settle_frames)
                 decoders.cleared.connect(self._on_decoder_tab_cleared)
             # Never outlive the main window running (the host closes this
             # window first; this covers a main window deleted without it).

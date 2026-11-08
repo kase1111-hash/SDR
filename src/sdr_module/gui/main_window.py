@@ -11514,7 +11514,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         background thread, much faster than real time, with progress and
         Cancel. Each message goes to the Decoder tab as it is found, noted
         with the file and where in it."""
-        from ..dsp.live_decoders import LIVE_DECODERS
+        from ..dsp.live_decoders import LIVE_DECODERS, audio_input
 
         protocols = list(LIVE_DECODERS)
         path = path or self._choose_recording("Decode Recording")
@@ -11556,16 +11556,21 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         except ValueError:
             pass
 
+        # An audio recording's sound, decoded as a receiver's audio: no
+        # frequency of its own, and the file's own rate.
+        as_audio = options.decodes_as_audio(protocol)
+
         def show(batch: Any) -> None:
             for msg, at in batch:
                 counts["messages"] += 1
                 # The file's frequency and rate (not the receiver's); 0 when
                 # the file doesn't say where it was made.
+                freq = options.center_hz + offset if options.center_hz else 0.0
                 self._push_decoded_message(
                     msg,
                     note=f"from {options.name} at {at:.1f} s",
-                    freq_hz=options.center_hz + offset if options.center_hz else 0.0,
-                    sample_rate=options.sample_rate,
+                    freq_hz=0.0 if as_audio else freq,
+                    sample_rate=options.frame_rate if as_audio else options.sample_rate,
                     source=options.name,
                     when=start + timedelta(seconds=at) if start else None,
                     at_s=at,
@@ -11585,6 +11590,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             if options.center_hz
             else ""
         )
+        if as_audio:
+            where = ", read as a receiver's audio"
         if result.error is not None:
             logger.warning(f"Decoding {path} failed: {result.error}")
             QMessageBox.warning(
@@ -11619,6 +11626,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 f"{options.name}{where}{failed}.{unread}",
                 "success",
                 8000,
+            )
+        elif as_audio:
+            if audio_input(protocol) == "AM":
+                holds = "a receiver's AM audio"
+            elif protocol in ("POCSAG", "FLEX"):
+                holds = (
+                    "a receiver's FM discriminator audio (its speaker's, "
+                    "de-emphasised and cut below 300 Hz, holds no pages)"
+                )
+            else:
+                holds = "a receiver's FM audio"
+            self._show_status_message(
+                f"No {protocol} messages in {options.name}{where}. Check the "
+                f"protocol, and that it holds {holds}.",
+                "warning",
+                10000,
             )
         else:
             self._show_status_message(

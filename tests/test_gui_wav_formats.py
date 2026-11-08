@@ -306,8 +306,9 @@ class TestOneChannelRecordings(_WavCase):
 
     def test_decode_recording_reads_morse_tones(self):
         """A CW tone in audio decodes with CW (Morse) at its frequency
-        (below 1 kHz too); the dialog says audio from a receiver isn't
-        decoded as audio."""
+        (below 1 kHz too); the dialog says how each protocol decodes in it
+        (the others decode its sound as a receiver's audio: see
+        test_gui_audio_decoding)."""
         from sdr_module.gui import iq_files
 
         path = self.path("cw.wav")
@@ -333,7 +334,7 @@ class TestOneChannelRecordings(_WavCase):
         self.assertIn("CQ CQ DE N0CALL K", texts)
         self.assertIn("one channel", notes[0])
         self.assertIn("Morse", notes[0])
-        self.assertIn("isn't decoded as audio", notes[0])
+        self.assertIn("decode its sound as a receiver's audio", notes[0])
 
     def test_a_real_if_recording_decodes_like_any_recording(self):
         """A receiver's IF sampled directly (one channel at 960 kS/s): an

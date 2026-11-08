@@ -9217,6 +9217,8 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         paced = bool(getattr(self._device, "paced", False))
         samples = self._read_block()
         if samples is None or len(samples) == 0:
+            if paced:
+                self._between_blocks()
             self._stream_died()
             return
         # A recording's read waits for the disk: no measure of what this
@@ -10113,6 +10115,32 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         if self._playback.active or sound.stretching:
             audio = sound.play(audio, time.monotonic(), last=last)
         self._audio.write(audio)
+
+    def _between_blocks(self) -> None:
+        """A display frame that read nothing of a playing recording: one
+        slower than a display block a frame (a one-channel file of 8 kHz
+        audio is 4 kS/s of I/Q, a block every half second at 1x, every
+        second at 0.5x). The pace its sound follows counts the frame, and
+        at another speed the speaker gets what the time-stretch holds for
+        it (M-P1 with M-F2: given out only with each block, a quarter of a
+        second at most, the sound of such a file ran dry most of the time
+        at 0.5x). A sound the next block would stop (the speaker off, the
+        Second Receiver's Listen) gets nothing more meanwhile."""
+        if not self._playback.active:
+            return
+        sound = self._playback_sound
+        now = time.monotonic()
+        sound.note(0.0, now, self._playback.speed)
+        second = getattr(self, "_second_rx", None)
+        if (
+            not self._audio_enabled
+            or not self._audio_join.playing
+            or (second is not None and second.mutes_main())
+        ):
+            return
+        audio = sound.more(now)
+        if len(audio):
+            self._audio.write(audio)
 
     def _set_stereo_enabled(self, on: bool) -> None:
         """Radio > Audio > Stereo (K-S1): broadcast FM in stereo where the

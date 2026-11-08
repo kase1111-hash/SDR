@@ -263,6 +263,19 @@ class PlaybackSound:
         out = self._play(block, float(now))
         return _joined(out, self.finish(now)) if last else out
 
+    def more(self, now: float) -> np.ndarray:
+        """The sound for the speaker at monotonic time ``now`` for a
+        display frame that brought no block: a recording slower than a
+        display block a frame (2048 samples: a one-channel file of 8 kHz
+        audio is 4 kS/s of I/Q, a block every half second at 1x, every
+        second at 0.5x) gives its sound out between its blocks too, from
+        what the stretch holds, as a block's :meth:`play` would. Empty
+        while nothing is stretched (at 1x a recording that keeps up passes
+        its blocks through as they are) or before a sound has started."""
+        if not (self._stretching and self._flowing):
+            return np.zeros(0, dtype=np.float32)
+        return self._play(np.zeros(0, dtype=np.float32), float(now))
+
     def _play(self, block: np.ndarray, now: float) -> np.ndarray:
         seconds = len(block) / self.rate
         pace = self.pace
@@ -316,6 +329,16 @@ class PlaybackSound:
             self._held_max(self._swings, now, swing)
         # (Never more than fits AudioSink's own buffer: see MOST_HELD_S.)
         want = min(want, max(0.0, most - remaining))
+        if not self._flowing and seconds > self.STALL_S * max(pace, self.MIN_RATIO):
+            # A sound's first block holds more than a stall's worth of it:
+            # a recording slower than a display block a frame, whose blocks
+            # are given out over the frames until the next one (:meth:`more`;
+            # 8 kHz audio in a one-channel file: half a second a block).
+            # What this one keeps for later is such a swing from the start:
+            # taken for a pile-up, it was rushed through, and the speaker
+            # ran dry before the next block.
+            allowance = self._held_max(self._swings, now, seconds - want * pace)
+            target = lookahead + self.MARGIN_S + allowance
         wanted = want * self.rate + self._carry
         count = int(wanted)
         self._carry = wanted - count

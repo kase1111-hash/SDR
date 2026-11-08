@@ -200,6 +200,206 @@ class TestOneX(unittest.TestCase):
         self.assertEqual(len(sound.finish()), 0)
 
 
+class _SlowRun:
+    """A one-channel file of ``audio_rate`` audio (I/Q at half its rate:
+    8 kHz audio is 4 kS/s, a display block every half second at 1x) read
+    by the display loop's real ``_Pacer`` at ``speed``, its frames 32 ms
+    apart give or take a millisecond (Qt's coarse 33 ms timer). Block
+    frames ``play`` the block, the frames between ``more`` (as the
+    window's ``_between_blocks``)."""
+
+    def __init__(self, audio_rate, speed=1.0, seed=0):
+        self.iq_rate = audio_rate / 2.0
+        self.speed = float(speed)
+        self.rng = np.random.default_rng(seed)
+        self.frame_s, self.jitter_s = 0.032, 0.001  # (frames apart, give or take)
+        self.pacer = _Pacer()
+        self.sound = PlaybackSound(RATE, AudioSink.TARGET_S)
+        self.speaker = _Speaker()
+        self.now = 50.0
+        self.position = 0.0  # (audio samples of the recording read so far)
+        self.fed, self.writes = [], []
+        self.delays = []  # (time, seconds of sound in the speaker and held)
+
+    def frames(self, seconds):
+        end = self.now + seconds
+        sound, speed = self.sound, self.speed
+        while self.now < end:
+            now = self.now
+            count = self.pacer.paced_request(self.iq_rate * speed, now, self.iq_rate)
+            if count:
+                first = int(self.position)
+                self.position += count * RATE / self.iq_rate
+                block = _tone(first, int(self.position) - first)
+                sound.note(len(block) / RATE, now, speed)
+                out = sound.play(block, now)
+                self.fed.append(block)
+            else:
+                sound.note(0.0, now, speed)
+                out = sound.more(now)
+            self.speaker.write(out, now)
+            self.writes.append(np.asarray(out, dtype=np.float32))
+            self.delays.append((now, self.speaker.queued + sound.waiting_s))
+            jitter = self.rng.uniform(-self.jitter_s, self.jitter_s)
+            self.now += self.frame_s + jitter
+        self.speaker.advance(self.now)
+
+    def troubles(self, seconds):
+        """Seconds the speaker ran dry, and of audio dropped, in the next
+        ``seconds`` of frames."""
+        gaps, dropped = self.speaker.gaps, self.speaker.dropped
+        self.frames(seconds)
+        return self.speaker.gaps - gaps, self.speaker.dropped - dropped
+
+    def delay(self, since, until):
+        """The mean wait for sound (in the speaker and held) over a time."""
+        return float(np.mean([d for t, d in self.delays if since <= t < until]))
+
+
+def _slow_audio(audio_rate, speed, seconds, seed=0, settle=1.0):
+    """``seconds`` of a :class:`_SlowRun` after ``settle``: the speaker (its
+    troubles counted after ``settle``), what went in, and what the speaker
+    got, write by write."""
+    run = _SlowRun(audio_rate, speed, seed)
+    run.frames(settle)
+    run.speaker.gaps = run.speaker.dropped = 0.0
+    run.frames(seconds)
+    return run.speaker, np.concatenate(run.fed), run.writes
+
+
+@unittest.skipUnless(HAS_PACER, "the display loop's pacer needs PyQt6")
+class TestARecordingSlowerThanABlockAFrame(unittest.TestCase):
+    """8 kHz audio in a one-channel file comes half a second a block at
+    1x (11.025 kHz audio 0.37 s): longer than the speaker holds. Each
+    block was handed to it whole, and it got nothing between blocks: a
+    block a frame late ran it dry, one a frame early made AudioSink drop
+    the start of the new block (past its HIGH_S), about twice a second at
+    1x, the speed most used (0.5x, 2x and 4x played clean)."""
+
+    def test_1x_plays_the_recording_as_it_is_without_gaps_or_drops(self):
+        for audio_rate in (8000, 11025, 16000):
+            for seed in (0, 1):
+                with self.subTest(audio_rate=audio_rate, seed=seed):
+                    speaker, fed, writes = _slow_audio(audio_rate, 1.0, 6.0, seed)
+                    self.assertLess(speaker.gaps, 0.005)
+                    self.assertEqual(speaker.dropped, 0.0)
+                    # The recording's own samples, in order (only cut up),
+                    # never more at once than the speaker holds.
+                    got = np.concatenate(writes)
+                    np.testing.assert_array_equal(got, fed[: len(got)])
+                    self.assertGreater(len(got), len(fed) - int(0.6 * RATE))
+                    longest = max(len(w) for w in writes) / RATE
+                    self.assertLessEqual(longest, PlaybackSound.MOST_HELD_S)
+
+    def test_other_speeds_stay_clean(self):
+        for speed in (0.5, 2.0, 4.0):
+            with self.subTest(speed=speed):
+                speaker, _fed, _writes = _slow_audio(8000, speed, 6.0)
+                self.assertLess(speaker.gaps, 0.005)
+                self.assertEqual(speaker.dropped, 0.0)
+
+    def test_a_sound_of_blocks_that_fit_starts_with_a_margin(self):
+        """22.05 kHz audio comes 0.19 s a block: that fits the speaker, and
+        its blocks pass through as they are. Its first one, though, went
+        whole to a speaker that held nothing: longer than the cushion
+        AudioSink pads a start with, it got no silence in front, and each
+        block then lasted until the next. On a timer a few ms irregular a
+        block a frame late ran the speaker dry, 20-30 ms in the first
+        seconds. Its first block now starts as a longer one does, half the
+        cushion first, so the margin is there from the start."""
+        for seed in (0, 1, 2):
+            with self.subTest(seed=seed):
+                run = _SlowRun(22050, seed=seed)
+                run.jitter_s = 0.004
+                run.frames(5.0)
+                self.assertLess(run.speaker.gaps, 0.005)
+                self.assertEqual(run.speaker.dropped, 0.0)
+                # The same samples in order, and later blocks as they are.
+                got, fed = np.concatenate(run.writes), np.concatenate(run.fed)
+                np.testing.assert_array_equal(got, fed[: len(got)])
+                later = [w for w in run.writes if len(w)][-3:]
+                for written, block in zip(later, run.fed[-3:], strict=True):
+                    np.testing.assert_array_equal(written, block)
+
+    def test_from_another_speed_back_to_1x_without_a_gap(self):
+        """Back at 1x the stretch hands over what it holds, kept for the
+        frames until the next block. Drained fast as a pile-up first, it
+        ran the speaker dry until that block: 0.25 s at 0.5x to 1x, 0.4 s
+        at 2x to 1x (8 kHz audio)."""
+        for audio_rate in (8000, 11025):
+            for speed in (0.5, 2.0, 4.0):
+                with self.subTest(audio_rate=audio_rate, speed=speed):
+                    run = _SlowRun(audio_rate, speed)
+                    run.frames(3.0)
+                    run.speed = 1.0
+                    gaps, dropped = run.troubles(4.0)
+                    self.assertLess(gaps, 0.005)
+                    self.assertEqual(dropped, 0.0)
+                    self.assertFalse(run.sound.stretching)
+                    # (Then 1x as it is: what was held, then the blocks.)
+                    later = np.concatenate(run.writes[-60:])
+                    self.assertLess(_steps(later), 1.05)
+
+    def test_a_stall_at_1x_doesnt_grow_the_delay(self):
+        """The window freezes for 0.6 s (twice): the speaker runs dry, as
+        no sound card can avoid, and what it would have played meanwhile
+        is skipped (as AudioSink skipped it when the blocks came whole):
+        afterwards the sound is as late as before (see
+        test_stalls_dont_add_up), not 0.5 s later after each stall."""
+        for audio_rate in (8000, 11025):
+            with self.subTest(audio_rate=audio_rate):
+                run = _SlowRun(audio_rate)
+                run.frames(4.0)
+                before = run.delay(run.now - 2.0, run.now)
+                for _stall in range(2):
+                    run.now += 0.6
+                    run.frames(4.0)
+                after = run.delay(run.now - 2.0, run.now)
+                margin = 0.5 * AudioSink.TARGET_S
+                self.assertLess(after - before, 2 * margin + 0.01)
+                gaps, dropped = run.troubles(3.0)
+                self.assertLess(gaps, 0.005)
+                self.assertEqual(dropped, 0.0)
+
+    def test_stalls_dont_add_up(self):
+        """After a stall the speaker starts again where the sound is now,
+        with the margin it had. Given half the cushion as a new sound is
+        (AudioSink padding the rest with silence), each stall made the
+        sound 60 ms later for good: half a second later after eight, and
+        on and on. Recordings whose blocks fit the speaker went that way
+        too once a stall's catch-up didn't: 22.05 kHz audio, and I/Q at 48
+        kS/s (96 kHz here: I/Q at half the rate) stayed queued, later and
+        later."""
+        for audio_rate in (8000, 22050, 96000):
+            with self.subTest(audio_rate=audio_rate):
+                run = _SlowRun(audio_rate)
+                run.frames(3.0)
+                before = run.delay(run.now - 2.0, run.now)
+                for _stall in range(8):
+                    run.now += 0.3
+                    run.frames(2.0)
+                run.frames(1.0)
+                after = run.delay(run.now - 2.0, run.now)
+                self.assertLess(after - before, 0.03)
+                gaps, dropped = run.troubles(2.0)
+                self.assertLess(gaps, 0.005)
+                self.assertEqual(dropped, 0.0)
+
+    def test_blocks_often_late_get_a_wider_margin(self):
+        """Frames of a computer that can't keep up come up to 80 ms apart:
+        a block of 8 kHz audio is now and then later than the margin of a
+        new sound (60 ms) covers. The speaker runs dry once or twice, and
+        each new start widens the margin, until the blocks find it: no
+        gaps after that."""
+        run = _SlowRun(8000)
+        run.frames(2.0)
+        run.frame_s, run.jitter_s = 0.056, 0.024
+        run.frames(4.0)
+        gaps, dropped = run.troubles(6.0)
+        self.assertLess(gaps, 0.005)
+        self.assertEqual(dropped, 0.0)
+
+
 class TestEverySpeedPlays(unittest.TestCase):
     """At 0.5x, 2x and 4x on a computer that keeps up."""
 

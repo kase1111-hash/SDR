@@ -23,9 +23,12 @@ recording's sound at 0.5x, 2x or 4x (``gui/playback_sound.py``).
   The ratio may change from one pull to the next; each frame is made with
   the ratio of the pull that makes it.
 * Mono (1-D) or stereo (``(n, 2)``: left, right) blocks: both channels
-  take each frame from the same place (found on their sum), so the stereo
-  image stays as it was. A stream turns stereo at its first stereo block
-  (its mono plays on both channels from then on) until :meth:`reset`.
+  take each frame from the same place, so the stereo image stays as it
+  was, found on both sides' correlations together: what is in phase, in
+  opposite phase (a channel wired the other way round) or different on
+  each side lines up, and the same sound on both lines up as in mono. A
+  stream turns stereo at its first stereo block (its mono plays on both
+  channels from then on) until :meth:`reset`.
 * The first frame starts at full level (no fade-in of its own), so a
   stream taken over mid-sound continues it without a dip; :meth:`finish`
   makes the rest of the input into output and fades out (the stream
@@ -33,10 +36,10 @@ recording's sound at 0.5x, 2x or 4x (``gui/playback_sound.py``).
   continues the input exactly, so blocks played as they are join it
   without a step.
 
-NumPy only: two real FFTs of 2048 points and an inverse one per hop of
-output (12.5 ms), so the work follows the time played, not the speed
-(about 0.2 ms per 33 ms display frame in mono, 0.3 ms in stereo, on a
-4-core computer).
+NumPy only: two real FFTs of 2048 points (two a side in stereo) and an
+inverse one per hop of output (12.5 ms), so the work follows the time
+played, not the speed (about 0.2 ms per 33 ms display frame in mono,
+0.35 ms in stereo, on a 4-core computer).
 """
 
 from __future__ import annotations
@@ -266,28 +269,38 @@ class TimeStretch:
 
     def _best_place(self, here: int) -> int:
         """Where, within the search of ``here``, the input best continues
-        the last frame (its next half frame, as it was in the input)."""
+        the last frame (its next half frame, as it was in the input). In
+        stereo each side's correlation and energy count, averaged: what is
+        in phase, in opposite phase or different on the two sides lines up.
+        (Found on their sum alone, a sound in opposite polarity on the two
+        sides, whose sum is nothing, lined up on nothing or on the hiss: it
+        came out off pitch and warbling.) The same sound on both sides lines
+        up exactly as in mono."""
         assert self._prev is not None
         buf, base, hop = self._buf, self._base, self.hop
         low = max(here - self.search, base)
         high = here + self.search
         start = self._prev + hop - base
-        template = buf[start : start + hop]
-        region = buf[low - base : high - base + hop]
-        if template.ndim == 2:
-            template = template.sum(axis=1)
-            region = region.sum(axis=1)
-        template = template.astype(np.float64)
-        region = region.astype(np.float64)
-        energy_t = float(np.dot(template, template))
+        template = buf[start : start + hop].astype(np.float64)
+        region = buf[low - base : high - base + hop].astype(np.float64)
+        if template.ndim == 1:
+            energy_t = float(np.dot(template, template))
+        else:  # (stereo: a row a side, each worked as a mono one)
+            template, region = template.T.copy(), region.T.copy()
+            left, right = template
+            energy_t = float(np.dot(left, left) + np.dot(right, right)) / 2.0
         if energy_t <= 1e-12:
             return min(max(here, low), high)  # (silence: its own place)
         count = high - low + 1
         spectrum = np.fft.rfft(region, self._nfft) * np.conj(
             np.fft.rfft(template, self._nfft)
         )
+        power = region * region
+        if spectrum.ndim == 2:
+            spectrum = spectrum.mean(axis=0)
+            power = power.mean(axis=0)
         correlation = np.fft.irfft(spectrum, self._nfft)[:count]
-        squares = np.concatenate([[0.0], np.cumsum(region * region)])
+        squares = np.concatenate([[0.0], np.cumsum(power)])
         energy = squares[hop : hop + count] - squares[:count]
         score = correlation / np.sqrt(np.maximum(energy, 1e-12 * energy_t))
         return low + int(np.argmax(score))

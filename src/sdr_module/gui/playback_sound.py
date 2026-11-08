@@ -42,7 +42,21 @@ audio:
 * **At 1x** the audio passes through untouched (the same array) while the
   recording keeps up; only while it falls behind (the pace below
   ``ENGAGE_BELOW``) is it stretched to the pace, and once it keeps up
-  again the stretch drains and hands back sample for sample.
+  again the stretch drains and hands back sample for sample. A block
+  longer than the speaker holds (``MOST_HELD_S``: a recording slower than
+  a display block a frame, such as 8 kHz audio in a one-channel file,
+  half a second a block) is given out as it plays instead, frame by frame
+  (:meth:`more`), its very samples in order: handed over whole it was
+  more than AudioSink keeps (past its ``HIGH_S`` it dropped the start of
+  the next block, one that came a frame early) and lasted exactly until
+  the next one (a frame late, the speaker ran dry). A new sound's first
+  piece is shorter than the speaker's cushion, which AudioSink pads in
+  front of it with silence: the margin a block a frame late still finds
+  to play. So is that of blocks that fit the speaker but not the cushion
+  (22.05 kHz audio, 0.19 s a block: given whole, each lasted until the
+  next one), which then pass through as they are. After a stall of the
+  window the speaker starts again where the sound is by then, with the
+  margin it had (a new one each stall made the sound later and later).
 * :meth:`finish` ends a stream (the squelch closed, the speaker stopped):
   what the stretch still holds plays at once, in at most ``FLUSH_S`` and
   in no more than the speaker can still take (faster, or cut short and
@@ -148,6 +162,7 @@ class PlaybackSound:
         self._a = self._speed * self.PACE_S  # (signal seconds, decaying)
         self._b = self.PACE_S  # (clock seconds, decaying)
         self._noted: Optional[float] = None
+        self._stalled = False  # (the last frame came after a stall)
 
     def note(self, seconds: float, now: float, speed: float) -> None:
         """A display frame brought ``seconds`` of the recording's signal
@@ -162,6 +177,7 @@ class PlaybackSound:
         if last is None:
             return
         gap = max(0.0, float(now) - last)
+        self._stalled = gap > self.STALL_S
         if gap <= self.STALL_S:  # (a stall is no pattern to keep)
             # The longest recent wait between frames, which the speaker is
             # kept above: kept across streams (the squelch closing for a
@@ -191,12 +207,30 @@ class PlaybackSound:
 
     @property
     def waiting_s(self) -> float:
-        """Seconds of sound the stretch holds, not yet given out."""
+        """Seconds of sound the stretch holds, not yet given out (or at 1x
+        what a block longer than the speaker holds has still to give)."""
+        if self._held is not None:
+            return len(self._held) / self.rate
         if not self._stretching:
             return 0.0
         stretch = self._stretch
         held = stretch.pending / max(self._ratio, self.MIN_RATIO) + stretch.ready
         return held / self.rate
+
+    @property
+    def holding(self) -> bool:
+        """Whether sound waits here to be given out (the stretch's, or at
+        1x the rest of a block longer than the speaker holds): what
+        :meth:`finish` ends."""
+        return self._stretching or self._held is not None
+
+    @property
+    def rest_s(self) -> float:
+        """At 1x, seconds of a block longer than the speaker holds still to
+        be given out as it plays (:meth:`more`): a recording at its end
+        has that much of its sound still to play. 0.0 when no such block
+        is held (at another speed the stretch holds the sound)."""
+        return 0.0 if self._held is None else len(self._held) / self.rate
 
     def reset(self) -> None:
         """Forget the stream and the pace (a new recording, a seek). What
@@ -214,6 +248,11 @@ class PlaybackSound:
         self._stretching = False
         self._flowing = False
         self._passing = False  # (blocks played as they are, at 1x)
+        # At 1x, the rest of a block longer than the speaker holds, as it
+        # is: given out as the speaker plays it (see _give).
+        self._held: Optional[np.ndarray] = None
+        self._block_s = 0.0  # (the length of this stream's last block)
+        self._sounded = False  # (the speaker got some of this stream)
         self._ratio = 1.0
 
     def _held_max(
@@ -249,6 +288,8 @@ class PlaybackSound:
         else:
             self._queued = remaining + seconds
         self._spoke_at = now
+        if seconds > 0.0:
+            self._sounded = True
 
     def play(self, block: np.ndarray, now: float, last: bool = False) -> np.ndarray:
         """The sound for the speaker for ``block`` (mono or ``(n, 2)``
@@ -260,6 +301,7 @@ class PlaybackSound:
         (:meth:`finish`)."""
         if not len(block):
             return _joined(block, self.finish(now)) if last else block
+        self._block_s = len(block) / self.rate
         out = self._play(block, float(now))
         return _joined(out, self.finish(now)) if last else out
 
@@ -269,12 +311,61 @@ class PlaybackSound:
         display block a frame (2048 samples: a one-channel file of 8 kHz
         audio is 4 kS/s of I/Q, a block every half second at 1x, every
         second at 0.5x) gives its sound out between its blocks too, from
-        what the stretch holds, as a block's :meth:`play` would. Empty
-        while nothing is stretched (at 1x a recording that keeps up passes
-        its blocks through as they are) or before a sound has started."""
+        what the stretch holds, as a block's :meth:`play` would, or at 1x
+        from what its last block has still to give, as it is. Empty while
+        nothing is held (a recording that keeps up at 1x, its blocks no
+        longer than the speaker holds, passes them through as they are) or
+        before a sound has started."""
+        now = float(now)
+        if self._held is not None:
+            if self._speed == 1.0:
+                # (Whatever the pace measured between blocks: it swings
+                # about 1x with each one of a recording this slow.)
+                return self._give(now)
+            # Another speed chosen between blocks: the stretch takes over
+            # with what is held.
+            held, self._held = self._held, None
+            return self._play(held, now)
         if not (self._stretching and self._flowing):
             return np.zeros(0, dtype=np.float32)
-        return self._play(np.zeros(0, dtype=np.float32), float(now))
+        return self._play(np.zeros(0, dtype=np.float32), now)
+
+    def _level(self, wait: float) -> float:
+        """Seconds the speaker is kept at, given the longest recent wait
+        between frames (see the module docstring)."""
+        most = max(self.cushion_s, self.MOST_HELD_S)
+        return min(max(self.cushion_s, wait * (1.0 + self.WAIT_MARGIN)), most)
+
+    def _give(self, now: float) -> np.ndarray:
+        """At 1x, from the rest of a block longer than the speaker holds:
+        what the speaker played since the last write (it is kept at its
+        level, as by the stretch), as it is."""
+        held = self._held
+        if held is None:
+            return np.zeros(0, dtype=np.float32)
+        remaining = self._speaker_left(now)
+        want = max(0.0, self._level(self._longest_wait(now)) - remaining)
+        if remaining <= 0.0:
+            if self._sounded and self._spoke_at is not None:
+                # The speaker ran dry mid-sound (the window stalled, or a
+                # block came later than the margin covers): what it would
+                # have played meanwhile is skipped. (Played late instead,
+                # each stall made the sound that much later for good: the
+                # sound as it is can't catch up as the stretch does.)
+                dry = max(0.0, now - self._spoke_at - self._queued)
+                held = held[min(len(held), int(round(dry * self.rate))) :]
+            if not (self._sounded and self._stalled):
+                # A new sound (or one a block came too late for): its first
+                # piece is shorter than the cushion AudioSink pads it to,
+                # with silence in front: the margin a block a frame late
+                # still finds to play. After a stall the margin it had goes
+                # on (padded anew, each stall made the sound 60 ms later).
+                want = min(want, 0.5 * self.cushion_s)
+        count = min(len(held), int(round(want * self.rate)))
+        out = held[:count]
+        self._held = held[count:] if count < len(held) else None
+        self._wrote(now, remaining, count / self.rate)
+        return out
 
     def _play(self, block: np.ndarray, now: float) -> np.ndarray:
         seconds = len(block) / self.rate
@@ -294,8 +385,24 @@ class PlaybackSound:
         if not self._stretching:
             if one and pace >= self.ENGAGE_BELOW:
                 self._passing = True
-                self._wrote(now, remaining, seconds)
-                return block
+                # (A new sound's first block, to a speaker that holds
+                # nothing, fits only within the cushion: longer, it got no
+                # silence in front, so no margin for the next block.)
+                starts = not self._sounded and remaining <= 0.0
+                most = self.cushion_s if starts else self.MOST_HELD_S
+                if self._held is None and seconds <= most:
+                    self._wrote(now, remaining, seconds)
+                    return block
+                # Longer than the speaker holds (or after what is still
+                # held): given out as it plays, frame by frame (more).
+                audio = np.array(block, dtype=np.float32, copy=True)
+                held = self._held
+                self._held = audio if held is None else _joined(held, audio)
+                return self._give(now)
+            if self._held is not None:
+                # The stretch takes over: what is held comes first.
+                block, self._held = _joined(self._held, block), None
+                seconds = len(block) / self.rate
             self._stretching = True
             self._stretch.reset()
             self._settled = None
@@ -307,11 +414,22 @@ class PlaybackSound:
         stretch.feed(block)
         lookahead = stretch.lookahead / self.rate
         release = one and pace >= self.RELEASE_AT
+        if release and self._block_s > self.MOST_HELD_S:
+            # Back at 1x, a recording slower than a display block a frame:
+            # what the stretch holds (kept for the frames until the next
+            # block) plays on as it is, given out as the speaker plays it
+            # (drained fast as a pile-up first, it ran the speaker dry until
+            # the next block: 0.15-0.4 s).
+            drained = stretch.drain()
+            self._held = drained if len(drained) else None
+            self._stretching = False
+            self._passing = True
+            return self._give(now)
         allowance = 0.0 if release or not self._swings else self._swings[0][1]
         target = lookahead + self.MARGIN_S + allowance
         have = stretch.pending / self.rate
         most = max(self.cushion_s, self.MOST_HELD_S)
-        level = min(max(self.cushion_s, wait * (1.0 + self.WAIT_MARGIN)), most)
+        level = self._level(wait)
         if not self._flowing:
             # Starting: once the input kept beyond the target brings the
             # speaker to its level by itself (after what the last stream
@@ -391,11 +509,23 @@ class PlaybackSound:
         (faster than the ratio where needed), ending in its fade-out, and
         no more than fits what the speaker holds under ``MOST_HELD_S`` but
         for that fade (cut short and faded when even that is too long).
-        Empty when nothing is held. ``now``: when it goes to the speaker
-        (the last block's time when not given)."""
+        At 1x the rest of a block longer than the speaker holds, as it is,
+        within the same bounds. Empty when nothing is held. ``now``: when
+        it goes to the speaker (the last block's time when not given)."""
         out = np.zeros(0, dtype=np.float32)
         when = self._spoke_at if now is None else float(now)
-        if self._stretching:
+        if self._held is not None:
+            # (Normally a frame or two of it: the next block was due. The
+            # rest of a block, when nobody hears it any more, is cut short.)
+            hop = self._stretch.hop
+            left = 0.0 if when is None else self._speaker_left(when)
+            room = max(0.0, self.MOST_HELD_S - left)  # (see MOST_HELD_S)
+            fits = min(self.FLUSH_S, room) + hop / self.rate  # (and its fade)
+            out = self._held
+            most = max(hop, int(fits * self.rate))
+            if len(out) > most:
+                out = _faded(out[:most], hop)
+        elif self._stretching:
             stretch = self._stretch
             held = stretch.pending / self.rate
             hop = stretch.hop / self.rate

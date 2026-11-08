@@ -63,6 +63,13 @@ class TestAudioTake(unittest.TestCase):
         name = audio_file_name(145.8e6, "FM", 0)
         self.assertRegex(name, r"^145\.800MHz_FM_\d{8}_\d{6}\.wav$")
         self.assertTrue(audio_file_name(7.074e6, "USB").startswith("7.074MHz_USB_"))
+        # An audio recording's sound: after the recording, not the 1 Hz it
+        # is listened from ("0.000MHz_USB_...").
+        source = os.path.join("recordings", "scanner audio.wav")
+        name = audio_file_name(1.0, "USB", 0, source=source)
+        self.assertRegex(name, r"^scanner audio_USB_\d{8}_\d{6}\.wav$")
+        long_name = audio_file_name(1.0, "USB", 0, source="x" * 300 + ".wav")
+        self.assertLess(len(long_name), 100)
 
 
 class _AudioCase(_WindowTestCase):

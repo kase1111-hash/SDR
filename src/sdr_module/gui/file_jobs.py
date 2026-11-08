@@ -146,28 +146,17 @@ def _audio_chunks(options: IqFileOptions, report: Report) -> Iterable[np.ndarray
     """A one-channel WAV file's own samples (float, full scale 1.0, at its
     own rate), a chunk at a time, reporting progress: its sound as it was
     recorded, not the I/Q it plays as. Samples that aren't numbers (a
-    damaged floating-point file) are read as 0."""
-    from ..dsp.recording import wav_values
+    damaged floating-point file) are read as 0 (as ``sdr-scan decode``
+    reads them: :func:`~sdr_module.dsp.recording.wav_frames`)."""
+    from ..dsp.recording import wav_frames
 
-    header = read_wav_header(options.path)
-    width = header.frame_bytes
-    total = max(1, header.frames)
+    total = max(1, read_wav_header(options.path).frames)
     done = 0
     report(0.0)
-    with open(options.path, "rb") as handle:
-        handle.seek(header.data_offset)
-        while done < header.frames:
-            take = min(CHUNK_SAMPLES, header.frames - done)
-            data = handle.read(take * width)
-            got = len(data) // width
-            if got == 0:
-                break
-            values = wav_values(data[: got * width], header)
-            if header.sample_type == "float":
-                np.nan_to_num(values, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
-            done += got
-            yield values
-            report(min(1.0, done / total))
+    for values in wav_frames(options.path, CHUNK_SAMPLES):
+        done += len(values)
+        yield values
+        report(min(1.0, done / total))
 
 
 def load_recording(

@@ -22,7 +22,17 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, BinaryIO, Dict, List, Optional, Sequence, Tuple, Union
+from typing import (
+    Any,
+    BinaryIO,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    Union,
+)
 
 import numpy as np
 
@@ -424,6 +434,39 @@ def wav_values(
         out[:] = np.frombuffer(raw, dtype="<i4")
         np.divide(out, np.float32(2147483647.0), out=out)
     return out
+
+
+def wav_frames(
+    filepath: Union[str, Path],
+    chunk_frames: int = 1 << 20,
+    max_frames: Optional[int] = None,
+) -> Iterator[np.ndarray]:
+    """A WAV file's own samples, ``chunk_frames`` frames at a time (up to
+    ``max_frames``): float32 at full scale 1.0 (see :func:`wav_values`),
+    each frame's channels in turn. A one-channel file's are its real
+    signal as recorded (an audio recording's sound), not the I/Q it is read
+    as. Samples that aren't numbers (a damaged floating-point file) read as
+    0. Raises WavError (a ValueError) for a file that isn't a WAV file this
+    app reads, OSError when it can't be read."""
+    header = read_wav_header(filepath)
+    width = header.frame_bytes
+    total = header.frames
+    if max_frames is not None:
+        total = min(total, max(0, int(max_frames)))
+    step = max(1, int(chunk_frames))
+    done = 0
+    with open(filepath, "rb") as handle:
+        handle.seek(header.data_offset)
+        while done < total:
+            data = handle.read(min(step, total - done) * width)
+            got = len(data) // width
+            if got == 0:
+                break  # (cut short since its header was read)
+            values = wav_values(data[: got * width], header)
+            if header.sample_type == "float":
+                np.nan_to_num(values, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+            done += got
+            yield values
 
 
 def wav_sample_format(header: WavHeader) -> SampleFormat:

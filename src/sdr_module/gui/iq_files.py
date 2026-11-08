@@ -281,7 +281,7 @@ def format_mhz(freq_hz: float) -> str:
 
 #: Up to this rate (Hz) a one-channel file is probably audio (an IF or RF
 #: sampled directly is faster): the Decode dialog then says what decodes.
-AUDIO_RATE_MAX = 200e3
+AUDIO_RATE_MAX = real_iq.AUDIO_RATE_MAX
 
 
 def _real_signal_text(iq_rate_hz: float, center_hz: float) -> str:

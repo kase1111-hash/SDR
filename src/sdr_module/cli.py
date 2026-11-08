@@ -710,11 +710,13 @@ def cmd_decode(args: argparse.Namespace) -> int:
     Uses the same streaming live decoders as the window's Decoder panel:
     the channel at ``--offset`` from the recording's centre is picked out,
     demodulated and decoded in one-second blocks. Only messages that pass
-    their checks are counted; ``--show-invalid`` lists the others too.
+    their checks are counted; ``--show-invalid`` lists the others too. A
+    one-channel WAV file at an audio rate (a receiver's sound) is decoded
+    as a receiver's audio where the protocol is sent as one, as File >
+    Decode Recording does (see :func:`_audio_rate`).
     """
     from .dsp.live_decoders import (
         create_live_decoder,
-        describe_message,
         format_rate,
         live_decoder_class,
     )
@@ -725,6 +727,10 @@ def cmd_decode(args: argparse.Namespace) -> int:
     if not input_path.exists():
         print(f"Error: file not found: {input_path}")
         return 1
+
+    audio_rate = _audio_rate(args, input_path)
+    if audio_rate:
+        return _decode_audio(args, input_path, audio_rate)
 
     sample_format = SampleFormat(args.format) if args.format else None
     samples, metadata = load_iq_file(
@@ -769,6 +775,78 @@ def cmd_decode(args: argparse.Namespace) -> int:
     for start in range(0, len(samples), block):
         messages += decoder.process(samples[start : start + block])
     messages += decoder.flush()  # e.g. the last line of Morse code
+    return _print_decoded(args, name, messages)
+
+
+def _audio_rate(args: argparse.Namespace, path: Path) -> float:
+    """The rate at which ``sdr-scan decode`` reads ``path``'s own samples as
+    a receiver's audio, as File > Decode Recording does: a one-channel WAV
+    file at an audio rate (up to real_iq.AUDIO_RATE_MAX: its header's, or
+    ``--sample-rate``, or its sidecar's) and a protocol sent as a receiver's
+    audio (APRS, POCSAG and FLEX after its FM discriminator, ACARS after
+    its AM detector). 0.0 when it is decoded from I/Q: two channels, an IF
+    or RF sampled directly (faster), Morse (at its pitch), ``--format``."""
+    from .dsp.live_decoders import audio_input
+    from .dsp.real_iq import AUDIO_RATE_MAX
+    from .dsp.recording import find_sidecar
+    from .dsp.wav_file import is_wav_file, read_wav_header
+
+    if args.format or not audio_input(args.protocol) or not is_wav_file(path):
+        return 0.0
+    try:
+        header = read_wav_header(path)
+    except (OSError, ValueError):
+        return 0.0  # (the I/Q reader says why)
+    if header.channels != 1:
+        return 0.0
+    rate = float(args.sample_rate or header.frame_rate)
+    if not rate:
+        sidecar = find_sidecar(path)
+        rate = float(sidecar.sample_rate) if sidecar is not None else 0.0
+    return rate if 0 < rate <= AUDIO_RATE_MAX else 0.0
+
+
+def _decode_audio(args: argparse.Namespace, path: Path, rate: float) -> int:
+    """``sdr-scan decode`` of a one-channel audio recording (see
+    :func:`_audio_rate`): its own samples go to the live decoder as a
+    receiver's audio, in one-second blocks, as File > Decode Recording
+    does."""
+    from .dsp.live_decoders import audio_input, create_live_decoder, format_rate
+    from .dsp.recording import wav_frames
+
+    try:
+        decoder = create_live_decoder(args.protocol, rate, audio=True)
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
+    if decoder.status.problem:
+        print(f"Error: {decoder.status.problem}")
+        return 1
+    messages: List[Any] = []
+    frames = 0
+    try:
+        for chunk in wav_frames(path, max(1, int(rate)), args.max_samples):
+            messages += decoder.process(chunk)
+            frames += len(chunk)
+    except (OSError, ValueError) as exc:
+        print(f"Error: {path.name} can't be read: {exc}")
+        return 1
+    messages += decoder.flush()
+    detector = (
+        "AM detector" if audio_input(args.protocol) == "AM" else "FM discriminator"
+    )
+    print(
+        f"Loaded {frames} samples ({frames / rate:.3f}s at {format_rate(rate)}, one "
+        f"channel), read as a receiver's audio (its {detector}'s output)"
+    )
+    return _print_decoded(args, args.protocol.upper(), messages)
+
+
+def _print_decoded(args: argparse.Namespace, name: str, messages: List[Any]) -> int:
+    """List the messages ``sdr-scan decode`` found: those that pass their
+    checks (``--show-invalid``: the others too)."""
+    from .dsp.live_decoders import describe_message
+
     valid = [m for m in messages if getattr(m, "valid", True)]
     invalid = [m for m in messages if not getattr(m, "valid", True)]
 
@@ -1263,7 +1341,12 @@ def create_parser() -> argparse.ArgumentParser:
         help="Protocol to decode",
     )
     decode_parser.add_argument(
-        "--input", "-i", type=str, required=True, help="Recorded I/Q file to decode"
+        "--input",
+        "-i",
+        type=str,
+        required=True,
+        help="Recorded I/Q file to decode (a one-channel WAV file at an audio "
+        "rate, a receiver's sound, is decoded as a receiver's audio)",
     )
     decode_parser.add_argument(
         "--format",

@@ -796,11 +796,12 @@ if HAS_PYQT6:
             """Audio in a one-channel file (0 Hz to half its rate, its sound
             itself) heard at its own pitch: in USB from 0 Hz, whose filter
             passes it from 200 Hz up (2.7 kHz: to 2.9 kHz; the widest, 3.6
-            kHz, to 3.8 kHz), as Radio > Choose Mode From Band Plan hears a
-            band its usual way (not when that is off). Not all of it: what
-            lies above the filter isn't heard, which the status line says
-            (it claimed the file "plays as recorded"). True when the line
-            says so."""
+            kHz, to 3.8 kHz; audio slower than about 16 kHz to under a
+            quarter of its rate, all its I/Q holds: _filter_width), as
+            Radio > Choose Mode From Band Plan hears a band its usual way
+            (not when that is off). Not all of it: what lies above the
+            filter isn't heard, which the status line says (it claimed the
+            file "plays as recorded"). True when the line says so."""
             win = self._win
             action = win._own("_band_plan_action")
             if action is not None and not action.isChecked():

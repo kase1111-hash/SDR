@@ -867,9 +867,18 @@ class _Resampler:
 
 def _filter_width(mode: str, bandwidth: float, rate: float) -> float:
     """The Bandwidth control, limited to what ``mode`` can use: the SSB or
-    CW filter width in those modes, else the channel width."""
+    CW filter width in those modes, else the channel width.
+
+    An SSB filter is no wider than ``rate`` holds above its 200 Hz edge,
+    skirt included: a slow recording's I/Q rate is a few kHz (6 kHz
+    audio's, 3 kHz, holds a 1.15 kHz filter: its sound to 1.35 kHz). A
+    wider one folded its top back into what played (8 kHz audio with the
+    3.6 kHz filter: its 3.3 kHz tone at 0.7 kHz, as loud)."""
     if mode in ("USB", "LSB"):
         low, high = _SSB_WIDTH_RANGE
+        room = 0.5 * float(rate) - _SSB_LOW_HZ - _SSB_TRANSITION_HZ
+        if room > 0:
+            high = max(low, min(high, room))
         return min(max(float(bandwidth), low), high)
     if mode == "CW":
         low, high = _CW_WIDTH_RANGE
@@ -1120,7 +1129,10 @@ class _ReceiverChain:
 
         In USB, LSB and CW the decimation only needs to keep +/- a quarter
         of the channel rate (a lighter filter), and the SSB or CW filter at
-        the channel rate ends the chain: the channel is the passband.
+        the channel rate ends the chain: the channel is the passband. Not
+        decimated (a slow recording's I/Q, a few kHz), it keeps all of
+        that channel, which a quarter of the rate may not hold (8 kHz audio
+        played only to 1 kHz, 6 kHz audio's 1 kHz tone not at all).
         """
         rate = self.rate
         narrow = mode in _NARROW_MODES
@@ -1128,6 +1140,10 @@ class _ReceiverChain:
             return []  # the channel is the whole span: nothing to remove
         if narrow:
             pass_hz = 0.25 * self.channel_rate
+            if factor == 1:
+                low, high = _channel_edges(mode, self.bandwidth, rate)
+                reach = min(max(-low, high), 0.5 * rate - _SSB_TRANSITION_HZ)
+                pass_hz = max(pass_hz, reach)
         else:
             pass_hz = min(half, 0.45 * self.channel_rate)
         stop_hz = min(pass_hz * 1.25, max(self.channel_rate - pass_hz, pass_hz * 1.05))

@@ -155,6 +155,50 @@ class TestDecodeAnAudioRecording(_WavCase):
         self.assertIn("at 144.390 MHz", said)
         self.assertNotIn("receiver's audio", said)
 
+    def test_decoding_as_it_plays_points_to_decode_recording(self):
+        """The Decoder tab's decoders take the I/Q a recording plays as, and
+        an audio recording's is its sound turned into a signal (0 Hz to
+        half its rate), with no receiver's FM or AM signal in it: APRS,
+        POCSAG, FLEX and ACARS decoded nothing from it as it played (or
+        blamed a rate too low for I/Q). They now say to use Decode
+        Recording. CW (Morse) still decodes its tones as it plays, and an
+        I/Q recording is decoded as it plays as before."""
+        win = self.win
+        panel = win._decoder_panel
+        panel._proto_combo.setCurrentText("POCSAG")
+        panel._enabled_check.setChecked(True)
+        path = self._wav("flex48k.wav", _audio("FLEX", 48000, 0.3, -1.0), 48000)
+        with self.open_dialog(path), self.warnings():
+            self.assertTrue(win._open_recording())
+        self.assertTrue(win._playback.active)
+        for name in ("POCSAG", "FLEX", "AX.25/APRS", "ACARS"):
+            with self.subTest(name):
+                panel._proto_combo.setCurrentText(name)
+                self.settle(2)
+                self.assertIsNone(win._decoder)
+                self.assertEqual(
+                    panel.decoder_status_text(),
+                    f"{name} isn't decoded from an audio recording as it plays",
+                )
+                self.assertIn(
+                    "File > Decode Recording decodes its sound as a receiver's "
+                    "audio",
+                    self.message(),
+                )
+        panel._proto_combo.setCurrentText("CW (Morse)")
+        self.settle(2)
+        self.assertIsNotNone(win._decoder)
+        win._playback.close()
+        # (I/Q, as before.)
+        path = self._wav_iq(self._aprs_iq("Plain I/Q"))
+        with self.open_dialog(path), self.warnings():
+            self.assertTrue(win._open_recording())
+        panel._proto_combo.setCurrentText("AX.25/APRS")
+        self.settle(2)
+        self.assertIsNotNone(win._decoder)
+        self.assertNotIn("audio recording", panel.decoder_status_text())
+        win._playback.close()
+
     def _wav_iq(self, x):
         from tests.test_gui_recording_files import RATE
 

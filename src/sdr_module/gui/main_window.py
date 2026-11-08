@@ -5928,7 +5928,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         blocks and picks out its own channel at the VFO, so it works
         whatever the Mode and Bandwidth are.
         """
-        from ..dsp.live_decoders import create_live_decoder, live_decoder_class
+        from ..dsp.live_decoders import (
+            LiveDecoderStatus,
+            audio_input,
+            create_live_decoder,
+            live_decoder_class,
+        )
         from ..dsp.protocols import ProtocolType
 
         proto_value = self._DECODER_PROTOCOLS.get(text)
@@ -5969,6 +5974,32 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._decoder_panel.set_decoder_status(None)
             self._update_decoder_chip()  # (no decoder runs: no chip)
             return
+        options = getattr(getattr(playback, "device", None), "options", None)
+        if (
+            self._decoder_recording
+            and getattr(options, "audio", False)
+            and audio_input(text)
+        ):
+            # An audio recording plays as its sound turned into I/Q (0 Hz to
+            # half its rate), with no receiver's FM or AM signal in it for
+            # the decoder to demodulate: it decoded nothing (or blamed a rate
+            # too low for I/Q). Decode Recording reads it as a receiver's
+            # audio. (CW decodes its tones as they play.)
+            self._decoder = None
+            self._decoder_protocol = None
+            status = LiveDecoderStatus(
+                name=text,
+                problem=f"{text} isn't decoded from an audio recording as it plays",
+                remedy="File > Decode Recording decodes its sound as a receiver's "
+                "audio.",
+            )
+            self._decoder_panel.set_decoder_status(status)
+            self._update_decoder_chip()  # (no decoder runs: no chip)
+            if self._decoder_panel.is_decoding():
+                self._show_status_message(
+                    f"{status.problem}. {status.remedy}", "warning", 10000, log=False
+                )
+            return
         try:
             self._decoder = create_live_decoder(
                 text,
@@ -5978,8 +6009,6 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             )
             self._decoder_protocol = ProtocolType(proto_value)
         except Exception as exc:
-            from ..dsp.live_decoders import LiveDecoderStatus
-
             self._decoder = None
             self._decoder_protocol = None
             problem = f"The {text} decoder could not start: {exc}"

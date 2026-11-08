@@ -754,7 +754,8 @@ def cmd_decode(args: argparse.Namespace) -> int:
     their checks are counted; ``--show-invalid`` lists the others too. A
     one-channel WAV file at an audio rate (a receiver's sound) is decoded
     as a receiver's audio where the protocol is sent as one, as File >
-    Decode Recording does (see :func:`_audio_rate`).
+    Decode Recording does (see :func:`_audio_rate`); Morse in it at its
+    tone's pitch, ``--pitch`` or found (see :func:`_decode_morse_audio`).
     """
     from .dsp.live_decoders import (
         create_live_decoder,
@@ -766,6 +767,20 @@ def cmd_decode(args: argparse.Namespace) -> int:
     input_path = Path(args.input).expanduser()
     if not input_path.exists():
         print(f"Error: file not found: {input_path}")
+        return 1
+
+    if args.pitch is not None and (args.protocol != "cw" or args.offset is not None):
+        print(f"Error: {_PITCH_IS}, given in place of --offset.")
+        return 1
+    if args.protocol == "cw" and args.offset is None:
+        morse_rate = _own_audio_rate(args, input_path)
+        if morse_rate:
+            return _decode_morse_audio(args, input_path, morse_rate)
+    if args.pitch is not None:
+        print(
+            f"Error: {_PITCH_IS}; {input_path.name} is read as I/Q: give --offset "
+            "(Hz from its center) instead."
+        )
         return 1
 
     audio_rate = _audio_rate(args, input_path)
@@ -810,7 +825,7 @@ def cmd_decode(args: argparse.Namespace) -> int:
         )
         return 1
     try:
-        decoder = create_live_decoder(args.protocol, sample_rate, args.offset)
+        decoder = create_live_decoder(args.protocol, sample_rate, args.offset or 0.0)
     except ValueError as exc:
         print(f"Error: {exc}")
         return 1
@@ -826,6 +841,10 @@ def cmd_decode(args: argparse.Namespace) -> int:
     return _print_decoded(args, name, messages)
 
 
+#: What ``sdr-scan decode --pitch`` is (for the messages that refuse it).
+_PITCH_IS = "--pitch is the pitch of a Morse tone (cw) in a one-channel audio recording"
+
+
 def _audio_rate(args: argparse.Namespace, path: Path) -> float:
     """The rate at which ``sdr-scan decode`` reads ``path``'s own samples as
     a receiver's audio, as File > Decode Recording does: a one-channel WAV
@@ -835,13 +854,26 @@ def _audio_rate(args: argparse.Namespace, path: Path) -> float:
     protocol sent as a receiver's audio (APRS, POCSAG and FLEX after its FM
     discriminator, ACARS after its AM detector). 0.0 when it is decoded
     from I/Q: two channels, an IF or RF sampled directly (faster, or placed
-    by its sidecar), Morse (at its pitch), ``--format``."""
+    by its sidecar), Morse (at its pitch: :func:`_decode_morse_audio`),
+    ``--format``."""
     from .dsp.live_decoders import audio_input
+
+    if not audio_input(args.protocol):
+        return 0.0
+    return _own_audio_rate(args, path)
+
+
+def _own_audio_rate(args: argparse.Namespace, path: Path) -> float:
+    """``path``'s own rate when it is a one-channel audio recording, a
+    receiver's sound: a one-channel WAV file at an audio rate (its
+    header's, ``--sample-rate`` or its sidecar's) at its own frequencies,
+    not placed elsewhere by its sidecar (real_iq.is_audio, the window's
+    rule). 0.0 for any other file, and with ``--format``."""
     from .dsp.real_iq import is_audio
     from .dsp.recording import find_sidecar
     from .dsp.wav_file import is_wav_file, read_wav_header
 
-    if args.format or not audio_input(args.protocol) or not is_wav_file(path):
+    if args.format or not is_wav_file(path):
         return 0.0
     try:
         header = read_wav_header(path)
@@ -891,6 +923,77 @@ def _decode_audio(args: argparse.Namespace, path: Path, rate: float) -> int:
         f"channel), read as a receiver's audio (its {detector}'s output)"
     )
     return _print_decoded(args, args.protocol.upper(), messages)
+
+
+def _decode_morse_audio(args: argparse.Namespace, path: Path, rate: float) -> int:
+    """``sdr-scan decode cw`` of a one-channel audio recording (a receiver's
+    CW audio, see :func:`_own_audio_rate`) at its Morse tone's pitch:
+    ``--pitch``, or the strongest tone in it (dsp.morse.PitchFinder). It is
+    decoded from its I/Q as File > Decode Recording reads Morse in it: the
+    channel at the tone's pitch among its own frequencies (0 Hz to half its
+    rate). ``--max-samples`` counts its own samples, as the other audio
+    decoders do."""
+    from .dsp import real_iq
+    from .dsp.live_decoders import create_live_decoder, format_rate, live_decoder_class
+    from .dsp.morse import PITCH_RANGE, PitchFinder
+    from .dsp.recording import load_iq_file, wav_frames
+    from .dsp.wav_file import read_wav_header
+
+    # (Its sound is 0 Hz to half its rate: I/Q at that rate, centered on a
+    # quarter of its own, where the window reads Morse in it too.)
+    iq_rate = real_iq.iq_rate(rate)
+    low = 2.0 * float(getattr(live_decoder_class("cw"), "MIN_SAMPLE_RATE", 0.0))
+    if rate < low:
+        print(
+            f"Error: CW (Morse) needs audio at {format_rate(low)} or more; this is "
+            f"{format_rate(rate)}"
+        )
+        return 1
+    pitch = args.pitch
+    try:
+        frames = read_wav_header(path).frames
+        if args.max_samples is not None:
+            frames = min(frames, max(0, int(args.max_samples)))
+        if pitch is None:
+            finder = PitchFinder(rate)
+            for chunk in wav_frames(path, max(1, int(rate)), args.max_samples):
+                finder.add(chunk)
+            pitch = finder.pitch
+            if pitch is None:
+                print(
+                    f"Error: no Morse tone in {path.name} stands out from its noise "
+                    f"between {PITCH_RANGE[0]:.0f} Hz and "
+                    f"{_hz_text(PITCH_RANGE[1])}; give its pitch with --pitch (Hz)."
+                )
+                return 1
+        if not 0 < pitch < iq_rate:
+            print(
+                f"Error: --pitch {pitch:g} Hz isn't in {path.name}'s sound (0 Hz to "
+                f"{_hz_text(iq_rate)})."
+            )
+            return 1
+        most = None if args.max_samples is None else real_iq.iq_count(args.max_samples)
+        samples, _metadata = load_iq_file(path, max_samples=most, sample_rate=iq_rate)
+    except (OSError, ValueError) as exc:
+        print(f"Error: {path.name} can't be read: {exc}")
+        return 1
+    try:
+        decoder = create_live_decoder("cw", iq_rate, pitch - real_iq.iq_center(rate))
+    except ValueError as exc:
+        print(f"Error: {exc}")
+        return 1
+    messages: List[Any] = []
+    block = max(1, int(iq_rate))
+    for start in range(0, len(samples), block):
+        messages += decoder.process(samples[start : start + block])
+    messages += decoder.flush()  # (the last line)
+    how = "found; --pitch gives another" if args.pitch is None else "given with --pitch"
+    print(
+        f"Loaded {frames} samples ({frames / rate:.3f}s at {format_rate(rate)}, one "
+        f"channel), read as a receiver's audio: its Morse tone at {pitch:.0f} Hz "
+        f"({how})"
+    )
+    return _print_decoded(args, "CW", messages)
 
 
 def _print_decoded(args: argparse.Namespace, name: str, messages: List[Any]) -> int:
@@ -1421,9 +1524,18 @@ def create_parser() -> argparse.ArgumentParser:
     decode_parser.add_argument(
         "--offset",
         type=float,
-        default=0.0,
+        default=None,
         help="Where the signal is, in Hz from the centre of the recording "
-        "(default: 0, the centre)",
+        "(default: 0, the centre; Morse in a one-channel audio recording is "
+        "found at its pitch instead: --pitch)",
+    )
+    decode_parser.add_argument(
+        "--pitch",
+        type=float,
+        default=None,
+        help="cw in a one-channel audio recording (a receiver's CW audio): the "
+        "Morse tone's pitch in Hz (default: the strongest tone between 150 Hz "
+        "and 3 kHz)",
     )
     decode_parser.add_argument(
         "--show-invalid",

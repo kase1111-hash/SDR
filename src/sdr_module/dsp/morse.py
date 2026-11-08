@@ -40,6 +40,10 @@ decoded 33 ms at a time gives the same text as the whole recording at once:
   either. The speed is ``1.2 / dit`` words per minute (PARIS), 5 to 60
   WPM.
 
+In a receiver's audio (a CW receiver's beat note, an audio recording's
+sound) a :class:`PitchFinder` finds the Morse tone's pitch, where the
+channel to decode lies.
+
 NumPy only; no Qt.
 """
 
@@ -60,6 +64,8 @@ __all__ = [
     "MorseMessage",
     "KeyingDetector",
     "MorseDecoder",
+    "PITCH_RANGE",
+    "PitchFinder",
     "wpm_from_dit",
 ]
 
@@ -971,3 +977,86 @@ class MorseDecoder:
             self._steady = 0
         else:  # a mark ended
             self._mark_ended(self._run)
+
+
+#: Where a receiver's audio has a Morse tone (its pitch: the beat note a CW
+#: receiver makes, 400 Hz to 1 kHz as most are set), as :class:`PitchFinder`
+#: looks for one: below it lie hum and the low cut, above it the voice band.
+PITCH_RANGE = (150.0, 3000.0)
+
+
+class PitchFinder:
+    """The pitch of the Morse tone in a receiver's audio (a CW receiver's
+    beat note, an audio recording's sound): where the audio's power,
+    averaged over all of it :meth:`add` was given, peaks between ``low_hz``
+    and ``high_hz`` (:data:`PITCH_RANGE`, and below 45% of the rate),
+    standing :attr:`MIN_PEAK_DB` above the median there (the noise);
+    otherwise there is none (:attr:`pitch` is None). Keyed on and off or
+    not, a tone keeps its power in one line of the spectrum while noise
+    spreads its own over the band, so the code's own pauses don't hide it.
+    Of two tones, the louder. The spectrum's lines are 4 to 8 Hz apart; the
+    peak between them is interpolated."""
+
+    #: How far the tone must stand above the band's median power.
+    MIN_PEAK_DB = 10.0
+
+    def __init__(
+        self,
+        rate: float,
+        low_hz: float = PITCH_RANGE[0],
+        high_hz: float = PITCH_RANGE[1],
+    ):
+        self.rate = float(rate)
+        if not self.rate > 0:
+            raise ValueError("the audio's rate must be above 0")
+        self.low_hz = float(low_hz)
+        self.high_hz = min(float(high_hz), 0.45 * self.rate)
+        # (A power of two of rate/8 or more: lines 4 to 8 Hz apart.)
+        self._size = 1 << max(6, int(math.ceil(math.log2(self.rate / 8.0))))
+        self._window = np.hanning(self._size)
+        self._power = np.zeros(self._size // 2 + 1)
+        self._stretches = 0
+        self._pending = np.zeros(0)
+
+    def add(self, audio: np.ndarray) -> None:
+        """Take in a block of the audio (real samples, any scale)."""
+        x = np.asarray(audio, dtype=np.float64).ravel()
+        if len(self._pending):
+            x = np.concatenate([self._pending, x])
+        whole = len(x) // self._size
+        if whole:
+            stretches = x[: whole * self._size].reshape(whole, self._size)
+            spectra = np.fft.rfft(stretches * self._window, axis=1)
+            self._power += np.sum(np.abs(spectra) ** 2, axis=0)
+            self._stretches += whole
+        self._pending = x[whole * self._size :].copy()
+
+    @property
+    def pitch(self) -> Optional[float]:
+        """The tone's pitch (Hz), or None when no tone stands out."""
+        power = self._power
+        if not self._stretches:
+            if not len(self._pending):
+                return None
+            # (A take shorter than a stretch: what there is, padded.)
+            short = np.zeros(self._size)
+            short[: len(self._pending)] = self._pending
+            power = np.abs(np.fft.rfft(short * self._window)) ** 2
+        step = self.rate / self._size
+        first = max(1, int(math.ceil(self.low_hz / step)))
+        last = min(len(power) - 2, int(self.high_hz / step))
+        if last <= first:
+            return None
+        band = power[first : last + 1]
+        k = int(np.argmax(band))
+        peak = float(band[k])
+        if not peak > 0 or peak < float(np.median(band)) * 10 ** (
+            self.MIN_PEAK_DB / 10.0
+        ):
+            return None
+        k += first
+        # (Between the lines: a parabola through the peak's log power.)
+        a, b, c = np.log(np.maximum(power[k - 1 : k + 2], peak * 1e-12))
+        bend = a - 2.0 * b + c
+        shift = 0.5 * (a - c) / bend if bend < 0 else 0.0
+        return float((k + max(-0.5, min(0.5, shift))) * step)

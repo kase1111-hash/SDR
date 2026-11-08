@@ -7,6 +7,7 @@ real AFSK APRS or ACARS never decoded.
 """
 
 import numpy as np
+import pytest
 
 from sdr_module.cli import main
 from sdr_module.dsp import protocol_encoders as enc
@@ -300,3 +301,90 @@ def test_an_audio_rate_file_its_sidecar_places_is_read_as_iq(tmp_path, capsys):
     assert "centered on 10.7 MHz, which --offset counts from" in out, out
     assert "Decoded 1 APRS message(s)" in out, out
     assert "From an IF" in out
+
+
+class TestMorseInAnAudioRecording:
+    """R8-12: ``sdr-scan decode cw`` of a one-channel audio recording (a
+    receiver's CW audio: the Morse tone at its pitch) wanted ``--offset``
+    from the I/Q's center, a quarter of the file's rate (``--offset -1300``
+    for a 700 Hz tone in 8 kHz audio), and without it decoded nothing. It
+    now decodes the audio as a receiver's audio like the other audio
+    decoders: at the tone's pitch, found (the strongest tone between 150 Hz
+    and 3 kHz) or given with ``--pitch``. ``--offset`` keeps reading it as
+    I/Q, as before, and is what I/Q files take."""
+
+    def _cw(self, path, rate=8000, pitch=700.0, text="CQ DE N0CALL", noise=0.0):
+        from tests.wav_builders import iq_wav
+
+        tone = np.real(enc.cw_baseband(text, rate, 20, offset_hz=pitch))
+        pad = np.zeros(rate // 2)
+        x = 0.5 * np.concatenate([pad, tone, pad])
+        if noise:
+            x = x + noise * np.random.default_rng(2).standard_normal(len(x))
+        iq_wav(path, x, "int", 2, rate)
+        return path, len(x)
+
+    @pytest.mark.parametrize("rate,pitch", [(8000, 700.0), (48000, 600.0)])
+    def test_the_pitch_is_found(self, tmp_path, capsys, rate, pitch):
+        path, frames = self._cw(tmp_path / "cw.wav", rate, pitch, noise=0.05)
+        assert main(["decode", "cw", "-i", str(path)]) == 0
+        out = capsys.readouterr().out
+        assert "CQ DE N0CALL" in out, out
+        assert f"Loaded {frames} samples" in out
+        assert "one channel), read as a receiver's audio" in out
+        assert f"its Morse tone at {pitch:.0f} Hz (found" in out, out
+
+    def test_the_pitch_given(self, tmp_path, capsys):
+        path, _frames = self._cw(tmp_path / "cw.wav", noise=0.05)
+        assert main(["decode", "cw", "-i", str(path), "--pitch", "700"]) == 0
+        out = capsys.readouterr().out
+        assert "CQ DE N0CALL" in out, out
+        assert "its Morse tone at 700 Hz (given with --pitch)" in out
+        # (A pitch that isn't the tone's: nothing, as in the window.)
+        assert main(["decode", "cw", "-i", str(path), "--pitch", "1500"]) == 0
+        assert "Decoded 0 CW message(s)" in capsys.readouterr().out
+
+    def test_no_tone_is_said(self, tmp_path, capsys):
+        from tests.wav_builders import iq_wav
+
+        path = tmp_path / "hiss.wav"
+        noise = 0.2 * np.random.default_rng(4).standard_normal(16000)
+        iq_wav(path, noise, "int", 2, 8000)
+        assert main(["decode", "cw", "-i", str(path)]) == 1
+        out = capsys.readouterr().out
+        assert "no Morse tone in hiss.wav" in out
+        assert "--pitch" in out
+
+    def test_a_pitch_outside_its_sound_is_said(self, tmp_path, capsys):
+        path, _frames = self._cw(tmp_path / "cw.wav")
+        assert main(["decode", "cw", "-i", str(path), "--pitch", "5000"]) == 1
+        out = capsys.readouterr().out
+        assert "5000 Hz isn't in cw.wav's sound (0 Hz to 4 kHz)" in out
+
+    def test_offset_still_reads_it_as_iq(self, tmp_path, capsys):
+        path, _frames = self._cw(tmp_path / "cw.wav")
+        assert main(["decode", "cw", "-i", str(path), "--offset", "-1300"]) == 0
+        out = capsys.readouterr().out
+        assert "CQ DE N0CALL" in out
+        assert "which --offset counts from" in out
+        assert "read as a receiver's audio" not in out
+
+    def test_pitch_is_for_morse_in_audio(self, tmp_path, capsys):
+        """(Not with --offset, another protocol, or an I/Q recording.)"""
+        path, _frames = self._cw(tmp_path / "cw.wav")
+        iq = _save(tmp_path / "iq.sigmf-data", _place(_aprs("!4903.50N/07201.75W>x")))
+        for argv in (
+            ["decode", "cw", "-i", str(path), "--pitch", "700", "--offset", "0"],
+            ["decode", "aprs", "-i", str(path), "--pitch", "700"],
+            ["decode", "cw", "-i", str(iq), "--pitch", "700"],
+        ):
+            assert main(argv) == 1, argv
+            out = capsys.readouterr().out
+            assert "--pitch is the pitch of a Morse tone" in out, out
+
+    def test_max_samples_counts_its_own_samples(self, tmp_path, capsys):
+        """(As the other audio decoders count them.)"""
+        path, _frames = self._cw(tmp_path / "cw.wav")
+        argv = ["decode", "cw", "-i", str(path), "--max-samples", "16000"]
+        assert main(argv) == 0
+        assert "Loaded 16000 samples (2.000s at 8 kS/s" in capsys.readouterr().out

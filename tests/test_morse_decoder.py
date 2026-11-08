@@ -696,3 +696,78 @@ class TestDemoBeacon:
         assert results[0] == results[1]
         assert "VVV DE SDR" in results[0]
         assert decoder.status.detail == "15 WPM"
+
+
+def _cw_audio(text, rate, pitch, wpm=20, amplitude=0.4, noise=0.0, seed=1):
+    """Morse ``text`` as a receiver's CW audio: a ``pitch`` Hz tone keyed,
+    with white noise of standard deviation ``noise``, a pause each side."""
+    tone = np.real(enc.cw_baseband(text, rate, wpm, offset_hz=pitch))
+    pad = np.zeros(int(0.5 * rate))
+    x = amplitude * np.concatenate([pad, tone, pad])
+    if noise:
+        x = x + noise * np.random.default_rng(seed).standard_normal(len(x))
+    return x.astype(np.float32)
+
+
+class TestPitchFinder:
+    """R8-12: the pitch of a Morse tone in a receiver's audio, found the
+    way ``sdr-scan decode cw`` finds it in a one-channel audio recording:
+    where its averaged spectrum peaks between 150 Hz and 3 kHz, standing
+    clear of the noise."""
+
+    @pytest.mark.parametrize("rate,pitch", [(8000, 700.0), (48000, 600.0)])
+    def test_finds_a_keyed_tone_in_noise(self, rate, pitch):
+        from sdr_module.dsp.morse import PitchFinder
+
+        finder = PitchFinder(rate)
+        finder.add(_cw_audio(MESSAGE, rate, pitch, noise=0.1))
+        assert finder.pitch == pytest.approx(pitch, abs=4.0)
+
+    def test_fed_in_pieces_as_at_once(self):
+        from sdr_module.dsp.morse import PitchFinder
+
+        x = _cw_audio(MESSAGE, 8000, 812.0, noise=0.05)
+        whole, pieces = PitchFinder(8000), PitchFinder(8000)
+        whole.add(x)
+        rng = np.random.default_rng(3)
+        start = 0
+        while start < len(x):
+            size = int(rng.integers(1, 3000))
+            pieces.add(x[start : start + size])
+            start += size
+        assert pieces.pitch == pytest.approx(whole.pitch, abs=1e-6)
+        assert whole.pitch == pytest.approx(812.0, abs=4.0)
+
+    def test_the_strongest_tone_in_the_range(self):
+        """(Of two stations the louder; a hum below 150 Hz doesn't count.)"""
+        from sdr_module.dsp.morse import PitchFinder
+
+        rate = 8000
+        t = np.arange(4 * rate) / rate
+        x = (
+            0.1 * np.sin(2 * np.pi * 500 * t)
+            + 0.3 * np.sin(2 * np.pi * 900 * t)
+            + 0.8 * np.sin(2 * np.pi * 60 * t)
+        )
+        finder = PitchFinder(rate)
+        finder.add(x)
+        assert finder.pitch == pytest.approx(900.0, abs=4.0)
+
+    def test_no_tone_no_pitch(self):
+        """(Noise alone, silence, or nothing at all.)"""
+        from sdr_module.dsp.morse import PitchFinder
+
+        rng = np.random.default_rng(5)
+        for x in (0.2 * rng.standard_normal(40000), np.zeros(40000), np.zeros(0)):
+            finder = PitchFinder(8000)
+            finder.add(x)
+            assert finder.pitch is None
+
+    def test_a_short_take(self):
+        """(Shorter than one stretch of the spectrum: still found.)"""
+        from sdr_module.dsp.morse import PitchFinder
+
+        rate = 48000
+        finder = PitchFinder(rate)
+        finder.add(0.5 * np.sin(2 * np.pi * 750 * np.arange(3000) / rate))
+        assert finder.pitch == pytest.approx(750.0, abs=8.0)

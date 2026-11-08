@@ -274,3 +274,85 @@ class TestReadingAOneChannelFile:
             np.testing.assert_allclose(
                 player.read(player.total_samples), load_iq_file(path)[0], atol=1e-6
             )
+
+
+class TestAOneChannelFileWithoutARate:
+    """files-2: a one-channel WAV file whose header gives no sample rate
+    (0). The rate it gets from elsewhere, its sidecar's or the caller's,
+    was taken as its I/Q rate, though a sidecar gives the file's own rate
+    (the rate of its real samples, as a header does, and as SigMF gives a
+    real dataset's): every frequency came out doubled and shifted, the
+    duration halved, the center 0 Hz and the filter the shortest (a 300 Hz
+    tone's mirror image 5.6 dB down, against 54 dB). Now its I/Q is worked
+    out from that rate as from a header's."""
+
+    def _file(self, tmp_path, name="rate0.wav", seconds=2.0):
+        frames = int(seconds * RATE)
+        x = _cos(frames, 1000.0, amplitude=0.4)
+        x += _cos(frames, 300.0, amplitude=0.4, phase=1.1)
+        path = tmp_path / name
+        write_wav(path, fmt_body(1, 0, 2), encode(x, "int", 2))
+        return path, frames
+
+    @staticmethod
+    def _tones_right(y):
+        """1 kHz and 300 Hz at their own frequencies (I/Q at 24 kS/s
+        centred on 12 kHz), each once: the 300 Hz tone's mirror image over
+        50 dB down (the filter sized for 48 kHz)."""
+        for tone, floor_db in ((1000.0, -90.0), (300.0, -50.0)):
+            wanted, mirror = _components(y, tone - RATE / 4, RATE / 2, 1000, 24000)
+            assert abs(wanted) == pytest.approx(0.4, rel=1e-2), tone
+            assert 20 * np.log10(abs(mirror) / abs(wanted)) < floor_db, tone
+
+    def test_its_sidecars_rate_is_its_own(self, tmp_path):
+        path, frames = self._file(tmp_path)
+        write_sidecar(path, SampleFormat.INT16, RATE, 0.0, header_bytes=44)
+        info = detect_format(path)
+        assert info.is_valid, info.error_message
+        assert (info.sample_rate, info.center_frequency) == (RATE / 2, RATE / 4)
+        assert info.num_samples == frames // 2
+        assert info.duration_seconds == pytest.approx(frames / RATE)
+        assert info.metadata["wav_frame_rate"] == RATE
+        with IQPlayer(path) as player:
+            assert (player.sample_rate, player.center_frequency) == (RATE / 2, RATE / 4)
+            assert player.duration_seconds == pytest.approx(frames / RATE)
+            y = player.read(player.total_samples)
+        self._tones_right(y)
+
+    def test_a_sidecar_can_still_place_it(self, tmp_path):
+        path, _frames = self._file(tmp_path)
+        write_sidecar(path, SampleFormat.INT16, RATE, 10.7e6, header_bytes=44)
+        assert detect_format(path).center_frequency == 10.7e6
+        assert detect_format(path).sample_rate == RATE / 2
+        with IQPlayer(path) as player:
+            assert (player.sample_rate, player.center_frequency) == (RATE / 2, 10.7e6)
+
+    def test_the_callers_rate_is_its_iq_rate_as_ever(self, tmp_path):
+        """(IqFileOptions.open_player passes the I/Q rate, half the file's
+        own.) Its own frequencies and filter follow from it: centred on a
+        quarter of the file's rate unless the caller gives a center."""
+        path, frames = self._file(tmp_path)
+        with IQPlayer(path, sample_rate=RATE / 2) as player:
+            assert (player.sample_rate, player.center_frequency) == (RATE / 2, RATE / 4)
+            assert player.duration_seconds == pytest.approx(frames / RATE)
+            y = player.read(player.total_samples)
+        self._tones_right(y)
+        with IQPlayer(path, sample_rate=RATE / 2, center_frequency=7.1e6) as player:
+            assert player.center_frequency == 7.1e6
+        with IQPlayer(path) as player:  # (nothing says it: unknown, as before)
+            assert (player.sample_rate, player.center_frequency) == (0.0, 0.0)
+
+    def test_two_channels_take_a_sidecars_rate_as_their_iq_rate(self, tmp_path):
+        """(As before: a two-channel file's samples are I/Q, a sidecar's
+        rate is theirs. detect_format's duration now counts it too.)"""
+        x = np.exp(2j * np.pi * 3000.0 * np.arange(4800) / RATE).astype(np.complex64)
+        path = tmp_path / "iq_rate0.wav"
+        offset = write_wav(
+            path, fmt_body(2, 0, 2), encode(np.column_stack([x.real, x.imag]), "int", 2)
+        )
+        write_sidecar(path, SampleFormat.INT16, RATE, 145e6, header_bytes=offset)
+        info = detect_format(path)
+        assert (info.sample_rate, info.center_frequency) == (RATE, 145e6)
+        assert info.duration_seconds == pytest.approx(len(x) / RATE)
+        with IQPlayer(path) as player:
+            assert (player.sample_rate, player.total_samples) == (RATE, len(x))

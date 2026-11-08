@@ -93,6 +93,11 @@ def hilbert_taps(context: int = CONTEXT) -> np.ndarray:
 #: The shortest filter's taps (34).
 TAPS = hilbert_taps(CONTEXT)
 
+#: Up to this rate (Hz) a one-channel recording is probably audio, a
+#: receiver's sound (an IF or RF sampled directly is faster): File > Decode
+#: Recording and ``sdr-scan decode`` decode its sound as a receiver's audio.
+AUDIO_RATE_MAX = 200e3
+
 
 def iq_rate(frame_rate: float) -> float:
     """The I/Q sample rate of a real recording at ``frame_rate``: half."""

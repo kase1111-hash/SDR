@@ -11357,6 +11357,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             options = dialog.options()
             if options is None:
                 return None
+        if purpose == "decode":
+            # The center the file's name gives, as Import Options offers it
+            # for Open Recording: a frequency to decode at (R7W-06).
+            options = options.with_name_center()
         return options
 
     def _confirm_stop_recordings(self, name: str) -> bool:
@@ -11569,10 +11573,22 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         unknown = "unknown (not stored in the file)"
         rate = options.sample_rate
         center = options.center_hz
+        rate_text = format_rate(rate) if rate else unknown
+        if options.real_signal and rate:
+            rate_text = options.rate_text  # (its I/Q's, half its own: as Info)
+        center_text = format_frequency(center) if center else unknown
+        # An audio file's own frequencies are its sound's: no receiver was
+        # tuned to their middle, so there is nowhere to tune (ui-3).
+        placed = bool(center) and not (options.audio and options.own_frequencies)
+        if center and not placed:
+            center_text += (
+                " (the middle of its own frequencies, 0 Hz to "
+                f"{format_frequency(2.0 * center)})"
+            )
         lines = [
             f"Sample format: {options.format_label}",
-            f"Sample rate: {format_rate(rate) if rate else unknown}",
-            f"Center frequency: {format_frequency(center) if center else unknown}",
+            f"Sample rate: {rate_text}",
+            f"Center frequency: {center_text}",
         ]
         if rate:
             lines.append(f"Length: {loaded.samples / rate:.1f} s")
@@ -11603,7 +11619,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 "center frequency it doesn't say)"
             )
         tune_btn = None
-        if center:
+        if placed:
             tune_btn = box.addButton("&Tune There", QMessageBox.ButtonRole.ActionRole)
             tune_btn.setToolTip(
                 f"Tune the receiver to {format_frequency(center)}, where the "

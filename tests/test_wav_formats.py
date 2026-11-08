@@ -230,6 +230,61 @@ class TestStillRefusedInPlainWords:
         with pytest.raises(wav_file.WavError, match="extensible"):
             wav_file.read_wav_header(path)
 
+    @pytest.mark.parametrize("channels", [2, 1])
+    @pytest.mark.parametrize("justified", ["left", "right"])
+    def test_samples_in_wider_words_than_their_bits(
+        self, tmp_path, channels, justified
+    ):
+        """files-3: a plain PCM fmt chunk saying 24 bits a sample with a
+        block align of 4 bytes a channel (24-bit samples in 32-bit words, as
+        ALSA's arecord wrote S24_LE) was read as packed 3-byte samples: a
+        third more of them than the file holds, every one wrong (noise),
+        with no word of it (the sample check trusts a WAV header). Where in
+        its word each sample lies the header doesn't say (left-justified,
+        or in the low three bytes as arecord's): refused in plain words."""
+        x = _tone() if channels == 2 else _tone().real
+        ints = np.rint(interleave(x) * full_scale(3)).astype(np.int64)
+        words = ints << 8 if justified == "left" else ints  # (sign-extended)
+        path = tmp_path / "s24_le.wav"
+        write_wav(path, fmt_body(channels, RATE, 4, bits=24), integers(words, 4))
+        said = "24-bit samples are stored in 32-bit words"
+        with pytest.raises(wav_file.WavError, match=said):
+            wav_file.read_wav_header(path)
+        info = detect_format(path)
+        assert not info.is_valid and said in info.error_message
+        with pytest.raises(ValueError, match=said):
+            IQPlayer(path)
+        check = check_iq_samples(path)
+        assert not check.ok and said in check.problem
+        with pytest.raises(ValueError, match=said):
+            AudioPlayer(path)
+
+    def test_samples_in_words_they_fill_still_read(self, tmp_path):
+        """(Unchanged: packed 24-bit samples, the extensible format's 32-bit
+        words with 24 valid bits, whose wBitsPerSample is the word's, and a
+        block align of 0, a slip whose samples are packed.)"""
+        x = _tone()
+        ints = np.rint(interleave(x) * full_scale(3)).astype(np.int64)
+        packed = tmp_path / "packed.wav"
+        write_wav(packed, fmt_body(2, RATE, 3), integers(ints, 3))
+        ext = tmp_path / "ext.wav"
+        write_wav(
+            ext, fmt_body(2, RATE, 4, extensible=True, valid=24), integers(ints << 8, 4)
+        )
+        no_align = tmp_path / "align0.wav"
+        body = bytearray(fmt_body(2, RATE, 2))
+        body[12:14] = b"\0\0"  # nBlockAlign 0
+        write_wav(no_align, bytes(body), encode(interleave(x), "int", 2))
+        for path, width, step in (
+            (packed, 3, 2e-7),
+            (ext, 4, 2e-7),
+            (no_align, 2, 4e-5),
+        ):
+            assert wav_file.read_wav_header(path).sample_width == width
+            with IQPlayer(path) as player:
+                assert player.total_samples == len(x)
+                np.testing.assert_allclose(player.read(len(x) + 10), x, atol=step)
+
     def test_more_than_two_channels(self, tmp_path):
         """Four channels aren't I and Q: refused, not read as garbage."""
         path = tmp_path / "quad.wav"

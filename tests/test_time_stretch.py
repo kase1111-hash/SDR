@@ -227,8 +227,8 @@ class TestStereo(unittest.TestCase):
         has none, so frames lined up on nothing (exactly opposite: 77-165
         cents off, and its level falling) or on the hiss in the sum (5-23
         cents, the side warbling at the frame rate). Each side's
-        correlation is added instead: in phase, in opposite phase or
-        different on each side, all line up."""
+        correlation counts instead (averaged): in phase, in opposite phase
+        or different on each side, all line up."""
         left = _tone(2.0, 440.0)
         hiss = 1e-4 * np.random.default_rng(1).standard_normal((len(left), 2))
         exact = np.stack([left, -left], axis=1)

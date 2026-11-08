@@ -252,6 +252,8 @@ class ScanHit:
         readings = data.get("readings")
         if isinstance(readings, dict):
             for key, value in readings.items():
+                if isinstance(value, bool):
+                    continue  # (true/false is no level: float() reads 1, 0)
                 try:
                     peak = float(value)
                 except (TypeError, ValueError, OverflowError):
@@ -265,6 +267,22 @@ class ScanHit:
         else:
             hit.readings = {}
         return hit
+
+
+def squelch_text(hit: ScanHit) -> str:
+    """The tone squelch Listen applies to a result (a bookmark's: FM
+    only), as its tooltip and Export Results say it: ``"tone squelch
+    100.0 Hz"``, ``"DCS 023 N"``, ``"reverse tone squelch 123.0 Hz"``
+    (muted while it is heard: TSQL-R, DTCS-R); "" for none."""
+    if hit.mode != "FM":
+        return ""
+    text = f"tone squelch {hit.tone_hz:.1f} Hz" if hit.tone_hz else ""
+    code = parse_dcs(hit.dcs)
+    if code is not None:
+        text = dcs_label(*code)
+    if text and hit.reverse:
+        text = f"reverse {text}"
+    return text
 
 
 def _band_name(label: str) -> str:
@@ -2227,16 +2245,8 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         mode = mode_text(hit.mode, hit.fm_deviation)
         if mode:
             width = f", {hit.bandwidth} filter" if hit.bandwidth else ""
-            tone = (
-                f", tone squelch {hit.tone_hz:.1f} Hz"
-                if hit.tone_hz and hit.mode == "FM"
-                else ""
-            )
-            code = parse_dcs(hit.dcs) if hit.mode == "FM" else None
-            if code is not None:
-                tone = f", {dcs_label(*code)}"
-            if tone and hit.reverse:
-                tone = f", reverse {tone[2:]}"  # (muted while it is heard)
+            squelch = squelch_text(hit)
+            tone = f", {squelch}" if squelch else ""
             lines.append(f"Listen: {mode}{width}{tone}")
         if hit.first_seen:
             first = datetime.fromtimestamp(hit.first_seen).strftime("%H:%M:%S")
@@ -2432,9 +2442,13 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         if not path.lower().endswith(".csv"):
             path += ".csv"
         rows = sorted(self._hits, key=lambda h: h.frequency_hz)
-        # Results of a sweep with both receivers also say which read each,
-        # and whose reading the level and SNR are (after the other columns:
-        # a single receiver's export is as it was).
+        # A bookmark's result with a tone squelch says it (two bookmarks on
+        # one frequency may differ by it alone); results of a sweep with
+        # both receivers also say which read each, and whose reading the
+        # level and SNR are (after the other columns: an export without
+        # either is as it was).
+        squelch = [squelch_text(hit) for hit in rows]
+        squelched = any(squelch)
         both = any(hit.receiver for hit in rows)
         try:
             with open(path, "w", newline="", encoding="utf-8") as handle:
@@ -2454,9 +2468,10 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                         "Last heard",
                         "Times heard",
                     ]
+                    + (["Squelch"] if squelched else [])
                     + (["Receiver", "Level from"] if both else [])
                 )
-                for hit in rows:
+                for hit, tone in zip(rows, squelch, strict=True):
                     band = band_for(hit.frequency_hz)
                     writer.writerow(
                         [
@@ -2473,6 +2488,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
                             _iso(hit.last_seen),
                             hit.count,
                         ]
+                        + ([tone] if squelched else [])
                         + (
                             [hit.read_by, RECEIVER_NAMES.get(hit.receiver, "")]
                             if both

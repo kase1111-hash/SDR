@@ -1264,13 +1264,14 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
     def _update_views(self) -> None:
         """Show the protocol's own view (Aircraft, Text), in front when the
         protocol was just chosen; the others' tabs hide, unless they hold
-        what a recording decoded (Decode Recording's own protocol)."""
+        what a recording decoded (Decode Recording's own protocol) or what
+        another receiver decoded (the Second Receiver's), until Clear."""
         proto = self.protocol()
         chosen = proto != getattr(self, "_views_for", None)
         self._views_for = proto
         for name, view in self._protocol_views.items():
             index = self._tabs.indexOf(view)
-            shown = name == proto or view.has_recordings()
+            shown = name == proto or self._view_kept(view)
             if self._tabs.isTabVisible(index) != shown:
                 self._tabs.setTabVisible(index, shown)
             if name == proto and chosen:
@@ -1286,10 +1287,16 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         if (
             proto != "ADS-B"
             and self._filter_address
-            and not self._aircraft_view.has_recordings()
+            and not self._view_kept(self._aircraft_view)
         ):
             self.set_address_filter("")
         self._fit_tab_bar()
+
+    @staticmethod
+    def _view_kept(view: Any) -> bool:
+        """Whether a protocol's view stays whatever protocol is chosen: it
+        holds a recording's list or another receiver's (until Clear)."""
+        return bool(view.has_recordings() or view.has_other_receivers())
 
     def resizeEvent(self, event: Any) -> None:  # noqa: N802 (Qt API)
         super().resizeEvent(event)
@@ -1980,8 +1987,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 ("2nd RX": the Second Receiver's). Its rows say so before
                 the protocol ("2nd RX · POCSAG": first, so a Protocol column
                 too narrow for the whole name still shows whose they are)
-                and are counted apart, as a recording's are; they stay out
-                of the main receiver's Aircraft and Text views.
+                and are counted apart, as a recording's are. Its aircraft
+                join the live Aircraft list (the same sky: a row per
+                aircraft, saying which receiver heard it, and when); its
+                Morse text is an entry of its own in the Text view.
         """
         now = datetime.now()
         if when is not None:
@@ -1990,11 +1999,11 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         timestamp = now.strftime("%H:%M:%S.%f")[:-3]
         protocol, address, content = str(protocol), str(address), str(content)
         source = str(source or "")
+        receiver = "" if source else str(receiver or "")
         if source:
             protocol = f"{protocol} (file)"
         elif receiver:
             protocol = f"{receiver} · {protocol}"
-            message = None  # (the views are the main receiver's)
             self._receiver_protocols.add(protocol)
         valid = bool(valid)
         if freq_hz is None:
@@ -2069,6 +2078,8 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
         # A recording's messages go to its own list in the views, timed by
         # its clock: an aircraft heard in it is not one heard now (M-D1).
+        # Another receiver's are live: its aircraft join the live list, its
+        # Morse text is an entry of its own.
         kind = type(message).__name__ if message is not None else ""
         if source:
             at, sent = at_s, when
@@ -2076,10 +2087,13 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 sent = now  # (as the table times it)
         else:
             at, sent = None, None
+        whose = {"receiver": receiver} if receiver else {}
         view, added = None, False
         if kind == "ADSBMessage" and valid:
             view = self._aircraft_view
-            added = view.update_message(message, source=source, at_s=at, when=sent)
+            added = view.update_message(
+                message, source=source, at_s=at, when=sent, **whose
+            )
         elif kind == "MorseMessage":
             view = self._cw_view
             added = view.add_line(
@@ -2088,9 +2102,15 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 at_s=at,
                 when=sent,
                 wpm=getattr(message, "wpm", 0.0),
+                **whose,
             )
         if view is not None and added:
-            self._recording_shown(view)
+            if receiver:
+                # Its tab shows (whatever protocol this window decodes), not
+                # in front: nothing was asked here.
+                self._update_views()
+            else:
+                self._recording_shown(view)
         if self._filter_address:
             self._show_filter_label()  # its count (and the callsign, once heard)
 

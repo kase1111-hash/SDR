@@ -14,6 +14,12 @@ above the view: what is heard live and what a recording holds are never
 mixed. A recording's messages are timed by its own clock (its time of day
 when it says when it was made, else the time into it), so its aircraft
 neither dim nor go as the wall clock runs on.
+
+What another receiver decodes (the Second Receiver window's, marked
+"2nd RX") is live too: its aircraft join the live list (the same sky, one
+row per aircraft whichever receiver heard it, saying which did and when),
+and its Morse text is an entry of its own under "Showing:" (two receivers'
+texts mixed line by line would make no sense).
 """
 
 from __future__ import annotations
@@ -73,6 +79,9 @@ class Aircraft:
     messages: int = 0
     first_seen: float = 0.0
     last_seen: float = 0.0
+    #: When each receiver last heard it: "" this window's, else another
+    #: receiver's mark ("2nd RX", the Second Receiver's).
+    heard_by: Dict[str, float] = field(default_factory=dict)
 
     @property
     def name(self) -> str:
@@ -179,9 +188,37 @@ def describe_aircraft(aircraft: Aircraft, now: float, heard: str = "") -> str:
     if heard:
         parts.append(heard)
         return "  ·  ".join(parts)
-    age = format_age(now - aircraft.last_seen)
-    parts.append("last heard just now" if age == "now" else f"last heard {age} ago")
+    parts.append(
+        f"last heard {_ago(now - aircraft.last_seen)}{_heard_by(aircraft, now)}"
+    )
     return "  ·  ".join(parts)
+
+
+#: What the views call this window's own receiver beside another one.
+MAIN_RECEIVER = "main receiver"
+
+
+def _ago(seconds: float) -> str:
+    """``"just now"``, ``"3 s ago"``, ``"2 min ago"``."""
+    age = format_age(seconds)
+    return "just now" if age == "now" else f"{age} ago"
+
+
+def _heard_by(aircraft: Aircraft, now: float) -> str:
+    """Which receivers heard a live aircraft, and when: "" when only this
+    window's did (as it read before there was another), " by the 2nd RX"
+    when only another did, else each with its own time ("(main receiver
+    just now, 2nd RX 4 s ago)")."""
+    others = [mark for mark in aircraft.heard_by if mark]
+    if not others:
+        return ""
+    if len(aircraft.heard_by) == 1:
+        return f" by the {others[0]}"
+    each = [
+        f"{mark or MAIN_RECEIVER} {_ago(now - seen)}"
+        for mark, seen in sorted(aircraft.heard_by.items(), key=lambda kv: bool(kv[0]))
+    ]
+    return f" ({', '.join(each)})"
 
 
 class AircraftTracker:
@@ -220,9 +257,12 @@ class AircraftTracker:
     def is_stale(self, aircraft: Aircraft) -> bool:
         return self.ages and self._clock() - aircraft.last_seen > self.STALE_S
 
-    def update(self, msg: Any, at: Optional[float] = None) -> Optional[Aircraft]:
-        """Take one ADS-B message (heard ``at``, default: the clock's now);
-        returns its aircraft (None if the message is not a valid one with an
+    def update(
+        self, msg: Any, at: Optional[float] = None, receiver: str = ""
+    ) -> Optional[Aircraft]:
+        """Take one ADS-B message (heard ``at``, default: the clock's now,
+        by ``receiver``: "" this window's, else another's mark); returns
+        its aircraft (None if the message is not a valid one with an
         address)."""
         icao = str(getattr(msg, "icao_address", "") or "").strip()
         if not icao or not getattr(msg, "valid", True):
@@ -233,6 +273,7 @@ class AircraftTracker:
             aircraft = self._aircraft[icao] = Aircraft(icao=icao, first_seen=now)
         aircraft.messages += 1
         aircraft.last_seen = now
+        aircraft.heard_by[str(receiver or "")] = now
         callsign = str(getattr(msg, "callsign", "") or "").strip()
         if callsign:
             aircraft.callsign = callsign
@@ -336,6 +377,19 @@ class _AircraftItem(QTableWidgetItem if HAS_PYQT6 else object):
 #: What the source bar calls what is heard now.
 LIVE = "Live"
 
+#: How another receiver's list is told apart from a recording's in a view's
+#: list of sources (a file name never holds it): see :func:`receiver_source`.
+_RECEIVER_SOURCE = "\0"
+
+
+def receiver_source(mark: str) -> str:
+    """The source a view knows another receiver's live list by ("2nd RX":
+    the Second Receiver's): for :meth:`MorseTextView.show_source` and
+    :meth:`MorseTextView.plain_text`. Never a recording's name, even one
+    named like the receiver."""
+    return _RECEIVER_SOURCE + str(mark)
+
+
 _LIVE_TABLE_TIP = (
     "One row per aircraft heard, with its latest information. Click an "
     "aircraft to show only its messages under Messages (double-click to go "
@@ -389,15 +443,45 @@ class SourceBar(QWidget if HAS_PYQT6 else object):
         label.setBuddy(self.combo)
         self.combo.activated.connect(self._on_activated)
         row.addWidget(self.combo, 1)
+        self._what = what
+        self._tip = self.combo.toolTip()
         self.hide()
 
-    def set_sources(self, recordings: List[str], current: str) -> None:
-        """Offer Live and ``recordings`` (in this order), ``current`` picked;
-        shown while there is a recording."""
+    def set_sources(
+        self, recordings: List[str], current: str, receivers: Any = ()
+    ) -> None:
+        """Offer Live, another receiver's live list for each mark in
+        ``receivers`` ("2nd RX"), then ``recordings`` (in this order),
+        ``current`` picked; shown while there is more than Live."""
+        receivers = [str(mark) for mark in receivers]
         blocked = self.combo.blockSignals(True)
         try:
             self.combo.clear()
             self.combo.addItem(LIVE, "")
+            tip = self._tip
+            if receivers:
+                self.combo.setItemData(
+                    0,
+                    f"What this window's receiver decodes now ({MAIN_RECEIVER})",
+                    Qt.ItemDataRole.ToolTipRole,
+                )
+                tip = (
+                    f"Which {self._what.lower()} this view shows: {LIVE} (what "
+                    f"this window's receiver decodes now), "
+                    f"{', '.join(receivers)} (what the Second Receiver window "
+                    "decodes now) or a recording File > Decode Recording "
+                    "decoded, timed by the recording's clock. Clear empties "
+                    "them all."
+                )
+            for mark in receivers:
+                self.combo.addItem(mark, receiver_source(mark))
+                self.combo.setItemData(
+                    self.combo.count() - 1,
+                    f"What the Second Receiver window decodes now ({mark})",
+                    Qt.ItemDataRole.ToolTipRole,
+                )
+            if self.combo.toolTip() != tip:
+                self.combo.setToolTip(tip)
             for name in recordings:
                 self.combo.addItem(name, name)
                 self.combo.setItemData(
@@ -409,7 +493,7 @@ class SourceBar(QWidget if HAS_PYQT6 else object):
             self.combo.setCurrentIndex(max(0, index))
         finally:
             self.combo.blockSignals(blocked)
-        self.setVisible(bool(recordings))
+        self.setVisible(bool(recordings or receivers))
 
     def current_text(self) -> str:
         return self.combo.currentText()
@@ -476,6 +560,9 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         # came, and the list the table shows ("": live).
         self._recordings: Dict[str, _RecordedAircraft] = {}
         self._shown = ""
+        # Other receivers whose aircraft joined the live list since Clear
+        # (their marks, in the order they came: "2nd RX").
+        self._others: Dict[str, None] = {}
         # Each aircraft's Flight item (its row moves when the list is
         # sorted: the row is looked up from the item).
         self._items: Dict[str, Any] = {}
@@ -578,22 +665,33 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
         source: str = "",
         at_s: Optional[float] = None,
         when: Optional[datetime] = None,
+        receiver: str = "",
     ) -> bool:
         """Take a decoded ADS-B message: heard live, or (``source``) found
         in that recording by Decode Recording, ``at_s`` seconds into it and
         (``when``, if the recording says when it was made) at that time.
-        True when it started the list of a recording (it is shown now)."""
+        True when it started the list of a recording (it is shown now).
+
+        ``receiver``: heard live by another receiver ("2nd RX", the Second
+        Receiver's): the same sky, so its aircraft are the live list's, a
+        row per aircraft whichever receiver heard it, and say which did
+        (see :func:`describe_aircraft`). True for that receiver's first
+        aircraft since Clear (the view holds another receiver's now)."""
         source = str(source or "")
         if source:
             return self._recorded(msg, source, at_s, when)
-        aircraft = self.tracker.update(msg)
+        receiver = str(receiver or "")
+        aircraft = self.tracker.update(msg, receiver=receiver)
         if aircraft is None:
             return False
+        first = bool(receiver) and receiver not in self._others
+        if first:
+            self._others[receiver] = None
         if not self._timer.isActive():
             self._timer.start()  # (ages tick, the gone go, shown or not)
         if not self._shown:
             self._show_row(aircraft)
-        return False
+        return first
 
     def _recorded(
         self, msg: Any, source: str, at_s: Optional[float], when: Optional[datetime]
@@ -632,6 +730,7 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
     def clear(self) -> None:
         self.tracker.clear()
         self._recordings.clear()
+        self._others.clear()
         self._shown = ""
         self._source_bar.set_sources([], "")
         self._show_list_tips()
@@ -694,6 +793,14 @@ class AircraftView(QWidget if HAS_PYQT6 else object):
 
     def has_recordings(self) -> bool:
         return bool(self._recordings)
+
+    def other_receivers(self) -> List[str]:
+        """The other receivers ("2nd RX") whose aircraft joined the live
+        list since Clear, in the order they came."""
+        return list(self._others)
+
+    def has_other_receivers(self) -> bool:
+        return bool(self._others)
 
     def tracker_for(self, source: str = "") -> Optional[AircraftTracker]:
         """The live aircraft (""), a recording's, or None (no such list)."""
@@ -1038,7 +1145,12 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
     A recording's text (``add_line(text, source=name, ...)``, Decode
     Recording) is kept apart from what is heard live, a list per recording,
     each line after its time by the recording's clock; the source bar above
-    picks the one shown (the newest recording when it comes)."""
+    picks the one shown (the newest recording when it comes).
+
+    Another receiver's text (``add_line(text, receiver="2nd RX")``, the
+    Second Receiver's, on a frequency of its own) is an entry of its own
+    there too, after Live (:func:`receiver_source` names it), each line as
+    it ends; it is shown when it starts if Live has nothing yet."""
 
     if HAS_PYQT6:
         # Its empty state's button was clicked.
@@ -1052,9 +1164,12 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         # Each recording's text (Decode Recording), in the order they came,
-        # and the one shown ("": live).
+        # and the one shown ("": live; a receiver's: receiver_source(mark)).
         self._recordings: Dict[str, _RecordedText] = {}
         self._shown = ""
+        # Each other receiver's live text since Clear, by its mark ("2nd
+        # RX"), in the order they came.
+        self._receivers: Dict[str, _RecordedText] = {}
         # The live speed and whether a signal is heard (shown when live is).
         self._live_speed = ("", False)
         self._source_bar = SourceBar("Text")
@@ -1125,6 +1240,7 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         at_s: Optional[float] = None,
         when: Optional[datetime] = None,
         wpm: float = 0.0,
+        receiver: str = "",
     ) -> bool:
         """A finished line of text (the live line is cleared: it was this
         line; the next :meth:`set_live` shows what follows). From a
@@ -1132,12 +1248,50 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         recording's text, after its time there (``when`` it was sent, if
         the recording says when it was made, else ``at_s`` seconds into it),
         at ``wpm``. True when it started the text of a recording (it is
-        shown now)."""
+        shown now).
+
+        From another receiver (``receiver``: "2nd RX"), it goes to that
+        receiver's text, at ``wpm``. True when it started that text (an
+        entry of its own; shown if Live has nothing yet)."""
         source = str(source or "")
         if source:
             return self._recorded_line(str(text), source, at_s, when, wpm)
+        receiver = str(receiver or "")
+        if receiver:
+            return self._receiver_line(str(text), receiver, wpm)
         self._live_line(text)
         return False
+
+    def _receiver_line(self, text: str, mark: str, wpm: float) -> bool:
+        record = self._receivers.get(mark)
+        new = record is None
+        if record is None:
+            record = self._receivers[mark] = _RecordedText(absolute=False)
+        record.lines.append(text)
+        del record.lines[: -self._MAX_LINES]
+        try:
+            record.wpm = float(wpm or 0.0)
+        except (TypeError, ValueError):
+            record.wpm = 0.0
+        key = receiver_source(mark)
+        if new:
+            # Shown when the live text has nothing (the main receiver decodes
+            # no Morse): else Live stays, the entry beside it.
+            live_empty = self.text.document().isEmpty()
+            self.show_source(key if not self._shown and live_empty else self._shown)
+            return True
+        if self._shown == key:
+            self._append_shown(text)
+        return False
+
+    def _append_shown(self, line: str) -> None:
+        """A new line of the list shown (a recording's or a receiver's)."""
+        cursor = QTextCursor(self._recorded.document())
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        if not self._recorded.document().isEmpty():
+            cursor.insertBlock()
+        cursor.insertText(line, self._format(False))
+        self._show_speed()
 
     def _recorded_line(
         self,
@@ -1166,12 +1320,7 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
             self.show_source(source)  # (the newest decode: what was asked)
             return True
         if self._shown == source:
-            cursor = QTextCursor(self._recorded.document())
-            cursor.movePosition(QTextCursor.MoveOperation.End)
-            if not self._recorded.document().isEmpty():
-                cursor.insertBlock()
-            cursor.insertText(line, self._format(False))
-            self._show_speed()
+            self._append_shown(line)
         return False
 
     def _live_line(self, text: str) -> None:
@@ -1198,7 +1347,7 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         self._show_speed()
 
     def _show_speed(self) -> None:
-        record = self._recordings.get(self._shown)
+        record = self._list(self._shown)
         if record is None:
             wpm_text, receiving = self._live_speed
         else:
@@ -1219,6 +1368,7 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         self._lines = 0
         self._tail.reset()
         self._recordings.clear()
+        self._receivers.clear()
         self.show_source("")
         self._source_bar.set_sources([], "")
         self._empty.set_visible(True)
@@ -1232,37 +1382,65 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         if self._shown == source:
             self.show_source("")
         else:
-            self._source_bar.set_sources(list(self._recordings), self._shown)
+            self._offer_sources()
 
     def show_source(self, source: str) -> None:
-        """Show the live text ("") or a recording's."""
+        """Show the live text (""), a recording's (its name) or another
+        receiver's (:func:`receiver_source` of its mark)."""
         source = str(source or "")
-        record = self._recordings.get(source)
+        record = self._list(source)
         if source and record is None:
             return
         changed = source != self._shown
         self._shown = source
-        self._source_bar.set_sources(list(self._recordings), source)
+        self._offer_sources()
         if record is not None and changed:
             self._recorded.setPlainText("\n".join(record.lines))
             self._recorded_tail.reset()
             self._recorded.moveCursor(QTextCursor.MoveOperation.End)
+            whose = (
+                source[len(_RECEIVER_SOURCE) :]
+                if source.startswith(_RECEIVER_SOURCE)
+                else "recording"
+            )
+            self._recorded.setAccessibleName(f"Morse text of the {whose}")
         self.text.setVisible(record is None)
         self._recorded.setVisible(record is not None)
         if record is None:
             self._recorded.clear()  # (rebuilt when shown again)
         self._show_speed()
 
+    def _list(self, source: str) -> Optional[_RecordedText]:
+        """The list ``source`` names: a recording's, another receiver's, or
+        None (live, or no such list)."""
+        if source.startswith(_RECEIVER_SOURCE):
+            return self._receivers.get(source[len(_RECEIVER_SOURCE) :])
+        return self._recordings.get(source)
+
+    def _offer_sources(self) -> None:
+        self._source_bar.set_sources(
+            list(self._recordings), self._shown, list(self._receivers)
+        )
+
     def sources(self) -> List[str]:
         """The recordings with text here, in the order they came."""
         return list(self._recordings)
 
     def shown_source(self) -> str:
-        """The text shown: "" (live) or a recording's name."""
+        """The text shown: "" (live), a recording's name, or another
+        receiver's :func:`receiver_source`."""
         return self._shown
 
     def has_recordings(self) -> bool:
         return bool(self._recordings)
+
+    def other_receivers(self) -> List[str]:
+        """The other receivers ("2nd RX") whose text is here, since Clear,
+        in the order they came."""
+        return list(self._receivers)
+
+    def has_other_receivers(self) -> bool:
+        return bool(self._receivers)
 
     def source_bar(self) -> "SourceBar":
         return self._source_bar
@@ -1286,11 +1464,12 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         return self._empty
 
     def plain_text(self, source: str = "") -> str:
-        """The live text (the line being received included), or a
-        recording's ("" for one not here)."""
+        """The live text (the line being received included), a recording's
+        or another receiver's (:func:`receiver_source`; "" for one not
+        here)."""
         if not source:
             return self.text.toPlainText()
-        record = self._recordings.get(source)
+        record = self._list(str(source))
         return "\n".join(record.lines) if record is not None else ""
 
     # -- internals -----------------------------------------------------------

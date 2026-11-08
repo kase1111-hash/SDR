@@ -525,9 +525,13 @@ class Frame:
     audio: Optional[np.ndarray]
     #: The STEREO lamp: (text, tone, tooltip), see stereo_reading.
     stereo: StereoReading = NO_STEREO_READING
-    #: The frequency the audio notch removes (Manual's, or the whistle
-    #: Auto found), None when it removes none or nothing was demodulated.
+    #: The frequency the audio notch removes (Manual's, or the strongest
+    #: whistle Auto found), None when it removes none or nothing was
+    #: demodulated.
     notch_hz: Optional[float] = None
+    #: Every frequency the notch removes: Manual's, or each whistle Auto
+    #: found (up to three, the strongest first); empty as for notch_hz.
+    notches: Tuple[float, ...] = ()
     #: Tone heard: (CTCSS tone, DCS code, checked), see ToneHeard.
     tone_heard: ToneHeard = (None, None, False)
 
@@ -720,6 +724,8 @@ class ReceiverDsp:
         frame.stereo = self._stereo_lamp(chain, received)
         # (Nothing is notched while nothing is demodulated.)
         frame.notch_hz = chain.notch_frequency_hz if self._demod_running else None
+        if self._demod_running:
+            frame.notches = tuple(chain.notch_frequencies_hz)
         frame.tone_heard = (
             tones.detected_hz,
             tones.detected_dcs,
@@ -3215,7 +3221,7 @@ if HAS_PYQT6:
                 self._show_auto_threshold(gate.last_threshold_db)
             self._show_stereo(frame.stereo)
             if self._notch_mode() == "auto":
-                self._show_notch_found(frame.notch_hz)
+                self._show_notch_found(frame.notches)
             tone, dcs, checked = frame.tone_heard
             self._show_tone_heard(tone, checked, dcs)
             self._show_decoded(result)

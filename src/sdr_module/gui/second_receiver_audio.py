@@ -41,6 +41,9 @@ from .audio_chain import (
     NOTCH_RANGE_HZ,
 )
 
+# (The main window's Audio group reads its readout's frequencies so.)
+from .control_panel import _frequencies
+
 # The main window's thresholds: STEREO lights at half the stereo
 # difference or more (about 10 dB of separation) and goes out below a
 # third of it (no flicker while the blend hovers); below
@@ -174,12 +177,13 @@ def stereo_reading(
 # Notch and low cut (the main window's Audio group's rules and wording)
 # ---------------------------------------------------------------------------
 
-#: The Notch's and the Low cut's tooltips where they apply.
+#: The Notch's and the Low cut's tooltips where they apply (the main
+#: window's Audio group's: Auto removes up to three whistles, M-A3).
 NOTCH_TIP = (
-    "Removes a whistle (a heterodyne) from the audio. Auto finds the "
-    "strongest steady one and follows it as it drifts, leaving voice alone "
-    "(for music use Off: a held note counts as a whistle); Manual removes "
-    "the frequency you set (AM, SSB, CW and narrow FM)."
+    "Removes whistles (heterodynes) from the audio. Auto finds up to three "
+    "steady ones, the strongest first, and follows each as it drifts, leaving "
+    "voice alone (for music use Off: a held note counts as a whistle); Manual "
+    "removes the frequency you set (AM, SSB, CW and narrow FM)."
 )
 LOW_CUT_TIP = (
     "Cuts the audio below this frequency: mains hum and rumble out, the "
@@ -209,17 +213,35 @@ def low_cut_unused(mode: str, deviation_hz: float) -> str:
     return notch_unused(mode, deviation_hz)
 
 
-def notch_found_text(hz: Optional[float]) -> Tuple[str, str, str]:
-    """Auto's readout, ``(text, tooltip, tone)``: the whistle it removes
-    (Hz), or None."""
-    if hz is None:
+def notch_found_text(found: Any) -> Tuple[str, str, str]:
+    """Auto's readout, ``(text, tooltip, tone)``: what it removes, a
+    whistle's frequency (Hz), several (a sequence, the strongest first: up
+    to three) or None, in the main window's wording
+    (``ControlPanel.show_notch_found``): several in order of frequency, so
+    the row doesn't jump about when two are about as loud, the strongest
+    first in the tooltip."""
+    whistles = _frequencies(found)
+    if not whistles:
         return (
             "None",
             "Auto hears no steady whistle on the channel: the audio plays as "
-            "it is. It finds one within about half a second.",
+            "it is. It finds one within about half a second, and removes up to "
+            "three at once.",
             "muted",
         )
-    return f"{hz:.0f} Hz", f"Auto removes a steady whistle at {hz:.1f} Hz", "success"
+    if len(whistles) == 1:
+        hz = whistles[0]
+        return (
+            f"{hz:.0f} Hz",
+            f"Auto removes a steady whistle at {hz:.1f} Hz",
+            "success",
+        )
+    text = ", ".join(f"{hz:.0f}" for hz in sorted(whistles)) + " Hz"
+    tip = (
+        f"Auto removes {len(whistles)} steady whistles, the strongest first: "
+        + ", ".join(f"{hz:.1f} Hz" for hz in whistles)
+    )
+    return text, tip, "success"
 
 
 # ---------------------------------------------------------------------------
@@ -469,6 +491,7 @@ if HAS_PYQT6:
             label.setBuddy(self._notch_spin)
             form.addRow(label, notch_row)
             self._notch_row = notch_row
+            self._notch_label = label  # ("Whistles:" for several)
             form.setRowVisible(notch_row, False)  # (Off)
             self._notch_combo.currentIndexChanged.connect(self._on_notch_changed)
             self._notch_spin.valueChanged.connect(self._on_notch_changed)
@@ -538,15 +561,20 @@ if HAS_PYQT6:
             self._low_cut_combo.setEnabled(not why)
             self._low_cut_combo.setToolTip(why or LOW_CUT_TIP)
 
-        def _show_notch_found(self, hz: Optional[float]) -> None:
-            """The Whistle row's readout in Auto (refreshed every frame:
-            nothing is touched unless it changed)."""
-            text, tip, tone = notch_found_text(hz)
+        def _show_notch_found(self, found: Any) -> None:
+            """The Whistle row's readout in Auto: every whistle it removes
+            (a frame's ``notches``, the strongest first; one frequency or
+            None also do). Refreshed every frame: nothing is touched unless
+            it changed."""
+            text, tip, tone = notch_found_text(found)
             label = self._notch_found
             if label.text() != text or label.toolTip() != tip:
                 label.setText(text)
                 label.setToolTip(tip)
                 set_tone(label, tone)
+            caption = "Whistles:" if len(_frequencies(found)) > 1 else "Whistle:"
+            if self._notch_label.text() != caption:
+                self._notch_label.setText(caption)
 
         def _restore_filters(self) -> None:
             """The saved tone squelch, Notch, its frequency and the Low cut,

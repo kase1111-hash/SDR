@@ -6647,8 +6647,11 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             return None
         target, target_deviation, _width = heard
         zone = cls._band_plan_zone(freq_hz)
-        if band is not None and cls._band_plan_zone(before_hz) == zone:
-            return None  # the same band (and segment): your mode stays
+        if zone != ("", "") and cls._band_plan_zone(before_hz) == zone:
+            # The same band (and segment), or the neighbourhood of a preset
+            # channel outside every band (a click off POCSAG's channel and
+            # back): your mode stays.
+            return None
         if mode == target:
             # FM at another deviation is not: FRS's 2.5 kHz clipped a 2 m
             # repeater (5 kHz), and a satellite's 25 kHz left it quiet.
@@ -6669,10 +6672,25 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
     def _band_plan_zone(freq_hz: float) -> Tuple[str, str]:
         """The band and, in an amateur band, the part of it (an FT8
         channel, the CW/data segment) ``freq_hz`` is in: a mode chosen
-        there stays while you tune within it."""
-        from ..core.band_plan import band_for, segment_listening
+        there stays while you tune within it. Outside every band, the
+        neighbourhood of a preset channel there (POCSAG 152.240 MHz, its
+        channel width either side): ``("", preset name)``; elsewhere
+        ``("", "")``, no place at all."""
+        from ..core.band_plan import band_for, preset_for, segment_listening
+        from ..core.frequency_manager import RX_PRESETS
 
         band = band_for(freq_hz)
+        if band is None:
+            near = [
+                (abs(freq_hz - preset.frequency_hz), str(preset.name))
+                for preset in RX_PRESETS
+                if abs(freq_hz - preset.frequency_hz) <= preset.bandwidth_hz
+                # (A channel preset, not a whole band's, itself outside
+                # every band.)
+                and preset_for(preset.frequency_hz) is preset
+                and band_for(preset.frequency_hz) is None
+            ]
+            return "", min(near)[1] if near else ""
         segment = segment_listening(freq_hz)
         return (
             band.name if band is not None else "",

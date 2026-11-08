@@ -555,5 +555,124 @@ class TestTheSecondReceiverSaysItsFmClips(_TypingCase):
         self.assertEqual(self.said, [])
 
 
+# --------------------------------------------------------------------------- #
+# R8-02: a lone preset channel keeps what you picked there
+# --------------------------------------------------------------------------- #
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestALonePresetKeepsWhatYouPickedThere(_TypingCase):
+    """R8-02: POCSAG 152.240 MHz is a preset channel outside every band.
+    With a deviation picked there by hand, a click 10 kHz away and 152.24
+    typed again set the preset's 12.5 kHz again, with its message: outside
+    every band the "same zone" test was skipped, so the short hop counted
+    as a far tune. Inside a band the same steps keep your choice. Now the
+    lone preset's neighbourhood (its channel width either side) is its
+    zone, in both windows; a real far tune to it still applies the
+    preset's listening."""
+
+    def type_main(self, text):
+        """Type ``text`` into the main window's Frequency box."""
+        self.win.activateWindow()
+        spin = self.win._frequency_field()
+        spin.setFocus()
+        self.settle()
+        spin.lineEdit().selectAll()
+        QTest.keyClicks(spin, text)
+        QTest.keyClick(spin, Qt.Key.Key_Return)
+
+    def main_listening(self):
+        panel = self.win._control_panel
+        mode = panel.get_demod_mode()
+        deviation = panel.get_fm_deviation_text() if mode == "FM" else ""
+        return mode, deviation, panel._bw_combo.currentText()
+
+    def windows(self):
+        """For each window: (name, type a frequency, tune as a click,
+        pick a deviation by hand, how it listens, its status line, clear
+        its status line)."""
+        rx, win = self.rx, self.win
+        panel = win._control_panel
+        return (
+            (
+                "Second Receiver",
+                self.type_frequency,
+                rx.tune,
+                rx._set_deviation,
+                self.listening,
+                rx.message,
+                rx._clear_message,
+            ),
+            (
+                "main window",
+                self.type_main,
+                win.set_frequency,
+                panel._fm_dev_combo.setCurrentText,
+                self.main_listening,
+                win._message_label.text,
+                win._clear_status_message,
+            ),
+        )
+
+    def start_on_2m(self):
+        self.type_main("145.8")
+        self.win._set_demod_mode("FM", "5 kHz", "25 kHz")
+        self.type_frequency("145.8")
+
+    def test_a_short_hop_off_the_channel_and_back_keeps_your_deviation(self):
+        self.start_on_2m()
+        for name, type_in, click, pick, listening, message, clear in self.windows():
+            type_in("152.24")
+            self.assertEqual(listening(), ("FM", "12.5 kHz", "25 kHz"), name)
+            self.assertTrue(message().startswith("POCSAG: listening"), name)
+            pick("5 kHz")
+            self.assertEqual(listening(), ("FM", "5 kHz", "25 kHz"), name)
+            for hop in (152.25e6, 152.2275e6, 152.265e6):  # (a click away)
+                self.assertTrue(click(hop), name)
+                clear()
+                type_in("152.24")
+                self.assertEqual(listening(), ("FM", "5 kHz", "25 kHz"), (name, hop))
+                self.assertEqual(message(), "", name)  # (nothing set, nothing said)
+
+    def test_a_far_tune_to_the_channel_still_hears_it_as_the_preset(self):
+        self.start_on_2m()
+        for name, type_in, _click, pick, listening, message, _clear in self.windows():
+            # (From another band, from a frequency outside every band far
+            # away, and from beyond the channel's neighbourhood.)
+            for start in ("145.8", "300", "152.3"):
+                type_in("152.24")
+                pick("5 kHz")
+                type_in(start)
+                type_in("152.24")
+                self.assertEqual(
+                    listening(), ("FM", "12.5 kHz", "25 kHz"), (name, start)
+                )
+                self.assertTrue(message().startswith("POCSAG: listening"), name)
+
+    def test_its_message_goes_with_a_far_tune_outside_every_band(self):
+        # (As LISTEN-13: the message about where you came from no longer
+        # applies. 300 MHz is in no band either, which read as the same
+        # place as POCSAG's channel.)
+        self.start_on_2m()
+        for name, type_in, _click, _pick, _listening, message, _clear in self.windows():
+            type_in("152.24")
+            self.assertTrue(message().startswith("POCSAG: listening"), name)
+            type_in("300")
+            self.assertEqual(message(), "", name)
+
+    def test_the_zone_of_a_lone_preset(self):
+        from sdr_module.gui.main_window import SDRMainWindow
+
+        zone = SDRMainWindow._band_plan_zone
+        pocsag = zone(152.24e6)
+        self.assertNotEqual(pocsag, ("", ""))
+        for near in (152.215e6, 152.25e6, 152.265e6):
+            self.assertEqual(zone(near), pocsag, near)
+        for far in (152.2e6, 152.3e6, 300e6):
+            self.assertEqual(zone(far), ("", ""), far)
+        # Inside a band, as before.
+        self.assertEqual(zone(145.8e6), zone(146.52e6))
+
+
 if __name__ == "__main__":
     unittest.main()

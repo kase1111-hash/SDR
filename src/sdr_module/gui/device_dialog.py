@@ -2007,12 +2007,11 @@ def _squitter_spans(pos: int, n: int, rate: float) -> List[tuple]:
 # demo device made with ``shared_sky`` (the main window's, the Second
 # Receiver's) whose stream starts (its first, or again after a stop) while
 # another such device streams (read in the last _SKY_LIVE_S) flies it on
-# that device's clock, so the two
-# receivers on 1090 MHz hear each of its replies at the same moment, bit
-# for bit, as two real receivers do (the Aircraft view counts it once). A
-# device on its own flies it from its own stream position 0, as before;
-# the other aircraft's replies and every other signal keep each device's
-# own clock.
+# that device's clock, so the two receivers on 1090 MHz hear each of its
+# replies at the same moment, bit for bit, as two real receivers do (the
+# Aircraft view counts it once). A device on its own flies it from its own
+# stream position 0, as before; the other aircraft's replies and every
+# other signal keep each device's own clock.
 _SKY_LIVE_S = 1.0
 _SKY_DEVICES: "weakref.WeakSet[Any]" = weakref.WeakSet()
 _SKY_LOCK = threading.Lock()

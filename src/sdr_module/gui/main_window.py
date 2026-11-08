@@ -9702,7 +9702,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 logger.debug("Could not show the passband: %s", exc)
 
     def _note_block(self, count: int) -> None:
-        """Remember when samples arrived (for ``_realtime``)."""
+        """Remember when samples arrived (for ``_realtime``). The read that
+        found the end of a recording counts as the read it was: short
+        because the file ends there, it said nothing of the rate (8 kHz
+        audio at 0.5x: a last block under half of one muted its own sound,
+        as for a device that can't keep up)."""
+        if self._playback.active:
+            count += int(getattr(self._device, "short_by", 0))
         now = time.monotonic()
         history = self._rx_history
         history.append((now, int(count)))

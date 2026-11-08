@@ -457,6 +457,38 @@ class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
                     self.assertLessEqual(writes[-1][0], paused[0])
                     win._playback.close()
 
+    def test_a_short_last_block_is_heard_at_0_5x(self):
+        """At 0.5x two blocks of 8 kHz audio make the two seconds real time
+        is judged over: the last block, short because the file ends there
+        (not a device that can't keep up), counted alone, and under half a
+        block it muted its own sound and flashed "The recording isn't
+        playing at 0.5x right now, so audio is paused" (R8-06)."""
+        win = self.win
+        for last in (600, 1000):  # (I/Q samples in the last block: < 1056)
+            with self.subTest(last=last):
+                self.clock.advance(1.0)  # (the last one's sound has played)
+                mark_s = 0.8 * last / 4000
+                seconds = 2 * (2048 + 5 * 2112 + last) / 8000
+                path = os.path.join(self.folder, "short.wav")
+                self.open_audio(8000, path=_marked_wav(path, 8000, seconds, mark_s))
+                win._playback_bar.set_loop(False)
+                win._playback_bar.set_speed(0.5)
+                win._rx_history.clear()
+                win._pacer.restart()
+                self.heard.clear()
+                show = win._show_status_message
+                with mock.patch.object(
+                    win, "_show_status_message", side_effect=show
+                ) as said:
+                    self.ticked_frames(2 * seconds + 2.0, self.clock.now)
+                texts = " ".join(str(c.args[0]) for c in said.call_args_list)
+                self.assertNotIn("isn't playing", texts)
+                self.assertIn("End of short.wav", self.message())
+                # (Its last part, less what the filters still held: 20 ms.)
+                heard = _marker_seconds(self.sound())
+                self.assertGreater(heard, 0.75 * mark_s / 0.5)
+                win._playback.close()
+
     def test_loop_turned_on_as_the_end_plays_plays_on(self):
         """Loop turned on while the last of a recording's sound still plays
         (its end read, the window waiting for that sound): it plays on from

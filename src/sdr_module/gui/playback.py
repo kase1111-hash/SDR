@@ -122,6 +122,9 @@ class FilePlaybackDevice:
         self.info = self.Info(f"Playback: {options.name}")
         self._running = False
         self._finished = False
+        # What the read that found the end of the file (Loop off) asked for
+        # beyond it (see short_by).
+        self._short = 0
         #: Start again at the end of the file.
         self.loop = False
         #: Playback speed (the window reads this much faster than real time).
@@ -226,6 +229,7 @@ class FilePlaybackDevice:
             return None
         if not self.loop and self._player.position >= self._total:
             self._finished = True
+            self._short = max(0, n - len(out))
         if self._float_data and len(out):
             finite = np.isfinite(out)
             if not finite.all():
@@ -249,6 +253,12 @@ class FilePlaybackDevice:
         return self._finished
 
     @property
+    def short_by(self) -> int:
+        """Samples the read that found the end of the file (Loop off)
+        asked for beyond it; 0 when it found none."""
+        return self._short
+
+    @property
     def total_samples(self) -> int:
         return self._total
 
@@ -270,6 +280,7 @@ class FilePlaybackDevice:
         sample = min(max(0, int(sample)), self._total)
         self._player.seek(sample)
         self._finished = False
+        self._short = 0
 
     def seek_seconds(self, seconds: float) -> None:
         self.seek(int(round(float(seconds) * self._rate)))

@@ -221,6 +221,41 @@ class TestStereo(unittest.TestCase):
                 same = time_stretch(np.stack([left, left], axis=1), ratio)
                 np.testing.assert_array_equal(same[:, 0], same[:, 1])
 
+    def test_sides_in_opposite_polarity_keep_their_pitch(self):
+        """Frames were lined up on the sum of the sides alone: a sound in
+        opposite polarity on the two (a channel wired the other way round)
+        has none, so frames lined up on nothing (exactly opposite: 77-165
+        cents off, and its level falling) or on the hiss in the sum (5-23
+        cents, the side warbling at the frame rate). Each side's
+        correlation is added instead: in phase, in opposite phase or
+        different on each side, all line up."""
+        left = _tone(2.0, 440.0)
+        hiss = 1e-4 * np.random.default_rng(1).standard_normal((len(left), 2))
+        exact = np.stack([left, -left], axis=1)
+        for name, x, cents, off in (
+            ("exact", exact, 0.1, -55.0),
+            ("hiss", exact + hiss.astype(np.float32), 1.0, -50.0),
+        ):
+            for ratio in RATIOS:
+                with self.subTest(name, ratio=ratio):
+                    y = time_stretch(x, ratio)
+                    middle = y[len(y) // 4 : 3 * len(y) // 4]
+                    for side in (0, 1):
+                        found = _peak_hz(middle[:, side])
+                        self.assertLess(abs(_cents(found, 440.0)), cents)
+                        self.assertLess(_off_tone_db(middle[:, side], 440.0), off)
+                    if name == "exact":
+                        np.testing.assert_array_equal(y[:, 0], -y[:, 1])
+
+    def test_the_same_on_both_sides_plays_as_mono_does(self):
+        # (The frames come from the same places as the mono sound's.)
+        voice = _vowel(120.0, seconds=1.5)
+        for ratio in RATIOS:
+            with self.subTest(ratio=ratio):
+                mono = time_stretch(voice, ratio)
+                stereo = time_stretch(np.stack([voice, voice], axis=1), ratio)
+                np.testing.assert_array_equal(stereo[:, 0], mono)
+
     def test_mono_and_stereo_blocks_in_one_stream(self):
         # Broadcast FM's stereo comes and goes: the stream turns stereo at
         # its first stereo block (mono plays on both sides), without a step.

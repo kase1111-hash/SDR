@@ -394,6 +394,31 @@ class TestAddMessageReceiver(_WindowTestCase):
         panel.add_message("CW (Morse)", "", "CQ CQ", message=line)
         self.assertIn("CQ CQ", panel._cw_view.plain_text())
 
+    def test_clear_says_so_before_the_rows_go(self):
+        # (thr-1) A receiver with messages still on their way adds them on
+        # `clearing`: Clear takes them with the rest, then says `cleared`.
+        panel = self.win._decoder_panel
+        panel.add_message("POCSAG", "1234567 (F3)", "HELLO", receiver="2nd RX")
+        heard = []
+
+        def late():
+            heard.append("clearing")
+            panel.add_message("POCSAG", "1234567 (F3)", "LATE", receiver="2nd RX")
+
+        def done():
+            heard.append(("cleared", len(panel._messages)))
+
+        panel.clearing.connect(late)
+        panel.cleared.connect(done)
+        try:
+            panel._clear_btn.click()
+        finally:
+            panel.clearing.disconnect(late)
+            panel.cleared.disconnect(done)
+        self.assertEqual(heard, ["clearing", ("cleared", 0)])
+        self.assertEqual(panel._messages, [])
+        self.assertEqual(panel._table.rowCount(), 0)
+
     def test_the_protocol_column_says_whose_rows_they_are(self):
         # With nothing chosen in the selector and one protocol in the table
         # the column hides (it would repeat nothing): not for another

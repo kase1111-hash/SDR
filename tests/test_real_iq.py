@@ -341,3 +341,18 @@ class TestAOneChannelFileWithoutARate:
             assert player.center_frequency == 7.1e6
         with IQPlayer(path) as player:  # (nothing says it: unknown, as before)
             assert (player.sample_rate, player.center_frequency) == (0.0, 0.0)
+
+    def test_two_channels_take_a_sidecars_rate_as_their_iq_rate(self, tmp_path):
+        """(As before: a two-channel file's samples are I/Q, a sidecar's
+        rate is theirs. detect_format's duration now counts it too.)"""
+        x = np.exp(2j * np.pi * 3000.0 * np.arange(4800) / RATE).astype(np.complex64)
+        path = tmp_path / "iq_rate0.wav"
+        offset = write_wav(
+            path, fmt_body(2, 0, 2), encode(np.column_stack([x.real, x.imag]), "int", 2)
+        )
+        write_sidecar(path, SampleFormat.INT16, RATE, 145e6, header_bytes=offset)
+        info = detect_format(path)
+        assert (info.sample_rate, info.center_frequency) == (RATE, 145e6)
+        assert info.duration_seconds == pytest.approx(len(x) / RATE)
+        with IQPlayer(path) as player:
+            assert (player.sample_rate, player.total_samples) == (RATE, len(x))

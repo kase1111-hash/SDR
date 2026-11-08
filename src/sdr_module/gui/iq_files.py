@@ -373,6 +373,9 @@ class IqFileOptions:
     #: I/Q at half its rate, centred on a quarter of it (dsp.real_iq), so
     #: ``sample_rate``, ``center_hz`` and ``total_samples`` are the I/Q's.
     channels: int = 2
+    #: ``center_hz`` is the one the file's name gives (SDR# and HDSDR put
+    #: it there), not its metadata's or the user's: see with_name_center.
+    center_named: bool = False
 
     @property
     def name(self) -> str:
@@ -426,6 +429,19 @@ class IqFileOptions:
     def headerless(self) -> bool:
         """A raw file whose format nothing but its name suggests."""
         return self.file_format is FileFormat.RAW and not self.source
+
+    def with_name_center(self) -> "IqFileOptions":
+        """These options with the center frequency the file's name gives
+        when nothing else gives one (:attr:`center_named`): what Import
+        Options offers Open Recording, for Decode Recording and Recording
+        Info, which don't ask for it. Unchanged for a one-channel file (its
+        frequencies are its own) or a name that gives none."""
+        if self.center_hz or self.real_signal:
+            return self
+        named = guess_from_filename(self.path).center_hz
+        if not named:
+            return self
+        return replace(self, center_hz=float(named), center_named=True)
 
     def open_player(self) -> IQPlayer:
         """An :class:`IQPlayer` reading the file with these settings."""
@@ -1097,6 +1113,13 @@ if HAS_PYQT6:
             fmt = options.sample_format
             rate = float(info["sample_rate_hz"] or 0.0)
             center = float(info["center_frequency_hz"] or 0.0)
+            center_text = format_mhz(center) if center else unknown
+            if not center:
+                # (As Import Options offers it for Open Recording.)
+                named = options.with_name_center()
+                if named.center_named:
+                    center = named.center_hz
+                    center_text = f"{format_mhz(center)} (from the file name)"
             rate_text = format_rate(rate) if rate else unknown
             if options.real_signal and rate:
                 rate_text = f"{rate_text} as I/Q ({format_rate(2 * rate)} in the file)"
@@ -1116,7 +1139,7 @@ if HAS_PYQT6:
                     options.wav_format or FORMAT_NAMES.get(fmt, fmt.value),
                 ),
                 ("Sample rate", rate_text),
-                ("Center frequency", format_mhz(center) if center else unknown),
+                ("Center frequency", center_text),
             ]
             if rate and center:
                 rows.append(
@@ -1232,8 +1255,14 @@ if HAS_PYQT6:
                 span = (
                     f"The recording covers "
                     f"{format_mhz(options.center_hz - half).split(' ')[0]}–"
-                    f"{format_mhz(options.center_hz + half)}."
+                    f"{format_mhz(options.center_hz + half)}"
                 )
+                if options.center_named:
+                    span += (
+                        f" (centered on {format_mhz(options.center_hz)}, from "
+                        "the file name)"
+                    )
+                span += "."
             else:
                 self._freq.setAccessibleName("Offset from the center")
                 self._freq.setToolTip(

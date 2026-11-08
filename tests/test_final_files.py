@@ -35,6 +35,7 @@ from tests.wav_builders import (  # noqa: E402
     full_scale,
     integers,
     interleave,
+    iq_wav,
     write_wav,
 )
 
@@ -199,6 +200,81 @@ class TestAOneChannelFileWithoutARate(_WavCase):
         self.assertTrue(
             any(a == address and c.startswith(content) for a, c in rows), rows
         )
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
+class TestTheFrequencyInTheFileName(_WavCase):
+    """R7W-06: a WAV I/Q file named the SDR# way, its center in its name
+    and nowhere else. Open Recording's Import Options fills the center in
+    "from the file name"; Recording Info said "Unknown (not stored in the
+    file)", and Decode Recording said "The file doesn't say where it was
+    tuned" and asked for an offset (its messages then had no frequency).
+    Now both use the frequency the name gives, and say where it is from."""
+
+    NAME = "SDRSharp_20261108_101500Z_144440000Hz_IQ.wav"
+
+    def _named(self, name=NAME):
+        """An APRS packet 50 kHz below the middle (144.390 MHz), 24-bit,
+        with no sidecar: only the name says where it was tuned."""
+        path = self.path(name)
+        iq_wav(path, self._aprs_iq(), "int", 3, int(RATE))
+        return path
+
+    def test_recording_info_shows_it(self):
+        dialog, options, missing = self.info_dialog(self._named())
+        self.assertIn("center", missing)  # (not stored in the file)
+        self.assertEqual(
+            dialog.value("Center frequency"), "144.440 MHz (from the file name)"
+        )
+        self.assertEqual(dialog.value("Covers"), "144.320–144.560 MHz")
+        self.assertEqual(dialog.value("Metadata"), "The WAV header")
+
+    def test_decode_recording_decodes_at_its_frequency(self):
+        from sdr_module.gui import iq_files
+
+        path = self._named()
+        panel = self.win._decoder_panel
+        panel._proto_combo.setCurrentText("AX.25/APRS")
+        self.settle(2)
+        dialogs = []
+
+        def fake_exec(dialog):
+            self.boxes.append(dialog)
+            self.assertIsInstance(dialog, iq_files.DecodeOptionsDialog)
+            dialogs.append(dialog)
+            dialog._on_accept()
+            return dialog.result()
+
+        self.win._exec_dialog = fake_exec
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertTrue(self.win._decode_recording())
+        warn.assert_not_called()
+        (dialog,) = dialogs  # (no Import Options: nothing it needs is asked)
+        # A frequency inside the recording, not an offset from its middle.
+        self.assertEqual(dialog._freq.accessibleName(), "Frequency")
+        self.assertEqual(dialog._freq.text(), "144.390 MHz")
+        note = dialog._note.text()
+        self.assertIn("covers 144.320–144.560 MHz", note)
+        self.assertIn("from the file name", note)
+        self.assertIn(
+            "Decoded 1 AX.25/APRS message(s) from " f"{self.NAME} at 144.390 MHz",
+            self.message(),
+        )
+        (row,) = list(panel._messages)
+        self.assertAlmostEqual(row["freq_hz"], 144.39e6, delta=1.0)
+
+    def test_open_recording_still_asks(self):
+        """(Open Recording confirms it as before: Import Options, filled in
+        from the file name.)"""
+        path = self._named()
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertTrue(self.win._open_recording())
+        warn.assert_not_called()
+        (dialog,) = self.boxes
+        self.assertEqual(dialog._center_edit.text(), "144.440 MHz")
+        self.assertEqual(dialog._center_hint.text(), "from the file name")
+        self.assertAlmostEqual(self.win._lo_frequency(), 144.44e6, delta=1.0)
+        self.win._playback.close()
 
 
 if __name__ == "__main__":

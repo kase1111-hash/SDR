@@ -11301,6 +11301,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             options = dialog.options()
             if options is None:
                 return None
+        if purpose == "decode":
+            # The center the file's name gives, as Import Options offers it
+            # for Open Recording: a frequency to decode at (R7W-06).
+            options = options.with_name_center()
         return options
 
     def _confirm_stop_recordings(self, name: str) -> bool:

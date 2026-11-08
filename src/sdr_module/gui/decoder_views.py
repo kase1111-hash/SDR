@@ -1190,7 +1190,9 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
     Another receiver's text (``add_line(text, receiver="2nd RX")``, the
     Second Receiver's, on a frequency of its own) is an entry of its own
     there too, after Live (:func:`receiver_source` names it), each line as
-    it ends; it is shown when it starts if Live has nothing yet."""
+    it ends, then the line it is receiving (:meth:`set_receiver_live`, in
+    the accent color as Live's); it is shown when it starts if Live has
+    nothing yet."""
 
     if HAS_PYQT6:
         # Its empty state's button was clicked.
@@ -1210,6 +1212,10 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         # Each other receiver's live text since Clear, by its mark ("2nd
         # RX"), in the order they came.
         self._receivers: Dict[str, _RecordedText] = {}
+        # The line each of them is receiving now (R7L-4), and whether the
+        # text shown ends with it.
+        self._receiver_live: Dict[str, str] = {}
+        self._shown_live = False
         # The live speed and whether a signal is heard (shown when live is).
         self._live_speed = ("", False)
         self._source_bar = SourceBar("Text")
@@ -1313,15 +1319,45 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
             record.wpm = float(wpm or 0.0)
         except (TypeError, ValueError):
             record.wpm = 0.0
+        # (The line it was receiving was this one: set_receiver_live shows
+        # what follows.)
+        self._receiver_live.pop(mark, None)
         key = receiver_source(mark)
         if new:
-            # Shown when the live text has nothing (the main receiver decodes
-            # no Morse): else Live stays, the entry beside it.
-            live_empty = self.text.document().isEmpty()
-            self.show_source(key if not self._shown and live_empty else self._shown)
+            self._receiver_started(key)
             return True
         if self._shown == key:
+            self._replace_shown_live("")
             self._append_shown(text)
+        return False
+
+    def _receiver_started(self, key: str) -> None:
+        """Another receiver's text has started: shown when the live text
+        has nothing (the main receiver decodes no Morse), else Live stays,
+        the entry beside it."""
+        live_empty = self.text.document().isEmpty()
+        self.show_source(key if not self._shown and live_empty else self._shown)
+
+    def set_receiver_live(self, mark: str, text: str) -> bool:
+        """The line another receiver (``mark``: "2nd RX") is receiving now
+        ("" when none): shown after its finished lines, in the accent
+        color, as Live shows the line this window's receiver is receiving
+        (R7L-4). Cheap when it is unchanged (called for each of that
+        receiver's frames). True when it started that receiver's text (an
+        entry of its own), as its first finished line would."""
+        mark, text = str(mark or ""), str(text or "")
+        if not mark or self._receiver_live.get(mark, "") == text:
+            return False
+        self._receiver_live[mark] = text
+        key = receiver_source(mark)
+        if mark not in self._receivers:
+            if not text:
+                return False
+            self._receivers[mark] = _RecordedText(absolute=False)
+            self._receiver_started(key)
+            return True
+        if self._shown == key:
+            self._replace_shown_live(text)
         return False
 
     def _append_shown(self, line: str) -> None:
@@ -1409,6 +1445,7 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         self._tail.reset()
         self._recordings.clear()
         self._receivers.clear()
+        self._receiver_live.clear()
         self.show_source("")
         self._source_bar.set_sources([], "")
         self._empty.set_visible(True)
@@ -1436,6 +1473,8 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         self._offer_sources()
         if record is not None and changed:
             self._recorded.setPlainText("\n".join(record.lines))
+            self._shown_live = False
+            self._replace_shown_live(self._receiver_live.get(self._shown_mark(), ""))
             self._recorded_tail.reset()
             self._recorded.moveCursor(QTextCursor.MoveOperation.End)
             whose = (
@@ -1448,7 +1487,16 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         self._recorded.setVisible(record is not None)
         if record is None:
             self._recorded.clear()  # (rebuilt when shown again)
+            self._shown_live = False
         self._show_speed()
+
+    def _shown_mark(self) -> str:
+        """The mark of the receiver whose text is shown ("" for Live or a
+        recording's)."""
+        shown = self._shown
+        if shown.startswith(_RECEIVER_SOURCE):
+            return shown[len(_RECEIVER_SOURCE) :]
+        return ""
 
     def _list(self, source: str) -> Optional[_RecordedText]:
         """The list ``source`` names: a recording's, another receiver's, or
@@ -1509,8 +1557,15 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         here)."""
         if not source:
             return self.text.toPlainText()
-        record = self._list(str(source))
-        return "\n".join(record.lines) if record is not None else ""
+        source = str(source)
+        record = self._list(source)
+        if record is None:
+            return ""
+        lines = list(record.lines)
+        if source.startswith(_RECEIVER_SOURCE):
+            live = self._receiver_live.get(source[len(_RECEIVER_SOURCE) :], "")
+            lines += [live] if live else []
+        return "\n".join(lines)
 
     # -- internals -----------------------------------------------------------
 
@@ -1548,8 +1603,39 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         self._has_live = True
         self._empty.set_visible(False)
 
+    def _replace_shown_live(self, text: str) -> None:
+        """The line another receiver is receiving, at the end of its text
+        shown, in the accent color: replaced by ``text`` ("" takes it
+        away), as :meth:`_replace_live` does it for Live's."""
+        doc = self._recorded.document()
+        cursor = QTextCursor(doc)
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        if self._shown_live:
+            cursor.movePosition(
+                QTextCursor.MoveOperation.StartOfBlock,
+                QTextCursor.MoveMode.KeepAnchor,
+            )
+            cursor.removeSelectedText()
+            if text:
+                cursor.insertText(text, self._format(True))
+            else:
+                # Remove the empty block (and the break before it).
+                cursor.deletePreviousChar()
+                self._shown_live = False
+            return
+        if not text:
+            return
+        if not doc.isEmpty():
+            cursor.insertBlock()
+        cursor.insertText(text, self._format(True))
+        self._shown_live = True
+
     def _restyle_live(self, *_args: Any) -> None:
         if self._has_live:
             live = self._live
             self._replace_live("")
             self._replace_live(live)
+        if self._shown_live:
+            live = self._receiver_live.get(self._shown_mark(), "")
+            self._replace_shown_live("")
+            self._replace_shown_live(live)

@@ -1461,6 +1461,16 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
                 bool(getattr(status, "signal_present", False)),
             )
 
+    def set_receiver_live(self, receiver: str, text: str) -> None:
+        """The Morse line another receiver ("2nd RX", the Second
+        Receiver's) is receiving now ("" when none): shown after its
+        finished lines in its entry of the Text view, as the line this
+        window's decoder is receiving is shown in Live (R7L-4). Its tab
+        shows when this starts its text, as a finished line's does (not
+        in front). Cheap when unchanged: called for each of its frames."""
+        if self._cw_view.set_receiver_live(receiver, text):
+            self._update_views()
+
     def set_skipping(self, reason: Optional[str]) -> None:
         """While the receiver skips part of the signal (this computer can't
         keep up with the sample rate), the status line says so in

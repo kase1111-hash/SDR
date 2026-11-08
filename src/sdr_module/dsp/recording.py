@@ -933,6 +933,9 @@ class IQPlayer:
         self._wav_header: Optional[WavHeader] = None
         # How far the Hilbert filter of a one-channel file reaches (real_iq).
         self._real_context = real_iq.CONTEXT
+        # A one-channel file whose own rate neither its header nor its
+        # sidecar gives: the caller's rate decides (_apply_given_values).
+        self._real_rate_unknown = False
         self._position = 0
         self._total_samples = 0
         self._eof = False
@@ -975,6 +978,14 @@ class IQPlayer:
         """The caller's sample rate and centre frequency over the file's."""
         if self._given_rate:
             self._sample_rate = self._given_rate
+            if self._real_rate_unknown:
+                # A one-channel file whose own rate only the caller knows
+                # (the I/Q's it gives is half of it): its filter and its own
+                # frequencies follow from it, as from a header's rate.
+                own = 2.0 * self._given_rate
+                self._real_context = real_iq.context_for(own)
+                if not self._center_frequency:
+                    self._center_frequency = real_iq.iq_center(own)
         if self._given_center is not None:
             self._center_frequency = self._given_center
         meta = self._metadata
@@ -1053,18 +1064,25 @@ class IQPlayer:
 
         # Get parameters (a real signal's are its I/Q's)
         real = header.channels == 1
+        sidecar = find_sidecar(self._filepath)
         frame_rate = float(header.frame_rate)
+        if real and not frame_rate and sidecar is not None:
+            # (None in its header: its metadata's is its own, the rate of
+            # its real samples, as SigMF gives a real dataset's.)
+            frame_rate = float(sidecar.sample_rate or 0.0)
+        self._real_rate_unknown = real and not frame_rate
         self._real_context = real_iq.context_for(frame_rate)
         self._sample_rate = real_iq.iq_rate(frame_rate) if real else frame_rate
         self._total_samples = real_iq.iq_count(header.frames) if real else header.frames
         self._sample_format = wav_sample_format(header)
 
         rate = self._sample_rate
-        sidecar = find_sidecar(self._filepath)
         if sidecar is not None:
             self._use_sidecar(sidecar)
             if rate > 0:
-                self._sample_rate = rate  # the header's rate is the truth
+                # The header's rate is the truth (a one-channel file's own
+                # rate gives its I/Q's).
+                self._sample_rate = rate
         else:
             self._metadata = RecordingMetadata(
                 sample_rate=self._sample_rate,
@@ -3016,13 +3034,18 @@ class FormatDetector:
 
             sidecar = find_sidecar(filepath)
             if suffix == ".wav" or self._is_wav_file(filepath):
-                info = self._detect_wav(filepath)
+                # (A one-channel file without a rate in its header: its
+                # sidecar's is its own, as IQPlayer takes it.)
+                own_rate = sidecar.sample_rate if sidecar is not None else 0.0
+                info = self._detect_wav(filepath, own_rate)
                 if sidecar is not None and info.is_valid:
                     # (One that gives none keeps a real signal's own.)
                     info.center_frequency = (
                         sidecar.center_frequency or info.center_frequency
                     )
                     info.sample_rate = info.sample_rate or sidecar.sample_rate
+                    if info.sample_rate > 0 and not info.duration_seconds:
+                        info.duration_seconds = info.num_samples / info.sample_rate
                     info.metadata.update(self._sidecar_metadata(sidecar))
                 return info
 
@@ -3095,12 +3118,13 @@ class FormatDetector:
             metadata=self._sidecar_metadata(sidecar),
         )
 
-    def _detect_wav(self, filepath: Path) -> FormatInfo:
+    def _detect_wav(self, filepath: Path, own_rate: float = 0.0) -> FormatInfo:
         """Detect WAV file format: classic, RF64 (past 4 GiB), BW64 or Sony
         Wave64 (``wav_container`` in its metadata says which), how its
         samples are stored (``wav_sample_type``: "int" or "float",
         ``wav_sample_width`` in bytes) and, for one channel (a real
-        signal), the I/Q it is read as (``wav_frame_rate``: its own rate)."""
+        signal), the I/Q it is read as (``wav_frame_rate``: its own rate,
+        the header's, or ``own_rate`` when the header gives none)."""
         try:
             header = read_wav_header(filepath)
             file_size = filepath.stat().st_size
@@ -3125,7 +3149,8 @@ class FormatDetector:
         sample_width = header.sample_width
         frame_rate = float(header.frame_rate)
         if n_channels == 1:
-            # A real signal, as IQPlayer reads it: I/Q at half the rate.
+            # A real signal, as IQPlayer reads it: I/Q at half its own rate.
+            frame_rate = frame_rate or max(0.0, float(own_rate or 0.0))
             sample_rate = real_iq.iq_rate(frame_rate)
             center = real_iq.iq_center(frame_rate)
             n_samples = real_iq.iq_count(header.frames)
@@ -3149,7 +3174,7 @@ class FormatDetector:
                 "wav_channels": n_channels,
                 "wav_sample_width": sample_width,
                 "wav_sample_type": header.sample_type,
-                "wav_frame_rate": header.frame_rate,
+                "wav_frame_rate": header.frame_rate or frame_rate,
                 "wav_container": header.container,
             },
         )

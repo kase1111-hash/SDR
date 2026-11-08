@@ -23,6 +23,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from ..dsp import real_iq
 from ..dsp.recording import (
     FileFormat,
     IQPlayer,
@@ -639,6 +640,12 @@ if HAS_PYQT6:
         def _build(self, guesses: Dict[str, float]) -> None:
             options = self._options
             hints = guess_from_filename(options.path)
+            # A one-channel file (a real signal): the rate asked is its own,
+            # its samples' (its I/Q's is half of it), and unless its metadata
+            # places it, its frequencies are its own (0 Hz to half its rate):
+            # centered on a quarter of that rate, not asked (files-2).
+            real = options.real_signal
+            self._center_follows_rate = real and not options.center_hz
             layout = QVBoxLayout(self)
             layout.setSpacing(10)
 
@@ -700,12 +707,19 @@ if HAS_PYQT6:
             self._rate_edit = QLineEdit()
             self._rate_edit.setAccessibleName("Sample rate")
             self._rate_edit.setToolTip(
-                "Samples per second: 2.4 or 2.4M (MS/s), 2048000, 250k."
+                "The file's own samples per second: one channel plays as I/Q at "
+                "half of it. 48k, 44.1k, 2.4M (MS/s)."
+                if real
+                else "Samples per second: 2.4 or 2.4M (MS/s), 2048000, 250k."
             )
             self._rate_hint = QLabel()
             set_role(self._rate_hint, "hint")
+            # (The receiver's rate is no guess for a one-channel file.)
             rate, rate_note = self._prefill(
-                "rate", options.sample_rate, hints.sample_rate, guesses.get("rate")
+                "rate",
+                options.frame_rate,
+                hints.sample_rate,
+                None if real else guesses.get("rate"),
             )
             if rate:
                 self._rate_edit.setText(format_rate(rate))
@@ -721,14 +735,21 @@ if HAS_PYQT6:
             self._center_edit = QLineEdit()
             self._center_edit.setAccessibleName("Center frequency")
             self._center_edit.setToolTip(
-                "Where the receiver was tuned (the middle of the recording), "
+                "A one-channel file shows its own frequencies, 0 Hz to half its "
+                "rate: centered on a quarter of its rate."
+                if self._center_follows_rate
+                else "Where the receiver was tuned (the middle of the recording), "
                 "in MHz unless you type a unit: 433.92, 7074k, 1.09G."
             )
             self._center_hint = QLabel()
             set_role(self._center_hint, "hint")
-            center, center_note = self._prefill(
-                "center", options.center_hz, hints.center_hz, guesses.get("center")
-            )
+            if self._center_follows_rate:
+                # (Filled in from the rate as it is typed: _update_check.)
+                center, center_note = 0.0, "the middle of its own frequencies"
+            else:
+                center, center_note = self._prefill(
+                    "center", options.center_hz, hints.center_hz, guesses.get("center")
+                )
             if center:
                 self._center_edit.setText(format_mhz(center))
             self._center_note = center_note
@@ -736,7 +757,9 @@ if HAS_PYQT6:
             self._center_edit.setPlaceholderText(
                 "Required" if "center" in self._required else "Unknown"
             )
-            self._center_edit.setEnabled("center" in self._missing)
+            self._center_edit.setEnabled(
+                "center" in self._missing and not self._center_follows_rate
+            )
             self._center_edit.textChanged.connect(self._update_check)
             form.addRow(
                 "&Center frequency:", self._row(self._center_edit, self._center_hint)
@@ -820,6 +843,8 @@ if HAS_PYQT6:
                     "Can't read the sample rate: type it in MS/s (2.4), with a "
                     "unit (250k, 2.048M) or in samples per second (2048000)."
                 )
+            if self._center_follows_rate:
+                center = real_iq.iq_center(rate)  # (its own frequencies)
             if center is None:
                 return None, (
                     "Can't read the center frequency: type it in MHz (433.92) "
@@ -832,6 +857,8 @@ if HAS_PYQT6:
                     verb = _ACTION_TEXT.get(self._purpose, "&OK").replace("&", "")
                     return None, f"Enter the {what} to {verb.lower()} the file."
             fmt = self.sample_format()
+            if self._options.real_signal:
+                rate = real_iq.iq_rate(rate)  # (its I/Q's: half its own)
             options = replace(
                 self._options,
                 sample_format=fmt,
@@ -851,6 +878,13 @@ if HAS_PYQT6:
                 )
 
         def _update_check(self, *_args: Any) -> None:
+            if self._center_follows_rate:
+                rate = self.sample_rate()
+                text = format_mhz(real_iq.iq_center(rate)) if rate else ""
+                if self._center_edit.text() != text:
+                    blocked = self._center_edit.blockSignals(True)
+                    self._center_edit.setText(text)
+                    self._center_edit.blockSignals(blocked)
             fmt = self.sample_format()
             guess = self._content
             hint = guess is not None and guess != fmt and self._format_combo.isEnabled()

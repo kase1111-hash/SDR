@@ -30,12 +30,16 @@ from tests.test_gui_chrome import HAS_PYQT6  # noqa: E402
 from tests.test_gui_recording_files import RATE  # noqa: E402
 from tests.test_gui_wav_formats import _WavCase  # noqa: E402
 from tests.wav_builders import (  # noqa: E402
+    encode,
     fmt_body,
     full_scale,
     integers,
     interleave,
     write_wav,
 )
+
+#: A one-channel (audio) file's own rate.
+AUDIO_RATE = 48000
 
 
 def _tone(n, freq, rate, amplitude=0.4):
@@ -79,6 +83,122 @@ class TestSamplesInWiderWords(_WavCase):
                 self.assertFalse(run())
             self._refused(warn)
         self.assertEqual(self.boxes, [])  # (no dialog of what it holds)
+
+
+def _rate0_wav(path, x):
+    """``x`` as a one-channel 16-bit WAV file whose header gives no sample
+    rate (0)."""
+    write_wav(path, fmt_body(1, 0, 2), encode(x, "int", 2))
+    return path
+
+
+def _strongest(samples, rate, center):
+    """Where the strongest signal of ``samples`` (I/Q at ``rate``, centered
+    on ``center``) shows, in Hz, as the spectrum maps it."""
+    y = np.asarray(samples[:8192], dtype=np.complex128)
+    spectrum = np.abs(np.fft.fftshift(np.fft.fft(y * np.hanning(len(y)))))
+    return center + (int(np.argmax(spectrum)) - len(y) // 2) * rate / len(y)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 required")
+class TestAOneChannelFileWithoutARate(_WavCase):
+    """files-2: a one-channel WAV file whose header gives no sample rate.
+    Import Options asked for "Sample rate" prefilled with the file's own
+    rate (from its name, tone_48ksps) and took it as the I/Q rate: a 1 kHz
+    tone played at -10 kHz, the file lasted half its length, and Decode
+    Recording read its sound at twice its rate (nothing decoded). Its
+    center was asked too, with the receiver's frequency as a guess. Now the
+    rate asked is the file's own (the tooltip says so), and its center
+    follows from it: its own frequencies, 0 Hz to half its rate."""
+
+    def _tone_file(self, name="tone_48ksps.wav", seconds=2.0, freq=1000.0):
+        t = np.arange(int(seconds * AUDIO_RATE)) / AUDIO_RATE
+        return _rate0_wav(self.path(name), 0.5 * np.cos(2 * np.pi * freq * t))
+
+    def test_import_options_asks_for_its_own_rate(self):
+        from sdr_module.gui.iq_files import ImportOptionsDialog, describe_iq_file
+
+        options, missing = describe_iq_file(self._tone_file())
+        self.assertIn("rate", missing)
+        guesses = {"rate": 2.4e6, "center": 100.1e6}  # (the receiver's)
+        dialog = ImportOptionsDialog(options, missing, "play", guesses)
+        self.addCleanup(dialog.deleteLater)
+        self.assertEqual(dialog._rate_edit.text(), "48 kS/s")  # (its name)
+        self.assertEqual(dialog._rate_hint.text(), "from the file name")
+        self.assertIn("The file's own samples", dialog._rate_edit.toolTip())
+        self.assertIn("half of it", dialog._rate_edit.toolTip())
+        # Its center isn't asked (nor guessed from the receiver's): the
+        # middle of its own frequencies, a quarter of its rate.
+        self.assertFalse(dialog._center_edit.isEnabled())
+        self.assertEqual(dialog._center_edit.text(), "0.012 MHz")
+        self.assertEqual(
+            dialog._center_hint.text(), "the middle of its own frequencies"
+        )
+        self.assertIn(
+            "48,000 samples, 0:02.0 long, 0.000–0.024 MHz", dialog.check_text()
+        )
+        dialog._rate_edit.setText("8k")  # (another rate: the center follows)
+        self.assertEqual(dialog._center_edit.text(), "0.002 MHz")
+        self.assertIn("0:12.0 long, 0.000–0.004 MHz", dialog.check_text())
+        dialog._rate_edit.setText("48 kS/s")
+        dialog._on_accept()
+        chosen = dialog.options()
+        self.assertEqual(chosen.sample_rate, AUDIO_RATE / 2)  # (its I/Q's)
+        self.assertEqual(chosen.frame_rate, AUDIO_RATE)
+        self.assertEqual(chosen.center_hz, AUDIO_RATE / 4)
+        self.assertAlmostEqual(chosen.duration_s, 2.0)
+
+    def test_open_recording_plays_its_own_frequencies(self):
+        path = self._tone_file()
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertTrue(self.win._open_recording())
+        warn.assert_not_called()
+        self.assertEqual(
+            [type(b).__name__ for b in self.boxes], ["ImportOptionsDialog"]
+        )
+        device = self.win._playback.device
+        self.assertEqual(device.sample_rate, AUDIO_RATE / 2)
+        self.assertAlmostEqual(self.win._lo_frequency(), AUDIO_RATE / 4, delta=0.5)
+        self.assertAlmostEqual(device.total_samples / device.sample_rate, 2.0)
+        device.seek(4000)
+        shown = _strongest(device._player.read(8192), AUDIO_RATE / 2, AUDIO_RATE / 4)
+        self.assertAlmostEqual(shown, 1000.0, delta=10.0)  # (it showed at -10 kHz)
+        self.win._playback.close()
+
+    def test_a_sidecars_rate_is_its_own(self):
+        from sdr_module.dsp.recording import SampleFormat, write_sidecar
+
+        path = self._tone_file("tone.wav")
+        write_sidecar(path, SampleFormat.INT16, AUDIO_RATE, 0.0, header_bytes=44)
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertTrue(self.win._open_recording())
+        warn.assert_not_called()
+        self.assertEqual(self.boxes, [])  # (nothing to ask)
+        device = self.win._playback.device
+        self.assertEqual(device.sample_rate, AUDIO_RATE / 2)
+        self.assertAlmostEqual(self.win._lo_frequency(), AUDIO_RATE / 4, delta=0.5)
+        self.win._playback.close()
+
+    def test_decode_recording_reads_its_sound_at_its_own_rate(self):
+        from tests.test_audio_decoding import EXPECTED, _audio
+
+        path = _rate0_wav(
+            self.path("aprs_48ksps.wav"), _audio("AX.25/APRS", AUDIO_RATE, 0.3)
+        )
+        panel = self.win._decoder_panel
+        panel._proto_combo.setCurrentText("AX.25/APRS")
+        self.settle(2)
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertTrue(self.win._decode_recording())
+        warn.assert_not_called()
+        said = self.message()
+        self.assertIn("Decoded 1 AX.25/APRS message(s)", said)
+        self.assertIn("read as a receiver's audio", said)
+        rows = [(m["address"], m["content"]) for m in panel._messages]
+        ((address, content),) = EXPECTED["AX.25/APRS"]
+        self.assertTrue(
+            any(a == address and c.startswith(content) for a, c in rows), rows
+        )
 
 
 if __name__ == "__main__":

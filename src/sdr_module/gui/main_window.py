@@ -6671,7 +6671,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         (both windows'): the mode ("AM", "I/Q"), FM with the deviation in
         the FM deviation list's own words (its table, FM_DEVIATIONS: "FM
         (wide voice, 12.5 kHz deviation)" for "12.5 kHz (wide voice)")."""
-        if mode != "FM":
+        if mode != "FM" or not deviation:
             return cls._mode_text(mode)
         shown = {value: text for value, text, _tip in FM_DEVIATIONS}
         _value, _, words = shown.get(deviation, "").partition(" (")

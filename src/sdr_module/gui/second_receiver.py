@@ -750,7 +750,7 @@ class ReceiverDsp:
         # isn't checked, so isn't demodulated for it).
         tone_check = audible and self._tones_checked() and gate.is_open and tones.active
         frame.audio = self._audio(chain, channel, speaker, received, tone_check)
-        if self._demod_running and self.mode == "FM":
+        if self._demod_running and chain.mode == "FM":
             frame.clip_warning = self._clip_warning(chain, seconds, level, noise)
         frame.stereo = self._stereo_lamp(chain, received)
         # (Nothing is notched while nothing is demodulated.)

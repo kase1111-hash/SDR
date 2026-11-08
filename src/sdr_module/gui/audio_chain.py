@@ -255,6 +255,14 @@ class SquelchGate:
         """The threshold the last :meth:`update` used."""
         return self._last_threshold
 
+    @property
+    def hanging(self) -> bool:
+        """Whether it is open only for its hang time: the level has fallen
+        more than ``hysteresis_db`` below the threshold (the carrier dropped,
+        or faded away), and it closes unless the level comes back within
+        ``hang_s``. What it lets through meanwhile is noise, or a fade."""
+        return self.is_open and self._below_s > 0.0
+
     def update(self, level_db: float, noise_db: Optional[float], seconds: float) -> str:
         """Decide for one block of ``seconds`` at ``level_db``."""
         threshold = self.threshold_db(noise_db)
@@ -841,7 +849,11 @@ class ToneSquelch:
     the tone or code isn't there (:data:`REVERSE_DECIDE_S` of audio since
     :meth:`reset`, or since a DCS turn-off code or a reverse burst: the
     detectors find one in 0.35-0.5 s), so the station it mutes isn't heard
-    as each of its transmissions starts (or ends) either.
+    as each of its transmissions starts (or ends) either. And it opens only
+    on a carrier that is really there (:meth:`process`'s ``carrier``): the
+    station it mutes, heard for less than half a second before its carrier
+    dropped, wasn't recognised yet, and the noise the squelch's hang time
+    lets through after it is no station without the tone.
     """
 
     #: Audio the reverse tone squelch hears before it opens (s): the CTCSS
@@ -857,6 +869,7 @@ class ToneSquelch:
         self.reverse: bool = False
         self._detector = CTCSSDetector(self.rate, reverse_burst=bool(tail_elimination))
         self._dcs_detector = DcsDetector(self.rate)
+        self._open = False  # (what the last block's process() answered)
 
     @property
     def tail_elimination(self) -> bool:
@@ -875,6 +888,7 @@ class ToneSquelch:
     def reset(self) -> None:
         self._detector.reset()
         self._dcs_detector.reset()
+        self._open = False
 
     @property
     def detected_hz(self) -> Optional[float]:
@@ -900,20 +914,32 @@ class ToneSquelch:
         """The discriminator's audio before DC blocking (for DCS)."""
         self._dcs_detector.process(audio)
 
-    def process(self, audio: np.ndarray) -> bool:
-        """Feed FM audio; True while the speaker may play."""
+    def process(self, audio: np.ndarray, carrier: bool = True) -> bool:
+        """Feed FM audio; True while the speaker may play.
+
+        ``carrier``: whether a signal is really there in this block (the
+        squelch's view: False while it is open only for its hang time, see
+        :attr:`SquelchGate.hanging`). Reversed, it doesn't open on such a
+        block (the noise after a carrier dropped is no station without the
+        tone), but a station it plays plays on through it, a fade or its
+        squelch tail, as with no tone squelch. Not reversed, it isn't used.
+        """
         self._detector.process(audio)
         if self.dcs is not None:
             heard = self._dcs_detector.is_present(*self.dcs)
-            if not self.reverse:
-                return heard
-            return not heard and self._dcs_detector.heard_s >= self.REVERSE_DECIDE_S
-        if self.tone_hz is None:
+            listened = self._dcs_detector.heard_s
+        elif self.tone_hz is None:
+            self._open = True
             return True
-        heard = self._detector.is_present(self.tone_hz)
+        else:
+            heard = self._detector.is_present(self.tone_hz)
+            listened = self._detector.heard_s
         if not self.reverse:
+            self._open = heard
             return heard
-        return not heard and self._detector.heard_s >= self.REVERSE_DECIDE_S
+        sure = not heard and listened >= self.REVERSE_DECIDE_S
+        self._open = sure and (bool(carrier) or self._open)
+        return self._open
 
 
 class IqConditioner:

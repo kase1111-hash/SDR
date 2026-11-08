@@ -562,10 +562,12 @@ class ReceiverDsp:
     ``options.tone_squelch`` with it (narrow FM is then heard from 300 Hz
     up, without the tone or the code's bits). Reversed (CHIRP's TSQL-R and
     DTCS-R, a third ``True``), it mutes the stations sending that tone or
-    code and plays every other one. A signal the squelch has just opened on
-    is judged afresh, whatever was demodulated before it (as the main
-    window's ``_route_audio`` does): the station a reverse tone squelch
-    mutes isn't heard for the first half second of its transmission.
+    code and plays every other one; what it holds silent reads
+    ``"reverse"`` on the lamp (as in the main window). A signal the squelch
+    has just opened on is judged afresh, whatever was demodulated before it
+    (as the main window's ``_route_audio`` does): the station a reverse
+    tone squelch mutes isn't heard for the first half second of its
+    transmission.
     """
 
     def __init__(self) -> None:
@@ -743,7 +745,9 @@ class ReceiverDsp:
             self._tones_checked(),
         )
         if audible and gate.is_open and self._tone_blocked:
-            frame.state = "tone"
+            # (Reversed: its tone or code is heard, or may be; the main
+            # window's _squelch_state says the same.)
+            frame.state = "reverse" if tones.reverse else "tone"
         return frame
 
     def _tones_checked(self) -> bool:
@@ -761,7 +765,11 @@ class ReceiverDsp:
                 tones.reset()
             return True
         tones.feed_dcs(chain.fm_raw_audio)  # (DCS: before DC blocking)
-        if tones.process(chain.pre_nr_audio):
+        # (A reverse tone squelch opens on a carrier that is there, not on
+        # the noise the squelch's hang lets through after one dropped, as in
+        # the main window's _route_audio.)
+        gate = self.squelch
+        if tones.process(chain.pre_nr_audio, gate.is_open and not gate.hanging):
             return True
         self._tone_blocked = True
         return False

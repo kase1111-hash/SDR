@@ -955,9 +955,10 @@ class TestNoStaleAudioInTheWindow(_WindowTestCase):
             heard.append(audio)
         )
         tone_process = self.win._tone_squelch.process
-        self.win._tone_squelch.process = lambda audio: (
+        # (The window also says whether a carrier is there: passed on.)
+        self.win._tone_squelch.process = lambda audio, *rest, **kw: (
             tones.append(audio),
-            tone_process(audio),
+            tone_process(audio, *rest, **kw),
         )[1]
         dev = self.win._device
         dev.start_rx()

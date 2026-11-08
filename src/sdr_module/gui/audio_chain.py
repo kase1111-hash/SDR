@@ -402,6 +402,17 @@ REVERSE_TONE_TIP = (
     "looked for."
 )
 
+#: Radio > Audio > Squelch Tail Elimination (radios' STE), for
+#: :attr:`ToneSquelch.tail_elimination`: what it does and why one might
+#: turn it off.
+TAIL_ELIMINATION_TIP = (
+    "Close the CTCSS tone squelch at the reverse burst a radio sends as its "
+    "user stops talking, before the squelch tail (the noise as the carrier "
+    "drops) is heard. Turn it off if a station is cut off for a moment "
+    "mid-transmission: a voice pitched near its tone can sound like a burst. "
+    "(A DCS code's turn-off code always closes it.)"
+)
+
 
 class AudioOptions:
     """Listening options the receiver chain reads on every block.
@@ -817,6 +828,13 @@ class ToneSquelch:
     burst closes it within 100 ms of either (M-Q1, M-Q2), before the
     carrier drops: its squelch tail isn't heard.
 
+    ``tail_elimination`` (True by default, settable while it runs: Radio >
+    Audio > Squelch Tail Elimination) switches the CTCSS reverse burst on
+    or off, as radios' STE menus do: a voice pitched near the tone, sent
+    with little filtering, can sound like a burst now and then and mute
+    the station for about 0.8 s. The DCS turn-off code isn't covered: it
+    is part of the DCS standard and no voice was heard to fake it.
+
     ``reverse`` (False by default) reverses it, as CHIRP's TSQL-R and
     DTCS-R and the radios that have them do: muted while the tone or code
     is heard, open for every other station. It opens only once it is sure
@@ -831,14 +849,23 @@ class ToneSquelch:
     #: (0.5 s at 6 dB signal to noise in its band).
     REVERSE_DECIDE_S = 0.55
 
-    def __init__(self, rate: float):
+    def __init__(self, rate: float, tail_elimination: bool = True):
         self.rate = float(rate)
         self.tone_hz: Optional[float] = None
         self.dcs: Optional[Tuple[int, bool]] = None
         #: Reverse: muted while the tone or code is heard (see above).
         self.reverse: bool = False
-        self._detector = CTCSSDetector(self.rate)
+        self._detector = CTCSSDetector(self.rate, reverse_burst=bool(tail_elimination))
         self._dcs_detector = DcsDetector(self.rate)
+
+    @property
+    def tail_elimination(self) -> bool:
+        """Whether a CTCSS station's reverse burst closes it (see above)."""
+        return self._detector.reverse_burst
+
+    @tail_elimination.setter
+    def tail_elimination(self, on: bool) -> None:
+        self._detector.reverse_burst = bool(on)
 
     @property
     def active(self) -> bool:

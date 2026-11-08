@@ -646,9 +646,13 @@ def _scan_file(args: argparse.Namespace) -> int:
         return 1
 
     sample_format = SampleFormat(args.format) if args.format else None
-    samples, metadata = load_iq_file(
-        input_path, sample_format=sample_format, max_samples=args.max_samples
-    )
+    try:
+        samples, metadata = load_iq_file(
+            input_path, sample_format=sample_format, max_samples=args.max_samples
+        )
+    except (OSError, ValueError) as exc:  # (e.g. a WAV format not read)
+        print(f"Error: {input_path.name} can't be read: {exc}")
+        return 1
 
     sample_rate = args.sample_rate or metadata.sample_rate
     if not sample_rate:
@@ -733,9 +737,13 @@ def cmd_decode(args: argparse.Namespace) -> int:
         return _decode_audio(args, input_path, audio_rate)
 
     sample_format = SampleFormat(args.format) if args.format else None
-    samples, metadata = load_iq_file(
-        input_path, sample_format=sample_format, max_samples=args.max_samples
-    )
+    try:
+        samples, metadata = load_iq_file(
+            input_path, sample_format=sample_format, max_samples=args.max_samples
+        )
+    except (OSError, ValueError) as exc:  # (e.g. a WAV format not read)
+        print(f"Error: {input_path.name} can't be read: {exc}")
+        return 1
 
     sample_rate = args.sample_rate or metadata.sample_rate
     if not sample_rate:

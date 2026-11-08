@@ -205,3 +205,17 @@ class TestAudioRecordings:
         out = capsys.readouterr().out
         assert "as a receiver's audio" not in out
         assert "Decoded 1 APRS message(s)" in out
+
+
+def test_a_file_that_cant_be_read_is_said_plainly(tmp_path, capsys):
+    """files-3: 24-bit samples in 32-bit words are refused by the WAV reader
+    (they read as noise before); the command says so, as the window does,
+    instead of a traceback."""
+    from tests.wav_builders import fmt_body, integers, write_wav
+
+    path = tmp_path / "s24_le.wav"
+    write_wav(path, fmt_body(2, 48000, 4, bits=24), integers(np.arange(800), 4))
+    for argv in (["decode", "aprs", "-i", str(path)], ["scan", "--input", str(path)]):
+        assert main(argv) == 1
+        out = capsys.readouterr().out
+        assert "Error: s24_le.wav can't be read: its 24-bit samples are stored" in out

@@ -961,9 +961,9 @@ if HAS_PYQT6:
 
         def _tick(self) -> None:
             """Follow the playing position; pause at the end of the file,
-            once its sound has played (at 1x the rest of a block longer
-            than the speaker holds is still given out as it plays: see the
-            window's ``_between_blocks``)."""
+            once its sound has played (what the sound still holds when the
+            end is read is given out as the speaker plays it, at the speed
+            chosen: see the window's ``_between_blocks``)."""
             device = self.device
             if device is None:
                 self._timer.stop()

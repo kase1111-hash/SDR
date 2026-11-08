@@ -10225,11 +10225,18 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         at 1x while it keeps up, the same block). ``last``: the sound
         stops after this block (the squelch closed, the speaker stopped,
         the stream broke off): what the stretch still holds plays with it.
-        Everything else (Record Audio, SSTV, the decoders) keeps the
-        recording's own pace."""
+        Once the recording's end was read (Loop off), what is held plays
+        out as the speaker plays it, at the speed chosen (see
+        _between_blocks). Everything else (Record Audio, SSTV, the
+        decoders) keeps the recording's own pace."""
         sound = self._playback_sound
         if self._playback.active or sound.holding:
-            audio = sound.play(audio, time.monotonic(), last=last)
+            now = time.monotonic()
+            device = self._playback.device
+            if device is not None and device.finished:
+                audio = sound.play(audio, now, last=last, end=True)
+            else:
+                audio = sound.play(audio, now, last=last)
         self._audio.write(audio)
 
     def _between_blocks(self) -> None:
@@ -10247,11 +10254,13 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         next block would end it: what is held, faded out, and nothing
         after it (with that block, up to a second later at 0.5x, it came
         back for a moment after it had stopped). At the end of a
-        recording its sound ends with the last of it given out: the decay
-        from its last sample comes right after it, and the playback stops
-        at its next tick (which waits for it: stopped as soon as the end
-        was read, up to a quarter of a second of 8 kHz audio's end was cut
-        off)."""
+        recording (Loop off) what is held plays out at the speed chosen,
+        the decay from its last sample right after the last of it, and the
+        playback stops at its next tick, which waits for that. (Stopped as
+        soon as the end was read, the end of 8 kHz audio was cut short at
+        1x, and at another speed what the time-stretch held was rushed
+        out: its last 0.3 s at 0.5x in 0.05 s. And the decay waited for
+        that tick, up to 0.2 s, often after the speaker had run dry.)"""
         if not self._playback.active:
             return
         sound = self._playback_sound
@@ -10266,11 +10275,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 self._speak(np.zeros(0, dtype=np.float32), last=True)
                 join.stop()
             return
-        rest = sound.rest_s
         audio = sound.more(now)
         if len(audio):
             self._audio.write(audio)
-        if rest and not sound.rest_s and getattr(self._device, "finished", False):
+        if getattr(self._device, "finished", False) and not sound.rest_s:
             self._speak(join.release(), last=True)
 
     def _set_stereo_enabled(self, on: bool) -> None:

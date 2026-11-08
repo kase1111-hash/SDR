@@ -661,8 +661,11 @@ if HAS_PYQT6:
             self._notch_combo.setEnabled(not why)
             self._notch_spin.setEnabled(not why and notch == "manual")
             self._notch_found.setEnabled(not why)
-            if why:
-                self._show_notch_found(None)  # (nothing is removed here)
+            if why or notch != "auto":
+                # (Nothing is removed here, or Manual's one frequency: its
+                # box is captioned "Whistle:", as in the main window. Auto
+                # names what it finds again within a frame or two.)
+                self._show_notch_found(None)
             self._notch_stack.setCurrentWidget(
                 self._notch_found if notch == "auto" else self._notch_spin
             )

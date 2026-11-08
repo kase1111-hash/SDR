@@ -294,6 +294,8 @@ def _real_signal_text(iq_rate_hz: float, center_hz: float) -> str:
         "One: a real signal (audio, or an IF or RF sampled directly), played "
         "as I/Q at half its rate"
     )
+    if not top > 0:
+        return text  # (its rate unknown: so are its frequencies)
     if abs(float(center_hz) - top / 2.0) > 0.5:
         return (
             f"{text}, each frequency once (not mirrored), where its metadata places it"
@@ -459,8 +461,9 @@ class IqFileOptions:
         when nothing else gives one (:attr:`center_named`): what Import
         Options offers Open Recording, for Decode Recording and Recording
         Info, which don't ask for it. Unchanged for a one-channel file (its
-        frequencies are its own) or a name that gives none."""
-        if self.center_hz or self.real_signal:
+        frequencies are its own), a name that gives none, or options the
+        user confirmed (a center cleared in Import Options stays unknown)."""
+        if self.center_hz or self.real_signal or self.confirmed:
             return self
         named = guess_from_filename(self.path).center_hz
         if not named:

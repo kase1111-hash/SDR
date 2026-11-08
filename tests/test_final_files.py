@@ -166,6 +166,19 @@ class TestAOneChannelFileWithoutARate(_WavCase):
         self.assertAlmostEqual(shown, 1000.0, delta=10.0)  # (it showed at -10 kHz)
         self.win._playback.close()
 
+    def test_recording_info_doesnt_invent_its_frequencies(self):
+        """(Its rate unknown: no "0 Hz to 0 kHz".)"""
+        dialog, options, _missing = self.info_dialog(self._tone_file())
+        self.assertTrue(options.real_signal)
+        self.assertEqual(
+            dialog.value("Sample rate"), "Unknown (not stored in the file)"
+        )
+        self.assertEqual(
+            dialog.value("Channels"),
+            "One: a real signal (audio, or an IF or RF sampled directly), played "
+            "as I/Q at half its rate",
+        )
+
     def test_a_sidecars_rate_is_its_own(self):
         from sdr_module.dsp.recording import SampleFormat, write_sidecar
 
@@ -262,6 +275,34 @@ class TestTheFrequencyInTheFileName(_WavCase):
         )
         (row,) = list(panel._messages)
         self.assertAlmostEqual(row["freq_hz"], 144.39e6, delta=1.0)
+
+    def test_a_center_cleared_in_import_options_stays_unknown(self):
+        """(Asked, as for a headerless file, and the center the name gives
+        cleared: the user's word, not the name's, so an offset is asked.)"""
+        from sdr_module.gui import iq_files
+
+        path = self.path("capture_144440000Hz_240ksps.cf32")
+        self._aprs_iq().tofile(path)
+        dialogs = []
+
+        def fake_exec(dialog):
+            self.boxes.append(dialog)
+            if isinstance(dialog, iq_files.ImportOptionsDialog):
+                self.assertEqual(dialog._center_edit.text(), "144.440 MHz")
+                dialog._center_edit.setText("")
+                dialog._on_accept()
+                return dialog.result()
+            self.assertIsInstance(dialog, iq_files.DecodeOptionsDialog)
+            dialogs.append(dialog)
+            return 0  # (looked at, then cancelled)
+
+        self.win._exec_dialog = fake_exec
+        with self.open_dialog(path), self.warnings() as warn:
+            self.assertFalse(self.win._decode_recording())
+        warn.assert_not_called()
+        (dialog,) = dialogs
+        self.assertEqual(dialog._freq.accessibleName(), "Offset from the center")
+        self.assertNotIn("from the file name", dialog._note.text())
 
     def test_open_recording_still_asks(self):
         """(Open Recording confirms it as before: Import Options, filled in

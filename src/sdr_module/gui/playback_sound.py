@@ -52,9 +52,11 @@ audio:
   the next one (a frame late, the speaker ran dry). A new sound's first
   piece is shorter than the speaker's cushion, which AudioSink pads in
   front of it with silence: the margin a block a frame late still finds
-  to play. After a stall of the window the speaker starts again where
-  the sound is by then, with the margin it had (a new one each stall
-  made the sound later and later).
+  to play. So is that of blocks that fit the speaker but not the cushion
+  (22.05 kHz audio, 0.19 s a block: given whole, each lasted until the
+  next one), which then pass through as they are. After a stall of the
+  window the speaker starts again where the sound is by then, with the
+  margin it had (a new one each stall made the sound later and later).
 * :meth:`finish` ends a stream (the squelch closed, the speaker stopped):
   what the stretch still holds plays at once, in at most ``FLUSH_S`` and
   in no more than the speaker can still take (faster, or cut short and
@@ -383,7 +385,12 @@ class PlaybackSound:
         if not self._stretching:
             if one and pace >= self.ENGAGE_BELOW:
                 self._passing = True
-                if self._held is None and seconds <= self.MOST_HELD_S:
+                # (A new sound's first block, to a speaker that holds
+                # nothing, fits only within the cushion: longer, it got no
+                # silence in front, so no margin for the next block.)
+                starts = not self._sounded and remaining <= 0.0
+                most = self.cushion_s if starts else self.MOST_HELD_S
+                if self._held is None and seconds <= most:
                     self._wrote(now, remaining, seconds)
                     return block
                 # Longer than the speaker holds (or after what is still

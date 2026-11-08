@@ -331,6 +331,31 @@ class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
                 self.assertFalse(win._playback_sound.stretching)
                 win._playback.close()
 
+    def test_22050_hz_audio_starts_without_a_gap(self):
+        """22.05 kHz audio at 1x, a block every 6 frames (0.19 s): its
+        blocks fit the speaker and pass through as they are, but the first
+        went whole to a speaker that held nothing, with no silence in
+        front: each block then lasted until the next, and on a timer 4 ms
+        irregular the speaker ran dry for 30 ms in the first seconds."""
+        win = self.win
+        for seed in range(4):
+            with self.subTest(seed=seed):
+                rng = np.random.default_rng(seed)
+                self.clock.advance(1.0)  # (the last one's sound has played)
+                self.heard.clear()
+                self.open_audio(22050)
+                opened = self.clock.now
+                end = opened + 4.0
+                while self.clock.now < end - 1e-9:
+                    start = self.clock.now
+                    win._update_display()
+                    tick = 0.032 + float(rng.uniform(-0.004, 0.004))
+                    self.clock.now = max(self.clock.now, start + tick)
+                gaps, dropped = self.troubles_since(opened)
+                self.assertLess(gaps, 0.005)
+                self.assertEqual(dropped, 0.0)
+                win._playback.close()
+
     def test_1x_plays_a_recording_to_its_very_end(self):
         """Without Loop, 8 and 11.025 kHz audio at 1x plays to its last
         sample: the window stops once the sound has been given out, and

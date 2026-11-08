@@ -298,6 +298,29 @@ class TestARecordingSlowerThanABlockAFrame(unittest.TestCase):
                 self.assertLess(speaker.gaps, 0.005)
                 self.assertEqual(speaker.dropped, 0.0)
 
+    def test_a_sound_of_blocks_that_fit_starts_with_a_margin(self):
+        """22.05 kHz audio comes 0.19 s a block: that fits the speaker, and
+        its blocks pass through as they are. Its first one, though, went
+        whole to a speaker that held nothing: longer than the cushion
+        AudioSink pads a start with, it got no silence in front, and each
+        block then lasted until the next. On a timer a few ms irregular a
+        block a frame late ran the speaker dry, 20-30 ms in the first
+        seconds. Its first block now starts as a longer one does, half the
+        cushion first, so the margin is there from the start."""
+        for seed in (0, 1, 2):
+            with self.subTest(seed=seed):
+                run = _SlowRun(22050, seed=seed)
+                run.jitter_s = 0.004
+                run.frames(5.0)
+                self.assertLess(run.speaker.gaps, 0.005)
+                self.assertEqual(run.speaker.dropped, 0.0)
+                # The same samples in order, and later blocks as they are.
+                got, fed = np.concatenate(run.writes), np.concatenate(run.fed)
+                np.testing.assert_array_equal(got, fed[: len(got)])
+                later = [w for w in run.writes if len(w)][-3:]
+                for written, block in zip(later, run.fed[-3:], strict=True):
+                    np.testing.assert_array_equal(written, block)
+
     def test_from_another_speed_back_to_1x_without_a_gap(self):
         """Back at 1x the stretch hands over what it holds, kept for the
         frames until the next block. Drained fast as a pile-up first, it

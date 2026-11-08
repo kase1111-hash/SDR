@@ -593,6 +593,36 @@ class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
                 self.assertEqual(dropped, 0.0)
                 win._playback.close()
 
+    def test_loop_turned_on_late_at_11_khz_drops_nothing(self):
+        """(Loop turned on as the end of 11.025 kHz audio plays, at 1x: the
+        read that found the end, under a quarter of a second of sound, went
+        to the speaker whole, and so did the start that came with the next
+        frame. Together more than AudioSink keeps: it dropped 0.15-0.2 s of
+        them, and the speaker ran dry for as long before the next block.)"""
+        win = self.win
+        for last in (600, 950, 1300):  # (I/Q samples in the last block)
+            with self.subTest(last=last):
+                self.clock.advance(1.0)  # (the last one's sound has played)
+                seconds = 2 * (2048 + 5 * 2182 + last) / 11025
+                self.open_audio(11025, seconds=seconds)
+                win._playback_bar.set_loop(False)
+                win._rx_history.clear()
+                win._pacer.restart()
+                device = win._device
+                tick = self.ticked_frames(
+                    seconds + 1.0, self.clock.now, lambda device=device: device.finished
+                )
+                self.assertTrue(win._is_running)
+                win._playback_bar.set_loop(True)
+                start = self.clock.now
+                self.ticked_frames(3.0, tick)
+                self.assertTrue(win._is_running)
+                self.assertGreaterEqual(device.loops, 1)
+                gaps, dropped = self.troubles_since(start)
+                self.assertLess(gaps, 0.005)
+                self.assertEqual(dropped, 0.0)
+                win._playback.close()
+
     def test_stalls_at_1x_dont_make_the_sound_later_and_later(self):
         """A stall of the window at 1x: the speaker runs dry, and starts
         again where the sound is now, as late as before. 22.05 kHz audio

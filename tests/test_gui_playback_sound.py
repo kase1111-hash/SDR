@@ -605,6 +605,46 @@ class TestTheEndOfARecording(_SoundCase):
                     self.assertLessEqual(last, paused)
                     win._playback.close()
 
+    def test_loop_turned_on_once_its_end_was_given_out_plays_on(self):
+        """Loop turned on once the last of the end has gone to the speaker
+        (its decay right after it), while the speaker still plays it,
+        before the playback pauses: the start follows without a gap, at
+        every speed. (At another speed the start came as a new sound,
+        which filled the time-stretch first while the speaker ran dry: a
+        gap of 20-100 ms at 0.5x, 2x and 4x.)"""
+        for speed, wait in ((0.5, 0), (0.5, 1), (1.0, 0), (2.0, 1), (4.0, 1)):
+            # (wait: frames after the end was given out; at 1x the speaker
+            # holds its cushion, which the next frame's start follows.)
+            with self.subTest(speed=speed, wait=wait):
+                self.clock.advance(1.0)  # (the last one's sound has played)
+                win = self.win
+                self.open(_fm_tone(1.0))
+                win._playback_bar.set_loop(False)
+                win._playback_bar.set_speed(speed)
+                win._rx_history.clear()
+                win._pacer.restart()
+                self.heard.clear()
+                device = win._device
+                began = self.clock.now
+                while not (device.finished and not win._audio_join.playing):
+                    start = self.clock.now
+                    win._update_display()
+                    self.clock.now = max(self.clock.now, start + 0.033)
+                    self.assertLess(self.clock.now - began, 10.0)
+                self.frames(0.033 * wait)
+                self.assertTrue(win._is_running)  # (not paused yet)
+                held = self.speaker()
+                self.assertGreater(held.queued, 0.02)  # (it still plays)
+                win._playback_bar.set_loop(True)
+                start = self.clock.now
+                self.frames(2.0)
+                self.assertTrue(win._is_running)
+                self.assertGreaterEqual(device.loops, 1)
+                gaps, dropped = self.troubles_since(start)
+                self.assertLess(gaps, 0.005)
+                self.assertEqual(dropped, 0.0)
+                win._playback.close()
+
 
 class TestWhatItSays(_SoundCase):
     def test_the_speed_note_and_the_speed_tooltip(self):

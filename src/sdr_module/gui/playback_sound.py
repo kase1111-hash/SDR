@@ -65,7 +65,15 @@ audio:
   which only it can make. At 1x that is the sound as it is: a last block
   short of a whole one sank the pace measured, and went into the
   stretch. (Given out at once when the playback paused, at 0.5x the last
-  0.3 s of 8 kHz audio lasted 0.05 s.)
+  0.3 s of 8 kHz audio lasted 0.05 s.) Should the recording go on while
+  the speaker still plays the last of it (Loop turned on before the
+  playback paused), its sound continues at once, as a sound at 1x the
+  stretch takes over does: a new sound filled the stretch first, and the
+  speaker ran dry meanwhile (20-100 ms at 0.5x, 2x and 4x). At 1x the
+  block it goes on with comes right after the last: one that would take
+  the speaker past what AudioSink keeps (``OVERRUN_S``) is given out as it
+  plays (11.025 kHz audio: the end's read, then at once what that fell
+  short by; whole, AudioSink dropped 0.15-0.2 s of them).
 * :meth:`finish` ends a stream (the squelch closed, the speaker stopped):
   what the stretch still holds plays at once, in at most ``FLUSH_S`` and
   in no more than the speaker can still take (faster, or cut short and
@@ -134,6 +142,11 @@ class PlaybackSound:
     #: the speaker holds more than this follows: past AudioSink's HIGH_S it
     #: drops the oldest audio, the start of a sound or the end of one).
     MOST_HELD_S = 0.25
+    #: Past this much AudioSink drops the oldest audio (its HIGH_S): at 1x
+    #: the block with which a recording goes on after its end, should it
+    #: take the speaker beyond it, is given out as it plays (:meth:`more`),
+    #: not whole.
+    OVERRUN_S = 0.35
     #: The slowest and fastest the sound may play (input per output).
     MIN_RATIO = 0.25
     MAX_RATIO = 5.0
@@ -270,6 +283,9 @@ class PlaybackSound:
         self._follow_speed(self._speed)
         self._end_stream()
         self._waits.clear()
+        # The last stream ended with the recording's end, which the speaker
+        # may still play (see finish and _play).
+        self._after_end = False
 
     def _end_stream(self) -> None:
         self._stretch.reset()
@@ -339,8 +355,11 @@ class PlaybackSound:
         last piece with the stream's ``last`` block."""
         if end:
             self._ended = True
-        elif len(block):
-            self._ended = False  # (more came: Loop turned on as the end played)
+        elif len(block) and self._ended:
+            # More came: Loop turned on as the end played. The recording
+            # goes on (see _play).
+            self._ended = False
+            self._after_end = True
         if not len(block):
             return _joined(block, self.finish(now)) if last else block
         self._block_s = len(block) / self.rate
@@ -422,20 +441,30 @@ class PlaybackSound:
         steady = elapsed <= self.STALL_S
         wait = self._longest_wait(now)
         self._last = now
+        # The recording going on after its end while the speaker still
+        # plays the last of it (Loop turned on before the playback paused):
+        # that sound goes on, as one the stretch takes over at 1x does, and
+        # this block may come right after the last (see OVERRUN_S).
+        going_on = self._after_end and remaining > 0.0 and seconds > 0.0
+        if seconds > 0.0:
+            self._after_end = False
         # (This block starts the stretch: a new sound, or one that played
         # as it is at 1x taken over.)
         first = not self._stretching
         if not self._stretching:
             # (At the recording's end the pace measured is no measure: its
-            # last block, short of a whole one, sank it.)
-            if one and (pace >= self.ENGAGE_BELOW or self._ended):
+            # last block, short of a whole one, sank it; nor is it while the
+            # last of the sound plays, the frames bringing nothing.)
+            if one and (pace >= self.ENGAGE_BELOW or self._ended or going_on):
                 self._passing = True
                 # (A new sound's first block, to a speaker that holds
                 # nothing, fits only within the cushion: longer, it got no
                 # silence in front, so no margin for the next block.)
                 starts = not self._sounded and remaining <= 0.0
                 most = self.cushion_s if starts else self.MOST_HELD_S
-                if self._held is None and seconds <= most:
+                # (Nor, going on, one past what AudioSink keeps: OVERRUN_S.)
+                fits = not going_on or remaining + seconds <= self.OVERRUN_S
+                if self._held is None and seconds <= most and fits:
                     self._wrote(now, remaining, seconds)
                     return block
                 # Longer than the speaker holds (or after what is still
@@ -453,8 +482,9 @@ class PlaybackSound:
             self._settled = None
             self._swings.clear()
             # Taking over a sound that plays as it is (at 1x, falling
-            # behind): no wait to fill up first. A new sound fills up.
-            self._flowing = self._passing and remaining > 0.0
+            # behind), or the recording going on: no wait to fill up first.
+            # A new sound fills up.
+            self._flowing = (self._passing and remaining > 0.0) or going_on
         stretch = self._stretch
         stretch.feed(block)
         if self._ended and not one:
@@ -582,11 +612,13 @@ class PlaybackSound:
         At 1x the rest of a block longer than the speaker holds, as it is,
         within the same bounds. Once the recording's end was read
         (:meth:`play`'s ``end``) at the speed chosen, however long it
-        takes, within those bounds: the last of the recording.
-        Empty when nothing is held. ``now``: when it goes to the speaker
-        (the last block's time when not given)."""
+        takes, within those bounds: the last of the recording (should the
+        recording go on while the speaker plays it, its sound continues:
+        see :meth:`_play`). Empty when nothing is held. ``now``: when it
+        goes to the speaker (the last block's time when not given)."""
         out = np.zeros(0, dtype=np.float32)
         when = self._spoke_at if now is None else float(now)
+        ended = self._ended
         if self._held is not None:
             # (Normally a frame or two of it: the next block was due. The
             # rest of a block, when nobody hears it any more, is cut short.)
@@ -619,6 +651,7 @@ class PlaybackSound:
             # (The speaker plays it after what it holds.)
             self._wrote(when, self._speaker_left(when), len(out) / self.rate)
         self._end_stream()
+        self._after_end = ended
         return out
 
 

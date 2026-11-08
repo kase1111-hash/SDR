@@ -1191,8 +1191,9 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
     Second Receiver's, on a frequency of its own) is an entry of its own
     there too, after Live (:func:`receiver_source` names it), each line as
     it ends, then the line it is receiving (:meth:`set_receiver_live`, in
-    the accent color as Live's); it is shown when it starts if Live has
-    nothing yet."""
+    the accent color as Live's), with its decoder's speed and whether it
+    receives above, as Live has its own; it is shown when it starts if
+    Live has nothing yet."""
 
     if HAS_PYQT6:
         # Its empty state's button was clicked.
@@ -1216,6 +1217,9 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         # text shown ends with it.
         self._receiver_live: Dict[str, str] = {}
         self._shown_live = False
+        # Each one's decoder's speed and whether it receives now (R8-05),
+        # shown with its text as Live shows _live_speed.
+        self._receiver_speed: Dict[str, Tuple[str, bool]] = {}
         # The live speed and whether a signal is heard (shown when live is).
         self._live_speed = ("", False)
         self._source_bar = SourceBar("Text")
@@ -1338,15 +1342,27 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         live_empty = self.text.document().isEmpty()
         self.show_source(key if not self._shown and live_empty else self._shown)
 
-    def set_receiver_live(self, mark: str, text: str) -> bool:
+    def set_receiver_live(
+        self, mark: str, text: str, speed: str = "", receiving: bool = False
+    ) -> bool:
         """The line another receiver (``mark``: "2nd RX") is receiving now
         ("" when none): shown after its finished lines, in the accent
         color, as Live shows the line this window's receiver is receiving
-        (R7L-4). Cheap when it is unchanged (called for each of that
-        receiver's frames). True when it started that receiver's text (an
-        entry of its own), as its first finished line would."""
+        (R7L-4); with its decoder's ``speed`` ("18 WPM", "" before it is
+        known) and whether a keyed signal is heard now (``receiving``),
+        shown above it as Live's are (R8-05; its last line's speed while
+        it has none). Cheap when they are unchanged (called for each of
+        that receiver's frames). True when it started that receiver's text
+        (an entry of its own), as its first finished line would."""
         mark, text = str(mark or ""), str(text or "")
-        if not mark or self._receiver_live.get(mark, "") == text:
+        if not mark:
+            return False
+        live = (str(speed or ""), bool(receiving))
+        if self._receiver_speed.get(mark, ("", False)) != live:
+            self._receiver_speed[mark] = live
+            if self._shown_mark() == mark:
+                self._show_speed()
+        if self._receiver_live.get(mark, "") == text:
             return False
         self._receiver_live[mark] = text
         key = receiver_source(mark)
@@ -1428,7 +1444,9 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
             wpm_text, receiving = self._live_speed
         else:
             wpm_text = f"{record.wpm:.0f} WPM" if record.wpm > 0 else ""
-            receiving = False
+            # (Another receiver's: its decoder's, as it receives.)
+            live, receiving = self._receiver_speed.get(self._shown_mark(), ("", False))
+            wpm_text = live or wpm_text
         speed = wpm_text or _NO_VALUE
         if self.speed.text() != speed:
             self.speed.setText(speed)
@@ -1446,6 +1464,7 @@ class MorseTextView(QWidget if HAS_PYQT6 else object):
         self._recordings.clear()
         self._receivers.clear()
         self._receiver_live.clear()
+        self._receiver_speed.clear()
         self.show_source("")
         self._source_bar.set_sources([], "")
         self._empty.set_visible(True)

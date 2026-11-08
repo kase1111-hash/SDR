@@ -841,5 +841,129 @@ class TestTheDemoAirlinerFliesOneSky(unittest.TestCase):
         np.testing.assert_array_equal(later.read_samples(n), samples)
 
 
+# --------------------------------------------------------------------------- #
+# R8-05: the Second Receiver's Morse speed and Receiving in the Text view
+# --------------------------------------------------------------------------- #
+
+if HAS_PYQT6:
+    from tests.test_gui_decoder_views import _settle
+    from tests.test_gui_receiver_views import _Case as _ViewCase
+    from tests.test_gui_receiver_views import _morse
+    from tests.test_gui_second_receiver_decoders import _DecodeCase
+else:  # pragma: no cover - environment
+    _ViewCase = _DecodeCase = unittest.TestCase
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestTheSecondReceiversMorseSpeedInTheTextView(_ViewCase):
+    """R8-05: above the Text view's "2nd RX" entry, SPEED was its last
+    finished line's speed and "Receiving" never showed, while Live shows
+    the main receiver's decoder's speed and state as it receives. The
+    entry now shows the Second Receiver's own, from its decoder's status
+    (made on its DSP worker), as Live does."""
+
+    RX2 = "2nd RX"
+
+    def setUp(self):
+        super().setUp()
+        self.view = self.panel._cw_view
+
+    def shown(self):
+        return self.view.speed.text(), self.view.state.text()
+
+    def show_rx2(self):
+        from sdr_module.gui.decoder_views import receiver_source
+
+        self.view.source_bar().choose(receiver_source(self.RX2))
+        _settle(1)
+
+    def test_its_entry_shows_its_speed_and_receiving_as_it_receives(self):
+        p = self.panel
+        self.add(_morse("VVV DE SDR", wpm=15.0), receiver=self.RX2)
+        self.show_rx2()
+        self.assertEqual(self.shown(), ("15 WPM", ""))  # (its last line's)
+        p.set_receiver_live(self.RX2, "VVV D", "18 WPM", True)
+        self.assertEqual(self.view.shown_text(), "VVV DE SDR\nVVV D")
+        self.assertEqual(self.shown(), ("18 WPM", "Receiving"))
+        p.set_receiver_live(self.RX2, "VVV DE", "18 WPM", False)  # (key up)
+        self.assertEqual(self.shown(), ("18 WPM", ""))
+        p.set_receiver_live(self.RX2, "", "", False)  # (it stopped)
+        self.assertEqual(self.shown(), ("15 WPM", ""))
+
+    def test_live_keeps_this_windows_own(self):
+        p, view = self.panel, self.view
+        self.add(_morse("CQ DE MAIN"))
+        view.set_speed("20 WPM", True)
+        p.set_receiver_live(self.RX2, "VVV", "18 WPM", True)
+        self.assertEqual(view.shown_source(), "")  # (Live stays)
+        self.assertEqual(self.shown(), ("20 WPM", "Receiving"))
+        self.show_rx2()
+        self.assertEqual(self.shown(), ("18 WPM", "Receiving"))
+        view.set_speed("21 WPM", False)  # (this window's, meanwhile)
+        self.assertEqual(self.shown(), ("18 WPM", "Receiving"))
+        view.source_bar().choose("")
+        _settle(1)
+        self.assertEqual(self.shown(), ("21 WPM", ""))
+
+    def test_clear_forgets_it(self):
+        from sdr_module.gui.decoder_views import _NO_VALUE
+
+        p = self.panel
+        p.set_receiver_live(self.RX2, "VVV", "18 WPM", True)  # (its entry, shown)
+        self.assertEqual(self.shown(), ("18 WPM", "Receiving"))
+        p.clear()
+        _settle(1)
+        self.assertEqual(self.shown(), (_NO_VALUE, ""))
+        p.set_receiver_live(self.RX2, "", "18 WPM", True)  # (nothing to show yet)
+        self.assertEqual(self.view.other_receivers(), [])
+        self.assertEqual(self.shown(), (_NO_VALUE, ""))
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestTheSecondReceiversMorseSpeedOnTheDemoBeacon(_DecodeCase):
+    """R8-05 in the window: the Second Receiver on the demo's beacon
+    (99.820 MHz, CW decoder), the Decoder tab's Text view on "2nd RX"."""
+
+    def test_speed_and_receiving_follow_its_decoder(self):
+        from sdr_module.gui.decoder_views import receiver_source
+
+        panel, rx = self.panel, self.rx
+        view = panel._cw_view
+        panel._proto_combo.setCurrentText("POCSAG")  # (the main window's)
+        self.settle()
+        self.start_on(99.82e6, ("CW",))
+        self.choose("CW (Morse)")
+        self.run_seconds(4.0)
+        self.assertEqual(view.shown_source(), receiver_source("2nd RX"))
+        block = int(rx._rate() / 30)
+        seen = set()
+        for _ in range(45):  # (1.5 s more, frame by frame)
+            rx._process(rx.device.read_samples(block))
+            status = rx._decoder_status
+            self.assertTrue(status.detail.endswith("WPM"), status.detail)
+            self.assertEqual(view.speed.text(), status.detail)
+            receiving = "Receiving" if status.signal_present else ""
+            self.assertEqual(view.state.text(), receiving)
+            seen.add(view.state.text())
+        self.assertIn("Receiving", seen)
+        # Decoding paused, or another protocol: nothing is received.
+        rx._decode_check.setChecked(False)
+        rx._process(rx.device.read_samples(block))
+        self.assertEqual(view.state.text(), "")
+        rx._decode_check.setChecked(True)
+        for _ in range(15):
+            rx._process(rx.device.read_samples(block))
+        self.assertEqual(view.speed.text(), rx._decoder_status.detail)
+        self.choose("POCSAG")
+        rx._process(rx.device.read_samples(block))
+        self.assertEqual(view.state.text(), "")
+        self.choose("CW (Morse)")
+        for _ in range(15):
+            rx._process(rx.device.read_samples(block))
+        # Stopped, it receives nothing.
+        rx.stop()
+        self.assertEqual(view.state.text(), "")
+
+
 if __name__ == "__main__":
     unittest.main()

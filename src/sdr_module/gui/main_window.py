@@ -8935,8 +8935,12 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._sync_audio_record_ui()
             return False
         freq = self._current_frequency()
+        # (An audio recording's sound is named after the recording: the
+        # 1 Hz it is listened from said "0.000MHz".)
+        played = self._playback.device
+        source = played.options.name if played and played.options.audio else ""
         path = file_dialogs.unique_path(
-            folder, audio_file_name(freq, self._mode_text(mode))
+            folder, audio_file_name(freq, self._mode_text(mode), source=source)
         )
         # A stereo WAV where stereo can play (broadcast FM with Radio >
         # Audio > Stereo on); its mono stretches play on both channels.

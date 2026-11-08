@@ -20,12 +20,15 @@ it was; the speaker's sound, time-stretched to the speed
 (``playback_sound.py``), isn't.
 
 Files are named after what was tuned: ``<freq>_<mode>_<date>_<time>.wav``
-(:func:`audio_file_name`), e.g. ``145.800MHz_FM_20261030_142233.wav``.
+(:func:`audio_file_name`), e.g. ``145.800MHz_FM_20261030_142233.wav``; an
+audio recording's sound (a one-channel file of audio, listened to from
+1 Hz) after the recording: ``scanner_audio_USB_20261030_142233.wav``.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Optional
 
@@ -39,11 +42,19 @@ logger = logging.getLogger(__name__)
 AUDIO_RATE = 48000
 
 
-def audio_file_name(freq_hz: float, mode: str, when: Optional[float] = None) -> str:
-    """``145.800MHz_FM_20261030_142233.wav`` (local time)."""
+def audio_file_name(
+    freq_hz: float, mode: str, when: Optional[float] = None, source: str = ""
+) -> str:
+    """``145.800MHz_FM_20261030_142233.wav`` (local time). ``source``: an
+    audio recording playing, after whose name its sound is named
+    (``scanner_audio_USB_20261030_142233.wav``): the frequency it is
+    listened from, 1 Hz, says nothing ("0.000MHz")."""
     stamp = time.strftime("%Y%m%d_%H%M%S", time.localtime(when))
     mode = "".join(ch for ch in str(mode) if ch.isalnum()) or "audio"
-    return f"{float(freq_hz) / 1e6:.3f}MHz_{mode}_{stamp}.wav"
+    what = os.path.splitext(os.path.basename(str(source)))[0].strip()[:60]
+    if not what:
+        what = f"{float(freq_hz) / 1e6:.3f}MHz"
+    return f"{what}_{mode}_{stamp}.wav"
 
 
 class AudioTake:

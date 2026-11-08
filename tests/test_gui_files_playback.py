@@ -337,6 +337,32 @@ class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
                 self.assertEqual(dropped, 0.0)
                 win._playback.close()
 
+    def test_a_take_of_an_audio_recording_is_named_after_it(self):
+        """Record Audio names a take after what was tuned. An audio
+        recording's sound is listened to in USB from 1 Hz: its take was
+        "0.000MHz_USB_<date>_<time>.wav"; now it is named after the
+        recording. A take of an I/Q recording keeps its frequency."""
+        import shutil
+        import tempfile
+
+        folder = tempfile.mkdtemp(prefix="audio-take-name-")
+        self.addCleanup(shutil.rmtree, folder, True)
+        self.store.values["recording/folder"] = folder
+        win = self.win
+        self.open_audio(8000, seconds=2.0)
+        self.assertTrue(win._start_audio_recording())
+        self.assertIn("audio8000_USB_", self.message())
+        self.frames(0.5)
+        path = win._stop_audio_recording()
+        self.assertRegex(os.path.basename(path), r"^audio8000_USB_\d{8}_\d{6}\.wav$")
+        win._playback.close()
+        self.open()  # (an FM recording at 100.0 MHz)
+        self.assertTrue(win._start_audio_recording())
+        self.frames(0.5)
+        path = win._stop_audio_recording()
+        self.assertRegex(os.path.basename(path), r"^\d+\.\d{3}MHz_FM_\d{8}_\d{6}\.wav$")
+        win._playback.close()
+
     def test_record_audio_seek_pause_and_loop(self):
         """8 kHz audio at 0.5x with Record Audio on, through a seek, a
         pause, the file's end (Loop) and 2x: the take keeps the

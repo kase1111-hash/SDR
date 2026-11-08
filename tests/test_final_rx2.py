@@ -982,6 +982,21 @@ class TestTheSecondReceiversMorseSpeedOnTheDemoBeacon(_DecodeCase):
     """R8-05 in the window: the Second Receiver on the demo's beacon
     (99.820 MHz, CW decoder), the Decoder tab's Text view on "2nd RX"."""
 
+    def receiving(self, pipelined=False, frames=150):
+        """Frames of the beacon until the Text view says Receiving above
+        the 2nd RX entry (the beacon keys again within ``frames``)."""
+        rx, view = self.rx, self.panel._cw_view
+        block = int(rx._rate() / 30)
+        for _ in range(frames):
+            if view.state.text() == "Receiving":
+                return
+            samples = rx.device.read_samples(block)
+            if pipelined:
+                rx._feed(samples)
+            else:
+                rx._process(samples)
+        self.fail("the Text view never said Receiving")
+
     def test_speed_and_receiving_follow_its_decoder(self):
         from sdr_module.gui.decoder_views import receiver_source
 
@@ -1005,22 +1020,49 @@ class TestTheSecondReceiversMorseSpeedOnTheDemoBeacon(_DecodeCase):
             seen.add(view.state.text())
         self.assertIn("Receiving", seen)
         # Decoding paused, or another protocol: nothing is received.
+        self.receiving()
         rx._decode_check.setChecked(False)
+        self.assertEqual(view.state.text(), "")
         rx._process(rx.device.read_samples(block))
         self.assertEqual(view.state.text(), "")
         rx._decode_check.setChecked(True)
         for _ in range(15):
             rx._process(rx.device.read_samples(block))
         self.assertEqual(view.speed.text(), rx._decoder_status.detail)
+        self.receiving()
         self.choose("POCSAG")
+        self.assertEqual(view.state.text(), "")  # (at once, as when stopped)
         rx._process(rx.device.read_samples(block))
         self.assertEqual(view.state.text(), "")
         self.choose("CW (Morse)")
-        for _ in range(15):
-            rx._process(rx.device.read_samples(block))
-        # Stopped, it receives nothing.
+        # Stopped (while the beacon keys), it receives nothing.
+        self.receiving()
         rx.stop()
         self.assertEqual(view.state.text(), "")
+
+    def test_a_scan_sweeping_with_it_pauses_it_too(self):
+        # (Check) The Scanner tab sweeping with this receiver ("Use both
+        # receivers") pauses its decoding, as Decode unticked does; but
+        # "Receiving" stayed above its entry the whole scan.
+        rx, view = self.rx, self.panel._cw_view
+        self.panel._proto_combo.setCurrentText("POCSAG")  # (the main window's)
+        self.settle()
+        self.start_on(99.82e6, ("CW",))
+        self.choose("CW (Morse)")
+        self.run_seconds(4.0, pipelined=True)
+        self.receiving(pipelined=True)
+        block = int(rx._rate() / 30)
+        rx._feed(rx.device.read_samples(block))
+        self.assertTrue(rx._pipeline.pending)  # (a frame of it on the worker)
+        rx.set_scan_feed(lambda samples: None)  # (the scan starts)
+        self.assertIn("Paused while the Scanner", rx._decoder_line.text())
+        self.assertEqual(view.state.text(), "")
+        for _ in range(30):  # (a second of the scan)
+            rx._feed(rx.device.read_samples(block))
+            self.assertEqual(view.state.text(), "")
+        # The scan over, it decodes again.
+        rx.set_scan_feed(None)
+        self.receiving(pipelined=True)
 
 
 if __name__ == "__main__":

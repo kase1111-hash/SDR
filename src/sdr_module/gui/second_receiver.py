@@ -1909,7 +1909,15 @@ if HAS_PYQT6:
             its own frame (the main window's Scanner tab sweeping with it:
             "Use both receivers"); None ends that. (This receiver doesn't
             decode meanwhile: the scan tunes it step by step.)"""
+            starts = feed is not None and self._scan_feed is None
+            if starts:
+                # (The frame on the DSP worker, decoded, is shown first.)
+                self._settle_frames()
             self._scan_feed = feed
+            if starts:
+                # Nothing is received while it sweeps, as with Decode
+                # unticked; the line its decoder holds shows again after.
+                self._show_line_received(None)
             self._update_decoder_line()
 
         def set_scan_muted(self, muted: bool) -> None:

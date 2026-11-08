@@ -530,10 +530,64 @@ class TestTuningInsideAOneChannelRecording(_WavCase):
         self.assertEqual(len(heard), 16384)
         spectrum = np.abs(np.fft.rfft(heard * np.hanning(len(heard))))
         freqs = np.fft.rfftfreq(len(heard), 1 / 48000)
-        # The file's own 1 kHz tone, as recorded.
+        # The file's own 1 kHz tone, at its own pitch.
         self.assertAlmostEqual(freqs[np.argmax(spectrum[20:]) + 20], 1000.0, delta=10)
         win._playback.close()
         self.assertEqual(self._mode(), before)  # (as it was before the file)
+
+    def test_the_line_says_which_of_its_sound_plays(self):
+        """USB from 0 Hz with the 2.7 kHz filter plays an audio file's sound
+        from 0.2 to 2.9 kHz, at its own pitch, and nothing above: the line
+        says that band. It said "so it plays as recorded" of 48 kHz audio
+        whose 6 kHz tone came out 110 dB below its 1 kHz tone (no filter on
+        offer plays as recorded what lies above 3.8 kHz)."""
+        from tests.test_gui_round3_main import _FakeClock
+        from tests.test_gui_second_receiver import _FakeSink
+
+        win = self.win
+        sink = _FakeSink()
+        sink.open = True
+        win._audio, win._audio_enabled, win._audio_problem = sink, True, None
+        win._audio_output_problem = lambda: None
+        self._open(self._audio(tones=((1000.0, 0.2), (6000.0, 0.2))))
+        said = self.message()
+        self.assertEqual(self._mode(), ("USB", "2.7 kHz"))
+        clock = _FakeClock()
+        with mock.patch.object(self.mw, "time", clock):
+            win._pacer.restart()
+            for _ in range(30):  # (0.9 s)
+                clock.advance(0.03)
+                win._update_display()
+        heard = sink.samples()[-16384:]
+        self.assertEqual(len(heard), 16384)
+        spectrum = np.abs(np.fft.rfft(heard * np.hanning(len(heard))))
+        freqs = np.fft.rfftfreq(len(heard), 1 / 48000)
+
+        def level_db(freq):
+            return 20 * np.log10(spectrum[np.abs(freqs - freq) < 30].max() + 1e-12)
+
+        # What plays: 0.2-2.9 kHz (the 1 kHz tone), not the 6 kHz one...
+        self.assertGreater(level_db(1000.0) - level_db(6000.0), 60.0)
+        # ...and the line says so, not that the file plays as recorded.
+        self.assertNotIn("as recorded", said)
+        self.assertIn(
+            "USB from 0 Hz with a 2.7 kHz filter, so its sound from 0.2–2.9 kHz "
+            "plays at its own pitch",
+            said,
+        )
+        win._playback.close()
+
+    def test_the_line_follows_the_filter_it_opens_with(self):
+        """(The filter used last in USB: the widest, 3.6 kHz, plays to
+        3.8 kHz.)"""
+        win = self.win
+        win._set_demod_mode("USB", None, "3.6 kHz")
+        win._set_demod_mode("FM")
+        self._open(self._audio())
+        self.assertEqual(self._mode(), ("USB", "3.6 kHz"))
+        said = self.message()
+        self.assertIn("with a 3.6 kHz filter, so its sound from 0.2–3.8 kHz", said)
+        win._playback.close()
 
     def test_its_mode_stays_without_choose_mode_from_band_plan(self):
         win = self.win

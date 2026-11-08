@@ -648,7 +648,7 @@ if HAS_PYQT6:
             self._previous: Optional[_PreviousSource] = None
             self._device_tip = ""
             #: The last open() changed the listening by the band plan, or
-            #: to hear a one-channel file's audio as recorded (its
+            #: to hear a one-channel file's audio at its own pitch (its
             #: status line is the one to keep).
             self.band_plan_applied = False
             # Where the file was (monotonic time, sample, loops) when the
@@ -770,10 +770,13 @@ if HAS_PYQT6:
 
         def _hear_as_recorded(self, options: IqFileOptions) -> bool:
             """Audio in a one-channel file (0 Hz to half its rate, its sound
-            itself) heard as it was recorded: in USB from 0 Hz, whose filter
-            passes it from 200 Hz up at its own pitch (2.7 kHz: to 2.9 kHz),
-            as Radio > Choose Mode From Band Plan hears a band its usual way
-            (not when that is off). True when its status line says so."""
+            itself) heard at its own pitch: in USB from 0 Hz, whose filter
+            passes it from 200 Hz up (2.7 kHz: to 2.9 kHz; the widest, 3.6
+            kHz, to 3.8 kHz), as Radio > Choose Mode From Band Plan hears a
+            band its usual way (not when that is off). Not all of it: what
+            lies above the filter isn't heard, which the status line says
+            (it claimed the file "plays as recorded"). True when the line
+            says so."""
             win = self._win
             action = win._own("_band_plan_action")
             if action is not None and not action.isChecked():
@@ -788,9 +791,13 @@ if HAS_PYQT6:
             if not win.set_frequency(lowest):
                 return False
             width = win._control_panel._bw_combo.currentText()
+            # (The passband heard: 200 Hz up to 200 Hz plus the filter.)
+            tuned = win._current_frequency()
+            low, high = (tuned + edge for edge in win._passband_edges())
             text = win._keeping_release_note(
-                f"Audio: listening in USB from 0 Hz with a {width} filter, so it "
-                "plays as recorded (Radio > Choose Mode From Band Plan)"
+                f"Audio: listening in USB from 0 Hz with a {width} filter, so its "
+                f"sound from {low / 1e3:.1f}–{high / 1e3:.1f} kHz plays at its own "
+                "pitch (Radio > Choose Mode From Band Plan)"
             )
             win._show_status_message(f"{playing_line(options)} · {text}", "info", 8000)
             return True

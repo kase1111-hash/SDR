@@ -64,7 +64,7 @@ class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
         self.play(path)
         win = self.win
         self.assertTrue(win._playback.active, self.message())
-        # (Heard as recorded: USB from 0 Hz, the 1 kHz tone at 1 kHz.)
+        # (Heard at its own pitch: USB from 0 Hz, the 1 kHz tone at 1 kHz.)
         self.assertEqual(win._control_panel.get_demod_mode(), "USB")
         win._playback_bar.set_loop(True)
         win._control_panel.set_squelch_enabled(False)

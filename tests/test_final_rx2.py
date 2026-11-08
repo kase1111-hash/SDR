@@ -202,6 +202,48 @@ class TestATypedFrequencyFollowsTheBandPlan(_TypingCase):
         self.assertEqual(self.listening(), ("AM", "", "10 kHz"))
         self.assertEqual(rx.message(), "Tuned to Talk (AM)")
 
+    def test_a_bookmark_in_the_bands_mode_keeps_its_deviation(self):
+        # (Narrow FM on a broadcast station: FM is the band's mode too, but
+        # the bookmark's 5 kHz and 25 kHz filter are its own.)
+        from sdr_module.gui.bookmarks_panel import _new_bookmark
+
+        rx = self.rx
+        bookmark = _new_bookmark("Narrow", 97.1e6, "FM", "5 kHz", "25 kHz")
+        self.assertTrue(rx.tune_bookmark(bookmark))
+        self.assertEqual(self.listening(), ("FM", "5 kHz", "25 kHz"))
+        self.assertEqual(rx.message(), "Tuned to Narrow (FM)")
+        # One without a mode where the band plan knows nothing keeps it too.
+        self.assertTrue(rx.tune_bookmark({"label": "Somewhere", "freq_hz": 300e6}))
+        self.assertEqual(self.listening(), ("FM", "5 kHz", "25 kHz"))
+        self.assertEqual(rx.message(), "Tuned to Somewhere (FM)")
+
+    def test_where_the_band_plan_knows_nothing_the_mode_stays(self):
+        # (No band, segment or preset channel there: nothing to go by, as
+        # in the main window. The message about the band left goes.)
+        rx = self.rx
+        self.type_frequency("97.1")
+        self.assertEqual(self.listening(), ("FM", "75 kHz", "200 kHz"))
+        self.type_frequency("300")
+        self.assertEqual(rx.tuned_frequency(), 300e6)
+        self.assertEqual(self.listening(), ("FM", "75 kHz", "200 kHz"))
+        self.assertEqual(rx.message(), "")
+        rx._mode_combo.setCurrentText("AM")  # picked by hand there
+        self.type_frequency("250")
+        self.assertEqual(rx.tuned_frequency(), 250e6)
+        self.assertEqual(rx.mode(), "AM")
+        self.assertEqual(rx.message(), "")
+
+    def test_a_sideband_chosen_by_hand_takes_the_message_down(self):
+        # (USB and LSB share the 2.7 kHz filter: only the mode changes, and
+        # "listening in LSB" no longer says how this receiver listens.)
+        rx = self.rx
+        self.type_frequency("7.2")
+        self.assertEqual(self.listening(), ("LSB", "", "2.7 kHz"))
+        self.assertTrue(rx.message().startswith("40m Ham: listening in LSB"))
+        rx._mode_combo.setCurrentText("USB")
+        self.assertEqual(self.listening(), ("USB", "", "2.7 kHz"))
+        self.assertEqual(rx.message(), "")
+
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestTheTypedStationPlaysInStereo(_TypingCase):

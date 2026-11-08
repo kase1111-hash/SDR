@@ -10079,6 +10079,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 # (Another mode with no audio: no block to fade out.)
                 self._speak(self._audio_join.release(), last=True)
             self._show_detected_tone()
+            self._update_squelch_lamp(level_db, noise_db, audible)
             if recording:
                 self._record_audio_block(None, False, seconds, False)
             self._show_stereo(chain, received)  # (Stereo off: MONO)
@@ -10147,6 +10148,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             # before mustn't leave its verdict for the Scanner and the meter).
             self._tone_blocked = False
         self._show_detected_tone()
+        self._update_squelch_lamp(level_db, noise_db, audible)
         join = self._audio_join
         nr = self._audio_options.noise_reduction
         # A new chain, deviation or noise reduction: the audio doesn't
@@ -10496,6 +10498,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
             self._squelch_state(audible),
             gate.auto and noise_db is not None,
         )
+
+    def _update_squelch_lamp(
+        self, level_db: float, noise_db: Optional[float], audible: bool
+    ) -> None:
+        """The lamp again once the block's tone gate has run (the meter is
+        set before it, with the last block's verdict: a station the tone
+        squelch mutes read OPEN for a frame as it keyed up, and one a
+        reverse tone squelch lets through read TONE as it began to play)."""
+        if self._level_meter.state() != self._squelch_state(audible):
+            self._update_level_meter(level_db, noise_db, audible)
 
     def _tones_checked(self, deviation: float) -> bool:
         """Whether FM audio is searched for a CTCSS tone: below a broadcast

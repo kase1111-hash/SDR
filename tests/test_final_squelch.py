@@ -393,6 +393,71 @@ class TestTheMainWindow(_WindowTestCase):
 
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestTheMainWindowsLamp(_WindowTestCase):
+    """The main window's LEVEL lamp says what each block's tone gate
+    decided, as the Second Receiver's does. It was set before the gate ran,
+    with the last block's verdict: a station the tone squelch mutes read
+    OPEN for a frame as it keyed up, and the station a reverse tone squelch
+    lets through read TONE as it began to play."""
+
+    demo = True
+
+    def setUp(self):
+        super().setUp()
+        win = self.win
+        pretend_audio_output(win)
+        self.written = []
+        win._audio.write = lambda a: self.written.append(np.asarray(a).copy())
+        win._device._rng = np.random.default_rng(7)  # (its noise, repeatable)
+        win._set_demod_mode("FM", "5 kHz", "12.5 kHz")
+
+    def key_up(self, tone_hz, reverse):
+        """(lamp, the gate's verdict, sound) for each frame from 0.2 s
+        before a transmission of the demo's 2 m repeater (100.0 Hz) to 1 s
+        into it."""
+        win = self.win
+        panel = win._control_panel
+        panel.set_tone_squelch_hz(tone_hz)
+        panel.set_tone_reverse(reverse)
+        win._stop_acquisition()
+        win._device.start_rx()
+        self.assertTrue(win.set_frequency(145.29e6))
+        rate = win._device_sample_rate()
+        win._device._stream_pos = int((_on_at("rpt", 0.0) - 0.2) * rate)
+        rows = []
+        with _demo_lag():
+            for _ in range(36):
+                self.written.clear()
+                win._pacer.reset()
+                win._process_block(win._device.read_samples(int(rate / 30)))
+                sound = any(np.max(np.abs(a)) > 1e-3 for a in self.written if a.size)
+                rows.append((win._level_meter.state(), win._squelch_state(True), sound))
+        return rows
+
+    def test_a_station_it_mutes_never_reads_open(self):
+        for tone_hz, reverse, muted in (
+            (100.0, True, "reverse"),
+            (123.0, False, "tone"),
+        ):
+            rows = self.key_up(tone_hz, reverse)
+            lamps = [lamp for lamp, _gate, _sound in rows]
+            self.assertIn(muted, lamps, tone_hz)
+            self.assertNotIn("open", lamps, tone_hz)
+            self.assertEqual(lamps, [gate for _lamp, gate, _sound in rows], tone_hz)
+            self.assertNotIn(True, [sound for _lamp, _gate, sound in rows], tone_hz)
+
+    def test_it_reads_open_as_the_station_begins_to_play(self):
+        """Reversed on 123.0 Hz: held about half a second, then heard."""
+        rows = self.key_up(123.0, True)
+        lamps = [lamp for lamp, _gate, _sound in rows]
+        heard = [sound for _lamp, _gate, sound in rows]
+        self.assertIn(True, heard)
+        self.assertIn("reverse", lamps)
+        self.assertEqual(lamps, [gate for _lamp, gate, _sound in rows])
+        self.assertEqual([lamp == "open" for lamp in lamps], heard)
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestScanBookmarks(_WindowTestCase):
     """R7W-01: a bookmark scan that reaches a repeater in the last half
     second of a transmission, its only bookmark reversed on the tone or code

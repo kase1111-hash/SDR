@@ -6141,9 +6141,10 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         Decoder tab's line has it (a recording at the device's rate keeps
         the decoder built for the device). Nor while the Decoder tab's line
         says the decoder misses part of the signal (this computer, the
-        device or a job can't keep up, see _sync_decoder_skipping): a
-        lower rate helps then, as that line says, and 2.5 MS/s or more
-        (no limit to the decoder's work) would only add to it (R7W-05)."""
+        device or a job of this app can't keep up, see
+        _sync_decoder_skipping): that line says what helps then, and 2.5
+        MS/s or more (no limit to the decoder's work) would only add to
+        the work (R7W-05)."""
         from ..dsp.live_decoders import skipped_text
 
         said = self._own("_busy_sky_said") or ""

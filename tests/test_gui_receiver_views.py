@@ -498,8 +498,8 @@ def _last_block_color(edit):
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestTheLineItIsReceiving(_Case):
     """R7L-4 (final review): the Second Receiver's Morse line still being
-    received showed in neither window's Text view (only its finished lines
-    reached the Decoder tab, as messages). Now its entry under Showing:
+    received showed nowhere (only its finished lines reached the Decoder
+    tab, as messages). Now its entry under Showing:
     ("2nd RX") shows it after its finished lines, in the accent color, as
     the Live text shows the line this window's receiver is receiving; it
     starts the entry as a finished line does."""

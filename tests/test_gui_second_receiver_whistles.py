@@ -152,6 +152,50 @@ class TestTheWhistleRow(_SecondCase):
         self.assertEqual(rx._notch_found.text(), "None")
         self.assertEqual(rx._notch_label.text(), "Whistle:")
 
+    def choose(self, key):
+        combo = self.rx._notch_combo
+        combo.setCurrentIndex(combo.findData(key))
+
+    def test_manual_says_whistle_after_auto_found_several(self):
+        # ui-4: after Auto named several whistles ("Whistles:"), Manual's
+        # one frequency box kept that caption, frame after frame. It says
+        # "Whistle:", as the main window's Audio group does.
+        rx = self.rx
+        self.listen()
+        self.assertEqual(rx._notch_found.text(), "700, 1900, 2600 Hz")
+        self.assertEqual(rx._notch_label.text(), "Whistles:")
+        self.choose("manual")
+        self.assertIs(rx._notch_stack.currentWidget(), rx._notch_spin)
+        self.assertEqual(rx._notch_label.text(), "Whistle:")
+        self.listen(0.5)
+        self.assertEqual(rx._notch_label.text(), "Whistle:")
+        # Auto again searches anew (no old list meanwhile) and names them
+        # all once found.
+        self.choose("auto")
+        self.assertEqual(rx._notch_found.text(), "None")
+        self.listen(1.5)
+        self.assertEqual(rx._notch_label.text(), "Whistles:")
+        self.assertEqual(rx._notch_found.text(), "700, 1900, 2600 Hz")
+
+    def test_off_then_manual_says_whistle(self):
+        rx = self.rx
+        self.listen()
+        self.assertEqual(rx._notch_label.text(), "Whistles:")
+        self.choose("off")
+        self.choose("manual")
+        self.assertEqual(rx._notch_label.text(), "Whistle:")
+
+    def test_the_main_windows_audio_group_says_the_same(self):
+        rx, panel = self.rx, self.win._control_panel
+        self.listen()
+        self.choose("manual")
+        self.win._set_demod_mode("USB")
+        panel._notch_combo.setCurrentIndex(panel._notch_combo.findData("auto"))
+        panel.show_notch_found((1900.0, 700.0, 2600.0))
+        self.assertEqual(panel._notch_label.text(), "Whistles:")
+        panel._notch_combo.setCurrentIndex(panel._notch_combo.findData("manual"))
+        self.assertEqual(rx._notch_label.text(), panel._notch_label.text())
+
 
 if __name__ == "__main__":
     unittest.main()

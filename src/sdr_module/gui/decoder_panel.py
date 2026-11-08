@@ -692,6 +692,10 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
         tune_requested = pyqtSignal(float, str, str, str)
         # Decode was ticked (True) or unticked by the user.
         decode_toggled = pyqtSignal(bool)
+        # Clear is about to remove the messages: a receiver with a frame
+        # still on its DSP worker (the Second Receiver) shows it first, so
+        # that frame's messages go with the rest.
+        clearing = pyqtSignal()
         # Clear removed the messages (the live decoder forgets its notes).
         cleared = pyqtSignal()
         # Export can no longer keep every message (e.g. the temporary
@@ -2298,6 +2302,7 @@ class DecoderPanel(QWidget if HAS_PYQT6 else object):
 
     def clear(self):
         """Clear all messages (and count the decoder's from here)."""
+        self.clearing.emit()  # (messages still on their way come first)
         status = self._decoder_status
         self._count_base = tuple(
             int(getattr(status, attr, 0) or 0) for attr in ("frames", "valid", "failed")

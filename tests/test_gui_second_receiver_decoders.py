@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -299,6 +300,77 @@ class TestTheDecoderTab(_DecodeCase):
         self.assertEqual(rx._decoder_last.toolTip(), "")
         self.assertNotIn("1 packet", rx._decoder_line.text())
 
+    def feed_until_in_flight(self, seconds):
+        """Display frames one at a time, as the display loop feeds them
+        (each leaves its frame on the DSP worker, _feed), until the frame
+        on the worker has decoded a message: True when one did."""
+        rx = self.rx
+        decoding = rx._work.decoding
+        decoded = []
+        real = decoding.process
+
+        def process(*args):
+            out = real(*args)
+            decoded.append(sum(1 for m in out if getattr(m, "valid", True)))
+            return out
+
+        decoding.process = process
+        self.addCleanup(lambda: decoding.__dict__.pop("process", None))
+        block = int(rx._rate() / 30)
+        for _ in range(int(seconds * 30)):
+            rx._feed(rx.device.read_samples(block))
+            deadline = time.monotonic() + 10
+            while not rx._pipeline.ready() and time.monotonic() < deadline:
+                time.sleep(0.001)
+            if decoded and decoded[-1]:
+                return rx._pipeline.pending
+        return False
+
+    def test_clear_takes_the_page_on_the_dsp_worker_with_the_rest(self):
+        # thr-1: Clear while the frame on the DSP worker held a page put
+        # that page into the tab just emptied, and this window counted it
+        # as before Clear: the tab showed a row the window said hadn't
+        # come ("No message yet"), and its count left it out for good.
+        rx, panel = self.rx, self.panel
+        self.start_on(152.24e6)
+        self.choose("POCSAG")
+        self.run_seconds(12, pipelined=True)  # (the 3 s page: Clear has rows)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertTrue(self.feed_until_in_flight(6))  # (a 13 s page)
+        panel._clear_btn.click()
+        self.assertEqual(panel._messages, [])
+        self.assertEqual(panel._table.rowCount(), 0)
+        self.assertEqual(rx._decoder_last.text(), "No message yet")
+        self.assertEqual(rx._decoded_rows, 0)
+        self.assertNotRegex(rx._decoder_line.text(), r"\d+ pages?")  # (none yet)
+        # The pages after it are counted alike, here and there.
+        self.run_seconds(12, pipelined=True)
+        rows = self.rows()
+        self.assertTrue(rows)
+        self.assertEqual(rx._decoded_rows, len(rows))
+        pages = f"{len(rows)} page{'' if len(rows) == 1 else 's'}"
+        self.assertIn(pages, rx._decoder_line.text())
+
+    def test_clear_with_a_reply_on_the_dsp_worker_empties_the_aircraft(self):
+        # (thr-1 with ADS-B: the aircraft of the frame on the worker landed
+        # in the Aircraft list just cleared.)
+        rx, panel = self.rx, self.panel
+        self.start_on(1090e6)
+        self.choose("ADS-B")
+        self.run_seconds(2, pipelined=True)
+        view = panel._aircraft_view
+        self.assertGreater(view.count(), 0)
+        self.assertTrue(self.feed_until_in_flight(5))
+        panel._clear_btn.click()
+        self.assertEqual(panel._messages, [])
+        self.assertEqual(view.count(), 0)
+        self.assertEqual(rx._decoded_rows, 0)
+        self.assertEqual(rx._decoder_last.text(), "No message yet")
+        self.run_seconds(2, pipelined=True)
+        rows = self.rows()
+        self.assertTrue(rows)
+        self.assertEqual(rx._decoded_rows, len(rows))
+
 
 @unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
 class TestAddMessageReceiver(_WindowTestCase):
@@ -321,6 +393,31 @@ class TestAddMessageReceiver(_WindowTestCase):
         # The main receiver's own Morse still reaches its Text view.
         panel.add_message("CW (Morse)", "", "CQ CQ", message=line)
         self.assertIn("CQ CQ", panel._cw_view.plain_text())
+
+    def test_clear_says_so_before_the_rows_go(self):
+        # (thr-1) A receiver with messages still on their way adds them on
+        # `clearing`: Clear takes them with the rest, then says `cleared`.
+        panel = self.win._decoder_panel
+        panel.add_message("POCSAG", "1234567 (F3)", "HELLO", receiver="2nd RX")
+        heard = []
+
+        def late():
+            heard.append("clearing")
+            panel.add_message("POCSAG", "1234567 (F3)", "LATE", receiver="2nd RX")
+
+        def done():
+            heard.append(("cleared", len(panel._messages)))
+
+        panel.clearing.connect(late)
+        panel.cleared.connect(done)
+        try:
+            panel._clear_btn.click()
+        finally:
+            panel.clearing.disconnect(late)
+            panel.cleared.disconnect(done)
+        self.assertEqual(heard, ["clearing", ("cleared", 0)])
+        self.assertEqual(panel._messages, [])
+        self.assertEqual(panel._table.rowCount(), 0)
 
     def test_the_protocol_column_says_whose_rows_they_are(self):
         # With nothing chosen in the selector and one protocol in the table

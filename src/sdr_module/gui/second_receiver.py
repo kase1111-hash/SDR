@@ -19,6 +19,10 @@ main window has as in use, and the main window's Device > Connect... refuses
 the one this window holds (:meth:`SecondReceiverHost.device_problem`). A
 stopped second receiver holds no device at all (Stop closes it).
 
+A frequency typed in (or a bookmark without a mode) in another band is heard
+the way the band plan says, by the main window's rule and switch (Radio >
+Choose Mode From Band Plan): broadcast FM at 97.1 MHz, narrow FM on 2 m.
+
 It reuses the main window's bookmarks (tune from one, bookmark the frequency
 heard here) and records its I/Q with the library's :class:`~sdr_module.dsp.
 recording.IQRecorder` straight to a SigMF file in the recordings folder (the
@@ -1040,6 +1044,10 @@ if HAS_PYQT6:
             self._lo_hz = _DEFAULT_FREQUENCY_HZ
             self._tuned_hz = _DEFAULT_FREQUENCY_HZ
             self._step_hz = 12.5e3
+            # The band plan's last message and the band (and segment) it is
+            # about: a far tune into another one takes it down (as the main
+            # window's _band_plan_note).
+            self._band_plan_note: Optional[Tuple[str, Tuple[str, str]]] = None
             # In stereo where the output can (broadcast FM), mono on both
             # channels otherwise: stereo coming and going never reopens it.
             self._audio = AudioSink(channels=2)
@@ -1781,7 +1789,11 @@ if HAS_PYQT6:
             self._refresh_bookmarks()
             decoders = getattr(self._win, "_decoder_panel", None)
             if decoders is not None:
-                # (Its Clear clears this receiver's rows too.)
+                # (Its Clear clears this receiver's rows too, with those of
+                # the frame on the DSP worker: that frame is shown before
+                # the rows go, so the tab and this window agree on what
+                # came before Clear.)
+                decoders.clearing.connect(self._settle_frames)
                 decoders.cleared.connect(self._on_decoder_tab_cleared)
             # Never outlive the main window running (the host closes this
             # window first; this covers a main window deleted without it).
@@ -2465,7 +2477,74 @@ if HAS_PYQT6:
             return note
 
         def _on_entry_frequency(self, freq_hz: float) -> None:
-            self.tune(freq_hz)
+            """Tuning > Frequency: a frequency typed in is a far tune (the
+            band plan's mode, see _listen_by_band_plan); the field's
+            arrows, Page Up/Down and wheel step, keeping the mode as
+            Left/Right on the plots do (as in the main window)."""
+            before = self._tuned_hz
+            far = not self._freq_input.is_stepping()
+            if self.tune(freq_hz) and far:
+                self._listen_by_band_plan(before)
+
+        def _band_plan_on(self) -> bool:
+            """The main window's Radio > Choose Mode From Band Plan: one
+            switch for both receivers (its saved setting once that window
+            is gone)."""
+            action = None
+            if not self._main_gone:
+                action = getattr(self._win, "_band_plan_action", None)
+            if action is not None:
+                return bool(action.isChecked())
+            return self._settings.get_bool("tuning/band_plan_mode", True)
+
+        def _listen_by_band_plan(self, before_hz: float) -> bool:
+            """After a far tune with no mode of its own (a frequency typed
+            in, a bookmark without one), from ``before_hz``: in another
+            band, listen the way it is usually heard, by the main window's
+            rule (SDRMainWindow._band_plan_listening: broadcast FM at 97.1
+            MHz, not the 2 m band's narrow FM, which clipped it and played
+            no stereo), and say so. A mode chosen within the band stays.
+            True when it changed."""
+            zone = SDRMainWindow._band_plan_zone(self._tuned_hz)
+            # The message about the band you came from no longer applies.
+            note = self._band_plan_note
+            if note is not None and note[1] != zone:
+                self._band_plan_note = None
+                if self.message() == note[0]:
+                    self._clear_message()
+            if not self._band_plan_on():
+                return False
+            mode = self.mode()
+            deviation = self._deviation_value() if mode == "FM" else ""
+            change = SDRMainWindow._band_plan_listening(
+                before_hz, self._tuned_hz, mode, deviation
+            )
+            if change is None:
+                return False
+            (target, target_deviation, width), name, where = change
+            self.set_mode(target, target_deviation, width)
+            how = "I/Q" if target.startswith("None") else target
+            if target == "FM":
+                wide = self._deviation_hz() >= _BROADCAST_DEVIATION_HZ
+                fm = "broadcast" if wide else "narrow"
+                how = f"FM ({fm}, {self._deviation_value()} deviation)"
+            text = (
+                f"{name}: listening in {how} with a "
+                f"{self._filter_combo.currentText()} filter, as {where} is "
+                "usually heard (the main window's Radio > Choose Mode From "
+                "Band Plan)"
+            )
+            self._show_message(text, "info", 6000)
+            self._band_plan_note = (text, zone)
+            return True
+
+        def _drop_band_plan_note(self) -> None:
+            """A mode, filter or FM deviation chosen since: the band plan's
+            message no longer says how this receiver listens (the main
+            window says the new mode instead)."""
+            note, self._band_plan_note = self._band_plan_note, None
+            if note is not None and self.message() == note[0]:
+                self._clear_message()
 
         def _tune_steps(self, steps: int) -> None:
             self.tune(step_frequency(self._tuned_hz, self._step_hz, int(steps)))
@@ -2505,6 +2584,7 @@ if HAS_PYQT6:
             main window."""
             self._fill_filters(mode)
             if not self._restoring:
+                self._drop_band_plan_note()
                 width, deviation = MODE_FILTER_DEFAULTS.get(
                     filter_profile(mode, self._tuned_hz), ("", "")
                 )
@@ -2565,12 +2645,14 @@ if HAS_PYQT6:
         def _on_filter_changed(self, _text: str) -> None:
             self._apply_dsp_settings()
             if not self._restoring:
+                self._drop_band_plan_note()
                 self._ensure_vfo_fits()
 
         def _on_deviation_changed(self) -> None:
             self._apply_dsp_settings()
             self._update_filter_controls()  # (broadcast FM keeps its audio)
             if not self._restoring:
+                self._drop_band_plan_note()
                 self._load_step()
 
         def _apply_dsp_settings(self) -> None:
@@ -3598,15 +3680,19 @@ if HAS_PYQT6:
                 self.tune_bookmark(bookmark)
 
         def tune_bookmark(self, bookmark: Dict[str, Any]) -> bool:
-            """Tune to a bookmark, in its mode, deviation and filter."""
+            """Tune to a bookmark, in its mode, deviation and filter (one
+            without a mode: the band plan's, in another band)."""
             try:
                 freq = float(bookmark.get("freq_hz") or 0.0)
             except (TypeError, ValueError):
                 return False
+            before = self._tuned_hz
             if not self.tune(freq):
                 return False
             demod, deviation, width, _tone = bookmark_listening(bookmark)
             squelch = ""
+            if not demod and self._listen_by_band_plan(before):
+                return True  # (its message says how)
             if demod:
                 self._listen_like_bookmark(demod, deviation, width)
                 if demod == "FM":

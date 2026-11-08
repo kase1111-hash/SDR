@@ -199,6 +199,44 @@ class TestTheResults(_TabCase):
         self.assertIn("Read by the second receiver", tip)
         self.assertEqual([h.receiver for h in panel.hits()], ["main", "second"])
 
+    def test_the_level_header_says_whose_scale_each_level_is_on(self):
+        """ui-6 (final review): with the RX column shown, the Level header's
+        tooltip still said every level was on the spectrum's scale, which a
+        2nd result's isn't (the Second Receiver's own dBFS, as the RX
+        header and the row's tooltip say)."""
+        from sdr_module.gui.scanner_panel import ScannerPanel
+
+        panel, mod = self.panel, self.mod
+        title = panel._table.horizontalHeaderItem(mod.COL_LEVEL)
+        single = title.toolTip()
+        self.assertEqual(
+            single,
+            "Strongest FFT bin, in dB relative to full scale (same scale as "
+            "the spectrum)",
+        )  # (as before)
+        panel._on_found(self.found(1720e6, -50.0, 0))
+        panel._on_found(self.found(1850e6, -40.0, 1))  # (the second's)
+        both = title.toolTip()
+        self.assertNotIn("same scale as the spectrum", both)
+        for words in (
+            "relative to full scale",  # (the cells drop their unit)
+            "the receiver that read it",
+            "the Second Receiver's",
+            "aren't calibrated against each other",
+        ):
+            self.assertIn(words, both)
+        # Restored with the results at startup.
+        panel._save_results()
+        again = ScannerPanel(settings=self.store)
+        self.addCleanup(again.deleteLater)
+        self.assertEqual(
+            again._table.horizontalHeaderItem(mod.COL_LEVEL).toolTip(), both
+        )
+        # Results of one receiver again (Clear, or a new scan): as before.
+        panel.clear_results()
+        self.assertTrue(panel._table.isColumnHidden(mod.COL_RECEIVER))
+        self.assertEqual(title.toolTip(), single)
+
     def test_the_frequency_keeps_its_room(self):
         # The right column is about 384 px inside at 1024x640 (and 370 at
         # 1366x768): "1850.000 MHz" still fits beside the RX column.

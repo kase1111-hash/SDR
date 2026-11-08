@@ -232,6 +232,116 @@ class TestItsAircraft(_Case):
         self.assertNotIn(RX2, view.detail_text("4840D6"))
 
 
+def _frames():
+    """The demo airliner's identification, even position and velocity
+    frames, as both receivers decode them (bit for bit)."""
+    from sdr_module.gui.device_dialog import _aircraft_frame
+
+    return [_aircraft_frame(kind, 0.35) for kind in ("ident", "even", "velocity")]
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestAReplyBothReceiversHeard(_Case):
+    """ui-5 (final review): both receivers on 1090 MHz hear the same
+    replies, each decoding its own copy of a reply (the same frame, bit for
+    bit). The Aircraft view's Msgs and the line under it counted every
+    copy: KLM1023 read 66 messages while each receiver, and the Decoder
+    tab's status line, said 33. A reply is counted once now; which
+    receivers heard it, and when, is said as before."""
+
+    def setUp(self):
+        super().setUp()
+        self.panel._proto_combo.setCurrentText("ADS-B")
+        _settle(1)
+        self.view = self.panel._aircraft_view
+
+    def msgs(self):
+        ident, even, velocity = _frames()
+        return [
+            _klm(raw_bits=ident, type_code=4, callsign="KLM1023", altitude=0),
+            _klm(raw_bits=even),
+            _klm(raw_bits=velocity, type_code=19, velocity=450.0, heading=265.0),
+        ]
+
+    def test_it_counts_once_and_still_says_which_receivers_heard_it(self):
+        from sdr_module.gui import decoder_views as dv
+
+        view = self.view
+        msgs = self.msgs()
+        for msg in msgs:
+            self.add(msg)  # (this window's receiver)
+        self.now += 0.5
+        for msg in msgs:
+            self.add(msg, receiver=RX2)  # (the Second Receiver's copies)
+        aircraft = view.tracker.get("4840D6")
+        self.assertEqual(aircraft.messages, 3)  # (it was 6)
+        row = view._items["4840D6"].row()
+        self.assertEqual(view.table.item(row, dv.AC_MESSAGES).text(), "3")
+        line = view.detail_text("4840D6")
+        self.assertIn("3 messages", line)
+        self.assertIn("(main receiver just now, 2nd RX just now)", line)
+        # The Messages table keeps each receiver's rows, as before.
+        self.assertEqual(len(self.panel._messages), 6)
+        # Whichever receiver's copy comes first.
+        self.add(_klm(raw_bits=_frames()[1][:-1] + b"\x00"), receiver=RX2)
+        self.add(_klm(raw_bits=_frames()[1][:-1] + b"\x00"))
+        self.assertEqual(aircraft.messages, 4)
+
+    def test_a_frame_sent_again_is_another_reply(self):
+        velocity = self.msgs()[2]
+        self.add(velocity)
+        self.add(velocity, receiver=RX2)
+        self.now += 0.5  # (the aircraft sends the same velocity again)
+        self.add(velocity, receiver=RX2)
+        self.add(velocity)
+        self.assertEqual(self.view.tracker.get("4840D6").messages, 2)
+
+    def test_what_only_one_receiver_heard_counts(self):
+        ident, even, _velocity = self.msgs()
+        self.add(ident)
+        self.add(even, receiver=RX2)  # (only the Second Receiver heard it)
+        self.add(ident, receiver=RX2)
+        self.assertEqual(self.view.tracker.get("4840D6").messages, 2)
+        # The same frame long after: another reply.
+        self.now += 10.0
+        self.add(even)
+        self.assertEqual(self.view.tracker.get("4840D6").messages, 3)
+
+    def test_one_receiver_alone_counts_every_frame(self):
+        velocity = self.msgs()[2]
+        for receiver in ("", RX2):
+            self.add(velocity, receiver=receiver)
+            self.add(velocity, receiver=receiver)  # (sent again, not a copy)
+        self.assertEqual(self.view.tracker.get("4840D6").messages, 2)
+
+    def test_messages_without_their_frame_count_as_before(self):
+        self.add(_klm())
+        self.add(_klm(), receiver=RX2)
+        self.assertEqual(self.view.tracker.get("4840D6").messages, 2)
+
+    def test_after_clear_a_late_copy_is_counted(self):
+        # (A copy of a reply heard before Clear, decoded after it: the
+        # aircraft is listed anew with that message.)
+        velocity = self.msgs()[2]
+        self.add(velocity)
+        self.panel.clear()
+        _settle(1)
+        self.add(velocity, receiver=RX2)
+        self.assertEqual(self.view.tracker.get("4840D6").messages, 1)
+        row = self.view._items["4840D6"].row()
+        from sdr_module.gui import decoder_views as dv
+
+        self.assertEqual(self.view.table.item(row, dv.AC_MESSAGES).text(), "1")
+
+    def test_a_recordings_list_counts_every_message(self):
+        # (One recording, one receiver: nothing in it is another's copy.)
+        velocity = self.msgs()[2]
+        self.add(velocity)
+        for at in (0.1, 0.2):
+            self.add(velocity, source=REC, at_s=at)
+        self.assertEqual(self.view.tracker_for(REC).get("4840D6").messages, 2)
+
+
 # --------------------------------------------------------------------------- #
 # The Aircraft tab while the main receiver decodes something else
 # --------------------------------------------------------------------------- #
@@ -376,6 +486,184 @@ class TestItsText(_Case):
         self.assertEqual(view.shown_text(), "")
 
 
+def _last_block_color(edit):
+    """The text color of the last line of a text box (its first letter)."""
+    from PyQt6.QtGui import QTextCursor
+
+    cursor = QTextCursor(edit.document().lastBlock())
+    cursor.movePosition(QTextCursor.MoveOperation.NextCharacter)
+    return cursor.charFormat().foreground().color().name()
+
+
+def _accent_lines(edit):
+    """The lines of a text box shown in the accent color (as the line
+    being received is)."""
+    from PyQt6.QtGui import QTextCursor
+
+    from sdr_module.gui.themes import get_palette
+
+    accent = get_palette().qcolor("accent").name()
+    lines, block = [], edit.document().firstBlock()
+    while block.isValid():
+        cursor = QTextCursor(block)
+        cursor.movePosition(QTextCursor.MoveOperation.NextCharacter)
+        if cursor.charFormat().foreground().color().name() == accent:
+            lines.append(block.text())
+        block = block.next()
+    return lines
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestTheLineItIsReceiving(_Case):
+    """R7L-4 (final review): the Second Receiver's Morse line still being
+    received showed nowhere (only its finished lines reached the Decoder
+    tab, as messages). Now its entry under Showing:
+    ("2nd RX") shows it after its finished lines, in the accent color, as
+    the Live text shows the line this window's receiver is receiving; it
+    starts the entry as a finished line does."""
+
+    def setUp(self):
+        super().setUp()
+        self.view = self.panel._cw_view
+
+    def test_it_follows_its_lines_in_the_accent_color(self):
+        from sdr_module.gui.decoder_views import receiver_source
+        from sdr_module.gui.themes import get_palette
+
+        p, view = self.panel, self.view
+        key = receiver_source(RX2)
+        p.set_receiver_live(RX2, "")  # (nothing yet: no entry)
+        self.assertEqual(view.other_receivers(), [])
+        p.set_receiver_live(RX2, "VVV DE S")
+        self.assertEqual(view.other_receivers(), [RX2])
+        self.assertEqual(view.shown_source(), key)  # (Live has nothing)
+        self.assertEqual(view.shown_text(), "VVV DE S")
+        self.assertEqual(view.plain_text(key), "VVV DE S")
+        tabs = p._tabs
+        self.assertTrue(tabs.isTabVisible(tabs.indexOf(view)))
+        accent = get_palette().qcolor("accent").name()
+        self.assertEqual(_last_block_color(view._recorded), accent)
+        p.set_receiver_live(RX2, "VVV DE SDR")
+        self.assertEqual(view.shown_text(), "VVV DE SDR")
+        # The line ends: a finished line, then the next one being received.
+        self.add(_morse("VVV DE SDR"), receiver=RX2)
+        self.assertEqual(view.shown_text(), "VVV DE SDR")
+        self.assertNotEqual(_last_block_color(view._recorded), accent)
+        p.set_receiver_live(RX2, "VV")
+        self.assertEqual(view.shown_text(), "VVV DE SDR\nVV")
+        self.assertEqual(view.plain_text(key), "VVV DE SDR\nVV")
+        self.assertEqual(_last_block_color(view._recorded), accent)
+        p.set_receiver_live(RX2, "")
+        self.assertEqual(view.shown_text(), "VVV DE SDR")
+        # This window's own text is left alone throughout.
+        self.assertEqual(view.plain_text(), "")
+
+    def test_beside_this_windows_text_it_is_picked_under_showing(self):
+        from sdr_module.gui.decoder_views import receiver_source
+
+        p, view = self.panel, self.view
+        self.add(_morse("CQ DE MAIN"))
+        view.set_live("CQ")  # (this window's line being received)
+        p.set_receiver_live(RX2, "VVV")
+        self.assertEqual(view.shown_source(), "")  # (Live stays)
+        self.assertEqual(view.source_bar().texts(), ["Live", RX2])
+        self.assertEqual(view.shown_text(), "CQ DE MAIN\nCQ")
+        p.set_receiver_live(RX2, "VVV DE")
+        view.source_bar().choose(receiver_source(RX2))
+        _settle(1)
+        self.assertEqual(view.shown_text(), "VVV DE")
+        p.set_receiver_live(RX2, "VVV DE S")
+        self.assertEqual(view.shown_text(), "VVV DE S")
+        view.source_bar().choose("")
+        _settle(1)
+        self.assertEqual(view.shown_text(), "CQ DE MAIN\nCQ")
+
+    def test_a_recording_shown_is_left_alone(self):
+        from sdr_module.gui.decoder_views import receiver_source
+
+        p, view = self.panel, self.view
+        self.add(_morse("CQ DE SECOND"), receiver=RX2)
+        self.add(_morse("CQ DE REC"), source="cw.wav", at_s=75.0)
+        self.assertEqual(view.shown_source(), "cw.wav")
+        p.set_receiver_live(RX2, "TU")
+        self.assertEqual(view.shown_text(), "1:15  CQ DE REC")
+        self.assertEqual(view.plain_text(receiver_source(RX2)), "CQ DE SECOND\nTU")
+        view.source_bar().choose(receiver_source(RX2))
+        _settle(1)
+        self.assertEqual(view.shown_text(), "CQ DE SECOND\nTU")
+        view.source_bar().choose("cw.wav")
+        _settle(1)
+        self.assertEqual(view.shown_text(), "1:15  CQ DE REC")
+
+    def test_clear_takes_it_too(self):
+        from sdr_module.gui.decoder_views import receiver_source
+
+        p, view = self.panel, self.view
+        p.set_receiver_live(RX2, "VVV")
+        p.clear()
+        _settle(1)
+        self.assertEqual(view.other_receivers(), [])
+        self.assertEqual(view.plain_text(receiver_source(RX2)), "")
+        self.assertEqual(view.shown_text(), "")
+        # (The receiver goes on with the line: it shows again.)
+        p.set_receiver_live(RX2, "VVV D")
+        self.assertEqual(view.shown_text(), "VVV D")
+
+    def test_a_theme_change_recolours_it(self):
+        from PyQt6.QtWidgets import QApplication
+
+        from sdr_module.gui import themes
+
+        qapp = QApplication.instance()
+        old_sheet, old_palette = qapp.styleSheet(), qapp.palette()
+        old_theme = themes.current_theme()
+        self.addCleanup(qapp.setPalette, old_palette)
+        self.addCleanup(qapp.setStyleSheet, old_sheet)
+        self.addCleanup(themes.apply_theme, None, old_theme)
+        p, view = self.panel, self.view
+        self.add(_morse("CQ DE SECOND"), receiver=RX2)
+        p.set_receiver_live(RX2, "VVV")
+        for theme in ("light", "dark", "light"):
+            themes.apply_theme(qapp, theme)
+            _settle(1)
+            self.assertEqual(view.shown_text(), "CQ DE SECOND\nVVV")
+            accent = themes.get_palette().qcolor("accent").name()
+            self.assertEqual(_last_block_color(view._recorded), accent, theme)
+
+    def test_shown_again_only_the_line_being_received_is_in_accent(self):
+        # (Checker: the text box rebuilt for another entry took the color
+        # of its last character, the accent color of the line that was
+        # being received: every finished line, and a recording's, read as
+        # if still being received.)
+        from sdr_module.gui.decoder_views import receiver_source
+
+        p, view = self.panel, self.view
+        key = receiver_source(RX2)
+        self.add(_morse("VVV DE SDR"), receiver=RX2)
+        p.set_receiver_live(RX2, "CQ")
+        self.assertEqual(_accent_lines(view._recorded), ["CQ"])
+        # Live picked under Showing:, then the Second Receiver's again.
+        view.source_bar().choose("")
+        _settle(1)
+        p.set_receiver_live(RX2, "CQ CQ")
+        view.source_bar().choose(key)
+        _settle(1)
+        self.assertEqual(view.shown_text(), "VVV DE SDR\nCQ CQ")
+        self.assertEqual(_accent_lines(view._recorded), ["CQ CQ"])
+        # A recording decoded meanwhile: none of its lines is being received.
+        self.add(_morse("CQ DE REC"), source="cw.wav", at_s=75.0)
+        self.add(_morse("TU"), source="cw.wav", at_s=80.0)
+        self.assertEqual(view.shown_source(), "cw.wav")
+        self.assertEqual(view.shown_text(), "1:15  CQ DE REC\n1:20  TU")
+        self.assertEqual(_accent_lines(view._recorded), [])
+        # Clear, then a recording: the same.
+        p.clear()
+        _settle(1)
+        self.add(_morse("CQ DE REC"), source="cw.wav", at_s=75.0)
+        self.assertEqual(view.shown_text(), "1:15  CQ DE REC")
+        self.assertEqual(_accent_lines(view._recorded), [])
+
+
 # --------------------------------------------------------------------------- #
 # Unchanged without it; Clear, Export, the spool
 # --------------------------------------------------------------------------- #
@@ -474,6 +762,41 @@ class TestInTheWindow(_DecodeCase):
         tabs = panel._tabs
         self.assertTrue(tabs.isTabVisible(tabs.indexOf(view)))
         self.assertEqual(panel.count_for("ADS-B"), 0)  # (the main window's own)
+
+    def test_the_morse_line_it_is_receiving_shows_in_the_text_view(self):
+        # R7L-4: the demo's beacon ("VVV DE SDR" at about 15 WPM, a long
+        # carrier ending each line, every 10.2 s) on the Second Receiver.
+        from sdr_module.gui.decoder_views import receiver_source
+
+        panel = self.panel
+        view = panel._cw_view
+        panel._proto_combo.setCurrentText("POCSAG")  # (the main window's)
+        self.settle()
+        self.start_on(99.82e6, ("CW",))
+        self.choose("CW (Morse)")
+        self.run_seconds(5.5)
+        self.assertEqual(self.rows(), [])  # (no line finished yet)
+        key = receiver_source(RX2)
+        self.assertEqual(view.other_receivers(), [RX2])
+        self.assertEqual(view.shown_source(), key)
+        self.assertTrue(view.shown_text().startswith("VVV DE"), view.shown_text())
+        tabs = panel._tabs
+        self.assertTrue(tabs.isTabVisible(tabs.indexOf(view)))
+        # The line ends (its message comes) and the next one starts.
+        self.run_seconds(6.0)
+        self.assertEqual([m["content"] for m in self.rows()], ["VVV DE SDR"])
+        lines = view.plain_text(key).split("\n")
+        self.assertEqual(lines[0], "VVV DE SDR")
+        self.assertEqual(len(lines), 2, lines)  # (the next, being received)
+        self.assertTrue("VVV DE SDR".startswith(lines[1]), lines)
+        # Stop: the line being received goes to the tab as a message, in
+        # its place (shown once).
+        self.rx.stop()
+        rows = self.rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(
+            view.plain_text(key).split("\n"), ["VVV DE SDR", rows[1]["content"]]
+        )
 
 
 if __name__ == "__main__":

@@ -107,6 +107,17 @@ logger = logging.getLogger(__name__)
 COL_FREQ, COL_LEVEL, COL_SNR, COL_MODE, COL_HEARD = range(5)
 #: Which receiver read it: shown only for a sweep with both receivers.
 COL_RECEIVER = 5
+#: The Level column's header tooltip: results of one receiver, and of a
+#: sweep with both (the RX column shown), each on its receiver's own scale.
+_LEVEL_TIP = (
+    "Strongest FFT bin, in dB relative to full scale (same scale as the spectrum)"
+)
+_LEVEL_TIP_BOTH = (
+    "Strongest FFT bin, in dB relative to full scale of the receiver that "
+    "read it (RX): Main on this window's scale (the spectrum's), 2nd on the "
+    "Second Receiver's, Both the stronger of the two readings (hover for "
+    "whose). The two receivers aren't calibrated against each other"
+)
 _HIT_ROLE = Qt.ItemDataRole.UserRole + 1 if HAS_PYQT6 else 0
 
 #: A shared sweep's receivers (the engine's MAIN, PARTNER) as a result keeps
@@ -772,8 +783,7 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
             "Signal center frequency, to the nearest kHz (a broadcast FM "
             "station: its 100 kHz channel); a bookmark scan's results also "
             "name the bookmark",
-            "Strongest FFT bin, in dB relative to full scale (same scale as "
-            "the spectrum)",
+            _LEVEL_TIP,
             get_short_tip("snr"),
             "How Listen tunes it: the band's mode (or the bookmark's)",
             "When it was last found or heard (hover for how often)",
@@ -1999,6 +2009,11 @@ class ScannerPanel(QWidget if HAS_PYQT6 else object):
         hide = not any(hit.receiver for hit in self._hits)
         if self._table.isColumnHidden(COL_RECEIVER) != hide:
             self._table.setColumnHidden(COL_RECEIVER, hide)
+            # Whose scale the levels are on: this window's spectrum's, or
+            # each receiver's own (ui-6).
+            title = self._table.horizontalHeaderItem(COL_LEVEL)
+            if title is not None:
+                title.setToolTip(_LEVEL_TIP if hide else _LEVEL_TIP_BOTH)
             self._size_columns()
             # The rows listed anew: the levels' unit comes or goes (see
             # _level_text), sorted once.

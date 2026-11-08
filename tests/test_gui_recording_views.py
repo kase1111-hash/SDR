@@ -13,6 +13,10 @@ the time into the file. A recording's aircraft never dim or go as the wall
 clock runs on, and live aircraft go on in their own list meanwhile. Clear
 clears both; decoding the same recording again starts its lists over; the
 views' empty-state hints say that recordings show there too.
+
+files-1 (final review): two recordings that share a file name in different
+folders are two recordings, the second named with its folder too
+("tuesday/capture.wav"), each with lists of its own.
 """
 
 import json
@@ -26,6 +30,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from tests.test_gui_decoder_views import _adsb, _PanelCase, _settle  # noqa: E402
 from tests.test_gui_recording_files import _FilesCase  # noqa: E402
+from tests.test_gui_recording_views_files import _Case as _DecodeCase  # noqa: E402
 
 REC = "adsb.sigmf-data"
 WHEN = datetime(2026, 10, 30, 7, 0, 1, tzinfo=timezone.utc)
@@ -491,6 +496,133 @@ class TestDecodeRecordingInTheViews(_FilesCase):
         self.assertLess(seconds[0], seconds[1])
         self.assertLessEqual(seconds[1], length)
         self.assertGreater(seconds[0], 2)
+
+
+# --------------------------------------------------------------------------- #
+# Two recordings with one file name (files-1)
+# --------------------------------------------------------------------------- #
+
+
+def _morse_iq(text, rate=16e3):
+    """``text`` at 20 WPM, keyed at 0 Hz, then a second of quiet."""
+    from sdr_module.dsp import protocol_encoders as enc
+
+    key = enc.morse_keying(text, rate, 20, lead_s=0.3, tail_s=1.0)
+    rng = np.random.default_rng(7)
+    noise = rng.standard_normal(len(key)) + 1j * rng.standard_normal(len(key))
+    return (0.5 * key + 0.002 * noise).astype(np.complex64)
+
+
+def _aircraft_iq(icao, callsign, rate=2.4e6):
+    """A quarter of a second holding two identification squitters of one
+    aircraft."""
+    from sdr_module.gui import device_dialog as dd
+
+    n = int(rate * 0.25)
+    rng = np.random.default_rng(icao & 0xFFFF)
+    x = 0.01 * (rng.standard_normal(n) + 1j * rng.standard_normal(n))
+    frame = dd._extended_squitter(icao, dd._ident_me(callsign))
+    for t in (0.05, 0.15):
+        first, env = dd._pulse_envelope(dd._modes_pulses(frame), t * rate, rate)
+        x[first : first + len(env)] += 0.5 * env
+    return x.astype(np.complex64)
+
+
+class TestRecordingsOfOneName(_DecodeCase):
+    """files-1: two recordings that share a file name in different folders
+    (Monday's and Tuesday's capture.wav) are two recordings. Before, a
+    recording was known by its file name alone: decoding the second one
+    emptied the first one's list in the views (a file of that name holding
+    nothing emptied it too), and their rows in the Messages table and in
+    Export read alike. Now the second is known by its folder too
+    ("tuesday/capture.wav"), and a file keeps its name: decoded again, its
+    own lists start over."""
+
+    def capture(self, folder, x, center, rate):
+        """``x`` as <folder>/capture.wav, with the sidecar this app saves."""
+        os.makedirs(self.path(folder), exist_ok=True)
+        name = os.path.join(folder, "capture.wav")
+        return self._wav(name, x, "int", 2, "RIFF", center, rate)
+
+    def test_each_files_text_keeps_a_list_of_its_own(self):
+        panel = self.win._decoder_panel
+        view = panel._cw_view
+        monday = self.capture("monday", _morse_iq("CQ DE N0CALL"), 7.03e6, 16000)
+        tuesday = self.capture("tuesday", _morse_iq("CQ DE W1AW"), 7.03e6, 16000)
+        self.decode("CW (Morse)", monday)
+        self.assertIn("message(s) from capture.wav at", self.message())
+        self.decode("CW (Morse)", tuesday)
+        both = ["capture.wav", "tuesday/capture.wav"]
+        self.assertEqual(view.sources(), both)
+        self.assertEqual(
+            [view.plain_text(name).split("  ", 1)[1] for name in both],
+            ["CQ DE N0CALL", "CQ DE W1AW"],
+        )
+        self.assertEqual(view.shown_source(), both[1])  # (the newest)
+        self.assertEqual(view.source_bar().texts(), ["Live"] + both)
+        self.assertIn(
+            "Decoded 1 CW (Morse) message(s) from tuesday/capture.wav",
+            self.message(),
+        )
+        # The Messages table's rows (and so Export's) say whose they are.
+        rows = [(m["source"], m["content"]) for m in panel._messages]
+        self.assertEqual([source for source, _content in rows], both)
+        self.assertIn("(from capture.wav at", rows[0][1])
+        self.assertIn("(from tuesday/capture.wav at", rows[1][1])
+        # Monday's again: its own list starts over, Tuesday's stays.
+        self.decode("CW (Morse)", monday)
+        self.assertEqual(view.sources(), [both[1], both[0]])
+        self.assertEqual(view.shown_source(), both[0])
+        self.assertEqual(view.plain_text(both[0]).count("CQ DE N0CALL"), 1)
+        self.assertEqual(view.plain_text(both[1]).split("  ", 1)[1], "CQ DE W1AW")
+
+    def test_a_file_of_that_name_holding_nothing_leaves_the_list_alone(self):
+        view = self.win._decoder_panel._cw_view
+        monday = self.capture("monday", _morse_iq("CQ DE N0CALL"), 7.03e6, 16000)
+        rng = np.random.default_rng(5)
+        noise = 0.002 * (rng.standard_normal(32000) + 1j * rng.standard_normal(32000))
+        empty = self.capture("wednesday", noise.astype(np.complex64), 7.03e6, 16000)
+        self.decode("CW (Morse)", monday)
+        self.decode("CW (Morse)", empty)
+        self.assertIn("No CW (Morse) messages in wednesday/capture.wav", self.message())
+        self.assertEqual(view.sources(), ["capture.wav"])
+        self.assertEqual(
+            view.plain_text("capture.wav").split("  ", 1)[1], "CQ DE N0CALL"
+        )
+
+    def test_each_files_aircraft_keep_a_list_of_their_own(self):
+        view = self.win._decoder_panel._aircraft_view
+        a = self.capture("site_a", _aircraft_iq(0xA1B2C3, "MON123"), 1090e6, 2.4e6)
+        b = self.capture("site_b", _aircraft_iq(0x3C4D5E, "TUE456"), 1090e6, 2.4e6)
+        self.decode("ADS-B", a)
+        self.decode("ADS-B", b)
+        both = ["capture.wav", "site_b/capture.wav"]
+        self.assertEqual(view.sources(), both)
+        self.assertEqual(
+            [[x.callsign for x in view.tracker_for(name).aircraft()] for name in both],
+            [["MON123"], ["TUE456"]],
+        )
+        self.assertEqual(view.source_bar().texts(), ["Live"] + both)
+        self.assertIn("into site_b/capture.wav", view.detail_text("3C4D5E"))
+
+    def test_the_names_given(self):
+        """A file keeps its name (by another path to it too); one named
+        like an earlier one gets as many of its folders as tell it apart,
+        else its whole path."""
+        name = self.win._decoded_name
+        first = self.capture("monday", _morse_iq("E"), 7.03e6, 16000)
+        again = os.path.join(self.folder, "monday", os.pardir, "monday", "capture.wav")
+        self.assertEqual(name(first), "capture.wav")
+        self.assertEqual(name(again), "capture.wav")  # (the same file)
+        x, y = (os.path.join(self.folder, f, "b", "c.wav") for f in "xy")
+        self.assertEqual([name(x), name(y), name(y), name(x)],
+                         ["c.wav", "b/c.wav", "b/c.wav", "c.wav"])  # fmt: skip
+        # Every ending of its path taken (by x's and y's: on a drive or at
+        # the root): its whole path.
+        whole = os.path.join(os.path.abspath(os.sep), "b", "c.wav")
+        given = name(whole)
+        self.assertNotIn(given, ("c.wav", "b/c.wav"))
+        self.assertTrue(given.replace(os.sep, "/").endswith("/b/c.wav"), given)
 
 
 if __name__ == "__main__":

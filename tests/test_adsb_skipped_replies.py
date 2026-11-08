@@ -277,6 +277,42 @@ class TestTheWindow(_FilesCase):
         self.assertNotIn("weren't read", self.win._message_label.text())
         self.assertEqual(len(self._run_with(busy)), 1)
 
+    def test_no_rate_to_raise_while_the_signal_is_skipped(self):
+        """R7W-05 (final walk): while the demo device (or this computer, or
+        the device) can't keep up, the Decoder tab's line says the decoder
+        misses part of the signal and that a lower sample rate helps. The
+        status bar's busy-sky notice said "2.56 MS/s or more reads every
+        one" at the same time: the opposite advice, and more work for a
+        computer already behind (from 2.5 MS/s the decoder's work has no
+        limit). While the signal is skipped, the notice now says what it
+        saw, with no rate to choose."""
+        win = self.win
+        panel = win._decoder_panel
+        calm = [_status(0.0)] * 3
+        self._run_with(calm)  # (the decoder runs, in a calm sky)
+        with mock.patch.object(win, "_samples_skipped", return_value=True):
+            win._sync_decoder_skipping()
+        hint = panel.decoder_status_text()
+        self.assertIn("A lower sample rate (Receiver > Sample rate) helps", hint)
+        said = self._run_with([_status(873.0)] * 5)
+        self.assertEqual(
+            said,
+            [
+                "Busy sky: about 870 replies a second weren't read (the "
+                "clearest are read first)."
+            ],
+        )
+        self.assertEqual(panel.decoder_status_text(), hint)  # (as before)
+        # Keeping up again, the next busy spell says what helps, as before.
+        self._run_with(calm)
+        win._skip_hint_until = 0.0  # (the hint's hold over)
+        with mock.patch.object(win, "_samples_skipped", return_value=False):
+            win._sync_decoder_skipping()
+        self.assertNotIn("lower sample rate", panel.decoder_status_text())
+        said = self._run_with([_status(873.0)] * 5)
+        self.assertEqual(len(said), 1, said)
+        self.assertTrue(said[0].endswith("2.56 MS/s or more reads every one."))
+
     def test_decode_recording_counts_them(self):
         from sdr_module.dsp.recording import FileFormat, SampleFormat, save_iq_file
 

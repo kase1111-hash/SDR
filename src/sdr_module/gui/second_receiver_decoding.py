@@ -541,6 +541,20 @@ if HAS_PYQT6:
                 self._push_decoded(result.decoded, result.tuned_hz)
             elif result.decoder_status is not None:
                 self._update_decoder_line()
+            if result.decoder_status is not None:
+                self._show_line_received(result.decoder_status)
+
+        def _show_line_received(self, status: Any) -> None:
+            """The Morse line this receiver is receiving (its decoder's
+            status, made on the DSP worker with the frame): in the Decoder
+            tab's Text view after its finished lines, as the main window's
+            is in Live (R7L-4). "" for other protocols."""
+            if self._main_gone:
+                return
+            panel = getattr(self._win, "_decoder_panel", None)
+            show = getattr(panel, "set_receiver_live", None)
+            if callable(show):
+                show(RECEIVER_MARK, str(getattr(status, "live_text", "") or ""))
 
         def _flush_decoder(self) -> None:
             """The stream ends (Stop): what the decoder still holds."""

@@ -115,6 +115,7 @@ from . import device_settings, file_dialogs
 from .audio_chain import (
     AudioJoin,
     AudioOptions,
+    ClipWarning,
     LevelAverager,
     NoiseFloorTracker,
     SquelchGate,
@@ -538,6 +539,9 @@ class Frame:
     notches: Tuple[float, ...] = ()
     #: Tone heard: (CTCSS tone, DCS code, checked), see ToneHeard.
     tone_heard: ToneHeard = (None, None, False)
+    #: The main window's "FM audio is clipping" warning, due with this
+    #: block ("" when not: see ReceiverDsp.clipping).
+    clip_warning: str = ""
 
 
 class ReceiverDsp:
@@ -572,6 +576,11 @@ class ReceiverDsp:
     (as the main window's ``_route_audio`` does): the station a reverse
     tone squelch mutes isn't heard for the first half second of its
     transmission.
+
+    FM audio clipping (the station deviates more than :attr:`deviation_hz`)
+    is judged by the main window's rule (:attr:`clipping`, an
+    ``audio_chain.ClipWarning``) on what is demodulated: the frame its
+    warning is due with carries it (:attr:`Frame.clip_warning`).
     """
 
     def __init__(self) -> None:
@@ -610,6 +619,8 @@ class ReceiverDsp:
         self._join_deviation = 0.0
         self._demod_running = False
         self._stereo_lit = False  # (the lamp said STEREO for the last block)
+        #: The FM clipping warning, by the main window's rule.
+        self.clipping = ClipWarning()
         self._window: Optional[np.ndarray] = None
         self._window_gain = 1.0
 
@@ -635,6 +646,7 @@ class ReceiverDsp:
         self._level_average.reset()
         self._noise.reset()
         self._join.stop()
+        self.clipping.reset()
 
     def chain(self) -> _ReceiverChain:
         """The channel filter and demodulator for the current settings."""
@@ -738,6 +750,8 @@ class ReceiverDsp:
         # isn't checked, so isn't demodulated for it).
         tone_check = audible and self._tones_checked() and gate.is_open and tones.active
         frame.audio = self._audio(chain, channel, speaker, received, tone_check)
+        if self._demod_running and self.mode == "FM":
+            frame.clip_warning = self._clip_warning(chain, seconds, level, noise)
         frame.stereo = self._stereo_lamp(chain, received)
         # (Nothing is notched while nothing is demodulated.)
         frame.notch_hz = chain.notch_frequency_hz if self._demod_running else None
@@ -753,6 +767,22 @@ class ReceiverDsp:
             # window's _squelch_state says the same.)
             frame.state = "reverse" if tones.reverse else "tone"
         return frame
+
+    def _clip_warning(
+        self,
+        chain: _ReceiverChain,
+        seconds: float,
+        level_db: float,
+        noise_db: Optional[float],
+    ) -> str:
+        """The warning due with an FM block just demodulated ("" when none):
+        the main window's ("FM audio is clipping ...", by its rule), naming
+        this window's Tuning group, where the FM deviation is chosen."""
+        deviation = self.deviation_hz  # (read once: the window may set it)
+        snr = None if noise_db is None else level_db - noise_db
+        if not self.clipping.update(chain, deviation, seconds, snr):
+            return ""
+        return self.clipping.text(deviation, where="Tuning")
 
     def _tones_checked(self) -> bool:
         """Whether FM audio is searched for a tone or code: narrow FM (as in
@@ -810,6 +840,7 @@ class ReceiverDsp:
                 # Closed for real (not during the hang): start afresh.
                 chain.reset_demodulator()
                 self.tones.reset()
+                self.clipping.reset()
                 self._demod_running = False
             return None
         if not self.audible or len(channel) == 0:
@@ -3325,6 +3356,11 @@ if HAS_PYQT6:
                 self._show_notch_found(frame.notches)
             tone, dcs, checked = frame.tone_heard
             self._show_tone_heard(tone, checked, dcs)
+            if frame.clip_warning:
+                # (As the main window warns, and lists it in Tools > Error
+                # History.)
+                logger.warning(f"Second receiver: {frame.clip_warning}")
+                self._show_message(frame.clip_warning, "warning", 8000)
             self._show_decoded(result)
             if frame.audio is not None and len(frame.audio) and self._audio_open:
                 self._audio.write(frame.audio)

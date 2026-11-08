@@ -117,6 +117,10 @@ from . import presets as preset_table
 from .audio_chain import (
     AGC_SPEEDS,
     AM_CARRIER_TIME_S,
+    CLIP_FRACTION,
+    CLIP_MIN_SNR_DB,
+    CLIP_WARN_AFTER_S,
+    CLIP_WARN_EVERY_S,
     DEFAULT_CW_PITCH_HZ,
     DEFAULT_NOTCH_HZ,
     LOW_CUT_CHOICES,
@@ -126,6 +130,7 @@ from .audio_chain import (
     AudioAgc,
     AudioJoin,
     AudioOptions,
+    ClipWarning,
     DcBlocker,
     IqConditioner,
     LevelAverager,
@@ -563,11 +568,11 @@ _AM_HOLD_S = _SQUELCH_HANG_S
 _AM_LEFT_S = _AM_HOLD_S + 0.1
 # FM audio clipping warning: more than this fraction of the samples beyond
 # full scale for this long (the deviation is set too small), at most this
-# often.
-_CLIP_FRACTION = 0.05
-_CLIP_MIN_SNR_DB = 15.0  # (noise clips whatever the deviation)
-_CLIP_WARN_AFTER_S = 0.5
-_CLIP_WARN_EVERY_S = 30.0
+# often. (The rule both receivers use: audio_chain.ClipWarning.)
+_CLIP_FRACTION = CLIP_FRACTION
+_CLIP_MIN_SNR_DB = CLIP_MIN_SNR_DB  # (noise clips whatever the deviation)
+_CLIP_WARN_AFTER_S = CLIP_WARN_AFTER_S
+_CLIP_WARN_EVERY_S = CLIP_WARN_EVERY_S
 # Noise reduction leaves an FM or AM channel this far above its noise alone.
 _NR_CLEAN_SNR_DB = 30.0
 # The radio tuner's FM seek stops on a broadcast station: one filling at
@@ -3133,11 +3138,9 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._tone_gate_open = False  # the squelch, as the tone squelch saw it
         self._quiet_reverse = False  # (a bookmark sets Reverse: it says so)
         self._iq_conditioner = IqConditioner()
-        self._clip_s = 0.0
-        self._clip_warn_due = 0.0
-        # How far the audio swung, (peak, often) in Hz, in the frames that
-        # clipped lately (the warning names what holds it).
-        self._clip_swings: Deque[Tuple[float, float]] = deque(maxlen=60)
+        # The FM clipping warning: how long the audio clipped lately and
+        # how far it swung (the warning names what holds it), its rule.
+        self._clip_warning = ClipWarning()
         # The Scanner tab mutes the speaker while it moves between channels,
         # and has a bookmark's CTCSS tone checked even with the speaker off.
         self._scan_muted = False
@@ -10099,7 +10102,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
                 chain.reset_demodulator()
                 self._tone_squelch.reset()
                 self._demod_running = False
-                self._clip_s = 0.0
+                self._clip_warning.reset()
                 # (Nothing is notched while nothing plays.)
                 self._control_panel.show_notch_found(None)
             self._tone_blocked = False
@@ -10573,54 +10576,16 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         more than the FM deviation setting, which distorts it. Only a clear
         signal counts: noise (a squelch tail, an empty channel with the
         squelch off) clips whatever the setting. The warning names the
-        deviation that holds the swing measured while it clipped."""
-        clear = snr_db is not None and snr_db >= _CLIP_MIN_SNR_DB
-        if clear and chain.last_clip_fraction > _CLIP_FRACTION:
-            if self._clip_s <= 0.0:
-                self._clip_swings.clear()  # (a new episode)
-            self._clip_s += seconds
-            # (In Hz: the deviation may be changed while it clips.)
-            deviation = float(self._control_panel.get_fm_deviation())
-            peak, often = chain.clip_swing()
-            self._clip_swings.append((peak * deviation, often * deviation))
-        else:
-            self._clip_s = max(0.0, self._clip_s - seconds)
+        deviation that holds the swing measured while it clipped. (The rule
+        is the Second Receiver's too: audio_chain.ClipWarning.)"""
+        panel = self._control_panel
+        warning = self._clip_warning
+        if not warning.update(chain, panel.get_fm_deviation(), seconds, snr_db):
             return
-        now = time.monotonic()
-        if self._clip_s < _CLIP_WARN_AFTER_S or now < self._clip_warn_due:
-            return
-        self._clip_warn_due = now + _CLIP_WARN_EVERY_S
-        self._clip_s = 0.0
-        current = self._control_panel.get_fm_deviation_text()
-        text = f"FM audio is clipping: this station deviates more than {current}"
-        holds = self._deviation_holding_clip(self._control_panel.get_fm_deviation())
-        if holds == "75 kHz":
-            text += (
-                ". Choose a larger FM deviation in Demodulation, such as 75 kHz "
-                "(broadcast) for an FM radio station."
-            )
-        elif holds:
-            text += f". Choose a larger FM deviation in Demodulation: {holds} holds it."
-        else:
-            text += ", the largest FM deviation offered."
+        text = warning.text(
+            panel.get_fm_deviation(), current=panel.get_fm_deviation_text()
+        )
         self._show_status_message(text, "warning", 8000)
-
-    def _deviation_holding_clip(self, deviation_hz: float) -> str:
-        """The FM deviation choice that holds the swing measured while the
-        audio clipped at ``deviation_hz`` (the rule Identify suggests one
-        by: a pager heard at 5 kHz gets 12.5 kHz, a broadcast station 75
-        kHz), at least the next larger choice; "" when none is larger."""
-        from ..dsp.signal_id import _DEVIATIONS, _deviation_for
-
-        larger = [text for hz, text in _DEVIATIONS if hz > 1.001 * deviation_hz]
-        if not larger:
-            return ""
-        swings = np.asarray(self._clip_swings, dtype=float).reshape(-1, 2)
-        if not len(swings):
-            return larger[0]
-        peak, often = np.median(swings, axis=0)
-        holds = _deviation_for(float(peak), float(often))
-        return holds if holds in larger else larger[0]
 
     def _follow_realtime_hint(self) -> None:
         """While audio stays paused and the status bar still says why, it
@@ -10717,7 +10682,7 @@ class SDRMainWindow(QMainWindow if HAS_PYQT6 else object):
         self._tone_squelch.reset()
         self._tone_blocked = False
         self._iq_conditioner.reset()
-        self._clip_s = 0.0
+        self._clip_warning.reset()
         self._show_stereo(None, False)
 
     def _demodulate(

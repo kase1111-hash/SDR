@@ -24,6 +24,8 @@ tested without a window and costs little at 30 frames a second:
   or closing, a new receiver chain after a Bandwidth or Mode change).
 * :class:`ToneSquelch`: CTCSS or DCS tone squelch on FM audio (or reversed:
   muted while the tone or code is heard).
+* :class:`ClipWarning`: when to warn that FM audio clips (the deviation
+  set is smaller than the station's), and what to say, for both receivers.
 * :class:`IqConditioner`: optional DC-spike removal and I/Q balance
   correction of the raw samples.
 """
@@ -31,7 +33,9 @@ tested without a window and costs little at 30 frames a second:
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Optional, Tuple
+import time
+from collections import deque
+from typing import Any, Deque, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -940,6 +944,113 @@ class ToneSquelch:
         sure = not heard and listened >= self.REVERSE_DECIDE_S
         self._open = sure and (bool(carrier) or self._open)
         return self._open
+
+
+# FM audio clipping warning: more than this fraction of the samples beyond
+# full scale (the station deviates more than the deviation set) on a clear
+# signal, for this long, said at most this often.
+CLIP_FRACTION = 0.05
+CLIP_MIN_SNR_DB = 15.0  # (noise clips whatever the deviation)
+CLIP_WARN_AFTER_S = 0.5
+CLIP_WARN_EVERY_S = 30.0
+
+
+class ClipWarning:
+    """When to warn that FM audio clips, and what to say: the rule both
+    receivers use (the main window's ``_check_fm_clipping``, the Second
+    Receiver's DSP worker), so their thresholds and texts can't drift.
+
+    Feed it every demodulated FM block (:meth:`update`, with the receiver
+    chain's ``last_clip_fraction`` and ``clip_swing()``): only a clear
+    signal counts (:data:`CLIP_MIN_SNR_DB` above the noise: a squelch tail
+    or an empty channel clips whatever the setting); more than
+    :data:`CLIP_FRACTION` of its audio beyond full scale for
+    :data:`CLIP_WARN_AFTER_S` makes the warning due, at most every
+    :data:`CLIP_WARN_EVERY_S`. :meth:`text` names the deviation that holds
+    the swing measured while it clipped. A block that doesn't clip costs a
+    comparison (the swing is measured only while it clips).
+    """
+
+    def __init__(self) -> None:
+        #: Seconds of clipping lately (each block that doesn't clip takes
+        #: its length off).
+        self.seconds = 0.0
+        #: No warning before this time (``time.monotonic()``).
+        self.due = 0.0
+        #: How far the audio swung, (peak, often) in Hz, in the blocks that
+        #: clipped lately.
+        self.swings: Deque[Tuple[float, float]] = deque(maxlen=60)
+
+    def reset(self) -> None:
+        """Demodulation stopped (or the stream broke off): what clips next
+        starts afresh."""
+        self.seconds = 0.0
+
+    def update(
+        self,
+        chain: Any,
+        deviation_hz: float,
+        seconds: float,
+        snr_db: Optional[float],
+        now: Optional[float] = None,
+    ) -> bool:
+        """Take one FM block of ``seconds`` heard at ``deviation_hz`` (Hz),
+        ``snr_db`` above the noise (None: not known). True when the warning
+        is due now (:meth:`text` says it)."""
+        clear = snr_db is not None and snr_db >= CLIP_MIN_SNR_DB
+        if not (clear and chain.last_clip_fraction > CLIP_FRACTION):
+            self.seconds = max(0.0, self.seconds - seconds)
+            return False
+        if self.seconds <= 0.0:
+            self.swings.clear()  # (a new episode)
+        self.seconds += seconds
+        # (In Hz: the deviation may be changed while it clips.)
+        deviation = float(deviation_hz)
+        peak, often = chain.clip_swing()
+        self.swings.append((peak * deviation, often * deviation))
+        now = time.monotonic() if now is None else float(now)
+        if self.seconds < CLIP_WARN_AFTER_S or now < self.due:
+            return False
+        self.due = now + CLIP_WARN_EVERY_S
+        self.seconds = 0.0
+        return True
+
+    def holding(self, deviation_hz: float) -> str:
+        """The FM deviation choice that holds the swing measured while the
+        audio clipped at ``deviation_hz`` (the rule Identify suggests one
+        by: a pager heard at 5 kHz gets 12.5 kHz, a broadcast station 75
+        kHz), at least the next larger choice; "" when none is larger."""
+        from ..dsp.signal_id import _DEVIATIONS, _deviation_for
+
+        larger = [text for hz, text in _DEVIATIONS if hz > 1.001 * deviation_hz]
+        if not larger:
+            return ""
+        swings = np.asarray(self.swings, dtype=float).reshape(-1, 2)
+        if not len(swings):
+            return larger[0]
+        peak, often = np.median(swings, axis=0)
+        holds = _deviation_for(float(peak), float(often))
+        return holds if holds in larger else larger[0]
+
+    def text(
+        self, deviation_hz: float, where: str = "Demodulation", current: str = ""
+    ) -> str:
+        """The warning for audio clipping at ``deviation_hz``: ``current``
+        is how that choice reads ("5 kHz"; made from ``deviation_hz`` when
+        empty) and ``where`` the group of the window it is chosen in."""
+        current = current or f"{float(deviation_hz) / 1e3:g} kHz"
+        text = f"FM audio is clipping: this station deviates more than {current}"
+        holds = self.holding(deviation_hz)
+        if holds == "75 kHz":
+            text += (
+                f". Choose a larger FM deviation in {where}, such as 75 kHz "
+                "(broadcast) for an FM radio station."
+            )
+        elif holds:
+            text += f". Choose a larger FM deviation in {where}: {holds} holds it."
+        else:
+            text += ", the largest FM deviation offered."
+        return text
 
 
 class IqConditioner:

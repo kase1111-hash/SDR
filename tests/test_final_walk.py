@@ -214,7 +214,7 @@ class TestTheClippingWarningNamesADeviationThatHolds(_window_case()):
         chain = main_window._ReceiverChain(rate, "FM", float(width.split()[0]) * 1e3)
         said = []
         win._show_status_message = lambda text, *a, **k: said.append(text)
-        win._clip_warn_due = 0.0
+        win._clip_warning.due = 0.0
         block = int(rate / 30)
         for _ in range(int(seconds * 30)):
             channel = chain.channelize(dev.read_samples(block))
@@ -263,7 +263,7 @@ class TestTheClippingWarningNamesADeviationThatHolds(_window_case()):
         win = self.win
         said = []
         win._show_status_message = lambda text, *a, **k: said.append(text)
-        win._clip_warn_due = 0.0
+        win._clip_warning.due = 0.0
         chain = Chain()
         for deviation, blocks in (("2.5 kHz", 12), ("5 kHz", 6)):
             win._set_demod_mode("FM", deviation, "25 kHz")

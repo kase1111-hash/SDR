@@ -303,5 +303,257 @@ class TestTheTypedStationPlaysInStereo(_TypingCase):
         self.assertGreater(_db(left, right), 35)
 
 
+# --------------------------------------------------------------------------- #
+# R8-01: the Second Receiver warns of clipped FM, by the main window's rule
+# --------------------------------------------------------------------------- #
+
+RATE = 2.4e6
+BLOCK = 80_000  # (one display frame at 2.4 MS/s)
+
+
+def _clipping_dsp(deviation=5e3, bandwidth=25e3):
+    from sdr_module.gui.second_receiver import ReceiverDsp
+
+    dsp = ReceiverDsp()
+    dsp.rate = RATE
+    dsp.mode = "FM"
+    dsp.bandwidth_hz = bandwidth
+    dsp.deviation_hz = deviation
+    dsp.tuned_hz = 146.52e6
+    return dsp
+
+
+def _frames(dsp, iq, play=True):
+    return [
+        dsp.process(iq[start : start + BLOCK], play)
+        for start in range(0, len(iq), BLOCK)
+    ]
+
+
+class _FakeClippingChain:
+    """What the rule reads of a receiver chain: the last FM block's share
+    of samples beyond full scale, and its swing (in multiples of the
+    deviation it was heard at). Counts how often the swing was asked."""
+
+    def __init__(self, fraction=0.5, swing=(2.0, 1.9)):
+        self.last_clip_fraction = fraction
+        self.swing = swing
+        self.swings_asked = 0
+
+    def clip_swing(self):
+        self.swings_asked += 1
+        return self.swing
+
+
+class TestTheClippingRule(unittest.TestCase):
+    """R8-01: the FM clipping warning's rule, out of the main window into
+    one Qt-free helper (``audio_chain.ClipWarning``) both receivers use:
+    a clear signal only, clipping for half a second, at most every 30 s,
+    naming the deviation that holds the swing measured while it clipped."""
+
+    def setUp(self):
+        from sdr_module.gui.audio_chain import ClipWarning
+
+        self.rule = ClipWarning()
+
+    def run_blocks(self, chain, deviation, blocks, snr=30.0, start=100.0):
+        """``blocks`` blocks of 1/30 s from ``start`` (s): when it warned."""
+        said = []
+        for i in range(blocks):
+            now = start + i / 30
+            if self.rule.update(chain, deviation, 1 / 30, snr, now):
+                said.append(now)
+        return said
+
+    def test_half_a_second_of_clipping_then_at_most_every_30_s(self):
+        chain = _FakeClippingChain()
+        said = self.run_blocks(chain, 5e3, 20)
+        self.assertEqual(len(said), 1)
+        self.assertAlmostEqual(said[0] - 100.0, 15 / 30, delta=1.5 / 30)
+        # Clipping on: not again within 30 s, again after.
+        self.assertEqual(self.run_blocks(chain, 5e3, 30 * 25, start=101.0), [])
+        later = self.run_blocks(chain, 5e3, 30, start=131.0)
+        self.assertEqual(len(later), 1)
+
+    def test_only_a_clear_signal_counts(self):
+        # (Noise clips whatever the deviation: a squelch tail, an empty
+        # channel with the squelch off.)
+        chain = _FakeClippingChain()
+        self.assertEqual(self.run_blocks(chain, 5e3, 60, snr=10.0), [])
+        self.assertEqual(self.run_blocks(chain, 5e3, 60, snr=None), [])
+        self.assertEqual(chain.swings_asked, 0)
+
+    def test_no_cost_while_nothing_clips(self):
+        chain = _FakeClippingChain(fraction=0.01)
+        self.assertEqual(self.run_blocks(chain, 5e3, 90), [])
+        self.assertEqual(chain.swings_asked, 0)
+
+    def test_the_texts_name_what_holds_the_swing(self):
+        cases = (
+            # (deviation heard at, swing in its multiples, text)
+            (
+                5e3,
+                (2.0, 1.9),
+                "FM audio is clipping: this station deviates more than 5 kHz. "
+                "Choose a larger FM deviation in Demodulation: 12.5 kHz holds it.",
+            ),
+            (
+                5e3,
+                (12.0, 8.0),
+                "FM audio is clipping: this station deviates more than 5 kHz. "
+                "Choose a larger FM deviation in Demodulation, such as 75 kHz "
+                "(broadcast) for an FM radio station.",
+            ),
+            (
+                75e3,
+                (1.3, 1.1),
+                "FM audio is clipping: this station deviates more than 75 kHz, "
+                "the largest FM deviation offered.",
+            ),
+        )
+        from sdr_module.gui.audio_chain import ClipWarning
+
+        for deviation, swing, text in cases:
+            rule = self.rule = ClipWarning()
+            said = self.run_blocks(_FakeClippingChain(swing=swing), deviation, 20)
+            self.assertEqual(len(said), 1)
+            self.assertEqual(rule.text(deviation), text)
+        # Where the deviation is chosen is the window's: the Second
+        # Receiver's is in its Tuning group.
+        self.assertEqual(
+            rule.text(75e3, where="Tuning"),
+            "FM audio is clipping: this station deviates more than 75 kHz, "
+            "the largest FM deviation offered.",
+        )
+
+    def test_the_main_window_uses_it(self):
+        from sdr_module.gui import audio_chain, main_window
+
+        self.assertEqual(main_window._CLIP_FRACTION, audio_chain.CLIP_FRACTION)
+        self.assertEqual(main_window._CLIP_MIN_SNR_DB, audio_chain.CLIP_MIN_SNR_DB)
+        self.assertEqual(main_window._CLIP_WARN_AFTER_S, audio_chain.CLIP_WARN_AFTER_S)
+        self.assertEqual(main_window._CLIP_WARN_EVERY_S, audio_chain.CLIP_WARN_EVERY_S)
+
+
+class TestTheSecondReceiversDspMeasuresClipping(unittest.TestCase):
+    """R8-01 on the DSP worker: each frame says when the warning is due
+    (``Frame.clip_warning``), by the main window's rule, for what this
+    receiver demodulates; nothing while nothing clips."""
+
+    def setUp(self):
+        try:
+            import PyQt6  # noqa: F401
+        except ImportError:  # pragma: no cover - environment-dependent
+            self.skipTest("PyQt6 not available")
+
+    def test_a_station_swinging_10_khz_heard_at_5_khz(self):
+        from tests.test_gui_second_receiver import fm_signal
+
+        dsp = _clipping_dsp()
+        frames = _frames(dsp, fm_signal(int(1.5 * RATE), deviation=10e3))
+        said = [(i, f.clip_warning) for i, f in enumerate(frames) if f.clip_warning]
+        self.assertEqual(
+            [text for _i, text in said],
+            [
+                "FM audio is clipping: this station deviates more than 5 kHz. "
+                "Choose a larger FM deviation in Tuning: 12.5 kHz holds it."
+            ],
+        )
+        # (After half a second of it, as in the main window.)
+        self.assertGreaterEqual(said[0][0], 14)
+        self.assertLessEqual(said[0][0], 20)
+        # Clipping on: not again within 30 s.
+        more = _frames(dsp, fm_signal(int(1.5 * RATE), deviation=10e3))
+        self.assertFalse(any(f.clip_warning for f in more))
+
+    def test_a_deviation_that_holds_it_never_warns(self):
+        from tests.test_gui_second_receiver import fm_signal
+
+        dsp = _clipping_dsp(deviation=12.5e3)
+        frames = _frames(dsp, fm_signal(int(1.5 * RATE), deviation=10e3))
+        self.assertFalse(any(f.clip_warning for f in frames))
+        self.assertTrue(all(f.audio is not None for f in frames[2:]))
+
+    def test_noise_doesnt_warn(self):
+        # (An empty channel with the squelch off clips whatever the
+        # deviation.)
+        from tests.test_gui_second_receiver import noise_only
+
+        dsp = _clipping_dsp()
+        dsp.squelch.enabled = False
+        frames = _frames(dsp, noise_only(int(1.5 * RATE)))
+        self.assertTrue(all(f.audio is not None for f in frames[2:]))
+        self.assertFalse(any(f.clip_warning for f in frames))
+
+    def test_not_demodulated_not_measured(self):
+        # (Nobody listens: as in the main window, nothing is demodulated,
+        # so nothing is said.)
+        from tests.test_gui_second_receiver import fm_signal
+
+        dsp = _clipping_dsp()
+        frames = _frames(dsp, fm_signal(int(1.5 * RATE), deviation=10e3), play=False)
+        self.assertFalse(any(f.clip_warning for f in frames))
+
+
+@unittest.skipUnless(HAS_PYQT6, "PyQt6 not available")
+class TestTheSecondReceiverSaysItsFmClips(_TypingCase):
+    """R8-01 as the walker met it: the band plan off (or narrow FM chosen
+    by hand), 97.1 MHz in the Second Receiver at 5 kHz deviation, Listen:
+    This receiver. It played clipped at full scale (peak 1.00 on 55% of
+    the samples) and nothing said why, while the main window, tuned the
+    same way, says "FM audio is clipping"; now its status line says so
+    too, naming where its FM deviation is chosen."""
+
+    def setUp(self):
+        super().setUp()
+        from sdr_module.gui import device_dialog
+
+        patcher = mock.patch.object(device_dialog, "_MAX_LAG_S", 1e9)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        main_sink = _FakeSink()
+        main_sink.open = True
+        self.win._audio = main_sink
+        self.win._audio_enabled = True
+        self.win._audio_problem = None
+        self.speaker = self.sink()
+        rx = self.rx
+        rx.set_listen("second")
+        rx._sync_audio_output()
+        self.win._band_plan_action.setChecked(False)
+        self.type_frequency("97.1")
+        rx.set_mode("FM", "5 kHz", "200 kHz")
+        self.said = []
+        shown = rx._show_message
+
+        def show(text, *args, **kwargs):
+            self.said.append(text)
+            shown(text, *args, **kwargs)
+
+        rx._show_message = show
+
+    def test_the_status_line_says_it_clips(self):
+        rx = self.rx
+        self.feed(45)
+        audio = np.concatenate([np.ravel(b) for b in self.speaker.blocks])
+        self.assertGreater(float(np.mean(np.abs(audio) >= 0.999)), 0.2)
+        text = (
+            "FM audio is clipping: this station deviates more than 5 kHz. "
+            "Choose a larger FM deviation in Tuning, such as 75 kHz "
+            "(broadcast) for an FM radio station."
+        )
+        self.assertEqual(self.said, [text])
+        self.assertEqual(rx.message(), text)
+        self.assertEqual(rx._message_label.property("tone"), "warning")
+        # At most every so often (it clips on).
+        self.feed(45)
+        self.assertEqual(self.said, [text])
+
+    def test_at_75_khz_nothing_is_said(self):
+        self.rx.set_mode("FM", "75 kHz", "200 kHz")
+        self.feed(45)
+        self.assertEqual(self.said, [])
+
+
 if __name__ == "__main__":
     unittest.main()

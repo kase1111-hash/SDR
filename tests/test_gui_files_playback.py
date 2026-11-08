@@ -389,6 +389,47 @@ class TestSlowRecordingsAtOtherSpeeds(_SoundCase):
         self.assertEqual(dropped, 0.0)
         win._playback.close()
 
+    def test_stalls_at_1x_dont_make_the_sound_later_and_later(self):
+        """A stall of the window at 1x: the speaker runs dry, and starts
+        again where the sound is now, as late as before. 22.05 kHz audio
+        plays its blocks as they are, but a stall's catch-up is longer than
+        the speaker holds: it was given out as a new sound's, with a new
+        margin of silence in front, and stayed queued. Each stall made the
+        sound 60 ms later for good."""
+        win = self.win
+        sound = win._playback_sound
+        self.open_audio(22050, seconds=30.0)
+        delays = []  # (time, seconds of sound in the speaker and held)
+
+        def frames(seconds):
+            end = self.clock.now + seconds
+            while self.clock.now < end - 1e-9:
+                start = self.clock.now
+                win._update_display()
+                waiting = self.speaker().queued + sound.waiting_s
+                delays.append((self.clock.now, waiting, sound.holding))
+                self.clock.now = max(self.clock.now, start + 0.033)
+
+        def recent(seconds):
+            return [d for d in delays if d[0] >= self.clock.now - seconds]
+
+        frames(3.0)
+        before = np.mean([d[1] for d in recent(2.0)])
+        for _stall in range(5):
+            self.clock.now += 0.3
+            frames(2.0)
+        frames(1.0)
+        after = np.mean([d[1] for d in recent(2.0)])
+        self.assertLess(after - before, 0.03)
+        # (Its blocks play as they are again: none held between them.)
+        self.assertLess(sum(d[2] for d in recent(2.0)), 10)
+        start = self.clock.now
+        frames(2.0)
+        gaps, dropped = self.troubles_since(start)
+        self.assertLess(gaps, 0.005)
+        self.assertEqual(dropped, 0.0)
+        win._playback.close()
+
     def test_an_audio_file_opened_while_the_last_sound_plays(self):
         """An 8 kHz audio file opened while the last recording's sound
         still plays, then another speed chosen, or back to 1x: no gap and

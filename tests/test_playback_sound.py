@@ -321,9 +321,8 @@ class TestARecordingSlowerThanABlockAFrame(unittest.TestCase):
         """The window freezes for 0.6 s (twice): the speaker runs dry, as
         no sound card can avoid, and what it would have played meanwhile
         is skipped (as AudioSink skipped it when the blocks came whole):
-        afterwards the sound is as late as before but for the new start's
-        margin (half the cushion a stall at most), not 0.5 s later after
-        each stall."""
+        afterwards the sound is as late as before (see
+        test_stalls_dont_add_up), not 0.5 s later after each stall."""
         for audio_rate in (8000, 11025):
             with self.subTest(audio_rate=audio_rate):
                 run = _SlowRun(audio_rate)
@@ -336,6 +335,30 @@ class TestARecordingSlowerThanABlockAFrame(unittest.TestCase):
                 margin = 0.5 * AudioSink.TARGET_S
                 self.assertLess(after - before, 2 * margin + 0.01)
                 gaps, dropped = run.troubles(3.0)
+                self.assertLess(gaps, 0.005)
+                self.assertEqual(dropped, 0.0)
+
+    def test_stalls_dont_add_up(self):
+        """After a stall the speaker starts again where the sound is now,
+        with the margin it had. Given half the cushion as a new sound is
+        (AudioSink padding the rest with silence), each stall made the
+        sound 60 ms later for good: half a second later after eight, and
+        on and on. Recordings whose blocks fit the speaker went that way
+        too once a stall's catch-up didn't: 22.05 kHz audio, and I/Q at 48
+        kS/s (96 kHz here: I/Q at half the rate) stayed queued, later and
+        later."""
+        for audio_rate in (8000, 22050, 96000):
+            with self.subTest(audio_rate=audio_rate):
+                run = _SlowRun(audio_rate)
+                run.frames(3.0)
+                before = run.delay(run.now - 2.0, run.now)
+                for _stall in range(8):
+                    run.now += 0.3
+                    run.frames(2.0)
+                run.frames(1.0)
+                after = run.delay(run.now - 2.0, run.now)
+                self.assertLess(after - before, 0.03)
+                gaps, dropped = run.troubles(2.0)
                 self.assertLess(gaps, 0.005)
                 self.assertEqual(dropped, 0.0)
 

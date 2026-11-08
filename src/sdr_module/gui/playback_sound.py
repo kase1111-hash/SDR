@@ -52,7 +52,9 @@ audio:
   the next one (a frame late, the speaker ran dry). A new sound's first
   piece is shorter than the speaker's cushion, which AudioSink pads in
   front of it with silence: the margin a block a frame late still finds
-  to play.
+  to play. After a stall of the window the speaker starts again where
+  the sound is by then, with the margin it had (a new one each stall
+  made the sound later and later).
 * :meth:`finish` ends a stream (the squelch closed, the speaker stopped):
   what the stretch still holds plays at once, in at most ``FLUSH_S`` and
   in no more than the speaker can still take (faster, or cut short and
@@ -158,6 +160,7 @@ class PlaybackSound:
         self._a = self._speed * self.PACE_S  # (signal seconds, decaying)
         self._b = self.PACE_S  # (clock seconds, decaying)
         self._noted: Optional[float] = None
+        self._stalled = False  # (the last frame came after a stall)
 
     def note(self, seconds: float, now: float, speed: float) -> None:
         """A display frame brought ``seconds`` of the recording's signal
@@ -172,6 +175,7 @@ class PlaybackSound:
         if last is None:
             return
         gap = max(0.0, float(now) - last)
+        self._stalled = gap > self.STALL_S
         if gap <= self.STALL_S:  # (a stall is no pattern to keep)
             # The longest recent wait between frames, which the speaker is
             # kept above: kept across streams (the squelch closing for a
@@ -348,10 +352,13 @@ class PlaybackSound:
                 # sound as it is can't catch up as the stretch does.)
                 dry = max(0.0, now - self._spoke_at - self._queued)
                 held = held[min(len(held), int(round(dry * self.rate))) :]
-            # A new sound (or one the speaker ran dry of): its first piece
-            # is shorter than the cushion AudioSink pads it to, with silence
-            # in front: the margin a block a frame late still finds to play.
-            want = min(want, 0.5 * self.cushion_s)
+            if not (self._sounded and self._stalled):
+                # A new sound (or one a block came too late for): its first
+                # piece is shorter than the cushion AudioSink pads it to,
+                # with silence in front: the margin a block a frame late
+                # still finds to play. After a stall the margin it had goes
+                # on (padded anew, each stall made the sound 60 ms later).
+                want = min(want, 0.5 * self.cushion_s)
         count = min(len(held), int(round(want * self.rate)))
         out = held[:count]
         self._held = held[count:] if count < len(held) else None
